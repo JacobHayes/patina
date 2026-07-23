@@ -1,0 +1,15 @@
+[package]
+name = "patina-fs-host"
+description = "Explicit allowlisted read-only host filesystem capture driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+patina-abi.workspace = true
+patina-driver-api.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

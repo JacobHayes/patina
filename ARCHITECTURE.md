@@ -58,8 +58,10 @@ The shim is a compatibility layer, not the center of the system. It shares the P
 
 ```text
 cargo-patina              # cargo subcommand; also exposes cargo-dst alias
+patina                    # public facade for runtime entry and common effect types
 patina-abi                # stable deterministic boundary contracts
 patina-runtime            # runtime registry, driver installation, scheduling, params
+patina-async              # deterministic futures executor over the explicit boundary
 patina-trace              # trace bundle format, event logs, branch metadata, replay matching
 patina-minimize           # pluggable minimization interfaces and reducers for traces/scenarios
 patina-target             # target specs and build integration
@@ -69,6 +71,7 @@ patina-macros             # optional registration/test macros
 patina-driver-api         # common driver traits and helper types
 patina-fs-mem             # in-memory virtual filesystem
 patina-fs-crash           # crash-consistency filesystem model
+patina-fs-host            # explicit allowlisted read-only host capture
 patina-net-sim            # deterministic virtual network
 patina-time-virtual       # virtual clock and timers
 patina-rng-seeded         # deterministic entropy source
@@ -81,6 +84,8 @@ patina-wrapper-latency    # generic delay and jitter wrappers
 
 patina-native-shim        # libc/pthread/syscall compatibility layer
 patina-wasi-host          # deterministic WASI host implementation
+
+patina-bench              # performance qualification workload and budget gates
 ```
 
 The exact crate names are conventional, but the separation is intentional: the ABI and trace format are shared, drivers are modular, and native compatibility remains separate from the Rust-first core.
@@ -126,6 +131,8 @@ trait SchedulerDriver {
 
 These traits are illustrative rather than final API text. The invariant is stable: common interfaces describe effects, not high-level service models.
 
+The `Async<...>` returns sketched above are realized by the `patina-async` crate: a deterministic single-threaded executor whose TCP/UDP and timer futures drive these effect operations through the recorded boundary, so `block_on`/`spawn`/`sleep_until`/`timeout` compose over the same scheduler, network, and clock decisions without introducing new operations. It is an explicit-boundary executor, not an interposition of third-party async runtimes.
+
 ## Construction plane: typed driver setup
 
 Concrete drivers expose rich typed builders. Driver-specific configuration lives here, not in the common ABI.
@@ -139,14 +146,19 @@ fn configure_patina(ctx: &mut patina::Context) {
         .build();
 
     let fs = patina_fs_crash::CrashFs::builder()
-        .mount("/var/lib/app", patina_fs_mem::MemFs::new())
-        .model_rename_atomicity(true)
-        .build();
+        .filesystem(patina_fs_mem::MemFs::new())
+        .seed(7)
+        .torn_write_probability(0.5)
+        .model_rename_atomicity(false)
+        .build()
+        .expect("valid crash-model configuration");
 
     ctx.install_net(net);
     ctx.install_fs(fs);
 }
 ```
+
+The `CrashFs` configuration above matches the implemented builder; the `SimNet` routing methods shown are aspirational (the implemented `SimNet` models datagram endpoints, delivery, and partitions).
 
 After installation, concrete drivers erase to the small data-plane interfaces. This lets Patina keep `NetDriver` minimal while allowing `SimNet` to expose routing, protocol handlers, latency zones, partitions, or other domain-specific features.
 
@@ -273,6 +285,8 @@ A simple run contains one timeline. Trace-guided exploration can append addition
 
 Strict replay expects matching fingerprints and the same sequence of boundary events. Fingerprint mismatches and boundary-event mismatches are errors by default.
 
+Bundles written by older supported format versions are migrated losslessly in memory when loaded; the file on disk is never rewritten, and Patina only ever writes the current format version.
+
 Within the same build and environment, a trace can be used to replay to a recorded moment and branch from there: explore different scheduler choices, vary injected faults, or play the run out longer. The prefix is replayed exactly. The suffix uses a branch seed and decision policy, and its decisions are recorded as a new timeline.
 
 Captured host I/O is replayable only as part of the recorded sequence. If replay reaches an unrecorded host effect, Patina fails by default. It does not generically record on miss, because the real external resource may not have observed the replayed prefix and may now be in an incompatible state.
@@ -345,6 +359,12 @@ pthread_create, pthread_mutex_*, pthread_cond_*
 These symbols delegate to Patina drivers and scheduler operations. Direct syscalls, dynamic loading, and platform-specific APIs are denied unless explicitly supported.
 
 This layer improves compatibility with crates that use `libc` or native libraries, but it does not weaken the deterministic boundary. Unsupported native behavior remains an error.
+
+Three control-plane concerns are deliberately separated from the interposed data plane:
+
+- **Trace channel.** When ordinary file symbols are interposed, the runtime must not open trace files through them: record finalization would recurse into the deterministic filesystem. A supervisor instead passes an inherited host descriptor through `PATINA_TRACE_FD`; the shim reads replay bundles from it and writes record bundles to it using non-interposed host aliases (`read$NOCANCEL`/`write$NOCANCEL` on macOS, `__read`/`__write` on glibc). The audit denies these aliases by default; supervisors that enable the descriptor channel allowlist exactly those symbols.
+- **Captured stdio.** Writes to file descriptors 1 and 2 are captured deterministically in the shim, mirroring the WASI host, and flushed to the real host descriptors at shutdown.
+- **Environment policy.** The ambient environment is a nondeterminism source, so interposed `getenv` returns no value, except for the supervisor-provided `PATINA_*` experiment protocol, which passes through.
 
 ## WASI host
 

@@ -1,0 +1,61 @@
+[workspace]
+members = [
+    "crates/cargo-patina",
+    "crates/patina",
+    "crates/patina-abi",
+    "crates/patina-async",
+    "crates/patina-bench",
+    "crates/patina-driver-api",
+    "crates/patina-fs-crash",
+    "crates/patina-fs-host",
+    "crates/patina-fs-mem",
+    "crates/patina-minimize",
+    "crates/patina-native-shim",
+    "crates/patina-net-sim",
+    "crates/patina-rng-seeded",
+    "crates/patina-runtime",
+    "crates/patina-sched-det",
+    "crates/patina-target",
+    "crates/patina-time-virtual",
+    "crates/patina-trace",
+    "crates/patina-wasi-host",
+    "crates/patina-wrapper-fault",
+    "crates/patina-wrapper-latency",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+repository = "https://github.com/JacobHayes/patina"
+
+[workspace.dependencies]
+patina = { path = "crates/patina" }
+patina-abi = { path = "crates/patina-abi" }
+patina-async = { path = "crates/patina-async" }
+patina-driver-api = { path = "crates/patina-driver-api" }
+patina-fs-crash = { path = "crates/patina-fs-crash" }
+patina-fs-host = { path = "crates/patina-fs-host" }
+patina-fs-mem = { path = "crates/patina-fs-mem" }
+patina-minimize = { path = "crates/patina-minimize" }
+patina-native-shim = { path = "crates/patina-native-shim" }
+patina-net-sim = { path = "crates/patina-net-sim" }
+patina-rng-seeded = { path = "crates/patina-rng-seeded" }
+patina-runtime = { path = "crates/patina-runtime" }
+patina-sched-det = { path = "crates/patina-sched-det" }
+patina-target = { path = "crates/patina-target" }
+patina-time-virtual = { path = "crates/patina-time-virtual" }
+patina-trace = { path = "crates/patina-trace" }
+patina-wasi-host = { path = "crates/patina-wasi-host" }
+patina-wrapper-fault = { path = "crates/patina-wrapper-fault" }
+patina-wrapper-latency = { path = "crates/patina-wrapper-latency" }
+object = { version = "0.37.3", default-features = false, features = ["read", "std"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.10.9"
+tempfile = "3.27.0"
+wasmi = "0.46.0"
+wasmparser = "0.254.0"
+wat = "1.252.0"

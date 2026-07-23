@@ -1,0 +1,12 @@
+[package]
+name = "patina-fs-mem"
+description = "Deterministic in-memory filesystem driver for Patina"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+patina-abi.workspace = true
+patina-driver-api.workspace = true

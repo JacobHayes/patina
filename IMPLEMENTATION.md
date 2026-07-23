@@ -1,0 +1,163 @@
+# Patina Implementation Plan
+
+This plan turns the architecture into independently verifiable vertical slices. Status labels describe the repository, not the long-term design.
+
+- **Complete**: implemented and covered by the corresponding `VALIDATION.md` gate.
+- **Partial**: useful code exists, but the gate is not complete.
+- **Planned**: no supported implementation exists yet.
+
+## Slice 1: deterministic Rust-level execution — Complete
+
+Acceptance level: V0 and V1.
+
+### Workspace and contracts
+
+- Create a Cargo workspace with separate ABI, driver API, driver, trace, runtime, facade, and CLI crates.
+- Define serializable effect operations and outcomes in `patina-abi`.
+- Keep concrete construction APIs out of `patina-driver-api`.
+- Represent denied and missing effects with stable, typed error codes.
+
+### Initial deterministic drivers
+
+- Implement `SeededEntropy` with a specified SplitMix64 byte stream.
+- Implement `VirtualClock` with monotonic and deterministic realtime clocks.
+- Implement `MemFs` with deterministic handles, file contents, cursors, and errors.
+- Do not add host passthrough fallback.
+
+### Trace and replay
+
+- Store versioned JSON trace bundles containing metadata and a `main` timeline.
+- Record typed boundary operation/outcome pairs with contiguous sequence numbers.
+- Reserve record paths and reject active or existing writers instead of combining or overwriting traces.
+- Write bundles through a same-directory temporary file and atomic rename.
+- Strictly reject malformed bundles, fingerprint mismatches, operation mismatches, deterministic outcome mismatches, and unconsumed events.
+- In replay, return recorded entropy and clock observations; execute deterministic filesystem mutations and compare their outcomes with the trace.
+
+### Runtime and facade
+
+- Build a runtime from explicit configuration or the CLI environment protocol.
+- Install deterministic default drivers for `patina::run`.
+- Expose primitive filesystem, clock, and entropy effects through `Context` plus `read_file`/`write_file` conveniences.
+- Finalize recording/replay on both successful closures and closures returning a Patina error.
+- Return errors when a requested capability has no installed driver.
+
+### Cargo command
+
+- Provide `cargo-patina` and `cargo-dst` binaries.
+- Support `run` and `test`, `--seed`, `--record`, and `--replay`, forwarding all other arguments to Cargo.
+- Compute a SHA-256 compatibility fingerprint over Patina version, Rust identity, Cargo command arguments, workspace Rust/Cargo inputs, and `Cargo.lock`.
+- Pass experiment settings to the child through documented `PATINA_*` variables.
+- Add an independent-package end-to-end test and a runnable example.
+
+## Slice 2: scheduler and richer simulation — Complete
+
+Acceptance level: V2.
+
+- Scheduler ABI operations route explicit spawn, choose, yield, park, wake, and completion through `DetScheduler`.
+- `SimNet` provides bound datagram endpoints, delivery queues, timing, reorder, partition, routing, and close state.
+- Seeded fault and latency wrappers compose around the network data plane.
+- Runtime traces cross scheduler, network, clock, filesystem, and entropy effects.
+- Trace format 2 stores branch relationships and seeds, resolves inherited decisions, and supports exact-prefix/new-suffix execution.
+- CLI controls replay timelines, branches, and step budgets.
+- `cargo patina minimize` runs an external failure oracle against unbranched main timelines or leaf branch suffixes.
+
+CLI key/value parameters are exposed through `Context::param`, typed driver setup is available through `patina::run_with`, and `cargo patina explore` runs bounded independent-process seed campaigns. Named scenario profiles remain a future experiment-plane convenience.
+
+The `patina-async` crate builds a deterministic single-threaded futures executor over these same recorded operations: `block_on`/`spawn`/`JoinHandle`/`yield_now`, virtual-time `sleep`/`sleep_for`/`sleep_until`/`timeout`, and async TCP and UDP futures. It adds no new boundary operations — task creation, interleaving, parking, waking, yielding, completion, clock reads, and every net effect route through the existing `Context` recorded ops, so record/replay stays byte-identical. The executor makes exactly one recorded scheduling decision per poll: leaf futures perform their recorded effect, register an interest or deadline on the current poll scope, and return `Pending`, while an executor-internal FIFO wake queue (deduplicated per task) is drained into recorded `TaskWake`/`TaskYield` at fixed points. Timer futures ride the virtual-clock timer queue and its deadlock rescue (`task_park_timed` plus rescued `SleepUntil`/`TaskWake`); net futures translate would-block outcomes into interest registration plus a `NetNextDelivery` timed park, so wrapper-added latency stays visible. The `patina` facade re-exports the surface as `patina::rt` (plus `patina::block_on`), and `crates/patina-async/examples/async_echo.rs` runs a seeded TCP echo. Native interposition of third-party async runtimes (tokio/async-std under the shim) is a separate concern tracked in Slice 4.
+
+## Slice 3: WASI target boundary — Complete
+
+Acceptance level: V3.
+
+1. Pin the target/interface to Rust's `wasm32-wasip1` Preview 1 target.
+2. Add `cargo patina wasi-build`, `wasi-audit`, and `wasi-run`.
+3. Audit Wasm imports fail-closed against the host's explicit allowlist.
+4. Implement every allowlisted Preview 1 import (46 functions): arguments, environment, virtual clocks, entropy, regular files/directories, hard links, symlinks, metadata and timestamp mutation, descriptor flag/rights mutation and renumbering, seek/positioned I/O, allocation/advice, polling, configured datagrams, captured stdio, yielding, and exit through Wasmi guest memory. File metadata reports real inode identity and link counts from the driver.
+5. Preopened-directory policy: `wasi-run --preopen GUEST[:ro|:rw]` mounts guest directories with host-enforced read-only or read-write policy; the first explicit preopen replaces the implicit read-write root.
+6. Unified fail-closed resource limits (memory pages, descriptors, preopens, path bytes, I/O bytes, iovecs) with `--max-*` CLI overrides; Wasm fuel and Patina boundary-operation budgets bound execution.
+7. Fingerprint Wasm bytes plus guest argument, environment, socket, preopen, and overridden-limit configuration in domain-separated sections.
+8. Verify real Rust filesystem/time, datagram, hard-link/symlink/readlink, and set-times probes across seeds, record/replay, and branching in `scripts/validate-wasi.sh`.
+
+Deliberate semantic limitations (documented behavior, not open gaps):
+
+- `sock_accept` and `proc_raise` return `NOSYS` by design: Preview 1 has no listen surface and Patina has no signal model.
+- `MemFs` timestamps change only through explicit set-times operations; writes do not auto-update mtime.
+- Symlinks are inert leaf nodes: terminal follow is one hop (then `ELOOP`); intermediate-component traversal is a deterministic `NOTCAPABLE` error.
+- Unlinking a file that is open is denied across all names of a multi-link inode (a documented POSIX deviation).
+- `APPEND` set after open is honored through a traced seek-to-end before each `fd_write`; `fd_pwrite` ignores `APPEND`.
+- Read-only mounts are host-enforced; descriptor rights masks are advisory defense-in-depth.
+- Memory growth beyond the configured cap is a deterministic trap rather than a `-1` grow result.
+
+## Slice 4: native Rust target — Partial macOS/Linux foundation
+
+Acceptance level: V4 is not complete.
+
+Completed foundations:
+
+1. `cargo patina` injects `cfg(patina)` and `cfg(dst)` into Cargo builds.
+2. `patina-native-shim` exposes prefixed filesystem, clock, entropy, sleep, crash, captured-stdio, and lifecycle ABI calls.
+3. The opt-in POSIX C layer exports `open/read/write/writev/readv/close/dup/lseek/fsync/ftruncate`, namespace/stat calls, clock/sleep calls, and entropy calls (including Darwin's `CCRandomGenerateBytes` and `F_FULLFSYNC`) without host fallback. Startup snapshots the private `PATINA_*` control plane for shim configuration, then scrubs the live environment; guest-visible `getenv` and direct `environ` iteration see an empty immutable environment, and mutation (`setenv`/`unsetenv`/`putenv`) fails closed with `ENOSYS` plus a `patina:` diagnostic.
+4. Linked macOS and Linux Rust probes execute ordinary `std::fs`, metadata, `SystemTime`, `Instant`, `thread::sleep`, printing, and standard-library entropy through the shim with cross-process seed stability; Linux large-file/stat variants and Rust's startup descriptor probe are explicit.
+5. The trace control plane is separated from the interposed data plane: a supervisor-provided `PATINA_TRACE_FD` descriptor carries trace bundles through non-interposed host read/write aliases, so the fully interposed probe records and replays traces.
+6. `cargo patina native-audit` is a strict per-platform import allowlist: after alias normalization (`$NOCANCEL`, `__`-prefixes), an import passes only if it is an explicitly listed effect-free host-deferred symbol for the binary's format (Mach-O or ELF; other formats are rejected) or is `--allow`ed by the caller — anything else fails closed as `unknown-import`, with known host-effect names still categorized (filesystem, network-or-wait, unmanaged-sync, and so on) for error quality. AArch64/x86_64 syscall and clock/entropy instruction scanning is unchanged. The shim's own control-plane symbols (trace-fd read/write aliases; the thread vehicle — macOS `pthread_create_suspended_np`/`thread_resume`/dispatch-semaphore batons, Linux `__real_pthread_create`/`sem_*` batons) are deliberately not on the static allowlist: validation scripts `--allow` them per audited binary so unmanaged binaries importing the same symbols still fail.
+7. Native C and Rust escape fixtures verify successful controlled imports and rejection of direct syscall assembly/unmanaged threads.
+8. `scripts/smoke-cross-target.sh` builds one ordinary-`std` smoke program for wasm32-wasip1 and the native host and verifies identical seeded, recorded, and replayed output across targets.
+9. `cargo patina native-build <SOURCE.rs>` packages the shim link/startup integration: it builds the shim static library with the embedded POSIX layer and compiles a single Rust source with `cfg(patina)`/`cfg(dst)` and the required link arguments; `cargo patina native-run <BIN>` supervises execution through the documented `PATINA_*` environment and the `PATINA_TRACE_FD` descriptor. `native-build <DIR|Cargo.toml>` extends the same recipe to whole Cargo packages: it drives the package's own `cargo build`, injecting the cfgs and shim link arguments through `CARGO_ENCODED_RUSTFLAGS` while an explicit host `--target` isolates them to the final binary (rlib compiles ignore link arguments; build scripts and proc macros link for the host without the flags, so their host-side I/O never routes into an uninitialized runtime). `--package` selects a workspace member and `--bin` selects among multiple binaries; missing `--bin` on a multi-binary package fails closed rather than guessing, and the produced binary audits and record/replays identically to a single-source one. Path dependencies and build-script outputs reach the deterministic binary unchanged.
+10. Auto-initialization: a C constructor initializes the runtime from the `PATINA_*` protocol and `atexit` finalizes it, so ordinary programs need no explicit init calls; running outside the supervisor aborts fail-closed.
+11. Managed threads: `pthread_create` is interposed (macOS `pthread_create_suspended_np` plus mach `thread_resume`; Linux `-Wl,--wrap=pthread_create`), and real host threads are gated one-at-a-time by `DetScheduler` through a per-thread OS-semaphore baton with atomics-based shim-internal locking — no `dlsym` anywhere. Interposed mutex/condvar operations route contention through the scheduler, so a lock held across a boundary operation cannot deadlock.
+12. Native networking over `SimNet`: UDP datagrams and zero-latency TCP streams are interposed for `AF_INET` sockets. UDP covers `socket`/`bind`/`connect`/`send`/`sendto`/`recv`/`recvfrom`/`getsockname`; TCP covers `SOCK_STREAM`, `listen`/`accept`/`connect`/`read`/`write`/`send`/`recv`/`shutdown`/`getpeername`, with wrapper forwarding for latency/fault layers. Sockets are fully virtual (zero network host imports); blocking recv/accept/send paths park through the scheduler baton; non-blocking sockets return `EWOULDBLOCK`; the setsockopt allow-list admits deterministic no-op socket options including `TCP_NODELAY`; IPv6 and DNS (`getaddrinfo`) fail closed with explicit errors. The native gate verifies this with `NATIVE_TCP_RESULT`. Deterministic process-state constants cover `getuid`/`geteuid`/`getgid`/`getegid` and common `sysconf` values; `fork`/`exec`-family/`posix_spawn`/`kill`/`waitpid` are deliberately absent so the audit rejects them as unmanaged imports.
+
+13. Linux futex routing: Rust `std` on Linux reaches `Mutex`/`Condvar`/thread parking through raw `SYS_futex` via libc's `syscall` wrapper (not pthread), so the shim interposes `syscall` — `FUTEX_WAIT`/`FUTEX_WAIT_BITSET` checks the futex word and parks the caller on the word's address through the scheduler baton (value check and park are atomic under the baton, so no wakeup is lost); `FUTEX_WAKE`/`FUTEX_WAKE_BITSET` wakes up to N parked tasks; every other syscall number fails closed with `ENOSYS`. `dlsym` is interposed to resolve nothing, so std's optional-symbol probe falls back to defaults and dynamic lookup can never return a host symbol. Timed futex waits park with their deadline on the virtual-clock timer queue (item 15) and return `ETIMEDOUT` when the deadline fires before a `FUTEX_WAKE`.
+
+14. Directory, symlink, identity, descriptor, and environment containment: the dirent family (`opendir`/`readdir`/`readdir64`/`readdir_r`/`closedir`/`rewinddir`) iterates driver-ordered snapshots with deterministic synthetic inodes, so ordinary `std::fs::read_dir` works; `symlink`/`readlink` and symlink-aware `stat`/`lstat`/`fstatat`/`statx` follow MemFs semantics (leaf metadata without following, one terminal hop then `ELOOP`, `AT_SYMLINK_NOFOLLOW` honored); `gettid` (Linux) and `pthread_threadid_np` (macOS) return deterministic scheduler thread ids. `dup`/`fcntl(F_DUPFD*)` duplicate MemFs/CrashFs descriptors through the recorded `FsDup` operation, sharing cursor and access flags with deterministic monotonic fd numbers; unsupported targeted variants (`dup2`/`dup3` to a different number), captured stdio duplication, and socket duplication fail closed with `ENOSYS` plus captured `patina:` diagnostics. `__res_init` still fails closed. The deterministic environment is empty and immutable after startup. On Linux, `scripts/validate-native-shim.sh` adds a whole-run `strace` containment pass: outside an exact loader/std-runtime prelude (shared-object loads, `/proc/self/maps` stack introspection, control-plane descriptors 0-3, process-local memory and signal setup), no file, network, clock, entropy, or descriptor syscall may appear anywhere in the run — the seeded probe's guest section reaches zero host syscalls. macOS has no equivalent runtime gate: calibration established that `ktrace` (the only root-capable, SIP-compatible whole-run tracer) cannot found a sound default-deny check, so the macOS path skips loudly and `PATINA_REQUIRE_KTRACE=1` hard-fails on Darwin rather than reporting a check that cannot fail, leaving static instruction scanning plus import audit as the macOS containment evidence. Three independent, on-host-reproduced blockers: `BSC_*` events carry only raw register values, not decoded paths, so a guest's raw `open`/`stat` is indistinguishable by argument from the loader's libSystem prelude; the deterministic runtime buffers all guest output (stdout and stderr) into a single flush at process exit, so there is no in-band boundary marker to separate the pre-main loader prelude from guest code; and the loader/runtime issues the same syscall names an escape would (`open`, `fcntl`, `getpid`, ...) with init interleaved into early guest execution, so a name-scoped default-deny is either vacuous or false-positives on clean runs — a planted post-init raw `getpid` (inline `svc`) lands among the runtime's own `getpid` events, name-identical and not temporally separable.
+
+15. Virtual-clock timer queue: the runtime `Context` keeps a timer registry ordered by `(monotonic deadline, registration sequence)` with at most one live timer per task, registered through the recorded `TaskParkTimed` boundary operation (realtime deadlines convert to monotonic at registration). When the scheduler would otherwise deadlock and timers exist, `scheduler_next` rescues: it advances the virtual clock to the single earliest deadline through the recorded `SleepUntil` path, wakes every due task in `(deadline, sequence)` order through recorded `TaskWake` operations, and retries — so replay re-executes the rescue from the trace and an empty registry still deadlocks explicitly. Any earlier wake deregisters the task's timer. Consumers: `pthread_cond_timedwait` and timed futex waits park with their deadline and learn timeout-versus-signal from the wake cause (the rescue purges the waiter from its primitive's queue and marks it timed out; the mutex is re-acquired before `ETIMEDOUT` returns), `nanosleep`/`clock_nanosleep`/`mach_wait_until` park timed under managed threads so other runnable tasks execute during a sleep (single-threaded programs keep the identical direct clock jump; the WASI host and explicit facade are unchanged), and a blocking UDP `recv` on an empty queue consults the new recorded `NetDriver::next_delivery` operation and parks until the earliest pending delivery, which makes non-zero link latency work end to end: `cargo patina native-run --net-latency-nanos N` (environment `PATINA_NET_LATENCY_NANOS`, rejected fail-closed when malformed) configures `SimNet`, and the latency wrapper forwards `next_delivery` so wrapper-added latency stays visible to the parking deadline.
+
+Remaining:
+
+1. Native async-runtime interposition (a shim-level epoll/kqueue/eventfd readiness reactor mapped onto `SimNet`) and non-zero TCP latency over `SimNet`. The explicit-API async executor (`patina-async`, Slice 2) is complete; native tokio/async-std under the shim stays a deliberate non-goal until such a reactor exists.
+2. Cross-machine stress and a usable macOS whole-run syscall trace if a future `ktrace`/OS version exposes enough path context for a default-deny gate.
+
+Ordinary programs built through `cargo patina native-build` — a single Rust source or a whole Cargo package with dependencies and build scripts — now claim supported `std` calls use Patina, with threads managed on both platforms and both verified locally by the validation scripts (macOS directly; Linux in a VM). Scheduling granularity differs deterministically: on macOS every interposed lock operation is a scheduling point, while on Linux uncontended lock operations are pure userspace atomics, so scheduling points occur at futex contention — Linux interleaving is contention-granular, macOS is lock-granular; both are seed-stable and seed-varying.
+
+## Slice 5: native ABI, capture, crash, and stability — Partial foundations
+
+Acceptance level: V5 is not complete.
+
+Completed foundations:
+
+- trace file and timeline-event resource limits;
+- corruption, structural mismatch, and unsupported-version rejection;
+- trace schema migration: prior supported formats (v1 and v2) migrate losslessly in memory on load with fixtures for supported, unsupported, and malformed inputs; bundles are never rewritten on disk and only the current format version is written;
+- compact trace byte encoding (format 3): bundles are written as compact JSON with base64 byte payloads instead of pretty-printed number arrays, cutting the representative workload from ~344 to ~124 bytes/event; the file stays valid JSON, so `jq`/`python3 -m json.tool` still render it for humans;
+- failure-oracle delta debugging for main timelines, leaf branch suffixes, and non-leaf branch trees (protected inherited prefix, reducible suffix), plus scenario/parameter/seed reducers (seed reduction is bounded ascending canonicalization);
+- a whole-image checkpoint/rollback crash filesystem integrated with traces, with seeded torn writes (configurable granularity and probability), rename-atomicity on/off, directory-fsync durability, and crash/restart recomputation with stale-handle rejection;
+- explicit read-only host capture with path containment, replay without host I/O, and failure on branch misses;
+- prefixed and opt-in POSIX native filesystem symbols with mixed C/Rust probes, plus managed pthread synchronization (Slice 4);
+- bounded multi-process seed exploration;
+- performance budgets in `patina-bench`: a hard trace bytes-per-event gate runs in `cargo test`, structural gates always run, and generous timing ceilings are `#[ignore]`d opt-ins.
+
+- schedule reducers: `reduce_schedule` rewrites recorded `SchedulerNext` outcomes toward a canonical schedule — longer runs per task (switch collapsing) and lowest-task-id-first at switch points — accepting a candidate only when the failure oracle confirms the failure survives; protected inherited prefixes are never rewritten, and the combined minimization entry points run pruning, suffix shrinking, and schedule reduction to a joint fixed point.
+
+Remaining: nothing for this slice's current scope; broader hardening items live in VALIDATION.md.
+
+## Dependency order
+
+```text
+patina-abi
+  -> patina-driver-api
+      -> concrete drivers
+patina-abi
+  -> patina-trace
+concrete drivers + patina-trace
+  -> patina-runtime
+      -> patina-async (explicit-boundary futures executor)
+          -> patina facade
+              -> cargo-patina (process configuration)
+```
+
+Target hosts and native shims depend on the runtime boundary; they do not redefine it.
+
+## Deliberate limitations of the complete slice
+
+V1-V2 remain end-to-end at the explicit Rust API boundary. WASI executes the full audited Preview 1 surface. Native programs — single Rust sources and whole Cargo packages — build and run through `cargo patina native-build`/`native-run` with managed threads, UDP datagrams over `SimNet` (including deterministic timed waits and non-zero link latency through the virtual-clock timer queue), deterministic process-state constants, and a strict fail-closed import audit — but TCP, async runtimes, arbitrary FFI, and unrelated direct host APIs remain outside Patina's control. (Deterministic async at the explicit Rust boundary is supported separately through `patina-async`; the limitation here is native interposition of third-party async runtimes under the shim.)

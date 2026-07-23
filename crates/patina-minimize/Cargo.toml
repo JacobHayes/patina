@@ -1,0 +1,15 @@
+[package]
+name = "patina-minimize"
+description = "Pluggable trace reducers for Patina"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+patina-abi.workspace = true
+patina-trace.workspace = true
+
+[dev-dependencies]
+patina-runtime.workspace = true

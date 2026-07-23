@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  stable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - run: cargo doc --workspace --no-deps --locked
+      - run: scripts/validate-wasi.sh
+      - run: scripts/validate-native-shim.sh
+      - run: scripts/smoke-cross-target.sh
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+      - run: scripts/validate-wasi.sh
+      - run: scripts/validate-native-shim.sh
+      - run: scripts/smoke-cross-target.sh
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+      # macOS runtime syscall containment is not verifiable via ktrace (BSC_*
+      # events carry no path context and the runtime defers all output, so the
+      # loader prelude cannot be separated from post-init guest syscalls), so
+      # PATINA_REQUIRE_KTRACE is deliberately NOT set here — it would hard-fail.
+      # The static instruction scan + import audit are the macOS containment
+      # evidence; the strace default-deny gate runs on the Linux jobs.
+      - run: scripts/validate-native-shim.sh
+      - run: scripts/smoke-cross-target.sh

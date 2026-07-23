@@ -6,7 +6,9 @@ The key documents are:
 
 1. @INTENTS.md for project goals, non-goals, trade-offs, and design principles.
 2. @ARCHITECTURE.md for the source of truth for crate boundaries, interfaces, target model, wrappers, traces, and runtime architecture.
-3. @README.md for the user-facing project summary and current status.
+3. @VALIDATION.md for capability acceptance gates and required evidence.
+4. @IMPLEMENTATION.md for completed and planned implementation slices.
+5. @README.md for the user-facing project summary and current status.
 
 When changing intent, architecture, or user-visible behavior, update the relevant docs in the same change.
 

@@ -1,0 +1,17 @@
+[package]
+name = "patina-async"
+description = "Deterministic single-threaded async executor over the Patina boundary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+patina-abi.workspace = true
+patina-runtime.workspace = true
+
+[dev-dependencies]
+patina-net-sim.workspace = true
+patina-wrapper-latency.workspace = true
+tempfile.workspace = true

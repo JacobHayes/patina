@@ -1,0 +1,24 @@
+[package]
+name = "patina-runtime"
+description = "Driver registry and deterministic execution runtime for Patina"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+patina-abi.workspace = true
+patina-driver-api.workspace = true
+patina-fs-mem.workspace = true
+patina-net-sim.workspace = true
+patina-rng-seeded.workspace = true
+patina-sched-det.workspace = true
+patina-time-virtual.workspace = true
+patina-trace.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+patina-fs-crash.workspace = true
+patina-fs-host.workspace = true
+tempfile.workspace = true

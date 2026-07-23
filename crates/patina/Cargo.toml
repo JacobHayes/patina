@@ -1,0 +1,19 @@
+[package]
+name = "patina"
+description = "Public Rust facade for Patina deterministic execution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+patina-abi.workspace = true
+patina-async.workspace = true
+patina-runtime.workspace = true
+
+[dev-dependencies]
+patina-net-sim.workspace = true
+patina-wrapper-fault.workspace = true
+patina-wrapper-latency.workspace = true
+tempfile.workspace = true

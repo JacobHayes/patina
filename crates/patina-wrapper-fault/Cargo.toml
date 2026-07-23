@@ -1,0 +1,16 @@
+[package]
+name = "patina-wrapper-fault"
+description = "Seeded fault-injection wrappers for Patina drivers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+patina-abi.workspace = true
+patina-driver-api.workspace = true
+patina-rng-seeded.workspace = true
+
+[dev-dependencies]
+patina-net-sim.workspace = true

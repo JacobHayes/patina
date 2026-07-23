@@ -1,0 +1,16 @@
+[package]
+name = "patina-trace"
+description = "Versioned record and strict replay traces for Patina"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+patina-abi.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

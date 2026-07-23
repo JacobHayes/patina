@@ -1,0 +1,30 @@
+[package]
+name = "cargo-patina"
+description = "Cargo subcommand for Patina deterministic runs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+patina-minimize.workspace = true
+patina-runtime.workspace = true
+patina-target.workspace = true
+patina-trace.workspace = true
+patina-wasi-host.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+patina-abi.workspace = true
+wat.workspace = true
+
+[[bin]]
+name = "cargo-patina"
+path = "src/bin/cargo-patina.rs"
+
+[[bin]]
+name = "cargo-dst"
+path = "src/bin/cargo-dst.rs"
