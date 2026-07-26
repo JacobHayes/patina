@@ -1,5 +1,9 @@
 //! A small deterministic in-memory filesystem driver.
 
+pub mod image;
+
+pub use image::{FsImage, FsImageEntry, FsImageError};
+
 use std::collections::BTreeMap;
 
 use patina_abi::{

@@ -16,6 +16,19 @@ if ! command -v "$cc" >/dev/null 2>&1; then
   exit 2
 fi
 
+# A direct staticlib link that drives any host vehicle (the packaged startup
+# constructor's host I/O, managed threads, trace-fd I/O) must reach the shim's
+# host-alias table. On Linux that table resolves through `__real_dlsym`, the real
+# glibc resolver provided by `-Wl,--wrap=dlsym`; without the flag `__real_dlsym`
+# is a null weak symbol and the first host vehicle call segfaults. `cargo patina
+# native-build` always passes this flag; the direct-`cc` probes below pass it
+# explicitly. macOS resolves `dlsym` directly and needs no flag.
+if [[ "$(uname -s)" == Linux ]]; then
+  native_wrap=(-Wl,--wrap=dlsym)
+else
+  native_wrap=()
+fi
+
 cat >"$tmp/probe.c" <<'C'
 #include "patina_native.h"
 #include <inttypes.h>
@@ -413,6 +426,35 @@ C
 
 cargo build --locked --manifest-path "$root/Cargo.toml" -p patina-native-shim -p cargo-patina >/dev/null
 runner="$target_dir/debug/cargo-patina"
+
+# -----------------------------------------------------------------------------
+# Host-alias doctrine: static enforcement over the shim's own objects.
+#
+# The doctrine (see the shim's `hostapi` module and ARCHITECTURE.md "Host-alias
+# doctrine") requires that shim-internal code never name a public, interposable
+# host symbol as an undefined external — such a name lands in the guest binary's
+# import table and forces a name-based `--allow` that guest code can ride past
+# the audit (the class the macOS dispatch-semaphore Parker escape belonged to).
+# Every host vehicle is instead resolved at runtime through the single `dlsym`
+# primitive. This gate scans the shim's OWN compiled object members and fails on
+# any undefined external the audit would deny as a classified escape, holding the
+# shim to the exact standard it enforces on guests. The `object` scan and its
+# planted-leak self-test (a fixture naming `open`/`semaphore_wait` that the scan
+# must catch, so it can never go vacuous) live in the cargo test below; running
+# it here makes the containment gate cover the doctrine. Red→green: the
+# pre-doctrine shim (which named `semaphore_wait`, `read$NOCANCEL`, ... directly)
+# fails this; the swept shim passes with `dlsym` as the only escape-surface
+# residue.
+echo 'validate-native-shim: enforcing the host-alias doctrine over the shim objects' >&2
+cargo test --locked --manifest-path "$root/Cargo.toml" -p cargo-patina \
+  --test shim_host_alias >/dev/null
+# The C-ABI-only probe links the shim staticlib WITHOUT the packaged POSIX layer
+# (no `patina_posix.c`), so it defines no `__wrap_dlsym` and must NOT be built
+# with `-Wl,--wrap=dlsym` (that would rewrite std's own bundled `dlsym` probe to
+# the missing wrapper). It also drives no host vehicle — no threads, no trace fd,
+# an empty stdio flush — so it never reaches the host-alias table and needs no
+# wrap. The POSIX probe below links `patina_posix.c` (which provides
+# `__wrap_dlsym`) and exercises the startup constructor, so it takes the wrap.
 "$cc" -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror \
   -I"$root/crates/patina-native-shim/include" \
   "$tmp/probe.c" "$target_dir/debug/libpatina_native_shim.a" \
@@ -420,7 +462,7 @@ runner="$target_dir/debug/cargo-patina"
 "$cc" -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror \
   -I"$root/crates/patina-native-shim/include" \
   "$tmp/posix_probe.c" "$root/crates/patina-native-shim/c/patina_posix.c" \
-  "$target_dir/debug/libpatina_native_shim.a" -o "$tmp/posix-probe"
+  "$target_dir/debug/libpatina_native_shim.a" ${native_wrap[@]+"${native_wrap[@]}"} -o "$tmp/posix-probe"
 "$tmp/posix-probe"
 # The interposed ordinary-std probe is built and driven through the packaged
 # `cargo patina` native target: native-build compiles the shim layer, injects
@@ -465,26 +507,28 @@ fi
 
 # The audit's static allowlist covers only effect-free host-deferred symbols.
 # Everything the SHIM itself uses as its host control plane is `--allow`ed per
-# audited binary here instead, so an unmanaged binary importing the same
-# symbols (to read/write, spawn, or block outside the scheduler) still fails
-# the audit: the trace-fd read/write aliases; the managed host-thread vehicle
-# (macOS: pthread_create_suspended_np + pthread_mach_thread_np + thread_resume;
-# Linux: the __real_pthread_create import left by -Wl,--wrap=pthread_create);
-# and the scheduler's execution batons (macOS: dispatch semaphores; Linux:
-# POSIX sem_* — glibc-internal futexes invisible to the guest's interposed
-# syscall()).
+# audited binary here instead, so an unmanaged binary importing the same symbols
+# still fails the audit.
+#
+# Under the host-alias doctrine (see the shim's `hostapi` modules and the
+# host-alias static section above) the shim resolves every host vehicle — the
+# trace-fd read/write aliases and the execution-baton semaphore — at runtime
+# through `dlsym(RTLD_NEXT, ...)`, so those vehicle names never appear in the
+# guest import table. On macOS `dlsym` itself is the sanctioned primitive and the
+# whole control plane is just `dlsym`. On Linux the shim interposes `dlsym`, so
+# the primitive is `__real_dlsym` reached through `-Wl,--wrap=dlsym`, which leaves
+# `dlsym` as the single resolution residue; `pthread_create` also stays, as the
+# wrap-contained managed thread-creation vehicle (guest `pthread_create` binds to
+# `__wrap_pthread_create`, so allowing the name cannot escape). Either way a guest
+# importing semaphore_wait/sem_wait/read$NOCANCEL/__read/... is now DENIED rather
+# than riding a name-based allowance.
 if [[ "$(uname -s)" == Darwin ]]; then
   control_plane=(
-    --allow '_read$NOCANCEL' --allow '_write$NOCANCEL'
-    --allow pthread_create_suspended_np --allow pthread_mach_thread_np
-    --allow thread_resume
-    --allow dispatch_semaphore_create --allow dispatch_semaphore_wait
-    --allow dispatch_semaphore_signal --allow dispatch_release
+    --allow dlsym
   )
 else
   control_plane=(
-    --allow __read --allow __write --allow pthread_create
-    --allow sem_init --allow sem_post --allow sem_wait
+    --allow dlsym --allow pthread_create
   )
 fi
 shim_allow=("${control_plane[@]}")
@@ -843,10 +887,17 @@ fn main() {
 }
 RS
 cat >"$pkg/app/src/bin/leaky.rs" <<'RS'
-// Imports a process-spawning libc symbol the audit denies as "process".
+// Imports an uninterposed process-class libc symbol (`kill`) the audit denies as
+// "process". The spawn family (fork/posix_spawn*/waitpid/...) is now shim-defined
+// (deny-traps), so a Command::spawn leaves no process *import* to flag; this
+// reaches for a still-uninterposed member of the class. Taking its address forces
+// the undefined import; building succeeds, the audit must reject the product.
+unsafe extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
+}
 fn main() {
-    let status = std::process::Command::new("/bin/true").status().unwrap();
-    std::process::exit(status.code().unwrap_or(1));
+    let reached = kill as *const ();
+    std::process::exit((reached as usize & 1) as i32);
 }
 RS
 
@@ -974,6 +1025,115 @@ fn main() {
         signal_elapsed.as_nanos(),
         timeout_elapsed.as_nanos()
     );
+}
+RS
+
+cat >"$tmp/recv_timeout_probe.rs" <<'RS'
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
+// Two threads over mpsc with recv_timeout. On macOS this drives std's Darwin
+// thread Parker (park/park_timeout on a libdispatch semaphore); the shim
+// interposes those semaphores and routes the wait through the deterministic
+// scheduler + virtual clock, so the delivery/timeout interleaving and the
+// timeout count are a function of the seed alone.
+fn main() {
+    let (tx, rx) = mpsc::channel::<u64>();
+    let producer = thread::spawn(move || {
+        for i in 0..5 {
+            thread::sleep(Duration::from_millis(10));
+            tx.send(i).unwrap();
+        }
+    });
+    let mut delivered = Vec::new();
+    let mut timeouts = 0u32;
+    loop {
+        match rx.recv_timeout(Duration::from_millis(7)) {
+            Ok(v) => delivered.push(v),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                timeouts += 1;
+                if delivered.len() == 5 {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    producer.join().unwrap();
+    println!("NATIVE_RECV_TIMEOUT_RESULT delivered={delivered:?} timeouts={timeouts}");
+}
+RS
+
+cat >"$tmp/rwlock_ffi_probe.rs" <<'RS'
+use std::cell::UnsafeCell;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+// std's own RwLock never lowers to pthread_rwlock_* on the supported
+// toolchains, so exercise the shim's deterministic pthread_rwlock interposers
+// directly through FFI. Three writer threads each hold the write lock across a
+// scheduling point, so the others park on it; the acquisition order is chosen by
+// DetScheduler (writer-preferring, FIFO), byte-identical per seed.
+#[repr(C, align(16))]
+struct RawRwLock(UnsafeCell<[u8; 200]>);
+unsafe impl Sync for RawRwLock {}
+
+unsafe extern "C" {
+    fn pthread_rwlock_init(lock: *mut u8, attr: *const u8) -> i32;
+    fn pthread_rwlock_wrlock(lock: *mut u8) -> i32;
+    fn pthread_rwlock_unlock(lock: *mut u8) -> i32;
+}
+
+static LOCK: RawRwLock = RawRwLock(UnsafeCell::new([0u8; 200]));
+
+fn main() {
+    unsafe {
+        assert_eq!(pthread_rwlock_init(LOCK.0.get() as *mut u8, std::ptr::null()), 0);
+    }
+    let log = Arc::new(Mutex::new(Vec::<u32>::new()));
+    let mut handles = Vec::new();
+    for id in 0..3u32 {
+        let log = Arc::clone(&log);
+        handles.push(thread::spawn(move || {
+            for _ in 0..3 {
+                unsafe {
+                    assert_eq!(pthread_rwlock_wrlock(LOCK.0.get() as *mut u8), 0);
+                }
+                log.lock().unwrap().push(id);
+                thread::sleep(Duration::from_nanos(1));
+                unsafe {
+                    assert_eq!(pthread_rwlock_unlock(LOCK.0.get() as *mut u8), 0);
+                }
+            }
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+    println!("NATIVE_RWLOCK_FFI_RESULT order={:?}", *log.lock().unwrap());
+}
+RS
+
+cat >"$tmp/parker_escape_probe.rs" <<'RS'
+// Planted escape: reaches an uninterposed blocking primitive (os_unfair_lock,
+// in the unmanaged-sync class) directly. Uncontended it returns without a
+// syscall so the guest runs, but the calls are host operations the runtime does
+// not model — the pre-run gate must refuse to run it unless overridden.
+#[repr(C)]
+struct OsUnfairLock(u32);
+unsafe extern "C" {
+    fn os_unfair_lock_lock(lock: *mut OsUnfairLock);
+    fn os_unfair_lock_unlock(lock: *mut OsUnfairLock);
+}
+fn main() {
+    let mut lock = OsUnfairLock(0);
+    unsafe {
+        os_unfair_lock_lock(&mut lock);
+        os_unfair_lock_unlock(&mut lock);
+    }
+    println!("PARKER_ESCAPE_RAN");
 }
 RS
 
@@ -1109,6 +1269,87 @@ cmp "$tmp/timed-wait.patina" "$tmp/timed-wait-repeat.patina"
   --fingerprint native-timed-wait-v1 >"$tmp/timed-wait-replay"
 cmp "$tmp/timed-wait-record" "$tmp/timed-wait-replay"
 cmp "$tmp/timed-wait-seed-5-1" "$tmp/timed-wait-replay"
+
+# std::thread Parker via mpsc recv_timeout. On macOS the Parker blocks on a
+# libdispatch semaphore, so this exercises the interposed dispatch-semaphore
+# path (park/park_timeout/unpark); on Linux the futex Parker. The interposed
+# semaphores must NOT leak as imports (the shim now DEFINES them — before the
+# fix they shared the baton's `--allow`ed dispatch-semaphore audit entry, which
+# was the escape). The delivery/timeout schedule is byte-identical across three
+# runs at multiple seeds and record/replay-exact.
+"$runner" native-build "$tmp/recv_timeout_probe.rs" --output "$tmp/recv-timeout-probe" >/dev/null
+"$runner" native-audit "$tmp/recv-timeout-probe" "${shim_allow[@]}" >/dev/null
+if nm -u "$tmp/recv-timeout-probe" 2>/dev/null | grep -q dispatch_semaphore; then
+  echo 'validate-native-shim: dispatch_semaphore_* leaked as an import; the Parker escape is not closed' >&2
+  exit 1
+fi
+for seed in 5 6 7; do
+  "$runner" native-run "$tmp/recv-timeout-probe" --seed "$seed" >"$tmp/recv-timeout-$seed-1"
+  "$runner" native-run "$tmp/recv-timeout-probe" --seed "$seed" >"$tmp/recv-timeout-$seed-2"
+  "$runner" native-run "$tmp/recv-timeout-probe" --seed "$seed" >"$tmp/recv-timeout-$seed-3"
+  cmp "$tmp/recv-timeout-$seed-1" "$tmp/recv-timeout-$seed-2"
+  cmp "$tmp/recv-timeout-$seed-1" "$tmp/recv-timeout-$seed-3"
+  grep -Fqx 'NATIVE_RECV_TIMEOUT_RESULT delivered=[0, 1, 2, 3, 4] timeouts=5' \
+    "$tmp/recv-timeout-$seed-1"
+done
+"$runner" native-run "$tmp/recv-timeout-probe" --seed 5 --record "$tmp/recv-timeout.patina" \
+  --fingerprint native-recv-timeout-v1 >"$tmp/recv-timeout-record"
+"$runner" native-run "$tmp/recv-timeout-probe" --seed 5 --record "$tmp/recv-timeout-repeat.patina" \
+  --fingerprint native-recv-timeout-v1 >/dev/null
+cmp "$tmp/recv-timeout.patina" "$tmp/recv-timeout-repeat.patina"
+"$runner" native-run "$tmp/recv-timeout-probe" --replay "$tmp/recv-timeout.patina" \
+  --fingerprint native-recv-timeout-v1 >"$tmp/recv-timeout-replay"
+cmp "$tmp/recv-timeout-record" "$tmp/recv-timeout-replay"
+
+# Deterministic pthread_rwlock_* via FFI (std's RwLock does not lower to these,
+# so drive them directly). Writer contention routes through the scheduler:
+# byte-identical acquisition order per seed, and the interposers are DEFINED so
+# pthread_rwlock never appears as an import.
+"$runner" native-build "$tmp/rwlock_ffi_probe.rs" --output "$tmp/rwlock-ffi-probe" >/dev/null
+"$runner" native-audit "$tmp/rwlock-ffi-probe" "${shim_allow[@]}" >/dev/null
+if nm -u "$tmp/rwlock-ffi-probe" 2>/dev/null | grep -q pthread_rwlock; then
+  echo 'validate-native-shim: pthread_rwlock leaked as an import; the rwlock interposers are missing' >&2
+  exit 1
+fi
+rwlock_ffi_distinct=0
+for seed in 1 3 5; do
+  "$runner" native-run "$tmp/rwlock-ffi-probe" --seed "$seed" >"$tmp/rwlock-ffi-$seed-1"
+  "$runner" native-run "$tmp/rwlock-ffi-probe" --seed "$seed" >"$tmp/rwlock-ffi-$seed-2"
+  "$runner" native-run "$tmp/rwlock-ffi-probe" --seed "$seed" >"$tmp/rwlock-ffi-$seed-3"
+  cmp "$tmp/rwlock-ffi-$seed-1" "$tmp/rwlock-ffi-$seed-2"
+  cmp "$tmp/rwlock-ffi-$seed-1" "$tmp/rwlock-ffi-$seed-3"
+  grep -q '^NATIVE_RWLOCK_FFI_RESULT order=' "$tmp/rwlock-ffi-$seed-1"
+done
+rwlock_ffi_distinct=$(cat "$tmp"/rwlock-ffi-{1,3,5}-1 | sort -u | wc -l)
+if [[ "$rwlock_ffi_distinct" -lt 2 ]]; then
+  echo 'validate-native-shim: pthread_rwlock acquisition order did not vary across seeds' >&2
+  exit 1
+fi
+
+# Pre-run default-deny gate self-test (macOS). A binary that reaches an
+# uninterposed blocking primitive must be REFUSED by native-run, naming and
+# categorizing the symbol, with the guest never running; and it must run only
+# under --allow-unsupported-symbols, with a loud warning. This gate is
+# demonstrably able to fail: the first check depends on the run being rejected.
+if [[ "$(uname -s)" == Darwin ]]; then
+  "$runner" native-build "$tmp/parker_escape_probe.rs" \
+    --output "$tmp/parker-escape-probe" >/dev/null
+  if "$runner" native-run "$tmp/parker-escape-probe" --seed 1 \
+      >"$tmp/parker-escape-out" 2>"$tmp/parker-escape-err"; then
+    echo 'validate-native-shim: pre-run gate let an uninterposed blocking symbol run' >&2
+    exit 1
+  fi
+  grep -q 'os_unfair_lock_lock' "$tmp/parker-escape-err"
+  grep -q 'unmanaged-sync' "$tmp/parker-escape-err"
+  if grep -q 'PARKER_ESCAPE_RAN' "$tmp/parker-escape-out"; then
+    echo 'validate-native-shim: guest ran despite the pre-run gate denial' >&2
+    exit 1
+  fi
+  "$runner" native-run "$tmp/parker-escape-probe" --seed 1 --allow-unsupported-symbols all \
+    >"$tmp/parker-escape-hatch-out" 2>"$tmp/parker-escape-hatch-err"
+  grep -qx 'PARKER_ESCAPE_RAN' "$tmp/parker-escape-hatch-out"
+  grep -q 'WARNING' "$tmp/parker-escape-hatch-err"
+fi
 
 "$runner" native-build "$tmp/sleep_order_probe.rs" --output "$tmp/sleep-order-probe" >/dev/null
 "$runner" native-audit "$tmp/sleep-order-probe" "${shim_allow[@]}" >/dev/null

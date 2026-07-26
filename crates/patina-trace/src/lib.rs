@@ -21,7 +21,16 @@ use serde::{Deserialize, Serialize};
 /// greppable JSON. Additive ABI variants, such as the TCP operations and
 /// outcomes, do not require a format bump because older traces never contain
 /// those enum tags and serde's name-tagged representation preserves old events.
-pub const TRACE_FORMAT_VERSION: u32 = 3;
+///
+/// Format 4 records the run's fault-injection configuration in the bundle
+/// metadata ([`RunMetadata::faults`]) so a fault run replays self-contained: the
+/// stored config is authoritative and no `--fs-crash-at`/jitter/drop flags need
+/// re-supplying. A format 3 (or earlier) bundle carries no such field — its
+/// `faults` migrates to `None`, which the runtime reads as "pre-metadata trace"
+/// and falls back to the historical re-supply contract. The metadata field is a
+/// new struct key, not a new operation, so recorded event streams are byte-for-
+/// byte unchanged across the bump.
+pub const TRACE_FORMAT_VERSION: u32 = 4;
 /// The oldest trace format version this runtime can read. A bundle at this
 /// version, or any later supported version, is migrated in memory through the
 /// `MIGRATIONS` chain up to [`TRACE_FORMAT_VERSION`] and then validated by
@@ -34,12 +43,81 @@ pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
 const MAIN_TIMELINE: &str = "main";
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// The boundary-operation kind a filesystem crash is pinned to. Serialized by
+/// name (snake_case) so it round-trips independent of declaration order, mirror
+/// of the runtime's `CrashOp`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FaultCrashOp {
+    Open,
+    Write,
+    Sync,
+    Close,
+}
+
+/// Granularity at which a torn write reverts on crash, mirror of the fs-crash
+/// `TornGranularity`. Serialized by name so the default stays legible.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TornGranularity {
+    #[default]
+    Block,
+    Byte,
+}
+
+/// Where a filesystem crash is injected: after the `ordinal`-th (1-based)
+/// occurrence of `op`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CrashPointRecord {
+    pub op: FaultCrashOp,
+    pub ordinal: u64,
+}
+
+/// The full seed-driven fault-injection configuration of a recorded run. Stored
+/// in the trace metadata so replay reproduces the run's faults without any flag
+/// re-supply. Every field defaults to inert and is omitted from the serialized
+/// form when at its default, so a fault-free run records a compact empty object.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FaultConfigRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crash_at: Option<CrashPointRecord>,
+    #[serde(default, skip_serializing_if = "torn_granularity_is_block")]
+    pub torn_granularity: TornGranularity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sleep_jitter_nanos: Option<(u64, u64)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net_jitter_nanos: Option<(u64, u64)>,
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub net_drop_permille: u16,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub net_latency_nanos: u64,
+}
+
+fn torn_granularity_is_block(granularity: &TornGranularity) -> bool {
+    matches!(granularity, TornGranularity::Block)
+}
+
+fn is_zero_u16(value: &u16) -> bool {
+    *value == 0
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunMetadata {
     pub root_seed: u64,
     pub decision_policy: String,
     pub fingerprint: String,
+    /// The run's fault-injection configuration, authoritative on replay.
+    /// Absent (`None`) in traces recorded before format 4, which the runtime
+    /// treats as the pre-metadata re-supply contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub faults: Option<FaultConfigRecord>,
 }
 
 impl RunMetadata {
@@ -48,7 +126,15 @@ impl RunMetadata {
             root_seed,
             decision_policy: "splitmix64-v1".into(),
             fingerprint: fingerprint.into(),
+            faults: None,
         }
+    }
+
+    /// Attach the run's fault-injection configuration recorded into the trace.
+    #[must_use]
+    pub fn with_faults(mut self, faults: Option<FaultConfigRecord>) -> Self {
+        self.faults = faults;
+        self
     }
 }
 
@@ -425,6 +511,12 @@ impl Replayer {
         self.metadata.root_seed
     }
 
+    /// The recorded fault-injection configuration, authoritative on replay.
+    /// `None` for a pre-format-4 trace that carried no such metadata.
+    pub const fn fault_config(&self) -> Option<&FaultConfigRecord> {
+        self.metadata.faults.as_ref()
+    }
+
     pub fn expect(&mut self, operation: &Operation) -> Result<Outcome, TraceError> {
         let event = self
             .decisions
@@ -540,6 +632,13 @@ impl BranchSession {
             prefix,
             suffix: Vec::new(),
         })
+    }
+
+    /// The parent trace's recorded fault-injection configuration, inherited by
+    /// the branch so its replayed prefix uses the same fault drivers. `None` for
+    /// a pre-format-4 parent trace.
+    pub const fn fault_config(&self) -> Option<&FaultConfigRecord> {
+        self.bundle.metadata.faults.as_ref()
     }
 
     pub fn expect_prefix(
@@ -699,7 +798,7 @@ type Migration = fn(serde_json::Value) -> Result<serde_json::Value, TraceError>;
 /// format bump needs exactly one new step appended here (and the constant
 /// [`TRACE_FORMAT_VERSION`] raised). No plugin system: the chain is a fixed,
 /// auditable slice.
-const MIGRATIONS: &[Migration] = &[migrate_v1_to_v2, migrate_v2_to_v3];
+const MIGRATIONS: &[Migration] = &[migrate_v1_to_v2, migrate_v2_to_v3, migrate_v3_to_v4];
 
 // One migration step must exist for each supported prior version; this keeps
 // the chain and the version window from drifting apart on a future bump.
@@ -787,6 +886,22 @@ fn migrate_v2_to_v3(mut value: serde_json::Value) -> Result<serde_json::Value, T
         .as_object_mut()
         .ok_or_else(|| TraceError::Invalid("format 2 trace is not a JSON object".into()))?;
     object.insert("format_version".into(), serde_json::Value::from(3u32));
+    Ok(value)
+}
+
+/// Upgrade the format 3 layout to format 4.
+///
+/// Format 4 adds the optional `faults` key to the bundle metadata. A format 3
+/// bundle carries no such key, and its absence deserializes to `None` through
+/// `serde(default)` once the version tag is bumped — the runtime reads that
+/// `None` as a pre-metadata trace and keeps the historical fault re-supply
+/// contract. So the upgrade is purely a version-tag bump, exactly like v2→v3;
+/// no recorded event is touched.
+fn migrate_v3_to_v4(mut value: serde_json::Value) -> Result<serde_json::Value, TraceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| TraceError::Invalid("format 3 trace is not a JSON object".into()))?;
+    object.insert("format_version".into(), serde_json::Value::from(4u32));
     Ok(value)
 }
 
@@ -919,6 +1034,56 @@ mod tests {
         assert_eq!(resolved[0].outcome, Outcome::U64(10));
         assert_eq!(resolved[1].outcome, Outcome::Bytes(vec![9]));
         assert_eq!(bundle.timelines[1].branch_seed, Some(99));
+    }
+
+    #[test]
+    fn fault_config_metadata_round_trips_and_omits_defaults() {
+        let faults = FaultConfigRecord {
+            crash_at: Some(CrashPointRecord {
+                op: FaultCrashOp::Write,
+                ordinal: 34,
+            }),
+            torn_granularity: TornGranularity::Byte,
+            net_drop_permille: 250,
+            ..FaultConfigRecord::default()
+        };
+        let metadata = RunMetadata::new(7, "fingerprint").with_faults(Some(faults.clone()));
+        let bundle = TraceBundle::new(metadata, Vec::new());
+        let bytes = bundle.to_bytes().unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        // Enum tags serialize by name, and inert knobs are omitted entirely.
+        assert!(text.contains("\"op\":\"write\""), "{text}");
+        assert!(text.contains("\"torn_granularity\":\"byte\""), "{text}");
+        assert!(!text.contains("sleep_jitter_nanos"), "{text}");
+        assert!(!text.contains("net_latency_nanos"), "{text}");
+
+        let reloaded = TraceBundle::from_slice(&bytes).unwrap();
+        assert_eq!(reloaded.metadata.faults, Some(faults));
+
+        // A fault-free run records a compact empty object, still distinct from a
+        // pre-metadata trace whose field is absent (None).
+        let empty = TraceBundle::new(
+            RunMetadata::new(7, "fingerprint").with_faults(Some(FaultConfigRecord::default())),
+            Vec::new(),
+        );
+        let text = String::from_utf8(empty.to_bytes().unwrap()).unwrap();
+        assert!(text.contains("\"faults\":{}"), "{text}");
+    }
+
+    #[test]
+    fn pre_metadata_trace_migrates_to_absent_fault_config() {
+        // A format-3 bundle carries no `faults` key; after migration it is None,
+        // the runtime's signal to fall back to the re-supply contract.
+        let mut v3 = TraceBundle::new(RunMetadata::new(1, "fingerprint"), Vec::new());
+        v3.format_version = 3;
+        let mut value = serde_json::to_value(&v3).unwrap();
+        // Emulate an on-disk v3 trace: strip the additive metadata field.
+        value["metadata"].as_object_mut().unwrap().remove("faults");
+        value["format_version"] = serde_json::Value::from(3u32);
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let migrated = TraceBundle::from_slice(&bytes).unwrap();
+        assert_eq!(migrated.format_version, TRACE_FORMAT_VERSION);
+        assert_eq!(migrated.metadata.faults, None);
     }
 
     #[test]

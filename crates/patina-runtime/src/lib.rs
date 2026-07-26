@@ -12,9 +12,11 @@ use patina_abi::{
     Operation, Outcome, SeekWhence, SendReport, ShutdownHow, SocketId, TaskId, TcpAccepted,
 };
 use patina_driver_api::{ClockDriver, EntropyDriver, FsDriver, NetDriver, SchedulerDriver};
+use patina_fs_crash::CrashFs;
+pub use patina_fs_crash::TornGranularity;
 use patina_fs_mem::MemFs;
 use patina_net_sim::SimNet;
-use patina_rng_seeded::SeededEntropy;
+use patina_rng_seeded::{SeededEntropy, SplitMix64};
 use patina_sched_det::DetScheduler;
 use patina_time_virtual::VirtualClock;
 pub use patina_trace::MAX_TRACE_BYTES;
@@ -24,6 +26,13 @@ pub const ENV_MODE: &str = "PATINA_MODE";
 pub const ENV_SEED: &str = "PATINA_SEED";
 pub const ENV_TRACE: &str = "PATINA_TRACE";
 pub const ENV_TRACE_FD: &str = "PATINA_TRACE_FD";
+/// Inherited host descriptor carrying an encoded `patina_fs_mem::FsImage`. When
+/// set, `native-run` streams a read-only host directory tree into the guest and
+/// the shim rebuilds it as the deterministic filesystem instead of an empty one,
+/// so a fully interposed guest sees a fixed corpus without touching the host.
+/// The image's hash is folded into the run fingerprint, so replay rejects a
+/// different corpus. Off when unset.
+pub const ENV_FS_IMAGE_FD: &str = "PATINA_FS_IMAGE_FD";
 pub const ENV_FINGERPRINT: &str = "PATINA_FINGERPRINT";
 pub const ENV_BRANCH_FROM: &str = "PATINA_BRANCH_FROM";
 pub const ENV_BRANCH_SEED: &str = "PATINA_BRANCH_SEED";
@@ -36,6 +45,30 @@ pub const ENV_PARAMS_JSON: &str = "PATINA_PARAMS_JSON";
 /// network. Blocking receives under a non-zero value park on the virtual-clock
 /// timer queue until delivery. Invalid values are rejected fail-closed.
 pub const ENV_NET_LATENCY: &str = "PATINA_NET_LATENCY_NANOS";
+/// Seeded per-datagram delivery jitter range `MIN..MAX` in nanoseconds applied
+/// to the default `SimNet`. Varying jitter reorders datagrams relative to their
+/// send order — the UDP-reorder fault. Off when unset.
+pub const ENV_NET_JITTER: &str = "PATINA_NET_JITTER_NANOS";
+/// Seeded datagram drop probability in per-mille (0..=1000) applied to the
+/// default `SimNet`. Off (zero) when unset.
+pub const ENV_NET_DROP_PERMILLE: &str = "PATINA_NET_DROP_PERMILLE";
+/// Seeded extra latency `MIN..MAX` in nanoseconds added to every guest sleep,
+/// inflating virtual elapsed time to trip wall-clock deadline assumptions. Off
+/// when unset.
+pub const ENV_SLEEP_JITTER: &str = "PATINA_SLEEP_JITTER_NANOS";
+/// Filesystem crash-injection point, e.g. `close:1`, `write:3`, `sync:2`,
+/// `open:1`. When set the default filesystem becomes a `CrashFs` and the runtime
+/// injects a crash immediately after the selected boundary operation, dropping
+/// unsynced data. Off when unset.
+pub const ENV_FS_CRASH_AT: &str = "PATINA_FS_CRASH_AT";
+/// Torn-write granularity for an injected crash: `block` (default, whole-block
+/// revert) or `byte` (the final unsynced write may survive partially at
+/// sub-block byte granularity, modeling a torn in-flight page). Only meaningful
+/// alongside [`ENV_FS_CRASH_AT`]. Off (block) when unset.
+pub const ENV_FS_TORN_GRANULARITY: &str = "PATINA_FS_TORN_GRANULARITY";
+/// Suppress the default-on end-of-run schedule diagnostic when set to a false-y
+/// value (`0`, `off`, `false`, `no`). The diagnostic is on by default.
+pub const ENV_SCHEDULE_REPORT: &str = "PATINA_SCHEDULE_REPORT";
 
 const DEFAULT_FINGERPRINT: &str = "direct-seeded-run-v1";
 const READ_CHUNK_SIZE: usize = 4096;
@@ -76,6 +109,91 @@ pub enum ExecutionMode {
     },
 }
 
+/// A boundary operation kind that a filesystem crash can be pinned to. The
+/// runtime crashes immediately after the Nth matching operation completes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CrashOp {
+    Open,
+    Write,
+    Sync,
+    Close,
+}
+
+/// Where a filesystem crash is injected: after the `ordinal`-th (1-based)
+/// occurrence of `op`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CrashPoint {
+    pub op: CrashOp,
+    pub ordinal: u64,
+}
+
+/// Per-task scheduling-boundary count and whether the task's body was
+/// effectively unexplorable — it ran from first scheduled to completion without
+/// ever passing a scheduling boundary (yield or park), so no seed could
+/// interleave anything inside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TaskScheduleStat {
+    pub task: TaskId,
+    /// Voluntary reschedules taken on the interposed effect surface. Scale with a
+    /// genuine concurrent loop; zero means an atomics-only (unschedulable) body.
+    pub yields: u64,
+    /// Blocking waits. For an atomics-only worker these are only spawn/join
+    /// housekeeping and do not scale with its work.
+    pub parks: u64,
+    /// Total scheduling boundaries (`yields + parks`) between spawn and
+    /// completion.
+    pub boundaries: u64,
+    /// A spawned worker (not the initial task) that completed without ever
+    /// yielding on the effect surface: its interleavings are unreachable at any
+    /// seed.
+    pub vacuous: bool,
+}
+
+/// End-of-run schedule-exploration diagnostics. Surfaces whether a multithreaded
+/// guest's schedule was actually explorable, so "N seeds explored, all clean"
+/// can never silently mean "nothing inside a thread was ever schedulable".
+/// Computed from the runtime's task-lifecycle shadow, which is maintained
+/// identically on record and replay, so the diagnostic reproduces on replay.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScheduleDiagnostics {
+    /// Distinct tasks the guest spawned, including the initial task.
+    pub tasks_spawned: u64,
+    /// High-water mark of concurrently-live tasks.
+    pub max_concurrent: u64,
+    /// Total yield/park boundaries across every task.
+    pub total_boundaries: u64,
+    /// Per-completed-task boundary counts, in spawn order.
+    pub tasks: Vec<TaskScheduleStat>,
+    /// Spawned workers that ran start-to-finish with zero boundaries.
+    pub vacuous: Vec<TaskId>,
+}
+
+impl ScheduleDiagnostics {
+    /// Whether there was any concurrency to explore at all. A single-task run
+    /// has no schedule, so the diagnostic stays silent for it.
+    pub fn had_concurrency(&self) -> bool {
+        self.tasks_spawned >= 2
+    }
+}
+
+/// Seed-driven, default-off fault knobs layered onto the deterministic drivers.
+/// Every field is inert at its default so a run that configures no fault behaves
+/// exactly as before.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FaultConfig {
+    /// Inject a filesystem crash after a chosen boundary operation.
+    crash_at: Option<CrashPoint>,
+    /// Granularity at which the injected crash tears the final unsynced write.
+    /// Inert without `crash_at`; defaults to whole-block.
+    torn_granularity: TornGranularity,
+    /// Inclusive `[min, max]` nanoseconds of seeded extra latency per guest sleep.
+    sleep_jitter_nanos: Option<(u64, u64)>,
+    /// Inclusive `[min, max]` nanoseconds of seeded per-datagram delivery jitter.
+    net_jitter_nanos: Option<(u64, u64)>,
+    /// Seeded datagram drop probability in per-mille (0..=1000).
+    net_drop_permille: u16,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeConfig {
     seed: u64,
@@ -84,6 +202,7 @@ pub struct RuntimeConfig {
     step_budget: Option<u64>,
     params: BTreeMap<String, String>,
     net_latency_nanos: u64,
+    faults: FaultConfig,
 }
 
 impl RuntimeConfig {
@@ -95,6 +214,7 @@ impl RuntimeConfig {
             step_budget: None,
             params: BTreeMap::new(),
             net_latency_nanos: 0,
+            faults: FaultConfig::default(),
         }
     }
 
@@ -106,6 +226,7 @@ impl RuntimeConfig {
             step_budget: None,
             params: BTreeMap::new(),
             net_latency_nanos: 0,
+            faults: FaultConfig::default(),
         }
     }
 
@@ -122,6 +243,7 @@ impl RuntimeConfig {
             step_budget: None,
             params: BTreeMap::new(),
             net_latency_nanos: 0,
+            faults: FaultConfig::default(),
         }
     }
 
@@ -139,6 +261,7 @@ impl RuntimeConfig {
             step_budget: None,
             params: BTreeMap::new(),
             net_latency_nanos: 0,
+            faults: FaultConfig::default(),
         }
     }
 
@@ -157,6 +280,7 @@ impl RuntimeConfig {
             step_budget: None,
             params: BTreeMap::new(),
             net_latency_nanos: 0,
+            faults: FaultConfig::default(),
         }
     }
 
@@ -181,6 +305,7 @@ impl RuntimeConfig {
             step_budget: None,
             params: BTreeMap::new(),
             net_latency_nanos: 0,
+            faults: FaultConfig::default(),
         }
     }
 
@@ -197,6 +322,78 @@ impl RuntimeConfig {
 
     pub const fn net_latency_nanos(&self) -> u64 {
         self.net_latency_nanos
+    }
+
+    /// Inject a filesystem crash after the `ordinal`-th (1-based) `op` boundary.
+    pub fn with_crash_at(mut self, op: CrashOp, ordinal: u64) -> Self {
+        self.faults.crash_at = Some(CrashPoint { op, ordinal });
+        self
+    }
+
+    /// Select whole-block or sub-block byte-granularity tearing for an injected
+    /// crash. Inert without [`RuntimeConfig::with_crash_at`].
+    pub fn with_fs_torn_granularity(mut self, granularity: TornGranularity) -> Self {
+        self.faults.torn_granularity = granularity;
+        self
+    }
+
+    /// Add seeded extra latency to every guest sleep, drawn from `[min, max]`.
+    pub fn with_sleep_jitter_nanos(mut self, min: u64, max: u64) -> Self {
+        self.faults.sleep_jitter_nanos = Some((min, max));
+        self
+    }
+
+    /// Add seeded per-datagram delivery jitter drawn from `[min, max]`.
+    pub fn with_net_jitter_nanos(mut self, min: u64, max: u64) -> Self {
+        self.faults.net_jitter_nanos = Some((min, max));
+        self
+    }
+
+    /// Drop datagrams with the given per-mille (0..=1000) probability.
+    pub fn with_net_drop_permille(mut self, permille: u16) -> Self {
+        self.faults.net_drop_permille = permille;
+        self
+    }
+
+    pub const fn crash_at(&self) -> Option<CrashPoint> {
+        self.faults.crash_at
+    }
+
+    /// Apply the fault-injection knobs from a control-plane accessor. Shared by
+    /// [`RuntimeConfig::from_env`] (reading the process environment) and the
+    /// native shim (reading its scrubbed constructor-time control plane), so both
+    /// entry points parse the fault protocol identically and fail closed on any
+    /// malformed value. Each knob defaults off when its variable is absent.
+    pub fn apply_fault_env<F>(mut self, get: F) -> Result<Self, RuntimeError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        if let Some(value) = get(ENV_FS_CRASH_AT) {
+            self.faults.crash_at = Some(parse_crash_point(&value)?);
+        }
+        if let Some(value) = get(ENV_FS_TORN_GRANULARITY) {
+            self.faults.torn_granularity = parse_torn_granularity(&value)?;
+        }
+        if let Some(value) = get(ENV_SLEEP_JITTER) {
+            self.faults.sleep_jitter_nanos = Some(parse_nanos_range(ENV_SLEEP_JITTER, &value)?);
+        }
+        if let Some(value) = get(ENV_NET_JITTER) {
+            self.faults.net_jitter_nanos = Some(parse_nanos_range(ENV_NET_JITTER, &value)?);
+        }
+        if let Some(value) = get(ENV_NET_DROP_PERMILLE) {
+            let permille: u16 = value.parse().map_err(|_| {
+                RuntimeError::Config(format!(
+                    "{ENV_NET_DROP_PERMILLE} must be an integer in [0, 1000]"
+                ))
+            })?;
+            if permille > 1000 {
+                return Err(RuntimeError::Config(format!(
+                    "{ENV_NET_DROP_PERMILLE} must be within [0, 1000] per-mille"
+                )));
+            }
+            self.faults.net_drop_permille = permille;
+        }
+        Ok(self)
     }
 
     pub fn with_param(
@@ -305,6 +502,7 @@ impl RuntimeConfig {
                 )));
             }
         };
+        let config = config.apply_fault_env(|name| env::var(name).ok())?;
         Ok(config)
     }
 
@@ -420,14 +618,18 @@ impl RuntimeBuilder {
             }
         }
 
+        // A replayed or branched trace supplies its own authoritative fault
+        // configuration, applied to `self.config` after the match releases its
+        // borrow. `None` leaves the operator-supplied configuration in place.
+        let mut replay_fault_override: Option<(FaultConfig, u64)> = None;
         let (execution, root_seed) = match &self.config.mode {
             ExecutionMode::Seeded => (Execution::Seeded, self.config.seed),
             ExecutionMode::Record { path } => (
                 Execution::Record {
-                    recorder: Recorder::new(RunMetadata::new(
-                        self.config.seed,
-                        self.config.fingerprint.clone(),
-                    )),
+                    recorder: Recorder::new(
+                        RunMetadata::new(self.config.seed, self.config.fingerprint.clone())
+                            .with_faults(Some(fault_record(&self.config))),
+                    ),
                     sink: RecordSink::Path {
                         path: path.clone(),
                         _reservation: RecordReservation::acquire(path)?,
@@ -437,10 +639,10 @@ impl RuntimeBuilder {
             ),
             ExecutionMode::RecordTransport => (
                 Execution::Record {
-                    recorder: Recorder::new(RunMetadata::new(
-                        self.config.seed,
-                        self.config.fingerprint.clone(),
-                    )),
+                    recorder: Recorder::new(
+                        RunMetadata::new(self.config.seed, self.config.fingerprint.clone())
+                            .with_faults(Some(fault_record(&self.config))),
+                    ),
                     sink: RecordSink::Transport(
                         self.trace_transport.take().expect("transport was checked"),
                     ),
@@ -450,6 +652,9 @@ impl RuntimeBuilder {
             ExecutionMode::Replay { path, timeline } => {
                 let replayer = Replayer::open_timeline(path, &self.config.fingerprint, timeline)?;
                 let root_seed = replayer.root_seed();
+                // The trace's fault configuration is authoritative on replay.
+                replay_fault_override =
+                    reconcile_replay_faults(&self.config, replayer.fault_config())?;
                 (Execution::Replay(replayer), root_seed)
             }
             ExecutionMode::ReplayTransport { timeline } => {
@@ -461,6 +666,8 @@ impl RuntimeBuilder {
                 let bundle = TraceBundle::from_slice(&bytes)?;
                 let replayer = Replayer::from_bundle(bundle, &self.config.fingerprint, timeline)?;
                 let root_seed = replayer.root_seed();
+                replay_fault_override =
+                    reconcile_replay_faults(&self.config, replayer.fault_config())?;
                 (Execution::Replay(replayer), root_seed)
             }
             ExecutionMode::Branch {
@@ -479,9 +686,13 @@ impl RuntimeBuilder {
                     branch_id.clone(),
                     *branch_seed,
                 )?;
+                // A branch replays the parent prefix, so it inherits the parent
+                // trace's fault configuration for the replayed drivers.
+                replay_fault_override =
+                    reconcile_replay_faults(&self.config, session.fault_config())?;
                 (
                     Execution::Branch {
-                        session,
+                        session: Box::new(session),
                         _reservation: reservation,
                     },
                     *branch_seed,
@@ -489,23 +700,46 @@ impl RuntimeBuilder {
             }
         };
 
+        // Adopt the trace's authoritative fault configuration before any driver
+        // is constructed from it, so a flag-free replay rebuilds the same
+        // CrashFs/SimNet the recording used.
+        if let Some((faults, net_latency_nanos)) = replay_fault_override {
+            self.config.faults = faults;
+            self.config.net_latency_nanos = net_latency_nanos;
+        }
+
         if self.install_defaults {
-            self.filesystem
-                .get_or_insert_with(|| Box::new(MemFs::new()));
+            // A configured crash point upgrades the default filesystem to the
+            // crash-consistency model so an injected crash drops unsynced data.
+            // An explicitly installed filesystem is left untouched.
+            if self.filesystem.is_none() {
+                self.filesystem = Some(if self.config.faults.crash_at.is_some() {
+                    Box::new(
+                        CrashFs::builder()
+                            .seed(root_seed)
+                            .torn_granularity(self.config.faults.torn_granularity)
+                            .build()
+                            .map_err(RuntimeError::Effect)?,
+                    )
+                } else {
+                    Box::new(MemFs::new())
+                });
+            }
             self.clock
                 .get_or_insert_with(|| Box::new(VirtualClock::default()));
             self.entropy
                 .get_or_insert_with(|| Box::new(SeededEntropy::new(root_seed)));
             self.scheduler
                 .get_or_insert_with(|| Box::new(DetScheduler::new(root_seed)));
-            let latency = self.config.net_latency_nanos;
             if self.network.is_none() {
-                self.network = Some(Box::new(
-                    SimNet::builder()
-                        .base_latency_nanos(latency)
-                        .build()
-                        .map_err(RuntimeError::Effect)?,
-                ));
+                let mut network = SimNet::builder()
+                    .base_latency_nanos(self.config.net_latency_nanos)
+                    .fault_seed(root_seed)
+                    .drop_permille(self.config.faults.net_drop_permille);
+                if let Some((min, max)) = self.config.faults.net_jitter_nanos {
+                    network = network.jitter_nanos(min, max);
+                }
+                self.network = Some(Box::new(network.build().map_err(RuntimeError::Effect)?));
             }
         }
 
@@ -527,8 +761,180 @@ impl RuntimeBuilder {
             scheduler_tasks: std::collections::BTreeSet::new(),
             parked_tasks: std::collections::BTreeSet::new(),
             rescued: Vec::new(),
+            crash_at: self.config.faults.crash_at,
+            crash_counts: CrashCounts::default(),
+            crash_fired: false,
+            sleep_jitter_nanos: self.config.faults.sleep_jitter_nanos,
+            // Domain-separated seed so sleep-jitter draws do not correlate with
+            // the entropy or scheduler streams that also derive from root_seed.
+            sleep_jitter_rng: SplitMix64::new(root_seed ^ 0x5EED_1A7E_0FF5_E720),
+            schedule: ScheduleTracker::default(),
         })
     }
+}
+
+/// A task still running (spawned, not yet completed) with its spawn order and
+/// the scheduling boundaries it has passed so far, split by kind. `yields` are
+/// voluntary reschedules the guest takes every time it touches the interposed
+/// effect surface (a lock/unlock, syscall, sleep, …); they scale with a genuine
+/// concurrent loop. `parks` are blocking waits, which for an atomics-only worker
+/// are only spawn/join housekeeping and do not scale with its work.
+struct LiveTask {
+    order: u64,
+    yields: u64,
+    parks: u64,
+}
+
+/// A completed task's final schedule accounting.
+struct CompletedTask {
+    task: TaskId,
+    order: u64,
+    yields: u64,
+    parks: u64,
+}
+
+/// Yield count that spawning and joining a std thread incurs on its own —
+/// independent of what the thread's body does. A spawned worker whose yields do
+/// not exceed this baseline performed zero interposed operations of its own: it
+/// never touched the effect surface at a schedulable point, so any loop it ran
+/// was atomics-only (a `std::sync::RwLock` fast-path read-modify-write, say) and
+/// completely invisible to the runtime. Yields are the stable signal — blocking
+/// parks vary by seed, but the scaffolding yield count is invariant to the body's
+/// iteration count. A worker at or below it is unexplorable; one real interposed
+/// op lifts it above, a `--yield-points` build to tens, an interposed sync loop
+/// (contended mutexes) to hundreds.
+///
+/// The baseline is platform-specific and measured with the do-nothing-thread
+/// experiment (spawn a worker with an empty body, read its yields from
+/// `PATINA_SCHEDULE_REPORT`):
+///
+/// - **macOS = 4.** Rust std's Darwin thread `Parker` spins on the interposed
+///   `dispatch_semaphore` during the spawn/join handshake, so the *worker* incurs
+///   four scheduling boundaries before its body runs.
+/// - **Linux = 0.** Std lowers parking to raw `futex`, and the join handshake
+///   parks the *main* thread, not the worker; a do-nothing worker reaches
+///   completion with zero worker-side boundaries. Measured on glibc 2.39/aarch64:
+///   an empty-body worker reports `0y+0p`, an uncontended-`Mutex` worker likewise
+///   `0y+0p` (uncontended locks are pure userspace atomics), and a `--yield-points`
+///   worker reports tens — so a floor of 0 flags exactly the atomics-only workers
+///   (buggy-smoke `lost-update`) while one interposed boundary clears it.
+#[cfg(target_os = "macos")]
+const SCAFFOLDING_YIELD_FLOOR: u64 = 4;
+#[cfg(not(target_os = "macos"))]
+const SCAFFOLDING_YIELD_FLOOR: u64 = 0;
+
+/// Per-task scheduling-boundary accounting backing [`ScheduleDiagnostics`].
+/// Every field is driven by the recorded task-lifecycle ops, so it is populated
+/// identically on record and replay.
+#[derive(Default)]
+struct ScheduleTracker {
+    live: BTreeMap<TaskId, LiveTask>,
+    completed: Vec<CompletedTask>,
+    spawned: u64,
+    max_concurrent: u64,
+}
+
+impl ScheduleTracker {
+    fn on_spawn(&mut self, task: TaskId) {
+        let order = self.spawned;
+        self.spawned += 1;
+        self.live.insert(
+            task,
+            LiveTask {
+                order,
+                yields: 0,
+                parks: 0,
+            },
+        );
+        self.max_concurrent = self.max_concurrent.max(self.live.len() as u64);
+    }
+
+    fn on_yield(&mut self, task: TaskId) {
+        if let Some(live) = self.live.get_mut(&task) {
+            live.yields += 1;
+        }
+    }
+
+    fn on_park(&mut self, task: TaskId) {
+        if let Some(live) = self.live.get_mut(&task) {
+            live.parks += 1;
+        }
+    }
+
+    fn on_complete(&mut self, task: TaskId) {
+        if let Some(live) = self.live.remove(&task) {
+            self.completed.push(CompletedTask {
+                task,
+                order: live.order,
+                yields: live.yields,
+                parks: live.parks,
+            });
+        }
+    }
+
+    fn diagnostics(&self) -> ScheduleDiagnostics {
+        let mut records: Vec<(u64, TaskId, u64, u64)> = self
+            .completed
+            .iter()
+            .map(|done| (done.order, done.task, done.yields, done.parks))
+            .chain(
+                self.live
+                    .iter()
+                    .map(|(task, live)| (live.order, *task, live.yields, live.parks)),
+            )
+            .collect();
+        records.sort_by_key(|(order, _, _, _)| *order);
+        let total_boundaries = records
+            .iter()
+            .map(|(_, _, yields, parks)| yields + parks)
+            .sum();
+        let mut vacuous = Vec::new();
+        let tasks = records
+            .iter()
+            .map(|&(order, task, yields, parks)| {
+                // The initial task (spawn order 0) is the guest's own thread of
+                // control, not a spawned worker, so it is not a vacuity signal.
+                // A spawned worker whose yields do not clear the thread-lifecycle
+                // scaffolding floor exposed no schedulable body: any loop it ran
+                // was atomics-only and unschedulable at any seed. That is the
+                // exact shape of the buggy-smoke `lost-update` race window, and
+                // the yield count is invariant to its iteration count.
+                // A spawned worker (order > 0) is vacuous when its yields do not
+                // exceed the platform scaffolding floor. Written as `!(> floor)`
+                // rather than `<= floor` so the comparison stays valid when the
+                // floor is the type minimum (Linux = 0), where `<= 0` would trip
+                // clippy::absurd_extreme_comparisons.
+                let is_vacuous = order > 0 && !(yields > SCAFFOLDING_YIELD_FLOOR);
+                if is_vacuous {
+                    vacuous.push(task);
+                }
+                TaskScheduleStat {
+                    task,
+                    yields,
+                    parks,
+                    boundaries: yields + parks,
+                    vacuous: is_vacuous,
+                }
+            })
+            .collect();
+        ScheduleDiagnostics {
+            tasks_spawned: self.spawned,
+            max_concurrent: self.max_concurrent,
+            total_boundaries,
+            tasks,
+            vacuous,
+        }
+    }
+}
+
+/// Per-operation-kind occurrence counters used to fire a crash at the Nth
+/// boundary op of a chosen kind.
+#[derive(Default)]
+struct CrashCounts {
+    open: u64,
+    write: u64,
+    sync: u64,
+    close: u64,
 }
 
 enum Execution {
@@ -539,7 +945,10 @@ enum Execution {
     },
     Replay(Replayer),
     Branch {
-        session: BranchSession,
+        // Boxed: a `BranchSession` is by far the largest variant payload, and
+        // branch runs are the rare path, so keeping it out of line avoids
+        // inflating every `Execution` (clippy::large_enum_variant).
+        session: Box<BranchSession>,
         _reservation: RecordReservation,
     },
 }
@@ -646,6 +1055,20 @@ pub struct Context {
     /// Tasks woken by the most recent deadlock-rescue (their timers fired), for
     /// an embedder to drain and resolve as timeouts.
     rescued: Vec<TaskId>,
+    /// Configured filesystem crash point, or `None` when crash injection is off.
+    /// Consulted after each matching boundary operation; the crash fires exactly
+    /// once. The op sequence is identical on record and replay, so the injected
+    /// `FsCrash` lands at the same position and reconciles.
+    crash_at: Option<CrashPoint>,
+    crash_counts: CrashCounts,
+    crash_fired: bool,
+    /// Inclusive `[min, max]` nanoseconds of seeded latency added to each guest
+    /// sleep, or `None` when latency injection is off.
+    sleep_jitter_nanos: Option<(u64, u64)>,
+    sleep_jitter_rng: SplitMix64,
+    /// Per-task scheduling-boundary accounting for the vacuous-schedule
+    /// diagnostic emitted at [`Context::finish`].
+    schedule: ScheduleTracker,
 }
 
 impl Context {
@@ -663,6 +1086,12 @@ impl Context {
 
     pub const fn steps(&self) -> u64 {
         self.steps
+    }
+
+    /// End-of-run schedule-exploration diagnostics. See [`ScheduleDiagnostics`].
+    /// Also emitted to stderr by [`Context::finish`] for multithreaded runs.
+    pub fn schedule_diagnostics(&self) -> ScheduleDiagnostics {
+        self.schedule.diagnostics()
     }
 
     pub fn param(&self, key: &str) -> Option<&str> {
@@ -710,6 +1139,11 @@ impl Context {
         decode_u64(&operation, outcome)
     }
 
+    /// Sleep until `deadline_nanos`. Plain: latency jitter is applied by the
+    /// caller through [`Context::apply_sleep_jitter`] so that the single
+    /// guest-sleep entry point (which may park managed tasks rather than route
+    /// through this method) jitters exactly once, while runtime-internal sleeps
+    /// (the deadlock-rescue advancing to a timer) never do.
     pub fn sleep_until(
         &mut self,
         clock: ClockKind,
@@ -736,11 +1170,32 @@ impl Context {
         decode_unit(&operation, outcome)
     }
 
+    /// Add the configured seeded sleep-latency jitter to an absolute sleep
+    /// deadline, returning it unchanged when latency injection is off. Drawn from
+    /// a domain-separated seeded stream so the inflation is deterministic per seed
+    /// and reproduced on replay. A single decision-free range value consumes no
+    /// draw. The embedder applies this once, at the guest-facing sleep entry,
+    /// before parking a managed task or calling [`Context::sleep_until`].
+    pub fn apply_sleep_jitter(&mut self, deadline_nanos: u64) -> u64 {
+        let jitter = match self.sleep_jitter_nanos {
+            None => return deadline_nanos,
+            Some((min, max)) if min == max => min,
+            Some((min, max)) => {
+                let span = max - min + 1;
+                min + (self.sleep_jitter_rng.next_u64() % span)
+            }
+        };
+        deadline_nanos.saturating_add(jitter)
+    }
+
     pub fn sleep_for(&mut self, duration_nanos: u64) -> Result<(), RuntimeError> {
         let now = self.now(ClockKind::Monotonic)?;
         let deadline = now.checked_add(duration_nanos).ok_or_else(|| {
             EffectError::new(ErrorCode::InvalidInput, "virtual sleep deadline overflowed")
         })?;
+        // Direct-API sleeps jitter here (the native embedder jitters at its own
+        // sleep entry instead); either way a guest sleep is jittered exactly once.
+        let deadline = self.apply_sleep_jitter(deadline);
         self.sleep_until(ClockKind::Monotonic, deadline)
     }
 
@@ -766,7 +1221,9 @@ impl Context {
             Err(error) => Outcome::Error(error),
         };
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
-        decode_handle(&operation, outcome)
+        let decoded = decode_handle(&operation, outcome);
+        self.maybe_inject_crash(CrashOp::Open)?;
+        decoded
     }
 
     pub fn fs_read(&mut self, fd: Fd, max_len: usize) -> Result<Vec<u8>, RuntimeError> {
@@ -813,7 +1270,80 @@ impl Context {
             Err(error) => Outcome::Error(error),
         };
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
-        decode_usize(&operation, outcome)
+        let decoded = decode_usize(&operation, outcome);
+        self.maybe_inject_crash(CrashOp::Write)?;
+        decoded
+    }
+
+    /// Positional read (`pread`): read at an explicit offset without moving the
+    /// file cursor. Recorded as [`Operation::FsReadAt`], distinct from a cursor
+    /// read, and -- like a cursor read -- fires no crash-injection boundary.
+    pub fn fs_read_at(
+        &mut self,
+        fd: Fd,
+        offset: u64,
+        max_len: usize,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        if self.filesystem.is_none() {
+            return Err(EffectError::missing_driver("filesystem").into());
+        }
+        let operation = Operation::FsReadAt {
+            fd,
+            offset,
+            max_len,
+        };
+        let expected = match self.filesystem_expected(&operation)? {
+            FilesystemExpected::Execute(expected) => expected,
+            FilesystemExpected::Captured(outcome) => return decode_bytes(&operation, outcome),
+        };
+        let result = self
+            .filesystem
+            .as_mut()
+            .expect("driver was checked")
+            .read_at(fd, offset, max_len);
+        let actual = match result {
+            Ok(bytes) => Outcome::Bytes(bytes),
+            Err(error) => Outcome::Error(error),
+        };
+        let outcome = self.reconcile(operation.clone(), expected, actual)?;
+        decode_bytes(&operation, outcome)
+    }
+
+    /// Positional write (`pwrite`): write at an explicit offset without moving
+    /// the file cursor. Recorded as [`Operation::FsWriteAt`] and counts toward
+    /// the `write` crash ordinal, so `--fs-crash-at write:N` fires on redb's
+    /// positional page writes.
+    pub fn fs_write_at(
+        &mut self,
+        fd: Fd,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<usize, RuntimeError> {
+        if self.filesystem.is_none() {
+            return Err(EffectError::missing_driver("filesystem").into());
+        }
+        let operation = Operation::FsWriteAt {
+            fd,
+            offset,
+            bytes: bytes.to_vec(),
+        };
+        let expected = match self.filesystem_expected(&operation)? {
+            FilesystemExpected::Execute(expected) => expected,
+            FilesystemExpected::Captured(outcome) => return decode_usize(&operation, outcome),
+        };
+        let result = self
+            .filesystem
+            .as_mut()
+            .expect("driver was checked")
+            .write_at(fd, offset, bytes);
+        let actual = match result {
+            Ok(written) => Outcome::Usize(written),
+            Err(error) => Outcome::Error(error),
+        };
+        let outcome = self.reconcile(operation.clone(), expected, actual)?;
+        let decoded = decode_usize(&operation, outcome);
+        self.maybe_inject_crash(CrashOp::Write)?;
+        decoded
     }
 
     pub fn fs_close(&mut self, fd: Fd) -> Result<(), RuntimeError> {
@@ -835,7 +1365,9 @@ impl Context {
             Err(error) => Outcome::Error(error),
         };
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
-        decode_unit(&operation, outcome)
+        let decoded = decode_unit(&operation, outcome);
+        self.maybe_inject_crash(CrashOp::Close)?;
+        decoded
     }
 
     pub fn fs_dup(&mut self, fd: Fd) -> Result<Fd, RuntimeError> {
@@ -946,7 +1478,10 @@ impl Context {
     }
 
     pub fn fs_sync(&mut self, fd: Fd) -> Result<(), RuntimeError> {
-        self.filesystem_unit(Operation::FsSync { fd }, |filesystem| filesystem.sync(fd))
+        let result =
+            self.filesystem_unit(Operation::FsSync { fd }, |filesystem| filesystem.sync(fd));
+        self.maybe_inject_crash(CrashOp::Sync)?;
+        result
     }
 
     pub fn fs_set_len(&mut self, fd: Fd, len: u64) -> Result<(), RuntimeError> {
@@ -1074,6 +1609,45 @@ impl Context {
         self.filesystem_unit(Operation::FsCrash, |filesystem| filesystem.crash())
     }
 
+    /// Fire the configured filesystem crash if the just-completed boundary
+    /// operation is the selected Nth occurrence. Called after each counted fs op
+    /// completes; the crash is injected exactly once. Because the boundary-op
+    /// sequence is identical on record and replay, the injected `FsCrash` lands
+    /// at the same position and reconciles without the flag being re-supplied
+    /// having any different effect (a mismatched flag fails closed like any other
+    /// operation divergence).
+    fn maybe_inject_crash(&mut self, op: CrashOp) -> Result<(), RuntimeError> {
+        if self.crash_fired {
+            return Ok(());
+        }
+        let Some(point) = self.crash_at else {
+            return Ok(());
+        };
+        let count = match op {
+            CrashOp::Open => {
+                self.crash_counts.open += 1;
+                self.crash_counts.open
+            }
+            CrashOp::Write => {
+                self.crash_counts.write += 1;
+                self.crash_counts.write
+            }
+            CrashOp::Sync => {
+                self.crash_counts.sync += 1;
+                self.crash_counts.sync
+            }
+            CrashOp::Close => {
+                self.crash_counts.close += 1;
+                self.crash_counts.close
+            }
+        };
+        if point.op == op && count == point.ordinal {
+            self.crash_fired = true;
+            self.fs_crash()?;
+        }
+        Ok(())
+    }
+
     pub fn task_spawn(&mut self, label: &str) -> Result<TaskId, RuntimeError> {
         if self.scheduler.is_none() {
             return Err(EffectError::missing_driver("scheduler").into());
@@ -1094,6 +1668,7 @@ impl Context {
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
         let task = decode_task(&operation, outcome)?;
         self.scheduler_tasks.insert(task);
+        self.schedule.on_spawn(task);
         Ok(task)
     }
 
@@ -1103,6 +1678,7 @@ impl Context {
         })?;
         // A yield leaves the task runnable; a yielded task is never parked.
         self.parked_tasks.remove(&task);
+        self.schedule.on_yield(task);
         Ok(())
     }
 
@@ -1115,6 +1691,7 @@ impl Context {
             |scheduler| scheduler.park(task, reason),
         )?;
         self.parked_tasks.insert(task);
+        self.schedule.on_park(task);
         Ok(())
     }
 
@@ -1163,6 +1740,7 @@ impl Context {
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
         decode_unit(&operation, outcome)?;
         self.parked_tasks.insert(task);
+        self.schedule.on_park(task);
         self.timer_seq = next_seq;
         let key = (monotonic_deadline, seq);
         if let Some(previous) = self.timer_by_task.insert(task, key) {
@@ -1188,6 +1766,7 @@ impl Context {
         self.scheduler_tasks.remove(&task);
         self.parked_tasks.remove(&task);
         self.deregister_timer(task);
+        self.schedule.on_complete(task);
         Ok(())
     }
 
@@ -1597,6 +2176,7 @@ impl Context {
     }
 
     pub fn finish(self) -> Result<(), RuntimeError> {
+        emit_schedule_report(&self.schedule.diagnostics());
         match self.execution {
             Execution::Seeded => Ok(()),
             Execution::Record { recorder, sink } => match sink {
@@ -1860,6 +2440,216 @@ pub fn trace_fd_from_env() -> Result<Option<i32>, RuntimeError> {
     }
 }
 
+/// Parse a `close:1`/`write:3`/`sync:2`/`open:1` crash point. A bare op name
+/// (`close`) means the first occurrence.
+fn parse_crash_point(value: &str) -> Result<CrashPoint, RuntimeError> {
+    let (op_text, ordinal) = match value.split_once(':') {
+        Some((op_text, ordinal_text)) => {
+            let ordinal = ordinal_text.parse::<u64>().map_err(|_| {
+                RuntimeError::Config(format!(
+                    "{ENV_FS_CRASH_AT} ordinal must be a positive integer: {value:?}"
+                ))
+            })?;
+            (op_text, ordinal)
+        }
+        None => (value, 1),
+    };
+    if ordinal == 0 {
+        return Err(RuntimeError::Config(format!(
+            "{ENV_FS_CRASH_AT} ordinal is 1-based and must be at least 1: {value:?}"
+        )));
+    }
+    let op = match op_text {
+        "open" => CrashOp::Open,
+        "write" => CrashOp::Write,
+        "sync" => CrashOp::Sync,
+        "close" => CrashOp::Close,
+        other => {
+            return Err(RuntimeError::Config(format!(
+                "{ENV_FS_CRASH_AT} op must be open, write, sync, or close; got {other:?}"
+            )));
+        }
+    };
+    Ok(CrashPoint { op, ordinal })
+}
+
+fn parse_torn_granularity(value: &str) -> Result<TornGranularity, RuntimeError> {
+    match value {
+        "block" => Ok(TornGranularity::Block),
+        "byte" => Ok(TornGranularity::Byte),
+        other => Err(RuntimeError::Config(format!(
+            "{ENV_FS_TORN_GRANULARITY} must be block or byte; got {other:?}"
+        ))),
+    }
+}
+
+/// Map the runtime crash op to the serializable trace-record op.
+fn crash_op_to_record(op: CrashOp) -> patina_trace::FaultCrashOp {
+    match op {
+        CrashOp::Open => patina_trace::FaultCrashOp::Open,
+        CrashOp::Write => patina_trace::FaultCrashOp::Write,
+        CrashOp::Sync => patina_trace::FaultCrashOp::Sync,
+        CrashOp::Close => patina_trace::FaultCrashOp::Close,
+    }
+}
+
+fn crash_op_from_record(op: patina_trace::FaultCrashOp) -> CrashOp {
+    match op {
+        patina_trace::FaultCrashOp::Open => CrashOp::Open,
+        patina_trace::FaultCrashOp::Write => CrashOp::Write,
+        patina_trace::FaultCrashOp::Sync => CrashOp::Sync,
+        patina_trace::FaultCrashOp::Close => CrashOp::Close,
+    }
+}
+
+fn torn_granularity_to_record(granularity: TornGranularity) -> patina_trace::TornGranularity {
+    match granularity {
+        TornGranularity::Block => patina_trace::TornGranularity::Block,
+        TornGranularity::Byte => patina_trace::TornGranularity::Byte,
+    }
+}
+
+fn torn_granularity_from_record(granularity: patina_trace::TornGranularity) -> TornGranularity {
+    match granularity {
+        patina_trace::TornGranularity::Block => TornGranularity::Block,
+        patina_trace::TornGranularity::Byte => TornGranularity::Byte,
+    }
+}
+
+/// Serialize the run's effective fault configuration into the trace record so a
+/// fault run replays self-contained. `net_latency_nanos` is folded in because it
+/// too shapes the recorded operation stream, so a flag-free replay must restore
+/// it as well.
+fn fault_record(config: &RuntimeConfig) -> patina_trace::FaultConfigRecord {
+    patina_trace::FaultConfigRecord {
+        crash_at: config
+            .faults
+            .crash_at
+            .map(|point| patina_trace::CrashPointRecord {
+                op: crash_op_to_record(point.op),
+                ordinal: point.ordinal,
+            }),
+        torn_granularity: torn_granularity_to_record(config.faults.torn_granularity),
+        sleep_jitter_nanos: config.faults.sleep_jitter_nanos,
+        net_jitter_nanos: config.faults.net_jitter_nanos,
+        net_drop_permille: config.faults.net_drop_permille,
+        net_latency_nanos: config.net_latency_nanos,
+    }
+}
+
+/// Rebuild the runtime fault configuration and base net latency from a recorded
+/// trace's authoritative fault metadata.
+fn fault_config_from_record(record: &patina_trace::FaultConfigRecord) -> (FaultConfig, u64) {
+    let faults = FaultConfig {
+        crash_at: record.crash_at.map(|point| CrashPoint {
+            op: crash_op_from_record(point.op),
+            ordinal: point.ordinal,
+        }),
+        torn_granularity: torn_granularity_from_record(record.torn_granularity),
+        sleep_jitter_nanos: record.sleep_jitter_nanos,
+        net_jitter_nanos: record.net_jitter_nanos,
+        net_drop_permille: record.net_drop_permille,
+    };
+    (faults, record.net_latency_nanos)
+}
+
+/// Reconcile a recorded trace's authoritative fault configuration with any fault
+/// knobs the operator also supplied at replay. The trace is authoritative: when
+/// no knobs are supplied (the default), the stored configuration is adopted
+/// verbatim so replay is byte-identical; when knobs ARE supplied they must match
+/// the recording exactly or replay fails closed rather than silently running a
+/// different fault schedule. A pre-metadata trace (`None`) keeps the historical
+/// re-supply behavior.
+fn reconcile_replay_faults(
+    config: &RuntimeConfig,
+    recorded: Option<&patina_trace::FaultConfigRecord>,
+) -> Result<Option<(FaultConfig, u64)>, RuntimeError> {
+    let Some(record) = recorded else {
+        return Ok(None);
+    };
+    let (stored_faults, stored_latency) = fault_config_from_record(record);
+    let supplied_any = config.faults != FaultConfig::default() || config.net_latency_nanos != 0;
+    if supplied_any
+        && (config.faults != stored_faults || config.net_latency_nanos != stored_latency)
+    {
+        return Err(RuntimeError::Config(
+            "replay fault knobs conflict with the trace's recorded configuration; \
+             the trace is authoritative, so omit the flags (or supply matching values)"
+                .into(),
+        ));
+    }
+    Ok(Some((stored_faults, stored_latency)))
+}
+
+/// Emit the default-on schedule-exploration diagnostic to stderr for a
+/// multithreaded run. Single-task runs (no concurrency to explore) stay silent.
+/// The machine-readable `PATINA_SCHEDULE_REPORT` line lets a campaign tell a
+/// genuinely-explored "all clean" from a vacuous one; a loud warning fires when
+/// a spawned worker ran start-to-finish with zero scheduling boundaries.
+fn emit_schedule_report(diag: &ScheduleDiagnostics) {
+    if !diag.had_concurrency() {
+        return;
+    }
+    if let Ok(value) = env::var(ENV_SCHEDULE_REPORT) {
+        if matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "false" | "no"
+        ) {
+            return;
+        }
+    }
+    let mut line = format!(
+        "PATINA_SCHEDULE_REPORT tasks_spawned={} max_concurrent={} total_boundaries={} vacuous_threads={}",
+        diag.tasks_spawned,
+        diag.max_concurrent,
+        diag.total_boundaries,
+        diag.vacuous.len(),
+    );
+    for stat in &diag.tasks {
+        line.push_str(&format!(
+            " task{}={}y+{}p",
+            stat.task.0, stat.yields, stat.parks
+        ));
+    }
+    eprintln!("{line}");
+    if !diag.vacuous.is_empty() {
+        let ids = diag
+            .vacuous
+            .iter()
+            .map(|task| task.0.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!(
+            "PATINA WARNING: vacuous schedule exploration — {} spawned thread(s) (task id {ids}) ran \
+to completion with no more scheduling boundaries than thread spawn/join alone incurs. Any loop in \
+their body was atomics-only and thus invisible to the scheduler, so their internal interleavings \
+are UNREACHABLE at any seed and a clean result here does NOT mean the concurrency was tested. \
+Rebuild with `cargo patina native-build --yield-points` to make atomics-only race windows \
+schedulable.",
+            diag.vacuous.len(),
+        );
+    }
+}
+
+/// Parse an inclusive `MIN..MAX` nanosecond range, requiring `MIN <= MAX`.
+fn parse_nanos_range(name: &str, value: &str) -> Result<(u64, u64), RuntimeError> {
+    let (min_text, max_text) = value.split_once("..").ok_or_else(|| {
+        RuntimeError::Config(format!("{name} must be a MIN..MAX range; got {value:?}"))
+    })?;
+    let min = min_text
+        .parse::<u64>()
+        .map_err(|_| RuntimeError::Config(format!("{name} MIN must be an unsigned integer")))?;
+    let max = max_text
+        .parse::<u64>()
+        .map_err(|_| RuntimeError::Config(format!("{name} MAX must be an unsigned integer")))?;
+    if min > max {
+        return Err(RuntimeError::Config(format!(
+            "{name} requires MIN <= MAX; got {value:?}"
+        )));
+    }
+    Ok((min, max))
+}
+
 fn parse_seed(value: Option<String>) -> Result<u64, RuntimeError> {
     value.map_or(Ok(0), |value| {
         value.parse().map_err(|_| {
@@ -2053,6 +2843,57 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn reconcile_replay_faults_enforces_the_authoritative_trace_contract() {
+        use patina_trace::{CrashPointRecord, FaultConfigRecord, FaultCrashOp};
+
+        let stored = FaultConfigRecord {
+            crash_at: Some(CrashPointRecord {
+                op: FaultCrashOp::Close,
+                ordinal: 1,
+            }),
+            torn_granularity: patina_trace::TornGranularity::Byte,
+            net_latency_nanos: 500,
+            ..FaultConfigRecord::default()
+        };
+
+        // A pre-metadata trace (None) yields no override: the operator-supplied
+        // configuration is kept, preserving the historical re-supply contract.
+        let supplied = RuntimeConfig::seeded(0).with_crash_at(CrashOp::Close, 2);
+        assert_eq!(reconcile_replay_faults(&supplied, None).unwrap(), None);
+
+        // Flag-free replay adopts the stored configuration verbatim, so replay is
+        // byte-identical without any knobs.
+        let (faults, latency) = reconcile_replay_faults(&RuntimeConfig::seeded(0), Some(&stored))
+            .unwrap()
+            .expect("stored config adopted");
+        assert_eq!(
+            faults.crash_at,
+            Some(CrashPoint {
+                op: CrashOp::Close,
+                ordinal: 1
+            })
+        );
+        assert_eq!(faults.torn_granularity, TornGranularity::Byte);
+        assert_eq!(latency, 500);
+
+        // Explicit knobs that MATCH the recording are accepted.
+        let matching = RuntimeConfig::seeded(0)
+            .with_crash_at(CrashOp::Close, 1)
+            .with_fs_torn_granularity(TornGranularity::Byte)
+            .with_net_latency_nanos(500);
+        reconcile_replay_faults(&matching, Some(&stored))
+            .unwrap()
+            .expect("matching config adopted");
+
+        // Explicit knobs that DIVERGE fail closed before any driver is built.
+        let mismatched = RuntimeConfig::seeded(0).with_crash_at(CrashOp::Close, 2);
+        assert!(matches!(
+            reconcile_replay_faults(&mismatched, Some(&stored)),
+            Err(RuntimeError::Config(_))
+        ));
+    }
+
     fn exercise(context: &mut Context) -> Result<Vec<u8>, RuntimeError> {
         let entropy = context.entropy_bytes(12)?;
         context.write_file("/state/value", &entropy)?;
@@ -2060,6 +2901,90 @@ mod tests {
         context.sleep_for(250)?;
         assert_eq!(context.now(ClockKind::Monotonic)?, 250);
         Ok(entropy)
+    }
+
+    /// Drive the scheduler until `worker` completes, parking any other task that
+    /// is scheduled first and yielding the worker `yields` times before it runs
+    /// to completion. `yields == 0` models a worker whose whole body runs under a
+    /// single selection with no scheduling boundary.
+    fn run_worker(context: &mut Context, worker: TaskId, yields: u32) {
+        let mut remaining = yields;
+        loop {
+            let selected = context.scheduler_next().unwrap().unwrap();
+            if selected == worker {
+                if remaining > 0 {
+                    remaining -= 1;
+                    context.task_yield(worker).unwrap();
+                } else {
+                    context.task_complete(worker).unwrap();
+                    return;
+                }
+            } else {
+                context.task_park(selected, "wait-for-worker").unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn vacuous_worker_that_never_yields_is_flagged() {
+        // RED: a spawned worker that runs from first scheduled to completion with
+        // zero scheduling boundaries — like buggy-smoke `lost-update` on an
+        // atomics-only RwLock fast path — must be reported as vacuous.
+        let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+        let _main = context.task_spawn("main").unwrap();
+        let worker = context.task_spawn("worker").unwrap();
+        run_worker(&mut context, worker, 0);
+
+        let diagnostics = context.schedule_diagnostics();
+        assert!(diagnostics.had_concurrency());
+        assert_eq!(diagnostics.vacuous, vec![worker]);
+        let stat = diagnostics
+            .tasks
+            .iter()
+            .find(|stat| stat.task == worker)
+            .expect("worker recorded");
+        assert_eq!(stat.boundaries, 0);
+        assert!(stat.vacuous);
+    }
+
+    #[test]
+    fn worker_that_passes_a_boundary_is_not_flagged() {
+        // GREEN: a worker that clears the scaffolding floor with real scheduling
+        // boundaries — like the `deadlock` mode's interposed mutex loop, which
+        // yields on every lock/unlock — is explorable and must NOT be flagged.
+        let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+        let _main = context.task_spawn("main").unwrap();
+        let worker = context.task_spawn("worker").unwrap();
+        run_worker(&mut context, worker, SCAFFOLDING_YIELD_FLOOR as u32 + 1);
+
+        let diagnostics = context.schedule_diagnostics();
+        assert!(diagnostics.had_concurrency());
+        assert!(
+            diagnostics.vacuous.is_empty(),
+            "worker cleared the scaffolding floor; must not be vacuous: {diagnostics:?}"
+        );
+        let stat = diagnostics
+            .tasks
+            .iter()
+            .find(|stat| stat.task == worker)
+            .expect("worker recorded");
+        assert!(stat.yields > SCAFFOLDING_YIELD_FLOOR);
+        assert!(!stat.vacuous);
+    }
+
+    #[test]
+    fn single_task_run_reports_no_concurrency() {
+        // A run with only the initial task has no schedule to explore, so the
+        // diagnostic stays silent.
+        let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+        let solo = context.task_spawn("main").unwrap();
+        let selected = context.scheduler_next().unwrap().unwrap();
+        assert_eq!(selected, solo);
+        context.task_complete(solo).unwrap();
+
+        let diagnostics = context.schedule_diagnostics();
+        assert!(!diagnostics.had_concurrency());
+        assert!(diagnostics.vacuous.is_empty());
     }
 
     #[test]

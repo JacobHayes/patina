@@ -14,6 +14,38 @@ pub trait FsDriver: Send {
     fn open(&mut self, path: &str, flags: OpenFlags) -> DriverResult<Fd>;
     fn read(&mut self, fd: Fd, max_len: usize) -> DriverResult<Vec<u8>>;
     fn write(&mut self, fd: Fd, bytes: &[u8]) -> DriverResult<usize>;
+    /// Positional read: read up to `max_len` bytes starting at `offset` WITHOUT
+    /// disturbing the shared file cursor (the `pread`/`read_at` contract).
+    ///
+    /// The default composes `seek`(save)/`seek`(offset)/`read`/`seek`(restore)
+    /// and runs entirely inside this one driver call. The runtime never
+    /// interleaves a scheduler switch inside a single driver invocation, so the
+    /// save/seek/read/restore sequence is atomic with respect to the
+    /// deterministic scheduler even when multiple guest threads share the fd --
+    /// which is exactly why positional I/O must reach the driver as ONE
+    /// operation rather than being emulated with separate seek/read calls on the
+    /// caller side. Drivers with native positional reads may override this.
+    fn read_at(&mut self, fd: Fd, offset: u64, max_len: usize) -> DriverResult<Vec<u8>> {
+        let saved = self.seek(fd, 0, SeekWhence::Current)?;
+        self.seek(fd, checked_offset(offset)?, SeekWhence::Start)?;
+        let result = self.read(fd, max_len);
+        // Restore the cursor regardless of the read outcome, so a positional
+        // read is a no-op on the file offset; the read result takes precedence.
+        let restored = self.seek(fd, checked_offset(saved)?, SeekWhence::Start);
+        result.and_then(|bytes| restored.map(|_| bytes))
+    }
+    /// Positional write: write `bytes` starting at `offset` WITHOUT disturbing
+    /// the shared file cursor (the `pwrite`/`write_at` contract). Atomic with
+    /// respect to the scheduler for the same reason as [`FsDriver::read_at`];
+    /// crash-consistency wrappers see the underlying `write`, so a positional
+    /// write is journaled and crash-losable exactly like a cursor write.
+    fn write_at(&mut self, fd: Fd, offset: u64, bytes: &[u8]) -> DriverResult<usize> {
+        let saved = self.seek(fd, 0, SeekWhence::Current)?;
+        self.seek(fd, checked_offset(offset)?, SeekWhence::Start)?;
+        let result = self.write(fd, bytes);
+        let restored = self.seek(fd, checked_offset(saved)?, SeekWhence::Start);
+        result.and_then(|written| restored.map(|_| written))
+    }
     fn close(&mut self, fd: Fd) -> DriverResult<()>;
     fn seek(&mut self, _fd: Fd, _offset: i64, _whence: SeekWhence) -> DriverResult<u64> {
         Err(unsupported_filesystem_operation("seek"))
@@ -83,6 +115,18 @@ fn unsupported_filesystem_operation(operation: &str) -> EffectError {
         patina_abi::ErrorCode::Denied,
         format!("filesystem driver does not support {operation}"),
     )
+}
+
+/// Convert an unsigned byte offset to the signed offset `seek` takes, rejecting
+/// values past `i64::MAX` (unreachable for the in-memory filesystems but kept
+/// sound rather than silently wrapping).
+fn checked_offset(offset: u64) -> DriverResult<i64> {
+    i64::try_from(offset).map_err(|_| {
+        EffectError::new(
+            patina_abi::ErrorCode::InvalidInput,
+            format!("positional offset {offset} exceeds the addressable range"),
+        )
+    })
 }
 
 fn unsupported_network_operation(operation: &str) -> EffectError {

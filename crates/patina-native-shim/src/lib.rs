@@ -20,6 +20,7 @@ use patina_abi::{
 };
 
 use patina_fs_crash::CrashFs;
+use patina_fs_mem::FsImage;
 use patina_runtime::{
     Context, MAX_TRACE_BYTES, RuntimeBuilder, RuntimeConfig, RuntimeError, TraceTransport,
 };
@@ -31,28 +32,60 @@ pub use thread::{
     patina_net_close, patina_net_connect, patina_net_getpeername, patina_net_getsockname,
     patina_net_is_nonblocking, patina_net_kind, patina_net_listen, patina_net_recv,
     patina_net_recvfrom, patina_net_send, patina_net_sendto, patina_net_set_nonblocking,
-    patina_net_shutdown, patina_net_socket, patina_net_stream_recv, patina_net_stream_send,
-    patina_net_tcp_connect, patina_thread_create, patina_thread_detach, patina_thread_exit,
+    patina_net_set_read_timeout, patina_net_shutdown, patina_net_socket, patina_net_stream_recv,
+    patina_net_stream_send, patina_net_tcp_connect, patina_rwlock_destroy, patina_rwlock_init,
+    patina_rwlock_rdlock, patina_rwlock_tryrdlock, patina_rwlock_trywrlock, patina_rwlock_unlock,
+    patina_rwlock_wrlock, patina_thread_create, patina_thread_detach, patina_thread_exit,
     patina_thread_join,
 };
+#[cfg(target_os = "macos")]
+pub use thread::{
+    patina_dispatch_release, patina_dispatch_semaphore_create, patina_dispatch_semaphore_signal,
+    patina_dispatch_semaphore_wait, patina_dispatch_time,
+};
 
+// POSIX errno values. The low-numbered codes below are identical on macOS and
+// Linux, but several higher codes diverge (Darwin's BSD numbering vs Linux's
+// asm-generic table). Those MUST be target-conditional: returning the macOS
+// value on Linux hands the guest a *different* error — e.g. the macOS
+// `EWOULDBLOCK` value 35 is Linux's `EDEADLK` ("Resource deadlock avoided"), so
+// std's futex `EAGAIN` retry path (every contended mutex) was seen as a fatal
+// deadlock. `EWOULDBLOCK == EAGAIN` on Linux (11).
 const EACCES: c_int = 13;
+#[cfg(target_os = "macos")]
 const EALREADY: c_int = 37;
+#[cfg(not(target_os = "macos"))]
+const EALREADY: c_int = 114;
 const EBADF: c_int = 9;
 const EBUSY: c_int = 16;
+#[cfg(target_os = "macos")]
 const EDEADLK: c_int = 11;
+#[cfg(not(target_os = "macos"))]
+const EDEADLK: c_int = 35;
 const EEXIST: c_int = 17;
 const EINVAL: c_int = 22;
 const EIO: c_int = 5;
 const EISDIR: c_int = 21;
 const ENOENT: c_int = 2;
+#[cfg(target_os = "macos")]
 const ENOSYS: c_int = 78;
+#[cfg(not(target_os = "macos"))]
+const ENOSYS: c_int = 38;
 const ENOTDIR: c_int = 20;
+#[cfg(target_os = "macos")]
 const ENOTEMPTY: c_int = 66;
+#[cfg(not(target_os = "macos"))]
+const ENOTEMPTY: c_int = 39;
+#[cfg(target_os = "macos")]
 const EOVERFLOW: c_int = 84;
+#[cfg(not(target_os = "macos"))]
+const EOVERFLOW: c_int = 75;
 const EPERM: c_int = 1;
 const ESRCH: c_int = 3;
+#[cfg(target_os = "macos")]
 const EWOULDBLOCK: c_int = 35;
+#[cfg(not(target_os = "macos"))]
+const EWOULDBLOCK: c_int = 11;
 #[cfg(target_os = "macos")]
 const ENOTCONN: c_int = 57;
 #[cfg(not(target_os = "macos"))]
@@ -165,19 +198,304 @@ struct StdioCapture {
     stderr: Vec<u8>,
 }
 
+// Host-alias doctrine (see ARCHITECTURE.md, "Host-alias doctrine").
+//
+// Shim-internal code must never name a public, interposable host symbol as an
+// undefined external. Such a name would appear in the *guest binary's* import
+// table (the shim is statically linked into the guest), forcing `native-audit`
+// to `--allow` it — a name-based allowance guest code can ride past the gate.
+// That is exactly the class of the worst escape found: the execution baton used
+// the public `dispatch_semaphore_*` symbols, so allowing them for the shim also
+// allowed std's `Parker` to reach the real host semaphore off-scheduler.
+//
+// Instead every host vehicle the shim needs — the trace-fd descriptor I/O here,
+// the execution-baton semaphore, and the managed host-thread creation vehicle —
+// is resolved once, by string, through `dlsym(RTLD_NEXT, ...)` at first use and
+// cached in [`hostapi::HostApi`]. `RTLD_NEXT` reaches the *real* libSystem/libc
+// definition even for a name the shim itself interposes (verified: from the main
+// executable image, `dlsym(RTLD_NEXT, "dispatch_semaphore_wait")` returns
+// libdispatch's implementation, not the shim's strong def), so the shim's own
+// host use is invisible to the symbol namespace while a guest naming the same
+// public symbol still binds to the interposer (its own image) or is denied by
+// the audit. The only escape-surface symbol the shim objects still name is
+// `dlsym` itself; the `scripts/validate-native-shim.sh` "host-alias" section
+// enforces that by scanning the shim's own objects (red→green: it fails on the
+// pre-doctrine shim that named `semaphore_wait`, `pthread_create_suspended_np`,
+// `read$NOCANCEL`, ... and passes once they route through here).
+//
+// Both platforms are swept onto this table (see the two `hostapi` modules
+// below). macOS resolves through `dlsym(RTLD_NEXT, ...)` directly. Linux has one
+// wrinkle: the shim interposes `dlsym` itself (to neuter std's optional-symbol
+// probing), and glibc's flat namespace means the shim's own strong `read`/
+// `write`/`sem_*` defs would satisfy any reference the shim made to those names —
+// so a plain `dlsym`-based table would hit the shim's own stub. The Linux
+// primitive is instead `__real_dlsym`, the real glibc resolver reached through
+// `-Wl,--wrap=dlsym` (mirroring the existing `-Wl,--wrap=pthread_create`); guest
+// `dlsym` binds to the neutering `__wrap_dlsym`, and `dlsym(RTLD_NEXT, "read")`
+// reaches genuine glibc, skipping the shim's strong def. So `__read`/`__write`/
+// `sem_*` leave the guest import table on Linux too, and its `shim_control_plane`
+// residue is `dlsym` plus the wrap-contained `pthread_create`.
+#[cfg(target_os = "macos")]
+mod hostapi {
+    use std::ffi::{CStr, c_char, c_int, c_void};
+    use std::sync::OnceLock;
+
+    // The single sanctioned host-alias resolution primitive. `dlsym` is not
+    // interposed on macOS, so this reaches the real dyld resolver. This is the
+    // one escape-surface symbol the shim objects legitimately name.
+    unsafe extern "C" {
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    }
+
+    // `<dlfcn.h>`: `RTLD_NEXT == (void *)-1`. Resolve against the images that
+    // follow the caller's, i.e. the real host definition even when the shim
+    // interposes the public name in its own (the main executable's) image.
+    const RTLD_NEXT: *mut c_void = usize::MAX as *mut c_void;
+
+    type MachPort = u32;
+
+    // libdispatch semaphore vehicle for the execution baton. `dispatch_semaphore_t`
+    // is an opaque object pointer; `dispatch_semaphore_wait`'s timeout is a
+    // `dispatch_time_t` (u64), and the baton always passes `DISPATCH_TIME_FOREVER`.
+    pub type DispatchSemaphoreCreate = unsafe extern "C" fn(isize) -> *mut c_void;
+    pub type DispatchSemaphoreWait = unsafe extern "C" fn(*mut c_void, u64) -> isize;
+    pub type DispatchSemaphoreSignal = unsafe extern "C" fn(*mut c_void) -> isize;
+    pub type DispatchRelease = unsafe extern "C" fn(*mut c_void);
+    pub type StartRoutine = extern "C" fn(*mut c_void) -> *mut c_void;
+    pub type PthreadCreateSuspended =
+        unsafe extern "C" fn(*mut *mut c_void, *const c_void, StartRoutine, *mut c_void) -> c_int;
+    pub type PthreadMachThread = unsafe extern "C" fn(*mut c_void) -> MachPort;
+    pub type ThreadResume = unsafe extern "C" fn(MachPort) -> c_int;
+    pub type HostRead = unsafe extern "C" fn(c_int, *mut c_void, usize) -> isize;
+    pub type HostWrite = unsafe extern "C" fn(c_int, *const c_void, usize) -> isize;
+
+    /// Real host vehicles resolved once through `dlsym(RTLD_NEXT, ...)`. None of
+    /// these names appears as an undefined external in the shim objects.
+    pub struct HostApi {
+        /// The execution-baton vehicle: the real libdispatch semaphore — the same
+        /// primitive Rust std's Darwin `Parker` uses, which the doctrine now makes
+        /// safe to share (the shim resolves the *real* libdispatch entry via
+        /// `dlsym(RTLD_NEXT, ...)` while its public strong-def interposers capture
+        /// guest calls). Using the canonical primitive also exercises that
+        /// caller-discrimination on every context switch, so a doctrine regression
+        /// deadlocks immediately instead of lying dormant.
+        pub dispatch_semaphore_create: DispatchSemaphoreCreate,
+        pub dispatch_semaphore_wait: DispatchSemaphoreWait,
+        pub dispatch_semaphore_signal: DispatchSemaphoreSignal,
+        pub dispatch_release: DispatchRelease,
+        pub pthread_create_suspended_np: PthreadCreateSuspended,
+        pub pthread_mach_thread_np: PthreadMachThread,
+        pub thread_resume: ThreadResume,
+        /// The non-cancel-point host `read`/`write` for the trace control plane
+        /// and captured-stdio flush; resolving `read$NOCANCEL`/`write$NOCANCEL`
+        /// reaches libSystem's real descriptor I/O (never the interposed `read`/
+        /// `write`), so trace finalization can never recurse into the FS.
+        pub host_read: HostRead,
+        pub host_write: HostWrite,
+    }
+
+    // SAFETY: the fields are all function pointers into libSystem/libdispatch;
+    // sharing them across threads is sound.
+    unsafe impl Send for HostApi {}
+    // SAFETY: as above.
+    unsafe impl Sync for HostApi {}
+
+    fn resolve(name: &CStr) -> *mut c_void {
+        // SAFETY: `dlsym` with a valid NUL-terminated symbol name and the
+        // `RTLD_NEXT` pseudo-handle.
+        let ptr = unsafe { dlsym(RTLD_NEXT, name.as_ptr()) };
+        if ptr.is_null() {
+            // A core libSystem symbol failed to resolve: the process image is
+            // unusable, so fail closed rather than continue with a null vehicle.
+            eprintln!(
+                "patina native shim fatal: could not resolve host symbol {name:?} via dlsym(RTLD_NEXT)"
+            );
+            std::process::abort();
+        }
+        ptr
+    }
+
+    fn build() -> HostApi {
+        // SAFETY: each resolved pointer is transmuted to the real C ABI
+        // signature of the libSystem/libdispatch symbol it names. Resolving the
+        // `dispatch_semaphore_*` names through `RTLD_NEXT` reaches libdispatch's
+        // real implementation, not the shim's own strong-def interposers (which
+        // route guest calls through the scheduler), so the baton never recurses.
+        unsafe {
+            HostApi {
+                dispatch_semaphore_create: std::mem::transmute::<
+                    *mut c_void,
+                    DispatchSemaphoreCreate,
+                >(resolve(c"dispatch_semaphore_create")),
+                dispatch_semaphore_wait: std::mem::transmute::<*mut c_void, DispatchSemaphoreWait>(
+                    resolve(c"dispatch_semaphore_wait"),
+                ),
+                dispatch_semaphore_signal: std::mem::transmute::<
+                    *mut c_void,
+                    DispatchSemaphoreSignal,
+                >(resolve(c"dispatch_semaphore_signal")),
+                dispatch_release: std::mem::transmute::<*mut c_void, DispatchRelease>(resolve(
+                    c"dispatch_release",
+                )),
+                pthread_create_suspended_np: std::mem::transmute::<
+                    *mut c_void,
+                    PthreadCreateSuspended,
+                >(resolve(
+                    c"pthread_create_suspended_np",
+                )),
+                pthread_mach_thread_np: std::mem::transmute::<*mut c_void, PthreadMachThread>(
+                    resolve(c"pthread_mach_thread_np"),
+                ),
+                thread_resume: std::mem::transmute::<*mut c_void, ThreadResume>(resolve(
+                    c"thread_resume",
+                )),
+                host_read: std::mem::transmute::<*mut c_void, HostRead>(resolve(c"read$NOCANCEL")),
+                host_write: std::mem::transmute::<*mut c_void, HostWrite>(resolve(
+                    c"write$NOCANCEL",
+                )),
+            }
+        }
+    }
+
+    /// The process-wide host-alias table, resolved on first use. Every entry
+    /// point that reaches it (the baton, thread creation, trace-fd I/O) runs
+    /// well after the loader has mapped libSystem, so lazy resolution is safe;
+    /// the `OnceLock` makes the one-time resolution race-free.
+    pub fn get() -> &'static HostApi {
+        static API: OnceLock<HostApi> = OnceLock::new();
+        API.get_or_init(build)
+    }
+}
+
+// Linux half of the host-alias doctrine. glibc's flat namespace means the shim's
+// own strong `read`/`write`/`sem_*` definitions would satisfy any reference the
+// shim made to those names, and the shim also interposes `dlsym` itself (to
+// neuter std's optional-symbol probing) — so neither a named import nor a plain
+// `dlsym` can reach the real host vehicles. The resolution primitive is instead
+// `__real_dlsym`, the real glibc resolver reached through `-Wl,--wrap=dlsym`
+// (added by `cargo patina native-build`), exactly mirroring `__real_pthread_create`.
+// `dlsym(RTLD_NEXT, "read")` then returns glibc's `read`, not the shim's strong
+// def (RTLD_NEXT searches images *after* the main executable), so the trace-fd
+// I/O and the baton semaphore reach the genuine host functions while their public
+// names never appear as undefined externals in the shim objects. The one
+// escape-surface residue is `dlsym` — matching macOS — plus `pthread_create`,
+// which stays wrap-contained (guest calls bind to the managed `__wrap_pthread_create`).
+#[cfg(target_os = "linux")]
+mod hostapi {
+    use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
+    use std::sync::OnceLock;
+
+    // The real glibc resolver, reached through the `-Wl,--wrap=dlsym` alias
+    // `__real_dlsym`. Guest and std `dlsym` references bind to the shim's
+    // neutering `__wrap_dlsym` (patina_posix.c); only this shim-internal path
+    // reaches the real resolver. Any consumer of the shim staticlib that drives a
+    // host vehicle (managed threads / trace-fd I/O) must link `-Wl,--wrap=dlsym`,
+    // exactly as `__real_pthread_create` requires `-Wl,--wrap=pthread_create`;
+    // `cargo patina native-build` always links both, and the direct-`cc`
+    // validate-native-shim.sh probes pass them explicitly.
+    unsafe extern "C" {
+        fn __real_dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    }
+    core::arch::global_asm!(".weak __real_dlsym");
+
+    // `<dlfcn.h>`: `RTLD_NEXT == (void *)-1`. Resolve against the images that
+    // follow the main executable, i.e. the real glibc definition even for a name
+    // the shim itself defines as a strong symbol (`read`/`write`/`sem_*`).
+    // Verified empirically on glibc 2.39/aarch64: from the main executable image,
+    // `dlsym(RTLD_NEXT, "read")` returns glibc's `read`, not the shim's strong def.
+    const RTLD_NEXT: *mut c_void = usize::MAX as *mut c_void;
+
+    pub type HostRead = unsafe extern "C" fn(c_int, *mut c_void, usize) -> isize;
+    pub type HostWrite = unsafe extern "C" fn(c_int, *const c_void, usize) -> isize;
+    pub type SemInit = unsafe extern "C" fn(*mut c_void, c_int, c_uint) -> c_int;
+    pub type SemOp = unsafe extern "C" fn(*mut c_void) -> c_int;
+
+    /// Real host vehicles resolved once through `__real_dlsym(RTLD_NEXT, ...)`.
+    /// None of these names appears as an undefined external in the shim objects.
+    pub struct HostApi {
+        /// The non-cancel-point-free host `read`/`write` for the trace control
+        /// plane and captured-stdio flush; resolving them through `RTLD_NEXT`
+        /// reaches glibc's descriptor I/O, never the shim's interposed `read`/
+        /// `write`, so trace finalization can never recurse into the FS.
+        pub host_read: HostRead,
+        pub host_write: HostWrite,
+        /// The execution-baton POSIX semaphore vehicle.
+        pub sem_init: SemInit,
+        pub sem_wait: SemOp,
+        pub sem_post: SemOp,
+    }
+
+    // SAFETY: the fields are function pointers into glibc; sharing them across
+    // threads is sound.
+    unsafe impl Send for HostApi {}
+    // SAFETY: as above.
+    unsafe impl Sync for HostApi {}
+
+    fn resolve(name: &CStr) -> *mut c_void {
+        // SAFETY: `__real_dlsym` (the wrap-provided real glibc `dlsym`) with a
+        // valid NUL-terminated name and the `RTLD_NEXT` pseudo-handle.
+        let ptr = unsafe { __real_dlsym(RTLD_NEXT, name.as_ptr()) };
+        if ptr.is_null() {
+            // A core glibc symbol failed to resolve: the process image is
+            // unusable, so fail closed rather than continue with a null vehicle.
+            eprintln!(
+                "patina native shim fatal: could not resolve host symbol {name:?} via dlsym(RTLD_NEXT)"
+            );
+            std::process::abort();
+        }
+        ptr
+    }
+
+    fn build() -> HostApi {
+        // SAFETY: each resolved pointer is transmuted to the real C ABI signature
+        // of the glibc symbol it names.
+        unsafe {
+            HostApi {
+                host_read: std::mem::transmute::<*mut c_void, HostRead>(resolve(c"read")),
+                host_write: std::mem::transmute::<*mut c_void, HostWrite>(resolve(c"write")),
+                sem_init: std::mem::transmute::<*mut c_void, SemInit>(resolve(c"sem_init")),
+                sem_wait: std::mem::transmute::<*mut c_void, SemOp>(resolve(c"sem_wait")),
+                sem_post: std::mem::transmute::<*mut c_void, SemOp>(resolve(c"sem_post")),
+            }
+        }
+    }
+
+    /// The process-wide host-alias table, resolved on first use. Every entry
+    /// point that reaches it (the baton, trace-fd I/O) runs well after the loader
+    /// has mapped glibc, so lazy resolution is safe; the `OnceLock` makes the
+    /// one-time resolution race-free.
+    pub fn get() -> &'static HostApi {
+        static API: OnceLock<HostApi> = OnceLock::new();
+        API.get_or_init(build)
+    }
+}
+
 // Non-interposed host descriptor I/O for Patina's trace control plane and
-// captured-stdio flushing. These aliases resolve inside the host libc even
-// when the opt-in POSIX layer overrides the ordinary `read`/`write` symbols,
-// so trace finalization can never recurse into the deterministic filesystem.
-// `cargo patina native-audit` denies these aliases by default; supervisors
-// that enable the descriptor trace channel allowlist them explicitly.
-unsafe extern "C" {
-    #[cfg_attr(target_os = "macos", link_name = "read$NOCANCEL")]
-    #[cfg_attr(target_os = "linux", link_name = "__read")]
-    fn host_read(fd: c_int, destination: *mut c_void, length: usize) -> isize;
-    #[cfg_attr(target_os = "macos", link_name = "write$NOCANCEL")]
-    #[cfg_attr(target_os = "linux", link_name = "__write")]
-    fn host_write(fd: c_int, source: *const c_void, length: usize) -> isize;
+// captured-stdio flushing. Both platforms route through the resolved host-alias
+// table: macOS through `dlsym(RTLD_NEXT, "read$NOCANCEL")`, Linux through
+// `__real_dlsym(RTLD_NEXT, "read")` (see the two `hostapi` modules above).
+#[cfg(target_os = "macos")]
+unsafe fn host_read(fd: c_int, destination: *mut c_void, length: usize) -> isize {
+    // SAFETY: forwarded from the caller's contract to the resolved host `read`.
+    unsafe { (hostapi::get().host_read)(fd, destination, length) }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn host_write(fd: c_int, source: *const c_void, length: usize) -> isize {
+    // SAFETY: forwarded from the caller's contract to the resolved host `write`.
+    unsafe { (hostapi::get().host_write)(fd, source, length) }
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn host_read(fd: c_int, destination: *mut c_void, length: usize) -> isize {
+    // SAFETY: forwarded from the caller's contract to the resolved host `read`.
+    unsafe { (hostapi::get().host_read)(fd, destination, length) }
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn host_write(fd: c_int, source: *const c_void, length: usize) -> isize {
+    // SAFETY: forwarded from the caller's contract to the resolved host `write`.
+    unsafe { (hostapi::get().host_write)(fd, source, length) }
 }
 
 fn host_write_all(fd: c_int, bytes: &[u8]) -> io::Result<()> {
@@ -255,6 +573,44 @@ fn control_plane() -> &'static SpinMutex<BTreeMap<String, String>> {
     CONTROL_PLANE.get_or_init(|| SpinMutex::new(BTreeMap::new()))
 }
 
+/// The runtime's own diagnostic from the most recent failed `init_from_env`,
+/// captured so the fail-closed abort path can surface *why* initialization
+/// failed (fingerprint mismatch, bad `--mount` corpus, replay-fault conflict, …)
+/// instead of the generic "no runtime installed" line. `install` collapses the
+/// [`RuntimeError`] to an errno, discarding the message; this preserves it.
+static INIT_ERROR: OnceLock<SpinMutex<Option<String>>> = OnceLock::new();
+
+fn init_error() -> &'static SpinMutex<Option<String>> {
+    INIT_ERROR.get_or_init(|| SpinMutex::new(None))
+}
+
+/// The mode a descriptor holds an advisory `flock` in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FlockMode {
+    Shared,
+    Exclusive,
+}
+
+/// Advisory `flock` state, keyed by the guest descriptor that holds the lock and
+/// recording the deterministic-fs inode the descriptor is open on. Conflicts are
+/// resolved against the *inode*, so two independent opens of the same path
+/// contend exactly as a real per-file-identity `flock` would (redb's
+/// `DatabaseAlreadyOpen`), while a lone opener always acquires. Cleared on
+/// `LOCK_UN` and on `close`. This is shim-side state, never a trace record: the
+/// inode it keys on is read through the recorded metadata path, so the table
+/// rebuilds identically under replay from the same deterministic open sequence.
+static FLOCK_TABLE: OnceLock<SpinMutex<BTreeMap<c_int, (u64, FlockMode)>>> = OnceLock::new();
+
+fn flock_table() -> &'static SpinMutex<BTreeMap<c_int, (u64, FlockMode)>> {
+    FLOCK_TABLE.get_or_init(|| SpinMutex::new(BTreeMap::new()))
+}
+
+/// Release any advisory lock a descriptor holds. Called by `LOCK_UN` and on
+/// `close`; a descriptor holding no lock is a no-op.
+fn flock_release(raw_fd: c_int) {
+    flock_table().lock().remove(&raw_fd);
+}
+
 fn set_errno(errno: c_int) {
     LAST_ERRNO.with(|value| value.set(errno));
 }
@@ -315,15 +671,45 @@ fn ensure_runtime() -> Result<(), c_int> {
     if SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
         return Err(ENOSYS);
     }
+    // A prior init attempt (the startup constructor, or an earlier boundary) has
+    // already failed closed: surface ITS diagnostic and abort. Never retry — the
+    // failed attempt may have drained the inherited trace descriptor to EOF, so a
+    // re-init would mask the real cause (fingerprint/corpus/fault mismatch) behind
+    // a degraded "empty trace" parse error.
+    if let Some(message) = init_error().lock().clone() {
+        abort_with_init_error(&message);
+    }
     if control_env(patina_runtime::ENV_MODE).is_some() {
         let _ = init_from_env();
         if slot().lock().is_some() {
             return Ok(());
         }
+        // The protocol was present but initialization failed closed — a
+        // fingerprint mismatch (including plain-vs-`--yield-points` cross-replay),
+        // a `--mount` corpus that does not match the recorded image hash, a
+        // replay-fault-config conflict, and so on. Surface the runtime's specific
+        // diagnostic instead of the generic "no runtime installed" line.
+        if let Some(message) = init_error().lock().clone() {
+            abort_with_init_error(&message);
+        }
     }
     let message: &[u8] = b"patina: this binary was built with `cargo patina native-build` and must \
 run under `cargo patina native-run` (or with the PATINA_MODE protocol set); no deterministic runtime is installed\n";
     let _ = host_write_all(2, message);
+    std::process::abort();
+}
+
+/// Emit the runtime's own init-failure diagnostic and abort the process. The
+/// `message` is the runtime's error text — a fingerprint mismatch (incl.
+/// plain-vs-`--yield-points` cross-replay), a `--mount` corpus whose hash does
+/// not match the recording, a replay-fault-config conflict, and so on. The write
+/// goes through the host-alias descriptor I/O (never the interposed `write`);
+/// captured guest stdio is flushed first so the diagnostic lands after any
+/// buffered output, mirroring the process-class deny-trap path.
+fn abort_with_init_error(message: &str) -> ! {
+    let _ = flush_captured_stdio();
+    let line = format!("patina: the deterministic runtime failed to initialize: {message}\n");
+    let _ = host_write_all(2, line.as_bytes());
     std::process::abort();
 }
 
@@ -409,6 +795,73 @@ fn control_trace_fd() -> Result<Option<i32>, RuntimeError> {
         .transpose()
 }
 
+/// Parse `PATINA_FS_IMAGE_FD` from the control plane, mirroring `control_trace_fd`.
+/// Present only when `native-run --mount` streamed a captured host directory.
+fn control_fs_image_fd() -> Result<Option<i32>, RuntimeError> {
+    control_env(patina_runtime::ENV_FS_IMAGE_FD)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value.parse().map_err(|_| {
+                RuntimeError::Config(format!(
+                    "{} must be a non-negative descriptor number",
+                    patina_runtime::ENV_FS_IMAGE_FD
+                ))
+            })
+        })
+        .transpose()
+}
+
+/// Read an inherited host descriptor to EOF using the non-interposed host alias,
+/// mirroring `FdTraceTransport::read_bundle`. Used to slurp the filesystem image
+/// the supervisor duplicated onto the child before exec.
+fn read_host_fd_to_end(fd: c_int) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut chunk = vec![0_u8; HOST_IO_CHUNK];
+    loop {
+        // SAFETY: The pointer and length describe a live buffer.
+        let count = unsafe { host_read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
+        if count < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if count == 0 {
+            return Ok(bytes);
+        }
+        bytes.extend_from_slice(&chunk[..count as usize]);
+    }
+}
+
+/// Build the deterministic filesystem for a native run. When
+/// `PATINA_FS_IMAGE_FD` is set (`native-run --mount`), rebuild the streamed
+/// read-only corpus image and wrap it in the same crash-modeling `CrashFs` used
+/// otherwise, so `--fs-crash-at` and friends compose identically with a mount.
+/// Absent the knob, an empty `CrashFs`, exactly as before. `FsImage::decode`
+/// fails closed on a corrupt or non-canonical image, so a bad stream errors here
+/// rather than yielding a silently different filesystem.
+fn fs_image_filesystem() -> Result<CrashFs, RuntimeError> {
+    let Some(fd) = control_fs_image_fd()? else {
+        return Ok(CrashFs::default());
+    };
+    let bytes = read_host_fd_to_end(fd).map_err(|error| {
+        RuntimeError::Config(format!(
+            "failed to read {}: {error}",
+            patina_runtime::ENV_FS_IMAGE_FD
+        ))
+    })?;
+    let image = FsImage::decode(&bytes)
+        .map_err(|error| RuntimeError::Config(format!("invalid filesystem image: {error}")))?;
+    let filesystem = image.into_memfs().map_err(|error| {
+        RuntimeError::Config(format!("failed to rebuild filesystem image: {error}"))
+    })?;
+    // `CrashFs::default()` is `CrashFs::new(MemFs::new())`, so `new` here yields
+    // the identical crash policy (default torn-write/durability, seed 0); only
+    // the starting contents differ.
+    Ok(CrashFs::new(filesystem))
+}
+
 fn runtime_config_from_control_plane() -> Result<(RuntimeConfig, Option<i32>), RuntimeError> {
     let mode = control_env(patina_runtime::ENV_MODE).unwrap_or_else(|| "seeded".into());
     let seed = parse_control_u64(patina_runtime::ENV_SEED)?.unwrap_or(0);
@@ -491,6 +944,11 @@ fn runtime_config_from_control_plane() -> Result<(RuntimeConfig, Option<i32>), R
     if let Some(latency) = parse_control_u64(patina_runtime::ENV_NET_LATENCY)? {
         config = config.with_net_latency_nanos(latency);
     }
+    // Seed-driven fault knobs (crash point, sleep/net jitter, drop) are read from
+    // the scrubbed constructor-time control plane by the same parser the process
+    // environment path uses, so both entry points accept the identical protocol
+    // and fail closed on any malformed value.
+    config = config.apply_fault_env(control_env)?;
     Ok((config, trace_fd))
 }
 
@@ -574,12 +1032,17 @@ fn init_from_env() -> c_int {
     let context = runtime_config_from_control_plane().and_then(|(config, trace_fd)| {
         let mut builder = RuntimeBuilder::new(config)
             .with_default_drivers()
-            .with_filesystem(CrashFs::default());
+            .with_filesystem(fs_image_filesystem()?);
         if let Some(fd) = trace_fd {
             builder = builder.with_trace_transport(FdTraceTransport { fd });
         }
         builder.build()
     });
+    if let Err(error) = &context {
+        // Preserve the runtime's diagnostic before `install` collapses it to a
+        // bare errno, so the fail-closed abort path can report *why*.
+        *init_error().lock() = Some(error.to_string());
+    }
     install(context)
 }
 
@@ -624,6 +1087,19 @@ pub extern "C" fn patina_shutdown() -> c_int {
         }
         (Err(error), _) => fail(runtime_errno(&error)),
         (Ok(()), Err(_)) => fail(EIO),
+    }
+}
+
+/// Flush captured stdout/stderr to the real host descriptors WITHOUT finalizing
+/// the run (unlike [`patina_shutdown`], which also finishes the trace/record).
+/// The process-class deny-traps in `c/patina_posix.c` call this immediately
+/// before `abort()`: `abort()` skips the atexit-driven shutdown flush, so
+/// without it the guest's buffered output and the deny diagnostic would be lost.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_flush_captured_stdio() -> c_int {
+    match flush_captured_stdio() {
+        Ok(()) => 0,
+        Err(_) => -1,
     }
 }
 
@@ -744,6 +1220,17 @@ pub extern "C" fn patina_sleep_until(clock_id: u32, deadline_nanos: u64) -> c_in
     if let Err(errno) = ensure_runtime() {
         return fail(errno);
     }
+    // Apply any configured seeded sleep-latency jitter once here, at the single
+    // guest-facing sleep entry, so both the managed-thread park and the
+    // single-threaded clock jump below sleep to the same inflated deadline. The
+    // draw is owned by the deterministic context (seeded, replayed), so the
+    // jittered deadline reproduces exactly. `with_context_raw` avoids taking an
+    // extra scheduling point, leaving unjittered runs byte-for-byte unchanged.
+    let deadline_nanos =
+        match with_context_raw(|context| Ok(context.apply_sleep_jitter(deadline_nanos))) {
+            Ok(deadline) => deadline,
+            Err(errno) => return fail(errno),
+        };
     // With managed threads, a sleep parks on the virtual-clock timer queue so
     // other runnable tasks execute while it sleeps and the clock advances only
     // through the deadlock rescue. A single-threaded program (thread subsystem
@@ -850,16 +1337,164 @@ pub unsafe extern "C" fn patina_write(
     }
 }
 
+/// Positional read (`pread`): read at `offset` without moving the file cursor.
+/// A negative offset is rejected, matching the kernel `pread` contract.
+///
+/// # Safety
+/// `destination` must be writable for `length` bytes when nonzero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_pread(
+    raw_fd: c_int,
+    destination: *mut c_void,
+    length: usize,
+    offset: i64,
+) -> isize {
+    if length != 0 && destination.is_null() {
+        return isize::try_from(fail(EINVAL)).expect("-1 fits in isize");
+    }
+    let offset = match u64::try_from(offset) {
+        Ok(offset) => offset,
+        Err(_) => return isize::try_from(fail(EINVAL)).expect("-1 fits in isize"),
+    };
+    let fd = match fd(raw_fd) {
+        Ok(fd) => fd,
+        Err(errno) => return isize::try_from(fail(errno)).expect("-1 fits in isize"),
+    };
+    match with_context(|context| context.fs_read_at(fd, offset, length)) {
+        Ok(bytes) => {
+            if !bytes.is_empty() {
+                // SAFETY: Guaranteed by this function's C ABI contract.
+                unsafe {
+                    slice::from_raw_parts_mut(destination.cast::<u8>(), length)[..bytes.len()]
+                        .copy_from_slice(&bytes);
+                }
+            }
+            isize::try_from(bytes.len()).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
+        }
+        Err(errno) => fail(errno) as isize,
+    }
+}
+
+/// Positional write (`pwrite`): write at `offset` without moving the file
+/// cursor. A negative offset is rejected, matching the kernel `pwrite` contract.
+///
+/// # Safety
+/// `source` must be readable for `length` bytes when nonzero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_pwrite(
+    raw_fd: c_int,
+    source: *const c_void,
+    length: usize,
+    offset: i64,
+) -> isize {
+    if length != 0 && source.is_null() {
+        return fail(EINVAL) as isize;
+    }
+    let offset = match u64::try_from(offset) {
+        Ok(offset) => offset,
+        Err(_) => return fail(EINVAL) as isize,
+    };
+    let fd = match fd(raw_fd) {
+        Ok(fd) => fd,
+        Err(errno) => return fail(errno) as isize,
+    };
+    let bytes = if length == 0 {
+        &[]
+    } else {
+        // SAFETY: Guaranteed by this function's C ABI contract.
+        unsafe { slice::from_raw_parts(source.cast::<u8>(), length) }
+    };
+    match with_context(|context| context.fs_write_at(fd, offset, bytes)) {
+        Ok(written) => isize::try_from(written).unwrap_or_else(|_| fail(EOVERFLOW) as isize),
+        Err(errno) => fail(errno) as isize,
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_close(raw_fd: c_int) -> c_int {
     let fd = match fd(raw_fd) {
         Ok(fd) => fd,
         Err(errno) => return fail(errno),
     };
-    match with_context(|context| context.fs_close(fd)) {
+    let result = match with_context(|context| context.fs_close(fd)) {
         Ok(()) => 0,
         Err(errno) => fail(errno),
+    };
+    // flock(2): a descriptor's advisory lock is released when the descriptor is
+    // closed. (Deterministic fd numbers are never reused, so no later open can
+    // inherit a stale entry.)
+    flock_release(raw_fd);
+    result
+}
+
+/// `LOCK_SH`/`LOCK_EX`/`LOCK_NB`/`LOCK_UN` from `<sys/file.h>` — identical values
+/// on Linux and Darwin.
+const LOCK_SH: c_int = 1;
+const LOCK_EX: c_int = 2;
+const LOCK_NB: c_int = 4;
+const LOCK_UN: c_int = 8;
+
+/// Advisory whole-file lock over the deterministic filesystem — the interposed
+/// `flock` in `c/patina_posix.c`. redb (via std `File::try_lock`) takes one
+/// `LOCK_EX | LOCK_NB` on open; a lone opener always acquires it.
+///
+/// The lock is keyed on the descriptor's deterministic-fs inode, so two
+/// independent opens of the *same* path contend faithfully: a non-blocking
+/// request that would collide with an incompatible lock held on another
+/// descriptor reports `EWOULDBLOCK` (redb surfaces this as
+/// `DatabaseError::DatabaseAlreadyOpen`). `LOCK_SH` conflicts only with a held
+/// `LOCK_EX`; `LOCK_EX` conflicts with any held lock. Re-locking or upgrading on
+/// the *same* descriptor is always allowed (it replaces that descriptor's entry
+/// and never self-conflicts). The lock clears on `LOCK_UN` and on `close`.
+///
+/// Simplifications, sound for the supported surface: a *blocking* request that
+/// would contend fails closed with `EDEADLK` rather than parking a real thread —
+/// the single-baton scheduler does not model advisory-lock waiting, and no
+/// supported guest blocks on a contended `flock` (std's `File::try_lock*` is
+/// always `LOCK_NB`). Dup'd descriptors are tracked independently rather than
+/// sharing one open-file-description lock, so closing one dup releases only its
+/// own entry; no supported guest dups a locked descriptor.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_flock(raw_fd: c_int, operation: c_int) -> c_int {
+    let non_blocking = operation & LOCK_NB != 0;
+    let request = operation & !LOCK_NB;
+    if request == LOCK_UN {
+        flock_release(raw_fd);
+        set_errno(0);
+        return 0;
     }
+    let mode = match request {
+        LOCK_SH => FlockMode::Shared,
+        LOCK_EX => FlockMode::Exclusive,
+        _ => return fail(EINVAL),
+    };
+    let fd = match fd(raw_fd) {
+        Ok(fd) => fd,
+        Err(errno) => return fail(errno),
+    };
+    // Resolve the descriptor's inode through the recorded metadata path so the
+    // conflict decision keys on the same file identity under record and replay.
+    let ino = match with_context(|context| context.fs_fd_metadata(fd)) {
+        Ok(metadata) => metadata.ino,
+        Err(errno) => return fail(errno),
+    };
+    let mut table = flock_table().lock();
+    let conflict = table.iter().any(|(&holder, &(held_ino, held_mode))| {
+        holder != raw_fd
+            && held_ino == ino
+            && (mode == FlockMode::Exclusive || held_mode == FlockMode::Exclusive)
+    });
+    if conflict {
+        drop(table);
+        return if non_blocking {
+            fail(EWOULDBLOCK)
+        } else {
+            fail(EDEADLK)
+        };
+    }
+    table.insert(raw_fd, (ino, mode));
+    set_errno(0);
+    0
 }
 
 /// Duplicate an open deterministic file descriptor; the duplicate shares the
@@ -1288,6 +1923,17 @@ pub extern "C" fn patina_thread_id() -> c_int {
     thread::deterministic_thread_id()
 }
 
+/// `sched_yield`/`thread::yield_now`: take a deterministic scheduling point
+/// instead of yielding the host scheduler. std's `mpsc`/`mpmc` backoff spins
+/// through `thread::yield_now` before parking, so an uninterposed `sched_yield`
+/// would be a host scheduling call outside the runtime. A no-op until the
+/// thread subsystem activates, so single-threaded programs are unaffected.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_sched_yield() -> c_int {
+    let _ = thread::sched_point();
+    0
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_crash() -> c_int {
     match with_context(Context::fs_crash) {
@@ -1354,21 +2000,12 @@ mod thread {
     // (added by `cargo patina native-build`). The `__real_` reference is marked
     // weak so unit-test and library links succeed without the flag (it is never
     // called there); a native binary is always linked with the wrap flag.
-    #[cfg(target_os = "macos")]
-    unsafe extern "C" {
-        fn pthread_create_suspended_np(
-            thread: *mut *mut c_void,
-            attr: *const c_void,
-            start: StartRoutine,
-            arg: *mut c_void,
-        ) -> c_int;
-        fn pthread_mach_thread_np(thread: *mut c_void) -> u32;
-        fn thread_resume(target: u32) -> c_int;
-    }
-
     /// Create a real, non-interposed host OS thread running `start(arg)` and
     /// write its `pthread_t` into `handle`. The thread's trampoline parks on the
-    /// baton before executing any guest code.
+    /// baton before executing any guest code. The creation vehicle is reached
+    /// through the resolved host-alias table, so `pthread_create_suspended_np`,
+    /// `pthread_mach_thread_np`, and `thread_resume` never appear in the guest
+    /// binary's import table (see the top-level host-alias doctrine).
     ///
     /// # Safety
     /// `handle` must be writable and `start`/`arg` a valid thread entry point.
@@ -1379,13 +2016,17 @@ mod thread {
         start: StartRoutine,
         arg: *mut c_void,
     ) -> c_int {
-        // SAFETY: forwarded from this function's contract.
-        let rc = unsafe { pthread_create_suspended_np(handle, attr, start, arg) };
+        let api = crate::hostapi::get();
+        // SAFETY: forwarded from this function's contract to the resolved host
+        // `pthread_create_suspended_np`. `StartRoutine` here and the table's
+        // matching type share the `extern "C" fn(*mut c_void) -> *mut c_void`
+        // ABI, so the resolved pointer is called with its true signature.
+        let rc = unsafe { (api.pthread_create_suspended_np)(handle, attr, start, arg) };
         if rc != 0 {
             return rc;
         }
         // SAFETY: `*handle` is the freshly created (suspended) host thread.
-        unsafe { thread_resume(pthread_mach_thread_np(handle.read())) };
+        unsafe { (api.thread_resume)((api.pthread_mach_thread_np)(handle.read())) };
         0
     }
 
@@ -1422,10 +2063,31 @@ mod thread {
     thread_local! {
         /// The managed task this host thread runs, if any.
         static CURRENT_TASK: Cell<Option<TaskId>> = const { Cell::new(None) };
+        /// Set once this host thread's task has completed (`thread_finish`), so
+        /// any instrumented teardown it runs afterward — pthread TLS destructors
+        /// under `--yield-points` execute std generic code monomorphized into the
+        /// guest crate, which carries the yield hook — takes no scheduling point
+        /// instead of rescheduling a task the scheduler has already removed. This
+        /// is deliberately a *distinct* state from "never registered": a foreign
+        /// or pre-registration thread that reaches a scheduling point still fails
+        /// loudly through the unchanged `reschedule` path, never silently proceeds
+        /// unscheduled.
+        static TASK_COMPLETED: Cell<bool> = const { Cell::new(false) };
     }
 
     fn set_current_task(task: TaskId) {
         CURRENT_TASK.with(|cell| cell.set(Some(task)));
+    }
+
+    /// Mark this host thread's task as completed. Idempotent.
+    fn mark_task_completed() {
+        TASK_COMPLETED.with(|cell| cell.set(true));
+    }
+
+    /// Whether this host thread has already finished its managed task and is now
+    /// in post-completion teardown.
+    fn task_completed() -> bool {
+        TASK_COMPLETED.with(Cell::get)
     }
 
     /// The unmanaged sentinel used before the thread subsystem activates; the
@@ -1551,6 +2213,22 @@ mod thread {
         waiters: VecDeque<(TaskId, usize)>,
     }
 
+    /// A deterministic reader/writer lock. Writer-preferring: a new reader
+    /// blocks while any writer holds or is waiting, so a stream of readers can
+    /// never starve a waiting writer. Writers are granted in strict FIFO order;
+    /// when a writer releases and no writer is waiting, every blocked reader is
+    /// granted at once (a batch wake, like a condvar broadcast). Every wake is a
+    /// recorded scheduler decision, so the wake order is reproducible.
+    #[derive(Default)]
+    struct RwLockEntry {
+        /// Number of tasks currently holding the read lock.
+        readers: usize,
+        /// The task currently holding the write lock, if any.
+        writer: Option<TaskId>,
+        write_waiters: VecDeque<TaskId>,
+        read_waiters: VecDeque<TaskId>,
+    }
+
     struct ThreadEntry {
         finished: bool,
         retval: usize,
@@ -1578,6 +2256,7 @@ mod thread {
     struct ThreadTable {
         mutexes: BTreeMap<usize, MutexEntry>,
         conds: BTreeMap<usize, CondEntry>,
+        rwlocks: BTreeMap<usize, RwLockEntry>,
         threads: BTreeMap<TaskId, ThreadEntry>,
     }
 
@@ -1653,6 +2332,118 @@ mod thread {
                     return Err(ThreadError::Posix(EBUSY));
                 }
                 self.mutexes.remove(&key);
+            }
+            Ok(())
+        }
+
+        fn init_rwlock(&mut self, key: usize) {
+            self.rwlocks.insert(key, RwLockEntry::default());
+        }
+
+        /// Acquire the read lock. Writer-preferring: block while a writer holds
+        /// the lock or any writer is waiting.
+        fn rwlock_rdlock(&mut self, me: TaskId, key: usize) -> Result<LockStep, ThreadError> {
+            let entry = self.rwlocks.entry(key).or_default();
+            if entry.writer == Some(me) {
+                return Err(ThreadError::Posix(EDEADLK));
+            }
+            if entry.writer.is_none() && entry.write_waiters.is_empty() {
+                entry.readers += 1;
+                Ok(LockStep::Acquired)
+            } else {
+                entry.read_waiters.push_back(me);
+                Ok(LockStep::MustBlock)
+            }
+        }
+
+        /// Acquire the write lock: exclusive, so block unless the lock is fully
+        /// idle (no readers and no writer).
+        fn rwlock_wrlock(&mut self, me: TaskId, key: usize) -> Result<LockStep, ThreadError> {
+            let entry = self.rwlocks.entry(key).or_default();
+            if entry.writer == Some(me) {
+                return Err(ThreadError::Posix(EDEADLK));
+            }
+            if entry.writer.is_none() && entry.readers == 0 {
+                entry.writer = Some(me);
+                Ok(LockStep::Acquired)
+            } else {
+                entry.write_waiters.push_back(me);
+                Ok(LockStep::MustBlock)
+            }
+        }
+
+        fn rwlock_tryrdlock(&mut self, me: TaskId, key: usize) -> c_int {
+            let entry = self.rwlocks.entry(key).or_default();
+            if entry.writer == Some(me) {
+                EDEADLK
+            } else if entry.writer.is_none() && entry.write_waiters.is_empty() {
+                entry.readers += 1;
+                0
+            } else {
+                EBUSY
+            }
+        }
+
+        fn rwlock_trywrlock(&mut self, me: TaskId, key: usize) -> c_int {
+            let entry = self.rwlocks.entry(key).or_default();
+            if entry.writer == Some(me) {
+                EDEADLK
+            } else if entry.writer.is_none() && entry.readers == 0 {
+                entry.writer = Some(me);
+                0
+            } else {
+                EBUSY
+            }
+        }
+
+        /// Release whichever mode `me` holds, then grant the lock to the next
+        /// waiter(s) deterministically: a waiting writer (FIFO) is preferred, and
+        /// only when none waits is every blocked reader woken together.
+        fn rwlock_unlock(
+            &mut self,
+            scheduler: &mut dyn Scheduler,
+            me: TaskId,
+            key: usize,
+        ) -> Result<(), ThreadError> {
+            let entry = self
+                .rwlocks
+                .get_mut(&key)
+                .ok_or(ThreadError::Posix(EINVAL))?;
+            if entry.writer == Some(me) {
+                entry.writer = None;
+            } else if entry.readers > 0 {
+                entry.readers -= 1;
+                if entry.readers > 0 {
+                    // Other readers still hold the lock; no grant yet.
+                    return Ok(());
+                }
+            } else {
+                return Err(ThreadError::Posix(EPERM));
+            }
+            // The lock is now idle (no writer, no readers). Grant it.
+            if let Some(next) = entry.write_waiters.pop_front() {
+                entry.writer = Some(next);
+                scheduler.wake(next)?;
+            } else {
+                let readers: Vec<TaskId> = entry.read_waiters.drain(..).collect();
+                entry.readers = readers.len();
+                for reader in readers {
+                    scheduler.wake(reader)?;
+                }
+            }
+            Ok(())
+        }
+
+        fn destroy_rwlock(&mut self, key: usize) -> Result<(), ThreadError> {
+            if let Some(entry) = self.rwlocks.get(&key) {
+                if entry.writer.is_some()
+                    || entry.readers > 0
+                    || !entry.write_waiters.is_empty()
+                    || !entry.read_waiters.is_empty()
+                {
+                    return Err(ThreadError::Posix(EBUSY));
+                }
+                self.rwlocks.remove(&key);
             }
             Ok(())
         }
@@ -1804,66 +2595,100 @@ mod thread {
 
     /// Per-managed-thread blocking primitive. The execution baton is handed to a
     /// task by signaling its semaphore; a task parks by waiting on its own. The
-    /// backing host OS semaphore (a `dispatch_semaphore` on macOS, a POSIX
-    /// `sem_t` on Linux) is neither interposed nor denied by the native audit,
-    /// and is a pure blocking primitive that carries no deterministic decision —
-    /// every scheduling choice is made by [`DetScheduler`](patina_sched_det).
+    /// backing host OS semaphore (a libdispatch semaphore on macOS, a POSIX
+    /// `sem_t` on Linux) is a pure blocking primitive that carries no
+    /// deterministic decision — every scheduling choice is made by
+    /// [`DetScheduler`](patina_sched_det).
+    ///
+    /// On macOS the baton uses the *canonical* Darwin primitive — a libdispatch
+    /// semaphore, the same one Rust std's thread [`Parker`] uses — rather than a
+    /// distinct one chosen to dodge the symbol namespace. That is only safe
+    /// because of the host-alias doctrine: the shim interposes
+    /// `dispatch_semaphore_*` with public strong defs (so a *guest* `Parker`
+    /// routes through the deterministic scheduler), while the baton reaches the
+    /// *real* libdispatch entry points through the host-alias table
+    /// (`dlsym(RTLD_NEXT, ...)`), so it never recurses into its own interposer.
+    /// The vehicle names therefore never appear in the guest import table (only
+    /// `dlsym` does), so no `--allow` is needed and a guest importing
+    /// `dispatch_semaphore_wait` still fails the audit. Matching the native
+    /// primitive is also a robustness win: the baton exercises this shim-vs-guest
+    /// discrimination on every context switch, so a doctrine regression deadlocks
+    /// immediately instead of lying dormant.
     #[cfg(target_os = "macos")]
     mod baton {
         use std::ffi::c_void;
 
-        unsafe extern "C" {
-            fn dispatch_semaphore_create(value: isize) -> *mut c_void;
-            fn dispatch_semaphore_wait(sem: *mut c_void, timeout: u64) -> isize;
-            fn dispatch_semaphore_signal(sem: *mut c_void) -> isize;
-        }
+        use crate::hostapi;
 
-        /// `DISPATCH_TIME_FOREVER`.
-        const FOREVER: u64 = u64::MAX;
+        // `<dispatch/time.h>`: `DISPATCH_TIME_FOREVER == ~0ull`. The baton never
+        // times out — a park blocks until the baton is handed back by a signal.
+        const DISPATCH_TIME_FOREVER: u64 = u64::MAX;
 
+        /// The per-task execution baton: a real libdispatch counting semaphore
+        /// (created with value 0, so the first wait blocks until the baton is
+        /// first handed over). This is the *canonical* Darwin primitive — the
+        /// same one Rust std's `Parker` uses — chosen deliberately to match the
+        /// native implementation. The doctrine makes reusing it safe: the shim
+        /// reaches the REAL libdispatch entry points through the host-alias table
+        /// (`dlsym(RTLD_NEXT, ...)`), while the shim's own public
+        /// `dispatch_semaphore_*` strong-def interposers capture *guest* parking
+        /// and route it through the deterministic scheduler. Because the baton
+        /// exercises that shim-vs-guest discrimination on every context switch, a
+        /// doctrine regression (the baton accidentally binding the interposer)
+        /// deadlocks immediately instead of lying dormant.
         pub(super) struct Semaphore(*mut c_void);
 
-        // SAFETY: dispatch semaphores are thread-safe kernel objects.
+        // SAFETY: libdispatch semaphores are thread-safe objects.
         unsafe impl Send for Semaphore {}
         // SAFETY: as above.
         unsafe impl Sync for Semaphore {}
 
         impl Semaphore {
             pub(super) fn new() -> Self {
-                // SAFETY: creating a semaphore with an initial value of zero.
-                let handle = unsafe { dispatch_semaphore_create(0) };
+                // Initial value 0: the first wait blocks until the baton is handed
+                // over, exactly matching the previous Mach-semaphore baton.
+                let handle = unsafe { (hostapi::get().dispatch_semaphore_create)(0) };
                 assert!(!handle.is_null(), "dispatch_semaphore_create failed");
                 Self(handle)
             }
 
             pub(super) fn wait(&self) {
-                // SAFETY: `self.0` is a live semaphore for this object's lifetime.
-                unsafe { dispatch_semaphore_wait(self.0, FOREVER) };
+                // SAFETY: `self.0` is a live dispatch semaphore for this object's
+                // lifetime. `DISPATCH_TIME_FOREVER` blocks until signalled and
+                // never times out (libdispatch absorbs interrupts internally), so
+                // the wait returns only when the baton is handed to this task —
+                // the same "block until handed the baton" contract the Mach
+                // `semaphore_wait` EINTR loop provided.
+                unsafe { (hostapi::get().dispatch_semaphore_wait)(self.0, DISPATCH_TIME_FOREVER) };
             }
 
             pub(super) fn signal(&self) {
-                // SAFETY: as above.
-                unsafe { dispatch_semaphore_signal(self.0) };
+                // SAFETY: as above; hands the baton to the task waiting on `self`.
+                unsafe { (hostapi::get().dispatch_semaphore_signal)(self.0) };
             }
         }
-        // Intentionally not `Drop`: dispatch objects abort if released while
-        // over-signaled, and managed-thread semaphores live for the process.
+
+        impl Drop for Semaphore {
+            fn drop(&mut self) {
+                // A baton at rest has value 0 (its created value), so releasing is
+                // sound (libdispatch traps a release below the created value). In
+                // practice managed-task batons live for the process — the runtime's
+                // `sems` map is never pruned — so this is defensive lifecycle
+                // correctness mirroring a native libdispatch client, not a hot path.
+                // SAFETY: `self.0` is a live dispatch object with no waiters.
+                unsafe { (hostapi::get().dispatch_release)(self.0) };
+            }
+        }
     }
 
     #[cfg(target_os = "linux")]
     mod baton {
-        use std::ffi::{c_int, c_uint, c_void};
+        use crate::hostapi;
 
         // `sem_t` is opaque; glibc's is 32 bytes. Over-allocate and align so the
         // backing storage is valid on any supported layout.
         #[repr(C, align(16))]
         struct SemStorage([u8; 64]);
-
-        unsafe extern "C" {
-            fn sem_init(sem: *mut c_void, pshared: c_int, value: c_uint) -> c_int;
-            fn sem_wait(sem: *mut c_void) -> c_int;
-            fn sem_post(sem: *mut c_void) -> c_int;
-        }
 
         pub(super) struct Semaphore(*mut SemStorage);
 
@@ -1876,19 +2701,26 @@ mod thread {
             pub(super) fn new() -> Self {
                 let storage = Box::into_raw(Box::new(SemStorage([0; 64])));
                 // SAFETY: `storage` is a fresh, correctly aligned `sem_t` slot.
-                let rc = unsafe { sem_init(storage.cast(), 0, 0) };
+                // `sem_init` is reached through the resolved host-alias table, so
+                // `sem_init`/`sem_wait`/`sem_post` never appear in the guest
+                // binary's import table (see the top-level host-alias doctrine):
+                // the shim's use is invisible to the symbol namespace, so even a
+                // guest that itself uses POSIX semaphores could be interposed
+                // without colliding with the baton.
+                let rc = unsafe { (hostapi::get().sem_init)(storage.cast(), 0, 0) };
                 assert!(rc == 0, "sem_init failed");
                 Self(storage)
             }
 
             pub(super) fn wait(&self) {
+                let wait = hostapi::get().sem_wait;
                 // SAFETY: `self.0` is a live semaphore; retry on EINTR.
-                while unsafe { sem_wait(self.0.cast()) } != 0 {}
+                while unsafe { wait(self.0.cast()) } != 0 {}
             }
 
             pub(super) fn signal(&self) {
                 // SAFETY: as above.
-                unsafe { sem_post(self.0.cast()) };
+                unsafe { (hostapi::get().sem_post)(self.0.cast()) };
             }
         }
         // Intentionally not `Drop`: managed-thread semaphores live for the
@@ -1926,7 +2758,30 @@ mod thread {
         /// `ETIMEDOUT` instead of the signalled `0`. Populated by
         /// [`ThreadRuntime::settle_rescued`] from the runtime's rescued set.
         timed_out: std::collections::BTreeSet<TaskId>,
+        /// libdispatch semaphores modeled deterministically, keyed by the opaque
+        /// handle the interposed `dispatch_semaphore_create` hands out. std's
+        /// Darwin thread `Parker` (and everything built on it: `mpsc`/`mpmc`
+        /// `recv`/`recv_timeout`, `Once`, ...) blocks here through the interposed
+        /// `dispatch_semaphore_wait` so it stays on the scheduler + virtual clock.
+        #[cfg(target_os = "macos")]
+        dispatch: BTreeMap<usize, DispatchSem>,
+        /// Monotonic allocator for dispatch-semaphore handles. Starts at one so
+        /// the pointer std stores is never null (it asserts non-null).
+        #[cfg(target_os = "macos")]
+        next_dispatch_handle: usize,
         active: bool,
+    }
+
+    /// A libdispatch counting semaphore modeled for the deterministic scheduler.
+    /// `count` follows dispatch semantics: `wait` decrements and blocks when the
+    /// result is negative, `signal` increments and wakes one waiter when the
+    /// result is not positive. A negative `count` equals the number of blocked
+    /// waiters, so a timed-out waiter restores one to `count` when it leaves.
+    #[cfg(target_os = "macos")]
+    #[derive(Default)]
+    struct DispatchSem {
+        count: isize,
+        waiters: VecDeque<TaskId>,
     }
 
     impl ThreadRuntime {
@@ -1969,6 +2824,20 @@ mod thread {
             match self.table.lock(me, key)? {
                 LockStep::Acquired => Ok(Step::Continue),
                 LockStep::MustBlock => self.block(me, "mutex-contended"),
+            }
+        }
+
+        fn begin_rdlock(&mut self, me: TaskId, key: usize) -> Result<Step, ThreadError> {
+            match self.table.rwlock_rdlock(me, key)? {
+                LockStep::Acquired => Ok(Step::Continue),
+                LockStep::MustBlock => self.block(me, "rwlock-read-contended"),
+            }
+        }
+
+        fn begin_wrlock(&mut self, me: TaskId, key: usize) -> Result<Step, ThreadError> {
+            match self.table.rwlock_wrlock(me, key)? {
+                LockStep::Acquired => Ok(Step::Continue),
+                LockStep::MustBlock => self.block(me, "rwlock-write-contended"),
             }
         }
 
@@ -2062,6 +2931,17 @@ mod thread {
                     return;
                 }
             }
+            #[cfg(target_os = "macos")]
+            for sem in self.dispatch.values_mut() {
+                if let Some(index) = sem.waiters.iter().position(|waiter| *waiter == task) {
+                    sem.waiters.remove(index);
+                    // The waiter eagerly decremented on entry; restore it so a
+                    // negative `count` keeps equaling the live waiter total.
+                    sem.count += 1;
+                    self.timed_out.insert(task);
+                    return;
+                }
+            }
             for socket in self.net.sockets.values_mut() {
                 if let Some(index) = socket
                     .recv_waiters
@@ -2085,6 +2965,10 @@ mod thread {
                 net: NetState::new(),
                 futexes: BTreeMap::new(),
                 timed_out: std::collections::BTreeSet::new(),
+                #[cfg(target_os = "macos")]
+                dispatch: BTreeMap::new(),
+                #[cfg(target_os = "macos")]
+                next_dispatch_handle: 1,
                 active: false,
             })
         })
@@ -2098,6 +2982,13 @@ mod thread {
     /// the thread subsystem activates, so single-threaded programs are
     /// unaffected.
     pub(crate) fn sched_point() -> Result<(), c_int> {
+        // A thread whose task already completed is running teardown code only; it
+        // must not take a scheduling point. Checked before locking and keyed on
+        // the completed sentinel alone, so a never-registered thread falls through
+        // to the unchanged (loud) reschedule path below rather than being silenced.
+        if task_completed() {
+            return Ok(());
+        }
         let mut state = lock_state();
         if !state.active {
             return Ok(());
@@ -2162,6 +3053,10 @@ mod thread {
         if let Err(ThreadError::Fatal(message)) = state.table.exit(&mut scheduler, task, retval) {
             fatal(&message);
         }
+        // The task is gone from the scheduler; mark this host thread completed so
+        // instrumented teardown (TLS destructors under `--yield-points`) takes no
+        // scheduling point rather than rescheduling a task that no longer exists.
+        mark_task_completed();
         let next = match scheduler.next() {
             Ok(next) => next,
             Err(message) => fatal(&message),
@@ -2390,6 +3285,112 @@ mod thread {
         })
     }
 
+    /// Deterministic `pthread_rwlock_*`. Reader/writer contention routes through
+    /// the scheduler exactly like the mutex/cond interposition: writer-preferring
+    /// grant order, FIFO among writers, and a batch wake of all blocked readers
+    /// when a writer releases with no writer waiting. std's own `RwLock` does not
+    /// lower to these symbols on the supported toolchains (it uses the queue-based
+    /// parking `RwLock`), so this serves C guests and any std that does.
+    ///
+    /// # Safety
+    /// `lock` must reference a valid `pthread_rwlock_t`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn patina_rwlock_init(lock: *mut c_void, _attr: *const c_void) -> c_int {
+        managed_op!({
+            let mut state = lock_state();
+            state.table.init_rwlock(lock as usize);
+            0
+        })
+    }
+
+    /// # Safety
+    /// `lock` must reference a valid `pthread_rwlock_t`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn patina_rwlock_rdlock(lock: *mut c_void) -> c_int {
+        managed_op!({
+            let key = lock as usize;
+            let me = current_task();
+            let mut state = lock_state();
+            match state.begin_rdlock(me, key) {
+                Ok(Step::Continue) => 0,
+                Ok(Step::Switch(picked)) => {
+                    switch_and_park(state, picked, me);
+                    0
+                }
+                Err(error) => error.into_posix(),
+            }
+        })
+    }
+
+    /// # Safety
+    /// `lock` must reference a valid `pthread_rwlock_t`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn patina_rwlock_wrlock(lock: *mut c_void) -> c_int {
+        managed_op!({
+            let key = lock as usize;
+            let me = current_task();
+            let mut state = lock_state();
+            match state.begin_wrlock(me, key) {
+                Ok(Step::Continue) => 0,
+                Ok(Step::Switch(picked)) => {
+                    switch_and_park(state, picked, me);
+                    0
+                }
+                Err(error) => error.into_posix(),
+            }
+        })
+    }
+
+    /// # Safety
+    /// `lock` must reference a valid `pthread_rwlock_t`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn patina_rwlock_tryrdlock(lock: *mut c_void) -> c_int {
+        managed_op!({
+            let me = current_task();
+            let mut state = lock_state();
+            state.table.rwlock_tryrdlock(me, lock as usize)
+        })
+    }
+
+    /// # Safety
+    /// `lock` must reference a valid `pthread_rwlock_t`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn patina_rwlock_trywrlock(lock: *mut c_void) -> c_int {
+        managed_op!({
+            let me = current_task();
+            let mut state = lock_state();
+            state.table.rwlock_trywrlock(me, lock as usize)
+        })
+    }
+
+    /// # Safety
+    /// `lock` must reference a valid `pthread_rwlock_t` the caller holds.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn patina_rwlock_unlock(lock: *mut c_void) -> c_int {
+        managed_op!({
+            let me = current_task();
+            let mut state = lock_state();
+            let mut scheduler = RealScheduler;
+            match state.table.rwlock_unlock(&mut scheduler, me, lock as usize) {
+                Ok(()) => 0,
+                Err(error) => error.into_posix(),
+            }
+        })
+    }
+
+    /// # Safety
+    /// `lock` must reference a valid `pthread_rwlock_t`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn patina_rwlock_destroy(lock: *mut c_void) -> c_int {
+        managed_op!({
+            let mut state = lock_state();
+            match state.table.destroy_rwlock(lock as usize) {
+                Ok(()) => 0,
+                Err(error) => error.into_posix(),
+            }
+        })
+    }
+
     /// # Safety
     /// `cond` must reference a valid `pthread_cond_t`.
     #[unsafe(no_mangle)]
@@ -2549,6 +3550,212 @@ mod thread {
     }
 
     // ------------------------------------------------------------------
+    // libdispatch semaphores (macOS std thread `Parker`).
+    //
+    // Rust `std`'s Darwin thread `Parker` blocks on a libdispatch semaphore, so
+    // `thread::park`/`park_timeout` and everything layered on them — `mpsc`/
+    // `mpmc` `recv`/`recv_timeout`, blocking channel and `Once` paths — reach
+    // `dispatch_semaphore_wait`. The C layer interposes `dispatch_time`,
+    // `dispatch_semaphore_create`/`wait`/`signal`, and `dispatch_release` and
+    // forwards them here so the wait routes through `DetScheduler` and the
+    // virtual clock exactly like the pthread/futex primitives. Without this the
+    // Parker would block a real host thread outside the scheduler and read host
+    // time — a silent determinism escape that shared the shim baton's own
+    // `dispatch_semaphore_*` audit allowance.
+    //
+    // Deterministic tie-break (signal vs. deadline at the same virtual instant):
+    // a signal is only applied by a *runnable* unparker, which the scheduler
+    // runs before any clock advance; the deadline fires only through the
+    // deadlock rescue, which advances virtual time solely when no task can make
+    // progress. So a pending signal always wins a same-instant tie, and which
+    // path removed the waiter — never a clock comparison — decides the outcome,
+    // matching `patina_cond_timedwait`. Wakeup cause and order are recorded as
+    // ordinary scheduler park/wake and timer-rescue operations, so replay is
+    // exact.
+    #[cfg(target_os = "macos")]
+    const DISPATCH_TIME_NOW: u64 = 0;
+    #[cfg(target_os = "macos")]
+    const DISPATCH_TIME_FOREVER: u64 = u64::MAX;
+    /// Non-zero sentinel returned when a timed wait reaches its deadline; std
+    /// only tests `dispatch_semaphore_wait(...) != 0`.
+    #[cfg(target_os = "macos")]
+    const DISPATCH_TIMED_OUT: isize = -1;
+
+    /// Reduce `dispatch_time(when, delta)` to the relative monotonic token that
+    /// [`patina_dispatch_semaphore_wait`] consumes. std only ever calls it as
+    /// `dispatch_time(DISPATCH_TIME_NOW, nanos)` for `park_timeout`, so a
+    /// `NOW`-relative non-negative nanosecond delta is returned verbatim (the
+    /// wait resolves it against the virtual monotonic clock); `FOREVER` and a
+    /// non-positive delta pass through as their sentinels.
+    ///
+    /// # Safety
+    /// C ABI entry point; no pointers are dereferenced.
+    #[cfg(target_os = "macos")]
+    #[unsafe(no_mangle)]
+    pub extern "C" fn patina_dispatch_time(when: u64, delta: i64) -> u64 {
+        if when == DISPATCH_TIME_FOREVER {
+            return DISPATCH_TIME_FOREVER;
+        }
+        if delta <= 0 {
+            return DISPATCH_TIME_NOW;
+        }
+        // Clamp away from the `FOREVER` sentinel so a real deadline is never
+        // mistaken for an infinite wait.
+        (delta as u64).min(DISPATCH_TIME_FOREVER - 1)
+    }
+
+    /// Allocate a modeled dispatch semaphore and return its opaque handle. Pure
+    /// local allocation — no scheduling point, mirroring the non-blocking
+    /// `dispatch_semaphore_create`.
+    ///
+    /// # Safety
+    /// C ABI entry point; the returned pointer is an opaque token, never
+    /// dereferenced by the shim or by std.
+    #[cfg(target_os = "macos")]
+    #[unsafe(no_mangle)]
+    pub extern "C" fn patina_dispatch_semaphore_create(value: isize) -> *mut c_void {
+        let mut state = lock_state();
+        let handle = state.next_dispatch_handle;
+        state.next_dispatch_handle = handle.wrapping_add(1).max(1);
+        state.dispatch.insert(
+            handle,
+            DispatchSem {
+                count: value,
+                waiters: VecDeque::new(),
+            },
+        );
+        handle as *mut c_void
+    }
+
+    /// Release a modeled dispatch semaphore (its `Parker`'s `Drop`). Handles are
+    /// never reused, so simply dropping the table entry is safe.
+    ///
+    /// # Safety
+    /// C ABI entry point; `object` is an opaque handle from
+    /// [`patina_dispatch_semaphore_create`].
+    #[cfg(target_os = "macos")]
+    #[unsafe(no_mangle)]
+    pub extern "C" fn patina_dispatch_release(object: *mut c_void) {
+        lock_state().dispatch.remove(&(object as usize));
+    }
+
+    /// Wait on a modeled dispatch semaphore, routing any block through the
+    /// deterministic scheduler and virtual clock. Returns `0` when acquired (or
+    /// signalled) and a non-zero sentinel when a timed wait reaches its
+    /// deadline.
+    ///
+    /// # Safety
+    /// C ABI entry point; `sem` is an opaque handle from
+    /// [`patina_dispatch_semaphore_create`].
+    #[cfg(target_os = "macos")]
+    #[unsafe(no_mangle)]
+    pub extern "C" fn patina_dispatch_semaphore_wait(sem: *mut c_void, timeout: u64) -> isize {
+        let key = sem as usize;
+        if sched_point().is_err() {
+            fatal("scheduler error entering dispatch_semaphore_wait");
+        }
+        let mut state = lock_state();
+        if let Err(error) = state.ensure_active() {
+            fatal(&format!("activating the thread runtime failed: {error:?}"));
+        }
+        // `ensure_active` may have just registered this host thread as the main
+        // managed task, so read the current task after it.
+        let me = current_task();
+        let count_after = {
+            let entry = state.dispatch.entry(key).or_default();
+            entry.count -= 1;
+            entry.count
+        };
+        if count_after >= 0 {
+            // The token was available; no block.
+            return 0;
+        }
+        if timeout == DISPATCH_TIME_NOW {
+            // Non-blocking poll: undo the decrement and report timed out.
+            if let Some(entry) = state.dispatch.get_mut(&key) {
+                entry.count += 1;
+            }
+            return DISPATCH_TIMED_OUT;
+        }
+        state
+            .dispatch
+            .get_mut(&key)
+            .expect("semaphore was just decremented")
+            .waiters
+            .push_back(me);
+        if timeout == DISPATCH_TIME_FOREVER {
+            match state.block(me, "dispatch-sem-wait") {
+                Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
+                Ok(Step::Continue) => {
+                    fatal("dispatch semaphore wait parked without transferring the baton")
+                }
+                Err(ThreadError::Fatal(message)) => fatal(&message),
+                Err(ThreadError::Posix(errno)) => fatal(&format!(
+                    "dispatch semaphore wait failed with errno {errno}"
+                )),
+            }
+            // Resumed only by a signal, which removed us from the waiters.
+            0
+        } else {
+            let now = match with_context_raw(|context| context.now(ClockKind::Monotonic)) {
+                Ok(now) => now,
+                Err(_) => fatal("dispatch semaphore timed wait could not read the virtual clock"),
+            };
+            let deadline = now.saturating_add(timeout);
+            match state.block_timed(me, "dispatch-sem-timedwait", ClockKind::Monotonic, deadline) {
+                Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
+                Ok(Step::Continue) => drop(state),
+                Err(ThreadError::Fatal(message)) => fatal(&message),
+                Err(ThreadError::Posix(errno)) => fatal(&format!(
+                    "dispatch semaphore timed wait failed with errno {errno}"
+                )),
+            }
+            // A timer wake left us in `timed_out` (and restored the count); a
+            // signal wake removed us from the waiters and kept the decrement.
+            if lock_state().timed_out.remove(&me) {
+                DISPATCH_TIMED_OUT
+            } else {
+                0
+            }
+        }
+    }
+
+    /// Signal a modeled dispatch semaphore, waking one waiter if the increment
+    /// leaves a non-positive count (i.e. a task was blocked). Returns `1` when a
+    /// task was woken, `0` otherwise; std ignores the value.
+    ///
+    /// # Safety
+    /// C ABI entry point; `sem` is an opaque handle from
+    /// [`patina_dispatch_semaphore_create`].
+    #[cfg(target_os = "macos")]
+    #[unsafe(no_mangle)]
+    pub extern "C" fn patina_dispatch_semaphore_signal(sem: *mut c_void) -> isize {
+        let key = sem as usize;
+        if sched_point().is_err() {
+            fatal("scheduler error entering dispatch_semaphore_signal");
+        }
+        let mut state = lock_state();
+        let woke = {
+            let entry = state.dispatch.entry(key).or_default();
+            entry.count += 1;
+            if entry.count <= 0 {
+                entry.waiters.pop_front()
+            } else {
+                None
+            }
+        };
+        match woke {
+            Some(task) => {
+                if let Err(message) = RealScheduler.wake(task) {
+                    fatal(&message);
+                }
+                1
+            }
+            None => 0,
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Virtual AF_INET sockets over the runtime's SimNet.
     //
     // Guest socket descriptors live in a high, non-colliding range so `close`
@@ -2585,6 +3792,10 @@ mod thread {
         bound: Option<(u32, u16)>,
         peer: Option<(u32, u16)>,
         nonblocking: bool,
+        /// Deterministic `SO_RCVTIMEO`: `Some(nanos)` bounds a blocking receive by
+        /// this many virtual nanoseconds from entry; `None` (or a zero timeval,
+        /// which POSIX treats as no timeout) blocks until data or a genuine wake.
+        read_timeout_nanos: Option<u64>,
         recv_waiters: VecDeque<TaskId>,
         send_waiters: VecDeque<TaskId>,
     }
@@ -2598,6 +3809,7 @@ mod thread {
                 bound: None,
                 peer: None,
                 nonblocking,
+                read_timeout_nanos: None,
                 recv_waiters: VecDeque::new(),
                 send_waiters: VecDeque::new(),
             }
@@ -2897,6 +4109,7 @@ mod thread {
                             bound: Some(bound),
                             peer: Some(peer),
                             nonblocking: false,
+                            read_timeout_nanos: None,
                             recv_waiters: VecDeque::new(),
                             send_waiters: VecDeque::new(),
                         },
@@ -3180,11 +4393,14 @@ mod thread {
             return super::fail(errno) as isize;
         }
         let me = current_task();
+        // Absolute virtual deadline for a `SO_RCVTIMEO` receive, fixed on the
+        // first block from entry time so it does not drift across re-checks.
+        let mut timeout_deadline: Option<u64> = None;
         loop {
             let mut state = lock_state();
-            let (socket_id, nonblocking) = match state.net.sockets.get(&fd) {
+            let (socket_id, nonblocking, read_timeout) = match state.net.sockets.get(&fd) {
                 Some(socket) if socket.kind == SocketKind::Datagram => match socket.socket_id {
-                    Some(socket_id) => (socket_id, socket.nonblocking),
+                    Some(socket_id) => (socket_id, socket.nonblocking, socket.read_timeout_nanos),
                     None => return super::fail(super::EBADF) as isize,
                 },
                 Some(_) => return super::fail(EOPNOTSUPP) as isize,
@@ -3199,6 +4415,21 @@ mod thread {
                     if nonblocking {
                         return super::fail(EWOULDBLOCK) as isize;
                     }
+                    // Deterministic SO_RCVTIMEO. `net_recv` above is checked
+                    // first every iteration, so a datagram deliverable at exactly
+                    // the timeout instant is returned rather than timing out:
+                    // delivery wins ties. The deadline is captured once (relative
+                    // to entry) and the park below is bounded by it.
+                    if let Some(rt) = read_timeout {
+                        let now = match with_context_raw(|c| c.now(ClockKind::Monotonic)) {
+                            Ok(now) => now,
+                            Err(errno) => return super::fail(errno) as isize,
+                        };
+                        let deadline = *timeout_deadline.get_or_insert(now.saturating_add(rt));
+                        if now >= deadline {
+                            return super::fail(EWOULDBLOCK) as isize;
+                        }
+                    }
                     state
                         .net
                         .sockets
@@ -3210,7 +4441,15 @@ mod thread {
                         Ok(delivery) => delivery,
                         Err(errno) => return super::fail(errno) as isize,
                     };
-                    let step = match delivery {
+                    // Park until the earlier of the next delivery and the receive
+                    // timeout; block indefinitely only when neither bounds it.
+                    let park_deadline = match (delivery, timeout_deadline) {
+                        (Some(delivery), Some(timeout)) => Some(delivery.min(timeout)),
+                        (Some(delivery), None) => Some(delivery),
+                        (None, Some(timeout)) => Some(timeout),
+                        (None, None) => None,
+                    };
+                    let step = match park_deadline {
                         Some(deadline) => {
                             state.block_timed(me, "net-recv", ClockKind::Monotonic, deadline)
                         }
@@ -3431,6 +4670,21 @@ mod thread {
         match state.net.sockets.get_mut(&fd) {
             Some(socket) => {
                 socket.nonblocking = nonblocking != 0;
+                0
+            }
+            None => super::fail(super::EBADF),
+        }
+    }
+
+    /// Set a socket's `SO_RCVTIMEO` in virtual nanoseconds. A zero clears the
+    /// timeout (POSIX: block indefinitely); any nonzero value bounds a later
+    /// blocking receive by that many nanoseconds of virtual time from entry.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn patina_net_set_read_timeout(fd: c_int, nanos: u64) -> c_int {
+        let mut state = lock_state();
+        match state.net.sockets.get_mut(&fd) {
+            Some(socket) => {
+                socket.read_timeout_nanos = (nanos != 0).then_some(nanos);
                 0
             }
             None => super::fail(super::EBADF),
@@ -3707,6 +4961,43 @@ mod thread {
 
         const MUTEX: usize = 0x1000;
         const COND: usize = 0x2000;
+        const RWLOCK: usize = 0x3000;
+
+        // The `--yield-points` teardown fix must keep "task completed" a state
+        // distinct from "thread never registered": a completed thread's
+        // post-finish scheduling points are silently skipped, but a foreign or
+        // pre-registration thread must still fail loudly. Run on a fresh host
+        // thread so the thread-locals start at their defaults.
+        #[test]
+        fn completed_sentinel_is_distinct_from_never_registered() {
+            std::thread::spawn(|| {
+                // Never-registered defaults: no task, not completed.
+                assert_eq!(current_task(), UNMANAGED_TASK);
+                assert!(!task_completed());
+                // sched_point on a never-registered thread does NOT take the
+                // completed no-op path (it would fall through to the loud
+                // reschedule when the subsystem is active).
+                mark_task_completed();
+                // Completing marks the sentinel WITHOUT aliasing the unregistered
+                // task id, so the two states remain distinguishable.
+                assert!(task_completed());
+                assert_eq!(current_task(), UNMANAGED_TASK);
+                // A completed thread takes no scheduling point.
+                assert!(sched_point().is_ok());
+            })
+            .join()
+            .unwrap();
+        }
+
+        // The loud path the fix must preserve: rescheduling a task the scheduler
+        // never registered is an error, not a silent no-op. `sched_point` reaches
+        // this via `reschedule` for any non-completed thread, so a foreign thread
+        // reaching a scheduling point still fails closed.
+        #[test]
+        fn rescheduling_an_unregistered_task_errors() {
+            let mut scheduler = DetAdapter::new(1);
+            assert!(scheduler.yield_task(UNMANAGED_TASK).is_err());
+        }
 
         #[test]
         fn uncontended_lock_and_unlock_round_trips() {
@@ -3764,6 +5055,109 @@ mod thread {
             assert_eq!(table.mutexes[&MUTEX].owner, Some(c));
             table.unlock(&mut scheduler, c, MUTEX).unwrap();
             assert_eq!(table.mutexes[&MUTEX].owner, None);
+        }
+
+        #[test]
+        fn rwlock_trylock_and_deadlock_reporting() {
+            let mut table = ThreadTable::default();
+            let mut scheduler = DetAdapter::new(1);
+            let a = TaskId(1);
+            let b = TaskId(2);
+
+            // A write hold excludes both a reader and another writer, and the
+            // holder re-acquiring is a deadlock.
+            assert!(matches!(
+                table.rwlock_wrlock(a, RWLOCK).unwrap(),
+                LockStep::Acquired
+            ));
+            assert_eq!(table.rwlock_trywrlock(b, RWLOCK), EBUSY);
+            assert_eq!(table.rwlock_tryrdlock(b, RWLOCK), EBUSY);
+            assert_eq!(table.rwlock_trywrlock(a, RWLOCK), EDEADLK);
+            assert!(matches!(
+                table.rwlock_rdlock(a, RWLOCK),
+                Err(ThreadError::Posix(EDEADLK))
+            ));
+
+            // Releasing lets multiple readers share, but a writer is then busy.
+            table.rwlock_unlock(&mut scheduler, a, RWLOCK).unwrap();
+            assert_eq!(table.rwlock_tryrdlock(a, RWLOCK), 0);
+            assert_eq!(table.rwlock_tryrdlock(b, RWLOCK), 0);
+            assert_eq!(table.rwlocks[&RWLOCK].readers, 2);
+            assert_eq!(table.rwlock_trywrlock(a, RWLOCK), EBUSY);
+
+            // A held rwlock cannot be destroyed; an idle one can.
+            assert!(matches!(
+                table.destroy_rwlock(RWLOCK),
+                Err(ThreadError::Posix(EBUSY))
+            ));
+            table.rwlock_unlock(&mut scheduler, a, RWLOCK).unwrap();
+            table.rwlock_unlock(&mut scheduler, b, RWLOCK).unwrap();
+            assert!(table.destroy_rwlock(RWLOCK).is_ok());
+        }
+
+        #[test]
+        fn rwlock_is_writer_preferring_with_fifo_writers_and_batched_readers() {
+            let mut table = ThreadTable::default();
+            let mut scheduler = DetAdapter::new(1);
+            let r1 = scheduler.spawn("r1").unwrap();
+            let r2 = scheduler.spawn("r2").unwrap();
+            let w1 = scheduler.spawn("w1").unwrap();
+            let r3 = scheduler.spawn("r3").unwrap();
+            for task in [r1, r2, w1, r3] {
+                table.register(task);
+            }
+
+            // Two readers share the lock.
+            scheduler.scheduler.select(Some(r1)).unwrap();
+            assert!(matches!(
+                table.rwlock_rdlock(r1, RWLOCK).unwrap(),
+                LockStep::Acquired
+            ));
+            scheduler.yield_task(r1).unwrap();
+            scheduler.scheduler.select(Some(r2)).unwrap();
+            assert!(matches!(
+                table.rwlock_rdlock(r2, RWLOCK).unwrap(),
+                LockStep::Acquired
+            ));
+            assert_eq!(table.rwlocks[&RWLOCK].readers, 2);
+            scheduler.yield_task(r2).unwrap();
+
+            // A writer arrives and blocks behind the active readers.
+            scheduler.scheduler.select(Some(w1)).unwrap();
+            assert!(matches!(
+                table.rwlock_wrlock(w1, RWLOCK).unwrap(),
+                LockStep::MustBlock
+            ));
+            scheduler.park(w1, "rwlock-write").unwrap();
+
+            // Writer-preferring: a new reader blocks while a writer waits, even
+            // though only readers currently hold the lock.
+            scheduler.scheduler.select(Some(r3)).unwrap();
+            assert!(matches!(
+                table.rwlock_rdlock(r3, RWLOCK).unwrap(),
+                LockStep::MustBlock
+            ));
+            scheduler.park(r3, "rwlock-read").unwrap();
+
+            // First reader releases: one reader remains, nothing is granted.
+            table.rwlock_unlock(&mut scheduler, r1, RWLOCK).unwrap();
+            assert_eq!(table.rwlocks[&RWLOCK].readers, 1);
+            assert_eq!(table.rwlocks[&RWLOCK].writer, None);
+
+            // Last reader releases: the waiting writer is granted (preference).
+            table.rwlock_unlock(&mut scheduler, r2, RWLOCK).unwrap();
+            assert_eq!(table.rwlocks[&RWLOCK].writer, Some(w1));
+            assert_eq!(table.rwlocks[&RWLOCK].readers, 0);
+
+            // Writer releases with no writer waiting: every blocked reader is
+            // granted at once.
+            table.rwlock_unlock(&mut scheduler, w1, RWLOCK).unwrap();
+            assert_eq!(table.rwlocks[&RWLOCK].writer, None);
+            assert_eq!(table.rwlocks[&RWLOCK].readers, 1);
+            assert!(table.rwlocks[&RWLOCK].read_waiters.is_empty());
+
+            table.rwlock_unlock(&mut scheduler, r3, RWLOCK).unwrap();
+            assert_eq!(table.rwlocks[&RWLOCK].readers, 0);
         }
 
         #[test]

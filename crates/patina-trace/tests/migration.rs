@@ -26,9 +26,12 @@ fn expected_operations() -> Vec<Operation> {
 
 #[test]
 fn current_format_fixture_parses_validates_and_is_canonically_encoded() {
-    let bundle = TraceBundle::load(fixture("format-3.patina")).unwrap();
+    let bundle = TraceBundle::load(fixture("format-4.patina")).unwrap();
     assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
     bundle.validate().unwrap();
+    // A pre-metadata run records no fault configuration; the field is absent
+    // from the canonical form rather than an explicit empty object.
+    assert_eq!(bundle.metadata.faults, None);
     let main = bundle.resolved_timeline("main").unwrap();
     assert_eq!(main.len(), 2);
     assert_eq!(main[0].outcome, Outcome::U64(1000));
@@ -39,7 +42,7 @@ fn current_format_fixture_parses_validates_and_is_canonically_encoded() {
     // on-disk encoding and guards against the fixture drifting from the writer.
     let reencoded = bundle.to_bytes().unwrap();
     assert_eq!(
-        std::fs::read(fixture("format-3.patina")).unwrap(),
+        std::fs::read(fixture("format-4.patina")).unwrap(),
         reencoded
     );
     let text = String::from_utf8(reencoded).unwrap();
@@ -59,8 +62,8 @@ fn every_prior_format_migrates_to_an_equivalent_current_bundle() {
     // Both supported prior formats upgrade to a bundle byte-for-byte equivalent
     // to the hand-written current-format fixture: current version, a single
     // unbranched `main` timeline, and absent branch metadata.
-    let current = TraceBundle::load(fixture("format-3.patina")).unwrap();
-    for prior in ["format-1.patina", "format-2.patina"] {
+    let current = TraceBundle::load(fixture("format-4.patina")).unwrap();
+    for prior in ["format-1.patina", "format-2.patina", "format-3.patina"] {
         let migrated = TraceBundle::load(fixture(prior)).unwrap();
         assert_eq!(
             migrated, current,
@@ -92,7 +95,7 @@ fn every_prior_format_migrates_to_an_equivalent_current_bundle() {
 
 #[test]
 fn migration_never_rewrites_the_source_file() {
-    for prior in ["format-1.patina", "format-2.patina"] {
+    for prior in ["format-1.patina", "format-2.patina", "format-3.patina"] {
         let path = fixture(prior);
         let before = std::fs::read(&path).unwrap();
         TraceBundle::load(&path).unwrap();
@@ -158,8 +161,8 @@ fn malformed_fixture_is_rejected_as_a_parse_error() {
 fn migration_is_reachable_through_the_in_memory_transport_path() {
     // The same decode path backs `from_slice`, so transported prior-format
     // bundles migrate identically to file loads.
-    let current = TraceBundle::load(fixture("format-3.patina")).unwrap();
-    for prior in ["format-1.patina", "format-2.patina"] {
+    let current = TraceBundle::load(fixture("format-4.patina")).unwrap();
+    for prior in ["format-1.patina", "format-2.patina", "format-3.patina"] {
         let bytes = std::fs::read(fixture(prior)).unwrap();
         let migrated = TraceBundle::from_slice(&bytes).unwrap();
         assert_eq!(

@@ -40,6 +40,13 @@ int32_t patina_init_crash(uint64_t seed);
 int32_t patina_init_from_env(void);
 void patina_control_set_entry(const char *entry);
 int32_t patina_shutdown(void);
+/*
+ * Flush captured stdout/stderr to the real host descriptors WITHOUT finalizing
+ * the run (unlike patina_shutdown). The process-class deny-traps call this
+ * before abort() so the guest's output and the deny diagnostic reach the
+ * operator even though abort() skips the atexit-driven shutdown flush.
+ */
+int32_t patina_flush_captured_stdio(void);
 int32_t patina_errno(void);
 int32_t patina_entropy(void *destination, size_t length);
 int32_t patina_clock_now(uint32_t clock, uint64_t *nanos);
@@ -47,11 +54,22 @@ int32_t patina_sleep_until(uint32_t clock, uint64_t deadline_nanos);
 int32_t patina_open(const char *path, uint32_t flags);
 intptr_t patina_read(int32_t fd, void *destination, size_t length);
 intptr_t patina_write(int32_t fd, const void *source, size_t length);
+intptr_t patina_pread(int32_t fd, void *destination, size_t length, int64_t offset);
+intptr_t patina_pwrite(int32_t fd, const void *source, size_t length, int64_t offset);
 int32_t patina_close(int32_t fd);
 int32_t patina_dup(int32_t fd);
 int64_t patina_seek(int32_t fd, int64_t offset, uint32_t whence);
 int32_t patina_fsync(int32_t fd);
 int32_t patina_set_len(int32_t fd, uint64_t length);
+/*
+ * Advisory whole-file lock (flock(2)). `operation` is LOCK_SH/LOCK_EX/LOCK_UN
+ * optionally OR'd with LOCK_NB. Keyed on the descriptor's deterministic-fs
+ * inode: a lone opener always acquires, while an incompatible lock held on a
+ * different descriptor of the same file yields EWOULDBLOCK (LOCK_NB) so a guest
+ * that opens the same file twice contends as it would on a real kernel. The
+ * lock clears on LOCK_UN and on close.
+ */
+int32_t patina_flock(int32_t fd, int32_t operation);
 enum {
     PATINA_ENTRY_FILE = 1,
     PATINA_ENTRY_DIRECTORY = 2,
@@ -76,6 +94,7 @@ void patina_read_dir_free(void *state);
 int32_t patina_symlink(const char *target, const char *link_path);
 intptr_t patina_read_link(const char *path, char *buf, size_t len);
 int32_t patina_thread_id(void);
+int32_t patina_sched_yield(void);
 int32_t patina_mkdir(const char *path);
 int32_t patina_unlink(const char *path);
 int32_t patina_rmdir(const char *path);
@@ -112,6 +131,20 @@ int32_t patina_cond_broadcast(void *cond);
 int32_t patina_cond_destroy(void *cond);
 
 /*
+ * Deterministic pthread_rwlock_* under the scheduler: writer-preferring, FIFO
+ * among writers, blocked readers batch-woken when a writer releases with no
+ * writer waiting. Handles are identified by the pthread_rwlock_t storage
+ * address.
+ */
+int32_t patina_rwlock_init(void *lock, const void *attr);
+int32_t patina_rwlock_rdlock(void *lock);
+int32_t patina_rwlock_wrlock(void *lock);
+int32_t patina_rwlock_tryrdlock(void *lock);
+int32_t patina_rwlock_trywrlock(void *lock);
+int32_t patina_rwlock_unlock(void *lock);
+int32_t patina_rwlock_destroy(void *lock);
+
+/*
  * Virtual AF_INET sockets over the runtime's SimNet. Descriptors are numbered
  * from PATINA_SOCKET_FD_BASE so the interposed close can route them here;
  * addresses are passed as host-order IPv4 + port. Blocking calls park the
@@ -135,6 +168,8 @@ int32_t patina_net_getsockname(int32_t fd, uint32_t *ip, uint16_t *port);
 int32_t patina_net_getpeername(int32_t fd, uint32_t *ip, uint16_t *port);
 int32_t patina_net_kind(int32_t fd); /* -1 unknown, 0 datagram, 1 unbound stream, 2 listener, 3 stream */
 int32_t patina_net_set_nonblocking(int32_t fd, int32_t nonblocking);
+/* Set SO_RCVTIMEO in virtual nanoseconds; 0 clears (no timeout). */
+int32_t patina_net_set_read_timeout(int32_t fd, uint64_t nanos);
 int32_t patina_net_is_nonblocking(int32_t fd);
 int32_t patina_net_close(int32_t fd);
 
@@ -155,6 +190,22 @@ int32_t patina_futex_wait(uintptr_t addr, uint32_t expected);
 int32_t patina_futex_wait_timed(uintptr_t addr, uint32_t expected, uint32_t clock,
                                 int32_t absolute, uint64_t timeout_nanos);
 int32_t patina_futex_wake(uintptr_t addr, int32_t count);
+
+/*
+ * libdispatch semaphore routing (macOS). Rust std's Darwin thread Parker blocks
+ * on a libdispatch semaphore; the interposed dispatch_time /
+ * dispatch_semaphore_create/wait/signal / dispatch_release forward here so
+ * std::thread parking (and the mpsc/mpmc/Once paths built on it) run under the
+ * deterministic scheduler and virtual clock. dispatch_time returns the relative
+ * monotonic token consumed by patina_dispatch_semaphore_wait.
+ */
+#ifdef __APPLE__
+uint64_t patina_dispatch_time(uint64_t when, int64_t delta);
+void *patina_dispatch_semaphore_create(intptr_t value);
+intptr_t patina_dispatch_semaphore_wait(void *sem, uint64_t timeout);
+intptr_t patina_dispatch_semaphore_signal(void *sem);
+void patina_dispatch_release(void *object);
+#endif
 
 #ifdef __cplusplus
 }

@@ -14,7 +14,16 @@
 //! - **Torn writes**: on crash, blocks modified since their last durability
 //!   point may fail to persist and revert to the durable bytes. The tear
 //!   decision is drawn per block of `torn_write_granularity` bytes from a
-//!   seeded [`SplitMix64`] stream with `torn_write_probability`.
+//!   seeded [`SplitMix64`] stream with `torn_write_probability`. The default
+//!   [`TornGranularity::Block`] policy tears whole blocks all-or-nothing, so a
+//!   torn block is either entirely the durable image or entirely the live one —
+//!   the model that only ever yields crash-consistent block prefixes. Under
+//!   [`TornGranularity::Byte`] the single most recent unsynced write may instead
+//!   survive *partially*: a seeded cut point inside the differing region keeps a
+//!   prefix of the write and reverts the suffix to the durable bytes, modeling a
+//!   torn in-flight page whose header and body disagree. Every other unsynced
+//!   block still tears wholesale, so a byte-granularity crash reproduces the
+//!   realistic "clean prefix plus one torn final page" geometry.
 //! - **Rename atomicity**: with `model_rename_atomicity(true)` a rename is a
 //!   single all-or-nothing namespace change across a crash. With it disabled a
 //!   crash can land between the destination link and source unlink, exposing
@@ -51,11 +60,31 @@ use patina_driver_api::{DriverResult, FsDriver};
 use patina_fs_mem::MemFs;
 use patina_rng_seeded::SplitMix64;
 
+/// Granularity at which a torn write reverts on crash.
+///
+/// [`TornGranularity::Block`] (the default) reverts a modified block all-or-
+/// nothing, so a torn block is byte-identical to either the durable baseline or
+/// the live image. [`TornGranularity::Byte`] additionally lets the single most
+/// recent unsynced write survive at sub-block byte granularity: a seeded cut
+/// inside the write's differing bytes keeps a prefix from the live image and
+/// reverts the suffix to the durable baseline, so the affected block differs
+/// from *both* endpoints — the torn-page image a whole-block model can never
+/// produce.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TornGranularity {
+    /// Whole-block revert: a torn block is entirely durable or entirely live.
+    #[default]
+    Block,
+    /// Sub-block tearing of the final unsynced write at byte granularity.
+    Byte,
+}
+
 /// Tuning for the seeded crash-consistency decision policies.
 #[derive(Clone, Debug)]
 struct CrashPolicy {
     torn_write_granularity: usize,
     torn_write_probability: f64,
+    torn_granularity: TornGranularity,
     model_rename_atomicity: bool,
     model_directory_durability: bool,
     directory_loss_probability: f64,
@@ -66,6 +95,7 @@ impl Default for CrashPolicy {
         Self {
             torn_write_granularity: 4096,
             torn_write_probability: 1.0,
+            torn_granularity: TornGranularity::Block,
             model_rename_atomicity: true,
             model_directory_durability: false,
             directory_loss_probability: 0.0,
@@ -131,6 +161,11 @@ pub struct CrashFs {
     pending: Vec<PendingOp>,
     /// Live descriptor-to-path map used to attribute `sync` calls.
     open_paths: BTreeMap<Fd, String>,
+    /// The single most recent unsynced write as `(path, offset, len)`. Under
+    /// [`TornGranularity::Byte`] this is the region eligible for a sub-block
+    /// partial tear on crash; `None` before any write and after a durability
+    /// point clears the pending set.
+    last_write: Option<(String, usize, usize)>,
     policy: CrashPolicy,
     rng: SplitMix64,
     crashes: u64,
@@ -173,6 +208,13 @@ impl CrashFsBuilder {
     /// Probability in `[0, 1]` that a modified block reverts on crash.
     pub fn torn_write_probability(mut self, probability: f64) -> Self {
         self.policy.torn_write_probability = probability;
+        self
+    }
+
+    /// Select whole-block or sub-block byte-granularity tearing of the final
+    /// unsynced write. See [`TornGranularity`].
+    pub fn torn_granularity(mut self, granularity: TornGranularity) -> Self {
+        self.policy.torn_granularity = granularity;
         self
     }
 
@@ -251,6 +293,7 @@ impl CrashFs {
             staged_content: BTreeMap::new(),
             pending: Vec::new(),
             open_paths: BTreeMap::new(),
+            last_write: None,
             policy,
             rng: SplitMix64::new(seed),
             crashes: 0,
@@ -262,6 +305,7 @@ impl CrashFs {
         self.durable = enumerate(&mut self.live);
         self.staged_content.clear();
         self.pending.clear();
+        self.last_write = None;
     }
 
     /// Commit the namespace operations of one directory, modeling a directory
@@ -325,7 +369,19 @@ impl CrashFs {
 
     /// Merge durable `baseline` and live `current` at block granularity,
     /// tearing modified blocks back to the baseline per the seeded policy.
-    fn torn_merge(&mut self, baseline: &[u8], current: &[u8]) -> Vec<u8> {
+    ///
+    /// `partial_region`, when set, is the `[start, end)` byte range of the final
+    /// unsynced write to this file under [`TornGranularity::Byte`]. A torn block
+    /// overlapping that region keeps a seeded prefix of the live bytes and
+    /// reverts the rest, so the block differs from both the durable and the
+    /// fully-applied image. Every other torn block reverts wholesale, exactly as
+    /// in the whole-block model.
+    fn torn_merge(
+        &mut self,
+        baseline: &[u8],
+        current: &[u8],
+        partial_region: Option<(usize, usize)>,
+    ) -> Vec<u8> {
         let granularity = self.policy.torn_write_granularity;
         let max_len = baseline.len().max(current.len());
         if max_len == 0 {
@@ -333,7 +389,11 @@ impl CrashFs {
         }
         let blocks = max_len.div_ceil(granularity);
         let mut result = vec![0u8; max_len];
-        let mut tail_persisted = true;
+        // The tail block dictates the reconstructed length: a persisted or
+        // partially-torn tail keeps the live length (a partial tear models an
+        // in-place page whose size already reached disk), a wholly-reverted tail
+        // falls back to the durable length.
+        let mut tail_reverted = false;
         for block in 0..blocks {
             let start = block * granularity;
             let end = ((block + 1) * granularity).min(max_len);
@@ -344,21 +404,71 @@ impl CrashFs {
             } else {
                 !self.decide(self.policy.torn_write_probability)
             };
-            let source = if persist { current } else { baseline };
-            for (offset, slot) in result[start..end].iter_mut().enumerate() {
-                *slot = byte_at(source, start + offset);
+            let mut reverted = false;
+            if persist {
+                copy_range(&mut result, current, start, end);
+            } else if let Some(cut) = partial_region
+                .and_then(|(rs, re)| self.partial_cut(start, end, rs, re, baseline, current))
+            {
+                // Sub-block tear: keep the live prefix, revert the suffix.
+                copy_range(&mut result, current, start, cut);
+                copy_range(&mut result, baseline, cut, end);
+            } else {
+                copy_range(&mut result, baseline, start, end);
+                reverted = true;
             }
             if block + 1 == blocks {
-                tail_persisted = persist;
+                tail_reverted = reverted;
             }
         }
-        let final_len = if tail_persisted {
-            current.len()
-        } else {
+        let final_len = if tail_reverted {
             baseline.len()
+        } else {
+            current.len()
         };
         result.truncate(final_len);
         result
+    }
+
+    /// Choose a seeded byte cut inside the intersection of block `[start, end)`,
+    /// the final-write `[region_start, region_end)`, and the bytes that actually
+    /// differ between `baseline` and `current`. Returns the absolute cut so that
+    /// `[start, cut)` takes the live bytes and `[cut, end)` reverts to durable,
+    /// guaranteeing at least one differing byte on each side (so the block
+    /// differs from both endpoints). Returns `None` when the overlap has fewer
+    /// than two differing bytes and no partial split is possible.
+    fn partial_cut(
+        &mut self,
+        start: usize,
+        end: usize,
+        region_start: usize,
+        region_end: usize,
+        baseline: &[u8],
+        current: &[u8],
+    ) -> Option<usize> {
+        let lo = start.max(region_start);
+        let hi = end.min(region_end);
+        if lo >= hi {
+            return None;
+        }
+        let mut first_diff = None;
+        let mut last_diff = None;
+        for index in lo..hi {
+            if byte_at(baseline, index) != byte_at(current, index) {
+                first_diff.get_or_insert(index);
+                last_diff = Some(index);
+            }
+        }
+        let (first_diff, last_diff) = (first_diff?, last_diff?);
+        if last_diff <= first_diff {
+            return None;
+        }
+        // Cut lands in `[first_diff + 1, last_diff]`: the live prefix keeps
+        // `first_diff` (differs from durable) and the durable suffix keeps
+        // `last_diff` (differs from live).
+        let span = (last_diff - first_diff) as u64;
+        let cut = first_diff + 1 + (self.rng.next_u64() % span) as usize;
+        Some(cut)
     }
 
     fn recompute_after_crash(&mut self) -> DriverResult<()> {
@@ -419,6 +529,13 @@ impl CrashFs {
             }
         }
 
+        // The final unsynced write is eligible for a sub-block partial tear
+        // under the byte-granularity policy; every other block still tears
+        // wholesale. Captured before the merge loop borrows the rng.
+        let final_write = match self.policy.torn_granularity {
+            TornGranularity::Byte => self.last_write.clone(),
+            TornGranularity::Block => None,
+        };
         let mut file_contents: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         for path in &files {
             let baseline = self
@@ -427,10 +544,16 @@ impl CrashFs {
                 .or_else(|| self.durable.files.get(path))
                 .cloned()
                 .unwrap_or_default();
+            let partial_region = match &final_write {
+                Some((write_path, offset, len)) if write_path == path => {
+                    Some((*offset, offset.saturating_add(*len)))
+                }
+                _ => None,
+            };
             let content = match self.live.contents(path) {
                 Ok(current) => {
                     let current = current.to_vec();
-                    self.torn_merge(&baseline, &current)
+                    self.torn_merge(&baseline, &current, partial_region)
                 }
                 Err(_) => baseline,
             };
@@ -478,6 +601,7 @@ impl CrashFs {
         self.staged_content.clear();
         self.pending.clear();
         self.open_paths.clear();
+        self.last_write = None;
         Ok(())
     }
 
@@ -532,7 +656,16 @@ impl FsDriver for CrashFs {
     }
 
     fn write(&mut self, fd: Fd, bytes: &[u8]) -> DriverResult<usize> {
-        self.live.write(fd, bytes)
+        // Capture the write offset before the cursor advances so the byte-
+        // granularity crash model knows which bytes the final write touched.
+        // Positional writes (`write_at`) reach this method after the driver's
+        // default seek-to-offset, so their target offset is recorded too.
+        let offset = self.live.seek(fd, 0, SeekWhence::Current).ok();
+        let written = self.live.write(fd, bytes)?;
+        if let (Some(offset), Some(path)) = (offset, self.open_paths.get(&fd).cloned()) {
+            self.last_write = Some((path, offset as usize, written));
+        }
+        Ok(written)
     }
 
     fn close(&mut self, fd: Fd) -> DriverResult<()> {
@@ -733,6 +866,13 @@ fn byte_at(bytes: &[u8], index: usize) -> u8 {
     bytes.get(index).copied().unwrap_or(0)
 }
 
+/// Copy `source[start..end]` (zero-filled past its end) into `result[start..end]`.
+fn copy_range(result: &mut [u8], source: &[u8], start: usize, end: usize) {
+    for (offset, slot) in result[start..end].iter_mut().enumerate() {
+        *slot = byte_at(source, start + offset);
+    }
+}
+
 /// Select the survival set matching an entry kind, so files, directories, and
 /// symlinks each apply their namespace decisions to the right table.
 fn survival_set<'a>(
@@ -903,6 +1043,69 @@ mod tests {
     }
 
     #[test]
+    fn positional_write_is_crash_losable_exactly_like_a_cursor_write() {
+        // redb writes every page through pwrite (write_at), so a positional
+        // write MUST be as crash-losable as a cursor write -- otherwise the
+        // crash campaign would silently miss redb's real durability boundary.
+        // write_at rides the default seek/write/seek path, so CrashFs journals
+        // it through the same live-vs-durable model. This is the load-bearing
+        // guarantee for the whole redb rung.
+        const OFFSET: u64 = 1024;
+
+        // Unsynced positional write is dropped: after a durable zero baseline,
+        // a pwrite that is never fsynced reverts on crash.
+        let mut fs = CrashFs::default();
+        let fd = fs.open("/db", OpenFlags::create_truncate_write()).unwrap();
+        fs.set_len(fd, 4096).unwrap();
+        fs.sync(fd).unwrap(); // durable baseline: 4096 zero bytes
+        fs.write_at(fd, OFFSET, b"positional").unwrap();
+        fs.crash().unwrap();
+        let after = fs.contents("/db").unwrap();
+        assert!(
+            !after
+                .windows(b"positional".len())
+                .any(|w| w == b"positional"),
+            "an unsynced positional write survived a crash"
+        );
+
+        // A positional write that IS fsynced survives byte-for-byte.
+        let mut fs = CrashFs::default();
+        let fd = fs.open("/db", OpenFlags::create_truncate_write()).unwrap();
+        fs.set_len(fd, 4096).unwrap();
+        fs.write_at(fd, OFFSET, b"positional").unwrap();
+        fs.sync(fd).unwrap();
+        fs.crash().unwrap();
+        let after = fs.contents("/db").unwrap();
+        let start = OFFSET as usize;
+        assert_eq!(
+            &after[start..start + b"positional".len()],
+            b"positional",
+            "a synced positional write did not survive a crash"
+        );
+
+        // A positional read reaches the written bytes WITHOUT disturbing the
+        // shared cursor -- the property that makes positional I/O sound under
+        // concurrency (no crash involved).
+        let mut fs = CrashFs::default();
+        let read_write = OpenFlags {
+            read: true,
+            write: true,
+            create: true,
+            truncate: true,
+            append: false,
+            exclusive: false,
+        };
+        let fd = fs.open("/db", read_write).unwrap();
+        fs.set_len(fd, 4096).unwrap();
+        fs.write_at(fd, OFFSET, b"positional").unwrap();
+        fs.seek(fd, 0, SeekWhence::Start).unwrap();
+        let positional = fs.read_at(fd, OFFSET, b"positional".len()).unwrap();
+        assert_eq!(positional, b"positional");
+        let cursor_pos = fs.seek(fd, 0, SeekWhence::Current).unwrap();
+        assert_eq!(cursor_pos, 0, "read_at disturbed the shared cursor");
+    }
+
+    #[test]
     fn crash_discards_unsynchronized_data_and_open_handles() {
         let mut fs = CrashFs::default();
         let fd = write(&mut fs, "/volatile", b"lost");
@@ -925,6 +1128,34 @@ mod tests {
         fs.write(fd, b"-volatile").unwrap();
         fs.crash().unwrap();
         assert_eq!(fs.contents("/state").unwrap(), b"stable");
+    }
+
+    #[test]
+    fn a_mounted_image_is_durable_and_composes_with_crash_injection() {
+        // This is the `native-run --mount` composition with `--fs-crash-at`: the
+        // shim builds `CrashFs::new(FsImage::into_memfs())`, so a mounted corpus
+        // is the durable baseline while unsynced guest writes still drop on a
+        // crash exactly as with an empty filesystem. `CrashFs::new` here uses the
+        // same default policy as `CrashFs::default()` (torn-write probability 1),
+        // so the mount does not change crash behavior.
+        let image = patina_fs_mem::FsImage::new(vec![patina_fs_mem::FsImageEntry::File {
+            path: "/corpus/data.txt".into(),
+            contents: b"mounted-and-durable".to_vec(),
+        }]);
+        let mounted = image.into_memfs().unwrap();
+        let mut fs = CrashFs::new(mounted);
+
+        // A new guest write without an fsync.
+        let _volatile = write(&mut fs, "/scratch/out.txt", b"never-synced");
+        fs.crash().unwrap();
+
+        // The mounted (durable) content survives the crash byte-for-byte.
+        assert_eq!(
+            fs.contents("/corpus/data.txt").unwrap(),
+            b"mounted-and-durable"
+        );
+        // The unsynced guest write is dropped, just as against an empty FS.
+        assert!(fs.contents("/scratch/out.txt").unwrap().is_empty());
     }
 
     #[test]
@@ -1017,6 +1248,126 @@ mod tests {
         reverted.write(fd, b"BBBB").unwrap();
         reverted.crash().unwrap();
         assert_eq!(reverted.contents("/f").unwrap(), b"AAAA");
+    }
+
+    fn byte_torn_final_write(seed: u64) -> Vec<u8> {
+        // Durable "AAAA...", then a single unsynced overwrite with "BBBB..."
+        // that a byte-granularity crash may tear part-way through.
+        let mut fs = CrashFs::builder()
+            .seed(seed)
+            .torn_granularity(TornGranularity::Byte)
+            .build()
+            .unwrap();
+        let fd = write(&mut fs, "/f", b"AAAAAAAA");
+        fs.close(fd).unwrap();
+        fs.checkpoint();
+        let fd = fs.open("/f", write_only()).unwrap();
+        fs.write(fd, b"BBBBBBBB").unwrap();
+        fs.crash().unwrap();
+        fs.contents("/f").unwrap().to_vec()
+    }
+
+    #[test]
+    fn byte_granularity_tears_the_final_write_into_a_partial_image() {
+        // The load-bearing property for the redb sub-block campaign: the final
+        // unsynced write survives PARTIALLY, so the reconstructed image differs
+        // from BOTH the durable baseline and the fully-applied write -- the torn
+        // page a whole-block model can never produce.
+        for seed in 0..32 {
+            let torn = byte_torn_final_write(seed);
+            assert_eq!(torn.len(), 8);
+            assert_ne!(
+                torn, b"AAAAAAAA",
+                "seed {seed} reverted wholesale (durable)"
+            );
+            assert_ne!(torn, b"BBBBBBBB", "seed {seed} applied wholesale (live)");
+            // The surviving prefix is live bytes, the reverted suffix is durable.
+            let cut = torn.iter().take_while(|&&byte| byte == b'B').count();
+            assert!(
+                (1..8).contains(&cut),
+                "seed {seed} cut {cut} is not a strict interior split: {torn:?}"
+            );
+            assert!(
+                torn[cut..].iter().all(|&byte| byte == b'A'),
+                "seed {seed} suffix is not the durable image: {torn:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn byte_torn_final_write_is_deterministic_per_seed_and_varies() {
+        for seed in 0..8 {
+            assert_eq!(byte_torn_final_write(seed), byte_torn_final_write(seed));
+        }
+        let baseline = byte_torn_final_write(0);
+        assert!(
+            (0..64).any(|seed| byte_torn_final_write(seed) != baseline),
+            "byte-granularity tear geometry never varied across seeds"
+        );
+    }
+
+    #[test]
+    fn block_granularity_leaves_the_final_write_whole() {
+        // The default whole-block policy is unchanged: with certain tearing the
+        // single unsynced overwrite reverts entirely to the durable image, never
+        // a partial mix. This is the behavior every pre-existing trace relies on.
+        for seed in 0..32 {
+            let mut fs = CrashFs::builder()
+                .seed(seed)
+                .torn_granularity(TornGranularity::Block)
+                .build()
+                .unwrap();
+            let fd = write(&mut fs, "/f", b"AAAAAAAA");
+            fs.close(fd).unwrap();
+            fs.checkpoint();
+            let fd = fs.open("/f", write_only()).unwrap();
+            fs.write(fd, b"BBBBBBBB").unwrap();
+            fs.crash().unwrap();
+            assert_eq!(
+                fs.contents("/f").unwrap(),
+                b"AAAAAAAA",
+                "whole-block tear produced a non-durable image at seed {seed}"
+            );
+        }
+    }
+
+    #[test]
+    fn byte_granularity_tears_only_the_final_write_not_earlier_ones() {
+        // An earlier unsynced write to a different page reverts wholesale, while
+        // the final write's page tears partially -- the "clean prefix plus one
+        // torn final page" geometry the redb hunt needs.
+        let mut fs = CrashFs::builder()
+            .seed(11)
+            .torn_write_granularity(4)
+            .torn_granularity(TornGranularity::Byte)
+            .build()
+            .unwrap();
+        // Durable baseline: two 4-byte pages of zeros.
+        let fd = fs.open("/db", OpenFlags::create_truncate_write()).unwrap();
+        fs.set_len(fd, 8).unwrap();
+        fs.sync(fd).unwrap();
+        // First (earlier) write to page 0, then the final write to page 1.
+        fs.write_at(fd, 0, b"XXXX").unwrap();
+        fs.write_at(fd, 4, b"YYYY").unwrap();
+        fs.crash().unwrap();
+        let after = fs.contents("/db").unwrap();
+        assert_eq!(after.len(), 8);
+        // Page 0 (the earlier write) reverted wholesale to durable zeros.
+        assert_eq!(
+            &after[0..4],
+            &[0, 0, 0, 0],
+            "earlier write did not revert wholesale"
+        );
+        // Page 1 (the final write) tore partially: at least one live 'Y' survived
+        // and at least one durable zero remains.
+        assert!(
+            after[4..8].contains(&b'Y'),
+            "final write left no surviving prefix: {after:?}"
+        );
+        assert!(
+            after[4..8].contains(&0),
+            "final write applied wholesale instead of tearing: {after:?}"
+        );
     }
 
     fn rename_outcome(atomic: bool, seed: u64) -> (bool, bool) {

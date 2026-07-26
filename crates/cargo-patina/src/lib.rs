@@ -9,16 +9,21 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 
+use patina_fs_mem::{FsImage, FsImageEntry};
 use patina_minimize::{
     MinimizeError, Scenario, minimize_all, minimize_branch_tree, minimize_main, minimize_timeline,
     reduce_scenario, reduce_schedule,
 };
 use patina_runtime::{
-    Context, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_FINGERPRINT, ENV_MODE,
-    ENV_NET_LATENCY, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_SEED, ENV_STEP_BUDGET, ENV_TIMELINE,
-    ENV_TRACE, ENV_TRACE_FD, RuntimeConfig,
+    Context, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_FINGERPRINT, ENV_FS_CRASH_AT,
+    ENV_FS_IMAGE_FD, ENV_FS_TORN_GRANULARITY, ENV_MODE, ENV_NET_DROP_PERMILLE, ENV_NET_JITTER,
+    ENV_NET_LATENCY, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_SEED, ENV_SLEEP_JITTER,
+    ENV_STEP_BUDGET, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, RuntimeConfig,
 };
-use patina_target::{NativeAudit, WASI_PREVIEW1_TARGET, WasiAudit};
+use patina_target::{
+    NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
+    shim_control_plane_symbols,
+};
 use patina_trace::TraceBundle;
 use patina_wasi_host::{
     DEFAULT_WASM_FUEL, MountPolicy, Preview1Host, ResourceLimits, execute_preview1_with_fuel,
@@ -33,12 +38,25 @@ const PATINA_CFG_FLAGS: &str = "--cfg patina --cfg dst";
 // `patina-native-shim` staticlib.
 const PATINA_POSIX_C: &str = include_str!("../../patina-native-shim/c/patina_posix.c");
 const PATINA_NATIVE_H: &str = include_str!("../../patina-native-shim/include/patina_native.h");
+/// Build-time deterministic-preemption hook, linked only under `--yield-points`.
+const PATINA_YIELD_C: &str = include_str!("../c/patina_yield.c");
+/// Marker string the `--yield-points` hook embeds; `native-run` looks for it in
+/// the binary to fold yield-point scheduling into the compatibility fingerprint.
+const PATINA_YIELD_MARKER: &[u8] = b"PATINA_YIELD_POINTS_V1";
+/// Fingerprint suffix distinguishing a yield-point binary's schedule policy from
+/// a plain one, so their recorded traces never cross-replay.
+const PATINA_YIELD_FINGERPRINT_SUFFIX: &str = "+yieldpoints";
 const NATIVE_SHIM_STATICLIB: &str = "libpatina_native_shim.a";
 const DEFAULT_NATIVE_EDITION: &str = "2024";
 const DEFAULT_NATIVE_FINGERPRINT: &str = "patina-native";
 /// Inherited descriptor `native-run` hands the child for the trace control
 /// plane (`PATINA_TRACE_FD`), matching the supervisor channel the shim reads.
 const PATINA_TRACE_CHANNEL_FD: i32 = 3;
+/// Inherited descriptor `native-run` hands the child carrying an encoded
+/// `FsImage` (`PATINA_FS_IMAGE_FD`) when `--mount` captures a host directory
+/// into the guest filesystem. Distinct from the trace channel so both may be
+/// installed at once.
+const PATINA_FS_IMAGE_CHANNEL_FD: i32 = 4;
 
 const HELP: &str = "Patina deterministic Cargo runner
 
@@ -49,9 +67,9 @@ Usage:
   cargo patina wasi-audit <MODULE.wasm>
   cargo patina wasi-run <MODULE.wasm> [PATINA OPTIONS] [--fuel N] [--arg VALUE] [--env K=V] [--socket FD=BIND->PEER] [--preopen GUEST[:ro|:rw]]...
   cargo patina native-audit <BINARY> [--allow SYMBOL]...
-  cargo patina native-build <SOURCE.rs> --output <PATH> [--edition YEAR] [--release] [-- RUSTC OPTIONS]
-  cargo patina native-build <DIR|Cargo.toml> [--output <PATH>] [--package NAME] [--bin NAME] [--release]
-  cargo patina native-run <BINARY> [--seed N | --record PATH | --replay PATH] [--fingerprint STR] [--net-latency-nanos N] [-- PROGRAM ARGS]
+  cargo patina native-build <SOURCE.rs> --output <PATH> [--edition YEAR] [--release] [--yield-points] [-- RUSTC OPTIONS]
+  cargo patina native-build <DIR|Cargo.toml> [--output <PATH>] [--package NAME] [--bin NAME] [--release] [--yield-points]
+  cargo patina native-run <BINARY> [--seed N | --record PATH | --replay PATH] [--fingerprint STR] [--mount HOST_DIR] [--net-latency-nanos N] [--fs-crash-at SPEC] [--fs-torn-granularity block|byte] [--sleep-jitter-nanos MIN..MAX] [--net-jitter-nanos MIN..MAX] [--net-drop-permille N] [--allow SYMBOL]... [--allow-unsupported-symbols <all|name,...>] [-- PROGRAM ARGS]
   cargo patina minimize <TRACE> --output <PATH> [--timeline ID] [--prune-branches] -- <ORACLE> [ARGS]...
   cargo patina minimize --scenario --seed <U64> [--param K=V]... [--seed-budget N] -- <ORACLE> [ARGS]...
   cargo dst    <run|test> [PATINA OPTIONS] [CARGO OPTIONS] [-- PROGRAM OPTIONS]
@@ -92,7 +110,9 @@ environment protocol; a non-zero exit means the failure is still present.
 `patina-native-shim` staticlib, compiles the embedded POSIX C layer, injects
 `cfg(patina)`/`cfg(dst)`, and links the shim below the user program with `rustc`.
 On Linux it also links `-Wl,--wrap=pthread_create` so the shim interposes thread
-creation without dynamic loading; macOS needs no such flag.
+creation without dynamic loading, and `-Wl,--wrap=dlsym` so the shim reaches the
+real glibc resolver through `__real_dlsym` (its host-alias table) while guest
+`dlsym` stays neutered; macOS needs neither flag.
 A `.rs` path builds that single source directly. A directory (or `Cargo.toml`)
 path instead drives the package's own `cargo build` under Patina control: the
 same cfg flags and shim link arguments are injected through
@@ -102,10 +122,27 @@ scripts and proc macros (which link for the host). Select the member with
 more than one; `--output` copies the built binary out (otherwise its Cargo
 artifact path is reported). The `patina-native-shim` staticlib is built from the
 surrounding Patina workspace, so run `native-build` from within it.
+`--yield-points` additionally instruments the guest with deterministic
+cooperative preemption: LLVM SanitizerCoverage emits a hook at every basic block
+(reaching loop backedges) that routes into the scheduler, so a race window that
+lives entirely in atomics-only code — a `std::sync::RwLock` read-modify-write,
+say — becomes reachable by the seeded scheduler instead of running to completion
+uninterrupted. It is off by default and touches only the Patina build; a plain
+native build is unaffected. `native-run` detects a yield-point binary and folds
+it into the compatibility fingerprint so its traces never cross-replay with a
+plain binary.
 `native-run` executes such a binary under the deterministic runtime; for
 `--record`/`--replay` it opens the trace on the host and hands the child an
 inherited `PATINA_TRACE_FD` descriptor so a fully interposed program never
-recurses into the deterministic filesystem while finalizing its trace.
+recurses into the deterministic filesystem while finalizing its trace. Before
+the guest runs it applies a pre-run default-deny audit: every externally
+resolved symbol must be interposed or known-safe (the shim's own control-plane
+vehicle is allowed automatically), and any unsupported symbol on the
+blocking/time/scheduling/effect surface hard-errors with the names listed.
+`--allow SYMBOL` adds a known-safe symbol; `--allow-unsupported-symbols
+<all|name,...>` downgrades matching denials to a loud warning (recorded beside a
+`--record` trace) for programs that carry unsupported surface the scenario never
+reaches.
 
 WASI options:
       --preopen <GUEST[:ro|:rw]>  Preopen an absolute guest path (repeatable;
@@ -117,6 +154,44 @@ WASI options:
       --max-path-bytes <N>        Maximum bytes in a single guest path
       --max-io-bytes <N>          Maximum bytes in one WASI I/O operation
       --max-iovecs <N>            Maximum iovec entries in one WASI operation
+
+Native filesystem options (native-run):
+      --mount <HOST_DIR>          Capture a host directory read-only into the
+                                  guest filesystem, mounted at the guest root
+                                  `/`. The supervisor walks it into a
+                                  deterministic in-memory image (sorted; host
+                                  readdir order never leaks) and streams it to
+                                  the guest, which never touches the host FS.
+                                  Symlinks are preserved as inert (not followed).
+                                  The image hash folds into the run fingerprint
+                                  so replay rejects a different corpus.
+
+Native fault options (native-run; seed-driven, default off):
+      --fs-crash-at <SPEC>        Inject a filesystem crash after the Nth boundary
+                                  op: open|write|sync|close[:N] (bare = :1). The
+                                  filesystem becomes a CrashFs and unsynced data
+                                  is dropped, exposing missing-fsync durability
+                                  bugs.
+      --fs-torn-granularity <G>   Torn-write granularity for --fs-crash-at:
+                                  block (default, whole-block revert) or byte
+                                  (the final unsynced write may survive
+                                  partially at sub-block byte granularity,
+                                  modeling a torn in-flight page).
+      --sleep-jitter-nanos <MIN..MAX>
+                                  Add seeded latency drawn from [MIN, MAX] to
+                                  every guest sleep, inflating virtual elapsed
+                                  time past wall-clock deadline assumptions.
+      --net-jitter-nanos <MIN..MAX>
+                                  Add seeded per-datagram delivery jitter drawn
+                                  from [MIN, MAX], reordering datagrams relative
+                                  to send order.
+      --net-drop-permille <N>     Drop datagrams with probability N per-mille
+                                  (0..=1000).
+
+Fault knobs are seeded by the run seed. A --record run captures its full fault
+configuration into the trace metadata, so --replay reproduces the faults with no
+knobs re-supplied: the trace is authoritative. Supplying knobs on --replay is
+optional and, if they conflict with the recording, fails closed.
 ";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -254,6 +329,10 @@ struct NativeBuildInvocation {
     target: NativeBuildTarget,
     output: Option<PathBuf>,
     release: bool,
+    /// Instrument the guest with deterministic yield points (LLVM
+    /// SanitizerCoverage → `patina_sched_yield`) so atomics-only race windows are
+    /// schedulable. Off by default; native builds never see it.
+    yield_points: bool,
 }
 
 /// What `native-build` compiles: a single Rust source linked directly with
@@ -291,6 +370,58 @@ struct NativeRunInvocation {
     mode: NativeRunMode,
     program_args: Vec<OsString>,
     net_latency_nanos: Option<u64>,
+    /// Fault-injection knobs forwarded to the guest through the `PATINA_*`
+    /// control plane. Each is a validated raw value stored verbatim; the runtime
+    /// re-parses it identically on record and replay, so a mismatched flag on
+    /// replay fails closed like any other operation divergence.
+    faults: NativeFaults,
+    /// Extra symbols to treat as known-safe in the pre-run audit gate, beyond
+    /// the baked shim control-plane vehicle. Mirrors `native-audit --allow`.
+    allow: BTreeSet<String>,
+    /// How the pre-run gate treats symbols that are neither interposed nor
+    /// known-safe.
+    allow_unsupported: UnsupportedPolicy,
+    /// Host directory to capture read-only into the guest filesystem, mounted at
+    /// the guest root `/`. When set, the supervisor (which is not interposed)
+    /// walks the tree into a deterministic `FsImage`, streams it to the guest
+    /// over an inherited descriptor, and the shim rebuilds it as the
+    /// deterministic filesystem. The image hash is folded into the run
+    /// fingerprint so replay rejects a different corpus.
+    mount: Option<PathBuf>,
+}
+
+/// Seed-driven fault-injection knobs for `native-run`, all default-off. Stored
+/// as validated raw strings so the exact protocol text reaches the guest.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct NativeFaults {
+    /// Filesystem crash point, e.g. `close:1`, `write:3`, `sync:2`, `open:1`.
+    fs_crash_at: Option<String>,
+    /// Torn-write granularity for an injected crash: `block` (default) or
+    /// `byte` (sub-block tearing of the final unsynced write). Only meaningful
+    /// alongside `fs_crash_at`.
+    fs_torn_granularity: Option<String>,
+    /// Seeded sleep-latency range `MIN..MAX` nanoseconds.
+    sleep_jitter_nanos: Option<String>,
+    /// Seeded per-datagram delivery-jitter range `MIN..MAX` nanoseconds.
+    net_jitter_nanos: Option<String>,
+    /// Seeded datagram drop probability in per-mille (0..=1000).
+    net_drop_permille: Option<String>,
+}
+
+/// The escape hatch for `native-run`'s pre-run default-deny gate. By default an
+/// unsupported symbol on the blocking/effect surface is a hard error before the
+/// guest runs; the operator can downgrade specific symbols (or all) to a loud
+/// warning for programs that carry unsupported surface never reached by the
+/// scenario under test.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum UnsupportedPolicy {
+    /// Default: any unsupported symbol is a hard error (fail closed).
+    Deny,
+    /// `--allow-unsupported-symbols all`: downgrade every unsupported symbol.
+    All,
+    /// `--allow-unsupported-symbols a,b,c`: downgrade only the listed symbols;
+    /// anything else still hard-errors.
+    Only(BTreeSet<String>),
 }
 
 pub fn entrypoint() -> Result<i32, CliError> {
@@ -956,6 +1087,7 @@ fn parse_native_build(mut arguments: Vec<OsString>) -> Result<NativeBuildInvocat
     let mut release = false;
     let mut package = None;
     let mut bin = None;
+    let mut yield_points = false;
     let mut index = 0;
     while index < arguments.len() {
         let option = arguments[index]
@@ -976,6 +1108,9 @@ fn parse_native_build(mut arguments: Vec<OsString>) -> Result<NativeBuildInvocat
             }
             "--release" => {
                 release = true;
+            }
+            "--yield-points" => {
+                yield_points = true;
             }
             "--package" | "-p" => {
                 index += 1;
@@ -1015,6 +1150,7 @@ fn parse_native_build(mut arguments: Vec<OsString>) -> Result<NativeBuildInvocat
             },
             output,
             release,
+            yield_points,
         })
     } else {
         if package.is_some() || bin.is_some() {
@@ -1032,6 +1168,7 @@ fn parse_native_build(mut arguments: Vec<OsString>) -> Result<NativeBuildInvocat
             },
             output: Some(output),
             release,
+            yield_points,
         })
     }
 }
@@ -1057,6 +1194,39 @@ fn native_manifest_path(path: &Path) -> PathBuf {
     }
 }
 
+/// Validate a `--fs-crash-at` value (`close`, `close:1`, `write:3`, ...) so a
+/// malformed knob is rejected before the guest is built and spawned. The runtime
+/// re-parses the same grammar; this keeps the failure early and legible.
+fn validate_crash_at(value: &str) -> Result<(), CliError> {
+    let (op, ordinal) = value.split_once(':').unwrap_or((value, "1"));
+    if !matches!(op, "open" | "write" | "sync" | "close") {
+        return Err(CliError::usage(format!(
+            "--fs-crash-at op must be open, write, sync, or close; got {op:?}"
+        )));
+    }
+    match ordinal.parse::<u64>() {
+        Ok(0) | Err(_) => Err(CliError::usage(format!(
+            "--fs-crash-at ordinal must be a positive integer; got {value:?}"
+        ))),
+        Ok(_) => Ok(()),
+    }
+}
+
+/// Validate an inclusive `MIN..MAX` nanosecond range flag.
+fn validate_nanos_range(name: &str, value: &str) -> Result<(), CliError> {
+    let (min, max) = value.split_once("..").ok_or_else(|| {
+        CliError::usage(format!("{name} must be a MIN..MAX range; got {value:?}"))
+    })?;
+    let min = parse_u64(name, min)?;
+    let max = parse_u64(name, max)?;
+    if min > max {
+        return Err(CliError::usage(format!(
+            "{name} requires MIN <= MAX; got {value:?}"
+        )));
+    }
+    Ok(())
+}
+
 fn parse_native_run(mut arguments: Vec<OsString>) -> Result<NativeRunInvocation, CliError> {
     let program_args = split_trailing_args(&mut arguments);
     if arguments.is_empty() {
@@ -1068,12 +1238,49 @@ fn parse_native_run(mut arguments: Vec<OsString>) -> Result<NativeRunInvocation,
     let mut replay = None;
     let mut fingerprint = None;
     let mut net_latency_nanos = None;
+    let mut faults = NativeFaults::default();
+    let mut allow = BTreeSet::new();
+    let mut allow_unsupported: Option<UnsupportedPolicy> = None;
+    let mut mount = None;
     let mut index = 0;
     while index < arguments.len() {
         let option = arguments[index]
             .to_str()
             .ok_or_else(|| CliError::usage("native-run options must be valid UTF-8"))?;
         match option {
+            "--allow" => {
+                index += 1;
+                let symbol = utf8_argument(&arguments, index, "--allow")?;
+                if symbol.is_empty() {
+                    return Err(CliError::usage("--allow symbol must not be empty"));
+                }
+                allow.insert(symbol.to_string());
+            }
+            "--allow-unsupported-symbols" => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--allow-unsupported-symbols")?;
+                let policy = if value == "all" {
+                    UnsupportedPolicy::All
+                } else {
+                    let symbols: BTreeSet<String> = value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|part| !part.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                    if symbols.is_empty() {
+                        return Err(CliError::usage(
+                            "--allow-unsupported-symbols requires `all` or a comma-separated symbol list",
+                        ));
+                    }
+                    UnsupportedPolicy::Only(symbols)
+                };
+                set_once(
+                    &mut allow_unsupported,
+                    policy,
+                    "--allow-unsupported-symbols",
+                )?;
+            }
             "--seed" => {
                 index += 1;
                 let value = utf8_argument(&arguments, index, "--seed")?;
@@ -1086,6 +1293,68 @@ fn parse_native_run(mut arguments: Vec<OsString>) -> Result<NativeRunInvocation,
                     &mut net_latency_nanos,
                     parse_u64("--net-latency-nanos", value)?,
                     "--net-latency-nanos",
+                )?;
+            }
+            "--mount" => {
+                index += 1;
+                let path = arguments
+                    .get(index)
+                    .ok_or_else(|| CliError::usage("--mount requires a host directory path"))?;
+                set_once(&mut mount, PathBuf::from(path), "--mount")?;
+            }
+            "--fs-crash-at" => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--fs-crash-at")?;
+                validate_crash_at(value)?;
+                set_once(&mut faults.fs_crash_at, value.to_string(), "--fs-crash-at")?;
+            }
+            "--fs-torn-granularity" => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--fs-torn-granularity")?;
+                if value != "block" && value != "byte" {
+                    return Err(CliError::usage(format!(
+                        "--fs-torn-granularity must be block or byte; got {value:?}"
+                    )));
+                }
+                set_once(
+                    &mut faults.fs_torn_granularity,
+                    value.to_string(),
+                    "--fs-torn-granularity",
+                )?;
+            }
+            "--sleep-jitter-nanos" => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--sleep-jitter-nanos")?;
+                validate_nanos_range("--sleep-jitter-nanos", value)?;
+                set_once(
+                    &mut faults.sleep_jitter_nanos,
+                    value.to_string(),
+                    "--sleep-jitter-nanos",
+                )?;
+            }
+            "--net-jitter-nanos" => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--net-jitter-nanos")?;
+                validate_nanos_range("--net-jitter-nanos", value)?;
+                set_once(
+                    &mut faults.net_jitter_nanos,
+                    value.to_string(),
+                    "--net-jitter-nanos",
+                )?;
+            }
+            "--net-drop-permille" => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--net-drop-permille")?;
+                let permille = parse_u64("--net-drop-permille", value)?;
+                if permille > 1000 {
+                    return Err(CliError::usage(
+                        "--net-drop-permille must be within [0, 1000]",
+                    ));
+                }
+                set_once(
+                    &mut faults.net_drop_permille,
+                    permille.to_string(),
+                    "--net-drop-permille",
                 )?;
             }
             "--record" => {
@@ -1144,6 +1413,10 @@ fn parse_native_run(mut arguments: Vec<OsString>) -> Result<NativeRunInvocation,
         mode,
         program_args,
         net_latency_nanos,
+        faults,
+        allow,
+        allow_unsupported: allow_unsupported.unwrap_or(UnsupportedPolicy::Deny),
+        mount,
     })
 }
 
@@ -1655,6 +1928,21 @@ fn execute_native_build(invocation: NativeBuildInvocation) -> Result<i32, CliErr
     let workdir = tempfile::tempdir()
         .map_err(|error| CliError(format!("failed to create native build workspace: {error}")))?;
     let object = compile_posix_object(workdir.path())?;
+    // The yield-point hook object is compiled and linked only under
+    // `--yield-points`; a plain build never references SanitizerCoverage symbols.
+    let yield_object = if invocation.yield_points {
+        // Surface the instrumentation prominently: this binary is not a plain
+        // build — it carries LLVM SanitizerCoverage yield points wired to the
+        // deterministic scheduler, and `native-run` will schedule it under a
+        // distinct (denser) policy recorded in its fingerprint.
+        println!(
+            "PATINA_NATIVE_BUILD_YIELD_POINTS instrumentation=llvm-sancov-trace-pc-guard \
+scheduler-hook=patina_sched_yield fingerprint-suffix={PATINA_YIELD_FINGERPRINT_SUFFIX}"
+        );
+        Some(compile_yield_object(workdir.path())?)
+    } else {
+        None
+    };
 
     match invocation.target {
         NativeBuildTarget::Source {
@@ -1670,6 +1958,7 @@ fn execute_native_build(invocation: NativeBuildInvocation) -> Result<i32, CliErr
             &edition,
             &object,
             &staticlib,
+            yield_object.as_deref(),
             &rustc_args,
         ),
         NativeBuildTarget::Package {
@@ -1684,8 +1973,59 @@ fn execute_native_build(invocation: NativeBuildInvocation) -> Result<i32, CliErr
             invocation.release,
             &object,
             &staticlib,
+            yield_object.as_deref(),
         ),
     }
+}
+
+/// Stage and compile the `--yield-points` hook object. Compiled without the
+/// SanitizerCoverage flags themselves, so the hook (and thus `patina_sched_yield`
+/// it calls) is never itself instrumented and cannot recurse.
+fn compile_yield_object(workdir: &Path) -> Result<PathBuf, CliError> {
+    let c_source = workdir.join("patina_yield.c");
+    fs::write(&c_source, PATINA_YIELD_C)
+        .map_err(|error| CliError(format!("failed to stage the yield-point hook: {error}")))?;
+    let object = workdir.join("patina_yield.o");
+    let cc = env::var_os("CC").unwrap_or_else(|| OsString::from("cc"));
+    let cc_status = Command::new(&cc)
+        .args([
+            "-std=c11",
+            "-fno-stack-protector",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-c",
+        ])
+        .arg(&c_source)
+        .arg("-o")
+        .arg(&object)
+        .status()
+        .map_err(|error| CliError(format!("failed to run C compiler {cc:?}: {error}")))?;
+    if !cc_status.success() {
+        return Err(CliError(
+            "compiling the Patina yield-point hook failed".into(),
+        ));
+    }
+    Ok(object)
+}
+
+/// The rustc flags that turn on LLVM SanitizerCoverage trace-pc-guard
+/// instrumentation at basic-block granularity (level 3 reaches loop backedges),
+/// so `__sanitizer_cov_trace_pc_guard` — routed to `patina_sched_yield` by the
+/// linked hook — fires inside hot loops, not only at function entry. `-Cpasses`
+/// and `-Cllvm-args` are stable rustc codegen flags, so this needs no nightly
+/// toolchain and no `RUSTC_BOOTSTRAP`. The only version coupling is to LLVM's
+/// internal pass name (`sancov-module`) and coverage cl::opts, which are stable
+/// across the LLVM releases rustc ships but are not a rustc stability guarantee.
+fn sancov_rustc_flags() -> [&'static str; 6] {
+    [
+        "-C",
+        "passes=sancov-module",
+        "-C",
+        "llvm-args=-sanitizer-coverage-level=3",
+        "-C",
+        "llvm-args=-sanitizer-coverage-trace-pc-guard",
+    ]
 }
 
 /// Stage the embedded POSIX shim C layer in `workdir` and compile it to an
@@ -1737,6 +2077,13 @@ fn push_platform_link_args(mut configure: impl FnMut(&str)) {
     #[cfg(target_os = "linux")]
     {
         configure("link-arg=-Wl,--wrap=pthread_create");
+        // Wrap `dlsym` so the shim's host-alias table can reach the real glibc
+        // resolver through `__real_dlsym` while guest/std references to `dlsym`
+        // still bind to the shim's neutering `__wrap_dlsym` interposer. This is
+        // the Linux half of the host-alias doctrine: `dlsym(RTLD_NEXT, ...)`
+        // resolves the trace-fd I/O and baton-semaphore vehicles at runtime, so
+        // `__read`/`__write`/`sem_*` no longer appear in the guest import table.
+        configure("link-arg=-Wl,--wrap=dlsym");
         configure("link-arg=-lc");
     }
     #[cfg(not(target_os = "linux"))]
@@ -1754,6 +2101,7 @@ fn build_native_source(
     edition: &str,
     object: &Path,
     staticlib: &Path,
+    yield_object: Option<&Path>,
     rustc_args: &[OsString],
 ) -> Result<i32, CliError> {
     let rustc = env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
@@ -1766,6 +2114,15 @@ fn build_native_source(
         .arg(link_arg(object))
         .arg("-C")
         .arg(link_arg(staticlib));
+    if let Some(yield_object) = yield_object {
+        // SanitizerCoverage is driven entirely through stable `-C` codegen flags
+        // (no `RUSTC_BOOTSTRAP`); the hook object below resolves the emitted
+        // callbacks.
+        command
+            .args(sancov_rustc_flags())
+            .arg("-C")
+            .arg(link_arg(yield_object));
+    }
     push_platform_link_args(|arg| {
         command.arg("-C").arg(arg);
     });
@@ -1787,6 +2144,7 @@ fn build_native_source(
 /// ignores them), and building for an explicit target keeps them off build
 /// scripts and proc macros, which Cargo compiles for the host without these
 /// flags.
+#[allow(clippy::too_many_arguments)]
 fn build_native_package(
     manifest: &Path,
     package: Option<&str>,
@@ -1795,6 +2153,7 @@ fn build_native_package(
     release: bool,
     object: &Path,
     staticlib: &Path,
+    yield_object: Option<&Path>,
 ) -> Result<i32, CliError> {
     if !manifest.is_file() {
         return Err(CliError(format!(
@@ -1804,7 +2163,7 @@ fn build_native_package(
     }
     let selected = select_native_package_bin(manifest, package, bin)?;
     let host_target = host_target_triple()?;
-    let rustflags = native_package_rustflags(object, staticlib);
+    let rustflags = native_package_rustflags(object, staticlib, yield_object);
 
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let mut command = Command::new(&cargo);
@@ -1823,6 +2182,11 @@ fn build_native_package(
         .env("CARGO_ENCODED_RUSTFLAGS", rustflags)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
+    // The SanitizerCoverage flags carried in the encoded rustflags are stable
+    // `-C` codegen options, so no `RUSTC_BOOTSTRAP` is needed. They apply to every
+    // crate Cargo compiles from source in this invocation (guest + its
+    // path/registry deps); the precompiled std is untouched, so only guest code
+    // gains yield points.
     if release {
         command.arg("--release");
     }
@@ -2028,7 +2392,11 @@ fn host_target_triple() -> Result<String, CliError> {
 /// separator so link-argument paths that contain spaces survive intact. Any
 /// pre-existing `RUSTFLAGS` are preserved ahead of the injected flags, matching
 /// how `cargo patina run` layers its cfgs onto the user's flags.
-fn native_package_rustflags(object: &Path, staticlib: &Path) -> OsString {
+fn native_package_rustflags(
+    object: &Path,
+    staticlib: &Path,
+    yield_object: Option<&Path>,
+) -> OsString {
     let mut tokens: Vec<OsString> = Vec::new();
     if let Some(existing) = env::var_os("RUSTFLAGS") {
         for part in existing.to_string_lossy().split_whitespace() {
@@ -2043,6 +2411,13 @@ fn native_package_rustflags(object: &Path, staticlib: &Path) -> OsString {
     tokens.push(link_arg(object));
     tokens.push(OsString::from("-C"));
     tokens.push(link_arg(staticlib));
+    if let Some(yield_object) = yield_object {
+        for flag in sancov_rustc_flags() {
+            tokens.push(OsString::from(flag));
+        }
+        tokens.push(OsString::from("-C"));
+        tokens.push(link_arg(yield_object));
+    }
     push_platform_link_args(|arg| {
         tokens.push(OsString::from("-C"));
         tokens.push(OsString::from(arg));
@@ -2058,6 +2433,282 @@ fn native_package_rustflags(object: &Path, staticlib: &Path) -> OsString {
 }
 
 #[cfg(unix)]
+/// Does `policy` downgrade the denied import `escape` from a hard error to a
+/// warning? Matches the raw import name and its underscore-stripped alias so an
+/// operator can pass either `_os_unfair_lock_lock` or `os_unfair_lock_lock`.
+fn policy_downgrades(policy: &UnsupportedPolicy, escape: &NativeEscape) -> bool {
+    match policy {
+        UnsupportedPolicy::Deny => false,
+        UnsupportedPolicy::All => true,
+        UnsupportedPolicy::Only(symbols) => {
+            symbols.contains(&escape.symbol)
+                || symbols.contains(escape.symbol.trim_start_matches('_'))
+        }
+    }
+}
+
+/// Pre-run default-deny gate for `native-run`. Audits the guest binary against
+/// the baked shim control-plane vehicle plus any operator `--allow`, then
+/// applies the `--allow-unsupported-symbols` policy. Returns the symbols that
+/// were downgraded to warnings (empty when the binary audits clean), or a hard
+/// error listing the symbols that remain unsupported.
+/// Whether `binary` was built with `--yield-points`, detected by the hook's
+/// embedded marker. Read failures report "not instrumented"; the pre-run gate
+/// reads the same file and surfaces any genuine read error first.
+fn binary_has_yield_points(binary: &Path) -> bool {
+    match fs::read(binary) {
+        Ok(bytes) => bytes
+            .windows(PATINA_YIELD_MARKER.len())
+            .any(|window| window == PATINA_YIELD_MARKER),
+        Err(_) => false,
+    }
+}
+
+/// Append the yield-point policy suffix to a base fingerprint when the binary is
+/// yield-instrumented, leaving a plain binary's fingerprint untouched.
+fn yield_point_fingerprint(base: &str, yield_points: bool) -> String {
+    if yield_points {
+        format!("{base}{PATINA_YIELD_FINGERPRINT_SUFFIX}")
+    } else {
+        base.to_string()
+    }
+}
+
+/// The compatibility fingerprint for a native run: the base fingerprint, then
+/// the yield-point policy suffix, then the mounted-corpus suffix. Folding the
+/// filesystem image hash in means a trace recorded against one corpus fails
+/// closed on replay against a different one, exactly like a schedule-policy
+/// mismatch, rather than replaying stale outcomes over new inputs.
+fn native_run_fingerprint(base: &str, yield_points: bool, image_hash: Option<&str>) -> String {
+    let mut fingerprint = yield_point_fingerprint(base, yield_points);
+    if let Some(hash) = image_hash {
+        fingerprint.push_str("+fsimg:");
+        fingerprint.push_str(hash);
+    }
+    fingerprint
+}
+
+/// An encoded filesystem image held open in a temporary file, ready to be
+/// duplicated onto the guest's inherited image descriptor, plus its content
+/// hash for the run fingerprint.
+struct FsImageCapture {
+    file: fs::File,
+    hash: String,
+}
+
+/// Capture `host_dir` into a deterministic [`FsImage`], encode it, and write the
+/// bytes to a rewound anonymous temporary file the child reads over its
+/// inherited image descriptor. The supervisor runs uninterposed, so reading the
+/// host tree here is sound; the guest only ever sees the rebuilt image.
+fn build_fs_image_file(host_dir: &Path) -> Result<FsImageCapture, CliError> {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let root = fs::canonicalize(host_dir).map_err(|error| {
+        CliError(format!(
+            "failed to resolve --mount directory {}: {error}",
+            host_dir.display()
+        ))
+    })?;
+    if !root.is_dir() {
+        return Err(CliError(format!(
+            "--mount target is not a directory: {}",
+            root.display()
+        )));
+    }
+    let mut entries = Vec::new();
+    collect_fs_entries(&root, "", &mut entries)?;
+    let image = FsImage::new(entries);
+    let bytes = image.encode();
+
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let hash = hasher
+        .finalize()
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    let mut file = tempfile::tempfile().map_err(|error| {
+        CliError(format!(
+            "failed to create filesystem image scratch file: {error}"
+        ))
+    })?;
+    file.write_all(&bytes)
+        .map_err(|error| CliError(format!("failed to write filesystem image: {error}")))?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| CliError(format!("failed to rewind filesystem image: {error}")))?;
+    Ok(FsImageCapture { file, hash })
+}
+
+/// Recursively collect `host_dir`'s contents as [`FsImageEntry`] values, mapping
+/// the mount root to the guest root `/`. Symlinks are captured verbatim (their
+/// target string, never followed), directories are recorded and descended, and
+/// regular files carry their bytes. `FsImage::new` sorts the result, so the host
+/// `readdir` order never leaks into the deterministic image.
+fn collect_fs_entries(
+    host_dir: &Path,
+    guest_prefix: &str,
+    entries: &mut Vec<FsImageEntry>,
+) -> Result<(), CliError> {
+    let listing = fs::read_dir(host_dir).map_err(|error| {
+        CliError(format!(
+            "failed to read --mount directory {}: {error}",
+            host_dir.display()
+        ))
+    })?;
+    for entry in listing {
+        let entry = entry.map_err(|error| {
+            CliError(format!(
+                "failed to read entry under {}: {error}",
+                host_dir.display()
+            ))
+        })?;
+        let host_path = entry.path();
+        let name = entry.file_name().into_string().map_err(|_| {
+            CliError(format!(
+                "--mount directory contains a non-UTF-8 name under {}",
+                host_dir.display()
+            ))
+        })?;
+        let guest_path = format!("{guest_prefix}/{name}");
+        // Classify without following symlinks so a symlink stays a symlink in
+        // the image, matching how a default ripgrep walk lstat's and skips it.
+        let metadata = fs::symlink_metadata(&host_path).map_err(|error| {
+            CliError(format!("failed to stat {}: {error}", host_path.display()))
+        })?;
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            let target = fs::read_link(&host_path)
+                .map_err(|error| {
+                    CliError(format!(
+                        "failed to read symlink {}: {error}",
+                        host_path.display()
+                    ))
+                })?
+                .into_os_string()
+                .into_string()
+                .map_err(|_| {
+                    CliError(format!(
+                        "symlink {} has a non-UTF-8 target",
+                        host_path.display()
+                    ))
+                })?;
+            entries.push(FsImageEntry::Symlink {
+                path: guest_path,
+                target,
+            });
+        } else if file_type.is_dir() {
+            entries.push(FsImageEntry::Directory {
+                path: guest_path.clone(),
+            });
+            collect_fs_entries(&host_path, &guest_path, entries)?;
+        } else if file_type.is_file() {
+            let contents = fs::read(&host_path).map_err(|error| {
+                CliError(format!("failed to read {}: {error}", host_path.display()))
+            })?;
+            entries.push(FsImageEntry::File {
+                path: guest_path,
+                contents,
+            });
+        }
+        // Anything else (sockets, devices, fifos) is skipped: a search corpus
+        // has none, and the in-memory filesystem cannot model them.
+    }
+    Ok(())
+}
+
+fn native_prerun_gate(
+    binary: &Path,
+    allow: &BTreeSet<String>,
+    policy: &UnsupportedPolicy,
+) -> Result<Vec<NativeEscape>, CliError> {
+    let bytes = fs::read(binary).map_err(|error| {
+        CliError(format!(
+            "failed to read native program {} for the pre-run audit: {error}",
+            binary.display()
+        ))
+    })?;
+    let mut effective = shim_control_plane_symbols();
+    effective.extend(allow.iter().cloned());
+    let denied = match NativeAudit::audit(&bytes, &effective) {
+        Ok(_) => return Ok(Vec::new()),
+        Err(TargetError::UnsupportedNativeImports(denied)) => denied,
+        // A binary we cannot even parse/format-check must never run.
+        Err(other) => {
+            return Err(CliError(format!(
+                "refusing to run {}: {other}",
+                binary.display()
+            )));
+        }
+    };
+
+    let (downgraded, blocked): (Vec<_>, Vec<_>) = denied
+        .into_iter()
+        .partition(|escape| policy_downgrades(policy, escape));
+
+    if !blocked.is_empty() {
+        let mut message = format!(
+            "refusing to run {}: {} symbol(s) on the blocking/time/scheduling/effect surface are \
+neither interposed by the deterministic runtime nor known-safe (default-deny). Interpose them, or \
+pass --allow-unsupported-symbols <all|name,name,...> to run anyway with a warning:",
+            binary.display(),
+            blocked.len()
+        );
+        for escape in &blocked {
+            message.push_str(&format!("\n  {} ({})", escape.symbol, escape.category));
+        }
+        return Err(CliError(message));
+    }
+
+    if !downgraded.is_empty() {
+        eprintln!(
+            "patina: WARNING: running {} with {} UNSUPPORTED symbol(s) downgraded from error by \
+--allow-unsupported-symbols:",
+            binary.display(),
+            downgraded.len()
+        );
+        for escape in &downgraded {
+            eprintln!("patina:   {} ({})", escape.symbol, escape.category);
+        }
+        eprintln!(
+            "patina: these host symbols are NOT interposed by the deterministic runtime; if the \
+guest reaches them at run time it can block, read host time, or otherwise escape the scheduler. \
+This run's determinism is NOT guaranteed and any \"deterministic\" claim on it is qualified."
+        );
+    }
+
+    Ok(downgraded)
+}
+
+/// Record the downgraded-symbol caveat next to a recorded trace so a later
+/// reader of the artifact sees that the run was not an unconditional
+/// determinism claim.
+fn write_unsupported_sidecar(trace: &Path, downgraded: &[NativeEscape]) -> Result<(), CliError> {
+    if downgraded.is_empty() {
+        return Ok(());
+    }
+    let sidecar = {
+        let mut name = trace.as_os_str().to_owned();
+        name.push(".unsupported-symbols");
+        PathBuf::from(name)
+    };
+    let mut contents = String::from(
+        "# This trace was recorded with --allow-unsupported-symbols. The symbols\n\
+# below are NOT interposed by the deterministic runtime; the run's determinism\n\
+# is qualified. Symbol (category):\n",
+    );
+    for escape in downgraded {
+        contents.push_str(&format!("{} ({})\n", escape.symbol, escape.category));
+    }
+    fs::write(&sidecar, contents).map_err(|error| {
+        CliError(format!(
+            "failed to write unsupported-symbols sidecar {}: {error}",
+            sidecar.display()
+        ))
+    })
+}
+
 fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> {
     use std::os::unix::io::AsRawFd;
     use std::os::unix::process::CommandExt;
@@ -2070,8 +2721,11 @@ fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> 
         fn dup2(oldfd: i32, newfd: i32) -> i32;
         fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32;
     }
-    // F_SETFD with flags 0 clears FD_CLOEXEC on macOS and Linux.
+    // F_SETFD with flags 0 clears FD_CLOEXEC on macOS and Linux; FD_CLOEXEC is 1.
+    // F_DUPFD (0) duplicates to the lowest free descriptor at or above its arg.
     const F_SETFD: i32 = 2;
+    const F_DUPFD: i32 = 0;
+    const FD_CLOEXEC: i32 = 1;
 
     let binary = fs::canonicalize(&invocation.binary).map_err(|error| {
         CliError(format!(
@@ -2079,10 +2733,65 @@ fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> 
             invocation.binary.display()
         ))
     })?;
+
+    // Pre-run default-deny gate. Before the guest executes, enumerate every
+    // externally-resolved symbol it can reach and hard-error, listing names, if
+    // any on the blocking/time/scheduling/effect surface is neither interposed
+    // nor known-safe. This is what makes a missed interposer (the class the
+    // macOS dispatch-semaphore Parker escape belonged to) structurally
+    // impossible to run silently: an unmodeled blocking symbol is an import the
+    // shim does not define, so it surfaces here as a denial rather than blocking
+    // a host thread outside the scheduler. `--allow-unsupported-symbols`
+    // downgrades matching denials to a loud warning for programs that carry
+    // unsupported surface the scenario never reaches.
+    let downgraded = native_prerun_gate(&binary, &invocation.allow, &invocation.allow_unsupported)?;
+
+    // A binary built with `--yield-points` schedules under a different (denser)
+    // policy, so its recorded traces must not cross-replay with a plain binary.
+    // Detect the linked hook's marker and fold it into the compatibility
+    // fingerprint; the same binary is inspected on record and replay, so the
+    // suffix is applied consistently and a policy mismatch is rejected.
+    let yield_points = binary_has_yield_points(&binary);
+
+    // Capture the mounted host directory into a deterministic filesystem image.
+    // The supervisor is not interposed, so it may read the host tree freely; the
+    // encoded image travels to the guest over an inherited descriptor and the
+    // shim rebuilds it, so the fully interposed guest never touches the host
+    // filesystem. The image hash folds into the fingerprint below so a replay
+    // against a different corpus is rejected exactly like any incompatibility.
+    let image_file = match &invocation.mount {
+        Some(host_dir) => Some(build_fs_image_file(host_dir)?),
+        None => None,
+    };
+    let image_hash = image_file.as_ref().map(|image| image.hash.clone());
+
     let mut command = Command::new(&binary);
     command.args(&invocation.program_args).env_clear();
+    if image_file.is_some() {
+        command.env(ENV_FS_IMAGE_FD, PATINA_FS_IMAGE_CHANNEL_FD.to_string());
+    }
     if let Some(latency) = invocation.net_latency_nanos {
         command.env(ENV_NET_LATENCY, latency.to_string());
+    }
+    // Forward whatever fault knobs the operator supplied to the guest. On record
+    // and seeded runs these configure the faults and are recorded into the trace
+    // metadata. On replay they are OPTIONAL: the trace's recorded configuration
+    // is authoritative, so an operator who supplies none replays the faults from
+    // the trace alone, while conflicting knobs fail closed in the runtime.
+    if let Some(value) = &invocation.faults.fs_crash_at {
+        command.env(ENV_FS_CRASH_AT, value);
+    }
+    if let Some(value) = &invocation.faults.fs_torn_granularity {
+        command.env(ENV_FS_TORN_GRANULARITY, value);
+    }
+    if let Some(value) = &invocation.faults.sleep_jitter_nanos {
+        command.env(ENV_SLEEP_JITTER, value);
+    }
+    if let Some(value) = &invocation.faults.net_jitter_nanos {
+        command.env(ENV_NET_JITTER, value);
+    }
+    if let Some(value) = &invocation.faults.net_drop_permille {
+        command.env(ENV_NET_DROP_PERMILLE, value);
     }
 
     // Hold the trace file open until the child has been spawned so its
@@ -2108,8 +2817,16 @@ fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> 
             command
                 .env(ENV_MODE, "record")
                 .env(ENV_SEED, seed.to_string())
-                .env(ENV_FINGERPRINT, fingerprint)
+                .env(
+                    ENV_FINGERPRINT,
+                    native_run_fingerprint(fingerprint, yield_points, image_hash.as_deref()),
+                )
                 .env(ENV_TRACE_FD, PATINA_TRACE_CHANNEL_FD.to_string());
+            // Qualify the recorded artifact: a run that downgraded unsupported
+            // symbols is not an unconditional determinism claim. Record the
+            // downgraded surface in a sidecar next to the trace so the caveat
+            // travels with it.
+            write_unsupported_sidecar(path, &downgraded)?;
             Some(file)
         }
         NativeRunMode::Replay { path, fingerprint } => {
@@ -2118,28 +2835,59 @@ fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> 
             })?;
             command
                 .env(ENV_MODE, "replay")
-                .env(ENV_FINGERPRINT, fingerprint)
+                .env(
+                    ENV_FINGERPRINT,
+                    native_run_fingerprint(fingerprint, yield_points, image_hash.as_deref()),
+                )
                 .env(ENV_TRACE_FD, PATINA_TRACE_CHANNEL_FD.to_string());
             Some(file)
         }
     };
 
+    // Install every inherited descriptor the shim reads at a fixed number: the
+    // trace channel (record/replay) and the filesystem image (`--mount`). Both
+    // are duplicated with close-on-exec cleared so they survive the exec.
+    let mut inherited: Vec<(std::os::unix::io::RawFd, i32)> = Vec::new();
     if let Some(file) = &trace_file {
-        let source_fd = file.as_raw_fd();
+        inherited.push((file.as_raw_fd(), PATINA_TRACE_CHANNEL_FD));
+    }
+    if let Some(image) = &image_file {
+        inherited.push((image.file.as_raw_fd(), PATINA_FS_IMAGE_CHANNEL_FD));
+    }
+    if !inherited.is_empty() {
         // SAFETY: `dup2` and `fcntl` are async-signal-safe, so they are sound to
-        // call between fork and exec. This installs the trace descriptor at the
-        // well-known number the shim reads. `dup2` normally clears close-on-exec
-        // on the new descriptor, but when the source already sits at the target
-        // number it is a no-op that leaves the flag set, so clear it explicitly;
-        // otherwise the descriptor would close at exec and the child's trace
-        // write would hit a bad descriptor.
+        // call between fork and exec, and the closure allocates nothing (it
+        // iterates a Vec moved in from the parent and uses a fixed-size stack
+        // array). Installing the descriptors naively is unsafe: a source file
+        // can already sit on another pair's target number (e.g. the image temp
+        // file landing on fd 3, the trace target), and writing that target first
+        // would clobber the still-unread source. So first relocate every source
+        // to a fresh high descriptor with F_DUPFD (which picks the lowest free
+        // fd at or above 10, never aliasing a target or another source), then
+        // install each at its fixed target with close-on-exec cleared so it
+        // survives the exec, marking the scratch copies close-on-exec so they do
+        // not leak into the guest. `inherited` holds at most two entries (trace,
+        // image).
         unsafe {
             command.pre_exec(move || {
-                if dup2(source_fd, PATINA_TRACE_CHANNEL_FD) < 0 {
-                    return Err(io::Error::last_os_error());
+                let mut scratch = [-1_i32; 2];
+                for (index, (source_fd, _target)) in inherited.iter().enumerate() {
+                    let high = fcntl(*source_fd, F_DUPFD, 10);
+                    if high < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    scratch[index] = high;
                 }
-                if fcntl(PATINA_TRACE_CHANNEL_FD, F_SETFD, 0) < 0 {
-                    return Err(io::Error::last_os_error());
+                for (index, (_source, target_fd)) in inherited.iter().enumerate() {
+                    if dup2(scratch[index], *target_fd) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if fcntl(*target_fd, F_SETFD, 0) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if fcntl(scratch[index], F_SETFD, FD_CLOEXEC) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
                 }
                 Ok(())
             });
@@ -2153,6 +2901,7 @@ fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> 
         ))
     })?;
     drop(trace_file);
+    drop(image_file);
     exit_code(status)
 }
 
@@ -2635,6 +3384,62 @@ mod tests {
         match parse(strings(values)).unwrap() {
             ParseResult::WasiRun(value) => value,
             _ => panic!("expected wasi-run invocation"),
+        }
+    }
+
+    fn native_run(values: &[&str]) -> NativeRunInvocation {
+        match parse(strings(values)).unwrap() {
+            ParseResult::NativeRun(value) => value,
+            _ => panic!("expected native-run invocation"),
+        }
+    }
+
+    #[test]
+    fn native_run_parses_fault_knobs() {
+        let parsed = native_run(&[
+            "native-run",
+            "bin",
+            "--fs-crash-at",
+            "close:1",
+            "--fs-torn-granularity",
+            "byte",
+            "--sleep-jitter-nanos",
+            "500..1500",
+            "--net-jitter-nanos",
+            "0..1000",
+            "--net-drop-permille",
+            "250",
+        ]);
+        assert_eq!(parsed.faults.fs_crash_at.as_deref(), Some("close:1"));
+        assert_eq!(parsed.faults.fs_torn_granularity.as_deref(), Some("byte"));
+        assert_eq!(
+            parsed.faults.sleep_jitter_nanos.as_deref(),
+            Some("500..1500")
+        );
+        assert_eq!(parsed.faults.net_jitter_nanos.as_deref(), Some("0..1000"));
+        assert_eq!(parsed.faults.net_drop_permille.as_deref(), Some("250"));
+    }
+
+    #[test]
+    fn native_run_defaults_leave_fault_knobs_off() {
+        let parsed = native_run(&["native-run", "bin"]);
+        assert_eq!(parsed.faults, NativeFaults::default());
+    }
+
+    #[test]
+    fn native_run_rejects_malformed_fault_knobs() {
+        for bad in [
+            &["native-run", "bin", "--fs-crash-at", "flush:1"][..],
+            &["native-run", "bin", "--fs-crash-at", "close:0"][..],
+            &["native-run", "bin", "--fs-torn-granularity", "page"][..],
+            &["native-run", "bin", "--sleep-jitter-nanos", "1500..500"][..],
+            &["native-run", "bin", "--net-jitter-nanos", "10"][..],
+            &["native-run", "bin", "--net-drop-permille", "1001"][..],
+        ] {
+            assert!(
+                parse(strings(bad)).is_err(),
+                "expected rejection for {bad:?}"
+            );
         }
     }
 
@@ -3378,6 +4183,41 @@ mod tests {
                 "x"
             ]))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn yield_points_flag_and_fingerprint_suffix() {
+        // Off by default on both target shapes.
+        assert!(
+            !native_build_invocation(&["native-build", "probe.rs", "--output", "p"]).yield_points
+        );
+        assert!(!native_build_invocation(&["native-build", "pkg", "--output", "p"]).yield_points);
+        // `--yield-points` sets it on a single source and on a package.
+        assert!(
+            native_build_invocation(&[
+                "native-build",
+                "probe.rs",
+                "--output",
+                "p",
+                "--yield-points",
+            ])
+            .yield_points
+        );
+        assert!(
+            native_build_invocation(&["native-build", "pkg", "--output", "p", "--yield-points"])
+                .yield_points
+        );
+        // The fingerprint gains the policy suffix only for a yield-point binary,
+        // so a plain binary's traces stay compatible and cross-config replay is
+        // rejected.
+        assert_eq!(
+            yield_point_fingerprint(DEFAULT_NATIVE_FINGERPRINT, false),
+            DEFAULT_NATIVE_FINGERPRINT
+        );
+        assert_eq!(
+            yield_point_fingerprint(DEFAULT_NATIVE_FINGERPRINT, true),
+            format!("{DEFAULT_NATIVE_FINGERPRINT}{PATINA_YIELD_FINGERPRINT_SUFFIX}")
         );
     }
 

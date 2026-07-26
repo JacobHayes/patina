@@ -53,9 +53,23 @@ pub struct NodeSpec {
     pub seed: u64,
     pub tick_millis: u64,
     pub shutdown: Arc<AtomicBool>,
+    /// How this incarnation of the node stopped, written just before the thread
+    /// returns so the supervisor can tell a clean stop from a storage failure
+    /// without joining (which would block).
+    pub exit: Arc<std::sync::Mutex<NodeExit>>,
     pub observation: ObservationHandle,
     pub leadership: Arc<std::sync::Mutex<LeadershipLog>>,
     pub client_rx: Receiver<ClientProposal>,
+}
+
+/// Why a node thread stopped. The supervisor polls the shared slot: `Running`
+/// until the thread returns, then either a clean cooperative `Stopped` or a
+/// `StorageFailed` carrying the I/O error string.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NodeExit {
+    Running,
+    Stopped,
+    StorageFailed(String),
 }
 
 /// Election-timeout bounds (in ticks). Randomized timeout lives in `[MIN, MAX)`.
@@ -64,13 +78,28 @@ const HEARTBEAT_TICK: usize = 3;
 const MIN_ELECTION: usize = ELECTION_TICK;
 const MAX_ELECTION: usize = 2 * ELECTION_TICK;
 
-/// Run the node to completion (until its shutdown flag is set). Any storage I/O
-/// error aborts the process — a node that cannot persist must not keep voting.
+/// Run the node to completion (until its shutdown flag is set). A storage I/O
+/// error does NOT abort the process: a node that cannot persist stops voting and
+/// its failure is propagated to the supervisor via the shared `exit` slot. The
+/// supervisor decides whether to restart the node (recovery) or fail the whole
+/// run closed (the fail-stop policy, when recovery is not enabled). Keeping the
+/// abort decision in the supervisor — never in a node thread — is what lets one
+/// node die and be reincarnated without taking the process down with it.
 pub fn run(spec: NodeSpec) {
-    if let Err(error) = run_inner(spec) {
-        eprintln!("RAFT_ABORT node storage failure: {error}");
-        std::process::exit(2);
-    }
+    let id = spec.id;
+    let exit = spec.exit.clone();
+    let observation = spec.observation.clone();
+    let outcome = match run_inner(spec) {
+        Ok(()) => NodeExit::Stopped,
+        Err(error) => {
+            eprintln!("node {id}: storage failure: {error}");
+            // Stop advertising liveness so the checker/completion logic drops us
+            // immediately; the supervisor observes `StorageFailed` and reacts.
+            observation.lock().unwrap().alive = false;
+            NodeExit::StorageFailed(error.to_string())
+        }
+    };
+    *exit.lock().unwrap() = outcome;
 }
 
 fn run_inner(spec: NodeSpec) -> std::io::Result<()> {
@@ -86,6 +115,8 @@ fn run_inner(spec: NodeSpec) -> std::io::Result<()> {
         observation,
         leadership,
         client_rx,
+        // `exit` is owned and written by `run`, not the inner loop.
+        exit: _,
     } = spec;
 
     let conf_state = ConfState::from((voters.clone(), vec![]));

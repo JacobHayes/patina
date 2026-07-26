@@ -13,6 +13,7 @@ crate-type = ["rlib", "staticlib"]
 [dependencies]
 patina-abi.workspace = true
 patina-fs-crash.workspace = true
+patina-fs-mem.workspace = true
 patina-runtime.workspace = true
 serde_json.workspace = true
 

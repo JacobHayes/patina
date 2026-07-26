@@ -30,6 +30,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -167,6 +168,7 @@ enum RunMode {
     Write,
     Verify,
     Full,
+    Crash,
 }
 
 struct Options {
@@ -196,6 +198,7 @@ fn parse_options() -> Result<Options, String> {
                     "write" => RunMode::Write,
                     "verify" => RunMode::Verify,
                     "full" => RunMode::Full,
+                    "crash" => RunMode::Crash,
                     other => return Err(format!("unknown --mode {other:?}")),
                 });
             }
@@ -226,16 +229,27 @@ fn main() {
             eprintln!("error: {message}");
             eprintln!(
                 "usage: redb-harness --seed <u64> --ops <n> --db <path> \
-                 --mode <write|verify|full> [--threads <n>]"
+                 --mode <write|verify|full|crash> [--threads <n>]"
             );
             std::process::exit(2);
         }
     };
 
+    // Crash mode owns its own reporting: it always prints a CRASH line (the
+    // recovered state is data, not a pass/fail) and exits with a code that
+    // classifies the durability outcome, so it never routes through the
+    // Ok/Err RESULT-line path below.
+    if options.mode == RunMode::Crash {
+        let report = run_crash(&options);
+        println!("{}", report.line(options.seed));
+        std::process::exit(report.exit_code());
+    }
+
     let outcome = match options.mode {
         RunMode::Write => run_write(&options).map(|summary| summary.result_line(options.seed)),
         RunMode::Verify => run_verify(&options.db).map(|summary| summary.result_line(options.seed)),
         RunMode::Full => run_full(&options).map(|summary| summary.result_line(options.seed)),
+        RunMode::Crash => unreachable!("crash mode is handled above"),
     };
 
     match outcome {
@@ -256,6 +270,7 @@ fn mode_name(mode: RunMode) -> &'static str {
         RunMode::Write => "write",
         RunMode::Verify => "verify",
         RunMode::Full => "full",
+        RunMode::Crash => "crash",
     }
 }
 
@@ -556,4 +571,459 @@ fn run_full(options: &Options) -> Fallible<Summary> {
         .into());
     }
     Ok(verify_summary)
+}
+
+// --- Crash mode: the durability oracle under injected crashes -------------
+//
+// Native `full` mode asserts write == verify because no crash occurs. Under
+// Patina's `--fs-crash-at`, the crash drops unsynced data and invalidates
+// redb's open file handles, so the write workload stops with a redb I/O error
+// partway through, and reopening the same in-memory image exposes whatever redb
+// made durable. This mode runs the write workload and the cold reopen in ONE
+// process (the in-memory crash filesystem does not survive a process exit),
+// then judges the recovered state against the committed-PREFIX oracle:
+//
+//   * Every commit whose `commit()` RETURNED before the crash was fsynced
+//     (Durability::Immediate), so the recovered commit count must be >= that
+//     last acknowledged count -- losing one is a real durability bug.
+//   * The recovered (count, state) must be exactly one legitimately published
+//     committed prefix -- a state that was never a real prefix is torn,
+//     reordered, or phantom, also a real bug.
+//   * redb may instead panic or return Err while opening a sufficiently damaged
+//     image; those are robustness outcomes, distinguished and reported, not
+//     conflated with a lost commit.
+
+/// Why the write workload stopped. A redb-origin error is the injected crash
+/// (its handles went stale); a harness-invariant violation is a genuine
+/// pre-crash correctness bug that must never be silently reclassified.
+enum WriteStop {
+    Crashed,
+    Invariant(String),
+}
+
+/// The recovered-state classification a crash run reports.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CrashOutcome {
+    /// The configured crash never fired; the workload completed and the reopen
+    /// reproduced the full write state (native runs always land here).
+    NoCrash,
+    /// Reopen succeeded and exposed a legitimate committed prefix that kept
+    /// every acknowledged commit -- durability held.
+    Holds,
+    /// Reopen succeeded but lost a commit redb had acknowledged durable.
+    LostCommit,
+    /// Reopen succeeded but exposed a state that was never a published prefix.
+    TornState,
+    /// `Database::open` (or the integrity check) returned `Err` on the image.
+    OpenErr,
+    /// `Database::open` panicked on the image (redb's internal recovery assert).
+    OpenPanic,
+}
+
+impl CrashOutcome {
+    fn label(self) -> &'static str {
+        match self {
+            CrashOutcome::NoCrash => "NO_CRASH",
+            CrashOutcome::Holds => "HOLDS",
+            CrashOutcome::LostCommit => "LOST_COMMIT",
+            CrashOutcome::TornState => "TORN_STATE",
+            CrashOutcome::OpenErr => "OPEN_ERR",
+            CrashOutcome::OpenPanic => "OPEN_PANIC",
+        }
+    }
+}
+
+/// Everything a crash run reports on its single CRASH line.
+struct CrashReport {
+    outcome: CrashOutcome,
+    crashed: bool,
+    ack: u64,
+    recovered: Option<u64>,
+    state: Option<u64>,
+    integrity: &'static str,
+    detail: String,
+}
+
+impl CrashReport {
+    fn line(&self, seed: u64) -> String {
+        let recovered = self
+            .recovered
+            .map_or_else(|| "-".to_string(), |value| value.to_string());
+        let state = self
+            .state
+            .map_or_else(|| "-".to_string(), |value| format!("{value:016x}"));
+        format!(
+            "CRASH seed={seed} crashed={} ack={} recovered={recovered} state={state} \
+             integrity={} outcome={} detail={}",
+            u8::from(self.crashed),
+            self.ack,
+            self.integrity,
+            self.outcome.label(),
+            self.detail
+        )
+    }
+
+    /// Exit code partitions outcomes for scripts: 0 = durability held or no
+    /// crash; 3 = a real redb durability bug (the jackpot -- run-patina.sh must
+    /// fail on it); 4 = redb refused to open; 5 = redb panicked; 1 = a
+    /// pre-crash harness-invariant violation.
+    fn exit_code(&self) -> i32 {
+        match self.outcome {
+            CrashOutcome::NoCrash | CrashOutcome::Holds => 0,
+            CrashOutcome::LostCommit | CrashOutcome::TornState => 3,
+            CrashOutcome::OpenErr => 4,
+            CrashOutcome::OpenPanic => 5,
+        }
+    }
+}
+
+/// Run the seeded write workload single-threaded, recording the ordered set of
+/// legitimately-committed prefixes, then reopen the (possibly crashed) image
+/// cold and classify the recovered state. `--threads` is ignored here: MVCC
+/// readers would themselves fault on the crash and muddy the durability signal
+/// (they are exercised separately, crash-free).
+fn run_crash(options: &Options) -> CrashReport {
+    // Every (commit_count -> committed model hash) redb could legitimately
+    // expose after recovery. Published just before each commit, mirroring
+    // `run_write`, so an in-flight commit's target is included. Seed the
+    // pre-baseline empty prefix (committed 0) up front so that even a crash
+    // injected *inside* `Database::create` -- before the workload can record
+    // anything -- still recognizes redb recovering to an empty database as the
+    // legitimate committed-0 prefix rather than a torn state.
+    let mut published: BTreeMap<u64, u64> = BTreeMap::new();
+    published.insert(0, hash_model(&empty_model()));
+    // The last commit whose `commit()` RETURNED -- fsynced and acknowledged.
+    let mut ack: u64 = 0;
+
+    let stop = drive_crash_workload(options, &mut published, &mut ack);
+    if let Some(WriteStop::Invariant(message)) = &stop {
+        // A correctness violation observed BEFORE any crash is a real bug, not a
+        // durability outcome; surface it like any harness failure.
+        eprintln!("FAIL seed={} mode=crash: {message}", options.seed);
+        std::process::exit(1);
+    }
+    let crashed = matches!(stop, Some(WriteStop::Crashed));
+
+    // Reopen cold. `Database::open` can panic on a damaged image before
+    // `check_integrity` runs, so guard it with `catch_unwind` and a silenced
+    // hook to keep the sweep output to one line per run.
+    let previous_hook = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+    let opened = panic::catch_unwind(AssertUnwindSafe(|| reopen_and_read(&options.db)));
+    panic::set_hook(previous_hook);
+
+    match opened {
+        Err(_) => CrashReport {
+            outcome: CrashOutcome::OpenPanic,
+            crashed,
+            ack,
+            recovered: None,
+            state: None,
+            integrity: "panic",
+            detail: "Database::open panicked on the crashed image".to_string(),
+        },
+        Ok(Err(error)) => CrashReport {
+            outcome: CrashOutcome::OpenErr,
+            crashed,
+            ack,
+            recovered: None,
+            state: None,
+            integrity: "error",
+            detail: sanitize(&error.to_string()),
+        },
+        Ok(Ok(recovery)) => classify_recovery(recovery, crashed, ack, &published),
+    }
+}
+
+/// The successful outcome of a cold reopen: integrity verdict plus the recovered
+/// commit count and state hash.
+struct Recovery {
+    integrity: &'static str,
+    committed: u64,
+    state: u64,
+}
+
+/// Reopen the database cold and read back the recovered committed count and
+/// state hash. Unlike native `verify`, a repaired (`Ok(false)`) integrity check
+/// is a legitimate post-crash result and is reported, not rejected.
+///
+/// The read is deliberately LENIENT about missing tables: a crash injected
+/// before the baseline commit became durable leaves redb with a valid but
+/// table-less database (`committed = 0`, empty state). That is durability
+/// holding when nothing was acknowledged, not a read failure -- so an absent
+/// harness table hashes as empty and an absent meta table reads as `0`, exactly
+/// mirroring the pre-baseline model. A genuine `Database::open` refusal still
+/// propagates as `Err` (→ `OPEN_ERR`), and a non-absent read error still fails.
+fn reopen_and_read(path: &Path) -> Fallible<Recovery> {
+    let mut database = Database::open(path)?;
+    let integrity = if database.check_integrity()? {
+        "clean"
+    } else {
+        "repaired"
+    };
+    let read = database.begin_read()?;
+    let state = hash_db_lenient(&read)?;
+    let committed = match read.open_table(META_TABLE) {
+        Ok(meta) => meta
+            .get(META_COMMIT_COUNT_KEY)?
+            .map(|guard| guard.value())
+            .unwrap_or(0),
+        Err(redb::TableError::TableDoesNotExist(_)) => 0,
+        Err(other) => return Err(other.into()),
+    };
+    Ok(Recovery {
+        integrity,
+        committed,
+        state,
+    })
+}
+
+/// Digest the database like [`hash_db`], but treat a table that does not exist
+/// as an empty table (matching [`hash_model`]'s framing for an empty map). This
+/// is what makes a pre-baseline crashed image hash equal to the empty model.
+fn hash_db_lenient(txn: &ReadTransaction) -> Fallible<u64> {
+    let mut hash = FNV_OFFSET;
+    for (index, definition) in DATA_TABLES.iter().enumerate() {
+        hash = fnv_bytes(hash, DATA_TABLE_NAMES[index].as_bytes());
+        match txn.open_table(*definition) {
+            Ok(table) => {
+                hash = fnv_u64(hash, table.len()?);
+                for entry in table.range(0u64..)? {
+                    let (key, value) = entry?;
+                    hash = fnv_u64(hash, key.value());
+                    let bytes = value.value();
+                    hash = fnv_u64(hash, bytes.len() as u64);
+                    hash = fnv_bytes(hash, bytes);
+                }
+            }
+            Err(redb::TableError::TableDoesNotExist(_)) => {
+                hash = fnv_u64(hash, 0);
+            }
+            Err(other) => return Err(other.into()),
+        }
+    }
+    Ok(hash)
+}
+
+/// Apply the committed-prefix durability oracle to a successful reopen.
+fn classify_recovery(
+    recovery: Recovery,
+    crashed: bool,
+    ack: u64,
+    published: &BTreeMap<u64, u64>,
+) -> CrashReport {
+    let Recovery {
+        integrity,
+        committed,
+        state,
+    } = recovery;
+    let is_published_prefix = published.get(&committed) == Some(&state);
+    let outcome = if !is_published_prefix {
+        // A recovered state that was never a legitimate committed prefix: torn,
+        // reordered, or phantom data.
+        CrashOutcome::TornState
+    } else if committed < ack {
+        // redb lost a commit it had acknowledged durable.
+        CrashOutcome::LostCommit
+    } else if !crashed && committed == ack {
+        CrashOutcome::NoCrash
+    } else {
+        CrashOutcome::Holds
+    };
+    let detail = format!("prefix={} ack={ack}", u8::from(is_published_prefix));
+    CrashReport {
+        outcome,
+        crashed,
+        ack,
+        recovered: Some(committed),
+        state: Some(state),
+        integrity,
+        detail,
+    }
+}
+
+/// Replace whitespace runs in an error string so it stays a single
+/// space-delimited field on the CRASH line.
+fn sanitize(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join("_")
+}
+
+/// Drive the seeded write workload single-threaded, publishing every committed
+/// prefix and advancing `ack` on each returned commit. Returns `None` if the
+/// workload completed with no crash, or the reason it stopped.
+fn drive_crash_workload(
+    options: &Options,
+    published: &mut BTreeMap<u64, u64>,
+    ack: &mut u64,
+) -> Option<WriteStop> {
+    let result = (|| -> Result<(), WriteStop> {
+        let database = Database::create(&options.db).map_err(crashed)?;
+        let mut rng = SplitMix64::new(options.seed);
+        let interval = commit_interval(options.seed);
+        let mut model = empty_model();
+        let mut committed: u64 = 0;
+
+        // Baseline commit: materialize the tables and record the empty prefix.
+        // (The committed-0 pre-baseline prefix is pre-seeded by the caller.)
+        published.insert(committed + 1, hash_model(&model));
+        {
+            let write = database.begin_write().map_err(crashed)?;
+            for definition in DATA_TABLES.iter() {
+                write.open_table(*definition).map_err(crashed)?;
+            }
+            write_commit_count(&write, committed + 1).map_err(|_| WriteStop::Crashed)?;
+            write.commit().map_err(crashed)?;
+            committed += 1;
+            *ack = committed;
+        }
+
+        // Savepoint/restore, crash-catching: a fault here is the injected crash,
+        // not a savepoint bug (savepoint correctness is covered by native full).
+        savepoint_exercise(&database, &model).map_err(|_| WriteStop::Crashed)?;
+
+        let mut applied: u64 = 0;
+        while applied < options.ops {
+            let group_end = (applied + interval).min(options.ops);
+            let write = database.begin_write().map_err(crashed)?;
+            {
+                let mut tables = DATA_TABLES
+                    .iter()
+                    .map(|definition| write.open_table(*definition))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(crashed)?;
+                while applied < group_end {
+                    apply_op_crash(&mut rng, &mut tables, &mut model)?;
+                    applied += 1;
+                }
+            }
+            let next_count = committed + 1;
+            write_commit_count(&write, next_count).map_err(|_| WriteStop::Crashed)?;
+            // Publish before commit so a recovered in-flight state is a member.
+            published.insert(next_count, hash_model(&model));
+            write.commit().map_err(crashed)?;
+            committed = next_count;
+            *ack = committed;
+        }
+        Ok(())
+    })();
+    result.err()
+}
+
+/// Any redb-origin error is the injected crash: its handle went stale.
+fn crashed<E>(_error: E) -> WriteStop {
+    WriteStop::Crashed
+}
+
+/// Crash-aware [`apply_op`]: redb errors become `Crashed` (the injected crash
+/// invalidated the handle) while a model divergence becomes `Invariant` (a real
+/// read-your-writes bug that must not be hidden by the crash reclassification).
+fn apply_op_crash(
+    rng: &mut SplitMix64,
+    tables: &mut [redb::Table<u64, &'static [u8]>],
+    model: &mut Model,
+) -> Result<(), WriteStop> {
+    let table_index = (rng.next_u64() as usize) % tables.len();
+    let key = rng.below(KEYSPACE);
+    match rng.below(10) {
+        0..=5 => {
+            let value = generate_value(rng);
+            tables[table_index]
+                .insert(key, value.as_slice())
+                .map_err(crashed)?;
+            model[table_index].insert(key, value);
+        }
+        6..=7 => {
+            tables[table_index].remove(key).map_err(crashed)?;
+            model[table_index].remove(&key);
+        }
+        _ => {
+            let span = 1 + rng.below(64);
+            let hi = key.saturating_add(span);
+            let mut db_hash = FNV_OFFSET;
+            for entry in tables[table_index].range(key..hi).map_err(crashed)? {
+                let (entry_key, entry_value) = entry.map_err(crashed)?;
+                db_hash = fnv_u64(db_hash, entry_key.value());
+                db_hash = fnv_bytes(db_hash, entry_value.value());
+            }
+            let mut model_hash = FNV_OFFSET;
+            for (entry_key, entry_value) in model[table_index].range(key..hi) {
+                model_hash = fnv_u64(model_hash, *entry_key);
+                model_hash = fnv_bytes(model_hash, entry_value);
+            }
+            if db_hash != model_hash {
+                return Err(WriteStop::Invariant(format!(
+                    "range read [{key}, {hi}) on {} diverged from the model",
+                    DATA_TABLE_NAMES[table_index]
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Positive control for the durability oracle: prove `classify_recovery`
+    // actually fires LOST_COMMIT and TORN_STATE, so the campaign's "zero
+    // durability violations across N runs" is a real negative, not a detector
+    // that can never trip. A published prefix set with three acknowledged
+    // commits (0=empty, 1=stateA, 2=stateB) stands in for a real run.
+    fn published() -> BTreeMap<u64, u64> {
+        let mut map = BTreeMap::new();
+        map.insert(0, 0xE0);
+        map.insert(1, 0xA1);
+        map.insert(2, 0xB2);
+        map
+    }
+
+    fn recovery(committed: u64, state: u64) -> Recovery {
+        Recovery {
+            integrity: "clean",
+            committed,
+            state,
+        }
+    }
+
+    #[test]
+    fn oracle_accepts_a_committed_prefix_that_keeps_every_ack() {
+        // Crash acked commit 2; redb recovers exactly commit 2 -> HOLDS.
+        let report = classify_recovery(recovery(2, 0xB2), true, 2, &published());
+        assert_eq!(report.outcome, CrashOutcome::Holds);
+        // Crash acked commit 2; redb recovers an OLDER valid prefix (1) that is
+        // still >= a LOWER ack (1) -> HOLDS (a legitimate shorter prefix).
+        let report = classify_recovery(recovery(1, 0xA1), true, 1, &published());
+        assert_eq!(report.outcome, CrashOutcome::Holds);
+    }
+
+    #[test]
+    fn oracle_flags_a_lost_acknowledged_commit() {
+        // ack=2 but redb only recovered commit 1 (a real, valid prefix) -- an
+        // acknowledged durable commit was lost. LOST_COMMIT, exit code 3.
+        let report = classify_recovery(recovery(1, 0xA1), true, 2, &published());
+        assert_eq!(report.outcome, CrashOutcome::LostCommit);
+        assert_eq!(report.exit_code(), 3);
+    }
+
+    #[test]
+    fn oracle_flags_a_state_that_was_never_a_published_prefix() {
+        // redb reports committed=2 but with a state hash that is NOT the
+        // published commit-2 state: torn, reordered, or phantom. TORN_STATE.
+        let report = classify_recovery(recovery(2, 0xDEAD), true, 2, &published());
+        assert_eq!(report.outcome, CrashOutcome::TornState);
+        assert_eq!(report.exit_code(), 3);
+        // A right count with a right-but-mismatched-count state also tears:
+        // commit-1's state reported under count 2.
+        let report = classify_recovery(recovery(2, 0xA1), true, 2, &published());
+        assert_eq!(report.outcome, CrashOutcome::TornState);
+    }
+
+    #[test]
+    fn oracle_reports_no_crash_when_nothing_fired() {
+        // The crash never fired and redb kept the full acked state.
+        let report = classify_recovery(recovery(2, 0xB2), false, 2, &published());
+        assert_eq!(report.outcome, CrashOutcome::NoCrash);
+        assert_eq!(report.exit_code(), 0);
+    }
 }

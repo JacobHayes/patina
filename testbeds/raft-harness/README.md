@@ -45,6 +45,8 @@ Binary flags:
 ```
 raft-harness [--seed N] [--proposals N] [--timeout-secs N] [--base-port N]
              [--data-dir PATH] [--tick-millis N] [--kill-node ID] [--kill-after-secs N]
+             [--kill-plan ID:AT[,ID:AT...]] [--restart-after-ticks N]
+             [--recover-storage-faults] [--propose-window N]
 ```
 
 Final stdout line:
@@ -162,8 +164,17 @@ durable mutation is mirrored to files:
 - `FileStorage::open` reconstructs a node from whatever survived: apply
   `snapshot.bin` (or seed the static conf state), replay `entries.log`, then load
   `hardstate.bin`. A torn final `entries.log` record is reported, not silently
-  dropped. Restart is verified natively by pointing a second run at a populated
-  data dir — the reconstructed log hashes identically.
+  dropped. Restart is verified natively (scenario 3 of `run-native.sh`, a
+  kill+restart+catch-up) and **under Patina** (the `Supervisor`, see below).
+- **Crash-recovery supervisor.** `main`'s `Supervisor` owns each node thread and
+  can kill and *restart* one in-process: on a deliberate `--kill-plan ID:AT` kill
+  or (with `--recover-storage-faults`) an injected storage crash, it joins the
+  dead thread, reopens `FileStorage` on the same data dir, rebinds the UDP port,
+  and rejoins. Invariants hold across the restart (fsync'd `HardState` prevents a
+  double vote; re-application from the recovered log is monotonic per incarnation)
+  and the run stays deterministic and replayable. See `PATINA-RESULTS.md`
+  §Crash-recovery. Without `--recover-storage-faults` a storage fault still fails
+  the run closed (`RAFT_ABORT`, exit 2).
 
 ## Dependency choice: prost codec + raft 0.7.0 pinned exact
 
@@ -212,6 +223,9 @@ Planned exploration:
 - **Crash-restart from files** — fault an injected `FileStorage` fsync point
   mid-write, then re-open the node from whatever bytes survived
   (`FileStorage::open`), asserting log matching still holds after recovery.
+  *Implemented:* `--fs-crash-at <spec> --recover-storage-faults` composes the
+  process-global CrashFs with the per-node restart supervisor; see
+  `PATINA-RESULTS.md` §Crash-recovery.
 - **Seed sweeps** — enumerate seeds (`explore` / a `--seed` loop) to shake out
   rare interleavings; `native-run --record` + `minimize` shrink any failing seed
   to a minimal boundary trace.

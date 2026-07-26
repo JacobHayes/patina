@@ -452,6 +452,24 @@ pub enum Operation {
         #[serde(with = "bytes_base64")]
         bytes: Vec<u8>,
     },
+    /// Positional read at an explicit byte offset that does NOT disturb the file
+    /// cursor (`pread`/`read_at`). Distinct from [`Operation::FsRead`] in the
+    /// trace so a positional read and a cursor read at the same fd never
+    /// reconcile against each other.
+    FsReadAt {
+        fd: Fd,
+        offset: u64,
+        max_len: usize,
+    },
+    /// Positional write at an explicit byte offset that does NOT disturb the
+    /// file cursor (`pwrite`/`write_at`). Counts toward the `write` crash
+    /// ordinal exactly like [`Operation::FsWrite`].
+    FsWriteAt {
+        fd: Fd,
+        offset: u64,
+        #[serde(with = "bytes_base64")]
+        bytes: Vec<u8>,
+    },
     FsClose {
         fd: Fd,
     },
@@ -622,6 +640,98 @@ pub enum Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operation_variant_tags_are_pinned_by_name_not_declaration_order() {
+        // `Operation` is `#[serde(tag = "kind", rename_all = "snake_case")]`, so
+        // every variant's trace tag is its snake_case NAME, not a discriminant
+        // derived from declaration order. Inserting a new variant anywhere is
+        // therefore additive and can never renumber an existing one. This test
+        // pins the exact tag string of representative pre-existing variants
+        // (and the two positional-I/O additions) so any accidental switch to
+        // order-based tagging -- or a variant rename -- breaks loudly and every
+        // recorded trace stops decoding at the same instant this test fails.
+        let cases: &[(Operation, &str)] = &[
+            (
+                Operation::FsRead {
+                    fd: Fd(3),
+                    max_len: 8,
+                },
+                "fs_read",
+            ),
+            (
+                Operation::FsWrite {
+                    fd: Fd(3),
+                    bytes: vec![1],
+                },
+                "fs_write",
+            ),
+            (
+                Operation::FsSeek {
+                    fd: Fd(3),
+                    offset: 0,
+                    whence: SeekWhence::Start,
+                },
+                "fs_seek",
+            ),
+            (Operation::FsClose { fd: Fd(3) }, "fs_close"),
+            (Operation::FsSync { fd: Fd(3) }, "fs_sync"),
+            (Operation::FsCrash, "fs_crash"),
+            (
+                Operation::FsReadAt {
+                    fd: Fd(3),
+                    offset: 4096,
+                    max_len: 8,
+                },
+                "fs_read_at",
+            ),
+            (
+                Operation::FsWriteAt {
+                    fd: Fd(3),
+                    offset: 4096,
+                    bytes: vec![1],
+                },
+                "fs_write_at",
+            ),
+        ];
+        for (operation, tag) in cases {
+            let json = serde_json::to_string(operation).unwrap();
+            let needle = format!("\"kind\":\"{tag}\"");
+            assert!(
+                json.contains(&needle),
+                "variant tag drifted: expected {needle} in {json}"
+            );
+            assert_eq!(
+                &serde_json::from_str::<Operation>(&json).unwrap(),
+                operation
+            );
+        }
+    }
+
+    #[test]
+    fn positional_io_offset_survives_round_trip() {
+        // The positional offset must be preserved exactly through the trace so a
+        // pread/pwrite reconciles only against the same offset on replay.
+        for operation in [
+            Operation::FsReadAt {
+                fd: Fd(7),
+                offset: 1 << 40,
+                max_len: 4096,
+            },
+            Operation::FsWriteAt {
+                fd: Fd(7),
+                offset: 1 << 40,
+                bytes: vec![9, 8, 7],
+            },
+        ] {
+            let json = serde_json::to_string(&operation).unwrap();
+            assert!(
+                json.contains("\"offset\":1099511627776"),
+                "offset lost: {json}"
+            );
+            assert_eq!(serde_json::from_str::<Operation>(&json).unwrap(), operation);
+        }
+    }
 
     #[test]
     fn operation_json_is_tagged_and_round_trips() {

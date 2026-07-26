@@ -33,7 +33,9 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 name = "cargo-patina"
 version = "0.1.0"
 dependencies = [
+ "object",
  "patina-abi",
+ "patina-fs-mem",
  "patina-minimize",
  "patina-runtime",
  "patina-target",
@@ -320,6 +322,7 @@ dependencies = [
  "patina-abi",
  "patina-driver-api",
  "patina-fs-crash",
+ "patina-fs-mem",
  "patina-runtime",
  "patina-sched-det",
  "serde_json",
@@ -331,6 +334,7 @@ version = "0.1.0"
 dependencies = [
  "patina-abi",
  "patina-driver-api",
+ "patina-rng-seeded",
 ]
 
 [[package]]

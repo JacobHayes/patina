@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Native (non-Patina) smoke test for the raft harness.
 #
-# Runs two scenarios against real threads and real loopback UDP:
+# Runs three scenarios against real threads and real loopback UDP:
 #   1. healthy 3-node cluster commits every proposal;
-#   2. one node is killed mid-run and the remaining two still commit.
+#   2. one node is killed mid-run and the remaining two still commit;
+#   3. one node is killed mid-run and RESTARTED: it reopens its FileStorage,
+#      rejoins, catches up, and the cluster still commits every proposal
+#      (crash-recovery, verified natively before the Patina campaign).
 #
 # The harness binary is 100% std-pure: it contains NO Patina imports and NO
 # cfg(patina). The ONLY difference between a native and a Patina run is the
@@ -66,5 +69,19 @@ run_scenario "healthy" --seed 1 --base-port 4001
 # Scenario 2: kill node 3 one second in; nodes 1 and 2 (a quorum) must still
 # commit every proposal. Separate port range avoids any lingering bind.
 run_scenario "one-node-down" --seed 2 --base-port 4011 --kill-node 3 --kill-after-secs 1
+
+# Scenario 3: crash-RECOVERY. Kill node 2 the moment the committed count reaches
+# 10, then RESTART it after a short delay. The supervisor reopens FileStorage on
+# node 2's SAME data dir (recovery reconstruction), rebinds its UDP port, and
+# rejoins; node 2 must catch up the entries it missed while down and the cluster
+# must still commit every proposal. `--propose-window` paces the client so the
+# kill lands mid-run (native commits the whole batch in one burst otherwise),
+# forcing genuine catch-up rather than a re-apply of an already-complete log.
+# The RAFT_RESULT line reports `restarts=1`; run_scenario only asserts full
+# commit and exit 0, and the binary's own invariant checks (log matching, no
+# applied regress, single leader/term) hold ACROSS the restart or it exits
+# non-zero with RAFT_VIOLATION.
+run_scenario "kill-and-restart" --seed 3 --base-port 4021 \
+  --kill-plan 2:10 --restart-after-ticks 5 --propose-window 3
 
 echo "==> all native scenarios passed"

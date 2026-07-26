@@ -10,3 +10,4 @@ repository.workspace = true
 [dependencies]
 patina-abi.workspace = true
 patina-driver-api.workspace = true
+patina-rng-seeded.workspace = true

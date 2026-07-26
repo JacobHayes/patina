@@ -11,13 +11,18 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <limits.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <pthread.h>
+#include <pwd.h>
+#include <signal.h>
+#include <spawn.h>
 #include <sys/ioctl.h>
+#include <sys/wait.h>
 #include <sys/socket.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -31,6 +36,7 @@
 #ifdef __linux__
 #include <dlfcn.h>
 #include <linux/futex.h>
+#include <sched.h>
 #include <sys/random.h>
 #include <sys/syscall.h>
 #endif
@@ -40,6 +46,7 @@
 #ifdef __APPLE__
 #include <crt_externs.h>
 #include <mach/mach_time.h>
+#include <mach-o/dyld.h>
 
 uint64_t mach_absolute_time(void) {
     uint64_t nanos = 0;
@@ -57,6 +64,62 @@ kern_return_t mach_timebase_info(mach_timebase_info_t info) {
 kern_return_t mach_wait_until(uint64_t deadline) {
     if (patina_sleep_until(PATINA_CLOCK_MONOTONIC, deadline) != 0) __builtin_trap();
     return KERN_SUCCESS;
+}
+
+/*
+ * libdispatch semaphores. Rust std's Darwin thread Parker blocks on a
+ * libdispatch semaphore, so std::thread::park / park_timeout and everything
+ * layered on them (mpsc/mpmc recv and recv_timeout, blocking channel and Once
+ * paths) reach dispatch_semaphore_wait. Interpose the whole surface and route
+ * it through the deterministic scheduler + virtual clock; without this the
+ * Parker blocks a real host thread and reads host time outside the runtime.
+ *
+ * These are strong definitions, so std's references bind here at link time and
+ * the real libdispatch symbols drop off the import table entirely. The shim's
+ * own execution baton deliberately uses a distinct Mach semaphore, so it never
+ * recurses into these interposers.
+ */
+uint64_t dispatch_time(uint64_t when, int64_t delta) {
+    return patina_dispatch_time(when, delta);
+}
+
+void *dispatch_semaphore_create(intptr_t value) {
+    return patina_dispatch_semaphore_create(value);
+}
+
+intptr_t dispatch_semaphore_wait(void *sem, uint64_t timeout) {
+    return patina_dispatch_semaphore_wait(sem, timeout);
+}
+
+intptr_t dispatch_semaphore_signal(void *sem) {
+    return patina_dispatch_semaphore_signal(sem);
+}
+
+void dispatch_release(void *object) {
+    patina_dispatch_release(object);
+}
+
+/*
+ * confstr reads host configuration strings (temp/cache directory, default PATH),
+ * which are host-specific and nondeterministic. std::env::temp_dir queries
+ * _CS_DARWIN_USER_TEMP_DIR; return a fixed deterministic path routed through the
+ * deterministic filesystem, and report "no value" for everything else so callers
+ * fall back to their own deterministic defaults.
+ */
+size_t confstr(int name, char *buf, size_t len) {
+    const char *value = NULL;
+    if (name == _CS_DARWIN_USER_TEMP_DIR) value = "/tmp/";
+    if (value == NULL) {
+        if (buf != NULL && len > 0) buf[0] = '\0';
+        return 0;
+    }
+    size_t needed = strlen(value) + 1;
+    if (buf != NULL && len > 0) {
+        size_t copy = needed < len ? needed : len;
+        memcpy(buf, value, copy);
+        buf[copy - 1] = '\0';
+    }
+    return needed;
 }
 #endif
 
@@ -265,6 +328,42 @@ char *realpath(const char *restrict path, char *restrict destination) {
     return destination;
 }
 
+/*
+ * isatty: whether a descriptor is a terminal is a nondeterministic property of
+ * how the run was launched (pipe vs file vs tty), and programs branch on it —
+ * ripgrep, for instance, derives heading/color/line-number defaults from it. A
+ * fully interposed guest must never observe host terminal state, so report a
+ * deterministic "not a terminal" for every descriptor: captured guest stdio is
+ * never a tty under the runtime. Interposing here (rather than allow-listing the
+ * import) makes guest output provably independent of host tty state instead of
+ * merely "neutral given the flags". This is a strong definition, so the guest's
+ * isatty reference binds here and the libc symbol drops off the import table.
+ */
+int isatty(int fd) {
+    (void)fd;
+    errno = ENOTTY;
+    return 0;
+}
+
+/*
+ * pthread_atfork: registers handlers to run around fork(). The whole fork/exec
+ * process surface is a deterministic-runtime non-goal (denied by the audit, and
+ * a managed guest never forks), so a registered handler could never actually
+ * run. Rust std / libc startup nonetheless *reference* this symbol (e.g. thread
+ * and once machinery pull it in), and left as a host import it taints the run's
+ * determinism claim even though it is a pure no-op here. Interpose it with a
+ * strong definition that ignores the registration and returns success: the guest
+ * reference binds here and the libc symbol drops off the import table, so the
+ * pre-run gate has nothing to flag. Ignoring the handlers is sound precisely
+ * because the process-class surface that would invoke them is never reached.
+ */
+int pthread_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(void)) {
+    (void)prepare;
+    (void)parent;
+    (void)child;
+    return 0;
+}
+
 int nanosleep(const struct timespec *duration, struct timespec *remaining) {
     if (duration == NULL || duration->tv_sec < 0 || duration->tv_nsec < 0 ||
         duration->tv_nsec >= 1000000000L) {
@@ -357,6 +456,15 @@ int pause(void) {
     return -1;
 }
 
+/*
+ * sched_yield / std::thread::yield_now. std's mpsc/mpmc backoff spins through
+ * yield_now before it parks, so route the yield to a deterministic scheduling
+ * point rather than yielding the host scheduler outside the runtime.
+ */
+int sched_yield(void) {
+    return patina_sched_yield();
+}
+
 int getentropy(void *destination, size_t length) {
     if (patina_entropy(destination, length) != 0) {
         errno = patina_errno();
@@ -439,6 +547,25 @@ long syscall(long number, ...) {
         errno = ENOSYS;
         return -1;
     }
+    if (number == SYS_getrandom) {
+        /* The `getrandom` crate (rand::thread_rng, used by tikv/raft for its
+         * randomized election timeouts) issues the raw SYS_getrandom syscall
+         * through this wrapper rather than the libc getrandom() above. Route it to
+         * the same deterministic entropy source; otherwise it returns ENOSYS and
+         * the crate falls back to opening /dev/urandom, which the in-memory FS
+         * lacks (ENOENT) — panicking every rng-using guest thread. GRND_* flags
+         * are irrelevant: deterministic entropy never blocks and has one source. */
+        va_list ap;
+        va_start(ap, number);
+        void *buffer = va_arg(ap, void *);
+        size_t buffer_len = va_arg(ap, size_t);
+        va_end(ap);
+        if (patina_entropy(buffer, buffer_len) != 0) {
+            errno = patina_errno();
+            return -1;
+        }
+        return (long)buffer_len;
+    }
     (void)number;
     errno = ENOSYS;
     return -1;
@@ -450,8 +577,15 @@ long syscall(long number, ...) {
  * lookup is neutered fail-closed (no host symbol is ever returned) rather than
  * allowlisted, and std falls back to its defaults. dlopen/dlclose/dladdr are
  * not provided, so an unmanaged binary importing them is still audit-rejected.
+ *
+ * The interposer is `__wrap_dlsym`: `cargo patina native-build` links
+ * `-Wl,--wrap=dlsym`, so every guest/std reference to `dlsym` binds here while
+ * the shim's own host-alias table reaches the real glibc resolver through the
+ * distinct `__real_dlsym` (see the shim's Linux `hostapi` module). This mirrors
+ * `__wrap_pthread_create` and keeps `dlsym` neutered for guest code without
+ * denying the shim its one sanctioned resolution primitive.
  */
-void *dlsym(void *handle, const char *symbol) {
+void *__wrap_dlsym(void *handle, const char *symbol) {
     (void)handle;
     (void)symbol;
     return NULL;
@@ -721,6 +855,52 @@ ssize_t write(int fd, const void *source, size_t length) {
     return fail_size(patina_write(fd, source, length));
 }
 
+/* Positional I/O. redb's file backend does ALL of its reads and writes through
+ * pread/pwrite (read_exact_at/write_all_at), never seek+read/write, so these
+ * must reach the deterministic filesystem or redb's I/O would bypass the crash
+ * model entirely. They route to patina_p{read,write}, which the runtime
+ * services as ONE positional operation (atomic w.r.t. the scheduler and cursor-
+ * independent), NOT a caller-side seek+read that could interleave under
+ * concurrency. Virtual sockets have no offset addressing, so a positional call
+ * on a socket fd is ESPIPE, matching the kernel. */
+ssize_t pread(int fd, void *destination, size_t length, off_t offset) {
+    if (fd >= PATINA_SOCKET_FD_BASE) { errno = ESPIPE; return -1; }
+    return fail_size(patina_pread(fd, destination, length, (int64_t)offset));
+}
+
+ssize_t pwrite(int fd, const void *source, size_t length, off_t offset) {
+    if (fd == 1 || fd == 2 || fd >= PATINA_SOCKET_FD_BASE) { errno = ESPIPE; return -1; }
+    return fail_size(patina_pwrite(fd, source, length, (int64_t)offset));
+}
+
+#ifdef __linux__
+/* Large-file positional I/O variants. glibc std lowers positional reads/writes
+ * on 64-bit off_t Linux to the *64 symbols (redb's file backend uses them), so
+ * they must reach the same deterministic positional I/O as pread/pwrite rather
+ * than be denied. off64_t is always 64-bit, so the full offset is preserved. */
+ssize_t pread64(int fd, void *destination, size_t length, off64_t offset) {
+    if (fd >= PATINA_SOCKET_FD_BASE) { errno = ESPIPE; return -1; }
+    return fail_size(patina_pread(fd, destination, length, (int64_t)offset));
+}
+ssize_t pwrite64(int fd, const void *source, size_t length, off64_t offset) {
+    if (fd == 1 || fd == 2 || fd >= PATINA_SOCKET_FD_BASE) { errno = ESPIPE; return -1; }
+    return fail_size(patina_pwrite(fd, source, length, (int64_t)offset));
+}
+#endif
+
+/* Whole-file advisory lock (redb takes one via std File::try_lock on open).
+ * Routed to the runtime's per-inode lock table (patina_flock): a lone opener
+ * always acquires, but two independent opens of the same file contend exactly
+ * as a real flock would (LOCK_EX|LOCK_NB on the second → EWOULDBLOCK, i.e.
+ * redb's DatabaseAlreadyOpen). See the "Advisory file lock" row in
+ * crates/patina-target/ESCAPE-CLASSES.md. Virtual sockets have no advisory-lock
+ * model, so a flock on one fails closed. */
+int flock(int fd, int operation) {
+    if (fd >= PATINA_SOCKET_FD_BASE)
+        return patina_posix_deny("patina: advisory locks on virtual sockets are not modeled; failing closed\n");
+    return patina_flock(fd, operation);
+}
+
 int close(int fd) {
     if (fd >= PATINA_SOCKET_FD_BASE) return fail_int(patina_net_close(fd));
     return fail_int(patina_close(fd));
@@ -809,6 +989,16 @@ off_t lseek(int fd, off_t offset, int whence) {
 int fsync(int fd) {
     return fail_int(patina_fsync(fd));
 }
+
+#ifdef __linux__
+/* fdatasync: redb calls it to make committed data durable. The deterministic
+ * crash-model FS makes the file durable through the same sync path (it draws no
+ * data-vs-metadata distinction), so route it to patina_fsync — a durability
+ * guarantee at least as strong as fdatasync's, and deterministic. */
+int fdatasync(int fd) {
+    return fail_int(patina_fsync(fd));
+}
+#endif
 
 int ftruncate(int fd, off_t length) {
     if (length < 0) {
@@ -1190,52 +1380,50 @@ int pthread_cond_destroy(pthread_cond_t *cond) {
 }
 
 /*
- * pthread synchronization Patina does not yet model deterministically is denied
+ * pthread synchronization Patina does not model deterministically is denied
  * (fail-closed) rather than allowed to fall through to the host, where it would
- * block a real thread outside the scheduler. Rust std::sync::RwLock uses a
- * futex on recent toolchains and never reaches these symbols; a C guest using
- * them gets a clear ENOSYS. (pthread_barrier_* and pthread_spin_* do not exist
- * on Darwin and are left to a future Linux-specific layer.)
+ * block a real thread outside the scheduler. (pthread_barrier_* and
+ * pthread_spin_* do not exist on Darwin and are left to a future Linux layer.)
  */
 int pthread_cancel(pthread_t thread) {
     (void)thread;
     return ENOSYS;
 }
 
+/*
+ * pthread_rwlock_* routes reader/writer contention through the deterministic
+ * scheduler (writer-preferring; FIFO among writers; blocked readers batch-woken
+ * when a writer releases with no writer waiting). Rust std::sync::RwLock uses
+ * the queue-based parking RwLock on the supported toolchains and does not reach
+ * these symbols, so this is for C guests (and any std that lowers to pthread).
+ * rwlockattr is ignored: the deterministic rwlock has one policy.
+ */
 int pthread_rwlock_init(pthread_rwlock_t *lock, const pthread_rwlockattr_t *attr) {
-    (void)lock;
-    (void)attr;
-    return ENOSYS;
+    return patina_rwlock_init((void *)lock, (const void *)attr);
 }
 
 int pthread_rwlock_destroy(pthread_rwlock_t *lock) {
-    (void)lock;
-    return ENOSYS;
+    return patina_rwlock_destroy((void *)lock);
 }
 
 int pthread_rwlock_rdlock(pthread_rwlock_t *lock) {
-    (void)lock;
-    return ENOSYS;
+    return patina_rwlock_rdlock((void *)lock);
 }
 
 int pthread_rwlock_tryrdlock(pthread_rwlock_t *lock) {
-    (void)lock;
-    return ENOSYS;
+    return patina_rwlock_tryrdlock((void *)lock);
 }
 
 int pthread_rwlock_wrlock(pthread_rwlock_t *lock) {
-    (void)lock;
-    return ENOSYS;
+    return patina_rwlock_wrlock((void *)lock);
 }
 
 int pthread_rwlock_trywrlock(pthread_rwlock_t *lock) {
-    (void)lock;
-    return ENOSYS;
+    return patina_rwlock_trywrlock((void *)lock);
 }
 
 int pthread_rwlock_unlock(pthread_rwlock_t *lock) {
-    (void)lock;
-    return ENOSYS;
+    return patina_rwlock_unlock((void *)lock);
 }
 
 /*
@@ -1464,7 +1652,24 @@ int setsockopt(int fd, int level, int optname, const void *value, socklen_t len)
                 if (patina_linger_off(value, len)) return 0;
                 break;
             case SO_RCVTIMEO:
+                /* Deterministic receive timeout: store the timeval (in virtual
+                 * nanoseconds) on the socket so a blocking recv is bounded by the
+                 * virtual clock. A zero timeval is POSIX "no timeout" and clears
+                 * it. */
+                if (value != NULL && len >= (socklen_t)sizeof(struct timeval)) {
+                    const struct timeval *rcv = (const struct timeval *)value;
+                    uint64_t nanos = (uint64_t)rcv->tv_sec * 1000000000ull +
+                                     (uint64_t)rcv->tv_usec * 1000ull;
+                    if (patina_net_set_read_timeout(fd, nanos) != 0) {
+                        errno = patina_errno();
+                        return -1;
+                    }
+                    return 0;
+                }
+                break;
             case SO_SNDTIMEO:
+                /* Send timeouts are moot: virtual datagram/stream sends never
+                 * block, so only the no-op zero timeval is accepted. */
                 if (patina_zero_timeval(value, len)) return 0;
                 break;
             default:
@@ -1600,10 +1805,9 @@ void freeaddrinfo(struct addrinfo *res) {
 }
 
 /*
- * Deterministic process-state values. Process spawning and signals (fork,
- * exec-family, posix_spawn-family, kill, waitpid) are deliberately NOT provided
- * here so they remain unmanaged imports that `cargo patina native-audit`
- * rejects.
+ * Deterministic process-state values (getuid/geteuid/... below). The process
+ * class itself — spawning, exec, reaping, credential and session changes — is a
+ * deterministic-runtime non-goal, handled by the deny-traps just below.
  */
 uid_t getuid(void) { return (uid_t)1000; }
 uid_t geteuid(void) { return (uid_t)1000; }
@@ -1635,6 +1839,285 @@ long sysconf(int name) {
     errno = EINVAL;
     return -1;
 }
+
+/*
+ * Process-class deny-traps. The fork/exec/spawn/reap/credential/session surface
+ * is a deterministic-runtime non-goal: a managed guest never legitimately enters
+ * it and the runtime models none of it. Programs like ripgrep still LINK this
+ * surface (std::process + grep-cli's --pre/-z preprocessor path, which a plain
+ * search never triggers), and a reachability audit cannot clear it — the spawn
+ * path is statically wired into the search loop by direct calls and only a
+ * runtime flag keeps it dormant (see crates/patina-target/ESCAPE-CLASSES.md).
+ *
+ * So interpose the whole family with strong definitions that ABORT
+ * deterministically if ever reached. Two wins over leaving them as imports: the
+ * symbols drop off the import table (the pre-run gate needs no allowance), AND a
+ * guest that genuinely spawns fails LOUD and reproducibly instead of escaping
+ * the runtime silently. A trap fires only if CALLED, so merely linking the
+ * surface is inert and a plain search is unaffected.
+ */
+__attribute__((noreturn)) static void patina_process_trap(const char *symbol) {
+    static const char prefix[] = "patina: process spawn reached under patina: ";
+    write(2, prefix, sizeof prefix - 1);
+    write(2, symbol, strlen(symbol));
+    static const char suffix[] =
+        "; the process class is a deterministic-runtime non-goal; failing closed\n";
+    write(2, suffix, sizeof suffix - 1);
+    /* abort() skips the atexit shutdown flush, so push the captured guest output
+     * and this diagnostic to the real descriptors before terminating. */
+    patina_flush_captured_stdio();
+    abort();
+}
+
+pid_t fork(void) { patina_process_trap("fork"); }
+int execvp(const char *file, char *const argv[]) {
+    (void)file;
+    (void)argv;
+    patina_process_trap("execvp");
+}
+pid_t waitpid(pid_t pid, int *status, int options) {
+    (void)pid;
+    (void)status;
+    (void)options;
+    patina_process_trap("waitpid");
+}
+int pipe(int fildes[2]) {
+    (void)fildes;
+    patina_process_trap("pipe");
+}
+pid_t setsid(void) { patina_process_trap("setsid"); }
+int setgid(gid_t gid) {
+    (void)gid;
+    patina_process_trap("setgid");
+}
+int setuid(uid_t uid) {
+    (void)uid;
+    patina_process_trap("setuid");
+}
+int setpgid(pid_t pid, pid_t pgid) {
+    (void)pid;
+    (void)pgid;
+    patina_process_trap("setpgid");
+}
+#ifdef __APPLE__
+int setgroups(int count, const gid_t *groups) {
+#else
+int setgroups(size_t count, const gid_t *groups) {
+#endif
+    (void)count;
+    (void)groups;
+    patina_process_trap("setgroups");
+}
+int chdir(const char *path) {
+    (void)path;
+    patina_process_trap("chdir");
+}
+int chroot(const char *path) {
+    (void)path;
+    patina_process_trap("chroot");
+}
+int posix_spawnp(pid_t *restrict pid, const char *restrict file,
+                 const posix_spawn_file_actions_t *file_actions,
+                 const posix_spawnattr_t *restrict attrp, char *const argv[restrict],
+                 char *const envp[restrict]) {
+    (void)pid;
+    (void)file;
+    (void)file_actions;
+    (void)attrp;
+    (void)argv;
+    (void)envp;
+    patina_process_trap("posix_spawnp");
+}
+int posix_spawn_file_actions_init(posix_spawn_file_actions_t *acts) {
+    (void)acts;
+    patina_process_trap("posix_spawn_file_actions_init");
+}
+int posix_spawn_file_actions_adddup2(posix_spawn_file_actions_t *acts, int fd, int newfd) {
+    (void)acts;
+    (void)fd;
+    (void)newfd;
+    patina_process_trap("posix_spawn_file_actions_adddup2");
+}
+int posix_spawn_file_actions_destroy(posix_spawn_file_actions_t *acts) {
+    (void)acts;
+    patina_process_trap("posix_spawn_file_actions_destroy");
+}
+int posix_spawnattr_init(posix_spawnattr_t *attr) {
+    (void)attr;
+    patina_process_trap("posix_spawnattr_init");
+}
+int posix_spawnattr_destroy(posix_spawnattr_t *attr) {
+    (void)attr;
+    patina_process_trap("posix_spawnattr_destroy");
+}
+int posix_spawnattr_setflags(posix_spawnattr_t *attr, short flags) {
+    (void)attr;
+    (void)flags;
+    patina_process_trap("posix_spawnattr_setflags");
+}
+int posix_spawnattr_setpgroup(posix_spawnattr_t *attr, pid_t pgroup) {
+    (void)attr;
+    (void)pgroup;
+    patina_process_trap("posix_spawnattr_setpgroup");
+}
+int posix_spawnattr_setsigdefault(posix_spawnattr_t *restrict attr,
+                                  const sigset_t *restrict sigdefault) {
+    (void)attr;
+    (void)sigdefault;
+    patina_process_trap("posix_spawnattr_setsigdefault");
+}
+
+#ifdef __linux__
+/*
+ * Linux-only spawn/IPC/effect surface that newer glibc's std pulls in and macOS
+ * does not (so it only shows up in the Linux import audit). These follow the
+ * fork/posix_spawnp deny-trap doctrine above: a strong def drops the symbol off
+ * the guest import table (the pre-run gate needs no allowance) and fails LOUD and
+ * reproducibly if the guest ever genuinely reaches it. A plain search never
+ * calls them, so linking the surface is inert. The `_GNU_SOURCE` prototypes are
+ * visible here, so each definition matches glibc's exact signature.
+ */
+pid_t pidfd_getpid(int pidfd) {
+    (void)pidfd;
+    patina_process_trap("pidfd_getpid");
+}
+int pidfd_spawnp(int *restrict pidfd, const char *restrict file,
+                 const posix_spawn_file_actions_t *restrict file_actions,
+                 const posix_spawnattr_t *restrict attrp, char *const argv[restrict],
+                 char *const envp[restrict]) {
+    (void)pidfd;
+    (void)file;
+    (void)file_actions;
+    (void)attrp;
+    (void)argv;
+    (void)envp;
+    patina_process_trap("pidfd_spawnp");
+}
+int posix_spawn_file_actions_addchdir_np(posix_spawn_file_actions_t *acts,
+                                         const char *path) {
+    (void)acts;
+    (void)path;
+    patina_process_trap("posix_spawn_file_actions_addchdir_np");
+}
+int posix_spawn_file_actions_addchdir(posix_spawn_file_actions_t *acts, const char *path) {
+    (void)acts;
+    (void)path;
+    patina_process_trap("posix_spawn_file_actions_addchdir");
+}
+int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options) {
+    (void)idtype;
+    (void)id;
+    (void)infop;
+    (void)options;
+    patina_process_trap("waitid");
+}
+int pipe2(int pipefd[2], int flags) {
+    (void)pipefd;
+    (void)flags;
+    patina_process_trap("pipe2");
+}
+int socketpair(int domain, int type, int protocol, int sv[2]) {
+    (void)domain;
+    (void)type;
+    (void)protocol;
+    (void)sv;
+    patina_process_trap("socketpair");
+}
+
+/*
+ * recvmsg/sendmsg are the ancillary/scatter-gather message variants; std links
+ * them but Patina's deterministic net layer models only sendto/recvfrom (routed
+ * through patina_net_*). No supported guest uses the msg variants, so fail closed
+ * softly with ENOSYS rather than aborting: the symbols leave the import table and
+ * a caller cannot send or receive undeterministically.
+ */
+ssize_t recvmsg(int sockfd, struct msghdr *msg, int flags) {
+    (void)sockfd;
+    (void)msg;
+    (void)flags;
+    errno = ENOSYS;
+    return -1;
+}
+ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags) {
+    (void)sockfd;
+    (void)msg;
+    (void)flags;
+    errno = ENOSYS;
+    return -1;
+}
+
+/*
+ * std::thread::available_parallelism reads the CPU affinity mask. Return a fixed
+ * single-CPU set so the guest sees a deterministic core count regardless of the
+ * host; the deterministic scheduler runs one baton at a time anyway, and every
+ * testbed forces stable output (ripgrep's `--sort path`), so the value never
+ * perturbs results. This is interposed (not trapped) because it IS reached at
+ * startup, unlike the inert spawn surface above.
+ */
+int sched_getaffinity(pid_t pid, size_t cpusetsize, cpu_set_t *mask) {
+    (void)pid;
+    if (mask == NULL || cpusetsize == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(mask, 0, cpusetsize);
+    /* CPU 0 present, all others absent: a deterministic one-core affinity. */
+    ((unsigned char *)mask)[0] = 1;
+    return 0;
+}
+#endif
+
+/*
+ * Host-state queries → fixed deterministic values (isatty/confstr precedent).
+ * These read real host identity/paths; a fully interposed guest must see a
+ * constant instead so its output cannot depend on where, or as whom, it ran.
+ * Being strong definitions, the guest references bind here and the libc symbols
+ * drop off the import table.
+ */
+int gethostname(char *name, size_t len) {
+    static const char host[] = "patina";
+    /* `name` is declared nonnull by glibc (comparing it to NULL is a
+     * -Werror=nonnull-compare error under gcc, and passing NULL is caller UB),
+     * so only the buffer length is validated here — the readdir/dirent
+     * nonnull-parameter precedent above. */
+    if (len == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    size_t copied = sizeof host - 1; /* length without the NUL */
+    if (copied >= len) copied = len - 1;
+    memcpy(name, host, copied);
+    name[copied] = '\0';
+    return 0;
+}
+int getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen,
+               struct passwd **result) {
+    (void)uid;
+    (void)pwd;
+    (void)buf;
+    (void)buflen;
+    /* Deterministic "no such user": the guest environment is emptied, so std's
+     * home-directory lookup cleanly Nones and no host user identity leaks.
+     * `result` is declared nonnull by glibc (a NULL compare is a
+     * -Werror=nonnull-compare error under gcc), so the contract is trusted. */
+    *result = NULL;
+    return 0;
+}
+#ifdef __APPLE__
+/*
+ * _NSGetExecutablePath hands back the host executable's real path (std's
+ * current_exe() reads it). Fail so current_exe() is a deterministic Err rather
+ * than leaking the host path. A future guest that needs current_exe() -> Ok
+ * should get a FIXED VIRTUAL path written here, never the host's real one.
+ * (One leading underscore in source: the asm symbol is `__NSGetExecutablePath`,
+ * matching the guest import — two underscores here would define the wrong name.)
+ */
+int _NSGetExecutablePath(char *buf, uint32_t *bufsize) {
+    (void)buf;
+    (void)bufsize;
+    return -1;
+}
+#endif
 
 /*
  * Packaged startup. An ordinary program built with `cargo patina native-build`

@@ -7,12 +7,16 @@ use patina_abi::{
     TcpAccepted,
 };
 use patina_driver_api::{DriverResult, NetDriver};
+use patina_rng_seeded::SplitMix64;
 
 #[derive(Default)]
 pub struct SimNetBuilder {
     base_latency_nanos: u64,
     partitions: BTreeSet<(String, String)>,
     tcp_buffer_bytes: Option<usize>,
+    fault_seed: u64,
+    jitter_nanos: Option<(u64, u64)>,
+    drop_permille: u16,
 }
 
 impl SimNetBuilder {
@@ -23,6 +27,31 @@ impl SimNetBuilder {
 
     pub fn tcp_buffer_bytes(mut self, value: usize) -> Self {
         self.tcp_buffer_bytes = Some(value);
+        self
+    }
+
+    /// Seed the deterministic datagram reorder/drop decision stream. Draws are a
+    /// pure function of this seed and the exact send sequence, so identical
+    /// configurations reproduce identical delivery schedules across record and
+    /// replay.
+    pub fn fault_seed(mut self, seed: u64) -> Self {
+        self.fault_seed = seed;
+        self
+    }
+
+    /// Add a seeded per-datagram delivery jitter drawn uniformly from the
+    /// inclusive `[min, max]` nanosecond range. Because a blocking receiver
+    /// delivers the earliest-deadline datagram first, varying per-packet jitter
+    /// reorders datagrams relative to their send order — the UDP-reorder fault.
+    pub fn jitter_nanos(mut self, min: u64, max: u64) -> Self {
+        self.jitter_nanos = Some((min, max));
+        self
+    }
+
+    /// Drop a fraction of datagrams, expressed in per-mille (0..=1000). Each send
+    /// draws once against this probability before any jitter draw.
+    pub fn drop_permille(mut self, permille: u16) -> Self {
+        self.drop_permille = permille;
         self
     }
 
@@ -43,6 +72,20 @@ impl SimNetBuilder {
                 "virtual TCP receive buffer size must be greater than zero",
             ));
         }
+        if let Some((min, max)) = self.jitter_nanos {
+            if min > max {
+                return Err(EffectError::new(
+                    ErrorCode::InvalidInput,
+                    "virtual network jitter range requires min <= max",
+                ));
+            }
+        }
+        if self.drop_permille > 1000 {
+            return Err(EffectError::new(
+                ErrorCode::InvalidInput,
+                "virtual network drop probability must be within [0, 1000] per-mille",
+            ));
+        }
         Ok(SimNet {
             base_latency_nanos: self.base_latency_nanos,
             partitions: self.partitions,
@@ -55,6 +98,9 @@ impl SimNetBuilder {
             tcp_listeners: BTreeMap::new(),
             tcp_listener_addresses: BTreeMap::new(),
             tcp_endpoints: BTreeMap::new(),
+            fault_rng: SplitMix64::new(self.fault_seed),
+            jitter_nanos: self.jitter_nanos,
+            drop_permille: self.drop_permille,
         })
     }
 }
@@ -108,6 +154,12 @@ pub struct SimNet {
     tcp_listeners: BTreeMap<SocketId, TcpListenerState>,
     tcp_listener_addresses: BTreeMap<String, SocketId>,
     tcp_endpoints: BTreeMap<SocketId, TcpEndpoint>,
+    /// Seeded decision stream for datagram drop and delivery-jitter faults.
+    /// Advanced once per datagram `send` in send order, so its consumption is a
+    /// deterministic function of the traffic and reproduces on replay.
+    fault_rng: SplitMix64,
+    jitter_nanos: Option<(u64, u64)>,
+    drop_permille: u16,
 }
 
 impl SimNet {
@@ -130,6 +182,31 @@ impl SimNet {
             .get(&socket)
             .map(String::as_str)
             .ok_or_else(|| invalid_socket(socket))
+    }
+
+    /// Draw the seeded drop decision for one datagram. Extreme probabilities are
+    /// decision-free so the never-drop default and always-drop config do not
+    /// perturb the stream consumed by jitter draws.
+    fn decide_drop(&mut self) -> bool {
+        match self.drop_permille {
+            0 => false,
+            1000 => true,
+            permille => (self.fault_rng.next_u64() % 1000) < u64::from(permille),
+        }
+    }
+
+    /// Draw the seeded per-datagram delivery jitter in nanoseconds, or zero when
+    /// no jitter is configured (decision-free so latency-only configs are
+    /// unaffected).
+    fn draw_jitter(&mut self) -> u64 {
+        match self.jitter_nanos {
+            None => 0,
+            Some((min, max)) if min == max => min,
+            Some((min, max)) => {
+                let span = max - min + 1;
+                min + (self.fault_rng.next_u64() % span)
+            }
+        }
     }
 
     fn allocate_socket(&mut self) -> DriverResult<SocketId> {
@@ -194,8 +271,22 @@ impl NetDriver for SimNet {
                 disposition: SendDisposition::DroppedByPartition,
             });
         }
+        // Seeded fault decisions, drawn in a fixed order (drop, then jitter) so
+        // the stream is a stable function of the send sequence. A dropped
+        // datagram still reports the bytes as written — a lossy UDP send
+        // succeeds locally — but queues no packet, so the peer never receives it.
+        if self.decide_drop() {
+            return Ok(SendReport {
+                written: bytes.len(),
+                copies: 0,
+                delivery_nanos: Vec::new(),
+                disposition: SendDisposition::DroppedByFault,
+            });
+        }
+        let jitter = self.draw_jitter();
         let delivery_nanos = delivery_nanos
             .checked_add(self.base_latency_nanos)
+            .and_then(|value| value.checked_add(jitter))
             .ok_or_else(|| {
                 EffectError::new(
                     ErrorCode::InvalidInput,
@@ -786,6 +877,122 @@ mod tests {
         assert_eq!(listener, SocketId(2));
         assert_eq!(client, SocketId(3));
         assert_eq!(accepted, SocketId(4));
+    }
+
+    /// Send `count` numbered datagrams at send-time zero and drain them in
+    /// delivery order, returning the sequence numbers actually received.
+    fn delivered_order(net: &mut SimNet, count: u32) -> Vec<u32> {
+        net.bind("tx").unwrap();
+        net.bind("rx").unwrap();
+        let tx = net.addresses["tx"];
+        for seq in 0..count {
+            net.send(tx, "rx", &seq.to_le_bytes(), 0).unwrap();
+        }
+        let rx = net.addresses["rx"];
+        let mut received = Vec::new();
+        while let Some(datagram) = net.recv(rx, u64::MAX).unwrap() {
+            received.push(u32::from_le_bytes(datagram.bytes.try_into().unwrap()));
+        }
+        received
+    }
+
+    #[test]
+    fn jitter_reorders_datagrams_deterministically_per_seed() {
+        // A seed that reorders: the received order differs from the send order,
+        // and is byte-identical across two runs of the same configuration.
+        let mut first = SimNet::builder()
+            .fault_seed(7)
+            .jitter_nanos(0, 1000)
+            .build()
+            .unwrap();
+        let mut second = SimNet::builder()
+            .fault_seed(7)
+            .jitter_nanos(0, 1000)
+            .build()
+            .unwrap();
+        let order_a = delivered_order(&mut first, 8);
+        let order_b = delivered_order(&mut second, 8);
+        assert_eq!(order_a, order_b, "same seed must reproduce delivery order");
+        assert_eq!(order_a.len(), 8, "no jitter run should drop datagrams");
+        let in_order: Vec<u32> = (0..8).collect();
+        // At least one seed in a small sweep must actually reorder, proving the
+        // knob is not vacuous.
+        let any_reordered = (0..16u64).any(|seed| {
+            let mut net = SimNet::builder()
+                .fault_seed(seed)
+                .jitter_nanos(0, 1000)
+                .build()
+                .unwrap();
+            delivered_order(&mut net, 8) != in_order
+        });
+        assert!(any_reordered, "jitter never reordered across seeds");
+    }
+
+    #[test]
+    fn zero_jitter_preserves_send_order() {
+        let mut net = SimNet::builder().jitter_nanos(0, 0).build().unwrap();
+        assert_eq!(delivered_order(&mut net, 8), (0..8).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn drop_permille_loses_datagrams_deterministically_and_extremes_are_total() {
+        // Certain drop loses everything; zero drop keeps everything.
+        let mut all = SimNet::builder().drop_permille(1000).build().unwrap();
+        assert!(delivered_order(&mut all, 8).is_empty());
+        let mut none = SimNet::builder().drop_permille(0).build().unwrap();
+        assert_eq!(delivered_order(&mut none, 8), (0..8).collect::<Vec<_>>());
+
+        // A partial probability drops some but not all, reproducibly per seed.
+        let received_a = {
+            let mut net = SimNet::builder()
+                .fault_seed(3)
+                .drop_permille(500)
+                .build()
+                .unwrap();
+            delivered_order(&mut net, 32)
+        };
+        let received_b = {
+            let mut net = SimNet::builder()
+                .fault_seed(3)
+                .drop_permille(500)
+                .build()
+                .unwrap();
+            delivered_order(&mut net, 32)
+        };
+        assert_eq!(received_a, received_b, "drops must reproduce per seed");
+        assert!(
+            received_a.len() < 32 && !received_a.is_empty(),
+            "half-probability drop should lose some but not all of 32 datagrams, got {}",
+            received_a.len()
+        );
+    }
+
+    #[test]
+    fn dropped_send_reports_bytes_written_but_queues_nothing() {
+        let mut net = SimNet::builder().drop_permille(1000).build().unwrap();
+        let tx = net.bind("tx").unwrap();
+        net.bind("rx").unwrap();
+        let report = net.send(tx, "rx", b"payload", 0).unwrap();
+        assert_eq!(report.written, 7);
+        assert_eq!(report.copies, 0);
+        assert_eq!(report.disposition, SendDisposition::DroppedByFault);
+        assert_eq!(net.queued_packets(), 0);
+    }
+
+    #[test]
+    fn fault_builder_rejects_invalid_configuration() {
+        let jitter_error = SimNet::builder()
+            .jitter_nanos(100, 10)
+            .build()
+            .err()
+            .expect("inverted jitter range must be rejected");
+        assert_eq!(jitter_error.code, ErrorCode::InvalidInput);
+        let drop_error = SimNet::builder()
+            .drop_permille(1001)
+            .build()
+            .err()
+            .expect("out-of-range drop probability must be rejected");
+        assert_eq!(drop_error.code, ErrorCode::InvalidInput);
     }
 
     #[test]

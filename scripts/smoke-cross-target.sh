@@ -109,13 +109,12 @@ if [[ "$(uname -s)" == Darwin ]]; then
     --allow '_read$NOCANCEL' --allow '_write$NOCANCEL'
     --allow pthread_create_suspended_np --allow pthread_mach_thread_np
     --allow thread_resume
-    --allow dispatch_semaphore_create --allow dispatch_semaphore_wait
-    --allow dispatch_semaphore_signal --allow dispatch_release
+    --allow semaphore_create --allow semaphore_wait
+    --allow semaphore_signal --allow mach_task_self_
   )
 else
   control_plane=(
-    --allow __read --allow __write --allow pthread_create
-    --allow sem_init --allow sem_post --allow sem_wait
+    --allow dlsym --allow pthread_create
   )
 fi
 "$runner" native-audit "$tmp/smoke-native" "${control_plane[@]}" >/dev/null

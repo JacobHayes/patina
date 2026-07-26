@@ -126,3 +126,4 @@ Patina chooses pluggable drivers over one canonical simulation model. This keeps
 5. **Experiments are externally controlled.** Seeds, traces, replay policies, and budgets are CLI/runtime concerns.
 6. **Unsupported effects fail loudly.** Patina does not silently fall back to the host OS.
 7. **Rust comes first.** Native ABI compatibility extends the system but does not define it.
+8. **The shim's own host access is invisible to the guest.** The interposition layer reaches real host primitives by private, resolved-at-runtime aliases, never by naming a symbol the guest could import; allowing the shim its vehicle must never grant the guest an escape. A guest is judged on what it can reach, not on a name the shim happens to share.
