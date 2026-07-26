@@ -1,0 +1,23 @@
+# Standalone package: its own empty [workspace] table keeps it OUT of the root
+# Patina workspace so `cargo` here never touches crates/ or the root manifest.
+[workspace]
+
+[package]
+name = "buggy-smoke"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "buggy-smoke"
+path = "src/main.rs"
+
+# 100% std-pure: NO dependencies at all. Every bug below is expressible with the
+# standard library, and the whole point of this testbed is that the SAME binary
+# is deterministic-and-buggy under Patina with zero code changes.
+[dependencies]
+
+[profile.release]
+# The deadlock watchdog and the panic-free bug paths rely on ordinary unwinding
+# semantics; keep the default so a caught panic doesn't abort the process.
+panic = "unwind"

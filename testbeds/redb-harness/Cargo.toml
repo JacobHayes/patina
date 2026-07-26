@@ -1,0 +1,28 @@
+# Standalone package: its own empty [workspace] table keeps it OUT of the root
+# Patina workspace so `cargo` here never touches crates/ or the root manifest.
+[workspace]
+
+[package]
+name = "redb-harness"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "redb-harness"
+path = "src/main.rs"
+
+[dependencies]
+# The system under test, pinned exact. redb is a pure-Rust embedded key/value
+# store with a single-file on-disk format, MVCC snapshots, and an explicit
+# commit/durability model -- exactly the durability surface the Patina crash
+# filesystem exists to fuzz. No other runtime deps: the workload PRNG is an
+# inline splitmix64 and the state digest is a hand-rolled FNV-1a, so the
+# dependency tree under test is redb and redb alone.
+redb = "=4.1.0"
+
+[profile.release]
+# Keep unwinding so the harness can surface a panic message (invariant
+# violations exit non-zero via process::exit, but a redb bug may panic) and so
+# the future Patina phase gets readable backtraces.
+panic = "unwind"

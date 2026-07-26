@@ -1,0 +1,31 @@
+# Standalone package: its own empty [workspace] table keeps it OUT of the root
+# Patina workspace so `cargo` here never touches crates/ or the root manifest.
+[workspace]
+
+[package]
+name = "raft-harness"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "raft-harness"
+path = "src/main.rs"
+
+[dependencies]
+# tikv raft, pinned exact. Default features select `protobuf-codec`
+# (rust-protobuf), whose codegen is pre-generated and vendored in raft-proto,
+# so the build needs no `protoc` / system packages. See README for the choice.
+raft = { version = "=0.7.0", default-features = false, features = ["prost-codec"] }
+# raft's public API takes a slog::Logger; a Discard drain keeps it silent.
+slog = "2"
+# The eraftpb messages derive `prost::Message`; we encode/decode them for the
+# on-disk log and the UDP transport with the same prost 0.11 raft-proto uses.
+prost = "0.11"
+# 256-bit applied-sequence digest for the RAFT_RESULT line / cross-node compare.
+sha2 = "0.10"
+
+[profile.release]
+# Keep panics as aborts off: the harness relies on catching thread panics /
+# clean exits, and readable backtraces help during the native phase.
+panic = "unwind"
