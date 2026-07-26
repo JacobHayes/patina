@@ -14,7 +14,20 @@
 # Per generation a config is sampled from a space that COMBINES 2-3 fault knobs
 # at once (net drop, net jitter, sleep jitter, fs-crash, kill-plan+restart,
 # storage-fault recovery, proposals, tick) and a self-contained v4 trace is
-# recorded under out-fuzz/gen-G/. The outcome is classified by a PURE function
+# recorded under out-fuzz/gen-G/.
+#
+# Two planes are fuzzed. The MESSAGE/FAULT plane (BREADTH/TRAFFIC tiers, the
+# plain binary) crosses network/storage/kill faults. The SCHEDULE plane
+# (SCHEDULE tier, ~20% of gens, the yield-points binary) isolates thread
+# INTERLEAVINGS at atomics granularity: the yield-points build routes every
+# instrumented edge through the DetScheduler, so a race window that is pure
+# atomics between two interposed boundaries becomes schedulable, and the SEED is
+# the interleaving explorer. SCHEDULE gens keep network faults off (or light) to
+# isolate that plane. Tier selection is a PURE function of G (BYTE[21] gates the
+# schedule overlay; BYTE[18] the original split for the rest), so any generation
+# is still re-runnable by number.
+#
+# The outcome is classified by a PURE function
 # (testable via --selftest) that is deliberately not vacuous: a planted
 # RAFT_VIOLATION is a SAFETY_BUG even on exit 0; an exit 1 is only tolerated for
 # a "heavy" config; an exit 2 only when an fs-crash without recovery is present;
@@ -32,7 +45,17 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
+# Two SEPARATE on-disk artifacts, built ONCE up front (see build_all):
+#   built    -- plain Patina binary (BREADTH/TRAFFIC/DETERMINISM tiers)
+#   built_yp -- yield-points binary (SCHEDULE tier): LLVM sancov trace-pc-guard
+#               instrumentation funnels every instrumented edge through
+#               patina_sched_yield, making atomics-only race windows schedulable.
+# They are distinct files precisely so the sweep never rewrites a binary while a
+# process might be executing it (macOS SIGKILLs a rewritten running binary), and
+# so their traces never cross-replay (the yield-points fingerprint differs by
+# design and native-run fails closed on a mismatch).
 built="$here/target/patina/raft-harness"
+built_yp="$here/target/patina/raft-harness-yp"
 PATINA="$repo_root/target/release/cargo-patina"
 
 # Output dir. Overridable so a verification/triage run can use an isolated dir
@@ -153,8 +176,46 @@ disc_check() {
   if [[ "$unpaced" == OK ]]; then echo WORKLOAD_SHAPE; else echo UNEXPECTED_LIVENESS; fi
 }
 
+# Schedule-divergence verdict -- pure. A SCHEDULE double-run replays the SAME
+# yield-points binary at the same seed; determinism must hold per (seed, binary)
+# even under the ~100x-denser yield-point schedule. A mismatch is a
+# SCHEDULE_DIVERGENCE -- kept DISTINCT from a plain-tier DETERMINISM_BUG so triage
+# knows the yield-point scheduling path is what diverged. (A yp trace replayed
+# against a plain binary fails closed by fingerprint by design; that is native-run
+# guarding the boundary, not this check, and is never weakened to paper over it.)
+sched_det_check() {
+  # args: primary r1 r2 h1 h2
+  local primary="$1" r1="$2" r2="$3" h1="$4" h2="$5"
+  if [[ "$r1" == "$r2" && "$h1" == "$h2" ]]; then echo "$primary"; else echo SCHEDULE_DIVERGENCE; fi
+}
+
+# Schedule-vacuity verdict -- pure. For a SCHEDULE-tier run the whole point is a
+# NON-vacuous exploration: the yield-points binary must produce FAR more
+# scheduling boundaries than an uninstrumented run (empirically ~100x: a plain
+# 3-node run is ~1.1k boundaries, the yield-points build ~110k), and no spawned
+# worker may go vacuous. Given a base class plus the run's vacuous-thread count
+# and total boundary count, a would-be-clean SCHEDULE result whose exploration did
+# NOT actually happen (instrumentation failed to bite, or a plain binary slipped
+# into the schedule slot) is promoted to VACUOUS_SCHEDULE, so a vacuous "all
+# clean" can never masquerade as real schedule coverage. A genuine finding
+# (anything that is not a clean OK) keeps priority and is never downgraded -- we
+# do not hide a crash/safety bug/divergence behind a vacuity note.
+SCHEDULE_MIN_BOUNDARIES=5000
+sched_check() {
+  # args: is_schedule base_class vacuous_threads total_boundaries
+  local is_sched="$1" base="$2" vac="$3" tb="$4"
+  if [[ "$is_sched" != 1 ]]; then echo "$base"; return; fi
+  if [[ "$base" != OK ]]; then echo "$base"; return; fi
+  if [[ -n "$vac" && "$vac" -gt 0 ]]; then echo VACUOUS_SCHEDULE; return; fi
+  if [[ -z "$tb" || "$tb" -lt "$SCHEDULE_MIN_BOUNDARIES" ]]; then echo VACUOUS_SCHEDULE; return; fi
+  echo OK
+}
+
 # A class is a FAILURE unless it is a tolerated / neutral outcome. WORKLOAD_SHAPE
 # is neutral: it is a harness-shape artifact, not a raft/patina fault finding.
+# VACUOUS_SCHEDULE and SCHEDULE_DIVERGENCE are failures (not tolerated): a
+# schedule tier that did not explore, or a yield-point run that is
+# nondeterministic, is a broken guarantee that must fire loudly.
 is_failure() {
   case "$1" in
     OK|LIVENESS_TIMEOUT|FAILCLOSED_ABORT|WORKLOAD_SHAPE) return 1 ;;
@@ -167,15 +228,22 @@ is_failure() {
 # byte i is HEX[2i..2i+1] as 0..255 (global BYTE[]). Every knob -- AND the config
 # TIER -- is a function of these bytes, so any generation is re-runnable by G.
 #
-# Tiers (chosen from BYTE[18]):
+# Tiers:
+#   ~20% SCHEDULE     BYTE[21]<=50 overlay: isolate the interleaving plane on the
+#                     yield-points binary (network off/light). This overlay is
+#                     checked FIRST and gates on BYTE[21], so the remaining ~80%
+#                     keep their EXACT original BYTE[18] mapping below.
+#   The remaining ~80% split by BYTE[18] as before:
 #   ~80% BREADTH      short combined-fault space (proposals 20/40)
 #   ~15% TRAFFIC      long-horizon paced realistic traffic (proposals 200/400)
-#    ~5% DETERMINISM  a config from EITHER space, run twice, byte-identical
-#                     required (this replaces the old "every 10th gen" rule)
+#    ~5% DETERMINISM  a config from breadth/traffic/schedule, run twice,
+#                     byte-identical required (replaces the old "every 10th gen")
+# Net effect over all G: SCHEDULE ~20%, BREADTH ~64%, TRAFFIC ~12%, DET ~4%.
 #
 # Every sampler sets globals: PKNOBS[] (native-run knobs, before --), HARGS[]
 # (harness args, after --), CFG_SUMMARY, HEAVY, FS_CRASH, RECOVER, PROPOSALS.
-# derive_config additionally sets TIER and DET_RUN (1 => run twice & compare).
+# derive_config additionally sets TIER, DET_RUN (1 => run twice & compare),
+# IS_SCHEDULE (1 => yield-points tier), and BIN (which binary to run).
 ###############################################################################
 
 # Fill global BYTE[0..31] from SHA-256("patina-fuzz-$G").
@@ -342,24 +410,77 @@ sample_traffic() {
   CFG_SUMMARY="seed=$G drop=$drop jitter=${jmin_ms}-${jmax_ms}ms sleep=off fscrash=off recover=0 kill=$kspec proposals=$PROPOSALS window=$pw tick=$tick timeout=${timeout}s heavy=$HEAVY"
 }
 
-# Pick the tier for G and sample it. DETERMINISM draws from either space and
-# marks DET_RUN so the runner executes the config twice and compares.
+# SCHEDULE tier: isolate the interleaving (schedule) plane on the yield-points
+# binary. That build's LLVM sancov trace-pc-guard instrumentation funnels every
+# instrumented edge through patina_sched_yield, so atomics-only race windows
+# between interposed boundaries become schedulable -- empirically ~100x more
+# scheduling boundaries than the plain binary. The SEED is the explorer:
+# patina's DetScheduler derives its choice at each of the (now vastly more
+# numerous) boundaries from the seed, so seed variation walks the interleaving
+# space. Network faults are OFF for most gens (isolate the schedule plane); ~1/3
+# add LIGHT drop so schedule diversity crosses light message loss. No jitter, no
+# sleep jitter, no fs-crash, no kills -- HEAVY is always 0, so a liveness timeout
+# here is NEVER tolerated (a clean cluster must always converge). Small proposal
+# counts: the plane is interleaving-dominated and each boundary is a real
+# scheduling point, so a small workload already exercises a huge decision space
+# cheaply (yield-points guidance: use SMALL iters to catch races).
+sample_schedule() {
+  local G="$1"
+  IS_SCHEDULE=1
+  BIN="$built_yp"
+
+  local props_tbl=(20 20 40)
+  PROPOSALS=${props_tbl[$(( BYTE[16] % 3 ))]}
+  local tick_tbl=(80 100 150)
+  local tick=${tick_tbl[$(( BYTE[17] % 3 ))]}
+
+  # Network mostly OFF (isolate schedule); ~1/3 gets light drop only.
+  local drop_tbl=(0 0 0 0 50 100)
+  local drop=${drop_tbl[$(( BYTE[0] % 6 ))]}
+
+  FS_CRASH=0; RECOVER=0
+
+  local timeout=$(( TIMEOUT_SECS * PROPOSALS / 20 ))
+  CFG_TIMEOUT=$timeout
+
+  PKNOBS=(--seed "$G")
+  (( drop > 0 )) && PKNOBS+=(--net-drop-permille "$drop")
+
+  HARGS=(--seed "$G" --proposals "$PROPOSALS" --base-port "$BASE_PORT"
+         --data-dir "$DATA_DIR" --timeout-secs "$timeout" --tick-millis "$tick")
+
+  HEAVY=0    # no heavy faults in the schedule plane -> a timeout is never honest
+
+  CFG_SUMMARY="seed=$G drop=$drop jitter=off sleep=off fscrash=off recover=0 kill=off proposals=$PROPOSALS tick=$tick timeout=${timeout}s heavy=0 plane=SCHEDULE(yield-points)"
+}
+
+# Pick the tier for G and sample it. The SCHEDULE overlay is gated on BYTE[21]
+# and checked FIRST so the remaining generations keep their exact original
+# BYTE[18] mapping. DETERMINISM draws from breadth/traffic/schedule and marks
+# DET_RUN so the runner executes the config twice and compares (SCHEDULE draws
+# replay against the SAME yield-points binary -- fingerprints differ by build).
 derive_config() {
   local G="$1"
   compute_bytes "$G"
   DET_RUN=0
+  IS_SCHEDULE=0
+  BIN="$built"
+  if (( BYTE[21] <= 50 )); then     # ~20% SCHEDULE overlay (preserves the
+    TIER=SCHEDULE; sample_schedule "$G"   # BYTE[18] mapping for the other ~80%)
+    return
+  fi
   local t=${BYTE[18]}
-  if (( t <= 204 )); then           # ~80%
+  if (( t <= 204 )); then           # ~80% of the remainder
     TIER=BREADTH; sample_breadth "$G"
   elif (( t <= 242 )); then         # ~15%
     TIER=TRAFFIC; sample_traffic "$G"
   else                              # ~5%
     DET_RUN=1
-    if (( BYTE[19] % 2 == 0 )); then
-      TIER="DETERMINISM/breadth"; sample_breadth "$G"
-    else
-      TIER="DETERMINISM/traffic"; sample_traffic "$G"
-    fi
+    case $(( BYTE[19] % 3 )) in
+      0) TIER="DETERMINISM/breadth"; sample_breadth "$G" ;;
+      1) TIER="DETERMINISM/traffic"; sample_traffic "$G" ;;
+      2) TIER="DETERMINISM/schedule"; sample_schedule "$G" ;;
+    esac
   fi
 }
 
@@ -475,6 +596,59 @@ $vacuous_warn")" "ok-vacuous-warn"
   assert_class UNEXPECTED_LIVENESS \
     "$(disc_check UNEXPECTED_LIVENESS)" "disc-still-nonlive"
 
+  # SCHEDULE tier -- sched_det_check (determinism under the yield-points binary).
+  # Identical result+trace confirms the primary class; any divergence in either
+  # the RAFT_RESULT or the trace SHA is a SCHEDULE_DIVERGENCE (distinct from the
+  # plain-tier DETERMINISM_BUG so triage knows the yield-point path diverged).
+  assert_class OK \
+    "$(sched_det_check OK 'RAFT_RESULT a' 'RAFT_RESULT a' 'hashA' 'hashA')" "sched-det-identical"
+  assert_class SCHEDULE_DIVERGENCE \
+    "$(sched_det_check OK 'RAFT_RESULT a' 'RAFT_RESULT b' 'hashA' 'hashA')" "sched-det-result-diff"
+  assert_class SCHEDULE_DIVERGENCE \
+    "$(sched_det_check OK 'RAFT_RESULT a' 'RAFT_RESULT a' 'hashA' 'hashB')" "sched-det-trace-diff"
+
+  # SCHEDULE tier -- sched_check (vacuity gate). A SCHEDULE run must actually
+  # explore: a clean OK with a healthy boundary count and zero vacuous workers
+  # stays OK; a vacuous worker OR a boundary count below the floor promotes a
+  # would-be-clean OK to VACUOUS_SCHEDULE; a real finding is NEVER downgraded; and
+  # a non-schedule run passes its base class straight through.
+  assert_class OK \
+    "$(sched_check 1 OK 0 110574)" "sched-nonvacuous-ok"
+  assert_class VACUOUS_SCHEDULE \
+    "$(sched_check 1 OK 1 110574)" "sched-vacuous-worker"
+  assert_class VACUOUS_SCHEDULE \
+    "$(sched_check 1 OK 0 1135)" "sched-below-boundary-floor"
+  assert_class VACUOUS_SCHEDULE \
+    "$(sched_check 1 OK 0 '')" "sched-no-report"
+  # A genuine finding on a SCHEDULE gen keeps priority even if the run looks
+  # vacuous -- detection-first: never hide a crash/safety bug behind vacuity.
+  assert_class SAFETY_BUG \
+    "$(sched_check 1 SAFETY_BUG 0 100)" "sched-finding-not-downgraded"
+  assert_class UNEXPECTED_CRASH \
+    "$(sched_check 1 UNEXPECTED_CRASH 1 0)" "sched-crash-not-downgraded"
+  # A non-schedule run is untouched by the gate (base passes through unchanged),
+  # so the vacuity logic can never affect a plain BREADTH/TRAFFIC generation.
+  assert_class OK \
+    "$(sched_check 0 OK 0 1135)" "sched-nonschedule-passthrough"
+
+  # report_field extracts the schedule-report numbers the gate reads. Prove it
+  # pulls the right values from a real PATINA_SCHEDULE_REPORT line -- including the
+  # EXTENDED per-task suffix (.../life=N/cause=X lifetime+completion-cause
+  # annotation), which must not perturb the total_boundaries/vacuous_threads
+  # extraction -- and that sched_check then judges it correctly.
+  local sched_stderr_file; sched_stderr_file="$(mktemp)"
+  printf '%s\n' 'PATINA_SCHEDULE_REPORT tasks_spawned=4 max_concurrent=4 total_boundaries=110574 vacuous_threads=0 task1=17712y+28p/life=140574/cause=completed task4=51182y+17p/life=0/cause=live-at-exit' > "$sched_stderr_file"
+  local rf_tb rf_vac
+  rf_tb=$(report_field total_boundaries "$sched_stderr_file")
+  rf_vac=$(report_field vacuous_threads "$sched_stderr_file")
+  if [[ "$rf_tb" == 110574 && "$rf_vac" == 0 ]]; then
+    printf '  ok   %-20s -> tb=%s vac=%s\n' "report-field-parse" "$rf_tb" "$rf_vac"
+  else
+    printf '  FAIL %-20s -> tb=%s vac=%s (want 110574/0)\n' "report-field-parse" "$rf_tb" "$rf_vac"; SELFTEST_FAIL=1
+  fi
+  assert_class OK "$(sched_check 1 OK "$rf_vac" "$rf_tb")" "report-field-nonvacuous"
+  rm -f "$sched_stderr_file"
+
   # Marker precision: an infrastructure "cargo-patina: ..." line must NOT be
   # matched as a patina runtime crash (the bare "patina: " used to false-match
   # the "cargo-patina:" prefix). With no fs-crash + exit 2 this is UNEXPECTED_ABORT,
@@ -507,13 +681,28 @@ $vacuous_warn")" "ok-vacuous-warn"
 ###############################################################################
 build_all() {
   cd "$repo_root"
-  echo "==> building cargo-patina and the harness under Patina"
+  echo "==> building cargo-patina and BOTH harness binaries (plain + yield-points)"
   if ! cargo build --release --quiet -p cargo-patina; then
     echo "FATAL: cargo build -p cargo-patina failed" >&2; exit 3
   fi
   mkdir -p "$here/target/patina"
+  # Plain binary (BREADTH/TRAFFIC/DETERMINISM tiers). No --allow-unsupported-symbols:
+  # the harness passes the default-deny gate clean.
   if ! "$PATINA" patina native-build "$here" --output "$built" --release >/dev/null; then
-    echo "FATAL: native-build failed" >&2; exit 3
+    echo "FATAL: native-build (plain) failed" >&2; exit 3
+  fi
+  # Yield-points binary (SCHEDULE tier). SEPARATE artifact; built ONCE here,
+  # before the sweep loop, and NEVER rewritten while a run may be executing it
+  # (macOS SIGKILLs a rewritten running binary).
+  if ! "$PATINA" patina native-build "$here" --output "$built_yp" --release --yield-points >/dev/null; then
+    echo "FATAL: native-build (--yield-points) failed" >&2; exit 3
+  fi
+  # The SCHEDULE tier's entire value depends on the instrumentation being present:
+  # a plain binary in this slot would make every SCHEDULE gen silently vacuous.
+  # Fail loudly here rather than discover it per-gen (the sched-vacuity gate is the
+  # second line of defense).
+  if ! /usr/bin/grep -a -q "PATINA_YIELD_POINTS_V1" "$built_yp"; then
+    echo "FATAL: yield-points binary lacks the PATINA_YIELD_POINTS_V1 marker" >&2; exit 3
   fi
 }
 
@@ -524,7 +713,7 @@ sha_of()   { if [[ -f "$1" ]]; then shasum -a256 "$1" | cut -d' ' -f1; else echo
 # per-class counters (bash 3.2: no associative arrays)
 c_OK=0; c_SAFETY_BUG=0; c_LIVENESS_TIMEOUT=0; c_UNEXPECTED_LIVENESS=0
 c_FAILCLOSED_ABORT=0; c_UNEXPECTED_ABORT=0; c_UNEXPECTED_CRASH=0; c_DETERMINISM_BUG=0
-c_INFRA_ERROR=0; c_WORKLOAD_SHAPE=0
+c_INFRA_ERROR=0; c_WORKLOAD_SHAPE=0; c_VACUOUS_SCHEDULE=0; c_SCHEDULE_DIVERGENCE=0
 bump() {
   case "$1" in
     OK) c_OK=$(( c_OK + 1 )) ;;
@@ -537,18 +726,28 @@ bump() {
     DETERMINISM_BUG) c_DETERMINISM_BUG=$(( c_DETERMINISM_BUG + 1 )) ;;
     INFRA_ERROR) c_INFRA_ERROR=$(( c_INFRA_ERROR + 1 )) ;;
     WORKLOAD_SHAPE) c_WORKLOAD_SHAPE=$(( c_WORKLOAD_SHAPE + 1 )) ;;
+    VACUOUS_SCHEDULE) c_VACUOUS_SCHEDULE=$(( c_VACUOUS_SCHEDULE + 1 )) ;;
+    SCHEDULE_DIVERGENCE) c_SCHEDULE_DIVERGENCE=$(( c_SCHEDULE_DIVERGENCE + 1 )) ;;
   esac
 }
 
 FAIL_DIRS=()
 INFRA_DIRS=()
-c_t_breadth=0; c_t_traffic=0; c_t_determinism=0
+c_t_breadth=0; c_t_traffic=0; c_t_determinism=0; c_t_schedule=0
 tier_bump() {
   case "$1" in
+    SCHEDULE) c_t_schedule=$(( c_t_schedule + 1 )) ;;
     BREADTH) c_t_breadth=$(( c_t_breadth + 1 )) ;;
     TRAFFIC) c_t_traffic=$(( c_t_traffic + 1 )) ;;
     DETERMINISM/*) c_t_determinism=$(( c_t_determinism + 1 )) ;;
   esac
+}
+
+# Extract a numeric field from the run's PATINA_SCHEDULE_REPORT stderr line
+# (e.g. total_boundaries, vacuous_threads). Empty if the line/field is absent.
+report_field() {
+  # args: field_name stderr_file
+  /usr/bin/grep -o "$1=[0-9][0-9]*" "$2" 2>/dev/null | head -1 | cut -d= -f2
 }
 
 # --dry-run [START [END]] : print the derived config (and exact command) for a
@@ -558,9 +757,10 @@ dry_run() {
   local s="$1" e="$2" G
   for (( G = s; G <= e; G++ )); do
     derive_config "$G"
-    printf 'gen=%s tier=%s det_run=%s %s\n' "$G" "$TIER" "$DET_RUN" "$CFG_SUMMARY"
+    printf 'gen=%s tier=%s det_run=%s schedule=%s bin=%s %s\n' \
+      "$G" "$TIER" "$DET_RUN" "$IS_SCHEDULE" "$(basename "$BIN")" "$CFG_SUMMARY"
     printf '    cmd: '
-    printf '%q ' "$PATINA" patina native-run "$built" "${PKNOBS[@]}" --record "$OUTDIR/gen-$G/trace" -- "${HARGS[@]}"
+    printf '%q ' "$PATINA" patina native-run "$BIN" "${PKNOBS[@]}" --record "$OUTDIR/gen-$G/trace" -- "${HARGS[@]}"
     echo
   done
 }
@@ -578,12 +778,12 @@ run_gen() {
   # Authoritative reproducer command line.
   {
     echo "# generation $G  ($CFG_SUMMARY)"
-    printf '%q ' "$PATINA" patina native-run "$built" "${PKNOBS[@]}" --record "$trace" -- "${HARGS[@]}"
+    printf '%q ' "$PATINA" patina native-run "$BIN" "${PKNOBS[@]}" --record "$trace" -- "${HARGS[@]}"
     echo
   } > "$gd/config.txt"
 
   local code=0
-  if "$PATINA" patina native-run "$built" "${PKNOBS[@]}" --record "$trace" -- "${HARGS[@]}" \
+  if "$PATINA" patina native-run "$BIN" "${PKNOBS[@]}" --record "$trace" -- "${HARGS[@]}" \
         >"$out" 2>"$err"; then code=0; else code=$?; fi
 
   # Infrastructure guard: a cargo-patina/build/environment failure (concurrent
@@ -591,7 +791,7 @@ run_gen() {
   # NOT a raft/patina bug and must never be reported as one. Detect it, retry
   # ONCE, and if it recurs mark INFRA_ERROR (surfaced, kept, but not a bug find).
   if is_infra "$(cat "$out")" "$(cat "$err")"; then
-    if "$PATINA" patina native-run "$built" "${PKNOBS[@]}" --record "$trace" -- "${HARGS[@]}" \
+    if "$PATINA" patina native-run "$BIN" "${PKNOBS[@]}" --record "$trace" -- "${HARGS[@]}" \
           >"$out" 2>"$err"; then code=0; else code=$?; fi
     if is_infra "$(cat "$out")" "$(cat "$err")"; then
       bump INFRA_ERROR
@@ -630,7 +830,7 @@ run_gen() {
       [[ "${HARGS[i]}" == "--timeout-secs" ]] && { eargs+=("$big"); i=$(( i + 1 )); }
     done
     local eout="$gd/stdout.liveness10x" eerr="$gd/stderr.liveness10x" ecode=0
-    if "$PATINA" patina native-run "$built" "${PKNOBS[@]}" -- "${eargs[@]}" \
+    if "$PATINA" patina native-run "$BIN" "${PKNOBS[@]}" -- "${eargs[@]}" \
           >"$eout" 2>"$eerr"; then ecode=0; else ecode=$?; fi
     local ec ep everdict
     ec=$(field_of committed "$eout"); ep=$(field_of proposals "$eout")
@@ -657,7 +857,7 @@ run_gen() {
       done
       (( saw_window == 0 )) && dargs+=(--propose-window 0)
       local dout="$gd/stdout.window0" derr="$gd/stderr.window0" dcode=0
-      if "$PATINA" patina native-run "$built" "${PKNOBS[@]}" -- "${dargs[@]}" \
+      if "$PATINA" patina native-run "$BIN" "${PKNOBS[@]}" -- "${dargs[@]}" \
             >"$dout" 2>"$derr"; then dcode=0; else dcode=$?; fi
       local dc dp dverdict
       dc=$(field_of committed "$dout"); dp=$(field_of proposals "$dout")
@@ -677,27 +877,60 @@ run_gen() {
 
   # DETERMINISM tier: re-run the identical config and require byte-identical
   # RAFT_RESULT + trace SHA-256 (replaces the old every-10th-generation rule).
+  # A SCHEDULE-drawn determinism run replays the SAME yield-points binary ($BIN
+  # is already the yp binary here) -- fingerprints differ across builds by design,
+  # so cross-build replay is never attempted -- and a mismatch is reported as
+  # SCHEDULE_DIVERGENCE to flag that the denser yield-point schedule diverged.
   local det_note=""
   if (( DET_RUN == 1 )); then
     local trace2="$gd/trace.rerun" out2="$gd/stdout.rerun" err2="$gd/stderr.rerun"
-    "$PATINA" patina native-run "$built" "${PKNOBS[@]}" --record "$trace2" -- "${HARGS[@]}" \
+    "$PATINA" patina native-run "$BIN" "${PKNOBS[@]}" --record "$trace2" -- "${HARGS[@]}" \
         >"$out2" 2>"$err2" || true
     local r1 r2 h1 h2
     r1=$(grep '^RAFT_RESULT' "$out"  2>/dev/null || true)
     r2=$(grep '^RAFT_RESULT' "$out2" 2>/dev/null || true)
     h1=$(sha_of "$trace"); h2=$(sha_of "$trace2")
     local verdict
-    verdict=$(det_check "$class" "$r1" "$r2" "$h1" "$h2")
-    if [[ "$verdict" == DETERMINISM_BUG ]]; then
-      class=DETERMINISM_BUG
-      det_note=" DETERMINISM(rerun): result1='$r1' result2='$r2' trace1=$h1 trace2=$h2"
+    if (( IS_SCHEDULE == 1 )); then
+      verdict=$(sched_det_check "$class" "$r1" "$r2" "$h1" "$h2")
+      if [[ "$verdict" == SCHEDULE_DIVERGENCE ]]; then
+        class=SCHEDULE_DIVERGENCE
+        det_note=" SCHEDULE_DIVERGENCE(rerun, same yield-points binary): result1='$r1' result2='$r2' trace1=$h1 trace2=$h2"
+      else
+        det_note=" schedule-determinism-ok(trace=$h1)"
+      fi
     else
-      det_note=" determinism-ok(trace=$h1)"
+      verdict=$(det_check "$class" "$r1" "$r2" "$h1" "$h2")
+      if [[ "$verdict" == DETERMINISM_BUG ]]; then
+        class=DETERMINISM_BUG
+        det_note=" DETERMINISM(rerun): result1='$r1' result2='$r2' trace1=$h1 trace2=$h2"
+      else
+        det_note=" determinism-ok(trace=$h1)"
+      fi
+    fi
+  fi
+
+  # Schedule-vacuity gate (SCHEDULE tier only, applied LAST so it never downgrades
+  # a real finding). Confirm the yield-points run actually explored a dense
+  # schedule: a clean OK that produced no more boundaries than an uninstrumented
+  # run, or that flagged a vacuous worker, is promoted to VACUOUS_SCHEDULE so a
+  # vacuous "all clean" can never masquerade as real schedule coverage.
+  local sched_note=""
+  if (( IS_SCHEDULE == 1 )); then
+    local vac tb sclass
+    vac=$(report_field vacuous_threads "$err")
+    tb=$(report_field total_boundaries "$err")
+    sclass=$(sched_check 1 "$class" "${vac:-}" "${tb:-}")
+    if [[ "$sclass" != "$class" ]]; then
+      class="$sclass"
+      sched_note=" (VACUOUS_SCHEDULE: total_boundaries=${tb:-?} vacuous_threads=${vac:-?} floor=$SCHEDULE_MIN_BOUNDARIES -- yield-point instrumentation did not create schedule choice; result is NOT real coverage)"
+    else
+      sched_note=" schedule(boundaries=${tb:-?} vacuous=${vac:-0})"
     fi
   fi
 
   bump "$class"
-  local logline="gen=$G tier=$TIER class=$class exit=$code committed=${committed:-?}/${proposals:-?} terms=${terms:-?} restarts=${restarts:-0} config='$CFG_SUMMARY'$live_note$det_note"
+  local logline="gen=$G tier=$TIER class=$class exit=$code committed=${committed:-?}/${proposals:-?} terms=${terms:-?} restarts=${restarts:-0} config='$CFG_SUMMARY'$live_note$det_note$sched_note"
   echo "$logline" >> "$SWEEP_LOG"
   echo "$logline"
 
@@ -738,7 +971,25 @@ sweep() {
   # Trap references the GLOBAL (in scope when EXIT fires post-return), not $lock.
   trap 'rm -rf "${FUZZ_LOCK:-}" 2>/dev/null || true' EXIT
 
-  build_all
+  # PATINA_FUZZ_SKIP_BUILD=1 continues a campaign against the EXISTING on-disk
+  # binaries without rebuilding (default: build both fresh). Used to append a
+  # further range to a running/verified campaign while guaranteeing the exact
+  # verified artifacts are what runs -- a rebuild would re-link fresh binaries.
+  # It still hard-fails if either binary is missing or the yield-points binary
+  # has lost its instrumentation marker (would make every SCHEDULE gen vacuous).
+  if [[ "${PATINA_FUZZ_SKIP_BUILD:-0}" == 1 ]]; then
+    if [[ ! -x "$built" || ! -x "$built_yp" ]]; then
+      echo "FATAL: PATINA_FUZZ_SKIP_BUILD=1 but a binary is missing ($built / $built_yp)" >&2; exit 3
+    fi
+    if ! /usr/bin/grep -a -q "PATINA_YIELD_POINTS_V1" "$built_yp"; then
+      echo "FATAL: existing yield-points binary lacks the PATINA_YIELD_POINTS_V1 marker" >&2; exit 3
+    fi
+    echo "==> PATINA_FUZZ_SKIP_BUILD=1: using existing binaries, NO rebuild"
+    echo "    plain=$built"
+    echo "    yp   =$built_yp"
+  else
+    build_all
+  fi
   mkdir -p "$OUTDIR"
   touch "$SWEEP_LOG"
   echo "==> fuzz sweep generations $start..$end (log: $SWEEP_LOG)"
@@ -748,10 +999,10 @@ sweep() {
   done
 
   local total=$(( end - start + 1 ))
-  local failures=$(( c_SAFETY_BUG + c_UNEXPECTED_LIVENESS + c_UNEXPECTED_ABORT + c_UNEXPECTED_CRASH + c_DETERMINISM_BUG ))
+  local failures=$(( c_SAFETY_BUG + c_UNEXPECTED_LIVENESS + c_UNEXPECTED_ABORT + c_UNEXPECTED_CRASH + c_DETERMINISM_BUG + c_VACUOUS_SCHEDULE + c_SCHEDULE_DIVERGENCE ))
   echo
   echo "==> sweep summary (generations $start..$end, $total total)"
-  echo "    tiers: BREADTH=$c_t_breadth TRAFFIC=$c_t_traffic DETERMINISM=$c_t_determinism"
+  echo "    tiers: SCHEDULE=$c_t_schedule BREADTH=$c_t_breadth TRAFFIC=$c_t_traffic DETERMINISM=$c_t_determinism"
   echo "    OK                  = $c_OK"
   echo "    LIVENESS_TIMEOUT    = $c_LIVENESS_TIMEOUT   (tolerated: heavy config)"
   echo "    FAILCLOSED_ABORT    = $c_FAILCLOSED_ABORT   (tolerated: fs-crash w/o recovery)"
@@ -762,6 +1013,8 @@ sweep() {
   echo "    UNEXPECTED_ABORT    = $c_UNEXPECTED_ABORT"
   echo "    UNEXPECTED_CRASH    = $c_UNEXPECTED_CRASH"
   echo "    DETERMINISM_BUG     = $c_DETERMINISM_BUG"
+  echo "    VACUOUS_SCHEDULE    = $c_VACUOUS_SCHEDULE   (SCHEDULE gen did not explore -- instrumentation did not bite)"
+  echo "    SCHEDULE_DIVERGENCE = $c_SCHEDULE_DIVERGENCE   (yield-points double-run non-deterministic)"
   echo "    TOTAL FAILURES      = $failures"
   echo "    -- infrastructure (NOT bugs; results incomplete for these gens) --"
   echo "    INFRA_ERROR         = $c_INFRA_ERROR"

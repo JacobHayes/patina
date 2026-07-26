@@ -127,6 +127,31 @@ pub struct CrashPoint {
     pub ordinal: u64,
 }
 
+/// How a task's schedule accounting ended. Derived purely from the task-lifecycle
+/// shadow at report time — driven by the same recorded ops on record and replay,
+/// so it reproduces exactly. There is no panic/abort cause at this layer: a guest
+/// panic aborts the process, so a task the runtime observed is either one it saw
+/// completed or one still live when the run ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskCompletionCause {
+    /// The task ran a `TaskComplete` boundary (a std thread body returned and was
+    /// joined, or the guest completed the task explicitly).
+    Completed,
+    /// The task was still live when the run ended — the initial thread of control
+    /// that reached process exit, or a detached worker never joined.
+    LiveAtExit,
+}
+
+impl TaskCompletionCause {
+    /// Stable machine-readable token used in the `PATINA_SCHEDULE_REPORT` line.
+    fn as_str(self) -> &'static str {
+        match self {
+            TaskCompletionCause::Completed => "completed",
+            TaskCompletionCause::LiveAtExit => "live-at-exit",
+        }
+    }
+}
+
 /// Per-task scheduling-boundary count and whether the task's body was
 /// effectively unexplorable — it ran from first scheduled to completion without
 /// ever passing a scheduling boundary (yield or park), so no seed could
@@ -143,6 +168,15 @@ pub struct TaskScheduleStat {
     /// Total scheduling boundaries (`yields + parks`) between spawn and
     /// completion.
     pub boundaries: u64,
+    /// Global scheduling-event steps the task was live for: the span of
+    /// task-lifecycle boundaries (across all tasks) between this task's spawn and
+    /// its completion (or the run's end, for a task still live). Orthogonal to
+    /// `boundaries` (this task's own activity): it captures longevity/overlap, so
+    /// a short-lived helper and a run-long coordinator are distinguishable even
+    /// when their own boundary counts match.
+    pub lifetime: u64,
+    /// How the task's accounting ended (completed vs still live at run end).
+    pub cause: TaskCompletionCause,
     /// A spawned worker (not the initial task) that completed without ever
     /// yielding on the effect surface: its interleavings are unreachable at any
     /// seed.
@@ -783,6 +817,8 @@ struct LiveTask {
     order: u64,
     yields: u64,
     parks: u64,
+    /// Global scheduling-step clock value when this task was spawned.
+    spawn_step: u64,
 }
 
 /// A completed task's final schedule accounting.
@@ -791,6 +827,10 @@ struct CompletedTask {
     order: u64,
     yields: u64,
     parks: u64,
+    /// Global scheduling-step clock value at spawn and at completion; their
+    /// difference is the task's lifetime in scheduling steps.
+    spawn_step: u64,
+    complete_step: u64,
 }
 
 /// Yield count that spawning and joining a std thread incurs on its own —
@@ -832,66 +872,105 @@ struct ScheduleTracker {
     completed: Vec<CompletedTask>,
     spawned: u64,
     max_concurrent: u64,
+    /// Monotonic global scheduling-event clock: every task-lifecycle boundary
+    /// (spawn/yield/park/complete, on any task) advances it by one. Stamped at a
+    /// task's spawn and completion to derive its lifetime. Driven entirely by the
+    /// recorded ops, so it advances identically on record and replay.
+    steps: u64,
 }
 
 impl ScheduleTracker {
     fn on_spawn(&mut self, task: TaskId) {
         let order = self.spawned;
         self.spawned += 1;
+        self.steps += 1;
         self.live.insert(
             task,
             LiveTask {
                 order,
                 yields: 0,
                 parks: 0,
+                spawn_step: self.steps,
             },
         );
         self.max_concurrent = self.max_concurrent.max(self.live.len() as u64);
     }
 
     fn on_yield(&mut self, task: TaskId) {
+        self.steps += 1;
         if let Some(live) = self.live.get_mut(&task) {
             live.yields += 1;
         }
     }
 
     fn on_park(&mut self, task: TaskId) {
+        self.steps += 1;
         if let Some(live) = self.live.get_mut(&task) {
             live.parks += 1;
         }
     }
 
     fn on_complete(&mut self, task: TaskId) {
+        self.steps += 1;
         if let Some(live) = self.live.remove(&task) {
             self.completed.push(CompletedTask {
                 task,
                 order: live.order,
                 yields: live.yields,
                 parks: live.parks,
+                spawn_step: live.spawn_step,
+                complete_step: self.steps,
             });
         }
     }
 
     fn diagnostics(&self) -> ScheduleDiagnostics {
-        let mut records: Vec<(u64, TaskId, u64, u64)> = self
+        // Each record carries the completion step as `Option`: `Some` for a task
+        // the runtime saw complete, `None` for one still live at run end (whose
+        // lifetime runs to the current step clock).
+        let mut records: Vec<(u64, TaskId, u64, u64, u64, Option<u64>)> = self
             .completed
             .iter()
-            .map(|done| (done.order, done.task, done.yields, done.parks))
-            .chain(
-                self.live
-                    .iter()
-                    .map(|(task, live)| (live.order, *task, live.yields, live.parks)),
-            )
+            .map(|done| {
+                (
+                    done.order,
+                    done.task,
+                    done.yields,
+                    done.parks,
+                    done.spawn_step,
+                    Some(done.complete_step),
+                )
+            })
+            .chain(self.live.iter().map(|(task, live)| {
+                (
+                    live.order,
+                    *task,
+                    live.yields,
+                    live.parks,
+                    live.spawn_step,
+                    None,
+                )
+            }))
             .collect();
-        records.sort_by_key(|(order, _, _, _)| *order);
+        records.sort_by_key(|(order, _, _, _, _, _)| *order);
         let total_boundaries = records
             .iter()
-            .map(|(_, _, yields, parks)| yields + parks)
+            .map(|(_, _, yields, parks, _, _)| yields + parks)
             .sum();
         let mut vacuous = Vec::new();
         let tasks = records
             .iter()
-            .map(|&(order, task, yields, parks)| {
+            .map(|&(order, task, yields, parks, spawn_step, complete_step)| {
+                // Lifetime spans global scheduling steps from spawn to completion
+                // (or to the run's end for a still-live task). Cause distinguishes
+                // the two.
+                let (lifetime, cause) = match complete_step {
+                    Some(end) => (end.saturating_sub(spawn_step), TaskCompletionCause::Completed),
+                    None => (
+                        self.steps.saturating_sub(spawn_step),
+                        TaskCompletionCause::LiveAtExit,
+                    ),
+                };
                 // The initial task (spawn order 0) is the guest's own thread of
                 // control, not a spawned worker, so it is not a vacuity signal.
                 // A spawned worker whose yields do not clear the thread-lifecycle
@@ -913,6 +992,8 @@ impl ScheduleTracker {
                     yields,
                     parks,
                     boundaries: yields + parks,
+                    lifetime,
+                    cause,
                     vacuous: is_vacuous,
                 }
             })
@@ -2607,8 +2688,12 @@ fn emit_schedule_report(diag: &ScheduleDiagnostics) {
     );
     for stat in &diag.tasks {
         line.push_str(&format!(
-            " task{}={}y+{}p",
-            stat.task.0, stat.yields, stat.parks
+            " task{}={}y+{}p/life={}/cause={}",
+            stat.task.0,
+            stat.yields,
+            stat.parks,
+            stat.lifetime,
+            stat.cause.as_str()
         ));
     }
     eprintln!("{line}");
@@ -2985,6 +3070,36 @@ mod tests {
         let diagnostics = context.schedule_diagnostics();
         assert!(!diagnostics.had_concurrency());
         assert!(diagnostics.vacuous.is_empty());
+    }
+
+    #[test]
+    fn task_lifetime_and_completion_cause_are_annotated() {
+        // A joined worker is reported `Completed` with a positive lifetime (it
+        // spans at least its own spawn->complete steps); the initial thread of
+        // control, still live at run end, is reported `LiveAtExit`.
+        let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+        let main = context.task_spawn("main").unwrap();
+        let worker = context.task_spawn("worker").unwrap();
+        run_worker(&mut context, worker, 2);
+
+        let diagnostics = context.schedule_diagnostics();
+        let worker_stat = diagnostics
+            .tasks
+            .iter()
+            .find(|stat| stat.task == worker)
+            .expect("worker recorded");
+        assert_eq!(worker_stat.cause, TaskCompletionCause::Completed);
+        assert!(
+            worker_stat.lifetime > 0,
+            "a completed worker spans at least one scheduling step: {worker_stat:?}"
+        );
+
+        let main_stat = diagnostics
+            .tasks
+            .iter()
+            .find(|stat| stat.task == main)
+            .expect("main recorded");
+        assert_eq!(main_stat.cause, TaskCompletionCause::LiveAtExit);
     }
 
     #[test]
