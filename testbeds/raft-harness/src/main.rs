@@ -76,6 +76,10 @@ struct Options {
     /// entries it missed via raft — rather than the whole batch committing in a
     /// single burst.
     propose_window: u64,
+    /// Enable raft PreVote + CheckQuorum on every node (see `--pre-vote`). Off by
+    /// default so both behaviours are testable; on suppresses the term inflation a
+    /// partially-disconnected follower causes under loss.
+    pre_vote: bool,
 }
 
 fn main() {
@@ -88,7 +92,7 @@ fn main() {
                  [--base-port N] [--data-dir PATH] [--tick-millis N] \
                  [--kill-node ID] [--kill-after-secs N] \
                  [--kill-plan ID:AT[,ID:AT...]] [--restart-after-ticks N] \
-                 [--recover-storage-faults] [--propose-window N]"
+                 [--recover-storage-faults] [--propose-window N] [--pre-vote]"
             );
             std::process::exit(2);
         }
@@ -109,6 +113,7 @@ struct NodeConfig {
     peers: Vec<(u64, SocketAddr)>,
     seed: u64,
     tick_millis: u64,
+    pre_vote: bool,
     observation: ObservationHandle,
     leadership: Arc<Mutex<LeadershipLog>>,
 }
@@ -186,6 +191,7 @@ fn spawn_node(
         peers: config.peers.clone(),
         seed: config.seed,
         tick_millis: config.tick_millis,
+        pre_vote: config.pre_vote,
         shutdown: shutdown.clone(),
         exit: exit.clone(),
         observation: config.observation.clone(),
@@ -394,6 +400,7 @@ fn orchestrate(options: Options) -> i32 {
                 peers,
                 seed: options.seed,
                 tick_millis: options.tick_millis,
+                pre_vote: options.pre_vote,
                 observation: observations[&id].clone(),
                 leadership: leadership.clone(),
             }
@@ -698,6 +705,7 @@ fn parse_options() -> Result<Options, String> {
     let mut restart_after_ticks = 5u64;
     let mut recover_storage_faults = false;
     let mut propose_window = 0u64;
+    let mut pre_vote = false;
     let mut data_dir: Option<std::path::PathBuf> = None;
 
     let mut args = std::env::args().skip(1);
@@ -749,6 +757,7 @@ fn parse_options() -> Result<Options, String> {
                     .parse()
                     .map_err(|_| "--propose-window must be u64")?
             }
+            "--pre-vote" => pre_vote = true,
             "--data-dir" => data_dir = Some(std::path::PathBuf::from(value("--data-dir")?)),
             other => return Err(format!("unknown option {other}")),
         }
@@ -781,6 +790,7 @@ fn parse_options() -> Result<Options, String> {
         restart_after: Duration::from_millis(restart_after_ticks.saturating_mul(tick_millis)),
         recover_storage_faults,
         propose_window,
+        pre_vote,
     })
 }
 

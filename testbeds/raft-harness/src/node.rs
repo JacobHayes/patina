@@ -52,6 +52,10 @@ pub struct NodeSpec {
     pub peers: Vec<(u64, SocketAddr)>,
     pub seed: u64,
     pub tick_millis: u64,
+    /// Enable raft PreVote + CheckQuorum on this node (see `--pre-vote`). Default
+    /// off preserves the original behaviour; on is the A/B arm that suppresses
+    /// term inflation from a partially-disconnected follower under loss.
+    pub pre_vote: bool,
     pub shutdown: Arc<AtomicBool>,
     /// How this incarnation of the node stopped, written just before the thread
     /// returns so the supervisor can tell a clean stop from a storage failure
@@ -111,6 +115,7 @@ fn run_inner(spec: NodeSpec) -> std::io::Result<()> {
         peers,
         seed,
         tick_millis,
+        pre_vote,
         shutdown,
         observation,
         leadership,
@@ -131,6 +136,10 @@ fn run_inner(spec: NodeSpec) -> std::io::Result<()> {
         // Fresh cluster members already share the static 3-voter conf state, so
         // no application-driven applied index is carried in here.
         applied: 0,
+        // PreVote (and CheckQuorum, which PreVote relies on) are opt-in via
+        // `--pre-vote`; default off keeps the original raft-rs 0.7 defaults.
+        pre_vote,
+        check_quorum: pre_vote,
         ..Default::default()
     };
     config.validate().expect("raft config invalid");
@@ -150,6 +159,14 @@ fn run_inner(spec: NodeSpec) -> std::io::Result<()> {
     let mut applied: Vec<AppliedEntry> = Vec::new();
     let mut applied_ids: BTreeSet<u64> = BTreeSet::new();
     let mut last_applied: u64 = 0;
+    // Ids this node has appended as leader in its CURRENT leadership tenure. It
+    // makes the leader path idempotent: a naive client legitimately retries an
+    // unacked id every 500ms (see the driver), but re-calling `propose()` would
+    // append a DUPLICATE log entry each time, bloating the log under sparse or
+    // lossy traffic. Reset whenever we are not leader — a fresh tenure re-proposes
+    // (its uncommitted tail may be truncated), the state machine dedups committed
+    // ids at apply, and a post-election duplicate is raft-legal.
+    let mut proposed: BTreeSet<u64> = BTreeSet::new();
 
     while !shutdown.load(Ordering::Relaxed) {
         // 1. Drain inbound raft datagrams and step them.
@@ -167,12 +184,22 @@ fn run_inner(spec: NodeSpec) -> std::io::Result<()> {
             }
         }
 
-        // 2. Service client proposals: only the leader can accept them.
+        // 2. Service client proposals: only the leader can accept them. The
+        //    leader path is IDEMPOTENT — an id already committed (applied) or
+        //    already appended in this leadership tenure is acknowledged without
+        //    re-appending, so a retrying client never duplicates log entries.
         while let Ok(request) = client_rx.try_recv() {
             let reply = if node.raft.state == StateRole::Leader {
-                match node.propose(vec![], request.id.to_le_bytes().to_vec()) {
-                    Ok(()) => ProposeReply::Accepted,
-                    Err(_) => ProposeReply::Dropped,
+                if applied_ids.contains(&request.id) || proposed.contains(&request.id) {
+                    ProposeReply::Accepted
+                } else {
+                    match node.propose(vec![], request.id.to_le_bytes().to_vec()) {
+                        Ok(()) => {
+                            proposed.insert(request.id);
+                            ProposeReply::Accepted
+                        }
+                        Err(_) => ProposeReply::Dropped,
+                    }
                 }
             } else {
                 ProposeReply::NotLeader(node.raft.leader_id)
@@ -198,6 +225,10 @@ fn run_inner(spec: NodeSpec) -> std::io::Result<()> {
 
         // 5. Publish this node's observable state.
         let is_leader = node.raft.state == StateRole::Leader;
+        // Reset the per-tenure proposed-id tracking whenever we are not leader.
+        if !is_leader {
+            proposed.clear();
+        }
         let term = node.raft.term;
         if is_leader {
             leadership.lock().unwrap().record(term, id);

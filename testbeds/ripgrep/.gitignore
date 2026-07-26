@@ -7,3 +7,4 @@ out/
 # Any Cargo build output directories.
 target/
 **/target/
+out-patina/
