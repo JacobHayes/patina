@@ -462,6 +462,13 @@ impl RuntimeConfig {
         self.faults.crash_at
     }
 
+    /// The configured torn-write granularity for `--fs-crash-at`. `Block`
+    /// (whole-block revert) unless `--fs-torn-granularity byte` selected the
+    /// sub-block model.
+    pub const fn torn_granularity(&self) -> TornGranularity {
+        self.faults.torn_granularity
+    }
+
     /// Apply the fault-injection knobs from a control-plane accessor. Shared by
     /// [`RuntimeConfig::from_env`] (reading the process environment) and the
     /// native shim (reading its scrubbed constructor-time control plane), so both
@@ -680,6 +687,13 @@ pub struct RuntimeBuilder {
     trace_transport: Option<Box<dyn TraceTransport>>,
     filesystem: Option<Box<dyn FsDriver>>,
     filesystem_is_capture: bool,
+    /// Durable base image for the runtime-built crash/mem filesystem. Callers
+    /// that want config-driven crash-consistency (the shim, and any operator
+    /// path) supply the image here rather than pre-installing a filesystem, so
+    /// `build` is the single choke point that constructs the `CrashFs` from
+    /// `config.faults`. A pre-installed `filesystem` and an `fs_image` are
+    /// mutually exclusive.
+    fs_image: Option<MemFs>,
     clock: Option<Box<dyn ClockDriver>>,
     entropy: Option<Box<dyn EntropyDriver>>,
     scheduler: Option<Box<dyn SchedulerDriver>>,
@@ -694,6 +708,7 @@ impl RuntimeBuilder {
             trace_transport: None,
             filesystem: None,
             filesystem_is_capture: false,
+            fs_image: None,
             clock: None,
             entropy: None,
             scheduler: None,
@@ -715,6 +730,18 @@ impl RuntimeBuilder {
     pub fn with_filesystem(mut self, driver: impl FsDriver + 'static) -> Self {
         self.filesystem = Some(Box::new(driver));
         self.filesystem_is_capture = false;
+        self
+    }
+
+    /// Supply the durable base image the runtime wraps in its own
+    /// config-driven filesystem. When `--fs-crash-at` is configured, `build`
+    /// wraps this image in a [`CrashFs`] seeded and torn-write-configured from
+    /// `config.faults`; otherwise the image is used directly. This is the path
+    /// production callers (the shim) must use so no parsed fault knob can be
+    /// silently dropped by a pre-installed filesystem — the crash filesystem is
+    /// only ever constructed at the single choke point in `build`.
+    pub fn with_fs_image(mut self, image: MemFs) -> Self {
+        self.fs_image = Some(image);
         self
     }
 
@@ -879,21 +906,57 @@ impl RuntimeBuilder {
             self.config.buggify = buggify;
         }
 
+        // The crash-consistency filesystem is built HERE, and only here, from
+        // `config.faults` — the single choke point that always consumes the
+        // parsed crash knobs. Callers pass the durable base image via
+        // `with_fs_image`; they must not pre-install the final filesystem, so a
+        // knob like `--fs-torn-granularity` can never be silently dropped by a
+        // filesystem that bypassed the fault config (the gap this replaced).
+        let crash_knobs_set = self.config.faults.crash_at.is_some()
+            || self.config.faults.torn_granularity != TornGranularity::default();
+        if self.filesystem.is_some() {
+            // An explicit filesystem (`with_filesystem`/`with_captured_filesystem`)
+            // cannot reflect config-driven crash knobs, and an accompanying base
+            // image would be ignored. Fail closed rather than proceed silently.
+            if crash_knobs_set {
+                return Err(RuntimeError::Config(
+                    "a filesystem was installed explicitly while crash-consistency \
+                     fault knobs (--fs-crash-at / --fs-torn-granularity) are set; \
+                     those knobs would be silently ignored. Supply the durable \
+                     image via RuntimeBuilder::with_fs_image so the runtime builds \
+                     the crash filesystem from the fault configuration."
+                        .into(),
+                ));
+            }
+            if self.fs_image.is_some() {
+                return Err(RuntimeError::Config(
+                    "both an explicit filesystem and a base image were provided; \
+                     use exactly one"
+                        .into(),
+                ));
+            }
+        }
         if self.install_defaults {
-            // A configured crash point upgrades the default filesystem to the
+            // A configured crash point upgrades the base image to the
             // crash-consistency model so an injected crash drops unsynced data.
-            // An explicitly installed filesystem is left untouched.
+            // An explicitly installed filesystem is left untouched (guarded above
+            // against coexisting with crash knobs).
             if self.filesystem.is_none() {
+                let base = self.fs_image.take().unwrap_or_default();
                 self.filesystem = Some(if self.config.faults.crash_at.is_some() {
                     Box::new(
                         CrashFs::builder()
+                            .filesystem(base)
                             .seed(root_seed)
                             .torn_granularity(self.config.faults.torn_granularity)
                             .build()
                             .map_err(RuntimeError::Effect)?,
                     )
                 } else {
-                    Box::new(MemFs::new())
+                    // No crash modeling requested: the base image is used
+                    // directly. An un-crashed CrashFs is observationally
+                    // identical to its inner MemFs, so this preserves behavior.
+                    Box::new(base)
                 });
             }
             self.clock
@@ -912,6 +975,17 @@ impl RuntimeBuilder {
                 }
                 self.network = Some(Box::new(network.build().map_err(RuntimeError::Effect)?));
             }
+        }
+
+        // A base image is only ever consumed by the default-driver choke point
+        // above. If one survives, `with_fs_image` was used without
+        // `with_default_drivers`, so it would be silently dropped — fail closed.
+        if self.fs_image.is_some() {
+            return Err(RuntimeError::Config(
+                "with_fs_image requires with_default_drivers so the runtime can \
+                 build the filesystem from it"
+                    .into(),
+            ));
         }
 
         Ok(Context {
@@ -4797,6 +4871,95 @@ mod tests {
             .unwrap();
         assert_eq!(exercise(&mut replay).unwrap(), recorded);
         replay.finish().unwrap();
+    }
+
+    // Structural guard for the "parsed fault knob silently ignored because a
+    // pre-installed filesystem bypassed the config" gap class: an explicit
+    // filesystem MUST NOT coexist with config-driven crash knobs. `build` fails
+    // closed instead of dropping them. (The historical bug installed a default
+    // CrashFs and let `--fs-torn-granularity byte` be silently ignored.)
+    #[test]
+    fn explicit_filesystem_with_crash_knobs_fails_closed() {
+        // `Context` is not `Debug`, so assert on the Result shape directly.
+        // Explicit filesystem + a crash point -> refuse.
+        let result = RuntimeBuilder::new(RuntimeConfig::seeded(1).with_crash_at(CrashOp::Write, 1))
+            .with_default_drivers()
+            .with_filesystem(CrashFs::default())
+            .build();
+        assert!(matches!(result, Err(RuntimeError::Config(_))));
+
+        // Explicit filesystem + a non-default torn granularity -> refuse, even
+        // with no crash point, because the granularity would be dropped.
+        let result = RuntimeBuilder::new(
+            RuntimeConfig::seeded(1).with_fs_torn_granularity(TornGranularity::Byte),
+        )
+        .with_default_drivers()
+        .with_filesystem(CrashFs::default())
+        .build();
+        assert!(matches!(result, Err(RuntimeError::Config(_))));
+
+        // An explicit filesystem with NO crash knobs is still fine (tests /
+        // embedders that drive `fs_crash` manually).
+        assert!(
+            RuntimeBuilder::new(RuntimeConfig::seeded(1))
+                .with_default_drivers()
+                .with_filesystem(CrashFs::default())
+                .build()
+                .is_ok()
+        );
+
+        // Supplying both a base image and an explicit filesystem is ambiguous.
+        let result = RuntimeBuilder::new(RuntimeConfig::seeded(1))
+            .with_default_drivers()
+            .with_filesystem(MemFs::new())
+            .with_fs_image(MemFs::new())
+            .build();
+        assert!(matches!(result, Err(RuntimeError::Config(_))));
+    }
+
+    // The single choke point builds the crash filesystem from the fault config:
+    // a base image + `--fs-crash-at` + `--fs-torn-granularity byte` yields a
+    // sub-block partial tear, while the default (block) granularity reverts the
+    // final write wholesale. This is the runtime-level guarantee the shim relies
+    // on instead of constructing the CrashFs itself.
+    #[test]
+    fn fs_image_choke_point_honors_configured_torn_granularity() {
+        fn recovered_image(granularity: TornGranularity) -> Vec<u8> {
+            let mut config = RuntimeConfig::seeded(1).with_crash_at(CrashOp::Write, 2);
+            if granularity == TornGranularity::Byte {
+                config = config.with_fs_torn_granularity(TornGranularity::Byte);
+            }
+            let mut context = RuntimeBuilder::new(config)
+                .with_default_drivers()
+                .with_fs_image(MemFs::new())
+                .build()
+                .unwrap();
+            // Durable baseline, then one unsynced overwrite (crash fires after
+            // this second write), then read the recovered image.
+            let fd = context
+                .fs_open("/f", OpenFlags::create_truncate_write())
+                .unwrap();
+            context.fs_write_at(fd, 0, &[b'A'; 16]).unwrap(); // write 1
+            context.fs_sync(fd).unwrap();
+            let _ = context.fs_write_at(fd, 0, &[b'B'; 16]); // write 2 -> crash
+            context.read_file("/f").unwrap_or_default()
+        }
+
+        let block = recovered_image(TornGranularity::Block);
+        let byte = recovered_image(TornGranularity::Byte);
+        assert_eq!(
+            block,
+            vec![b'A'; 16],
+            "block granularity should revert wholesale"
+        );
+        assert_ne!(
+            byte, block,
+            "byte granularity should not match the block revert"
+        );
+        assert!(
+            byte.contains(&b'B') && byte.contains(&b'A'),
+            "byte granularity should leave a partial live/durable mix: {byte:?}"
+        );
     }
 
     /// Drive the runtime the way the shim does: spawn two tasks, park each with

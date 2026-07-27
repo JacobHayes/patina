@@ -2463,3 +2463,150 @@ fn native_two_axis_stateful_shrink_then_schedule_minimize() {
         "minimized replay must carry the same failure marker"
     );
 }
+
+// A guest that establishes a durable 16-byte baseline, then issues one UNSYNCED
+// positional overwrite. `--fs-crash-at write:2` fires right after that pwrite,
+// so it is the final write eligible for a sub-block (byte-granularity) tear. The
+// guest reopens cold and prints the recovered image. Under whole-block tearing
+// the overwrite reverts wholesale (all 'A'); under byte tearing it survives
+// partially (an 'B' prefix, an 'A' suffix) -- an image a block model can never
+// produce.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const TORN_GRANULARITY_SOURCE: &str = r#"
+use std::fs::{File, OpenOptions};
+use std::io::Read;
+use std::os::unix::fs::FileExt;
+
+fn main() {
+    let path = "/f";
+    {
+        let f = OpenOptions::new().create(true).write(true).open(path).unwrap();
+        f.write_all_at(&[b'A'; 16], 0).unwrap();
+        f.sync_all().unwrap();
+    }
+    {
+        let f = OpenOptions::new().write(true).open(path).unwrap();
+        let _ = f.write_all_at(&[b'B'; 16], 0);
+    }
+    let mut buf = Vec::new();
+    if let Ok(mut f) = File::open(path) {
+        let _ = f.read_to_end(&mut buf);
+    }
+    println!("recovered={buf:?}");
+}
+"#;
+
+// `--fs-torn-granularity byte` must actually reach the guest's crash filesystem.
+// This FAILED before the structural fix: the shim pre-installed a default-policy
+// (whole-block) CrashFs via `with_filesystem`, so `RuntimeBuilder::build` never
+// consumed `config.faults.torn_granularity` and every crash ran as block. With
+// the runtime now the single choke point that builds the CrashFs from the fault
+// config, block and byte produce different guest-visible recovered images.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_fs_torn_granularity_byte_reaches_the_guest() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("torn.rs");
+    fs::write(&source, TORN_GRANULARITY_SOURCE).unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("torn");
+    invoke_in(
+        workspace,
+        &[
+            "native-build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    let run = |gran: &str| {
+        let output = invoke_in(
+            workspace,
+            &[
+                "native-run",
+                bin.to_str().unwrap(),
+                "--seed",
+                "1",
+                "--fs-crash-at",
+                "write:2",
+                "--fs-torn-granularity",
+                gran,
+            ],
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+
+    let block = run("block");
+    let byte = run("byte");
+    // Block granularity reverts the unsynced overwrite wholesale to the durable
+    // baseline; byte granularity keeps a live prefix, so the images differ.
+    assert!(
+        block
+            .contains("recovered=[65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65]"),
+        "block granularity should revert wholesale to the durable baseline: {block}"
+    );
+    assert_ne!(
+        block, byte,
+        "--fs-torn-granularity byte did not reach the guest (byte tearing == block)"
+    );
+    assert!(
+        byte.contains("66") && byte.contains("65"),
+        "byte granularity should leave a partial live/durable mix: {byte}"
+    );
+}
+
+// The seeded crash-decision stream must be LIVE per `--seed` (the shim used to
+// pin the CrashFs to seed 0, so every seed produced the same crash image), and
+// still deterministic: identical seed reproduces the identical torn image.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_fs_crash_image_is_seed_live_and_deterministic() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("torn.rs");
+    fs::write(&source, TORN_GRANULARITY_SOURCE).unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("torn");
+    invoke_in(
+        workspace,
+        &[
+            "native-build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    let run = |seed: &str| {
+        let output = invoke_in(
+            workspace,
+            &[
+                "native-run",
+                bin.to_str().unwrap(),
+                "--seed",
+                seed,
+                "--fs-crash-at",
+                "write:2",
+                "--fs-torn-granularity",
+                "byte",
+            ],
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+
+    let images: Vec<String> = ["1", "2", "3"].iter().map(|seed| run(seed)).collect();
+    // Seed liveness: the seeded tear point varies, so not every seed yields the
+    // same recovered image.
+    assert!(
+        images.iter().any(|image| *image != images[0]),
+        "crash image did not vary across seeds (seed stream is pinned): {images:?}"
+    );
+    // Determinism: each seed reproduces its image byte-identically on re-run.
+    for seed in ["1", "2", "3"] {
+        assert_eq!(
+            run(seed),
+            run(seed),
+            "crash image is not deterministic for seed {seed}"
+        );
+    }
+}

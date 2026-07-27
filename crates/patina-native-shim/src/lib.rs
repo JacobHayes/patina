@@ -20,7 +20,7 @@ use patina_abi::{
 };
 
 use patina_fs_crash::CrashFs;
-use patina_fs_mem::FsImage;
+use patina_fs_mem::{FsImage, MemFs};
 use patina_runtime::{
     Context, MAX_TRACE_BYTES, RuntimeBuilder, RuntimeConfig, RuntimeError, SiteOutcome,
     TraceTransport,
@@ -842,9 +842,14 @@ fn read_host_fd_to_end(fd: c_int) -> io::Result<Vec<u8>> {
 /// Absent the knob, an empty `CrashFs`, exactly as before. `FsImage::decode`
 /// fails closed on a corrupt or non-canonical image, so a bad stream errors here
 /// rather than yielding a silently different filesystem.
-fn fs_image_filesystem() -> Result<CrashFs, RuntimeError> {
+/// The durable base image handed to `RuntimeBuilder::with_fs_image`: an empty
+/// `MemFs`, or the decoded `--mount` corpus. The runtime — not the shim —
+/// wraps this in the config-driven `CrashFs` at its single choke point, so a
+/// parsed crash knob (`--fs-crash-at`, `--fs-torn-granularity`) can never be
+/// dropped by a filesystem the shim pre-installed outside the fault config.
+fn fs_image_base() -> Result<MemFs, RuntimeError> {
     let Some(fd) = control_fs_image_fd()? else {
-        return Ok(CrashFs::default());
+        return Ok(MemFs::new());
     };
     let bytes = read_host_fd_to_end(fd).map_err(|error| {
         RuntimeError::Config(format!(
@@ -854,13 +859,9 @@ fn fs_image_filesystem() -> Result<CrashFs, RuntimeError> {
     })?;
     let image = FsImage::decode(&bytes)
         .map_err(|error| RuntimeError::Config(format!("invalid filesystem image: {error}")))?;
-    let filesystem = image.into_memfs().map_err(|error| {
+    image.into_memfs().map_err(|error| {
         RuntimeError::Config(format!("failed to rebuild filesystem image: {error}"))
-    })?;
-    // `CrashFs::default()` is `CrashFs::new(MemFs::new())`, so `new` here yields
-    // the identical crash policy (default torn-write/durability, seed 0); only
-    // the starting contents differ.
-    Ok(CrashFs::new(filesystem))
+    })
 }
 
 fn runtime_config_from_control_plane() -> Result<(RuntimeConfig, Option<i32>), RuntimeError> {
@@ -1025,10 +1026,19 @@ pub extern "C" fn patina_init_seed(seed: u64) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_init_crash(seed: u64) -> c_int {
-    let context = RuntimeBuilder::new(RuntimeConfig::seeded(seed))
-        .with_default_drivers()
-        .with_filesystem(CrashFs::default())
-        .build();
+    // Explicit manual-crash filesystem for C-ABI embedders that drive
+    // `context.fs_crash()` themselves. Seed the crash policy from the argument
+    // (a default-constructed `CrashFs` would pin seed 0 and silently ignore it).
+    let context = CrashFs::builder()
+        .seed(seed)
+        .build()
+        .map_err(RuntimeError::Effect)
+        .and_then(|filesystem| {
+            RuntimeBuilder::new(RuntimeConfig::seeded(seed))
+                .with_default_drivers()
+                .with_filesystem(filesystem)
+                .build()
+        });
     install(context)
 }
 
@@ -1036,7 +1046,7 @@ fn init_from_env() -> c_int {
     let context = runtime_config_from_control_plane().and_then(|(config, trace_fd)| {
         let mut builder = RuntimeBuilder::new(config)
             .with_default_drivers()
-            .with_filesystem(fs_image_filesystem()?);
+            .with_fs_image(fs_image_base()?);
         if let Some(fd) = trace_fd {
             builder = builder.with_trace_transport(FdTraceTransport { fd });
         }
