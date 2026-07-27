@@ -81,6 +81,8 @@
 
 pub use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRunner};
 
+pub mod state;
+
 /// A commonly-needed set of imports for writing properties under Patina.
 ///
 /// Wildcard-import this (`use patina_proptest::prelude::*;`) in place of
