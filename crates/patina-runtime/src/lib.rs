@@ -69,8 +69,37 @@ pub const ENV_FS_TORN_GRANULARITY: &str = "PATINA_FS_TORN_GRANULARITY";
 /// Suppress the default-on end-of-run schedule diagnostic when set to a false-y
 /// value (`0`, `off`, `false`, `no`). The diagnostic is on by default.
 pub const ENV_SCHEDULE_REPORT: &str = "PATINA_SCHEDULE_REPORT";
+/// Enable cooperative-SUT (buggify) fault injection. Its value is the
+/// per-evaluation firing probability in per-mille for an active site (0..=1000);
+/// an empty value uses the FoundationDB default of 25% (250). Presence of the
+/// variable enables buggify; absence disables it (zero behavior change).
+pub const ENV_BUGGIFY: &str = "PATINA_BUGGIFY";
+/// Per-run site activation probability in per-mille (0..=1000): the fraction of
+/// buggify sites made active for the run. Default 25% (250). Inert without
+/// [`ENV_BUGGIFY`].
+pub const ENV_BUGGIFY_ACTIVATION: &str = "PATINA_BUGGIFY_ACTIVATION_PERMILLE";
+/// Virtual-time monotonic-nanoseconds cutoff after which buggify stops firing
+/// (the FoundationDB damage-control window). Default 300 virtual seconds. Inert
+/// without [`ENV_BUGGIFY`].
+pub const ENV_BUGGIFY_CUTOFF: &str = "PATINA_BUGGIFY_CUTOFF_NANOS";
+/// Declare that the guest calls `patina::lifecycle::setup_complete()`, gating
+/// buggify off until that call. A false-y value (or absence) leaves it off.
+/// Inert without [`ENV_BUGGIFY`]. When set and the guest never calls
+/// `setup_complete()`, the run fails loudly at finalization.
+pub const ENV_BUGGIFY_AFTER_SETUP: &str = "PATINA_BUGGIFY_AFTER_SETUP";
+/// Suppress the default-on end-of-run cooperative-SUT diagnostic when set to a
+/// false-y value (`0`, `off`, `false`, `no`). On by default when buggify is
+/// enabled.
+pub const ENV_SDK_REPORT: &str = "PATINA_SDK_REPORT";
 
 const DEFAULT_FINGERPRINT: &str = "direct-seeded-run-v1";
+
+/// FoundationDB's default per-evaluation buggify firing probability, in per-mille.
+pub const DEFAULT_BUGGIFY_FIRE_PERMILLE: u16 = 250;
+/// FoundationDB's default per-run buggify site activation probability, in per-mille.
+pub const DEFAULT_BUGGIFY_ACTIVATION_PERMILLE: u16 = 250;
+/// Default buggify damage-control cutoff: 300 virtual seconds, in nanoseconds.
+pub const DEFAULT_BUGGIFY_CUTOFF_NANOS: u64 = 300_000_000_000;
 const READ_CHUNK_SIZE: usize = 4096;
 const MAX_READ_FILE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -228,6 +257,39 @@ pub struct FaultConfig {
     net_drop_permille: u16,
 }
 
+/// Seed-driven cooperative-SUT (buggify) configuration. Inert (`enabled =
+/// false`) by default, so a run that does not opt in behaves exactly as before.
+/// When enabled, activation and firing are pure deterministic functions of the
+/// root seed, the site label, and these knobs — see [`Buggify`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BuggifyConfig {
+    /// Whether buggify is active this run.
+    pub enabled: bool,
+    /// Per-evaluation firing probability (per-mille) for an active site.
+    pub fire_permille: u16,
+    /// Per-run site activation probability (per-mille).
+    pub activation_permille: u16,
+    /// Virtual monotonic-time cutoff (nanoseconds) after which firing stops.
+    pub cutoff_nanos: u64,
+    /// When set, the runner has declared that the guest calls
+    /// `patina::lifecycle::setup_complete()`, so buggify stays inert until that
+    /// call (a causal gate — intent comes from the flag, not from predicting the
+    /// guest). If the guest never calls it, the run fails loudly at finalization.
+    pub after_setup: bool,
+}
+
+impl Default for BuggifyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            fire_permille: DEFAULT_BUGGIFY_FIRE_PERMILLE,
+            activation_permille: DEFAULT_BUGGIFY_ACTIVATION_PERMILLE,
+            cutoff_nanos: DEFAULT_BUGGIFY_CUTOFF_NANOS,
+            after_setup: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeConfig {
     seed: u64,
@@ -237,6 +299,7 @@ pub struct RuntimeConfig {
     params: BTreeMap<String, String>,
     net_latency_nanos: u64,
     faults: FaultConfig,
+    buggify: BuggifyConfig,
 }
 
 impl RuntimeConfig {
@@ -249,6 +312,7 @@ impl RuntimeConfig {
             params: BTreeMap::new(),
             net_latency_nanos: 0,
             faults: FaultConfig::default(),
+            buggify: BuggifyConfig::default(),
         }
     }
 
@@ -261,6 +325,7 @@ impl RuntimeConfig {
             params: BTreeMap::new(),
             net_latency_nanos: 0,
             faults: FaultConfig::default(),
+            buggify: BuggifyConfig::default(),
         }
     }
 
@@ -278,6 +343,7 @@ impl RuntimeConfig {
             params: BTreeMap::new(),
             net_latency_nanos: 0,
             faults: FaultConfig::default(),
+            buggify: BuggifyConfig::default(),
         }
     }
 
@@ -296,6 +362,7 @@ impl RuntimeConfig {
             params: BTreeMap::new(),
             net_latency_nanos: 0,
             faults: FaultConfig::default(),
+            buggify: BuggifyConfig::default(),
         }
     }
 
@@ -315,6 +382,7 @@ impl RuntimeConfig {
             params: BTreeMap::new(),
             net_latency_nanos: 0,
             faults: FaultConfig::default(),
+            buggify: BuggifyConfig::default(),
         }
     }
 
@@ -340,6 +408,7 @@ impl RuntimeConfig {
             params: BTreeMap::new(),
             net_latency_nanos: 0,
             faults: FaultConfig::default(),
+            buggify: BuggifyConfig::default(),
         }
     }
 
@@ -426,6 +495,57 @@ impl RuntimeConfig {
                 )));
             }
             self.faults.net_drop_permille = permille;
+        }
+        Ok(self)
+    }
+
+    /// The run's cooperative-SUT (buggify) configuration.
+    pub const fn buggify(&self) -> BuggifyConfig {
+        self.buggify
+    }
+
+    /// Set the run's cooperative-SUT (buggify) configuration directly (used by
+    /// tests and explicit-API embedders).
+    #[must_use]
+    pub fn with_buggify(mut self, buggify: BuggifyConfig) -> Self {
+        self.buggify = buggify;
+        self
+    }
+
+    /// Apply the cooperative-SUT (buggify) knobs from a control-plane accessor,
+    /// mirroring [`RuntimeConfig::apply_fault_env`]. Presence of [`ENV_BUGGIFY`]
+    /// enables buggify; its value (if non-empty) is the per-evaluation firing
+    /// per-mille. Activation and cutoff come from their own variables, defaulting
+    /// to the FoundationDB defaults. Absence leaves buggify disabled (zero
+    /// behavior change).
+    pub fn apply_buggify_env<F>(mut self, get: F) -> Result<Self, RuntimeError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let Some(fire) = get(ENV_BUGGIFY) else {
+            return Ok(self);
+        };
+        self.buggify.enabled = true;
+        let fire = fire.trim();
+        if !fire.is_empty() {
+            self.buggify.fire_permille = parse_permille(ENV_BUGGIFY, fire)?;
+        }
+        if let Some(value) = get(ENV_BUGGIFY_ACTIVATION) {
+            self.buggify.activation_permille =
+                parse_permille(ENV_BUGGIFY_ACTIVATION, value.trim())?;
+        }
+        if let Some(value) = get(ENV_BUGGIFY_CUTOFF) {
+            self.buggify.cutoff_nanos = value.trim().parse().map_err(|_| {
+                RuntimeError::Config(format!(
+                    "{ENV_BUGGIFY_CUTOFF} must be an unsigned 64-bit integer"
+                ))
+            })?;
+        }
+        if let Some(value) = get(ENV_BUGGIFY_AFTER_SETUP) {
+            self.buggify.after_setup = !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "" | "0" | "off" | "false" | "no"
+            );
         }
         Ok(self)
     }
@@ -537,6 +657,7 @@ impl RuntimeConfig {
             }
         };
         let config = config.apply_fault_env(|name| env::var(name).ok())?;
+        let config = config.apply_buggify_env(|name| env::var(name).ok())?;
         Ok(config)
     }
 
@@ -656,13 +777,17 @@ impl RuntimeBuilder {
         // configuration, applied to `self.config` after the match releases its
         // borrow. `None` leaves the operator-supplied configuration in place.
         let mut replay_fault_override: Option<(FaultConfig, u64)> = None;
+        // Same contract for the cooperative-SUT (buggify) configuration: a
+        // replayed/branched trace's recorded config is authoritative.
+        let mut replay_buggify_override: Option<BuggifyConfig> = None;
         let (execution, root_seed) = match &self.config.mode {
             ExecutionMode::Seeded => (Execution::Seeded, self.config.seed),
             ExecutionMode::Record { path } => (
                 Execution::Record {
                     recorder: Recorder::new(
                         RunMetadata::new(self.config.seed, self.config.fingerprint.clone())
-                            .with_faults(Some(fault_record(&self.config))),
+                            .with_faults(Some(fault_record(&self.config)))
+                            .with_buggify(buggify_record(&self.config)),
                     ),
                     sink: RecordSink::Path {
                         path: path.clone(),
@@ -675,7 +800,8 @@ impl RuntimeBuilder {
                 Execution::Record {
                     recorder: Recorder::new(
                         RunMetadata::new(self.config.seed, self.config.fingerprint.clone())
-                            .with_faults(Some(fault_record(&self.config))),
+                            .with_faults(Some(fault_record(&self.config)))
+                            .with_buggify(buggify_record(&self.config)),
                     ),
                     sink: RecordSink::Transport(
                         self.trace_transport.take().expect("transport was checked"),
@@ -689,6 +815,8 @@ impl RuntimeBuilder {
                 // The trace's fault configuration is authoritative on replay.
                 replay_fault_override =
                     reconcile_replay_faults(&self.config, replayer.fault_config())?;
+                replay_buggify_override =
+                    reconcile_replay_buggify(&self.config, replayer.buggify_config())?;
                 (Execution::Replay(replayer), root_seed)
             }
             ExecutionMode::ReplayTransport { timeline } => {
@@ -702,6 +830,8 @@ impl RuntimeBuilder {
                 let root_seed = replayer.root_seed();
                 replay_fault_override =
                     reconcile_replay_faults(&self.config, replayer.fault_config())?;
+                replay_buggify_override =
+                    reconcile_replay_buggify(&self.config, replayer.buggify_config())?;
                 (Execution::Replay(replayer), root_seed)
             }
             ExecutionMode::Branch {
@@ -724,6 +854,8 @@ impl RuntimeBuilder {
                 // trace's fault configuration for the replayed drivers.
                 replay_fault_override =
                     reconcile_replay_faults(&self.config, session.fault_config())?;
+                replay_buggify_override =
+                    reconcile_replay_buggify(&self.config, session.buggify_config())?;
                 (
                     Execution::Branch {
                         session: Box::new(session),
@@ -740,6 +872,11 @@ impl RuntimeBuilder {
         if let Some((faults, net_latency_nanos)) = replay_fault_override {
             self.config.faults = faults;
             self.config.net_latency_nanos = net_latency_nanos;
+        }
+        // Adopt the trace's authoritative buggify configuration so a flag-free
+        // replay re-derives the same activation and firing decisions.
+        if let Some(buggify) = replay_buggify_override {
+            self.config.buggify = buggify;
         }
 
         if self.install_defaults {
@@ -803,6 +940,7 @@ impl RuntimeBuilder {
             // the entropy or scheduler streams that also derive from root_seed.
             sleep_jitter_rng: SplitMix64::new(root_seed ^ 0x5EED_1A7E_0FF5_E720),
             schedule: ScheduleTracker::default(),
+            buggify: Buggify::new(self.config.buggify, root_seed),
         })
     }
 }
@@ -965,7 +1103,10 @@ impl ScheduleTracker {
                 // (or to the run's end for a still-live task). Cause distinguishes
                 // the two.
                 let (lifetime, cause) = match complete_step {
-                    Some(end) => (end.saturating_sub(spawn_step), TaskCompletionCause::Completed),
+                    Some(end) => (
+                        end.saturating_sub(spawn_step),
+                        TaskCompletionCause::Completed,
+                    ),
                     None => (
                         self.steps.saturating_sub(spawn_step),
                         TaskCompletionCause::LiveAtExit,
@@ -1106,6 +1247,295 @@ enum FilesystemExpected {
     Captured(Outcome),
 }
 
+/// Domain separators for the buggify PRF, so activation, firing, knob, and delay
+/// draws for one site never correlate.
+mod buggify_domain {
+    pub const ACTIVATION: u64 = 0x4143_5449_5641_5445; // "ACTIVATE"
+    pub const FIRING: u64 = 0x4649_5249_4e47_5f5f; // "FIRING__"
+    pub const KNOB: u64 = 0x4b4e_4f42_5f5f_5f5f; // "KNOB____"
+    pub const DELAY: u64 = 0x4445_4c41_595f_5f5f; // "DELAY___"
+    pub const RNG: u64 = 0x524e_475f_5f5f_5f5f; // "RNG_____"
+}
+
+/// A deterministic 64-bit hash of a site label, stable across builds, platforms,
+/// and Rust versions (unlike `DefaultHasher`) so cross-machine replay agrees.
+/// FNV-1a over the UTF-8 bytes.
+fn label_hash(label: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in label.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// A domain-separated deterministic pseudo-random value from a set of 64-bit
+/// inputs, built from the specified SplitMix64 finalizer so it needs no state
+/// beyond the inputs and reproduces exactly across processes.
+fn buggify_prf(inputs: &[u64]) -> u64 {
+    let mut acc = 0xa5a5_a5a5_5a5a_5a5a_u64;
+    for &value in inputs {
+        acc = SplitMix64::new(acc ^ value).next_u64();
+        acc = acc.wrapping_add(value.rotate_left(17));
+    }
+    SplitMix64::new(acc).next_u64()
+}
+
+/// What a registered buggify site is used for. Purely descriptive: it drives the
+/// `PATINA_SDK_REPORT` categorization and never the firing decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuggifyKind {
+    /// `buggify!` / `buggify_with_prob!` — a probabilistic fault trigger.
+    Fault,
+    /// `buggify_delay!` — a probabilistic deterministic delay.
+    Delay,
+    /// `buggify_knob!` — a per-run perturbed value.
+    Knob,
+    /// `always!` — an invariant whose violation is fatal.
+    Always,
+    /// `sometimes!` — a coverage oracle (should be true at least once).
+    Sometimes,
+    /// `reachable!` — a coverage oracle (this site should be reached).
+    Reachable,
+}
+
+impl BuggifyKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            BuggifyKind::Fault => "fault",
+            BuggifyKind::Delay => "delay",
+            BuggifyKind::Knob => "knob",
+            BuggifyKind::Always => "always",
+            BuggifyKind::Sometimes => "sometimes",
+            BuggifyKind::Reachable => "reachable",
+        }
+    }
+}
+
+/// The result of evaluating a cooperative-SUT site, for the embedder (the native
+/// shim) to act on. The runtime never performs process I/O or aborts itself; it
+/// returns the signal and the embedder emits the marker line and aborts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SiteOutcome {
+    /// Proceed normally: the buggify site did not fire, or the oracle was noted.
+    Ok,
+    /// The buggify site fired — the embedder injects the fault / takes the branch.
+    Fire,
+    /// An `always!` invariant was violated: the embedder emits the
+    /// `PATINA_ALWAYS_VIOLATION` marker for the label and aborts.
+    AlwaysViolation,
+    /// The label is reused at a different call site: a fatal duplicate. The
+    /// embedder emits the `PATINA_BUGGIFY_DUPLICATE_LABEL` marker and aborts.
+    DuplicateLabel,
+}
+
+/// One registered cooperative-SUT site, keyed by its unique explicit label.
+#[derive(Clone, Debug)]
+struct BuggifySite {
+    /// The `file:line` identity captured by the macro, used only to detect a
+    /// duplicate label reused at a different call site.
+    site: String,
+    kind: BuggifyKind,
+    /// Per-run activation decision (fault/delay/knob sites). Pure function of
+    /// `(seed, label, activation_permille)`.
+    active: bool,
+    /// Firing-PRF counter, incremented on every evaluation. Advances identically
+    /// on record and replay because the same code runs on both.
+    eval_count: u64,
+    fire_count: u64,
+    reachable: bool,
+    sometimes_satisfied: bool,
+    always_violated: bool,
+    knob: Option<i64>,
+}
+
+/// End-of-run cooperative-SUT diagnostics, surfaced in `PATINA_SDK_REPORT` and,
+/// via [`Buggify::to_record`], in the trace metadata.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BuggifyDiagnostics {
+    pub enabled: bool,
+    pub fire_permille: u16,
+    pub activation_permille: u16,
+    pub cutoff_nanos: u64,
+    pub cutoff_reached: bool,
+    pub sites_registered: u64,
+    pub sites_activated: u64,
+    pub total_firings: u64,
+    pub cutoff_suppressed: u64,
+    pub after_setup: bool,
+    pub setup_complete: bool,
+    /// Per-site rows in label order: (label, kind, active, evals, fires,
+    /// reachable, sometimes_satisfied, always_violated, knob).
+    pub sites: Vec<BuggifySiteReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuggifySiteReport {
+    pub label: String,
+    pub kind: BuggifyKind,
+    pub active: bool,
+    pub evals: u64,
+    pub fires: u64,
+    pub reachable: bool,
+    pub sometimes_satisfied: bool,
+    pub always_violated: bool,
+    pub knob: Option<i64>,
+}
+
+/// The cooperative-SUT (buggify) site registry and deterministic decision
+/// engine. All randomness derives from the root seed and the site's explicit
+/// label through [`buggify_prf`]; nothing is recorded per-evaluation, so replay
+/// re-derives every decision from the seed and the trace's recorded config.
+struct Buggify {
+    config: BuggifyConfig,
+    seed: u64,
+    /// Lifecycle marker state. Firing is not gated on it (see the crate/module
+    /// docs on the causal limitation); it is reported and, for a guest that
+    /// places its workload sites after the call, marks the setup boundary.
+    setup_complete: bool,
+    sites: BTreeMap<String, BuggifySite>,
+    rng: SplitMix64,
+    cutoff_suppressed: u64,
+    /// Set once the cutoff has been observed passed at a firing check.
+    cutoff_reached: bool,
+}
+
+impl Buggify {
+    fn new(config: BuggifyConfig, seed: u64) -> Self {
+        Self {
+            config,
+            seed,
+            setup_complete: false,
+            sites: BTreeMap::new(),
+            rng: SplitMix64::new(buggify_prf(&[seed, buggify_domain::RNG])),
+            cutoff_suppressed: 0,
+            cutoff_reached: false,
+        }
+    }
+
+    /// Whether a site's label activates it this run. Pure function of the seed,
+    /// the label, and the activation per-mille.
+    fn label_is_active(&self, label_hash: u64) -> bool {
+        (buggify_prf(&[self.seed, label_hash, buggify_domain::ACTIVATION]) % 1000)
+            < u64::from(self.config.activation_permille)
+    }
+
+    /// Register (or revisit) a site under `label`, returning its stable label
+    /// hash. A label reused at a different call `site` is a fatal duplicate
+    /// (returned as `Err(existing_site)`). On first registration the activation
+    /// decision is computed once and frozen.
+    fn register(&mut self, label: &str, site: &str, kind: BuggifyKind) -> Result<u64, String> {
+        let hash = label_hash(label);
+        match self.sites.get(label) {
+            Some(existing) if existing.site != site => return Err(existing.site.clone()),
+            Some(_) => {}
+            None => {
+                let active = self.label_is_active(hash);
+                self.sites.insert(
+                    label.to_string(),
+                    BuggifySite {
+                        site: site.to_string(),
+                        kind,
+                        active,
+                        eval_count: 0,
+                        fire_count: 0,
+                        reachable: false,
+                        sometimes_satisfied: false,
+                        always_violated: false,
+                        knob: None,
+                    },
+                );
+            }
+        }
+        Ok(hash)
+    }
+
+    /// The firing decision for an active site at its current evaluation, given a
+    /// (possibly overridden) firing per-mille. Increments the evaluation counter
+    /// as a side effect so consecutive evaluations use independent draws.
+    fn fire_draw(hash: u64, seed: u64, eval_count: u64, fire_permille: u16) -> bool {
+        (buggify_prf(&[seed, hash, buggify_domain::FIRING, eval_count]) % 1000)
+            < u64::from(fire_permille)
+    }
+
+    fn diagnostics(&self, cutoff_reached_now: bool) -> BuggifyDiagnostics {
+        let mut sites = Vec::with_capacity(self.sites.len());
+        let mut activated = 0_u64;
+        let mut firings = 0_u64;
+        for (label, site) in &self.sites {
+            if site.active {
+                activated += 1;
+            }
+            firings += site.fire_count;
+            sites.push(BuggifySiteReport {
+                label: label.clone(),
+                kind: site.kind,
+                active: site.active,
+                evals: site.eval_count,
+                fires: site.fire_count,
+                reachable: site.reachable,
+                sometimes_satisfied: site.sometimes_satisfied,
+                always_violated: site.always_violated,
+                knob: site.knob,
+            });
+        }
+        BuggifyDiagnostics {
+            enabled: self.config.enabled,
+            fire_permille: self.config.fire_permille,
+            activation_permille: self.config.activation_permille,
+            cutoff_nanos: self.config.cutoff_nanos,
+            cutoff_reached: self.cutoff_reached || cutoff_reached_now,
+            sites_registered: self.sites.len() as u64,
+            sites_activated: activated,
+            total_firings: firings,
+            cutoff_suppressed: self.cutoff_suppressed,
+            after_setup: self.config.after_setup,
+            setup_complete: self.setup_complete,
+            sites,
+        }
+    }
+
+    /// The realized configuration and per-site picks recorded into the trace
+    /// metadata, or `None` when buggify is disabled.
+    fn to_record(&self) -> Option<patina_trace::BuggifyConfigRecord> {
+        if !self.config.enabled {
+            return None;
+        }
+        let active_sites = self
+            .sites
+            .iter()
+            .filter(|(_, site)| site.active)
+            .map(|(label, _)| label.clone())
+            .collect();
+        let knobs = self
+            .sites
+            .iter()
+            .filter_map(|(label, site)| site.knob.map(|value| (label.clone(), value)))
+            .collect();
+        Some(patina_trace::BuggifyConfigRecord {
+            fire_permille: self.config.fire_permille,
+            activation_permille: self.config.activation_permille,
+            cutoff_nanos: self.config.cutoff_nanos,
+            after_setup: self.config.after_setup,
+            active_sites,
+            knobs,
+        })
+    }
+
+    /// Whether the run declared `--buggify-after-setup` but the guest never
+    /// reached `setup_complete()`: a harness bug that must fail loudly, not a
+    /// silent no-fault run.
+    fn setup_violation(&self) -> bool {
+        self.config.enabled && self.config.after_setup && !self.setup_complete
+    }
+
+    /// Whether firing is currently armed: always, unless gated behind a
+    /// setup-complete the guest has not reached yet.
+    fn armed(&self) -> bool {
+        !self.config.after_setup || self.setup_complete
+    }
+}
+
 /// The runtime context through which initial Patina effects are performed.
 pub struct Context {
     root_seed: u64,
@@ -1150,6 +1580,9 @@ pub struct Context {
     /// Per-task scheduling-boundary accounting for the vacuous-schedule
     /// diagnostic emitted at [`Context::finish`].
     schedule: ScheduleTracker,
+    /// Cooperative-SUT (buggify) site registry and decision engine. Inert when
+    /// buggify is disabled, so a run that does not opt in is unaffected.
+    buggify: Buggify,
 }
 
 impl Context {
@@ -1177,6 +1610,257 @@ impl Context {
 
     pub fn param(&self, key: &str) -> Option<&str> {
         self.params.get(key).map(String::as_str)
+    }
+
+    // ---- Cooperative-SUT (buggify) surface -----------------------------------
+    //
+    // These methods are the runtime side of the `patina` crate's `buggify!`,
+    // `always!`, `sometimes!`, `reachable!`, and lifecycle macros, invoked
+    // through thin C-ABI wrappers in the native shim. All randomness derives from
+    // the root seed and the site's explicit label; nothing is recorded per
+    // evaluation, so replay re-derives every decision. The only recorded effect
+    // is `buggify_delay!`'s virtual-time advance, which rides the existing
+    // `SleepUntil` boundary op and therefore reproduces exactly on replay.
+
+    /// Whether execution is under the deterministic simulator. Always true for an
+    /// installed [`Context`] — the `patina::is_simulated()` hook.
+    pub const fn is_simulated(&self) -> bool {
+        true
+    }
+
+    /// Whether cooperative-SUT fault injection is enabled this run.
+    pub const fn buggify_enabled(&self) -> bool {
+        self.buggify.config.enabled
+    }
+
+    /// Evaluate a `buggify!` / `buggify_with_prob!` site. `prob_permille`
+    /// overrides the run-default firing probability when `Some`. Fires only when
+    /// buggify is enabled, the label activated this run, and the virtual clock is
+    /// before the damage-control cutoff.
+    pub fn buggify_evaluate(
+        &mut self,
+        label: &str,
+        site: &str,
+        prob_permille: Option<u16>,
+    ) -> Result<SiteOutcome, RuntimeError> {
+        let enabled = self.buggify.config.enabled;
+        let now = if enabled {
+            Some(self.current_monotonic()?)
+        } else {
+            None
+        };
+        let hash = match self.buggify.register(label, site, BuggifyKind::Fault) {
+            Ok(hash) => hash,
+            Err(_) => return Ok(SiteOutcome::DuplicateLabel),
+        };
+        let (active, eval) = {
+            let entry = self.buggify.sites.get_mut(label).expect("registered");
+            entry.reachable = true;
+            let eval = entry.eval_count;
+            entry.eval_count += 1;
+            (entry.active, eval)
+        };
+        if !enabled || !active || !self.buggify.armed() {
+            return Ok(SiteOutcome::Ok);
+        }
+        if now.is_some_and(|now| now >= self.buggify.config.cutoff_nanos) {
+            self.buggify.cutoff_reached = true;
+            self.buggify.cutoff_suppressed += 1;
+            return Ok(SiteOutcome::Ok);
+        }
+        let permille = prob_permille.unwrap_or(self.buggify.config.fire_permille);
+        if Buggify::fire_draw(hash, self.buggify.seed, eval, permille) {
+            self.buggify
+                .sites
+                .get_mut(label)
+                .expect("registered")
+                .fire_count += 1;
+            Ok(SiteOutcome::Fire)
+        } else {
+            Ok(SiteOutcome::Ok)
+        }
+    }
+
+    /// Evaluate a `buggify_delay!` site. On firing, advance the virtual clock by
+    /// a seed-derived amount through the recorded `SleepUntil` path — never a real
+    /// sleep — so the perturbation reproduces on replay. Returns [`SiteOutcome::Fire`]
+    /// when it delayed.
+    pub fn buggify_delay(&mut self, label: &str, site: &str) -> Result<SiteOutcome, RuntimeError> {
+        let enabled = self.buggify.config.enabled;
+        let now = if enabled {
+            Some(self.current_monotonic()?)
+        } else {
+            None
+        };
+        let hash = match self.buggify.register(label, site, BuggifyKind::Delay) {
+            Ok(hash) => hash,
+            Err(_) => return Ok(SiteOutcome::DuplicateLabel),
+        };
+        let (active, eval) = {
+            let entry = self.buggify.sites.get_mut(label).expect("registered");
+            entry.reachable = true;
+            let eval = entry.eval_count;
+            entry.eval_count += 1;
+            (entry.active, eval)
+        };
+        if !enabled || !active || !self.buggify.armed() {
+            return Ok(SiteOutcome::Ok);
+        }
+        let now = now.expect("time read when enabled");
+        if now >= self.buggify.config.cutoff_nanos {
+            self.buggify.cutoff_reached = true;
+            self.buggify.cutoff_suppressed += 1;
+            return Ok(SiteOutcome::Ok);
+        }
+        if !Buggify::fire_draw(
+            hash,
+            self.buggify.seed,
+            eval,
+            self.buggify.config.fire_permille,
+        ) {
+            return Ok(SiteOutcome::Ok);
+        }
+        // A seed-derived delay in [1ms, 5s], deterministic per (seed, label,
+        // eval). Routed through the recorded clock path so replay reproduces it.
+        const MIN_DELAY_NANOS: u64 = 1_000_000;
+        const MAX_DELAY_NANOS: u64 = 5_000_000_000;
+        let span = MAX_DELAY_NANOS - MIN_DELAY_NANOS + 1;
+        let delay = MIN_DELAY_NANOS
+            + (buggify_prf(&[self.buggify.seed, hash, buggify_domain::DELAY, eval]) % span);
+        self.buggify
+            .sites
+            .get_mut(label)
+            .expect("registered")
+            .fire_count += 1;
+        let deadline = now.saturating_add(delay);
+        self.sleep_until(ClockKind::Monotonic, deadline)?;
+        Ok(SiteOutcome::Fire)
+    }
+
+    /// Evaluate a `buggify_knob!` site: return a per-run perturbed value within
+    /// `[lo, hi]` (deterministic from seed and label) for an active site under an
+    /// enabled run, or `default` otherwise. `Err(())` marks a duplicate label.
+    pub fn buggify_knob(
+        &mut self,
+        label: &str,
+        site: &str,
+        default: i64,
+        lo: i64,
+        hi: i64,
+    ) -> Result<Result<i64, ()>, RuntimeError> {
+        let hash = match self.buggify.register(label, site, BuggifyKind::Knob) {
+            Ok(hash) => hash,
+            Err(_) => return Ok(Err(())),
+        };
+        let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+        let enabled = self.buggify.config.enabled;
+        let entry = self.buggify.sites.get_mut(label).expect("registered");
+        entry.reachable = true;
+        let value = if enabled && entry.active {
+            let span = (hi as i128 - lo as i128 + 1) as u128;
+            let draw = buggify_prf(&[self.buggify.seed, hash, buggify_domain::KNOB]) as u128;
+            (lo as i128 + (draw % span) as i128) as i64
+        } else {
+            default.clamp(lo, hi)
+        };
+        entry.knob = Some(value);
+        Ok(Ok(value))
+    }
+
+    /// Evaluate an `always!` invariant. A false condition is a fatal violation
+    /// whenever running under the simulator, independent of buggify being
+    /// enabled — the embedder emits the marker and aborts.
+    pub fn always_check(
+        &mut self,
+        label: &str,
+        site: &str,
+        condition: bool,
+    ) -> Result<SiteOutcome, RuntimeError> {
+        if self
+            .buggify
+            .register(label, site, BuggifyKind::Always)
+            .is_err()
+        {
+            return Ok(SiteOutcome::DuplicateLabel);
+        }
+        let entry = self.buggify.sites.get_mut(label).expect("registered");
+        entry.reachable = true;
+        entry.eval_count += 1;
+        if condition {
+            Ok(SiteOutcome::Ok)
+        } else {
+            entry.always_violated = true;
+            Ok(SiteOutcome::AlwaysViolation)
+        }
+    }
+
+    /// Evaluate a `sometimes!` coverage oracle: note the site reached, and
+    /// satisfied when `condition` is true at least once across the run.
+    pub fn sometimes_check(
+        &mut self,
+        label: &str,
+        site: &str,
+        condition: bool,
+    ) -> Result<SiteOutcome, RuntimeError> {
+        if self
+            .buggify
+            .register(label, site, BuggifyKind::Sometimes)
+            .is_err()
+        {
+            return Ok(SiteOutcome::DuplicateLabel);
+        }
+        let entry = self.buggify.sites.get_mut(label).expect("registered");
+        entry.reachable = true;
+        entry.eval_count += 1;
+        if condition {
+            entry.sometimes_satisfied = true;
+        }
+        Ok(SiteOutcome::Ok)
+    }
+
+    /// Mark a `reachable!` coverage site reached.
+    pub fn reachable_mark(&mut self, label: &str, site: &str) -> Result<SiteOutcome, RuntimeError> {
+        if self
+            .buggify
+            .register(label, site, BuggifyKind::Reachable)
+            .is_err()
+        {
+            return Ok(SiteOutcome::DuplicateLabel);
+        }
+        let entry = self.buggify.sites.get_mut(label).expect("registered");
+        entry.reachable = true;
+        entry.eval_count += 1;
+        Ok(SiteOutcome::Ok)
+    }
+
+    /// Draw a deterministic 64-bit value from the buggify entropy stream — the
+    /// `patina::rng()` hook, bridged to the root seed. Not recorded: it is a pure
+    /// function of the seed and the call count, so replay reproduces it.
+    pub fn buggify_rng(&mut self) -> u64 {
+        self.buggify.rng.next_u64()
+    }
+
+    /// Mark the `patina::lifecycle::setup_complete()` boundary.
+    pub fn lifecycle_setup_complete(&mut self) {
+        self.buggify.setup_complete = true;
+    }
+
+    /// Whether the run declared `--buggify-after-setup` but the guest never
+    /// reached `setup_complete()`. The embedder checks this at finalization and
+    /// fails the run loudly — a declared-but-never-called gate is a harness bug,
+    /// not a silent no-fault run.
+    pub fn buggify_setup_violation(&self) -> bool {
+        self.buggify.setup_violation()
+    }
+
+    /// End-of-run cooperative-SUT diagnostics. See [`BuggifyDiagnostics`]. Also
+    /// emitted to stderr by [`Context::finish`] via `PATINA_SDK_REPORT`.
+    pub fn buggify_diagnostics(&mut self) -> BuggifyDiagnostics {
+        let cutoff_reached_now = self.buggify.config.enabled
+            && self
+                .current_monotonic()
+                .is_ok_and(|now| now >= self.buggify.config.cutoff_nanos);
+        self.buggify.diagnostics(cutoff_reached_now)
     }
 
     pub fn entropy_bytes(&mut self, len: usize) -> Result<Vec<u8>, RuntimeError> {
@@ -2256,15 +2940,23 @@ impl Context {
         Ok(contents)
     }
 
-    pub fn finish(self) -> Result<(), RuntimeError> {
+    pub fn finish(mut self) -> Result<(), RuntimeError> {
         emit_schedule_report(&self.schedule.diagnostics());
+        // Cooperative-SUT diagnostic + metadata. Computed before the execution is
+        // consumed so the record sink can fold in the run's realized active-site
+        // set and knob picks.
+        let buggify_diag = self.buggify_diagnostics();
+        emit_sdk_report(&buggify_diag);
+        let buggify_record = self.buggify.to_record();
         match self.execution {
             Execution::Seeded => Ok(()),
-            Execution::Record { recorder, sink } => match sink {
+            Execution::Record { mut recorder, sink } => match sink {
                 RecordSink::Path { path, _reservation } => {
+                    recorder.set_buggify(buggify_record);
                     recorder.finish(path).map_err(Into::into)
                 }
                 RecordSink::Transport(mut transport) => {
+                    recorder.set_buggify(buggify_record);
                     let bytes = recorder.into_bundle().to_bytes()?;
                     transport
                         .write_bundle(&bytes)
@@ -2662,6 +3354,62 @@ fn reconcile_replay_faults(
     Ok(Some((stored_faults, stored_latency)))
 }
 
+/// The buggify configuration recorded into a trace at build time. `active_sites`
+/// and `knobs` are filled in at finalization from the run's realized picks; here
+/// they start empty. `None` when buggify is disabled, so a disabled run records
+/// no buggify metadata at all and is indistinguishable from an old trace.
+fn buggify_record(config: &RuntimeConfig) -> Option<patina_trace::BuggifyConfigRecord> {
+    if !config.buggify.enabled {
+        return None;
+    }
+    Some(patina_trace::BuggifyConfigRecord {
+        fire_permille: config.buggify.fire_permille,
+        activation_permille: config.buggify.activation_permille,
+        cutoff_nanos: config.buggify.cutoff_nanos,
+        after_setup: config.buggify.after_setup,
+        active_sites: Vec::new(),
+        knobs: BTreeMap::new(),
+    })
+}
+
+/// Rebuild a [`BuggifyConfig`] from a recorded trace's authoritative buggify
+/// metadata.
+fn buggify_config_from_record(record: &patina_trace::BuggifyConfigRecord) -> BuggifyConfig {
+    BuggifyConfig {
+        enabled: true,
+        fire_permille: record.fire_permille,
+        activation_permille: record.activation_permille,
+        cutoff_nanos: record.cutoff_nanos,
+        after_setup: record.after_setup,
+    }
+}
+
+/// Reconcile a recorded trace's authoritative buggify configuration with any
+/// buggify knobs the operator also supplied at replay, mirroring
+/// [`reconcile_replay_faults`]. The trace is authoritative: with no knobs the
+/// stored config is adopted verbatim (byte-identical replay); supplied knobs
+/// must match exactly or replay fails closed. A trace recorded without buggify
+/// (`None`) means the operator's configuration stands — and if the operator
+/// tries to enable buggify on a non-buggify trace, that is caught earlier by the
+/// `+buggify` fingerprint mismatch.
+fn reconcile_replay_buggify(
+    config: &RuntimeConfig,
+    recorded: Option<&patina_trace::BuggifyConfigRecord>,
+) -> Result<Option<BuggifyConfig>, RuntimeError> {
+    let Some(record) = recorded else {
+        return Ok(None);
+    };
+    let stored = buggify_config_from_record(record);
+    if config.buggify.enabled && config.buggify != stored {
+        return Err(RuntimeError::Config(
+            "replay buggify knobs conflict with the trace's recorded configuration; \
+             the trace is authoritative, so omit the flags (or supply matching values)"
+                .into(),
+        ));
+    }
+    Ok(Some(stored))
+}
+
 /// Emit the default-on schedule-exploration diagnostic to stderr for a
 /// multithreaded run. Single-task runs (no concurrency to explore) stay silent.
 /// The machine-readable `PATINA_SCHEDULE_REPORT` line lets a campaign tell a
@@ -2716,7 +3464,73 @@ schedulable.",
     }
 }
 
+/// Emit the machine-readable `PATINA_SDK_REPORT` line for a run that registered
+/// any cooperative-SUT sites (or enabled buggify). One line, same spirit as
+/// `PATINA_SCHEDULE_REPORT`: a campaign parses it to accumulate per-site coverage
+/// across generations. Suppressed by a false-y [`ENV_SDK_REPORT`]. Per-site token
+/// is `site=<label>|<kind>|a<0|1>|e<evals>|f<fires>|r<0|1>|s<0|1>|v<0|1>|k<knob|->`.
+fn emit_sdk_report(diag: &BuggifyDiagnostics) {
+    if !diag.enabled && diag.sites_registered == 0 {
+        return;
+    }
+    if let Ok(value) = env::var(ENV_SDK_REPORT) {
+        if matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "false" | "no"
+        ) {
+            return;
+        }
+    }
+    let mut line = format!(
+        "PATINA_SDK_REPORT enabled={} fire_permille={} activation_permille={} cutoff_nanos={} \
+cutoff_reached={} sites_registered={} sites_activated={} total_firings={} cutoff_suppressed={} \
+after_setup={} setup_complete={}",
+        u8::from(diag.enabled),
+        diag.fire_permille,
+        diag.activation_permille,
+        diag.cutoff_nanos,
+        u8::from(diag.cutoff_reached),
+        diag.sites_registered,
+        diag.sites_activated,
+        diag.total_firings,
+        diag.cutoff_suppressed,
+        u8::from(diag.after_setup),
+        u8::from(diag.setup_complete),
+    );
+    for site in &diag.sites {
+        let knob = site
+            .knob
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        line.push_str(&format!(
+            " site={}|{}|a{}|e{}|f{}|r{}|s{}|v{}|k{}",
+            site.label,
+            site.kind.as_str(),
+            u8::from(site.active),
+            site.evals,
+            site.fires,
+            u8::from(site.reachable),
+            u8::from(site.sometimes_satisfied),
+            u8::from(site.always_violated),
+            knob,
+        ));
+    }
+    eprintln!("{line}");
+}
+
 /// Parse an inclusive `MIN..MAX` nanosecond range, requiring `MIN <= MAX`.
+fn parse_permille(name: &str, value: &str) -> Result<u16, RuntimeError> {
+    let permille: u16 = value
+        .parse()
+        .map_err(|_| RuntimeError::Config(format!("{name} must be an integer in [0, 1000]")))?;
+    if permille > 1000 {
+        return Err(RuntimeError::Config(format!(
+            "{name} must be within [0, 1000] per-mille"
+        )));
+    }
+    Ok(permille)
+}
+
 fn parse_nanos_range(name: &str, value: &str) -> Result<(u64, u64), RuntimeError> {
     let (min_text, max_text) = value.split_once("..").ok_or_else(|| {
         RuntimeError::Config(format!("{name} must be a MIN..MAX range; got {value:?}"))
@@ -2927,6 +3741,314 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    fn buggify_context(seed: u64, config: BuggifyConfig) -> Context {
+        Context::from_config(RuntimeConfig::seeded(seed).with_buggify(config)).unwrap()
+    }
+
+    const BUGGIFY_ALL_ACTIVE: BuggifyConfig = BuggifyConfig {
+        enabled: true,
+        fire_permille: DEFAULT_BUGGIFY_FIRE_PERMILLE,
+        activation_permille: 1000,
+        cutoff_nanos: DEFAULT_BUGGIFY_CUTOFF_NANOS,
+        after_setup: false,
+    };
+
+    #[test]
+    fn buggify_activation_is_a_deterministic_function_of_seed_and_label() {
+        // Same (seed, label, permille) always agrees; the realized fraction of
+        // active sites tracks the activation per-mille.
+        let buggify = Buggify::new(
+            BuggifyConfig {
+                enabled: true,
+                activation_permille: 250,
+                ..BuggifyConfig::default()
+            },
+            7,
+        );
+        let mut active = 0;
+        for index in 0..2000 {
+            let hash = label_hash(&format!("site-{index}"));
+            let decision = buggify.label_is_active(hash);
+            assert_eq!(
+                decision,
+                buggify.label_is_active(hash),
+                "activation is stable"
+            );
+            if decision {
+                active += 1;
+            }
+        }
+        // ~25% of 2000, generous band for a 2000-sample draw.
+        assert!(
+            (400..=600).contains(&active),
+            "activation fraction off: {active}"
+        );
+
+        // A different seed reshuffles which labels are active.
+        let other = Buggify::new(
+            BuggifyConfig {
+                enabled: true,
+                activation_permille: 250,
+                ..BuggifyConfig::default()
+            },
+            8,
+        );
+        let differ = (0..2000).any(|index| {
+            let hash = label_hash(&format!("site-{index}"));
+            buggify.label_is_active(hash) != other.label_is_active(hash)
+        });
+        assert!(differ, "distinct seeds must reshuffle activation");
+    }
+
+    #[test]
+    fn buggify_firing_prf_is_deterministic_and_seed_varying() {
+        let fire_pattern = |seed: u64| {
+            let mut context = buggify_context(seed, BUGGIFY_ALL_ACTIVE);
+            (0..40)
+                .map(|_| {
+                    matches!(
+                        context
+                            .buggify_evaluate("commit-early-return", "f.rs:1", None)
+                            .unwrap(),
+                        SiteOutcome::Fire
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        // Byte-identical across two fresh contexts at the same seed.
+        assert_eq!(fire_pattern(5), fire_pattern(5));
+        // Some firings occurred (fire_permille = 250 over 40 evals).
+        assert!(
+            fire_pattern(5).iter().any(|fired| *fired),
+            "no firing at seed 5"
+        );
+        // A different seed yields a different firing pattern.
+        assert_ne!(fire_pattern(5), fire_pattern(6));
+    }
+
+    #[test]
+    fn buggify_duplicate_label_is_detected() {
+        let mut context = buggify_context(1, BUGGIFY_ALL_ACTIVE);
+        // Same label, same call site: fine (re-evaluation).
+        assert_ne!(
+            context.buggify_evaluate("dup", "a.rs:1", None).unwrap(),
+            SiteOutcome::DuplicateLabel
+        );
+        assert_ne!(
+            context.buggify_evaluate("dup", "a.rs:1", None).unwrap(),
+            SiteOutcome::DuplicateLabel
+        );
+        // Same label at a DIFFERENT call site: fatal duplicate.
+        assert_eq!(
+            context.buggify_evaluate("dup", "b.rs:9", None).unwrap(),
+            SiteOutcome::DuplicateLabel
+        );
+        // A collision across macro kinds is caught too.
+        assert_eq!(
+            context.always_check("dup", "c.rs:3", true).unwrap(),
+            SiteOutcome::DuplicateLabel
+        );
+    }
+
+    #[test]
+    fn buggify_disabled_is_inert_and_records_nothing() {
+        let mut context = buggify_context(3, BuggifyConfig::default());
+        for _ in 0..100 {
+            assert_eq!(
+                context.buggify_evaluate("never", "x.rs:1", None).unwrap(),
+                SiteOutcome::Ok
+            );
+        }
+        // always! still fires its invariant even with buggify disabled.
+        assert_eq!(
+            context.always_check("inv", "x.rs:2", false).unwrap(),
+            SiteOutcome::AlwaysViolation
+        );
+        let diag = context.buggify_diagnostics();
+        assert!(!diag.enabled);
+        assert_eq!(diag.total_firings, 0);
+        assert_eq!(context.buggify.to_record(), None);
+    }
+
+    #[test]
+    fn buggify_knob_is_deterministic_and_in_range() {
+        let mut a = buggify_context(9, BUGGIFY_ALL_ACTIVE);
+        let mut b = buggify_context(9, BUGGIFY_ALL_ACTIVE);
+        let va = a
+            .buggify_knob("batch", "k.rs:1", 10, 1, 100)
+            .unwrap()
+            .unwrap();
+        let vb = b
+            .buggify_knob("batch", "k.rs:1", 10, 1, 100)
+            .unwrap()
+            .unwrap();
+        assert_eq!(va, vb, "knob is deterministic per seed+label");
+        assert!((1..=100).contains(&va), "knob out of range: {va}");
+        // Disabled / inactive returns the clamped default.
+        let mut off = buggify_context(9, BuggifyConfig::default());
+        assert_eq!(
+            off.buggify_knob("batch", "k.rs:1", 10, 1, 100)
+                .unwrap()
+                .unwrap(),
+            10
+        );
+    }
+
+    #[test]
+    fn buggify_cutoff_suppresses_firing_after_the_window() {
+        let mut context = buggify_context(
+            5,
+            BuggifyConfig {
+                enabled: true,
+                fire_permille: 1000,
+                activation_permille: 1000,
+                cutoff_nanos: 1_000,
+                after_setup: false,
+            },
+        );
+        // Before the cutoff (virtual time 0) an always-fire site fires.
+        assert_eq!(
+            context.buggify_evaluate("c", "c.rs:1", None).unwrap(),
+            SiteOutcome::Fire
+        );
+        // Advance virtual time past the cutoff, then firing is suppressed.
+        context.sleep_for(2_000).unwrap();
+        assert_eq!(
+            context.buggify_evaluate("c", "c.rs:1", None).unwrap(),
+            SiteOutcome::Ok
+        );
+        assert!(context.buggify_diagnostics().cutoff_suppressed >= 1);
+    }
+
+    #[test]
+    fn buggify_after_setup_gates_firing_and_flags_never_called() {
+        let config = BuggifyConfig {
+            enabled: true,
+            fire_permille: 1000,
+            activation_permille: 1000,
+            cutoff_nanos: DEFAULT_BUGGIFY_CUTOFF_NANOS,
+            after_setup: true,
+        };
+        // Before setup_complete, an always-fire site stays inert.
+        let mut context = buggify_context(2, config);
+        assert_eq!(
+            context.buggify_evaluate("g", "g.rs:1", None).unwrap(),
+            SiteOutcome::Ok,
+            "site must be inert before setup_complete"
+        );
+        // The site is still marked reachable (coverage) even while gated.
+        assert!(
+            context
+                .buggify_diagnostics()
+                .sites
+                .iter()
+                .any(|s| s.reachable)
+        );
+        // A run that never reaches setup_complete is a declared-but-never-called
+        // violation.
+        assert!(context.buggify_setup_violation());
+        // After setup_complete, firing arms.
+        context.lifecycle_setup_complete();
+        assert_eq!(
+            context.buggify_evaluate("g", "g.rs:1", None).unwrap(),
+            SiteOutcome::Fire
+        );
+        assert!(!context.buggify_setup_violation());
+    }
+
+    #[test]
+    fn buggify_rng_is_seed_deterministic() {
+        let mut a = buggify_context(11, BuggifyConfig::default());
+        let mut b = buggify_context(11, BuggifyConfig::default());
+        let seq_a: Vec<u64> = (0..8).map(|_| a.buggify_rng()).collect();
+        let seq_b: Vec<u64> = (0..8).map(|_| b.buggify_rng()).collect();
+        assert_eq!(seq_a, seq_b);
+        let mut c = buggify_context(12, BuggifyConfig::default());
+        let seq_c: Vec<u64> = (0..8).map(|_| c.buggify_rng()).collect();
+        assert_ne!(seq_a, seq_c);
+    }
+
+    #[test]
+    fn buggify_record_replay_reproduces_decisions_without_re_supplying_flags() {
+        let directory = tempdir().unwrap();
+        let trace = directory.path().join("buggify.patina");
+        let config = BuggifyConfig {
+            enabled: true,
+            fire_permille: 500,
+            activation_permille: 1000,
+            cutoff_nanos: DEFAULT_BUGGIFY_CUTOFF_NANOS,
+            after_setup: false,
+        };
+
+        // Record: interleave a recorded entropy op with buggify evaluations and a
+        // fired delay (which records a SleepUntil), then finalize the trace.
+        let mut recorded_fires = Vec::new();
+        let mut context =
+            Context::from_config(RuntimeConfig::record(3, &trace, "fp").with_buggify(config))
+                .unwrap();
+        context.entropy_bytes(4).unwrap();
+        for _ in 0..20 {
+            recorded_fires.push(matches!(
+                context.buggify_evaluate("s", "r.rs:1", None).unwrap(),
+                SiteOutcome::Fire
+            ));
+            let _ = context.buggify_delay("d", "r.rs:2").unwrap();
+        }
+        context.finish().unwrap();
+
+        // Replay WITHOUT re-supplying buggify flags: the trace's recorded config
+        // is authoritative and the pure-function decisions must reproduce exactly.
+        let mut replay_fires = Vec::new();
+        let mut replay = Context::from_config(RuntimeConfig::replay(&trace, "fp")).unwrap();
+        replay.entropy_bytes(4).unwrap();
+        for _ in 0..20 {
+            replay_fires.push(matches!(
+                replay.buggify_evaluate("s", "r.rs:1", None).unwrap(),
+                SiteOutcome::Fire
+            ));
+            let _ = replay.buggify_delay("d", "r.rs:2").unwrap();
+        }
+        // No divergence at finalization means every recorded op (entropy +
+        // delay-driven SleepUntil) was consumed in the same order.
+        replay.finish().unwrap();
+
+        assert_eq!(recorded_fires, replay_fires);
+        assert!(
+            recorded_fires.iter().any(|fired| *fired),
+            "expected some firing"
+        );
+    }
+
+    #[test]
+    fn reconcile_replay_buggify_enforces_the_authoritative_trace_contract() {
+        let stored = patina_trace::BuggifyConfigRecord {
+            fire_permille: 250,
+            activation_permille: 250,
+            cutoff_nanos: 300_000_000_000,
+            after_setup: false,
+            active_sites: vec!["s".into()],
+            knobs: BTreeMap::new(),
+        };
+        // A trace without buggify yields no override.
+        assert_eq!(
+            reconcile_replay_buggify(&RuntimeConfig::seeded(0), None).unwrap(),
+            None
+        );
+        // Flag-free replay adopts the stored config verbatim.
+        let adopted = reconcile_replay_buggify(&RuntimeConfig::seeded(0), Some(&stored))
+            .unwrap()
+            .expect("stored config adopted");
+        assert!(adopted.enabled);
+        assert_eq!(adopted.fire_permille, 250);
+        // Conflicting knobs fail closed.
+        let conflicting = RuntimeConfig::seeded(0).with_buggify(BuggifyConfig {
+            enabled: true,
+            fire_permille: 999,
+            ..BuggifyConfig::default()
+        });
+        assert!(reconcile_replay_buggify(&conflicting, Some(&stored)).is_err());
+    }
 
     #[test]
     fn reconcile_replay_faults_enforces_the_authoritative_trace_contract() {

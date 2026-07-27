@@ -1621,7 +1621,7 @@ fn create_schedule_fixture(path: &Path) {
     fs::write(
         path.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"patina-sched-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina = {{ path = \"{patina_path}\" }}\n"
+            "[package]\nname = \"patina-sched-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina = {{ path = \"{patina_path}\", features = [\"runtime\"] }}\n"
         ),
     )
     .unwrap();
@@ -1687,7 +1687,7 @@ fn create_fixture(path: &Path) {
     fs::write(
         path.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"patina-e2e-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina = {{ path = \"{patina_path}\" }}\n"
+            "[package]\nname = \"patina-e2e-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina = {{ path = \"{patina_path}\", features = [\"runtime\"] }}\n"
         ),
     )
     .unwrap();
@@ -1722,4 +1722,234 @@ mod tests {
 "#,
     )
     .unwrap();
+}
+
+// ---- Cooperative-SUT (buggify) SDK, end to end -------------------------------
+//
+// A whole package depending on the `patina` crate's default-feature SDK, built
+// and run through native-build/native-run. Verifies that buggify fires
+// deterministically, emits `PATINA_SDK_REPORT`, records and replays
+// byte-identically without re-supplying `--buggify`, and that a duplicate label
+// aborts with the fatal marker.
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn write_sdk_fixture(root: &Path, main: &str) {
+    fs::create_dir_all(root.join("src")).unwrap();
+    let patina_path = native_workspace().join("crates/patina");
+    let patina_path = patina_path.to_string_lossy().replace('\\', "\\\\");
+    fs::write(
+        root.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"buggify-sdk-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina = {{ path = \"{patina_path}\" }}\n"
+        ),
+    )
+    .unwrap();
+    fs::write(root.join("src/main.rs"), main).unwrap();
+}
+
+// A guest whose buggify sites all activate and always fire under
+// `--buggify=1000 --buggify-activation-permille 1000`, so the outcome is
+// deterministic without hunting for a firing seed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const BUGGIFY_SDK_MAIN: &str = r#"
+fn main() {
+    patina::lifecycle::setup_complete();
+    let mut fired = 0u32;
+    let knob = patina::buggify_knob!("batch", 10_i64, 1, 100);
+    for i in 0..8 {
+        patina::reachable!("loop-body");
+        if patina::buggify!("early-return") {
+            fired += 1;
+        }
+        patina::sometimes!(i == 3, "index-is-three");
+    }
+    patina::always!(fired <= 8, "fired-in-bounds");
+    println!("RESULT knob={knob} fired={fired} rng={}", patina::rng());
+}
+"#;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_buggify_sdk_reports_records_and_replays() {
+    let directory = tempdir().unwrap();
+    let pkg = directory.path().join("pkg");
+    write_sdk_fixture(&pkg, BUGGIFY_SDK_MAIN);
+    let workspace = native_workspace();
+    let bin = directory.path().join("buggify-sdk");
+    invoke_in(
+        workspace,
+        &[
+            "native-build",
+            pkg.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    // Seeded run with every site active and always firing.
+    let flags = ["--buggify=1000", "--buggify-activation-permille", "1000"];
+    let seeded = invoke_in(
+        workspace,
+        &[
+            &["native-run", bin.to_str().unwrap(), "--seed", "4"][..],
+            &flags[..],
+        ]
+        .concat(),
+    );
+    let stdout = String::from_utf8_lossy(&seeded.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&seeded.stderr).into_owned();
+    assert!(
+        stdout.contains("fired=8"),
+        "all sites should fire: {stdout}"
+    );
+    assert!(
+        stderr.contains("PATINA_SDK_REPORT enabled=1"),
+        "expected SDK report: {stderr}"
+    );
+    assert!(
+        stderr.contains("total_firings=") && !stderr.contains("total_firings=0"),
+        "expected nonzero firings: {stderr}"
+    );
+
+    // Record, then replay WITHOUT re-supplying --buggify: byte-identical stdout.
+    let trace = directory.path().join("buggify.patina");
+    let recorded = invoke_in(
+        workspace,
+        &[
+            &["native-run", bin.to_str().unwrap(), "--seed", "4"][..],
+            &flags[..],
+            &["--record", trace.to_str().unwrap()][..],
+        ]
+        .concat(),
+    );
+    let replayed = invoke_in(
+        workspace,
+        &[
+            "native-run",
+            bin.to_str().unwrap(),
+            "--replay",
+            trace.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&recorded.stdout),
+        String::from_utf8_lossy(&replayed.stdout),
+        "record/replay stdout diverged"
+    );
+}
+
+// A guest that reuses the same label at two different call sites: a fatal
+// duplicate, aborting with the marker.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const BUGGIFY_DUP_MAIN: &str = r#"
+fn main() {
+    let _ = patina::buggify!("same-label");
+    let _ = patina::buggify!("same-label");
+    println!("unreachable");
+}
+"#;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_buggify_duplicate_label_aborts_with_marker() {
+    let directory = tempdir().unwrap();
+    let pkg = directory.path().join("dup");
+    write_sdk_fixture(&pkg, BUGGIFY_DUP_MAIN);
+    let workspace = native_workspace();
+    let bin = directory.path().join("buggify-dup");
+    invoke_in(
+        workspace,
+        &[
+            "native-build",
+            pkg.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let output = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["native-run", bin.to_str().unwrap(), "--seed", "1"],
+    );
+    assert!(!output.status.success(), "duplicate label must abort");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("PATINA_BUGGIFY_DUPLICATE_LABEL label=same-label"),
+        "expected duplicate-label marker: {stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("unreachable"),
+        "guest ran past the duplicate label"
+    );
+}
+
+// A guest that never calls setup_complete; under --buggify-after-setup this is a
+// declared-but-never-called harness bug that must fail loudly.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const BUGGIFY_NO_SETUP_MAIN: &str = r#"
+fn main() {
+    for _ in 0..5 {
+        let _ = patina::buggify!("gated");
+    }
+    println!("guest-finished");
+}
+"#;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_buggify_after_setup_never_called_fails_loudly() {
+    let directory = tempdir().unwrap();
+    let pkg = directory.path().join("nosetup");
+    write_sdk_fixture(&pkg, BUGGIFY_NO_SETUP_MAIN);
+    let workspace = native_workspace();
+    let bin = directory.path().join("buggify-nosetup");
+    invoke_in(
+        workspace,
+        &[
+            "native-build",
+            pkg.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    // With the gate declared but never reached: fatal marker + nonzero exit,
+    // even though buggify itself injected no fault.
+    let gated = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "native-run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--buggify",
+            "--buggify-after-setup",
+        ],
+    );
+    assert!(
+        !gated.status.success(),
+        "declared-but-never-called must fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&gated.stderr).contains("PATINA_BUGGIFY_SETUP_NEVER_CALLED"),
+        "expected never-called marker: {}",
+        String::from_utf8_lossy(&gated.stderr)
+    );
+
+    // Same guest WITHOUT the gate declaration runs clean.
+    let plain = invoke_in(
+        workspace,
+        &[
+            "native-run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--buggify",
+        ],
+    );
+    assert!(
+        String::from_utf8_lossy(&plain.stdout).contains("guest-finished"),
+        "ungated run should finish cleanly"
+    );
 }

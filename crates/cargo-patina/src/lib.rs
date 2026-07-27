@@ -15,10 +15,11 @@ use patina_minimize::{
     reduce_scenario, reduce_schedule,
 };
 use patina_runtime::{
-    Context, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_FINGERPRINT, ENV_FS_CRASH_AT,
-    ENV_FS_IMAGE_FD, ENV_FS_TORN_GRANULARITY, ENV_MODE, ENV_NET_DROP_PERMILLE, ENV_NET_JITTER,
-    ENV_NET_LATENCY, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_SEED, ENV_SLEEP_JITTER,
-    ENV_STEP_BUDGET, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, RuntimeConfig,
+    Context, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION,
+    ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_FINGERPRINT, ENV_FS_CRASH_AT, ENV_FS_IMAGE_FD,
+    ENV_FS_TORN_GRANULARITY, ENV_MODE, ENV_NET_DROP_PERMILLE, ENV_NET_JITTER, ENV_NET_LATENCY,
+    ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_SEED, ENV_SLEEP_JITTER, ENV_STEP_BUDGET,
+    ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, RuntimeConfig,
 };
 use patina_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
@@ -69,7 +70,7 @@ Usage:
   cargo patina native-audit <BINARY> [--allow SYMBOL]...
   cargo patina native-build <SOURCE.rs> --output <PATH> [--edition YEAR] [--release] [--yield-points] [-- RUSTC OPTIONS]
   cargo patina native-build <DIR|Cargo.toml> [--output <PATH>] [--package NAME] [--bin NAME] [--release] [--yield-points]
-  cargo patina native-run <BINARY> [--seed N | --record PATH | --replay PATH] [--fingerprint STR] [--mount HOST_DIR] [--net-latency-nanos N] [--fs-crash-at SPEC] [--fs-torn-granularity block|byte] [--sleep-jitter-nanos MIN..MAX] [--net-jitter-nanos MIN..MAX] [--net-drop-permille N] [--allow SYMBOL]... [--allow-unsupported-symbols <all|name,...>] [-- PROGRAM ARGS]
+  cargo patina native-run <BINARY> [--seed N | --record PATH | --replay PATH] [--fingerprint STR] [--mount HOST_DIR] [--net-latency-nanos N] [--fs-crash-at SPEC] [--fs-torn-granularity block|byte] [--sleep-jitter-nanos MIN..MAX] [--net-jitter-nanos MIN..MAX] [--net-drop-permille N] [--buggify[=PERMILLE]] [--buggify-activation-permille N] [--buggify-cutoff-nanos N] [--buggify-after-setup] [--allow SYMBOL]... [--allow-unsupported-symbols <all|name,...>] [-- PROGRAM ARGS]
   cargo patina minimize <TRACE> --output <PATH> [--timeline ID] [--prune-branches] -- <ORACLE> [ARGS]...
   cargo patina minimize --scenario --seed <U64> [--param K=V]... [--seed-budget N] -- <ORACLE> [ARGS]...
   cargo dst    <run|test> [PATINA OPTIONS] [CARGO OPTIONS] [-- PROGRAM OPTIONS]
@@ -187,11 +188,28 @@ Native fault options (native-run; seed-driven, default off):
                                   to send order.
       --net-drop-permille <N>     Drop datagrams with probability N per-mille
                                   (0..=1000).
+      --buggify[=<PERMILLE>]      Enable cooperative-SUT (buggify) fault
+                                  injection. PERMILLE is the per-evaluation
+                                  firing probability for an active site
+                                  (default 250 = 25%).
+      --buggify-activation-permille <N>
+                                  Fraction of buggify sites made active this run
+                                  (default 250 = 25%). Implies --buggify.
+      --buggify-cutoff-nanos <N>  Virtual-time cutoff after which buggify stops
+                                  firing (default 300000000000 = 300s). Implies
+                                  --buggify.
+      --buggify-after-setup       Declare that the guest calls
+                                  patina::lifecycle::setup_complete(); buggify
+                                  stays inert until it does. If the guest never
+                                  calls it, the run fails loudly. Implies
+                                  --buggify.
 
-Fault knobs are seeded by the run seed. A --record run captures its full fault
-configuration into the trace metadata, so --replay reproduces the faults with no
+Fault and buggify knobs are seeded by the run seed. A --record run captures its
+full configuration into the trace metadata, so --replay reproduces it with no
 knobs re-supplied: the trace is authoritative. Supplying knobs on --replay is
-optional and, if they conflict with the recording, fails closed.
+optional and, if they conflict with the recording, fails closed. Enabling
+buggify folds a +buggify component into the run fingerprint, so a buggify trace
+never cross-replays with a non-buggify build.
 ";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -375,6 +393,10 @@ struct NativeRunInvocation {
     /// re-parses it identically on record and replay, so a mismatched flag on
     /// replay fails closed like any other operation divergence.
     faults: NativeFaults,
+    /// Cooperative-SUT (buggify) knobs, or `None` when `--buggify` was not
+    /// passed. Presence enables buggify and folds `+buggify` into the run
+    /// fingerprint.
+    buggify: Option<NativeBuggify>,
     /// Extra symbols to treat as known-safe in the pre-run audit gate, beyond
     /// the baked shim control-plane vehicle. Mirrors `native-audit --allow`.
     allow: BTreeSet<String>,
@@ -406,6 +428,22 @@ struct NativeFaults {
     net_jitter_nanos: Option<String>,
     /// Seeded datagram drop probability in per-mille (0..=1000).
     net_drop_permille: Option<String>,
+}
+
+/// Cooperative-SUT (buggify) knobs for `native-run`, forwarded to the guest as
+/// validated raw strings through the `PATINA_BUGGIFY*` control plane. Presence
+/// of the enclosing `Option` means `--buggify` was passed (buggify enabled).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct NativeBuggify {
+    /// Per-evaluation firing probability in per-mille from `--buggify[=permille]`.
+    fire_permille: Option<String>,
+    /// Per-run site activation probability from `--buggify-activation-permille`.
+    activation_permille: Option<String>,
+    /// Damage-control cutoff in virtual nanoseconds from `--buggify-cutoff-nanos`.
+    cutoff_nanos: Option<String>,
+    /// `--buggify-after-setup`: declare that the guest calls
+    /// `setup_complete()`, gating buggify off until it does.
+    after_setup: bool,
 }
 
 /// The escape hatch for `native-run`'s pre-run default-deny gate. By default an
@@ -1239,6 +1277,7 @@ fn parse_native_run(mut arguments: Vec<OsString>) -> Result<NativeRunInvocation,
     let mut fingerprint = None;
     let mut net_latency_nanos = None;
     let mut faults = NativeFaults::default();
+    let mut buggify: Option<NativeBuggify> = None;
     let mut allow = BTreeSet::new();
     let mut allow_unsupported: Option<UnsupportedPolicy> = None;
     let mut mount = None;
@@ -1357,6 +1396,51 @@ fn parse_native_run(mut arguments: Vec<OsString>) -> Result<NativeRunInvocation,
                     "--net-drop-permille",
                 )?;
             }
+            "--buggify" => {
+                buggify.get_or_insert_with(NativeBuggify::default);
+            }
+            value if value.starts_with("--buggify=") => {
+                let permille = parse_u64("--buggify", &value["--buggify=".len()..])?;
+                if permille > 1000 {
+                    return Err(CliError::usage(
+                        "--buggify permille must be within [0, 1000]",
+                    ));
+                }
+                let entry = buggify.get_or_insert_with(NativeBuggify::default);
+                set_once(&mut entry.fire_permille, permille.to_string(), "--buggify")?;
+            }
+            "--buggify-activation-permille" => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--buggify-activation-permille")?;
+                let permille = parse_u64("--buggify-activation-permille", value)?;
+                if permille > 1000 {
+                    return Err(CliError::usage(
+                        "--buggify-activation-permille must be within [0, 1000]",
+                    ));
+                }
+                let entry = buggify.get_or_insert_with(NativeBuggify::default);
+                set_once(
+                    &mut entry.activation_permille,
+                    permille.to_string(),
+                    "--buggify-activation-permille",
+                )?;
+            }
+            "--buggify-cutoff-nanos" => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--buggify-cutoff-nanos")?;
+                let nanos = parse_u64("--buggify-cutoff-nanos", value)?;
+                let entry = buggify.get_or_insert_with(NativeBuggify::default);
+                set_once(
+                    &mut entry.cutoff_nanos,
+                    nanos.to_string(),
+                    "--buggify-cutoff-nanos",
+                )?;
+            }
+            "--buggify-after-setup" => {
+                buggify
+                    .get_or_insert_with(NativeBuggify::default)
+                    .after_setup = true;
+            }
             "--record" => {
                 index += 1;
                 let path = arguments
@@ -1414,6 +1498,7 @@ fn parse_native_run(mut arguments: Vec<OsString>) -> Result<NativeRunInvocation,
         program_args,
         net_latency_nanos,
         faults,
+        buggify,
         allow,
         allow_unsupported: allow_unsupported.unwrap_or(UnsupportedPolicy::Deny),
         mount,
@@ -2109,7 +2194,11 @@ fn build_native_source(
     command
         .arg("--edition")
         .arg(edition)
-        .args(["--cfg", "patina", "--cfg", "dst"])
+        // `patina_shim` marks a shim-linked build: the `patina` crate's SDK
+        // resolves its buggify FFI only under this cfg, so a plain/WASI/`run`
+        // build (which also sets `patina`/`dst`) never references the shim
+        // symbols and never fails to link.
+        .args(["--cfg", "patina", "--cfg", "dst", "--cfg", "patina_shim"])
         .arg("-C")
         .arg(link_arg(object))
         .arg("-C")
@@ -2407,6 +2496,10 @@ fn native_package_rustflags(
     tokens.push(OsString::from("patina"));
     tokens.push(OsString::from("--cfg"));
     tokens.push(OsString::from("dst"));
+    // Shim-linked build marker; see `compile_single_source` for why the SDK's
+    // buggify FFI is gated on `patina_shim` rather than `patina`.
+    tokens.push(OsString::from("--cfg"));
+    tokens.push(OsString::from("patina_shim"));
     tokens.push(OsString::from("-C"));
     tokens.push(link_arg(object));
     tokens.push(OsString::from("-C"));
@@ -2475,17 +2568,37 @@ fn yield_point_fingerprint(base: &str, yield_points: bool) -> String {
 }
 
 /// The compatibility fingerprint for a native run: the base fingerprint, then
-/// the yield-point policy suffix, then the mounted-corpus suffix. Folding the
-/// filesystem image hash in means a trace recorded against one corpus fails
-/// closed on replay against a different one, exactly like a schedule-policy
-/// mismatch, rather than replaying stale outcomes over new inputs.
-fn native_run_fingerprint(base: &str, yield_points: bool, image_hash: Option<&str>) -> String {
+/// the yield-point policy suffix, the mounted-corpus suffix, and the
+/// cooperative-SUT (buggify) suffix. Folding the filesystem image hash in means
+/// a trace recorded against one corpus fails closed on replay against a
+/// different one, exactly like a schedule-policy mismatch. The `+buggify`
+/// suffix means a buggify trace never cross-replays with a non-buggify build,
+/// even though the per-site knobs live in (reconciled) metadata.
+fn native_run_fingerprint(
+    base: &str,
+    yield_points: bool,
+    image_hash: Option<&str>,
+    buggify: bool,
+) -> String {
     let mut fingerprint = yield_point_fingerprint(base, yield_points);
     if let Some(hash) = image_hash {
         fingerprint.push_str("+fsimg:");
         fingerprint.push_str(hash);
     }
+    if buggify {
+        fingerprint.push_str("+buggify");
+    }
     fingerprint
+}
+
+/// Whether a recorded trace carries buggify metadata. Used at replay so the
+/// `+buggify` fingerprint component is reconstructed from the trace itself,
+/// keeping replay self-contained (the operator need not re-pass `--buggify`).
+/// A read/parse failure reports `false`; the runtime surfaces any genuine error.
+fn trace_has_buggify(path: &Path) -> bool {
+    patina_trace::TraceBundle::load(path)
+        .map(|bundle| bundle.metadata.buggify.is_some())
+        .unwrap_or(false)
 }
 
 /// An encoded filesystem image held open in a temporary file, ready to be
@@ -2793,6 +2906,22 @@ fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> 
     if let Some(value) = &invocation.faults.net_drop_permille {
         command.env(ENV_NET_DROP_PERMILLE, value);
     }
+    // Forward the cooperative-SUT (buggify) knobs. Presence of `PATINA_BUGGIFY`
+    // enables buggify; its value (if any) is the firing per-mille. Like the fault
+    // knobs, these are recorded into the trace metadata and are OPTIONAL on
+    // replay (the trace is authoritative; a conflicting knob fails closed).
+    if let Some(buggify) = &invocation.buggify {
+        command.env(ENV_BUGGIFY, buggify.fire_permille.as_deref().unwrap_or(""));
+        if let Some(value) = &buggify.activation_permille {
+            command.env(ENV_BUGGIFY_ACTIVATION, value);
+        }
+        if let Some(value) = &buggify.cutoff_nanos {
+            command.env(ENV_BUGGIFY_CUTOFF, value);
+        }
+        if buggify.after_setup {
+            command.env(ENV_BUGGIFY_AFTER_SETUP, "1");
+        }
+    }
 
     // Hold the trace file open until the child has been spawned so its
     // descriptor is still valid when `pre_exec` duplicates it.
@@ -2819,7 +2948,12 @@ fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> 
                 .env(ENV_SEED, seed.to_string())
                 .env(
                     ENV_FINGERPRINT,
-                    native_run_fingerprint(fingerprint, yield_points, image_hash.as_deref()),
+                    native_run_fingerprint(
+                        fingerprint,
+                        yield_points,
+                        image_hash.as_deref(),
+                        invocation.buggify.is_some(),
+                    ),
                 )
                 .env(ENV_TRACE_FD, PATINA_TRACE_CHANNEL_FD.to_string());
             // Qualify the recorded artifact: a run that downgraded unsupported
@@ -2833,11 +2967,20 @@ fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> 
             let file = fs::File::open(path).map_err(|error| {
                 CliError(format!("failed to open trace {}: {error}", path.display()))
             })?;
+            // Reconstruct the `+buggify` fingerprint component from the trace so
+            // replay is self-contained; a buggify trace replayed against a
+            // non-buggify build still fails closed on the fingerprint.
+            let buggify = invocation.buggify.is_some() || trace_has_buggify(path);
             command
                 .env(ENV_MODE, "replay")
                 .env(
                     ENV_FINGERPRINT,
-                    native_run_fingerprint(fingerprint, yield_points, image_hash.as_deref()),
+                    native_run_fingerprint(
+                        fingerprint,
+                        yield_points,
+                        image_hash.as_deref(),
+                        buggify,
+                    ),
                 )
                 .env(ENV_TRACE_FD, PATINA_TRACE_CHANNEL_FD.to_string());
             Some(file)

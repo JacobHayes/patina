@@ -1,6 +1,6 @@
 //! Versioned trace bundles and strict replay matching.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Write};
@@ -95,12 +95,54 @@ pub struct FaultConfigRecord {
     pub net_latency_nanos: u64,
 }
 
+/// The seed-driven cooperative-SUT (buggify) configuration of a recorded run.
+/// Stored in the trace metadata so replay reproduces the same activation and
+/// firing decisions without any flag re-supply, exactly like [`FaultConfigRecord`].
+///
+/// Buggify decisions are pure deterministic functions of `(root_seed, site
+/// label, config)` and are NOT recorded per-evaluation (that would bloat the
+/// trace), so replay re-derives them from this config. The `active_sites` and
+/// `knobs` fields are the run's realized activation/knob picks: authoritative on
+/// replay and surfaced in the `PATINA_SDK_REPORT` line, they also make a trace
+/// self-describing. This field is absent (`None`) in traces recorded before
+/// buggify shipped, which the runtime treats as buggify-disabled.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuggifyConfigRecord {
+    /// Per-evaluation firing probability in per-mille (0..=1000) for an active
+    /// site. FoundationDB's default is 25% (250).
+    pub fire_permille: u16,
+    /// Per-run site activation probability in per-mille (0..=1000): the fraction
+    /// of sites made active for this run. FoundationDB's default is 25% (250).
+    pub activation_permille: u16,
+    /// Virtual-time monotonic-nanoseconds cutoff after which buggify stops firing
+    /// (FoundationDB's damage-control window), so late-run steady state is not
+    /// perturbed forever. Default 300 virtual seconds.
+    pub cutoff_nanos: u64,
+    /// Whether the runner declared (`--buggify-after-setup`) that the guest calls
+    /// `patina::lifecycle::setup_complete()`, so buggify stays inert until that
+    /// call. Recorded so replay reproduces the same gating. Omitted when false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub after_setup: bool,
+    /// Labels of the sites that were activated during the run, in first-seen
+    /// order. Authoritative on replay and reported at finalization.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_sites: Vec<String>,
+    /// Realized per-run knob values keyed by site label, in label order.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub knobs: BTreeMap<String, i64>,
+}
+
 fn torn_granularity_is_block(granularity: &TornGranularity) -> bool {
     matches!(granularity, TornGranularity::Block)
 }
 
 fn is_zero_u16(value: &u16) -> bool {
     *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn is_zero_u64(value: &u64) -> bool {
@@ -118,6 +160,13 @@ pub struct RunMetadata {
     /// treats as the pre-metadata re-supply contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub faults: Option<FaultConfigRecord>,
+    /// The run's cooperative-SUT (buggify) configuration, authoritative on
+    /// replay. Additive: absent (`None`) in traces recorded without buggify,
+    /// which the runtime treats as buggify-disabled. An old trace therefore
+    /// migrates clean, and a conflicting explicit knob at replay fails closed
+    /// exactly like [`RunMetadata::faults`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buggify: Option<BuggifyConfigRecord>,
 }
 
 impl RunMetadata {
@@ -127,6 +176,7 @@ impl RunMetadata {
             decision_policy: "splitmix64-v1".into(),
             fingerprint: fingerprint.into(),
             faults: None,
+            buggify: None,
         }
     }
 
@@ -134,6 +184,14 @@ impl RunMetadata {
     #[must_use]
     pub fn with_faults(mut self, faults: Option<FaultConfigRecord>) -> Self {
         self.faults = faults;
+        self
+    }
+
+    /// Attach the run's cooperative-SUT (buggify) configuration recorded into
+    /// the trace.
+    #[must_use]
+    pub fn with_buggify(mut self, buggify: Option<BuggifyConfigRecord>) -> Self {
+        self.buggify = buggify;
         self
     }
 }
@@ -450,6 +508,14 @@ impl Recorder {
         });
     }
 
+    /// Overwrite the recorded buggify configuration at finalization. The run's
+    /// realized active-site set and knob picks are only known after execution, so
+    /// the runtime records the static config at build time and calls this to fold
+    /// in the accrued detail before the bundle is written.
+    pub fn set_buggify(&mut self, buggify: Option<BuggifyConfigRecord>) {
+        self.metadata.buggify = buggify;
+    }
+
     pub fn finish(self, path: impl AsRef<Path>) -> Result<(), TraceError> {
         self.into_bundle().write_atomic(path)
     }
@@ -515,6 +581,12 @@ impl Replayer {
     /// `None` for a pre-format-4 trace that carried no such metadata.
     pub const fn fault_config(&self) -> Option<&FaultConfigRecord> {
         self.metadata.faults.as_ref()
+    }
+
+    /// The recorded cooperative-SUT (buggify) configuration, authoritative on
+    /// replay. `None` for a trace recorded without buggify.
+    pub const fn buggify_config(&self) -> Option<&BuggifyConfigRecord> {
+        self.metadata.buggify.as_ref()
     }
 
     pub fn expect(&mut self, operation: &Operation) -> Result<Outcome, TraceError> {
@@ -639,6 +711,13 @@ impl BranchSession {
     /// a pre-format-4 parent trace.
     pub const fn fault_config(&self) -> Option<&FaultConfigRecord> {
         self.bundle.metadata.faults.as_ref()
+    }
+
+    /// The parent trace's recorded cooperative-SUT (buggify) configuration,
+    /// inherited by the branch. `None` for a parent trace recorded without
+    /// buggify.
+    pub const fn buggify_config(&self) -> Option<&BuggifyConfigRecord> {
+        self.bundle.metadata.buggify.as_ref()
     }
 
     pub fn expect_prefix(
@@ -1068,6 +1147,34 @@ mod tests {
         );
         let text = String::from_utf8(empty.to_bytes().unwrap()).unwrap();
         assert!(text.contains("\"faults\":{}"), "{text}");
+    }
+
+    #[test]
+    fn buggify_config_metadata_round_trips_and_is_additive() {
+        let mut knobs = BTreeMap::new();
+        knobs.insert("commit-batch".to_string(), 42);
+        let buggify = BuggifyConfigRecord {
+            fire_permille: 250,
+            activation_permille: 250,
+            cutoff_nanos: 300_000_000_000,
+            after_setup: true,
+            active_sites: vec!["commit-early-return".to_string()],
+            knobs,
+        };
+        let metadata =
+            RunMetadata::new(7, "fingerprint+buggify").with_buggify(Some(buggify.clone()));
+        let bundle = TraceBundle::new(metadata, Vec::new());
+        let bytes = bundle.to_bytes().unwrap();
+        let reloaded = TraceBundle::from_slice(&bytes).unwrap();
+        assert_eq!(reloaded.metadata.buggify, Some(buggify));
+
+        // A trace recorded without buggify keeps the field absent, so an old
+        // trace and a buggify-disabled run are indistinguishable (both None).
+        let plain = TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new());
+        let text = String::from_utf8(plain.to_bytes().unwrap()).unwrap();
+        assert!(!text.contains("buggify"), "{text}");
+        let reloaded_plain = TraceBundle::from_slice(plain.to_bytes().unwrap().as_slice()).unwrap();
+        assert_eq!(reloaded_plain.metadata.buggify, None);
     }
 
     #[test]

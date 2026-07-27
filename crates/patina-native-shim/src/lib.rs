@@ -22,7 +22,8 @@ use patina_abi::{
 use patina_fs_crash::CrashFs;
 use patina_fs_mem::FsImage;
 use patina_runtime::{
-    Context, MAX_TRACE_BYTES, RuntimeBuilder, RuntimeConfig, RuntimeError, TraceTransport,
+    Context, MAX_TRACE_BYTES, RuntimeBuilder, RuntimeConfig, RuntimeError, SiteOutcome,
+    TraceTransport,
 };
 pub use thread::{
     patina_cond_broadcast, patina_cond_destroy, patina_cond_init, patina_cond_signal,
@@ -949,6 +950,9 @@ fn runtime_config_from_control_plane() -> Result<(RuntimeConfig, Option<i32>), R
     // environment path uses, so both entry points accept the identical protocol
     // and fail closed on any malformed value.
     config = config.apply_fault_env(control_env)?;
+    // Cooperative-SUT (buggify) knobs come from the same control plane through
+    // the shared parser, so the shim and the process-environment path agree.
+    config = config.apply_buggify_env(control_env)?;
     Ok((config, trace_fd))
 }
 
@@ -1078,8 +1082,21 @@ pub extern "C" fn patina_shutdown() -> c_int {
         }
     };
     SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
+    // Detect a declared-but-never-reached setup gate before the context is
+    // consumed. The trace is still finalized (the run is reproducible), then the
+    // process fails loudly — a `--buggify-after-setup` run whose guest never
+    // called `setup_complete()` is a harness bug, not a silent no-fault run.
+    let setup_violation = context.buggify_setup_violation();
     let finished = context.finish();
     let flushed = flush_captured_stdio();
+    if setup_violation {
+        let _ = host_write_all(
+            2,
+            b"PATINA_BUGGIFY_SETUP_NEVER_CALLED --buggify-after-setup was declared but the guest \
+never called patina::lifecycle::setup_complete()\n",
+        );
+        std::process::abort();
+    }
     match (finished, flushed) {
         (Ok(()), Ok(())) => {
             set_errno(0);
@@ -1940,6 +1957,238 @@ pub extern "C" fn patina_crash() -> c_int {
         Ok(()) => 0,
         Err(errno) => fail(errno),
     }
+}
+
+// ---- Cooperative-SUT (buggify) C ABI -----------------------------------------
+//
+// The runtime side of the `patina` crate's `buggify!`, `always!`, `sometimes!`,
+// `reachable!`, `buggify_knob!`, `buggify_delay!`, `rng`, and lifecycle macros.
+// Labels and call-site identities arrive as `(ptr, len)` UTF-8 slices. Fatal
+// signals (`always!` violation, duplicate label) flush captured output, emit a
+// distinct marker line to the real stderr, and abort — never a silent escape.
+
+/// Reborrow a `(ptr, len)` pair as a UTF-8 label. `None` (invalid UTF-8 or a null
+/// non-empty pointer) is a fail-closed error at the call sites below.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes, or be null when `len == 0`.
+unsafe fn buggify_label<'a>(ptr: *const u8, len: usize) -> Option<&'a str> {
+    if len == 0 {
+        return Some("");
+    }
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: guaranteed by this function's documented contract.
+    std::str::from_utf8(unsafe { slice::from_raw_parts(ptr, len) }).ok()
+}
+
+/// Flush captured guest output, emit `<marker> label=<label>` to the real
+/// stderr through the non-interposed host alias, and abort. Mirrors
+/// [`abort_with_init_error`] so the marker lands after buffered guest output.
+fn abort_with_buggify_marker(marker: &str, label: &str) -> ! {
+    let _ = flush_captured_stdio();
+    let line = format!("{marker} label={label}\n");
+    let _ = host_write_all(2, line.as_bytes());
+    std::process::abort();
+}
+
+/// Append a diagnostic line to the captured stderr buffer so it interleaves with
+/// guest output and flushes at exit (lifecycle markers). Bounded like guest I/O.
+fn capture_stderr_line(line: &str) {
+    let mut capture = stdio_slot().lock();
+    if capture.stderr.len().saturating_add(line.len() + 1) > MAX_CAPTURED_STDIO_BYTES {
+        return;
+    }
+    capture.stderr.extend_from_slice(line.as_bytes());
+    capture.stderr.push(b'\n');
+}
+
+/// Shared body for the site-evaluating buggify entry points: read the label and
+/// call site, invoke the context method, map the outcome to `1`=fire / `0`=no,
+/// and abort on a fatal always-violation or duplicate label.
+fn buggify_site_call(
+    label_ptr: *const u8,
+    label_len: usize,
+    site_ptr: *const u8,
+    site_len: usize,
+    invoke: impl FnOnce(&mut Context, &str, &str) -> Result<SiteOutcome, RuntimeError>,
+) -> c_int {
+    // SAFETY: the caller (the `patina` crate macro expansion) passes live slices.
+    let label = match unsafe { buggify_label(label_ptr, label_len) } {
+        Some(label) => label,
+        None => return fail(EINVAL),
+    };
+    let site = match unsafe { buggify_label(site_ptr, site_len) } {
+        Some(site) => site,
+        None => return fail(EINVAL),
+    };
+    match with_context(|context| invoke(context, label, site)) {
+        Ok(SiteOutcome::Fire) => 1,
+        Ok(SiteOutcome::Ok) => 0,
+        Ok(SiteOutcome::AlwaysViolation) => {
+            abort_with_buggify_marker("PATINA_ALWAYS_VIOLATION", label)
+        }
+        Ok(SiteOutcome::DuplicateLabel) => {
+            abort_with_buggify_marker("PATINA_BUGGIFY_DUPLICATE_LABEL", label)
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
+/// `patina::is_simulated()`: 1 whenever the deterministic runtime is installed.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_is_simulated() -> c_int {
+    c_int::from(ensure_runtime().is_ok())
+}
+
+/// `buggify!` / `buggify_with_prob!`: `prob_permille < 0` uses the run default.
+/// Returns 1 when the site fires, 0 otherwise.
+///
+/// # Safety
+/// Label and site pointers must describe live UTF-8 slices of the given lengths.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_buggify(
+    label: *const u8,
+    label_len: usize,
+    site: *const u8,
+    site_len: usize,
+    prob_permille: i32,
+) -> c_int {
+    buggify_site_call(label, label_len, site, site_len, move |context, l, s| {
+        let prob = (prob_permille >= 0).then(|| prob_permille.clamp(0, 1000) as u16);
+        context.buggify_evaluate(l, s, prob)
+    })
+}
+
+/// `buggify_delay!`: on firing, advance virtual time deterministically. Returns
+/// 1 when it delayed.
+///
+/// # Safety
+/// See [`patina_buggify`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_buggify_delay(
+    label: *const u8,
+    label_len: usize,
+    site: *const u8,
+    site_len: usize,
+) -> c_int {
+    buggify_site_call(label, label_len, site, site_len, |context, l, s| {
+        context.buggify_delay(l, s)
+    })
+}
+
+/// `buggify_knob!`: a per-run perturbed value within `[lo, hi]` for an active
+/// site, or `default` otherwise. A duplicate label aborts.
+///
+/// # Safety
+/// See [`patina_buggify`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_buggify_knob(
+    label: *const u8,
+    label_len: usize,
+    site: *const u8,
+    site_len: usize,
+    default: i64,
+    lo: i64,
+    hi: i64,
+) -> i64 {
+    // SAFETY: the caller passes live slices.
+    let label = match unsafe { buggify_label(label, label_len) } {
+        Some(label) => label,
+        None => return default,
+    };
+    let site = match unsafe { buggify_label(site, site_len) } {
+        Some(site) => site,
+        None => return default,
+    };
+    match with_context(|context| context.buggify_knob(label, site, default, lo, hi)) {
+        Ok(Ok(value)) => value,
+        Ok(Err(())) => abort_with_buggify_marker("PATINA_BUGGIFY_DUPLICATE_LABEL", label),
+        Err(_) => default,
+    }
+}
+
+/// `always!`: a false `condition` is a fatal invariant violation under the
+/// simulator (independent of buggify being enabled).
+///
+/// # Safety
+/// See [`patina_buggify`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_always(
+    condition: c_int,
+    label: *const u8,
+    label_len: usize,
+    site: *const u8,
+    site_len: usize,
+) -> c_int {
+    buggify_site_call(label, label_len, site, site_len, move |context, l, s| {
+        context.always_check(l, s, condition != 0)
+    })
+}
+
+/// `sometimes!`: coverage oracle noting the site reached and satisfied-if-true.
+///
+/// # Safety
+/// See [`patina_buggify`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_sometimes(
+    condition: c_int,
+    label: *const u8,
+    label_len: usize,
+    site: *const u8,
+    site_len: usize,
+) -> c_int {
+    buggify_site_call(label, label_len, site, site_len, move |context, l, s| {
+        context.sometimes_check(l, s, condition != 0)
+    })
+}
+
+/// `reachable!`: coverage oracle noting the site reached.
+///
+/// # Safety
+/// See [`patina_buggify`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_reachable(
+    label: *const u8,
+    label_len: usize,
+    site: *const u8,
+    site_len: usize,
+) -> c_int {
+    buggify_site_call(label, label_len, site, site_len, |context, l, s| {
+        context.reachable_mark(l, s)
+    })
+}
+
+/// `patina::rng()`: a deterministic 64-bit draw bridged to the root seed.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_rng() -> u64 {
+    with_context(|context| Ok(context.buggify_rng())).unwrap_or(0)
+}
+
+/// `patina::lifecycle::setup_complete()`: mark the setup boundary and emit a marker.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_lifecycle_setup_complete() -> c_int {
+    let _ = with_context(|context| {
+        context.lifecycle_setup_complete();
+        Ok(())
+    });
+    capture_stderr_line("PATINA_LIFECYCLE setup_complete");
+    0
+}
+
+/// `patina::lifecycle::event!("label")`: emit a lifecycle marker.
+///
+/// # Safety
+/// Label pointer must describe a live UTF-8 slice of `label_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_lifecycle_event(label: *const u8, label_len: usize) -> c_int {
+    // SAFETY: the caller passes a live slice.
+    let Some(label) = (unsafe { buggify_label(label, label_len) }) else {
+        return fail(EINVAL);
+    };
+    capture_stderr_line(&format!("PATINA_LIFECYCLE_EVENT label={label}"));
+    0
 }
 
 /// Deterministic managed threads and pthread synchronization.

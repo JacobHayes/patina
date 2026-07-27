@@ -107,6 +107,30 @@ int32_t patina_crash(void);
 intptr_t patina_stdio_write(int32_t fd, const void *source, size_t length);
 
 /*
+ * Cooperative-SUT (buggify) surface. Labels and call-site identities are
+ * (pointer, length) UTF-8 slices. A fatal always-violation or a duplicate label
+ * flushes captured output, emits a distinct marker line, and aborts.
+ */
+int32_t patina_is_simulated(void);
+/* prob_permille < 0 uses the run default. Returns 1 when the site fires. */
+int32_t patina_buggify(const uint8_t *label, size_t label_len,
+                       const uint8_t *site, size_t site_len, int32_t prob_permille);
+int32_t patina_buggify_delay(const uint8_t *label, size_t label_len,
+                             const uint8_t *site, size_t site_len);
+int64_t patina_buggify_knob(const uint8_t *label, size_t label_len,
+                            const uint8_t *site, size_t site_len,
+                            int64_t default_value, int64_t lo, int64_t hi);
+int32_t patina_always(int32_t condition, const uint8_t *label, size_t label_len,
+                      const uint8_t *site, size_t site_len);
+int32_t patina_sometimes(int32_t condition, const uint8_t *label, size_t label_len,
+                         const uint8_t *site, size_t site_len);
+int32_t patina_reachable(const uint8_t *label, size_t label_len,
+                         const uint8_t *site, size_t site_len);
+uint64_t patina_rng(void);
+int32_t patina_lifecycle_setup_complete(void);
+int32_t patina_lifecycle_event(const uint8_t *label, size_t label_len);
+
+/*
  * Managed threads and pthread synchronization under the deterministic
  * scheduler. The opt-in POSIX layer routes pthread_create/join/detach/exit,
  * pthread_mutex_*, and pthread_cond_* through these entry points so real host
