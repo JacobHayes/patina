@@ -1123,7 +1123,9 @@ impl ScheduleTracker {
                 // exceed the platform scaffolding floor. Written as `!(> floor)`
                 // rather than `<= floor` so the comparison stays valid when the
                 // floor is the type minimum (Linux = 0), where `<= 0` would trip
-                // clippy::absurd_extreme_comparisons.
+                // clippy::absurd_extreme_comparisons; newer clippy flags this
+                // form as nonminimal_bool instead, hence the scoped allow.
+                #[allow(clippy::nonminimal_bool)]
                 let is_vacuous = order > 0 && !(yields > SCAFFOLDING_YIELD_FLOOR);
                 if is_vacuous {
                     vacuous.push(task);

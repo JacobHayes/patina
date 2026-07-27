@@ -364,6 +364,25 @@ fn common_native_allowlisted_import(symbol: &str) -> bool {
         "strnlen",
         "strrchr",
     ];
+    // Compiler-rt/libgcc 128-bit integer arithmetic intrinsics: pure functions
+    // of their register/stack operands with no boundary effect. Rust u128/i128
+    // math lowers to these; macOS resolves them statically from
+    // compiler-builtins, but Linux GCC-compiled objects (the shim's C half) and
+    // some codegen paths leave them as undefined imports resolved from libgcc,
+    // where the default-deny audit would otherwise refuse them (caught live:
+    // the buggify PRF's `u128 %` surfaced `__umodti3` on aarch64 Linux only).
+    const COMPILER_ARITHMETIC: &[&str] = &[
+        "ashlti3",
+        "ashrti3",
+        "divti3",
+        "lshrti3",
+        "modti3",
+        "muloti4",
+        "multi3",
+        "udivmodti4",
+        "udivti3",
+        "umodti3",
+    ];
     // Abort/exit paths terminate the process rather than observing host state;
     // they are used by Rust panic/abort and explicit process-exit glue.
     const TERMINATION: &[&str] = &["abort", "exit"];
@@ -423,6 +442,7 @@ fn common_native_allowlisted_import(symbol: &str) -> bool {
     symbol.starts_with("Unwind_")
         || ALLOCATOR.contains(&symbol)
         || MEMORY_AND_STRING.contains(&symbol)
+        || COMPILER_ARITHMETIC.contains(&symbol)
         || TERMINATION.contains(&symbol)
         || STACK_PROTECTOR.contains(&symbol)
         || PTHREAD_LOCAL_HELPERS.contains(&symbol)
@@ -1114,6 +1134,30 @@ mod tests {
             native_import_decision("sigprocmask", NativeFormat::Elf, &empty),
             NativeImportDecision::Denied("unknown-import")
         );
+        // Compiler-rt 128-bit integer arithmetic is pure register/stack math on
+        // both formats, with and without the leading-underscore decoration the
+        // linker leaves on the import (Linux surfaces `__umodti3` from libgcc).
+        for format in [NativeFormat::MachO, NativeFormat::Elf] {
+            for symbol in [
+                "__ashlti3",
+                "__ashrti3",
+                "__divti3",
+                "__lshrti3",
+                "__modti3",
+                "__muloti4",
+                "__multi3",
+                "__udivmodti4",
+                "__udivti3",
+                "__umodti3",
+                "umodti3",
+            ] {
+                assert_eq!(
+                    native_import_decision(symbol, format, &empty),
+                    NativeImportDecision::Allowed,
+                    "{symbol} is pure compiler-rt integer arithmetic and must be known-safe"
+                );
+            }
+        }
     }
 
     #[test]
