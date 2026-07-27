@@ -209,7 +209,7 @@ UDP — but this seam is what the Patina phase relies on.)
 
 ## Patina-phase plan (later change)
 
-Run the same binary under `cargo patina native-run` (see `run-patina.sh`, an
+Run the same binary under `cargo patina run` (see `run-patina.sh`, an
 **untested sketch**). Under Patina, `std::thread` (deterministic scheduler),
 `std::net` UDP/TCP (SimNet over loopback), and `std::time` (`sleep` advances
 virtual time) are interposed, so a `--seed` reproduces an entire world.
@@ -227,7 +227,7 @@ Planned exploration:
   process-global CrashFs with the per-node restart supervisor; see
   `PATINA-RESULTS.md` §Crash-recovery.
 - **Seed sweeps** — enumerate seeds (`explore` / a `--seed` loop) to shake out
-  rare interleavings; `native-run --record` + `minimize` shrink any failing seed
+  rare interleavings; `run --record` + `minimize` shrink any failing seed
   to a minimal boundary trace.
 
 ### Known risks / notes for the Patina phase

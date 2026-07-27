@@ -694,8 +694,8 @@ fn ensure_runtime() -> Result<(), c_int> {
             abort_with_init_error(&message);
         }
     }
-    let message: &[u8] = b"patina: this binary was built with `cargo patina native-build` and must \
-run under `cargo patina native-run` (or with the PATINA_MODE protocol set); no deterministic runtime is installed\n";
+    let message: &[u8] = b"patina: this binary was built with `cargo patina build` and must \
+run under `cargo patina run` (or with the PATINA_MODE protocol set); no deterministic runtime is installed\n";
     let _ = host_write_all(2, message);
     std::process::abort();
 }

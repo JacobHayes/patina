@@ -145,7 +145,7 @@ selftest() {
 # --- One run: emit a single record line ------------------------------------
 run_one() { # gran N -> "gran=.. n=.. site=.. outcome=.."
   local gran="$1" n="$2" out site outcome
-  out="$("$PATINA" patina native-run "$BUILT" --seed "$PSEED" \
+  out="$("$PATINA" patina run "$BUILT" --seed "$PSEED" \
         --fs-crash-at "write:$n" --fs-torn-granularity "$gran" \
         -- --seed "$WSEED" --ops "$OPS" --db /db/redb.redb --mode crash --threads 1 2>&1)"
   site="$(printf '%s' "$out" \
@@ -157,11 +157,11 @@ run_one() { # gran N -> "gran=.. n=.. site=.. outcome=.."
 
 build_once() {
   cd "$repo_root" || exit 3
-  echo "==> building cargo-patina + native-building the redb harness"
+  echo "==> building cargo-patina + building the redb harness"
   cargo build --release --quiet -p cargo-patina || { echo "FATAL: cargo-patina build failed" >&2; exit 3; }
   mkdir -p "$here/target/patina"
-  "$PATINA" patina native-build "$here" --output "$BUILT" --release >/dev/null \
-    || { echo "FATAL: native-build failed" >&2; exit 3; }
+  "$PATINA" patina build "$here" --output "$BUILT" --release >/dev/null \
+    || { echo "FATAL: build failed" >&2; exit 3; }
 }
 
 main() {
@@ -188,7 +188,7 @@ main() {
   echo "    records: $byte_f , $block_f"
   case "$verdict" in
     TORN_SLOT_SATISFIED)      exit 0 ;;
-    VACUOUS_BYTE_GRANULARITY) echo "    -> --fs-torn-granularity byte is a NO-OP under native-run (see GEOMETRY.md)"; exit 2 ;;
+    VACUOUS_BYTE_GRANULARITY) echo "    -> --fs-torn-granularity byte is a NO-OP under `run` (see GEOMETRY.md)"; exit 2 ;;
     SAFETY_BUG)               echo "    -> a run lost/tore an acknowledged commit; inspect $OUTDIR"; exit 3 ;;
     BYTE_ACTIVE_UNSAT)        exit 4 ;;
     *)                        echo "    -> unexpected verdict"; exit 5 ;;

@@ -153,7 +153,7 @@ dry_run() {
   for (( G = s; G <= e; G++ )); do
     derive_config "$G"; buggify_knobs; harness_args
     echo "$GEN_SUMMARY"
-    printf '    cmd: %q ' "$PATINA" patina native-run "$built" "${PKNOBS[@]}" -- "${HARGS[@]}"; echo
+    printf '    cmd: %q ' "$PATINA" patina run "$built" "${PKNOBS[@]}" -- "${HARGS[@]}"; echo
   done
 }
 
@@ -180,11 +180,11 @@ run_gen() {
   local out="$gd/stdout" err="$gd/stderr"
   {
     echo "# $GEN_SUMMARY"
-    printf '%q ' "$PATINA" patina native-run "$built" "${PKNOBS[@]}" --record "$gd/trace" -- "${HARGS[@]}"; echo
+    printf '%q ' "$PATINA" patina run "$built" "${PKNOBS[@]}" --record "$gd/trace" -- "${HARGS[@]}"; echo
   } > "$gd/config.txt"
 
   local code=0
-  if "$PATINA" patina native-run "$built" "${PKNOBS[@]}" --record "$gd/trace" -- "${HARGS[@]}" \
+  if "$PATINA" patina run "$built" "${PKNOBS[@]}" --record "$gd/trace" -- "${HARGS[@]}" \
         >"$out" 2>"$err"; then code=0; else code=$?; fi
 
   local class; class="$(classify_redb "$code" "$(cat "$out")" "$(cat "$err")")"
@@ -199,13 +199,13 @@ run_gen() {
 
 build_all() {
   cd "$repo_root"
-  echo "==> building cargo-patina + native-building the redb harness (against ../redb-fork)"
+  echo "==> building cargo-patina + building the redb harness (against ../redb-fork)"
   if ! cargo build --release --quiet -p cargo-patina; then
     echo "FATAL: cargo build -p cargo-patina failed" >&2; exit 3
   fi
   mkdir -p "$here/target/patina"
-  if ! "$PATINA" patina native-build "$here" --output "$built" --release >/dev/null; then
-    echo "FATAL: native-build failed" >&2; exit 3
+  if ! "$PATINA" patina build "$here" --output "$built" --release >/dev/null; then
+    echo "FATAL: build failed" >&2; exit 3
   fi
 }
 

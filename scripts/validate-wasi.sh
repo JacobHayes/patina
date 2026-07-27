@@ -201,21 +201,21 @@ rustc --edition 2024 --target wasm32-wasip1 "$tmp/network.rs" -o "$tmp/network.w
 cargo build --locked --manifest-path "$root/Cargo.toml" -p cargo-patina >/dev/null
 runner="$target_dir/debug/cargo-patina"
 guest=(--arg validation --env MODE=test)
-"$runner" wasi-audit "$tmp/probe.wasm" >"$tmp/imports"
-"$runner" wasi-run "$tmp/probe.wasm" "${guest[@]}" --seed 123 >"$tmp/seed-1"
-"$runner" wasi-run "$tmp/probe.wasm" "${guest[@]}" --seed 123 >"$tmp/seed-2"
-"$runner" wasi-run "$tmp/probe.wasm" "${guest[@]}" --seed 124 >"$tmp/seed-other"
+"$runner" audit "$tmp/probe.wasm" >"$tmp/imports"
+"$runner" run "$tmp/probe.wasm" "${guest[@]}" --seed 123 >"$tmp/seed-1"
+"$runner" run "$tmp/probe.wasm" "${guest[@]}" --seed 123 >"$tmp/seed-2"
+"$runner" run "$tmp/probe.wasm" "${guest[@]}" --seed 124 >"$tmp/seed-other"
 cmp "$tmp/seed-1" "$tmp/seed-2"
 if cmp -s "$tmp/seed-1" "$tmp/seed-other"; then
   echo 'validate-wasi: distinct seeds produced identical output' >&2
   exit 1
 fi
-"$runner" wasi-run "$tmp/probe.wasm" "${guest[@]}" --seed 123 --record "$tmp/run.patina" >"$tmp/record"
-"$runner" wasi-run "$tmp/probe.wasm" "${guest[@]}" --replay "$tmp/run.patina" >"$tmp/replay"
+"$runner" run "$tmp/probe.wasm" "${guest[@]}" --seed 123 --record "$tmp/run.patina" >"$tmp/record"
+"$runner" run "$tmp/probe.wasm" "${guest[@]}" --replay "$tmp/run.patina" >"$tmp/replay"
 cmp "$tmp/record" "$tmp/replay"
-"$runner" wasi-run "$tmp/probe.wasm" "${guest[@]}" --branch "$tmp/run.patina" \
+"$runner" run "$tmp/probe.wasm" "${guest[@]}" --branch "$tmp/run.patina" \
   --from 0 --branch-seed 124 --branch-id branch-124 >"$tmp/branch"
-"$runner" wasi-run "$tmp/probe.wasm" "${guest[@]}" --replay "$tmp/run.patina" \
+"$runner" run "$tmp/probe.wasm" "${guest[@]}" --replay "$tmp/run.patina" \
   --timeline branch-124 >"$tmp/branch-replay"
 cmp "$tmp/branch" "$tmp/branch-replay"
 if cmp -s "$tmp/record" "$tmp/branch"; then
@@ -223,10 +223,10 @@ if cmp -s "$tmp/record" "$tmp/branch"; then
   exit 1
 fi
 sockets=(--socket '4=node-a->node-b' --socket '5=node-b->node-a')
-"$runner" wasi-audit "$tmp/network.wasm" >"$tmp/network-imports"
-"$runner" wasi-run "$tmp/network.wasm" "${sockets[@]}" --seed 55 \
+"$runner" audit "$tmp/network.wasm" >"$tmp/network-imports"
+"$runner" run "$tmp/network.wasm" "${sockets[@]}" --seed 55 \
   --record "$tmp/network.patina" >"$tmp/network-record"
-"$runner" wasi-run "$tmp/network.wasm" "${sockets[@]}" \
+"$runner" run "$tmp/network.wasm" "${sockets[@]}" \
   --replay "$tmp/network.patina" >"$tmp/network-replay"
 cmp "$tmp/network-record" "$tmp/network-replay"
 printf 'Validated imports:\n'

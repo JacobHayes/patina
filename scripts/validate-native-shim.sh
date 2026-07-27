@@ -144,7 +144,7 @@ C
 
 cat >"$tmp/std_probe.rs" <<'RS'
 // An ordinary Rust program: no Patina-specific init/shutdown calls. The
-// packaged `cargo patina native-build`/`native-run` startup path installs and
+// packaged `cargo patina build`/`run` startup path installs and
 // finalizes the deterministic runtime around it.
 fn main() {
     use std::hash::{BuildHasher, Hasher};
@@ -470,7 +470,7 @@ cargo test --locked --manifest-path "$root/Cargo.toml" -p cargo-patina \
 # the PATINA_TRACE_FD supervisor channel for record/replay. The probe carries no
 # Patina-specific init/shutdown calls: the packaged startup path installs and
 # finalizes the deterministic runtime around ordinary application code.
-"$runner" native-build "$tmp/std_probe.rs" --output "$tmp/std-probe" >/dev/null
+"$runner" build "$tmp/std_probe.rs" --output "$tmp/std-probe" >/dev/null
 
 # Fail-closed startup: running the same binary directly, outside the supervisor,
 # must abort with a clear message rather than silently run undeterministically.
@@ -480,17 +480,17 @@ if "$tmp/std-probe" >/dev/null 2>"$tmp/standalone-error"; then
 fi
 grep -q 'must run under' "$tmp/standalone-error"
 
-"$runner" native-run "$tmp/std-probe" --seed 9 >"$tmp/std-seed-1"
-"$runner" native-run "$tmp/std-probe" --seed 9 >"$tmp/std-seed-2"
-"$runner" native-run "$tmp/std-probe" --seed 10 >"$tmp/std-seed-other"
+"$runner" run "$tmp/std-probe" --seed 9 >"$tmp/std-seed-1"
+"$runner" run "$tmp/std-probe" --seed 9 >"$tmp/std-seed-2"
+"$runner" run "$tmp/std-probe" --seed 10 >"$tmp/std-seed-other"
 cmp "$tmp/std-seed-1" "$tmp/std-seed-2"
 if cmp -s "$tmp/std-seed-1" "$tmp/std-seed-other"; then
   echo 'validate-native-shim: distinct std-probe seeds produced identical output' >&2
   exit 1
 fi
-"$runner" native-run "$tmp/std-probe" --seed 9 --record "$tmp/std.patina" \
+"$runner" run "$tmp/std-probe" --seed 9 --record "$tmp/std.patina" \
   --fingerprint native-std-v1 >"$tmp/std-record"
-"$runner" native-run "$tmp/std-probe" --seed 9 --record "$tmp/std-repeat.patina" \
+"$runner" run "$tmp/std-probe" --seed 9 --record "$tmp/std-repeat.patina" \
   --fingerprint native-std-v1 >/dev/null
 cmp "$tmp/std.patina" "$tmp/std-repeat.patina"
 "$runner" replay "$tmp/std-probe" "$tmp/std.patina" \
@@ -532,7 +532,7 @@ else
   )
 fi
 shim_allow=("${control_plane[@]}")
-"$runner" native-audit "$tmp/std-probe" \
+"$runner" audit "$tmp/std-probe" \
   "${shim_allow[@]}" >"$tmp/native-imports"
 
 # Syscall containment pass. Linux uses a whole-run strace default-deny over
@@ -689,19 +689,19 @@ C
   fi
 fi
 
-if "$runner" native-audit "$tmp/std-probe" >/dev/null 2>"$tmp/audit-error"; then
+if "$runner" audit "$tmp/std-probe" >/dev/null 2>"$tmp/audit-error"; then
   echo 'validate-native-shim: audit unexpectedly allowed control-plane aliases without --allow' >&2
   exit 1
 fi
 "$cc" -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror "$tmp/escape_probe.c" -o "$tmp/escape-probe"
-if "$runner" native-audit "$tmp/escape-probe" \
+if "$runner" audit "$tmp/escape-probe" \
   >"$tmp/escape-out" 2>"$tmp/escape-error"; then
   echo 'validate-native-shim: native escape probe unexpectedly passed audit' >&2
   exit 1
 fi
 grep -Eq 'direct-syscall|unmanaged-thread' "$tmp/escape-error"
 "$cc" -std=c11 -Wall -Wextra -Werror "$tmp/unknown_import_probe.c" -o "$tmp/unknown-import-probe"
-if "$runner" native-audit "$tmp/unknown-import-probe" \
+if "$runner" audit "$tmp/unknown-import-probe" \
   >"$tmp/unknown-import-out" 2>"$tmp/unknown-import-error"; then
   echo 'validate-native-shim: unknown import probe unexpectedly passed audit' >&2
   exit 1
@@ -717,9 +717,9 @@ grep -q 'unknown-import' "$tmp/unknown-import-error"
 # interposed pthread symbols on macOS and to raw SYS_futex (through the
 # interposed libc `syscall` wrapper) on Linux, and both route those waits and
 # wakes through the deterministic scheduler.
-"$runner" native-build "$tmp/thread_probe.rs" --output "$tmp/thread-probe" >/dev/null
-"$runner" native-run "$tmp/thread-probe" --seed 7 >"$tmp/thread-seed-1"
-"$runner" native-run "$tmp/thread-probe" --seed 7 >"$tmp/thread-seed-2"
+"$runner" build "$tmp/thread_probe.rs" --output "$tmp/thread-probe" >/dev/null
+"$runner" run "$tmp/thread-probe" --seed 7 >"$tmp/thread-seed-1"
+"$runner" run "$tmp/thread-probe" --seed 7 >"$tmp/thread-seed-2"
 cmp "$tmp/thread-seed-1" "$tmp/thread-seed-2"
 grep -q 'counter=12' "$tmp/thread-seed-1"
 # The acquisition order must actually vary across seeds. Interleaving
@@ -728,15 +728,15 @@ grep -q 'counter=12' "$tmp/thread-seed-1"
 # and only futex contention points interleave — so assert variation over a
 # range of seeds rather than between two fixed ones.
 thread_distinct=$(for s in 1 2 3 4 5 6; do
-  "$runner" native-run "$tmp/thread-probe" --seed "$s"
+  "$runner" run "$tmp/thread-probe" --seed "$s"
 done | sort -u | wc -l)
 if [[ "$thread_distinct" -lt 2 ]]; then
   echo 'validate-native-shim: thread-probe order did not vary across seeds' >&2
   exit 1
 fi
-"$runner" native-run "$tmp/thread-probe" --seed 7 --record "$tmp/thread.patina" \
+"$runner" run "$tmp/thread-probe" --seed 7 --record "$tmp/thread.patina" \
   --fingerprint native-thread-v1 >"$tmp/thread-record"
-"$runner" native-run "$tmp/thread-probe" --seed 7 --record "$tmp/thread-repeat.patina" \
+"$runner" run "$tmp/thread-probe" --seed 7 --record "$tmp/thread-repeat.patina" \
   --fingerprint native-thread-v1 >/dev/null
 cmp "$tmp/thread.patina" "$tmp/thread-repeat.patina"
 "$runner" replay "$tmp/thread-probe" "$tmp/thread.patina" \
@@ -751,16 +751,16 @@ fi
 # The pthread symbols are shim-provided (managed), so the thread probe audits
 # clean under the same allowlist as the single-threaded probe, while a bare
 # host pthread_create (the escape probe) is still denied as an unmanaged thread.
-"$runner" native-audit "$tmp/thread-probe" "${shim_allow[@]}" >"$tmp/thread-imports"
+"$runner" audit "$tmp/thread-probe" "${shim_allow[@]}" >"$tmp/thread-imports"
 
 # A std::sync::Mutex held across a boundary op while another thread contends:
 # proves lock contention is routed through the scheduler (virtual mutex) and not
 # a host kernel lock. `timeout` guards against a regression that reintroduces a
 # real host lock (which would deadlock); seeded mode uses no trace descriptor,
 # so timeout does not disturb the control plane.
-"$runner" native-build "$tmp/contend_probe.rs" --output "$tmp/contend-probe" >/dev/null
-contend_1=$(timeout 60 "$runner" native-run "$tmp/contend-probe" --seed 2)
-contend_2=$(timeout 60 "$runner" native-run "$tmp/contend-probe" --seed 2)
+"$runner" build "$tmp/contend_probe.rs" --output "$tmp/contend-probe" >/dev/null
+contend_1=$(timeout 60 "$runner" run "$tmp/contend-probe" --seed 2)
+contend_2=$(timeout 60 "$runner" run "$tmp/contend-probe" --seed 2)
 if [[ "$contend_1" != "$contend_2" ]]; then
   echo 'validate-native-shim: contention probe was not seed-stable' >&2
   exit 1
@@ -771,43 +771,43 @@ if ! grep -Eq 'NATIVE_CONTEND_RESULT worker=(1|111) final=111$' <<<"$contend_1";
   echo "validate-native-shim: contention probe lost an update across a boundary-held lock: $contend_1" >&2
   exit 1
 fi
-"$runner" native-audit "$tmp/contend-probe" "${shim_allow[@]}" >/dev/null
+"$runner" audit "$tmp/contend-probe" "${shim_allow[@]}" >/dev/null
 
 # Ordinary std::net::UdpSocket datagrams over SimNet: workers send to a
 # collector whose arrival order is scheduler-decided, so it is seed-stable and
 # varies across seeds, and record/replay reproduces the exact ordering. The
 # sockets are fully virtual, so the probe audits clean with no new allowance.
-"$runner" native-build "$tmp/udp_probe.rs" --output "$tmp/udp-probe" >/dev/null
-"$runner" native-run "$tmp/udp-probe" --seed 1 >"$tmp/udp-seed-1"
-"$runner" native-run "$tmp/udp-probe" --seed 1 >"$tmp/udp-seed-2"
+"$runner" build "$tmp/udp_probe.rs" --output "$tmp/udp-probe" >/dev/null
+"$runner" run "$tmp/udp-probe" --seed 1 >"$tmp/udp-seed-1"
+"$runner" run "$tmp/udp-probe" --seed 1 >"$tmp/udp-seed-2"
 cmp "$tmp/udp-seed-1" "$tmp/udp-seed-2"
 grep -Eq 'NATIVE_UDP_RESULT order=[012]{3}$' "$tmp/udp-seed-1"
 # Delivery order is scheduler-decided; assert it varies across a seed range.
 udp_distinct=$(for s in 1 2 3 4 5 6; do
-  "$runner" native-run "$tmp/udp-probe" --seed "$s"
+  "$runner" run "$tmp/udp-probe" --seed "$s"
 done | sort -u | wc -l)
 if [[ "$udp_distinct" -lt 2 ]]; then
   echo 'validate-native-shim: udp-probe delivery order did not vary across seeds' >&2
   exit 1
 fi
-"$runner" native-run "$tmp/udp-probe" --seed 1 --record "$tmp/udp.patina" \
+"$runner" run "$tmp/udp-probe" --seed 1 --record "$tmp/udp.patina" \
   --fingerprint native-udp-v1 >"$tmp/udp-record"
 "$runner" replay "$tmp/udp-probe" "$tmp/udp.patina" \
   --fingerprint native-udp-v1 >"$tmp/udp-replay"
 cmp "$tmp/udp-record" "$tmp/udp-replay"
 cmp "$tmp/udp-seed-1" "$tmp/udp-replay"
-"$runner" native-audit "$tmp/udp-probe" "${shim_allow[@]}" >/dev/null
+"$runner" audit "$tmp/udp-probe" "${shim_allow[@]}" >/dev/null
 
 # Deterministic descriptor duplication: File::try_clone routes through
 # fcntl(F_DUPFD_CLOEXEC) to the recorded FsDup operation, and the duplicate
 # shares the open-file cursor.
-"$runner" native-build "$tmp/dup_probe.rs" --output "$tmp/dup-probe" >/dev/null
-"$runner" native-audit "$tmp/dup-probe" "${shim_allow[@]}" >/dev/null
-"$runner" native-run "$tmp/dup-probe" --seed 3 >"$tmp/dup-seed-1"
-"$runner" native-run "$tmp/dup-probe" --seed 3 >"$tmp/dup-seed-2"
+"$runner" build "$tmp/dup_probe.rs" --output "$tmp/dup-probe" >/dev/null
+"$runner" audit "$tmp/dup-probe" "${shim_allow[@]}" >/dev/null
+"$runner" run "$tmp/dup-probe" --seed 3 >"$tmp/dup-seed-1"
+"$runner" run "$tmp/dup-probe" --seed 3 >"$tmp/dup-seed-2"
 cmp "$tmp/dup-seed-1" "$tmp/dup-seed-2"
 grep -qx 'NATIVE_DUP_RESULT head=abc rest=def mid=bc' "$tmp/dup-seed-1"
-"$runner" native-run "$tmp/dup-probe" --seed 3 --record "$tmp/dup.patina" \
+"$runner" run "$tmp/dup-probe" --seed 3 --record "$tmp/dup.patina" \
   --fingerprint native-dup-v1 >"$tmp/dup-record"
 "$runner" replay "$tmp/dup-probe" "$tmp/dup.patina" \
   --fingerprint native-dup-v1 >"$tmp/dup-replay"
@@ -816,13 +816,13 @@ cmp "$tmp/dup-seed-1" "$tmp/dup-replay"
 
 # The deterministic environment is empty, including direct environ iteration.
 # Host canaries (even PATINA_-prefixed ones) must not affect output or traces.
-"$runner" native-build "$tmp/env_probe.rs" --output "$tmp/env-probe" >/dev/null
-"$runner" native-audit "$tmp/env-probe" "${shim_allow[@]}" >/dev/null
-PATINA_ENV_CANARY_HOST=one "$runner" native-run "$tmp/env-probe" --seed 3 >"$tmp/env-seed-1"
-CANARY_HOST=two "$runner" native-run "$tmp/env-probe" --seed 3 >"$tmp/env-seed-2"
+"$runner" build "$tmp/env_probe.rs" --output "$tmp/env-probe" >/dev/null
+"$runner" audit "$tmp/env-probe" "${shim_allow[@]}" >/dev/null
+PATINA_ENV_CANARY_HOST=one "$runner" run "$tmp/env-probe" --seed 3 >"$tmp/env-seed-1"
+CANARY_HOST=two "$runner" run "$tmp/env-probe" --seed 3 >"$tmp/env-seed-2"
 cmp "$tmp/env-seed-1" "$tmp/env-seed-2"
 grep -qx 'NATIVE_ENV_RESULT vars=0' "$tmp/env-seed-1"
-CANARY_HOST=one "$runner" native-run "$tmp/env-probe" --seed 3 --record "$tmp/env.patina" \
+CANARY_HOST=one "$runner" run "$tmp/env-probe" --seed 3 --record "$tmp/env.patina" \
   --fingerprint native-env-v1 >"$tmp/env-record"
 CANARY_HOST=two "$runner" replay "$tmp/env-probe" "$tmp/env.patina" \
   --fingerprint native-env-v1 >"$tmp/env-replay"
@@ -901,11 +901,11 @@ fn main() {
 }
 RS
 
-"$runner" native-build "$pkg/app" --bin patina-native-pkg --output "$tmp/pkg-probe" >/dev/null
-"$runner" native-audit "$tmp/pkg-probe" "${shim_allow[@]}" >/dev/null
-"$runner" native-run "$tmp/pkg-probe" --seed 5 >"$tmp/pkg-seed-1"
-"$runner" native-run "$tmp/pkg-probe" --seed 5 >"$tmp/pkg-seed-2"
-"$runner" native-run "$tmp/pkg-probe" --seed 6 >"$tmp/pkg-seed-other"
+"$runner" build "$pkg/app" --bin patina-native-pkg --output "$tmp/pkg-probe" >/dev/null
+"$runner" audit "$tmp/pkg-probe" "${shim_allow[@]}" >/dev/null
+"$runner" run "$tmp/pkg-probe" --seed 5 >"$tmp/pkg-seed-1"
+"$runner" run "$tmp/pkg-probe" --seed 5 >"$tmp/pkg-seed-2"
+"$runner" run "$tmp/pkg-probe" --seed 6 >"$tmp/pkg-seed-other"
 cmp "$tmp/pkg-seed-1" "$tmp/pkg-seed-2"
 if cmp -s "$tmp/pkg-seed-1" "$tmp/pkg-seed-other"; then
   echo 'validate-native-shim: distinct pkg-probe seeds produced identical output' >&2
@@ -913,7 +913,7 @@ if cmp -s "$tmp/pkg-seed-1" "$tmp/pkg-seed-other"; then
 fi
 grep -q 'built=1' "$tmp/pkg-seed-1"
 grep -q 'stored=hello from greeter' "$tmp/pkg-seed-1"
-"$runner" native-run "$tmp/pkg-probe" --seed 5 --record "$tmp/pkg.patina" \
+"$runner" run "$tmp/pkg-probe" --seed 5 --record "$tmp/pkg.patina" \
   --fingerprint native-pkg-v1 >"$tmp/pkg-record"
 "$runner" replay "$tmp/pkg-probe" "$tmp/pkg.patina" \
   --fingerprint native-pkg-v1 >"$tmp/pkg-replay"
@@ -922,7 +922,7 @@ cmp "$tmp/pkg-seed-1" "$tmp/pkg-replay"
 
 # Multiple binary targets with no --bin selection fails closed rather than
 # guessing which binary to build.
-if "$runner" native-build "$pkg/app" --output "$tmp/pkg-ambiguous" \
+if "$runner" build "$pkg/app" --output "$tmp/pkg-ambiguous" \
   >/dev/null 2>"$tmp/pkg-ambiguous-error"; then
   echo 'validate-native-shim: multi-bin package built without --bin selection' >&2
   exit 1
@@ -931,8 +931,8 @@ grep -q 'multiple binary targets' "$tmp/pkg-ambiguous-error"
 
 # A package binary whose build product imports an off-allowlist symbol builds
 # but fails the audit with the existing category diagnostic.
-"$runner" native-build "$pkg/app" --bin leaky --output "$tmp/pkg-leaky" >/dev/null
-if "$runner" native-audit "$tmp/pkg-leaky" >/dev/null 2>"$tmp/pkg-leaky-error"; then
+"$runner" build "$pkg/app" --bin leaky --output "$tmp/pkg-leaky" >/dev/null
+if "$runner" audit "$tmp/pkg-leaky" >/dev/null 2>"$tmp/pkg-leaky-error"; then
   echo 'validate-native-shim: off-allowlist package binary passed the audit' >&2
   exit 1
 fi
@@ -1251,18 +1251,18 @@ fn main() {
 }
 RS
 
-"$runner" native-build "$tmp/timed_wait_probe.rs" --output "$tmp/timed-wait-probe" >/dev/null
-"$runner" native-audit "$tmp/timed-wait-probe" "${shim_allow[@]}" >/dev/null
+"$runner" build "$tmp/timed_wait_probe.rs" --output "$tmp/timed-wait-probe" >/dev/null
+"$runner" audit "$tmp/timed-wait-probe" "${shim_allow[@]}" >/dev/null
 for seed in 5 6; do
-  "$runner" native-run "$tmp/timed-wait-probe" --seed "$seed" >"$tmp/timed-wait-seed-$seed-1"
-  "$runner" native-run "$tmp/timed-wait-probe" --seed "$seed" >"$tmp/timed-wait-seed-$seed-2"
+  "$runner" run "$tmp/timed-wait-probe" --seed "$seed" >"$tmp/timed-wait-seed-$seed-1"
+  "$runner" run "$tmp/timed-wait-probe" --seed "$seed" >"$tmp/timed-wait-seed-$seed-2"
   cmp "$tmp/timed-wait-seed-$seed-1" "$tmp/timed-wait-seed-$seed-2"
   grep -qx 'NATIVE_TIMED_WAIT_RESULT signalled_elapsed_ns=25000000 timeout_elapsed_ns=100000000' \
     "$tmp/timed-wait-seed-$seed-1"
 done
-"$runner" native-run "$tmp/timed-wait-probe" --seed 5 --record "$tmp/timed-wait.patina" \
+"$runner" run "$tmp/timed-wait-probe" --seed 5 --record "$tmp/timed-wait.patina" \
   --fingerprint native-timed-wait-v1 >"$tmp/timed-wait-record"
-"$runner" native-run "$tmp/timed-wait-probe" --seed 5 --record "$tmp/timed-wait-repeat.patina" \
+"$runner" run "$tmp/timed-wait-probe" --seed 5 --record "$tmp/timed-wait-repeat.patina" \
   --fingerprint native-timed-wait-v1 >/dev/null
 cmp "$tmp/timed-wait.patina" "$tmp/timed-wait-repeat.patina"
 "$runner" replay "$tmp/timed-wait-probe" "$tmp/timed-wait.patina" \
@@ -1277,24 +1277,24 @@ cmp "$tmp/timed-wait-seed-5-1" "$tmp/timed-wait-replay"
 # fix they shared the baton's `--allow`ed dispatch-semaphore audit entry, which
 # was the escape). The delivery/timeout schedule is byte-identical across three
 # runs at multiple seeds and record/replay-exact.
-"$runner" native-build "$tmp/recv_timeout_probe.rs" --output "$tmp/recv-timeout-probe" >/dev/null
-"$runner" native-audit "$tmp/recv-timeout-probe" "${shim_allow[@]}" >/dev/null
+"$runner" build "$tmp/recv_timeout_probe.rs" --output "$tmp/recv-timeout-probe" >/dev/null
+"$runner" audit "$tmp/recv-timeout-probe" "${shim_allow[@]}" >/dev/null
 if nm -u "$tmp/recv-timeout-probe" 2>/dev/null | grep -q dispatch_semaphore; then
   echo 'validate-native-shim: dispatch_semaphore_* leaked as an import; the Parker escape is not closed' >&2
   exit 1
 fi
 for seed in 5 6 7; do
-  "$runner" native-run "$tmp/recv-timeout-probe" --seed "$seed" >"$tmp/recv-timeout-$seed-1"
-  "$runner" native-run "$tmp/recv-timeout-probe" --seed "$seed" >"$tmp/recv-timeout-$seed-2"
-  "$runner" native-run "$tmp/recv-timeout-probe" --seed "$seed" >"$tmp/recv-timeout-$seed-3"
+  "$runner" run "$tmp/recv-timeout-probe" --seed "$seed" >"$tmp/recv-timeout-$seed-1"
+  "$runner" run "$tmp/recv-timeout-probe" --seed "$seed" >"$tmp/recv-timeout-$seed-2"
+  "$runner" run "$tmp/recv-timeout-probe" --seed "$seed" >"$tmp/recv-timeout-$seed-3"
   cmp "$tmp/recv-timeout-$seed-1" "$tmp/recv-timeout-$seed-2"
   cmp "$tmp/recv-timeout-$seed-1" "$tmp/recv-timeout-$seed-3"
   grep -Fqx 'NATIVE_RECV_TIMEOUT_RESULT delivered=[0, 1, 2, 3, 4] timeouts=5' \
     "$tmp/recv-timeout-$seed-1"
 done
-"$runner" native-run "$tmp/recv-timeout-probe" --seed 5 --record "$tmp/recv-timeout.patina" \
+"$runner" run "$tmp/recv-timeout-probe" --seed 5 --record "$tmp/recv-timeout.patina" \
   --fingerprint native-recv-timeout-v1 >"$tmp/recv-timeout-record"
-"$runner" native-run "$tmp/recv-timeout-probe" --seed 5 --record "$tmp/recv-timeout-repeat.patina" \
+"$runner" run "$tmp/recv-timeout-probe" --seed 5 --record "$tmp/recv-timeout-repeat.patina" \
   --fingerprint native-recv-timeout-v1 >/dev/null
 cmp "$tmp/recv-timeout.patina" "$tmp/recv-timeout-repeat.patina"
 "$runner" replay "$tmp/recv-timeout-probe" "$tmp/recv-timeout.patina" \
@@ -1305,17 +1305,17 @@ cmp "$tmp/recv-timeout-record" "$tmp/recv-timeout-replay"
 # so drive them directly). Writer contention routes through the scheduler:
 # byte-identical acquisition order per seed, and the interposers are DEFINED so
 # pthread_rwlock never appears as an import.
-"$runner" native-build "$tmp/rwlock_ffi_probe.rs" --output "$tmp/rwlock-ffi-probe" >/dev/null
-"$runner" native-audit "$tmp/rwlock-ffi-probe" "${shim_allow[@]}" >/dev/null
+"$runner" build "$tmp/rwlock_ffi_probe.rs" --output "$tmp/rwlock-ffi-probe" >/dev/null
+"$runner" audit "$tmp/rwlock-ffi-probe" "${shim_allow[@]}" >/dev/null
 if nm -u "$tmp/rwlock-ffi-probe" 2>/dev/null | grep -q pthread_rwlock; then
   echo 'validate-native-shim: pthread_rwlock leaked as an import; the rwlock interposers are missing' >&2
   exit 1
 fi
 rwlock_ffi_distinct=0
 for seed in 1 3 5; do
-  "$runner" native-run "$tmp/rwlock-ffi-probe" --seed "$seed" >"$tmp/rwlock-ffi-$seed-1"
-  "$runner" native-run "$tmp/rwlock-ffi-probe" --seed "$seed" >"$tmp/rwlock-ffi-$seed-2"
-  "$runner" native-run "$tmp/rwlock-ffi-probe" --seed "$seed" >"$tmp/rwlock-ffi-$seed-3"
+  "$runner" run "$tmp/rwlock-ffi-probe" --seed "$seed" >"$tmp/rwlock-ffi-$seed-1"
+  "$runner" run "$tmp/rwlock-ffi-probe" --seed "$seed" >"$tmp/rwlock-ffi-$seed-2"
+  "$runner" run "$tmp/rwlock-ffi-probe" --seed "$seed" >"$tmp/rwlock-ffi-$seed-3"
   cmp "$tmp/rwlock-ffi-$seed-1" "$tmp/rwlock-ffi-$seed-2"
   cmp "$tmp/rwlock-ffi-$seed-1" "$tmp/rwlock-ffi-$seed-3"
   grep -q '^NATIVE_RWLOCK_FFI_RESULT order=' "$tmp/rwlock-ffi-$seed-1"
@@ -1332,9 +1332,9 @@ fi
 # under --allow-unsupported-symbols, with a loud warning. This gate is
 # demonstrably able to fail: the first check depends on the run being rejected.
 if [[ "$(uname -s)" == Darwin ]]; then
-  "$runner" native-build "$tmp/parker_escape_probe.rs" \
+  "$runner" build "$tmp/parker_escape_probe.rs" \
     --output "$tmp/parker-escape-probe" >/dev/null
-  if "$runner" native-run "$tmp/parker-escape-probe" --seed 1 \
+  if "$runner" run "$tmp/parker-escape-probe" --seed 1 \
       >"$tmp/parker-escape-out" 2>"$tmp/parker-escape-err"; then
     echo 'validate-native-shim: pre-run gate let an uninterposed blocking symbol run' >&2
     exit 1
@@ -1345,36 +1345,36 @@ if [[ "$(uname -s)" == Darwin ]]; then
     echo 'validate-native-shim: guest ran despite the pre-run gate denial' >&2
     exit 1
   fi
-  "$runner" native-run "$tmp/parker-escape-probe" --seed 1 --allow-unsupported-symbols all \
+  "$runner" run "$tmp/parker-escape-probe" --seed 1 --allow-unsupported-symbols all \
     >"$tmp/parker-escape-hatch-out" 2>"$tmp/parker-escape-hatch-err"
   grep -qx 'PARKER_ESCAPE_RAN' "$tmp/parker-escape-hatch-out"
   grep -q 'WARNING' "$tmp/parker-escape-hatch-err"
 fi
 
-"$runner" native-build "$tmp/sleep_order_probe.rs" --output "$tmp/sleep-order-probe" >/dev/null
-"$runner" native-audit "$tmp/sleep-order-probe" "${shim_allow[@]}" >/dev/null
+"$runner" build "$tmp/sleep_order_probe.rs" --output "$tmp/sleep-order-probe" >/dev/null
+"$runner" audit "$tmp/sleep-order-probe" "${shim_allow[@]}" >/dev/null
 for seed in 5 6; do
-  "$runner" native-run "$tmp/sleep-order-probe" --seed "$seed" >"$tmp/sleep-order-seed-$seed-1"
-  "$runner" native-run "$tmp/sleep-order-probe" --seed "$seed" >"$tmp/sleep-order-seed-$seed-2"
+  "$runner" run "$tmp/sleep-order-probe" --seed "$seed" >"$tmp/sleep-order-seed-$seed-1"
+  "$runner" run "$tmp/sleep-order-probe" --seed "$seed" >"$tmp/sleep-order-seed-$seed-2"
   cmp "$tmp/sleep-order-seed-$seed-1" "$tmp/sleep-order-seed-$seed-2"
   grep -Eq '^NATIVE_SLEEP_ORDER_RESULT order=(AB|BA) a_elapsed_ns=100000000 work=4950$' \
     "$tmp/sleep-order-seed-$seed-1"
 done
 
-"$runner" native-build "$tmp/udp_latency_probe.rs" --output "$tmp/udp-latency-probe" >/dev/null
-"$runner" native-audit "$tmp/udp-latency-probe" "${shim_allow[@]}" >/dev/null
+"$runner" build "$tmp/udp_latency_probe.rs" --output "$tmp/udp-latency-probe" >/dev/null
+"$runner" audit "$tmp/udp-latency-probe" "${shim_allow[@]}" >/dev/null
 udp_latency_nanos=250000000
-"$runner" native-run "$tmp/udp-latency-probe" --seed 5 \
+"$runner" run "$tmp/udp-latency-probe" --seed 5 \
   --net-latency-nanos "$udp_latency_nanos" >"$tmp/udp-latency-seed-5-1"
-"$runner" native-run "$tmp/udp-latency-probe" --seed 5 \
+"$runner" run "$tmp/udp-latency-probe" --seed 5 \
   --net-latency-nanos "$udp_latency_nanos" >"$tmp/udp-latency-seed-5-2"
 cmp "$tmp/udp-latency-seed-5-1" "$tmp/udp-latency-seed-5-2"
 grep -qx 'NATIVE_UDP_LATENCY_RESULT elapsed_ns=250000000 payload=ping' \
   "$tmp/udp-latency-seed-5-1"
-"$runner" native-run "$tmp/udp-latency-probe" --seed 5 \
+"$runner" run "$tmp/udp-latency-probe" --seed 5 \
   --net-latency-nanos "$udp_latency_nanos" --record "$tmp/udp-latency.patina" \
   --fingerprint native-udp-latency-v1 >"$tmp/udp-latency-record"
-"$runner" native-run "$tmp/udp-latency-probe" --seed 5 \
+"$runner" run "$tmp/udp-latency-probe" --seed 5 \
   --net-latency-nanos "$udp_latency_nanos" --record "$tmp/udp-latency-repeat.patina" \
   --fingerprint native-udp-latency-v1 >/dev/null
 cmp "$tmp/udp-latency.patina" "$tmp/udp-latency-repeat.patina"
@@ -1384,9 +1384,9 @@ cmp "$tmp/udp-latency.patina" "$tmp/udp-latency-repeat.patina"
   --fingerprint native-udp-latency-v1 >"$tmp/udp-latency-replay"
 cmp "$tmp/udp-latency-record" "$tmp/udp-latency-replay"
 cmp "$tmp/udp-latency-seed-5-1" "$tmp/udp-latency-replay"
-"$runner" native-run "$tmp/udp-latency-probe" --seed 5 \
+"$runner" run "$tmp/udp-latency-probe" --seed 5 \
   --net-latency-nanos 0 >"$tmp/udp-latency-zero-1"
-"$runner" native-run "$tmp/udp-latency-probe" --seed 5 \
+"$runner" run "$tmp/udp-latency-probe" --seed 5 \
   --net-latency-nanos 0 >"$tmp/udp-latency-zero-2"
 cmp "$tmp/udp-latency-zero-1" "$tmp/udp-latency-zero-2"
 udp_zero_elapsed=$(sed -n 's/^NATIVE_UDP_LATENCY_RESULT elapsed_ns=\([0-9][0-9]*\) payload=ping$/\1/p' \
@@ -1400,18 +1400,18 @@ if [[ "$udp_zero_elapsed" == "$udp_latency_nanos" ]]; then
   exit 1
 fi
 
-"$runner" native-build "$tmp/tcp_probe.rs" --output "$tmp/tcp-probe" >/dev/null
-"$runner" native-audit "$tmp/tcp-probe" "${shim_allow[@]}" >/dev/null
+"$runner" build "$tmp/tcp_probe.rs" --output "$tmp/tcp-probe" >/dev/null
+"$runner" audit "$tmp/tcp-probe" "${shim_allow[@]}" >/dev/null
 for seed in 5 6; do
-  "$runner" native-run "$tmp/tcp-probe" --seed "$seed" >"$tmp/tcp-seed-$seed-1"
-  "$runner" native-run "$tmp/tcp-probe" --seed "$seed" >"$tmp/tcp-seed-$seed-2"
+  "$runner" run "$tmp/tcp-probe" --seed "$seed" >"$tmp/tcp-seed-$seed-1"
+  "$runner" run "$tmp/tcp-probe" --seed "$seed" >"$tmp/tcp-seed-$seed-2"
   cmp "$tmp/tcp-seed-$seed-1" "$tmp/tcp-seed-$seed-2"
   grep -qx 'NATIVE_TCP_RESULT reply=PING peer=127.0.0.1:49152 ipv6_closed=true dns_closed=true' \
     "$tmp/tcp-seed-$seed-1"
 done
-"$runner" native-run "$tmp/tcp-probe" --seed 5 --record "$tmp/tcp.patina" \
+"$runner" run "$tmp/tcp-probe" --seed 5 --record "$tmp/tcp.patina" \
   --fingerprint native-tcp-v1 >"$tmp/tcp-record"
-"$runner" native-run "$tmp/tcp-probe" --seed 5 --record "$tmp/tcp-repeat.patina" \
+"$runner" run "$tmp/tcp-probe" --seed 5 --record "$tmp/tcp-repeat.patina" \
   --fingerprint native-tcp-v1 >/dev/null
 cmp "$tmp/tcp.patina" "$tmp/tcp-repeat.patina"
 "$runner" replay "$tmp/tcp-probe" "$tmp/tcp.patina" \

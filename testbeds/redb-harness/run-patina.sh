@@ -3,7 +3,7 @@
 # redb under Patina -- self-checking regression (rung 3).
 #
 # The SAME harness binary and SAME program args as run-native.sh, with only the
-# runner swapped to `cargo patina native-run`. std::fs is routed through the
+# runner swapped to `cargo patina run`. std::fs is routed through the
 # deterministic, crash-injecting filesystem; the db lives at an absolute path in
 # the writable in-memory guest filesystem (NO --mount: that mounts read-only).
 #
@@ -26,7 +26,7 @@ cd "$repo_root"
 echo "==> building cargo-patina and the harness under Patina"
 cargo build --release --quiet -p cargo-patina
 mkdir -p "$harness_dir/target/patina"
-"$PATINA" patina native-build "$harness_dir" --output "$built_bin" --release >/dev/null
+"$PATINA" patina build "$harness_dir" --output "$built_bin" --release >/dev/null
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -36,7 +36,7 @@ fail=0
 # guest directory redb creates). The Patina --seed varies the deterministic
 # world; the harness --seed fixes the workload.
 DB=/db/redb.redb
-run() { "$PATINA" patina native-run "$built_bin" "$@"; }
+run() { "$PATINA" patina run "$built_bin" "$@"; }
 # `replay <trace> [flags]` reproduces a recorded run flag-free: the seed, fault
 # knobs, and guest arguments are all restored from the trace metadata.
 replay() { "$PATINA" patina replay "$built_bin" "$@"; }

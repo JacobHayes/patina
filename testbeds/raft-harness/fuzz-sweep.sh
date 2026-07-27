@@ -725,14 +725,14 @@ build_all() {
   mkdir -p "$here/target/patina"
   # Plain binary (BREADTH/TRAFFIC/DETERMINISM tiers). No --allow-unsupported-symbols:
   # the harness passes the default-deny gate clean.
-  if ! "$PATINA" patina native-build "$here" --output "$built" --release >/dev/null; then
-    echo "FATAL: native-build (plain) failed" >&2; exit 3
+  if ! "$PATINA" patina build "$here" --output "$built" --release >/dev/null; then
+    echo "FATAL: build (plain) failed" >&2; exit 3
   fi
   # Yield-points binary (SCHEDULE tier). SEPARATE artifact; built ONCE here,
   # before the sweep loop, and NEVER rewritten while a run may be executing it
   # (macOS SIGKILLs a rewritten running binary).
-  if ! "$PATINA" patina native-build "$here" --output "$built_yp" --release --yield-points >/dev/null; then
-    echo "FATAL: native-build (--yield-points) failed" >&2; exit 3
+  if ! "$PATINA" patina build "$here" --output "$built_yp" --release --yield-points >/dev/null; then
+    echo "FATAL: build (--yield-points) failed" >&2; exit 3
   fi
   # The SCHEDULE tier's entire value depends on the instrumentation being present:
   # a plain binary in this slot would make every SCHEDULE gen silently vacuous.
@@ -799,7 +799,7 @@ dry_run() {
     printf 'gen=%s tier=%s det_run=%s schedule=%s bin=%s %s\n' \
       "$G" "$TIER" "$DET_RUN" "$IS_SCHEDULE" "$(basename "$BIN")" "$CFG_SUMMARY"
     printf '    cmd: '
-    printf '%q ' "$PATINA" patina native-run "$BIN" "${PKNOBS[@]}" --record "$OUTDIR/gen-$G/trace" -- "${HARGS[@]}"
+    printf '%q ' "$PATINA" patina run "$BIN" "${PKNOBS[@]}" --record "$OUTDIR/gen-$G/trace" -- "${HARGS[@]}"
     echo
   done
 }
@@ -817,12 +817,12 @@ run_gen() {
   # Authoritative reproducer command line.
   {
     echo "# generation $G  ($CFG_SUMMARY)"
-    printf '%q ' "$PATINA" patina native-run "$BIN" "${PKNOBS[@]}" --record "$trace" -- "${HARGS[@]}"
+    printf '%q ' "$PATINA" patina run "$BIN" "${PKNOBS[@]}" --record "$trace" -- "${HARGS[@]}"
     echo
   } > "$gd/config.txt"
 
   local code=0
-  if "$PATINA" patina native-run "$BIN" "${PKNOBS[@]}" --record "$trace" -- "${HARGS[@]}" \
+  if "$PATINA" patina run "$BIN" "${PKNOBS[@]}" --record "$trace" -- "${HARGS[@]}" \
         >"$out" 2>"$err"; then code=0; else code=$?; fi
 
   # Infrastructure guard: a cargo-patina/build/environment failure (concurrent
@@ -830,7 +830,7 @@ run_gen() {
   # NOT a raft/patina bug and must never be reported as one. Detect it, retry
   # ONCE, and if it recurs mark INFRA_ERROR (surfaced, kept, but not a bug find).
   if is_infra "$(cat "$out")" "$(cat "$err")"; then
-    if "$PATINA" patina native-run "$BIN" "${PKNOBS[@]}" --record "$trace" -- "${HARGS[@]}" \
+    if "$PATINA" patina run "$BIN" "${PKNOBS[@]}" --record "$trace" -- "${HARGS[@]}" \
           >"$out" 2>"$err"; then code=0; else code=$?; fi
     if is_infra "$(cat "$out")" "$(cat "$err")"; then
       bump INFRA_ERROR
@@ -869,7 +869,7 @@ run_gen() {
       [[ "${HARGS[i]}" == "--timeout-secs" ]] && { eargs+=("$big"); i=$(( i + 1 )); }
     done
     local eout="$gd/stdout.liveness10x" eerr="$gd/stderr.liveness10x" ecode=0
-    if "$PATINA" patina native-run "$BIN" "${PKNOBS[@]}" -- "${eargs[@]}" \
+    if "$PATINA" patina run "$BIN" "${PKNOBS[@]}" -- "${eargs[@]}" \
           >"$eout" 2>"$eerr"; then ecode=0; else ecode=$?; fi
     local ec ep everdict
     ec=$(field_of committed "$eout"); ep=$(field_of proposals "$eout")
@@ -896,7 +896,7 @@ run_gen() {
       done
       (( saw_window == 0 )) && dargs+=(--propose-window 0)
       local dout="$gd/stdout.window0" derr="$gd/stderr.window0" dcode=0
-      if "$PATINA" patina native-run "$BIN" "${PKNOBS[@]}" -- "${dargs[@]}" \
+      if "$PATINA" patina run "$BIN" "${PKNOBS[@]}" -- "${dargs[@]}" \
             >"$dout" 2>"$derr"; then dcode=0; else dcode=$?; fi
       local dc dp dverdict
       dc=$(field_of committed "$dout"); dp=$(field_of proposals "$dout")
@@ -923,7 +923,7 @@ run_gen() {
   local det_note=""
   if (( DET_RUN == 1 )); then
     local trace2="$gd/trace.rerun" out2="$gd/stdout.rerun" err2="$gd/stderr.rerun"
-    "$PATINA" patina native-run "$BIN" "${PKNOBS[@]}" --record "$trace2" -- "${HARGS[@]}" \
+    "$PATINA" patina run "$BIN" "${PKNOBS[@]}" --record "$trace2" -- "${HARGS[@]}" \
         >"$out2" 2>"$err2" || true
     local r1 r2 h1 h2
     r1=$(grep '^RAFT_RESULT' "$out"  2>/dev/null || true)

@@ -33,7 +33,7 @@ EXPECTED="$SCRIPT_DIR/expected"
 # and this battery stays outside it. RUNNER is the single point of substitution —
 # every battery case invokes "${RUNNER[@]}" and nothing references rg directly.
 # The Patina phase swaps this one line for a cargo-patina invocation, e.g.:
-#   RUNNER=(cargo patina native-run "$SCRIPT_DIR/out-patina/rg-patina" --seed 0 --)
+#   RUNNER=(cargo patina run "$SCRIPT_DIR/out-patina/rg-patina" --seed 0 --)
 # (note: native-run takes the corpus as an argument rather than via cwd, so that
 # phase passes the corpus path explicitly instead of relying on `cd`).
 RUNNER=("$SCRIPT_DIR/upstream/target/release/rg")

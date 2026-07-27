@@ -5,8 +5,8 @@ behavior the deterministic runtime does not model — blocking a real thread,
 reading host time or entropy, spawning a context, touching another address
 space — thereby breaking determinism silently.
 
-Detection is **symbol-reachability**: `cargo patina native-audit` (and the
-`native-run` pre-run default-deny gate that reuses it) enumerate every
+Detection is **symbol-reachability**: `cargo patina audit` (and the
+`run` pre-run default-deny gate that reuses it) enumerate every
 externally-resolved symbol the guest imports and refuse anything that is neither
 **interposed** (defined by the shim, so it never appears as an import) nor
 **known-safe** (an explicitly listed effect-free host-deferred symbol) nor

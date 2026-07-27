@@ -12,7 +12,7 @@ Patina.
   workload PRNG is an inline splitmix64 and the digest a hand-rolled FNV-1a, so
   the code under test is redb and redb alone.
 - **The one-line swap holds:** the SAME binary and SAME program args as
-  `run-native.sh`, only `$RUNNER` changes to `cargo patina native-run`.
+  `run-native.sh`, only `$RUNNER` changes to `cargo patina run`.
 
 ## Headline: durability HOLDS — 346 injected crashes, zero committed-op loss
 
@@ -98,9 +98,9 @@ Patina. `./run-patina.sh` runs this battery + replay + a bounded crash sweep and
 exits nonzero on any regression (**green**).
 
 ```sh
-cargo patina native-build testbeds/redb-harness \
+cargo patina build testbeds/redb-harness \
   --output testbeds/redb-harness/target/patina/redb-harness --release
-cargo patina native-run testbeds/redb-harness/target/patina/redb-harness \
+cargo patina run testbeds/redb-harness/target/patina/redb-harness \
   --seed 1 -- --seed 42 --ops 200 --db /db/redb.redb --mode full --threads 1
 ```
 
@@ -151,7 +151,7 @@ double-open divergence and the sound per-inode follow-up are documented in
 `pwrite`/`flock` drop off the import table (shim-defined); the only remaining
 flagged imports are the shim's own control-plane vehicle (`semaphore_*`,
 `pthread_create_suspended_np`, `read$NOCANCEL`/`write$NOCANCEL`, …), which
-`native-run` auto-allows exactly as in the ripgrep rung — no run here needs an
+`run` auto-allows exactly as in the ripgrep rung — no run here needs an
 allow-list.
 
 ## The crash oracle: committed-prefix durability (`--mode crash`)
@@ -191,7 +191,7 @@ CRASH seed=<s> crashed=<0|1> ack=<n> recovered=<n|-> state=<hex16|-> integrity=<
 Example durability HOLDS (crash mid-run, prefix recovered):
 
 ```sh
-cargo patina native-run …/redb-harness --seed 0 --fs-crash-at write:34 -- \
+cargo patina run …/redb-harness --seed 0 --fs-crash-at write:34 -- \
   --seed 42 --ops 400 --db /db/redb.redb --mode crash --threads 1
 # CRASH seed=42 crashed=1 ack=3 recovered=3 state=87b4039500207969 integrity=clean outcome=HOLDS detail=prefix=1 ack=3
 ```
@@ -234,7 +234,7 @@ Reading the outcomes:
   authoritative):
 
   ```sh
-  cargo patina native-run …/redb-harness --record c.trace --fs-crash-at write:34 --seed 0 -- \
+  cargo patina run …/redb-harness --record c.trace --fs-crash-at write:34 --seed 0 -- \
     --seed 42 --ops 400 --db /db/redb.redb --mode crash --threads 1   # HOLDS … 87b4039500207969
   cargo patina replay …/redb-harness c.trace                          # identical, exit 0
   ```

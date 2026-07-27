@@ -61,7 +61,7 @@ cd "$repo_root"
 echo "==> building cargo-patina (embeds the shim) and the harness under Patina"
 cargo build --release --quiet -p cargo-patina
 mkdir -p "$harness_dir/target/patina" "$artifacts_dir"
-"$PATINA" patina native-build "$harness_dir" \
+"$PATINA" patina build "$harness_dir" \
   --output "$built_bin" --release >/dev/null
 
 declare -A tally=()
@@ -80,7 +80,7 @@ preserve() {
   rm -f "$trace"
   local crash_flags=(--fs-crash-at "$spec")
   [[ "$gran" == "byte" ]] && crash_flags+=(--fs-torn-granularity byte)
-  "$PATINA" patina native-run "$built_bin" --seed "$fseed" \
+  "$PATINA" patina run "$built_bin" --seed "$fseed" \
     "${crash_flags[@]}" --record "$trace" -- \
     --seed "$WORKLOAD_SEED" --ops "$OPS" --db /db/redb.redb --mode crash --threads 1 \
     >/dev/null 2>&1 || true
@@ -95,7 +95,7 @@ run_one() {
   local line crash_flags=(--fs-crash-at "$spec")
   [[ "$gran" == "byte" ]] && crash_flags+=(--fs-torn-granularity byte)
   # crash mode owns its exit code; capture the line regardless of code.
-  line="$("$PATINA" patina native-run "$built_bin" --seed "$fseed" \
+  line="$("$PATINA" patina run "$built_bin" --seed "$fseed" \
     "${crash_flags[@]}" -- \
     --seed "$WORKLOAD_SEED" --ops "$OPS" --db /db/redb.redb --mode crash --threads 1 \
     2>/dev/null || true)"

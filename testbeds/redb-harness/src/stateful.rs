@@ -9,7 +9,7 @@
 //! to the model) and as a whole-table invariant.
 //!
 //! Command generation rides on `patina_proptest::runner()`, whose ChaCha RNG is
-//! seeded from `patina::rng()`. Under `cargo patina native-run` that means the
+//! seeded from `patina::rng()`. Under `cargo patina run` that means the
 //! entire command stream — and therefore the printed digest — is a pure function
 //! of the Patina run seed: same seed reproduces it byte-for-byte, a different
 //! seed changes it. redb is correct, so the property holds; the value here is a

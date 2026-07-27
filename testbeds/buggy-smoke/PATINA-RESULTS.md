@@ -5,8 +5,8 @@ when the std-pure `buggy-smoke` canary runs under Patina's deterministic runtime
 via the native (linked-shim) path, and what it proves about Patina.
 
 - **Host:** macOS 26.5.2, arm64. Date: 2026-07-26.
-- **Path exercised:** `cargo patina native-build` (cfg(patina)/cfg(dst) + POSIX
-  shim, linked below the guest) then `cargo patina native-run` (deterministic
+- **Path exercised:** `cargo patina build` (cfg(patina)/cfg(dst) + POSIX
+  shim, linked below the guest) then `cargo patina run` (deterministic
   runtime driven through the `PATINA_*` env protocol). The guest source is
   unchanged and 100% std-pure.
 
@@ -25,7 +25,7 @@ catch is byte-identical across 3 recorded repeats and **replays exactly**. Runs
 need **no** `--allow-unsupported-symbols` — the guest passes the pre-run audit
 clean (see the resolved audit note). All six run on a **single `--yield-points`
 build** (simplest wiring; verified by task #12): every command is
-`cargo patina native-run <yield.patina> …`.
+`cargo patina run <yield.patina> …`.
 
 | Bug | Capability | Deterministic failing command → detail | Seed | Trace SHA-256 (16) |
 | --- | --- | --- | --- | --- |
@@ -129,15 +129,15 @@ PATINA=target/release/cargo-patina
 
 # One instrumented guest catches all six (shim staticlib builds from inside the
 # workspace). No run-time allowance needed -- it passes the pre-run audit clean.
-"$PATINA" patina native-build testbeds/buggy-smoke --output /tmp/bs-yield.patina --release --yield-points
+"$PATINA" patina build testbeds/buggy-smoke --output /tmp/bs-yield.patina --release --yield-points
 BIN=/tmp/bs-yield.patina
 
-"$PATINA" patina native-run "$BIN" --seed 21 -- --bug unlucky-byte                                    # trips
-"$PATINA" patina native-run "$BIN" --seed 0  -- --bug deadlock --iters 64                             # trips
-"$PATINA" patina native-run "$BIN" --fs-crash-at close:1 --seed 0 -- --bug no-fsync --iters 32        # trips
-"$PATINA" patina native-run "$BIN" --sleep-jitter-nanos 8000000..12000000 --seed 0 -- --bug tight-deadline --iters 10   # trips
-"$PATINA" patina native-run "$BIN" --net-jitter-nanos 0..1000000 --seed 0 -- --bug udp-order --iters 64                 # trips
-"$PATINA" patina native-run "$BIN" --seed 0  -- --bug lost-update --iters 2                           # trips (lost=1 expected=4)
+"$PATINA" patina run "$BIN" --seed 21 -- --bug unlucky-byte                                    # trips
+"$PATINA" patina run "$BIN" --seed 0  -- --bug deadlock --iters 64                             # trips
+"$PATINA" patina run "$BIN" --fs-crash-at close:1 --seed 0 -- --bug no-fsync --iters 32        # trips
+"$PATINA" patina run "$BIN" --sleep-jitter-nanos 8000000..12000000 --seed 0 -- --bug tight-deadline --iters 10   # trips
+"$PATINA" patina run "$BIN" --net-jitter-nanos 0..1000000 --seed 0 -- --bug udp-order --iters 64                 # trips
+"$PATINA" patina run "$BIN" --seed 0  -- --bug lost-update --iters 2                           # trips (lost=1 expected=4)
 
 # The plain build (drop --yield-points) is what run-patina.sh uses for the
 # clean-mode / determinism / replay checks and the vacuous-schedule diagnostic.
@@ -167,16 +167,16 @@ Commands behind the table:
 # per-mode at seed 1
 for m in "no-fsync --iters 32" "tight-deadline --iters 10" "udp-order --iters 64" \
          "deadlock --iters 64" "lost-update --iters 100" "unlucky-byte"; do
-  "$PATINA" patina native-run "$BIN" --seed 1 -- --bug $m
+  "$PATINA" patina run "$BIN" --seed 1 -- --bug $m
 done
 # unlucky-byte sweep — first tripping seed
 for s in $(seq 0 300); do
-  "$PATINA" patina native-run "$BIN" --seed $s -- --bug unlucky-byte >/dev/null 2>&1 \
+  "$PATINA" patina run "$BIN" --seed $s -- --bug unlucky-byte >/dev/null 2>&1 \
     || { echo "trip at $s"; break; }
 done
 # lost-update never trips under Patina (checked 0..200, --stress, tiny iters)
 for s in $(seq 0 200); do
-  "$PATINA" patina native-run "$BIN" --seed $s -- --bug lost-update --iters 100 >/dev/null 2>&1 \
+  "$PATINA" patina run "$BIN" --seed $s -- --bug lost-update --iters 100 >/dev/null 2>&1 \
     || echo "trip at $s"
 done
 ```
@@ -194,7 +194,7 @@ Command:
 
 ```sh
 for i in 1 2 3; do
-  "$PATINA" patina native-run "$BIN" --record /tmp/t_$i.patina --seed 1 -- --bug unlucky-byte
+  "$PATINA" patina run "$BIN" --record /tmp/t_$i.patina --seed 1 -- --bug unlucky-byte
 done
 shasum -a 256 /tmp/t_1.patina /tmp/t_2.patina /tmp/t_3.patina   # three identical hashes
 ```
@@ -222,7 +222,7 @@ Trace SHA-256 (repeat #1; #1==#2==#3 verified for all):
 ```sh
 # Record a trip, then strictly replay it (replay restores the seed AND the
 # guest arguments from the trace, so no `--` section is re-passed).
-"$PATINA" patina native-run "$BIN" --record /tmp/trip.patina --seed 21 -- --bug unlucky-byte
+"$PATINA" patina run "$BIN" --record /tmp/trip.patina --seed 21 -- --bug unlucky-byte
 "$PATINA" patina replay "$BIN" /tmp/trip.patina
 ```
 
@@ -238,7 +238,7 @@ Trace SHA-256 (repeat #1; #1==#2==#3 verified for all):
 
 Wall time, release builds, warm-up run discarded, median of 5. "native" is
 `testbeds/buggy-smoke/target/release/buggy-smoke`; "patina" is
-`cargo patina native-run buggy-smoke.patina` (both are direct binary execs — no
+`cargo patina run buggy-smoke.patina` (both are direct binary execs — no
 `cargo` in the hot path). Timed with `time.perf_counter()` around
 `subprocess.run`.
 
@@ -341,8 +341,8 @@ fn main() {
     }
 }
 EOF
-"$PATINA" patina native-build /tmp/park_repro.rs --output /tmp/park_repro.patina --release
-timeout 8 "$PATINA" patina native-run /tmp/park_repro.patina --seed 1   # HANGS (should print TIMED-OUT instantly)
+"$PATINA" patina build /tmp/park_repro.rs --output /tmp/park_repro.patina --release
+timeout 8 "$PATINA" patina run /tmp/park_repro.patina --seed 1   # HANGS (should print TIMED-OUT instantly)
 ```
 
 Expected under a correct virtual clock: `recv_timeout` expires at the virtual
@@ -363,7 +363,7 @@ nonzero socket timeouts are deliberately fail-closed (documented at
 assertion. This is not a crash and not the planted bug — it's an unsupported
 operation. Triggering the real `udp-order` bug would need (a) virtual-clock-backed
 `SO_RCVTIMEO` acceptance in the shim + a SimNet receive-timeout, and (b) a SimNet
-reorder/drop fault surface reachable from a std-pure guest (a `native-run` fault
+reorder/drop fault surface reachable from a std-pure guest (a `run` fault
 knob or explicit-Context topology). Left as a noted gap, not implemented.
 
 ### 3. `lost-update` never reproduces — atomics-only RMW window is unschedulable (SOUNDNESS GAP)

@@ -34,7 +34,7 @@ BIN="$work/yield.patina"
 
 PATINA_BIN="$root/target/release/cargo-patina"
 [[ -x "$PATINA_BIN" ]] || ( cd "$root" && cargo build --release -p cargo-patina >/dev/null )
-( cd "$root" && "$PATINA_BIN" patina native-build "$here" --output "$BIN" --release --yield-points \
+( cd "$root" && "$PATINA_BIN" patina build "$here" --output "$BIN" --release --yield-points \
     2>&1 | grep -a "PATINA_NATIVE_BUILD_YIELD_POINTS" || true )
 
 caught=0
@@ -53,15 +53,15 @@ find_bug() {
   done
   local s line
   for s in $(seq 0 "$maxseed"); do
-    line="$(contract "$(timeout 40 "$PATINA_BIN" patina native-run "$BIN" "${flags[@]}" --seed "$s" -- "${guest[@]}" 2>/dev/null)")"
+    line="$(contract "$(timeout 40 "$PATINA_BIN" patina run "$BIN" "${flags[@]}" --seed "$s" -- "${guest[@]}" 2>/dev/null)")"
     if [[ "$line" == *"$oksub"* && "$line" == BUG_CAUGHT* ]]; then
       local tf="$work/${nm}.patina"
-      "$PATINA_BIN" patina native-run "$BIN" "${flags[@]}" --record "$tf" --seed "$s" -- "${guest[@]}" >/dev/null 2>&1
+      "$PATINA_BIN" patina run "$BIN" "${flags[@]}" --record "$tf" --seed "$s" -- "${guest[@]}" >/dev/null 2>&1
       local h; h="$(shasum -a 256 "$tf" 2>/dev/null | awk '{print $1}')"
       caught=$((caught+1))
       SCORE+=("CAUGHT  $nm  (seed=$s) :: $line  trace=${h:0:16}..")
       echo "CAUGHT  $nm  seed=$s  $line"
-      echo "        repro: cargo patina native-run <yield.patina> ${flags[*]} --seed $s -- ${guest[*]}"
+      echo "        repro: cargo patina run <yield.patina> ${flags[*]} --seed $s -- ${guest[*]}"
       return
     fi
   done

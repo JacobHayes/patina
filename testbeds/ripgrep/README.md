@@ -122,7 +122,7 @@ battery result is identical no matter where the testbed is checked out.
 These are why `run-patina.sh` is a sketch, not a working harness:
 
 1. **mmap import even with `--no-mmap`.** ripgrep links `memmap2`; the binary
-   imports `mmap`/`madvise` regardless of the runtime flag. `native-audit` will
+   imports `mmap`/`madvise` regardless of the runtime flag. `audit` will
    likely flag these — they must be `--allow`ed (or shimmed). Always pass
    `--no-mmap` so the *call path* is avoided even though the *symbols* remain.
 2. **CPU feature detection.** ripgrep's regex/SIMD paths probe CPU features at

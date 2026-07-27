@@ -72,7 +72,7 @@
 //!
 //! # Reproducing a failure
 //!
-//! When a property fails under `cargo patina native-run`, the failing run is
+//! When a property fails under `cargo patina run`, the failing run is
 //! identified by its `--seed`. Re-run the same binary with that seed to reproduce
 //! the exact case sequence and the shrunk counterexample; record the run with
 //! `--record` and reproduce it with `cargo patina replay <bin> <trace>` (the seed

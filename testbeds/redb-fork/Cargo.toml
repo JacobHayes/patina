@@ -11,7 +11,7 @@
 #
 # Every buggify macro is a no-op outside a Patina build, so a plain `cargo build`
 # here compiles and behaves exactly like upstream redb. Only when the redb-harness
-# is built through `cargo patina native-build` do the sites become live.
+# is built through `cargo patina build` do the sites become live.
 
 [workspace]
 

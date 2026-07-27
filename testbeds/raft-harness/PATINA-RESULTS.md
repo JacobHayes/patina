@@ -13,7 +13,7 @@ in-memory filesystem together.
   driver, the file-backed `Storage`, and the UDP transport are the harness's;
   the consensus logic under test is tikv raft and tikv raft alone.
 - **The one-line swap holds:** the SAME binary and SAME program args as
-  `run-native.sh`, only `$RUNNER` changes to `cargo patina native-run`. Fault
+  `run-native.sh`, only `$RUNNER` changes to `cargo patina run`. Fault
   topology (reorder, drop, crash) is 100% Patina experiment-plane knobs and the
   seed; there is no fault code in the harness.
 
@@ -46,26 +46,26 @@ prove each check bites — `divergent_logs_fail_invariants`,
 ```
 
 Single commands (from repo root, after `cargo build --release -p cargo-patina`
-and `cargo patina native-build testbeds/raft-harness --output <BIN> --release`):
+and `cargo patina build testbeds/raft-harness --output <BIN> --release`):
 
 ```sh
 PATINA=target/release/cargo-patina
 BIN=testbeds/raft-harness/target/patina/raft-harness
 
 # Clean deterministic run (world seed 1; harness seed 7 fixes the workload):
-$PATINA patina native-run $BIN --seed 1 -- \
+$PATINA patina run $BIN --seed 1 -- \
   --seed 7 --proposals 20 --base-port 4001 --data-dir /raft --timeout-secs 60
 
 # UDP delivery reorder:
-$PATINA patina native-run $BIN --seed 1 --net-jitter-nanos 1000000..80000000 -- \
+$PATINA patina run $BIN --seed 1 --net-jitter-nanos 1000000..80000000 -- \
   --seed 7 --proposals 20 --base-port 4001 --data-dir /raft --timeout-secs 60
 
 # 30% packet loss (raft retransmits and converges):
-$PATINA patina native-run $BIN --seed 1 --net-drop-permille 300 -- \
+$PATINA patina run $BIN --seed 1 --net-drop-permille 300 -- \
   --seed 7 --proposals 20 --base-port 4001 --data-dir /raft --timeout-secs 90
 
 # Record + strict replay (replay restores the seed and guest arguments from the trace):
-$PATINA patina native-run $BIN --record r.trace -- --seed 7 --proposals 20 --base-port 4001 --data-dir /raft
+$PATINA patina run $BIN --record r.trace -- --seed 7 --proposals 20 --base-port 4001 --data-dir /raft
 $PATINA patina replay $BIN r.trace
 ```
 
@@ -78,9 +78,9 @@ guest filesystem; each of the three nodes gets `/raft/node{1,2,3}/`. No `--mount
 
 ## Audit: passes the default-deny gate with no allowance
 
-The `native-run` pre-run gate (default-deny on the blocking/time/scheduling
+The `run` pre-run gate (default-deny on the blocking/time/scheduling
 surface) accepts the harness with **no `--allow` of any kind**. The remaining
-symbols `native-audit` lists (`_semaphore_{create,wait,signal}`, `_thread_resume`,
+symbols `audit` lists (`_semaphore_{create,wait,signal}`, `_thread_resume`,
 `_pthread_create_suspended_np`, `_pthread_mach_thread_np`, `_mach_task_self_`,
 `_read$NOCANCEL`, `_write$NOCANCEL`) are the shim's own control-plane / execution-
 baton vehicle and are already known-safe on the shim allow list.
@@ -316,12 +316,12 @@ PATINA=target/release/cargo-patina
 BIN=testbeds/raft-harness/target/patina/raft-harness
 
 # Deliberate kill of node 3 at committed=5, restart, catch up, converge:
-$PATINA patina native-run $BIN --seed 1 -- \
+$PATINA patina run $BIN --seed 1 -- \
   --seed 7 --proposals 20 --base-port 4001 --data-dir /raft --timeout-secs 90 \
   --kill-plan 3:5 --restart-after-ticks 5 --propose-window 2
 
 # Injected persist crash on one node + in-process recovery:
-$PATINA patina native-run $BIN --seed 1 --fs-crash-at write:5 -- \
+$PATINA patina run $BIN --seed 1 --fs-crash-at write:5 -- \
   --seed 7 --proposals 20 --base-port 4001 --data-dir /raft --timeout-secs 90 \
   --recover-storage-faults --restart-after-ticks 5
 

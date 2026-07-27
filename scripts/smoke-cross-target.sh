@@ -86,22 +86,22 @@ runner="$target_dir/debug/cargo-patina"
 
 # --- WASI target: seeded smoke plus record/replay ---
 rustc --edition 2024 --target wasm32-wasip1 "$tmp/smoke.rs" -o "$tmp/smoke.wasm"
-"$runner" wasi-audit "$tmp/smoke.wasm" >/dev/null
-"$runner" wasi-run "$tmp/smoke.wasm" --seed 123 >"$tmp/wasi-seed-1"
-"$runner" wasi-run "$tmp/smoke.wasm" --seed 123 >"$tmp/wasi-seed-2"
-"$runner" wasi-run "$tmp/smoke.wasm" --seed 124 >"$tmp/wasi-seed-other"
+"$runner" audit "$tmp/smoke.wasm" >/dev/null
+"$runner" run "$tmp/smoke.wasm" --seed 123 >"$tmp/wasi-seed-1"
+"$runner" run "$tmp/smoke.wasm" --seed 123 >"$tmp/wasi-seed-2"
+"$runner" run "$tmp/smoke.wasm" --seed 124 >"$tmp/wasi-seed-other"
 cmp "$tmp/wasi-seed-1" "$tmp/wasi-seed-2"
 if cmp -s "$tmp/wasi-seed-1" "$tmp/wasi-seed-other"; then
   echo 'smoke-cross-target: distinct WASI seeds produced identical output' >&2
   exit 1
 fi
-"$runner" wasi-run "$tmp/smoke.wasm" --seed 123 --record "$tmp/wasi.patina" >"$tmp/wasi-record"
-"$runner" wasi-run "$tmp/smoke.wasm" --replay "$tmp/wasi.patina" >"$tmp/wasi-replay"
+"$runner" run "$tmp/smoke.wasm" --seed 123 --record "$tmp/wasi.patina" >"$tmp/wasi-record"
+"$runner" run "$tmp/smoke.wasm" --replay "$tmp/wasi.patina" >"$tmp/wasi-replay"
 cmp "$tmp/wasi-record" "$tmp/wasi-replay"
 cmp "$tmp/wasi-seed-1" "$tmp/wasi-replay"
 
 # --- Native target: the same source built and driven by the packaged target ---
-"$runner" native-build "$tmp/smoke.rs" --output "$tmp/smoke-native" >/dev/null
+"$runner" build "$tmp/smoke.rs" --output "$tmp/smoke-native" >/dev/null
 # Shim control-plane symbols are --allow'ed per binary rather than statically
 # allowlisted (see validate-native-shim.sh for the full rationale).
 if [[ "$(uname -s)" == Darwin ]]; then
@@ -118,16 +118,16 @@ else
     --allow dlsym --allow pthread_create
   )
 fi
-"$runner" native-audit "$tmp/smoke-native" "${control_plane[@]}" >/dev/null
-"$runner" native-run "$tmp/smoke-native" --seed 123 >"$tmp/native-seed-1"
-"$runner" native-run "$tmp/smoke-native" --seed 123 >"$tmp/native-seed-2"
-"$runner" native-run "$tmp/smoke-native" --seed 124 >"$tmp/native-seed-other"
+"$runner" audit "$tmp/smoke-native" "${control_plane[@]}" >/dev/null
+"$runner" run "$tmp/smoke-native" --seed 123 >"$tmp/native-seed-1"
+"$runner" run "$tmp/smoke-native" --seed 123 >"$tmp/native-seed-2"
+"$runner" run "$tmp/smoke-native" --seed 124 >"$tmp/native-seed-other"
 cmp "$tmp/native-seed-1" "$tmp/native-seed-2"
 if cmp -s "$tmp/native-seed-1" "$tmp/native-seed-other"; then
   echo 'smoke-cross-target: distinct native seeds produced identical output' >&2
   exit 1
 fi
-"$runner" native-run "$tmp/smoke-native" --seed 123 --record "$tmp/native.patina" \
+"$runner" run "$tmp/smoke-native" --seed 123 --record "$tmp/native.patina" \
   --fingerprint smoke-native-v1 >"$tmp/native-record"
 "$runner" replay "$tmp/smoke-native" "$tmp/native.patina" \
   --fingerprint smoke-native-v1 >"$tmp/native-replay"

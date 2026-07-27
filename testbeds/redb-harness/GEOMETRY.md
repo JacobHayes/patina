@@ -18,7 +18,7 @@ its version byte still parsed. Was the site unreachable under redb's two-slot
 commit geometry, or satisfiable and merely missed?
 
 **Answer: satisfiable.** The site never fired because of a Patina tooling gap,
-not redb's design: under `native-run`, `--fs-torn-granularity byte` is silently
+not redb's design: under `run`, `--fs-torn-granularity byte` is silently
 a no-op. With byte granularity actually applied, the site fires deterministically
 (`--seed 1 --fs-crash-at write:7 --fs-torn-granularity byte`, below).
 
@@ -92,7 +92,7 @@ in both images) survives — precisely the oracle's trigger. Recovery then reads
 `pick_primary_for_repair` swaps to the intact secondary: **durability holds**,
 which is the healthy behavior the oracle exists to witness.
 
-## Root cause: `--fs-torn-granularity byte` is dropped under `native-run`
+## Root cause: `--fs-torn-granularity byte` is dropped under `run`
 
 `CrashFs` supports two tear policies (`TornGranularity::Block` default,
 `TornGranularity::Byte`). Only `Byte` produces the sub-block "clean prefix + one
@@ -129,7 +129,7 @@ if self.filesystem.is_none() {                       // <-- SKIPPED: already Som
 ```
 
 — is guarded by `self.filesystem.is_none()` and never runs. Net effect under
-`native-run`: the crash filesystem is **always** whole-block, seed 0.
+`run`: the crash filesystem is **always** whole-block, seed 0.
 `--fs-torn-granularity byte` and the per-generation `--seed` (for crash
 decisions) are both inert. Every byte-granularity generation in the 350-gen
 campaign actually ran as block granularity, so the torn-slot oracle was
@@ -144,7 +144,7 @@ byte-identical to the block panel):
 $ testbeds/redb-harness/geometry-sweep.sh "1 2 3 4"
 === geometry sweep verdict: VACUOUS_BYTE_GRANULARITY ===
     torn-slot fires: byte=0 block=0 (of 160 runs each)
-    -> --fs-torn-granularity byte is a NO-OP under native-run
+    -> --fs-torn-granularity byte is a NO-OP under run
 ```
 
 (`geometry-sweep.sh --selftest` proves the classifier's four verdicts bite on
@@ -172,7 +172,7 @@ falls back to the secondary): **no silent corruption, no redb durability bug.**
 Reproducer command (requires the fix applied):
 
 ```
-target/release/cargo-patina patina native-run \
+target/release/cargo-patina patina run \
   testbeds/redb-harness/target/patina/redb-geometry \
   --seed 1 --fs-crash-at write:7 --fs-torn-granularity byte \
   -- --seed 7 --ops 30 --db /db/redb.redb --mode crash --threads 1
@@ -234,7 +234,7 @@ seed 0), which changes crash images for `--fs-crash-at` runs across the board
 
 ### Earlier byte-granularity conclusions predate this fix
 
-Any prior campaign that relied on `--fs-torn-granularity byte` under `native-run`
+Any prior campaign that relied on `--fs-torn-granularity byte` under `run`
 ran as *block* and its sub-block conclusions are therefore vacuous — in
 particular the earlier ~432-run sub-block torn-write campaign. **Recommend** (do
 not auto-execute) re-validating those campaigns now that byte tearing is live.

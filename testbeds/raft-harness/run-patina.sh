@@ -5,7 +5,7 @@
 # deterministic schedule.
 #
 # The SAME harness binary and SAME program args as run-native.sh; only the
-# runner is swapped to `cargo patina native-run`. std::thread becomes the
+# runner is swapped to `cargo patina run`. std::thread becomes the
 # deterministic scheduler, std::net UDP becomes SimNet over loopback, std::time
 # sleeps advance a virtual clock, and std::fs is the in-memory (optionally
 # crash-injecting) filesystem. Fault topology comes entirely from Patina's
@@ -56,13 +56,13 @@ cd "$repo_root"
 echo "==> building cargo-patina and the harness under Patina"
 cargo build --release --quiet -p cargo-patina
 mkdir -p "$here/target/patina"
-"$PATINA" patina native-build "$here" --output "$built" --release >/dev/null
+"$PATINA" patina build "$here" --output "$built" --release >/dev/null
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 fail=0
 
-run() { "$PATINA" patina native-run "$built" "$@"; }
+run() { "$PATINA" patina run "$built" "$@"; }
 # `replay <trace> [flags]` reproduces a recorded run flag-free: the seed, fault
 # knobs, and guest arguments (the `-- ...` section) are restored from the trace,
 # so replays no longer re-pass them. `--allow` stays (a machine-local audit fact).

@@ -12,7 +12,7 @@
 # run-native.sh; only the runner changes:
 #
 #   native :  target/release/buggy-smoke                       --bug X ...
-#   patina :  cargo patina native-run buggy-smoke.patina --seed S -- --bug X ...
+#   patina :  cargo patina run buggy-smoke.patina --seed S -- --bug X ...
 #
 # This script encodes the OBSERVED Patina behavior as assertions and exits
 # nonzero if any currently-passing expectation regresses. Two modes are known
@@ -41,14 +41,14 @@ PATINA_BIN="$root/target/release/cargo-patina"
 if [[ ! -x "$PATINA_BIN" ]]; then
   ( cd "$root" && $CARGO build --release -p cargo-patina )
 fi
-( cd "$root" && "$PATINA_BIN" patina native-build "$here" --output "$PBIN" --release >/dev/null )
+( cd "$root" && "$PATINA_BIN" patina build "$here" --output "$PBIN" --release >/dev/null )
 echo "    guest: $PBIN"
 
 fail=0
 # ALLOWANCE-FREE: task #10 known-safe-listed __NSGetArgc/__NSGetArgv and now
 # interposes _confstr/temp_dir, so this std-pure guest passes the pre-run audit
 # with zero --allow-unsupported-symbols. Determinism here is unqualified.
-patina() { "$PATINA_BIN" patina native-run "$PBIN" "$@"; }
+patina() { "$PATINA_BIN" patina run "$PBIN" "$@"; }
 # `replay <trace> [flags]` reproduces a recorded run flag-free: the seed and the
 # guest arguments are restored from the trace, so no `--` section is re-passed.
 replay() { "$PATINA_BIN" patina replay "$PBIN" "$@"; }
@@ -134,7 +134,7 @@ echo "==> status probes (informational)"
 # parks with a virtual timer; all-parked -> the runtime's deadlock rescue advances
 # the clock to the deadline -> watchdog-timeout. Expect BUG_CAUGHT (no more hang).
 set +e
-dout="$(timeout 30 "$PATINA_BIN" patina native-run "$PBIN" --seed 1 -- --bug deadlock --iters 64 2>/dev/null)"; drc=$?
+dout="$(timeout 30 "$PATINA_BIN" patina run "$PBIN" --seed 1 -- --bug deadlock --iters 64 2>/dev/null)"; drc=$?
 set -e
 if [[ "$dout" == *"BUG_CAUGHT bug=deadlock detail=watchdog-timeout"* ]]; then
   echo "OK   (deadlock): CAUGHT watchdog-timeout (task #10 Parker fix) -- EXPECTED"

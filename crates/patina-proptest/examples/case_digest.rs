@@ -1,5 +1,5 @@
 //! Runs a proptest property under Patina and prints a digest of every generated
-//! case. Under `cargo patina native-run` the digest is a pure function of the run
+//! case. Under `cargo patina run` the digest is a pure function of the run
 //! `--seed`: the same seed prints the same digest, a different seed prints a
 //! different one, and a recorded run replays to the same digest. Under a plain
 //! `cargo run --example case_digest` it still runs (OS-entropy fallback).

@@ -4,7 +4,7 @@
 
 Patina is a deterministic execution and simulation-testing system for Rust programs. It compiles code for a deterministic OS personality, routes platform effects through a virtual runtime, and lets tests explore time, scheduling, storage, networking, entropy, crashes, and other production-shaped failures under seed control.
 
-The primary user interface is `cargo patina`. `cargo dst` exists as an alias for users who already think in terms of deterministic simulation testing.
+The primary user interface is `cargo patina`.
 
 ## Core idea
 

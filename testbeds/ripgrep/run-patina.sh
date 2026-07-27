@@ -98,10 +98,10 @@ normalize() {
 printf 'run-patina: building cargo-patina (release; embeds the shim C)\n'
 ( cd "$REPO_ROOT" && cargo build --release -p cargo-patina >/dev/null 2>&1 )
 
-printf 'run-patina: native-building the UNMODIFIED ripgrep package under Patina\n'
+printf 'run-patina: building the UNMODIFIED ripgrep package under Patina\n'
 mkdir -p "$OUT"
 # shellcheck disable=SC2086  # $PATINA may intentionally be multiple words
-$PATINA patina native-build "$SCRIPT_DIR/upstream/Cargo.toml" \
+$PATINA patina build "$SCRIPT_DIR/upstream/Cargo.toml" \
   --package ripgrep --bin rg --release --output "$RG_PATINA" >/dev/null
 
 printf 'run-patina: regenerating deterministic corpus\n'
@@ -131,7 +131,7 @@ run_one() {
   fi
   set +e
   # shellcheck disable=SC2086
-  $PATINA patina native-run "$RG_PATINA" \
+  $PATINA patina run "$RG_PATINA" \
     --seed 0 --mount "$CORPUS" \
     "${allow_args[@]}" \
     -- "${COMMON[@]}" "$@" / \

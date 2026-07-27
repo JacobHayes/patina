@@ -6,9 +6,9 @@ ripgrep 15.2.0 package is built and run under Patina's deterministic native
 (linked-shim) runtime over the deterministic corpus, and what it proves.
 
 - **Host:** macOS 26.5.2, arm64. Date: 2026-07-26. rustc 1.96.0.
-- **Path exercised:** `cargo patina native-build` of a real multi-crate Cargo
+- **Path exercised:** `cargo patina build` of a real multi-crate Cargo
   workspace binary (far beyond buggy-smoke's single source), then
-  `cargo patina native-run` with the new `--mount` surface streaming the corpus
+  `cargo patina run` with the new `--mount` surface streaming the corpus
   into the guest filesystem. The guest is byte-for-byte upstream ripgrep.
 
 ## Result: the full 11-case battery passes under Patina
@@ -40,14 +40,14 @@ Two environmental differences are handled, each documented and neither touching
 The whole ripgrep workspace builds under Patina, unmodified:
 
 ```sh
-cargo patina native-build testbeds/ripgrep/upstream/Cargo.toml \
+cargo patina build testbeds/ripgrep/upstream/Cargo.toml \
   --package ripgrep --bin rg --release --output testbeds/ripgrep/out-patina/rg-patina
 # → PATINA_NATIVE_BUILD output=…/rg-patina   (~9 s; all crates incl. memmap2, crossbeam-deque)
 ```
 
 ## Corpus into the guest filesystem (the rung's structural work)
 
-`native-run` had no way to put host files in front of the guest — the guest
+`run` had no way to put host files in front of the guest — the guest
 filesystem was an empty `CrashFs`, and the guest is fully interposed so it cannot
 read the host itself. Added a minimal, sound mount surface:
 
@@ -59,7 +59,7 @@ read the host itself. Added a minimal, sound mount surface:
   is not strictly ascending (unsorted or duplicate). Symlinks are preserved as
   symlinks, matching how a default `rg` walk `lstat`s and skips `link_to_readme`
   (which appears in **no** expected output, native or Patina).
-- **`cargo patina native-run --mount <DIR>`** — the supervisor (which is *not*
+- **`cargo patina run --mount <DIR>`** — the supervisor (which is *not*
   interposed) walks `<DIR>` into a sorted `FsImage`, streams the encoded bytes to
   the guest over an inherited descriptor (fd 4), and folds the image's SHA-256
   into the run fingerprint.
@@ -209,7 +209,7 @@ program.
 Median of 5, warm (first run discarded), release builds, same `rg-patina` binary.
 This rung is CPU/filesystem-bound with **no** sleeps or virtual-clock shortcuts,
 so unlike buggy-smoke it isolates honest interposition overhead. Native is
-`rg` in `corpus/`; Patina is `native-run … --mount corpus --record`.
+`rg` in `corpus/`; Patina is `run … --mount corpus --record`.
 
 | | Native total | Patina (record) total | Ratio |
 | --- | --- | --- | --- |
@@ -244,7 +244,7 @@ So the per-test cost of running a real CPU/fs-bound OSS tool deterministically i
 
 ## Bug found and fixed (in this rung's owned code)
 
-`native-run` installed each inherited descriptor with `dup2(source, target)` in
+`run` installed each inherited descriptor with `dup2(source, target)` in
 order. With **two** inherited descriptors (the new image fd 4 *and* the trace
 fd 3, i.e. any `--mount` + `--record`/`replay`), the image temp file could be
 allocated on fd 3, so installing the trace at fd 3 first clobbered the image
@@ -265,7 +265,7 @@ frozen `patina_sched_yield` / `patina_shutdown→finish()` APIs are untouched).
   rebuild with inert symlinks, adversarial-image rejection, readdir-order
   determinism).
 - `patina-runtime`: `ENV_FS_IMAGE_FD` constant.
-- `cargo-patina`: `native-run --mount <DIR>` (image build, fd-4 streaming,
+- `cargo-patina`: `run --mount <DIR>` (image build, fd-4 streaming,
   fingerprint fold) + the descriptor-install fix above.
 - `patina-native-shim`: `fs_image_filesystem` hook in `init_from_env` reading the
   image fd; `isatty` interposed to deterministic false in the POSIX C layer.

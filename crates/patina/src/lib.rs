@@ -334,7 +334,7 @@ pub mod __rt {
 }
 
 /// FFI into the native shim. Present only when the shim is actually linked
-/// (`cfg(patina_shim)`, injected by `cargo patina native-build`). Under a plain
+/// (`cfg(patina_shim)`, injected by `cargo patina build`). Under a plain
 /// `cargo build`, a WASI build, or `cargo patina run`, these symbols are never
 /// referenced, so nothing is left unresolved at link time.
 #[cfg(patina_shim)]

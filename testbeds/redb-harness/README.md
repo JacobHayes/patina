@@ -23,7 +23,7 @@ lines. The whole design turns on this: the native and Patina phases run the
 RUNNER=(cargo run --release --)
 
 # Patina (run-patina.sh, an untested sketch)
-RUNNER=(cargo patina native-run "$built_bin")
+RUNNER=(cargo patina run "$built_bin")
 ```
 
 ## CLI
@@ -131,9 +131,9 @@ and cross-seed distinct.
 
 `run-patina.sh` is an **untested sketch** of the next phase. The design:
 
-- **Same binary, same args.** `cargo patina native-build` compiles this package
+- **Same binary, same args.** `cargo patina build` compiles this package
   under `cfg(patina)`/`cfg(dst)` with the native shim linked, and
-  `cargo patina native-run` executes it with std::fs routed through the
+  `cargo patina run` executes it with std::fs routed through the
   deterministic, crash-injecting filesystem and std::thread through the
   deterministic scheduler.
 - **Crash points.** The Patina seed selects crash points *between and inside*
