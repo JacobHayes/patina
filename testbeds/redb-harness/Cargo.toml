@@ -19,7 +19,17 @@ path = "src/main.rs"
 # filesystem exists to fuzz. No other runtime deps: the workload PRNG is an
 # inline splitmix64 and the state digest is a hand-rolled FNV-1a, so the
 # dependency tree under test is redb and redb alone.
-redb = "=4.1.0"
+# PATINA FORK of redb 4.1.0, vendored at ../redb-fork with cooperative-SUT
+# (buggify) sites wired into its commit and recovery paths. Byte-for-byte
+# upstream except for the `patina::`-tagged sites; a plain build behaves exactly
+# like `redb = "=4.1.0"`.
+redb = { path = "../redb-fork" }
+
+# The Patina cooperative-SUT SDK (default features = dependency-light SDK). The
+# harness uses it only to mark the setup/workload boundary via
+# `patina::lifecycle::setup_complete()`; outside a Patina build every SDK call is
+# a no-op, so the plain `run-native.sh` build is unchanged.
+patina = { path = "../../crates/patina" }
 
 [profile.release]
 # Keep unwinding so the harness can surface a panic message (invariant

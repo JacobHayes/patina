@@ -1,12 +1,16 @@
 //! Deterministic redb workload/oracle for the Patina durability testbed.
 //!
-//! This is a std-pure + redb binary: no Patina imports, no `cfg(patina)`. The
-//! LATER Patina phase runs this same binary, unchanged, under `cargo patina`
-//! with the crash-injecting filesystem to hunt durability bugs. Everything the
-//! test decides -- the op sequence, the durable-state model, every invariant --
-//! lives inside this process and reports through the process exit code and one
-//! machine-parseable RESULT line. Shell scripts only orchestrate and compare
-//! those lines.
+//! This is a std-pure + redb binary. Its only cooperative-SUT touch point is a
+//! single `patina::lifecycle::setup_complete()` call marking the setup/workload
+//! boundary; that macro is a no-op outside a Patina build, so `run-native.sh`
+//! builds and behaves exactly as a plain std+redb binary (no `cfg(patina)` in
+//! this file). The buggify fault sites themselves live in the vendored redb fork
+//! (`../redb-fork`), not here. The Patina phase runs this same binary under
+//! `cargo patina` with the crash-injecting filesystem and `--buggify` to hunt
+//! durability bugs. Everything the test decides -- the op sequence, the durable-
+//! state model, every invariant -- lives inside this process and reports through
+//! the process exit code and one machine-parseable RESULT line. Shell scripts
+//! only orchestrate and compare those lines.
 //!
 //! ## Determinism contract
 //!
@@ -350,6 +354,12 @@ fn run_write(options: &Options) -> Fallible<Summary> {
     // rolled back to the baseline, and the database must hash back to the
     // committed model. This runs while single-threaded so it cannot race.
     savepoint_exercise(&database, &model)?;
+
+    // Setup (create + baseline + savepoint) is done. Under a Patina buggify run
+    // with --buggify-after-setup, cooperative faults in redb's commit/recovery
+    // paths stay inert until here, so DB creation is fault-free and the workload
+    // commits below are what get perturbed. A no-op outside a Patina build.
+    patina::lifecycle::setup_complete();
 
     // Spawn snapshot readers: one writer plus `threads - 1` readers.
     let done = Arc::new(AtomicBool::new(false));
@@ -880,6 +890,10 @@ fn drive_crash_workload(
         // Savepoint/restore, crash-catching: a fault here is the injected crash,
         // not a savepoint bug (savepoint correctness is covered by native full).
         savepoint_exercise(&database, &model).map_err(|_| WriteStop::Crashed)?;
+
+        // Setup done: gate cooperative (buggify) faults to the workload commits
+        // below under --buggify-after-setup. No-op outside a Patina build.
+        patina::lifecycle::setup_complete();
 
         let mut applied: u64 = 0;
         while applied < options.ops {

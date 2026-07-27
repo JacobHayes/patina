@@ -207,3 +207,33 @@ so the shim must model, at minimum:
 These are the concrete points where the crash filesystem's decisions must line
 up with real redb behavior; a mismatch would produce either false-positive
 "bugs" or missed real ones.
+
+## Cooperative-SUT (buggify) campaign
+
+`buggify-sweep.sh` runs a Patina cooperative-SUT campaign: the harness is built
+against the vendored `../redb-fork` (redb 4.1.0 with `patina::{buggify!,
+buggify_delay!, sometimes!, reachable!, always!}` sites in its commit/recovery
+paths — byte-for-byte upstream except for those clearly-marked sites), and run
+with `--buggify` combined with the crash filesystem. Each generation derives its
+seed, workload, crash geometry, and per-gen buggify activation/fire probabilities
+from `SHA-256("redb-buggify-$G")`, so any generation is re-runnable by number.
+
+The harness's single cooperative touch point is one
+`patina::lifecycle::setup_complete()` call marking the setup/workload boundary
+(a no-op outside a Patina build, so `run-native.sh` is unchanged). Crash-free
+generations additionally pass `--buggify-after-setup` so DB creation is
+fault-free and cooperative faults fire only from the first workload commit.
+
+Classification reuses the shared `../buggify-campaign.sh` layer (the
+`ALWAYS_VIOLATION` and `SOMETIMES_UNMET` classes, the `PATINA_SDK_REPORT` parser,
+and the cross-generation `campaign-state.json` coverage accumulator) plus redb's
+own durability oracle (a lost/torn acknowledged commit is a `SAFETY_BUG`). The
+campaign writes to a fresh `out-buggify/` directory and exits nonzero on any
+failure class, including a `sometimes!` site reached but never satisfied.
+
+```sh
+./buggify-sweep.sh              # 350 generations into out-buggify/
+./buggify-sweep.sh 1 50         # a range
+./buggify-sweep.sh --selftest   # the shared campaign-layer selftest
+./buggify-sweep.sh --dry-run 1 8
+```
