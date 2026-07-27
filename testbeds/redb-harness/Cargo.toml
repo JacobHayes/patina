@@ -31,6 +31,14 @@ redb = { path = "../redb-fork" }
 # a no-op, so the plain `run-native.sh` build is unchanged.
 patina = { path = "../../crates/patina" }
 
+# The Patina proptest compat + in-house model-based (stateful) testing layer,
+# used only by `--mode stateful` (a new bin mode). Its command generation is
+# seeded from `patina::rng()`, so a stateful run is deterministic from the Patina
+# run seed. The default crash/full/write/verify modes and the buggify sweep do
+# not touch it.
+patina-proptest = { path = "../../crates/patina-proptest" }
+proptest = { version = "1.11.0", default-features = false, features = ["std", "bit-set"] }
+
 [profile.release]
 # Keep unwinding so the harness can surface a panic message (invariant
 # violations exit non-zero via process::exit, but a redb bug may panic) and so

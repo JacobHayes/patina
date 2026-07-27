@@ -45,6 +45,8 @@ use redb::{
     TableDefinition,
 };
 
+mod stateful;
+
 /// Fallible result carrying a thread-safe boxed error, so worker-thread failures
 /// can cross the `JoinHandle` boundary unchanged.
 type Fallible<T> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -173,6 +175,11 @@ enum RunMode {
     Verify,
     Full,
     Crash,
+    /// Model-based (stateful) property mode: drives redb against a `BTreeMap`
+    /// model via `patina-proptest`'s state-machine layer. Storage is in-memory
+    /// and generation is seeded from `patina::rng()`, so `--db`/`--ops`/`--seed`
+    /// are not consulted here (they stay optional for this mode).
+    Stateful,
 }
 
 struct Options {
@@ -203,6 +210,7 @@ fn parse_options() -> Result<Options, String> {
                     "verify" => RunMode::Verify,
                     "full" => RunMode::Full,
                     "crash" => RunMode::Crash,
+                    "stateful" => RunMode::Stateful,
                     other => return Err(format!("unknown --mode {other:?}")),
                 });
             }
@@ -217,11 +225,29 @@ fn parse_options() -> Result<Options, String> {
         }
     }
 
+    let mode = mode.ok_or("--mode is required")?;
+    // Stateful mode is in-memory and seeds generation from `patina::rng()`, so
+    // `--ops`/`--db`/`--seed` are not required for it; the other modes keep the
+    // strict contract they always had.
+    let (seed, ops, db) = if mode == RunMode::Stateful {
+        (
+            seed.unwrap_or(0),
+            ops.unwrap_or(0),
+            db.unwrap_or_else(|| PathBuf::from("<in-memory>")),
+        )
+    } else {
+        (
+            seed.ok_or("--seed is required")?,
+            ops.ok_or("--ops is required")?,
+            db.ok_or("--db is required")?,
+        )
+    };
+
     Ok(Options {
-        seed: seed.ok_or("--seed is required")?,
-        ops: ops.ok_or("--ops is required")?,
-        db: db.ok_or("--db is required")?,
-        mode: mode.ok_or("--mode is required")?,
+        seed,
+        ops,
+        db,
+        mode,
         threads,
     })
 }
@@ -239,6 +265,13 @@ fn main() {
         }
     };
 
+    // Stateful mode owns its own reporting and exit code: it prints a single
+    // STATEFUL_RESULT line whose digest is a pure function of the Patina run
+    // seed, and never routes through the RESULT-line path below.
+    if options.mode == RunMode::Stateful {
+        std::process::exit(stateful::run_stateful());
+    }
+
     // Crash mode owns its own reporting: it always prints a CRASH line (the
     // recovered state is data, not a pass/fail) and exits with a code that
     // classifies the durability outcome, so it never routes through the
@@ -254,6 +287,7 @@ fn main() {
         RunMode::Verify => run_verify(&options.db).map(|summary| summary.result_line(options.seed)),
         RunMode::Full => run_full(&options).map(|summary| summary.result_line(options.seed)),
         RunMode::Crash => unreachable!("crash mode is handled above"),
+        RunMode::Stateful => unreachable!("stateful mode is handled above"),
     };
 
     match outcome {
@@ -275,6 +309,7 @@ fn mode_name(mode: RunMode) -> &'static str {
         RunMode::Verify => "verify",
         RunMode::Full => "full",
         RunMode::Crash => "crash",
+        RunMode::Stateful => "stateful",
     }
 }
 
