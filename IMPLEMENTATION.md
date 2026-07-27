@@ -144,6 +144,104 @@ Completed foundations:
 
 Remaining: nothing for this slice's current scope; broader hardening items live in VALIDATION.md.
 
+## Slice 6: cooperative-SUT SDK — Partial (Milestone A)
+
+Acceptance level: V6 is not complete.
+
+A FoundationDB-`BUGGIFY`- and Antithesis-style SDK lets a system-under-test
+cooperate with the deterministic simulator. It lives in the existing `patina`
+crate under a feature inversion: default features are the dependency-light SDK
+(the `buggify!`, `buggify_with_prob!`, `buggify_delay!`, `buggify_knob!`,
+`always!`, `sometimes!`, `reachable!`, and lifecycle macros plus
+`patina::is_simulated()`/`patina::rng()`); the explicit-boundary facade
+(`run`/`run_with`, `Context`, `rt`, the ABI re-exports) moved behind a new
+`runtime` feature. A plain `cargo build` of an adopter links no runtime and every
+macro is a no-op or a plain fallback, so instrumented code compiles and runs
+normally outside Patina — no `cfg(patina)` appears in adopter code.
+
+Completed foundations (Milestone A):
+
+1. **Deterministic decisions, pure functions of the seed.** Per-run site
+   *activation* derives from `(root_seed, label, activation_permille)` and
+   per-evaluation *firing* from a counter-keyed splitmix PRF over
+   `(seed, label_hash, eval_counter)`; nothing is recorded per evaluation, so the
+   trace never bloats and replay re-derives every decision. FoundationDB defaults
+   apply: activated sites fire at 25% per evaluation and ~25% of sites are active
+   per run, both configurable.
+2. **Site identity and uniqueness.** Labels are explicit strings; a label reused
+   at a different call site (`file:line`) is a fatal duplicate that emits a
+   `PATINA_BUGGIFY_DUPLICATE_LABEL` marker and aborts. Registration is lazy at
+   first evaluation — a compile-time inventory (`ctor`/`linkme`) was rejected (it
+   adds a dependency to the dependency-light default and constructor order is not
+   a determinism guarantee), so a never-reached site is invisible within one run;
+   the campaign layer closes this across generations.
+3. **Damage-control cutoff.** A virtual-time cutoff (default 300 virtual seconds,
+   configurable) after which firing stops, checked against the unrecorded
+   monotonic clock read.
+4. **Self-contained replay and fail-closed fingerprint.** The realized
+   configuration, active-site set, and knob picks are recorded in the trace
+   metadata (additive `buggify` field; old traces migrate clean, conflicting
+   replay knobs fail closed exactly like the fault knobs). Enabling buggify folds
+   a `+buggify` component into the run fingerprint, reconstructed at replay from
+   the trace, so a buggify trace never cross-replays with a non-buggify build.
+5. **`native-run --buggify[=permille]`** plus `--buggify-activation-permille`,
+   `--buggify-cutoff-nanos`, and `--buggify-after-setup`, passed to the guest
+   through the `PATINA_BUGGIFY*` control plane and recorded into the trace.
+   `native-build` injects an internal
+   `--cfg patina_shim` (only on the shim-linked native paths, never on
+   `run`/`test`/`wasi-build`) so the SDK's shim FFI is referenced only where those
+   symbols resolve.
+6. **`PATINA_SDK_REPORT`** — one machine-parseable stderr line per run:
+   registered/activated/fired counts, cutoff state, and per-site
+   `sometimes`/`reachable` coverage and knob values, in the spirit of
+   `PATINA_SCHEDULE_REPORT`.
+7. **`patina::rng()`** bridged to the root seed under Patina (a plainly-seeded
+   fallback outside), as the hook for the property-based-testing wave.
+
+Lifecycle gating is causal via the runner, not lookahead: with
+`--buggify-after-setup` the runner *declares* that the guest calls
+`setup_complete()`, so buggify stays inert until that call (intent comes from the
+flag). If the flag is set and the guest never reaches `setup_complete()`, the run
+records its trace and then fails loudly (`PATINA_BUGGIFY_SETUP_NEVER_CALLED` +
+abort) — a declared-but-never-called gate is a harness bug, not a silent no-fault
+run. Without the flag, buggify is armed from the start and `setup_complete()` is a
+boundary/coverage marker.
+
+Completed foundations (Milestone B):
+
+8. **Causal setup gate.** `native-run --buggify-after-setup` lets the runner
+   declare that the guest calls `patina::lifecycle::setup_complete()`, so buggify
+   stays inert until that call — a causal gate (intent from the flag, no
+   lookahead) recorded in the trace metadata. A declared-but-never-called run
+   records its trace and then fails loudly (`PATINA_BUGGIFY_SETUP_NEVER_CALLED` +
+   abort): a silent no-fault run is a harness bug, not a pass.
+9. **Campaign layer** (`testbeds/buggify-campaign.sh`, sourced by both sweeps):
+   parses `PATINA_SDK_REPORT`, accumulates a cross-generation `campaign-state.json`
+   (per-site kind/reached/activation/fire counts and sometimes-satisfaction), and
+   adds two classes — `ALWAYS_VIOLATION` (per-gen, top severity, fires even on
+   exit 0, never downgraded) and `SOMETIMES_UNMET` (campaign-level: a `sometimes!`
+   site reached but never satisfied fails the campaign). A selftest proves both
+   fireable and that `ALWAYS_VIOLATION` is not downgraded; it is wired into
+   `raft-harness/fuzz-sweep.sh --selftest` without altering any existing gate
+   priority.
+10. **Vendored `redb` fork** (`testbeds/redb-fork`, redb 4.1.0, clearly marked)
+    with real sites in the commit/recovery paths: `buggify!` forcing 2-phase and
+    quick-repair commits, a `buggify_delay!` before the durability flush,
+    `sometimes!`/`reachable!` coverage on the two-phase path, full-repair entry,
+    and torn-slot checksum rejection, and an `always!` on the quick-repair⇒2-phase
+    invariant. A plain `cargo build` of the fork behaves exactly like upstream
+    redb (every site is a no-op). The redb harness marks its setup boundary with
+    one `setup_complete()` call.
+11. **Dogfood campaign** (`testbeds/redb-harness/buggify-sweep.sh`, 350
+    generations, per-gen derived buggify activation/fire + crash geometry, fresh
+    `out-buggify/` dir): 350/350 `OK`, zero durability violations, zero
+    `ALWAYS_VIOLATION`, zero crashes; buggify fired thousands of commit-path
+    faults and every invariant held. One correctly-detected `SOMETIMES_UNMET`
+    (torn-slot checksum rejection never satisfied — redb's two-slot commit design
+    kept the committed slot intact under the crash geometry; torn data surfaced as
+    fail-closed `OPEN_ERR` instead), which the campaign reports as a coverage gap
+    with a nonzero exit exactly as specified.
+
 ## Dependency order
 
 ```text

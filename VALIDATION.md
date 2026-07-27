@@ -163,6 +163,26 @@ Required before claiming broad libc/POSIX compatibility or stable traces:
 
 `CrashFs` modeling simplifications stated honestly: directory renames are always atomic (no subtree tearing); directory-durability loss covers explicitly created entries, not implicitly created parents; defaults preserve the prior conservative behavior (4096-byte granularity, torn probability 1.0, atomic renames, directory durability off).
 
+### V6: cooperative-SUT SDK
+
+**Partial (Milestone A).** The `patina` crate ships a FoundationDB-`BUGGIFY`- and Antithesis-style SDK under a feature inversion: default features are the dependency-light SDK, and the explicit facade (`run`/`run_with`, `Context`, `rt`) is behind the `runtime` feature. Every SDK macro (`buggify!`, `buggify_with_prob!`, `buggify_delay!`, `buggify_knob!`, `always!`, `sometimes!`, `reachable!`, `lifecycle::event!`) plus `is_simulated()`/`rng()` is a no-op or plain fallback outside a Patina build, and no `cfg(patina)` appears in adopter code.
+
+Automated evidence:
+
+- `patina-runtime` unit tests cover activation as a deterministic function of seed and label (with the ~25% realized fraction), firing-PRF determinism and seed variation, the damage-control cutoff, duplicate-label detection, knob determinism and range, the disabled/inert path, `rng()` determinism, the trace-metadata reconcile contract, and byte-identical record/replay of buggify decisions without re-supplying flags;
+- `patina-trace` covers the additive `buggify` metadata round-trip and its absence from a buggify-free trace;
+- the `patina` crate's own tests, built WITHOUT `cfg(patina)`, prove every macro is inert (a consumer's plain `cargo build` behavior);
+- `cargo-patina` end-to-end tests build a whole package depending on the SDK, run it under `native-run --buggify`, assert the `PATINA_SDK_REPORT` line and nonzero firings, replay a recorded trace byte-identically without re-supplying `--buggify`, and prove a duplicate label aborts with the `PATINA_BUGGIFY_DUPLICATE_LABEL` marker;
+- the flag-off invariance is verified on the raft testbed: a rebuilt harness (now compiled with the internal `--cfg patina_shim`) reproduces the seed-7 `applied_hash` `bbb54b74e959aa0e91aa75728055911b40f44f529e5d4e3b9477bebc7e00caf4` with buggify disabled, so the SDK is zero behavior change when off.
+
+Determinism and fail-closed guarantees: buggify decisions are pure functions of the seed and site label and are never recorded per evaluation (no trace bloat); the realized config, active-site set, and knob picks are recorded in the trace metadata and are authoritative on replay (conflicting replay knobs fail closed like the fault knobs); enabling buggify folds a `+buggify` fingerprint component, reconstructed at replay from the trace, so a buggify trace never cross-replays with a non-buggify build.
+
+Lifecycle gating is causal through the runner: `native-run --buggify-after-setup` declares that the guest calls `setup_complete()`, so buggify stays inert until that call, and a declared-but-never-called run fails loudly (`PATINA_BUGGIFY_SETUP_NEVER_CALLED` + abort) after recording its trace — verified by a `cargo-patina` end-to-end test. Without the flag, buggify is armed from the start and `setup_complete()` is a boundary/coverage marker.
+
+Honest limitation: sites register lazily at first evaluation, so a never-reached site is invisible to a single run's `PATINA_SDK_REPORT` (the campaign layer accumulates coverage across generations).
+
+The campaign layer (`testbeds/buggify-campaign.sh`) adds two classes on top of the existing sweep classifier without changing any existing gate priority: `ALWAYS_VIOLATION` (per-gen, top severity, fires even on exit 0, never downgraded) and `SOMETIMES_UNMET` (campaign-level: a `sometimes!` site reached but never satisfied fails the campaign). Both are proven fireable — plus a not-downgraded check — by a selftest wired into `raft-harness/fuzz-sweep.sh --selftest`, and the sweep runs clean end to end (the buggify accumulation is inert for the buggify-free raft harness). A vendored, clearly-marked `redb` 4.1.0 fork (`testbeds/redb-fork`) carries real cooperative-SUT sites in its commit/recovery paths (forced 2-phase/quick-repair commits, a delay before the durability flush, two-phase/full-repair/torn-slot coverage oracles, and a quick-repair⇒2-phase invariant); a plain `cargo build` of the fork behaves exactly like upstream redb. A 350-generation dogfood campaign (`testbeds/redb-harness/buggify-sweep.sh`, fresh `out-buggify/`) exercised thousands of commit-path faults with every invariant holding and zero durability violations, and correctly reported one `SOMETIMES_UNMET` coverage gap (torn committed-slot rejection was never produced by the harness's crash geometry — a wide probe confirmed redb's two-slot commit design keeps the committed slot intact, torn data surfacing as fail-closed `OPEN_ERR`).
+
 ## Trace oracle
 
 A valid `.patina` bundle has:
