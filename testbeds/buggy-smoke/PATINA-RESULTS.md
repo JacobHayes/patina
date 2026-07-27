@@ -37,7 +37,7 @@ build** (simplest wiring; verified by task #12): every command is
 | `lost-update` | Deterministic preemption of an atomics-only RMW race (#12) | `--seed 0 -- --bug lost-update --iters 2` → `lost=1 expected=4` | 0 | `7c463dcd40a50422` |
 
 All six are deterministic (byte-identical across 3 repeats) and replay to the
-identical `BUG_CAUGHT`/exit under `--replay`. `lost-update` trips at **every**
+identical `BUG_CAUGHT`/exit under `replay`. `lost-update` trips at **every**
 seed 0..40; seed 3 gives `697d8d49c967127d` (the coordinator's independent record).
 
 **Single-build policy + a finding.** All six run on one `--yield-points` build;
@@ -109,8 +109,9 @@ two ways:
 - **Determinism**: every catch byte-identical across 3 repeats (hashes above);
   the earlier seed-sweep determinism table below still holds for the non-failing
   schedules.
-- **Replay**: all six catches replay to the identical outcome; strict replay
-  rejects mismatched args (`trace operation mismatch at 0`).
+- **Replay**: all six catches replay to the identical outcome; a `--` section
+  that does not match the recorded guest arguments is rejected up front
+  (`guest-argument mismatch`), naming both argv lists.
 - **Perf**: measured, incl. the instrumented (`--yield-points`) vs plain cost for
   `lost-update` (see Performance).
 - **No Patina crates modified by this rung** — the fixes are tasks #10/#11/#12.
@@ -219,9 +220,10 @@ Trace SHA-256 (repeat #1; #1==#2==#3 verified for all):
 ## Replay
 
 ```sh
-# Record a trip, then strictly replay it (replay takes its seed from the trace).
+# Record a trip, then strictly replay it (replay restores the seed AND the
+# guest arguments from the trace, so no `--` section is re-passed).
 "$PATINA" patina native-run "$BIN" --record /tmp/trip.patina --seed 21 -- --bug unlucky-byte
-"$PATINA" patina native-run "$BIN" --replay /tmp/trip.patina -- --bug unlucky-byte
+"$PATINA" patina replay "$BIN" /tmp/trip.patina
 ```
 
 - Record: `BUG_CAUGHT bug=unlucky-byte detail=derived=0x00 stored=0` (exit 1).

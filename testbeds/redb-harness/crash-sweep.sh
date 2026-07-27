@@ -70,8 +70,9 @@ declare -a panics=()
 runs=0
 
 # Re-record a notable run as a self-contained trace and emit the flag-free
-# replay command. The recorded trace carries the fault configuration in its
-# metadata, so replay needs no --fs-crash-at/--fs-torn-granularity flags.
+# replay command. The recorded trace carries the fault configuration AND the
+# guest arguments in its metadata, so `cargo patina replay` needs no
+# --fs-crash-at/--fs-torn-granularity flags and no `-- ...` argument section.
 preserve() {
   local spec="$1" fseed="$2" gran="$3" kind="$4"
   local safe_spec="${spec/:/-}"
@@ -85,8 +86,7 @@ preserve() {
     >/dev/null 2>&1 || true
   if [[ -f "$trace" ]]; then
     echo "       preserved trace: $trace"
-    echo "       flag-free replay: $PATINA patina native-run $built_bin --replay $trace -- \\"
-    echo "                         --seed $WORKLOAD_SEED --ops $OPS --db /db/redb.redb --mode crash --threads 1"
+    echo "       flag-free replay: $PATINA patina replay $built_bin $trace"
   fi
 }
 

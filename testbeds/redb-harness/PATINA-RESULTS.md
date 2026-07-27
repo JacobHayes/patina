@@ -228,19 +228,20 @@ Reading the outcomes:
   (`HOLDS … state=87b4039500207969 … ack=3`).
 - **Clean full:** 5 seeds × 3 repeats each byte-identical, cross-seed distinct
   (table above) — the seed genuinely drives the workload (non-vacuous).
-- **Replay (strict):** a recorded crash trace replays byte-identically when the
-  fault knob is **re-supplied** (it is a run input, like the seed, which replay
-  takes from the trace):
+- **Replay (strict, self-contained):** a recorded crash trace replays
+  byte-identically **flag-free** — the seed, the fault configuration, and the
+  guest arguments are all restored from the trace metadata (the trace is
+  authoritative):
 
   ```sh
   cargo patina native-run …/redb-harness --record c.trace --fs-crash-at write:34 --seed 0 -- \
     --seed 42 --ops 400 --db /db/redb.redb --mode crash --threads 1   # HOLDS … 87b4039500207969
-  cargo patina native-run …/redb-harness --replay c.trace --fs-crash-at write:34 -- \
-    --seed 42 --ops 400 --db /db/redb.redb --mode crash --threads 1   # identical, exit 0
+  cargo patina replay …/redb-harness c.trace                          # identical, exit 0
   ```
 
-  Replaying **without** re-supplying `--fs-crash-at` diverges (the recorded
-  `FsCrash` op has no counterpart) and fails closed — replay is genuinely
+  `replay` exposes no fault knobs: the recorded `FsCrash` configuration comes
+  from the trace, so the injected crash reproduces without re-supplying
+  `--fs-crash-at` (and, indeed, `replay` rejects the flag) — replay is genuinely
   strict, not a no-op.
 
 ## MVCC under preemption (the payoff of the atomic driver choice)

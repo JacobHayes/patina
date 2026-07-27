@@ -21,6 +21,7 @@ tempfile.workspace = true
 [dev-dependencies]
 object.workspace = true
 patina-abi.workspace = true
+serde_json.workspace = true
 wat.workspace = true
 
 [[bin]]

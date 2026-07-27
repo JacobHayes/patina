@@ -37,6 +37,9 @@ fail=0
 # world; the harness --seed fixes the workload.
 DB=/db/redb.redb
 run() { "$PATINA" patina native-run "$built_bin" "$@"; }
+# `replay <trace> [flags]` reproduces a recorded run flag-free: the seed, fault
+# knobs, and guest arguments are all restored from the trace metadata.
+replay() { "$PATINA" patina replay "$built_bin" "$@"; }
 result_of() { sed -n 's/^\(RESULT .*\)$/\1/p'; }
 
 echo "==> [1] clean full mode: 5 seeds, each 3 repeats byte-identical, cross-seed distinct"
@@ -60,7 +63,7 @@ fi
 echo "==> [2] record + strict replay is byte-identical"
 rec="$work/full.trace"
 r1="$(run --record "$rec" -- --seed 3 --ops 300 --db "$DB" --mode full --threads 1 | result_of)"
-r2="$(run --replay "$rec" -- --seed 3 --ops 300 --db "$DB" --mode full --threads 1 | result_of)"
+r2="$(replay "$rec" | result_of)"
 echo "    record: $r1"
 echo "    replay: $r2"
 if [[ "$r1" != "$r2" || -z "$r1" ]]; then
@@ -103,8 +106,7 @@ crash_rec="$work/crash.trace"
 c1="$(run --seed 1 --fs-crash-at write:16 --fs-torn-granularity byte --record "$crash_rec" -- \
   --seed 42 --ops 400 --db "$DB" --mode crash --threads 1 2>/dev/null \
   | sed -n 's/^\(CRASH .*\)$/\1/p')"
-c2="$(run --replay "$crash_rec" -- \
-  --seed 42 --ops 400 --db "$DB" --mode crash --threads 1 2>/dev/null \
+c2="$(replay "$crash_rec" 2>/dev/null \
   | sed -n 's/^\(CRASH .*\)$/\1/p')"
 echo "    record: $c1"
 echo "    replay: $c2"

@@ -75,7 +75,9 @@
 //! When a property fails under `cargo patina native-run`, the failing run is
 //! identified by its `--seed`. Re-run the same binary with that seed to reproduce
 //! the exact case sequence and the shrunk counterexample; record the run with
-//! `--record` and replay it with `--replay` for a byte-identical re-execution. To
+//! `--record` and reproduce it with `cargo patina replay <bin> <trace>` (the seed
+//! and guest arguments are restored from the trace) for a byte-identical
+//! re-execution. To
 //! reproduce a specific case sequence directly in a unit test, build a runner from
 //! an explicit 32-byte seed with [`rng_from_seed`].
 

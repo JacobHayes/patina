@@ -17,9 +17,9 @@ use patina_minimize::{
 use patina_runtime::{
     Context, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION,
     ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_FINGERPRINT, ENV_FS_CRASH_AT, ENV_FS_IMAGE_FD,
-    ENV_FS_TORN_GRANULARITY, ENV_MODE, ENV_NET_DROP_PERMILLE, ENV_NET_JITTER, ENV_NET_LATENCY,
-    ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_SEED, ENV_SLEEP_JITTER, ENV_STEP_BUDGET,
-    ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, RuntimeConfig,
+    ENV_FS_TORN_GRANULARITY, ENV_GUEST_ARGV, ENV_MODE, ENV_NET_DROP_PERMILLE, ENV_NET_JITTER,
+    ENV_NET_LATENCY, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_SEED, ENV_SLEEP_JITTER,
+    ENV_STEP_BUDGET, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, RuntimeConfig,
 };
 use patina_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
@@ -50,6 +50,15 @@ const PATINA_YIELD_FINGERPRINT_SUFFIX: &str = "+yieldpoints";
 const NATIVE_SHIM_STATICLIB: &str = "libpatina_native_shim.a";
 const DEFAULT_NATIVE_EDITION: &str = "2024";
 const DEFAULT_NATIVE_FINGERPRINT: &str = "patina-native";
+/// The fixed, machine-independent `argv[0]` every native guest sees. `native-run`
+/// resolves the guest binary to an absolute host path (tempdir-specific,
+/// machine-specific) to exec it, so passing that path through as `argv[0]` would
+/// leak a non-portable string into the guest's `std::env::args().next()` — a
+/// latent cross-machine determinism surface. The supervisor is the sole exec-er,
+/// so it stamps this stable name as `argv[0]` instead; guests read their own
+/// arguments from `argv[1..]` (all in-repo guests `.skip(1)`), so nothing that
+/// observes real program arguments is affected.
+const NATIVE_GUEST_ARGV0: &str = "patina-guest";
 /// Inherited descriptor `native-run` hands the child for the trace control
 /// plane (`PATINA_TRACE_FD`), matching the supervisor channel the shim reads.
 const PATINA_TRACE_CHANNEL_FD: i32 = 3;
@@ -70,7 +79,8 @@ Usage:
   cargo patina native-audit <BINARY> [--allow SYMBOL]...
   cargo patina native-build <SOURCE.rs> --output <PATH> [--edition YEAR] [--release] [--yield-points] [-- RUSTC OPTIONS]
   cargo patina native-build <DIR|Cargo.toml> [--output <PATH>] [--package NAME] [--bin NAME] [--release] [--yield-points]
-  cargo patina native-run <BINARY> [--seed N | --record PATH | --replay PATH] [--fingerprint STR] [--mount HOST_DIR] [--net-latency-nanos N] [--fs-crash-at SPEC] [--fs-torn-granularity block|byte] [--sleep-jitter-nanos MIN..MAX] [--net-jitter-nanos MIN..MAX] [--net-drop-permille N] [--buggify[=PERMILLE]] [--buggify-activation-permille N] [--buggify-cutoff-nanos N] [--buggify-after-setup] [--allow SYMBOL]... [--allow-unsupported-symbols <all|name,...>] [-- PROGRAM ARGS]
+  cargo patina native-run <BINARY> [--seed N | --record PATH] [--fingerprint STR] [--mount HOST_DIR] [--net-latency-nanos N] [--fs-crash-at SPEC] [--fs-torn-granularity block|byte] [--sleep-jitter-nanos MIN..MAX] [--net-jitter-nanos MIN..MAX] [--net-drop-permille N] [--buggify[=PERMILLE]] [--buggify-activation-permille N] [--buggify-cutoff-nanos N] [--buggify-after-setup] [--allow SYMBOL]... [--allow-unsupported-symbols <all|name,...>] [-- PROGRAM ARGS]
+  cargo patina replay <BINARY> <TRACE> [--fingerprint STR] [--mount HOST_DIR] [--allow SYMBOL]... [--allow-unsupported-symbols <all|name,...>]
   cargo patina minimize <TRACE> --output <PATH> [--timeline ID] [--prune-branches] -- <ORACLE> [ARGS]...
   cargo patina minimize --scenario --seed <U64> [--param K=V]... [--seed-budget N] -- <ORACLE> [ARGS]...
   cargo dst    <run|test> [PATINA OPTIONS] [CARGO OPTIONS] [-- PROGRAM OPTIONS]
@@ -133,9 +143,10 @@ native build is unaffected. `native-run` detects a yield-point binary and folds
 it into the compatibility fingerprint so its traces never cross-replay with a
 plain binary.
 `native-run` executes such a binary under the deterministic runtime; for
-`--record`/`--replay` it opens the trace on the host and hands the child an
-inherited `PATINA_TRACE_FD` descriptor so a fully interposed program never
-recurses into the deterministic filesystem while finalizing its trace. Before
+`--record` (and for the `replay` subcommand) it opens the trace on the host and
+hands the child an inherited `PATINA_TRACE_FD` descriptor so a fully interposed
+program never recurses into the deterministic filesystem while finalizing its
+trace. Before
 the guest runs it applies a pre-run default-deny audit: every externally
 resolved symbol must be interposed or known-safe (the shim's own control-plane
 vehicle is allowed automatically), and any unsupported symbol on the
@@ -205,11 +216,20 @@ Native fault options (native-run; seed-driven, default off):
                                   --buggify.
 
 Fault and buggify knobs are seeded by the run seed. A --record run captures its
-full configuration into the trace metadata, so --replay reproduces it with no
-knobs re-supplied: the trace is authoritative. Supplying knobs on --replay is
-optional and, if they conflict with the recording, fails closed. Enabling
-buggify folds a +buggify component into the run fingerprint, so a buggify trace
-never cross-replays with a non-buggify build.
+full configuration — fault knobs, buggify, and the guest arguments after `--` —
+into the trace metadata. Enabling buggify folds a +buggify component into the run
+fingerprint, so a buggify trace never cross-replays with a non-buggify build.
+
+Reproduce a recorded run with `cargo patina replay <BINARY> <TRACE>`, the sole
+replay entry point: it restores every semantic input (seed, fault knobs, buggify,
+and the guest arguments) from the trace — the trace is authoritative — and
+exposes no semantic flags, so a run recorded with non-default `-- ARGS` replays
+without re-passing them. Only host/build inputs the trace cannot carry are
+accepted (--fingerprint, --mount, --allow[-unsupported-symbols]). A `--` section
+is allowed only if byte-identical to the recording, or the replay is refused up
+front. The guest always sees a fixed, machine-independent `argv[0]`
+(`patina-guest`), never the host binary path, so traces are portable across
+machines.
 ";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -543,6 +563,14 @@ fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     if arguments.first() == Some(&OsString::from("native-run")) {
         arguments.remove(0);
         return parse_native_run(arguments).map(ParseResult::NativeRun);
+    }
+    if arguments.first() == Some(&OsString::from("replay")) {
+        arguments.remove(0);
+        // `replay` is the sole native replay entry point: it restores all
+        // semantic config (seed, fault knobs, buggify, guest argv) from the trace
+        // and exposes no semantic flags. It shares `execute_native_run` with the
+        // seeded/record paths, producing a `NativeRunInvocation` in replay mode.
+        return parse_replay(arguments).map(ParseResult::NativeRun);
     }
     if arguments.first() == Some(&OsString::from("minimize")) {
         arguments.remove(0);
@@ -1273,7 +1301,6 @@ fn parse_native_run(mut arguments: Vec<OsString>) -> Result<NativeRunInvocation,
     let binary = PathBuf::from(arguments.remove(0));
     let mut seed = None;
     let mut record = None;
-    let mut replay = None;
     let mut fingerprint = None;
     let mut net_latency_nanos = None;
     let mut faults = NativeFaults::default();
@@ -1448,13 +1475,6 @@ fn parse_native_run(mut arguments: Vec<OsString>) -> Result<NativeRunInvocation,
                     .ok_or_else(|| CliError::usage("--record requires a path"))?;
                 set_once(&mut record, PathBuf::from(path), "--record")?;
             }
-            "--replay" => {
-                index += 1;
-                let path = arguments
-                    .get(index)
-                    .ok_or_else(|| CliError::usage("--replay requires a path"))?;
-                set_once(&mut replay, PathBuf::from(path), "--replay")?;
-            }
             "--fingerprint" => {
                 index += 1;
                 let value = utf8_argument(&arguments, index, "--fingerprint")?;
@@ -1468,11 +1488,6 @@ fn parse_native_run(mut arguments: Vec<OsString>) -> Result<NativeRunInvocation,
         }
         index += 1;
     }
-    if record.is_some() && replay.is_some() {
-        return Err(CliError::usage(
-            "--record and --replay are mutually exclusive",
-        ));
-    }
     let fingerprint = fingerprint.unwrap_or_else(|| DEFAULT_NATIVE_FINGERPRINT.to_string());
     let mode = if let Some(path) = record {
         NativeRunMode::Record {
@@ -1480,13 +1495,6 @@ fn parse_native_run(mut arguments: Vec<OsString>) -> Result<NativeRunInvocation,
             path,
             fingerprint,
         }
-    } else if let Some(path) = replay {
-        if seed.is_some() {
-            return Err(CliError::usage(
-                "--seed cannot be combined with --replay; replay takes its seed from the trace",
-            ));
-        }
-        NativeRunMode::Replay { path, fingerprint }
     } else {
         NativeRunMode::Seeded {
             seed: seed.unwrap_or(0),
@@ -1499,6 +1507,144 @@ fn parse_native_run(mut arguments: Vec<OsString>) -> Result<NativeRunInvocation,
         net_latency_nanos,
         faults,
         buggify,
+        allow,
+        allow_unsupported: allow_unsupported.unwrap_or(UnsupportedPolicy::Deny),
+        mount,
+    })
+}
+
+/// Parse `cargo patina replay <BINARY> <TRACE> [--fingerprint STR] [--mount
+/// HOST_DIR] [--allow SYMBOL]... [--allow-unsupported-symbols <all|name,...>]
+/// [-- GUEST ARGS]`.
+///
+/// `replay` is the sole native replay entry point. It restores every semantic
+/// input from the trace itself — seed, fault knobs, buggify, and the guest
+/// arguments — so it exposes NO semantic flags (not `--seed`, not `--fs-*`, not
+/// `--buggify*`). The only flags are host/build facts the trace cannot carry:
+/// `--fingerprint` (the compatibility fingerprint), `--mount` (re-supply the host
+/// corpus whose hash the fingerprint verifies), and `--allow`/
+/// `--allow-unsupported-symbols` (the machine-local pre-run audit surface). An
+/// optional trailing `--` section is accepted only for script compatibility and
+/// must match the recorded arguments byte-for-byte (enforced downstream by
+/// `reconcile_replay_argv`); for a trace recorded before argv capture the `--`
+/// section is used as-is.
+fn parse_replay(mut arguments: Vec<OsString>) -> Result<NativeRunInvocation, CliError> {
+    let program_args = split_trailing_args(&mut arguments);
+    if arguments.is_empty() {
+        return Err(CliError::usage(
+            "replay requires a binary path and a trace path",
+        ));
+    }
+    let binary = PathBuf::from(arguments.remove(0));
+    if arguments.is_empty() {
+        return Err(CliError::usage("replay requires a trace path"));
+    }
+    let trace = PathBuf::from(arguments.remove(0));
+    let mut fingerprint = None;
+    let mut allow = BTreeSet::new();
+    let mut allow_unsupported: Option<UnsupportedPolicy> = None;
+    let mut mount = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        let option = arguments[index]
+            .to_str()
+            .ok_or_else(|| CliError::usage("replay options must be valid UTF-8"))?;
+        match option {
+            "--fingerprint" => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--fingerprint")?;
+                set_once(&mut fingerprint, value.to_string(), "--fingerprint")?;
+            }
+            // `--mount` re-supplies the host corpus, a host input the trace cannot
+            // carry: only its hash is recorded (folded into the fingerprint, which
+            // still rejects a wrong corpus). So, like `--fingerprint`, it is a
+            // host/build input rather than a semantic knob restored from metadata.
+            "--mount" => {
+                index += 1;
+                let path = arguments
+                    .get(index)
+                    .ok_or_else(|| CliError::usage("--mount requires a host directory path"))?;
+                set_once(&mut mount, PathBuf::from(path), "--mount")?;
+            }
+            "--allow" => {
+                index += 1;
+                let symbol = utf8_argument(&arguments, index, "--allow")?;
+                if symbol.is_empty() {
+                    return Err(CliError::usage("--allow symbol must not be empty"));
+                }
+                allow.insert(symbol.to_string());
+            }
+            "--allow-unsupported-symbols" => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--allow-unsupported-symbols")?;
+                let policy = if value == "all" {
+                    UnsupportedPolicy::All
+                } else {
+                    let symbols: BTreeSet<String> = value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|part| !part.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                    if symbols.is_empty() {
+                        return Err(CliError::usage(
+                            "--allow-unsupported-symbols requires `all` or a comma-separated symbol list",
+                        ));
+                    }
+                    UnsupportedPolicy::Only(symbols)
+                };
+                set_once(
+                    &mut allow_unsupported,
+                    policy,
+                    "--allow-unsupported-symbols",
+                )?;
+            }
+            // Semantic inputs are restored from the trace, never re-supplied.
+            // Name the offending flag so the operator is not left guessing why a
+            // knob was rejected; the trace is authoritative for all of these.
+            "--seed"
+            | "--record"
+            | "--branch"
+            | "--net-latency-nanos"
+            | "--fs-crash-at"
+            | "--fs-torn-granularity"
+            | "--sleep-jitter-nanos"
+            | "--net-jitter-nanos"
+            | "--net-drop-permille"
+            | "--buggify"
+            | "--buggify-activation-permille"
+            | "--buggify-cutoff-nanos"
+            | "--buggify-after-setup" => {
+                return Err(CliError::usage(format!(
+                    "replay restores run semantics from the trace and does not accept {option}; \
+the trace is authoritative"
+                )));
+            }
+            other if other.starts_with("--buggify=") => {
+                return Err(CliError::usage(
+                    "replay restores buggify from the trace and does not accept --buggify=...; the \
+trace is authoritative",
+                ));
+            }
+            _ => {
+                return Err(CliError::usage(format!(
+                    "unsupported replay option {option:?}"
+                )));
+            }
+        }
+        index += 1;
+    }
+    let fingerprint = fingerprint.unwrap_or_else(|| DEFAULT_NATIVE_FINGERPRINT.to_string());
+    Ok(NativeRunInvocation {
+        binary,
+        mode: NativeRunMode::Replay {
+            path: trace,
+            fingerprint,
+        },
+        program_args,
+        net_latency_nanos: None,
+        faults: NativeFaults::default(),
+        buggify: None,
         allow,
         allow_unsupported: allow_unsupported.unwrap_or(UnsupportedPolicy::Deny),
         mount,
@@ -2822,6 +2968,61 @@ fn write_unsupported_sidecar(trace: &Path, downgraded: &[NativeEscape]) -> Resul
     })
 }
 
+/// Encode the guest program arguments (`argv[1..]`) as the JSON string array the
+/// runtime records into the trace metadata. Recording requires UTF-8 arguments
+/// (the trace bundle is UTF-8 JSON); a non-UTF-8 argument fails closed here,
+/// before the guest runs, rather than corrupting the trace.
+fn encode_guest_argv(program_args: &[OsString]) -> Result<String, CliError> {
+    let mut argv = Vec::with_capacity(program_args.len());
+    for argument in program_args {
+        let text = argument.to_str().ok_or_else(|| {
+            CliError(format!(
+                "cannot record the guest argument {argument:?}: --record requires UTF-8 guest \
+arguments so they round-trip through the trace metadata"
+            ))
+        })?;
+        argv.push(text.to_owned());
+    }
+    serde_json::to_string(&argv)
+        .map_err(|error| CliError(format!("failed to encode guest arguments: {error}")))
+}
+
+/// Reconcile the guest arguments for a replay against the trace's recorded argv.
+///
+/// The trace records the `argv[1..]` it ran with, so a bare replay (no `--`
+/// section) reproduces them and the operator need not re-pass the arguments —
+/// fixing the incident where a divergent default argv caused a confusing mid-run
+/// operation mismatch. If a `--` section IS supplied it must match the recording
+/// byte-for-byte, otherwise the replay is refused UPFRONT naming both the
+/// recorded and the passed arguments (a parse-time error, never a mid-run
+/// divergence). A trace recorded before argv capture carries no recorded argv, so
+/// the arguments are taken from the command line exactly as before — no new error
+/// for old traces.
+fn reconcile_replay_argv(trace: &Path, passed: &[OsString]) -> Result<Vec<OsString>, CliError> {
+    let bundle = TraceBundle::load(trace).map_err(|error| {
+        CliError(format!(
+            "failed to read trace {} for guest-argument restoration: {error}",
+            trace.display()
+        ))
+    })?;
+    let Some(recorded) = bundle.metadata.guest_argv else {
+        // Pre-argv trace: honor the historical contract (arguments from the
+        // command line, and their absence behaves exactly as today).
+        return Ok(passed.to_vec());
+    };
+    let recorded_os: Vec<OsString> = recorded.iter().map(OsString::from).collect();
+    if passed.is_empty() || passed == recorded_os.as_slice() {
+        Ok(recorded_os)
+    } else {
+        Err(CliError(format!(
+            "replay guest-argument mismatch for {}: the trace recorded {recorded:?}, but the \
+command line passed {passed:?} after `--`. Omit the `--` section to replay the recorded arguments, \
+or pass them byte-for-byte identically.",
+            trace.display()
+        )))
+    }
+}
+
 fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> {
     use std::os::unix::io::AsRawFd;
     use std::os::unix::process::CommandExt;
@@ -2878,8 +3079,29 @@ fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> 
     };
     let image_hash = image_file.as_ref().map(|image| image.hash.clone());
 
+    // Restore the guest arguments for a replay from the trace's recorded argv, so
+    // a bare replay reproduces them without the `--` section being re-passed; a
+    // mismatched `--` section is refused upfront (see `reconcile_replay_argv`).
+    // For seeded/record runs the arguments are the ones supplied on the command
+    // line, unchanged.
+    let program_args = match &invocation.mode {
+        NativeRunMode::Replay { path, .. } => {
+            reconcile_replay_argv(path, &invocation.program_args)?
+        }
+        NativeRunMode::Seeded { .. } | NativeRunMode::Record { .. } => {
+            invocation.program_args.clone()
+        }
+    };
+
     let mut command = Command::new(&binary);
-    command.args(&invocation.program_args).env_clear();
+    // Stamp a fixed, machine-independent `argv[0]`: the guest is exec'd from an
+    // absolute host path, but that path must not leak into the guest's
+    // `std::env::args()` as a non-portable string. The guest's own arguments live
+    // in `argv[1..]`.
+    command
+        .args(&program_args)
+        .arg0(NATIVE_GUEST_ARGV0)
+        .env_clear();
     if image_file.is_some() {
         command.env(ENV_FS_IMAGE_FD, PATINA_FS_IMAGE_CHANNEL_FD.to_string());
     }
@@ -2955,7 +3177,14 @@ fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> 
                         invocation.buggify.is_some(),
                     ),
                 )
-                .env(ENV_TRACE_FD, PATINA_TRACE_CHANNEL_FD.to_string());
+                .env(ENV_TRACE_FD, PATINA_TRACE_CHANNEL_FD.to_string())
+                // Record the guest arguments into the trace metadata so a later
+                // `replay` restores them without the `--` section being
+                // re-passed. Always forwarded (even when empty) so a
+                // zero-argument run records `[]` — distinct from an old trace's
+                // absent field, so replaying it reproduces zero arguments rather
+                // than inheriting whatever the command line supplies.
+                .env(ENV_GUEST_ARGV, encode_guest_argv(&program_args)?);
             // Qualify the recorded artifact: a run that downgraded unsupported
             // symbols is not an unconditional determinism claim. Record the
             // downgraded surface in a sidecar next to the trace so the caveat
@@ -4459,40 +4688,61 @@ mod tests {
             },
             _ => panic!("expected native-run"),
         }
-        match parse(strings(&["native-run", "probe", "--replay", "run.patina"])).unwrap() {
-            ParseResult::NativeRun(invocation) => match invocation.mode {
-                NativeRunMode::Replay { path, fingerprint } => {
-                    assert_eq!(path, PathBuf::from("run.patina"));
-                    assert_eq!(fingerprint, DEFAULT_NATIVE_FINGERPRINT);
-                }
-                _ => panic!("expected replay mode"),
-            },
-            _ => panic!("expected native-run"),
-        }
-        // record/replay are mutually exclusive and replay takes its seed from the trace.
-        assert!(
-            parse(strings(&[
-                "native-run",
-                "probe",
-                "--record",
-                "a",
-                "--replay",
-                "b"
-            ]))
-            .is_err()
-        );
-        assert!(
-            parse(strings(&[
-                "native-run",
-                "probe",
-                "--replay",
-                "a",
-                "--seed",
-                "1"
-            ]))
-            .is_err()
-        );
+        // `native-run` no longer has a `--replay` flag: it is the sole domain of
+        // the `replay` subcommand, so native-run rejects it as an unknown option.
+        assert!(parse(strings(&["native-run", "probe", "--replay", "run.patina"])).is_err());
         assert!(parse(strings(&["native-run"])).is_err());
+
+        // `replay <bin> <trace>` parses into replay mode, restoring seed/faults/
+        // buggify/argv from the trace and defaulting the fingerprint.
+        match parse(strings(&["replay", "probe", "run.patina"])).unwrap() {
+            ParseResult::NativeRun(invocation) => {
+                assert_eq!(invocation.binary, PathBuf::from("probe"));
+                match invocation.mode {
+                    NativeRunMode::Replay { path, fingerprint } => {
+                        assert_eq!(path, PathBuf::from("run.patina"));
+                        assert_eq!(fingerprint, DEFAULT_NATIVE_FINGERPRINT);
+                    }
+                    _ => panic!("expected replay mode"),
+                }
+            }
+            _ => panic!("expected native-run invocation from replay"),
+        }
+        // `replay` accepts host/build inputs the trace cannot carry ...
+        assert!(
+            parse(strings(&[
+                "replay",
+                "probe",
+                "run.patina",
+                "--fingerprint",
+                "fp"
+            ]))
+            .is_ok()
+        );
+        assert!(
+            parse(strings(&[
+                "replay",
+                "probe",
+                "run.patina",
+                "--mount",
+                "corpus"
+            ]))
+            .is_ok()
+        );
+        // ... but rejects semantic knobs (the trace is authoritative) and a
+        // missing trace path.
+        assert!(
+            parse(strings(&[
+                "replay",
+                "probe",
+                "run.patina",
+                "--net-latency-nanos",
+                "5"
+            ]))
+            .is_err()
+        );
+        assert!(parse(strings(&["replay", "probe", "run.patina", "--seed", "1"])).is_err());
+        assert!(parse(strings(&["replay", "probe"])).is_err());
     }
 
     #[test]

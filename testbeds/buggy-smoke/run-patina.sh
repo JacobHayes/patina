@@ -49,6 +49,9 @@ fail=0
 # interposes _confstr/temp_dir, so this std-pure guest passes the pre-run audit
 # with zero --allow-unsupported-symbols. Determinism here is unqualified.
 patina() { "$PATINA_BIN" patina native-run "$PBIN" "$@"; }
+# `replay <trace> [flags]` reproduces a recorded run flag-free: the seed and the
+# guest arguments are restored from the trace, so no `--` section is re-passed.
+replay() { "$PATINA_BIN" patina replay "$PBIN" "$@"; }
 
 # ---------------------------------------------------------------------------
 # clean_det <name> [args...]
@@ -98,18 +101,21 @@ echo "==> replay: a recorded trip must replay to the identical outcome"
 if [[ -n "$hit" ]]; then
   rec="$work/ub_trip.patina"
   rec_out="$(patina --record "$rec" --seed "$hit" -- --bug unlucky-byte 2>/dev/null || true)"
-  rep_out="$(patina --replay "$rec" -- --bug unlucky-byte 2>/dev/null || true)"
+  # Flag-free replay: the guest arguments are restored from the trace metadata.
+  rep_out="$(replay "$rec" 2>/dev/null || true)"
   if [[ "$rec_out" == "$rep_out" && "$rep_out" == BUG_CAUGHT* ]]; then
     echo "OK   (replay): record==replay :: $rep_out"
   else
     echo "FAIL (replay): record='$rec_out' replay='$rep_out'"; fail=1
   fi
-  # Strict-replay must REJECT a trace replayed against different program args.
+  # Strict-replay must REJECT a `--` section that does not match the recorded
+  # guest arguments -- now an UP-FRONT (parse-time) error naming both argv lists,
+  # not a mid-run divergence.
   set +e
-  mism="$(patina --replay "$rec" -- --bug lost-update --iters 100 2>&1 >/dev/null)"; mrc=$?
+  mism="$(replay "$rec" -- --bug lost-update --iters 100 2>&1 >/dev/null)"; mrc=$?
   set -e
-  if [[ $mrc -ne 0 && "$mism" == *"trace operation mismatch"* ]]; then
-    echo "OK   (replay strictness): wrong-args replay rejected (exit $mrc)"
+  if [[ $mrc -ne 0 && "$mism" == *"guest-argument mismatch"* ]]; then
+    echo "OK   (replay strictness): wrong-args replay rejected up front (exit $mrc)"
   else
     echo "FAIL (replay strictness): wrong-args replay was not rejected (exit=$mrc): $mism"; fail=1
   fi

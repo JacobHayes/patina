@@ -129,7 +129,7 @@ if cmp -s "$tmp/native-seed-1" "$tmp/native-seed-other"; then
 fi
 "$runner" native-run "$tmp/smoke-native" --seed 123 --record "$tmp/native.patina" \
   --fingerprint smoke-native-v1 >"$tmp/native-record"
-"$runner" native-run "$tmp/smoke-native" --replay "$tmp/native.patina" \
+"$runner" replay "$tmp/smoke-native" "$tmp/native.patina" \
   --fingerprint smoke-native-v1 >"$tmp/native-replay"
 cmp "$tmp/native-record" "$tmp/native-replay"
 cmp "$tmp/native-seed-1" "$tmp/native-replay"

@@ -228,7 +228,7 @@ So the per-test cost of running a real CPU/fs-bound OSS tool deterministically i
 
 ## Replay
 
-- **Same corpus:** `--replay` of a recorded trace reproduces the run exactly
+- **Same corpus:** `replay` of a recorded trace reproduces the run exactly
   (exit 0, identical output).
 - **Different corpus → rejected, fail-closed.** Because the image SHA-256 is
   folded into the fingerprint, replaying a trace against a *different* mounted
@@ -246,7 +246,7 @@ So the per-test cost of running a real CPU/fs-bound OSS tool deterministically i
 
 `native-run` installed each inherited descriptor with `dup2(source, target)` in
 order. With **two** inherited descriptors (the new image fd 4 *and* the trace
-fd 3, i.e. any `--mount` + `--record`/`--replay`), the image temp file could be
+fd 3, i.e. any `--mount` + `--record`/`replay`), the image temp file could be
 allocated on fd 3, so installing the trace at fd 3 first clobbered the image
 source before it was duplicated to fd 4 → the guest crashed by signal.
 buggy-smoke never hit this (one inherited fd only). Fixed by relocating every

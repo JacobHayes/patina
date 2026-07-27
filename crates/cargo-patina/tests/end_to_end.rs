@@ -257,9 +257,8 @@ fn native_build_package_audits_records_and_fails_closed() {
     let replayed = package_result(&invoke_in(
         workspace,
         &[
-            "native-run",
+            "replay",
             clean.to_str().unwrap(),
-            "--replay",
             trace.to_str().unwrap(),
             "--fingerprint",
             "native-pkg-v1",
@@ -422,9 +421,8 @@ fn native_recv_timeout_is_deterministic_across_seeds_and_replay() {
     let replayed = invoke_in(
         workspace,
         &[
-            "native-run",
+            "replay",
             bin.to_str().unwrap(),
-            "--replay",
             trace.to_str().unwrap(),
             "--fingerprint",
             "recv-timeout",
@@ -438,7 +436,7 @@ fn native_recv_timeout_is_deterministic_across_seeds_and_replay() {
 }
 
 // A guest that reads a file the supervisor mounted into the deterministic
-// filesystem. Used to exercise `--mount` composing with `--record`/`--replay`,
+// filesystem. Used to exercise `--mount` composing with `--record`/`replay`,
 // which hands the child TWO inherited descriptors at once.
 const MOUNT_READER_SOURCE: &str = r#"
 use std::fs;
@@ -449,7 +447,7 @@ fn main() {
 }
 "#;
 
-// Regression: `--mount` + `--record`/`--replay` installs two inherited
+// Regression: `--mount` + `--record`/`replay` installs two inherited
 // descriptors — the trace channel (fd 3) and the filesystem image (fd 4). The
 // image temp file can be allocated on fd 3, so installing the trace there first
 // used to clobber the still-unread image source, crashing the guest by signal
@@ -501,14 +499,14 @@ fn native_mount_composes_with_record_and_replay_two_inherited_descriptors() {
         "record mode with --mount did not see the mounted file"
     );
 
-    // Replay carries both descriptors too, and must re-supply --mount so the
-    // image hash folded into the fingerprint still matches.
+    // `replay` re-supplies the host corpus with --mount (a host input the trace
+    // cannot carry; only its hash is in the fingerprint). The seed and everything
+    // else come from the trace, so the run reproduces byte-identically.
     let replayed = invoke_in(
         workspace,
         &[
-            "native-run",
+            "replay",
             bin.to_str().unwrap(),
-            "--replay",
             trace.to_str().unwrap(),
             "--mount",
             mount.to_str().unwrap(),
@@ -533,9 +531,8 @@ fn native_mount_composes_with_record_and_replay_two_inherited_descriptors() {
         env!("CARGO_BIN_EXE_cargo-patina"),
         workspace,
         &[
-            "native-run",
+            "replay",
             bin.to_str().unwrap(),
-            "--replay",
             trace.to_str().unwrap(),
             "--mount",
             other_mount.to_str().unwrap(),
@@ -552,6 +549,13 @@ fn native_mount_composes_with_record_and_replay_two_inherited_descriptors() {
         cross_stderr.contains("failed to initialize")
             && cross_stderr.contains("fingerprint mismatch"),
         "cross-corpus replay must name the fingerprint mismatch, not abort mutely:\nstderr:\n{cross_stderr}"
+    );
+    // The named mismatch carries the corpus image hash (`+fsimg:<hash>`): it is
+    // the recorded corpus's hash that no longer matches the substituted one, so
+    // the fail-closed reason points squarely at the corpus, not a generic error.
+    assert!(
+        cross_stderr.contains("+fsimg:"),
+        "the fingerprint mismatch must name the corpus image hash (+fsimg:):\nstderr:\n{cross_stderr}"
     );
 }
 
@@ -639,13 +643,15 @@ fn main() {
 }
 "#;
 
-// Supplying a fault knob at replay that conflicts with the trace's recorded
-// (authoritative) configuration must fail closed — and the shim must surface the
-// runtime's specific "fault knobs conflict" diagnostic, not abort with the
-// generic "no runtime installed" line.
+// The trace is authoritative for the fault configuration, so `replay` exposes no
+// fault knobs at all: a flag-free `replay` reproduces the recorded fault run, and
+// supplying a fault knob is refused UP FRONT (a CLI usage error naming the flag),
+// never silently applied. The underlying runtime reconcile-conflict fail-closed
+// path is covered directly by patina-runtime's
+// `reconcile_replay_faults_enforces_the_authoritative_trace_contract`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn native_replay_fault_knob_conflict_names_the_conflict() {
+fn native_replay_rejects_fault_knobs_and_reproduces_flag_free() {
     let directory = tempdir().unwrap();
     let source = directory.path().join("fs_touch.rs");
     fs::write(&source, FS_TOUCH_SOURCE).unwrap();
@@ -662,7 +668,7 @@ fn native_replay_fault_knob_conflict_names_the_conflict() {
     );
 
     let trace = directory.path().join("faults.patina");
-    invoke_in(
+    let recorded = invoke_in(
         workspace,
         &[
             "native-run",
@@ -678,15 +684,32 @@ fn native_replay_fault_knob_conflict_names_the_conflict() {
         ],
     );
 
-    // Same fingerprint, but a DIFFERENT net-latency knob than the recording: the
-    // trace is authoritative, so replay must reject the conflicting knob.
-    let conflict = invoke_unchecked(
+    // Flag-free replay reproduces the recorded fault run — the fault config comes
+    // from the trace, not the command line.
+    let replayed = invoke_in(
+        workspace,
+        &[
+            "replay",
+            bin.to_str().unwrap(),
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "trivial-faults",
+        ],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&replayed.stdout),
+        String::from_utf8_lossy(&recorded.stdout),
+        "flag-free replay must reproduce the recorded fault run"
+    );
+
+    // Supplying a fault knob to `replay` is refused up front (the trace is
+    // authoritative), naming the flag — never silently applied.
+    let rejected = invoke_unchecked(
         env!("CARGO_BIN_EXE_cargo-patina"),
         workspace,
         &[
-            "native-run",
+            "replay",
             bin.to_str().unwrap(),
-            "--replay",
             trace.to_str().unwrap(),
             "--fingerprint",
             "trivial-faults",
@@ -694,15 +717,15 @@ fn native_replay_fault_knob_conflict_names_the_conflict() {
             "2000",
         ],
     );
-    let conflict_stderr = String::from_utf8_lossy(&conflict.stderr);
+    let rejected_stderr = String::from_utf8_lossy(&rejected.stderr);
     assert!(
-        !conflict.status.success(),
-        "a conflicting replay fault knob must fail closed:\nstderr:\n{conflict_stderr}"
+        !rejected.status.success(),
+        "replay must reject a fault knob:\nstderr:\n{rejected_stderr}"
     );
     assert!(
-        conflict_stderr.contains("failed to initialize")
-            && conflict_stderr.contains("fault knobs conflict"),
-        "the conflict must be named, not aborted mutely:\nstderr:\n{conflict_stderr}"
+        rejected_stderr.contains("--net-latency-nanos")
+            && rejected_stderr.contains("does not accept"),
+        "the rejection must name the offending flag:\nstderr:\n{rejected_stderr}"
     );
 }
 
@@ -809,9 +832,8 @@ fn native_rwlock_contention_is_seed_deterministic_and_varies_across_seeds() {
     let replayed = invoke_in(
         workspace,
         &[
-            "native-run",
+            "replay",
             bin.to_str().unwrap(),
-            "--replay",
             trace.to_str().unwrap(),
             "--fingerprint",
             "rwlock-contention",
@@ -903,9 +925,8 @@ fn native_yield_points_trace_fails_closed_against_plain_binary() {
     let self_replay = invoke_in(
         workspace,
         &[
-            "native-run",
+            "replay",
             instrumented.to_str().unwrap(),
-            "--replay",
             yp_trace.to_str().unwrap(),
         ],
     );
@@ -921,9 +942,8 @@ fn native_yield_points_trace_fails_closed_against_plain_binary() {
         env!("CARGO_BIN_EXE_cargo-patina"),
         workspace,
         &[
-            "native-run",
+            "replay",
             plain.to_str().unwrap(),
-            "--replay",
             yp_trace.to_str().unwrap(),
         ],
     );
@@ -959,9 +979,8 @@ fn native_yield_points_trace_fails_closed_against_plain_binary() {
         env!("CARGO_BIN_EXE_cargo-patina"),
         workspace,
         &[
-            "native-run",
+            "replay",
             instrumented.to_str().unwrap(),
-            "--replay",
             plain_trace.to_str().unwrap(),
         ],
     );
@@ -1055,12 +1074,7 @@ fn native_yield_points_survive_thread_local_teardown() {
     );
     let replayed = invoke_in(
         workspace,
-        &[
-            "native-run",
-            bin.to_str().unwrap(),
-            "--replay",
-            trace.to_str().unwrap(),
-        ],
+        &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
     );
     assert!(
         String::from_utf8_lossy(&replayed.stdout).contains("TEARDOWN_ok"),
@@ -1824,12 +1838,7 @@ fn native_buggify_sdk_reports_records_and_replays() {
     );
     let replayed = invoke_in(
         workspace,
-        &[
-            "native-run",
-            bin.to_str().unwrap(),
-            "--replay",
-            trace.to_str().unwrap(),
-        ],
+        &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
     );
     assert_eq!(
         String::from_utf8_lossy(&recorded.stdout),
@@ -2090,9 +2099,8 @@ fn native_proptest_case_generation_is_seed_deterministic_and_replays() {
     let replayed = proptest_digest(&invoke_in(
         workspace,
         &[
-            "native-run",
+            "replay",
             bin.to_str().unwrap(),
-            "--replay",
             trace.to_str().unwrap(),
             "--fingerprint",
             "proptest-digest-v1",
@@ -2407,7 +2415,7 @@ fn native_two_axis_stateful_shrink_then_schedule_minimize() {
     fs::write(
         &oracle,
         format!(
-            "#!/bin/sh\nout=$(\"{}\" native-run \"{}\" --replay \"$PATINA_MINIMIZE_TRACE\" -- --replay-commands \"{}\" 2>/dev/null)\ncode=$?\nif [ \"$code\" -ne 0 ] && printf '%s' \"$out\" | grep -q 'TWOAXIS_FAIL'; then\n  exit 1\nfi\nexit 0\n",
+            "#!/bin/sh\nout=$(\"{}\" replay \"{}\" \"$PATINA_MINIMIZE_TRACE\" -- --replay-commands \"{}\" 2>/dev/null)\ncode=$?\nif [ \"$code\" -ne 0 ] && printf '%s' \"$out\" | grep -q 'TWOAXIS_FAIL'; then\n  exit 1\nfi\nexit 0\n",
             exe,
             bin.display(),
             spec
@@ -2442,9 +2450,8 @@ fn native_two_axis_stateful_shrink_then_schedule_minimize() {
         exe,
         workspace,
         &[
-            "native-run",
+            "replay",
             bin.to_str().unwrap(),
-            "--replay",
             minimized_path.to_str().unwrap(),
             "--",
             "--replay-commands",
@@ -2462,6 +2469,200 @@ fn native_two_axis_stateful_shrink_then_schedule_minimize() {
         String::from_utf8_lossy(&replayed.stdout).contains("TWOAXIS_FAIL"),
         "minimized replay must carry the same failure marker"
     );
+}
+
+// A guest whose deterministic boundary op-stream DEPENDS on its arguments: it
+// opens and reads back a file whose name is `argv[1]` (default "default"), so a
+// replay that runs it with the wrong arguments diverges with a trace operation
+// mismatch mid-run — exactly the confusing incident that recording guest argv
+// fixes. It also echoes `argv[0]` so the supervisor-normalized value is pinned.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const ARGV_ECHO_SOURCE: &str = r#"
+fn main() {
+    let argv: Vec<String> = std::env::args().collect();
+    println!("ARGV0={}", argv.first().map(String::as_str).unwrap_or(""));
+    let guest: Vec<&str> = argv.iter().skip(1).map(String::as_str).collect();
+    println!("ARGS={guest:?}");
+    // The open path is argv-derived, so the recorded FsOpen operation carries the
+    // argument. Replaying with a different argv opens a different path and the
+    // strict replay fails closed with an operation mismatch instead of silently
+    // running the wrong scenario.
+    let name = guest.first().copied().unwrap_or("default");
+    let path = format!("/{name}");
+    std::fs::write(&path, name.as_bytes()).unwrap();
+    let readback = std::fs::read_to_string(&path).unwrap();
+    println!("READBACK={readback}");
+}
+"#;
+
+// Guest argv is recorded into the trace metadata and restored on replay: a bare
+// `cargo patina replay <bin> <trace>` reproduces a run recorded with non-default
+// `-- ARGS` byte-identically (the incident class), a mismatched `--` section is
+// refused up front naming both argv lists, an old trace without the field still
+// replays with explicit arguments, and `argv[0]` is normalized to a fixed,
+// machine-independent value.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_replay_restores_guest_argv_and_normalizes_argv0() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("argv_echo.rs");
+    fs::write(&source, ARGV_ECHO_SOURCE).unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("argv-echo");
+    invoke_in(
+        workspace,
+        &[
+            "native-build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let exe = env!("CARGO_BIN_EXE_cargo-patina");
+
+    // argv[0] is the supervisor-synthesized fixed name, never the host binary
+    // path, so a guest reading std::env::args().next() gets a portable value.
+    let seeded = invoke_in(
+        workspace,
+        &["native-run", bin.to_str().unwrap(), "--seed", "0"],
+    );
+    let seeded_out = String::from_utf8_lossy(&seeded.stdout);
+    assert!(
+        seeded_out.contains("ARGV0=patina-guest"),
+        "argv[0] must be normalized to a fixed name, got:\n{seeded_out}"
+    );
+    assert!(
+        !seeded_out.contains(bin.to_str().unwrap()),
+        "the host binary path must not leak into the guest argv[0]:\n{seeded_out}"
+    );
+
+    // Record with NON-DEFAULT guest arguments (the real incident used a
+    // non-default --tick-millis), then a BARE replay — no `--` section —
+    // reproduces the run byte-identically because the arguments are restored
+    // from the trace. Before argv capture this bare replay ran the guest with
+    // default args and diverged with an operation mismatch.
+    let trace = directory.path().join("argv.patina");
+    let recorded = invoke_in(
+        workspace,
+        &[
+            "native-run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "0",
+            "--record",
+            trace.to_str().unwrap(),
+            "--",
+            "alpha",
+            "--tick-millis",
+            "50",
+        ],
+    );
+    let recorded_out = String::from_utf8_lossy(&recorded.stdout).into_owned();
+    assert!(
+        recorded_out.contains("ARGS=[\"alpha\", \"--tick-millis\", \"50\"]"),
+        "record run did not see the passed guest arguments:\n{recorded_out}"
+    );
+    assert!(recorded_out.contains("READBACK=alpha"), "{recorded_out}");
+
+    let bare_replay = invoke_with(
+        exe,
+        workspace,
+        &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&bare_replay.stdout),
+        recorded_out,
+        "bare `replay` must restore the recorded guest arguments and reproduce the run"
+    );
+
+    // A mismatched `--` section is refused UP FRONT, naming both the recorded and
+    // the passed argument lists — never a confusing mid-run divergence.
+    let mismatch = invoke_unchecked(
+        exe,
+        workspace,
+        &[
+            "replay",
+            bin.to_str().unwrap(),
+            trace.to_str().unwrap(),
+            "--",
+            "beta",
+            "--tick-millis",
+            "99",
+        ],
+    );
+    let mismatch_stderr = String::from_utf8_lossy(&mismatch.stderr);
+    assert!(
+        !mismatch.status.success(),
+        "a mismatched replay `--` section must fail:\nstderr:\n{mismatch_stderr}"
+    );
+    assert!(
+        mismatch_stderr.contains("alpha")
+            && mismatch_stderr.contains("beta")
+            && mismatch_stderr.contains("mismatch"),
+        "the mismatch error must name BOTH argv lists:\nstderr:\n{mismatch_stderr}"
+    );
+
+    // A matching `--` section is accepted (compat for scripts that still pass it).
+    let matching = invoke_with(
+        exe,
+        workspace,
+        &[
+            "replay",
+            bin.to_str().unwrap(),
+            trace.to_str().unwrap(),
+            "--",
+            "alpha",
+            "--tick-millis",
+            "50",
+        ],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&matching.stdout),
+        recorded_out,
+        "a byte-identical `--` section must be accepted"
+    );
+
+    // Old-trace compatibility: synthesize a trace WITHOUT the guest_argv field
+    // (a pre-argv recording) by stripping it, then replay with explicit
+    // arguments exactly as before — no new error, arguments taken from the
+    // command line.
+    let old_trace = directory.path().join("old.patina");
+    strip_guest_argv(&trace, &old_trace);
+    let old_replay = invoke_in(
+        workspace,
+        &[
+            "replay",
+            bin.to_str().unwrap(),
+            old_trace.to_str().unwrap(),
+            "--",
+            "alpha",
+            "--tick-millis",
+            "50",
+        ],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&old_replay.stdout),
+        recorded_out,
+        "an old trace without recorded argv must replay with explicit arguments as before"
+    );
+}
+
+// Rewrite `source` into `dest` with the additive `metadata.guest_argv` field
+// removed, synthesizing a trace as a pre-argv-capture recorder would have
+// written it. Traces are compact, greppable JSON, so this is a faithful stand-in
+// for an old on-disk bundle.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn strip_guest_argv(source: &Path, dest: &Path) {
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(source).unwrap()).unwrap();
+    let removed = value["metadata"]
+        .as_object_mut()
+        .unwrap()
+        .remove("guest_argv");
+    assert!(
+        removed.is_some(),
+        "the recorded trace was expected to carry guest_argv before stripping"
+    );
+    fs::write(dest, serde_json::to_vec(&value).unwrap()).unwrap();
 }
 
 // A guest that establishes a durable 16-byte baseline, then issues one UNSYNCED

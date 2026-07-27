@@ -493,13 +493,13 @@ fi
 "$runner" native-run "$tmp/std-probe" --seed 9 --record "$tmp/std-repeat.patina" \
   --fingerprint native-std-v1 >/dev/null
 cmp "$tmp/std.patina" "$tmp/std-repeat.patina"
-"$runner" native-run "$tmp/std-probe" --replay "$tmp/std.patina" \
+"$runner" replay "$tmp/std-probe" "$tmp/std.patina" \
   --fingerprint native-std-v1 >"$tmp/std-replay"
 cmp "$tmp/std-record" "$tmp/std-replay"
 cmp "$tmp/std-seed-1" "$tmp/std-replay"
 grep -qx 'PATINA_STRACE_MARKER' "$tmp/std-replay"
 grep -Eq '^NATIVE_STD_RESULT epoch_ns=0 first_hash=[0-9a-f]{16} second_hash=[0-9a-f]{16} fs=link:symlink,nested:dir,value:file$' "$tmp/std-replay"
-if "$runner" native-run "$tmp/std-probe" --replay "$tmp/std.patina" \
+if "$runner" replay "$tmp/std-probe" "$tmp/std.patina" \
   --fingerprint native-std-other >/dev/null 2>&1; then
   echo 'validate-native-shim: std-probe replay accepted a changed fingerprint' >&2
   exit 1
@@ -739,11 +739,11 @@ fi
 "$runner" native-run "$tmp/thread-probe" --seed 7 --record "$tmp/thread-repeat.patina" \
   --fingerprint native-thread-v1 >/dev/null
 cmp "$tmp/thread.patina" "$tmp/thread-repeat.patina"
-"$runner" native-run "$tmp/thread-probe" --replay "$tmp/thread.patina" \
+"$runner" replay "$tmp/thread-probe" "$tmp/thread.patina" \
   --fingerprint native-thread-v1 >"$tmp/thread-replay"
 cmp "$tmp/thread-record" "$tmp/thread-replay"
 cmp "$tmp/thread-seed-1" "$tmp/thread-replay"
-if "$runner" native-run "$tmp/thread-probe" --replay "$tmp/thread.patina" \
+if "$runner" replay "$tmp/thread-probe" "$tmp/thread.patina" \
   --fingerprint native-thread-other >/dev/null 2>&1; then
   echo 'validate-native-shim: thread-probe replay accepted a changed fingerprint' >&2
   exit 1
@@ -792,7 +792,7 @@ if [[ "$udp_distinct" -lt 2 ]]; then
 fi
 "$runner" native-run "$tmp/udp-probe" --seed 1 --record "$tmp/udp.patina" \
   --fingerprint native-udp-v1 >"$tmp/udp-record"
-"$runner" native-run "$tmp/udp-probe" --replay "$tmp/udp.patina" \
+"$runner" replay "$tmp/udp-probe" "$tmp/udp.patina" \
   --fingerprint native-udp-v1 >"$tmp/udp-replay"
 cmp "$tmp/udp-record" "$tmp/udp-replay"
 cmp "$tmp/udp-seed-1" "$tmp/udp-replay"
@@ -809,7 +809,7 @@ cmp "$tmp/dup-seed-1" "$tmp/dup-seed-2"
 grep -qx 'NATIVE_DUP_RESULT head=abc rest=def mid=bc' "$tmp/dup-seed-1"
 "$runner" native-run "$tmp/dup-probe" --seed 3 --record "$tmp/dup.patina" \
   --fingerprint native-dup-v1 >"$tmp/dup-record"
-"$runner" native-run "$tmp/dup-probe" --replay "$tmp/dup.patina" \
+"$runner" replay "$tmp/dup-probe" "$tmp/dup.patina" \
   --fingerprint native-dup-v1 >"$tmp/dup-replay"
 cmp "$tmp/dup-record" "$tmp/dup-replay"
 cmp "$tmp/dup-seed-1" "$tmp/dup-replay"
@@ -824,7 +824,7 @@ cmp "$tmp/env-seed-1" "$tmp/env-seed-2"
 grep -qx 'NATIVE_ENV_RESULT vars=0' "$tmp/env-seed-1"
 CANARY_HOST=one "$runner" native-run "$tmp/env-probe" --seed 3 --record "$tmp/env.patina" \
   --fingerprint native-env-v1 >"$tmp/env-record"
-CANARY_HOST=two "$runner" native-run "$tmp/env-probe" --replay "$tmp/env.patina" \
+CANARY_HOST=two "$runner" replay "$tmp/env-probe" "$tmp/env.patina" \
   --fingerprint native-env-v1 >"$tmp/env-replay"
 cmp "$tmp/env-record" "$tmp/env-replay"
 cmp "$tmp/env-seed-1" "$tmp/env-replay"
@@ -915,7 +915,7 @@ grep -q 'built=1' "$tmp/pkg-seed-1"
 grep -q 'stored=hello from greeter' "$tmp/pkg-seed-1"
 "$runner" native-run "$tmp/pkg-probe" --seed 5 --record "$tmp/pkg.patina" \
   --fingerprint native-pkg-v1 >"$tmp/pkg-record"
-"$runner" native-run "$tmp/pkg-probe" --replay "$tmp/pkg.patina" \
+"$runner" replay "$tmp/pkg-probe" "$tmp/pkg.patina" \
   --fingerprint native-pkg-v1 >"$tmp/pkg-replay"
 cmp "$tmp/pkg-record" "$tmp/pkg-replay"
 cmp "$tmp/pkg-seed-1" "$tmp/pkg-replay"
@@ -1265,7 +1265,7 @@ done
 "$runner" native-run "$tmp/timed-wait-probe" --seed 5 --record "$tmp/timed-wait-repeat.patina" \
   --fingerprint native-timed-wait-v1 >/dev/null
 cmp "$tmp/timed-wait.patina" "$tmp/timed-wait-repeat.patina"
-"$runner" native-run "$tmp/timed-wait-probe" --replay "$tmp/timed-wait.patina" \
+"$runner" replay "$tmp/timed-wait-probe" "$tmp/timed-wait.patina" \
   --fingerprint native-timed-wait-v1 >"$tmp/timed-wait-replay"
 cmp "$tmp/timed-wait-record" "$tmp/timed-wait-replay"
 cmp "$tmp/timed-wait-seed-5-1" "$tmp/timed-wait-replay"
@@ -1297,7 +1297,7 @@ done
 "$runner" native-run "$tmp/recv-timeout-probe" --seed 5 --record "$tmp/recv-timeout-repeat.patina" \
   --fingerprint native-recv-timeout-v1 >/dev/null
 cmp "$tmp/recv-timeout.patina" "$tmp/recv-timeout-repeat.patina"
-"$runner" native-run "$tmp/recv-timeout-probe" --replay "$tmp/recv-timeout.patina" \
+"$runner" replay "$tmp/recv-timeout-probe" "$tmp/recv-timeout.patina" \
   --fingerprint native-recv-timeout-v1 >"$tmp/recv-timeout-replay"
 cmp "$tmp/recv-timeout-record" "$tmp/recv-timeout-replay"
 
@@ -1378,8 +1378,9 @@ grep -qx 'NATIVE_UDP_LATENCY_RESULT elapsed_ns=250000000 payload=ping' \
   --net-latency-nanos "$udp_latency_nanos" --record "$tmp/udp-latency-repeat.patina" \
   --fingerprint native-udp-latency-v1 >/dev/null
 cmp "$tmp/udp-latency.patina" "$tmp/udp-latency-repeat.patina"
-"$runner" native-run "$tmp/udp-latency-probe" \
-  --net-latency-nanos "$udp_latency_nanos" --replay "$tmp/udp-latency.patina" \
+# Flag-free replay: the base net latency is recorded in the trace metadata, so it
+# is restored from the trace rather than re-supplied (replay rejects the knob).
+"$runner" replay "$tmp/udp-latency-probe" "$tmp/udp-latency.patina" \
   --fingerprint native-udp-latency-v1 >"$tmp/udp-latency-replay"
 cmp "$tmp/udp-latency-record" "$tmp/udp-latency-replay"
 cmp "$tmp/udp-latency-seed-5-1" "$tmp/udp-latency-replay"
@@ -1413,7 +1414,7 @@ done
 "$runner" native-run "$tmp/tcp-probe" --seed 5 --record "$tmp/tcp-repeat.patina" \
   --fingerprint native-tcp-v1 >/dev/null
 cmp "$tmp/tcp.patina" "$tmp/tcp-repeat.patina"
-"$runner" native-run "$tmp/tcp-probe" --replay "$tmp/tcp.patina" \
+"$runner" replay "$tmp/tcp-probe" "$tmp/tcp.patina" \
   --fingerprint native-tcp-v1 >"$tmp/tcp-replay"
 cmp "$tmp/tcp-record" "$tmp/tcp-replay"
 cmp "$tmp/tcp-seed-5-1" "$tmp/tcp-replay"

@@ -64,9 +64,9 @@ $PATINA patina native-run $BIN --seed 1 --net-jitter-nanos 1000000..80000000 -- 
 $PATINA patina native-run $BIN --seed 1 --net-drop-permille 300 -- \
   --seed 7 --proposals 20 --base-port 4001 --data-dir /raft --timeout-secs 90
 
-# Record + strict replay:
+# Record + strict replay (replay restores the seed and guest arguments from the trace):
 $PATINA patina native-run $BIN --record r.trace -- --seed 7 --proposals 20 --base-port 4001 --data-dir /raft
-$PATINA patina native-run $BIN --replay r.trace -- --seed 7 --proposals 20 --base-port 4001 --data-dir /raft
+$PATINA patina replay $BIN r.trace
 ```
 
 Every command runs under the **default-deny audit gate with no `--allow`** — the

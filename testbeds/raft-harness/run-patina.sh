@@ -63,6 +63,10 @@ trap 'rm -rf "$work"' EXIT
 fail=0
 
 run() { "$PATINA" patina native-run "$built" "$@"; }
+# `replay <trace> [flags]` reproduces a recorded run flag-free: the seed, fault
+# knobs, and guest arguments (the `-- ...` section) are restored from the trace,
+# so replays no longer re-pass them. `--allow` stays (a machine-local audit fact).
+replay() { "$PATINA" patina replay "$built" "$@"; }
 result_of() { sed -n 's/^\(RAFT_RESULT .*\)$/\1/p'; }
 committed_of() { sed -n 's/.*committed=\([0-9][0-9]*\).*/\1/p'; }
 violated() { grep -q 'RAFT_VIOLATION'; }
@@ -93,7 +97,7 @@ done
 echo "==> [2] record + strict replay is byte-identical"
 rec="$work/replay.trace"
 r1="$(run --record "$rec" "${ALLOW[@]}" -- "${ARGS[@]}" 2>/dev/null | result_of)"
-r2="$(run --replay "$rec" "${ALLOW[@]}" -- "${ARGS[@]}" 2>/dev/null | result_of)"
+r2="$(replay "$rec" "${ALLOW[@]}" 2>/dev/null | result_of)"
 echo "    record: $r1"
 echo "    replay: $r2"
 if [[ "$r1" != "$r2" || -z "$r1" ]]; then echo "    FAIL: replay differs from record"; fail=1; fi
@@ -213,7 +217,7 @@ echo "    write:5 recovery deterministic: ${ref_fd%%|*} | trace=${ref_fd##*|}"
 echo "    -- (d) a recovery run records + replays byte-identically (restart included) --"
 rrec="$work/recover.trace"
 rr1="$(run "${ALLOW[@]}" --record "$rrec" -- "${ARGS[@]}" "${RECOVER[@]}" 2>/dev/null | result_of)"
-rr2="$(run "${ALLOW[@]}" --replay "$rrec" -- "${ARGS[@]}" "${RECOVER[@]}" 2>/dev/null | result_of)"
+rr2="$(replay "$rrec" "${ALLOW[@]}" 2>/dev/null | result_of)"
 echo "    record: $rr1"
 echo "    replay: $rr2"
 if [[ "$rr1" != "$rr2" || -z "$rr1" ]]; then echo "    FAIL: recovery replay differs from record"; fail=1; fi
