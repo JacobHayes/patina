@@ -105,12 +105,13 @@ cmp "$tmp/wasi-seed-1" "$tmp/wasi-replay"
 # Shim control-plane symbols are --allow'ed per binary rather than statically
 # allowlisted (see validate-native-shim.sh for the full rationale).
 if [[ "$(uname -s)" == Darwin ]]; then
+  # Post host-alias doctrine the macOS control plane is a single symbol: the
+  # shim's dlsym resolution primitive (see validate-native-shim.sh). The former
+  # named vehicles (suspended-thread create, Mach semaphores, $NOCANCEL I/O) are
+  # resolved at runtime by the shim and must stay DENIED for guest binaries, so
+  # they are deliberately not allowlisted here.
   control_plane=(
-    --allow '_read$NOCANCEL' --allow '_write$NOCANCEL'
-    --allow pthread_create_suspended_np --allow pthread_mach_thread_np
-    --allow thread_resume
-    --allow semaphore_create --allow semaphore_wait
-    --allow semaphore_signal --allow mach_task_self_
+    --allow dlsym
   )
 else
   control_plane=(
