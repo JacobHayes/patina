@@ -45,6 +45,12 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
+# Shared cooperative-SUT (buggify) campaign layer: the ALWAYS_VIOLATION /
+# SOMETIMES_UNMET classes, the PATINA_SDK_REPORT parser, and the campaign-state
+# accumulator, proven by buggify_campaign_selftest. Additive only — it never
+# alters this sweep's existing gate priorities.
+# shellcheck source=../buggify-campaign.sh
+source "$here/../buggify-campaign.sh"
 # Two SEPARATE on-disk artifacts, built ONCE up front (see build_all):
 #   built    -- plain Patina binary (BREADTH/TRAFFIC/DETERMINISM tiers)
 #   built_yp -- yield-points binary (SCHEDULE tier): LLVM sancov trace-pc-guard
@@ -64,6 +70,9 @@ PATINA="$repo_root/target/release/cargo-patina"
 # is what actually prevents a destructive collision on the shared target dir.
 OUTDIR="${PATINA_FUZZ_OUT:-$here/out-fuzz}"
 SWEEP_LOG="$OUTDIR/sweep.log"
+# Cross-generation cooperative-SUT (buggify) coverage, accumulated per gen from
+# each run's PATINA_SDK_REPORT and checked for SOMETIMES_UNMET at sweep end.
+CAMPAIGN_STATE="$OUTDIR/campaign-state.json"
 # Run-lock path is a GLOBAL: the EXIT trap that removes it fires after sweep()
 # has already returned (main does `sweep; exit`), so a function-local would be
 # out of scope at trap time and trip `set -u` ("lock: unbound variable").
@@ -113,6 +122,16 @@ classify() {
   local out="$7" err="$8"
   local combined="$out
 $err"
+
+  # 0. A cooperative-SUT (buggify) `always!` violation is a top-severity bug,
+  #    peer of a safety violation, regardless of exit code. Checked first via the
+  #    shared campaign layer so it is never masked by a later verdict. (The raft
+  #    harness plants no buggify sites today; this keeps the class live + proven
+  #    for any future `always!` and for the shared redb campaign.)
+  local buggify_verdict; buggify_verdict="$(buggify_class "$exit_code" "$out" "$err")"
+  if [[ "$buggify_verdict" == ALWAYS_VIOLATION ]]; then
+    echo ALWAYS_VIOLATION; return
+  fi
 
   # 1. A safety violation is ALWAYS a bug, regardless of exit code (a planted
   #    RAFT_VIOLATION on exit 0 must still be SAFETY_BUG -- this is what proves
@@ -666,11 +685,29 @@ $vacuous_warn")" "ok-vacuous-warn"
     printf '  FAIL %-20s (false positive on clean run)\n' "infra-clean-negative"; SELFTEST_FAIL=1
   else printf '  ok   %-20s -> false\n' "infra-clean-negative"; fi
 
+  # Cooperative-SUT (buggify) classes integrated into classify(): a planted
+  # PATINA_ALWAYS_VIOLATION is ALWAYS_VIOLATION even on exit 0 with a fully
+  # committed RAFT_RESULT (fireable), and it is NOT downgraded by an otherwise-OK
+  # run. This is the classify() peer of the SAFETY_BUG-on-exit-0 check above.
+  assert_class ALWAYS_VIOLATION \
+    "$(classify 0 20 20 0 0 0 "$ok_stdout" "PATINA_ALWAYS_VIOLATION label=fired-in-bounds")" \
+    "always-violation-exit-0"
+  assert_class ALWAYS_VIOLATION \
+    "$(classify 0 20 20 0 0 0 "$ok_stdout" "PATINA_SDK_REPORT enabled=1 sites_registered=3
+PATINA_ALWAYS_VIOLATION label=x")" \
+    "always-violation-not-downgraded"
+
+  # The shared campaign layer's own selftest (ALWAYS_VIOLATION fireable +
+  # not-downgraded, SOMETIMES_UNMET fireable + clears when satisfied, accumulator
+  # counts). Fold its result into this sweep's selftest exit.
+  echo
+  if ! buggify_campaign_selftest; then SELFTEST_FAIL=1; fi
+
   echo
   if (( SELFTEST_FAIL )); then
     echo "SELFTEST FAILED"; return 1
   fi
-  echo "SELFTEST PASSED (every class covered, including planted RAFT_VIOLATION -> SAFETY_BUG)"
+  echo "SELFTEST PASSED (every class covered, including planted RAFT_VIOLATION -> SAFETY_BUG and PATINA_ALWAYS_VIOLATION -> ALWAYS_VIOLATION)"
   return 0
 }
 
@@ -714,9 +751,11 @@ sha_of()   { if [[ -f "$1" ]]; then shasum -a256 "$1" | cut -d' ' -f1; else echo
 c_OK=0; c_SAFETY_BUG=0; c_LIVENESS_TIMEOUT=0; c_UNEXPECTED_LIVENESS=0
 c_FAILCLOSED_ABORT=0; c_UNEXPECTED_ABORT=0; c_UNEXPECTED_CRASH=0; c_DETERMINISM_BUG=0
 c_INFRA_ERROR=0; c_WORKLOAD_SHAPE=0; c_VACUOUS_SCHEDULE=0; c_SCHEDULE_DIVERGENCE=0
+c_ALWAYS_VIOLATION=0
 bump() {
   case "$1" in
     OK) c_OK=$(( c_OK + 1 )) ;;
+    ALWAYS_VIOLATION) c_ALWAYS_VIOLATION=$(( c_ALWAYS_VIOLATION + 1 )) ;;
     SAFETY_BUG) c_SAFETY_BUG=$(( c_SAFETY_BUG + 1 )) ;;
     LIVENESS_TIMEOUT) c_LIVENESS_TIMEOUT=$(( c_LIVENESS_TIMEOUT + 1 )) ;;
     UNEXPECTED_LIVENESS) c_UNEXPECTED_LIVENESS=$(( c_UNEXPECTED_LIVENESS + 1 )) ;;
@@ -930,6 +969,10 @@ run_gen() {
   fi
 
   bump "$class"
+  # Accumulate this gen's cooperative-SUT coverage (inert when the guest emits no
+  # PATINA_SDK_REPORT, as the raft harness does today). Checked for unmet
+  # sometimes-sites at sweep end.
+  campaign_accumulate "$CAMPAIGN_STATE" "$(sdk_report_line "$err")"
   local logline="gen=$G tier=$TIER class=$class exit=$code committed=${committed:-?}/${proposals:-?} terms=${terms:-?} restarts=${restarts:-0} config='$CFG_SUMMARY'$live_note$det_note$sched_note"
   echo "$logline" >> "$SWEEP_LOG"
   echo "$logline"
@@ -998,8 +1041,16 @@ sweep() {
     run_gen "$G"
   done
 
+  # Campaign-level cooperative-SUT coverage: a `sometimes!` site reached but
+  # never satisfied across the whole campaign is a SOMETIMES_UNMET coverage gap
+  # (each such site counts as a failure). Evaluated once, at sweep end.
+  local unmet_sites=() line
+  while IFS= read -r line; do [[ -n "$line" ]] && unmet_sites+=("$line"); done \
+    < <(campaign_sometimes_unmet "$CAMPAIGN_STATE")
+  local c_SOMETIMES_UNMET=${#unmet_sites[@]}
+
   local total=$(( end - start + 1 ))
-  local failures=$(( c_SAFETY_BUG + c_UNEXPECTED_LIVENESS + c_UNEXPECTED_ABORT + c_UNEXPECTED_CRASH + c_DETERMINISM_BUG + c_VACUOUS_SCHEDULE + c_SCHEDULE_DIVERGENCE ))
+  local failures=$(( c_SAFETY_BUG + c_ALWAYS_VIOLATION + c_UNEXPECTED_LIVENESS + c_UNEXPECTED_ABORT + c_UNEXPECTED_CRASH + c_DETERMINISM_BUG + c_VACUOUS_SCHEDULE + c_SCHEDULE_DIVERGENCE + c_SOMETIMES_UNMET ))
   echo
   echo "==> sweep summary (generations $start..$end, $total total)"
   echo "    tiers: SCHEDULE=$c_t_schedule BREADTH=$c_t_breadth TRAFFIC=$c_t_traffic DETERMINISM=$c_t_determinism"
@@ -1009,6 +1060,8 @@ sweep() {
   echo "    WORKLOAD_SHAPE      = $c_WORKLOAD_SHAPE   (neutral: harness pacing artifact, converges unpaced)"
   echo "    -- failures --"
   echo "    SAFETY_BUG          = $c_SAFETY_BUG"
+  echo "    ALWAYS_VIOLATION    = $c_ALWAYS_VIOLATION   (buggify always! invariant violated)"
+  echo "    SOMETIMES_UNMET     = $c_SOMETIMES_UNMET   (buggify sometimes! reached but never satisfied)"
   echo "    UNEXPECTED_LIVENESS = $c_UNEXPECTED_LIVENESS"
   echo "    UNEXPECTED_ABORT    = $c_UNEXPECTED_ABORT"
   echo "    UNEXPECTED_CRASH    = $c_UNEXPECTED_CRASH"
@@ -1016,6 +1069,10 @@ sweep() {
   echo "    VACUOUS_SCHEDULE    = $c_VACUOUS_SCHEDULE   (SCHEDULE gen did not explore -- instrumentation did not bite)"
   echo "    SCHEDULE_DIVERGENCE = $c_SCHEDULE_DIVERGENCE   (yield-points double-run non-deterministic)"
   echo "    TOTAL FAILURES      = $failures"
+  if (( c_SOMETIMES_UNMET > 0 )); then
+    echo "    unmet sometimes-sites (reached but never satisfied across the campaign):"
+    for line in "${unmet_sites[@]}"; do echo "      $line"; done
+  fi
   echo "    -- infrastructure (NOT bugs; results incomplete for these gens) --"
   echo "    INFRA_ERROR         = $c_INFRA_ERROR"
   if (( ${#FAIL_DIRS[@]} > 0 )); then
