@@ -41,6 +41,12 @@ pub const ENV_PARENT_TIMELINE: &str = "PATINA_PARENT_TIMELINE";
 pub const ENV_TIMELINE: &str = "PATINA_TIMELINE";
 pub const ENV_STEP_BUDGET: &str = "PATINA_STEP_BUDGET";
 pub const ENV_PARAMS_JSON: &str = "PATINA_PARAMS_JSON";
+/// The guest program arguments (`argv[1..]`, i.e. everything after `--`) as a
+/// JSON string array. The supervisor forwards this in record mode so the run's
+/// arguments are captured into the trace metadata; the runtime records them and
+/// a later `replay` restores them without re-passing the `--` section. Absent
+/// leaves the recorded argv unset. Malformed JSON is rejected fail-closed.
+pub const ENV_GUEST_ARGV: &str = "PATINA_GUEST_ARGV";
 /// Base link latency in nanoseconds applied to the default `SimNet` datagram
 /// network. Blocking receives under a non-zero value park on the virtual-clock
 /// timer queue until delivery. Invalid values are rejected fail-closed.
@@ -300,6 +306,10 @@ pub struct RuntimeConfig {
     net_latency_nanos: u64,
     faults: FaultConfig,
     buggify: BuggifyConfig,
+    /// The guest program arguments (`argv[1..]`) recorded into the trace so a
+    /// `replay` restores them flag-free. `None` records nothing (unset); `Some`
+    /// (possibly empty) records the exact list. Not a fingerprint input.
+    guest_argv: Option<Vec<String>>,
 }
 
 impl RuntimeConfig {
@@ -313,6 +323,7 @@ impl RuntimeConfig {
             net_latency_nanos: 0,
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
+            guest_argv: None,
         }
     }
 
@@ -326,6 +337,7 @@ impl RuntimeConfig {
             net_latency_nanos: 0,
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
+            guest_argv: None,
         }
     }
 
@@ -344,6 +356,7 @@ impl RuntimeConfig {
             net_latency_nanos: 0,
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
+            guest_argv: None,
         }
     }
 
@@ -363,6 +376,7 @@ impl RuntimeConfig {
             net_latency_nanos: 0,
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
+            guest_argv: None,
         }
     }
 
@@ -383,6 +397,7 @@ impl RuntimeConfig {
             net_latency_nanos: 0,
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
+            guest_argv: None,
         }
     }
 
@@ -409,6 +424,7 @@ impl RuntimeConfig {
             net_latency_nanos: 0,
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
+            guest_argv: None,
         }
     }
 
@@ -557,6 +573,38 @@ impl RuntimeConfig {
         Ok(self)
     }
 
+    /// The recorded guest program arguments (`argv[1..]`), or `None` when unset.
+    pub fn guest_argv(&self) -> Option<&[String]> {
+        self.guest_argv.as_deref()
+    }
+
+    /// Set the guest program arguments recorded into the trace directly (used by
+    /// tests and explicit-API embedders).
+    #[must_use]
+    pub fn with_guest_argv(mut self, guest_argv: Option<Vec<String>>) -> Self {
+        self.guest_argv = guest_argv;
+        self
+    }
+
+    /// Apply the guest program arguments from a control-plane accessor, mirroring
+    /// [`RuntimeConfig::apply_fault_env`]. Presence of [`ENV_GUEST_ARGV`] sets the
+    /// recorded argv from its JSON string-array value; absence leaves it unset
+    /// (zero behavior change). Malformed JSON is rejected fail-closed. Shared by
+    /// [`RuntimeConfig::from_env`] and the native shim so both entry points parse
+    /// the argv protocol identically.
+    pub fn apply_guest_argv_env<F>(mut self, get: F) -> Result<Self, RuntimeError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        if let Some(value) = get(ENV_GUEST_ARGV) {
+            let argv: Vec<String> = serde_json::from_str(&value).map_err(|error| {
+                RuntimeError::Config(format!("{ENV_GUEST_ARGV} is invalid: {error}"))
+            })?;
+            self.guest_argv = Some(argv);
+        }
+        Ok(self)
+    }
+
     pub fn with_param(
         mut self,
         key: impl Into<String>,
@@ -665,6 +713,7 @@ impl RuntimeConfig {
         };
         let config = config.apply_fault_env(|name| env::var(name).ok())?;
         let config = config.apply_buggify_env(|name| env::var(name).ok())?;
+        let config = config.apply_guest_argv_env(|name| env::var(name).ok())?;
         Ok(config)
     }
 
@@ -814,7 +863,8 @@ impl RuntimeBuilder {
                     recorder: Recorder::new(
                         RunMetadata::new(self.config.seed, self.config.fingerprint.clone())
                             .with_faults(Some(fault_record(&self.config)))
-                            .with_buggify(buggify_record(&self.config)),
+                            .with_buggify(buggify_record(&self.config))
+                            .with_guest_argv(self.config.guest_argv.clone()),
                     ),
                     sink: RecordSink::Path {
                         path: path.clone(),
@@ -828,7 +878,8 @@ impl RuntimeBuilder {
                     recorder: Recorder::new(
                         RunMetadata::new(self.config.seed, self.config.fingerprint.clone())
                             .with_faults(Some(fault_record(&self.config)))
-                            .with_buggify(buggify_record(&self.config)),
+                            .with_buggify(buggify_record(&self.config))
+                            .with_guest_argv(self.config.guest_argv.clone()),
                     ),
                     sink: RecordSink::Transport(
                         self.trace_transport.take().expect("transport was checked"),
@@ -4628,6 +4679,38 @@ mod tests {
         .unwrap();
         assert_eq!(two_decisions(&mut replay).unwrap(), branched);
         replay.finish().unwrap();
+    }
+
+    #[test]
+    fn guest_argv_env_parses_a_json_array_and_fails_closed_on_garbage() {
+        // A JSON string array sets the recorded argv, preserving order; an empty
+        // array is a valid zero-argument recording distinct from absence.
+        fn map(value: &'static str) -> impl Fn(&str) -> Option<String> {
+            move |name: &str| (name == ENV_GUEST_ARGV).then(|| value.to_string())
+        }
+        let config = RuntimeConfig::record(0, "/trace", "fp")
+            .apply_guest_argv_env(map(r#"["--tick-millis","50"]"#))
+            .unwrap();
+        assert_eq!(
+            config.guest_argv(),
+            Some(["--tick-millis".to_string(), "50".to_string()].as_slice())
+        );
+        let empty = RuntimeConfig::record(0, "/trace", "fp")
+            .apply_guest_argv_env(map("[]"))
+            .unwrap();
+        assert_eq!(empty.guest_argv(), Some([].as_slice()));
+
+        // Absent variable leaves argv unset (no behavior change).
+        let unset = RuntimeConfig::record(0, "/trace", "fp")
+            .apply_guest_argv_env(|_| None)
+            .unwrap();
+        assert_eq!(unset.guest_argv(), None);
+
+        // Malformed JSON is rejected fail-closed rather than silently dropped.
+        let error = RuntimeConfig::record(0, "/trace", "fp")
+            .apply_guest_argv_env(map("not json"))
+            .unwrap_err();
+        assert!(matches!(error, RuntimeError::Config(_)), "{error:?}");
     }
 
     #[test]

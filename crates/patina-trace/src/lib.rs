@@ -167,6 +167,24 @@ pub struct RunMetadata {
     /// exactly like [`RunMetadata::faults`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buggify: Option<BuggifyConfigRecord>,
+    /// The guest program arguments (everything after `--`, i.e. `argv[1..]`) the
+    /// run was executed with, recorded so a `replay` reproduces them without the
+    /// operator re-passing the `--` section. Additive exactly like [`faults`] and
+    /// [`buggify`]: absent (`None`) in traces recorded before argv was captured,
+    /// which the replay path treats as "no recorded argv" and falls back to the
+    /// historical contract of taking the arguments from the command line. A run
+    /// with no guest arguments records an empty vector (`Some([])`), which is
+    /// distinct from an old trace's absent field (`None`) — so replaying a
+    /// zero-argument run reproduces zero arguments rather than silently accepting
+    /// whatever the command line supplies. [`RunMetadata::root_seed`] is not a
+    /// fingerprint input and neither is this: the recorded op-stream already
+    /// reflects any argv-dependent guest behavior.
+    ///
+    /// `argv[0]` is deliberately not recorded: it is supervisor-synthesized to a
+    /// fixed, machine-independent value (never the host binary path), so there is
+    /// nothing run-specific to reproduce.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_argv: Option<Vec<String>>,
 }
 
 impl RunMetadata {
@@ -177,6 +195,7 @@ impl RunMetadata {
             fingerprint: fingerprint.into(),
             faults: None,
             buggify: None,
+            guest_argv: None,
         }
     }
 
@@ -192,6 +211,16 @@ impl RunMetadata {
     #[must_use]
     pub fn with_buggify(mut self, buggify: Option<BuggifyConfigRecord>) -> Self {
         self.buggify = buggify;
+        self
+    }
+
+    /// Attach the guest program arguments (`argv[1..]`) recorded into the trace,
+    /// so a `replay` reproduces them without the operator re-passing the `--`
+    /// section. `None` records nothing (an old-style trace); `Some(vec)` — even
+    /// an empty vector — records the exact argument list.
+    #[must_use]
+    pub fn with_guest_argv(mut self, guest_argv: Option<Vec<String>>) -> Self {
+        self.guest_argv = guest_argv;
         self
     }
 }
@@ -587,6 +616,12 @@ impl Replayer {
     /// replay. `None` for a trace recorded without buggify.
     pub const fn buggify_config(&self) -> Option<&BuggifyConfigRecord> {
         self.metadata.buggify.as_ref()
+    }
+
+    /// The recorded guest program arguments (`argv[1..]`). `None` for a trace
+    /// recorded before argv capture; `Some` (possibly empty) otherwise.
+    pub fn guest_argv(&self) -> Option<&[String]> {
+        self.metadata.guest_argv.as_deref()
     }
 
     pub fn expect(&mut self, operation: &Operation) -> Result<Outcome, TraceError> {
@@ -1175,6 +1210,37 @@ mod tests {
         assert!(!text.contains("buggify"), "{text}");
         let reloaded_plain = TraceBundle::from_slice(plain.to_bytes().unwrap().as_slice()).unwrap();
         assert_eq!(reloaded_plain.metadata.buggify, None);
+    }
+
+    #[test]
+    fn guest_argv_metadata_round_trips_and_is_additive() {
+        // A recorded argument list round-trips exactly, including order.
+        let argv = vec!["--replay-commands".to_string(), "3,1,2".to_string()];
+        let metadata = RunMetadata::new(7, "fingerprint").with_guest_argv(Some(argv.clone()));
+        let bundle = TraceBundle::new(metadata, Vec::new());
+        let bytes = bundle.to_bytes().unwrap();
+        let reloaded = TraceBundle::from_slice(&bytes).unwrap();
+        assert_eq!(reloaded.metadata.guest_argv, Some(argv));
+
+        // An empty argument list is recorded as `Some([])` and stays distinct
+        // from an old trace's absent field: a zero-argument run must reproduce
+        // zero arguments on replay, not inherit whatever the command line gives.
+        let empty = TraceBundle::new(
+            RunMetadata::new(7, "fingerprint").with_guest_argv(Some(Vec::new())),
+            Vec::new(),
+        );
+        let text = String::from_utf8(empty.to_bytes().unwrap()).unwrap();
+        assert!(text.contains("\"guest_argv\":[]"), "{text}");
+        let reloaded_empty = TraceBundle::from_slice(empty.to_bytes().unwrap().as_slice()).unwrap();
+        assert_eq!(reloaded_empty.metadata.guest_argv, Some(Vec::new()));
+
+        // A trace recorded before argv capture keeps the field absent, so it and
+        // the "no arguments recorded" case are distinguishable (None vs Some([])).
+        let plain = TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new());
+        let text = String::from_utf8(plain.to_bytes().unwrap()).unwrap();
+        assert!(!text.contains("guest_argv"), "{text}");
+        let reloaded_plain = TraceBundle::from_slice(plain.to_bytes().unwrap().as_slice()).unwrap();
+        assert_eq!(reloaded_plain.metadata.guest_argv, None);
     }
 
     #[test]

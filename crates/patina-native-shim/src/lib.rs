@@ -954,6 +954,9 @@ fn runtime_config_from_control_plane() -> Result<(RuntimeConfig, Option<i32>), R
     // Cooperative-SUT (buggify) knobs come from the same control plane through
     // the shared parser, so the shim and the process-environment path agree.
     config = config.apply_buggify_env(control_env)?;
+    // Guest argv (recorded into the trace metadata) travels the same control
+    // plane, so record mode captures the arguments the supervisor forwarded.
+    config = config.apply_guest_argv_env(control_env)?;
     Ok((config, trace_fd))
 }
 
