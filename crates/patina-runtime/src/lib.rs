@@ -937,27 +937,34 @@ impl RuntimeBuilder {
             }
         }
         if self.install_defaults {
-            // A configured crash point upgrades the base image to the
-            // crash-consistency model so an injected crash drops unsynced data.
-            // An explicitly installed filesystem is left untouched (guarded above
-            // against coexisting with crash knobs).
+            // The base image is ALWAYS wrapped in a config-driven `CrashFs`,
+            // whether or not `--fs-crash-at` is set. This preserves the historical
+            // always-`CrashFs` behavior the shim relied on: a `CrashFs` is
+            // crashable, so imperative callers that trigger `fs_crash()` manually
+            // (the C-ABI `patina_init_crash` path, the WASI-host crash probes)
+            // keep working. A bare `MemFs` cannot crash — `FsDriver::crash`
+            // returns `InvalidState` — so installing one here regressed those
+            // paths. An un-crashed `CrashFs` reads/writes identically to its inner
+            // `MemFs` and consumes no seeded entropy, so non-crash runs are
+            // byte-for-byte unchanged.
             if self.filesystem.is_none() {
-                let base = self.fs_image.take().unwrap_or_default();
-                self.filesystem = Some(if self.config.faults.crash_at.is_some() {
-                    Box::new(
-                        CrashFs::builder()
-                            .filesystem(base)
-                            .seed(root_seed)
-                            .torn_granularity(self.config.faults.torn_granularity)
-                            .build()
-                            .map_err(RuntimeError::Effect)?,
-                    )
-                } else {
-                    // No crash modeling requested: the base image is used
-                    // directly. An un-crashed CrashFs is observationally
-                    // identical to its inner MemFs, so this preserves behavior.
-                    Box::new(base)
-                });
+                // NOT `unwrap_or_default()`: `MemFs::new()` seeds the root `/`
+                // directory, while `MemFs::default()` is ROOTLESS. A caller that
+                // uses `with_default_drivers` without `with_fs_image` (e.g.
+                // `Context::from_config`) would otherwise get a rootless
+                // filesystem and fail every path op with NotFound. Clippy's
+                // `unwrap_or_default` suggestion is wrong here because the two
+                // constructors are not equivalent.
+                #[allow(clippy::unwrap_or_default)]
+                let base = self.fs_image.take().unwrap_or_else(MemFs::new);
+                self.filesystem = Some(Box::new(
+                    CrashFs::builder()
+                        .filesystem(base)
+                        .seed(root_seed)
+                        .torn_granularity(self.config.faults.torn_granularity)
+                        .build()
+                        .map_err(RuntimeError::Effect)?,
+                ));
             }
             self.clock
                 .get_or_insert_with(|| Box::new(VirtualClock::default()));
@@ -4960,6 +4967,36 @@ mod tests {
             byte.contains(&b'B') && byte.contains(&b'A'),
             "byte granularity should leave a partial live/durable mix: {byte:?}"
         );
+    }
+
+    // Regression for two bugs the shim/WASI paths hit, both via
+    // `with_default_drivers` WITHOUT `with_fs_image` (exactly what
+    // `Context::from_config` — the WASI `wasi-run` path — does), knob-free:
+    //   (a) the choke point used `MemFs::default()` as the base, which is
+    //       ROOTLESS (no `/`), so every path op (create_dir/open) failed with
+    //       NotFound; it must use `MemFs::new()`.
+    //   (b) a bare `MemFs` cannot crash — `crash()` returns `InvalidState`
+    //       (errno 13) — so imperative `fs_crash()` callers broke; the base must
+    //       be wrapped in a `CrashFs`.
+    // This single test exercises both: a rooted directory/file op AND a manual
+    // crash with no `--fs-crash-at` configured.
+    #[test]
+    fn context_from_config_filesystem_is_rooted_and_crashable() {
+        let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+        // (a) Rooted: create a directory and a file under `/`, write, sync.
+        context.fs_create_directory("/state").unwrap();
+        let fd = context
+            .fs_open("/state/value", OpenFlags::create_truncate_write())
+            .unwrap();
+        context.fs_write_at(fd, 0, b"durable").unwrap();
+        context.fs_sync(fd).unwrap();
+        context.fs_write_at(fd, 0, b"volatile").unwrap(); // unsynced overwrite
+        // (b) Crashable: an imperative crash with NO crash_at must succeed and
+        // drop the unsynced overwrite back to the durable bytes.
+        context
+            .fs_crash()
+            .expect("imperative fs_crash must succeed");
+        assert_eq!(context.read_file("/state/value").unwrap(), b"durable");
     }
 
     /// Drive the runtime the way the shim does: spawn two tasks, park each with
