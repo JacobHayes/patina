@@ -1953,3 +1953,154 @@ fn native_buggify_after_setup_never_called_fails_loudly() {
         "ungated run should finish cleanly"
     );
 }
+
+// ---- proptest compatibility (patina-proptest), end to end --------------------
+//
+// A whole package depending on the `patina-proptest` compat crate, built and run
+// through native-build/native-run. The guest runs a proptest property whose cases
+// are generated from a `patina-proptest` runner (proptest's ChaCha RNG seeded from
+// `patina::rng()`), and prints a fold-digest of every generated case. Under Patina
+// that digest is a pure function of the run seed, so the same seed reproduces it,
+// a different seed changes it, and record/replay reproduces it byte-identically —
+// the determinism model that lets adopters drop proptest's regression files.
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn write_proptest_fixture(root: &Path) {
+    fs::create_dir_all(root.join("src")).unwrap();
+    let patina_path = native_workspace().join("crates/patina");
+    let patina_path = patina_path.to_string_lossy().replace('\\', "\\\\");
+    let proptest_path = native_workspace().join("crates/patina-proptest");
+    let proptest_path = proptest_path.to_string_lossy().replace('\\', "\\\\");
+    fs::write(
+        root.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"patina-proptest-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina = {{ path = \"{patina_path}\" }}\npatina-proptest = {{ path = \"{proptest_path}\" }}\n"
+        ),
+    )
+    .unwrap();
+    fs::write(root.join("src/main.rs"), PROPTEST_DIGEST_MAIN).unwrap();
+}
+
+// A passing property: with no failure proptest never shrinks, so the closure runs
+// exactly `cases` times over freshly generated inputs. Folding those inputs (and
+// the case count) produces a digest determined solely by the runner's seed, which
+// `patina-proptest` draws from `patina::rng()`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const PROPTEST_DIGEST_MAIN: &str = r#"
+use std::cell::Cell;
+
+use patina_proptest::prelude::*;
+
+fn case_digest() -> u64 {
+    let mut runner = patina_proptest::runner();
+    let digest = Cell::new(0xcbf2_9ce4_8422_2325_u64);
+    let cases = Cell::new(0u64);
+    runner
+        .run(&(any::<u64>(), 0i64..1_000_000i64), |(a, b)| {
+            let mixed = a ^ (b as u64).rotate_left(21);
+            digest.set(
+                (digest.get() ^ mixed)
+                    .wrapping_mul(0x0000_0100_0000_01b3)
+                    .rotate_left(13),
+            );
+            cases.set(cases.get() + 1);
+            Ok(())
+        })
+        .expect("the property holds for every generated case");
+    digest.get() ^ cases.get().rotate_left(7)
+}
+
+fn main() {
+    println!("PROPTEST_DIGEST digest={:016x}", case_digest());
+}
+"#;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn proptest_digest(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find(|line| line.starts_with("PROPTEST_DIGEST"))
+        .unwrap_or_else(|| {
+            panic!(
+                "missing PROPTEST_DIGEST in stdout:\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            )
+        })
+        .to_owned()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_proptest_case_generation_is_seed_deterministic_and_replays() {
+    let directory = tempdir().unwrap();
+    let pkg = directory.path().join("pkg");
+    write_proptest_fixture(&pkg);
+    let workspace = native_workspace();
+    let bin = directory.path().join("proptest-digest");
+    invoke_in(
+        workspace,
+        &[
+            "native-build",
+            pkg.to_str().unwrap(),
+            "--bin",
+            "patina-proptest-fixture",
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    // Same seed -> byte-identical case digest across two separate native-run
+    // invocations; a different seed -> a different digest.
+    let seeded = proptest_digest(&invoke_in(
+        workspace,
+        &["native-run", bin.to_str().unwrap(), "--seed", "5"],
+    ));
+    let repeated = proptest_digest(&invoke_in(
+        workspace,
+        &["native-run", bin.to_str().unwrap(), "--seed", "5"],
+    ));
+    let other = proptest_digest(&invoke_in(
+        workspace,
+        &["native-run", bin.to_str().unwrap(), "--seed", "6"],
+    ));
+    assert_eq!(
+        seeded, repeated,
+        "same seed must generate a byte-identical case digest"
+    );
+    assert_ne!(
+        seeded, other,
+        "a different seed must generate a different case digest"
+    );
+
+    // Record at seed 5, then strict replay: byte-identical digest.
+    let trace = directory.path().join("proptest.patina");
+    let recorded = proptest_digest(&invoke_in(
+        workspace,
+        &[
+            "native-run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "5",
+            "--record",
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "proptest-digest-v1",
+        ],
+    ));
+    let replayed = proptest_digest(&invoke_in(
+        workspace,
+        &[
+            "native-run",
+            bin.to_str().unwrap(),
+            "--replay",
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "proptest-digest-v1",
+        ],
+    ));
+    assert_eq!(recorded, seeded, "recording must not change the digest");
+    assert_eq!(
+        replayed, seeded,
+        "strict replay must reproduce the recorded case digest byte-identically"
+    );
+}
