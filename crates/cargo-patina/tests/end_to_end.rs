@@ -47,7 +47,7 @@ fn wasi_run_preopen_policy_controls_write_access() {
     let rw = invoke_unchecked(
         env!("CARGO_BIN_EXE_cargo-patina"),
         directory.path(),
-        &["wasi-run", module.to_str().unwrap(), "--preopen", "/rw:rw"],
+        &["run", module.to_str().unwrap(), "--preopen", "/rw:rw"],
     );
     assert!(
         rw.status.success(),
@@ -60,7 +60,7 @@ fn wasi_run_preopen_policy_controls_write_access() {
     let ro = invoke_unchecked(
         env!("CARGO_BIN_EXE_cargo-patina"),
         directory.path(),
-        &["wasi-run", module.to_str().unwrap(), "--preopen", "/ro:ro"],
+        &["run", module.to_str().unwrap(), "--preopen", "/ro:ro"],
     );
     assert_eq!(ro.status.code(), Some(69));
 }
@@ -127,12 +127,6 @@ fn separate_processes_repeat_record_and_replay() {
     assert_eq!(result_line(&replayed_branch), result_line(&branched));
 
     invoke(&fixture, &["test", "--seed", "123"]);
-    let alias = invoke_with(
-        env!("CARGO_BIN_EXE_cargo-dst"),
-        &fixture,
-        &["run", "--seed", "123"],
-    );
-    assert_eq!(result_line(&alias), first_result);
 
     writeln!(
         OpenOptions::new()
@@ -180,7 +174,7 @@ fn native_build_package_audits_records_and_fails_closed() {
     let built = invoke_in(
         workspace,
         &[
-            "native-build",
+            "build",
             package.to_str().unwrap(),
             "--bin",
             "patina-native-pkg-fixture",
@@ -208,7 +202,7 @@ fn native_build_package_audits_records_and_fails_closed() {
     } else {
         &["dlsym", "pthread_create"]
     };
-    let mut audit_args = vec!["native-audit", clean.to_str().unwrap()];
+    let mut audit_args = vec!["audit", clean.to_str().unwrap()];
     for symbol in control_plane {
         audit_args.push("--allow");
         audit_args.push(symbol);
@@ -219,15 +213,15 @@ fn native_build_package_audits_records_and_fails_closed() {
     // seed variation, and byte-identical record/replay through the supervisor.
     let seeded = package_result(&invoke_in(
         workspace,
-        &["native-run", clean.to_str().unwrap(), "--seed", "5"],
+        &["run", clean.to_str().unwrap(), "--seed", "5"],
     ));
     let repeated = package_result(&invoke_in(
         workspace,
-        &["native-run", clean.to_str().unwrap(), "--seed", "5"],
+        &["run", clean.to_str().unwrap(), "--seed", "5"],
     ));
     let other = package_result(&invoke_in(
         workspace,
-        &["native-run", clean.to_str().unwrap(), "--seed", "6"],
+        &["run", clean.to_str().unwrap(), "--seed", "6"],
     ));
     assert_eq!(seeded, repeated);
     assert_ne!(seeded, other);
@@ -244,7 +238,7 @@ fn native_build_package_audits_records_and_fails_closed() {
     let recorded = package_result(&invoke_in(
         workspace,
         &[
-            "native-run",
+            "run",
             clean.to_str().unwrap(),
             "--seed",
             "5",
@@ -272,7 +266,7 @@ fn native_build_package_audits_records_and_fails_closed() {
     let ambiguous = invoke_unchecked(
         env!("CARGO_BIN_EXE_cargo-patina"),
         workspace,
-        &["native-build", package.to_str().unwrap()],
+        &["build", package.to_str().unwrap()],
     );
     assert!(!ambiguous.status.success());
     let ambiguous_stderr = String::from_utf8_lossy(&ambiguous.stderr);
@@ -287,7 +281,7 @@ fn native_build_package_audits_records_and_fails_closed() {
     invoke_in(
         workspace,
         &[
-            "native-build",
+            "build",
             package.to_str().unwrap(),
             "--bin",
             "leaky",
@@ -298,13 +292,435 @@ fn native_build_package_audits_records_and_fails_closed() {
     let denied = invoke_unchecked(
         env!("CARGO_BIN_EXE_cargo-patina"),
         workspace,
-        &["native-audit", leaky.to_str().unwrap()],
+        &["audit", leaky.to_str().unwrap()],
     );
     assert!(!denied.status.success());
     assert!(
         String::from_utf8_lossy(&denied.stderr).contains("process"),
         "missing process-category diagnostic:\n{}",
         String::from_utf8_lossy(&denied.stderr)
+    );
+}
+
+// `run` and `audit` infer the target family from the artifact's leading magic
+// bytes, and a capability used on the wrong family is refused up front, naming
+// the flag and the target.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn run_and_audit_infer_target_and_reject_cross_target_flags() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+
+    // A hand-written WASI module (magic `\0asm`): `audit` lists its imports and
+    // `run` executes it, both inferred from the magic bytes with no `--target`.
+    let module = directory.path().join("noop.wasm");
+    fs::write(
+        &module,
+        wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#)
+            .unwrap(),
+    )
+    .unwrap();
+    invoke_in(workspace, &["audit", module.to_str().unwrap()]);
+    invoke_in(workspace, &["run", module.to_str().unwrap(), "--seed", "1"]);
+
+    // `--allow` is native-only, so auditing a WASI module with it is refused.
+    let allow_on_wasm = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "audit",
+            module.to_str().unwrap(),
+            "--allow",
+            "clock_gettime",
+        ],
+    );
+    assert!(!allow_on_wasm.status.success());
+    let allow_stderr = String::from_utf8_lossy(&allow_on_wasm.stderr);
+    assert!(
+        allow_stderr.contains("--allow") && allow_stderr.contains("WASI"),
+        "missing --allow-on-wasm diagnostic:\n{allow_stderr}"
+    );
+
+    // A native fault knob is refused on a WASI `run`, naming the flag and target.
+    let fault_on_wasm = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["run", module.to_str().unwrap(), "--fs-crash-at", "close:1"],
+    );
+    assert!(!fault_on_wasm.status.success());
+    let fault_stderr = String::from_utf8_lossy(&fault_on_wasm.stderr);
+    assert!(
+        fault_stderr.contains("--fs-crash-at") && fault_stderr.contains("WASI"),
+        "missing fault-on-wasm diagnostic:\n{fault_stderr}"
+    );
+
+    // A native binary (Mach-O/ELF magic): `build` (default `--target native`),
+    // `audit`, and `run` all infer the native path.
+    let source = directory.path().join("noop.rs");
+    fs::write(&source, "fn main() { println!(\"NATIVE_OK\"); }").unwrap();
+    let bin = directory.path().join("noop-native");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    // The pre-run gate auto-allows the shim control-plane vehicle; a standalone
+    // audit names it explicitly (macOS resolves through `dlsym`, Linux also keeps
+    // the wrap-contained `pthread_create`).
+    let control_plane: &[&str] = if cfg!(target_os = "macos") {
+        &["dlsym"]
+    } else {
+        &["dlsym", "pthread_create"]
+    };
+    let mut audit_args = vec!["audit", bin.to_str().unwrap()];
+    for symbol in control_plane {
+        audit_args.push("--allow");
+        audit_args.push(symbol);
+    }
+    invoke_in(workspace, &audit_args);
+    let ran = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    assert!(String::from_utf8_lossy(&ran.stdout).contains("NATIVE_OK"));
+
+    // `build --target wasi` is package-only and thread-free: a `.rs` source and
+    // `--yield-points` are both refused before any toolchain work.
+    let wasi_single = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["build", source.to_str().unwrap(), "--target", "wasi"],
+    );
+    assert!(!wasi_single.status.success());
+    assert!(String::from_utf8_lossy(&wasi_single.stderr).contains("native-only"));
+
+    let wasi_yield = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["build", "somepkg", "--target", "wasi", "--yield-points"],
+    );
+    assert!(!wasi_yield.status.success());
+    let yield_stderr = String::from_utf8_lossy(&wasi_yield.stderr);
+    assert!(
+        yield_stderr.contains("--yield-points") && yield_stderr.contains("wasip1"),
+        "missing yield-points-on-wasi diagnostic:\n{yield_stderr}"
+    );
+}
+
+// `build --target wasi` compiles a Cargo package for `wasm32-wasip1`, and the
+// resulting module composes with `audit` and `run` inferred from its magic
+// bytes. Requires the wasm32-wasip1 target (installed in CI and by the
+// validate/smoke scripts' preflight).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn build_target_wasi_compiles_and_composes_with_audit_and_run() {
+    if !wasm32_wasip1_installed() {
+        eprintln!(
+            "skipping build_target_wasi_compiles_and_composes_with_audit_and_run: \
+wasm32-wasip1 target not installed"
+        );
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let package = directory.path().join("wasi-hello");
+    fs::create_dir_all(package.join("src")).unwrap();
+    fs::write(
+        package.join("Cargo.toml"),
+        "[package]\nname = \"wasi-hello\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"wasi-hello\"\npath = \"src/main.rs\"\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("src/main.rs"),
+        "fn main() { println!(\"WASI_HELLO\"); }\n",
+    )
+    .unwrap();
+
+    let workspace = native_workspace();
+    let built = invoke_in(
+        workspace,
+        &["build", package.to_str().unwrap(), "--target", "wasi"],
+    );
+    assert!(
+        built.status.success(),
+        "build --target wasi failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&built.stdout),
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let module = package
+        .join("target/wasm32-wasip1/debug")
+        .join("wasi-hello.wasm");
+    assert!(
+        module.is_file(),
+        "missing wasm artifact at {}",
+        module.display()
+    );
+
+    // `audit` infers the WASI path from the `\0asm` magic and lists imports.
+    invoke_in(workspace, &["audit", module.to_str().unwrap()]);
+    // `run` infers the WASI runner and executes `_start` deterministically.
+    let ran = invoke_in(workspace, &["run", module.to_str().unwrap(), "--seed", "1"]);
+    assert!(
+        String::from_utf8_lossy(&ran.stdout).contains("WASI_HELLO"),
+        "unexpected wasi run output:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+}
+
+fn wasm32_wasip1_installed() -> bool {
+    Command::new("rustc")
+        .args(["--print", "target-libdir", "--target", "wasm32-wasip1"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+// The first stdout line containing `needle` (the build-on-the-fly identity note
+// and the guest's own output share stdout).
+fn stdout_line_with(output: &Output, needle: &str) -> String {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find(|line| line.contains(needle))
+        .unwrap_or_default()
+        .to_string()
+}
+
+// The audit's import lines, excluding the build-on-the-fly identity note.
+fn audit_imports(output: &Output) -> Vec<String> {
+    let mut imports: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.starts_with("PATINA_"))
+        .map(str::to_string)
+        .collect();
+    imports.sort();
+    imports
+}
+
+// `run <SOURCE.rs>` builds native on the fly (no prior `build`) and runs the
+// product; its output matches an explicit `build` + `run` of the same source,
+// and the one-line identity note is printed so an implicit build is never silent.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn run_builds_native_source_on_the_fly_and_matches_explicit_build() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("greet.rs");
+    fs::write(
+        &source,
+        "fn main() { let a: Vec<String> = std::env::args().skip(1).collect(); \
+         println!(\"GREET seed_args={:?}\", a); }",
+    )
+    .unwrap();
+
+    // Explicit: build to an artifact, then run the artifact.
+    let bin = directory.path().join("greet");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let explicit = invoke_in(
+        workspace,
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--",
+            "hi",
+            "there",
+        ],
+    );
+    let explicit_line = stdout_line_with(&explicit, "GREET");
+    assert!(
+        explicit_line.contains("[\"hi\", \"there\"]"),
+        "{explicit_line}"
+    );
+
+    // Implicit: run the source directly — build-on-the-fly then run.
+    let implicit = invoke_in(
+        workspace,
+        &[
+            "run",
+            source.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--",
+            "hi",
+            "there",
+        ],
+    );
+    assert_eq!(stdout_line_with(&implicit, "GREET"), explicit_line);
+    let note = stdout_line_with(&implicit, "PATINA_BUILD_ON_RUN");
+    assert!(
+        note.contains("target=native") && note.contains("sha256="),
+        "missing build-on-the-fly identity note:\n{}",
+        String::from_utf8_lossy(&implicit.stdout)
+    );
+}
+
+// `audit` and `replay` are source-first too: auditing a source equals auditing
+// the explicitly-built artifact; replaying an unchanged source reproduces the
+// recording byte-identically; replaying after a behavior-changing edit fails
+// closed (fingerprint or operation mismatch — either is a loud refusal).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn audit_and_replay_are_source_first() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("sf.rs");
+    // The guest reads the virtual clock (a recorded boundary decision) so a
+    // behavior-changing edit alters the op-stream and replay can fail closed —
+    // stdout content alone is captured output, not a replay-checked decision.
+    fs::write(
+        &source,
+        "use std::time::Instant; \
+         fn main() { let s = Instant::now(); let _ = s.elapsed(); \
+         println!(\"SF_MARKER v1\"); }",
+    )
+    .unwrap();
+
+    let bin = directory.path().join("sf");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let control_plane: &[&str] = if cfg!(target_os = "macos") {
+        &["dlsym"]
+    } else {
+        &["dlsym", "pthread_create"]
+    };
+    let mut artifact_args = vec!["audit", bin.to_str().unwrap()];
+    let mut source_args = vec!["audit", source.to_str().unwrap()];
+    for symbol in control_plane {
+        artifact_args.push("--allow");
+        artifact_args.push(symbol);
+        source_args.push("--allow");
+        source_args.push(symbol);
+    }
+    let artifact_audit = invoke_in(workspace, &artifact_args);
+    let source_audit = invoke_in(workspace, &source_args);
+    assert_eq!(audit_imports(&artifact_audit), audit_imports(&source_audit));
+
+    // Record from the built artifact, then source-first replay of the UNCHANGED
+    // source reproduces the recording byte-identically (rebuilt binary matches).
+    let trace = directory.path().join("sf.patina");
+    let recorded = invoke_in(
+        workspace,
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--record",
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "sf-v1",
+        ],
+    );
+    let replayed = invoke_in(
+        workspace,
+        &[
+            "replay",
+            source.to_str().unwrap(),
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "sf-v1",
+        ],
+    );
+    assert_eq!(
+        stdout_line_with(&recorded, "SF_MARKER"),
+        stdout_line_with(&replayed, "SF_MARKER")
+    );
+
+    // A behavior-changing edit that reads the clock more times than the recording
+    // — the rebuilt binary's op-stream diverges, so source-first replay must fail
+    // closed (operation mismatch / trace exhaustion).
+    fs::write(
+        &source,
+        "use std::time::Instant; \
+         fn main() { let s = Instant::now(); let mut acc = 0u128; \
+         for _ in 0..8 { acc = acc.wrapping_add(s.elapsed().as_nanos()); } \
+         println!(\"SF_MARKER v2 CHANGED acc={acc}\"); }",
+    )
+    .unwrap();
+    let broken = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "replay",
+            source.to_str().unwrap(),
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "sf-v1",
+        ],
+    );
+    assert!(
+        !broken.status.success(),
+        "source-first replay of a behavior-changed source must fail closed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&broken.stdout),
+        String::from_utf8_lossy(&broken.stderr)
+    );
+}
+
+// `run <pkg> --target wasi` builds the package for wasip1 on the fly and runs the
+// produced module, inferred by the shared resolution step.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn run_source_package_target_wasi_on_the_fly() {
+    if !wasm32_wasip1_installed() {
+        eprintln!(
+            "skipping run_source_package_target_wasi_on_the_fly: wasm32-wasip1 not installed"
+        );
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let package = directory.path().join("wasi-run-pkg");
+    fs::create_dir_all(package.join("src")).unwrap();
+    fs::write(
+        package.join("Cargo.toml"),
+        "[package]\nname = \"wasi-run-pkg\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"wasi-run-pkg\"\npath = \"src/main.rs\"\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("src/main.rs"),
+        "fn main() { println!(\"WASI_ON_THE_FLY\"); }\n",
+    )
+    .unwrap();
+
+    let workspace = native_workspace();
+    let ran = invoke_in(
+        workspace,
+        &[
+            "run",
+            package.to_str().unwrap(),
+            "--target",
+            "wasi",
+            "--seed",
+            "1",
+        ],
+    );
+    assert!(
+        ran.status.success(),
+        "run --target wasi on the fly failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(String::from_utf8_lossy(&ran.stdout).contains("WASI_ON_THE_FLY"));
+    let note = stdout_line_with(&ran, "PATINA_BUILD_ON_RUN");
+    assert!(
+        note.contains("target=wasi"),
+        "missing wasi identity note:\n{note}"
     );
 }
 
@@ -374,7 +790,7 @@ fn native_recv_timeout_is_deterministic_across_seeds_and_replay() {
     invoke_in(
         workspace,
         &[
-            "native-build",
+            "build",
             source.to_str().unwrap(),
             "--output",
             bin.to_str().unwrap(),
@@ -382,20 +798,14 @@ fn native_recv_timeout_is_deterministic_across_seeds_and_replay() {
     );
 
     for seed in ["1", "5", "9"] {
-        let first = invoke_in(
-            workspace,
-            &["native-run", bin.to_str().unwrap(), "--seed", seed],
-        );
+        let first = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
         let baseline = String::from_utf8_lossy(&first.stdout).into_owned();
         assert!(
             baseline.contains("delivered="),
             "unexpected recv_timeout output at seed {seed}: {baseline}"
         );
         for _ in 0..2 {
-            let again = invoke_in(
-                workspace,
-                &["native-run", bin.to_str().unwrap(), "--seed", seed],
-            );
+            let again = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
             assert_eq!(
                 baseline,
                 String::from_utf8_lossy(&again.stdout),
@@ -408,7 +818,7 @@ fn native_recv_timeout_is_deterministic_across_seeds_and_replay() {
     let recorded = invoke_in(
         workspace,
         &[
-            "native-run",
+            "run",
             bin.to_str().unwrap(),
             "--seed",
             "9",
@@ -466,7 +876,7 @@ fn native_mount_composes_with_record_and_replay_two_inherited_descriptors() {
     invoke_in(
         workspace,
         &[
-            "native-build",
+            "build",
             source.to_str().unwrap(),
             "--output",
             bin.to_str().unwrap(),
@@ -481,7 +891,7 @@ fn native_mount_composes_with_record_and_replay_two_inherited_descriptors() {
     let recorded = invoke_in(
         workspace,
         &[
-            "native-run",
+            "run",
             bin.to_str().unwrap(),
             "--seed",
             "0",
@@ -610,16 +1020,13 @@ fn native_flock_contends_on_a_second_open_and_releases_on_close() {
     invoke_in(
         workspace,
         &[
-            "native-build",
+            "build",
             source.to_str().unwrap(),
             "--output",
             bin.to_str().unwrap(),
         ],
     );
-    let run = invoke_in(
-        workspace,
-        &["native-run", bin.to_str().unwrap(), "--seed", "1"],
-    );
+    let run = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(
         stdout.contains("FLOCK first=0 second=-1 third=0"),
@@ -660,7 +1067,7 @@ fn native_replay_rejects_fault_knobs_and_reproduces_flag_free() {
     invoke_in(
         workspace,
         &[
-            "native-build",
+            "build",
             source.to_str().unwrap(),
             "--output",
             bin.to_str().unwrap(),
@@ -671,7 +1078,7 @@ fn native_replay_rejects_fault_knobs_and_reproduces_flag_free() {
     let recorded = invoke_in(
         workspace,
         &[
-            "native-run",
+            "run",
             bin.to_str().unwrap(),
             "--seed",
             "0",
@@ -776,7 +1183,7 @@ fn native_rwlock_contention_is_seed_deterministic_and_varies_across_seeds() {
     invoke_in(
         workspace,
         &[
-            "native-build",
+            "build",
             source.to_str().unwrap(),
             "--output",
             bin.to_str().unwrap(),
@@ -785,10 +1192,7 @@ fn native_rwlock_contention_is_seed_deterministic_and_varies_across_seeds() {
 
     let mut outputs = std::collections::BTreeSet::new();
     for seed in ["1", "2", "3", "4", "5", "6"] {
-        let first = invoke_in(
-            workspace,
-            &["native-run", bin.to_str().unwrap(), "--seed", seed],
-        );
+        let first = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
         let baseline = String::from_utf8_lossy(&first.stdout).into_owned();
         // Schedule-invariant total (correctly locked, no lost updates).
         assert!(
@@ -796,10 +1200,7 @@ fn native_rwlock_contention_is_seed_deterministic_and_varies_across_seeds() {
             "unexpected rwlock output at seed {seed}: {baseline}"
         );
         for _ in 0..2 {
-            let again = invoke_in(
-                workspace,
-                &["native-run", bin.to_str().unwrap(), "--seed", seed],
-            );
+            let again = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
             assert_eq!(
                 baseline,
                 String::from_utf8_lossy(&again.stdout),
@@ -819,7 +1220,7 @@ fn native_rwlock_contention_is_seed_deterministic_and_varies_across_seeds() {
     let recorded = invoke_in(
         workspace,
         &[
-            "native-run",
+            "run",
             bin.to_str().unwrap(),
             "--seed",
             "3",
@@ -891,7 +1292,7 @@ fn native_yield_points_trace_fails_closed_against_plain_binary() {
     invoke_in(
         workspace,
         &[
-            "native-build",
+            "build",
             source.to_str().unwrap(),
             "--output",
             plain.to_str().unwrap(),
@@ -900,7 +1301,7 @@ fn native_yield_points_trace_fails_closed_against_plain_binary() {
     invoke_in(
         workspace,
         &[
-            "native-build",
+            "build",
             source.to_str().unwrap(),
             "--output",
             instrumented.to_str().unwrap(),
@@ -912,7 +1313,7 @@ fn native_yield_points_trace_fails_closed_against_plain_binary() {
     invoke_in(
         workspace,
         &[
-            "native-run",
+            "run",
             instrumented.to_str().unwrap(),
             "--seed",
             "3",
@@ -967,7 +1368,7 @@ fn native_yield_points_trace_fails_closed_against_plain_binary() {
     invoke_in(
         workspace,
         &[
-            "native-run",
+            "run",
             plain.to_str().unwrap(),
             "--seed",
             "3",
@@ -1028,7 +1429,7 @@ fn native_yield_points_survive_thread_local_teardown() {
     invoke_in(
         workspace,
         &[
-            "native-build",
+            "build",
             source.to_str().unwrap(),
             "--output",
             bin.to_str().unwrap(),
@@ -1037,10 +1438,7 @@ fn native_yield_points_survive_thread_local_teardown() {
     );
 
     // Before the fix this aborted at thread exit; it must now run to completion.
-    let first = invoke_in(
-        workspace,
-        &["native-run", bin.to_str().unwrap(), "--seed", "1"],
-    );
+    let first = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     let baseline = String::from_utf8_lossy(&first.stdout).into_owned();
     assert!(
         baseline.contains("TEARDOWN_ok"),
@@ -1050,10 +1448,7 @@ fn native_yield_points_survive_thread_local_teardown() {
 
     // Deterministic across repeats and exactly replayable.
     for _ in 0..2 {
-        let again = invoke_in(
-            workspace,
-            &["native-run", bin.to_str().unwrap(), "--seed", "1"],
-        );
+        let again = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
         assert_eq!(
             baseline,
             String::from_utf8_lossy(&again.stdout),
@@ -1064,7 +1459,7 @@ fn native_yield_points_survive_thread_local_teardown() {
     invoke_in(
         workspace,
         &[
-            "native-run",
+            "run",
             bin.to_str().unwrap(),
             "--seed",
             "1",
@@ -1141,7 +1536,7 @@ fn native_run_prerun_gate_refuses_every_escape_class() {
     invoke_in(
         workspace,
         &[
-            "native-build",
+            "build",
             source.to_str().unwrap(),
             "--output",
             bin.to_str().unwrap(),
@@ -1151,7 +1546,7 @@ fn native_run_prerun_gate_refuses_every_escape_class() {
     let refused = invoke_unchecked(
         env!("CARGO_BIN_EXE_cargo-patina"),
         workspace,
-        &["native-run", bin.to_str().unwrap(), "--seed", "1"],
+        &["run", bin.to_str().unwrap(), "--seed", "1"],
     );
     assert!(
         !refused.status.success(),
@@ -1221,7 +1616,7 @@ fn native_run_prerun_gate_blocks_and_flags_uninterposed_blocking_symbol() {
     invoke_in(
         workspace,
         &[
-            "native-build",
+            "build",
             source.to_str().unwrap(),
             "--output",
             bin.to_str().unwrap(),
@@ -1234,7 +1629,7 @@ fn native_run_prerun_gate_blocks_and_flags_uninterposed_blocking_symbol() {
     let denied = invoke_unchecked(
         exe,
         workspace,
-        &["native-run", bin.to_str().unwrap(), "--seed", "1"],
+        &["run", bin.to_str().unwrap(), "--seed", "1"],
     );
     assert!(
         !denied.status.success(),
@@ -1255,7 +1650,7 @@ fn native_run_prerun_gate_blocks_and_flags_uninterposed_blocking_symbol() {
         exe,
         workspace,
         &[
-            "native-run",
+            "run",
             bin.to_str().unwrap(),
             "--seed",
             "1",
@@ -1282,7 +1677,7 @@ fn native_run_prerun_gate_blocks_and_flags_uninterposed_blocking_symbol() {
         exe,
         workspace,
         &[
-            "native-run",
+            "run",
             bin.to_str().unwrap(),
             "--seed",
             "1",
@@ -1335,7 +1730,7 @@ fn native_run_deny_trap_aborts_a_guest_that_actually_spawns() {
     invoke_in(
         workspace,
         &[
-            "native-build",
+            "build",
             source.to_str().unwrap(),
             "--output",
             bin.to_str().unwrap(),
@@ -1345,7 +1740,7 @@ fn native_run_deny_trap_aborts_a_guest_that_actually_spawns() {
     let ran = invoke_unchecked(
         env!("CARGO_BIN_EXE_cargo-patina"),
         workspace,
-        &["native-run", bin.to_str().unwrap(), "--seed", "1"],
+        &["run", bin.to_str().unwrap(), "--seed", "1"],
     );
     // The audit passes (fork is shim-defined, not an import), the guest starts,
     // and the fork() call aborts deterministically.
@@ -1793,7 +2188,7 @@ fn native_buggify_sdk_reports_records_and_replays() {
     invoke_in(
         workspace,
         &[
-            "native-build",
+            "build",
             pkg.to_str().unwrap(),
             "--output",
             bin.to_str().unwrap(),
@@ -1805,7 +2200,7 @@ fn native_buggify_sdk_reports_records_and_replays() {
     let seeded = invoke_in(
         workspace,
         &[
-            &["native-run", bin.to_str().unwrap(), "--seed", "4"][..],
+            &["run", bin.to_str().unwrap(), "--seed", "4"][..],
             &flags[..],
         ]
         .concat(),
@@ -1830,7 +2225,7 @@ fn native_buggify_sdk_reports_records_and_replays() {
     let recorded = invoke_in(
         workspace,
         &[
-            &["native-run", bin.to_str().unwrap(), "--seed", "4"][..],
+            &["run", bin.to_str().unwrap(), "--seed", "4"][..],
             &flags[..],
             &["--record", trace.to_str().unwrap()][..],
         ]
@@ -1869,7 +2264,7 @@ fn native_buggify_duplicate_label_aborts_with_marker() {
     invoke_in(
         workspace,
         &[
-            "native-build",
+            "build",
             pkg.to_str().unwrap(),
             "--output",
             bin.to_str().unwrap(),
@@ -1878,7 +2273,7 @@ fn native_buggify_duplicate_label_aborts_with_marker() {
     let output = invoke_unchecked(
         env!("CARGO_BIN_EXE_cargo-patina"),
         workspace,
-        &["native-run", bin.to_str().unwrap(), "--seed", "1"],
+        &["run", bin.to_str().unwrap(), "--seed", "1"],
     );
     assert!(!output.status.success(), "duplicate label must abort");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1915,7 +2310,7 @@ fn native_buggify_after_setup_never_called_fails_loudly() {
     invoke_in(
         workspace,
         &[
-            "native-build",
+            "build",
             pkg.to_str().unwrap(),
             "--output",
             bin.to_str().unwrap(),
@@ -1928,7 +2323,7 @@ fn native_buggify_after_setup_never_called_fails_loudly() {
         env!("CARGO_BIN_EXE_cargo-patina"),
         workspace,
         &[
-            "native-run",
+            "run",
             bin.to_str().unwrap(),
             "--seed",
             "1",
@@ -1949,13 +2344,7 @@ fn native_buggify_after_setup_never_called_fails_loudly() {
     // Same guest WITHOUT the gate declaration runs clean.
     let plain = invoke_in(
         workspace,
-        &[
-            "native-run",
-            bin.to_str().unwrap(),
-            "--seed",
-            "1",
-            "--buggify",
-        ],
+        &["run", bin.to_str().unwrap(), "--seed", "1", "--buggify"],
     );
     assert!(
         String::from_utf8_lossy(&plain.stdout).contains("guest-finished"),
@@ -2049,7 +2438,7 @@ fn native_proptest_case_generation_is_seed_deterministic_and_replays() {
     invoke_in(
         workspace,
         &[
-            "native-build",
+            "build",
             pkg.to_str().unwrap(),
             "--bin",
             "patina-proptest-fixture",
@@ -2062,15 +2451,15 @@ fn native_proptest_case_generation_is_seed_deterministic_and_replays() {
     // invocations; a different seed -> a different digest.
     let seeded = proptest_digest(&invoke_in(
         workspace,
-        &["native-run", bin.to_str().unwrap(), "--seed", "5"],
+        &["run", bin.to_str().unwrap(), "--seed", "5"],
     ));
     let repeated = proptest_digest(&invoke_in(
         workspace,
-        &["native-run", bin.to_str().unwrap(), "--seed", "5"],
+        &["run", bin.to_str().unwrap(), "--seed", "5"],
     ));
     let other = proptest_digest(&invoke_in(
         workspace,
-        &["native-run", bin.to_str().unwrap(), "--seed", "6"],
+        &["run", bin.to_str().unwrap(), "--seed", "6"],
     ));
     assert_eq!(
         seeded, repeated,
@@ -2086,7 +2475,7 @@ fn native_proptest_case_generation_is_seed_deterministic_and_replays() {
     let recorded = proptest_digest(&invoke_in(
         workspace,
         &[
-            "native-run",
+            "run",
             bin.to_str().unwrap(),
             "--seed",
             "5",
@@ -2324,7 +2713,7 @@ fn native_two_axis_stateful_shrink_then_schedule_minimize() {
     invoke_in(
         workspace,
         &[
-            "native-build",
+            "build",
             pkg.to_str().unwrap(),
             "--output",
             bin.to_str().unwrap(),
@@ -2341,7 +2730,7 @@ fn native_two_axis_stateful_shrink_then_schedule_minimize() {
             exe,
             workspace,
             &[
-                "native-run",
+                "run",
                 bin.to_str().unwrap(),
                 "--seed",
                 &seed.to_string(),
@@ -2366,7 +2755,7 @@ fn native_two_axis_stateful_shrink_then_schedule_minimize() {
         exe,
         workspace,
         &[
-            "native-run",
+            "run",
             bin.to_str().unwrap(),
             "--seed",
             &seed_string,
@@ -2389,7 +2778,7 @@ fn native_two_axis_stateful_shrink_then_schedule_minimize() {
         exe,
         workspace,
         &[
-            "native-run",
+            "run",
             bin.to_str().unwrap(),
             "--seed",
             &seed_string,
@@ -2512,7 +2901,7 @@ fn native_replay_restores_guest_argv_and_normalizes_argv0() {
     invoke_in(
         workspace,
         &[
-            "native-build",
+            "build",
             source.to_str().unwrap(),
             "--output",
             bin.to_str().unwrap(),
@@ -2522,10 +2911,7 @@ fn native_replay_restores_guest_argv_and_normalizes_argv0() {
 
     // argv[0] is the supervisor-synthesized fixed name, never the host binary
     // path, so a guest reading std::env::args().next() gets a portable value.
-    let seeded = invoke_in(
-        workspace,
-        &["native-run", bin.to_str().unwrap(), "--seed", "0"],
-    );
+    let seeded = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "0"]);
     let seeded_out = String::from_utf8_lossy(&seeded.stdout);
     assert!(
         seeded_out.contains("ARGV0=patina-guest"),
@@ -2545,7 +2931,7 @@ fn native_replay_restores_guest_argv_and_normalizes_argv0() {
     let recorded = invoke_in(
         workspace,
         &[
-            "native-run",
+            "run",
             bin.to_str().unwrap(),
             "--seed",
             "0",
@@ -2714,7 +3100,7 @@ fn native_fs_torn_granularity_byte_reaches_the_guest() {
     invoke_in(
         workspace,
         &[
-            "native-build",
+            "build",
             source.to_str().unwrap(),
             "--output",
             bin.to_str().unwrap(),
@@ -2725,7 +3111,7 @@ fn native_fs_torn_granularity_byte_reaches_the_guest() {
         let output = invoke_in(
             workspace,
             &[
-                "native-run",
+                "run",
                 bin.to_str().unwrap(),
                 "--seed",
                 "1",
@@ -2771,7 +3157,7 @@ fn native_fs_crash_image_is_seed_live_and_deterministic() {
     invoke_in(
         workspace,
         &[
-            "native-build",
+            "build",
             source.to_str().unwrap(),
             "--output",
             bin.to_str().unwrap(),
@@ -2782,7 +3168,7 @@ fn native_fs_crash_image_is_seed_live_and_deterministic() {
         let output = invoke_in(
             workspace,
             &[
-                "native-run",
+                "run",
                 bin.to_str().unwrap(),
                 "--seed",
                 seed,

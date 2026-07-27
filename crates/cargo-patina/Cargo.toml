@@ -27,7 +27,3 @@ wat.workspace = true
 [[bin]]
 name = "cargo-patina"
 path = "src/bin/cargo-patina.rs"
-
-[[bin]]
-name = "cargo-dst"
-path = "src/bin/cargo-dst.rs"

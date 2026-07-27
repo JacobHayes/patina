@@ -1,4 +1,4 @@
-/* Build-time deterministic-preemption hook for `cargo patina native-build
+/* Build-time deterministic-preemption hook for `cargo patina build
  * --yield-points`.
  *
  * When a guest is compiled with LLVM SanitizerCoverage trace-pc-guard
@@ -22,7 +22,7 @@
  * scheduler a chance to switch tasks. */
 extern int patina_sched_yield(void);
 
-/* A distinctive marker so `cargo patina native-run` can detect a yield-point
+/* A distinctive marker so `cargo patina run` can detect a yield-point
  * binary from its bytes and fold that into the compatibility fingerprint, so a
  * trace recorded against yield-point schedules never silently replays against a
  * plain binary (or vice versa). `used` + `retain` keeps it past `-dead_strip`,
