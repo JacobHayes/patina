@@ -52,6 +52,7 @@ dependencies = [
  "patina-dst-abi",
  "patina-dst-fs-mem",
  "patina-dst-minimize",
+ "patina-dst-native-shim",
  "patina-dst-runtime",
  "patina-dst-target",
  "patina-dst-trace",

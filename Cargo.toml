@@ -33,26 +33,30 @@ rust-version = "1.86"
 repository = "https://github.com/JacobHayes/patina"
 
 [workspace.dependencies]
-patina-dst = { path = "crates/patina" }
-patina-dst-abi = { path = "crates/patina-abi" }
-patina-dst-async = { path = "crates/patina-async" }
-patina-dst-driver-api = { path = "crates/patina-driver-api" }
-patina-dst-fs-crash = { path = "crates/patina-fs-crash" }
-patina-dst-fs-host = { path = "crates/patina-fs-host" }
-patina-dst-fs-mem = { path = "crates/patina-fs-mem" }
-patina-dst-minimize = { path = "crates/patina-minimize" }
-patina-dst-native-shim = { path = "crates/patina-native-shim" }
-patina-dst-net-sim = { path = "crates/patina-net-sim" }
-patina-dst-proptest = { path = "crates/patina-proptest" }
-patina-dst-rng-seeded = { path = "crates/patina-rng-seeded" }
-patina-dst-runtime = { path = "crates/patina-runtime" }
-patina-dst-sched-det = { path = "crates/patina-sched-det" }
-patina-dst-target = { path = "crates/patina-target" }
-patina-dst-time-virtual = { path = "crates/patina-time-virtual" }
-patina-dst-trace = { path = "crates/patina-trace" }
-patina-dst-wasi-host = { path = "crates/patina-wasi-host" }
-patina-dst-wrapper-fault = { path = "crates/patina-wrapper-fault" }
-patina-dst-wrapper-latency = { path = "crates/patina-wrapper-latency" }
+# Internal path deps carry an explicit `version` alongside `path`: `cargo
+# package`/`publish` requires a version requirement on every dependency (the
+# path is stripped in the published manifest and the crates.io version is used).
+# Keep these in lockstep with `workspace.package.version` above.
+patina-dst = { path = "crates/patina", version = "0.1.0" }
+patina-dst-abi = { path = "crates/patina-abi", version = "0.1.0" }
+patina-dst-async = { path = "crates/patina-async", version = "0.1.0" }
+patina-dst-driver-api = { path = "crates/patina-driver-api", version = "0.1.0" }
+patina-dst-fs-crash = { path = "crates/patina-fs-crash", version = "0.1.0" }
+patina-dst-fs-host = { path = "crates/patina-fs-host", version = "0.1.0" }
+patina-dst-fs-mem = { path = "crates/patina-fs-mem", version = "0.1.0" }
+patina-dst-minimize = { path = "crates/patina-minimize", version = "0.1.0" }
+patina-dst-native-shim = { path = "crates/patina-native-shim", version = "0.1.0" }
+patina-dst-net-sim = { path = "crates/patina-net-sim", version = "0.1.0" }
+patina-dst-proptest = { path = "crates/patina-proptest", version = "0.1.0" }
+patina-dst-rng-seeded = { path = "crates/patina-rng-seeded", version = "0.1.0" }
+patina-dst-runtime = { path = "crates/patina-runtime", version = "0.1.0" }
+patina-dst-sched-det = { path = "crates/patina-sched-det", version = "0.1.0" }
+patina-dst-target = { path = "crates/patina-target", version = "0.1.0" }
+patina-dst-time-virtual = { path = "crates/patina-time-virtual", version = "0.1.0" }
+patina-dst-trace = { path = "crates/patina-trace", version = "0.1.0" }
+patina-dst-wasi-host = { path = "crates/patina-wasi-host", version = "0.1.0" }
+patina-dst-wrapper-fault = { path = "crates/patina-wrapper-fault", version = "0.1.0" }
+patina-dst-wrapper-latency = { path = "crates/patina-wrapper-latency", version = "0.1.0" }
 object = { version = "0.39.1", default-features = false, features = ["read", "std"] }
 proptest = { version = "1.11.0", default-features = false, features = ["std", "bit-set"] }
 serde = { version = "1.0.229", features = ["derive"] }

@@ -151,5 +151,24 @@ grep '^SMOKE_RESULT ' "$tmp/wasi-replay" >"$tmp/wasi-line"
 grep '^SMOKE_RESULT ' "$tmp/native-replay" >"$tmp/native-line"
 cmp "$tmp/wasi-line" "$tmp/native-line"
 
+# Canonical entropy anchor. Every check above is purely DIFFERENTIAL (native vs
+# wasi, seed vs seed, record vs replay, cold vs warm): a drift that shifts the
+# seeded entropy IDENTICALLY on both targets -- an RNG-algorithm or seeding
+# change -- keeps every cmp equal and passes silently. Pin the exact literal so
+# any change to the observable seeded entropy fails loudly here with the observed
+# value. The hash is platform-invariant by design (the seeded RNG is
+# deterministic across targets); if a platform ever disagrees, THAT is the bug
+# this gate exists to catch. An intentional entropy-affecting change MUST update
+# this literal deliberately -- that friction is the point, the same discipline as
+# the raft canonical applied_hash and the record/replay identity above.
+canonical_entropy='entropy_hash=2d4cdb668affa7b2'
+for tgt in wasi native; do
+  if ! grep -qF "$canonical_entropy" "$tmp/$tgt-line"; then
+    echo "smoke-cross-target: $tgt SMOKE_RESULT entropy drift -- expected $canonical_entropy, observed:" >&2
+    cat "$tmp/$tgt-line" >&2
+    exit 1
+  fi
+done
+
 echo "Cross-target deterministic output ($(uname -s) + wasm32-wasip1):"
 cat "$tmp/native-line"

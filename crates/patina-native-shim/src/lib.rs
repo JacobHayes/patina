@@ -5,6 +5,16 @@
 //! `read`, or pthread symbols yet, so linking this crate cannot silently alter
 //! unrelated host operations.
 
+/// The POSIX interposer C source, exposed as text so out-of-tree tooling
+/// (`cargo patina native-build`) can reproduce the native link recipe from the
+/// installed crate without the workspace source tree. It lives here — the crate
+/// that owns `c/patina_posix.c` — so the shim's C and any embedded copy can
+/// never drift, and so both this crate and `cargo-patina` package cleanly for
+/// publish (each is self-contained; neither reaches across crate boundaries).
+pub const POSIX_C_SOURCE: &str = include_str!("../c/patina_posix.c");
+/// The companion C header for [`POSIX_C_SOURCE`] (`include/patina_native.h`).
+pub const NATIVE_HEADER: &str = include_str!("../include/patina_native.h");
+
 use std::cell::{Cell, UnsafeCell};
 use std::collections::BTreeMap;
 use std::ffi::{CStr, c_char, c_int, c_void};

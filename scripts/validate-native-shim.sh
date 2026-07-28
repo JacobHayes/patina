@@ -578,6 +578,15 @@ if [[ "$(uname -s)" == Darwin ]]; then
   fi
   echo 'validate-native-shim: skipping macOS ktrace containment pass (not verifiable via ktrace: BSC_* syscall events carry no path context and the runtime defers all output, so the loader prelude cannot be separated from post-init guest syscalls; static instruction scan + import audit remain the macOS containment evidence)' >&2
 elif ! command -v strace >/dev/null 2>&1; then
+  # Mirror the PATINA_REQUIRE_KTRACE idiom above: the strace pass is the Linux
+  # syscall-containment class detector, and a soft-skip when strace is absent
+  # means CI could run WITHOUT that gate and never notice. PATINA_REQUIRE_STRACE=1
+  # turns the missing-tool skip into a hard failure so CI cannot silently drop
+  # the containment evidence (the Linux jobs install strace and set this).
+  if [[ "${PATINA_REQUIRE_STRACE:-0}" == 1 ]]; then
+    echo 'validate-native-shim: PATINA_REQUIRE_STRACE=1 but strace is not on PATH; the Linux whole-run syscall-containment default-deny gate cannot run. Refusing to pass without it. Install strace (e.g. apt-get install -y strace) or unset PATINA_REQUIRE_STRACE.' >&2
+    exit 1
+  fi
   echo 'validate-native-shim: skipping strace containment pass (strace not found)' >&2
 else
   # Linux whole-run syscall containment: a default-deny strace filter over the

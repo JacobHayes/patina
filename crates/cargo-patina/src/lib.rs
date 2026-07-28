@@ -46,9 +46,12 @@ const PATINA_CFG_FLAGS: &str = "--cfg patina --cfg dst";
 // The native link recipe is packaged into `cargo patina` so `native-build` can
 // reproduce it without the source tree: the POSIX shim C layer and its header
 // are embedded, compiled below the user program, and linked against the
-// `patina-dst-native-shim` staticlib.
-const PATINA_POSIX_C: &str = include_str!("../../patina-native-shim/c/patina_posix.c");
-const PATINA_NATIVE_H: &str = include_str!("../../patina-native-shim/include/patina_native.h");
+// `patina-dst-native-shim` staticlib. The C text is sourced from the shim crate
+// itself (its `pub const`s) rather than an `include_str!` across the crate
+// boundary, so there is a single copy of the C that cannot drift and both
+// crates package cleanly for publish.
+const PATINA_POSIX_C: &str = patina_dst_native_shim::POSIX_C_SOURCE;
+const PATINA_NATIVE_H: &str = patina_dst_native_shim::NATIVE_HEADER;
 /// Build-time deterministic-preemption hook, linked only under `--yield-points`.
 const PATINA_YIELD_C: &str = include_str!("../c/patina_yield.c");
 /// Marker string the `--yield-points` hook embeds; `native-run` looks for it in

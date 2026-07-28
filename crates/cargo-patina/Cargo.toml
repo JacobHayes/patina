@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 patina-dst-fs-mem.workspace = true
 patina-dst-minimize.workspace = true
+patina-dst-native-shim.workspace = true
 patina-dst-runtime.workspace = true
 patina-dst-target.workspace = true
 patina-dst-trace.workspace = true

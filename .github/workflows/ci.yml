@@ -4,6 +4,12 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Nightly full run + the heavy raft-harness semantic gate (see the `nightly`
+  # job). Also manually triggerable. 07:17 UTC dodges top-of-hour cron congestion
+  # on GitHub-hosted runners.
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -25,6 +31,11 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
+      # strace is the Linux whole-run syscall-containment class detector invoked
+      # by validate-native-shim.sh. Install it and require it (PATINA_REQUIRE_STRACE=1
+      # below) so a runner image without strace hard-fails instead of silently
+      # dropping the containment gate.
+      - run: sudo apt-get update && sudo apt-get install -y strace
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
@@ -37,7 +48,16 @@ jobs:
       - run: cargo doc -p patina-dst --no-deps --features runtime --locked
       - run: scripts/validate-wasi.sh
       - run: scripts/validate-native-shim.sh
+        env:
+          PATINA_REQUIRE_STRACE: 1
       - run: scripts/smoke-cross-target.sh
+      # Fast, build-free classifier selftests (pure functions over canned tuples;
+      # ~1.4s + ~0.5s locally). The fuzz-sweep bash classifier is NOT otherwise
+      # covered by a Rust test; the campaign selftest is ALSO exercised by the
+      # `campaign_selftest_passes` integration test but kept here as a direct
+      # CLI-level gate against the shipped subcommand.
+      - run: testbeds/raft-harness/fuzz-sweep.sh --selftest
+      - run: cargo run -p cargo-patina --quiet -- campaign --selftest
 
   msrv:
     strategy:
@@ -51,9 +71,12 @@ jobs:
         with:
           targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y strace
       - run: cargo test --workspace --locked
       - run: scripts/validate-wasi.sh
       - run: scripts/validate-native-shim.sh
+        env:
+          PATINA_REQUIRE_STRACE: 1
       - run: scripts/smoke-cross-target.sh
 
   macos:
@@ -65,11 +88,95 @@ jobs:
           targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
+      - run: scripts/validate-wasi.sh
       # macOS runtime syscall containment is not verifiable via ktrace (BSC_*
       # events carry no path context and the runtime defers all output, so the
       # loader prelude cannot be separated from post-init guest syscalls), so
       # PATINA_REQUIRE_KTRACE is deliberately NOT set here — it would hard-fail.
       # The static instruction scan + import audit are the macOS containment
-      # evidence; the strace default-deny gate runs on the Linux jobs.
+      # evidence, and PATINA_REQUIRE_STRACE is a Linux-only concern (the macOS
+      # branch never reaches the strace check); the strace default-deny gate runs
+      # on the Linux jobs.
       - run: scripts/validate-native-shim.sh
       - run: scripts/smoke-cross-target.sh
+
+  # Prove every publishable workspace crate packages for crates.io: metadata
+  # completeness (description/version/license/…) and inter-dependent path-dep
+  # resolution (internal deps carry an explicit `version` alongside `path`, and
+  # each crate is self-contained — no `include_str!` reaches across a crate
+  # boundary). `--workspace` covers exactly the publishable members; the testbeds
+  # are separate workspaces (publish=false) and are excluded naturally. Nothing
+  # is published — this packages and verify-builds the tarballs only.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo package --workspace --locked
+
+  # Advisory audit (RustSec). The root workspace lockfile is STRICT — any
+  # advisory (including any protobuf appearance) fails the job. The testbeds are
+  # separate workspaces with their own locks; all are strict except the one
+  # documented ignore for raft-harness (see below).
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Audit root workspace lockfile (strict)
+        run: cargo audit --file Cargo.lock
+      - name: Audit testbed lockfiles
+        run: |
+          # Testbeds are standalone workspaces (publish=false) with their own
+          # lockfiles. Every one is strict EXCEPT the documented raft-harness
+          # ignore below.
+          for tb in buggify-wasi buggy-smoke liveness-campaign redb-fork redb-harness; do
+            echo "== audit testbeds/$tb =="
+            cargo audit --file "testbeds/$tb/Cargo.lock"
+          done
+          # raft-harness knowingly carries protobuf 2.x: tikv/raft 0.7 pulls
+          # `protobuf` unconditionally even on the prost-codec path we select
+          # (see the codec note in testbeds/raft-harness/Cargo.toml), and it never
+          # parses external input here — the cluster is SimNet loopback plus
+          # in-memory logs, so every byte protobuf sees is one we produced.
+          # RUSTSEC-2024-0437 (protobuf uncontrolled-recursion crash) is therefore
+          # ignored for THIS lockfile only. The ignore is scoped to this single
+          # invocation, so the strict root audit above still fails on any protobuf
+          # appearance anywhere in the workspace.
+          echo "== audit testbeds/raft-harness (protobuf 2.x: RUSTSEC-2024-0437 ignored, documented) =="
+          cargo audit --file testbeds/raft-harness/Cargo.lock --ignore RUSTSEC-2024-0437
+
+  # Heavy semantic gate: tikv/raft 0.7 3-node cluster under Patina — canonical
+  # applied_hash + record/replay identity + net/fs-fault + crash-recovery battery.
+  # It release-compiles the ~89-crate raft dependency tree under a SEPARATE target
+  # dir (testbeds/raft-harness/target) that the workspace rust-cache does not
+  # cover, so running it per-push would recompile that tree every push. Measured
+  # 39.5s wall on a 10-core Mac, dominated by that uncached release compile — over
+  # the ~3-minute per-push budget on slower hosted runners. Runs nightly (and on
+  # manual dispatch) instead, with its own cache. Proven clean on macOS locally;
+  # Linux raft cleanliness is an established project invariant.
+  nightly:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Cache both the root workspace (cargo-patina) and the raft-harness
+          # target so the heavy dependency tree is not recompiled every night.
+          workspaces: |
+            .
+            testbeds/raft-harness
+      - run: testbeds/raft-harness/run-patina.sh

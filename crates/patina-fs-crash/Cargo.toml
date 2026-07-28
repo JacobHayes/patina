@@ -1,5 +1,6 @@
 [package]
 name = "patina-dst-fs-crash"
+description = "Deterministic crash/restart filesystem driver with seeded torn-write injection for Patina"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
