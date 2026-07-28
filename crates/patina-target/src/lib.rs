@@ -295,17 +295,7 @@ fn scan_forbidden_instructions(file: &object::File<'_>) -> Result<Vec<NativeEsca
                     }
                 }
             }
-            Architecture::X86_64 => {
-                for index in 0..data.len().saturating_sub(1) {
-                    let category = x86_instruction_category(&data[index..]);
-                    if let Some(category) = category {
-                        escapes.push(NativeEscape {
-                            symbol: format!("instruction@{name}+0x{index:x}"),
-                            category,
-                        });
-                    }
-                }
-            }
+            Architecture::X86_64 => x86_scan::scan(data, name, &mut escapes),
             _ => {}
         }
     }
@@ -322,16 +312,697 @@ fn aarch64_instruction_category(instruction: u32) -> Option<&'static str> {
     }
 }
 
-fn x86_instruction_category(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(&[0x0f, 0x05]) {
-        Some("direct-syscall")
-    } else if bytes.starts_with(&[0x0f, 0x31])
-        || (bytes.starts_with(&[0x0f, 0xc7])
-            && bytes.get(2).is_some_and(|modrm| modrm & 0x38 == 0x30))
-    {
-        Some("cpu-nondeterminism")
-    } else {
-        None
+/// x86-64 forbidden-instruction scan, instruction-boundary-aware.
+///
+/// The aarch64 ISA is fixed-width, so its scan decodes aligned 4-byte words and
+/// cannot desync. x86-64 is variable-length: a byte-sliding scan that tested
+/// every offset matched the forbidden opcode bytes (`0f 05` syscall, `0f 31`
+/// rdtsc, `0f c7 /6` rdrand) *inside* longer instructions' ModRM/SIB/
+/// displacement/immediate bytes and flooded the audit with false positives — an
+/// ordinary `mov`/`lea`/`movups` whose operand encoding happens to contain those
+/// bytes. This module walks real instruction boundaries with a length decoder
+/// and only tests the opcode at a genuine boundary, matching the aarch64 scan's
+/// precision.
+///
+/// Soundness (this is a containment gate, so a *false negative* — a real
+/// `syscall` slipping past — is the dangerous direction): the decoder fails
+/// CLOSED. Any byte sequence it cannot confidently measure — an unmapped/invalid
+/// opcode, a truncated tail, a legacy three-byte (`0f 38`/`0f 3a`) opcode, or an
+/// EVEX (AVX-512) prefix — yields an `undecodable-instruction` finding naming the
+/// offset and stops the walk, so the binary is refused rather than silently
+/// scanned past a length guess. Those maps are declined deliberately: the default
+/// `x86_64` Rust target emits none of them (verified against the real std/glibc
+/// `.text` corpus), and none can encode the legacy-only forbidden opcodes, so
+/// declining them cannot hide a forbidden instruction — it can at most refuse a
+/// binary that used one, which is the safe direction. VEX (AVX/AVX2, both the
+/// two-byte `c5` and three-byte `c4` forms) *is* length-decoded, because default
+/// codegen does emit it (`vmovdqa`/`vzeroupper`/...); its opcodes are never
+/// forbidden, so it is measured only to reach the next real boundary. Because
+/// every real instruction advances the cursor to its true successor, a forbidden
+/// opcode embedded in another instruction's operand is never at a tested
+/// boundary. The length decoder is proven against `objdump -d` boundaries over
+/// real probe binaries (see `x86_decoder_matches_objdump_corpus`).
+mod x86_scan {
+    /// Immediate-operand width classes. Widths that depend on the effective
+    /// operand/address size are resolved from the `0x66`/`0x67`/REX.W prefixes.
+    #[derive(Clone, Copy)]
+    enum Imm {
+        None,
+        /// Exactly N bytes (rel8/rel32 fold in here — near branches are a fixed
+        /// width in 64-bit mode; `enter`'s `iw,ib` is a single 3-byte immediate).
+        Fixed(u8),
+        /// Operand-size immediate: 2 bytes with a `0x66` prefix, else 4.
+        Z,
+        /// 8 bytes with REX.W, else `Z` (the `mov r64, imm64` family).
+        V,
+        /// Address-size memory offset: 4 bytes with `0x67`, else 8.
+        Moffs,
+        /// `f6 /r`: an imm8 only when ModRM.reg selects TEST (0 or 1).
+        Group3Byte,
+        /// `f7 /r`: an immZ only when ModRM.reg selects TEST (0 or 1).
+        Group3Z,
+    }
+
+    struct OpAttr {
+        modrm: bool,
+        imm: Imm,
+        /// A forbidden opcode fixed by the opcode bytes alone (syscall, rdtsc).
+        cat: Option<&'static str>,
+        /// `0f c7` (group 9): rdrand (ModRM.reg 6) vs cmpxchg8b is a reg decision
+        /// resolved after the ModRM byte is read.
+        group9: bool,
+    }
+
+    enum Step {
+        Insn {
+            len: usize,
+            cat: Option<&'static str>,
+        },
+        Undecodable,
+    }
+
+    /// Walk `data` (a `.text` section) instruction by instruction, pushing a
+    /// finding for each forbidden opcode at a real boundary and one
+    /// `undecodable-instruction` finding (then stopping) if the decoder cannot
+    /// measure an instruction.
+    pub(super) fn scan(data: &[u8], name: &str, escapes: &mut Vec<super::NativeEscape>) {
+        let mut offset = 0usize;
+        while offset < data.len() {
+            match decode_one(&data[offset..]) {
+                Step::Insn { len, cat } => {
+                    if let Some(category) = cat {
+                        escapes.push(super::NativeEscape {
+                            symbol: format!("instruction@{name}+0x{offset:x}"),
+                            category,
+                        });
+                    }
+                    // Every instruction consumes at least its opcode byte, so
+                    // `len >= 1`; the guard only defends the loop invariant.
+                    if len == 0 {
+                        break;
+                    }
+                    offset += len;
+                }
+                Step::Undecodable => {
+                    escapes.push(super::NativeEscape {
+                        symbol: format!("instruction@{name}+0x{offset:x}"),
+                        category: "undecodable-instruction",
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Decode the length of the single instruction at `b[0]`, and whether its
+    /// opcode is forbidden. Returns `Undecodable` for anything the length rules
+    /// below do not cover (fail closed).
+    fn decode_one(b: &[u8]) -> Step {
+        let mut p = 0usize;
+        let mut o66 = false;
+        let mut a67 = false;
+        let mut rexw = false;
+        // Legacy prefixes, any order. Only `0x66`/`0x67` change a length (via the
+        // effective operand/address size); lock/rep/segment do not.
+        loop {
+            match b.get(p) {
+                Some(0x66) => o66 = true,
+                Some(0x67) => a67 = true,
+                Some(0xF0 | 0xF2 | 0xF3 | 0x2E | 0x36 | 0x3E | 0x26 | 0x64 | 0x65) => {}
+                _ => break,
+            }
+            p += 1;
+            if p > 14 {
+                return Step::Undecodable; // absurd prefix run
+            }
+        }
+        // REX must immediately precede the opcode in 64-bit mode.
+        if let Some(&r) = b.get(p) {
+            if (0x40..=0x4F).contains(&r) {
+                rexw = r & 0x08 != 0;
+                p += 1;
+            }
+        }
+        let op = match b.get(p) {
+            Some(&x) => x,
+            None => return Step::Undecodable,
+        };
+        p += 1;
+        let attr = if op == 0x0F {
+            let op2 = match b.get(p) {
+                Some(&x) => x,
+                None => return Step::Undecodable,
+            };
+            p += 1;
+            if op2 == 0x38 || op2 == 0x3A {
+                return Step::Undecodable; // legacy three-byte opcode map: fail closed
+            }
+            match two_byte(op2) {
+                Some(a) => a,
+                None => return Step::Undecodable,
+            }
+        } else if op == 0xC5 {
+            // Two-byte VEX: one prefix byte (`R.vvvv.L.pp`), then an opcode in the
+            // implied `0f` map.
+            if b.get(p).is_none() {
+                return Step::Undecodable;
+            }
+            p += 1;
+            let opc = match b.get(p) {
+                Some(&x) => x,
+                None => return Step::Undecodable,
+            };
+            p += 1;
+            match vex_body(1, opc) {
+                Some((modrm, imm)) => OpAttr {
+                    modrm,
+                    imm,
+                    cat: Option::None,
+                    group9: false,
+                },
+                None => return Step::Undecodable,
+            }
+        } else if op == 0xC4 {
+            // Three-byte VEX: two prefix bytes; the low 5 bits of the first pick
+            // the implied opcode map (1=`0f`, 2=`0f 38`, 3=`0f 3a`).
+            let b1 = match b.get(p) {
+                Some(&x) => x,
+                None => return Step::Undecodable,
+            };
+            p += 1;
+            if b.get(p).is_none() {
+                return Step::Undecodable;
+            }
+            p += 1;
+            let opc = match b.get(p) {
+                Some(&x) => x,
+                None => return Step::Undecodable,
+            };
+            p += 1;
+            match vex_body(b1 & 0x1F, opc) {
+                Some((modrm, imm)) => OpAttr {
+                    modrm,
+                    imm,
+                    cat: Option::None,
+                    group9: false,
+                },
+                None => return Step::Undecodable,
+            }
+        } else if op == 0x62 {
+            return Step::Undecodable; // EVEX (AVX-512): non-default, fail closed
+        } else {
+            match one_byte(op) {
+                Some(a) => a,
+                None => return Step::Undecodable,
+            }
+        };
+        let mut cat = attr.cat;
+        let mut imm = attr.imm;
+        if attr.modrm {
+            let m = match b.get(p) {
+                Some(&x) => x,
+                None => return Step::Undecodable,
+            };
+            p += 1;
+            let md = m >> 6;
+            let reg = (m >> 3) & 7;
+            let rm = m & 7;
+            // group 9 (`0f c7`): ModRM.reg 6 is RDRAND (reg 7 RDSEED is not
+            // currently classified; keep parity with the historical reg==6 test).
+            if attr.group9 && reg == 6 {
+                cat = Some("cpu-nondeterminism");
+            }
+            // group 3 (`f6`/`f7`): only TEST (reg 0 or 1) carries an immediate.
+            imm = match imm {
+                Imm::Group3Byte if reg <= 1 => Imm::Fixed(1),
+                Imm::Group3Z if reg <= 1 => Imm::Z,
+                Imm::Group3Byte | Imm::Group3Z => Imm::None,
+                other => other,
+            };
+            // ModRM memory forms pull a SIB byte and/or a displacement.
+            if md != 3 {
+                if rm == 4 {
+                    let sib = match b.get(p) {
+                        Some(&x) => x,
+                        None => return Step::Undecodable,
+                    };
+                    p += 1;
+                    if md == 0 && (sib & 7) == 5 {
+                        p += 4; // SIB with no base register: disp32
+                    } else {
+                        p += disp_len(md);
+                    }
+                } else if md == 0 && rm == 5 {
+                    p += 4; // RIP-relative disp32
+                } else {
+                    p += disp_len(md);
+                }
+            }
+        }
+        p += imm_len(imm, o66, rexw, a67);
+        if p > b.len() {
+            return Step::Undecodable; // instruction runs past the section end
+        }
+        Step::Insn { len: p, cat }
+    }
+
+    fn disp_len(md: u8) -> usize {
+        match md {
+            1 => 1,
+            2 => 4,
+            _ => 0,
+        }
+    }
+
+    fn imm_len(imm: Imm, o66: bool, rexw: bool, a67: bool) -> usize {
+        match imm {
+            Imm::None => 0,
+            Imm::Fixed(n) => n as usize,
+            Imm::Z => {
+                if o66 {
+                    2
+                } else {
+                    4
+                }
+            }
+            Imm::V => {
+                if rexw {
+                    8
+                } else if o66 {
+                    2
+                } else {
+                    4
+                }
+            }
+            Imm::Moffs => {
+                if a67 {
+                    4
+                } else {
+                    8
+                }
+            }
+            // Resolved to a concrete width during ModRM processing; never here.
+            Imm::Group3Byte | Imm::Group3Z => 0,
+        }
+    }
+
+    fn attr(modrm: bool, imm: Imm) -> Option<OpAttr> {
+        Some(OpAttr {
+            modrm,
+            imm,
+            cat: None,
+            group9: false,
+        })
+    }
+
+    /// One-byte opcode attributes. `None` = fail closed (opcodes invalid in
+    /// 64-bit mode, which valid code never emits). Prefix bytes and `0x0f` are
+    /// consumed by the caller and never reach here.
+    fn one_byte(op: u8) -> Option<OpAttr> {
+        use Imm::*;
+        match op {
+            // ALU r/m forms (add/or/adc/sbb/and/sub/xor/cmp), the `xx0..=xx3` rows.
+            0x00 | 0x01 | 0x02 | 0x03 | 0x08 | 0x09 | 0x0A | 0x0B | 0x10 | 0x11 | 0x12 | 0x13
+            | 0x18 | 0x19 | 0x1A | 0x1B | 0x20 | 0x21 | 0x22 | 0x23 | 0x28 | 0x29 | 0x2A | 0x2B
+            | 0x30 | 0x31 | 0x32 | 0x33 | 0x38 | 0x39 | 0x3A | 0x3B => attr(true, None),
+            // ALU AL, imm8 / eAX, immZ.
+            0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => attr(false, Fixed(1)),
+            0x05 | 0x0D | 0x15 | 0x1D | 0x25 | 0x2D | 0x35 | 0x3D => attr(false, Z),
+            // Invalid in 64-bit mode (push/pop seg, bcd math, pusha/popa, bound,
+            // callf/jmpf, aam/aad/salc, into): fail closed.
+            0x06 | 0x07 | 0x0E | 0x16 | 0x17 | 0x1E | 0x1F | 0x27 | 0x2F | 0x37 | 0x3F | 0x60
+            | 0x61 | 0x82 | 0x9A | 0xCE | 0xD4 | 0xD5 | 0xD6 | 0xEA => Option::None,
+            0x50..=0x5F => attr(false, None),     // push/pop r64
+            0x63 => attr(true, None),             // movsxd
+            0x68 => attr(false, Z),               // push immZ
+            0x69 => attr(true, Z),                // imul r, r/m, immZ
+            0x6A => attr(false, Fixed(1)),        // push imm8
+            0x6B => attr(true, Fixed(1)),         // imul r, r/m, imm8
+            0x6C..=0x6F => attr(false, None),     // ins/outs
+            0x70..=0x7F => attr(false, Fixed(1)), // Jcc rel8
+            0x80 => attr(true, Fixed(1)),         // grp1 Eb, Ib
+            0x81 => attr(true, Z),                // grp1 Ev, Iz
+            0x83 => attr(true, Fixed(1)),         // grp1 Ev, Ib (sign-extended)
+            0x84..=0x87 => attr(true, None),      // test / xchg
+            0x88..=0x8E => attr(true, None),      // mov / lea
+            0x8F => attr(true, None),             // grp1a pop Ev
+            0x90..=0x97 => attr(false, None),     // xchg eAX (0x90 nop)
+            0x98 | 0x99 | 0x9B | 0x9C | 0x9D | 0x9E | 0x9F => attr(false, None), // cbw..lahf
+            0xA0..=0xA3 => attr(false, Moffs),    // mov AL/eAX, moffs
+            0xA4..=0xA7 => attr(false, None),     // movs / cmps
+            0xA8 => attr(false, Fixed(1)),        // test AL, imm8
+            0xA9 => attr(false, Z),               // test eAX, immZ
+            0xAA..=0xAF => attr(false, None),     // stos / lods / scas
+            0xB0..=0xB7 => attr(false, Fixed(1)), // mov r8, imm8
+            0xB8..=0xBF => attr(false, V),        // mov r, immV
+            0xC0 | 0xC1 => attr(true, Fixed(1)),  // grp2 shift Eb/Ev, imm8
+            0xC2 => attr(false, Fixed(2)),        // ret imm16
+            0xC3 => attr(false, None),            // ret
+            0xC6 => attr(true, Fixed(1)),         // grp11 mov Eb, Ib
+            0xC7 => attr(true, Z),                // grp11 mov Ev, Iz
+            0xC8 => attr(false, Fixed(3)),        // enter iw, ib
+            0xC9 => attr(false, None),            // leave
+            0xCA => attr(false, Fixed(2)),        // retf imm16
+            0xCB | 0xCC => attr(false, None),     // retf / int3
+            0xCD => attr(false, Fixed(1)),        // int imm8
+            0xCF => attr(false, None),            // iret
+            0xD0..=0xD3 => attr(true, None),      // grp2 shift by 1 / CL
+            0xD7 => attr(false, None),            // xlat
+            0xD8..=0xDF => attr(true, None),      // x87 (always ModRM, no immediate)
+            0xE0..=0xE3 => attr(false, Fixed(1)), // loop / jcxz rel8
+            0xE4..=0xE7 => attr(false, Fixed(1)), // in/out imm8
+            0xE8 | 0xE9 => attr(false, Fixed(4)), // call / jmp rel32 (fixed in 64-bit)
+            0xEB => attr(false, Fixed(1)),        // jmp rel8
+            0xEC..=0xEF => attr(false, None),     // in/out DX
+            0xF1 | 0xF4 | 0xF5 => attr(false, None), // int1 / hlt / cmc
+            0xF6 => attr(true, Group3Byte),       // grp3 Eb
+            0xF7 => attr(true, Group3Z),          // grp3 Ev
+            0xF8..=0xFD => attr(false, None),     // clc..std
+            0xFE => attr(true, None),             // grp4 inc/dec Eb
+            0xFF => attr(true, None),             // grp5
+            // Prefixes (consumed by the caller) and any hole: fail closed.
+            _ => Option::None,
+        }
+    }
+
+    /// Two-byte (`0f xx`) opcode attributes. `None` = fail closed. The three
+    /// forbidden opcodes are `0f 05` (syscall), `0f 31` (rdtsc), and `0f c7 /6`
+    /// (rdrand, resolved from ModRM.reg by the caller).
+    fn two_byte(op2: u8) -> Option<OpAttr> {
+        use Imm::*;
+        match op2 {
+            0x05 => Some(OpAttr {
+                modrm: false,
+                imm: None,
+                cat: Some("direct-syscall"),
+                group9: false,
+            }),
+            0x31 => Some(OpAttr {
+                modrm: false,
+                imm: None,
+                cat: Some("cpu-nondeterminism"),
+                group9: false,
+            }),
+            0xC7 => Some(OpAttr {
+                modrm: true,
+                imm: None,
+                cat: Option::None,
+                group9: true,
+            }),
+            // No ModRM, no immediate (clts/syscall-family/cpuid/push-pop-seg/
+            // bswap/rsm/...).
+            0x06
+            | 0x07
+            | 0x08
+            | 0x09
+            | 0x0B
+            | 0x0E
+            | 0x30
+            | 0x32
+            | 0x33
+            | 0x34
+            | 0x35
+            | 0x37
+            | 0x77
+            | 0xA0
+            | 0xA1
+            | 0xA2
+            | 0xA8
+            | 0xA9
+            | 0xAA
+            | 0xC8..=0xCF => attr(false, None),
+            // Jcc rel32 (fixed in 64-bit).
+            0x80..=0x8F => attr(false, Fixed(4)),
+            // ModRM + imm8 (pshuf/shift-group/shld/shrd/bt-group/cmp*/insert/
+            // extract/shuf; `0f 0f` 3DNow carries its opcode in the trailing imm8).
+            0x0F | 0x70 | 0x71 | 0x72 | 0x73 | 0xA4 | 0xAC | 0xBA | 0xC2 | 0xC4 | 0xC5 | 0xC6 => {
+                attr(true, Fixed(1))
+            }
+            // ModRM, no immediate (the bulk of the 0F map: SSE2/MMX, cmov, setcc,
+            // movzx/movsx, bit ops, xadd, cmpxchg, ...).
+            0x00..=0x03
+            | 0x0D
+            | 0x10..=0x1F
+            | 0x20..=0x23
+            | 0x28..=0x2F
+            | 0x40..=0x4F
+            | 0x50..=0x6F
+            | 0x74..=0x76
+            | 0x78
+            | 0x79
+            | 0x7C..=0x7F
+            | 0x90..=0x9F
+            | 0xA3
+            | 0xA5
+            | 0xAB
+            | 0xAD
+            | 0xAE
+            | 0xAF
+            | 0xB0..=0xB9
+            | 0xBB..=0xBF
+            | 0xC0
+            | 0xC1
+            | 0xC3
+            | 0xD0..=0xDF
+            | 0xE0..=0xEF
+            | 0xF0..=0xFF => attr(true, None),
+            // Reserved / invalid 0F opcodes, and the three-byte escapes the caller
+            // has already peeled off: fail closed.
+            _ => Option::None,
+        }
+    }
+
+    /// VEX instruction body attributes `(modrm, imm)` for the implied opcode
+    /// `map` (1 = `0f`, 2 = `0f 38`, 3 = `0f 3a`) and `op`. VEX opcodes are never
+    /// forbidden, so no category is returned; this only measures length. Unknown
+    /// maps fail closed. The immediate rules follow the map: nearly every VEX
+    /// `0f`-map op is `(modrm, no-imm)`, except `vzeroupper`/`vzeroall` (`0f 77`,
+    /// no ModRM) and the imm8-bearing shuffle/compare/insert/extract group; `0f
+    /// 38` ops carry no immediate; `0f 3a` ops carry an imm8.
+    fn vex_body(map: u8, op: u8) -> Option<(bool, Imm)> {
+        match map {
+            1 => {
+                let modrm = op != 0x77; // vzeroupper / vzeroall take no ModRM
+                let imm = match op {
+                    0x70 | 0x71 | 0x72 | 0x73 | 0xC2 | 0xC4 | 0xC5 | 0xC6 => Imm::Fixed(1),
+                    _ => Imm::None,
+                };
+                Some((modrm, imm))
+            }
+            2 => Some((true, Imm::None)), // 0f 38: ModRM, no immediate
+            3 => Some((true, Imm::Fixed(1))), // 0f 3a: ModRM + imm8
+            _ => Option::None,            // reserved VEX map: fail closed
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Decode one instruction, panicking if the decoder fails closed. Returns
+        /// `(length, forbidden_category)`.
+        fn decode(b: &[u8]) -> (usize, Option<&'static str>) {
+            match decode_one(b) {
+                Step::Insn { len, cat } => (len, cat),
+                Step::Undecodable => panic!("decoder failed closed on {b:02x?}"),
+            }
+        }
+
+        #[test]
+        fn measures_representative_instruction_lengths() {
+            // (bytes, expected length) across the length-determining features.
+            let cases: &[(&[u8], usize)] = &[
+                (&[0x90], 1),                                // nop
+                (&[0xc3], 1),                                // ret
+                (&[0x0f, 0x05], 2),                          // syscall
+                (&[0x0f, 0x31], 2),                          // rdtsc
+                (&[0x48, 0x89, 0xe5], 3),                    // mov rbp, rsp (REX.W + ModRM reg)
+                (&[0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0], 8),  // mov rax,[disp32] (SIB, no base)
+                (&[0x48, 0x8d, 0x3d, 0, 0, 0, 0], 7),        // lea rdi,[rip+disp32]
+                (&[0xe8, 0, 0, 0, 0], 5),                    // call rel32
+                (&[0xeb, 0x00], 2),                          // jmp rel8
+                (&[0x0f, 0x84, 0, 0, 0, 0], 6),              // je rel32
+                (&[0x48, 0xb8, 1, 2, 3, 4, 5, 6, 7, 8], 10), // mov rax, imm64 (REX.W imm)
+                (&[0xb8, 1, 2, 3, 4], 5),                    // mov eax, imm32
+                (&[0x66, 0xb8, 1, 2], 4),                    // mov ax, imm16 (0x66 shrinks imm)
+                (&[0x68, 1, 2, 3, 4], 5),                    // push imm32
+                (&[0x83, 0xc0, 0x01], 3),                    // add eax, imm8 (grp1 Ib)
+                (&[0x81, 0xc0, 1, 2, 3, 4], 6),              // add eax, imm32 (grp1 Iz)
+                (&[0xf6, 0xc0, 0x01], 3),                    // test al, imm8 (grp3 reg 0 → imm8)
+                (&[0xf6, 0xd8], 2),                          // neg al (grp3 reg 3 → no imm)
+                (&[0xf7, 0xc0, 1, 2, 3, 4], 6),              // test eax, imm32 (grp3 reg 0)
+                (&[0xf7, 0xd8], 2),                          // neg eax (grp3 reg 3 → no imm)
+                (&[0x0f, 0xc7, 0xf0], 3),                    // rdrand eax (grp9 reg 6)
+                (&[0x48, 0x0f, 0xc7, 0x08], 4),              // cmpxchg8b [rax] (grp9 reg 1)
+                (&[0xc8, 1, 2, 3], 4),                       // enter iw, ib
+                (&[0x0f, 0x1f, 0x44, 0x00, 0x00], 5),        // 5-byte nop (ModRM+SIB+disp8)
+            ];
+            for (bytes, expected) in cases {
+                let (len, _) = decode(bytes);
+                assert_eq!(len, *expected, "length for {bytes:02x?}");
+            }
+        }
+
+        #[test]
+        fn flags_real_forbidden_opcodes_at_a_boundary() {
+            assert_eq!(decode(&[0x0f, 0x05]).1, Some("direct-syscall"));
+            assert_eq!(decode(&[0x0f, 0x31]).1, Some("cpu-nondeterminism"));
+            assert_eq!(decode(&[0x0f, 0xc7, 0xf0]).1, Some("cpu-nondeterminism")); // rdrand
+            // group 9 reg != 6 (cmpxchg8b) is not forbidden.
+            assert_eq!(decode(&[0x48, 0x0f, 0xc7, 0x08]).1, None);
+        }
+
+        #[test]
+        fn walks_past_forbidden_bytes_embedded_in_operands() {
+            // `mov rax, 0x0f31000f05` — the immediate contains both the `0f 05`
+            // (syscall) and `0f 31` (rdtsc) byte pairs, but they are operand data,
+            // not instruction boundaries. A boundary-aware scan flags neither; the
+            // old byte-slide flagged both.
+            let mut escapes = Vec::new();
+            let text = [0x48, 0xb8, 0x05, 0x0f, 0x00, 0x31, 0x0f, 0x00, 0x00, 0x00];
+            scan(&text, ".text", &mut escapes);
+            assert!(
+                escapes.is_empty(),
+                "operand-embedded opcode bytes must not be flagged: {escapes:?}"
+            );
+            // The same forbidden bytes at a real boundary (a `syscall` after a nop)
+            // must still be caught.
+            let mut escapes = Vec::new();
+            scan(&[0x90, 0x0f, 0x05], ".text", &mut escapes);
+            assert_eq!(escapes.len(), 1);
+            assert_eq!(escapes[0].category, "direct-syscall");
+            assert_eq!(escapes[0].symbol, "instruction@.text+0x1");
+        }
+
+        #[test]
+        fn fails_closed_on_undecodable_bytes() {
+            // An EVEX prefix (0x62) and a reserved 0F opcode (0f 04) are both
+            // declined; the scan emits an `undecodable-instruction` finding naming
+            // the offset rather than skipping past a length guess.
+            for bytes in [&[0x62, 0xf1, 0x7c, 0x48][..], &[0x0f, 0x04][..]] {
+                let mut escapes = Vec::new();
+                scan(bytes, ".text", &mut escapes);
+                assert_eq!(escapes.len(), 1, "should fail closed on {bytes:02x?}");
+                assert_eq!(escapes[0].category, "undecodable-instruction");
+                assert_eq!(escapes[0].symbol, "instruction@.text+0x0");
+            }
+        }
+
+        #[test]
+        fn measures_vex_avx_instruction_lengths() {
+            // VEX (AVX/AVX2) is the encoding the corpus check surfaced; default
+            // codegen emits it, so it must be length-decoded rather than declined.
+            let cases: &[(&[u8], usize)] = &[
+                (&[0xc5, 0xf8, 0x77], 3), // vzeroupper (2-byte VEX, no ModRM)
+                (&[0xc5, 0xfd, 0x6f, 0x44, 0x24, 0x20], 6), // vmovdqa ymm0,[rsp+0x20] (SIB+disp8)
+                (&[0xc5, 0xfd, 0xd7, 0xc0], 4), // vpmovmskb eax,ymm0 (reg ModRM)
+                (&[0xc5, 0xfc, 0x57, 0xc0], 4), // vxorps ymm0,ymm0,ymm0
+                (&[0xc4, 0xe2, 0x7d, 0x00, 0xc1], 5), // 3-byte VEX, 0f38 map, no imm
+                (&[0xc4, 0xe3, 0x7d, 0x46, 0xc1, 0x20], 6), // vperm2i128 (0f3a map, imm8)
+            ];
+            for (bytes, expected) in cases {
+                let (len, cat) = decode(bytes);
+                assert_eq!(len, *expected, "length for {bytes:02x?}");
+                assert_eq!(cat, None, "VEX opcodes are never forbidden: {bytes:02x?}");
+            }
+        }
+
+        // Ground-truth corpus check: the length decoder must reproduce objdump's
+        // instruction boundaries exactly over a real `.text`, or it could desync
+        // (a wrong length silently steps over a real instruction — the same
+        // false-negative failure the byte-slide had). Ignored by default because
+        // it needs an x86-64 ELF and its `objdump -d -j .text` output; run in the
+        // amd64 container over the real std/glibc probe binaries:
+        //   PATINA_X86_CORPUS_ELF=/path/guest \
+        //   PATINA_X86_CORPUS_OBJDUMP=/path/guest.objdump \
+        //   cargo test -p patina-target -- --ignored x86_decoder_matches_objdump
+        #[test]
+        #[ignore = "requires an x86-64 ELF + objdump corpus; run in the amd64 container"]
+        fn x86_decoder_matches_objdump_corpus() {
+            use object::{Object, ObjectSection};
+            use std::collections::BTreeSet;
+
+            let elf_path = std::env::var("PATINA_X86_CORPUS_ELF")
+                .expect("set PATINA_X86_CORPUS_ELF to an x86-64 ELF");
+            let objdump_path = std::env::var("PATINA_X86_CORPUS_OBJDUMP")
+                .expect("set PATINA_X86_CORPUS_OBJDUMP to its `objdump -d -j .text` output");
+            let bytes = std::fs::read(&elf_path).expect("read ELF");
+            let file = object::File::parse(&*bytes).expect("parse ELF");
+            let text = file
+                .sections()
+                .find(|s| s.name() == Ok(".text"))
+                .expect(".text section");
+            let base = text.address();
+            let data = text.data().expect(".text data");
+
+            // Golden boundaries: the address at the start of every objdump
+            // instruction line (`  <hexaddr>:\t<bytes>\t<mnemonic>`), restricted to
+            // this `.text`. Lines like `<addr> <name>:` (labels) and `\t...`
+            // (elided zero runs) are not instruction starts and are skipped.
+            let objdump = std::fs::read_to_string(&objdump_path).expect("read objdump");
+            let mut golden = BTreeSet::new();
+            for line in objdump.lines() {
+                let trimmed = line.trim_start();
+                if let Some((addr_hex, rest)) = trimmed.split_once(":\t") {
+                    if addr_hex.bytes().all(|c| c.is_ascii_hexdigit()) && !rest.is_empty() {
+                        if let Ok(addr) = u64::from_str_radix(addr_hex, 16) {
+                            if addr >= base && addr < base + data.len() as u64 {
+                                golden.insert(addr);
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(
+                golden.len() > 100,
+                "objdump corpus looks too small ({} boundaries) — wrong file? \
+                 (a real std `.text` has ~10^6; even a tiny probe has hundreds)",
+                golden.len()
+            );
+            let first = *golden.iter().next().unwrap();
+            let last = *golden.iter().next_back().unwrap();
+
+            // Walk the decoder and collect its boundaries as absolute addresses.
+            let mut decoded = BTreeSet::new();
+            let mut offset = 0usize;
+            while offset < data.len() {
+                let addr = base + offset as u64;
+                match decode_one(&data[offset..]) {
+                    Step::Insn { len, .. } => {
+                        if addr >= first && addr <= last {
+                            decoded.insert(addr);
+                        }
+                        assert!(len > 0);
+                        offset += len;
+                    }
+                    Step::Undecodable => panic!(
+                        "decoder failed closed at {addr:#x} (offset {offset:#x}); \
+                         the corpus should be fully decodable — bytes {:02x?}",
+                        &data[offset..(offset + 8).min(data.len())]
+                    ),
+                }
+            }
+
+            // Over objdump's covered range the two boundary sets must be identical.
+            // A decoder boundary objdump lacks means we split one instruction in
+            // two; a missing one means we merged/overran two — either is a desync.
+            let extra: Vec<_> = decoded.difference(&golden).take(5).collect();
+            let missing: Vec<_> = golden.difference(&decoded).take(5).collect();
+            assert!(
+                extra.is_empty() && missing.is_empty(),
+                "boundary mismatch vs objdump: {} extra {:#x?}, {} missing {:#x?}",
+                decoded.difference(&golden).count(),
+                extra,
+                golden.difference(&decoded).count(),
+                missing,
+            );
+            eprintln!(
+                "x86 decoder matched objdump on {} instruction boundaries [{:#x}..={:#x}]",
+                golden.len(),
+                first,
+                last
+            );
+        }
     }
 }
 
@@ -963,14 +1634,7 @@ mod tests {
             aarch64_instruction_category(0xd53b_e040),
             Some("cpu-nondeterminism")
         );
-        assert_eq!(
-            x86_instruction_category(&[0x0f, 0x05]),
-            Some("direct-syscall")
-        );
-        assert_eq!(
-            x86_instruction_category(&[0x0f, 0x31]),
-            Some("cpu-nondeterminism")
-        );
+        // The x86-64 boundary-aware scan is covered in `x86_scan::tests`.
     }
 
     #[test]
