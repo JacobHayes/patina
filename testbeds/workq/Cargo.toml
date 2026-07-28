@@ -1,0 +1,30 @@
+# Standalone package: its own empty [workspace] table keeps it OUT of the root
+# Patina workspace so `cargo` here never touches crates/ or the root manifest.
+# The dependency tree is deliberately tiny — patina (the cooperative-SUT SDK) and
+# sha2 only — so the harness is CI-cheap and its determinism story is unclouded
+# by a large third-party graph.
+[workspace]
+
+[package]
+name = "workq"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "workq"
+path = "src/main.rs"
+
+[dependencies]
+# The cooperative-SUT (buggify) SDK. Every macro is a no-op outside a Patina
+# build, so `cargo build`/`cargo run` here behave as an ordinary std program and
+# the SAME binary source runs under `cargo patina run`.
+patina-dst = { path = "../../crates/patina" }
+# 256-bit digest for the WORKQ_RESULT outcome hash. Hex is formatted by hand
+# (no extra dep) to keep the dependency tree tiny.
+sha2 = "0.11"
+
+[profile.release]
+# Keep panics unwinding: the supervisor catches a component thread stopping and
+# readable backtraces help during the native phase.
+panic = "unwind"

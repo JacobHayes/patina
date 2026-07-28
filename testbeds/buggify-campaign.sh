@@ -2,8 +2,8 @@
 ###############################################################################
 # Shared cooperative-SUT (buggify) campaign library.
 #
-# Sourced by the buggify-aware fuzz sweeps (raft-harness/fuzz-sweep.sh and
-# redb-harness/buggify-sweep.sh) so the buggify classifier, the PATINA_SDK_REPORT
+# Sourced by the buggify-aware sweeps (workq/fuzz-sweep.sh and
+# workq/run-patina.sh leg [6]) so the buggify classifier, the PATINA_SDK_REPORT
 # parser, the cross-generation campaign-state accumulator, and their selftests
 # live in ONE place and are proven once. Nothing here mutates a caller's existing
 # classifier state; it only ADDS the two buggify classes and the campaign-level

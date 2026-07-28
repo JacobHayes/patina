@@ -116,4 +116,7 @@ Instrument a system-under-test; every macro is a no-op under a plain
   planted bug, replay it, and render the timeline.
 - `ARCHITECTURE.md`, `IMPLEMENTATION.md`, `VALIDATION.md`: design, slice status,
   and the verification gates.
-- `testbeds/PATINA-REPORT.html`: campaign results against ripgrep, redb, raft-rs.
+- `testbeds/`: `workq` (the flagship durable-work-queue demo) and `raft-harness`
+  (a 3-node tikv/raft cluster) run the full end-to-end battery; see each testbed's
+  `run-patina.sh`. VALIDATION.md "Historical campaigns" records the archived redb
+  and ripgrep campaigns.

@@ -49,7 +49,7 @@ pub struct RenderInput<'a> {
 /// the caller can populate it from any family's result/violation output.
 #[derive(Clone, Debug, Default)]
 pub struct FailureSummary {
-    /// The runner's terminal result line (e.g. a `RAFT_VIOLATION ...` or
+    /// The runner's terminal result line (e.g. a `WORKQ_VIOLATION ...` or
     /// `trace operation mismatch ...` line).
     pub result_line: String,
     /// A short classification token (e.g. `operation-mismatch`,
@@ -1144,7 +1144,7 @@ mod tests {
             family: "native",
             timeline: "main",
             failure: Some(FailureSummary {
-                result_line: "RAFT_VIOLATION two-leaders term=4".into(),
+                result_line: "WORKQ_VIOLATION two-leaders term=4".into(),
                 classification: "violation".into(),
                 exit_code: 1,
                 facts: vec![("applied_hash".into(), "deadbeef".into())],
@@ -1152,7 +1152,7 @@ mod tests {
             }),
         });
         assert!(html.contains("Run failed"));
-        assert!(html.contains("RAFT_VIOLATION"));
+        assert!(html.contains("WORKQ_VIOLATION"));
         assert!(html.contains("applied_hash"));
     }
 }

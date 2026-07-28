@@ -1044,12 +1044,12 @@ mod tests {
 
     #[test]
     fn positional_write_is_crash_losable_exactly_like_a_cursor_write() {
-        // redb writes every page through pwrite (write_at), so a positional
-        // write MUST be as crash-losable as a cursor write -- otherwise the
-        // crash campaign would silently miss redb's real durability boundary.
-        // write_at rides the default seek/write/seek path, so CrashFs journals
-        // it through the same live-vs-durable model. This is the load-bearing
-        // guarantee for the whole redb rung.
+        // A page-oriented database writes every page through pwrite (write_at),
+        // so a positional write MUST be as crash-losable as a cursor write --
+        // otherwise the crash campaign would silently miss its real durability
+        // boundary. write_at rides the default seek/write/seek path, so CrashFs
+        // journals it through the same live-vs-durable model. This is the
+        // load-bearing guarantee for the whole positional-I/O rung.
         const OFFSET: u64 = 1024;
 
         // Unsynced positional write is dropped: after a durable zero baseline,
@@ -1269,7 +1269,7 @@ mod tests {
 
     #[test]
     fn byte_granularity_tears_the_final_write_into_a_partial_image() {
-        // The load-bearing property for the redb sub-block campaign: the final
+        // The load-bearing property for the sub-block crash campaign: the final
         // unsynced write survives PARTIALLY, so the reconstructed image differs
         // from BOTH the durable baseline and the fully-applied write -- the torn
         // page a whole-block model can never produce.
@@ -1335,7 +1335,7 @@ mod tests {
     fn byte_granularity_tears_only_the_final_write_not_earlier_ones() {
         // An earlier unsynced write to a different page reverts wholesale, while
         // the final write's page tears partially -- the "clean prefix plus one
-        // torn final page" geometry the redb hunt needs.
+        // torn final page" geometry the sub-block crash hunt needs.
         let mut fs = CrashFs::builder()
             .seed(11)
             .torn_write_granularity(4)

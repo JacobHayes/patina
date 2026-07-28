@@ -331,7 +331,7 @@ char *realpath(const char *restrict path, char *restrict destination) {
 /*
  * isatty: whether a descriptor is a terminal is a nondeterministic property of
  * how the run was launched (pipe vs file vs tty), and programs branch on it —
- * ripgrep, for instance, derives heading/color/line-number defaults from it. A
+ * search tools, for instance, derive heading/color/line-number defaults from it. A
  * fully interposed guest must never observe host terminal state, so report a
  * deterministic "not a terminal" for every descriptor: captured guest stdio is
  * never a tty under the runtime. Interposing here (rather than allow-listing the
@@ -548,8 +548,8 @@ long syscall(long number, ...) {
         return -1;
     }
     if (number == SYS_getrandom) {
-        /* The `getrandom` crate (rand::thread_rng, used by tikv/raft for its
-         * randomized election timeouts) issues the raw SYS_getrandom syscall
+        /* The `getrandom` crate (rand::thread_rng and similar runtime-seeded
+         * randomness) issues the raw SYS_getrandom syscall
          * through this wrapper rather than the libc getrandom() above. Route it to
          * the same deterministic entropy source; otherwise it returns ENOSYS and
          * the crate falls back to opening /dev/urandom, which the in-memory FS
@@ -859,9 +859,9 @@ ssize_t write(int fd, const void *source, size_t length) {
     return fail_size(patina_write(fd, source, length));
 }
 
-/* Positional I/O. redb's file backend does ALL of its reads and writes through
+/* Positional I/O. Database-style file backends do ALL of their I/O through
  * pread/pwrite (read_exact_at/write_all_at), never seek+read/write, so these
- * must reach the deterministic filesystem or redb's I/O would bypass the crash
+ * must reach the deterministic filesystem or that I/O would bypass the crash
  * model entirely. They route to patina_p{read,write}, which the runtime
  * services as ONE positional operation (atomic w.r.t. the scheduler and cursor-
  * independent), NOT a caller-side seek+read that could interleave under
@@ -879,7 +879,7 @@ ssize_t pwrite(int fd, const void *source, size_t length, off_t offset) {
 
 #ifdef __linux__
 /* Large-file positional I/O variants. glibc std lowers positional reads/writes
- * on 64-bit off_t Linux to the *64 symbols (redb's file backend uses them), so
+ * on 64-bit off_t Linux to the *64 symbols (database file backends use them), so
  * they must reach the same deterministic positional I/O as pread/pwrite rather
  * than be denied. off64_t is always 64-bit, so the full offset is preserved. */
 ssize_t pread64(int fd, void *destination, size_t length, off64_t offset) {
@@ -892,11 +892,11 @@ ssize_t pwrite64(int fd, const void *source, size_t length, off64_t offset) {
 }
 #endif
 
-/* Whole-file advisory lock (redb takes one via std File::try_lock on open).
+/* Whole-file advisory lock (a single-opener database takes one via File::try_lock on open).
  * Routed to the runtime's per-inode lock table (patina_flock): a lone opener
  * always acquires, but two independent opens of the same file contend exactly
  * as a real flock would (LOCK_EX|LOCK_NB on the second → EWOULDBLOCK, i.e.
- * redb's DatabaseAlreadyOpen). See the "Advisory file lock" row in
+ * a database's already-open error). See the "Advisory file lock" row in
  * crates/patina-target/ESCAPE-CLASSES.md. Virtual sockets have no advisory-lock
  * model, so a flock on one fails closed. */
 int flock(int fd, int operation) {
@@ -995,7 +995,7 @@ int fsync(int fd) {
 }
 
 #ifdef __linux__
-/* fdatasync: redb calls it to make committed data durable. The deterministic
+/* fdatasync: databases call it to make committed data durable. The deterministic
  * crash-model FS makes the file durable through the same sync path (it draws no
  * data-vs-metadata distinction), so route it to patina_fsync — a durability
  * guarantee at least as strong as fdatasync's, and deterministic. */
@@ -1929,10 +1929,10 @@ long sysconf(int name) {
 /*
  * Process-class deny-traps. The fork/exec/spawn/reap/credential/session surface
  * is a deterministic-runtime non-goal: a managed guest never legitimately enters
- * it and the runtime models none of it. Programs like ripgrep still LINK this
- * surface (std::process + grep-cli's --pre/-z preprocessor path, which a plain
- * search never triggers), and a reachability audit cannot clear it — the spawn
- * path is statically wired into the search loop by direct calls and only a
+ * it and the runtime models none of it. Real guests still LINK this
+ * surface (std::process and dormant subprocess helper paths that a plain
+ * run never triggers), and a reachability audit cannot clear it — the spawn
+ * path is statically wired into the main loop by direct calls and only a
  * runtime flag keeps it dormant (see crates/patina-target/ESCAPE-CLASSES.md).
  *
  * So interpose the whole family with strong definitions that ABORT
@@ -2136,7 +2136,7 @@ ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags) {
  * std::thread::available_parallelism reads the CPU affinity mask. Return a fixed
  * single-CPU set so the guest sees a deterministic core count regardless of the
  * host; the deterministic scheduler runs one baton at a time anyway, and every
- * testbed forces stable output (ripgrep's `--sort path`), so the value never
+ * testbed forces stable output ordering, so the value never
  * perturbs results. This is interposed (not trapped) because it IS reached at
  * startup, unlike the inert spawn surface above.
  */

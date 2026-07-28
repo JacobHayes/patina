@@ -9,7 +9,7 @@ use patina_dst_runtime::{Context, CrashOp, RuntimeConfig, TornGranularity};
 use tempfile::tempdir;
 
 /// Append `records` framed with a trailing marker to a write-ahead log without
-/// syncing, mirroring the buggy-smoke `no-fsync` protocol, then return how many
+/// syncing, mirroring a missing-fsync commit protocol, then return how many
 /// bytes survive a reopen. The write handle is closed before the reopen so a
 /// crash pinned to that close lands between the append and the verify.
 fn write_wal_and_reopen(seed: u64, crash: Option<CrashOp>) -> usize {

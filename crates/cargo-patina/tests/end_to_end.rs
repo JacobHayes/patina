@@ -1665,7 +1665,7 @@ fn main() {
 // descriptors — the trace channel (fd 3) and the filesystem image (fd 4). The
 // image temp file can be allocated on fd 3, so installing the trace there first
 // used to clobber the still-unread image source, crashing the guest by signal
-// (buggy-smoke never tripped it: it carries only the single trace fd). The
+// (a guest carrying only the single trace fd never tripped it). The
 // descriptor-relocation fix (F_DUPFD every source above the target range before
 // installing) must let both compose. Asserts a clean record AND replay that see
 // the mounted content.
@@ -1775,9 +1775,10 @@ fn native_mount_composes_with_record_and_replay_two_inherited_descriptors() {
 
 // A guest that opens the SAME file twice and takes an advisory `flock` on each
 // descriptor. The interposed `flock` keys on the deterministic-fs inode, so the
-// second `LOCK_EX | LOCK_NB` must report EWOULDBLOCK (-1) — the contention redb's
-// open surfaces as `DatabaseAlreadyOpen` — rather than both succeeding as a naive
-// always-0 stub would. Closing the first descriptor releases the lock, so a
+// second `LOCK_EX | LOCK_NB` must report EWOULDBLOCK (-1) — the contention a
+// single-opener database's open surfaces as an "already open" error — rather than
+// both succeeding as a naive always-0 stub would. Closing the first descriptor
+// releases the lock, so a
 // third opener then acquires it, proving release-on-close.
 const FLOCK_CONTENTION_SOURCE: &str = r#"
 use std::fs::{File, OpenOptions};
@@ -1811,8 +1812,8 @@ fn main() {
 "#;
 
 // The per-inode advisory-lock table: a second open of the same path contends the
-// first's `LOCK_EX`, and closing the first releases it. A single-opener redb path
-// still acquires cleanly (covered by the redb rung); this is the can-fail half.
+// first's `LOCK_EX`, and closing the first releases it. A single-opener path
+// still acquires cleanly; this is the can-fail half.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn native_flock_contends_on_a_second_open_and_releases_on_close() {
@@ -2052,7 +2053,7 @@ fn native_rwlock_contention_is_seed_deterministic_and_varies_across_seeds() {
 }
 
 // Two threads incrementing a shared counter through the atomics-only
-// `std::sync::RwLock` fast path — the buggy-smoke `lost-update` shape. Reads no
+// `std::sync::RwLock` fast path — the classic lost-update shape. Reads no
 // argv/env, so it audits clean without `--allow-unsupported-symbols`.
 const YIELD_POINTS_SOURCE: &str = r#"
 use std::sync::{Arc, RwLock};
@@ -2205,7 +2206,7 @@ fn native_yield_points_trace_fails_closed_against_plain_binary() {
 // handle whose destructor runs at pthread exit. Under `--yield-points` that
 // destructor is instrumented std code monomorphized into the guest crate, so it
 // runs the yield hook AFTER `thread_finish` completed the task — the regression
-// that aborted with "scheduler task 2 does not exist" on the raft harness. The
+// that aborted with "scheduler task 2 does not exist" on a multi-thread guest. The
 // program itself is trivial and must run to completion, deterministically.
 const YIELD_TEARDOWN_SOURCE: &str = r#"
 use std::sync::mpsc;
@@ -4315,7 +4316,7 @@ fn native_run_json_envelope_has_stable_shape() {
 // report and the `violation` classification.
 const PLANTED_FAILURE_SOURCE: &str = r#"
 fn main() {
-    eprintln!("RAFT_VIOLATION planted two-leaders term=4");
+    eprintln!("WORKQ_VIOLATION planted two-leaders term=4");
     std::process::exit(3);
 }
 "#;
@@ -4366,7 +4367,7 @@ fn native_planted_failure_emits_report_and_json_violation() {
         "failure summary section missing"
     );
     assert!(
-        page.contains("RAFT_VIOLATION planted"),
+        page.contains("WORKQ_VIOLATION planted"),
         "violation line missing from report"
     );
 
@@ -4394,7 +4395,7 @@ fn native_planted_failure_emits_report_and_json_violation() {
     assert_eq!(value["exit_code"], 3);
     assert_eq!(
         value["result_line"],
-        "RAFT_VIOLATION planted two-leaders term=4"
+        "WORKQ_VIOLATION planted two-leaders term=4"
     );
 }
 

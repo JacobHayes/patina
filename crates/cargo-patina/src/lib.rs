@@ -4555,7 +4555,7 @@ fn collect_fs_entries(
         })?;
         let guest_path = format!("{guest_prefix}/{name}");
         // Classify without following symlinks so a symlink stays a symlink in
-        // the image, matching how a default ripgrep walk lstat's and skips it.
+        // the image, matching how a default recursive file-walk lstat's and skips it.
         let metadata = fs::symlink_metadata(&host_path).map_err(|error| {
             CliError(format!("failed to stat {}: {error}", host_path.display()))
         })?;

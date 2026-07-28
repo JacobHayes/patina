@@ -359,8 +359,8 @@ const MARKER_PREFIXES: &[&str] = &[
     "PATINA_ALWAYS_VIOLATION",
     "PATINA_BUGGIFY_DUPLICATE_LABEL",
     "PATINA_BUGGIFY_SETUP_NEVER_CALLED",
-    "RAFT_RESULT",
-    "RAFT_VIOLATION",
+    "WORKQ_RESULT",
+    "WORKQ_VIOLATION",
     "BUG_CAUGHT",
 ];
 
@@ -714,7 +714,7 @@ mod tests {
     #[test]
     fn classify_detects_violation_markers() {
         assert_eq!(classify(0, "", ""), "ok");
-        assert_eq!(classify(3, "RAFT_VIOLATION two-leaders", ""), "violation");
+        assert_eq!(classify(3, "WORKQ_VIOLATION two-leaders", ""), "violation");
         assert_eq!(
             classify(2, "", "trace operation mismatch at 4"),
             "violation"

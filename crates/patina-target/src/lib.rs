@@ -952,8 +952,8 @@ mod x86_scan {
 
         #[test]
         fn decodes_legacy_three_byte_maps() {
-            // The exact bytes the release raft-harness carries (the `sha2` x86
-            // backend used for the applied-sequence digest). Before the 0f 38/0f 3a
+            // The exact bytes the `sha2` x86 backend carries (used by guests for
+            // an applied-sequence digest). Before the 0f 38/0f 3a
             // maps were length-decoded these all failed closed, refusing the binary
             // at the first `palignr` (`.text+0x42929`). Lengths are objdump-verified.
             let cases: &[(&[u8], usize)] = &[
@@ -1265,7 +1265,7 @@ fn macho_native_allowlisted_import(symbol: &str) -> bool {
     const PROCESS_LOCAL_MEMORY: &[&str] = &["mmap"];
     // Darwin libc byte-pattern fills: write a repeating 4/8/16-byte pattern into
     // a caller-owned buffer. Pure caller-memory writes, exactly like the common
-    // `memset`/`memcpy` intrinsics but Darwin-only (ripgrep's `grep-matcher`
+    // `memset`/`memcpy` intrinsics but Darwin-only (a byte-oriented regex matcher
     // reaches `memset_pattern16`), so they carry no boundary effect.
     const MEMORY_FILL: &[&str] = &["memset_pattern4", "memset_pattern8", "memset_pattern16"];
     // Read-only stack-extent queries used by Rust's stack-overflow guard. The
@@ -2043,8 +2043,9 @@ mod tests {
     // Pure-compute host symbols are known-safe with no `--allow`: they read or
     // write only caller-owned memory (Darwin byte-pattern fills; POSIX
     // signal-set bit manipulation) and carry no boundary effect. This is the
-    // audit-side half of the ripgrep allowance-removal pivot: the process-spawn
-    // and host-state-query members of that binary's old allow list become
+    // audit-side half of the allowance-removal pivot proven against a real-world
+    // file-walking CLI: the process-spawn and host-state-query members of such a
+    // binary's old allow list become
     // shim-*defined* (so they drop off the import table entirely), while these
     // pure-compute members are cleared here instead of being interposed.
     #[test]

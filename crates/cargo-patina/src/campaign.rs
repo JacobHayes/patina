@@ -1,6 +1,6 @@
 //! `cargo patina campaign` — a config-driven, deterministic fault-and-schedule
 //! sweep that generalizes the battle-tested shell campaign machinery
-//! (`testbeds/raft-harness/fuzz-sweep.sh`, `testbeds/buggify-campaign.sh`) into a
+//! (`testbeds/workq/fuzz-sweep.sh`, `testbeds/buggify-campaign.sh`) into a
 //! first-class product surface.
 //!
 //! A campaign runs `generations` independent child `cargo patina run` processes
@@ -15,7 +15,7 @@
 //!     scheme;
 //!   * the child streams a generalized result contract — `PATINA_RESULT <k=v…>`
 //!     and `PATINA_VIOLATION <class> <detail>` (harness-agnostic generalizations of
-//!     the existing `RAFT_RESULT`/`RAFT_VIOLATION`/`PATINA_SDK_REPORT`
+//!     the existing per-testbed result/violation and `PATINA_SDK_REPORT`
 //!     conventions), plus the runtime's own `PATINA_VIOLATION liveness` /
 //!     `PATINA_SCHEDULE_POLICY` diagnostics;
 //!   * the [`classify`] pure classifier assigns one of seven outcome classes with
@@ -301,7 +301,8 @@ pub enum CampaignClass {
     /// The run completed clean (exit 0, no finding markers).
     Ok,
     /// A system-under-test safety/assertion violation: `PATINA_VIOLATION`,
-    /// `PATINA_ALWAYS_VIOLATION`, `RAFT_VIOLATION`, `BUG_CAUGHT`, or a guest panic.
+    /// `PATINA_ALWAYS_VIOLATION`, a testbed violation marker, `BUG_CAUGHT`, or a
+    /// guest panic.
     Violation,
     /// A liveness-watchdog violation (`PATINA_VIOLATION liveness`/`converge`): a
     /// virtual-time no-progress wedge.
@@ -373,7 +374,7 @@ const FAIL_CLOSED_MARKERS: &[&str] = &[
 const VIOLATION_MARKERS: &[&str] = &[
     "PATINA_VIOLATION",
     "PATINA_ALWAYS_VIOLATION",
-    "RAFT_VIOLATION",
+    "WORKQ_VIOLATION",
     "BUG_CAUGHT",
     "panicked at",
 ];
@@ -470,7 +471,7 @@ fn primary_finding_line(class: CampaignClass, stdout: &str, stderr: &str) -> Str
         CampaignClass::Violation => &[
             "PATINA_VIOLATION",
             "PATINA_ALWAYS_VIOLATION",
-            "RAFT_VIOLATION",
+            "WORKQ_VIOLATION",
             "BUG_CAUGHT",
         ],
         CampaignClass::FailClosedAbort => &[

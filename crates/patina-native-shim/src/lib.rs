@@ -651,8 +651,8 @@ enum FlockMode {
 /// Advisory `flock` state, keyed by the guest descriptor that holds the lock and
 /// recording the deterministic-fs inode the descriptor is open on. Conflicts are
 /// resolved against the *inode*, so two independent opens of the same path
-/// contend exactly as a real per-file-identity `flock` would (redb's
-/// `DatabaseAlreadyOpen`), while a lone opener always acquires. Cleared on
+/// contend exactly as a real per-file-identity `flock` would (a single-opener
+/// database's "already open" error), while a lone opener always acquires. Cleared on
 /// `LOCK_UN` and on `close`. This is shim-side state, never a trace record: the
 /// inode it keys on is read through the recorded metadata path, so the table
 /// rebuilds identically under replay from the same deterministic open sequence.
@@ -1567,14 +1567,15 @@ const LOCK_NB: c_int = 4;
 const LOCK_UN: c_int = 8;
 
 /// Advisory whole-file lock over the deterministic filesystem — the interposed
-/// `flock` in `c/patina_posix.c`. redb (via std `File::try_lock`) takes one
-/// `LOCK_EX | LOCK_NB` on open; a lone opener always acquires it.
+/// `flock` in `c/patina_posix.c`. A single-opener database (via std
+/// `File::try_lock`) takes one `LOCK_EX | LOCK_NB` on open; a lone opener always
+/// acquires it.
 ///
 /// The lock is keyed on the descriptor's deterministic-fs inode, so two
 /// independent opens of the *same* path contend faithfully: a non-blocking
 /// request that would collide with an incompatible lock held on another
-/// descriptor reports `EWOULDBLOCK` (redb surfaces this as
-/// `DatabaseError::DatabaseAlreadyOpen`). `LOCK_SH` conflicts only with a held
+/// descriptor reports `EWOULDBLOCK` (a single-opener database surfaces this as
+/// an "already open" error). `LOCK_SH` conflicts only with a held
 /// `LOCK_EX`; `LOCK_EX` conflicts with any held lock. Re-locking or upgrading on
 /// the *same* descriptor is always allowed (it replaces that descriptor's entry
 /// and never self-conflicts). The lock clears on `LOCK_UN` and on `close`.

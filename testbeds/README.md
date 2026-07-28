@@ -1,30 +1,27 @@
 # Testbeds
 
-Real-world programs and planted-bug guests for exercising Patina end to end.
-Each testbed is native-first: it must build and run **correctly without
-Patina** (its `run-native.sh` proves that), and swaps to Patina by changing a
-single `RUNNER` variable. Harness binaries are 100% std-pure — no Patina
-imports, no `cfg(patina)` — so the same source runs both ways with identical
-arguments.
+Guests for exercising Patina end to end. Every harness binary is 100% std-pure
+— no Patina imports, no `cfg(patina)` — so the same source runs both natively
+and under Patina with identical arguments.
 
 | Testbed | Program under test | Shape | Patina phase exercises |
 |---|---|---|---|
-| [`ripgrep/`](ripgrep/) | ripgrep 15.2.0 (unmodified, pinned fetch) | host-driver: battery script runs the guest binary per search | filesystem model, threads, whole-package native builds |
-| [`redb-harness/`](redb-harness/) | redb 4.1.0 (embedded ACID KV) | guest: seeded workload + in-memory oracle in one binary | CrashFs fsync/torn-write injection, durability invariants |
-| [`raft-harness/`](raft-harness/) | tikv raft 0.7.0 (3-node cluster, threads + loopback UDP) | guest: cluster, invariants, and driver in one process | SimNet drop/reorder/partition, virtual-time elections, crash-restart |
-| [`buggy-smoke/`](buggy-smoke/) | itself — six deliberately planted bugs | guest: `--bug <name>` scenarios with internal assertions | canary: each Patina capability must find "its" bug |
+| [`workq/`](workq/) | itself — a single-process durable work queue (WAL segments + loopback UDP + worker/producer threads) | guest: server, workers, producers, and invariant checks in one process | WAL crash-recovery, SimNet drop/reorder/jitter, virtual-time visibility timeouts + retries, cooperative buggify faults, fail-closed recovery |
+| [`liveness-campaign/`](liveness-campaign/) | a small buggify-gated planted-bug fixture | guest: a deterministic bug the liveness/converge watchdog must catch | liveness/heal-then-converge oracles, buggify activation |
+| [`buggify-wasi/`](buggify-wasi/) | a small `wasm32-wasip1` buggify fixture | guest: several buggify site kinds + a plantable `always!` violation | guest-side buggify lowering on WASI, `PATINA_SDK_REPORT` parsing, record/replay determinism |
+
+`workq` is the flagship: `workq/run-patina.sh` runs its full self-checking
+battery (determinism, record/replay, net/fs faults, crash-recovery, buggify
+sweep) per push in CI, and `workq/fuzz-sweep.sh` is the home of the
+randomized-but-deterministic fault-combination campaign (including its
+schedule-fuzz tier) that runs nightly. `liveness-campaign` and `buggify-wasi`
+are small fixtures.
 
 Conventions:
 
-- `run-native.sh` — builds and verifies the testbed on the real OS. Exit 0
-  means the harness itself is sound. These scripts are safe to run
-  concurrently.
-- `run-patina.sh` — the intended Patina invocation. UNTESTED sketches until
-  the Patina phase lands; not wired into `run-native.sh`.
 - Oracles live inside the guest binaries (nonzero exit + a machine-parseable
-  line: `RESULT …`, `RAFT_RESULT …`, `BUG_CAUGHT …`), so a violation under
-  Patina is a deterministic failing run that `explore`/`minimize` can bisect.
+  line: `WORKQ_RESULT …` / `WORKQ_VIOLATION …`), so a violation under Patina is
+  a deterministic failing run that `explore`/`minimize` can bisect.
 - Every harness's failure path has been demonstrated (corrupted baseline /
-  corrupted db / divergent logs / stress-tripped race) — none of these gates
-  is unable to fail.
-- Versions are pinned exactly (fetch scripts verify shas; `=x.y.z` deps).
+  divergent logs / stress-tripped race) — none of these gates is unable to fail.
+- Versions are pinned exactly (`=x.y.z` deps).

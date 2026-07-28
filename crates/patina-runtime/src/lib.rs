@@ -1502,7 +1502,7 @@ struct CompletedTask {
 ///   an empty-body worker reports `0y+0p`, an uncontended-`Mutex` worker likewise
 ///   `0y+0p` (uncontended locks are pure userspace atomics), and a `--yield-points`
 ///   worker reports tens — so a floor of 0 flags exactly the atomics-only workers
-///   (buggy-smoke `lost-update`) while one interposed boundary clears it.
+///   (an atomics-only lost-update race) while one interposed boundary clears it.
 #[cfg(target_os = "macos")]
 const SCAFFOLDING_YIELD_FLOOR: u64 = 4;
 #[cfg(not(target_os = "macos"))]
@@ -1843,7 +1843,7 @@ impl ScheduleTracker {
                 // A spawned worker whose yields do not clear the thread-lifecycle
                 // scaffolding floor exposed no schedulable body: any loop it ran
                 // was atomics-only and unschedulable at any seed. That is the
-                // exact shape of the buggy-smoke `lost-update` race window, and
+                // exact shape of an atomics-only lost-update race window, and
                 // the yield count is invariant to its iteration count.
                 // A spawned worker (order > 0) is vacuous when its yields do not
                 // exceed the platform scaffolding floor. Written as `!(> floor)`
@@ -2808,7 +2808,7 @@ impl Context {
 
     /// Positional write (`pwrite`): write at an explicit offset without moving
     /// the file cursor. Recorded as [`Operation::FsWriteAt`] and counts toward
-    /// the `write` crash ordinal, so `--fs-crash-at write:N` fires on redb's
+    /// the `write` crash ordinal, so `--fs-crash-at write:N` fires on a guest's
     /// positional page writes.
     pub fn fs_write_at(
         &mut self,
@@ -5370,7 +5370,7 @@ mod tests {
     #[test]
     fn vacuous_worker_that_never_yields_is_flagged() {
         // RED: a spawned worker that runs from first scheduled to completion with
-        // zero scheduling boundaries — like buggy-smoke `lost-update` on an
+        // zero scheduling boundaries — like a lost-update race on an
         // atomics-only RwLock fast path — must be reported as vacuous.
         let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
         let _main = context.task_spawn("main").unwrap();

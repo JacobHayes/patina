@@ -45,8 +45,8 @@
 //! # Worked example: a key/value store against a `BTreeMap`
 //!
 //! The SUT here is a `HashMap` and the model a `BTreeMap`; both are correct, so
-//! the property holds. Swap in a real store (see the redb dogfood) or plant a
-//! bug and [`check`] returns the minimal failing command sequence.
+//! the property holds. Swap in a real store or plant a bug and [`check`] returns
+//! the minimal failing command sequence.
 //!
 //! ```
 //! use std::collections::{BTreeMap, HashMap};

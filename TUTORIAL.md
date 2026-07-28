@@ -182,5 +182,6 @@ $ cargo patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina --fo
 - Make atomics-only race windows schedulable: `cargo patina build --yield-points`.
 - Shrink a failing trace to its essence: `cargo patina minimize bug.patina
   --output small.patina -- ./oracle`.
-- See `llms.txt` for the full CLI/SDK map and `testbeds/PATINA-REPORT.html` for
-  campaign results against ripgrep, redb, and raft-rs.
+- See `llms.txt` for the full CLI/SDK map and `testbeds/workq` (a durable work
+  queue: WAL crash-recovery, SimNet faults, buggify) for the flagship end-to-end
+  demonstration.

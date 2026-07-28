@@ -888,7 +888,7 @@ mod tests {
         // task A — the resource holder another task needs — is starved by an
         // interval that never ends on its own. Without aging the scheduler would
         // pick the sole free candidate B forever and A would never run (the real
-        // buggy-smoke hang). A deterministic always-starve-A interval isolates the
+        // starvation hang). A deterministic always-starve-A interval isolates the
         // guarantee: A must be force-scheduled at least once every `aging_cap + 1`
         // decisions.
         let aging_cap = 6;

@@ -397,8 +397,8 @@ mod tests {
             .into_iter()
             .map(|entry| (entry.name, entry.kind))
             .collect();
-        // Symlink is listed as a symlink (inert, not followed), matching how a
-        // default `rg` walk skips it.
+        // Symlink is listed as a symlink (inert, not followed), matching how an
+        // ordinary directory walk skips it.
         assert!(root.contains(&("link_to_readme".to_string(), FsEntryKind::Symlink)));
         assert!(root.contains(&("README".to_string(), FsEntryKind::File)));
         // Empty directory survives.
