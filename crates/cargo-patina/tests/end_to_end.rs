@@ -2128,6 +2128,142 @@ fn native_yield_points_survive_thread_local_teardown() {
     );
 }
 
+// A `--yield-points` guest whose MAIN thread owns a thread-local with an
+// instrumented `Drop`, plus a worker thread that recreates the joined-task /
+// still-exiting-host-thread teardown window. Under `--yield-points` the main
+// thread's thread-local destructor runs instrumented code AFTER `main` returns —
+// inside the C runtime's `exit()`, which (on glibc) drives `__call_tls_dtors`
+// BEFORE the atexit-registered `patina_shutdown`. Before the `exit`-interposer
+// teardown flag, those late yields were recorded as trailing, host-teardown-
+// ordering-dependent `TaskYield`s on the ROOT task (which, unlike a worker, has
+// no `thread_finish` completion sentinel), so a record run and a replay run could
+// disagree on a final yield and abort the replay with "trace ended before
+// operation N; actual operation was TaskYield { task: TaskId(1) }" + a signal
+// death. The root task must now record exactly ZERO teardown yields, so
+// record/replay is byte-identical across repeats. On macOS the natural `main`
+// return keeps libSystem's own `exit` (two-level namespace) and teardown is
+// already deterministic, so this passes there too; the fix bites on Linux, where
+// ELF interposition routes the crt `exit` through the shim.
+const MAIN_TLS_TEARDOWN_SOURCE: &str = r#"
+use std::cell::Cell;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
+struct Noisy(Cell<u64>);
+impl Drop for Noisy {
+    fn drop(&mut self) {
+        // Instrumented teardown work: enough edges that the --yield-points hook
+        // fires while the main thread destroys its thread-local, at process exit.
+        let mut acc = self.0.get();
+        for i in 0..128u64 {
+            acc = acc.wrapping_mul(6364136223846793005).wrapping_add(i);
+        }
+        self.0.set(acc);
+        // Keep the loop and the drop observable so neither is elided.
+        if acc == 0 {
+            std::process::abort();
+        }
+    }
+}
+
+thread_local! {
+    static MAIN_LOCAL: Noisy = Noisy(Cell::new(1));
+}
+
+fn main() {
+    // Initialize the main thread's thread-local so its Drop runs at exit.
+    MAIN_LOCAL.with(|noisy| noisy.0.set(42));
+    // A worker recreates the joined-task / still-exiting-host-thread window.
+    let worker = thread::spawn(|| {
+        let (_tx, rx) = mpsc::channel::<u8>();
+        let _ = rx.recv_timeout(Duration::from_millis(5));
+    });
+    worker.join().unwrap();
+    println!("MAIN_TLS_ok");
+}
+"#;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_yield_points_main_thread_tls_teardown_is_deterministic() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("main_tls.rs");
+    fs::write(&source, MAIN_TLS_TEARDOWN_SOURCE).unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("main-tls");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+            "--yield-points",
+        ],
+    );
+
+    let first = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let baseline = String::from_utf8_lossy(&first.stdout).into_owned();
+    assert!(
+        baseline.contains("MAIN_TLS_ok"),
+        "main-thread TLS teardown run did not complete: {baseline}\nstderr:\n{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    // Record once, then replay several times: with the root task recording ZERO
+    // teardown yields, replay never exhausts the trace on a trailing teardown
+    // yield. Before the fix this replay aborted (fail-closed) on Linux.
+    let trace = directory.path().join("main_tls.patina");
+    let recorded = invoke_in(
+        workspace,
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--record",
+            trace.to_str().unwrap(),
+        ],
+    );
+    for _ in 0..4 {
+        let replayed = invoke_in(
+            workspace,
+            &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&recorded.stdout),
+            String::from_utf8_lossy(&replayed.stdout),
+            "main-thread TLS teardown replay diverged from the recording"
+        );
+    }
+
+    // Re-record and replay repeatedly: a nondeterministic trailing teardown yield
+    // would surface as a fresh recording whose own replay fails closed.
+    for _ in 0..4 {
+        let again = invoke_in(
+            workspace,
+            &[
+                "run",
+                bin.to_str().unwrap(),
+                "--seed",
+                "1",
+                "--record",
+                trace.to_str().unwrap(),
+            ],
+        );
+        let replay = invoke_in(
+            workspace,
+            &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&again.stdout),
+            String::from_utf8_lossy(&replay.stdout),
+            "re-recorded main-thread TLS teardown replay diverged"
+        );
+    }
+}
+
 // One uninterposed symbol per escape class in a single guest. Taking each as a
 // pointer forces the undefined import, so the pre-run gate must refuse the whole
 // binary before it runs. This is the gate-level per-class proof: if any class's

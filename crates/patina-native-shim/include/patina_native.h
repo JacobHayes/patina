@@ -41,6 +41,23 @@ int32_t patina_init_from_env(void);
 void patina_control_set_entry(const char *entry);
 int32_t patina_shutdown(void);
 /*
+ * The runtime side of the packaged `exit` interposer. Marks the process as
+ * having entered post-`main` teardown (so the root task's --yield-points hooks
+ * take no scheduling point) and then terminates through the real libc `exit`
+ * resolved via the shim host-alias table, so the atexit chain (trace
+ * finalization) and the thread-local destructors still run. Does not return.
+ */
+_Noreturn void patina_exit(int32_t status);
+/*
+ * Mark the process as having entered post-`main` teardown without terminating.
+ * Called by the Linux `__libc_start_main` interposer from its wrapper `main`, the
+ * instant the guest's real `main` returns and before the exit code re-enters
+ * glibc's `exit()` path — so the root task's --yield-points thread-local
+ * destructor yields are silenced on the natural-return path that a plain `exit`
+ * interposer cannot see (glibc calls `exit` through a hidden internal alias).
+ */
+void patina_note_main_returned(void);
+/*
  * Flush captured stdout/stderr to the real host descriptors WITHOUT finalizing
  * the run (unlike patina_shutdown). The process-class deny-traps call this
  * before abort() so the guest's output and the deny diagnostic reach the

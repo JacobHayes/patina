@@ -372,6 +372,7 @@ impl RuntimeConfig {
             schedule_policy: SchedulePolicy::default(),
             swarm: false,
             guest_argv: None,
+            liveness: LivenessConfig::default(),
         }
     }
 
@@ -388,6 +389,7 @@ impl RuntimeConfig {
             schedule_policy: SchedulePolicy::default(),
             swarm: false,
             guest_argv: None,
+            liveness: LivenessConfig::default(),
         }
     }
 
@@ -409,6 +411,7 @@ impl RuntimeConfig {
             schedule_policy: SchedulePolicy::default(),
             swarm: false,
             guest_argv: None,
+            liveness: LivenessConfig::default(),
         }
     }
 
@@ -431,6 +434,7 @@ impl RuntimeConfig {
             schedule_policy: SchedulePolicy::default(),
             swarm: false,
             guest_argv: None,
+            liveness: LivenessConfig::default(),
         }
     }
 
@@ -454,6 +458,7 @@ impl RuntimeConfig {
             schedule_policy: SchedulePolicy::default(),
             swarm: false,
             guest_argv: None,
+            liveness: LivenessConfig::default(),
         }
     }
 
@@ -483,6 +488,7 @@ impl RuntimeConfig {
             schedule_policy: SchedulePolicy::default(),
             swarm: false,
             guest_argv: None,
+            liveness: LivenessConfig::default(),
         }
     }
 
@@ -1075,6 +1081,7 @@ impl RuntimeBuilder {
                             .with_buggify(buggify_record(&self.config))
                             .with_schedule_policy(schedule_policy_record(&self.config))
                             .with_swarm(swarm_record.clone())
+                            .with_watchdog(watchdog_record(&self.config))
                             .with_guest_argv(self.config.guest_argv.clone()),
                     ),
                     sink: RecordSink::Path {
@@ -1092,6 +1099,7 @@ impl RuntimeBuilder {
                             .with_buggify(buggify_record(&self.config))
                             .with_schedule_policy(schedule_policy_record(&self.config))
                             .with_swarm(swarm_record.clone())
+                            .with_watchdog(watchdog_record(&self.config))
                             .with_guest_argv(self.config.guest_argv.clone()),
                     ),
                     sink: RecordSink::Transport(

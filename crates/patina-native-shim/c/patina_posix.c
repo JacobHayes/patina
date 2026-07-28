@@ -1307,6 +1307,91 @@ void pthread_exit(void *retval) {
     __builtin_unreachable();
 }
 
+/*
+ * `exit(3)` interposer. When the guest's `main` returns, the C runtime calls
+ * `exit(status)`; a guest's own `exit`/`std::process::exit` routes here too. This
+ * is the sole point that runs on the exiting thread AFTER its managed body but
+ * BEFORE the C runtime drives the guest's thread-local destructors — whose
+ * `--yield-points` yield hooks would otherwise record trailing, host-teardown-
+ * ordering-dependent scheduling points that diverge record from replay (see
+ * patina_exit and the shim's thread::sched_point). The teardown flag MUST be set
+ * here, not via atexit: glibc runs __call_tls_dtors() BEFORE the atexit list, so
+ * the packaged atexit finalizer is too late to precede the destructors.
+ * `_exit`/`_Exit` bypass the destructors entirely and are deliberately not
+ * interposed. patina_exit sets the flag and terminates through the real libc
+ * `exit` (resolved via the shim host-alias table), so the atexit chain (trace
+ * finalization in record mode) and the destructors still run, now with the flag
+ * set. This interposer lives in the POSIX layer, so a consumer that links only
+ * the C-ABI staticlib (no POSIX layer, no --wrap=dlsym) keeps libc's own `exit`
+ * and never reaches the host-alias table at teardown.
+ */
+_Noreturn void exit(int status) {
+    patina_exit(status);
+}
+
+#ifdef __linux__
+/*
+ * `__libc_start_main` interposer (Linux only). The `exit` interposer above
+ * catches only EXPLICIT `exit(3)` calls from guest/executable code: on the
+ * natural `main`-return path glibc's `__libc_start_main` calls `exit()` through a
+ * hidden internal alias (bound at libc build time, not via the PLT), so ELF
+ * interposition never sees it and the root task's post-`main` --yield-points
+ * teardown yields would still be recorded nondeterministically. crt1.o in the
+ * EXECUTABLE references `__libc_start_main`, and the executable's own strong
+ * definition wins at static link (no --wrap), so this runs BEFORE glibc gets
+ * control — immune to the internal binding. We stash the guest's real `main` and
+ * hand glibc a wrapper that runs it and then sets the teardown flag BEFORE
+ * returning the code into glibc's exit path (which then runs the thread-local
+ * destructors, now silenced in the shim's sched_point). The real
+ * `__libc_start_main` is resolved locally via `__real_dlsym(RTLD_NEXT, ...)`:
+ * this runs before patina_native_start's constructor, so the shim host-alias
+ * table is not yet built and must not be used; `__real_dlsym` is the
+ * `-Wl,--wrap=dlsym` alias (guest/std `dlsym` binds to the neutering
+ * `__wrap_dlsym`, so plain `dlsym` cannot reach the real resolver). Darwin uses a
+ * different C runtime entry and is untouched (the `exit` interposer above already
+ * covers its explicit-exit path; Darwin teardown is already deterministic).
+ */
+typedef int (*patina_main_fn)(int, char **, char **);
+typedef int (*patina_libc_start_main_fn)(patina_main_fn, int, char **, void *,
+                                         void *, void *, void *);
+
+extern void *__real_dlsym(void *handle, const char *symbol);
+
+static patina_main_fn patina_real_main;
+
+static int patina_main_wrapper(int argc, char **argv, char **envp) {
+    int code = patina_real_main(argc, argv, envp);
+    /*
+     * The guest's `main` has returned. Mark teardown NOW — before the code
+     * re-enters glibc's `exit()`, which drives `__call_tls_dtors` — so the root
+     * task's instrumented thread-local destructors take no scheduling point.
+     */
+    patina_note_main_returned();
+    return code;
+}
+
+int __libc_start_main(patina_main_fn main_fn, int argc, char **argv, void *init,
+                      void *fini, void *rtld_fini, void *stack_end) {
+    patina_real_main = main_fn;
+    patina_libc_start_main_fn real =
+        (patina_libc_start_main_fn)__real_dlsym(RTLD_NEXT, "__libc_start_main");
+    if (real == NULL) {
+        /*
+         * Defensive and effectively unreachable: glibc always exports
+         * __libc_start_main, and this file is only ever linked with
+         * -Wl,--wrap=dlsym, so __real_dlsym is the genuine resolver. Fail closed
+         * LOUDLY (SIGABRT) rather than run the guest unwrapped — which would
+         * silently reintroduce the nondeterministic teardown yields this
+         * interposer exists to remove. `abort()` is the real libc abort (the shim
+         * does not interpose it), so it works before the runtime is installed and
+         * without touching the interposed `syscall`/`write` layer.
+         */
+        abort();
+    }
+    return real(patina_main_wrapper, argc, argv, init, fini, rtld_fini, stack_end);
+}
+#endif
+
 int pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr) {
     return patina_mutex_init((void *)mutex, (const void *)attr);
 }

@@ -270,6 +270,10 @@ mod hostapi {
     pub type ThreadResume = unsafe extern "C" fn(MachPort) -> c_int;
     pub type HostRead = unsafe extern "C" fn(c_int, *mut c_void, usize) -> isize;
     pub type HostWrite = unsafe extern "C" fn(c_int, *const c_void, usize) -> isize;
+    // The real libSystem `exit`, reached so the shim's public `exit` interposer
+    // (which marks post-`main` teardown) can terminate the process without
+    // recursing into itself. `exit` does not return.
+    pub type HostExit = unsafe extern "C" fn(c_int) -> !;
 
     /// Real host vehicles resolved once through `dlsym(RTLD_NEXT, ...)`. None of
     /// these names appears as an undefined external in the shim objects.
@@ -294,6 +298,10 @@ mod hostapi {
         /// `write`), so trace finalization can never recurse into the FS.
         pub host_read: HostRead,
         pub host_write: HostWrite,
+        /// The real libSystem `exit`, called by the `exit` interposer after it
+        /// marks post-`main` teardown; resolving it here keeps the interposer from
+        /// naming (and recursing into) the public `exit` it defines.
+        pub host_exit: HostExit,
     }
 
     // SAFETY: the fields are all function pointers into libSystem/libdispatch;
@@ -355,6 +363,7 @@ mod hostapi {
                 host_write: std::mem::transmute::<*mut c_void, HostWrite>(resolve(
                     c"write$NOCANCEL",
                 )),
+                host_exit: std::mem::transmute::<*mut c_void, HostExit>(resolve(c"exit")),
             }
         }
     }
@@ -412,6 +421,9 @@ mod hostapi {
 
     pub type HostRead = unsafe extern "C" fn(c_int, *mut c_void, usize) -> isize;
     pub type HostWrite = unsafe extern "C" fn(c_int, *const c_void, usize) -> isize;
+    // The real glibc `exit`, reached so the shim's public `exit` interposer (which
+    // marks post-`main` teardown) can terminate without recursing into itself.
+    pub type HostExit = unsafe extern "C" fn(c_int) -> !;
     pub type SemInit = unsafe extern "C" fn(*mut c_void, c_int, c_uint) -> c_int;
     pub type SemOp = unsafe extern "C" fn(*mut c_void) -> c_int;
     pub type StartRoutine = extern "C" fn(*mut c_void) -> *mut c_void;
@@ -427,6 +439,10 @@ mod hostapi {
         /// `write`, so trace finalization can never recurse into the FS.
         pub host_read: HostRead,
         pub host_write: HostWrite,
+        /// The real glibc `exit`, called by the `exit` interposer after it marks
+        /// post-`main` teardown; resolving it here keeps the interposer from
+        /// naming (and recursing into) the public `exit` it defines.
+        pub host_exit: HostExit,
         /// The execution-baton POSIX semaphore vehicle.
         pub sem_init: SemInit,
         pub sem_wait: SemOp,
@@ -469,6 +485,7 @@ mod hostapi {
             HostApi {
                 host_read: std::mem::transmute::<*mut c_void, HostRead>(resolve(c"read")),
                 host_write: std::mem::transmute::<*mut c_void, HostWrite>(resolve(c"write")),
+                host_exit: std::mem::transmute::<*mut c_void, HostExit>(resolve(c"exit")),
                 sem_init: std::mem::transmute::<*mut c_void, SemInit>(resolve(c"sem_init")),
                 sem_wait: std::mem::transmute::<*mut c_void, SemOp>(resolve(c"sem_wait")),
                 sem_post: std::mem::transmute::<*mut c_void, SemOp>(resolve(c"sem_post")),
@@ -751,6 +768,23 @@ fn with_context_raw<T>(
 fn with_context_msg<T>(
     invoke: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
 ) -> Result<T, String> {
+    // Detection-before-fixes. `with_context_msg` is the sole chokepoint for every
+    // recorded/replayed managed *scheduler* operation (task spawn/yield/park/wake/
+    // complete/next). Once `main` has returned the process is in its post-`main`
+    // teardown window, where the only permitted managed activity is the root
+    // task's yield hooks — and those are silenced in `sched_point` before they
+    // ever reach here. So ANY scheduler operation arriving past the flag is an
+    // unmanaged-window leak (a boundary that bypassed the silence): fail LOUDLY
+    // and named rather than record/consume a trace op that would otherwise resurface
+    // as an unexplained record/replay op-count divergence at some far-away index.
+    if thread::main_returned() {
+        let _ = host_write_all(
+            2,
+            b"patina native shim fatal: a managed scheduling operation reached the trace after \
+`main` returned; the post-main teardown window must take no recorded scheduling points\n",
+        );
+        std::process::abort();
+    }
     ensure_runtime().map_err(|_| "Patina context is not installed".to_string())?;
     let mut guard = slot().lock();
     let context = guard
@@ -1987,6 +2021,43 @@ pub extern "C" fn patina_sched_yield() -> c_int {
     0
 }
 
+/// The runtime side of the packaged `exit` interposer (patina_posix.c). It runs
+/// at the process's main-return / `exit(3)` boundary — the one point that
+/// executes on the exiting thread AFTER its managed body but BEFORE the C runtime
+/// drives the guest's thread-local destructors. Marking teardown here makes the
+/// root task's post-`main` yield hooks take no scheduling point (see
+/// `thread::sched_point`), so a `--yield-points` guest's host-teardown-ordering-
+/// dependent trailing yields can never diverge record from replay. `atexit`
+/// cannot serve: glibc runs the TLS destructors BEFORE the atexit list, so the
+/// packaged `patina_shutdown` atexit hook is too late. `_exit`/`_Exit` skip the
+/// TLS destructors entirely and are deliberately not interposed. The real libc
+/// `exit` is reached through the init-resolved `host_exit` alias (never the
+/// public `exit`, which the C interposer defines), so there is no recursion —
+/// glibc's `exit` still runs the atexit chain (finalizing the trace in record
+/// mode) and the TLS destructors, now with the teardown flag set.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_exit(status: c_int) -> ! {
+    thread::note_main_returned();
+    // SAFETY: `host_exit` is the real libc `exit` resolved once via
+    // `dlsym(RTLD_NEXT, "exit")`; it does not return.
+    unsafe { (hostapi::get().host_exit)(status) }
+}
+
+/// Mark the process as having entered post-`main` teardown WITHOUT terminating.
+/// The Linux `__libc_start_main` interposer (patina_posix.c) calls this from its
+/// wrapper `main` the instant the guest's real `main` returns — before it hands
+/// the exit code back into glibc's `exit()` path, which then drives the
+/// thread-local destructors. That natural-return path never reaches
+/// [`patina_exit`]: glibc's `__libc_start_main` calls `exit` through a hidden
+/// internal alias (bound at libc build time, not via the PLT), so an `exit`
+/// strong-def only catches EXPLICIT `exit(3)`/`std::process::exit`. Setting the
+/// flag here silences the root task's `--yield-points` teardown yields on that
+/// natural path (see `thread::sched_point`).
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_note_main_returned() {
+    thread::note_main_returned();
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_crash() -> c_int {
     match with_context(Context::fs_crash) {
@@ -2361,6 +2432,34 @@ mod thread {
     /// in post-completion teardown.
     fn task_completed() -> bool {
         TASK_COMPLETED.with(Cell::get)
+    }
+
+    /// Set once the guest's `main` has returned (or the guest called `exit`), so
+    /// the process is unwinding through the `exit` interposer. Unlike
+    /// [`task_completed`] (per host thread, set for a *worker* at `thread_finish`),
+    /// this is process-wide and covers the ROOT (main) task, which never runs
+    /// `thread_finish` and so has no completion sentinel of its own. glibc drives
+    /// the guest's thread-local destructors from inside `exit()` — under
+    /// `--yield-points` those are instrumented std code that hits the yield hook —
+    /// BEFORE the atexit-registered `patina_shutdown` runs `deactivate()`. Those
+    /// teardown yields sit outside the deterministic body, and whether a given
+    /// yield-guard edge fires before or after the runtime detaches is governed by
+    /// host teardown ordering (glibc TLS-dtor vs atexit ordering, plus a
+    /// still-exiting worker host thread), not the seed — so recording them lets a
+    /// record run and a replay run disagree on a trailing `TaskYield`. Setting
+    /// this at the `exit` boundary (never via `atexit`, which glibc runs *after*
+    /// the TLS destructors) lets `sched_point` silence them deterministically.
+    static MAIN_RETURNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    /// Mark the process as having entered post-`main` teardown. Idempotent.
+    /// Called only by the `exit` interposer at the main-return/`exit` boundary.
+    pub(crate) fn note_main_returned() {
+        MAIN_RETURNED.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the process has entered post-`main` teardown.
+    pub(crate) fn main_returned() -> bool {
+        MAIN_RETURNED.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The unmanaged sentinel used before the thread subsystem activates; the
@@ -3259,7 +3358,17 @@ mod thread {
         // must not take a scheduling point. Checked before locking and keyed on
         // the completed sentinel alone, so a never-registered thread falls through
         // to the unchanged (loud) reschedule path below rather than being silenced.
-        if task_completed() {
+        //
+        // `main_returned()` extends the identical treatment to the ROOT (main)
+        // task once the process is unwinding through the `exit` interposer: the
+        // main task never runs `thread_finish`, so without this its instrumented
+        // thread-local destructors (under `--yield-points`) would record trailing,
+        // host-teardown-ordering-dependent `TaskYield`s and diverge record from
+        // replay. The deterministic contract: the root task records exactly ZERO
+        // teardown yields on every platform. This is a silence (no op recorded or
+        // consumed), never a replay-tolerance relaxation; a NON-yield scheduler op
+        // arriving past the flag is still caught loudly (see `with_context_msg`).
+        if task_completed() || main_returned() {
             return Ok(());
         }
         let mut state = lock_state();
@@ -5270,6 +5379,28 @@ mod thread {
         fn rescheduling_an_unregistered_task_errors() {
             let mut scheduler = DetAdapter::new(1);
             assert!(scheduler.yield_task(UNMANAGED_TASK).is_err());
+        }
+
+        // The main-thread teardown fix: once the process enters its post-`main`
+        // teardown window (the `exit` interposer calls `note_main_returned`), the
+        // ROOT task — which never runs `thread_finish` and so has no per-thread
+        // completion sentinel — takes NO scheduling point, exactly like a
+        // completed worker's post-teardown, so its `--yield-points` thread-local
+        // destructors record zero trailing yields. `MAIN_RETURNED` is process-wide
+        // (no other test sets it, and none relies on the global `sched_point`
+        // taking its reschedule path); this test restores it so the teardown state
+        // never leaks into sibling tests.
+        #[test]
+        fn main_returned_silences_the_root_task_scheduling_point() {
+            note_main_returned();
+            assert!(main_returned());
+            // A scheduling point in the teardown window is a no-op, on any thread —
+            // never a reschedule against a torn-down scheduler.
+            std::thread::spawn(|| assert!(sched_point().is_ok()))
+                .join()
+                .unwrap();
+            MAIN_RETURNED.store(false, std::sync::atomic::Ordering::SeqCst);
+            assert!(!main_returned());
         }
 
         #[test]
