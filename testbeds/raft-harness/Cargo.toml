@@ -13,9 +13,11 @@ name = "raft-harness"
 path = "src/main.rs"
 
 [dependencies]
-# tikv raft, pinned exact. Default features select `protobuf-codec`
-# (rust-protobuf), whose codegen is pre-generated and vendored in raft-proto,
-# so the build needs no `protoc` / system packages. See README for the choice.
+# tikv raft, pinned exact, on `prost-codec` (prost codegen is pre-generated
+# and vendored in raft-proto, so the build needs no `protoc` / system
+# packages). Note: raft 0.7 still pulls `protobuf` 2.x unconditionally even
+# with prost-codec selected — it never parses external input here (Dependabot
+# alert #2 context). See README for the codec choice.
 raft = { version = "=0.7.0", default-features = false, features = ["prost-codec"] }
 # raft's public API takes a slog::Logger; a Discard drain keeps it silent.
 slog = "2"
