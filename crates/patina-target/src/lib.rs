@@ -344,17 +344,18 @@ fn aarch64_instruction_category(instruction: u32) -> Option<&'static str> {
 /// Soundness (this is a containment gate, so a *false negative* — a real
 /// `syscall` slipping past — is the dangerous direction): the decoder fails
 /// CLOSED. Any byte sequence it cannot confidently measure — an unmapped/invalid
-/// opcode, a truncated tail, a legacy three-byte (`0f 38`/`0f 3a`) opcode, or an
-/// EVEX (AVX-512) prefix — yields an `undecodable-instruction` finding naming the
-/// offset and stops the walk, so the binary is refused rather than silently
-/// scanned past a length guess. Those maps are declined deliberately: the default
-/// `x86_64` Rust target emits none of them (verified against the real std/glibc
-/// `.text` corpus), and none can encode the legacy-only forbidden opcodes, so
-/// declining them cannot hide a forbidden instruction — it can at most refuse a
-/// binary that used one, which is the safe direction. VEX (AVX/AVX2, both the
-/// two-byte `c5` and three-byte `c4` forms) *is* length-decoded, because default
-/// codegen does emit it (`vmovdqa`/`vzeroupper`/...); its opcodes are never
-/// forbidden, so it is measured only to reach the next real boundary. Because
+/// opcode, a truncated tail, or an EVEX (AVX-512) prefix — yields an
+/// `undecodable-instruction` finding naming the offset and stops the walk, so the
+/// binary is refused rather than silently scanned past a length guess. The legacy
+/// three-byte maps (`0f 38`/`0f 3a`) *are* length-decoded: default codegen emits
+/// them (the `sha2` crate's x86 backend uses `pshufb`/`palignr`/`pblendw` and the
+/// SHA extensions `sha256rnds2`/`sha256msg1`/`sha256msg2`), and — like VEX below —
+/// none of their opcodes are forbidden (`syscall`/`rdtsc`/`rdrand`/`rdseed` live
+/// only in the legacy two-byte `0f` map), so measuring them cannot hide a
+/// forbidden instruction. VEX (AVX/AVX2, both the two-byte `c5` and three-byte
+/// `c4` forms) is length-decoded for the same reason — default codegen emits it
+/// (`vmovdqa`/`vzeroupper`/...) and its opcodes are never forbidden, so it is
+/// measured only to reach the next real boundary. Because
 /// every real instruction advances the cursor to its true successor, a forbidden
 /// opcode embedded in another instruction's operand is never at a tested
 /// boundary. The length decoder is proven against `objdump -d` boundaries over
@@ -472,11 +473,36 @@ mod x86_scan {
             };
             p += 1;
             if op2 == 0x38 || op2 == 0x3A {
-                return Step::Undecodable; // legacy three-byte opcode map: fail closed
-            }
-            match two_byte(op2) {
-                Some(a) => a,
-                None => return Step::Undecodable,
+                // Legacy three-byte opcode maps (SSSE3/SSE4.1/SSE4.2/SHA-NI): the
+                // third byte is the real opcode, always followed by a ModRM.
+                // Default codegen *does* emit these — e.g. the `sha2` crate's x86
+                // backend uses `pshufb`/`palignr`/`pblendw`/`pinsrd` and the SHA
+                // extensions `sha256rnds2`/`sha256msg1`/`sha256msg2` (`0f 38 cb/cc/
+                // cd`) — so they must be length-decoded, not declined. No opcode in
+                // either map is forbidden: `syscall`/`rdtsc`/`rdrand`/`rdseed` live
+                // only in the legacy `0f` (two-byte) map, so measuring these can
+                // never hide a forbidden instruction. Length rules mirror the VEX
+                // `0f 38`/`0f 3a` maps decoded below: `0f 38` ops carry no
+                // immediate, `0f 3a` ops carry an imm8.
+                if b.get(p).is_none() {
+                    return Step::Undecodable; // truncated: no third opcode byte
+                }
+                p += 1; // consume the third opcode byte
+                OpAttr {
+                    modrm: true,
+                    imm: if op2 == 0x3A {
+                        Imm::Fixed(1)
+                    } else {
+                        Imm::None
+                    },
+                    cat: Option::None,
+                    group9: false,
+                }
+            } else {
+                match two_byte(op2) {
+                    Some(a) => a,
+                    None => return Step::Undecodable,
+                }
             }
         } else if op == 0xC5 {
             // Two-byte VEX: one prefix byte (`R.vvvv.L.pp`), then an opcode in the
@@ -924,6 +950,48 @@ mod x86_scan {
             }
         }
 
+        #[test]
+        fn decodes_legacy_three_byte_maps() {
+            // The exact bytes the release raft-harness carries (the `sha2` x86
+            // backend used for the applied-sequence digest). Before the 0f 38/0f 3a
+            // maps were length-decoded these all failed closed, refusing the binary
+            // at the first `palignr` (`.text+0x42929`). Lengths are objdump-verified.
+            let cases: &[(&[u8], usize)] = &[
+                (&[0x66, 0x45, 0x0f, 0x3a, 0x0f, 0xec, 0x08], 7), // palignr (0f 3a 0f, imm8)
+                (&[0x66, 0x44, 0x0f, 0x3a, 0x0e, 0xe0, 0xf0], 7), // pblendw (0f 3a 0e, imm8)
+                (&[0x66, 0x0f, 0x3a, 0x22, 0xe1, 0x00], 6),       // pinsrd  (0f 3a 22, imm8)
+                (&[0x66, 0x0f, 0x38, 0x00, 0xfd], 5),             // pshufb  (0f 38 00, no imm)
+                (&[0x41, 0x0f, 0x38, 0xcb, 0xdd], 5),             // sha256rnds2 (0f 38 cb)
+                (&[0x41, 0x0f, 0x38, 0xcc, 0xfe], 5),             // sha256msg1  (0f 38 cc)
+                (&[0x41, 0x0f, 0x38, 0xcd, 0xf0], 5),             // sha256msg2  (0f 38 cd)
+            ];
+            for (bytes, expected) in cases {
+                let (len, cat) = decode(bytes);
+                assert_eq!(len, *expected, "length for {bytes:02x?}");
+                assert_eq!(
+                    cat, None,
+                    "three-byte-map opcodes are never forbidden: {bytes:02x?}"
+                );
+            }
+        }
+
+        #[test]
+        fn forbidden_opcode_after_three_byte_map_is_still_caught() {
+            // Decoding the 0f 38/0f 3a maps must not blunt the forbidden scan: a
+            // `syscall` at the real boundary immediately after a `palignr` (the
+            // encoding that used to halt the walk) must still be flagged, and the
+            // walk must land on it at exactly the right offset (7 = palignr's len).
+            let mut escapes = Vec::new();
+            let text = [
+                0x66, 0x45, 0x0f, 0x3a, 0x0f, 0xec, 0x08, // palignr (7 bytes)
+                0x0f, 0x05, // syscall at offset 7
+            ];
+            scan(&text, ".text", &mut escapes);
+            assert_eq!(escapes.len(), 1, "{escapes:?}");
+            assert_eq!(escapes[0].category, "direct-syscall");
+            assert_eq!(escapes[0].symbol, "instruction@.text+0x7");
+        }
+
         // Ground-truth corpus check: the length decoder must reproduce objdump's
         // instruction boundaries exactly over a real `.text`, or it could desync
         // (a wrong length silently steps over a real instruction — the same
@@ -956,12 +1024,23 @@ mod x86_scan {
             // instruction line (`  <hexaddr>:\t<bytes>\t<mnemonic>`), restricted to
             // this `.text`. Lines like `<addr> <name>:` (labels) and `\t...`
             // (elided zero runs) are not instruction starts and are skipped.
+            //
+            // GNU objdump wraps an instruction longer than 7 bytes onto a
+            // continuation line — `  <hexaddr>:\t<more bytes>` with NO trailing
+            // mnemonic — whose address is an interior byte, not a real boundary
+            // (e.g. an 8-byte `cmpq [rip+d32],imm8` prints 7 bytes on its address
+            // line and the 8th on a `+7:` continuation). Those must be skipped or
+            // they inflate the golden set with phantom boundaries the decoder (which
+            // treats the whole thing as one instruction) correctly lacks. A real
+            // instruction line always has a second tab before the mnemonic; a
+            // continuation line has only bytes, so require `rest` to contain a tab.
             let objdump = std::fs::read_to_string(&objdump_path).expect("read objdump");
             let mut golden = BTreeSet::new();
             for line in objdump.lines() {
                 let trimmed = line.trim_start();
                 if let Some((addr_hex, rest)) = trimmed.split_once(":\t") {
-                    if addr_hex.bytes().all(|c| c.is_ascii_hexdigit()) && !rest.is_empty() {
+                    let is_instruction_line = rest.contains('\t');
+                    if addr_hex.bytes().all(|c| c.is_ascii_hexdigit()) && is_instruction_line {
                         if let Ok(addr) = u64::from_str_radix(addr_hex, 16) {
                             if addr >= base && addr < base + data.len() as u64 {
                                 golden.insert(addr);
