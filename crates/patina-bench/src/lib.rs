@@ -18,8 +18,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use patina_abi::{ClockKind, OpenFlags};
-use patina_runtime::{Context, RuntimeBuilder, RuntimeConfig, RuntimeError, TraceTransport};
+use patina_dst_abi::{ClockKind, OpenFlags};
+use patina_dst_runtime::{Context, RuntimeBuilder, RuntimeConfig, RuntimeError, TraceTransport};
 
 /// Maximum serialized bytes per recorded boundary event for the representative
 /// workload. This is deterministic given the trace encoding, so it is a real,
@@ -73,7 +73,7 @@ impl TraceTransport for CapturingTransport {
 }
 
 /// The compatibility fingerprint used for record/replay qualification runs.
-const FINGERPRINT: &str = "patina-bench-v1";
+const FINGERPRINT: &str = "patina-dst-bench-v1";
 
 /// Drive one representative unit of work touching entropy, the clock, the
 /// filesystem data plane, and the scheduler. Returns the boundary-operation
@@ -322,7 +322,7 @@ mod tests {
     }
 
     // Timing guards are opt-in: they depend on the host and would flake as
-    // hard CI gates. Run with `cargo test -p patina-bench -- --ignored`.
+    // hard CI gates. Run with `cargo test -p patina-dst-bench -- --ignored`.
     #[test]
     #[ignore = "machine-dependent timing guard"]
     fn seeded_overhead_within_sanity_ceiling() {

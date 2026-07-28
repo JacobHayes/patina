@@ -50,20 +50,20 @@
 // ---- Explicit-boundary facade (behind the `runtime` feature) -----------------
 
 #[cfg(feature = "runtime")]
-pub use patina_abi::{
+pub use patina_dst_abi::{
     ClockKind, Datagram, EffectError, ErrorCode, Fd, FsDirectoryEntry, FsEntryKind, FsMetadata,
     OpenFlags, SeekWhence, SendDisposition, SendReport, ShutdownHow, SocketId, TaskId,
 };
 #[cfg(feature = "runtime")]
-pub use patina_async::block_on;
+pub use patina_dst_async::block_on;
 #[cfg(feature = "runtime")]
-pub use patina_runtime::{Context, ExecutionMode, RuntimeBuilder, RuntimeConfig, RuntimeError};
+pub use patina_dst_runtime::{Context, ExecutionMode, RuntimeBuilder, RuntimeConfig, RuntimeError};
 
 /// Deterministic async executor and network futures over the explicit boundary.
 #[cfg(feature = "runtime")]
 pub mod rt {
-    pub use patina_abi::{Datagram, SendReport, ShutdownHow};
-    pub use patina_async::{
+    pub use patina_dst_abi::{Datagram, SendReport, ShutdownHow};
+    pub use patina_dst_async::{
         JoinHandle, TcpListener, TcpStream, UdpSocket, block_on, sleep, sleep_until, spawn,
         timeout, yield_now,
     };
@@ -382,7 +382,7 @@ pub mod __rt {
         }
     }
 
-    /// `patina::lifecycle::event!`.
+    /// `patina_dst::lifecycle::event!`.
     #[inline]
     pub fn lifecycle_event(label: &str) {
         #[cfg(patina_shim)]
@@ -403,7 +403,7 @@ pub mod __rt {
         }
     }
 
-    /// `patina::lifecycle::setup_complete`.
+    /// `patina_dst::lifecycle::setup_complete`.
     #[inline]
     pub fn lifecycle_setup_complete() {
         #[cfg(patina_shim)]
@@ -487,8 +487,8 @@ mod ffi {
 /// only under a Patina wasm build (`cfg(patina)` without the native shim), so a
 /// plain `cargo build --target wasm32-wasip1` of an adopter references none of
 /// these symbols and its import table stays free of `patina_sdk`. The host side
-/// (`patina-wasi-host`) defines the `patina_sdk` module against the same
-/// deterministic runtime the shim uses; `patina-target`'s WASI audit allowlists
+/// (`patina-dst-wasi-host`) defines the `patina_sdk` module against the same
+/// deterministic runtime the shim uses; `patina-dst-target`'s WASI audit allowlists
 /// exactly these ten names. `usize`/`*const u8` lower to wasm `i32`, matching the
 /// host's `func_wrap` signatures.
 #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
@@ -570,7 +570,7 @@ mod fallback {
 /// site fires deterministically from the run seed; outside Patina always `false`.
 ///
 /// ```ignore
-/// if patina::buggify!("commit-early-return") {
+/// if patina_dst::buggify!("commit-early-return") {
 ///     return Err(commit_conflict());
 /// }
 /// ```

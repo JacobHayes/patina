@@ -13,8 +13,8 @@ Acceptance level: V0 and V1.
 ### Workspace and contracts
 
 - Create a Cargo workspace with separate ABI, driver API, driver, trace, runtime, facade, and CLI crates.
-- Define serializable effect operations and outcomes in `patina-abi`.
-- Keep concrete construction APIs out of `patina-driver-api`.
+- Define serializable effect operations and outcomes in `patina-dst-abi`.
+- Keep concrete construction APIs out of `patina-dst-driver-api`.
 - Represent denied and missing effects with stable, typed error codes.
 
 ### Initial deterministic drivers
@@ -36,7 +36,7 @@ Acceptance level: V0 and V1.
 ### Runtime and facade
 
 - Build a runtime from explicit configuration or the CLI environment protocol.
-- Install deterministic default drivers for `patina::run`.
+- Install deterministic default drivers for `patina_dst::run`.
 - Expose primitive filesystem, clock, and entropy effects through `Context` plus `read_file`/`write_file` conveniences.
 - Finalize recording/replay on both successful closures and closures returning a Patina error.
 - Return errors when a requested capability has no installed driver.
@@ -61,9 +61,9 @@ Acceptance level: V2.
 - CLI controls replay timelines, branches, and step budgets.
 - `cargo patina minimize` runs an external failure oracle against unbranched main timelines or leaf branch suffixes.
 
-CLI key/value parameters are exposed through `Context::param`, typed driver setup is available through `patina::run_with`, and `cargo patina explore` runs bounded independent-process seed campaigns. Named scenario profiles remain a future experiment-plane convenience.
+CLI key/value parameters are exposed through `Context::param`, typed driver setup is available through `patina_dst::run_with`, and `cargo patina explore` runs bounded independent-process seed campaigns. Named scenario profiles remain a future experiment-plane convenience.
 
-The `patina-async` crate builds a deterministic single-threaded futures executor over these same recorded operations: `block_on`/`spawn`/`JoinHandle`/`yield_now`, virtual-time `sleep`/`sleep_for`/`sleep_until`/`timeout`, and async TCP and UDP futures. It adds no new boundary operations — task creation, interleaving, parking, waking, yielding, completion, clock reads, and every net effect route through the existing `Context` recorded ops, so record/replay stays byte-identical. The executor makes exactly one recorded scheduling decision per poll: leaf futures perform their recorded effect, register an interest or deadline on the current poll scope, and return `Pending`, while an executor-internal FIFO wake queue (deduplicated per task) is drained into recorded `TaskWake`/`TaskYield` at fixed points. Timer futures ride the virtual-clock timer queue and its deadlock rescue (`task_park_timed` plus rescued `SleepUntil`/`TaskWake`); net futures translate would-block outcomes into interest registration plus a `NetNextDelivery` timed park, so wrapper-added latency stays visible. The `patina` facade re-exports the surface as `patina::rt` (plus `patina::block_on`), and `crates/patina-async/examples/async_echo.rs` runs a seeded TCP echo. Native interposition of third-party async runtimes (tokio/async-std under the shim) is a separate concern tracked in Slice 4.
+The `patina-dst-async` crate builds a deterministic single-threaded futures executor over these same recorded operations: `block_on`/`spawn`/`JoinHandle`/`yield_now`, virtual-time `sleep`/`sleep_for`/`sleep_until`/`timeout`, and async TCP and UDP futures. It adds no new boundary operations — task creation, interleaving, parking, waking, yielding, completion, clock reads, and every net effect route through the existing `Context` recorded ops, so record/replay stays byte-identical. The executor makes exactly one recorded scheduling decision per poll: leaf futures perform their recorded effect, register an interest or deadline on the current poll scope, and return `Pending`, while an executor-internal FIFO wake queue (deduplicated per task) is drained into recorded `TaskWake`/`TaskYield` at fixed points. Timer futures ride the virtual-clock timer queue and its deadlock rescue (`task_park_timed` plus rescued `SleepUntil`/`TaskWake`); net futures translate would-block outcomes into interest registration plus a `NetNextDelivery` timed park, so wrapper-added latency stays visible. The `patina` facade re-exports the surface as `patina_dst::rt` (plus `patina_dst::block_on`), and `crates/patina-async/examples/async_echo.rs` runs a seeded TCP echo. Native interposition of third-party async runtimes (tokio/async-std under the shim) is a separate concern tracked in Slice 4.
 
 ## Slice 3: WASI target boundary — Complete
 
@@ -95,7 +95,7 @@ Acceptance level: V4 is not complete.
 Completed foundations:
 
 1. `cargo patina` injects `cfg(patina)` and `cfg(dst)` into Cargo builds.
-2. `patina-native-shim` exposes prefixed filesystem, clock, entropy, sleep, crash, captured-stdio, and lifecycle ABI calls.
+2. `patina-dst-native-shim` exposes prefixed filesystem, clock, entropy, sleep, crash, captured-stdio, and lifecycle ABI calls.
 3. The opt-in POSIX C layer exports `open/read/write/writev/readv/close/dup/lseek/fsync/ftruncate`, namespace/stat calls, clock/sleep calls, and entropy calls (including Darwin's `CCRandomGenerateBytes` and `F_FULLFSYNC`) without host fallback. Startup snapshots the private `PATINA_*` control plane for shim configuration, then scrubs the live environment; guest-visible `getenv` and direct `environ` iteration see an empty immutable environment, and mutation (`setenv`/`unsetenv`/`putenv`) fails closed with `ENOSYS` plus a `patina:` diagnostic.
 4. Linked macOS and Linux Rust probes execute ordinary `std::fs`, metadata, `SystemTime`, `Instant`, `thread::sleep`, printing, and standard-library entropy through the shim with cross-process seed stability; Linux large-file/stat variants and Rust's startup descriptor probe are explicit.
 5. The trace control plane is separated from the interposed data plane: a supervisor-provided `PATINA_TRACE_FD` descriptor carries trace bundles through non-interposed host read/write aliases, so the fully interposed probe records and replays traces.
@@ -117,7 +117,7 @@ Completed foundations:
 
 Remaining:
 
-1. Native async-runtime interposition (a shim-level epoll/kqueue/eventfd readiness reactor mapped onto `SimNet`) and non-zero TCP latency over `SimNet`. The explicit-API async executor (`patina-async`, Slice 2) is complete; native tokio/async-std under the shim stays a deliberate non-goal until such a reactor exists.
+1. Native async-runtime interposition (a shim-level epoll/kqueue/eventfd readiness reactor mapped onto `SimNet`) and non-zero TCP latency over `SimNet`. The explicit-API async executor (`patina-dst-async`, Slice 2) is complete; native tokio/async-std under the shim stays a deliberate non-goal until such a reactor exists.
 2. Cross-machine stress and a usable macOS whole-run syscall trace if a future `ktrace`/OS version exposes enough path context for a default-deny gate.
 
 Ordinary programs built through `cargo patina build` — a single Rust source or a whole Cargo package with dependencies and build scripts — now claim supported `std` calls use Patina, with threads managed on both platforms and both verified locally by the validation scripts (macOS directly; Linux in a VM). Scheduling granularity differs deterministically: on macOS every interposed lock operation is a scheduling point, while on Linux uncontended lock operations are pure userspace atomics, so scheduling points occur at futex contention — Linux interleaving is contention-granular, macOS is lock-granular; both are seed-stable and seed-varying.
@@ -139,7 +139,7 @@ Completed foundations:
 - explicit read-only host capture with path containment, replay without host I/O, and failure on branch misses;
 - prefixed and opt-in POSIX native filesystem symbols with mixed C/Rust probes, plus managed pthread synchronization (Slice 4);
 - bounded multi-process seed exploration;
-- performance budgets in `patina-bench`: a hard trace bytes-per-event gate runs in `cargo test`, structural gates always run, and generous timing ceilings are `#[ignore]`d opt-ins.
+- performance budgets in `patina-dst-bench`: a hard trace bytes-per-event gate runs in `cargo test`, structural gates always run, and generous timing ceilings are `#[ignore]`d opt-ins.
 
 - schedule reducers: `reduce_schedule` rewrites recorded `SchedulerNext` outcomes toward a canonical schedule — longer runs per task (switch collapsing) and lowest-task-id-first at switch points — accepting a candidate only when the failure oracle confirms the failure survives; protected inherited prefixes are never rewritten, and the combined minimization entry points run pruning, suffix shrinking, and schedule reduction to a joint fixed point.
 
@@ -154,7 +154,7 @@ cooperate with the deterministic simulator. It lives in the existing `patina`
 crate under a feature inversion: default features are the dependency-light SDK
 (the `buggify!`, `buggify_with_prob!`, `buggify_delay!`, `buggify_knob!`,
 `always!`, `sometimes!`, `reachable!`, and lifecycle macros plus
-`patina::is_simulated()`/`patina::rng()`); the explicit-boundary facade
+`patina_dst::is_simulated()`/`patina_dst::rng()`); the explicit-boundary facade
 (`run`/`run_with`, `Context`, `rt`, the ABI re-exports) moved behind a new
 `runtime` feature. A plain `cargo build` of an adopter links no runtime and every
 macro is a no-op or a plain fallback, so instrumented code compiles and runs
@@ -189,14 +189,14 @@ Completed foundations (Milestone A):
    `--buggify-cutoff-nanos`, and `--buggify-after-setup`, passed to the guest
    through the `PATINA_BUGGIFY*` control plane and recorded into the trace. The
    SDK reaches the runtime through two build-selected transports, both resolving
-   to the *same* `patina-runtime` buggify subsystem. On native, `build` injects an
+   to the *same* `patina-dst-runtime` buggify subsystem. On native, `build` injects an
    internal `--cfg patina_shim` (only on the shim-linked native paths) so the
    SDK's shim C ABI is referenced only where those symbols resolve. On WASI,
    `build --target wasi` injects `--cfg patina` (no `patina_shim`), under which the
    SDK lowers to a dedicated `patina_sdk` wasm import module (`buggify`,
    `buggify_delay`, `buggify_knob`, `always`, `sometimes`, `reachable`, `rng`,
    `is_simulated`, `lifecycle_setup_complete`, `lifecycle_event`) that
-   `patina-wasi-host` defines against the runtime. Without `cfg(patina)` — a plain
+   `patina-dst-wasi-host` defines against the runtime. Without `cfg(patina)` — a plain
    `cargo build --target wasm32-wasip1` — the sites stay no-ops and the guest's
    import table grows *no* `patina_sdk` reference (proven by wasm inspection in a
    test), so adopters pay nothing.
@@ -204,7 +204,7 @@ Completed foundations (Milestone A):
    registered/activated/fired counts, cutoff state, and per-site
    `sometimes`/`reachable` coverage and knob values, in the spirit of
    `PATINA_SCHEDULE_REPORT`.
-7. **`patina::rng()`** bridged to the root seed under Patina (a plainly-seeded
+7. **`patina_dst::rng()`** bridged to the root seed under Patina (a plainly-seeded
    fallback outside), as the hook for the property-based-testing wave.
 
 Lifecycle gating is causal via the runner, not lookahead: with
@@ -219,7 +219,7 @@ boundary/coverage marker.
 Completed foundations (Milestone B):
 
 8. **Causal setup gate.** `run --buggify-after-setup` lets the runner
-   declare that the guest calls `patina::lifecycle::setup_complete()`, so buggify
+   declare that the guest calls `patina_dst::lifecycle::setup_complete()`, so buggify
    stays inert until that call — a causal gate (intent from the flag, no
    lookahead) recorded in the trace metadata. A declared-but-never-called run
    records its trace and then fails loudly (`PATINA_BUGGIFY_SETUP_NEVER_CALLED` +
@@ -256,16 +256,16 @@ Completed foundations (Milestone C — buggify on WASI):
 12. **`patina_sdk` wasm import module.** The full cooperative-SUT surface reaches
     a `wasm32-wasip1` guest at parity with native. The `patina` crate's macros
     lower, under `cfg(patina)` on wasm, to imports from a dedicated `patina_sdk`
-    module; `patina-wasi-host` defines that module against the **same**
-    `patina-runtime` buggify subsystem the native shim drives (activation, the
+    module; `patina-dst-wasi-host` defines that module against the **same**
+    `patina-dst-runtime` buggify subsystem the native shim drives (activation, the
     counter-keyed firing PRF, the labels registry, the 300-virtual-second cutoff,
     the diagnostics report, and the lifecycle markers are reused, not
-    reimplemented). `patina-target`'s WASI audit allowlists exactly the ten
+    reimplemented). `patina-dst-target`'s WASI audit allowlists exactly the ten
     `patina_sdk` names alongside the Preview 1 surface. The fatal outcomes mirror
     the native shim: an `always!` violation and a duplicate label emit their
     markers (`PATINA_ALWAYS_VIOLATION` / `PATINA_BUGGIFY_DUPLICATE_LABEL`) to the
     real process stderr and trap the guest, and the `--buggify-after-setup` gate
-    emits `PATINA_BUGGIFY_SETUP_NEVER_CALLED` at finish. `patina::rng()` routes
+    emits `PATINA_BUGGIFY_SETUP_NEVER_CALLED` at finish. `patina_dst::rng()` routes
     through the host's `buggify_rng` draw (the seed-bridged buggify entropy
     stream), not the WASI `random_get` entropy, so it is not double-plumbed.
 13. **CLI + fingerprint parity.** `cargo patina run <mod.wasm>` accepts
@@ -309,7 +309,7 @@ preserved — because the policies draw exclusively from their own
 domain-separated `SplitMix64` streams and the default `choose` branch is the
 original modulo draw verbatim.
 
-1. **PCT scheduling policy** (`patina-sched-det`): Probabilistic Concurrency
+1. **PCT scheduling policy** (`patina-dst-sched-det`): Probabilistic Concurrency
    Testing (Burckhardt/Musuvathi, PLDI 2010) as an alternative `DetScheduler`
    selection policy over yield-point boundaries. Each task draws a random
    priority from a high band; `d-1` seed-placed priority-change points demote the
@@ -322,7 +322,7 @@ original modulo draw verbatim.
    selection path (`next()`); replay consumes the recorded task stream through
    `select()`, so replay is byte-identical regardless of policy.
 
-2. **Swarm fault-class selection** (`patina-runtime`): `cargo patina run --swarm`
+2. **Swarm fault-class selection** (`patina-dst-runtime`): `cargo patina run --swarm`
    (`PATINA_SWARM`) applies a seed-derived subset of the enabled fault classes
    this generation instead of always-all (swarm testing). At `build` time, for
    each enabled class (`crash`, `sleep_jitter`, `net_jitter`, `net_drop`,
@@ -333,7 +333,7 @@ original modulo draw verbatim.
    selection so the trace is self-describing. Subsets vary across seeds; the
    always-all default (no `--swarm`) is unchanged.
 
-3. **Starvation intervals** (`patina-sched-det`): `cargo patina run --starve[=N]`
+3. **Starvation intervals** (`patina-dst-sched-det`): `cargo patina run --starve[=N]`
    (`PATINA_SCHED_STARVE`, default 3 intervals) with `--starve-max-len M`
    (`PATINA_SCHED_STARVE_MAX_LEN`) and `--starve-window W`
    (`PATINA_SCHED_STARVE_WINDOW`). Bounded, seed-chosen intervals during which a
@@ -384,7 +384,7 @@ vacuous-starvation detection.
 A deterministic, virtual-time-only liveness detector and a first-class product
 surface (`cargo patina campaign`) generalizing the shell campaign machinery.
 
-1. **Liveness watchdog** (`patina-runtime`): a no-progress detector that reports a
+1. **Liveness watchdog** (`patina-dst-runtime`): a no-progress detector that reports a
    structured, classifiable violation on a single stderr line — the interface
    contract `PATINA_VIOLATION liveness detail=no-progress vtime_ns=<n> budget_ns=<n>`
    (and `PATINA_VIOLATION converge detail=did-not-converge vtime_ns=<n> budget_ns=<n>
@@ -480,14 +480,14 @@ surface (`cargo patina campaign`) generalizing the shell campaign machinery.
 ## Dependency order
 
 ```text
-patina-abi
-  -> patina-driver-api
+patina-dst-abi
+  -> patina-dst-driver-api
       -> concrete drivers
-patina-abi
-  -> patina-trace
-concrete drivers + patina-trace
-  -> patina-runtime
-      -> patina-async (explicit-boundary futures executor)
+patina-dst-abi
+  -> patina-dst-trace
+concrete drivers + patina-dst-trace
+  -> patina-dst-runtime
+      -> patina-dst-async (explicit-boundary futures executor)
           -> patina facade
               -> cargo-patina (process configuration)
 ```
@@ -496,4 +496,4 @@ Target hosts and native shims depend on the runtime boundary; they do not redefi
 
 ## Deliberate limitations of the complete slice
 
-V1-V2 remain end-to-end at the explicit Rust API boundary. WASI executes the full audited Preview 1 surface. Native programs — single Rust sources and whole Cargo packages — build and run through `cargo patina build`/`run` with managed threads, UDP datagrams over `SimNet` (including deterministic timed waits and non-zero link latency through the virtual-clock timer queue), deterministic process-state constants, and a strict fail-closed import audit — but TCP, async runtimes, arbitrary FFI, and unrelated direct host APIs remain outside Patina's control. (Deterministic async at the explicit Rust boundary is supported separately through `patina-async`; the limitation here is native interposition of third-party async runtimes under the shim.)
+V1-V2 remain end-to-end at the explicit Rust API boundary. WASI executes the full audited Preview 1 surface. Native programs — single Rust sources and whole Cargo packages — build and run through `cargo patina build`/`run` with managed threads, UDP datagrams over `SimNet` (including deterministic timed waits and non-zero link latency through the virtual-clock timer queue), deterministic process-state constants, and a strict fail-closed import audit — but TCP, async runtimes, arbitrary FFI, and unrelated direct host APIs remain outside Patina's control. (Deterministic async at the explicit Rust boundary is supported separately through `patina-dst-async`; the limitation here is native interposition of third-party async runtimes under the shim.)

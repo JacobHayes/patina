@@ -1,5 +1,5 @@
 [package]
-name = "patina-wrapper-latency"
+name = "patina-dst-wrapper-latency"
 description = "Deterministic latency and jitter wrappers for Patina drivers"
 version.workspace = true
 edition.workspace = true
@@ -8,9 +8,9 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
-patina-abi.workspace = true
-patina-driver-api.workspace = true
-patina-rng-seeded.workspace = true
+patina-dst-abi.workspace = true
+patina-dst-driver-api.workspace = true
+patina-dst-rng-seeded.workspace = true
 
 [dev-dependencies]
-patina-net-sim.workspace = true
+patina-dst-net-sim.workspace = true

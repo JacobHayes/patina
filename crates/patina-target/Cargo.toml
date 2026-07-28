@@ -1,5 +1,5 @@
 [package]
-name = "patina-target"
+name = "patina-dst-target"
 description = "Patina target metadata and WebAssembly import auditing"
 version.workspace = true
 edition.workspace = true

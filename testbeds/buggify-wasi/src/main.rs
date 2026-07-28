@@ -22,40 +22,40 @@ fn main() {
     // Setup phase: fault-free. With `--buggify-after-setup` the runtime keeps
     // buggify inert until `setup_complete()`, so any site above this line stays
     // unarmed. `reachable!` records that we got here at all.
-    patina::reachable!("wasi-fixture-startup");
-    patina::lifecycle::setup_complete();
-    patina::lifecycle::event!("workload-begin");
+    patina_dst::reachable!("wasi-fixture-startup");
+    patina_dst::lifecycle::setup_complete();
+    patina_dst::lifecycle::event!("workload-begin");
 
     // Workload phase: several site kinds, all seed-deterministic.
-    let iterations = patina::buggify_knob!("iteration-count", 8, 4, 16);
+    let iterations = patina_dst::buggify_knob!("iteration-count", 8, 4, 16);
     let mut digest: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a offset basis
     let mut fired_early = 0u64;
     let mut fired_high = 0u64;
     let mut delayed = 0u64;
 
     for _ in 0..iterations {
-        if patina::buggify!("inject-early-return") {
+        if patina_dst::buggify!("inject-early-return") {
             fired_early += 1;
             digest = mix(digest, 0x11);
         }
-        if patina::buggify_with_prob!("inject-high-prob", 0.9) {
+        if patina_dst::buggify_with_prob!("inject-high-prob", 0.9) {
             fired_high += 1;
             digest = mix(digest, 0x22);
         }
-        if patina::buggify_delay!("delay-commit") {
+        if patina_dst::buggify_delay!("delay-commit") {
             delayed += 1;
             digest = mix(digest, 0x33);
         }
-        let draw = patina::rng();
-        patina::sometimes!(draw % 2 == 0, "rng-draw-even");
-        patina::sometimes!(draw % 5 == 0, "rng-draw-mult-five");
+        let draw = patina_dst::rng();
+        patina_dst::sometimes!(draw % 2 == 0, "rng-draw-even");
+        patina_dst::sometimes!(draw % 5 == 0, "rng-draw-mult-five");
         digest = mix(digest, draw);
     }
 
     // A fatal invariant that normally holds. `violate` mode makes it false to
     // prove ALWAYS_VIOLATION detection fires under wasip1.
     let ok = mode != "violate";
-    patina::always!(ok, "workload-completed");
+    patina_dst::always!(ok, "workload-completed");
 
     let mut out = std::io::stdout();
     let _ = writeln!(

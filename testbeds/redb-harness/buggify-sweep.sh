@@ -3,7 +3,7 @@
 # redb cooperative-SUT (buggify) campaign under Patina.
 #
 # Runs the redb harness (against the vendored ../redb-fork, whose commit and
-# recovery paths carry `patina::{buggify!,buggify_delay!,sometimes!,reachable!,
+# recovery paths carry `patina_dst::{buggify!,buggify_delay!,sometimes!,reachable!,
 # always!}` sites) with buggify ENABLED, combined with the crash filesystem so
 # both the commit-path faults (forced 2-phase / quick-repair / a delay before the
 # durability flush) and the recovery-path oracles (full-repair entered, torn-slot
@@ -13,7 +13,7 @@
 # so any generation is re-runnable by number and the whole campaign reproduces.
 # --buggify-after-setup is ALWAYS on: DB creation/baseline is fault-free, faults
 # fire only from the workload's first commit onward (the harness calls
-# patina::lifecycle::setup_complete() at that boundary).
+# patina_dst::lifecycle::setup_complete() at that boundary).
 #
 # Classification uses the shared buggify campaign layer (../buggify-campaign.sh)
 # for the two buggify classes, plus redb's own durability oracle:

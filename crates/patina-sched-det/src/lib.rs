@@ -24,9 +24,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use patina_abi::{EffectError, ErrorCode, TaskId};
-use patina_driver_api::{DriverResult, SchedulePolicyReport, SchedulerDriver};
-use patina_rng_seeded::SplitMix64;
+use patina_dst_abi::{EffectError, ErrorCode, TaskId};
+use patina_dst_driver_api::{DriverResult, SchedulePolicyReport, SchedulerDriver};
+use patina_dst_rng_seeded::SplitMix64;
 
 /// Domain separators mixed into the root seed so a policy's stream never
 /// correlates with the default selection generator or the other policy.

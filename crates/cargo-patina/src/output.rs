@@ -426,7 +426,7 @@ fn failure_summary(
 /// Compact facts about a trace on disk for the envelope's `trace` field. Best
 /// effort: a load failure yields `None` rather than aborting the run's exit.
 fn trace_facts(path: &Path, timeline: &str) -> Option<TraceFacts> {
-    let bundle = patina_trace::TraceBundle::load(path).ok()?;
+    let bundle = patina_dst_trace::TraceBundle::load(path).ok()?;
     let events = bundle
         .resolved_timeline(timeline)
         .map(|d| d.len())

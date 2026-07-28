@@ -53,12 +53,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use patina_abi::{
+use patina_dst_abi::{
     EffectError, ErrorCode, Fd, FsDirectoryEntry, FsEntryKind, FsMetadata, OpenFlags, SeekWhence,
 };
-use patina_driver_api::{DriverResult, FsDriver};
-use patina_fs_mem::MemFs;
-use patina_rng_seeded::SplitMix64;
+use patina_dst_driver_api::{DriverResult, FsDriver};
+use patina_dst_fs_mem::MemFs;
+use patina_dst_rng_seeded::SplitMix64;
 
 /// Granularity at which a torn write reverts on crash.
 ///
@@ -1021,7 +1021,7 @@ fn normalize_entry_path(path: &str) -> DriverResult<String> {
 
 #[cfg(test)]
 mod tests {
-    use patina_abi::{ErrorCode, OpenFlags};
+    use patina_dst_abi::{ErrorCode, OpenFlags};
 
     use super::*;
 
@@ -1138,7 +1138,7 @@ mod tests {
         // crash exactly as with an empty filesystem. `CrashFs::new` here uses the
         // same default policy as `CrashFs::default()` (torn-write probability 1),
         // so the mount does not change crash behavior.
-        let image = patina_fs_mem::FsImage::new(vec![patina_fs_mem::FsImageEntry::File {
+        let image = patina_dst_fs_mem::FsImage::new(vec![patina_dst_fs_mem::FsImageEntry::File {
             path: "/corpus/data.txt".into(),
             contents: b"mounted-and-durable".to_vec(),
         }]);

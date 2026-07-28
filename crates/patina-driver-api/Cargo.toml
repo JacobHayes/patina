@@ -1,5 +1,5 @@
 [package]
-name = "patina-driver-api"
+name = "patina-dst-driver-api"
 description = "Narrow data-plane driver traits for Patina"
 version.workspace = true
 edition.workspace = true
@@ -8,4 +8,4 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
-patina-abi.workspace = true
+patina-dst-abi.workspace = true

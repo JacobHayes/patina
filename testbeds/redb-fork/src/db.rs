@@ -811,14 +811,14 @@ impl Database {
         // PATINA FORK: coverage oracle -- the crash-injection campaign should
         // drive the database into the full-repair path (an unclean shutdown whose
         // primary slot fails checksum verification and must be rolled back).
-        patina::reachable!("redb-recovery-full-repair-entered");
+        patina_dst::reachable!("redb-recovery-full-repair-entered");
         if !Self::verify_primary_checksums(mem.clone())? {
             // PATINA FORK: coverage -- redb explicitly TOLERATES a primary that is
             // corrupted despite 2-phase commit (it returns Corrupted here rather
             // than treating it as impossible), so this is a reachability oracle,
             // NOT an `always!` invariant. A crash-injection campaign that reaches
             // it has exercised the strongest recovery-rejection path.
-            patina::reachable!("redb-recovery-two-phase-primary-corrupted");
+            patina_dst::reachable!("redb-recovery-two-phase-primary-corrupted");
             if mem.used_two_phase_commit() {
                 return Err(DatabaseError::Storage(StorageError::Corrupted(
                     "Primary is corrupted despite 2-phase commit".to_string(),

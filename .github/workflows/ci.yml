@@ -29,12 +29,12 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: cargo doc --workspace --no-deps --locked
-      # The `patina` facade (`run`/`run_with`, `Context`, `rt`, ABI re-exports)
+      # The `patina-dst` facade (`run`/`run_with`, `Context`, `rt`, ABI re-exports)
       # lives behind the non-default `runtime` feature; the default-feature build
       # is the dependency-light cooperative-SUT SDK. Cover the facade explicitly.
-      - run: cargo clippy -p patina --all-targets --features runtime --locked -- -D warnings
-      - run: cargo test -p patina --features runtime --locked
-      - run: cargo doc -p patina --no-deps --features runtime --locked
+      - run: cargo clippy -p patina-dst --all-targets --features runtime --locked -- -D warnings
+      - run: cargo test -p patina-dst --features runtime --locked
+      - run: cargo doc -p patina-dst --no-deps --features runtime --locked
       - run: scripts/validate-wasi.sh
       - run: scripts/validate-native-shim.sh
       - run: scripts/smoke-cross-target.sh

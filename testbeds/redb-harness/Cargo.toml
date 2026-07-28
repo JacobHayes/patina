@@ -21,22 +21,22 @@ path = "src/main.rs"
 # dependency tree under test is redb and redb alone.
 # PATINA FORK of redb 4.1.0, vendored at ../redb-fork with cooperative-SUT
 # (buggify) sites wired into its commit and recovery paths. Byte-for-byte
-# upstream except for the `patina::`-tagged sites; a plain build behaves exactly
+# upstream except for the `patina_dst::`-tagged sites; a plain build behaves exactly
 # like `redb = "=4.1.0"`.
 redb = { path = "../redb-fork" }
 
 # The Patina cooperative-SUT SDK (default features = dependency-light SDK). The
 # harness uses it only to mark the setup/workload boundary via
-# `patina::lifecycle::setup_complete()`; outside a Patina build every SDK call is
+# `patina_dst::lifecycle::setup_complete()`; outside a Patina build every SDK call is
 # a no-op, so the plain `run-native.sh` build is unchanged.
-patina = { path = "../../crates/patina" }
+patina-dst = { path = "../../crates/patina" }
 
 # The Patina proptest compat + in-house model-based (stateful) testing layer,
 # used only by `--mode stateful` (a new bin mode). Its command generation is
-# seeded from `patina::rng()`, so a stateful run is deterministic from the Patina
+# seeded from `patina_dst::rng()`, so a stateful run is deterministic from the Patina
 # run seed. The default crash/full/write/verify modes and the buggify sweep do
 # not touch it.
-patina-proptest = { path = "../../crates/patina-proptest" }
+patina-dst-proptest = { path = "../../crates/patina-proptest" }
 proptest = { version = "1.11.0", default-features = false, features = ["std", "bit-set"] }
 
 [profile.release]

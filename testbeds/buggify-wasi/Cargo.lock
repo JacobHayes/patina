@@ -6,9 +6,9 @@ version = 4
 name = "buggify-wasi-fixture"
 version = "0.1.0"
 dependencies = [
- "patina",
+ "patina-dst",
 ]
 
 [[package]]
-name = "patina"
+name = "patina-dst"
 version = "0.1.0"

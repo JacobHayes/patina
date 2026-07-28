@@ -1,8 +1,8 @@
 //! Deterministic fault injection around data-plane drivers.
 
-use patina_abi::{Datagram, SendDisposition, SendReport, ShutdownHow, SocketId, TcpAccepted};
-use patina_driver_api::{DriverResult, NetDriver};
-use patina_rng_seeded::SplitMix64;
+use patina_dst_abi::{Datagram, SendDisposition, SendReport, ShutdownHow, SocketId, TcpAccepted};
+use patina_dst_driver_api::{DriverResult, NetDriver};
+use patina_dst_rng_seeded::SplitMix64;
 
 /// Injects seeded packet loss and duplication around another network driver.
 pub struct FaultNet<D> {
@@ -146,7 +146,7 @@ fn divides(value: u64, denominator: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use patina_net_sim::SimNet;
+    use patina_dst_net_sim::SimNet;
 
     use super::*;
 

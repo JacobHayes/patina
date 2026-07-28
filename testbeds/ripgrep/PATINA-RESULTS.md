@@ -51,7 +51,7 @@ cargo patina build testbeds/ripgrep/upstream/Cargo.toml \
 filesystem was an empty `CrashFs`, and the guest is fully interposed so it cannot
 read the host itself. Added a minimal, sound mount surface:
 
-- **`patina-fs-mem::FsImage`** — a deterministic, self-describing codec for a
+- **`patina-dst-fs-mem::FsImage`** — a deterministic, self-describing codec for a
   read-only tree (directories, files, inert **no-follow** symlinks). Entries are
   sorted by path, so the encoded bytes are a pure function of the set and host
   `readdir` order never leaks. `decode` **fails closed**: it rejects a
@@ -109,8 +109,8 @@ symbol-reachability, not static call-graph reachability".)
 |---|---|---|---|
 | **Deny-trap interposition** | `fork`, `posix_spawnp`, `posix_spawn_file_actions_{init,adddup2,destroy}`, `posix_spawnattr_{init,destroy,setflags,setpgroup,setsigdefault}`, `execvp`, `waitpid`, `pipe`, `setsid`, `setgid`, `setuid`, `setpgid`, `setgroups`, `chdir`, `chroot` (20) | strong shim C def that **aborts deterministically** if ever reached — the process class is a non-goal, so a real spawn must fail loud + reproducible, never escape silently | shim (pending) |
 | **Deterministic-value interposition** | `__NSGetExecutablePath`, `gethostname`, `getpwuid_r` (3) | fixed deterministic returns (isatty/confstr precedent) | shim (pending) |
-| **Known-safe (pure compute)** | `memset_pattern4/8/16`, `sigaddset`, `sigemptyset` (+ `sigfillset`/`sigdelset`/`sigismember`) | added to `native_allowlisted_import` — caller-memory-only, no boundary effect | `patina-target` ✅ landed |
-| **Control-plane (host-alias)** | `dlsym` | the shim's own `dlsym(RTLD_NEXT,…)` resolution primitive, baked into `shim_control_plane_symbols` — auto-allowed, not an allowance | `patina-target` ✅ (host-alias doctrine) |
+| **Known-safe (pure compute)** | `memset_pattern4/8/16`, `sigaddset`, `sigemptyset` (+ `sigfillset`/`sigdelset`/`sigismember`) | added to `native_allowlisted_import` — caller-memory-only, no boundary effect | `patina-dst-target` ✅ landed |
+| **Control-plane (host-alias)** | `dlsym` | the shim's own `dlsym(RTLD_NEXT,…)` resolution primitive, baked into `shim_control_plane_symbols` — auto-allowed, not an allowance | `patina-dst-target` ✅ (host-alias doctrine) |
 | **Already interposed** | `isatty` | strong C def → deterministic non-tty | shim ✅ |
 
 Once the deny-trap + host-state stubs land, `ALLOW_UNSUPPORTED` empties to `""`
@@ -260,21 +260,21 @@ the fixed path.
 All additive; the shim edit was greenlit and confined to `init_from_env` (the
 frozen `patina_sched_yield` / `patina_shutdown→finish()` APIs are untouched).
 
-- `patina-fs-mem`: new `image` module — `FsImage` codec (encode/decode/
+- `patina-dst-fs-mem`: new `image` module — `FsImage` codec (encode/decode/
   `into_memfs`), fail-closed decode, 5 new tests (round-trip + order-independence,
   rebuild with inert symlinks, adversarial-image rejection, readdir-order
   determinism).
-- `patina-runtime`: `ENV_FS_IMAGE_FD` constant.
+- `patina-dst-runtime`: `ENV_FS_IMAGE_FD` constant.
 - `cargo-patina`: `run --mount <DIR>` (image build, fd-4 streaming,
   fingerprint fold) + the descriptor-install fix above.
-- `patina-native-shim`: `fs_image_filesystem` hook in `init_from_env` reading the
+- `patina-dst-native-shim`: `fs_image_filesystem` hook in `init_from_env` reading the
   image fd; `isatty` interposed to deterministic false in the POSIX C layer.
-- `patina-fs-crash`: `--mount` + `--fs-crash-at` composition test.
+- `patina-dst-fs-crash`: `--mount` + `--fs-crash-at` composition test.
 - `crates/patina-target/ESCAPE-CLASSES.md`: *Host-state query* (`isatty`) row.
 - `testbeds/ripgrep/run-patina.sh`: real self-checking harness (was a sketch).
 
-Gates green: `patina-fs-mem`/`patina-fs-crash`/`patina-runtime`/
-`patina-native-shim` unit tests, `cargo-patina` incl. `end_to_end`,
+Gates green: `patina-dst-fs-mem`/`patina-dst-fs-crash`/`patina-dst-runtime`/
+`patina-dst-native-shim` unit tests, `cargo-patina` incl. `end_to_end`,
 `scripts/validate-native-shim.sh`, and the native battery (`run-native.sh`)
 before and after.
 

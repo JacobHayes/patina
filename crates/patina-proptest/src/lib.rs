@@ -5,7 +5,7 @@
 //! An ordinary proptest run draws its randomness from OS entropy, so two runs of
 //! the same property explore different cases and a failure is only reproducible
 //! through proptest's own regression files. Under Patina the whole run is already
-//! a deterministic function of a single root seed: [`patina::rng()`] bridges to
+//! a deterministic function of a single root seed: [`patina_dst::rng()`] bridges to
 //! that seed inside simulation (and to a plainly-seeded fallback outside it). This
 //! crate wires proptest's case generation onto that hook, so **under simulation
 //! the entire sequence of generated cases — and therefore any failure — is a pure
@@ -14,7 +14,7 @@
 //! persist.
 //!
 //! ```no_run
-//! use patina_proptest::prelude::*;
+//! use patina_dst_proptest::prelude::*;
 //!
 //! proptest! {
 //!     #[test]
@@ -25,11 +25,11 @@
 //! ```
 //!
 //! Adopting the crate is a one-line change: swap `use proptest::prelude::*;` for
-//! `use patina_proptest::prelude::*;`. The [`proptest!`] macro re-exported here is
+//! `use patina_dst_proptest::prelude::*;`. The [`proptest!`] macro re-exported here is
 //! a drop-in wrapper that runs the property against a [`TestRunner`] seeded from
-//! [`patina::rng()`]; everything else (strategies, `prop_assert*`, `prop_oneof!`,
+//! [`patina_dst::rng()`]; everything else (strategies, `prop_assert*`, `prop_oneof!`,
 //! shrinking) is proptest's own. A plain `cargo test` of an adopter still works —
-//! outside simulation `patina::rng()` falls back to OS-independent entropy, so the
+//! outside simulation `patina_dst::rng()` falls back to OS-independent entropy, so the
 //! property still runs, just without a Patina universe pinning the cases.
 //!
 //! # Why ChaCha, and NOT `PassThrough` (do not "simplify" this back)
@@ -51,10 +51,10 @@
 //! replay a *single* persisted/forked case, not to drive a run.
 //!
 //! So we instead seed proptest's ChaCha RNG ([`RngAlgorithm::ChaCha`]) from 32
-//! bytes drawn from [`patina::rng()`] (see [`seed`]). ChaCha is a full-quality
+//! bytes drawn from [`patina_dst::rng()`] (see [`seed`]). ChaCha is a full-quality
 //! PRNG whose per-case splits (`rng.random()`) never degenerate, and because the
 //! 32-byte seed is a pure function of the Patina seed, the run stays fully
-//! deterministic and replayable. **ChaCha-seeded-from-`patina::rng()` is the
+//! deterministic and replayable. **ChaCha-seeded-from-`patina_dst::rng()` is the
 //! determinism boundary of this crate.** The [`seed`] draw and its byte order are
 //! the load-bearing detail; both the internal-stability and case-diversity
 //! properties are pinned by this crate's unit tests.
@@ -87,7 +87,7 @@ pub mod state;
 
 /// A commonly-needed set of imports for writing properties under Patina.
 ///
-/// Wildcard-import this (`use patina_proptest::prelude::*;`) in place of
+/// Wildcard-import this (`use patina_dst_proptest::prelude::*;`) in place of
 /// `proptest::prelude::*`. It re-exports proptest's prelude (strategies,
 /// `prop_assert*`, `prop_oneof!`, the `prop` module, …) but with the
 /// Patina-seeded [`proptest!`](crate::proptest) macro shadowing proptest's own, so
@@ -114,26 +114,26 @@ pub fn config() -> Config {
     prepare(Config::default())
 }
 
-/// The 32 seed bytes for a run's [`TestRng`], drawn from [`patina::rng()`].
+/// The 32 seed bytes for a run's [`TestRng`], drawn from [`patina_dst::rng()`].
 ///
 /// This is the crate's single seed-draw site with a fixed, stable draw order:
-/// exactly four consecutive [`patina::rng()`] draws, each written little-endian
+/// exactly four consecutive [`patina_dst::rng()`] draws, each written little-endian
 /// into the next 8 bytes (draw 0 → bytes `0..8`, draw 1 → `8..16`, …). Given the
-/// same `patina::rng()` stream state the result is identical, so — inside
-/// simulation, where `patina::rng()` is the run's seeded deterministic entropy —
+/// same `patina_dst::rng()` stream state the result is identical, so — inside
+/// simulation, where `patina_dst::rng()` is the run's seeded deterministic entropy —
 /// the returned bytes, and every case generated from them, are a pure function of
-/// the Patina run seed. Outside simulation they come from `patina::rng()`'s
+/// the Patina run seed. Outside simulation they come from `patina_dst::rng()`'s
 /// fallback stream. This draw order is load-bearing (see the crate docs on the
 /// determinism boundary) and is pinned by a unit test; do not reorder it.
 pub fn seed() -> [u8; 32] {
     let mut bytes = [0u8; 32];
     for chunk in bytes.chunks_exact_mut(8) {
-        chunk.copy_from_slice(&patina::rng().to_le_bytes());
+        chunk.copy_from_slice(&patina_dst::rng().to_le_bytes());
     }
     bytes
 }
 
-/// A [`TestRng`] seeded for this run from [`patina::rng()`] (via [`seed`]).
+/// A [`TestRng`] seeded for this run from [`patina_dst::rng()`] (via [`seed`]).
 pub fn rng() -> TestRng {
     rng_from_seed(seed())
 }
@@ -142,18 +142,18 @@ pub fn rng() -> TestRng {
 ///
 /// Uses [`RngAlgorithm::ChaCha`], so the RNG — and the whole case sequence derived
 /// from it — is a deterministic function of `seed`. Use this to reproduce a
-/// specific case sequence in a unit test without going through `patina::rng()`.
+/// specific case sequence in a unit test without going through `patina_dst::rng()`.
 pub fn rng_from_seed(seed: [u8; 32]) -> TestRng {
     TestRng::from_seed(RngAlgorithm::ChaCha, &seed)
 }
 
 /// A [`TestRunner`] with the default Patina [`config()`], seeded from
-/// [`patina::rng()`].
+/// [`patina_dst::rng()`].
 pub fn runner() -> TestRunner {
     runner_with_config(Config::default())
 }
 
-/// A [`TestRunner`] with a caller-supplied config, seeded from [`patina::rng()`].
+/// A [`TestRunner`] with a caller-supplied config, seeded from [`patina_dst::rng()`].
 ///
 /// The config is normalized the same way [`config()`] normalizes the default
 /// (failure persistence forced off, `PROPTEST_*` env honored), then the runner is
@@ -180,7 +180,7 @@ pub mod __rt {
 }
 
 /// A drop-in wrapper for proptest's [`proptest!`](proptest::proptest) macro that
-/// runs each property against a [`TestRunner`] seeded from [`patina::rng()`].
+/// runs each property against a [`TestRunner`] seeded from [`patina_dst::rng()`].
 ///
 /// It accepts the same forms as proptest's macro — the `fn`-item form
 /// (`proptest! { #[test] fn prop(x in strat) { .. } }`), the closure form
@@ -365,8 +365,8 @@ mod tests {
     }
 
     // The single seed-draw site is internally stable: with the same
-    // `patina::rng()` stream state it returns the same 32 bytes. A freshly spawned
-    // thread resets `patina::rng()`'s fallback stream to its fixed start, so two
+    // `patina_dst::rng()` stream state it returns the same 32 bytes. A freshly spawned
+    // thread resets `patina_dst::rng()`'s fallback stream to its fixed start, so two
     // fresh threads observe identical stream state and must produce identical
     // seeds — pinning both the draw order and its little-endian composition.
     #[test]
@@ -375,7 +375,7 @@ mod tests {
         let second = std::thread::spawn(seed).join().unwrap();
         assert_eq!(
             first, second,
-            "seed() must be a pure function of the patina::rng() stream state"
+            "seed() must be a pure function of the patina_dst::rng() stream state"
         );
     }
 

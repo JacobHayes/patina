@@ -2,12 +2,12 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use patina_abi::{
+use patina_dst_abi::{
     Datagram, EffectError, ErrorCode, SendDisposition, SendReport, ShutdownHow, SocketId,
     TcpAccepted,
 };
-use patina_driver_api::{DriverResult, NetDriver};
-use patina_rng_seeded::SplitMix64;
+use patina_dst_driver_api::{DriverResult, NetDriver};
+use patina_dst_rng_seeded::SplitMix64;
 
 #[derive(Default)]
 pub struct SimNetBuilder {

@@ -8,7 +8,7 @@
 //!
 //! Forward-compatibility with concurrent runtime work is deliberate: operations
 //! are categorized by their serde `kind` tag *prefix* rather than by an
-//! exhaustive `match` on the [`patina_abi::Operation`] enum, and the metadata
+//! exhaustive `match` on the [`patina_dst_abi::Operation`] enum, and the metadata
 //! panel is rendered generically from the raw JSON object. A new operation
 //! variant or a new metadata field therefore surfaces in the render with no code
 //! change here — it lands in the "other" lane / an extra metadata row rather than
@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use patina_trace::{TraceBundle, TraceError};
+use patina_dst_trace::{TraceBundle, TraceError};
 use serde_json::Value;
 
 /// Above this many events the per-event timeline is aggregated into density
@@ -986,8 +986,8 @@ fn human_nanos(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patina_abi::{ClockKind, Fd, Operation, Outcome, SocketId, TaskId};
-    use patina_trace::{RunMetadata, TraceBundle, TraceEvent};
+    use patina_dst_abi::{ClockKind, Fd, Operation, Outcome, SocketId, TaskId};
+    use patina_dst_trace::{RunMetadata, TraceBundle, TraceEvent};
 
     fn bundle_with(events: Vec<(Operation, Outcome)>) -> TraceBundle {
         let decisions = events
@@ -1063,13 +1063,13 @@ mod tests {
 
     #[test]
     fn surfaces_crash_error_and_drop_as_notable() {
-        use patina_abi::{EffectError, ErrorCode, SendDisposition, SendReport};
+        use patina_dst_abi::{EffectError, ErrorCode, SendDisposition, SendReport};
         let bundle = bundle_with(vec![
             (Operation::FsCrash, Outcome::Unit),
             (
                 Operation::FsOpen {
                     path: "/x".into(),
-                    flags: patina_abi::OpenFlags::read_only(),
+                    flags: patina_dst_abi::OpenFlags::read_only(),
                 },
                 Outcome::Error(EffectError::new(ErrorCode::NotFound, "missing")),
             ),

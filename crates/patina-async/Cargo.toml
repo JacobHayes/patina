@@ -1,5 +1,5 @@
 [package]
-name = "patina-async"
+name = "patina-dst-async"
 description = "Deterministic single-threaded async executor over the Patina boundary"
 version.workspace = true
 edition.workspace = true
@@ -8,10 +8,10 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
-patina-abi.workspace = true
-patina-runtime.workspace = true
+patina-dst-abi.workspace = true
+patina-dst-runtime.workspace = true
 
 [dev-dependencies]
-patina-net-sim.workspace = true
-patina-wrapper-latency.workspace = true
+patina-dst-net-sim.workspace = true
+patina-dst-wrapper-latency.workspace = true
 tempfile.workspace = true

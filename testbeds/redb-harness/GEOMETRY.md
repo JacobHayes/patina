@@ -8,7 +8,7 @@ The 350-generation buggify dogfood campaign (`buggify-sweep.sh`, evidence in
 ```rust
 // testbeds/redb-fork/src/tree_store/page_store/header.rs:342
 let corrupted = checksum != xxh3_checksum(&data[..SLOT_CHECKSUM_OFFSET]);
-patina::sometimes!(corrupted, "redb-recovery-torn-slot-checksum-rejected");
+patina_dst::sometimes!(corrupted, "redb-recovery-torn-slot-checksum-rejected");
 ```
 
 **214 times but never satisfied it** (`out-buggify/campaign-state.json`:
@@ -98,7 +98,7 @@ which is the healthy behavior the oracle exists to witness.
 `TornGranularity::Byte`). Only `Byte` produces the sub-block "clean prefix + one
 torn final page" image; `Block` reverts a modified block wholesale (entirely
 durable *or* entirely live), which **can never** yield an inconsistent slot.
-`patina-fs-crash`'s own unit tests prove the two differ
+`patina-dst-fs-crash`'s own unit tests prove the two differ
 (`byte_granularity_tears_the_final_write_into_a_partial_image`).
 
 The flag is parsed by `cargo-patina`, forwarded as `PATINA_FS_TORN_GRANULARITY`,
@@ -202,8 +202,8 @@ constructs the crash filesystem from `config.faults`:
 - `patina_init_crash(seed)` now seeds its `CrashFs` from the argument (it
   previously pinned seed 0 — the same silent-drop class, one level down).
 
-Touched crates: `patina-native-shim` and `patina-runtime` (pre-approved for this
-scope). No `patina-target` change; no classifier weakened; no fingerprint change.
+Touched crates: `patina-dst-native-shim` and `patina-dst-runtime` (pre-approved for this
+scope). No `patina-dst-target` change; no classifier weakened; no fingerprint change.
 
 ### Replay semantics (fail-closed for pre-fix traces)
 
@@ -221,7 +221,7 @@ seed 0), which changes crash images for `--fs-crash-at` runs across the board
 
 ### Regression tests
 
-- `patina-runtime`: `explicit_filesystem_with_crash_knobs_fails_closed` (the
+- `patina-dst-runtime`: `explicit_filesystem_with_crash_knobs_fails_closed` (the
   guard bites) and `fs_image_choke_point_honors_configured_torn_granularity`
   (byte vs block differ through the choke point).
 - `cargo-patina` e2e: `native_fs_torn_granularity_byte_reaches_the_guest` (byte
@@ -245,8 +245,8 @@ historical pre-fix record stays in `out-buggify/`.
 
 - `geometry-sweep.sh` — byte-vs-block gap detector + torn-slot witness, with a
   pure-classifier `--selftest`. Outputs to `out-geometry/` (git-ignored).
-- Investigation used temporary stderr probes in `redb-fork`, `patina-fs-crash`,
-  `patina-runtime`, and a temporary shim fix in `patina-native-shim`; **all were
+- Investigation used temporary stderr probes in `redb-fork`, `patina-dst-fs-crash`,
+  `patina-dst-runtime`, and a temporary shim fix in `patina-dst-native-shim`; **all were
   reverted** — those crates are back to pristine. No committed change touches
-  `patina-runtime`, `patina-fs-crash`, `patina-native-shim`, or `patina-target`.
+  `patina-dst-runtime`, `patina-dst-fs-crash`, `patina-dst-native-shim`, or `patina-dst-target`.
 ```

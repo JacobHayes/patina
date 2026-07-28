@@ -1,5 +1,5 @@
 [package]
-name = "patina"
+name = "patina-dst"
 description = "Patina cooperative-SUT SDK and public deterministic-execution facade"
 version.workspace = true
 edition.workspace = true
@@ -14,20 +14,20 @@ repository.workspace = true
 # a plain fallback, so a plain `cargo build` of an adopter stays lightweight and
 # warning-free and links no runtime.
 default = []
-# The explicit-boundary facade: `patina::run`/`run_with`, `Context`, the async
+# The explicit-boundary facade: `patina_dst::run`/`run_with`, `Context`, the async
 # `rt` module, and the ABI re-exports. Pulls in the runtime crates. Enable it in
 # consumers that drive Patina through the explicit API.
-runtime = ["dep:patina-abi", "dep:patina-async", "dep:patina-runtime"]
+runtime = ["dep:patina-dst-abi", "dep:patina-dst-async", "dep:patina-dst-runtime"]
 
 [dependencies]
-patina-abi = { workspace = true, optional = true }
-patina-async = { workspace = true, optional = true }
-patina-runtime = { workspace = true, optional = true }
+patina-dst-abi = { workspace = true, optional = true }
+patina-dst-async = { workspace = true, optional = true }
+patina-dst-runtime = { workspace = true, optional = true }
 
 [dev-dependencies]
-patina-net-sim.workspace = true
-patina-wrapper-fault.workspace = true
-patina-wrapper-latency.workspace = true
+patina-dst-net-sim.workspace = true
+patina-dst-wrapper-fault.workspace = true
+patina-dst-wrapper-latency.workspace = true
 tempfile.workspace = true
 
 # `cargo patina build` injects these cfgs workspace-wide; `patina_shim` is

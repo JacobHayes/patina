@@ -4,8 +4,8 @@
 
 use std::collections::BTreeSet;
 
-use patina_abi::{ClockKind, OpenFlags, SendDisposition};
-use patina_runtime::{Context, CrashOp, RuntimeConfig, TornGranularity};
+use patina_dst_abi::{ClockKind, OpenFlags, SendDisposition};
+use patina_dst_runtime::{Context, CrashOp, RuntimeConfig, TornGranularity};
 use tempfile::tempdir;
 
 /// Append `records` framed with a trailing marker to a write-ahead log without

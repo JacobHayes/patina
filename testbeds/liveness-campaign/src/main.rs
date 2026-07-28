@@ -29,24 +29,24 @@ use std::time::Duration;
 fn main() {
     // Setup boundary. With `--buggify-after-setup` the runtime keeps buggify inert
     // until this call; without it, this is just a coverage marker.
-    patina::lifecycle::setup_complete();
+    patina_dst::lifecycle::setup_complete();
 
     // Workload phase: pure, seed-deterministic compute. No virtual-time advance, so
     // a healthy run never approaches the watchdog's no-progress budget.
-    let iterations = patina::buggify_knob!("work-iterations", 4, 2, 8);
+    let iterations = patina_dst::buggify_knob!("work-iterations", 4, 2, 8);
     let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
     for i in 0..iterations {
         digest = digest
             .wrapping_mul(0x0000_0100_0000_01b3)
-            .wrapping_add(patina::rng());
-        patina::sometimes!(digest % 2 == 0, "digest-even");
-        patina::reachable!("workload-step");
+            .wrapping_add(patina_dst::rng());
+        patina_dst::sometimes!(digest % 2 == 0, "digest-even");
+        patina_dst::reachable!("workload-step");
         println!("GUEST_STEP i={i} digest={digest:016x}");
     }
 
     // The planted liveness bug. When buggify activates and fires this site, the
     // guest can no longer make progress and spins on retry timers indefinitely.
-    if patina::buggify!("liveness-wedge") {
+    if patina_dst::buggify!("liveness-wedge") {
         eprintln!("GUEST_WEDGE planted liveness bug: node never converges (retry-timer churn)");
         for _ in 0..1_000_000u64 {
             // Each sleep advances virtual time with no genuine effect — the exact

@@ -1,7 +1,7 @@
 //! Deterministic monotonic and realtime clocks.
 
-use patina_abi::{ClockKind, EffectError, ErrorCode};
-use patina_driver_api::{ClockDriver, DriverResult};
+use patina_dst_abi::{ClockKind, EffectError, ErrorCode};
+use patina_dst_driver_api::{ClockDriver, DriverResult};
 
 /// A clock that advances only when instructed by the deterministic runtime.
 pub struct VirtualClock {

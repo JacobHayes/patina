@@ -1,10 +1,10 @@
-use patina::RuntimeError;
-use patina_net_sim::SimNet;
-use patina_wrapper_fault::FaultNet;
-use patina_wrapper_latency::LatencyNet;
+use patina_dst::RuntimeError;
+use patina_dst_net_sim::SimNet;
+use patina_dst_wrapper_fault::FaultNet;
+use patina_dst_wrapper_latency::LatencyNet;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let summary = patina::run_with(
+    let summary = patina_dst::run_with(
         |builder| {
             let network = SimNet::builder()
                 .build()

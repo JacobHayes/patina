@@ -1,4 +1,4 @@
-//! In-house model-based (stateful) testing over [`patina-proptest`](crate).
+//! In-house model-based (stateful) testing over [`patina-dst-proptest`](crate).
 //!
 //! # What this adds over a plain property
 //!
@@ -8,7 +8,7 @@
 //! cheap in-memory **model** and the real **system under test** (SUT), and after
 //! every step asserts the SUT still agrees with the model. When they diverge,
 //! the failing command sequence is the counterexample — and, because generation
-//! rides on [`patina-proptest`](crate)'s ChaCha-seeded runner, the whole search
+//! rides on [`patina-dst-proptest`](crate)'s ChaCha-seeded runner, the whole search
 //! (and the shrunk sequence) is a pure function of the Patina run seed.
 //!
 //! This is the same idea as `proptest-state-machine`, kept deliberately small
@@ -51,8 +51,8 @@
 //! ```
 //! use std::collections::{BTreeMap, HashMap};
 //!
-//! use patina_proptest::prelude::*;
-//! use patina_proptest::state::{check, StateMachine};
+//! use patina_dst_proptest::prelude::*;
+//! use patina_dst_proptest::state::{check, StateMachine};
 //!
 //! #[derive(Clone, Debug)]
 //! enum Cmd {
@@ -123,7 +123,7 @@
 //!     }
 //! }
 //!
-//! let mut runner = patina_proptest::runner();
+//! let mut runner = patina_dst_proptest::runner();
 //! check::<KvStore>(&mut runner, 0..=16).expect("the store matches its model");
 //! ```
 

@@ -6,13 +6,13 @@
 
 use std::cell::Cell;
 
-use patina_proptest::prelude::*;
+use patina_dst_proptest::prelude::*;
 
 // A passing property: with no failure proptest never shrinks, so the closure is
 // invoked exactly `cases` times with freshly generated inputs. Folding those
 // inputs yields a digest that depends only on the runner's seed.
 fn case_digest() -> u64 {
-    let mut runner = patina_proptest::runner();
+    let mut runner = patina_dst_proptest::runner();
     let digest = Cell::new(0xcbf2_9ce4_8422_2325_u64);
     let cases = Cell::new(0u64);
     runner

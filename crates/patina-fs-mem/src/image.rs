@@ -15,7 +15,7 @@
 
 use std::fmt;
 
-use patina_driver_api::{DriverResult, FsDriver};
+use patina_dst_driver_api::{DriverResult, FsDriver};
 
 use crate::MemFs;
 
@@ -237,7 +237,7 @@ fn ensure_directory(fs: &mut MemFs, path: &str) -> DriverResult<()> {
         Ok(()) => Ok(()),
         // An entry that already exists as a directory is the desired state; a
         // repeated create in a full tree walk is expected.
-        Err(error) if error.code == patina_abi::ErrorCode::AlreadyExists => Ok(()),
+        Err(error) if error.code == patina_dst_abi::ErrorCode::AlreadyExists => Ok(()),
         Err(error) => Err(error),
     }
 }
@@ -345,7 +345,7 @@ impl std::error::Error for FsImageError {}
 
 #[cfg(test)]
 mod tests {
-    use patina_abi::{FsEntryKind, OpenFlags};
+    use patina_dst_abi::{FsEntryKind, OpenFlags};
 
     use super::*;
 

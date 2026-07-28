@@ -1,7 +1,7 @@
-use patina::{ClockKind, RuntimeError};
+use patina_dst::{ClockKind, RuntimeError};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (seed, entropy, time, stored) = patina::run(|context| {
+    let (seed, entropy, time, stored) = patina_dst::run(|context| {
         let entropy = context.entropy_bytes(12)?;
         context.write_file("/state/entropy", &entropy)?;
         context.sleep_for(250_000_000)?;

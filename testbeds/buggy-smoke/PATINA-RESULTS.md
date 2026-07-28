@@ -415,7 +415,7 @@ not implement them (task #10 owns `crates/patina-native-shim` + the audit; task
 ### `udp-order` — **branch 3 (spec)**: deterministic recv timeout + reorder/drop
 
 Not soundness-blocked. The building blocks already exist:
-`patina-net-sim` exposes `recv(socket, now) -> Option<Datagram>` and
+`patina-dst-net-sim` exposes `recv(socket, now) -> Option<Datagram>` and
 `next_delivery(socket, now) -> Option<u64>` (earliest future arrival), and the
 shim's `patina_net_recvfrom` (`crates/patina-native-shim/src/lib.rs:3172`)
 already timed-parks a blocking receive via
@@ -431,10 +431,10 @@ existing virtual-clock timer queue and `mark_timed_out` path.
    `WouldBlock`/`TimedOut`, which `udp-order` reports as `drop-or-timeout`).
    **Tie-break (deterministic):** at equal virtual timestamps, **delivery wins** —
    a datagram deliverable exactly at the deadline is returned, not a timeout.
-3. **Reorder/drop:** wrap SimNet in `patina-wrapper-latency` `LatencyNet`
+3. **Reorder/drop:** wrap SimNet in `patina-dst-wrapper-latency` `LatencyNet`
    (seeded `jitter_nanos` already reorders — see its
    `seeded_jitter_repeats_and_can_reorder_packets` test) and/or
-   `patina-wrapper-fault` `FaultNet` (`drop_one_in`), selected by new env knobs
+   `patina-dst-wrapper-fault` `FaultNet` (`drop_one_in`), selected by new env knobs
    read in `init_from_env`.
 4. **Trace:** the recv outcome (delivered datagram vs timeout) must be a recorded
    op so replay is exact.
@@ -463,7 +463,7 @@ stays CLEAN).
 ### `tight-deadline` — needs a **new** clock-latency capability (none exists)
 
 Confirmed: there is no clock latency/jitter wrapper anywhere in `crates/`
-(`patina-wrapper-latency` is network-only). `ClockDriver` is tiny
+(`patina-dst-wrapper-latency` is network-only). `ClockDriver` is tiny
 (`now`, `sleep_until` — `crates/patina-driver-api/src/lib.rs:95`). Needed: a
 `LatencyClock<D>` wrapper (or a `VirtualClock` option) that, on each
 `sleep_until`, advances the monotonic deadline by an extra **seeded** amount

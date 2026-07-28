@@ -1,6 +1,6 @@
 //! Prints a Patina performance qualification report.
 //!
-//! Usage: `cargo run -p patina-bench --release [-- <iterations> <campaign_runs>]`.
+//! Usage: `cargo run -p patina-dst-bench --release [-- <iterations> <campaign_runs>]`.
 
 use std::process::ExitCode;
 
@@ -9,7 +9,7 @@ fn main() -> ExitCode {
     let iterations = parse(args.next(), 2000);
     let campaign_runs = parse(args.next(), 200);
 
-    match patina_bench::qualify(iterations, campaign_runs) {
+    match patina_dst_bench::qualify(iterations, campaign_runs) {
         Ok(report) => {
             println!("{}", report.render());
             ExitCode::SUCCESS

@@ -6,8 +6,8 @@ use std::collections::HashSet;
 use std::convert::Infallible;
 use std::fmt;
 
-use patina_abi::{Operation, Outcome, TaskId};
-use patina_trace::{Timeline, TraceBundle, TraceError, TraceEvent};
+use patina_dst_abi::{Operation, Outcome, TaskId};
+use patina_dst_trace::{Timeline, TraceBundle, TraceError, TraceEvent};
 
 pub trait FailureOracle {
     type Error;
@@ -792,8 +792,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use patina_abi::{ClockKind, Operation, Outcome};
-    use patina_trace::{RunMetadata, Timeline, TraceEvent};
+    use patina_dst_abi::{ClockKind, Operation, Outcome};
+    use patina_dst_trace::{RunMetadata, Timeline, TraceEvent};
 
     use super::*;
 

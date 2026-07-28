@@ -1,10 +1,10 @@
 //! Deterministic delay and jitter around data-plane drivers.
 
-use patina_abi::{
+use patina_dst_abi::{
     Datagram, EffectError, ErrorCode, SendReport, ShutdownHow, SocketId, TcpAccepted,
 };
-use patina_driver_api::{DriverResult, NetDriver};
-use patina_rng_seeded::SplitMix64;
+use patina_dst_driver_api::{DriverResult, NetDriver};
+use patina_dst_rng_seeded::SplitMix64;
 
 /// Adds fixed latency and seeded inclusive jitter to virtual packet delivery.
 pub struct LatencyNet<D> {
@@ -146,7 +146,7 @@ impl<D: NetDriver> NetDriver for LatencyNet<D> {
 
 #[cfg(test)]
 mod tests {
-    use patina_net_sim::SimNet;
+    use patina_dst_net_sim::SimNet;
 
     use super::*;
 

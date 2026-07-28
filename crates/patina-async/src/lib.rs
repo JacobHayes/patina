@@ -19,10 +19,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll, Wake, Waker};
 
-use patina_abi::{
+use patina_dst_abi::{
     ClockKind, Datagram, EffectError, ErrorCode, SendReport, ShutdownHow, SocketId, TaskId,
 };
-use patina_runtime::{Context, RuntimeError};
+use patina_dst_runtime::{Context, RuntimeError};
 
 const REASON_ASYNC_WAIT: &str = "async-wait";
 const REASON_ASYNC_SLEEP: &str = "async-sleep";
@@ -42,7 +42,7 @@ thread_local! {
 pub fn block_on<F: Future>(context: &mut Context, future: F) -> Result<F::Output, RuntimeError> {
     if SCOPE.with(|scope| scope.get().is_some()) {
         return Err(invalid_state(
-            "nested patina_async::block_on is not supported",
+            "nested patina_dst_async::block_on is not supported",
         ));
     }
     Executor::new(context)?.run(future)
@@ -522,7 +522,7 @@ impl ScopeGuard {
         });
         if occupied {
             return Err(invalid_state(
-                "nested patina_async poll scope is not supported",
+                "nested patina_dst_async poll scope is not supported",
             ));
         }
         Ok(Self)
@@ -603,7 +603,7 @@ fn with_scope<T>(
     SCOPE.with(|slot| {
         let Some(mut ptr) = slot.get() else {
             return Err(invalid_state(
-                "patina-async future polled outside patina_async::block_on",
+                "patina-dst-async future polled outside patina_dst_async::block_on",
             ));
         };
         // SAFETY: SCOPE contains a pointer to the stack-local PollScope installed
@@ -1190,9 +1190,9 @@ mod tests {
     use std::fs;
     use std::task::{RawWaker, RawWakerVTable};
 
-    use patina_net_sim::SimNet;
-    use patina_runtime::{RuntimeBuilder, RuntimeConfig};
-    use patina_wrapper_latency::LatencyNet;
+    use patina_dst_net_sim::SimNet;
+    use patina_dst_runtime::{RuntimeBuilder, RuntimeConfig};
+    use patina_dst_wrapper_latency::LatencyNet;
 
     fn context(seed: u64) -> Context {
         Context::from_config(RuntimeConfig::seeded(seed)).unwrap()

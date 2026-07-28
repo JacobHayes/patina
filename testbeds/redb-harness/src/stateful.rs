@@ -1,6 +1,6 @@
 //! Model-based (stateful) property mode for the redb harness.
 //!
-//! This dogfoods `patina-proptest`'s in-house model-based testing layer against
+//! This dogfoods `patina-dst-proptest`'s in-house model-based testing layer against
 //! the real redb fork. The reference model is a `BTreeMap` mirror of a single
 //! redb table with transaction semantics (a working overlay that `Commit`
 //! promotes and `Abort` discards); the system under test is a redb database on
@@ -8,8 +8,8 @@
 //! command the SUT is checked against the model, both per-command (reads compare
 //! to the model) and as a whole-table invariant.
 //!
-//! Command generation rides on `patina_proptest::runner()`, whose ChaCha RNG is
-//! seeded from `patina::rng()`. Under `cargo patina run` that means the
+//! Command generation rides on `patina_dst_proptest::runner()`, whose ChaCha RNG is
+//! seeded from `patina_dst::rng()`. Under `cargo patina run` that means the
 //! entire command stream — and therefore the printed digest — is a pure function
 //! of the Patina run seed: same seed reproduces it byte-for-byte, a different
 //! seed changes it. redb is correct, so the property holds; the value here is a
@@ -19,8 +19,8 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
-use patina_proptest::prelude::*;
-use patina_proptest::state::{execute, StateMachine};
+use patina_dst_proptest::prelude::*;
+use patina_dst_proptest::state::{execute, StateMachine};
 use redb::{Database, ReadableTable, TableDefinition, WriteTransaction};
 
 /// The single table under test.
@@ -230,11 +230,11 @@ impl StateMachine for RedbKv {
 /// digest line. Returns the process exit code (0 on success; a model/SUT
 /// divergence panics with the minimal command sequence, aborting nonzero).
 pub fn run_stateful() -> i32 {
-    let mut config = patina_proptest::config();
+    let mut config = patina_dst_proptest::config();
     // A bounded but non-trivial campaign: enough cases and command depth to
     // exercise the commit/abort overlay without a slow in-guest run.
     config.cases = 96;
-    let mut runner = patina_proptest::runner_with_config(config);
+    let mut runner = patina_dst_proptest::runner_with_config(config);
 
     let digest = Cell::new(0xcbf2_9ce4_8422_2325_u64);
     let cases = Cell::new(0u64);

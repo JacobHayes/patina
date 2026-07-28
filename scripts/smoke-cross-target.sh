@@ -81,7 +81,7 @@ entropy_hash={entropy_hash:016x} tail={tail} len={len}"
 }
 RS
 
-cargo build --locked --manifest-path "$root/Cargo.toml" -p cargo-patina -p patina-native-shim >/dev/null
+cargo build --locked --manifest-path "$root/Cargo.toml" -p cargo-patina -p patina-dst-native-shim >/dev/null
 runner="$target_dir/debug/cargo-patina"
 
 # --- WASI target: seeded smoke plus record/replay ---

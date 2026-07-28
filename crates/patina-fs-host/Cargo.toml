@@ -1,5 +1,5 @@
 [package]
-name = "patina-fs-host"
+name = "patina-dst-fs-host"
 description = "Explicit allowlisted read-only host filesystem capture driver"
 version.workspace = true
 edition.workspace = true
@@ -8,8 +8,8 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
-patina-abi.workspace = true
-patina-driver-api.workspace = true
+patina-dst-abi.workspace = true
+patina-dst-driver-api.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

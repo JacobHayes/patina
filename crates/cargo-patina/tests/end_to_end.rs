@@ -8,7 +8,7 @@ use tempfile::tempdir;
 
 /// Serializes cargo-patina invocations that compile through cargo/rustc. Under
 /// default parallel test threads, concurrent builds race on the shared workspace
-/// `target/` (cold `patina-native-shim` staticlib builds, cached artifacts) and
+/// `target/` (cold `patina-dst-native-shim` staticlib builds, cached artifacts) and
 /// the global cargo package-cache lock, which surfaces as "Blocking waiting for
 /// file lock" stalls or signal-killed cargo processes — a flake where every test
 /// passes in isolation and serially. Holding this lock for the duration of a
@@ -319,7 +319,7 @@ fn separate_processes_repeat_record_and_replay() {
 // Whole Cargo-package `native-build`: a package with a path dependency and a
 // build script builds under Patina control, passes the strict audit, and
 // records/replays byte-identically, while multi-bin ambiguity and an
-// off-allowlist binary fail closed. `native-build` builds the `patina-native-shim`
+// off-allowlist binary fail closed. `native-build` builds the `patina-dst-native-shim`
 // staticlib from the surrounding Patina workspace, so it runs with the workspace
 // as its working directory while the fixture is addressed by absolute path.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1126,7 +1126,7 @@ fn create_wasi_buggify_package(path: &Path) {
     fs::write(
         path.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"wasi-buggify-guest\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"wasi-buggify-guest\"\npath = \"src/main.rs\"\n\n[dependencies]\npatina = {{ path = \"{patina_path}\" }}\n"
+            "[package]\nname = \"wasi-buggify-guest\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"wasi-buggify-guest\"\npath = \"src/main.rs\"\n\n[dependencies]\npatina-dst = {{ path = \"{patina_path}\" }}\n"
         ),
     )
     .unwrap();
@@ -1134,17 +1134,17 @@ fn create_wasi_buggify_package(path: &Path) {
         path.join("src/main.rs"),
         r#"fn main() {
     let violate = std::env::args().nth(1).as_deref() == Some("violate");
-    patina::reachable!("guest-startup");
-    patina::lifecycle::setup_complete();
-    let iterations = patina::buggify_knob!("iters", 6, 4, 12);
+    patina_dst::reachable!("guest-startup");
+    patina_dst::lifecycle::setup_complete();
+    let iterations = patina_dst::buggify_knob!("iters", 6, 4, 12);
     let mut digest: u64 = 0;
     for _ in 0..iterations {
-        if patina::buggify!("inject") { digest = digest.wrapping_add(1); }
-        let r = patina::rng();
-        patina::sometimes!(r % 2 == 0, "even-draw");
+        if patina_dst::buggify!("inject") { digest = digest.wrapping_add(1); }
+        let r = patina_dst::rng();
+        patina_dst::sometimes!(r % 2 == 0, "even-draw");
         digest = digest.wrapping_add(r % 13);
     }
-    patina::always!(!violate, "guest-invariant");
+    patina_dst::always!(!violate, "guest-invariant");
     println!("WASI_GUEST_DIGEST digest={digest:016x}");
 }
 "#,
@@ -1858,7 +1858,7 @@ fn main() {
 // fault knobs at all: a flag-free `replay` reproduces the recorded fault run, and
 // supplying a fault knob is refused UP FRONT (a CLI usage error naming the flag),
 // never silently applied. The underlying runtime reconcile-conflict fail-closed
-// path is covered directly by patina-runtime's
+// path is covered directly by patina-dst-runtime's
 // `reconcile_replay_faults_enforces_the_authoritative_trace_contract`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
@@ -2982,7 +2982,7 @@ fn create_schedule_fixture(path: &Path) {
     fs::write(
         path.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"patina-sched-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina = {{ path = \"{patina_path}\", features = [\"runtime\"] }}\n"
+            "[package]\nname = \"patina-sched-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina-dst = {{ path = \"{patina_path}\", features = [\"runtime\"] }}\n"
         ),
     )
     .unwrap();
@@ -2990,10 +2990,10 @@ fn create_schedule_fixture(path: &Path) {
         path.join("src/main.rs"),
         r#"use std::collections::BTreeMap;
 
-use patina::RuntimeError;
+use patina_dst::RuntimeError;
 
 fn scenario() -> Result<(String, bool), RuntimeError> {
-    patina::run(|context| {
+    patina_dst::run(|context| {
         let a = context.task_spawn("a")?;
         let b = context.task_spawn("b")?;
         let c = context.task_spawn("c")?;
@@ -3048,16 +3048,16 @@ fn create_fixture(path: &Path) {
     fs::write(
         path.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"patina-e2e-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina = {{ path = \"{patina_path}\", features = [\"runtime\"] }}\n"
+            "[package]\nname = \"patina-e2e-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina-dst = {{ path = \"{patina_path}\", features = [\"runtime\"] }}\n"
         ),
     )
     .unwrap();
     fs::write(
         path.join("src/main.rs"),
-        r#"use patina::{ClockKind, RuntimeError};
+        r#"use patina_dst::{ClockKind, RuntimeError};
 
 fn scenario() -> Result<String, RuntimeError> {
-    patina::run(|context| {
+    patina_dst::run(|context| {
         let prefix = context.entropy_bytes(8)?;
         let suffix = context.entropy_bytes(8)?;
         context.write_file("/state/value", &suffix)?;
@@ -3101,7 +3101,7 @@ fn write_sdk_fixture(root: &Path, main: &str) {
     fs::write(
         root.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"buggify-sdk-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina = {{ path = \"{patina_path}\" }}\n"
+            "[package]\nname = \"buggify-sdk-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina-dst = {{ path = \"{patina_path}\" }}\n"
         ),
     )
     .unwrap();
@@ -3114,18 +3114,18 @@ fn write_sdk_fixture(root: &Path, main: &str) {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const BUGGIFY_SDK_MAIN: &str = r#"
 fn main() {
-    patina::lifecycle::setup_complete();
+    patina_dst::lifecycle::setup_complete();
     let mut fired = 0u32;
-    let knob = patina::buggify_knob!("batch", 10_i64, 1, 100);
+    let knob = patina_dst::buggify_knob!("batch", 10_i64, 1, 100);
     for i in 0..8 {
-        patina::reachable!("loop-body");
-        if patina::buggify!("early-return") {
+        patina_dst::reachable!("loop-body");
+        if patina_dst::buggify!("early-return") {
             fired += 1;
         }
-        patina::sometimes!(i == 3, "index-is-three");
+        patina_dst::sometimes!(i == 3, "index-is-three");
     }
-    patina::always!(fired <= 8, "fired-in-bounds");
-    println!("RESULT knob={knob} fired={fired} rng={}", patina::rng());
+    patina_dst::always!(fired <= 8, "fired-in-bounds");
+    println!("RESULT knob={knob} fired={fired} rng={}", patina_dst::rng());
 }
 "#;
 
@@ -3199,8 +3199,8 @@ fn native_buggify_sdk_reports_records_and_replays() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const BUGGIFY_DUP_MAIN: &str = r#"
 fn main() {
-    let _ = patina::buggify!("same-label");
-    let _ = patina::buggify!("same-label");
+    let _ = patina_dst::buggify!("same-label");
+    let _ = patina_dst::buggify!("same-label");
     println!("unreachable");
 }
 "#;
@@ -3245,7 +3245,7 @@ fn native_buggify_duplicate_label_aborts_with_marker() {
 const BUGGIFY_NO_SETUP_MAIN: &str = r#"
 fn main() {
     for _ in 0..5 {
-        let _ = patina::buggify!("gated");
+        let _ = patina_dst::buggify!("gated");
     }
     println!("guest-finished");
 }
@@ -3304,12 +3304,12 @@ fn native_buggify_after_setup_never_called_fails_loudly() {
     );
 }
 
-// ---- proptest compatibility (patina-proptest), end to end --------------------
+// ---- proptest compatibility (patina-dst-proptest), end to end --------------------
 //
-// A whole package depending on the `patina-proptest` compat crate, built and run
+// A whole package depending on the `patina-dst-proptest` compat crate, built and run
 // through native-build/native-run. The guest runs a proptest property whose cases
-// are generated from a `patina-proptest` runner (proptest's ChaCha RNG seeded from
-// `patina::rng()`), and prints a fold-digest of every generated case. Under Patina
+// are generated from a `patina-dst-proptest` runner (proptest's ChaCha RNG seeded from
+// `patina_dst::rng()`), and prints a fold-digest of every generated case. Under Patina
 // that digest is a pure function of the run seed, so the same seed reproduces it,
 // a different seed changes it, and record/replay reproduces it byte-identically —
 // the determinism model that lets adopters drop proptest's regression files.
@@ -3324,7 +3324,7 @@ fn write_proptest_fixture(root: &Path) {
     fs::write(
         root.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"patina-proptest-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina = {{ path = \"{patina_path}\" }}\npatina-proptest = {{ path = \"{proptest_path}\" }}\n"
+            "[package]\nname = \"patina-dst-proptest-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina-dst = {{ path = \"{patina_path}\" }}\npatina-dst-proptest = {{ path = \"{proptest_path}\" }}\n"
         ),
     )
     .unwrap();
@@ -3334,15 +3334,15 @@ fn write_proptest_fixture(root: &Path) {
 // A passing property: with no failure proptest never shrinks, so the closure runs
 // exactly `cases` times over freshly generated inputs. Folding those inputs (and
 // the case count) produces a digest determined solely by the runner's seed, which
-// `patina-proptest` draws from `patina::rng()`.
+// `patina-dst-proptest` draws from `patina_dst::rng()`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const PROPTEST_DIGEST_MAIN: &str = r#"
 use std::cell::Cell;
 
-use patina_proptest::prelude::*;
+use patina_dst_proptest::prelude::*;
 
 fn case_digest() -> u64 {
-    let mut runner = patina_proptest::runner();
+    let mut runner = patina_dst_proptest::runner();
     let digest = Cell::new(0xcbf2_9ce4_8422_2325_u64);
     let cases = Cell::new(0u64);
     runner
@@ -3393,7 +3393,7 @@ fn native_proptest_case_generation_is_seed_deterministic_and_replays() {
             "build",
             pkg.to_str().unwrap(),
             "--bin",
-            "patina-proptest-fixture",
+            "patina-dst-proptest-fixture",
             "--output",
             bin.to_str().unwrap(),
         ],
@@ -3457,7 +3457,7 @@ fn native_proptest_case_generation_is_seed_deterministic_and_replays() {
 // ---- Two-axis shrinking: stateful command-sequence + schedule ----------------
 //
 // The compose story for the model-based (stateful) layer. A package depending on
-// `patina-proptest`'s state module drives a key/value store with a planted
+// `patina-dst-proptest`'s state module drives a key/value store with a planted
 // off-by-one delete bug (`Remove(1)` also evicts key 0 in the SUT) against a
 // `BTreeMap` model. Two independent shrinking axes are exercised end to end:
 //
@@ -3481,8 +3481,8 @@ fn native_proptest_case_generation_is_seed_deterministic_and_replays() {
 const TWO_AXIS_MAIN: &str = r#"
 use std::collections::BTreeMap;
 
-use patina_proptest::prelude::*;
-use patina_proptest::state::{check, execute, StateMachine};
+use patina_dst_proptest::prelude::*;
+use patina_dst_proptest::state::{check, execute, StateMachine};
 
 #[derive(Clone, Debug)]
 enum Cmd {
@@ -3596,9 +3596,9 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("--find") => {
-            let mut config = patina_proptest::config();
+            let mut config = patina_dst_proptest::config();
             config.cases = 64;
-            let mut runner = patina_proptest::runner_with_config(config);
+            let mut runner = patina_dst_proptest::runner_with_config(config);
             match check::<BuggyKv>(&mut runner, 0..=16) {
                 Ok(()) => println!("TWOAXIS_HELD"),
                 Err(f) => {
@@ -3633,7 +3633,7 @@ fn write_two_axis_fixture(root: &Path) {
     fs::write(
         root.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"two-axis-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina = {{ path = \"{patina_path}\" }}\npatina-proptest = {{ path = \"{proptest_path}\" }}\n"
+            "[package]\nname = \"two-axis-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina-dst = {{ path = \"{patina_path}\" }}\npatina-dst-proptest = {{ path = \"{proptest_path}\" }}\n"
         ),
     )
     .unwrap();

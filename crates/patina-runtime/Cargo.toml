@@ -1,5 +1,5 @@
 [package]
-name = "patina-runtime"
+name = "patina-dst-runtime"
 description = "Driver registry and deterministic execution runtime for Patina"
 version.workspace = true
 edition.workspace = true
@@ -8,18 +8,18 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
-patina-abi.workspace = true
-patina-driver-api.workspace = true
-patina-fs-crash.workspace = true
-patina-fs-mem.workspace = true
-patina-net-sim.workspace = true
-patina-rng-seeded.workspace = true
-patina-sched-det.workspace = true
-patina-time-virtual.workspace = true
-patina-trace.workspace = true
+patina-dst-abi.workspace = true
+patina-dst-driver-api.workspace = true
+patina-dst-fs-crash.workspace = true
+patina-dst-fs-mem.workspace = true
+patina-dst-net-sim.workspace = true
+patina-dst-rng-seeded.workspace = true
+patina-dst-sched-det.workspace = true
+patina-dst-time-virtual.workspace = true
+patina-dst-trace.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-patina-fs-crash.workspace = true
-patina-fs-host.workspace = true
+patina-dst-fs-crash.workspace = true
+patina-dst-fs-host.workspace = true
 tempfile.workspace = true

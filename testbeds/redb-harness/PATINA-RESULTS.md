@@ -65,7 +65,7 @@ was written for — redb behaving *better* than the README feared (clean `Err`,
 not panic) is the honest result, now confirmed against the harder crash model.
 
 The sub-block model is proven non-vacuous by
-`patina-fs-crash` unit tests (`byte_granularity_tears_the_final_write_into_a_partial_image`,
+`patina-dst-fs-crash` unit tests (`byte_granularity_tears_the_final_write_into_a_partial_image`,
 `byte_granularity_tears_only_the_final_write_not_earlier_ones`, over positional
 `write_at` pages — redb's exact I/O shape) and the runtime round-trip test
 `byte_granularity_crash_records_a_torn_image_and_replays_self_contained`: each
@@ -298,22 +298,22 @@ All additive; the greenlit interposition is the atomic positional-I/O driver
 path (frozen `patina_sched_yield` / `patina_shutdown→finish()` / `init_from_env`
 fs-image hook / `isatty` untouched).
 
-- **`patina-abi`**: `Operation::FsReadAt` / `FsWriteAt` (positional, offset in
+- **`patina-dst-abi`**: `Operation::FsReadAt` / `FsWriteAt` (positional, offset in
   the trace). Encoding is `#[serde(tag="kind", rename_all="snake_case")]` — tags
   are variant **names**, not declaration-order discriminants, so the additions
   are order-independent and cannot renumber existing traces. Pin tests
   `operation_variant_tags_are_pinned_by_name_not_declaration_order` and
   `positional_io_offset_survives_round_trip` make any drift break loudly.
-- **`patina-driver-api`**: default `FsDriver::read_at` / `write_at` composing
+- **`patina-dst-driver-api`**: default `FsDriver::read_at` / `write_at` composing
   `seek`/`read`|`write`/`seek` **atomically within one driver call** (so
   MemFs/CrashFs need no changes and CrashFs journaling of positional writes is
   automatic via the default `write_at`→`self.write` path) + `checked_offset`.
-- **`patina-runtime`**: `fs_read_at` / `fs_write_at` mirroring `fs_read`/
+- **`patina-dst-runtime`**: `fs_read_at` / `fs_write_at` mirroring `fs_read`/
   `fs_write`; `fs_write_at` calls `maybe_inject_crash(CrashOp::Write)`.
-- **`patina-native-shim`**: Rust `patina_pread` / `patina_pwrite` exports; C
+- **`patina-dst-native-shim`**: Rust `patina_pread` / `patina_pwrite` exports; C
   `pread` / `pwrite` (→ the runtime positional ops) and single-process `flock`
   (→ success) in `patina_posix.c`, + header decls.
-- **`patina-fs-crash`**: `positional_write_is_crash_losable_exactly_like_a_cursor_write`
+- **`patina-dst-fs-crash`**: `positional_write_is_crash_losable_exactly_like_a_cursor_write`
   (the load-bearing test for the campaign).
 - **`crates/patina-target/ESCAPE-CLASSES.md`**: *Positional file I/O* and
   *Advisory file lock* rows (the latter documents the double-open divergence and
@@ -322,7 +322,7 @@ fs-image hook / `isatty` untouched).
   `catch_unwind` panic classification, outcome exit codes) + 4 oracle
   positive-control unit tests; real `run-patina.sh`; `crash-sweep.sh`; this file.
 
-Gates green: `patina-abi`/`patina-driver-api`/`patina-fs-crash`/`patina-runtime`
+Gates green: `patina-dst-abi`/`patina-dst-driver-api`/`patina-dst-fs-crash`/`patina-dst-runtime`
 unit tests (incl. the 3 new), `cargo-patina` incl. `end_to_end`,
 `scripts/validate-native-shim.sh` (exit 0), and the redb native battery
 (`run-native.sh`) before and after.

@@ -49,13 +49,13 @@ name = "cargo-patina"
 version = "0.1.0"
 dependencies = [
  "object",
- "patina-abi",
- "patina-fs-mem",
- "patina-minimize",
- "patina-runtime",
- "patina-target",
- "patina-trace",
- "patina-wasi-host",
+ "patina-dst-abi",
+ "patina-dst-fs-mem",
+ "patina-dst-minimize",
+ "patina-dst-runtime",
+ "patina-dst-target",
+ "patina-dst-trace",
+ "patina-dst-wasi-host",
  "serde_json",
  "sha2",
  "tempfile",
@@ -262,20 +262,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
-name = "patina"
+name = "patina-dst"
 version = "0.1.0"
 dependencies = [
- "patina-abi",
- "patina-async",
- "patina-net-sim",
- "patina-runtime",
- "patina-wrapper-fault",
- "patina-wrapper-latency",
+ "patina-dst-abi",
+ "patina-dst-async",
+ "patina-dst-net-sim",
+ "patina-dst-runtime",
+ "patina-dst-wrapper-fault",
+ "patina-dst-wrapper-latency",
  "tempfile",
 ]
 
 [[package]]
-name = "patina-abi"
+name = "patina-dst-abi"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -283,134 +283,134 @@ dependencies = [
 ]
 
 [[package]]
-name = "patina-async"
+name = "patina-dst-async"
 version = "0.1.0"
 dependencies = [
- "patina-abi",
- "patina-net-sim",
- "patina-runtime",
- "patina-wrapper-latency",
+ "patina-dst-abi",
+ "patina-dst-net-sim",
+ "patina-dst-runtime",
+ "patina-dst-wrapper-latency",
  "tempfile",
 ]
 
 [[package]]
-name = "patina-bench"
+name = "patina-dst-bench"
 version = "0.1.0"
 dependencies = [
- "patina-abi",
- "patina-runtime",
+ "patina-dst-abi",
+ "patina-dst-runtime",
 ]
 
 [[package]]
-name = "patina-driver-api"
+name = "patina-dst-driver-api"
 version = "0.1.0"
 dependencies = [
- "patina-abi",
+ "patina-dst-abi",
 ]
 
 [[package]]
-name = "patina-fs-crash"
+name = "patina-dst-fs-crash"
 version = "0.1.0"
 dependencies = [
- "patina-abi",
- "patina-driver-api",
- "patina-fs-mem",
- "patina-rng-seeded",
+ "patina-dst-abi",
+ "patina-dst-driver-api",
+ "patina-dst-fs-mem",
+ "patina-dst-rng-seeded",
 ]
 
 [[package]]
-name = "patina-fs-host"
+name = "patina-dst-fs-host"
 version = "0.1.0"
 dependencies = [
- "patina-abi",
- "patina-driver-api",
+ "patina-dst-abi",
+ "patina-dst-driver-api",
  "tempfile",
 ]
 
 [[package]]
-name = "patina-fs-mem"
+name = "patina-dst-fs-mem"
 version = "0.1.0"
 dependencies = [
- "patina-abi",
- "patina-driver-api",
+ "patina-dst-abi",
+ "patina-dst-driver-api",
 ]
 
 [[package]]
-name = "patina-minimize"
+name = "patina-dst-minimize"
 version = "0.1.0"
 dependencies = [
- "patina-abi",
- "patina-runtime",
- "patina-trace",
+ "patina-dst-abi",
+ "patina-dst-runtime",
+ "patina-dst-trace",
 ]
 
 [[package]]
-name = "patina-native-shim"
+name = "patina-dst-native-shim"
 version = "0.1.0"
 dependencies = [
- "patina-abi",
- "patina-driver-api",
- "patina-fs-crash",
- "patina-fs-mem",
- "patina-runtime",
- "patina-sched-det",
+ "patina-dst-abi",
+ "patina-dst-driver-api",
+ "patina-dst-fs-crash",
+ "patina-dst-fs-mem",
+ "patina-dst-runtime",
+ "patina-dst-sched-det",
  "serde_json",
 ]
 
 [[package]]
-name = "patina-net-sim"
+name = "patina-dst-net-sim"
 version = "0.1.0"
 dependencies = [
- "patina-abi",
- "patina-driver-api",
- "patina-rng-seeded",
+ "patina-dst-abi",
+ "patina-dst-driver-api",
+ "patina-dst-rng-seeded",
 ]
 
 [[package]]
-name = "patina-proptest"
+name = "patina-dst-proptest"
 version = "0.1.0"
 dependencies = [
- "patina",
+ "patina-dst",
  "proptest",
 ]
 
 [[package]]
-name = "patina-rng-seeded"
+name = "patina-dst-rng-seeded"
 version = "0.1.0"
 dependencies = [
- "patina-abi",
- "patina-driver-api",
+ "patina-dst-abi",
+ "patina-dst-driver-api",
 ]
 
 [[package]]
-name = "patina-runtime"
+name = "patina-dst-runtime"
 version = "0.1.0"
 dependencies = [
- "patina-abi",
- "patina-driver-api",
- "patina-fs-crash",
- "patina-fs-host",
- "patina-fs-mem",
- "patina-net-sim",
- "patina-rng-seeded",
- "patina-sched-det",
- "patina-time-virtual",
- "patina-trace",
+ "patina-dst-abi",
+ "patina-dst-driver-api",
+ "patina-dst-fs-crash",
+ "patina-dst-fs-host",
+ "patina-dst-fs-mem",
+ "patina-dst-net-sim",
+ "patina-dst-rng-seeded",
+ "patina-dst-sched-det",
+ "patina-dst-time-virtual",
+ "patina-dst-trace",
  "serde_json",
  "tempfile",
 ]
 
 [[package]]
-name = "patina-sched-det"
+name = "patina-dst-sched-det"
 version = "0.1.0"
 dependencies = [
- "patina-abi",
- "patina-driver-api",
- "patina-rng-seeded",
+ "patina-dst-abi",
+ "patina-dst-driver-api",
+ "patina-dst-rng-seeded",
 ]
 
 [[package]]
-name = "patina-target"
+name = "patina-dst-target"
 version = "0.1.0"
 dependencies = [
  "object",
@@ -418,55 +418,55 @@ dependencies = [
 ]
 
 [[package]]
-name = "patina-time-virtual"
+name = "patina-dst-time-virtual"
 version = "0.1.0"
 dependencies = [
- "patina-abi",
- "patina-driver-api",
+ "patina-dst-abi",
+ "patina-dst-driver-api",
 ]
 
 [[package]]
-name = "patina-trace"
+name = "patina-dst-trace"
 version = "0.1.0"
 dependencies = [
- "patina-abi",
+ "patina-dst-abi",
  "serde",
  "serde_json",
  "tempfile",
 ]
 
 [[package]]
-name = "patina-wasi-host"
+name = "patina-dst-wasi-host"
 version = "0.1.0"
 dependencies = [
- "patina-abi",
- "patina-fs-mem",
- "patina-runtime",
- "patina-target",
- "patina-trace",
+ "patina-dst-abi",
+ "patina-dst-fs-mem",
+ "patina-dst-runtime",
+ "patina-dst-target",
+ "patina-dst-trace",
  "tempfile",
  "wasmi",
  "wat",
 ]
 
 [[package]]
-name = "patina-wrapper-fault"
+name = "patina-dst-wrapper-fault"
 version = "0.1.0"
 dependencies = [
- "patina-abi",
- "patina-driver-api",
- "patina-net-sim",
- "patina-rng-seeded",
+ "patina-dst-abi",
+ "patina-dst-driver-api",
+ "patina-dst-net-sim",
+ "patina-dst-rng-seeded",
 ]
 
 [[package]]
-name = "patina-wrapper-latency"
+name = "patina-dst-wrapper-latency"
 version = "0.1.0"
 dependencies = [
- "patina-abi",
- "patina-driver-api",
- "patina-net-sim",
- "patina-rng-seeded",
+ "patina-dst-abi",
+ "patina-dst-driver-api",
+ "patina-dst-net-sim",
+ "patina-dst-rng-seeded",
 ]
 
 [[package]]

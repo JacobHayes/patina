@@ -1,6 +1,6 @@
 //! A deterministic entropy byte stream based on SplitMix64.
 
-use patina_driver_api::{DriverResult, EntropyDriver};
+use patina_dst_driver_api::{DriverResult, EntropyDriver};
 
 /// The specified SplitMix64 stream used by deterministic decision policies.
 pub struct SplitMix64 {
@@ -58,7 +58,7 @@ impl EntropyDriver for SeededEntropy {
 
 #[cfg(test)]
 mod tests {
-    use patina_driver_api::EntropyDriver;
+    use patina_dst_driver_api::EntropyDriver;
 
     use super::*;
 

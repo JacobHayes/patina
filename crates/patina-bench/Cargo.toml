@@ -1,5 +1,5 @@
 [package]
-name = "patina-bench"
+name = "patina-dst-bench"
 description = "Performance qualification harness and budgets for the Patina runtime"
 version.workspace = true
 edition.workspace = true
@@ -8,5 +8,5 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
-patina-abi.workspace = true
-patina-runtime.workspace = true
+patina-dst-abi.workspace = true
+patina-dst-runtime.workspace = true

@@ -353,12 +353,12 @@ pub struct FsMetadata {
     /// Explicit virtual access timestamp in nanoseconds.
     ///
     /// Drivers without a clock do not auto-update this field. For example,
-    /// `patina-fs-mem` changes timestamps only via explicit set-times calls.
+    /// `patina-dst-fs-mem` changes timestamps only via explicit set-times calls.
     pub atime_nanos: u64,
     /// Explicit virtual modification timestamp in nanoseconds.
     ///
     /// Drivers without a clock do not auto-update this field. For example,
-    /// `patina-fs-mem` changes timestamps only via explicit set-times calls.
+    /// `patina-dst-fs-mem` changes timestamps only via explicit set-times calls.
     pub mtime_nanos: u64,
 }
 

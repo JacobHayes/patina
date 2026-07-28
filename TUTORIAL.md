@@ -39,10 +39,10 @@ patina = { path = "../patina/crates/patina" }
 // An end-of-run consistency check catches it and exits nonzero (a clean exit, so
 // the recorded trace finalizes and can be replayed and rendered).
 fn main() {
-    patina::lifecycle::setup_complete();
+    patina_dst::lifecycle::setup_complete();
     let mut durable: Vec<u64> = Vec::new();
     for i in 0..8u64 {
-        if patina::buggify!("batch-commit") {
+        if patina_dst::buggify!("batch-commit") {
             let last = durable.len();
             durable.push(i);
             if last >= 1 {

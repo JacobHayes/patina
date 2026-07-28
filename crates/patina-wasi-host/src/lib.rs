@@ -7,11 +7,11 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use patina_abi::{
+use patina_dst_abi::{
     ClockKind, EffectError, ErrorCode, Fd, FsEntryKind, FsMetadata, OpenFlags, SeekWhence, SocketId,
 };
-use patina_runtime::{Context, RuntimeError, SiteOutcome};
-use patina_target::{TargetError, WasiAudit};
+use patina_dst_runtime::{Context, RuntimeError, SiteOutcome};
+use patina_dst_target::{TargetError, WasiAudit};
 use wasmi::{
     AsContextMut, Caller, Config as WasmiConfig, Engine, Error as WasmiError, Extern, Linker,
     Memory, Module, Store, StoreLimits, StoreLimitsBuilder,
@@ -3100,7 +3100,7 @@ pub enum WasiHostError {
     /// A configured preopen path was not a valid absolute path.
     InvalidPreopen(String),
     /// `--buggify-after-setup` was declared but the guest never called
-    /// `patina::lifecycle::setup_complete()` — a harness bug, not a silent
+    /// `patina_dst::lifecycle::setup_complete()` — a harness bug, not a silent
     /// no-fault run. Mirrors the native shim's `PATINA_BUGGIFY_SETUP_NEVER_CALLED`.
     BuggifySetupNeverCalled,
 }
@@ -3109,7 +3109,7 @@ pub enum WasiHostError {
 /// by the [`WasiHostError`] display and the host-side stderr emission so the
 /// campaign classifier sees the same token the native shim emits.
 const BUGGIFY_SETUP_NEVER_CALLED_MARKER: &str = "PATINA_BUGGIFY_SETUP_NEVER_CALLED --buggify-after-setup was declared but the guest never \
-called patina::lifecycle::setup_complete()";
+called patina_dst::lifecycle::setup_complete()";
 
 impl fmt::Display for WasiHostError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -3157,8 +3157,8 @@ impl From<RuntimeError> for WasiHostError {
 
 #[cfg(test)]
 mod tests {
-    use patina_abi::Operation;
-    use patina_runtime::RuntimeConfig;
+    use patina_dst_abi::Operation;
+    use patina_dst_runtime::RuntimeConfig;
     use tempfile::tempdir;
 
     use super::*;
@@ -3432,7 +3432,7 @@ mod tests {
             .unwrap();
         assert_eq!(values.0, values.1);
         record.finish().unwrap();
-        let bundle = patina_trace::TraceBundle::load(&trace).unwrap();
+        let bundle = patina_dst_trace::TraceBundle::load(&trace).unwrap();
         let clock_now_count = bundle.timelines[0]
             .decisions
             .iter()
@@ -3942,7 +3942,7 @@ mod tests {
             if let Some(range) = range {
                 config = config
                     .apply_fault_env(|name| {
-                        (name == patina_runtime::ENV_SLEEP_JITTER).then(|| range.to_string())
+                        (name == patina_dst_runtime::ENV_SLEEP_JITTER).then(|| range.to_string())
                     })
                     .unwrap();
             }
@@ -3968,7 +3968,7 @@ mod tests {
         let recorded = {
             let config = RuntimeConfig::record(7, &trace, "jitter-v1")
                 .apply_fault_env(|name| {
-                    (name == patina_runtime::ENV_SLEEP_JITTER).then(|| "100..200".to_string())
+                    (name == patina_dst_runtime::ENV_SLEEP_JITTER).then(|| "100..200".to_string())
                 })
                 .unwrap();
             let mut host = Preview1Host::new(Context::from_config(config).unwrap());
@@ -4016,8 +4016,8 @@ mod tests {
         // Enable buggify at full activation and firing so the single site fires.
         let config = RuntimeConfig::seeded(3)
             .apply_buggify_env(|name| match name {
-                patina_runtime::ENV_BUGGIFY => Some("1000".to_string()),
-                patina_runtime::ENV_BUGGIFY_ACTIVATION => Some("1000".to_string()),
+                patina_dst_runtime::ENV_BUGGIFY => Some("1000".to_string()),
+                patina_dst_runtime::ENV_BUGGIFY_ACTIVATION => Some("1000".to_string()),
                 _ => None,
             })
             .unwrap();
@@ -4051,8 +4051,8 @@ mod tests {
         assert_eq!(diagnostics.total_firings, 1);
     }
 
-    fn seeded_memfs(files: &[(&str, &[u8])]) -> patina_fs_mem::MemFs {
-        let mut fs = patina_fs_mem::MemFs::new();
+    fn seeded_memfs(files: &[(&str, &[u8])]) -> patina_dst_fs_mem::MemFs {
+        let mut fs = patina_dst_fs_mem::MemFs::new();
         for (path, bytes) in files {
             fs = fs.with_file(path, bytes.to_vec()).unwrap();
         }
@@ -4060,7 +4060,7 @@ mod tests {
     }
 
     fn seeded_context(seed: u64, files: &[(&str, &[u8])]) -> Context {
-        patina_runtime::RuntimeBuilder::new(RuntimeConfig::seeded(seed))
+        patina_dst_runtime::RuntimeBuilder::new(RuntimeConfig::seeded(seed))
             .with_default_drivers()
             .with_filesystem(seeded_memfs(files))
             .build()
@@ -4435,7 +4435,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let trace = directory.path().join("preopen.patina");
         let record_context =
-            patina_runtime::RuntimeBuilder::new(RuntimeConfig::record(9, &trace, "preopen-v1"))
+            patina_dst_runtime::RuntimeBuilder::new(RuntimeConfig::record(9, &trace, "preopen-v1"))
                 .with_default_drivers()
                 .with_filesystem(seeded_memfs(&[("/ro/seed", b"data")]))
                 .build()
@@ -4445,7 +4445,7 @@ mod tests {
         record.finish().unwrap();
 
         let replay_context =
-            patina_runtime::RuntimeBuilder::new(RuntimeConfig::replay(&trace, "preopen-v1"))
+            patina_dst_runtime::RuntimeBuilder::new(RuntimeConfig::replay(&trace, "preopen-v1"))
                 .with_default_drivers()
                 .with_filesystem(seeded_memfs(&[("/ro/seed", b"data")]))
                 .build()

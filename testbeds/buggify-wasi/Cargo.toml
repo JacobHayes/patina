@@ -21,7 +21,7 @@ path = "src/main.rs"
 # The Patina cooperative-SUT SDK (default features = dependency-light SDK). The
 # only dependency: this fixture exists solely to exercise the SDK macros on
 # wasip1, so its dependency tree is `patina` and nothing else.
-patina = { path = "../../crates/patina" }
+patina-dst = { path = "../../crates/patina" }
 
 [profile.release]
 # Keep unwinding so a genuine panic surfaces a message; buggify `always!`

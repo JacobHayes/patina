@@ -1465,7 +1465,7 @@ impl WriteTransaction {
 
     fn commit_inner(&mut self) -> Result<(), CommitError> {
         // PATINA FORK: coverage oracle -- the campaign should reach the commit path.
-        patina::reachable!("redb-commit-inner-entered");
+        patina_dst::reachable!("redb-commit-inner-entered");
 
         // Quick-repair requires 2-phase commit
         if self.quick_repair {
@@ -1476,19 +1476,19 @@ impl WriteTransaction {
         // legal, stronger durability mode (a superset of the single-phase path),
         // so forcing it only ever makes the commit safer -- it exercises the
         // 2-phase code and its extra fsync ordering on ordinary commits.
-        if patina::buggify!("redb-commit-force-two-phase") {
+        if patina_dst::buggify!("redb-commit-force-two-phase") {
             self.two_phase_commit = true;
         }
         // PATINA FORK: force the quick-repair path (which also implies 2-phase),
         // exercising the allocator-state-save branch of durable_commit. Also a
         // legal config the API exposes via set_quick_repair.
-        if patina::buggify!("redb-commit-force-quick-repair") {
+        if patina_dst::buggify!("redb-commit-force-quick-repair") {
             self.quick_repair = true;
             self.two_phase_commit = true;
         }
         // PATINA FORK: genuine internal invariant established just above --
         // quick-repair always implies 2-phase commit.
-        patina::always!(
+        patina_dst::always!(
             !self.quick_repair || self.two_phase_commit,
             "redb-quick-repair-implies-two-phase"
         );
@@ -1707,12 +1707,12 @@ impl WriteTransaction {
 
         // PATINA FORK: coverage oracle -- the 2-phase durable path should be
         // exercised at least once across the campaign.
-        patina::sometimes!(self.two_phase_commit, "redb-commit-two-phase-path-taken");
+        patina_dst::sometimes!(self.two_phase_commit, "redb-commit-two-phase-path-taken");
         // PATINA FORK: inject a deterministic delay (virtual time, never a real
         // sleep) right before the durability point, widening the window between
         // the data write and the god-byte/commit-slot flush so a crash injected
         // here lands mid-durability. `mem.commit` is where redb flushes + fsyncs.
-        let _ = patina::buggify_delay!("redb-commit-before-durable-flush");
+        let _ = patina_dst::buggify_delay!("redb-commit-before-durable-flush");
 
         self.mem.commit(
             user_root,

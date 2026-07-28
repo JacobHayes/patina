@@ -1,5 +1,5 @@
 [package]
-name = "patina-wasi-host"
+name = "patina-dst-wasi-host"
 description = "Deterministic WASI Preview 1 host adapter for Patina"
 version.workspace = true
 edition.workspace = true
@@ -8,13 +8,13 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
-patina-abi.workspace = true
-patina-runtime.workspace = true
-patina-target.workspace = true
+patina-dst-abi.workspace = true
+patina-dst-runtime.workspace = true
+patina-dst-target.workspace = true
 wasmi.workspace = true
 
 [dev-dependencies]
-patina-fs-mem.workspace = true
-patina-trace.workspace = true
+patina-dst-fs-mem.workspace = true
+patina-dst-trace.workspace = true
 tempfile.workspace = true
 wat.workspace = true

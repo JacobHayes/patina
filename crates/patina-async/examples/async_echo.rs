@@ -1,6 +1,6 @@
-use patina_async::{TcpListener, TcpStream, block_on, spawn};
-use patina_net_sim::SimNet;
-use patina_runtime::{RuntimeBuilder, RuntimeConfig, RuntimeError};
+use patina_dst_async::{TcpListener, TcpStream, block_on, spawn};
+use patina_dst_net_sim::SimNet;
+use patina_dst_runtime::{RuntimeBuilder, RuntimeConfig, RuntimeError};
 
 fn main() -> Result<(), RuntimeError> {
     let seed = std::env::var("PATINA_SEED")

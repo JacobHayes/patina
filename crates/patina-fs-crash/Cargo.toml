@@ -1,5 +1,5 @@
 [package]
-name = "patina-fs-crash"
+name = "patina-dst-fs-crash"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
-patina-abi.workspace = true
-patina-driver-api.workspace = true
-patina-fs-mem.workspace = true
-patina-rng-seeded.workspace = true
+patina-dst-abi.workspace = true
+patina-dst-driver-api.workspace = true
+patina-dst-fs-mem.workspace = true
+patina-dst-rng-seeded.workspace = true

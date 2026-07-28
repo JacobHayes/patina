@@ -1,5 +1,5 @@
 [package]
-name = "patina-net-sim"
+name = "patina-dst-net-sim"
 description = "Deterministic virtual datagram network for Patina"
 version.workspace = true
 edition.workspace = true
@@ -8,6 +8,6 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
-patina-abi.workspace = true
-patina-driver-api.workspace = true
-patina-rng-seeded.workspace = true
+patina-dst-abi.workspace = true
+patina-dst-driver-api.workspace = true
+patina-dst-rng-seeded.workspace = true

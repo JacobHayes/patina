@@ -211,7 +211,7 @@ up with real redb behavior; a mismatch would produce either false-positive
 ## Cooperative-SUT (buggify) campaign
 
 `buggify-sweep.sh` runs a Patina cooperative-SUT campaign: the harness is built
-against the vendored `../redb-fork` (redb 4.1.0 with `patina::{buggify!,
+against the vendored `../redb-fork` (redb 4.1.0 with `patina_dst::{buggify!,
 buggify_delay!, sometimes!, reachable!, always!}` sites in its commit/recovery
 paths — byte-for-byte upstream except for those clearly-marked sites), and run
 with `--buggify` combined with the crash filesystem. Each generation derives its
@@ -219,7 +219,7 @@ seed, workload, crash geometry, and per-gen buggify activation/fire probabilitie
 from `SHA-256("redb-buggify-$G")`, so any generation is re-runnable by number.
 
 The harness's single cooperative touch point is one
-`patina::lifecycle::setup_complete()` call marking the setup/workload boundary
+`patina_dst::lifecycle::setup_complete()` call marking the setup/workload boundary
 (a no-op outside a Patina build, so `run-native.sh` is unchanged). Crash-free
 generations additionally pass `--buggify-after-setup` so DB creation is
 fault-free and cooperative faults fire only from the first workload commit.

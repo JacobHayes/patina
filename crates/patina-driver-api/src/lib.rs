@@ -3,7 +3,7 @@
 //! Concrete drivers keep rich builders in their own crates. These traits only
 //! describe effects required by the runtime boundary.
 
-use patina_abi::{
+use patina_dst_abi::{
     ClockKind, Datagram, EffectError, Fd, FsDirectoryEntry, FsMetadata, OpenFlags, SeekWhence,
     SendReport, ShutdownHow, SocketId, TaskId, TcpAccepted,
 };
@@ -112,7 +112,7 @@ pub trait FsDriver: Send {
 
 fn unsupported_filesystem_operation(operation: &str) -> EffectError {
     EffectError::new(
-        patina_abi::ErrorCode::Denied,
+        patina_dst_abi::ErrorCode::Denied,
         format!("filesystem driver does not support {operation}"),
     )
 }
@@ -123,7 +123,7 @@ fn unsupported_filesystem_operation(operation: &str) -> EffectError {
 fn checked_offset(offset: u64) -> DriverResult<i64> {
     i64::try_from(offset).map_err(|_| {
         EffectError::new(
-            patina_abi::ErrorCode::InvalidInput,
+            patina_dst_abi::ErrorCode::InvalidInput,
             format!("positional offset {offset} exceeds the addressable range"),
         )
     })
@@ -131,7 +131,7 @@ fn checked_offset(offset: u64) -> DriverResult<i64> {
 
 fn unsupported_network_operation(operation: &str) -> EffectError {
     EffectError::new(
-        patina_abi::ErrorCode::Denied,
+        patina_dst_abi::ErrorCode::Denied,
         format!("network driver does not support {operation}"),
     )
 }

@@ -10,10 +10,10 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use patina_abi::{
+use patina_dst_abi::{
     EffectError, ErrorCode, Fd, FsDirectoryEntry, FsEntryKind, FsMetadata, OpenFlags, SeekWhence,
 };
-use patina_driver_api::{DriverResult, FsDriver};
+use patina_dst_driver_api::{DriverResult, FsDriver};
 
 const MAX_CAPTURE_READ: usize = 16 * 1024 * 1024;
 

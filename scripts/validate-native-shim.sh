@@ -432,7 +432,7 @@ cat >"$tmp/unknown_import_probe.c" <<'C'
 int main(void) { return puts("unknown-import-probe") < 0; }
 C
 
-cargo build --locked --manifest-path "$root/Cargo.toml" -p patina-native-shim -p cargo-patina >/dev/null
+cargo build --locked --manifest-path "$root/Cargo.toml" -p patina-dst-native-shim -p cargo-patina >/dev/null
 runner="$target_dir/debug/cargo-patina"
 
 # -----------------------------------------------------------------------------
@@ -465,12 +465,12 @@ cargo test --locked --manifest-path "$root/Cargo.toml" -p cargo-patina \
 # `__wrap_dlsym`) and exercises the startup constructor, so it takes the wrap.
 "$cc" -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror \
   -I"$root/crates/patina-native-shim/include" \
-  "$tmp/probe.c" "$target_dir/debug/libpatina_native_shim.a" \
+  "$tmp/probe.c" "$target_dir/debug/libpatina_dst_native_shim.a" \
   -o "$tmp/probe"
 "$cc" -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror \
   -I"$root/crates/patina-native-shim/include" \
   "$tmp/posix_probe.c" "$root/crates/patina-native-shim/c/patina_posix.c" \
-  "$target_dir/debug/libpatina_native_shim.a" ${native_wrap[@]+"${native_wrap[@]}"} -o "$tmp/posix-probe"
+  "$target_dir/debug/libpatina_dst_native_shim.a" ${native_wrap[@]+"${native_wrap[@]}"} -o "$tmp/posix-probe"
 "$tmp/posix-probe"
 # The interposed ordinary-std probe is built and driven through the packaged
 # `cargo patina` native target: native-build compiles the shim layer, injects

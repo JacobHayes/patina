@@ -21,7 +21,7 @@ path = "src/main.rs"
 
 [dependencies]
 # The Patina cooperative-SUT SDK (default features = dependency-light SDK).
-patina = { path = "../../crates/patina" }
+patina-dst = { path = "../../crates/patina" }
 
 [profile.release]
 panic = "unwind"

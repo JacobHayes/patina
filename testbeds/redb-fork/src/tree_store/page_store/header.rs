@@ -343,7 +343,7 @@ impl TransactionHeader {
         // PATINA FORK: coverage oracle -- a torn/partially-written commit-slot
         // header whose checksum fails to verify should be exercised by the
         // crash-injection campaign (this is the recovery-time torn-page rejection).
-        patina::sometimes!(corrupted, "redb-recovery-torn-slot-checksum-rejected");
+        patina_dst::sometimes!(corrupted, "redb-recovery-torn-slot-checksum-rejected");
 
         let user_root = if data[USER_ROOT_NON_NULL_OFFSET] != 0 {
             Some(BtreeHeader::from_le_bytes(

@@ -14,7 +14,7 @@
 //! would deny as a classified escape, given the shim's declared control-plane
 //! allowance. It is the automated, in-suite half of the
 //! `scripts/validate-native-shim.sh` "host-alias" section; the classifier it
-//! calls (`patina_target::shim_host_alias_violation`) is the exact predicate the
+//! calls (`patina_dst_target::shim_host_alias_violation`) is the exact predicate the
 //! guest-binary audit uses, so the shim is held to the standard it enforces.
 //!
 //! Red→green: on the pre-doctrine shim (which named `semaphore_wait`,
@@ -28,7 +28,7 @@ use std::process::Command;
 
 use object::read::archive::ArchiveFile;
 use object::{Object, ObjectSymbol};
-use patina_target::{shim_control_plane_symbols, shim_host_alias_violation};
+use patina_dst_target::{shim_control_plane_symbols, shim_host_alias_violation};
 
 /// The profile directory (`.../target/debug` or `.../release`) that holds the
 /// test binary and, alongside it, the shim staticlib.
@@ -47,7 +47,7 @@ fn workspace_manifest() -> PathBuf {
         .join("Cargo.toml")
 }
 
-/// Build (idempotently) and locate `libpatina_native_shim.a`.
+/// Build (idempotently) and locate `libpatina_dst_native_shim.a`.
 fn shim_archive() -> PathBuf {
     let profile = profile_dir();
     let target_dir = profile
@@ -61,7 +61,7 @@ fn shim_archive() -> PathBuf {
         .arg("--manifest-path")
         .arg(workspace_manifest())
         .arg("-p")
-        .arg("patina-native-shim")
+        .arg("patina-dst-native-shim")
         .arg("--target-dir")
         .arg(&target_dir);
     if profile.file_name().and_then(|n| n.to_str()) == Some("release") {
@@ -69,12 +69,12 @@ fn shim_archive() -> PathBuf {
     }
     let status = build
         .status()
-        .expect("cargo build -p patina-native-shim runs");
+        .expect("cargo build -p patina-dst-native-shim runs");
     assert!(
         status.success(),
         "failed to build the native shim staticlib"
     );
-    let archive = profile.join("libpatina_native_shim.a");
+    let archive = profile.join("libpatina_dst_native_shim.a");
     assert!(
         archive.exists(),
         "shim staticlib not found at {}",
@@ -84,7 +84,7 @@ fn shim_archive() -> PathBuf {
 }
 
 /// Collect the undefined external symbol names of the shim's *own* object
-/// members (named `patina_native_shim-*`), excluding the bundled std/dep
+/// members (named `patina_dst_native_shim-*`), excluding the bundled std/dep
 /// members whose imports the shim's strong definitions satisfy at final link.
 fn shim_undefined_externals(archive_bytes: &[u8]) -> BTreeSet<String> {
     let archive = ArchiveFile::parse(archive_bytes).expect("parse shim staticlib");
@@ -93,7 +93,7 @@ fn shim_undefined_externals(archive_bytes: &[u8]) -> BTreeSet<String> {
     for member in archive.members() {
         let member = member.expect("archive member");
         let name = String::from_utf8_lossy(member.name());
-        if !name.starts_with("patina_native_shim-") {
+        if !name.starts_with("patina_dst_native_shim-") {
             continue;
         }
         saw_shim_member = true;
@@ -109,7 +109,7 @@ fn shim_undefined_externals(archive_bytes: &[u8]) -> BTreeSet<String> {
     }
     assert!(
         saw_shim_member,
-        "no patina_native_shim-* members found in the staticlib"
+        "no patina_dst_native_shim-* members found in the staticlib"
     );
     undefined
 }

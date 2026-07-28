@@ -9,11 +9,11 @@ flowchart TD
     App[Application and dependencies]
     Std[Rust std / async runtimes / libc-compatible shims]
     ABI[Patina deterministic ABI]
-    Runtime[patina-runtime]
+    Runtime[patina-dst-runtime]
     Wrappers[Wrappers: record, replay, fault, latency, logging]
     Drivers[Concrete drivers: fs, net, time, rng, scheduler]
     Host[Host OS, only through explicit policy]
-    Trace[patina-trace]
+    Trace[patina-dst-trace]
 
     App --> Std
     Std --> ABI
@@ -57,33 +57,33 @@ The shim is a compatibility layer, not the center of the system. It shares the P
 ```text
 cargo-patina              # cargo subcommand
 patina                    # cooperative-SUT SDK (default) + explicit facade (runtime feature)
-patina-abi                # stable deterministic boundary contracts
-patina-runtime            # runtime registry, driver installation, scheduling, params
-patina-async              # deterministic futures executor over the explicit boundary
-patina-trace              # trace bundle format, event logs, branch metadata, replay matching
-patina-minimize           # pluggable minimization interfaces and reducers for traces/scenarios
-patina-target             # target specs and build integration
+patina-dst-abi                # stable deterministic boundary contracts
+patina-dst-runtime            # runtime registry, driver installation, scheduling, params
+patina-dst-async              # deterministic futures executor over the explicit boundary
+patina-dst-trace              # trace bundle format, event logs, branch metadata, replay matching
+patina-dst-minimize           # pluggable minimization interfaces and reducers for traces/scenarios
+patina-dst-target             # target specs and build integration
 patina-std                # std/sys integration for Patina targets
 patina-macros             # optional registration/test macros
 
-patina-driver-api         # common driver traits and helper types
-patina-fs-mem             # in-memory virtual filesystem
-patina-fs-crash           # crash-consistency filesystem model
-patina-fs-host            # explicit allowlisted read-only host capture
-patina-net-sim            # deterministic virtual network
-patina-time-virtual       # virtual clock and timers
-patina-rng-seeded         # deterministic entropy source
-patina-sched-det          # deterministic scheduler policies
+patina-dst-driver-api         # common driver traits and helper types
+patina-dst-fs-mem             # in-memory virtual filesystem
+patina-dst-fs-crash           # crash-consistency filesystem model
+patina-dst-fs-host            # explicit allowlisted read-only host capture
+patina-dst-net-sim            # deterministic virtual network
+patina-dst-time-virtual       # virtual clock and timers
+patina-dst-rng-seeded         # deterministic entropy source
+patina-dst-sched-det          # deterministic scheduler policies
 
 patina-wrapper-record     # records boundary decisions
 patina-wrapper-replay     # replays boundary decisions
-patina-wrapper-fault      # generic fault injection wrappers
-patina-wrapper-latency    # generic delay and jitter wrappers
+patina-dst-wrapper-fault      # generic fault injection wrappers
+patina-dst-wrapper-latency    # generic delay and jitter wrappers
 
-patina-native-shim        # libc/pthread/syscall compatibility layer
-patina-wasi-host          # deterministic WASI host implementation
+patina-dst-native-shim        # libc/pthread/syscall compatibility layer
+patina-dst-wasi-host          # deterministic WASI host implementation
 
-patina-bench              # performance qualification workload and budget gates
+patina-dst-bench              # performance qualification workload and budget gates
 ```
 
 The exact crate names are conventional, but the separation is intentional: the ABI and trace format are shared, drivers are modular, and native compatibility remains separate from the Rust-first core.
@@ -129,7 +129,7 @@ trait SchedulerDriver {
 
 These traits are illustrative rather than final API text. The invariant is stable: common interfaces describe effects, not high-level service models.
 
-The `Async<...>` returns sketched above are realized by the `patina-async` crate: a deterministic single-threaded executor whose TCP/UDP and timer futures drive these effect operations through the recorded boundary, so `block_on`/`spawn`/`sleep_until`/`timeout` compose over the same scheduler, network, and clock decisions without introducing new operations. It is an explicit-boundary executor, not an interposition of third-party async runtimes.
+The `Async<...>` returns sketched above are realized by the `patina-dst-async` crate: a deterministic single-threaded executor whose TCP/UDP and timer futures drive these effect operations through the recorded boundary, so `block_on`/`spawn`/`sleep_until`/`timeout` compose over the same scheduler, network, and clock decisions without introducing new operations. It is an explicit-boundary executor, not an interposition of third-party async runtimes.
 
 ## Construction plane: typed driver setup
 
@@ -137,14 +137,14 @@ Concrete drivers expose rich typed builders. Driver-specific configuration lives
 
 ```rust
 #[cfg(patina)]
-fn configure_patina(ctx: &mut patina::Context) {
-    let net = patina_net_sim::SimNet::builder()
+fn configure_patina(ctx: &mut patina_dst::Context) {
+    let net = patina_dst_net_sim::SimNet::builder()
         .route_host("s3.amazonaws.com", fake_s3_http())
         .route_cidr("10.0.0.0/8", simulated_tcp())
         .build();
 
-    let fs = patina_fs_crash::CrashFs::builder()
-        .filesystem(patina_fs_mem::MemFs::new())
+    let fs = patina_dst_fs_crash::CrashFs::builder()
+        .filesystem(patina_dst_fs_mem::MemFs::new())
         .seed(7)
         .torn_write_probability(0.5)
         .model_rename_atomicity(false)
@@ -299,7 +299,7 @@ Registration may be explicit:
 ```rust
 #[cfg(patina)]
 fn main() {
-    patina::run(|ctx| {
+    patina_dst::run(|ctx| {
         configure_patina(ctx);
         app::main();
     });
@@ -309,7 +309,7 @@ fn main() {
 or macro-assisted:
 
 ```rust
-patina::register!(configure_patina);
+patina_dst::register!(configure_patina);
 ```
 
 The registration mechanism is deliberately small. It installs drivers and scenario hooks; it does not define a large declarative configuration system.
@@ -387,8 +387,8 @@ The WASI host implements WASI imports using Patina drivers. WASI’s explicit im
 flowchart TD
     Wasm[Rust program compiled to WASI]
     Imports[WASI imports]
-    Host[patina-wasi-host]
-    Runtime[patina-runtime]
+    Host[patina-dst-wasi-host]
+    Runtime[patina-dst-runtime]
     Drivers[Patina drivers]
 
     Wasm --> Imports --> Host --> Runtime --> Drivers

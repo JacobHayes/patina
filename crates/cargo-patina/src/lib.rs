@@ -9,12 +9,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 
-use patina_fs_mem::{FsImage, FsImageEntry};
-use patina_minimize::{
+use patina_dst_fs_mem::{FsImage, FsImageEntry};
+use patina_dst_minimize::{
     MinimizeError, Scenario, minimize_all, minimize_branch_tree, minimize_main, minimize_timeline,
     reduce_scenario, reduce_schedule,
 };
-use patina_runtime::{
+use patina_dst_runtime::{
     Context, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION,
     ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN, ENV_FINGERPRINT,
     ENV_FS_CRASH_AT, ENV_FS_IMAGE_FD, ENV_FS_TORN_GRANULARITY, ENV_GUEST_ARGV, ENV_HEAL_AFTER,
@@ -23,12 +23,12 @@ use patina_runtime::{
     ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED, ENV_SLEEP_JITTER, ENV_STEP_BUDGET,
     ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, RuntimeConfig,
 };
-use patina_target::{
+use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
     shim_control_plane_symbols,
 };
-use patina_trace::TraceBundle;
-use patina_wasi_host::{
+use patina_dst_trace::TraceBundle;
+use patina_dst_wasi_host::{
     DEFAULT_WASM_FUEL, MountPolicy, Preview1Host, ResourceLimits, execute_preview1_with_fuel,
 };
 use sha2::{Digest, Sha256};
@@ -46,7 +46,7 @@ const PATINA_CFG_FLAGS: &str = "--cfg patina --cfg dst";
 // The native link recipe is packaged into `cargo patina` so `native-build` can
 // reproduce it without the source tree: the POSIX shim C layer and its header
 // are embedded, compiled below the user program, and linked against the
-// `patina-native-shim` staticlib.
+// `patina-dst-native-shim` staticlib.
 const PATINA_POSIX_C: &str = include_str!("../../patina-native-shim/c/patina_posix.c");
 const PATINA_NATIVE_H: &str = include_str!("../../patina-native-shim/include/patina_native.h");
 /// Build-time deterministic-preemption hook, linked only under `--yield-points`.
@@ -57,7 +57,7 @@ const PATINA_YIELD_MARKER: &[u8] = b"PATINA_YIELD_POINTS_V1";
 /// Fingerprint suffix distinguishing a yield-point binary's schedule policy from
 /// a plain one, so their recorded traces never cross-replay.
 const PATINA_YIELD_FINGERPRINT_SUFFIX: &str = "+yieldpoints";
-const NATIVE_SHIM_STATICLIB: &str = "libpatina_native_shim.a";
+const NATIVE_SHIM_STATICLIB: &str = "libpatina_dst_native_shim.a";
 const DEFAULT_NATIVE_EDITION: &str = "2024";
 const DEFAULT_NATIVE_FINGERPRINT: &str = "patina-native";
 /// The fixed, machine-independent `argv[0]` every native guest sees. `native-run`
@@ -179,7 +179,7 @@ receives the candidate through the usual `PATINA_SEED`/`PATINA_PARAMS_JSON`
 environment protocol; a non-zero exit means the failure is still present.
 
 `build` (default `--target native`) packages the native linked-shim target: it
-builds the `patina-native-shim` staticlib, compiles the embedded POSIX C layer,
+builds the `patina-dst-native-shim` staticlib, compiles the embedded POSIX C layer,
 injects `cfg(patina)`/`cfg(dst)`, and links the shim below the user program with
 `rustc`. On Linux it also links `-Wl,--wrap=dlsym` so the shim reaches the real
 glibc resolver through `__real_dlsym` (its host-alias table) while guest `dlsym`
@@ -195,7 +195,7 @@ same cfg flags and shim link arguments are injected through
 scripts and proc macros (which link for the host). Select the member with
 `--package` in a workspace and the binary with `--bin` when the package defines
 more than one; `--output` copies the built binary out (otherwise its Cargo
-artifact path is reported). The `patina-native-shim` staticlib is built from the
+artifact path is reported). The `patina-dst-native-shim` staticlib is built from the
 surrounding Patina workspace, so run `build` from within it.
 `build --target wasi` instead compiles a Cargo package for `wasm32-wasip1`; it is
 package-only (a single `.rs` source is native-only) and `--yield-points` is
@@ -277,7 +277,7 @@ Native fault options (run <BINARY>; seed-driven, default off):
                                   firing (default 300000000000 = 300s). Implies
                                   --buggify.
       --buggify-after-setup       Declare that the guest calls
-                                  patina::lifecycle::setup_complete(); buggify
+                                  patina_dst::lifecycle::setup_complete(); buggify
                                   stays inert until it does. If the guest never
                                   calls it, the run fails loudly. Implies
                                   --buggify.
@@ -3727,22 +3727,22 @@ fn link_arg(path: &Path) -> OsString {
     arg
 }
 
-/// Build the `patina-native-shim` staticlib and return its path. The shim's
+/// Build the `patina-dst-native-shim` staticlib and return its path. The shim's
 /// Rust boundary is produced by Cargo; the C POSIX layer and header are packaged
 /// into this binary and compiled at link time by [`execute_native_build`].
 fn build_native_shim(release: bool) -> Result<PathBuf, CliError> {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let mut command = Command::new(&cargo);
-    command.arg("build").arg("-p").arg("patina-native-shim");
+    command.arg("build").arg("-p").arg("patina-dst-native-shim");
     if release {
         command.arg("--release");
     }
     let status = command
         .status()
-        .map_err(|error| CliError(format!("failed to build patina-native-shim: {error}")))?;
+        .map_err(|error| CliError(format!("failed to build patina-dst-native-shim: {error}")))?;
     if !status.success() {
         return Err(CliError(
-            "building the patina-native-shim staticlib failed".into(),
+            "building the patina-dst-native-shim staticlib failed".into(),
         ));
     }
     let target_dir = match env::var_os("CARGO_TARGET_DIR") {
@@ -4439,7 +4439,7 @@ impl SchedulePolicyFingerprint {
 /// keeping replay self-contained (the operator need not re-pass `--buggify`).
 /// A read/parse failure reports `false`; the runtime surfaces any genuine error.
 fn trace_has_buggify(path: &Path) -> bool {
-    patina_trace::TraceBundle::load(path)
+    patina_dst_trace::TraceBundle::load(path)
         .map(|bundle| bundle.metadata.buggify.is_some())
         .unwrap_or(false)
 }
@@ -4450,7 +4450,7 @@ fn trace_has_buggify(path: &Path) -> bool {
 /// closed. A read/parse failure reports the inert default; the runtime surfaces
 /// any genuine error.
 fn native_policy_from_trace(path: &Path) -> SchedulePolicyFingerprint {
-    patina_trace::TraceBundle::load(path)
+    patina_dst_trace::TraceBundle::load(path)
         .map(|bundle| SchedulePolicyFingerprint {
             pct: bundle
                 .metadata
@@ -5944,13 +5944,13 @@ mod tests {
         }
     }
 
-    fn clock_event(sequence: u64, value: u64) -> patina_trace::TraceEvent {
-        patina_trace::TraceEvent {
+    fn clock_event(sequence: u64, value: u64) -> patina_dst_trace::TraceEvent {
+        patina_dst_trace::TraceEvent {
             sequence,
-            operation: patina_abi::Operation::ClockNow {
-                clock: patina_abi::ClockKind::Monotonic,
+            operation: patina_dst_abi::Operation::ClockNow {
+                clock: patina_dst_abi::ClockKind::Monotonic,
             },
-            outcome: patina_abi::Outcome::U64(value),
+            outcome: patina_dst_abi::Outcome::U64(value),
         }
     }
 
@@ -5977,8 +5977,8 @@ mod tests {
 
     #[test]
     fn executes_trace_minimization_with_an_external_oracle() {
-        use patina_abi::Outcome;
-        use patina_trace::RunMetadata;
+        use patina_dst_abi::Outcome;
+        use patina_dst_trace::RunMetadata;
 
         let directory = tempfile::tempdir().unwrap();
         let input = directory.path().join("input.patina");
@@ -6010,7 +6010,7 @@ mod tests {
     }
 
     fn branched_input(path: &Path) {
-        use patina_trace::{RunMetadata, Timeline};
+        use patina_dst_trace::{RunMetadata, Timeline};
         // main -> keeper (holds the 999 marker plus a removable suffix) and
         // main -> disposable (dead weight the oracle never needs).
         let mut bundle = TraceBundle::new(RunMetadata::new(1, "fixture"), vec![clock_event(0, 0)]);
@@ -6033,7 +6033,7 @@ mod tests {
 
     #[test]
     fn executes_non_leaf_branch_tree_minimization_automatically() {
-        use patina_abi::Outcome;
+        use patina_dst_abi::Outcome;
 
         let directory = tempfile::tempdir().unwrap();
         let input = directory.path().join("input.patina");
@@ -6098,7 +6098,7 @@ mod tests {
 
     #[test]
     fn executes_branch_pruning_dropping_and_shrinking() {
-        use patina_abi::Outcome;
+        use patina_dst_abi::Outcome;
 
         let directory = tempfile::tempdir().unwrap();
         let input = directory.path().join("input.patina");

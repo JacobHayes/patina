@@ -35,7 +35,7 @@ CARGO="${CARGO:-cargo}"
 
 echo "==> building cargo-patina (release) and the instrumented guest binary"
 # native-build must run from within the Patina workspace: it compiles the
-# patina-native-shim staticlib from the surrounding crates and links it below
+# patina-dst-native-shim staticlib from the surrounding crates and links it below
 # the guest. Reuse an existing release cargo-patina if present.
 PATINA_BIN="$root/target/release/cargo-patina"
 if [[ ! -x "$PATINA_BIN" ]]; then

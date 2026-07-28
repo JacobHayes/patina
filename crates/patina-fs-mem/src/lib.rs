@@ -6,10 +6,10 @@ pub use image::{FsImage, FsImageEntry, FsImageError};
 
 use std::collections::BTreeMap;
 
-use patina_abi::{
+use patina_dst_abi::{
     EffectError, ErrorCode, Fd, FsDirectoryEntry, FsEntryKind, FsMetadata, OpenFlags, SeekWhence,
 };
-use patina_driver_api::{DriverResult, FsDriver};
+use patina_dst_driver_api::{DriverResult, FsDriver};
 
 type InodeId = u64;
 type DescriptionId = u64;

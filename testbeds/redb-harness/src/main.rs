@@ -1,7 +1,7 @@
 //! Deterministic redb workload/oracle for the Patina durability testbed.
 //!
 //! This is a std-pure + redb binary. Its only cooperative-SUT touch point is a
-//! single `patina::lifecycle::setup_complete()` call marking the setup/workload
+//! single `patina_dst::lifecycle::setup_complete()` call marking the setup/workload
 //! boundary; that macro is a no-op outside a Patina build, so `run-native.sh`
 //! builds and behaves exactly as a plain std+redb binary (no `cfg(patina)` in
 //! this file). The buggify fault sites themselves live in the vendored redb fork
@@ -176,8 +176,8 @@ enum RunMode {
     Full,
     Crash,
     /// Model-based (stateful) property mode: drives redb against a `BTreeMap`
-    /// model via `patina-proptest`'s state-machine layer. Storage is in-memory
-    /// and generation is seeded from `patina::rng()`, so `--db`/`--ops`/`--seed`
+    /// model via `patina-dst-proptest`'s state-machine layer. Storage is in-memory
+    /// and generation is seeded from `patina_dst::rng()`, so `--db`/`--ops`/`--seed`
     /// are not consulted here (they stay optional for this mode).
     Stateful,
 }
@@ -226,7 +226,7 @@ fn parse_options() -> Result<Options, String> {
     }
 
     let mode = mode.ok_or("--mode is required")?;
-    // Stateful mode is in-memory and seeds generation from `patina::rng()`, so
+    // Stateful mode is in-memory and seeds generation from `patina_dst::rng()`, so
     // `--ops`/`--db`/`--seed` are not required for it; the other modes keep the
     // strict contract they always had.
     let (seed, ops, db) = if mode == RunMode::Stateful {
@@ -394,7 +394,7 @@ fn run_write(options: &Options) -> Fallible<Summary> {
     // with --buggify-after-setup, cooperative faults in redb's commit/recovery
     // paths stay inert until here, so DB creation is fault-free and the workload
     // commits below are what get perturbed. A no-op outside a Patina build.
-    patina::lifecycle::setup_complete();
+    patina_dst::lifecycle::setup_complete();
 
     // Spawn snapshot readers: one writer plus `threads - 1` readers.
     let done = Arc::new(AtomicBool::new(false));
@@ -928,7 +928,7 @@ fn drive_crash_workload(
 
         // Setup done: gate cooperative (buggify) faults to the workload commits
         // below under --buggify-after-setup. No-op outside a Patina build.
-        patina::lifecycle::setup_complete();
+        patina_dst::lifecycle::setup_complete();
 
         let mut applied: u64 = 0;
         while applied < options.ops {

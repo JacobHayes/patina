@@ -7,26 +7,26 @@ use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
-use patina_abi::{
+use patina_dst_abi::{
     ClockKind, Datagram, EffectError, ErrorCode, Fd, FsDirectoryEntry, FsMetadata, OpenFlags,
     Operation, Outcome, SeekWhence, SendReport, ShutdownHow, SocketId, TaskId, TcpAccepted,
 };
-use patina_driver_api::{ClockDriver, EntropyDriver, FsDriver, NetDriver, SchedulerDriver};
-use patina_fs_crash::CrashFs;
-pub use patina_fs_crash::TornGranularity;
-use patina_fs_mem::MemFs;
-use patina_net_sim::SimNet;
-use patina_rng_seeded::{SeededEntropy, SplitMix64};
-use patina_sched_det::{DetScheduler, PctConfig, SchedulePolicy, StarvationConfig};
-use patina_time_virtual::VirtualClock;
-pub use patina_trace::MAX_TRACE_BYTES;
-use patina_trace::{BranchSession, Recorder, Replayer, RunMetadata, TraceBundle, TraceError};
+use patina_dst_driver_api::{ClockDriver, EntropyDriver, FsDriver, NetDriver, SchedulerDriver};
+use patina_dst_fs_crash::CrashFs;
+pub use patina_dst_fs_crash::TornGranularity;
+use patina_dst_fs_mem::MemFs;
+use patina_dst_net_sim::SimNet;
+use patina_dst_rng_seeded::{SeededEntropy, SplitMix64};
+use patina_dst_sched_det::{DetScheduler, PctConfig, SchedulePolicy, StarvationConfig};
+use patina_dst_time_virtual::VirtualClock;
+pub use patina_dst_trace::MAX_TRACE_BYTES;
+use patina_dst_trace::{BranchSession, Recorder, Replayer, RunMetadata, TraceBundle, TraceError};
 
 pub const ENV_MODE: &str = "PATINA_MODE";
 pub const ENV_SEED: &str = "PATINA_SEED";
 pub const ENV_TRACE: &str = "PATINA_TRACE";
 pub const ENV_TRACE_FD: &str = "PATINA_TRACE_FD";
-/// Inherited host descriptor carrying an encoded `patina_fs_mem::FsImage`. When
+/// Inherited host descriptor carrying an encoded `patina_dst_fs_mem::FsImage`. When
 /// set, `native-run` streams a read-only host directory tree into the guest and
 /// the shim rebuilds it as the deterministic filesystem instead of an empty one,
 /// so a fully interposed guest sees a fixed corpus without touching the host.
@@ -88,7 +88,7 @@ pub const ENV_BUGGIFY_ACTIVATION: &str = "PATINA_BUGGIFY_ACTIVATION_PERMILLE";
 /// (the FoundationDB damage-control window). Default 300 virtual seconds. Inert
 /// without [`ENV_BUGGIFY`].
 pub const ENV_BUGGIFY_CUTOFF: &str = "PATINA_BUGGIFY_CUTOFF_NANOS";
-/// Declare that the guest calls `patina::lifecycle::setup_complete()`, gating
+/// Declare that the guest calls `patina_dst::lifecycle::setup_complete()`, gating
 /// buggify off until that call. A false-y value (or absence) leaves it off.
 /// Inert without [`ENV_BUGGIFY`]. When set and the guest never calls
 /// `setup_complete()`, the run fails loudly at finalization.
@@ -346,7 +346,7 @@ pub struct BuggifyConfig {
     /// Virtual monotonic-time cutoff (nanoseconds) after which firing stops.
     pub cutoff_nanos: u64,
     /// When set, the runner has declared that the guest calls
-    /// `patina::lifecycle::setup_complete()`, so buggify stays inert until that
+    /// `patina_dst::lifecycle::setup_complete()`, so buggify stays inert until that
     /// call (a causal gate — intent comes from the flag, not from predicting the
     /// guest). If the guest never calls it, the run fails loudly at finalization.
     pub after_setup: bool,
@@ -2225,7 +2225,7 @@ impl Buggify {
 
     /// The realized configuration and per-site picks recorded into the trace
     /// metadata, or `None` when buggify is disabled.
-    fn to_record(&self) -> Option<patina_trace::BuggifyConfigRecord> {
+    fn to_record(&self) -> Option<patina_dst_trace::BuggifyConfigRecord> {
         if !self.config.enabled {
             return None;
         }
@@ -2240,7 +2240,7 @@ impl Buggify {
             .iter()
             .filter_map(|(label, site)| site.knob.map(|value| (label.clone(), value)))
             .collect();
-        Some(patina_trace::BuggifyConfigRecord {
+        Some(patina_dst_trace::BuggifyConfigRecord {
             fire_permille: self.config.fire_permille,
             activation_permille: self.config.activation_permille,
             cutoff_nanos: self.config.cutoff_nanos,
@@ -2355,7 +2355,7 @@ impl Context {
     // `SleepUntil` boundary op and therefore reproduces exactly on replay.
 
     /// Whether execution is under the deterministic simulator. Always true for an
-    /// installed [`Context`] — the `patina::is_simulated()` hook.
+    /// installed [`Context`] — the `patina_dst::is_simulated()` hook.
     pub const fn is_simulated(&self) -> bool {
         true
     }
@@ -2566,13 +2566,13 @@ impl Context {
     }
 
     /// Draw a deterministic 64-bit value from the buggify entropy stream — the
-    /// `patina::rng()` hook, bridged to the root seed. Not recorded: it is a pure
+    /// `patina_dst::rng()` hook, bridged to the root seed. Not recorded: it is a pure
     /// function of the seed and the call count, so replay reproduces it.
     pub fn buggify_rng(&mut self) -> u64 {
         self.buggify.rng.next_u64()
     }
 
-    /// Mark the `patina::lifecycle::setup_complete()` boundary.
+    /// Mark the `patina_dst::lifecycle::setup_complete()` boundary.
     pub fn lifecycle_setup_complete(&mut self) {
         self.buggify.setup_complete = true;
     }
@@ -4045,35 +4045,35 @@ fn parse_torn_granularity(value: &str) -> Result<TornGranularity, RuntimeError> 
 }
 
 /// Map the runtime crash op to the serializable trace-record op.
-fn crash_op_to_record(op: CrashOp) -> patina_trace::FaultCrashOp {
+fn crash_op_to_record(op: CrashOp) -> patina_dst_trace::FaultCrashOp {
     match op {
-        CrashOp::Open => patina_trace::FaultCrashOp::Open,
-        CrashOp::Write => patina_trace::FaultCrashOp::Write,
-        CrashOp::Sync => patina_trace::FaultCrashOp::Sync,
-        CrashOp::Close => patina_trace::FaultCrashOp::Close,
+        CrashOp::Open => patina_dst_trace::FaultCrashOp::Open,
+        CrashOp::Write => patina_dst_trace::FaultCrashOp::Write,
+        CrashOp::Sync => patina_dst_trace::FaultCrashOp::Sync,
+        CrashOp::Close => patina_dst_trace::FaultCrashOp::Close,
     }
 }
 
-fn crash_op_from_record(op: patina_trace::FaultCrashOp) -> CrashOp {
+fn crash_op_from_record(op: patina_dst_trace::FaultCrashOp) -> CrashOp {
     match op {
-        patina_trace::FaultCrashOp::Open => CrashOp::Open,
-        patina_trace::FaultCrashOp::Write => CrashOp::Write,
-        patina_trace::FaultCrashOp::Sync => CrashOp::Sync,
-        patina_trace::FaultCrashOp::Close => CrashOp::Close,
+        patina_dst_trace::FaultCrashOp::Open => CrashOp::Open,
+        patina_dst_trace::FaultCrashOp::Write => CrashOp::Write,
+        patina_dst_trace::FaultCrashOp::Sync => CrashOp::Sync,
+        patina_dst_trace::FaultCrashOp::Close => CrashOp::Close,
     }
 }
 
-fn torn_granularity_to_record(granularity: TornGranularity) -> patina_trace::TornGranularity {
+fn torn_granularity_to_record(granularity: TornGranularity) -> patina_dst_trace::TornGranularity {
     match granularity {
-        TornGranularity::Block => patina_trace::TornGranularity::Block,
-        TornGranularity::Byte => patina_trace::TornGranularity::Byte,
+        TornGranularity::Block => patina_dst_trace::TornGranularity::Block,
+        TornGranularity::Byte => patina_dst_trace::TornGranularity::Byte,
     }
 }
 
-fn torn_granularity_from_record(granularity: patina_trace::TornGranularity) -> TornGranularity {
+fn torn_granularity_from_record(granularity: patina_dst_trace::TornGranularity) -> TornGranularity {
     match granularity {
-        patina_trace::TornGranularity::Block => TornGranularity::Block,
-        patina_trace::TornGranularity::Byte => TornGranularity::Byte,
+        patina_dst_trace::TornGranularity::Block => TornGranularity::Block,
+        patina_dst_trace::TornGranularity::Byte => TornGranularity::Byte,
     }
 }
 
@@ -4091,11 +4091,11 @@ fn resolve_heal_after(config: &RuntimeConfig) -> u64 {
 /// Serialize the run's liveness-watchdog configuration into the trace metadata.
 /// Informational only — NOT a fingerprint input and NOT reconciled on replay,
 /// because the watchdog is schedule-invariant. `None` when the watchdog is off.
-fn watchdog_record(config: &RuntimeConfig) -> Option<patina_trace::WatchdogConfigRecord> {
+fn watchdog_record(config: &RuntimeConfig) -> Option<patina_dst_trace::WatchdogConfigRecord> {
     if !config.liveness.is_enabled() {
         return None;
     }
-    Some(patina_trace::WatchdogConfigRecord {
+    Some(patina_dst_trace::WatchdogConfigRecord {
         no_progress_budget_nanos: config.liveness.no_progress_budget_nanos,
         converge_budget_nanos: config.liveness.converge_budget_nanos,
         heal_after_nanos: config
@@ -4109,12 +4109,12 @@ fn watchdog_record(config: &RuntimeConfig) -> Option<patina_trace::WatchdogConfi
 /// fault run replays self-contained. `net_latency_nanos` is folded in because it
 /// too shapes the recorded operation stream, so a flag-free replay must restore
 /// it as well.
-fn fault_record(config: &RuntimeConfig) -> patina_trace::FaultConfigRecord {
-    patina_trace::FaultConfigRecord {
+fn fault_record(config: &RuntimeConfig) -> patina_dst_trace::FaultConfigRecord {
+    patina_dst_trace::FaultConfigRecord {
         crash_at: config
             .faults
             .crash_at
-            .map(|point| patina_trace::CrashPointRecord {
+            .map(|point| patina_dst_trace::CrashPointRecord {
                 op: crash_op_to_record(point.op),
                 ordinal: point.ordinal,
             }),
@@ -4128,7 +4128,7 @@ fn fault_record(config: &RuntimeConfig) -> patina_trace::FaultConfigRecord {
 
 /// Rebuild the runtime fault configuration and base net latency from a recorded
 /// trace's authoritative fault metadata.
-fn fault_config_from_record(record: &patina_trace::FaultConfigRecord) -> (FaultConfig, u64) {
+fn fault_config_from_record(record: &patina_dst_trace::FaultConfigRecord) -> (FaultConfig, u64) {
     let faults = FaultConfig {
         crash_at: record.crash_at.map(|point| CrashPoint {
             op: crash_op_from_record(point.op),
@@ -4151,7 +4151,7 @@ fn fault_config_from_record(record: &patina_trace::FaultConfigRecord) -> (FaultC
 /// re-supply behavior.
 fn reconcile_replay_faults(
     config: &RuntimeConfig,
-    recorded: Option<&patina_trace::FaultConfigRecord>,
+    recorded: Option<&patina_dst_trace::FaultConfigRecord>,
 ) -> Result<Option<(FaultConfig, u64)>, RuntimeError> {
     let Some(record) = recorded else {
         return Ok(None);
@@ -4174,11 +4174,11 @@ fn reconcile_replay_faults(
 /// and `knobs` are filled in at finalization from the run's realized picks; here
 /// they start empty. `None` when buggify is disabled, so a disabled run records
 /// no buggify metadata at all and is indistinguishable from an old trace.
-fn buggify_record(config: &RuntimeConfig) -> Option<patina_trace::BuggifyConfigRecord> {
+fn buggify_record(config: &RuntimeConfig) -> Option<patina_dst_trace::BuggifyConfigRecord> {
     if !config.buggify.enabled {
         return None;
     }
-    Some(patina_trace::BuggifyConfigRecord {
+    Some(patina_dst_trace::BuggifyConfigRecord {
         fire_permille: config.buggify.fire_permille,
         activation_permille: config.buggify.activation_permille,
         cutoff_nanos: config.buggify.cutoff_nanos,
@@ -4190,7 +4190,7 @@ fn buggify_record(config: &RuntimeConfig) -> Option<patina_trace::BuggifyConfigR
 
 /// Rebuild a [`BuggifyConfig`] from a recorded trace's authoritative buggify
 /// metadata.
-fn buggify_config_from_record(record: &patina_trace::BuggifyConfigRecord) -> BuggifyConfig {
+fn buggify_config_from_record(record: &patina_dst_trace::BuggifyConfigRecord) -> BuggifyConfig {
     BuggifyConfig {
         enabled: true,
         fire_permille: record.fire_permille,
@@ -4210,7 +4210,7 @@ fn buggify_config_from_record(record: &patina_trace::BuggifyConfigRecord) -> Bug
 /// `+buggify` fingerprint mismatch.
 fn reconcile_replay_buggify(
     config: &RuntimeConfig,
-    recorded: Option<&patina_trace::BuggifyConfigRecord>,
+    recorded: Option<&patina_dst_trace::BuggifyConfigRecord>,
 ) -> Result<Option<BuggifyConfig>, RuntimeError> {
     let Some(record) = recorded else {
         return Ok(None);
@@ -4229,19 +4229,21 @@ fn reconcile_replay_buggify(
 /// The exploration scheduling policy recorded into a trace at build time. `None`
 /// under the default uniform policy, so a default run records no policy metadata
 /// at all and is indistinguishable from an old trace.
-fn schedule_policy_record(config: &RuntimeConfig) -> Option<patina_trace::SchedulePolicyRecord> {
+fn schedule_policy_record(
+    config: &RuntimeConfig,
+) -> Option<patina_dst_trace::SchedulePolicyRecord> {
     let policy = config.schedule_policy;
     if policy.is_default() {
         return None;
     }
-    Some(patina_trace::SchedulePolicyRecord {
-        pct: policy.pct.map(|pct| patina_trace::PctPolicyRecord {
+    Some(patina_dst_trace::SchedulePolicyRecord {
+        pct: policy.pct.map(|pct| patina_dst_trace::PctPolicyRecord {
             depth: pct.depth,
             steps: pct.steps,
         }),
         starvation: policy
             .starvation
-            .map(|starve| patina_trace::StarvationPolicyRecord {
+            .map(|starve| patina_dst_trace::StarvationPolicyRecord {
                 intervals: starve.intervals,
                 max_len: starve.max_len,
                 window: starve.window,
@@ -4251,7 +4253,7 @@ fn schedule_policy_record(config: &RuntimeConfig) -> Option<patina_trace::Schedu
 
 /// Rebuild a [`SchedulePolicy`] from a recorded trace's authoritative policy
 /// metadata.
-fn schedule_policy_from_record(record: &patina_trace::SchedulePolicyRecord) -> SchedulePolicy {
+fn schedule_policy_from_record(record: &patina_dst_trace::SchedulePolicyRecord) -> SchedulePolicy {
     SchedulePolicy {
         pct: record.pct.map(|pct| PctConfig {
             depth: pct.depth,
@@ -4275,7 +4277,7 @@ fn schedule_policy_from_record(record: &patina_trace::SchedulePolicyRecord) -> S
 /// fingerprint mismatch.
 fn reconcile_replay_schedule_policy(
     config: &RuntimeConfig,
-    recorded: Option<&patina_trace::SchedulePolicyRecord>,
+    recorded: Option<&patina_dst_trace::SchedulePolicyRecord>,
 ) -> Result<Option<SchedulePolicy>, RuntimeError> {
     let Some(record) = recorded else {
         return Ok(None);
@@ -4298,7 +4300,7 @@ fn reconcile_replay_schedule_policy(
 /// selected subset verbatim; the returned [`SwarmConfigRecord`] documents the
 /// candidate set and the seed's selection so the trace is self-describing. Each
 /// class draws independently, so subsets vary across generations (seeds).
-fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_trace::SwarmConfigRecord {
+fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_dst_trace::SwarmConfigRecord {
     // Stable class tokens paired with a live predicate and a dropper. A class is
     // a candidate only when currently enabled (non-default).
     let mut candidates: Vec<&'static str> = Vec::new();
@@ -4363,7 +4365,7 @@ fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_trace::SwarmConfigReco
         }
     }
 
-    patina_trace::SwarmConfigRecord {
+    patina_dst_trace::SwarmConfigRecord {
         candidate_classes: candidates.into_iter().map(String::from).collect(),
         selected_classes: selected,
     }
@@ -4473,7 +4475,7 @@ schedulable.",
 /// `PATINA_SCHEDULE_REPORT`: a sweep parses it to annotate a found failure with a
 /// bug-depth estimate and to detect a vacuous starvation configuration. Suppressed
 /// by a false-y [`ENV_SCHEDULE_POLICY_REPORT`].
-fn emit_schedule_policy_report(report: &patina_driver_api::SchedulePolicyReport) {
+fn emit_schedule_policy_report(report: &patina_dst_driver_api::SchedulePolicyReport) {
     if !report.is_active() {
         return;
     }
@@ -4780,9 +4782,9 @@ fn decode_optional_bytes(
 
 #[cfg(test)]
 mod tests {
-    use patina_abi::ErrorCode;
-    use patina_fs_crash::CrashFs;
-    use patina_fs_host::HostCaptureFs;
+    use patina_dst_abi::ErrorCode;
+    use patina_dst_fs_crash::CrashFs;
+    use patina_dst_fs_host::HostCaptureFs;
     use tempfile::tempdir;
 
     use super::*;
@@ -5105,7 +5107,7 @@ mod tests {
         record.finish().unwrap();
 
         // The trace records the policy metadata authoritatively.
-        let bundle = patina_trace::TraceBundle::load(&trace).unwrap();
+        let bundle = patina_dst_trace::TraceBundle::load(&trace).unwrap();
         let recorded_policy = bundle.metadata.schedule_policy.expect("policy recorded");
         assert_eq!(recorded_policy.pct.unwrap().depth, 3);
 
@@ -5128,8 +5130,8 @@ mod tests {
 
     #[test]
     fn reconcile_replay_schedule_policy_enforces_the_authoritative_trace_contract() {
-        let stored = patina_trace::SchedulePolicyRecord {
-            pct: Some(patina_trace::PctPolicyRecord {
+        let stored = patina_dst_trace::SchedulePolicyRecord {
+            pct: Some(patina_dst_trace::PctPolicyRecord {
                 depth: 3,
                 steps: 100,
             }),
@@ -5173,7 +5175,7 @@ mod tests {
                 .with_swarm(true);
             let context = Context::from_config(config).unwrap();
             context.finish().unwrap();
-            patina_trace::TraceBundle::load(&trace).unwrap()
+            patina_dst_trace::TraceBundle::load(&trace).unwrap()
         };
         let bundle = build(1);
         let swarm = bundle.metadata.swarm.expect("swarm recorded");
@@ -5255,7 +5257,7 @@ mod tests {
 
     #[test]
     fn reconcile_replay_buggify_enforces_the_authoritative_trace_contract() {
-        let stored = patina_trace::BuggifyConfigRecord {
+        let stored = patina_dst_trace::BuggifyConfigRecord {
             fire_permille: 250,
             activation_permille: 250,
             cutoff_nanos: 300_000_000_000,
@@ -5285,14 +5287,14 @@ mod tests {
 
     #[test]
     fn reconcile_replay_faults_enforces_the_authoritative_trace_contract() {
-        use patina_trace::{CrashPointRecord, FaultConfigRecord, FaultCrashOp};
+        use patina_dst_trace::{CrashPointRecord, FaultConfigRecord, FaultCrashOp};
 
         let stored = FaultConfigRecord {
             crash_at: Some(CrashPointRecord {
                 op: FaultCrashOp::Close,
                 ordinal: 1,
             }),
-            torn_granularity: patina_trace::TornGranularity::Byte,
+            torn_granularity: patina_dst_trace::TornGranularity::Byte,
             net_latency_nanos: 500,
             ..FaultConfigRecord::default()
         };

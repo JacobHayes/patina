@@ -915,7 +915,7 @@ mod x86_scan {
         // amd64 container over the real std/glibc probe binaries:
         //   PATINA_X86_CORPUS_ELF=/path/guest \
         //   PATINA_X86_CORPUS_OBJDUMP=/path/guest.objdump \
-        //   cargo test -p patina-target -- --ignored x86_decoder_matches_objdump
+        //   cargo test -p patina-dst-target -- --ignored x86_decoder_matches_objdump
         #[test]
         #[ignore = "requires an x86-64 ELF + objdump corpus; run in the amd64 container"]
         fn x86_decoder_matches_objdump_corpus() {

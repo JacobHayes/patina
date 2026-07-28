@@ -1,5 +1,5 @@
 [package]
-name = "patina-abi"
+name = "patina-dst-abi"
 description = "Stable effect contracts for the Patina deterministic boundary"
 version.workspace = true
 edition.workspace = true

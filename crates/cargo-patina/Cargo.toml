@@ -8,19 +8,19 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
-patina-fs-mem.workspace = true
-patina-minimize.workspace = true
-patina-runtime.workspace = true
-patina-target.workspace = true
-patina-trace.workspace = true
-patina-wasi-host.workspace = true
+patina-dst-fs-mem.workspace = true
+patina-dst-minimize.workspace = true
+patina-dst-runtime.workspace = true
+patina-dst-target.workspace = true
+patina-dst-trace.workspace = true
+patina-dst-wasi-host.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 
 [dev-dependencies]
 object.workspace = true
-patina-abi.workspace = true
+patina-dst-abi.workspace = true
 serde_json.workspace = true
 wat.workspace = true
 

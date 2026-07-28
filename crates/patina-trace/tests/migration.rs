@@ -5,8 +5,8 @@
 
 use std::path::PathBuf;
 
-use patina_abi::{ClockKind, Operation, Outcome};
-use patina_trace::{Replayer, TRACE_FORMAT_VERSION, TraceBundle, TraceError};
+use patina_dst_abi::{ClockKind, Operation, Outcome};
+use patina_dst_trace::{Replayer, TRACE_FORMAT_VERSION, TraceBundle, TraceError};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

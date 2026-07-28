@@ -1,5 +1,5 @@
 [package]
-name = "patina-proptest"
+name = "patina-dst-proptest"
 description = "Low-friction proptest compatibility under Patina: case generation seeded from the run's deterministic entropy"
 version.workspace = true
 edition.workspace = true
@@ -8,5 +8,5 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
-patina.workspace = true
+patina-dst.workspace = true
 proptest.workspace = true

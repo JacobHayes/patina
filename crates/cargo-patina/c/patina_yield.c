@@ -18,7 +18,7 @@
 
 #include <stdint.h>
 
-/* Provided by the patina-native-shim staticlib; offers the deterministic
+/* Provided by the patina-dst-native-shim staticlib; offers the deterministic
  * scheduler a chance to switch tasks. */
 extern int patina_sched_yield(void);
 

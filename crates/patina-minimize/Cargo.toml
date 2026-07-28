@@ -1,5 +1,5 @@
 [package]
-name = "patina-minimize"
+name = "patina-dst-minimize"
 description = "Pluggable trace reducers for Patina"
 version.workspace = true
 edition.workspace = true
@@ -8,8 +8,8 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
-patina-abi.workspace = true
-patina-trace.workspace = true
+patina-dst-abi.workspace = true
+patina-dst-trace.workspace = true
 
 [dev-dependencies]
-patina-runtime.workspace = true
+patina-dst-runtime.workspace = true

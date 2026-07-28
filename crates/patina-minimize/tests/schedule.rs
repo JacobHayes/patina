@@ -12,9 +12,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use patina_minimize::reduce_schedule;
-use patina_runtime::{Context, RuntimeBuilder, RuntimeConfig, RuntimeError, TraceTransport};
-use patina_trace::{TraceBundle, TraceError};
+use patina_dst_minimize::reduce_schedule;
+use patina_dst_runtime::{Context, RuntimeBuilder, RuntimeConfig, RuntimeError, TraceTransport};
+use patina_dst_trace::{TraceBundle, TraceError};
 
 const FINGERPRINT: &str = "schedule-reduction-v1";
 

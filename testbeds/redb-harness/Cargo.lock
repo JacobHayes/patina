@@ -63,14 +63,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "patina"
+name = "patina-dst"
 version = "0.1.0"
 
 [[package]]
-name = "patina-proptest"
+name = "patina-dst-proptest"
 version = "0.1.0"
 dependencies = [
- "patina",
+ "patina-dst",
  "proptest",
 ]
 
@@ -167,15 +167,15 @@ name = "redb"
 version = "4.1.0"
 dependencies = [
  "libc",
- "patina",
+ "patina-dst",
 ]
 
 [[package]]
 name = "redb-harness"
 version = "0.1.0"
 dependencies = [
- "patina",
- "patina-proptest",
+ "patina-dst",
+ "patina-dst-proptest",
  "proptest",
  "redb",
 ]

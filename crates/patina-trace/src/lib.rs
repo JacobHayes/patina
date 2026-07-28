@@ -7,7 +7,7 @@ use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use patina_abi::{Operation, Outcome};
+use patina_dst_abi::{Operation, Outcome};
 use serde::{Deserialize, Serialize};
 
 /// The trace bundle format this runtime writes. It is the only version ever
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Format 3 keeps the JSON bundle shape of format 2 but changes only its
 /// on-disk encoding: byte payloads are base64 strings rather than JSON number
-/// arrays (see `bytes_base64` in `patina-abi`) and the bundle is serialized
+/// arrays (see `bytes_base64` in `patina-dst-abi`) and the bundle is serialized
 /// compactly rather than pretty printed. Both changes shrink the dominant cost
 /// (recorded byte payloads) by several times while keeping the file valid,
 /// greppable JSON. Additive ABI variants, such as the TCP operations and
@@ -120,7 +120,7 @@ pub struct BuggifyConfigRecord {
     /// perturbed forever. Default 300 virtual seconds.
     pub cutoff_nanos: u64,
     /// Whether the runner declared (`--buggify-after-setup`) that the guest calls
-    /// `patina::lifecycle::setup_complete()`, so buggify stays inert until that
+    /// `patina_dst::lifecycle::setup_complete()`, so buggify stays inert until that
     /// call. Recorded so replay reproduces the same gating. Omitted when false.
     #[serde(default, skip_serializing_if = "is_false")]
     pub after_setup: bool,
@@ -1166,7 +1166,7 @@ fn migrate_v1_to_v2(mut value: serde_json::Value) -> Result<serde_json::Value, T
 /// is serialized compactly. The decoded `Value` tree is structurally identical
 /// across the two versions, so this step only rewrites the version tag. The
 /// legacy number-array payloads a format 2 bundle carries are decoded by the
-/// tolerant `bytes_base64` reader in `patina-abi` when the migrated value is
+/// tolerant `bytes_base64` reader in `patina-dst-abi` when the migrated value is
 /// finally deserialized, which is what keeps the upgrade lossless without a
 /// per-payload rewrite here.
 fn migrate_v2_to_v3(mut value: serde_json::Value) -> Result<serde_json::Value, TraceError> {
@@ -1204,7 +1204,7 @@ fn temporary_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use patina_abi::{ClockKind, Fd};
+    use patina_dst_abi::{ClockKind, Fd};
     use tempfile::tempdir;
 
     use super::*;

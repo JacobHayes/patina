@@ -14,14 +14,14 @@ use std::slice;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use patina_abi::{
+use patina_dst_abi::{
     ClockKind, EffectError, ErrorCode, Fd, FsDirectoryEntry, FsEntryKind, OpenFlags, SeekWhence,
     TaskId,
 };
 
-use patina_fs_crash::CrashFs;
-use patina_fs_mem::{FsImage, MemFs};
-use patina_runtime::{
+use patina_dst_fs_crash::CrashFs;
+use patina_dst_fs_mem::{FsImage, MemFs};
+use patina_dst_runtime::{
     Context, MAX_TRACE_BYTES, RuntimeBuilder, RuntimeConfig, RuntimeError, SiteOutcome,
     TraceTransport,
 };
@@ -741,7 +741,7 @@ fn ensure_runtime() -> Result<(), c_int> {
     if let Some(message) = init_error().lock().clone() {
         abort_with_init_error(&message);
     }
-    if control_env(patina_runtime::ENV_MODE).is_some() {
+    if control_env(patina_dst_runtime::ENV_MODE).is_some() {
         let _ = init_from_env();
         if slot().lock().is_some() {
             return Ok(());
@@ -861,13 +861,13 @@ fn required_control_string(name: &str) -> Result<String, RuntimeError> {
 }
 
 fn control_trace_fd() -> Result<Option<i32>, RuntimeError> {
-    control_env(patina_runtime::ENV_TRACE_FD)
+    control_env(patina_dst_runtime::ENV_TRACE_FD)
         .filter(|value| !value.is_empty())
         .map(|value| {
             value.parse().map_err(|_| {
                 RuntimeError::Config(format!(
                     "{} must be a non-negative descriptor number",
-                    patina_runtime::ENV_TRACE_FD
+                    patina_dst_runtime::ENV_TRACE_FD
                 ))
             })
         })
@@ -877,13 +877,13 @@ fn control_trace_fd() -> Result<Option<i32>, RuntimeError> {
 /// Parse `PATINA_FS_IMAGE_FD` from the control plane, mirroring `control_trace_fd`.
 /// Present only when `native-run --mount` streamed a captured host directory.
 fn control_fs_image_fd() -> Result<Option<i32>, RuntimeError> {
-    control_env(patina_runtime::ENV_FS_IMAGE_FD)
+    control_env(patina_dst_runtime::ENV_FS_IMAGE_FD)
         .filter(|value| !value.is_empty())
         .map(|value| {
             value.parse().map_err(|_| {
                 RuntimeError::Config(format!(
                     "{} must be a non-negative descriptor number",
-                    patina_runtime::ENV_FS_IMAGE_FD
+                    patina_dst_runtime::ENV_FS_IMAGE_FD
                 ))
             })
         })
@@ -932,7 +932,7 @@ fn fs_image_base() -> Result<MemFs, RuntimeError> {
     let bytes = read_host_fd_to_end(fd).map_err(|error| {
         RuntimeError::Config(format!(
             "failed to read {}: {error}",
-            patina_runtime::ENV_FS_IMAGE_FD
+            patina_dst_runtime::ENV_FS_IMAGE_FD
         ))
     })?;
     let image = FsImage::decode(&bytes)
@@ -943,16 +943,16 @@ fn fs_image_base() -> Result<MemFs, RuntimeError> {
 }
 
 fn runtime_config_from_control_plane() -> Result<(RuntimeConfig, Option<i32>), RuntimeError> {
-    let mode = control_env(patina_runtime::ENV_MODE).unwrap_or_else(|| "seeded".into());
-    let seed = parse_control_u64(patina_runtime::ENV_SEED)?.unwrap_or(0);
+    let mode = control_env(patina_dst_runtime::ENV_MODE).unwrap_or_else(|| "seeded".into());
+    let seed = parse_control_u64(patina_dst_runtime::ENV_SEED)?.unwrap_or(0);
     let trace_fd = control_trace_fd()?;
     if trace_fd.is_some()
-        && control_env(patina_runtime::ENV_TRACE).is_some_and(|value| !value.is_empty())
+        && control_env(patina_dst_runtime::ENV_TRACE).is_some_and(|value| !value.is_empty())
     {
         return Err(RuntimeError::Config(format!(
             "{} and {} must not both be set",
-            patina_runtime::ENV_TRACE,
-            patina_runtime::ENV_TRACE_FD
+            patina_dst_runtime::ENV_TRACE,
+            patina_dst_runtime::ENV_TRACE_FD
         )));
     }
     let mut config = match (mode.as_str(), trace_fd) {
@@ -960,68 +960,74 @@ fn runtime_config_from_control_plane() -> Result<(RuntimeConfig, Option<i32>), R
         ("seeded", Some(_)) => {
             return Err(RuntimeError::Config(format!(
                 "{} is only meaningful in record or replay mode",
-                patina_runtime::ENV_TRACE_FD
+                patina_dst_runtime::ENV_TRACE_FD
             )));
         }
         ("record", None) => RuntimeConfig::record(
             seed,
-            required_control_string(patina_runtime::ENV_TRACE)?,
-            required_control_string(patina_runtime::ENV_FINGERPRINT)?,
+            required_control_string(patina_dst_runtime::ENV_TRACE)?,
+            required_control_string(patina_dst_runtime::ENV_FINGERPRINT)?,
         ),
         ("record", Some(_)) => RuntimeConfig::record_transport(
             seed,
-            required_control_string(patina_runtime::ENV_FINGERPRINT)?,
+            required_control_string(patina_dst_runtime::ENV_FINGERPRINT)?,
         ),
         ("replay", None) => RuntimeConfig::replay_timeline(
-            required_control_string(patina_runtime::ENV_TRACE)?,
-            control_env(patina_runtime::ENV_TIMELINE).unwrap_or_else(|| "main".into()),
-            required_control_string(patina_runtime::ENV_FINGERPRINT)?,
+            required_control_string(patina_dst_runtime::ENV_TRACE)?,
+            control_env(patina_dst_runtime::ENV_TIMELINE).unwrap_or_else(|| "main".into()),
+            required_control_string(patina_dst_runtime::ENV_FINGERPRINT)?,
         ),
         ("replay", Some(_)) => RuntimeConfig::replay_transport_timeline(
-            control_env(patina_runtime::ENV_TIMELINE).unwrap_or_else(|| "main".into()),
-            required_control_string(patina_runtime::ENV_FINGERPRINT)?,
+            control_env(patina_dst_runtime::ENV_TIMELINE).unwrap_or_else(|| "main".into()),
+            required_control_string(patina_dst_runtime::ENV_FINGERPRINT)?,
         ),
         ("branch", None) => RuntimeConfig::branch(
-            required_control_string(patina_runtime::ENV_TRACE)?,
-            control_env(patina_runtime::ENV_PARENT_TIMELINE).unwrap_or_else(|| "main".into()),
-            parse_control_u64(patina_runtime::ENV_BRANCH_FROM)?.ok_or_else(|| {
-                RuntimeError::Config(format!("{} is required", patina_runtime::ENV_BRANCH_FROM))
+            required_control_string(patina_dst_runtime::ENV_TRACE)?,
+            control_env(patina_dst_runtime::ENV_PARENT_TIMELINE).unwrap_or_else(|| "main".into()),
+            parse_control_u64(patina_dst_runtime::ENV_BRANCH_FROM)?.ok_or_else(|| {
+                RuntimeError::Config(format!(
+                    "{} is required",
+                    patina_dst_runtime::ENV_BRANCH_FROM
+                ))
             })?,
-            required_control_string(patina_runtime::ENV_BRANCH_ID)?,
-            parse_control_u64(patina_runtime::ENV_BRANCH_SEED)?.ok_or_else(|| {
-                RuntimeError::Config(format!("{} is required", patina_runtime::ENV_BRANCH_SEED))
+            required_control_string(patina_dst_runtime::ENV_BRANCH_ID)?,
+            parse_control_u64(patina_dst_runtime::ENV_BRANCH_SEED)?.ok_or_else(|| {
+                RuntimeError::Config(format!(
+                    "{} is required",
+                    patina_dst_runtime::ENV_BRANCH_SEED
+                ))
             })?,
-            required_control_string(patina_runtime::ENV_FINGERPRINT)?,
+            required_control_string(patina_dst_runtime::ENV_FINGERPRINT)?,
         ),
         ("branch", Some(_)) => {
             return Err(RuntimeError::Config(format!(
                 "branch mode requires a {} path; {} is unsupported",
-                patina_runtime::ENV_TRACE,
-                patina_runtime::ENV_TRACE_FD
+                patina_dst_runtime::ENV_TRACE,
+                patina_dst_runtime::ENV_TRACE_FD
             )));
         }
         (value, _) => {
             return Err(RuntimeError::Config(format!(
                 "{} must be seeded, record, replay, or branch; got {value:?}",
-                patina_runtime::ENV_MODE
+                patina_dst_runtime::ENV_MODE
             )));
         }
     };
-    if let Some(budget) = parse_control_u64(patina_runtime::ENV_STEP_BUDGET)? {
+    if let Some(budget) = parse_control_u64(patina_dst_runtime::ENV_STEP_BUDGET)? {
         config = config.with_step_budget(budget);
     }
-    if let Some(value) = control_env(patina_runtime::ENV_PARAMS_JSON) {
+    if let Some(value) = control_env(patina_dst_runtime::ENV_PARAMS_JSON) {
         let params: BTreeMap<String, String> = serde_json::from_str(&value).map_err(|error| {
             RuntimeError::Config(format!(
                 "{} is invalid: {error}",
-                patina_runtime::ENV_PARAMS_JSON
+                patina_dst_runtime::ENV_PARAMS_JSON
             ))
         })?;
         for (key, value) in params {
             config = config.with_param(key, value)?;
         }
     }
-    if let Some(latency) = parse_control_u64(patina_runtime::ENV_NET_LATENCY)? {
+    if let Some(latency) = parse_control_u64(patina_dst_runtime::ENV_NET_LATENCY)? {
         config = config.with_net_latency_nanos(latency);
     }
     // Seed-driven fault knobs (crash point, sleep/net jitter, drop) are read from
@@ -1192,7 +1198,7 @@ pub extern "C" fn patina_shutdown() -> c_int {
         let _ = host_write_all(
             2,
             b"PATINA_BUGGIFY_SETUP_NEVER_CALLED --buggify-after-setup was declared but the guest \
-never called patina::lifecycle::setup_complete()\n",
+never called patina_dst::lifecycle::setup_complete()\n",
         );
         std::process::abort();
     }
@@ -1683,7 +1689,7 @@ fn metadata_kind(kind: FsEntryKind) -> u32 {
     }
 }
 
-fn write_metadata(metadata: patina_abi::FsMetadata, kind: *mut u32, length: *mut u64) -> c_int {
+fn write_metadata(metadata: patina_dst_abi::FsMetadata, kind: *mut u32, length: *mut u64) -> c_int {
     if kind.is_null() || length.is_null() {
         return fail(EINVAL);
     }
@@ -1697,7 +1703,7 @@ fn write_metadata(metadata: patina_abi::FsMetadata, kind: *mut u32, length: *mut
 }
 
 fn write_metadata_full(
-    metadata: patina_abi::FsMetadata,
+    metadata: patina_dst_abi::FsMetadata,
     kind: *mut u32,
     length: *mut u64,
     ino: *mut u64,
@@ -2201,7 +2207,7 @@ fn buggify_site_call(
     }
 }
 
-/// `patina::is_simulated()`: 1 whenever the deterministic runtime is installed.
+/// `patina_dst::is_simulated()`: 1 whenever the deterministic runtime is installed.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_is_simulated() -> c_int {
     c_int::from(ensure_runtime().is_ok())
@@ -2325,13 +2331,13 @@ pub unsafe extern "C" fn patina_reachable(
     })
 }
 
-/// `patina::rng()`: a deterministic 64-bit draw bridged to the root seed.
+/// `patina_dst::rng()`: a deterministic 64-bit draw bridged to the root seed.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_rng() -> u64 {
     with_context(|context| Ok(context.buggify_rng())).unwrap_or(0)
 }
 
-/// `patina::lifecycle::setup_complete()`: mark the setup boundary and emit a marker.
+/// `patina_dst::lifecycle::setup_complete()`: mark the setup boundary and emit a marker.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_lifecycle_setup_complete() -> c_int {
     let _ = with_context(|context| {
@@ -2342,7 +2348,7 @@ pub extern "C" fn patina_lifecycle_setup_complete() -> c_int {
     0
 }
 
-/// `patina::lifecycle::event!("label")`: emit a lifecycle marker.
+/// `patina_dst::lifecycle::event!("label")`: emit a lifecycle marker.
 ///
 /// # Safety
 /// Label pointer must describe a live UTF-8 slice of `label_len` bytes.
@@ -2360,7 +2366,7 @@ pub unsafe extern "C" fn patina_lifecycle_event(label: *const u8, label_len: usi
 ///
 /// The guest's `pthread_create`/`join`, `pthread_mutex_*`, and
 /// `pthread_cond_*` calls (and thereby Rust `std::thread`, `Mutex`, and
-/// `Condvar`) execute under Patina's [`DetScheduler`](patina_sched_det). Real
+/// `Condvar`) execute under Patina's [`DetScheduler`](patina_dst_sched_det). Real
 /// host OS threads back each managed task, but a single execution baton ensures
 /// exactly one runs at a time; every handoff is a seeded scheduler decision
 /// recorded and replayed like any other boundary operation.
@@ -2386,7 +2392,7 @@ pub unsafe extern "C" fn patina_lifecycle_event(label: *const u8, label_len: usi
 ///   as it reaches the real `read`/`write`/`sem_*`.
 ///
 /// Every scheduling decision — which task runs next at each boundary — is made
-/// by [`DetScheduler`](patina_sched_det) and recorded/replayed; the OS
+/// by [`DetScheduler`](patina_dst_sched_det) and recorded/replayed; the OS
 /// primitives only provide the vehicle and the blocking.
 mod thread {
     use std::cell::Cell;
@@ -2394,7 +2400,7 @@ mod thread {
     use std::ffi::{c_int, c_void};
     use std::sync::{Arc, OnceLock};
 
-    use patina_abi::{ClockKind, Datagram, ShutdownHow, SocketId};
+    use patina_dst_abi::{ClockKind, Datagram, ShutdownHow, SocketId};
 
     use super::{
         EBUSY, EDEADLK, EINVAL, EISCONN, ENOTCONN, EOPNOTSUPP, EOVERFLOW, EPERM, ESRCH, ETIMEDOUT,
@@ -2575,7 +2581,7 @@ mod thread {
 
     /// The scheduler transitions the thread runtime needs. Implemented for the
     /// real runtime [`Context`](super::Context) and, in tests, for a bare
-    /// [`DetScheduler`](patina_sched_det).
+    /// [`DetScheduler`](patina_dst_sched_det).
     trait Scheduler {
         fn spawn(&mut self, label: &str) -> Result<TaskId, String>;
         fn yield_task(&mut self, task: TaskId) -> Result<(), String>;
@@ -3028,7 +3034,7 @@ mod thread {
     /// backing host OS semaphore (a libdispatch semaphore on macOS, a POSIX
     /// `sem_t` on Linux) is a pure blocking primitive that carries no
     /// deterministic decision — every scheduling choice is made by
-    /// [`DetScheduler`](patina_sched_det).
+    /// [`DetScheduler`](patina_dst_sched_det).
     ///
     /// On macOS the baton uses the *canonical* Darwin primitive — a libdispatch
     /// semaphore, the same one Rust std's thread [`Parker`] uses — rather than a
@@ -5354,8 +5360,8 @@ mod thread {
 
     #[cfg(test)]
     mod tests {
-        use patina_driver_api::SchedulerDriver;
-        use patina_sched_det::DetScheduler;
+        use patina_dst_driver_api::SchedulerDriver;
+        use patina_dst_sched_det::DetScheduler;
 
         use super::*;
 

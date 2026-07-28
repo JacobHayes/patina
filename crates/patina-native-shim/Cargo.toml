@@ -1,5 +1,5 @@
 [package]
-name = "patina-native-shim"
+name = "patina-dst-native-shim"
 description = "Explicit C ABI shim for Patina's deterministic runtime boundary"
 version.workspace = true
 edition.workspace = true
@@ -11,12 +11,12 @@ repository.workspace = true
 crate-type = ["rlib", "staticlib"]
 
 [dependencies]
-patina-abi.workspace = true
-patina-fs-crash.workspace = true
-patina-fs-mem.workspace = true
-patina-runtime.workspace = true
+patina-dst-abi.workspace = true
+patina-dst-fs-crash.workspace = true
+patina-dst-fs-mem.workspace = true
+patina-dst-runtime.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-patina-driver-api.workspace = true
-patina-sched-det.workspace = true
+patina-dst-driver-api.workspace = true
+patina-dst-sched-det.workspace = true

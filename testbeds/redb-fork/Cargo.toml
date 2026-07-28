@@ -4,7 +4,7 @@
 # This is a MINIMAL, CLEARLY MARKED fork of the upstream `redb` embedded
 # key/value store, vendored so the Patina cooperative-SUT (buggify) SDK can be
 # wired into its real commit and recovery paths. The ONLY source changes from
-# upstream are the `patina::{buggify!, buggify_delay!, sometimes!, reachable!,
+# upstream are the `patina_dst::{buggify!, buggify_delay!, sometimes!, reachable!,
 # always!}` call sites, each tagged with a `PATINA FORK:` comment and grep-able
 # by the `patina` marker. Examples, tests, benches, and fuzz targets are dropped;
 # `src/` and `build.rs` are byte-for-byte upstream except for those tagged sites.
@@ -42,7 +42,7 @@ path = "src/lib.rs"
 # The Patina cooperative-SUT SDK. Default features only (the dependency-light
 # SDK): outside a Patina build every macro is a no-op, so this fork stays a
 # drop-in redb.
-[dependencies.patina]
+[dependencies.patina-dst]
 path = "../../crates/patina"
 
 [dependencies.chrono_v0_4]
