@@ -1,0 +1,65 @@
+# Local root-workspace setup for Patina.
+#
+# This intentionally covers only the main workspace and core validation scripts.
+# Heavy standalone testbeds (raft/redb/etc.) keep their own setup and are not
+# required for ordinary local development.
+
+[tools]
+# Select a stable Rust toolchain for the default local shell. Rust components,
+# targets, and the MSRV toolchain are installed by `mise run setup` through
+# rustup because they are toolchain-specific.
+rust = "stable"
+
+[tasks.setup]
+description = "Install root-workspace Rust toolchains and targets"
+run = '''
+set -euo pipefail
+rustup toolchain install stable --component rustfmt --component clippy --target wasm32-wasip1
+rustup toolchain install 1.86.0 --target wasm32-wasip1
+cc --version >/dev/null
+echo "Patina local toolchains are ready."
+'''
+
+[tasks.check]
+description = "Run local root-workspace validation (no heavyweight testbeds)"
+run = [
+  "cargo fmt --all -- --check",
+  "cargo clippy --workspace --all-targets --locked -- -D warnings",
+  "cargo test --workspace --locked",
+  "cargo doc --workspace --no-deps --locked",
+  "cargo clippy -p patina-dst --all-targets --features runtime --locked -- -D warnings",
+  "cargo test -p patina-dst --features runtime --locked",
+  "cargo doc -p patina-dst --no-deps --features runtime --locked",
+  "cargo +1.86.0 test --workspace --locked",
+  "scripts/validate-wasi.sh",
+  "scripts/validate-native-shim.sh",
+  "scripts/smoke-cross-target.sh",
+]
+
+[tasks.msrv]
+description = "Run the root workspace on the documented MSRV"
+run = "cargo +1.86.0 test --workspace --locked"
+
+[tasks.smoke]
+description = "Run core Patina validation scripts"
+run = [
+  "scripts/validate-wasi.sh",
+  "scripts/validate-native-shim.sh",
+  "scripts/smoke-cross-target.sh",
+]
+
+[tasks.demo]
+description = "Run the explicit-runtime vertical-slice demo"
+run = '''
+set -euo pipefail
+cargo build -p cargo-patina
+export PATH="$PWD/target/debug:$PATH"
+rm -f /tmp/demo.patina
+cargo patina run -p patina-dst --features runtime --example deterministic --seed 123
+cargo patina run -p patina-dst --features runtime --example deterministic --seed 123 --record /tmp/demo.patina
+cargo patina replay . /tmp/demo.patina -p patina-dst --features runtime --example deterministic
+cargo patina replay . /tmp/demo.patina -p patina-dst --features runtime --example deterministic --branch --from 1 --branch-seed 456 --branch-id branch-456
+cargo patina replay . /tmp/demo.patina -p patina-dst --features runtime --example deterministic --timeline branch-456
+cargo patina run -p patina-dst --features runtime --example simulation --seed 321
+cargo patina explore run --seeds 10 -p patina-dst --features runtime --example deterministic
+'''

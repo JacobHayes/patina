@@ -27,7 +27,12 @@ Required:
 - `scripts/validate-native-shim.sh` when validating native foundations
 - `scripts/smoke-cross-target.sh` when validating cross-target determinism
 
-These checks must run without network access after dependencies have been fetched.
+These checks must run without network access after dependencies have been
+fetched. For local development, `mise run setup` installs the Rust
+toolchains/targets needed by these gates, and `mise run check` runs the
+root-workspace checks plus the core WASI/native smoke scripts. The mise workflow
+intentionally excludes heavyweight standalone testbed setup such as raft and
+redb.
 
 ### V1: deterministic Rust-level vertical slice
 

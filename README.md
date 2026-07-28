@@ -40,6 +40,38 @@ Native interposition of third-party async runtimes and non-zero TCP latency over
 
 See [VALIDATION.md](./VALIDATION.md) for claim-by-claim acceptance gates and [IMPLEMENTATION.md](./IMPLEMENTATION.md) for completed and planned slices.
 
+## Local setup
+
+If you use [mise](https://mise.jdx.dev/), the root workspace has local setup and
+validation tasks:
+
+```sh
+mise run setup
+mise run check
+mise run demo
+```
+
+`setup` installs the stable Rust components, the documented MSRV toolchain
+(`1.86.0`), the `wasm32-wasip1` target, and verifies that a C compiler is
+available. `check` runs root-workspace validation plus the core WASI/native smoke
+scripts; it deliberately does not install or exercise heavyweight standalone
+testbeds such as raft or redb. On Linux, `validate-native-shim.sh` soft-skips the
+syscall-containment pass if `strace` is absent; CI installs `strace` and
+hard-requires that gate.
+
+The `patina-dst` crate keeps its default feature set dependency-light for
+cooperative-SUT adoption. Applications that only use the SDK macros can depend on
+`patina-dst` with default features and ordinary production builds will not link
+the explicit runtime. Patina's native/WASI `build` and `run` paths provide the
+runtime externally through the shim or host.
+
+The explicit facade (`patina_dst::run`, `Context`, `patina_dst::rt`) remains
+behind the `runtime` feature. Code that directly calls that facade must compile
+with the feature enabled, either as a normal dependency feature or behind an
+application-local test/simulation feature if production builds should stay
+runtime-free. The repository demo commands below spell out `--features runtime`
+because they run examples from the `patina-dst` crate itself.
+
 ## Try the vertical slice
 
 ```sh
