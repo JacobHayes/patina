@@ -274,6 +274,20 @@ fn native_allowlisted_import(symbol: &str, format: NativeFormat) -> bool {
 }
 
 fn scan_forbidden_instructions(file: &object::File<'_>) -> Result<Vec<NativeEscape>, TargetError> {
+    // Fail closed on any architecture whose ISA this containment scan cannot
+    // decode. A `_ => {}` default arm on the per-section match below silently
+    // PASSED unsupported-arch binaries — every instruction unexamined — which is
+    // exactly the vacuous-gate failure mode the default-deny doctrine forbids: a
+    // forbidden `syscall`/`rdtsc`/`mrs` in a riscv64/s390x/... guest would sail
+    // through with zero scanning. Refuse the whole scan up front (before touching
+    // sections, so even a text-less binary of an undecodable arch is refused),
+    // and keep the section-level match exhaustive so adding a new supported arch
+    // forces an explicit decoder here rather than defaulting to a silent pass.
+    let architecture = file.architecture();
+    match architecture {
+        Architecture::Aarch64 | Architecture::X86_64 => {}
+        _ => return Err(TargetError::UnsupportedNativeArchitecture(architecture)),
+    }
     let mut escapes = Vec::new();
     for section in file.sections() {
         if section.kind() != SectionKind::Text {
@@ -281,7 +295,7 @@ fn scan_forbidden_instructions(file: &object::File<'_>) -> Result<Vec<NativeEsca
         }
         let data = section.data().map_err(TargetError::NativeParse)?;
         let name = section.name().unwrap_or("<text>");
-        match file.architecture() {
+        match architecture {
             Architecture::Aarch64 => {
                 for (index, instruction) in data.chunks_exact(4).enumerate() {
                     let instruction =
@@ -296,7 +310,10 @@ fn scan_forbidden_instructions(file: &object::File<'_>) -> Result<Vec<NativeEsca
                 }
             }
             Architecture::X86_64 => x86_scan::scan(data, name, &mut escapes),
-            _ => {}
+            // Unreachable: the guard above refuses every other architecture. Kept
+            // explicit (never a silent `_ => {}`) so a newly-supported arch must be
+            // wired into both the guard and a real decoder here.
+            _ => unreachable!("unsupported architectures are refused before the section scan"),
         }
     }
     Ok(escapes)
@@ -1545,6 +1562,7 @@ pub enum TargetError {
     NativeParse(object::Error),
     UnsupportedImports(Vec<WasmImport>),
     UnsupportedNativeFormat(BinaryFormat),
+    UnsupportedNativeArchitecture(Architecture),
     UnsupportedNativeImports(Vec<NativeEscape>),
 }
 
@@ -1566,6 +1584,15 @@ impl fmt::Display for TargetError {
                     "unsupported native binary format {format:?}; expected Mach-O or ELF"
                 )
             }
+            Self::UnsupportedNativeArchitecture(architecture) => {
+                write!(
+                    f,
+                    "refusing to certify native binary: the forbidden-instruction \
+containment scan cannot decode architecture {architecture:?}; supported architectures are Aarch64 \
+and X86_64. Passing it would leave every instruction unexamined (a vacuous gate), so the audit/run \
+fails closed"
+                )
+            }
             Self::UnsupportedNativeImports(imports) => {
                 write!(f, "unsupported native imports:")?;
                 for import in imports {
@@ -1584,6 +1611,7 @@ impl std::error::Error for TargetError {
             Self::NativeParse(error) => Some(error),
             Self::UnsupportedImports(_)
             | Self::UnsupportedNativeFormat(_)
+            | Self::UnsupportedNativeArchitecture(_)
             | Self::UnsupportedNativeImports(_) => None,
         }
     }
@@ -1776,6 +1804,159 @@ mod tests {
                 native_import_decision(symbol, *format, &empty),
                 NativeImportDecision::Denied(class),
                 "symbol {symbol} ({class}) must be denied by default (not allowlisted)"
+            );
+        }
+    }
+
+    /// Build a minimal but well-formed little-endian ELF64 for `e_machine`, with
+    /// a single `ALLOC|EXECINSTR` PROGBITS `.text` section carrying a few bytes
+    /// plus a `.shstrtab`. Just enough for `object::File::parse` to report the
+    /// architecture and a real `SectionKind::Text` section — the `.text` bytes
+    /// are the executable code a silent-pass scanner would skip.
+    fn minimal_executable_elf64(e_machine: u16) -> Vec<u8> {
+        let text: [u8; 8] = [0x00; 8];
+        // ".text" name at byte 1, ".shstrtab" name at byte 7.
+        let shstr: &[u8] = b"\0.text\0.shstrtab\0";
+        let text_off = 64u64;
+        let shstr_off = text_off + text.len() as u64;
+        let shoff = {
+            let end = shstr_off + shstr.len() as u64;
+            (end + 7) & !7 // section header table is 8-aligned
+        };
+
+        let mut elf = Vec::new();
+        // e_ident: magic, ELFCLASS64, ELFDATA2LSB, EV_CURRENT, SysV ABI, padding.
+        elf.extend_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0]);
+        elf.extend_from_slice(&[0u8; 8]);
+        elf.extend_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
+        elf.extend_from_slice(&e_machine.to_le_bytes()); // e_machine
+        elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
+        elf.extend_from_slice(&0u64.to_le_bytes()); // e_entry
+        elf.extend_from_slice(&0u64.to_le_bytes()); // e_phoff
+        elf.extend_from_slice(&shoff.to_le_bytes()); // e_shoff
+        elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+        elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
+        elf.extend_from_slice(&0u16.to_le_bytes()); // e_phentsize
+        elf.extend_from_slice(&0u16.to_le_bytes()); // e_phnum
+        elf.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
+        elf.extend_from_slice(&3u16.to_le_bytes()); // e_shnum
+        elf.extend_from_slice(&2u16.to_le_bytes()); // e_shstrndx -> .shstrtab
+        assert_eq!(elf.len(), 64, "ELF64 header is 64 bytes");
+
+        elf.extend_from_slice(&text); // .text data at offset 64
+        elf.extend_from_slice(shstr); // .shstrtab data at offset 72
+        while (elf.len() as u64) < shoff {
+            elf.push(0);
+        }
+
+        let mut push_shdr =
+            |name: u32, typ: u32, flags: u64, offset: u64, size: u64, addralign: u64| {
+                elf.extend_from_slice(&name.to_le_bytes());
+                elf.extend_from_slice(&typ.to_le_bytes());
+                elf.extend_from_slice(&flags.to_le_bytes());
+                elf.extend_from_slice(&0u64.to_le_bytes()); // sh_addr
+                elf.extend_from_slice(&offset.to_le_bytes());
+                elf.extend_from_slice(&size.to_le_bytes());
+                elf.extend_from_slice(&0u32.to_le_bytes()); // sh_link
+                elf.extend_from_slice(&0u32.to_le_bytes()); // sh_info
+                elf.extend_from_slice(&addralign.to_le_bytes());
+                elf.extend_from_slice(&0u64.to_le_bytes()); // sh_entsize
+            };
+        push_shdr(0, 0, 0, 0, 0, 0); // 0: SHN_UNDEF
+        // 1: .text — SHT_PROGBITS(1), SHF_ALLOC|SHF_EXECINSTR (0x2|0x4).
+        push_shdr(1, 1, 0x2 | 0x4, text_off, text.len() as u64, 4);
+        // 2: .shstrtab — SHT_STRTAB(3).
+        push_shdr(7, 3, 0, shstr_off, shstr.len() as u64, 1);
+
+        elf
+    }
+
+    // Default-deny for architectures the containment scan cannot decode.
+    // `scan_forbidden_instructions` once had a `_ => {}` arm that SILENTLY passed
+    // any binary whose ISA it could not decode: a riscv64/s390x guest — including
+    // one carrying a forbidden `ecall`/`svc` in `.text` — sailed through with zero
+    // instructions examined, exactly the vacuous-gate failure mode the default-deny
+    // doctrine forbids. Feed the scanner a hand-built minimal ELF of such an
+    // architecture, WITH a real executable `.text` section, and assert both the
+    // private scanner and the public `NativeAudit::audit` gate fail closed with a
+    // loud, structured error that names the architecture and the supported set.
+    // Red-before/green-after: with the old `_ => {}` arm the scan returns
+    // `Ok(vec![])` and the audit `Ok(_)`, so both assertions below fail.
+    #[test]
+    fn refuses_binaries_of_undecodable_architectures() {
+        use object::{Architecture, Object, ObjectSection, SectionKind};
+
+        const EM_S390: u16 = 22;
+        const EM_RISCV: u16 = 243;
+        for (machine, label) in [(EM_RISCV, "riscv"), (EM_S390, "s390")] {
+            let elf = minimal_executable_elf64(machine);
+
+            // The scenario is the live one: object reports a non-decodable arch and
+            // a genuine executable text section (the bytes the old arm skipped).
+            let parsed = object::File::parse(&*elf).expect("hand-built ELF must parse");
+            assert!(
+                !matches!(
+                    parsed.architecture(),
+                    Architecture::Aarch64 | Architecture::X86_64
+                ),
+                "{label}: test arch must be one the scanner cannot decode, got {:?}",
+                parsed.architecture()
+            );
+            assert!(
+                parsed.sections().any(|s| s.kind() == SectionKind::Text),
+                "{label}: the synthetic ELF must carry an executable .text section"
+            );
+
+            // Private scanner refuses.
+            let scan = scan_forbidden_instructions(&parsed);
+            assert!(
+                matches!(scan, Err(TargetError::UnsupportedNativeArchitecture(_))),
+                "{label}: scan must refuse an undecodable arch, got {scan:?}"
+            );
+
+            // Public gate refuses end to end.
+            let err = NativeAudit::audit(&elf, &BTreeSet::new())
+                .expect_err("audit must fail closed on an undecodable arch");
+            assert!(
+                matches!(err, TargetError::UnsupportedNativeArchitecture(_)),
+                "{label}: audit error must be UnsupportedNativeArchitecture, got {err:?}"
+            );
+            let message = err.to_string();
+            assert!(
+                message.contains("cannot decode architecture")
+                    && message.contains("Aarch64")
+                    && message.contains("X86_64")
+                    && message.contains("fails closed"),
+                "{label}: error must name the arch, the supported set, and fail closed: {message}"
+            );
+        }
+    }
+
+    // Supported architectures still scan (not swept up by the arch guard): a
+    // native binary built for the host — Aarch64 on macOS, X86_64 on Linux —
+    // decodes cleanly. The existing per-class and objdump-corpus tests cover the
+    // decoders themselves; this asserts the guard itself does not reject a
+    // supported arch. `scans_supported_arch_binary` builds nothing (no toolchain
+    // dependence): it hand-builds a supported-arch ELF the same way and asserts
+    // the scan does NOT return the arch error.
+    #[test]
+    fn scans_supported_arch_binary_without_arch_refusal() {
+        const EM_X86_64: u16 = 62;
+        const EM_AARCH64: u16 = 183;
+        for (machine, label) in [(EM_X86_64, "x86_64"), (EM_AARCH64, "aarch64")] {
+            let elf = minimal_executable_elf64(machine);
+            let parsed = object::File::parse(&*elf).expect("hand-built ELF must parse");
+            let scan = scan_forbidden_instructions(&parsed);
+            assert!(
+                !matches!(scan, Err(TargetError::UnsupportedNativeArchitecture(_))),
+                "{label}: a supported arch must not be refused by the arch guard, got {scan:?}"
+            );
+            // The .text here is all-zero, which decodes to no forbidden opcode on
+            // either supported ISA, so the scan succeeds with no findings.
+            assert_eq!(
+                scan.expect("supported arch scans").len(),
+                0,
+                "{label}: zeroed .text yields no forbidden-instruction findings"
             );
         }
     }
