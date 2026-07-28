@@ -1661,14 +1661,15 @@ fn main() {
 }
 "#;
 
-// Regression: `--mount` + `--record`/`replay` installs two inherited
-// descriptors — the trace channel (fd 3) and the filesystem image (fd 4). The
-// image temp file can be allocated on fd 3, so installing the trace there first
-// used to clobber the still-unread image source, crashing the guest by signal
-// (a guest carrying only the single trace fd never tripped it). The
-// descriptor-relocation fix (F_DUPFD every source above the target range before
-// installing) must let both compose. Asserts a clean record AND replay that see
-// the mounted content.
+// Regression: `--mount` + `--record`/`replay` hands the child two inherited
+// descriptors — the trace channel and the filesystem image. The image temp file
+// can be allocated on the same low fd the old fixed-fd installer wanted for the
+// trace, so installing fixed targets in the wrong order used to clobber the
+// still-unread image source and crash the guest by signal (a guest carrying only
+// the single trace fd never tripped it). The supervisor now passes the
+// already-open fd numbers through `PATINA_TRACE_FD` / `PATINA_FS_IMAGE_FD` and
+// clears close-on-exec only for those descriptors. Asserts a clean record AND
+// replay that see the mounted content.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn native_mount_composes_with_record_and_replay_two_inherited_descriptors() {

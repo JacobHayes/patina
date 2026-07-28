@@ -72,14 +72,21 @@ const DEFAULT_NATIVE_FINGERPRINT: &str = "patina-native";
 /// arguments from `argv[1..]` (all in-repo guests `.skip(1)`), so nothing that
 /// observes real program arguments is affected.
 const NATIVE_GUEST_ARGV0: &str = "patina-guest";
-/// Inherited descriptor `native-run` hands the child for the trace control
-/// plane (`PATINA_TRACE_FD`), matching the supervisor channel the shim reads.
-const PATINA_TRACE_CHANNEL_FD: i32 = 3;
-/// Inherited descriptor `native-run` hands the child carrying an encoded
-/// `FsImage` (`PATINA_FS_IMAGE_FD`) when `--mount` captures a host directory
-/// into the guest filesystem. Distinct from the trace channel so both may be
-/// installed at once.
-const PATINA_FS_IMAGE_CHANNEL_FD: i32 = 4;
+// Native supervisor descriptors are inherited at their already-open fd numbers;
+// the child discovers them from `PATINA_TRACE_FD` / `PATINA_FS_IMAGE_FD`. Keeping
+// the actual numbers avoids a macOS Rust 1.86 fork/exec edge where pre-exec
+// relocation onto fixed low fds could still leave those fds closed after exec.
+#[cfg(unix)]
+const F_GETFD: i32 = 1;
+#[cfg(unix)]
+const F_SETFD: i32 = 2;
+#[cfg(unix)]
+const FD_CLOEXEC: i32 = 1;
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32;
+}
 
 const HELP: &str = "Patina deterministic Cargo runner
 
@@ -4746,23 +4753,98 @@ or pass them byte-for-byte identically.",
     }
 }
 
+#[cfg(unix)]
+struct InheritedFdGuard {
+    saved: Vec<(i32, i32)>,
+}
+
+#[cfg(unix)]
+impl InheritedFdGuard {
+    fn clear_cloexec(fds: &[i32]) -> Result<Self, CliError> {
+        let mut saved = Vec::with_capacity(fds.len());
+        for &fd in fds {
+            // SAFETY: `fd` is an open descriptor owned by the supervisor.
+            let flags = unsafe { fcntl(fd, F_GETFD, 0) };
+            if flags < 0 {
+                return Err(CliError(format!(
+                    "failed to inspect inherited descriptor {fd}: {}",
+                    io::Error::last_os_error()
+                )));
+            }
+            saved.push((fd, flags));
+            if flags & FD_CLOEXEC != 0 {
+                // SAFETY: `F_SETFD` only updates descriptor flags on this fd.
+                if unsafe { fcntl(fd, F_SETFD, flags & !FD_CLOEXEC) } < 0 {
+                    return Err(CliError(format!(
+                        "failed to make descriptor {fd} inheritable: {}",
+                        io::Error::last_os_error()
+                    )));
+                }
+                let cleared = unsafe { fcntl(fd, F_GETFD, 0) };
+                if cleared < 0 || cleared & FD_CLOEXEC != 0 {
+                    return Err(CliError(format!(
+                        "failed to clear close-on-exec for descriptor {fd}: {}",
+                        if cleared < 0 {
+                            io::Error::last_os_error().to_string()
+                        } else {
+                            format!("descriptor flags are still {cleared}")
+                        }
+                    )));
+                }
+            }
+        }
+        Ok(Self { saved })
+    }
+
+    fn restore(mut self) -> Result<(), CliError> {
+        for (fd, flags) in self.saved.drain(..) {
+            // SAFETY: Restore the exact descriptor flags saved before spawn.
+            if unsafe { fcntl(fd, F_SETFD, flags) } < 0 {
+                return Err(CliError(format!(
+                    "failed to restore descriptor {fd} flags: {}",
+                    io::Error::last_os_error()
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for InheritedFdGuard {
+    fn drop(&mut self) {
+        for (fd, flags) in self.saved.drain(..) {
+            // Best-effort cleanup for early returns. Callers use `restore()` on
+            // the normal path so restore errors can be reported explicitly.
+            let _ = unsafe { fcntl(fd, F_SETFD, flags) };
+        }
+    }
+}
+
+#[cfg(unix)]
+fn spawn_native_child(
+    command: &mut Command,
+    binary: &Path,
+    inherited_fds: &[i32],
+) -> Result<(std::process::Child, InheritedFdGuard), CliError> {
+    // Return the guard to the caller instead of restoring immediately: the
+    // descriptor-inheritance contract is simple and conservative if the fds stay
+    // inheritable for the whole child lifetime, and this supervisor process does
+    // not spawn unrelated children while waiting for the guest.
+    let guard = InheritedFdGuard::clear_cloexec(inherited_fds)?;
+    let child = command.spawn().map_err(|error| {
+        CliError(format!(
+            "failed to run native program {}: {error}",
+            binary.display()
+        ))
+    })?;
+    Ok((child, guard))
+}
+
+#[cfg(unix)]
 fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> {
     use std::os::unix::io::AsRawFd;
     use std::os::unix::process::CommandExt;
-
-    // A non-interposed host descriptor duplicated into the child for the trace
-    // control plane. Declared here (rather than pulling in `libc`) mirroring the
-    // shim's own non-interposed host descriptor aliases. `fcntl` clears
-    // close-on-exec so the descriptor survives the exec into the child.
-    unsafe extern "C" {
-        fn dup2(oldfd: i32, newfd: i32) -> i32;
-        fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32;
-    }
-    // F_SETFD with flags 0 clears FD_CLOEXEC on macOS and Linux; FD_CLOEXEC is 1.
-    // F_DUPFD (0) duplicates to the lowest free descriptor at or above its arg.
-    const F_SETFD: i32 = 2;
-    const F_DUPFD: i32 = 0;
-    const FD_CLOEXEC: i32 = 1;
 
     // Source-first: an artifact runs as-is; a source/package is built on the fly
     // first (`resolved` holds the build workspace alive for the whole run). For
@@ -4853,8 +4935,8 @@ liveness-safe."
         .args(&program_args)
         .arg0(NATIVE_GUEST_ARGV0)
         .env_clear();
-    if image_file.is_some() {
-        command.env(ENV_FS_IMAGE_FD, PATINA_FS_IMAGE_CHANNEL_FD.to_string());
+    if let Some(image) = &image_file {
+        command.env(ENV_FS_IMAGE_FD, image.file.as_raw_fd().to_string());
     }
     if let Some(latency) = invocation.net_latency_nanos {
         command.env(ENV_NET_LATENCY, latency.to_string());
@@ -4909,8 +4991,8 @@ liveness-safe."
         command.env(name, value);
     }
 
-    // Hold the trace file open until the child has been spawned so its
-    // descriptor is still valid when `pre_exec` duplicates it.
+    // Hold the trace file open until the child has been spawned so the inherited
+    // descriptor named by `PATINA_TRACE_FD` remains valid.
     let trace_file = match &invocation.mode {
         NativeRunMode::Seeded { seed } => {
             command
@@ -4942,7 +5024,7 @@ liveness-safe."
                         &SchedulePolicyFingerprint::from_schedule(&invocation.schedule),
                     ),
                 )
-                .env(ENV_TRACE_FD, PATINA_TRACE_CHANNEL_FD.to_string())
+                .env(ENV_TRACE_FD, file.as_raw_fd().to_string())
                 // Record the guest arguments into the trace metadata so a later
                 // `replay` restores them without the `--` section being
                 // re-passed. Always forwarded (even when empty) so a
@@ -4979,59 +5061,21 @@ liveness-safe."
                         &policy,
                     ),
                 )
-                .env(ENV_TRACE_FD, PATINA_TRACE_CHANNEL_FD.to_string());
+                .env(ENV_TRACE_FD, file.as_raw_fd().to_string());
             Some(file)
         }
     };
 
-    // Install every inherited descriptor the shim reads at a fixed number: the
-    // trace channel (record/replay) and the filesystem image (`--mount`). Both
-    // are duplicated with close-on-exec cleared so they survive the exec.
-    let mut inherited: Vec<(std::os::unix::io::RawFd, i32)> = Vec::new();
+    // The shim reads inherited host descriptors named by `PATINA_TRACE_FD` and
+    // `PATINA_FS_IMAGE_FD`. Make only those already-open descriptors inheritable
+    // for the child, then restore the supervisor's close-on-exec state after the
+    // child exits.
+    let mut inherited_fds: Vec<std::os::unix::io::RawFd> = Vec::new();
     if let Some(file) = &trace_file {
-        inherited.push((file.as_raw_fd(), PATINA_TRACE_CHANNEL_FD));
+        inherited_fds.push(file.as_raw_fd());
     }
     if let Some(image) = &image_file {
-        inherited.push((image.file.as_raw_fd(), PATINA_FS_IMAGE_CHANNEL_FD));
-    }
-    if !inherited.is_empty() {
-        // SAFETY: `dup2` and `fcntl` are async-signal-safe, so they are sound to
-        // call between fork and exec, and the closure allocates nothing (it
-        // iterates a Vec moved in from the parent and uses a fixed-size stack
-        // array). Installing the descriptors naively is unsafe: a source file
-        // can already sit on another pair's target number (e.g. the image temp
-        // file landing on fd 3, the trace target), and writing that target first
-        // would clobber the still-unread source. So first relocate every source
-        // to a fresh high descriptor with F_DUPFD (which picks the lowest free
-        // fd at or above 10, never aliasing a target or another source), then
-        // install each at its fixed target with close-on-exec cleared so it
-        // survives the exec, marking the scratch copies close-on-exec so they do
-        // not leak into the guest. `inherited` holds at most two entries (trace,
-        // image).
-        unsafe {
-            command.pre_exec(move || {
-                let mut scratch = [-1_i32; 2];
-                for (index, (source_fd, _target)) in inherited.iter().enumerate() {
-                    let high = fcntl(*source_fd, F_DUPFD, 10);
-                    if high < 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                    scratch[index] = high;
-                }
-                for (index, (_source, target_fd)) in inherited.iter().enumerate() {
-                    if dup2(scratch[index], *target_fd) < 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                    if fcntl(*target_fd, F_SETFD, 0) < 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                    if fcntl(scratch[index], F_SETFD, FD_CLOEXEC) < 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                }
-                Ok(())
-            });
-        }
+        inherited_fds.push(image.file.as_raw_fd());
     }
 
     // Starvation stall backstop (diagnostic, NOT a liveness guarantee; armed only
@@ -5059,12 +5103,8 @@ liveness-safe."
         if capture {
             command.stdout(Stdio::piped()).stderr(Stdio::piped());
         }
-        let mut child = command.spawn().map_err(|error| {
-            CliError(format!(
-                "failed to run native program {}: {error}",
-                binary.display()
-            ))
-        })?;
+        let (mut child, inherited_guard) =
+            spawn_native_child(&mut command, &binary, &inherited_fds)?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(stall_secs);
         loop {
             match child.try_wait() {
@@ -5080,6 +5120,7 @@ yield-point instrumented, so cooperative scheduling cannot preempt a spinner whi
 is starved). This is the documented starvation limitation, not a liveness guarantee — see \
 IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
                         );
+                        inherited_guard.restore()?;
                         drop(trace_file);
                         drop(image_file);
                         return Ok(STARVATION_STALL_EXIT);
@@ -5100,14 +5141,45 @@ IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
                 binary.display()
             ))
         })?;
+        inherited_guard.restore()?;
         output::Captured {
             exit_code: exit_code(output.status)?,
             stdout: output.stdout,
             stderr: output.stderr,
             captured: capture,
         }
+    } else if output::capture_active() {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let (child, inherited_guard) = spawn_native_child(&mut command, &binary, &inherited_fds)?;
+        let output = child.wait_with_output().map_err(|error| {
+            CliError(format!(
+                "failed while waiting on native program {}: {error}",
+                binary.display()
+            ))
+        })?;
+        inherited_guard.restore()?;
+        output::Captured {
+            exit_code: exit_code(output.status)?,
+            stdout: output.stdout,
+            stderr: output.stderr,
+            captured: true,
+        }
     } else {
-        output::execute_command(&mut command)?
+        let (mut child, inherited_guard) =
+            spawn_native_child(&mut command, &binary, &inherited_fds)?;
+        let status = child.wait().map_err(|error| {
+            CliError(format!(
+                "failed while waiting on native program {}: {error}",
+                binary.display()
+            ))
+        })?;
+        inherited_guard.restore()?;
+        output::Captured {
+            exit_code: exit_code(status)?,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            captured: false,
+        }
     };
     drop(trace_file);
     drop(image_file);
