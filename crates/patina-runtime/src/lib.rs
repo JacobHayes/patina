@@ -334,7 +334,8 @@ pub struct FaultConfig {
 /// Seed-driven cooperative-SUT (buggify) configuration. Inert (`enabled =
 /// false`) by default, so a run that does not opt in behaves exactly as before.
 /// When enabled, activation and firing are pure deterministic functions of the
-/// root seed, the site label, and these knobs — see [`Buggify`].
+/// root seed, the site label, and these knobs; the internal `Buggify` state uses
+/// this configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BuggifyConfig {
     /// Whether buggify is active this run.
@@ -366,7 +367,8 @@ impl Default for BuggifyConfig {
 
 /// Liveness-watchdog configuration: a deterministic, virtual-time-only no-progress
 /// detector. Default (all `None`) is disabled, so a run that does not opt in is
-/// byte-for-byte unchanged. See [`LivenessWatchdog`] for the detection semantics.
+/// byte-for-byte unchanged. The internal liveness watchdog owns the detection
+/// semantics.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LivenessConfig {
     /// Generic no-progress budget (virtual nanoseconds), armed from run start.
@@ -2078,7 +2080,7 @@ struct BuggifySite {
 }
 
 /// End-of-run cooperative-SUT diagnostics, surfaced in `PATINA_SDK_REPORT` and,
-/// via [`Buggify::to_record`], in the trace metadata.
+/// via the internal buggify trace record, in the trace metadata.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BuggifyDiagnostics {
     pub enabled: bool,

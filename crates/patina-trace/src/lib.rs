@@ -277,8 +277,9 @@ pub struct RunMetadata {
     pub buggify: Option<BuggifyConfigRecord>,
     /// The guest program arguments (everything after `--`, i.e. `argv[1..]`) the
     /// run was executed with, recorded so a `replay` reproduces them without the
-    /// operator re-passing the `--` section. Additive exactly like [`faults`] and
-    /// [`buggify`]: absent (`None`) in traces recorded before argv was captured,
+    /// operator re-passing the `--` section. Additive exactly like
+    /// [`RunMetadata::faults`] and [`RunMetadata::buggify`]: absent (`None`) in
+    /// traces recorded before argv was captured,
     /// which the replay path treats as "no recorded argv" and falls back to the
     /// historical contract of taking the arguments from the command line. A run
     /// with no guest arguments records an empty vector (`Some([])`), which is

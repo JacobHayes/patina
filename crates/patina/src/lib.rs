@@ -44,8 +44,8 @@
 //! # Explicit facade (`runtime` feature)
 //!
 //! With `--features runtime`, this crate additionally re-exports the explicit
-//! boundary: [`run`]/[`run_with`], `Context`, the async `rt` module, and the ABI
-//! types.
+//! boundary: the `run`/`run_with` functions, `Context`, the async `rt` module,
+//! and the ABI types.
 
 // ---- Explicit-boundary facade (behind the `runtime` feature) -----------------
 
