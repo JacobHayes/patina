@@ -5,7 +5,7 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 
@@ -30,6 +30,13 @@ use patina_wasi_host::{
     DEFAULT_WASM_FUEL, MountPolicy, Preview1Host, ResourceLimits, execute_preview1_with_fuel,
 };
 use sha2::{Digest, Sha256};
+
+// Additive output-side modules: HTML timeline rendering and the machine-readable
+// `--output json` envelope. Both are read-only consumers of trace/runtime
+// semantics — they never record, replay, or mutate a trace — so rendering or
+// emitting an envelope cannot perturb replay hashes.
+mod output;
+mod render;
 
 const PATINA_CFG_FLAGS: &str = "--cfg patina --cfg dst";
 
@@ -120,6 +127,22 @@ Patina options (run/test):
       --param <K=V>      Typed-builder parameter exposed through Context
   -h, --help             Print help
   -V, --version          Print version
+
+Output options (all verbs; stripped before routing, never reach the guest):
+      --format <human|json>  Default human. `json` prints one machine-readable
+                             result envelope (schema \"patina.result/v1\") on
+                             stdout: result (ok|violation|failure|error),
+                             exit_code, family, artifact, fingerprint, seed,
+                             trace {path, format_version, timelines, event_count,
+                             metadata}, findings, markers, and captured
+                             stdout/stderr. Human output is unchanged by default.
+                             (`--output` is the build/minimize artifact path.)
+      --render <OUT.html>    For a run/replay with a trace (record or replay),
+                             write a self-contained HTML timeline (per-task lanes,
+                             scheduling/sleep/net/fs/crash events) to OUT.html.
+      --report <OUT.html>    Like --render but only when the run fails; the HTML
+                             leads with a failure summary (what fired, exit code,
+                             the result/violation lines).
 
 Fault options (run/test and run <MODULE.wasm>; seed-driven, default off):
       --fs-crash-at <SPEC>           open|write|sync|close[:N] (bare = :1)
@@ -608,6 +631,27 @@ enum UnsupportedPolicy {
 
 pub fn entrypoint() -> Result<i32, CliError> {
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    // Strip the cross-cutting output flags (`--output`, `--render`, `--report`)
+    // once, globally, before any per-verb routing — the same pre-pass shape as
+    // `extract_target`. They are patina-level flags, so they never reach the
+    // guest (anything after `--` is left in place).
+    let (options, arguments) = output::extract(arguments)?;
+    let is_json = options.is_json();
+    output::install(options);
+    let result = dispatch(arguments);
+    // Under `--output json` a CLI-side failure becomes a JSON error envelope
+    // rather than the bare `cargo-patina: {error}` stderr line, so an agent always
+    // parses one machine-readable object.
+    match result {
+        Err(error) if is_json => {
+            output::emit_simple("cli", "error", 2, Some(error.to_string()));
+            Ok(2)
+        }
+        other => other,
+    }
+}
+
+fn dispatch(arguments: Vec<OsString>) -> Result<i32, CliError> {
     match parse(arguments)? {
         ParseResult::Help => {
             print!("{HELP}");
@@ -2893,13 +2937,29 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
     let host = configured_wasi_host(&invocation, &resolved.display, context)?;
     let execution = execute_preview1_with_fuel(&bytes, host, invocation.fuel)
         .map_err(|error| CliError(error.to_string()))?;
-    std::io::stdout()
-        .write_all(&execution.stdout)
-        .map_err(|error| CliError(format!("failed to write captured WASI stdout: {error}")))?;
-    std::io::stderr()
-        .write_all(&execution.stderr)
-        .map_err(|error| CliError(format!("failed to write captured WASI stderr: {error}")))?;
-    Ok(execution.exit_code)
+    let (trace_path, seed, timeline) = match &invocation.mode {
+        Mode::Seeded { seed } => (None, Some(*seed), "main".to_string()),
+        Mode::Record { seed, path } => (Some(path.clone()), Some(*seed), "main".to_string()),
+        Mode::Replay { path, timeline } => (Some(path.clone()), None, timeline.clone()),
+        Mode::Branch {
+            path, branch_id, ..
+        } => (Some(path.clone()), None, branch_id.clone()),
+    };
+    let artifact = resolved.display.display().to_string();
+    output::finalize_inprocess(
+        output::RunReport {
+            verb: "run",
+            family: "wasi",
+            artifact: &artifact,
+            trace_path,
+            timeline: &timeline,
+            fingerprint: Some(fingerprint),
+            seed,
+        },
+        execution.exit_code,
+        execution.stdout,
+        execution.stderr,
+    )
 }
 
 /// The trace path a replay/branch mode reads its recorded guest argv from, or
@@ -3075,7 +3135,11 @@ fn mount_policy_name(policy: MountPolicy) -> &'static str {
 /// The `build --target wasi` verb: build the package and report the module path.
 fn execute_wasi_build(invocation: WasiBuildInvocation) -> Result<i32, CliError> {
     let path = run_wasi_build(&invocation, None)?;
-    println!("PATINA_WASI_BUILD output={}", path.display());
+    if output::options().is_json() {
+        output::emit_build("wasi", &path);
+    } else {
+        println!("PATINA_WASI_BUILD output={}", path.display());
+    }
     Ok(0)
 }
 
@@ -3150,8 +3214,23 @@ fn execute_wasi_audit(artifact: ArtifactRef) -> Result<i32, CliError> {
         ))
     })?;
     let audit = WasiAudit::audit(&bytes).map_err(|error| CliError(error.to_string()))?;
-    for import in audit.imports {
-        println!("{}::{}", import.module, import.name);
+    let findings: Vec<String> = audit
+        .imports
+        .iter()
+        .map(|import| format!("{}::{}", import.module, import.name))
+        .collect();
+    if output::options().is_json() {
+        output::emit_audit(
+            "audit",
+            "wasi",
+            &resolved.display.display().to_string(),
+            findings,
+            0,
+        );
+    } else {
+        for finding in &findings {
+            println!("{finding}");
+        }
     }
     Ok(0)
 }
@@ -3204,12 +3283,19 @@ fn build_on_the_fly(spec: BuildSpec) -> Result<ResolvedArtifact, CliError> {
     })?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    println!(
+    // Route this on-the-fly build note to stderr under `--output json` so stdout
+    // stays a single clean JSON envelope; human output keeps it on stdout.
+    let build_note = format!(
         "PATINA_BUILD_ON_RUN target={target_label} source={} artifact={} sha256={}",
         spec.origin.display(),
         path.display(),
         hex(&hasher.finalize())
     );
+    if output::options().is_json() {
+        eprintln!("{build_note}");
+    } else {
+        println!("{build_note}");
+    }
     Ok(ResolvedArtifact {
         path,
         display: spec.origin,
@@ -3218,6 +3304,10 @@ fn build_on_the_fly(spec: BuildSpec) -> Result<ResolvedArtifact, CliError> {
 }
 
 fn execute_explore(exploration: ExploreInvocation) -> Result<i32, CliError> {
+    // Explore drives many child runs and reports once, so per-seed run
+    // finalization (capture/envelope/render) is suppressed here: each child
+    // streams normally and this verb emits a single campaign-level envelope.
+    output::suppress_run_finalize();
     let start = exploration.start_seed;
     let count = exploration.seed_count;
     // The native and WASI families build the artifact once, then run that SAME
@@ -3270,10 +3360,25 @@ fn execute_explore(exploration: ExploreInvocation) -> Result<i32, CliError> {
         };
         if exit != 0 {
             eprintln!("PATINA_EXPLORE_FAILURE seed={seed} exit={exit}");
+            output::emit_simple(
+                "explore",
+                "failure",
+                exit,
+                Some(format!("seed {seed} exited {exit}")),
+            );
             return Ok(exit);
         }
     }
-    println!("PATINA_EXPLORE_COMPLETE start={start} seeds={count}");
+    if output::options().is_json() {
+        output::emit_simple(
+            "explore",
+            "ok",
+            0,
+            Some(format!("start={start} seeds={count}")),
+        );
+    } else {
+        println!("PATINA_EXPLORE_COMPLETE start={start} seeds={count}");
+    }
     Ok(0)
 }
 
@@ -3287,8 +3392,19 @@ fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<i32, CliErr
     })?;
     let audit = NativeAudit::audit(&bytes, &invocation.allow)
         .map_err(|error| CliError(error.to_string()))?;
-    for import in audit.imports {
-        println!("{import}");
+    let findings: Vec<String> = audit.imports.iter().map(ToString::to_string).collect();
+    if output::options().is_json() {
+        output::emit_audit(
+            "audit",
+            "native",
+            &resolved.path.display().to_string(),
+            findings,
+            0,
+        );
+    } else {
+        for finding in &findings {
+            println!("{finding}");
+        }
     }
     Ok(0)
 }
@@ -3335,7 +3451,11 @@ fn build_native_shim(release: bool) -> Result<PathBuf, CliError> {
 /// The `build` (native) verb: build and report the artifact path.
 fn execute_native_build(invocation: NativeBuildInvocation) -> Result<i32, CliError> {
     let path = run_native_build(invocation)?;
-    println!("PATINA_NATIVE_BUILD output={}", path.display());
+    if output::options().is_json() {
+        output::emit_build("native", &path);
+    } else {
+        println!("PATINA_NATIVE_BUILD output={}", path.display());
+    }
     Ok(0)
 }
 
@@ -3358,10 +3478,15 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
         // build — it carries LLVM SanitizerCoverage yield points wired to the
         // deterministic scheduler, and `native-run` will schedule it under a
         // distinct (denser) policy recorded in its fingerprint.
-        println!(
+        let yield_note = format!(
             "PATINA_NATIVE_BUILD_YIELD_POINTS instrumentation=llvm-sancov-trace-pc-guard \
 scheduler-hook=patina_sched_yield fingerprint-suffix={PATINA_YIELD_FINGERPRINT_SUFFIX}"
         );
+        if output::options().is_json() {
+            eprintln!("{yield_note}");
+        } else {
+            println!("{yield_note}");
+        }
         Some(compile_yield_object(workdir.path())?)
     } else {
         None
@@ -4497,15 +4622,33 @@ fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> 
         }
     }
 
-    let status = command.status().map_err(|error| {
-        CliError(format!(
-            "failed to run native program {}: {error}",
-            binary.display()
-        ))
-    })?;
+    let captured = output::execute_command(&mut command)?;
     drop(trace_file);
     drop(image_file);
-    exit_code(status)
+    let (trace_path, seed) = match &invocation.mode {
+        NativeRunMode::Seeded { seed } => (None, Some(*seed)),
+        NativeRunMode::Record { seed, path, .. } => (Some(path.clone()), Some(*seed)),
+        NativeRunMode::Replay { path, .. } => (Some(path.clone()), None),
+    };
+    let fingerprint = match &invocation.mode {
+        NativeRunMode::Seeded { .. } => None,
+        NativeRunMode::Record { fingerprint, .. } | NativeRunMode::Replay { fingerprint, .. } => {
+            Some(fingerprint.clone())
+        }
+    };
+    let artifact = binary.display().to_string();
+    output::finalize_run(
+        output::RunReport {
+            verb: "run",
+            family: "native",
+            artifact: &artifact,
+            trace_path,
+            timeline: "main",
+            fingerprint,
+            seed,
+        },
+        captured,
+    )
 }
 
 #[cfg(not(unix))]
@@ -4597,10 +4740,22 @@ fn execute_minimize_trace(invocation: TraceMinimize) -> Result<i32, CliError> {
                 invocation.output.display()
             ))
         })?;
-    println!(
-        "PATINA_MINIMIZE_COMPLETE before={before} after={after} oracle_runs={calls} output={}",
-        invocation.output.display()
-    );
+    if output::options().is_json() {
+        output::emit_simple(
+            "minimize",
+            "ok",
+            0,
+            Some(format!(
+                "before={before} after={after} oracle_runs={calls} output={}",
+                invocation.output.display()
+            )),
+        );
+    } else {
+        println!(
+            "PATINA_MINIMIZE_COMPLETE before={before} after={after} oracle_runs={calls} output={}",
+            invocation.output.display()
+        );
+    }
     Ok(0)
 }
 
@@ -4653,10 +4808,22 @@ fn execute_minimize_scenario(invocation: ScenarioMinimize) -> Result<i32, CliErr
         .map(|(key, value)| format!("{key}={value}"))
         .collect::<Vec<_>>()
         .join(",");
-    println!(
-        "PATINA_MINIMIZE_SCENARIO_COMPLETE seed={} params=[{params}] oracle_runs={calls}",
-        reduced.seed
-    );
+    if output::options().is_json() {
+        output::emit_simple(
+            "minimize",
+            "ok",
+            0,
+            Some(format!(
+                "seed={} params=[{params}] oracle_runs={calls}",
+                reduced.seed
+            )),
+        );
+    } else {
+        println!(
+            "PATINA_MINIMIZE_SCENARIO_COMPLETE seed={} params=[{params}] oracle_runs={calls}",
+            reduced.seed
+        );
+    }
     Ok(0)
 }
 
@@ -4677,7 +4844,7 @@ fn execute(invocation: Invocation) -> Result<i32, CliError> {
         .arg(&invocation.cargo_command)
         .args(&invocation.cargo_args)
         .env("RUSTFLAGS", patina_rustflags())
-        .env(ENV_FINGERPRINT, fingerprint)
+        .env(ENV_FINGERPRINT, fingerprint.clone())
         .env_remove(ENV_MODE)
         .env_remove(ENV_SEED)
         .env_remove(ENV_TRACE)
@@ -4753,10 +4920,28 @@ fn execute(invocation: Invocation) -> Result<i32, CliError> {
         command.env("RUST_TEST_THREADS", "1");
     }
 
-    let status = command
-        .status()
-        .map_err(|error| CliError(format!("failed to execute Cargo: {error}")))?;
-    exit_code(status)
+    let captured = output::execute_command(&mut command)?;
+    let (trace_path, seed, timeline) = match &invocation.mode {
+        Mode::Seeded { seed } => (None, Some(*seed), "main".to_string()),
+        Mode::Record { seed, path } => (Some(path.clone()), Some(*seed), "main".to_string()),
+        Mode::Replay { path, timeline } => (Some(path.clone()), None, timeline.clone()),
+        Mode::Branch {
+            path, branch_id, ..
+        } => (Some(path.clone()), None, branch_id.clone()),
+    };
+    let artifact = format!("cargo {}", invocation.cargo_command);
+    output::finalize_run(
+        output::RunReport {
+            verb: &invocation.cargo_command,
+            family: "cargo",
+            artifact: &artifact,
+            trace_path,
+            timeline: &timeline,
+            fingerprint: Some(fingerprint),
+            seed,
+        },
+        captured,
+    )
 }
 
 fn workspace_root(cargo_args: &[OsString]) -> Result<PathBuf, CliError> {

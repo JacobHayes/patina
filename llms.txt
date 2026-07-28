@@ -1,0 +1,119 @@
+# Patina
+
+> Patina is a deterministic-simulation runtime for Rust. It runs ordinary `std`
+> programs (single Rust sources, whole Cargo packages, or WebAssembly modules)
+> under a cooperative scheduler, a virtual clock, an in-memory filesystem, and a
+> simulated network, so every run is a pure function of a seed. Runs are recorded
+> to a trace and replayed byte-for-byte. Seed-driven fault injection (crashes,
+> torn writes, network loss/jitter, sleep jitter) and a FoundationDB-style
+> cooperative-SUT SDK (`buggify!`) turn a normal test into a deterministic
+> distributed-systems fuzzer. Everything below is the `cargo patina` CLI surface
+> and is verified against the current build.
+
+Patina has no host fallback: a supported `std` call is deterministic or the run
+fails closed (a missed interposer is a refusal, never a silent escape). A trace
+carries its seed, fault config, and buggify config, so `replay` is flag-free.
+
+## Targets (families)
+
+The verb infers the target from the artifact's magic bytes: `\0asm` -> WASI
+(`wasm32-wasip1`); Mach-O/ELF -> native (linked shim); a directory / `Cargo.toml`
+with no `--target` -> the Cargo package family (in-process boundary API). A
+`.rs`/dir/`Cargo.toml` source argument is built on the fly, then run.
+
+## CLI verbs
+
+- `cargo patina build <SOURCE.rs|DIR|Cargo.toml> [--output PATH] [--target native|wasi] [--release] [--yield-points]`
+  Build a deterministic artifact. Default `--target native`. `--yield-points`
+  instruments basic blocks (LLVM SanitizerCoverage) so atomics-only race windows
+  become schedulable; native-only. Prints `PATINA_NATIVE_BUILD output=...` /
+  `PATINA_WASI_BUILD output=...`.
+- `cargo patina run <ARTIFACT|SOURCE> [--seed N | --record PATH] [FAULT OPTIONS] [--buggify[=PERMILLE]] [-- ARGS]`
+  Run under the deterministic runtime. `--seed` (default 0) drives everything.
+  `--record PATH` writes a trace.
+- `cargo patina test [--seed N | --record PATH] [FAULT OPTIONS] [CARGO OPTIONS]`
+  The Cargo package family under Patina.
+- `cargo patina replay <ARTIFACT|SOURCE> <TRACE> [host inputs]`
+  Reproduce a recording. Flag-free: seed, fault knobs, buggify, and guest argv
+  are restored from the trace (the trace is authoritative; a re-supplied semantic
+  flag that conflicts is refused). A fingerprint or operation mismatch fails
+  closed with a nonzero exit.
+- `cargo patina audit <ARTIFACT|SOURCE> [--allow SYMBOL]...`
+  Strict fail-closed import allowlist. Any un-interposed effect symbol is a
+  finding. Native `audit` of a shim binary flags its control-plane symbols
+  (`dlsym`, `pthread_create`) unless `--allow`ed.
+- `cargo patina explore run <ARTIFACT|SOURCE> [--seeds N] [--start N] [RUN OPTIONS]`
+  Sweep seeds, building once and running that artifact per seed. Stops at the
+  first failing seed with `PATINA_EXPLORE_FAILURE seed=S exit=E`; otherwise
+  `PATINA_EXPLORE_COMPLETE start=... seeds=...`.
+- `cargo patina minimize <TRACE> --output PATH -- <ORACLE>` / `minimize --scenario --seed N -- <ORACLE>`
+  Delta-debug a failing trace, or shrink the seed/params that trigger a failure.
+
+## Fault + buggify knobs (seed-driven, default off; recorded into the trace)
+
+- `--fs-crash-at open|write|sync|close[:N]` and `--fs-torn-granularity block|byte`
+- `--sleep-jitter-nanos MIN..MAX`, `--net-jitter-nanos MIN..MAX`, `--net-drop-permille N`, `--net-latency-nanos N`
+- `--buggify[=PERMILLE]`, `--buggify-activation-permille N`, `--buggify-cutoff-nanos N`, `--buggify-after-setup`
+
+## Output options (all verbs; stripped before routing, never reach the guest)
+
+- `--format human|json` (default human). `json` prints ONE result envelope on
+  stdout (schema `patina.result/v1`) and folds captured guest output into it;
+  human output is unchanged by default. NOTE: the selector is `--format`, not
+  `--output`, because `--output PATH` is already the build/minimize artifact path.
+- `--render OUT.html` (run/replay with a trace): write a self-contained,
+  single-file HTML timeline — per-task lanes over trace sequence, colored by
+  category (scheduling, sleep, network, filesystem, crash, entropy, clock), a
+  metadata panel rendered generically from the trace JSON, per-task rollups, and
+  a notable-events list (crashes, boundary errors, dropped datagrams). No
+  external assets. Large traces aggregate into density buckets with a visible
+  banner. Rendering only reads the trace, so it never changes a replay hash.
+- `--report OUT.html`: like `--render` but only on failure; the page leads with a
+  failure summary (what fired, exit code, the result/violation lines).
+
+### JSON result envelope (`patina.result/v1`)
+
+One line of JSON on stdout. Always: `schema`, `verb`, `result`
+(`ok|violation|failure|error`), `exit_code`. When applicable: `family`
+(`native|wasi|cargo`), `artifact`, `fingerprint`, `seed`, `render`, `findings`
+(audit imports), `output_path` + `content_hash` (build), `markers` (extracted
+`PATINA_*`/`*_VIOLATION`/`BUG_CAUGHT` lines), `result_line`, `stdout`, `stderr`,
+`message`, and `trace` = `{path, format_version, timelines[], event_count,
+metadata}` where `metadata` is the raw trace metadata (seed, faults, buggify,
+guest_argv, and any future fields, rendered generically).
+
+## SDK macros (crate `patina`, default features = dependency-light SDK)
+
+Instrument a system-under-test; every macro is a no-op under a plain
+`cargo build` (adopters pay nothing) and lowers to the runtime only under Patina.
+
+- `patina::buggify!("label")` -> bool: fires on a rare, seed-deterministic path.
+- `patina::buggify_with_prob!("label", 0.9)`, `patina::buggify_delay!("label")`,
+  `patina::buggify_knob!("label", default, lo, hi)` -> value.
+- `patina::always!(cond, "label")`: fatal invariant; a violation emits
+  `PATINA_ALWAYS_VIOLATION` and aborts.
+- `patina::sometimes!(cond, "label")`, `patina::reachable!("label")`: coverage.
+- `patina::lifecycle::setup_complete()`, `patina::lifecycle::event!("name")`.
+- `patina::rng()`: seed-bridged deterministic entropy. `patina::is_simulated()`.
+- Explicit boundary API (feature `runtime`): `patina::run` / `run_with`,
+  `Context`, `patina::rt` (async), `patina::block_on`.
+
+## Interpreting results
+
+- Exit 0 = clean. A nonzero exit is the guest's own code; a violation
+  (`*_VIOLATION`, `BUG_CAUGHT`, an `always!` abort, or a replay mismatch)
+  classifies as `violation` under `--format json`. A CLI-side error (bad flags,
+  build failure, refused replay) exits 2.
+- `PATINA_SCHEDULE_REPORT` (stderr) reports per-task scheduling boundaries and
+  warns (`vacuous_threads>0`) when a spawned thread ran zero interposed ops — i.e.
+  its interleavings were not actually explored (use `build --yield-points`).
+- `PATINA_SDK_REPORT` (stderr) reports buggify site registration/activation/firing.
+- A trace is compact JSON: inspect it with `jq . run.patina`.
+
+## Docs
+
+- `TUTORIAL.md`: instrument a program with `buggify!`, sweep seeds, catch a
+  planted bug, replay it, and render the timeline.
+- `ARCHITECTURE.md`, `IMPLEMENTATION.md`, `VALIDATION.md`: design, slice status,
+  and the verification gates.
+- `testbeds/PATINA-REPORT.html`: campaign results against ripgrep, redb, raft-rs.

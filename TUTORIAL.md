@@ -1,0 +1,186 @@
+# Patina tutorial: catch a planted bug with buggify, then replay and render it
+
+This walkthrough takes a small `std` Rust program, instruments it with Patina's
+cooperative-SUT SDK (`buggify!`), sweeps seeds until a planted bug fires, then
+records that run, replays it byte-for-byte, and renders its timeline to a
+self-contained HTML page. Every command here is run against the current CLI.
+
+Prerequisites: build the CLI once from the workspace root — `cargo build
+--release -p cargo-patina` — and use `target/release/cargo-patina` (shown as
+`cargo patina` below). No extra toolchain is needed for the native target.
+
+## 1. A small program with a latent bug
+
+Create a standalone package `ledger/` (its own empty `[workspace]` keeps it out of
+the Patina workspace):
+
+`ledger/Cargo.toml`
+```toml
+[workspace]
+[package]
+name = "ledger"
+version = "0.1.0"
+edition = "2021"
+publish = false
+[[bin]]
+name = "ledger"
+path = "src/main.rs"
+[dependencies]
+# Path to your checkout's crates/patina. The SDK's default features are the
+# dependency-light macro set; a plain `cargo build` leaves every macro a no-op.
+patina = { path = "../patina/crates/patina" }
+```
+
+`ledger/src/main.rs`
+```rust
+// A tiny append-only ledger with a LATENT bug: a rare "batch-commit" path
+// appends the next entry out of order, breaking the sorted-prefix invariant. The
+// bug only triggers when that rare path runs -- exactly the path buggify forces.
+// An end-of-run consistency check catches it and exits nonzero (a clean exit, so
+// the recorded trace finalizes and can be replayed and rendered).
+fn main() {
+    patina::lifecycle::setup_complete();
+    let mut durable: Vec<u64> = Vec::new();
+    for i in 0..8u64 {
+        if patina::buggify!("batch-commit") {
+            let last = durable.len();
+            durable.push(i);
+            if last >= 1 {
+                durable.swap(last, last - 1); // BUG: reorders two committed entries
+            }
+        } else {
+            durable.push(i);
+        }
+    }
+    let ok = durable.iter().enumerate().all(|(i, v)| *v as usize == i);
+    if ok {
+        println!("LEDGER_OK entries={}", durable.len());
+    } else {
+        println!("BUG_CAUGHT reordered ledger={durable:?}");
+        std::process::exit(1);
+    }
+}
+```
+
+`buggify!("batch-commit")` returns `true` only on a rare, *seed-deterministic*
+path. Outside Patina (a plain `cargo build && ./ledger`) it is always `false`, so
+the program behaves normally and ships with the instrumentation inert.
+
+## 2. Build it for the deterministic runtime
+
+```
+$ cargo patina build ./ledger --output ./ledger/ledger
+PATINA_NATIVE_BUILD output=/.../ledger/ledger
+```
+
+`build` links the deterministic shim below your program and injects the cfgs that
+route the SDK macros to the runtime.
+
+## 3. Run it — a clean seed and a catching seed
+
+Most seeds do not activate the site or do not fire it, so the invariant holds:
+
+```
+$ cargo patina run ./ledger/ledger --seed 0 --buggify
+LEDGER_OK entries=8
+```
+
+Buggify is seeded by the run seed, so a different seed takes the rare path:
+
+```
+$ cargo patina run ./ledger/ledger --seed 5 --buggify
+BUG_CAUGHT reordered ledger=[0, 1, 3, 2, 4, 6, 5, 7]      # exit 1
+```
+
+On stderr you also get the SDK report — proof the site was actually exercised
+(not a vacuous "all clean"):
+
+```
+PATINA_SDK_REPORT enabled=1 fire_permille=250 activation_permille=250 ... \
+  sites_registered=1 sites_activated=1 total_firings=2 ... site=batch-commit|fault|...
+```
+
+Catching seeds are build-specific (the instrumentation shapes the decision
+space), so sweep for one rather than hardcoding it.
+
+## 4. Sweep seeds automatically
+
+`explore` builds once and runs that same artifact across a range of seeds,
+stopping at the first failure:
+
+```
+$ cargo patina explore run ./ledger/ledger --buggify --seeds 50
+PATINA_EXPLORE_FAILURE seed=5 exit=1
+```
+
+(A clean sweep instead ends with `PATINA_EXPLORE_COMPLETE start=0 seeds=50`.)
+
+## 5. Record the catching run
+
+Recording captures the seed, the buggify config, and the guest arguments into the
+trace, so the reproduction needs no flags later:
+
+```
+$ cargo patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina
+BUG_CAUGHT reordered ledger=[0, 1, 3, 2, 4, 6, 5, 7]      # exit 1
+```
+
+The trace is compact JSON — inspect it with `jq . bug.patina` if you like.
+
+## 6. Replay it — byte-for-byte, flag-free
+
+```
+$ cargo patina replay ./ledger/ledger ./bug.patina
+BUG_CAUGHT reordered ledger=[0, 1, 3, 2, 4, 6, 5, 7]      # exit 1, identical
+```
+
+No `--seed` or `--buggify`: the trace is authoritative. If you rebuild the binary
+incompatibly, replay fails closed on the fingerprint rather than lying.
+
+## 7. Render the timeline
+
+Add `--render` to write a self-contained HTML timeline (open it in any browser —
+no assets, no network):
+
+```
+$ cargo patina replay ./ledger/ledger ./bug.patina --render ./bug.html
+```
+
+`bug.html` shows per-task lanes over the trace, a metadata panel (seed, buggify
+config, active sites), per-task rollups, and a notable-events list. Rendering
+only reads the trace, so the replay hash is unchanged whether or not you pass
+`--render`.
+
+Prefer a one-shot failure report? `--report OUT.html` renders the timeline *only
+when the run fails*, leading with a failure summary:
+
+```
+$ cargo patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina --report ./report.html
+```
+
+## 8. Machine-readable output for agents
+
+Any verb accepts `--format json`, emitting one result envelope on stdout (schema
+`patina.result/v1`) with the guest output folded in:
+
+```
+$ cargo patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina --format json
+{"schema":"patina.result/v1","verb":"run","family":"native","result":"violation",
+ "exit_code":1,"seed":5,"trace":{"path":"./bug.patina","format_version":4,
+ "event_count":...,"metadata":{...}},"markers":["..."],
+ "result_line":"BUG_CAUGHT reordered ledger=[0, 1, 3, 2, 4, 6, 5, 7]", ...}
+```
+
+`result` is `ok | violation | failure | error`. The selector is `--format`
+(not `--output`, which is the build/minimize artifact path).
+
+## Where to go next
+
+- Add fault injection: `--fs-crash-at`, `--net-drop-permille`, `--net-jitter-nanos`,
+  `--sleep-jitter-nanos`. They are seed-driven, default off, and recorded into the
+  trace like buggify — so replay reproduces them flag-free.
+- Make atomics-only race windows schedulable: `cargo patina build --yield-points`.
+- Shrink a failing trace to its essence: `cargo patina minimize bug.patina
+  --output small.patina -- ./oracle`.
+- See `llms.txt` for the full CLI/SDK map and `testbeds/PATINA-REPORT.html` for
+  campaign results against ripgrep, redb, and raft-rs.
