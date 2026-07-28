@@ -22,7 +22,7 @@ Required:
 - `cargo test --workspace`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo doc --workspace --no-deps`
-- `cargo +1.85.0 test --workspace`
+- `cargo +1.86.0 test --workspace`
 - `scripts/validate-wasi.sh` when validating V3
 - `scripts/validate-native-shim.sh` when validating native foundations
 - `scripts/smoke-cross-target.sh` when validating cross-target determinism
@@ -214,7 +214,7 @@ Before a release, run the V2 end-to-end fixture for:
 - Linux and macOS when CI is available;
 - seeds `0`, `1`, `u64::MAX`, and at least 100 generated seeds.
 
-The repository runs these gates in `.github/workflows/ci.yml` on stable Linux, Rust 1.85, and stable macOS. Stable Linux executes the WASI, native-shim, and cross-target smoke probes; macOS executes the native-shim, ordinary-`std` interposition, and cross-target smoke probes.
+The repository runs these gates in `.github/workflows/ci.yml` on stable Linux, Rust 1.86, and stable macOS. Stable Linux executes the WASI, native-shim, and cross-target smoke probes; macOS executes the native-shim, ordinary-`std` interposition, and cross-target smoke probes.
 
 A failure report must retain the command, seed, trace bundle when one exists, Patina version, Rust version, target triple, and compatibility fingerprint.
 
