@@ -266,7 +266,7 @@ Before a release, run the V2 end-to-end fixture for:
 - Linux and macOS when CI is available;
 - seeds `0`, `1`, `u64::MAX`, and at least 100 generated seeds.
 
-The repository runs these gates in `.github/workflows/ci.yml` on stable Linux, Rust 1.86, and stable macOS. Stable Linux executes the WASI, native-shim, and cross-target smoke probes; macOS executes the native-shim, ordinary-`std` interposition, and cross-target smoke probes.
+The repository runs these gates in `.github/workflows/ci.yml` on stable Linux (x86_64 and aarch64), Rust 1.86 on both Linux architectures, and stable macOS. Every job executes the WASI, native-shim, and cross-target smoke probes; the Linux jobs install `strace` and set `PATINA_REQUIRE_STRACE=1` so the syscall-containment pass cannot silently skip. The stable Linux jobs additionally run the fuzz-sweep and campaign classifier selftests per push; a `package` job proves all 22 crates package for crates.io; an `audit` job runs RustSec advisories over the root and testbed lockfiles; and a nightly job (cron + manual dispatch, ubuntu + macos) runs the full raft-harness battery.
 
 A failure report must retain the command, seed, trace bundle when one exists, Patina version, Rust version, target triple, and compatibility fingerprint.
 
@@ -275,3 +275,79 @@ A failure report must retain the command, seed, trace bundle when one exists, Pa
 Passing V0-V2 proves the CLI-to-runtime-to-driver-to-trace loop for explicit `patina_dst::Context` effects. V3 proves the entire audited Preview 1 surface with preopen policy and resource limits, within the documented semantic limitations. The native script proves a controlled slice of ordinary `std` behavior — filesystem (including directory listing and symlinks), time, sleep, entropy, stdio, threads, and UDP datagrams — and mixed C ABI calls, built through the packaged `build`/`run` path with auto-initialization and record/replay over the descriptor trace channel — for single Rust sources and whole Cargo packages (path dependencies and build scripts included), though not yet a packaged native target with a recompiled deterministic `std`. Containment is enforced from two directions: the strict import allowlist fails closed on any unknown symbol, and the Linux `strace` pass shows the probe's guest section performing zero host syscalls over the whole run. Both platforms are verified locally: macOS directly, Linux in a VM (pthread interposition on macOS; futex-level `syscall` interposition on Linux). The cross-target smoke script proves one ordinary-`std` program behaves identically under seeds, record, and replay on wasm32-wasip1, native macOS, and native Linux. Crash models, trace migration, host capture, minimization reducers, and performance budgets have focused evidence.
 
 One record path still represents one finalized context; multi-test aggregation is unsupported. Native async-runtime interposition, native TCP/IPv6/DNS, process spawning, arbitrary FFI, dynamic loading, and full POSIX compatibility remain outside the confidence boundary (the explicit-boundary `patina-dst-async` executor is inside it, under V2).
+## Gate taxonomy: point pins vs class detectors
+
+Every validation gate in Patina is one of two kinds. A **class-level detector** is
+structural: a *new, never-before-seen* bug of the same family trips it (a
+default-deny audit, a single-choke-point invariant, a distinct-sentinel check, a
+fail-closed reconcile contract, a per-class taxonomy sweep). A **point-level pin**
+reproduces one specific past defect and would not catch a sibling variant. Point
+pins are legitimate — a reproducer is cheap insurance — but a point pin that is
+the *only* defense for a bug class is a latent gap: the next variant escapes.
+
+The "detection before fixes" doctrine has kept the ratio healthy: of ~72
+regression assertions in `crates/`, only 3 are true point pins, and each is
+already paired with a class-level invariant. The residual risk is not in the
+unit suite — it is in the handful of **structurally unpaired classes** below
+(escape paths with a known-absent detector).
+
+### Taxonomy — gates by family
+
+| Gate | Location | Motivating bug (if known) | Kind | Class pairing / coverage limit |
+|---|---|---|---|---|
+| Pre-run default-deny import audit (per-format allowlist, fail-closed on `unknown-import`) | `crates/patina-target/src/lib.rs` (`native_allowlisted_import`, `native_escape_category`); enforced in `cargo-patina` `run` | macOS Parker escape (a missed interposer passed silently) | **Class** | Catches any new uninterposed blocking/time/effect symbol. Limit: flat import list only, not inlined instructions or flag-dependent behavior. |
+| Per-class escape taxonomy + non-vacuity test | `patina-target` `every_escape_class_is_detected_and_denied`; e2e `native_run_prerun_gate_refuses_every_escape_class` | Escape-class rot | **Class** | One representative symbol per class must be named; a new class member trips it. |
+| Instruction scan (`scan_forbidden_instructions`: aarch64 `svc`/`mrs CNTVCT`/`RNDR`, x86 `syscall`/`rdtsc`/`rdrand`) | `patina-target/src/lib.rs`; `walks_past_forbidden_bytes_embedded_in_operands`, `fails_closed_on_undecodable_bytes`, `refuses_binaries_of_undecodable_architectures` | Old byte-slide false-positive on operand-embedded bytes; silent pass on undecodable architectures | **Class** | Boundary-aware; discriminates operand bytes from real opcodes; undecodable *architectures* refuse loudly (`UnsupportedNativeArchitecture`, no escape hatch). Limit: known encodings only — `rdseed`, commpage `ldr` time reads are residual. |
+| Linux whole-run `strace` containment | `scripts/validate-native-shim.sh` (Linux branch) + planted-`openat` filter selftest | Inlined raw syscall (no import) | **Class** | Whole-run default-deny; planted escape proves non-vacuity. Linux-only; `PATINA_REQUIRE_STRACE=1` (set on all Linux CI jobs, which install strace) turns the missing-tool soft-skip into a hard failure. |
+| macOS whole-run containment | — | — | **NONE** | Honestly absent: `ktrace` cannot ground a sound gate. `PATINA_REQUIRE_KTRACE=1` hard-fails rather than reporting a vacuous check. Only static scan + import audit on macOS. |
+| Shim host-alias object scan | `cargo-patina` `tests/shim_host_alias.rs` (`shim_objects_name_no_undeclared_host_escape` + `planted_leak_is_caught`) | Dispatch-semaphore Parker sharing the baton's `--allow` | **Class** | Scans shim's own objects for undeclared host escapes; planted leak keeps it honest. |
+| Fingerprint fail-closed (`+yieldpoints`/`+buggify`/`+pct`/`+starve`/`+swarm`, reconstructed from trace) | `patina-runtime`, `patina-trace`; `native_yield_points_trace_fails_closed_against_plain_binary`, `reconcile_replay_*_enforces_the_authoritative_trace_contract` | Cross-replay of incompatible build/policy | **Class** | Any capability mismatch fails closed; `deny_unknown_fields` rejects unknown policy in older runtime. |
+| Vacuous-schedule diagnostic (`PATINA_SCHEDULE_REPORT` + `PATINA WARNING`) | `patina-runtime/src/lib.rs` (`SCAFFOLDING_YIELD_FLOOR`); `vacuous_worker_that_never_yields_is_flagged` | "N seeds clean" hiding zero exploration (atomics-only window) | **Class (calibration-coupled)** | Mechanism is structural, but the floor is a tuned constant (macOS 4 / Linux 0). A std-scaffolding cost change could mis-calibrate it silently. |
+| Liveness watchdog (`PATINA_VIOLATION liveness`/`converge`; virtual-time only) | `patina-runtime` (`LIVENESS_MIN_STALL_OPS=4`, 600s budget); `liveness_watchdog_is_schedule_invariant_when_no_violation_fires` | Wedged run silently advancing vtime to budget | **Class** | Schedule-invariant (proven byte-identical op stream); non-vacuity via default-on `PATINA_LIVENESS_REPORT`. Limit: real-I/O-but-no-goal needs an app oracle. |
+| Starvation stall backstop (exit 111, wall-clock, `--starve`-only) | native supervisor; fuzz-sweep `STARVATION_STALL` selftest | Uninterposed atomic spinlock livelock under adversarial deferral | **Class** | Detection backstop (not liveness guarantee); armed only under `--starve` so the always-on canary never wedges. |
+| Teardown yield-point silencing | `patina-native-shim` `completed_sentinel_is_distinct_from_never_registered` + `main_returned_silences_the_root_task_scheduling_point` | `--yield-points` TLS destructor ran hook on removed task; main-thread root-task trailing yield | **Class** | Paired reproducers (`native_yield_points_survive_thread_local_teardown`, `..._main_thread_tls_teardown_is_deterministic`) are point pins; the mechanism invariants are the class pairing. |
+| Fail-closed binary yield-point detection | `cargo-patina` `yield_point_detection_streams_and_fails_closed` | Yield-point trace replayed against plain binary; ENOMEM fail-open in whole-file read | **Class** | Streaming scan errors loudly on any I/O failure; cross-replay fails closed. |
+| Single-choke-point CrashFs construction | `patina-runtime` `fs_image_choke_point_honors_configured_torn_granularity`; shim `native_fs_torn_granularity_byte_reaches_the_guest`, `native_fs_crash_image_is_seed_live_and_deterministic` | Shim pre-installed default-policy CrashFs, ignoring `torn_granularity` + pinning seed 0 | **Class** | Any regression reintroducing a shim-side CrashFs (bypassing fault config) trips byte≠block and seed-liveness. |
+| Byte-granularity torn-write geometry | `patina-fs-crash` `byte_granularity_tears_the_final_write...` (+3 siblings) | Whole-block model can't produce sub-block tear (redb sub-block campaign) | **Class** | Property family over the tear geometry. |
+| Trace op-tag stability | `patina-abi` `operation_variant_tags_are_pinned_by_name_not_declaration_order` | Variant insertion renumbering existing tags | **Class + point edge** | Class intent (name- not order-based tagging); the literal tag strings are point-ish for those variants. |
+| Trace strict-replay + migration safety | `patina-trace` `rejects_fingerprint_operation_and_trailing_event_mismatches`, `migration_never_rewrites_the_source_file`, version floor/ceiling | Malformed/hostile trace, lossy migration | **Class** | Fail-closed on any structural mismatch; migration never rewrites disk. |
+| Guest-argv replay | `cargo-patina` `native_replay_restores_guest_argv_and_normalizes_argv0`; wasi sibling | Real incident: divergent default argv → mid-run op mismatch | **Class** | Structural round-trip; argv[0] normalized so host path never leaks. |
+| Fuzz-sweep classifier (13 classes) + planted selftest (37 cases) | `testbeds/raft-harness/fuzz-sweep.sh` (`classify`, `assert_class`) | — | **Class** | Planted findings never downgraded; each class has a canned selftest. Selftest runs per-push in CI (stable job); full sweeps remain local/manual. |
+| Campaign classifier (7 classes) + selftest | `crates/cargo-patina/src/campaign.rs` (`classify`, `CampaignClass`) | — | **Class** | UNCLASSIFIED-loud on any unrecognized nonzero exit. CLI-level `--selftest` runs per-push in CI; real campaigns remain local/manual. |
+| Buggify SDK classes | `testbeds/buggify-campaign.sh` (`ALWAYS_VIOLATION` per-gen top severity; `SOMETIMES_UNMET` campaign-level) + selftest | — | **Class** | `ALWAYS_VIOLATION` fires even on exit 0, never downgraded. Selftest covered by the per-push fuzz-sweep selftest; real campaigns local. |
+| Cross-target byte-identity + canonical pins | `scripts/smoke-cross-target.sh` (`SMOKE_RESULT` cmp across wasi/native/record/replay + canonical `entropy_hash` literal); raft `applied_hash=bbb54b74…` (nightly CI) | Differential-only smoke let a both-targets-consistent entropy drift pass silently | **Class (differential) + canonical anchor** | Cross-target/record `cmp` catches divergence on exercised paths; the pinned literal catches consistent drift. Intentional entropy changes must update the literal deliberately. |
+
+### Unpaired / thin-coverage classes, ranked by risk
+
+1. **macOS inlined raw syscall (post-init) — no runtime detector.** The Linux
+   `strace` gate has no macOS equivalent (documented: `ktrace` cannot ground a
+   sound check). Static instruction scan misses commpage `ldr` time reads and
+   novel encodings. Highest structural residual; honestly stated, not closeable
+   today.
+2. **Vacuous-schedule floor + `SCHEDULE_MIN_BOUNDARIES=5000` are tuned constants.**
+   The detector mechanism is structural but its calibration is a magic number; a
+   std thread-scaffolding cost change could produce silent false negatives. Wants
+   a calibration guard that pins the measured scaffolding yield cost.
+3. **macOS guest `dlsym` of a non-deny-trapped blocked symbol** (e.g. `kill`).
+   Measured unreachable for any std guest, but no detector — relies on a guest not
+   hand-writing `dlsym`. Low risk by measurement, unpaired in principle.
+4. **`mmap(MAP_SHARED)` / instruction-level `rdseed`.** Invisible to the symbol
+   audit and instruction scan; no detector.
+
+Closed 2026-07-28 (previously ranked here): CI-absent `strace` (now installed +
+`PATINA_REQUIRE_STRACE=1` on every Linux job), classifier selftests absent from
+CI (fuzz-sweep + campaign selftests per-push; raft harness battery nightly +
+dispatch), and the missing canonical `entropy_hash` literal in the cross-target
+smoke (now pinned).
+
+### Maintenance rule
+
+**Every new point-level regression pin must name its class-level pairing in a
+comment, or be flagged in review.** A reproducer that pins one past bug is
+welcome, but it must sit beside a structural invariant (choke-point, distinct
+sentinel, default-deny audit, fail-closed reconcile) that a *new variant of the
+same family* would also trip. A tuned constant in a detector (a yield floor, a
+boundary threshold) is a calibration point-pin: it must carry a comment stating
+what it is calibrated against and how a drift would surface. When a class-level
+detector exists but does not run in CI, that gap is itself a tracked item — a
+detector that "would fire" is only evidence if it actually executes.
