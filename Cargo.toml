@@ -55,10 +55,10 @@ patina-dst-wrapper-fault = { path = "crates/patina-wrapper-fault" }
 patina-dst-wrapper-latency = { path = "crates/patina-wrapper-latency" }
 object = { version = "0.39.1", default-features = false, features = ["read", "std"] }
 proptest = { version = "1.11.0", default-features = false, features = ["std", "bit-set"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 sha2 = "0.11.0"
 tempfile = "3.27.0"
 wasmi = "1.1.0"
 wasmparser = "0.254.0"
-wat = "1.252.0"
+wat = "1.254.0"
