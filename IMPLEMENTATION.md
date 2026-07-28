@@ -379,6 +379,104 @@ a seed-derived `--swarm` overlay when >=2 fault classes are enabled. The
 `--selftest` covers `PATINA_SCHEDULE_POLICY` parsing (bug-depth extraction) and
 vacuous-starvation detection.
 
+## Slice 8: liveness watchdog + campaign — Partial (wave 13)
+
+A deterministic, virtual-time-only liveness detector and a first-class product
+surface (`cargo patina campaign`) generalizing the shell campaign machinery.
+
+1. **Liveness watchdog** (`patina-runtime`): a no-progress detector that reports a
+   structured, classifiable violation on a single stderr line — the interface
+   contract `PATINA_VIOLATION liveness detail=no-progress vtime_ns=<n> budget_ns=<n>`
+   (and `PATINA_VIOLATION converge detail=did-not-converge vtime_ns=<n> budget_ns=<n>
+   last_fault_vtime_ns=<n>` for heal-then-converge) — rather than letting a wedged
+   run advance virtual time to a silent budget. It reads virtual time and
+   the scheduler's policy state ONLY — no wall clock in the detection path (the
+   wall-clock `STARVATION_STALL` supervisor backstop stays separate and unchanged).
+   "Progress" is defined by boundary-op class: the pure scheduling/time/wait ops
+   (`SchedulerNext`, `SleepUntil`, `ClockNow`, `TaskYield/Park/ParkTimed/Wake`,
+   `NetNextDelivery`) are non-progress; every genuine effect (filesystem, entropy,
+   task spawn/complete, network data) resets the no-progress clock. An arm fires
+   when the run has churned (`>= 4` consecutive non-progress ops, so a single long
+   legitimate sleep can never trip it) for more than the configured budget of
+   virtual nanoseconds without progress — so a run that COMPLETED, or that reached
+   genuine quiescence (idle/blocked with no timers, virtual time frozen), never
+   fires, while a pure timer/park churn wedge does. Documented limitation: a system
+   that keeps doing real I/O but never reaches an application goal counts its I/O
+   as progress; that needs an application-level oracle. Detection is
+   record/seeded-only (like the policy report); replay consumes the authoritative
+   trace.
+
+   **Critical coupling to the exploration policies:** the watchdog consults the
+   scheduler through a new `SchedulerDriver::liveness_deferring()` — true whenever
+   the most recent decision deliberately withheld a runnable task (a starvation
+   interval excluding a runnable task, or PCT priority ordering deferring a
+   strictly-lower-priority runnable task). While the scheduler is deferring, the
+   no-progress clock is reset, so a deliberate starvation interval or a PCT
+   priority deferral is never misreported as a liveness violation; only genuine
+   no-progress beyond policy-explained deferral trips it.
+
+   **Heal-then-converge oracle** (`--converge-within[=NANOS]`): a second watchdog
+   arm that arms at the fault-window end — the buggify damage-control cutoff when
+   buggify is enabled, else run start, overridable with `--heal-after NANOS` — and
+   requires the guest to converge (complete or fall quiescent) within a
+   convergence budget of virtual time. It generalizes what the raft-harness scripts
+   assert ad hoc.
+
+   **Replay discipline:** the watchdog config records into the trace metadata as an
+   additive `RunMetadata::watchdog` field (`deny_unknown_fields`), but is
+   deliberately NOT a fingerprint input and NOT reconciled fail-closed on replay,
+   because it is schedule-invariant: it only ADDS a possible violation report and
+   never records a boundary op or perturbs selection. Proven by a runtime test that
+   records a healthy run with and without the watchdog and asserts a byte-identical
+   recorded op stream (the metadata differs only by the informational field). The
+   native shim aborts fail-closed on a `RuntimeError::Liveness` (flushing the
+   captured marker first) so a wedged guest cannot ignore the errno and spin on.
+   Knobs travel the shared `PATINA_LIVENESS_WATCHDOG_NANOS` /
+   `PATINA_CONVERGE_WITHIN_NANOS` / `PATINA_HEAL_AFTER_NANOS` control plane and are
+   applied by native `run`, WASI `run`, and the in-process runtime through
+   `RuntimeConfig::apply_liveness_env`. A default-on `PATINA_LIVENESS_REPORT` line
+   at a clean finish proves the watchdog was armed and did not fire (non-vacuity).
+
+2. **`cargo patina campaign`** (`crates/cargo-patina/src/campaign.rs`): a
+   config-driven, deterministic sweep. Each generation is an independent child
+   `cargo patina run --record` whose seed and every randomized knob (buggify,
+   swarm, PCT, fault knobs, the liveness budgets) are a pure function of
+   `SHA-256("patina-campaign-<seed_base>-<gen>")` — no wall clock, no `$RANDOM`,
+   exactly the fuzz-sweep scheme — so a re-run reproduces identical outcomes and
+   signatures. The spec is a JSON file (`--spec`, `deny`-unknown-keys) and/or flags.
+   A pure classifier assigns one of seven outcome classes — `OK` / `VIOLATION` /
+   `LIVENESS` / `FAIL_CLOSED_ABORT` / `STARVATION_STALL` / `INFRA` /
+   `UNCLASSIFIED` — with fuzz-sweep's strictness: an explicit finding is never
+   downgraded, exit 111 is `STARVATION_STALL`, a Patina fail-closed refusal (a
+   shim fatal stderr line or a bare SIGABRT carrying no SUT finding) is its own
+   class distinct from a generic failure, and any nonzero exit matching no class
+   lands LOUDLY in `UNCLASSIFIED` rather than being silently OK or mislabeled. It
+   generalizes the `RAFT_RESULT`/`RAFT_VIOLATION` / `PATINA_SDK_REPORT` conventions
+   to the harness-agnostic `PATINA_RESULT` / `PATINA_VIOLATION` markers and parses
+   the watchdog's `PATINA_VIOLATION liveness`/`converge` contract lines (one format
+   everywhere — no legacy marker parsing). A per-failure signature (class +
+   digit-collapsed violation-detail shape + policy bug-depth annotation) is
+   accumulated into `signatures.json` in the output dir: repeats dedup, novel
+   signatures are flagged with their first-seen generation and a reproduce command
+   (`cargo patina replay <trace>` when a valid trace exists, else a deterministic
+   re-run — a liveness/always abort writes no trace). A per-generation wall-clock
+   `--timeout-secs` backstop kills a generation that hangs in a way the virtual-time
+   watchdog cannot see (an uninterposed atomics-only busy loop), classifying it
+   INFRA so one hung generation cannot wedge the whole campaign. Output is a human
+   summary or a `patina.campaign/v1` JSON envelope (the `patina.result/v1` family
+   extended). `--selftest` proves every class reachable and the signature
+   dedup/novelty logic, mirroring the fuzz-sweep classifier selftest. The existing
+   `fuzz-sweep.sh` and `buggify-campaign.sh` are untouched and remain the
+   battle-tested reference.
+
+3. **Dogfood** (`testbeds/liveness-campaign`): a buggify-gated planted-bug guest —
+   when `buggify!("liveness-wedge")` fires the node never converges (an unbounded
+   virtual-time retry churn), else it completes. An end-to-end test builds it and
+   sweeps it: the campaign catches the planted `LIVENESS` bug on the generations
+   that fire it, deduplicates the one signature across them, records a working
+   reproduce command, and produces byte-identical outcomes/signatures on a
+   deterministic re-run.
+
 ## Dependency order
 
 ```text

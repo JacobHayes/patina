@@ -328,6 +328,15 @@ fn classify(exit_code: i32, stdout: &str, stderr: &str) -> String {
         return "ok".to_string();
     }
     let combined = format!("{stdout}\n{stderr}");
+    // A liveness-watchdog violation is its own classification (a virtual-time
+    // no-progress wedge), distinct from a safety violation, so triage can tell a
+    // "converges wrong" bug from a "never converges" one. Emitted per the interface
+    // contract as `PATINA_VIOLATION liveness …` / `PATINA_VIOLATION converge …`.
+    if combined.contains("PATINA_VIOLATION liveness ")
+        || combined.contains("PATINA_VIOLATION converge ")
+    {
+        return "liveness".to_string();
+    }
     if combined.contains("VIOLATION")
         || combined.contains("BUG_CAUGHT")
         || combined.contains("mismatch")
@@ -343,8 +352,10 @@ fn classify(exit_code: i32, stdout: &str, stderr: &str) -> String {
 /// surfacing verbatim in the envelope and failure report.
 const MARKER_PREFIXES: &[&str] = &[
     "PATINA_RESULT",
+    "PATINA_VIOLATION",
     "PATINA_SCHEDULE_REPORT",
     "PATINA_SDK_REPORT",
+    "PATINA_LIVENESS_REPORT",
     "PATINA_ALWAYS_VIOLATION",
     "PATINA_BUGGIFY_DUPLICATE_LABEL",
     "PATINA_BUGGIFY_SETUP_NEVER_CALLED",
@@ -372,7 +383,7 @@ fn extract_markers(stdout: &str, stderr: &str) -> Vec<String> {
 /// non-empty stderr line.
 fn result_line(stdout: &str, stderr: &str) -> Option<String> {
     let combined: Vec<&str> = stdout.lines().chain(stderr.lines()).collect();
-    for needle in ["VIOLATION", "BUG_CAUGHT", "mismatch"] {
+    for needle in ["PATINA_VIOLATION", "VIOLATION", "BUG_CAUGHT", "mismatch"] {
         if let Some(line) = combined.iter().find(|l| l.contains(needle)) {
             return Some(line.trim().to_string());
         }
@@ -709,5 +720,30 @@ mod tests {
             "violation"
         );
         assert_eq!(classify(1, "panic somewhere", ""), "failure");
+    }
+
+    #[test]
+    fn classify_detects_liveness_violations_distinctly() {
+        assert_eq!(
+            classify(
+                1,
+                "",
+                "PATINA_VIOLATION converge detail=did-not-converge vtime_ns=400 budget_ns=300 last_fault_vtime_ns=0"
+            ),
+            "liveness"
+        );
+        assert_eq!(
+            classify(
+                1,
+                "",
+                "PATINA_VIOLATION liveness detail=no-progress vtime_ns=700 budget_ns=600"
+            ),
+            "liveness"
+        );
+        // The finish-time report alone (armed, did not fire) is not a violation.
+        assert_eq!(
+            classify(0, "", "PATINA_LIVENESS_REPORT armed=1 fired=0"),
+            "ok"
+        );
     }
 }

@@ -580,6 +580,159 @@ fn run_and_audit_infer_target_and_reject_cross_target_flags() {
 // bytes. Requires the wasm32-wasip1 target (installed in CI and by the
 // validate/smoke scripts' preflight).
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+// End-to-end coverage for `cargo patina campaign` + the liveness watchdog: build
+// the buggify-driven planted-bug guest (`testbeds/liveness-campaign`), sweep it,
+// and prove the campaign catches the planted liveness violation, deduplicates the
+// signature across the generations that fire it, records a working reproduce
+// command, and produces byte-identical outcomes/signatures on a deterministic
+// re-run. Native (single-threaded guest), so it does not touch the known
+// main-thread TLS-teardown race.
+#[test]
+fn campaign_catches_planted_liveness_bug_dedups_and_reproduces() {
+    let workspace = native_workspace();
+    let fixture = workspace.join("testbeds/liveness-campaign");
+    let directory = tempdir().unwrap();
+    let guest = directory.path().join("liveness-guest");
+
+    // Build the planted-bug guest once; the campaign sweeps this same binary.
+    let built = invoke_in(
+        workspace,
+        &[
+            "build",
+            fixture.to_str().unwrap(),
+            "--output",
+            guest.to_str().unwrap(),
+            "--release",
+        ],
+    );
+    assert!(
+        built.status.success(),
+        "building the liveness-campaign guest failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&built.stdout),
+        String::from_utf8_lossy(&built.stderr)
+    );
+
+    let out = directory.path().join("camp");
+    let campaign_args = |out: &Path| {
+        vec![
+            "campaign".to_string(),
+            guest.to_str().unwrap().to_string(),
+            "--gens".to_string(),
+            "12".to_string(),
+            "--buggify".to_string(),
+            "--liveness-watchdog".to_string(),
+            "600000000000".to_string(),
+            "--out".to_string(),
+            out.to_str().unwrap().to_string(),
+        ]
+    };
+    let owned1 = campaign_args(&out);
+    let ran = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &owned1.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    let stdout = String::from_utf8_lossy(&ran.stdout);
+    // A campaign with failures exits nonzero.
+    assert_eq!(
+        ran.status.code(),
+        Some(1),
+        "campaign should report failures (exit 1)\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    // A genuine mix: the planted bug fires on some generations and not others.
+    let liveness_gens = stdout.matches("class=LIVENESS").count();
+    let ok_gens = stdout.matches("class=OK").count();
+    assert!(
+        liveness_gens >= 1 && ok_gens >= 1,
+        "expected a mix of LIVENESS and OK generations, got liveness={liveness_gens} ok={ok_gens}\n{stdout}"
+    );
+
+    // The signature store deduplicates the planted liveness bug into ONE signature
+    // whose count equals the number of generations that fired it, and flags it as
+    // first seen exactly once (NOVEL appears once).
+    assert_eq!(
+        stdout.matches("NOVEL").count(),
+        1,
+        "the single planted bug must produce exactly one NOVEL signature\n{stdout}"
+    );
+    let store: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(out.join("signatures.json")).unwrap()).unwrap();
+    let signatures = store["signatures"].as_array().unwrap();
+    assert_eq!(
+        signatures.len(),
+        1,
+        "expected exactly one deduplicated signature: {store:#}"
+    );
+    let signature = &signatures[0];
+    assert_eq!(signature["class"], "LIVENESS");
+    assert_eq!(
+        signature["count"].as_u64().unwrap() as usize,
+        liveness_gens,
+        "signature count must equal the number of LIVENESS generations"
+    );
+
+    // The recorded reproduce command deterministically re-triggers the violation.
+    let reproduce = signature["reproduce"].as_str().unwrap();
+    let repro_args: Vec<&str> = reproduce
+        .strip_prefix("cargo patina ")
+        .unwrap()
+        .split(' ')
+        .collect();
+    let reproduced = invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, &repro_args);
+    assert!(
+        !reproduced.status.success()
+            && String::from_utf8_lossy(&reproduced.stderr).contains("PATINA_VIOLATION liveness "),
+        "reproduce command did not re-trigger the liveness violation: {reproduce}\nstderr:\n{}",
+        String::from_utf8_lossy(&reproduced.stderr)
+    );
+
+    // Determinism: a re-run with the same spec yields byte-identical per-generation
+    // outcomes and an identical signature store.
+    let out2 = directory.path().join("camp2");
+    let owned2 = campaign_args(&out2);
+    let ran2 = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &owned2.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    let gen_lines = |text: &str| {
+        text.lines()
+            .filter(|l| l.starts_with("PATINA_CAMPAIGN_GEN"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(
+        gen_lines(&stdout),
+        gen_lines(&String::from_utf8_lossy(&ran2.stdout)),
+        "a deterministic re-run must produce identical per-generation outcomes"
+    );
+    assert_eq!(
+        fs::read_to_string(out.join("signatures.json")).unwrap(),
+        fs::read_to_string(out2.join("signatures.json")).unwrap(),
+        "a deterministic re-run must produce an identical signature store"
+    );
+}
+
+// The campaign classifier `--selftest` proves every outcome class is reachable
+// and the signature store dedups/novelty logic bites — the campaign peer of
+// fuzz-sweep's `--selftest`.
+#[test]
+fn campaign_selftest_passes() {
+    let ran = invoke_in(native_workspace(), &["campaign", "--selftest"]);
+    assert!(
+        ran.status.success(),
+        "campaign --selftest failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&ran.stdout).contains("CAMPAIGN SELFTEST PASSED"),
+        "missing pass marker:\n{}",
+        String::from_utf8_lossy(&ran.stdout)
+    );
+}
+
 #[test]
 fn build_target_wasi_compiles_and_composes_with_audit_and_run() {
     if !wasm32_wasip1_installed() {

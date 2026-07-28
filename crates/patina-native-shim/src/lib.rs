@@ -671,12 +671,27 @@ fn runtime_errno(error: &RuntimeError) -> c_int {
     match error {
         RuntimeError::Effect(error) => effect_errno(error),
         RuntimeError::StepBudgetExceeded { .. } => EOVERFLOW,
+        // A liveness-watchdog violation is fatal and fail-closed: the run has
+        // wedged into a virtual-time no-progress churn. Returning an errno the
+        // guest could ignore would let it keep spinning, so abort loudly instead —
+        // the runtime has already emitted the classifiable PATINA_LIVENESS marker
+        // to the captured stderr.
+        RuntimeError::Liveness { .. } => abort_with_liveness(),
         RuntimeError::Config(_)
         | RuntimeError::Io { .. }
         | RuntimeError::Trace(_)
         | RuntimeError::InvalidOutcome { .. }
         | RuntimeError::RunAndFinalize { .. } => EIO,
     }
+}
+
+/// Flush the captured guest output (which already contains the runtime's
+/// `PATINA_LIVENESS` marker) and abort the wedged run. `abort()` skips the
+/// atexit-driven shutdown flush, so the explicit flush here is what preserves the
+/// marker — mirroring [`abort_with_init_error`] / [`abort_with_buggify_marker`].
+fn abort_with_liveness() -> ! {
+    let _ = flush_captured_stdio();
+    std::process::abort();
 }
 
 fn effect_errno(error: &EffectError) -> c_int {
@@ -1022,6 +1037,9 @@ fn runtime_config_from_control_plane() -> Result<(RuntimeConfig, Option<i32>), R
     // so the shim and the process-environment path agree on the protocol.
     config = config.apply_schedule_env(control_env)?;
     config = config.apply_swarm_env(control_env)?;
+    // Liveness-watchdog knobs travel the same control plane through the shared
+    // parser, so the shim and the process-environment path agree on the protocol.
+    config = config.apply_liveness_env(control_env)?;
     // Guest argv (recorded into the trace metadata) travels the same control
     // plane, so record mode captures the arguments the supervisor forwarded.
     config = config.apply_guest_argv_env(control_env)?;

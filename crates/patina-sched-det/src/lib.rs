@@ -161,6 +161,25 @@ impl PctState {
         }
     }
 
+    /// Whether, at this decision, PCT is deferring a strictly-lower-priority
+    /// runnable task in favor of a higher-priority one (a priority deferral the
+    /// liveness watchdog must treat as policy-explained). True when the candidate
+    /// set holds at least two distinct priorities, so a lower-priority runnable
+    /// task is passed over.
+    fn defers(&self, candidates: &[TaskId]) -> bool {
+        if candidates.len() < 2 {
+            return false;
+        }
+        let priority = |task: &TaskId| {
+            self.priorities
+                .get(task)
+                .copied()
+                .unwrap_or(i64::from(self.depth))
+        };
+        let max = candidates.iter().map(priority).max().expect("non-empty");
+        candidates.iter().any(|task| priority(task) < max)
+    }
+
     /// Pick the highest-priority task among `candidates`, ties broken by lowest
     /// task id. `candidates` is non-empty.
     fn pick(&mut self, candidates: &[TaskId]) -> TaskId {
@@ -308,6 +327,14 @@ pub struct DetScheduler {
     next_task: u64,
     pct: Option<PctState>,
     starvation: Option<StarvationState>,
+    /// Whether the most recent `choose` deliberately withheld a runnable task
+    /// from selection under an active exploration policy (a starvation interval
+    /// excluding a runnable task, or PCT priority ordering deferring a
+    /// lower-priority runnable task). Exposed through
+    /// [`SchedulerDriver::liveness_deferring`] so the liveness watchdog never
+    /// misreports a policy-explained non-progress window. Reset to `false` before
+    /// every default (policy-free) selection.
+    last_decision_deferred: bool,
 }
 
 impl DetScheduler {
@@ -324,6 +351,7 @@ impl DetScheduler {
             starvation: policy
                 .starvation
                 .map(|config| StarvationState::new(config, seed)),
+            last_decision_deferred: false,
         }
     }
 
@@ -351,6 +379,7 @@ impl DetScheduler {
         // over the full runnable set, consuming the selection generator exactly
         // as before so every canonical seed sequence is unchanged.
         if self.pct.is_none() && self.starvation.is_none() {
+            self.last_decision_deferred = false;
             let index = (self.generator.next_u64() % runnable.len() as u64) as usize;
             return runnable[index];
         }
@@ -424,6 +453,22 @@ interval window.",
         } else {
             runnable.to_vec()
         };
+
+        // A starvation interval that excludes at least one currently-runnable task
+        // is an active policy deferral this decision (whichever branch selects the
+        // task: free pool, forced aging, or vacuous fallback). The step counter has
+        // already advanced, so `interval_starves` keys on the correct decision.
+        let starve_deferring = self
+            .starvation
+            .as_ref()
+            .map(|starve| runnable.iter().any(|task| starve.interval_starves(*task)))
+            .unwrap_or(false);
+        let pct_deferring = self
+            .pct
+            .as_ref()
+            .map(|pct| pct.defers(&candidates))
+            .unwrap_or(false);
+        self.last_decision_deferred = starve_deferring || pct_deferring;
 
         let selected = if let Some(task) = forced {
             task
@@ -586,6 +631,10 @@ impl SchedulerDriver for DetScheduler {
             report.decisions = report.decisions.max(starve.step);
         }
         Some(report)
+    }
+
+    fn liveness_deferring(&self) -> bool {
+        self.last_decision_deferred
     }
 }
 
@@ -897,5 +946,78 @@ mod tests {
         sched.spawn("a").unwrap();
         sched.spawn("b").unwrap();
         assert!(sched.policy_report().is_none());
+    }
+
+    #[test]
+    fn default_policy_never_reports_liveness_deferral() {
+        // The uniform-random policy never withholds a runnable task, so the
+        // liveness watchdog stays fully live for a plain run.
+        let mut sched = DetScheduler::new(7);
+        for label in ["a", "b", "c"] {
+            sched.spawn(label).unwrap();
+        }
+        for _ in 0..20 {
+            let task = sched.next().unwrap().unwrap();
+            assert!(
+                !sched.liveness_deferring(),
+                "default policy must never defer"
+            );
+            sched.yield_task(task).unwrap();
+        }
+    }
+
+    #[test]
+    fn starvation_reports_liveness_deferral_while_excluding() {
+        // A wide interval excluding a residue class reports a policy deferral for
+        // at least one decision, so the watchdog excuses that non-progress window.
+        let policy = SchedulePolicy {
+            pct: None,
+            starvation: Some(StarvationConfig {
+                intervals: 1,
+                max_len: 6,
+                window: 2,
+            }),
+        };
+        let mut sched = DetScheduler::with_policy(9, policy);
+        for label in 0..4u64 {
+            sched.spawn(&format!("t{label}")).unwrap();
+        }
+        let mut saw_deferral = false;
+        for _ in 0..60 {
+            let task = sched.next().unwrap().unwrap();
+            saw_deferral |= sched.liveness_deferring();
+            sched.yield_task(task).unwrap();
+        }
+        assert!(
+            saw_deferral,
+            "an active starvation interval must report a deferral"
+        );
+    }
+
+    #[test]
+    fn pct_reports_liveness_deferral_across_priorities() {
+        // With multiple tasks at distinct PCT priorities, a lower-priority
+        // runnable task is deferred by priority ordering.
+        let policy = SchedulePolicy {
+            pct: Some(PctConfig {
+                depth: 3,
+                steps: 40,
+            }),
+            starvation: None,
+        };
+        let mut sched = DetScheduler::with_policy(3, policy);
+        for label in 0..4u64 {
+            sched.spawn(&format!("t{label}")).unwrap();
+        }
+        let mut saw_deferral = false;
+        for _ in 0..20 {
+            let task = sched.next().unwrap().unwrap();
+            saw_deferral |= sched.liveness_deferring();
+            sched.yield_task(task).unwrap();
+        }
+        assert!(
+            saw_deferral,
+            "PCT priority ordering must defer a lower-priority runnable task"
+        );
     }
 }

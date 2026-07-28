@@ -1,0 +1,27 @@
+# Standalone package: its own empty [workspace] table keeps it OUT of the root
+# Patina workspace so `cargo` here never touches crates/ or the root manifest.
+# Built to wasm32-wasip1 via `cargo patina build --target wasi` (or to the native
+# host via `cargo patina build`) and swept by `cargo patina campaign`.
+#
+# This is the wave-13 planted-bug guest: a buggify-gated liveness bug. When the
+# `liveness-wedge` site fires, the guest fails to converge and spins on retry
+# timers forever (an unbounded virtual-time sleep churn with no genuine progress),
+# which the liveness watchdog catches as PATINA_LIVENESS; otherwise it converges.
+[workspace]
+
+[package]
+name = "liveness-campaign-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "liveness-campaign-fixture"
+path = "src/main.rs"
+
+[dependencies]
+# The Patina cooperative-SUT SDK (default features = dependency-light SDK).
+patina = { path = "../../crates/patina" }
+
+[profile.release]
+panic = "unwind"

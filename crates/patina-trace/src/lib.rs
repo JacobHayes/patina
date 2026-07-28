@@ -203,6 +203,44 @@ pub struct SwarmConfigRecord {
     pub selected_classes: Vec<String>,
 }
 
+/// The liveness-watchdog configuration of a recorded run. The watchdog is a
+/// virtual-time no-progress detector: it reports a structured `PATINA_LIVENESS`
+/// violation rather than letting a wedged run advance virtual time forever.
+///
+/// This record is **purely informational**: unlike the fault, buggify, and
+/// schedule-policy records it is deliberately *not* folded into the compatibility
+/// fingerprint and is *not* reconciled fail-closed on replay. The watchdog only
+/// ever ADDS a violation report — it never records a boundary operation and never
+/// perturbs scheduler selection — so a trace recorded with the watchdog enabled is
+/// byte-for-byte identical to one recorded without it (when no violation fires),
+/// and either trace replays against a build with any watchdog configuration.
+/// Recording it keeps the trace self-describing (which budgets were armed).
+/// Absent (`None`) in traces recorded with the watchdog disabled or before this
+/// field existed, which the runtime treats as "no watchdog".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WatchdogConfigRecord {
+    /// Generic no-progress budget in virtual nanoseconds, armed from run start.
+    /// Absent when the generic arm was not enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_progress_budget_nanos: Option<u64>,
+    /// Heal-then-converge budget in virtual nanoseconds, armed at the fault-window
+    /// end. Absent when the converge arm was not enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub converge_budget_nanos: Option<u64>,
+    /// The virtual monotonic time (nanoseconds) at which the converge arm arms
+    /// (the fault-window end). Absent when the converge arm was not enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heal_after_nanos: Option<u64>,
+}
+
+impl WatchdogConfigRecord {
+    /// Whether any watchdog arm was configured.
+    pub fn is_active(&self) -> bool {
+        self.no_progress_budget_nanos.is_some() || self.converge_budget_nanos.is_some()
+    }
+}
+
 fn torn_granularity_is_block(granularity: &TornGranularity) -> bool {
     matches!(granularity, TornGranularity::Block)
 }
@@ -266,6 +304,13 @@ pub struct RunMetadata {
     /// swarm was not enabled. See [`SwarmConfigRecord`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swarm: Option<SwarmConfigRecord>,
+    /// The run's liveness-watchdog configuration. Additive and *informational
+    /// only*: NOT a fingerprint input and NOT reconciled fail-closed on replay,
+    /// because the watchdog is schedule-invariant (it only adds a violation
+    /// report). Absent (`None`) when the watchdog was disabled. See
+    /// [`WatchdogConfigRecord`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watchdog: Option<WatchdogConfigRecord>,
 }
 
 impl RunMetadata {
@@ -279,6 +324,7 @@ impl RunMetadata {
             guest_argv: None,
             schedule_policy: None,
             swarm: None,
+            watchdog: None,
         }
     }
 
@@ -318,6 +364,14 @@ impl RunMetadata {
     #[must_use]
     pub fn with_swarm(mut self, swarm: Option<SwarmConfigRecord>) -> Self {
         self.swarm = swarm;
+        self
+    }
+
+    /// Attach the run's liveness-watchdog configuration recorded into the trace.
+    /// Informational only — see [`WatchdogConfigRecord`].
+    #[must_use]
+    pub fn with_watchdog(mut self, watchdog: Option<WatchdogConfigRecord>) -> Self {
+        self.watchdog = watchdog;
         self
     }
 }

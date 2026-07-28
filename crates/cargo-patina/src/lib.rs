@@ -16,12 +16,12 @@ use patina_minimize::{
 };
 use patina_runtime::{
     Context, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION,
-    ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_FINGERPRINT, ENV_FS_CRASH_AT, ENV_FS_IMAGE_FD,
-    ENV_FS_TORN_GRANULARITY, ENV_GUEST_ARGV, ENV_MODE, ENV_NET_DROP_PERMILLE, ENV_NET_JITTER,
-    ENV_NET_LATENCY, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS,
-    ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED,
-    ENV_SLEEP_JITTER, ENV_STEP_BUDGET, ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD,
-    RuntimeConfig,
+    ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN, ENV_FINGERPRINT,
+    ENV_FS_CRASH_AT, ENV_FS_IMAGE_FD, ENV_FS_TORN_GRANULARITY, ENV_GUEST_ARGV, ENV_HEAL_AFTER,
+    ENV_LIVENESS_WATCHDOG, ENV_MODE, ENV_NET_DROP_PERMILLE, ENV_NET_JITTER, ENV_NET_LATENCY,
+    ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS, ENV_SCHED_STARVE,
+    ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED, ENV_SLEEP_JITTER, ENV_STEP_BUDGET,
+    ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, RuntimeConfig,
 };
 use patina_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
@@ -37,6 +37,7 @@ use sha2::{Digest, Sha256};
 // `--output json` envelope. Both are read-only consumers of trace/runtime
 // semantics — they never record, replay, or mutate a trace — so rendering or
 // emitting an envelope cannot perturb replay hashes.
+mod campaign;
 mod output;
 mod render;
 
@@ -82,11 +83,13 @@ const HELP: &str = "Patina deterministic Cargo runner
 Usage:
   cargo patina run [--seed N | --record PATH] [FAULT OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]
   cargo patina run <MODULE.wasm> [--seed N | --record PATH] [--fuel N] [--arg VALUE]... [--env K=V]... [--socket FD=BIND->PEER]... [--preopen GUEST[:ro|:rw]]... [--fs-crash-at SPEC] [--fs-torn-granularity block|byte] [--net-jitter-nanos MIN..MAX] [--net-drop-permille N]
-  cargo patina run <BINARY> [--seed N | --record PATH] [--fingerprint STR] [--mount HOST_DIR] [--net-latency-nanos N] [FAULT OPTIONS] [--buggify[=PERMILLE]] [--buggify-activation-permille N] [--buggify-cutoff-nanos N] [--buggify-after-setup] [--allow SYMBOL]... [--allow-unsupported-symbols <all|name,...>] [-- PROGRAM ARGS]
+  cargo patina run <BINARY> [--seed N | --record PATH] [--fingerprint STR] [--mount HOST_DIR] [--net-latency-nanos N] [FAULT OPTIONS] [--buggify[=PERMILLE]] [--buggify-activation-permille N] [--buggify-cutoff-nanos N] [--buggify-after-setup] [--liveness-watchdog[=NANOS]] [--converge-within[=NANOS]] [--heal-after NANOS] [--allow SYMBOL]... [--allow-unsupported-symbols <all|name,...>] [-- PROGRAM ARGS]
   cargo patina run <SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [RUN OPTIONS]   (builds on the fly, then runs)
   cargo patina test [--seed N | --record PATH] [FAULT OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]
   cargo patina explore run <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [--seeds N] [--start N] [RUN OPTIONS]
   cargo patina explore test [--seeds N] [--start N] [PATINA/CARGO OPTIONS]
+  cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out DIR] [--spec FILE.json] [--seed-base N] [--buggify] [--swarm] [--pct] [--faults] [--liveness-watchdog N] [--converge-within N] [--report] [-- GUEST ARGS]
+  cargo patina campaign --selftest
   cargo patina build <SOURCE.rs> --output <PATH> [--edition YEAR] [--release] [--yield-points] [-- RUSTC OPTIONS]
   cargo patina build <DIR|Cargo.toml> [--output <PATH>] [--package NAME] [--bin NAME] [--release] [--yield-points]
   cargo patina build <DIR|Cargo.toml> --target wasi [--output PATH] [--package NAME] [--bin NAME] [--release]
@@ -347,6 +350,10 @@ struct WasiInvocation {
     /// trace metadata on `--record` and restored from the trace on `replay`, so a
     /// WASI buggify replay is flag-free, exactly like the fault knobs.
     buggify: Option<NativeBuggify>,
+    /// Liveness-watchdog knobs applied to the in-process runtime through the shared
+    /// `apply_liveness_env` accessor. Schedule-invariant, so recorded into the
+    /// trace metadata (informational) but never fingerprinted.
+    liveness: NativeLiveness,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -570,6 +577,9 @@ struct NativeRunInvocation {
     /// a non-default policy or swarm folds `+pct`/`+starve`/`+swarm` into the run
     /// fingerprint.
     schedule: NativeSchedule,
+    /// Liveness-watchdog knobs forwarded to the guest through the control plane.
+    /// Schedule-invariant: recorded (informational) but NOT fingerprinted.
+    liveness: NativeLiveness,
     /// Extra symbols to treat as known-safe in the pre-run audit gate, beyond
     /// the baked shim control-plane vehicle. Mirrors `native-audit --allow`.
     allow: BTreeSet<String>,
@@ -643,6 +653,31 @@ struct NativeSchedule {
     swarm: bool,
 }
 
+/// Liveness-watchdog knobs, forwarded to the guest/runtime as validated raw
+/// strings through the `PATINA_LIVENESS_*`/`PATINA_CONVERGE_*`/`PATINA_HEAL_*`
+/// control plane. Default-off. Deliberately kept SEPARATE from [`NativeSchedule`]
+/// because the watchdog is schedule-invariant: enabling it folds NO fingerprint
+/// component (it only adds a possible violation report), so a watchdog trace
+/// replays against any build.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct NativeLiveness {
+    /// `--liveness-watchdog[=NANOS]`: generic no-progress budget. `Some("")` = bare
+    /// (runtime default budget); `Some("N")` = explicit budget. `None` = off.
+    watchdog: Option<String>,
+    /// `--converge-within[=NANOS]`: heal-then-converge budget. `Some("")` = bare
+    /// (runtime default); `Some("N")` = explicit. `None` = off.
+    converge: Option<String>,
+    /// `--heal-after=NANOS`: explicit override for the converge arm-time. Inert
+    /// without `converge`.
+    heal_after: Option<String>,
+}
+
+impl NativeLiveness {
+    fn is_enabled(&self) -> bool {
+        self.watchdog.is_some() || self.converge.is_some()
+    }
+}
+
 /// The escape hatch for `native-run`'s pre-run default-deny gate. By default an
 /// unsupported symbol on the blocking/effect surface is a hard error before the
 /// guest runs; the operator can downgrade specific symbols (or all) to a loud
@@ -692,6 +727,7 @@ fn dispatch(arguments: Vec<OsString>) -> Result<i32, CliError> {
             Ok(0)
         }
         ParseResult::Run(invocation) => execute(invocation),
+        ParseResult::Campaign(invocation) => campaign::execute(invocation),
         ParseResult::Explore(invocation) => execute_explore(invocation),
         ParseResult::WasiBuild(invocation) => execute_wasi_build(invocation),
         ParseResult::WasiAudit(artifact) => execute_wasi_audit(artifact),
@@ -707,6 +743,7 @@ enum ParseResult {
     Help,
     Version,
     Run(Invocation),
+    Campaign(campaign::CampaignInvocation),
     Explore(ExploreInvocation),
     WasiBuild(WasiBuildInvocation),
     WasiAudit(ArtifactRef),
@@ -724,10 +761,14 @@ fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     }
     if arguments.is_empty() {
         return Err(CliError::usage(
-            "missing command (expected run, test, explore, build, audit, replay, or minimize)",
+            "missing command (expected run, test, campaign, explore, build, audit, replay, or minimize)",
         ));
     }
     match arguments.first().and_then(|value| value.to_str()) {
+        Some("campaign") => {
+            arguments.remove(0);
+            campaign::parse(arguments).map(ParseResult::Campaign)
+        }
         Some("explore") => {
             arguments.remove(0);
             parse_explore(arguments).map(ParseResult::Explore)
@@ -763,7 +804,7 @@ fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
         Some("-h" | "--help") => Ok(ParseResult::Help),
         Some("-V" | "--version") => Ok(ParseResult::Version),
         _ => Err(CliError::usage(format!(
-            "unsupported command {:?}; expected run, test, explore, build, audit, replay, or minimize",
+            "unsupported command {:?}; expected run, test, campaign, explore, build, audit, replay, or minimize",
             arguments[0].to_string_lossy()
         ))),
     }
@@ -1536,6 +1577,7 @@ fn wasi_invocation_from(
     inputs: WasiHostInputs,
     faults: NativeFaults,
     buggify: Option<NativeBuggify>,
+    liveness: NativeLiveness,
 ) -> WasiInvocation {
     WasiInvocation {
         module,
@@ -1548,6 +1590,7 @@ fn wasi_invocation_from(
         resource_limits: inputs.resource_limits,
         faults,
         buggify,
+        liveness,
     }
 }
 
@@ -1565,6 +1608,7 @@ fn parse_wasi_run_from(
     let mut record = None;
     let mut faults = NativeFaults::default();
     let mut buggify: Option<NativeBuggify> = None;
+    let mut liveness = NativeLiveness::default();
     let mut inputs = WasiHostInputs::default();
     let mut index = 0;
     while index < arguments.len() {
@@ -1576,6 +1620,32 @@ fn parse_wasi_run_from(
         // Valueless cooperative-SUT flags consume no following argument, so they
         // are handled before the eager value fetch below (which requires one).
         match name.as_str() {
+            "--liveness-watchdog" => {
+                liveness.watchdog = Some(String::new());
+                continue;
+            }
+            other if other.starts_with("--liveness-watchdog=") => {
+                let nanos = &other["--liveness-watchdog=".len()..];
+                parse_u64("--liveness-watchdog", nanos)?;
+                liveness.watchdog = Some(nanos.to_string());
+                continue;
+            }
+            "--converge-within" => {
+                liveness.converge = Some(String::new());
+                continue;
+            }
+            other if other.starts_with("--converge-within=") => {
+                let nanos = &other["--converge-within=".len()..];
+                parse_u64("--converge-within", nanos)?;
+                liveness.converge = Some(nanos.to_string());
+                continue;
+            }
+            other if other.starts_with("--heal-after=") => {
+                let nanos = &other["--heal-after=".len()..];
+                parse_u64("--heal-after", nanos)?;
+                liveness.heal_after = Some(nanos.to_string());
+                continue;
+            }
             "--buggify" => {
                 buggify.get_or_insert_with(NativeBuggify::default);
                 continue;
@@ -1654,6 +1724,13 @@ fn parse_wasi_run_from(
                     "--buggify-cutoff-nanos",
                 )?;
             }
+            "--heal-after" => {
+                let nanos = value
+                    .to_str()
+                    .ok_or_else(|| CliError::usage("--heal-after requires UTF-8"))?;
+                parse_u64("--heal-after", nanos)?;
+                liveness.heal_after = Some(nanos.to_string());
+            }
             option if FAULT_FLAGS.contains(&option) => {
                 let value = value
                     .to_str()
@@ -1679,7 +1756,9 @@ fn parse_wasi_run_from(
             seed: seed.unwrap_or(0),
         },
     };
-    Ok(wasi_invocation_from(module, mode, inputs, faults, buggify))
+    Ok(wasi_invocation_from(
+        module, mode, inputs, faults, buggify, liveness,
+    ))
 }
 
 /// Parse the WASI `replay <MODULE.wasm> <TRACE>` verb given an already-resolved
@@ -1808,6 +1887,7 @@ the trace is authoritative"
         inputs,
         NativeFaults::default(),
         None,
+        NativeLiveness::default(),
     ))
 }
 
@@ -2257,6 +2337,62 @@ fn schedule_env_pairs(schedule: &NativeSchedule) -> Vec<(&'static str, String)> 
     pairs
 }
 
+/// The liveness-watchdog control-plane pairs, mirroring [`schedule_env_pairs`] so
+/// the native family forwards them to the subprocess and the WASI/Cargo families
+/// to the in-process runtime through the same `apply_liveness_env` protocol.
+fn liveness_env_pairs(liveness: &NativeLiveness) -> Vec<(&'static str, String)> {
+    let mut pairs = Vec::new();
+    if let Some(budget) = &liveness.watchdog {
+        pairs.push((ENV_LIVENESS_WATCHDOG, budget.clone()));
+    }
+    if let Some(budget) = &liveness.converge {
+        pairs.push((ENV_CONVERGE_WITHIN, budget.clone()));
+        if let Some(heal_after) = &liveness.heal_after {
+            pairs.push((ENV_HEAL_AFTER, heal_after.clone()));
+        }
+    }
+    pairs
+}
+
+/// Parse a single liveness-watchdog flag into `liveness`, returning `true` when
+/// `option` was one (advancing `index` past any separate value). Shared by every
+/// `run` family so `--liveness-watchdog`, `--converge-within`, and `--heal-after`
+/// parse identically. A supplied budget is validated as an unsigned integer.
+fn parse_liveness_flag(
+    option: &str,
+    arguments: &[OsString],
+    index: &mut usize,
+    liveness: &mut NativeLiveness,
+) -> Result<bool, CliError> {
+    match option {
+        "--liveness-watchdog" => liveness.watchdog = Some(String::new()),
+        value if value.starts_with("--liveness-watchdog=") => {
+            let nanos = &value["--liveness-watchdog=".len()..];
+            parse_u64("--liveness-watchdog", nanos)?;
+            liveness.watchdog = Some(nanos.to_string());
+        }
+        "--converge-within" => liveness.converge = Some(String::new()),
+        value if value.starts_with("--converge-within=") => {
+            let nanos = &value["--converge-within=".len()..];
+            parse_u64("--converge-within", nanos)?;
+            liveness.converge = Some(nanos.to_string());
+        }
+        "--heal-after" => {
+            *index += 1;
+            let value = utf8_argument(arguments, *index, "--heal-after")?;
+            parse_u64("--heal-after", value)?;
+            liveness.heal_after = Some(value.to_string());
+        }
+        value if value.starts_with("--heal-after=") => {
+            let nanos = &value["--heal-after=".len()..];
+            parse_u64("--heal-after", nanos)?;
+            liveness.heal_after = Some(nanos.to_string());
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 /// Thin wrapper: treat the leading argument as an already-built binary. Used by
 /// unit tests; `run` routing calls [`parse_native_run_from`] with a resolved ref.
 #[cfg(test)]
@@ -2286,6 +2422,7 @@ fn parse_native_run_from(
     let mut faults = NativeFaults::default();
     let mut buggify: Option<NativeBuggify> = None;
     let mut schedule = NativeSchedule::default();
+    let mut liveness = NativeLiveness::default();
     let mut allow = BTreeSet::new();
     let mut allow_unsupported: Option<UnsupportedPolicy> = None;
     let mut mount = None;
@@ -2525,10 +2662,12 @@ fn parse_native_run_from(
                 let value = utf8_argument(&arguments, index, "--fingerprint")?;
                 set_once(&mut fingerprint, value.to_string(), "--fingerprint")?;
             }
-            _ => {
-                return Err(CliError::usage(format!(
-                    "unsupported option {option:?} for `run` of a native binary"
-                )));
+            other => {
+                if !parse_liveness_flag(other, &arguments, &mut index, &mut liveness)? {
+                    return Err(CliError::usage(format!(
+                        "unsupported option {option:?} for `run` of a native binary"
+                    )));
+                }
             }
         }
         index += 1;
@@ -2544,6 +2683,9 @@ fn parse_native_run_from(
         return Err(CliError::usage(
             "--starve-max-len and --starve-window require --starve",
         ));
+    }
+    if liveness.converge.is_none() && liveness.heal_after.is_some() {
+        return Err(CliError::usage("--heal-after requires --converge-within"));
     }
     let fingerprint = fingerprint.unwrap_or_else(|| DEFAULT_NATIVE_FINGERPRINT.to_string());
     let mode = if let Some(path) = record {
@@ -2565,6 +2707,7 @@ fn parse_native_run_from(
         faults,
         buggify,
         schedule,
+        liveness,
         allow,
         allow_unsupported: allow_unsupported.unwrap_or(UnsupportedPolicy::Deny),
         mount,
@@ -2778,6 +2921,9 @@ trace is authoritative",
         // trace metadata; the run path reconstructs the fingerprint suffix from
         // the trace (see `native_schedule_from_trace`), so nothing is supplied.
         schedule: NativeSchedule::default(),
+        // Liveness is schedule-invariant and informational-only in the trace, so a
+        // replay does not re-supply or reconcile it.
+        liveness: NativeLiveness::default(),
         allow,
         allow_unsupported: allow_unsupported.unwrap_or(UnsupportedPolicy::Deny),
         mount,
@@ -3069,6 +3215,21 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
             let pairs = buggify_env_pairs(buggify);
             config = config
                 .apply_buggify_env(|name| {
+                    pairs
+                        .iter()
+                        .find(|(key, _)| *key == name)
+                        .map(|(_, value)| value.clone())
+                })
+                .map_err(|error| CliError(error.to_string()))?;
+        }
+        // Liveness-watchdog knobs configure the same in-process runtime. The
+        // watchdog is schedule-invariant, so on `--record` its config is recorded
+        // (informational metadata) but not fingerprinted; a WASI guest that wedges
+        // into a pure-sleep churn trips a deterministic PATINA_LIVENESS.
+        if invocation.liveness.is_enabled() {
+            let pairs = liveness_env_pairs(&invocation.liveness);
+            config = config
+                .apply_liveness_env(|name| {
                     pairs
                         .iter()
                         .find(|(key, _)| *key == name)
@@ -4736,6 +4897,12 @@ liveness-safe."
     // OPTIONAL on replay (the trace is authoritative; the fingerprint suffix
     // rejects a cross-policy replay).
     for (name, value) in schedule_env_pairs(&invocation.schedule) {
+        command.env(name, value);
+    }
+    // Forward the liveness-watchdog knobs through the same control plane. The
+    // watchdog is schedule-invariant: recorded (informational) but not
+    // fingerprinted, so a watchdog trace replays against any build.
+    for (name, value) in liveness_env_pairs(&invocation.liveness) {
         command.env(name, value);
     }
 

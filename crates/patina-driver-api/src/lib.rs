@@ -208,6 +208,21 @@ pub trait SchedulerDriver: Send {
     fn policy_report(&self) -> Option<SchedulePolicyReport> {
         None
     }
+
+    /// Whether the most recent scheduling decision deliberately withheld a
+    /// runnable task from selection because of an active exploration policy — a
+    /// starvation interval excluding a runnable task, or PCT priority ordering
+    /// preferring a higher-priority task over an available strictly-lower-priority
+    /// one. The liveness watchdog consults this so a *policy-explained*
+    /// non-progress window (a deliberate starvation interval or a PCT priority
+    /// deferral) is never misreported as a liveness violation: only genuine
+    /// no-progress beyond policy-explained deferral trips the watchdog. The
+    /// default (uniform-random) policy never defers, so it reports `false` and
+    /// the watchdog is fully live for a plain run. Reflects the last `next()`
+    /// decision; on replay `next()` is not called, so it reports `false`.
+    fn liveness_deferring(&self) -> bool {
+        false
+    }
 }
 
 pub trait NetDriver: Send {

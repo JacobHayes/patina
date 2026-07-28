@@ -127,6 +127,34 @@ pub const ENV_SWARM: &str = "PATINA_SWARM";
 /// policy is active.
 pub const ENV_SCHEDULE_POLICY_REPORT: &str = "PATINA_SCHEDULE_POLICY_REPORT";
 
+/// Enable the generic liveness watchdog with a virtual-time no-progress budget in
+/// nanoseconds (armed from run start). A bare/empty value uses
+/// [`DEFAULT_LIVENESS_BUDGET_NANOS`].
+pub const ENV_LIVENESS_WATCHDOG: &str = "PATINA_LIVENESS_WATCHDOG_NANOS";
+/// Enable the heal-then-converge watchdog with a virtual-time convergence budget
+/// in nanoseconds, armed at the fault-window end. A bare/empty value uses
+/// [`DEFAULT_CONVERGE_BUDGET_NANOS`].
+pub const ENV_CONVERGE_WITHIN: &str = "PATINA_CONVERGE_WITHIN_NANOS";
+/// Explicit override for the heal-then-converge arm-time (virtual nanoseconds).
+/// When unset and converge is enabled, the runtime derives it from the buggify
+/// damage-control cutoff (if buggify is enabled) else 0.
+pub const ENV_HEAL_AFTER: &str = "PATINA_HEAL_AFTER_NANOS";
+/// Suppress the default-on end-of-run liveness-watchdog diagnostic
+/// (`PATINA_LIVENESS_REPORT`) when set to a false-y value.
+pub const ENV_LIVENESS_REPORT: &str = "PATINA_LIVENESS_REPORT";
+
+/// Default generic no-progress budget: 600 virtual seconds. Generous by design —
+/// the budget must exceed the longest legitimate quiescent (single-sleep) period,
+/// so a real workload's ordinary waiting never trips it.
+pub const DEFAULT_LIVENESS_BUDGET_NANOS: u64 = 600_000_000_000;
+/// Default heal-then-converge budget: 300 virtual seconds after the fault window.
+pub const DEFAULT_CONVERGE_BUDGET_NANOS: u64 = 300_000_000_000;
+/// Minimum number of consecutive non-progress operations a no-progress window must
+/// contain before the watchdog may fire, so a single long-but-legitimate sleep
+/// (one non-progress op) can never trip it — only genuine churn (a timer/park spin
+/// issuing many scheduling ops) does.
+const LIVENESS_MIN_STALL_OPS: u64 = 4;
+
 /// Default PCT target bug depth when `--sched-pct` is given without a value.
 pub const DEFAULT_PCT_DEPTH: u32 = 3;
 /// Default PCT expected schedule length.
@@ -336,6 +364,30 @@ impl Default for BuggifyConfig {
     }
 }
 
+/// Liveness-watchdog configuration: a deterministic, virtual-time-only no-progress
+/// detector. Default (all `None`) is disabled, so a run that does not opt in is
+/// byte-for-byte unchanged. See [`LivenessWatchdog`] for the detection semantics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LivenessConfig {
+    /// Generic no-progress budget (virtual nanoseconds), armed from run start.
+    /// `Some(0)` is rejected at parse time. `None` disables the generic arm.
+    pub no_progress_budget_nanos: Option<u64>,
+    /// Heal-then-converge budget (virtual nanoseconds), armed at the fault-window
+    /// end (the buggify cutoff when buggify is enabled, else 0, unless
+    /// [`heal_after_nanos`](Self::heal_after_nanos) overrides). `None` disables it.
+    pub converge_budget_nanos: Option<u64>,
+    /// Explicit override for the converge arm's arm-time (virtual nanoseconds).
+    /// `None` derives it from the buggify cutoff / run start.
+    pub heal_after_nanos: Option<u64>,
+}
+
+impl LivenessConfig {
+    /// Whether any watchdog arm is configured.
+    pub fn is_enabled(&self) -> bool {
+        self.no_progress_budget_nanos.is_some() || self.converge_budget_nanos.is_some()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeConfig {
     seed: u64,
@@ -356,6 +408,10 @@ pub struct RuntimeConfig {
     /// `replay` restores them flag-free. `None` records nothing (unset); `Some`
     /// (possibly empty) records the exact list. Not a fingerprint input.
     guest_argv: Option<Vec<String>>,
+    /// The liveness-watchdog configuration. Default (disabled) leaves a run
+    /// byte-for-byte unchanged; enabling it only ADDS a possible violation report
+    /// and is deliberately NOT a fingerprint input (schedule-invariant).
+    liveness: LivenessConfig,
 }
 
 impl RuntimeConfig {
@@ -372,6 +428,7 @@ impl RuntimeConfig {
             schedule_policy: SchedulePolicy::default(),
             swarm: false,
             guest_argv: None,
+            liveness: LivenessConfig::default(),
         }
     }
 
@@ -388,6 +445,7 @@ impl RuntimeConfig {
             schedule_policy: SchedulePolicy::default(),
             swarm: false,
             guest_argv: None,
+            liveness: LivenessConfig::default(),
         }
     }
 
@@ -409,6 +467,7 @@ impl RuntimeConfig {
             schedule_policy: SchedulePolicy::default(),
             swarm: false,
             guest_argv: None,
+            liveness: LivenessConfig::default(),
         }
     }
 
@@ -431,6 +490,7 @@ impl RuntimeConfig {
             schedule_policy: SchedulePolicy::default(),
             swarm: false,
             guest_argv: None,
+            liveness: LivenessConfig::default(),
         }
     }
 
@@ -454,6 +514,7 @@ impl RuntimeConfig {
             schedule_policy: SchedulePolicy::default(),
             swarm: false,
             guest_argv: None,
+            liveness: LivenessConfig::default(),
         }
     }
 
@@ -483,6 +544,7 @@ impl RuntimeConfig {
             schedule_policy: SchedulePolicy::default(),
             swarm: false,
             guest_argv: None,
+            liveness: LivenessConfig::default(),
         }
     }
 
@@ -792,6 +854,69 @@ impl RuntimeConfig {
         Ok(self)
     }
 
+    /// Install the liveness-watchdog configuration.
+    #[must_use]
+    pub fn with_liveness(mut self, liveness: LivenessConfig) -> Self {
+        self.liveness = liveness;
+        self
+    }
+
+    /// The configured liveness-watchdog knobs.
+    pub const fn liveness(&self) -> LivenessConfig {
+        self.liveness
+    }
+
+    /// Apply the liveness-watchdog knobs from a control-plane accessor. A present
+    /// [`ENV_LIVENESS_WATCHDOG`] enables the generic no-progress arm (its value, if
+    /// non-empty, being the budget in nanoseconds); [`ENV_CONVERGE_WITHIN`] enables
+    /// the heal-then-converge arm; [`ENV_HEAL_AFTER`] overrides its arm-time. A
+    /// zero budget is rejected so the watchdog cannot be armed to fire vacuously.
+    pub fn apply_liveness_env<F>(mut self, get: F) -> Result<Self, RuntimeError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let parse_budget = |name: &str, value: String, default: u64| -> Result<u64, RuntimeError> {
+            let value = value.trim();
+            if value.is_empty() {
+                return Ok(default);
+            }
+            let nanos: u64 = value.parse().map_err(|_| {
+                RuntimeError::Config(format!("{name} must be an unsigned 64-bit integer"))
+            })?;
+            if nanos == 0 {
+                return Err(RuntimeError::Config(format!(
+                    "{name} budget must be > 0 so the watchdog cannot fire vacuously"
+                )));
+            }
+            Ok(nanos)
+        };
+        if let Some(value) = get(ENV_LIVENESS_WATCHDOG) {
+            self.liveness.no_progress_budget_nanos = Some(parse_budget(
+                ENV_LIVENESS_WATCHDOG,
+                value,
+                DEFAULT_LIVENESS_BUDGET_NANOS,
+            )?);
+        }
+        if let Some(value) = get(ENV_CONVERGE_WITHIN) {
+            self.liveness.converge_budget_nanos = Some(parse_budget(
+                ENV_CONVERGE_WITHIN,
+                value,
+                DEFAULT_CONVERGE_BUDGET_NANOS,
+            )?);
+        }
+        if let Some(value) = get(ENV_HEAL_AFTER) {
+            let value = value.trim();
+            if !value.is_empty() {
+                self.liveness.heal_after_nanos = Some(value.parse().map_err(|_| {
+                    RuntimeError::Config(format!(
+                        "{ENV_HEAL_AFTER} must be an unsigned 64-bit integer"
+                    ))
+                })?);
+            }
+        }
+        Ok(self)
+    }
+
     pub fn with_param(
         mut self,
         key: impl Into<String>,
@@ -902,6 +1027,7 @@ impl RuntimeConfig {
         let config = config.apply_buggify_env(|name| env::var(name).ok())?;
         let config = config.apply_schedule_env(|name| env::var(name).ok())?;
         let config = config.apply_swarm_env(|name| env::var(name).ok())?;
+        let config = config.apply_liveness_env(|name| env::var(name).ok())?;
         let config = config.apply_guest_argv_env(|name| env::var(name).ok())?;
         Ok(config)
     }
@@ -1075,6 +1201,7 @@ impl RuntimeBuilder {
                             .with_buggify(buggify_record(&self.config))
                             .with_schedule_policy(schedule_policy_record(&self.config))
                             .with_swarm(swarm_record.clone())
+                            .with_watchdog(watchdog_record(&self.config))
                             .with_guest_argv(self.config.guest_argv.clone()),
                     ),
                     sink: RecordSink::Path {
@@ -1092,6 +1219,7 @@ impl RuntimeBuilder {
                             .with_buggify(buggify_record(&self.config))
                             .with_schedule_policy(schedule_policy_record(&self.config))
                             .with_swarm(swarm_record.clone())
+                            .with_watchdog(watchdog_record(&self.config))
                             .with_guest_argv(self.config.guest_argv.clone()),
                     ),
                     sink: RecordSink::Transport(
@@ -1276,6 +1404,22 @@ impl RuntimeBuilder {
             ));
         }
 
+        // Build the liveness watchdog before the Context literal consumes
+        // `self.config` fields. The heal-then-converge arm arms at the fault-window
+        // end: an explicit override, else the buggify damage-control cutoff (when
+        // buggify is enabled), else run start. Detection is live only on a
+        // record/seeded run; a replay consumes the authoritative trace.
+        let liveness = LivenessWatchdog::new(
+            self.config.liveness,
+            resolve_heal_after(&self.config),
+            matches!(
+                self.config.mode,
+                ExecutionMode::Seeded
+                    | ExecutionMode::Record { .. }
+                    | ExecutionMode::RecordTransport
+            ),
+        );
+
         Ok(Context {
             root_seed,
             step_budget: self.config.step_budget,
@@ -1303,6 +1447,7 @@ impl RuntimeBuilder {
             sleep_jitter_rng: SplitMix64::new(root_seed ^ 0x5EED_1A7E_0FF5_E720),
             schedule: ScheduleTracker::default(),
             buggify: Buggify::new(self.config.buggify, root_seed),
+            liveness,
         })
     }
 }
@@ -1362,6 +1507,225 @@ struct CompletedTask {
 const SCAFFOLDING_YIELD_FLOOR: u64 = 4;
 #[cfg(not(target_os = "macos"))]
 const SCAFFOLDING_YIELD_FLOOR: u64 = 0;
+
+/// Whether a boundary operation represents *genuine progress* (guest-driven state
+/// advancement) rather than pure scheduling/time housekeeping. The liveness
+/// watchdog resets its no-progress clock on a progress op and accumulates only on
+/// non-progress ops.
+///
+/// Non-progress = the pure scheduling/time/wait ops the runtime uses to rotate
+/// tasks and advance virtual time without any guest state change: reading the
+/// clock, sleeping, yielding, parking (timed or not), waking, the scheduler
+/// decision itself, and the park-until-delivery probe. Everything else — every
+/// filesystem effect, entropy draw, task spawn/completion, and network data
+/// movement — is genuine progress.
+///
+/// Consequence (documented): a system that keeps doing real I/O (e.g. exchanging
+/// network messages) but never reaches an application-level goal is NOT caught by
+/// this generic detector, because its I/O counts as progress; that requires an
+/// application-level oracle. The watchdog catches the *pure-churn wedge* — a run
+/// that has stopped issuing genuine effects and only spins on timers/parks while
+/// virtual time marches on.
+fn operation_is_progress(operation: &Operation) -> bool {
+    !matches!(
+        operation,
+        Operation::ClockNow { .. }
+            | Operation::SleepUntil { .. }
+            | Operation::TaskYield { .. }
+            | Operation::TaskPark { .. }
+            | Operation::TaskParkTimed { .. }
+            | Operation::TaskWake { .. }
+            | Operation::SchedulerNext
+            | Operation::NetNextDelivery { .. }
+    )
+}
+
+/// Which watchdog arm fired.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LivenessKind {
+    /// The generic no-progress arm (armed from run start).
+    NoProgress,
+    /// The heal-then-converge arm (armed at the fault-window end).
+    HealThenConverge,
+}
+
+impl LivenessKind {
+    /// The stable category token (the second field of the `PATINA_VIOLATION`
+    /// line): `liveness` for the generic no-progress arm, `converge` for the
+    /// heal-then-converge arm. A downstream campaign classifier keys on it.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            LivenessKind::NoProgress => "liveness",
+            LivenessKind::HealThenConverge => "converge",
+        }
+    }
+
+    /// The short kebab-case reason (`detail=…`) describing the specific failure.
+    pub const fn reason(&self) -> &'static str {
+        match self {
+            LivenessKind::NoProgress => "no-progress",
+            LivenessKind::HealThenConverge => "did-not-converge",
+        }
+    }
+}
+
+/// A structured liveness-watchdog violation, formatted into the stable
+/// `PATINA_VIOLATION` interface-contract line a downstream campaign consumer
+/// parses. `vtime_ns` is the absolute virtual-monotonic time at the fire;
+/// `last_fault_vtime_ns` is the converge arm's fault-window-end arm time (the
+/// `--heal-after` / buggify-cutoff instant), meaningful only for the converge arm.
+#[derive(Clone, Copy, Debug)]
+struct LivenessViolation {
+    kind: LivenessKind,
+    vtime_ns: u64,
+    budget_ns: u64,
+    last_fault_vtime_ns: u64,
+}
+
+impl LivenessViolation {
+    /// The single stderr line per the interface contract:
+    /// `PATINA_VIOLATION liveness detail=no-progress vtime_ns=<n> budget_ns=<n>` and
+    /// `PATINA_VIOLATION converge detail=did-not-converge vtime_ns=<n> budget_ns=<n> last_fault_vtime_ns=<n>`.
+    fn marker_line(&self) -> String {
+        match self.kind {
+            LivenessKind::NoProgress => format!(
+                "PATINA_VIOLATION liveness detail={} vtime_ns={} budget_ns={}",
+                self.kind.reason(),
+                self.vtime_ns,
+                self.budget_ns,
+            ),
+            LivenessKind::HealThenConverge => format!(
+                "PATINA_VIOLATION converge detail={} vtime_ns={} budget_ns={} last_fault_vtime_ns={}",
+                self.kind.reason(),
+                self.vtime_ns,
+                self.budget_ns,
+                self.last_fault_vtime_ns,
+            ),
+        }
+    }
+}
+
+/// One virtual-time no-progress budget the watchdog enforces. Each arm tracks the
+/// virtual time of the last genuine progress (its `baseline`) and the count of
+/// consecutive non-progress ops since then; it fires when the run has churned
+/// (`>= LIVENESS_MIN_STALL_OPS` non-progress ops) for more than `budget` virtual
+/// nanoseconds past the baseline without any progress and without a
+/// policy-explained deferral.
+#[derive(Clone, Copy, Debug)]
+struct WatchdogArm {
+    kind: LivenessKind,
+    /// Virtual time (nanoseconds) at which this arm becomes active. The generic
+    /// arm arms at 0; the converge arm arms at the fault-window end.
+    arm_time_nanos: u64,
+    budget_nanos: u64,
+    /// Whether virtual time has reached `arm_time_nanos` yet.
+    armed: bool,
+    /// Virtual time of the last progress (or of arming), from which the budget is
+    /// measured.
+    baseline_nanos: u64,
+    /// Consecutive non-progress ops since the baseline.
+    stall_ops: u64,
+}
+
+impl WatchdogArm {
+    /// Observe one boundary op at virtual time `now`. Returns a
+    /// [`LivenessViolation`] if this arm fires. `progress` is whether the op
+    /// advanced genuine state; `deferring` is whether the scheduler is deliberately
+    /// withholding a runnable task (a policy-explained window that must not count
+    /// as no-progress).
+    fn observe(&mut self, now: u64, progress: bool, deferring: bool) -> Option<LivenessViolation> {
+        if !self.armed {
+            if now < self.arm_time_nanos {
+                return None;
+            }
+            // Arm now: start measuring no-progress from this instant, so nothing
+            // before the arm-time counts against the budget.
+            self.armed = true;
+            self.baseline_nanos = now;
+            self.stall_ops = 0;
+        }
+        if progress || deferring {
+            self.baseline_nanos = now;
+            self.stall_ops = 0;
+            return None;
+        }
+        self.stall_ops += 1;
+        let elapsed = now.saturating_sub(self.baseline_nanos);
+        if self.stall_ops >= LIVENESS_MIN_STALL_OPS && elapsed > self.budget_nanos {
+            Some(LivenessViolation {
+                kind: self.kind,
+                vtime_ns: now,
+                budget_ns: self.budget_nanos,
+                last_fault_vtime_ns: self.arm_time_nanos,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+/// The deterministic, virtual-time-only liveness watchdog. It never records a
+/// boundary operation and never perturbs scheduler selection — it only READS the
+/// virtual clock and the scheduler's policy-deferral state and, on a genuine
+/// no-progress wedge, ADDS a structured `PATINA_VIOLATION` line. That is why
+/// enabling it is schedule-invariant (byte-identical trace when no violation
+/// fires) and needs no fingerprint component.
+///
+/// Detection is live-selection only (record/seeded), like the exploration-policy
+/// report: on replay the recorded trace is authoritative and already reflects any
+/// abort, and the scheduler's live deferral state is not available, so the
+/// watchdog stays inert on replay.
+struct LivenessWatchdog {
+    arms: Vec<WatchdogArm>,
+    /// Whether detection is live this run (record/seeded and at least one arm).
+    active: bool,
+    fired: bool,
+}
+
+impl LivenessWatchdog {
+    /// Build the watchdog from the resolved config. `heal_after_nanos` is the
+    /// converge arm's arm-time already resolved by the caller (buggify cutoff or
+    /// override). `active` gates whether detection actually runs.
+    fn new(config: LivenessConfig, heal_after_nanos: u64, active: bool) -> Self {
+        let mut arms = Vec::new();
+        if let Some(budget) = config.no_progress_budget_nanos {
+            arms.push(WatchdogArm {
+                kind: LivenessKind::NoProgress,
+                arm_time_nanos: 0,
+                budget_nanos: budget,
+                armed: false,
+                baseline_nanos: 0,
+                stall_ops: 0,
+            });
+        }
+        if let Some(budget) = config.converge_budget_nanos {
+            arms.push(WatchdogArm {
+                kind: LivenessKind::HealThenConverge,
+                arm_time_nanos: heal_after_nanos,
+                budget_nanos: budget,
+                armed: false,
+                baseline_nanos: heal_after_nanos,
+                stall_ops: 0,
+            });
+        }
+        Self {
+            active: active && !arms.is_empty(),
+            arms,
+            fired: false,
+        }
+    }
+
+    /// Observe one boundary op across every arm; return the first arm that fires.
+    fn observe(&mut self, now: u64, progress: bool, deferring: bool) -> Option<LivenessViolation> {
+        for arm in &mut self.arms {
+            if let Some(violation) = arm.observe(now, progress, deferring) {
+                self.fired = true;
+                return Some(violation);
+            }
+        }
+        None
+    }
+}
 
 /// Per-task scheduling-boundary accounting backing [`ScheduleDiagnostics`].
 /// Every field is driven by the recorded task-lifecycle ops, so it is populated
@@ -1947,6 +2311,10 @@ pub struct Context {
     /// Cooperative-SUT (buggify) site registry and decision engine. Inert when
     /// buggify is disabled, so a run that does not opt in is unaffected.
     buggify: Buggify,
+    /// Virtual-time liveness watchdog. Inert (`active == false`) unless a budget is
+    /// configured on a record/seeded run, so a run that does not opt in — and every
+    /// replay — is byte-for-byte unchanged.
+    liveness: LivenessWatchdog,
 }
 
 impl Context {
@@ -3312,6 +3680,13 @@ impl Context {
         if let Some(report) = self.scheduler.as_ref().and_then(|s| s.policy_report()) {
             emit_schedule_policy_report(&report);
         }
+        // Liveness-watchdog diagnostic: prove the watchdog was actually armed and
+        // ran to a clean finish (it did NOT fire — a fired watchdog aborts before
+        // finish()). Default-on so "watchdog enabled, run OK" is never silently
+        // vacuous; suppressed by a false-y PATINA_LIVENESS_REPORT.
+        if self.liveness.active {
+            emit_liveness_report(&self.liveness);
+        }
         // Cooperative-SUT diagnostic + metadata. Computed before the execution is
         // consumed so the record sink can fold in the run's realized active-site
         // set and knob picks.
@@ -3416,6 +3791,37 @@ impl Context {
         decode_unit(&operation, outcome)
     }
 
+    /// Advance the liveness watchdog for one boundary op. Reads virtual time and
+    /// the scheduler's policy-deferral state WITHOUT recording anything or
+    /// perturbing selection; returns a [`RuntimeError::Liveness`] (after emitting
+    /// the loud, classifiable `PATINA_VIOLATION` line) when a no-progress budget is
+    /// exceeded. Inert unless the watchdog is active (record/seeded with a budget
+    /// configured), so a plain run and every replay are unaffected.
+    fn liveness_track(&mut self, operation: &Operation) -> Result<(), RuntimeError> {
+        if !self.liveness.active || self.clock.is_none() {
+            return Ok(());
+        }
+        let now = self.current_monotonic()?;
+        let progress = operation_is_progress(operation);
+        let deferring = self
+            .scheduler
+            .as_ref()
+            .map(|scheduler| scheduler.liveness_deferring())
+            .unwrap_or(false);
+        if let Some(violation) = self.liveness.observe(now, progress, deferring) {
+            // The single interface-contract line, loud and machine-parseable.
+            // Emitted from the runtime so it reaches stderr regardless of the
+            // driving surface, exactly like the vacuous-starvation `PATINA WARNING`.
+            let marker = violation.marker_line();
+            eprintln!("{marker}");
+            return Err(RuntimeError::Liveness {
+                kind: violation.kind,
+                detail: marker,
+            });
+        }
+        Ok(())
+    }
+
     fn replay_expected(
         &mut self,
         operation: &Operation,
@@ -3426,6 +3832,7 @@ impl Context {
             });
         }
         self.steps += 1;
+        self.liveness_track(operation)?;
         match &mut self.execution {
             Execution::Replay(replayer) => {
                 let sequence = replayer.consumed();
@@ -3486,6 +3893,14 @@ pub enum RuntimeError {
     StepBudgetExceeded {
         budget: u64,
     },
+    /// The liveness watchdog observed a genuine no-progress wedge: virtual time
+    /// advanced past the configured budget with only scheduling/wait churn and no
+    /// policy-explained deferral. Loud (a `PATINA_VIOLATION` line was emitted) and
+    /// classifiable. `detail` holds the emitted marker line.
+    Liveness {
+        kind: LivenessKind,
+        detail: String,
+    },
     InvalidOutcome {
         operation: Box<Operation>,
         outcome: Box<Outcome>,
@@ -3508,6 +3923,9 @@ impl fmt::Display for RuntimeError {
                     f,
                     "Patina step budget of {budget} boundary operations was exhausted"
                 )
+            }
+            Self::Liveness { detail, .. } => {
+                write!(f, "Patina liveness watchdog violation: {detail}")
             }
             Self::InvalidOutcome { operation, outcome } => write!(
                 f,
@@ -3657,6 +4075,34 @@ fn torn_granularity_from_record(granularity: patina_trace::TornGranularity) -> T
         patina_trace::TornGranularity::Block => TornGranularity::Block,
         patina_trace::TornGranularity::Byte => TornGranularity::Byte,
     }
+}
+
+/// Resolve the heal-then-converge arm-time for a config: an explicit override,
+/// else the buggify damage-control cutoff (when buggify is enabled), else run
+/// start. Shared by the metadata record and the built watchdog so they agree.
+fn resolve_heal_after(config: &RuntimeConfig) -> u64 {
+    match config.liveness.heal_after_nanos {
+        Some(nanos) => nanos,
+        None if config.buggify.enabled => config.buggify.cutoff_nanos,
+        None => 0,
+    }
+}
+
+/// Serialize the run's liveness-watchdog configuration into the trace metadata.
+/// Informational only — NOT a fingerprint input and NOT reconciled on replay,
+/// because the watchdog is schedule-invariant. `None` when the watchdog is off.
+fn watchdog_record(config: &RuntimeConfig) -> Option<patina_trace::WatchdogConfigRecord> {
+    if !config.liveness.is_enabled() {
+        return None;
+    }
+    Some(patina_trace::WatchdogConfigRecord {
+        no_progress_budget_nanos: config.liveness.no_progress_budget_nanos,
+        converge_budget_nanos: config.liveness.converge_budget_nanos,
+        heal_after_nanos: config
+            .liveness
+            .converge_budget_nanos
+            .map(|_| resolve_heal_after(config)),
+    })
 }
 
 /// Serialize the run's effective fault configuration into the trace record so a
@@ -3936,6 +4382,36 @@ fn splitmix_hash_str(text: &str) -> u64 {
         state ^= state >> 31;
     }
     state
+}
+
+/// Emit the default-on liveness-watchdog diagnostic at a clean finish. Proves the
+/// watchdog was armed and did not fire (a fired watchdog aborts before finish), so
+/// "watchdog on, run OK" is demonstrably non-vacuous. Suppressed by a false-y
+/// `PATINA_LIVENESS_REPORT`.
+fn emit_liveness_report(watchdog: &LivenessWatchdog) {
+    if let Ok(value) = env::var(ENV_LIVENESS_REPORT) {
+        if matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "false" | "no"
+        ) {
+            return;
+        }
+    }
+    let mut line = format!(
+        "PATINA_LIVENESS_REPORT armed={} fired={}",
+        watchdog.arms.len(),
+        u8::from(watchdog.fired),
+    );
+    for arm in &watchdog.arms {
+        line.push_str(&format!(
+            " {}=budget{}/armed{}/stall{}",
+            arm.kind.as_str(),
+            arm.budget_nanos,
+            u8::from(arm.armed),
+            arm.stall_ops,
+        ));
+    }
+    eprintln!("{line}");
 }
 
 /// Emit the default-on schedule-exploration diagnostic to stderr for a
@@ -5852,5 +6328,225 @@ mod tests {
             replay.fs_open("/value", OpenFlags::create_truncate_write()),
             Err(RuntimeError::Trace(TraceError::OutcomeMismatch { .. }))
         ));
+    }
+
+    // -- Liveness watchdog --------------------------------------------------
+
+    #[test]
+    fn operation_progress_classification_is_correct() {
+        // Pure scheduling/time/wait ops are non-progress; genuine effects are.
+        assert!(!operation_is_progress(&Operation::SchedulerNext));
+        assert!(!operation_is_progress(&Operation::ClockNow {
+            clock: ClockKind::Monotonic
+        }));
+        assert!(!operation_is_progress(&Operation::SleepUntil {
+            clock: ClockKind::Monotonic,
+            deadline_nanos: 1
+        }));
+        assert!(!operation_is_progress(&Operation::TaskParkTimed {
+            task: TaskId(1),
+            reason: "x".into(),
+            deadline_nanos: 1
+        }));
+        assert!(operation_is_progress(&Operation::FsWrite {
+            fd: Fd(1),
+            bytes: vec![1]
+        }));
+        assert!(operation_is_progress(&Operation::TaskComplete {
+            task: TaskId(1)
+        }));
+        assert!(operation_is_progress(&Operation::EntropyFill { len: 4 }));
+    }
+
+    #[test]
+    fn watchdog_arm_excuses_policy_deferral_windows() {
+        // The CRITICAL COUPLING: while the scheduler reports a deliberate
+        // deferral, no-progress must NOT accrue toward the budget — a starvation
+        // interval or PCT priority deferral is never a liveness violation.
+        let mut arm = WatchdogArm {
+            kind: LivenessKind::NoProgress,
+            arm_time_nanos: 0,
+            budget_nanos: 1_000,
+            armed: false,
+            baseline_nanos: 0,
+            stall_ops: 0,
+        };
+        // Virtual time races far past the budget, but every step is a policy
+        // deferral, so the arm never fires and the baseline keeps advancing.
+        for now in [500u64, 1_000, 5_000, 50_000, 500_000] {
+            assert!(arm.observe(now, false, true).is_none());
+        }
+        // Once deferral stops, genuine no-progress accrues from the current time
+        // and eventually trips the budget.
+        assert!(arm.observe(500_500, false, false).is_none()); // stall 1
+        assert!(arm.observe(501_000, false, false).is_none()); // stall 2
+        assert!(arm.observe(501_400, false, false).is_none()); // stall 3
+        // stall 4 and elapsed (501_600-500_000=1_600) > 1_000 -> fire.
+        assert!(arm.observe(501_600, false, false).is_some());
+    }
+
+    #[test]
+    fn watchdog_arm_ignores_a_single_long_but_legitimate_sleep() {
+        // One huge no-progress jump (a single legitimate sleep) must not trip the
+        // watchdog: only genuine churn (>= LIVENESS_MIN_STALL_OPS non-progress
+        // ops) can. A progress op then resets the clock.
+        let mut arm = WatchdogArm {
+            kind: LivenessKind::NoProgress,
+            arm_time_nanos: 0,
+            budget_nanos: 1_000,
+            armed: false,
+            baseline_nanos: 0,
+            stall_ops: 0,
+        };
+        // A single sleep past the budget: only one stall op, below the floor.
+        assert!(arm.observe(1_000_000, false, false).is_none());
+        // Genuine progress resets.
+        assert!(arm.observe(1_000_001, true, false).is_none());
+        assert_eq!(arm.stall_ops, 0);
+    }
+
+    #[test]
+    fn liveness_watchdog_fires_on_virtual_time_no_progress_wedge() {
+        // A single-task loop that only advances the virtual clock (sleep) with no
+        // genuine effect is a pure-churn wedge: the watchdog fires deterministically
+        // rather than letting virtual time march to a step budget silently.
+        let mut context =
+            Context::from_config(RuntimeConfig::seeded(1).with_liveness(LivenessConfig {
+                no_progress_budget_nanos: Some(1_000),
+                converge_budget_nanos: None,
+                heal_after_nanos: None,
+            }))
+            .unwrap();
+        let mut fired = None;
+        for _ in 0..1_000 {
+            if let Err(error) = context.sleep_for(500) {
+                fired = Some(error);
+                break;
+            }
+        }
+        match fired {
+            Some(RuntimeError::Liveness { kind, .. }) => {
+                assert_eq!(kind, LivenessKind::NoProgress);
+            }
+            other => panic!("expected a liveness violation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn heal_then_converge_only_arms_after_the_fault_window() {
+        // The converge arm arms at H (here 5_000 ns) and must not fire before then,
+        // even though the guest is already wedged; after H it enforces the
+        // convergence budget and fires.
+        let mut context =
+            Context::from_config(RuntimeConfig::seeded(1).with_liveness(LivenessConfig {
+                no_progress_budget_nanos: None,
+                converge_budget_nanos: Some(1_000),
+                heal_after_nanos: Some(5_000),
+            }))
+            .unwrap();
+        let mut fired_at_iter = None;
+        for iteration in 0..1_000 {
+            if let Err(RuntimeError::Liveness { kind, .. }) = context.sleep_for(500) {
+                assert_eq!(kind, LivenessKind::HealThenConverge);
+                fired_at_iter = Some(iteration);
+                break;
+            }
+        }
+        // sleep_for advances 500 ns/iteration, so ~10 iterations to reach H=5_000
+        // and ~2 more (plus the min-stall floor) before the 1_000 ns budget trips.
+        let fired = fired_at_iter.expect("converge watchdog must fire");
+        assert!(
+            fired >= 10,
+            "must not fire before the fault window (H): {fired}"
+        );
+    }
+
+    #[test]
+    fn liveness_watchdog_does_not_fire_on_a_run_that_makes_progress() {
+        // A run that keeps doing genuine effects (writes) between sleeps never
+        // trips the watchdog: each write resets the no-progress clock.
+        let mut context =
+            Context::from_config(RuntimeConfig::seeded(1).with_liveness(LivenessConfig {
+                no_progress_budget_nanos: Some(1_000),
+                converge_budget_nanos: None,
+                heal_after_nanos: None,
+            }))
+            .unwrap();
+        for index in 0..50 {
+            context
+                .write_file(&format!("/f{index}"), b"progress")
+                .unwrap();
+            context.sleep_for(10_000).unwrap();
+        }
+        context.finish().unwrap();
+    }
+
+    #[test]
+    fn liveness_watchdog_is_schedule_invariant_when_no_violation_fires() {
+        // The schedule-invariance proof: recording a healthy run with the watchdog
+        // enabled produces a byte-identical recorded op stream to recording it
+        // without. The watchdog only ADDS a possible report; it never records a
+        // boundary op nor perturbs selection. The metadata differs only by the
+        // informational (non-fingerprinted) watchdog field.
+        let dir = tempdir().unwrap();
+        let plain = dir.path().join("plain.patina");
+        let watched = dir.path().join("watched.patina");
+        let run = |path: &std::path::Path, liveness: LivenessConfig| {
+            let mut context = Context::from_config(
+                RuntimeConfig::record(7, path, "wd-invariance-v1").with_liveness(liveness),
+            )
+            .unwrap();
+            context.write_file("/f", b"hello").unwrap();
+            context.sleep_for(1_000).unwrap();
+            let _ = context.read_file("/f").unwrap();
+            context.finish().unwrap();
+        };
+        run(&plain, LivenessConfig::default());
+        run(
+            &watched,
+            LivenessConfig {
+                no_progress_budget_nanos: Some(10_000_000_000),
+                converge_budget_nanos: Some(10_000_000_000),
+                heal_after_nanos: None,
+            },
+        );
+        let a = TraceBundle::load(&plain).unwrap();
+        let b = TraceBundle::load(&watched).unwrap();
+        assert_eq!(
+            a.timelines, b.timelines,
+            "the watchdog must not perturb the recorded op stream"
+        );
+        assert!(a.metadata.watchdog.is_none());
+        let record = b.metadata.watchdog.expect("watchdog recorded");
+        assert_eq!(record.no_progress_budget_nanos, Some(10_000_000_000));
+        assert_eq!(record.converge_budget_nanos, Some(10_000_000_000));
+        // Fingerprint is unchanged by the watchdog (schedule-invariant).
+        assert_eq!(a.metadata.fingerprint, b.metadata.fingerprint);
+    }
+
+    #[test]
+    fn watchdog_config_is_recorded_and_replay_ignores_it() {
+        // A watchdog trace replays against a build with no watchdog (informational
+        // metadata, not reconciled fail-closed) — the op stream is authoritative.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wd.patina");
+        {
+            let mut context = Context::from_config(
+                RuntimeConfig::record(3, &path, "wd-replay-v1").with_liveness(LivenessConfig {
+                    no_progress_budget_nanos: Some(1_000_000),
+                    converge_budget_nanos: None,
+                    heal_after_nanos: None,
+                }),
+            )
+            .unwrap();
+            context.write_file("/f", b"data").unwrap();
+            context.finish().unwrap();
+        }
+        // Replay with NO watchdog configured: must succeed (config not reconciled).
+        // Re-issue the same recorded op stream (the write).
+        let mut replay =
+            Context::from_config(RuntimeConfig::replay(&path, "wd-replay-v1")).unwrap();
+        replay.write_file("/f", b"data").unwrap();
+        replay.finish().unwrap();
     }
 }
