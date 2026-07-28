@@ -77,7 +77,7 @@ for s in 1 2 3 4 5; do
   for rep in 1 2 3; do
     tr="$work/c.$s.$rep.trace"
     err="$work/c.$s.$rep.err"
-    out="$(run --seed "$s" --record "$tr" "${ALLOW[@]}" -- "${ARGS[@]}" 2>"$err")" || {
+    out="$(run --seed "$s" --record "$tr" ${ALLOW[@]+"${ALLOW[@]}"} -- "${ARGS[@]}" 2>"$err")" || {
       echo "    FAIL: seed $s rep $rep exited nonzero"; fail=1
       # Surface the refusal/crash itself: a FAIL without the guest stderr is
       # undiagnosable from CI logs (learned on the nightly job's first run).
@@ -99,8 +99,8 @@ done
 
 echo "==> [2] record + strict replay is byte-identical"
 rec="$work/replay.trace"
-r1="$(run --record "$rec" "${ALLOW[@]}" -- "${ARGS[@]}" 2>/dev/null | result_of)"
-r2="$(replay "$rec" "${ALLOW[@]}" 2>/dev/null | result_of)"
+r1="$(run --record "$rec" ${ALLOW[@]+"${ALLOW[@]}"} -- "${ARGS[@]}" 2>/dev/null | result_of)"
+r2="$(replay "$rec" ${ALLOW[@]+"${ALLOW[@]}"} 2>/dev/null | result_of)"
 echo "    record: $r1"
 echo "    replay: $r2"
 if [[ "$r1" != "$r2" || -z "$r1" ]]; then echo "    FAIL: replay differs from record"; fail=1; fi
@@ -108,7 +108,7 @@ if [[ "$r1" != "$r2" || -z "$r1" ]]; then echo "    FAIL: replay differs from re
 echo "==> [3] net-jitter reorder: cluster converges, zero invariant violations"
 for s in 1 2 3 4 5; do
   err="$work/j.$s.err"
-  out="$(run --seed "$s" "${ALLOW[@]}" --net-jitter-nanos 1000000..80000000 -- "${ARGS[@]}" 2>"$err")" || true
+  out="$(run --seed "$s" ${ALLOW[@]+"${ALLOW[@]}"} --net-jitter-nanos 1000000..80000000 -- "${ARGS[@]}" 2>"$err")" || true
   if violated <"$err"; then echo "    FAIL: RAFT_VIOLATION under jitter seed $s"; fail=1; fi
   committed="$(committed_of <<<"$out")"
   echo "    seed $s: committed=${committed:-0}/$PROP  $(result_of <<<"$out" | sed 's/RAFT_RESULT //')"
@@ -122,7 +122,7 @@ for d in 100 300 500; do
   echo "    -- drop $d permille --"
   for s in 1 2 3 4 5; do
     err="$work/d.$d.$s.err"
-    out="$(run --seed "$s" "${ALLOW[@]}" --net-drop-permille "$d" -- "${ARGS[@]}" 2>"$err")" || true
+    out="$(run --seed "$s" ${ALLOW[@]+"${ALLOW[@]}"} --net-drop-permille "$d" -- "${ARGS[@]}" 2>"$err")" || true
     if violated <"$err"; then echo "      FAIL: RAFT_VIOLATION drop $d seed $s"; fail=1; fi
     committed="$(committed_of <<<"$out")"
     terms="$(sed -n 's/.*terms=\([0-9]*\).*/\1/p' <<<"$out")"
@@ -142,7 +142,7 @@ for spec in write:1 write:5 write:12 write:40 sync:1 sync:4 sync:16 close:1 clos
   for s in 1 2 3; do
     err="$work/f.err"
     # set -e safe capture: the fail-closed abort returns exit 2 by design.
-    if out="$(run --seed "$s" "${ALLOW[@]}" --fs-crash-at "$spec" -- "${ARGS[@]}" 2>"$err")"; then code=0; else code=$?; fi
+    if out="$(run --seed "$s" ${ALLOW[@]+"${ALLOW[@]}"} --fs-crash-at "$spec" -- "${ARGS[@]}" 2>"$err")"; then code=0; else code=$?; fi
     if violated <"$err"; then echo "      FAIL: RAFT_VIOLATION fs-crash $spec seed $s"; fail=1; fi
     if [[ $code -eq 0 ]]; then crash_ok=$((crash_ok+1)); elif [[ $code -eq 2 ]]; then crash_abort=$((crash_abort+1));
     else echo "      note: fs-crash $spec seed $s unexpected exit=$code"; fi
@@ -164,7 +164,7 @@ for s in 1 2 3 4 5; do
   ref_res=""; ref_trace=""
   for rep in 1 2 3; do
     tr="$work/r.$s.$rep.trace"; err="$work/r.$s.$rep.err"
-    out="$(run --seed "$s" "${ALLOW[@]}" --record "$tr" -- "${ARGS[@]}" "${RECOVER[@]}" 2>"$err")" || {
+    out="$(run --seed "$s" ${ALLOW[@]+"${ALLOW[@]}"} --record "$tr" -- "${ARGS[@]}" "${RECOVER[@]}" 2>"$err")" || {
       echo "    FAIL: recovery seed $s rep $rep exited nonzero"; fail=1; }
     if violated <"$err"; then echo "    FAIL: RAFT_VIOLATION recovery seed $s rep $rep"; fail=1; fi
     res="$(result_of <<<"$out")"; th="$(shasum -a256 "$tr" | cut -d' ' -f1)"
@@ -189,7 +189,7 @@ recovered=0; nohit=0; liveness=0
 for spec in write:5 write:12 write:40 sync:4 sync:16 close:4; do
   for s in 1 2 3; do
     err="$work/fr.err"
-    if out="$(run --seed "$s" "${ALLOW[@]}" --fs-crash-at "$spec" -- "${ARGS[@]}" --recover-storage-faults --restart-after-ticks 5 2>"$err")"; then code=0; else code=$?; fi
+    if out="$(run --seed "$s" ${ALLOW[@]+"${ALLOW[@]}"} --fs-crash-at "$spec" -- "${ARGS[@]}" --recover-storage-faults --restart-after-ticks 5 2>"$err")"; then code=0; else code=$?; fi
     if violated <"$err"; then echo "    FAIL: RAFT_VIOLATION fs-crash+recover $spec seed $s"; fail=1; fi
     committed="$(committed_of <<<"$out")"
     if [[ $code -eq 0 && "${committed:-0}" == "$PROP" ]]; then
@@ -210,7 +210,7 @@ echo "    -- (c) fs-crash recovery is deterministic (write:5, 3 repeats byte-ide
 ref_fd=""
 for rep in 1 2 3; do
   tr="$work/fd.$rep.trace"
-  out="$(run --seed 1 "${ALLOW[@]}" --fs-crash-at write:5 --record "$tr" -- "${ARGS[@]}" --recover-storage-faults --restart-after-ticks 5 2>/dev/null)"
+  out="$(run --seed 1 ${ALLOW[@]+"${ALLOW[@]}"} --fs-crash-at write:5 --record "$tr" -- "${ARGS[@]}" --recover-storage-faults --restart-after-ticks 5 2>/dev/null)"
   sig="$(result_of <<<"$out")|$(shasum -a256 "$tr" | cut -d' ' -f1)"
   if [[ $rep -eq 1 ]]; then ref_fd="$sig"; fi
   if [[ "$sig" != "$ref_fd" ]]; then echo "    FAIL: fs-crash recovery not deterministic at rep $rep"; fail=1; fi
@@ -219,8 +219,8 @@ echo "    write:5 recovery deterministic: ${ref_fd%%|*} | trace=${ref_fd##*|}"
 
 echo "    -- (d) a recovery run records + replays byte-identically (restart included) --"
 rrec="$work/recover.trace"
-rr1="$(run "${ALLOW[@]}" --record "$rrec" -- "${ARGS[@]}" "${RECOVER[@]}" 2>/dev/null | result_of)"
-rr2="$(replay "$rrec" "${ALLOW[@]}" 2>/dev/null | result_of)"
+rr1="$(run ${ALLOW[@]+"${ALLOW[@]}"} --record "$rrec" -- "${ARGS[@]}" "${RECOVER[@]}" 2>/dev/null | result_of)"
+rr2="$(replay "$rrec" ${ALLOW[@]+"${ALLOW[@]}"} 2>/dev/null | result_of)"
 echo "    record: $rr1"
 echo "    replay: $rr2"
 if [[ "$rr1" != "$rr2" || -z "$rr1" ]]; then echo "    FAIL: recovery replay differs from record"; fail=1; fi
