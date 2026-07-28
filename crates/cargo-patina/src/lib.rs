@@ -3884,14 +3884,48 @@ fn policy_downgrades(policy: &UnsupportedPolicy, escape: &NativeEscape) -> bool 
 /// were downgraded to warnings (empty when the binary audits clean), or a hard
 /// error listing the symbols that remain unsupported.
 /// Whether `binary` was built with `--yield-points`, detected by the hook's
-/// embedded marker. Read failures report "not instrumented"; the pre-run gate
-/// reads the same file and surfaces any genuine read error first.
-fn binary_has_yield_points(binary: &Path) -> bool {
-    match fs::read(binary) {
-        Ok(bytes) => bytes
-            .windows(PATINA_YIELD_MARKER.len())
-            .any(|window| window == PATINA_YIELD_MARKER),
-        Err(_) => false,
+/// embedded marker. This classification is load-bearing: it selects the
+/// `+yieldpoints` compatibility-fingerprint suffix, so a false negative silently
+/// records under — or cross-replays against — the wrong schedule policy. A read
+/// failure is therefore NOT treated as "not instrumented" (a silent fail-open
+/// that, under memory pressure, let an ENOMEM whole-file read misclassify an
+/// instrumented binary as plain and bypass the fingerprint gate); it fails
+/// closed with the underlying error. The scan streams the image in a bounded
+/// window rather than allocating the whole (large, instrumented) binary, so the
+/// detection itself never adds the memory pressure it must survive; a marker
+/// straddling a chunk boundary is caught by carrying the trailing overlap.
+fn binary_has_yield_points(binary: &Path) -> Result<bool, CliError> {
+    use std::io::Read;
+
+    let mut file = fs::File::open(binary).map_err(|error| {
+        CliError(format!(
+            "failed to open {} to detect yield-point instrumentation: {error}",
+            binary.display()
+        ))
+    })?;
+    let marker = PATINA_YIELD_MARKER;
+    let overlap = marker.len() - 1;
+    let mut window: Vec<u8> = Vec::with_capacity(overlap + 64 * 1024);
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut chunk).map_err(|error| {
+            CliError(format!(
+                "failed to read {} to detect yield-point instrumentation: {error}",
+                binary.display()
+            ))
+        })?;
+        if read == 0 {
+            return Ok(false);
+        }
+        window.extend_from_slice(&chunk[..read]);
+        if window.windows(marker.len()).any(|w| w == marker) {
+            return Ok(true);
+        }
+        // Retain only the trailing `overlap` bytes so a marker split across the
+        // next chunk boundary is still found without unbounded growth.
+        if window.len() > overlap {
+            window.drain(..window.len() - overlap);
+        }
     }
 }
 
@@ -4262,7 +4296,7 @@ fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> 
     // Detect the linked hook's marker and fold it into the compatibility
     // fingerprint; the same binary is inspected on record and replay, so the
     // suffix is applied consistently and a policy mismatch is rejected.
-    let yield_points = binary_has_yield_points(&binary);
+    let yield_points = binary_has_yield_points(&binary)?;
 
     // Capture the mounted host directory into a deterministic filesystem image.
     // The supervisor is not interposed, so it may read the host tree freely; the
@@ -6043,6 +6077,41 @@ mod tests {
         assert_eq!(
             yield_point_fingerprint(DEFAULT_NATIVE_FINGERPRINT, true),
             format!("{DEFAULT_NATIVE_FINGERPRINT}{PATINA_YIELD_FINGERPRINT_SUFFIX}")
+        );
+    }
+
+    // The yield-point classification is load-bearing for the compatibility
+    // fingerprint, so its detector must (a) find the marker even when it straddles
+    // the streaming chunk boundary, (b) report a clean absence as `Ok(false)`, and
+    // (c) FAIL CLOSED on an unreadable image rather than silently reporting "not
+    // instrumented" — the fail-open that let a memory-pressure read failure
+    // misclassify an instrumented binary as plain and bypass the fingerprint gate.
+    #[test]
+    fn yield_point_detection_streams_and_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Absent marker -> Ok(false).
+        let plain = dir.path().join("plain.bin");
+        fs::write(&plain, vec![0u8; 200_000]).unwrap();
+        assert_eq!(binary_has_yield_points(&plain).ok(), Some(false));
+
+        // Marker present, and deliberately positioned to straddle the 64 KiB
+        // streaming boundary so the trailing-overlap carry is exercised.
+        let boundary = 64 * 1024 - (PATINA_YIELD_MARKER.len() / 2);
+        let mut image = vec![0u8; 200_000];
+        image[boundary..boundary + PATINA_YIELD_MARKER.len()].copy_from_slice(PATINA_YIELD_MARKER);
+        let instrumented = dir.path().join("instrumented.bin");
+        fs::write(&instrumented, &image).unwrap();
+        assert_eq!(binary_has_yield_points(&instrumented).ok(), Some(true));
+
+        // An unreadable image is a hard error, never a silent `false`.
+        let missing = dir.path().join("does-not-exist.bin");
+        let error = binary_has_yield_points(&missing).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("detect yield-point instrumentation"),
+            "read failure must fail closed with a named error, got: {error}"
         );
     }
 
