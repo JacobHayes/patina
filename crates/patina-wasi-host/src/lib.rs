@@ -1308,8 +1308,40 @@ pub fn execute_preview1_with_fuel(
     fuel: u64,
 ) -> Result<WasiExecution, WasiRunError> {
     WasiAudit::audit(module_bytes).map_err(WasiRunError::Target)?;
+    // Determinism contract for the Wasmi engine. Every observable-behavior knob
+    // is pinned EXPLICITLY rather than inherited from `Config::default()`, so a
+    // future Wasmi default flip cannot silently change guest results under a
+    // deterministic-replay product. Verified against Wasmi 1.1.0:
+    //
+    // * `consume_fuel(true)` — fuel metering on; the execution ceiling and the
+    //   `fuel_consumed` we report. Wasmi 1.1 fixed the `fuel_for_copying_values`
+    //   rounding (`(len/64)*8` -> `(len*8)/64`), so the absolute fuel charged for
+    //   multi-value copies/calls can be slightly higher than under 0.47. This
+    //   only shifts the fuel-exhaustion trap boundary; `fuel_consumed` is never
+    //   recorded in the trace or any canonical hash (only stdout/stderr/exit_code
+    //   plus the deterministic host Context drive replay), so byte-identity is
+    //   unaffected. Within one engine version fuel is fully deterministic.
+    // * relaxed-SIMD (the one Wasm proposal whose results are spec-defined as
+    //   implementation-dependent / non-deterministic) and plain SIMD are OFF and
+    //   cannot be turned on here: Wasmi gates both `Config::wasm_simd` and
+    //   `Config::wasm_relaxed_simd` behind its own `simd` cargo feature, which we
+    //   do not enable, so the non-deterministic code path is compiled out of the
+    //   engine entirely — a stronger guarantee than a runtime `false`. This holds
+    //   in both 0.47 and 1.1 (`SIMD`/`RELAXED_SIMD` default to `cfg!(feature =
+    //   "simd")`, i.e. off for us).
+    // * `floats(true)` — f32/f64 stay enabled; Wasmi computes them in software
+    //   (wasmi_core), so NaN bit patterns and rounding are identical across
+    //   hosts. Neither 0.47 nor 1.1 offers a NaN-canonicalization knob because
+    //   none is needed for this interpreter. Default true in both; pinned here so
+    //   a default flip cannot disable float support out from under a guest.
+    //
+    // All remaining default features (mutable-global, multi-value, multi-memory,
+    // sat-float-to-int, sign-extension, bulk-memory, reference-types, tail-call,
+    // extended-const, memory64) are byte-for-byte identical between Wasmi 0.47.2
+    // and 1.1.0 and are all deterministic.
     let mut config = WasmiConfig::default();
     config.consume_fuel(true);
+    config.floats(true);
     let engine = Engine::new(&config);
     let module = Module::new(&engine, module_bytes).map_err(WasiRunError::Engine)?;
     let mut linker = Linker::<Preview1Host>::new(&engine);
@@ -1321,10 +1353,12 @@ pub fn execute_preview1_with_fuel(
     store.data_mut().store_limits = store_limits;
     store.limiter(|host| &mut host.store_limits);
     let run_result = (|| {
+        // wasmi 1.1 merged the two-step `instantiate(..).start(..)` (InstancePre
+        // then run the module's `start` section) into a single call that both
+        // instantiates and runs the start function. Observable behavior is
+        // unchanged: the guest's `start` section still runs before `_start`.
         let instance = linker
-            .instantiate(&mut store, &module)
-            .map_err(WasiRunError::Engine)?
-            .start(&mut store)
+            .instantiate_and_start(&mut store, &module)
             .map_err(WasiRunError::Engine)?;
         let start = instance
             .get_typed_func::<(), ()>(&store, "_start")
@@ -3918,11 +3952,7 @@ mod tests {
             Preview1Host::new(Context::from_config(config).unwrap()),
         );
         store.set_fuel(1_000_000).unwrap();
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate_and_start(&mut store, &module).unwrap();
         let start = instance.get_typed_func::<(), ()>(&store, "_start").unwrap();
         let exit = match start.call(&mut store, ()) {
             Ok(()) => 0,

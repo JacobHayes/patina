@@ -53,12 +53,12 @@ patina-trace = { path = "crates/patina-trace" }
 patina-wasi-host = { path = "crates/patina-wasi-host" }
 patina-wrapper-fault = { path = "crates/patina-wrapper-fault" }
 patina-wrapper-latency = { path = "crates/patina-wrapper-latency" }
-object = { version = "0.37.3", default-features = false, features = ["read", "std"] }
+object = { version = "0.39.1", default-features = false, features = ["read", "std"] }
 proptest = { version = "1.11.0", default-features = false, features = ["std", "bit-set"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 tempfile = "3.27.0"
-wasmi = "0.47.2"
+wasmi = "1.1.0"
 wasmparser = "0.254.0"
 wat = "1.252.0"
