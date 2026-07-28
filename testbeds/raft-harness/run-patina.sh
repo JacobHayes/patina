@@ -78,7 +78,10 @@ for s in 1 2 3 4 5; do
     tr="$work/c.$s.$rep.trace"
     err="$work/c.$s.$rep.err"
     out="$(run --seed "$s" --record "$tr" "${ALLOW[@]}" -- "${ARGS[@]}" 2>"$err")" || {
-      echo "    FAIL: seed $s rep $rep exited nonzero"; fail=1; }
+      echo "    FAIL: seed $s rep $rep exited nonzero"; fail=1
+      # Surface the refusal/crash itself: a FAIL without the guest stderr is
+      # undiagnosable from CI logs (learned on the nightly job's first run).
+      [[ -s "$err" ]] && sed -n '1,20p' "$err" | sed 's/^/      stderr| /'; }
     if violated <"$err"; then echo "    FAIL: RAFT_VIOLATION seed $s rep $rep"; fail=1; fi
     res="$(result_of <<<"$out")"
     th="$(shasum -a256 "$tr" | cut -d' ' -f1)"

@@ -266,7 +266,7 @@ Before a release, run the V2 end-to-end fixture for:
 - Linux and macOS when CI is available;
 - seeds `0`, `1`, `u64::MAX`, and at least 100 generated seeds.
 
-The repository runs these gates in `.github/workflows/ci.yml` on stable Linux (x86_64 and aarch64), Rust 1.86 on both Linux architectures, and stable macOS. Every job executes the WASI, native-shim, and cross-target smoke probes; the Linux jobs install `strace` and set `PATINA_REQUIRE_STRACE=1` so the syscall-containment pass cannot silently skip. The stable Linux jobs additionally run the fuzz-sweep and campaign classifier selftests per push; a `package` job proves all 22 crates package for crates.io; an `audit` job runs RustSec advisories over the root and testbed lockfiles; and a nightly job (cron + manual dispatch, ubuntu + macos) runs the full raft-harness battery.
+The repository runs these gates in `.github/workflows/ci.yml` on stable Linux (x86_64 and aarch64), Rust 1.86 on both Linux architectures, and stable macOS. Every job executes the WASI, native-shim, and cross-target smoke probes; the Linux jobs install `strace` and set `PATINA_REQUIRE_STRACE=1` so the syscall-containment pass cannot silently skip. The stable Linux jobs additionally run the fuzz-sweep and campaign classifier selftests per push; an `audit` job runs RustSec advisories over the root and testbed lockfiles; and a nightly job (cron + manual dispatch, ubuntu + macos) runs the full raft-harness battery. (`cargo package --workspace --locked` is the pre-publish packaging check, run deliberately as part of publish prep rather than in CI.)
 
 A failure report must retain the command, seed, trace bundle when one exists, Patina version, Rust version, target triple, and compatibility fingerprint.
 

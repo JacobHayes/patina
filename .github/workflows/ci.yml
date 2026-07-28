@@ -100,23 +100,6 @@ jobs:
       - run: scripts/validate-native-shim.sh
       - run: scripts/smoke-cross-target.sh
 
-  # Prove every publishable workspace crate packages for crates.io: metadata
-  # completeness (description/version/license/…) and inter-dependent path-dep
-  # resolution (internal deps carry an explicit `version` alongside `path`, and
-  # each crate is self-contained — no `include_str!` reaches across a crate
-  # boundary). `--workspace` covers exactly the publishable members; the testbeds
-  # are separate workspaces (publish=false) and are excluded naturally. Nothing
-  # is published — this packages and verify-builds the tarballs only.
-  package:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo package --workspace --locked
-
   # Advisory audit (RustSec). The root workspace lockfile is STRICT — any
   # advisory (including any protobuf appearance) fails the job. The testbeds are
   # separate workspaces with their own locks; all are strict except the one
