@@ -293,6 +293,92 @@ Completed foundations (Milestone C — buggify on WASI):
     deterministic campaign (per-gen derived activation/fire, per-gen record→replay
     determinism check, fresh `out-wasi-buggify/` dir) reusing the campaign layer.
 
+## Slice 7: exploration tier — Partial (wave 12)
+
+Directed exploration policies that steer *which* interleavings and fault
+combinations a seed reaches, layered over the deterministic drivers. Every policy
+is default-off, seed-derived, recorded into the trace metadata as an additive
+`Option` field (`RunMetadata::schedule_policy`, `RunMetadata::swarm`; both
+`deny_unknown_fields`, so an older runtime reading a newer trace rejects the
+unknown policy rather than silently ignoring it), reconciled authoritatively on
+replay, and folded into the compatibility fingerprint (`+pct`/`+starve`/`+swarm`,
+reconstructed from the trace on `replay`) so a policy trace never cross-replays
+with a plain build. The default (uniform-random) scheduler path is byte-for-byte
+unchanged — the canonical seed-7 sequence and every fault/buggify hash are
+preserved — because the policies draw exclusively from their own
+domain-separated `SplitMix64` streams and the default `choose` branch is the
+original modulo draw verbatim.
+
+1. **PCT scheduling policy** (`patina-sched-det`): Probabilistic Concurrency
+   Testing (Burckhardt/Musuvathi, PLDI 2010) as an alternative `DetScheduler`
+   selection policy over yield-point boundaries. Each task draws a random
+   priority from a high band; `d-1` seed-placed priority-change points demote the
+   running task as the schedule advances; the highest-priority runnable task
+   always runs (ties by lowest task id). `cargo patina run --sched-pct[=D]`
+   (`PATINA_SCHED_PCT`, default depth 3) with `--sched-pct-steps N`
+   (`PATINA_SCHED_PCT_STEPS`, the expected schedule length over which change
+   points are distributed). `d=1` is priority-ordering with no preemption; `d>=2`
+   introduces `d-1` preemptions. The policy affects only the record/seeded
+   selection path (`next()`); replay consumes the recorded task stream through
+   `select()`, so replay is byte-identical regardless of policy.
+
+2. **Swarm fault-class selection** (`patina-runtime`): `cargo patina run --swarm`
+   (`PATINA_SWARM`) applies a seed-derived subset of the enabled fault classes
+   this generation instead of always-all (swarm testing). At `build` time, for
+   each enabled class (`crash`, `sleep_jitter`, `net_jitter`, `net_drop`,
+   `net_latency`, `buggify`) a domain-separated per-class coin (seed ^ domain ^
+   class-hash) decides keep/drop; the masked configuration is what every driver
+   and the recorded `FaultConfigRecord` consume, so replay reproduces the subset
+   verbatim, and a `SwarmConfigRecord` documents the candidate set and the
+   selection so the trace is self-describing. Subsets vary across seeds; the
+   always-all default (no `--swarm`) is unchanged.
+
+3. **Starvation intervals** (`patina-sched-det`): `cargo patina run --starve[=N]`
+   (`PATINA_SCHED_STARVE`, default 3 intervals) with `--starve-max-len M`
+   (`PATINA_SCHED_STARVE_MAX_LEN`) and `--starve-window W`
+   (`PATINA_SCHED_STARVE_WINDOW`). Bounded, seed-chosen intervals during which a
+   seed-chosen residue-class subset of tasks is not selected, to surface
+   starvation/liveness assumptions. **Liveness safety is guaranteed by aging**: a
+   per-task consecutive-skip counter force-schedules any task once it has been
+   deferred `aging_cap` (= `max_len`) decisions in a row, so no task is ever
+   starved unboundedly (the "intervals must end" contract expressed in decision
+   space; proven by `starvation_aging_bounds_consecutive_skips_guaranteeing_liveness`).
+   A step that would starve *every* runnable task falls back to the full set and
+   emits a loud `PATINA WARNING` (vacuous starvation), counted in
+   `starve_vacuous`. **Documented limitation (native shim):** starvation is
+   liveness-safe for guests whose synchronization is interposed
+   (mutex/condvar/futex, and any `--yield-points` build for most configs), but a
+   guest with an *invisible atomic spinlock* (e.g. std's queue `RwLock`/`Parker`
+   fast path) held across a boundary can be driven into a mutual-spin livelock by
+   adversarial deferral — the same atomics-only window the vacuous-schedule
+   diagnostic flags as unreachable, forced to manifest. `run` emits a loud
+   `PATINA WARNING` when `--starve` is used on a non-`--yield-points` binary, and
+   the fuzz-sweep keeps starvation OPT-IN (`PATINA_SWEEP_STARVE=1`) so the
+   always-on canary never wedges; PCT and swarm are always-on there. As a
+   detection backstop (NOT a liveness guarantee), the uninterposed supervisor arms
+   a generous real wall-clock stall detector *only* when `--starve` is set
+   (default 60 s, `PATINA_STARVATION_STALL_SECS` override): an already-hung run is
+   killed with a named `patina: starvation stall` fatal and a distinct nonzero
+   exit (`111`), so a sweep classifies `STARVATION_STALL` instead of silently
+   losing the generation. It never touches the recorded operation stream of a run
+   that completes and is unreachable on any healthy run.
+
+4. **Bug-depth metrics**: an active exploration policy emits a machine-readable
+   `PATINA_SCHEDULE_POLICY` stderr line at finalization (via the new
+   `SchedulerDriver::policy_report`) — PCT depth, change points placed and *hit*,
+   starvation events and vacuous hits, decision count, and a `bug_depth` estimate
+   (priority-change points hit + starvation exclusions). `fuzz-sweep.sh` parses
+   it to annotate each generation (`policy(<mode> bug_depth=N ...)`), extending
+   the `life=`/`cause=` scheme, so a found failure carries an estimate of how deep
+   an interleaving its schedule required; a vacuous starvation configuration is
+   surfaced loudly.
+
+The fuzz-sweep SCHEDULE tier gains a seed-derived policy overlay (PCT by default,
+starvation opt-in) on the yield-points binary, and the BREADTH/TRAFFIC tiers gain
+a seed-derived `--swarm` overlay when >=2 fault classes are enabled. The
+`--selftest` covers `PATINA_SCHEDULE_POLICY` parsing (bug-depth extraction) and
+vacuous-starvation detection.
+
 ## Dependency order
 
 ```text

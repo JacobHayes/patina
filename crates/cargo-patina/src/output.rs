@@ -173,8 +173,16 @@ pub struct Captured {
 /// options require it (JSON / render / report) and otherwise inheriting the
 /// caller's streams unchanged (the human default). Signal death maps to a
 /// `CliError` exactly like [`crate::exit_code`].
+/// Whether guest output will be captured (JSON / render / report active and not
+/// suppressed). Exposed so callers that must run the child themselves (e.g. the
+/// starvation stall backstop's kill-able wait loop) can mirror
+/// [`execute_command`]'s capture semantics exactly.
+pub fn capture_active() -> bool {
+    options().wants_capture() && !suppressed()
+}
+
 pub fn execute_command(command: &mut Command) -> Result<Captured, CliError> {
-    if options().wants_capture() && !suppressed() {
+    if capture_active() {
         let output = command
             .output()
             .map_err(|error| CliError(format!("failed to execute child process: {error}")))?;

@@ -17,7 +17,7 @@ pub use patina_fs_crash::TornGranularity;
 use patina_fs_mem::MemFs;
 use patina_net_sim::SimNet;
 use patina_rng_seeded::{SeededEntropy, SplitMix64};
-use patina_sched_det::DetScheduler;
+use patina_sched_det::{DetScheduler, PctConfig, SchedulePolicy, StarvationConfig};
 use patina_time_virtual::VirtualClock;
 pub use patina_trace::MAX_TRACE_BYTES;
 use patina_trace::{BranchSession, Recorder, Replayer, RunMetadata, TraceBundle, TraceError};
@@ -97,6 +97,46 @@ pub const ENV_BUGGIFY_AFTER_SETUP: &str = "PATINA_BUGGIFY_AFTER_SETUP";
 /// false-y value (`0`, `off`, `false`, `no`). On by default when buggify is
 /// enabled.
 pub const ENV_SDK_REPORT: &str = "PATINA_SDK_REPORT";
+/// Enable the PCT (Probabilistic Concurrency Testing) exploration scheduling
+/// policy. Its value is the target bug depth `d` (>= 1); an empty value uses the
+/// default depth. Presence enables PCT; absence leaves the default uniform
+/// policy (zero behavior change). Folds a `+pct` fingerprint component.
+pub const ENV_SCHED_PCT: &str = "PATINA_SCHED_PCT";
+/// Expected schedule length over which PCT distributes its `d-1` priority-change
+/// points. Default [`DEFAULT_PCT_STEPS`]. Inert without [`ENV_SCHED_PCT`].
+pub const ENV_SCHED_PCT_STEPS: &str = "PATINA_SCHED_PCT_STEPS";
+/// Enable the starvation-interval exploration scheduling policy. Its value is the
+/// number of bounded intervals to place (>= 1); an empty value uses the default
+/// count. Presence enables starvation; absence leaves it off. Folds a `+starve`
+/// fingerprint component.
+pub const ENV_SCHED_STARVE: &str = "PATINA_SCHED_STARVE";
+/// Maximum length (scheduling decisions) of any starvation interval — the bound
+/// that keeps starvation liveness-safe. Default [`DEFAULT_STARVE_MAX_LEN`]. Inert
+/// without [`ENV_SCHED_STARVE`].
+pub const ENV_SCHED_STARVE_MAX_LEN: &str = "PATINA_SCHED_STARVE_MAX_LEN";
+/// Window `[1, N]` over which starvation interval starts are placed. Default
+/// [`DEFAULT_STARVE_WINDOW`]. Inert without [`ENV_SCHED_STARVE`].
+pub const ENV_SCHED_STARVE_WINDOW: &str = "PATINA_SCHED_STARVE_WINDOW";
+/// Enable swarm fault-class selection: a seed-derived subset of the enabled fault
+/// classes is applied this generation instead of all of them. A false-y value
+/// (or absence) keeps the existing always-all behavior. Folds a `+swarm`
+/// fingerprint component.
+pub const ENV_SWARM: &str = "PATINA_SWARM";
+/// Suppress the default-on end-of-run exploration-policy diagnostic
+/// (`PATINA_SCHEDULE_POLICY`) when set to a false-y value. On by default when a
+/// policy is active.
+pub const ENV_SCHEDULE_POLICY_REPORT: &str = "PATINA_SCHEDULE_POLICY_REPORT";
+
+/// Default PCT target bug depth when `--sched-pct` is given without a value.
+pub const DEFAULT_PCT_DEPTH: u32 = 3;
+/// Default PCT expected schedule length.
+pub const DEFAULT_PCT_STEPS: u64 = 2_000;
+/// Default number of starvation intervals when `--starve` is given bare.
+pub const DEFAULT_STARVE_INTERVALS: u32 = 3;
+/// Default maximum starvation interval length (bounded → liveness-safe).
+pub const DEFAULT_STARVE_MAX_LEN: u64 = 32;
+/// Default starvation interval start window.
+pub const DEFAULT_STARVE_WINDOW: u64 = 512;
 
 const DEFAULT_FINGERPRINT: &str = "direct-seeded-run-v1";
 
@@ -306,6 +346,12 @@ pub struct RuntimeConfig {
     net_latency_nanos: u64,
     faults: FaultConfig,
     buggify: BuggifyConfig,
+    /// The exploration scheduling policy (PCT / starvation). Default is the
+    /// uniform-random policy, byte-for-byte the historical scheduler.
+    schedule_policy: SchedulePolicy,
+    /// Whether swarm fault-class selection is enabled: a seed-derived subset of
+    /// the enabled fault classes is applied this run instead of all of them.
+    swarm: bool,
     /// The guest program arguments (`argv[1..]`) recorded into the trace so a
     /// `replay` restores them flag-free. `None` records nothing (unset); `Some`
     /// (possibly empty) records the exact list. Not a fingerprint input.
@@ -323,6 +369,8 @@ impl RuntimeConfig {
             net_latency_nanos: 0,
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
+            schedule_policy: SchedulePolicy::default(),
+            swarm: false,
             guest_argv: None,
         }
     }
@@ -337,6 +385,8 @@ impl RuntimeConfig {
             net_latency_nanos: 0,
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
+            schedule_policy: SchedulePolicy::default(),
+            swarm: false,
             guest_argv: None,
         }
     }
@@ -356,6 +406,8 @@ impl RuntimeConfig {
             net_latency_nanos: 0,
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
+            schedule_policy: SchedulePolicy::default(),
+            swarm: false,
             guest_argv: None,
         }
     }
@@ -376,6 +428,8 @@ impl RuntimeConfig {
             net_latency_nanos: 0,
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
+            schedule_policy: SchedulePolicy::default(),
+            swarm: false,
             guest_argv: None,
         }
     }
@@ -397,6 +451,8 @@ impl RuntimeConfig {
             net_latency_nanos: 0,
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
+            schedule_policy: SchedulePolicy::default(),
+            swarm: false,
             guest_argv: None,
         }
     }
@@ -424,6 +480,8 @@ impl RuntimeConfig {
             net_latency_nanos: 0,
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
+            schedule_policy: SchedulePolicy::default(),
+            swarm: false,
             guest_argv: None,
         }
     }
@@ -605,6 +663,135 @@ impl RuntimeConfig {
         Ok(self)
     }
 
+    /// The run's exploration scheduling policy.
+    pub const fn schedule_policy(&self) -> SchedulePolicy {
+        self.schedule_policy
+    }
+
+    /// Set the exploration scheduling policy directly (tests, explicit embedders).
+    #[must_use]
+    pub fn with_schedule_policy(mut self, policy: SchedulePolicy) -> Self {
+        self.schedule_policy = policy;
+        self
+    }
+
+    /// Whether swarm fault-class selection is enabled for this run.
+    pub const fn swarm(&self) -> bool {
+        self.swarm
+    }
+
+    /// Enable or disable swarm fault-class selection directly.
+    #[must_use]
+    pub fn with_swarm(mut self, swarm: bool) -> Self {
+        self.swarm = swarm;
+        self
+    }
+
+    /// Apply the exploration scheduling-policy knobs from a control-plane
+    /// accessor, mirroring [`RuntimeConfig::apply_fault_env`]. Presence of
+    /// [`ENV_SCHED_PCT`] enables PCT (its value is the bug depth `d`, empty =
+    /// default); presence of [`ENV_SCHED_STARVE`] enables starvation intervals
+    /// (its value is the interval count). Absence leaves the default uniform
+    /// policy (zero behavior change). Malformed values are rejected fail-closed.
+    pub fn apply_schedule_env<F>(mut self, get: F) -> Result<Self, RuntimeError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        if let Some(value) = get(ENV_SCHED_PCT) {
+            let value = value.trim();
+            let depth = if value.is_empty() {
+                DEFAULT_PCT_DEPTH
+            } else {
+                let depth: u32 = value.parse().map_err(|_| {
+                    RuntimeError::Config(format!(
+                        "{ENV_SCHED_PCT} must be an unsigned integer >= 1"
+                    ))
+                })?;
+                if depth < 1 {
+                    return Err(RuntimeError::Config(format!(
+                        "{ENV_SCHED_PCT} bug depth must be >= 1"
+                    )));
+                }
+                depth
+            };
+            let steps = match get(ENV_SCHED_PCT_STEPS) {
+                Some(value) => value.trim().parse().map_err(|_| {
+                    RuntimeError::Config(format!(
+                        "{ENV_SCHED_PCT_STEPS} must be an unsigned 64-bit integer"
+                    ))
+                })?,
+                None => DEFAULT_PCT_STEPS,
+            };
+            if steps < 1 {
+                return Err(RuntimeError::Config(format!(
+                    "{ENV_SCHED_PCT_STEPS} must be >= 1"
+                )));
+            }
+            self.schedule_policy.pct = Some(PctConfig { depth, steps });
+        }
+        if let Some(value) = get(ENV_SCHED_STARVE) {
+            let value = value.trim();
+            let intervals = if value.is_empty() {
+                DEFAULT_STARVE_INTERVALS
+            } else {
+                value.parse().map_err(|_| {
+                    RuntimeError::Config(format!(
+                        "{ENV_SCHED_STARVE} must be an unsigned integer >= 1"
+                    ))
+                })?
+            };
+            if intervals < 1 {
+                return Err(RuntimeError::Config(format!(
+                    "{ENV_SCHED_STARVE} interval count must be >= 1"
+                )));
+            }
+            let max_len = match get(ENV_SCHED_STARVE_MAX_LEN) {
+                Some(value) => value.trim().parse().map_err(|_| {
+                    RuntimeError::Config(format!(
+                        "{ENV_SCHED_STARVE_MAX_LEN} must be an unsigned 64-bit integer"
+                    ))
+                })?,
+                None => DEFAULT_STARVE_MAX_LEN,
+            };
+            let window = match get(ENV_SCHED_STARVE_WINDOW) {
+                Some(value) => value.trim().parse().map_err(|_| {
+                    RuntimeError::Config(format!(
+                        "{ENV_SCHED_STARVE_WINDOW} must be an unsigned 64-bit integer"
+                    ))
+                })?,
+                None => DEFAULT_STARVE_WINDOW,
+            };
+            if max_len < 1 || window < 1 {
+                return Err(RuntimeError::Config(format!(
+                    "{ENV_SCHED_STARVE_MAX_LEN} and {ENV_SCHED_STARVE_WINDOW} must be >= 1 so \
+                     intervals are bounded and placeable"
+                )));
+            }
+            self.schedule_policy.starvation = Some(StarvationConfig {
+                intervals,
+                max_len,
+                window,
+            });
+        }
+        Ok(self)
+    }
+
+    /// Apply the swarm fault-class-selection knob from a control-plane accessor.
+    /// Presence of a truthy [`ENV_SWARM`] enables swarm; a false-y value (or
+    /// absence) leaves it off (the existing always-all behavior).
+    pub fn apply_swarm_env<F>(mut self, get: F) -> Result<Self, RuntimeError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        if let Some(value) = get(ENV_SWARM) {
+            self.swarm = !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "" | "0" | "off" | "false" | "no"
+            );
+        }
+        Ok(self)
+    }
+
     pub fn with_param(
         mut self,
         key: impl Into<String>,
@@ -713,6 +900,8 @@ impl RuntimeConfig {
         };
         let config = config.apply_fault_env(|name| env::var(name).ok())?;
         let config = config.apply_buggify_env(|name| env::var(name).ok())?;
+        let config = config.apply_schedule_env(|name| env::var(name).ok())?;
+        let config = config.apply_swarm_env(|name| env::var(name).ok())?;
         let config = config.apply_guest_argv_env(|name| env::var(name).ok())?;
         Ok(config)
     }
@@ -849,6 +1038,24 @@ impl RuntimeBuilder {
             }
         }
 
+        // Swarm fault-class selection: for a record/seeded run, mask the enabled
+        // fault classes down to a seed-derived subset BEFORE any driver or
+        // metadata record consumes `self.config.faults`. Not applied on
+        // replay/branch, where the trace's recorded (already-masked) fault config
+        // is authoritative and re-masking would double-select. The record is
+        // attached to the recorder metadata below.
+        let swarm_record = if self.config.swarm
+            && matches!(
+                self.config.mode,
+                ExecutionMode::Seeded
+                    | ExecutionMode::Record { .. }
+                    | ExecutionMode::RecordTransport
+            ) {
+            Some(apply_swarm_mask(&mut self.config))
+        } else {
+            None
+        };
+
         // A replayed or branched trace supplies its own authoritative fault
         // configuration, applied to `self.config` after the match releases its
         // borrow. `None` leaves the operator-supplied configuration in place.
@@ -856,6 +1063,8 @@ impl RuntimeBuilder {
         // Same contract for the cooperative-SUT (buggify) configuration: a
         // replayed/branched trace's recorded config is authoritative.
         let mut replay_buggify_override: Option<BuggifyConfig> = None;
+        // Same contract for the exploration scheduling policy.
+        let mut replay_schedule_override: Option<SchedulePolicy> = None;
         let (execution, root_seed) = match &self.config.mode {
             ExecutionMode::Seeded => (Execution::Seeded, self.config.seed),
             ExecutionMode::Record { path } => (
@@ -864,6 +1073,8 @@ impl RuntimeBuilder {
                         RunMetadata::new(self.config.seed, self.config.fingerprint.clone())
                             .with_faults(Some(fault_record(&self.config)))
                             .with_buggify(buggify_record(&self.config))
+                            .with_schedule_policy(schedule_policy_record(&self.config))
+                            .with_swarm(swarm_record.clone())
                             .with_guest_argv(self.config.guest_argv.clone()),
                     ),
                     sink: RecordSink::Path {
@@ -879,6 +1090,8 @@ impl RuntimeBuilder {
                         RunMetadata::new(self.config.seed, self.config.fingerprint.clone())
                             .with_faults(Some(fault_record(&self.config)))
                             .with_buggify(buggify_record(&self.config))
+                            .with_schedule_policy(schedule_policy_record(&self.config))
+                            .with_swarm(swarm_record.clone())
                             .with_guest_argv(self.config.guest_argv.clone()),
                     ),
                     sink: RecordSink::Transport(
@@ -895,6 +1108,8 @@ impl RuntimeBuilder {
                     reconcile_replay_faults(&self.config, replayer.fault_config())?;
                 replay_buggify_override =
                     reconcile_replay_buggify(&self.config, replayer.buggify_config())?;
+                replay_schedule_override =
+                    reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
                 (Execution::Replay(replayer), root_seed)
             }
             ExecutionMode::ReplayTransport { timeline } => {
@@ -910,6 +1125,8 @@ impl RuntimeBuilder {
                     reconcile_replay_faults(&self.config, replayer.fault_config())?;
                 replay_buggify_override =
                     reconcile_replay_buggify(&self.config, replayer.buggify_config())?;
+                replay_schedule_override =
+                    reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
                 (Execution::Replay(replayer), root_seed)
             }
             ExecutionMode::Branch {
@@ -934,6 +1151,8 @@ impl RuntimeBuilder {
                     reconcile_replay_faults(&self.config, session.fault_config())?;
                 replay_buggify_override =
                     reconcile_replay_buggify(&self.config, session.buggify_config())?;
+                replay_schedule_override =
+                    reconcile_replay_schedule_policy(&self.config, session.schedule_policy())?;
                 (
                     Execution::Branch {
                         session: Box::new(session),
@@ -955,6 +1174,13 @@ impl RuntimeBuilder {
         // replay re-derives the same activation and firing decisions.
         if let Some(buggify) = replay_buggify_override {
             self.config.buggify = buggify;
+        }
+        // Adopt the trace's authoritative exploration scheduling policy. Replay
+        // consumes recorded task selections directly (through `select`), so the
+        // policy does not steer replay; adopting it keeps the built scheduler
+        // consistent and the reconcile above provides the fail-closed guard.
+        if let Some(policy) = replay_schedule_override {
+            self.config.schedule_policy = policy;
         }
 
         // The crash-consistency filesystem is built HERE, and only here, from
@@ -1021,8 +1247,12 @@ impl RuntimeBuilder {
                 .get_or_insert_with(|| Box::new(VirtualClock::default()));
             self.entropy
                 .get_or_insert_with(|| Box::new(SeededEntropy::new(root_seed)));
-            self.scheduler
-                .get_or_insert_with(|| Box::new(DetScheduler::new(root_seed)));
+            self.scheduler.get_or_insert_with(|| {
+                Box::new(DetScheduler::with_policy(
+                    root_seed,
+                    self.config.schedule_policy,
+                ))
+            });
             if self.network.is_none() {
                 let mut network = SimNet::builder()
                     .base_latency_nanos(self.config.net_latency_nanos)
@@ -3076,6 +3306,12 @@ impl Context {
 
     pub fn finish(mut self) -> Result<(), RuntimeError> {
         emit_schedule_report(&self.schedule.diagnostics());
+        // Exploration-policy diagnostic (PCT / starvation). Populated from live
+        // selection, so it reflects a record/seeded run; a replay reports the
+        // inert default because recorded selections bypass the policy.
+        if let Some(report) = self.scheduler.as_ref().and_then(|s| s.policy_report()) {
+            emit_schedule_policy_report(&report);
+        }
         // Cooperative-SUT diagnostic + metadata. Computed before the execution is
         // consumed so the record sink can fold in the run's realized active-site
         // set and knob picks.
@@ -3544,6 +3780,164 @@ fn reconcile_replay_buggify(
     Ok(Some(stored))
 }
 
+/// The exploration scheduling policy recorded into a trace at build time. `None`
+/// under the default uniform policy, so a default run records no policy metadata
+/// at all and is indistinguishable from an old trace.
+fn schedule_policy_record(config: &RuntimeConfig) -> Option<patina_trace::SchedulePolicyRecord> {
+    let policy = config.schedule_policy;
+    if policy.is_default() {
+        return None;
+    }
+    Some(patina_trace::SchedulePolicyRecord {
+        pct: policy.pct.map(|pct| patina_trace::PctPolicyRecord {
+            depth: pct.depth,
+            steps: pct.steps,
+        }),
+        starvation: policy
+            .starvation
+            .map(|starve| patina_trace::StarvationPolicyRecord {
+                intervals: starve.intervals,
+                max_len: starve.max_len,
+                window: starve.window,
+            }),
+    })
+}
+
+/// Rebuild a [`SchedulePolicy`] from a recorded trace's authoritative policy
+/// metadata.
+fn schedule_policy_from_record(record: &patina_trace::SchedulePolicyRecord) -> SchedulePolicy {
+    SchedulePolicy {
+        pct: record.pct.map(|pct| PctConfig {
+            depth: pct.depth,
+            steps: pct.steps,
+        }),
+        starvation: record.starvation.map(|starve| StarvationConfig {
+            intervals: starve.intervals,
+            max_len: starve.max_len,
+            window: starve.window,
+        }),
+    }
+}
+
+/// Reconcile a recorded trace's authoritative exploration scheduling policy with
+/// any policy the operator also supplied at replay, mirroring
+/// [`reconcile_replay_faults`]. The trace is authoritative: with no policy
+/// supplied the stored one is adopted verbatim; a conflicting supplied policy
+/// fails closed. A trace recorded under the default policy (`None`) leaves the
+/// operator's configuration in place — and an operator trying to *enable* a
+/// policy on a default trace is caught earlier by the `+pct`/`+starve`
+/// fingerprint mismatch.
+fn reconcile_replay_schedule_policy(
+    config: &RuntimeConfig,
+    recorded: Option<&patina_trace::SchedulePolicyRecord>,
+) -> Result<Option<SchedulePolicy>, RuntimeError> {
+    let Some(record) = recorded else {
+        return Ok(None);
+    };
+    let stored = schedule_policy_from_record(record);
+    if !config.schedule_policy.is_default() && config.schedule_policy != stored {
+        return Err(RuntimeError::Config(
+            "replay scheduling-policy knobs conflict with the trace's recorded configuration; \
+             the trace is authoritative, so omit the flags (or supply matching values)"
+                .into(),
+        ));
+    }
+    Ok(Some(stored))
+}
+
+/// Apply swarm fault-class selection to a record/seeded run's configuration: for
+/// each enabled fault class, a domain-separated seed-derived coin decides whether
+/// it stays active this generation. The masked configuration is what every driver
+/// and the recorded [`FaultConfigRecord`] then consume, so replay reproduces the
+/// selected subset verbatim; the returned [`SwarmConfigRecord`] documents the
+/// candidate set and the seed's selection so the trace is self-describing. Each
+/// class draws independently, so subsets vary across generations (seeds).
+fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_trace::SwarmConfigRecord {
+    // Stable class tokens paired with a live predicate and a dropper. A class is
+    // a candidate only when currently enabled (non-default).
+    let mut candidates: Vec<&'static str> = Vec::new();
+    let mut selected: Vec<String> = Vec::new();
+    let seed = config.seed;
+    // Independent per-class coin, domain-separated from every other seeded stream
+    // and from the other classes by hashing the class token into the draw.
+    let keep = |class: &str| -> bool {
+        let mut rng = SplitMix64::new(seed ^ 0x5A20_4C1A_5500_5EED ^ splitmix_hash_str(class));
+        rng.next_u64() & 1 == 1
+    };
+
+    if config.faults.crash_at.is_some()
+        || config.faults.torn_granularity != TornGranularity::default()
+    {
+        candidates.push("crash");
+        if keep("crash") {
+            selected.push("crash".into());
+        } else {
+            config.faults.crash_at = None;
+            config.faults.torn_granularity = TornGranularity::default();
+        }
+    }
+    if config.faults.sleep_jitter_nanos.is_some() {
+        candidates.push("sleep_jitter");
+        if keep("sleep_jitter") {
+            selected.push("sleep_jitter".into());
+        } else {
+            config.faults.sleep_jitter_nanos = None;
+        }
+    }
+    if config.faults.net_jitter_nanos.is_some() {
+        candidates.push("net_jitter");
+        if keep("net_jitter") {
+            selected.push("net_jitter".into());
+        } else {
+            config.faults.net_jitter_nanos = None;
+        }
+    }
+    if config.faults.net_drop_permille != 0 {
+        candidates.push("net_drop");
+        if keep("net_drop") {
+            selected.push("net_drop".into());
+        } else {
+            config.faults.net_drop_permille = 0;
+        }
+    }
+    if config.net_latency_nanos != 0 {
+        candidates.push("net_latency");
+        if keep("net_latency") {
+            selected.push("net_latency".into());
+        } else {
+            config.net_latency_nanos = 0;
+        }
+    }
+    if config.buggify.enabled {
+        candidates.push("buggify");
+        if keep("buggify") {
+            selected.push("buggify".into());
+        } else {
+            config.buggify.enabled = false;
+        }
+    }
+
+    patina_trace::SwarmConfigRecord {
+        candidate_classes: candidates.into_iter().map(String::from).collect(),
+        selected_classes: selected,
+    }
+}
+
+/// A stable SplitMix64-style hash of a class token, for domain-separating swarm
+/// per-class coins. Order-independent and platform-independent.
+fn splitmix_hash_str(text: &str) -> u64 {
+    let mut state: u64 = 0xD1B5_4A32_D192_ED03;
+    for byte in text.bytes() {
+        state = state
+            .wrapping_add(u64::from(byte))
+            .wrapping_add(0x9E37_79B9_7F4A_7C15);
+        state = (state ^ (state >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        state = (state ^ (state >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        state ^= state >> 31;
+    }
+    state
+}
+
 /// Emit the default-on schedule-exploration diagnostic to stderr for a
 /// multithreaded run. Single-task runs (no concurrency to explore) stay silent.
 /// The machine-readable `PATINA_SCHEDULE_REPORT` line lets a campaign tell a
@@ -3594,6 +3988,47 @@ are UNREACHABLE at any seed and a clean result here does NOT mean the concurrenc
 Rebuild with `cargo patina build --yield-points` to make atomics-only race windows \
 schedulable.",
             diag.vacuous.len(),
+        );
+    }
+}
+
+/// Emit the machine-readable `PATINA_SCHEDULE_POLICY` line for a run that used an
+/// exploration scheduling policy (PCT / starvation). One line, same spirit as
+/// `PATINA_SCHEDULE_REPORT`: a sweep parses it to annotate a found failure with a
+/// bug-depth estimate and to detect a vacuous starvation configuration. Suppressed
+/// by a false-y [`ENV_SCHEDULE_POLICY_REPORT`].
+fn emit_schedule_policy_report(report: &patina_driver_api::SchedulePolicyReport) {
+    if !report.is_active() {
+        return;
+    }
+    if let Ok(value) = env::var(ENV_SCHEDULE_POLICY_REPORT) {
+        if matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "false" | "no"
+        ) {
+            return;
+        }
+    }
+    eprintln!(
+        "PATINA_SCHEDULE_POLICY pct={} pct_depth={} pct_change_points={} pct_change_points_hit={} \
+starvation={} starve_events={} starve_vacuous={} decisions={} bug_depth={}",
+        u8::from(report.pct),
+        report.pct_depth,
+        report.pct_change_points,
+        report.pct_change_points_hit,
+        u8::from(report.starvation),
+        report.starve_events,
+        report.starve_vacuous,
+        report.decisions,
+        report.bug_depth(),
+    );
+    if report.starve_vacuous > 0 {
+        eprintln!(
+            "PATINA WARNING: vacuous starvation configuration — {} scheduling decision(s) would have \
+starved every runnable task and were forced to schedule anyway to preserve liveness. A starvation \
+configuration that routinely starves the only runnable task is testing nothing; narrow the starved \
+subset or the interval window.",
+            report.starve_vacuous,
         );
     }
 }
@@ -4151,6 +4586,194 @@ mod tests {
         assert!(
             recorded_fires.iter().any(|fired| *fired),
             "expected some firing"
+        );
+    }
+
+    /// Drive a fixed multi-task cooperative schedule through a context, returning
+    /// the order in which `scheduler_next` selected tasks. Tasks all stay runnable
+    /// (yield, never park/complete until the end), so the policy fully controls
+    /// the order.
+    fn drive_schedule(context: &mut Context, n_workers: usize, rounds: usize) -> Vec<u64> {
+        let mut workers = Vec::new();
+        for index in 0..n_workers {
+            workers.push(context.task_spawn(&format!("w{index}")).unwrap());
+        }
+        let mut order = Vec::new();
+        for _ in 0..rounds {
+            let task = context.scheduler_next().unwrap().unwrap();
+            order.push(task.0);
+            context.task_yield(task).unwrap();
+        }
+        drop(workers);
+        // Drain: complete whatever task each decision selects until none remain.
+        while let Some(task) = context.scheduler_next().unwrap() {
+            context.task_complete(task).unwrap();
+        }
+        order
+    }
+
+    #[test]
+    fn pct_record_replay_reproduces_schedule_and_records_policy() {
+        let directory = tempdir().unwrap();
+        let trace = directory.path().join("pct.patina");
+        let policy = SchedulePolicy {
+            pct: Some(PctConfig {
+                depth: 3,
+                steps: 50,
+            }),
+            starvation: None,
+        };
+        let config = RuntimeConfig::record(11, &trace, "fp+pct").with_schedule_policy(policy);
+        let mut record = Context::from_config(config).unwrap();
+        let recorded = drive_schedule(&mut record, 4, 40);
+        record.finish().unwrap();
+
+        // The trace records the policy metadata authoritatively.
+        let bundle = patina_trace::TraceBundle::load(&trace).unwrap();
+        let recorded_policy = bundle.metadata.schedule_policy.expect("policy recorded");
+        assert_eq!(recorded_policy.pct.unwrap().depth, 3);
+
+        // Replay WITHOUT re-supplying the policy reproduces the exact selection
+        // order (decisions come from the recorded op-stream).
+        let mut replay = Context::from_config(RuntimeConfig::replay(&trace, "fp+pct")).unwrap();
+        let replayed = drive_schedule(&mut replay, 4, 40);
+        replay.finish().unwrap();
+        assert_eq!(recorded, replayed);
+        // A depth-3 PCT schedule over four always-runnable workers preempts, so
+        // more than one task id appears.
+        assert!(
+            recorded
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                > 1
+        );
+    }
+
+    #[test]
+    fn reconcile_replay_schedule_policy_enforces_the_authoritative_trace_contract() {
+        let stored = patina_trace::SchedulePolicyRecord {
+            pct: Some(patina_trace::PctPolicyRecord {
+                depth: 3,
+                steps: 100,
+            }),
+            starvation: None,
+        };
+        // A default-policy trace (None) yields no override.
+        assert_eq!(
+            reconcile_replay_schedule_policy(&RuntimeConfig::seeded(0), None).unwrap(),
+            None
+        );
+        // Flag-free replay adopts the stored policy verbatim.
+        let adopted = reconcile_replay_schedule_policy(&RuntimeConfig::seeded(0), Some(&stored))
+            .unwrap()
+            .expect("stored policy adopted");
+        assert_eq!(adopted.pct.unwrap().depth, 3);
+        // A conflicting supplied policy fails closed.
+        let conflicting = RuntimeConfig::seeded(0).with_schedule_policy(SchedulePolicy {
+            pct: Some(PctConfig {
+                depth: 9,
+                steps: 100,
+            }),
+            starvation: None,
+        });
+        assert!(reconcile_replay_schedule_policy(&conflicting, Some(&stored)).is_err());
+    }
+
+    #[test]
+    fn swarm_masks_a_subset_and_records_candidates_and_selection() {
+        let directory = tempdir().unwrap();
+        // Enable several fault classes plus buggify, then record under swarm.
+        let build = |seed: u64| {
+            let trace = directory.path().join(format!("swarm-{seed}.patina"));
+            let config = RuntimeConfig::record(seed, &trace, "fp+swarm")
+                .with_crash_at(CrashOp::Close, 1)
+                .with_net_drop_permille(100)
+                .with_sleep_jitter_nanos(1, 2)
+                .with_buggify(BuggifyConfig {
+                    enabled: true,
+                    ..BuggifyConfig::default()
+                })
+                .with_swarm(true);
+            let context = Context::from_config(config).unwrap();
+            context.finish().unwrap();
+            patina_trace::TraceBundle::load(&trace).unwrap()
+        };
+        let bundle = build(1);
+        let swarm = bundle.metadata.swarm.expect("swarm recorded");
+        // All four enabled classes are candidates.
+        assert_eq!(
+            swarm.candidate_classes,
+            vec!["crash", "sleep_jitter", "net_drop", "buggify"]
+        );
+        // The selected subset is a subset of candidates and reflects the applied
+        // (masked) config: exactly the classes that survived masking.
+        for class in &swarm.selected_classes {
+            assert!(swarm.candidate_classes.contains(class));
+        }
+        let faults = bundle.metadata.faults.expect("faults recorded");
+        assert_eq!(
+            faults.crash_at.is_some(),
+            swarm.selected_classes.iter().any(|c| c == "crash")
+        );
+        assert_eq!(
+            bundle.metadata.buggify.is_some(),
+            swarm.selected_classes.iter().any(|c| c == "buggify")
+        );
+
+        // Across seeds the selected subset actually varies (swarm testing).
+        let subsets: std::collections::BTreeSet<Vec<String>> = (100..112)
+            .map(|seed| build(seed).metadata.swarm.unwrap().selected_classes)
+            .collect();
+        assert!(
+            subsets.len() > 1,
+            "swarm subset must vary across seeds: {subsets:?}"
+        );
+    }
+
+    #[test]
+    fn apply_schedule_and_swarm_env_parse_the_control_plane() {
+        let vars: BTreeMap<&str, String> = [
+            (ENV_SCHED_PCT, "4".to_string()),
+            (ENV_SCHED_PCT_STEPS, "123".to_string()),
+            (ENV_SCHED_STARVE, "2".to_string()),
+            (ENV_SCHED_STARVE_MAX_LEN, "16".to_string()),
+            (ENV_SCHED_STARVE_WINDOW, "64".to_string()),
+            (ENV_SWARM, "1".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let get = |name: &str| vars.get(name).cloned();
+        let config = RuntimeConfig::seeded(0)
+            .apply_schedule_env(get)
+            .unwrap()
+            .apply_swarm_env(get)
+            .unwrap();
+        let policy = config.schedule_policy();
+        assert_eq!(
+            policy.pct,
+            Some(PctConfig {
+                depth: 4,
+                steps: 123
+            })
+        );
+        assert_eq!(
+            policy.starvation,
+            Some(StarvationConfig {
+                intervals: 2,
+                max_len: 16,
+                window: 64
+            })
+        );
+        assert!(config.swarm());
+
+        // A malformed PCT depth fails closed.
+        let bad: BTreeMap<&str, String> =
+            [(ENV_SCHED_PCT, "abc".to_string())].into_iter().collect();
+        assert!(
+            RuntimeConfig::seeded(0)
+                .apply_schedule_env(|name| bad.get(name).cloned())
+                .is_err()
         );
     }
 

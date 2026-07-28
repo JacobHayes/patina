@@ -972,6 +972,11 @@ fn runtime_config_from_control_plane() -> Result<(RuntimeConfig, Option<i32>), R
     // Cooperative-SUT (buggify) knobs come from the same control plane through
     // the shared parser, so the shim and the process-environment path agree.
     config = config.apply_buggify_env(control_env)?;
+    // Exploration scheduling-policy (PCT / starvation) and swarm fault-class
+    // selection knobs travel the same control plane through the shared parsers,
+    // so the shim and the process-environment path agree on the protocol.
+    config = config.apply_schedule_env(control_env)?;
+    config = config.apply_swarm_env(control_env)?;
     // Guest argv (recorded into the trace metadata) travels the same control
     // plane, so record mode captures the arguments the supervisor forwarded.
     config = config.apply_guest_argv_env(control_env)?;

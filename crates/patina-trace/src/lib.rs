@@ -133,6 +133,76 @@ pub struct BuggifyConfigRecord {
     pub knobs: BTreeMap<String, i64>,
 }
 
+/// The PCT (Probabilistic Concurrency Testing) scheduling parameters of a
+/// recorded run. Mirror of the runtime's `PctConfig`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PctPolicyRecord {
+    /// Target bug depth `d`; `d-1` priority-change points are placed.
+    pub depth: u32,
+    /// Expected schedule length over which the change points are distributed.
+    pub steps: u64,
+}
+
+/// The starvation-interval scheduling parameters of a recorded run. Mirror of the
+/// runtime's `StarvationConfig`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StarvationPolicyRecord {
+    /// Number of bounded starvation intervals placed over the schedule.
+    pub intervals: u32,
+    /// Maximum length (scheduling decisions) of any interval; every interval is
+    /// bounded so it always ends.
+    pub max_len: u64,
+    /// Interval starts are placed uniformly in `[1, window]`.
+    pub window: u64,
+}
+
+/// The seed-driven exploration scheduling policy (PCT priority-change points,
+/// starvation intervals) of a recorded run. Stored in the trace metadata so a
+/// replay knows the policy that produced the recorded schedule, and enabling a
+/// non-default policy folds a fingerprint component so a cross-policy replay
+/// fails closed. Absent (`None`) in traces recorded under the default uniform
+/// policy or before this field existed — either way the runtime treats a missing
+/// field as the default policy, and `deny_unknown_fields` means an older runtime
+/// reading a newer trace rejects the unknown field rather than silently ignoring
+/// the policy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SchedulePolicyRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pct: Option<PctPolicyRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starvation: Option<StarvationPolicyRecord>,
+}
+
+impl SchedulePolicyRecord {
+    /// Whether this record describes any non-default policy.
+    pub fn is_active(&self) -> bool {
+        self.pct.is_some() || self.starvation.is_some()
+    }
+}
+
+/// Swarm fault-class selection of a recorded run: the candidate fault classes the
+/// operator enabled and the seed-derived subset actually applied this generation.
+/// The applied [`FaultConfigRecord`] already reflects the masked (selected)
+/// configuration, so replay reproduces the faults from it verbatim; this record
+/// documents the swarm *intent* (candidates) and *decision* (selection) so the
+/// trace is self-describing and a `+swarm` fingerprint rejects a non-swarm
+/// replay. Class names are stable snake_case tokens (`crash`, `sleep_jitter`,
+/// `net_jitter`, `net_drop`, `net_latency`, `buggify`). Absent (`None`) when
+/// swarm was not enabled.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwarmConfigRecord {
+    /// Fault classes that were candidates for this run (the operator-enabled
+    /// set), in stable sorted order.
+    pub candidate_classes: Vec<String>,
+    /// Fault classes the run seed selected to keep active this generation, in
+    /// stable sorted order — a subset of `candidate_classes`.
+    pub selected_classes: Vec<String>,
+}
+
 fn torn_granularity_is_block(granularity: &TornGranularity) -> bool {
     matches!(granularity, TornGranularity::Block)
 }
@@ -185,6 +255,17 @@ pub struct RunMetadata {
     /// nothing run-specific to reproduce.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_argv: Option<Vec<String>>,
+    /// The run's exploration scheduling policy (PCT / starvation), authoritative
+    /// on replay. Additive exactly like [`faults`](RunMetadata::faults): absent
+    /// (`None`) in traces recorded under the default uniform policy, which the
+    /// runtime treats as the default. Enabling a non-default policy folds a
+    /// fingerprint component so a cross-policy replay fails closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_policy: Option<SchedulePolicyRecord>,
+    /// The run's swarm fault-class selection. Additive: absent (`None`) when
+    /// swarm was not enabled. See [`SwarmConfigRecord`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm: Option<SwarmConfigRecord>,
 }
 
 impl RunMetadata {
@@ -196,6 +277,8 @@ impl RunMetadata {
             faults: None,
             buggify: None,
             guest_argv: None,
+            schedule_policy: None,
+            swarm: None,
         }
     }
 
@@ -221,6 +304,20 @@ impl RunMetadata {
     #[must_use]
     pub fn with_guest_argv(mut self, guest_argv: Option<Vec<String>>) -> Self {
         self.guest_argv = guest_argv;
+        self
+    }
+
+    /// Attach the run's exploration scheduling policy recorded into the trace.
+    #[must_use]
+    pub fn with_schedule_policy(mut self, policy: Option<SchedulePolicyRecord>) -> Self {
+        self.schedule_policy = policy;
+        self
+    }
+
+    /// Attach the run's swarm fault-class selection recorded into the trace.
+    #[must_use]
+    pub fn with_swarm(mut self, swarm: Option<SwarmConfigRecord>) -> Self {
+        self.swarm = swarm;
         self
     }
 }
@@ -618,6 +715,17 @@ impl Replayer {
         self.metadata.buggify.as_ref()
     }
 
+    /// The recorded exploration scheduling policy, authoritative on replay.
+    /// `None` for a trace recorded under the default uniform policy.
+    pub const fn schedule_policy(&self) -> Option<&SchedulePolicyRecord> {
+        self.metadata.schedule_policy.as_ref()
+    }
+
+    /// The recorded swarm fault-class selection. `None` when swarm was disabled.
+    pub const fn swarm_config(&self) -> Option<&SwarmConfigRecord> {
+        self.metadata.swarm.as_ref()
+    }
+
     /// The recorded guest program arguments (`argv[1..]`). `None` for a trace
     /// recorded before argv capture; `Some` (possibly empty) otherwise.
     pub fn guest_argv(&self) -> Option<&[String]> {
@@ -753,6 +861,18 @@ impl BranchSession {
     /// buggify.
     pub const fn buggify_config(&self) -> Option<&BuggifyConfigRecord> {
         self.bundle.metadata.buggify.as_ref()
+    }
+
+    /// The parent trace's recorded exploration scheduling policy, inherited by
+    /// the branch. `None` for a parent trace recorded under the default policy.
+    pub const fn schedule_policy(&self) -> Option<&SchedulePolicyRecord> {
+        self.bundle.metadata.schedule_policy.as_ref()
+    }
+
+    /// The parent trace's recorded swarm fault-class selection. `None` when the
+    /// parent was recorded without swarm.
+    pub const fn swarm_config(&self) -> Option<&SwarmConfigRecord> {
+        self.bundle.metadata.swarm.as_ref()
     }
 
     pub fn expect_prefix(
@@ -1210,6 +1330,60 @@ mod tests {
         assert!(!text.contains("buggify"), "{text}");
         let reloaded_plain = TraceBundle::from_slice(plain.to_bytes().unwrap().as_slice()).unwrap();
         assert_eq!(reloaded_plain.metadata.buggify, None);
+    }
+
+    #[test]
+    fn schedule_policy_metadata_round_trips_and_is_additive() {
+        let policy = SchedulePolicyRecord {
+            pct: Some(PctPolicyRecord {
+                depth: 3,
+                steps: 512,
+            }),
+            starvation: Some(StarvationPolicyRecord {
+                intervals: 2,
+                max_len: 64,
+                window: 256,
+            }),
+        };
+        let metadata =
+            RunMetadata::new(7, "fingerprint+pct+starve").with_schedule_policy(Some(policy));
+        let bundle = TraceBundle::new(metadata, Vec::new());
+        let bytes = bundle.to_bytes().unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(text.contains("\"depth\":3"), "{text}");
+        assert!(text.contains("\"intervals\":2"), "{text}");
+        let reloaded = TraceBundle::from_slice(&bytes).unwrap();
+        assert_eq!(reloaded.metadata.schedule_policy, Some(policy));
+        assert!(reloaded.metadata.schedule_policy.unwrap().is_active());
+
+        // A default-policy run keeps the field absent, indistinguishable from an
+        // old trace (both None).
+        let plain = TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new());
+        let text = String::from_utf8(plain.to_bytes().unwrap()).unwrap();
+        assert!(!text.contains("schedule_policy"), "{text}");
+        let reloaded_plain = TraceBundle::from_slice(plain.to_bytes().unwrap().as_slice()).unwrap();
+        assert_eq!(reloaded_plain.metadata.schedule_policy, None);
+    }
+
+    #[test]
+    fn swarm_config_metadata_round_trips_and_is_additive() {
+        let swarm = SwarmConfigRecord {
+            candidate_classes: vec![
+                "crash".to_string(),
+                "net_drop".to_string(),
+                "sleep_jitter".to_string(),
+            ],
+            selected_classes: vec!["crash".to_string(), "sleep_jitter".to_string()],
+        };
+        let metadata = RunMetadata::new(7, "fingerprint+swarm").with_swarm(Some(swarm.clone()));
+        let bundle = TraceBundle::new(metadata, Vec::new());
+        let bytes = bundle.to_bytes().unwrap();
+        let reloaded = TraceBundle::from_slice(&bytes).unwrap();
+        assert_eq!(reloaded.metadata.swarm, Some(swarm));
+
+        let plain = TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new());
+        let text = String::from_utf8(plain.to_bytes().unwrap()).unwrap();
+        assert!(!text.contains("swarm"), "{text}");
     }
 
     #[test]

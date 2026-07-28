@@ -18,8 +18,10 @@ use patina_runtime::{
     Context, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION,
     ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_FINGERPRINT, ENV_FS_CRASH_AT, ENV_FS_IMAGE_FD,
     ENV_FS_TORN_GRANULARITY, ENV_GUEST_ARGV, ENV_MODE, ENV_NET_DROP_PERMILLE, ENV_NET_JITTER,
-    ENV_NET_LATENCY, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_SEED, ENV_SLEEP_JITTER,
-    ENV_STEP_BUDGET, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, RuntimeConfig,
+    ENV_NET_LATENCY, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS,
+    ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED,
+    ENV_SLEEP_JITTER, ENV_STEP_BUDGET, ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD,
+    RuntimeConfig,
 };
 use patina_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
@@ -564,6 +566,10 @@ struct NativeRunInvocation {
     /// passed. Presence enables buggify and folds `+buggify` into the run
     /// fingerprint.
     buggify: Option<NativeBuggify>,
+    /// Exploration scheduling-policy (PCT / starvation) and swarm knobs. Enabling
+    /// a non-default policy or swarm folds `+pct`/`+starve`/`+swarm` into the run
+    /// fingerprint.
+    schedule: NativeSchedule,
     /// Extra symbols to treat as known-safe in the pre-run audit gate, beyond
     /// the baked shim control-plane vehicle. Mirrors `native-audit --allow`.
     allow: BTreeSet<String>,
@@ -611,6 +617,30 @@ struct NativeBuggify {
     /// `--buggify-after-setup`: declare that the guest calls
     /// `setup_complete()`, gating buggify off until it does.
     after_setup: bool,
+}
+
+/// Exploration scheduling-policy and swarm knobs for `native-run`, forwarded to
+/// the guest as validated raw strings through the `PATINA_SCHED_*`/`PATINA_SWARM`
+/// control plane. Each is default-off; enabling a non-default policy or swarm
+/// folds a fingerprint component so a policy trace never cross-replays with a
+/// plain build.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct NativeSchedule {
+    /// PCT bug depth `d` from `--sched-pct[=D]`. `Some("")` = bare `--sched-pct`
+    /// (default depth); `Some("N")` = explicit depth. `None` = PCT off.
+    pct: Option<String>,
+    /// Expected schedule length from `--sched-pct-steps N`. Inert without `pct`.
+    pct_steps: Option<String>,
+    /// Starvation interval count from `--starve[=N]`. `Some("")` = bare `--starve`
+    /// (default count). `None` = starvation off.
+    starve: Option<String>,
+    /// Maximum starvation-interval length from `--starve-max-len N`. Inert
+    /// without `starve`.
+    starve_max_len: Option<String>,
+    /// Starvation start window from `--starve-window N`. Inert without `starve`.
+    starve_window: Option<String>,
+    /// `--swarm`: apply a seed-derived subset of the enabled fault classes.
+    swarm: bool,
 }
 
 /// The escape hatch for `native-run`'s pre-run default-deny gate. By default an
@@ -2198,6 +2228,35 @@ fn buggify_env_pairs(buggify: &NativeBuggify) -> Vec<(&'static str, String)> {
     pairs
 }
 
+/// The exploration scheduling-policy and swarm control-plane pairs. Presence of
+/// `PATINA_SCHED_PCT` enables PCT (its value, possibly empty, being the bug
+/// depth); `PATINA_SCHED_STARVE` enables starvation; `PATINA_SWARM` enables
+/// swarm fault-class selection. Mirrors [`fault_env_pairs`] so the native family
+/// forwards them to the subprocess and the WASI/Cargo families to the in-process
+/// runtime through the same protocol.
+fn schedule_env_pairs(schedule: &NativeSchedule) -> Vec<(&'static str, String)> {
+    let mut pairs = Vec::new();
+    if let Some(depth) = &schedule.pct {
+        pairs.push((ENV_SCHED_PCT, depth.clone()));
+        if let Some(steps) = &schedule.pct_steps {
+            pairs.push((ENV_SCHED_PCT_STEPS, steps.clone()));
+        }
+    }
+    if let Some(count) = &schedule.starve {
+        pairs.push((ENV_SCHED_STARVE, count.clone()));
+        if let Some(len) = &schedule.starve_max_len {
+            pairs.push((ENV_SCHED_STARVE_MAX_LEN, len.clone()));
+        }
+        if let Some(window) = &schedule.starve_window {
+            pairs.push((ENV_SCHED_STARVE_WINDOW, window.clone()));
+        }
+    }
+    if schedule.swarm {
+        pairs.push((ENV_SWARM, "1".to_string()));
+    }
+    pairs
+}
+
 /// Thin wrapper: treat the leading argument as an already-built binary. Used by
 /// unit tests; `run` routing calls [`parse_native_run_from`] with a resolved ref.
 #[cfg(test)]
@@ -2226,6 +2285,7 @@ fn parse_native_run_from(
     let mut net_latency_nanos = None;
     let mut faults = NativeFaults::default();
     let mut buggify: Option<NativeBuggify> = None;
+    let mut schedule = NativeSchedule::default();
     let mut allow = BTreeSet::new();
     let mut allow_unsupported: Option<UnsupportedPolicy> = None;
     let mut mount = None;
@@ -2389,6 +2449,70 @@ fn parse_native_run_from(
                     .get_or_insert_with(NativeBuggify::default)
                     .after_setup = true;
             }
+            "--sched-pct" => {
+                set_once(&mut schedule.pct, String::new(), "--sched-pct")?;
+            }
+            value if value.starts_with("--sched-pct=") => {
+                let depth = &value["--sched-pct=".len()..];
+                let parsed = parse_u64("--sched-pct", depth)?;
+                if parsed < 1 {
+                    return Err(CliError::usage("--sched-pct bug depth must be >= 1"));
+                }
+                set_once(&mut schedule.pct, parsed.to_string(), "--sched-pct")?;
+            }
+            "--sched-pct-steps" => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--sched-pct-steps")?;
+                let steps = parse_u64("--sched-pct-steps", value)?;
+                if steps < 1 {
+                    return Err(CliError::usage("--sched-pct-steps must be >= 1"));
+                }
+                set_once(
+                    &mut schedule.pct_steps,
+                    steps.to_string(),
+                    "--sched-pct-steps",
+                )?;
+            }
+            "--starve" => {
+                set_once(&mut schedule.starve, String::new(), "--starve")?;
+            }
+            value if value.starts_with("--starve=") => {
+                let count = &value["--starve=".len()..];
+                let parsed = parse_u64("--starve", count)?;
+                if parsed < 1 {
+                    return Err(CliError::usage("--starve interval count must be >= 1"));
+                }
+                set_once(&mut schedule.starve, parsed.to_string(), "--starve")?;
+            }
+            "--starve-max-len" => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--starve-max-len")?;
+                let len = parse_u64("--starve-max-len", value)?;
+                if len < 1 {
+                    return Err(CliError::usage("--starve-max-len must be >= 1"));
+                }
+                set_once(
+                    &mut schedule.starve_max_len,
+                    len.to_string(),
+                    "--starve-max-len",
+                )?;
+            }
+            "--starve-window" => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--starve-window")?;
+                let window = parse_u64("--starve-window", value)?;
+                if window < 1 {
+                    return Err(CliError::usage("--starve-window must be >= 1"));
+                }
+                set_once(
+                    &mut schedule.starve_window,
+                    window.to_string(),
+                    "--starve-window",
+                )?;
+            }
+            "--swarm" => {
+                schedule.swarm = true;
+            }
             "--record" => {
                 index += 1;
                 let path = arguments
@@ -2409,6 +2533,18 @@ fn parse_native_run_from(
         }
         index += 1;
     }
+    // Dependent knobs are inert without their parent policy; reject rather than
+    // silently ignore, so a mistyped sweep flag fails loudly.
+    if schedule.pct.is_none() && (schedule.pct_steps.is_some()) {
+        return Err(CliError::usage("--sched-pct-steps requires --sched-pct"));
+    }
+    if schedule.starve.is_none()
+        && (schedule.starve_max_len.is_some() || schedule.starve_window.is_some())
+    {
+        return Err(CliError::usage(
+            "--starve-max-len and --starve-window require --starve",
+        ));
+    }
     let fingerprint = fingerprint.unwrap_or_else(|| DEFAULT_NATIVE_FINGERPRINT.to_string());
     let mode = if let Some(path) = record {
         NativeRunMode::Record {
@@ -2428,6 +2564,7 @@ fn parse_native_run_from(
         net_latency_nanos,
         faults,
         buggify,
+        schedule,
         allow,
         allow_unsupported: allow_unsupported.unwrap_or(UnsupportedPolicy::Deny),
         mount,
@@ -2596,15 +2733,25 @@ and native runs cannot branch; branch/timeline replay is the Cargo package and W
             | "--buggify"
             | "--buggify-activation-permille"
             | "--buggify-cutoff-nanos"
-            | "--buggify-after-setup" => {
+            | "--buggify-after-setup"
+            | "--sched-pct"
+            | "--sched-pct-steps"
+            | "--starve"
+            | "--starve-max-len"
+            | "--starve-window"
+            | "--swarm" => {
                 return Err(CliError::usage(format!(
                     "replay restores run semantics from the trace and does not accept {option}; \
 the trace is authoritative"
                 )));
             }
-            other if other.starts_with("--buggify=") => {
+            other
+                if other.starts_with("--buggify=")
+                    || other.starts_with("--sched-pct=")
+                    || other.starts_with("--starve=") =>
+            {
                 return Err(CliError::usage(
-                    "replay restores buggify from the trace and does not accept --buggify=...; the \
+                    "replay restores run semantics from the trace and does not accept this flag; the \
 trace is authoritative",
                 ));
             }
@@ -2627,6 +2774,10 @@ trace is authoritative",
         net_latency_nanos: None,
         faults: NativeFaults::default(),
         buggify: None,
+        // Replay restores the scheduling policy and swarm selection from the
+        // trace metadata; the run path reconstructs the fingerprint suffix from
+        // the trace (see `native_schedule_from_trace`), so nothing is supplied.
+        schedule: NativeSchedule::default(),
         allow,
         allow_unsupported: allow_unsupported.unwrap_or(UnsupportedPolicy::Deny),
         mount,
@@ -4076,6 +4227,7 @@ fn native_run_fingerprint(
     yield_points: bool,
     image_hash: Option<&str>,
     buggify: bool,
+    policy: &SchedulePolicyFingerprint,
 ) -> String {
     let mut fingerprint = yield_point_fingerprint(base, yield_points);
     if let Some(hash) = image_hash {
@@ -4085,7 +4237,40 @@ fn native_run_fingerprint(
     if buggify {
         fingerprint.push_str("+buggify");
     }
+    // Exploration-policy suffixes, in a fixed order so the fingerprint is stable.
+    // Each folds only when active, so a plain run fingerprints exactly as before
+    // these components existed — mirroring the conditional `+buggify` suffix.
+    if policy.pct {
+        fingerprint.push_str("+pct");
+    }
+    if policy.starvation {
+        fingerprint.push_str("+starve");
+    }
+    if policy.swarm {
+        fingerprint.push_str("+swarm");
+    }
     fingerprint
+}
+
+/// The exploration-policy fingerprint components of a native run. On a fresh run
+/// these come from the CLI flags; on replay they are reconstructed from the trace
+/// metadata (see [`native_policy_from_trace`]), so replay is self-contained and a
+/// policy trace never cross-replays with a plain build.
+#[derive(Clone, Copy, Debug, Default)]
+struct SchedulePolicyFingerprint {
+    pct: bool,
+    starvation: bool,
+    swarm: bool,
+}
+
+impl SchedulePolicyFingerprint {
+    fn from_schedule(schedule: &NativeSchedule) -> Self {
+        Self {
+            pct: schedule.pct.is_some(),
+            starvation: schedule.starve.is_some(),
+            swarm: schedule.swarm,
+        }
+    }
 }
 
 /// Whether a recorded trace carries buggify metadata. Used at replay so the
@@ -4096,6 +4281,29 @@ fn trace_has_buggify(path: &Path) -> bool {
     patina_trace::TraceBundle::load(path)
         .map(|bundle| bundle.metadata.buggify.is_some())
         .unwrap_or(false)
+}
+
+/// Reconstruct the exploration-policy fingerprint components from a recorded
+/// trace's metadata, so a flag-free replay recomputes the same fingerprint the
+/// record run folded (`+pct`/`+starve`/`+swarm`) and a cross-policy replay fails
+/// closed. A read/parse failure reports the inert default; the runtime surfaces
+/// any genuine error.
+fn native_policy_from_trace(path: &Path) -> SchedulePolicyFingerprint {
+    patina_trace::TraceBundle::load(path)
+        .map(|bundle| SchedulePolicyFingerprint {
+            pct: bundle
+                .metadata
+                .schedule_policy
+                .as_ref()
+                .is_some_and(|policy| policy.pct.is_some()),
+            starvation: bundle
+                .metadata
+                .schedule_policy
+                .as_ref()
+                .is_some_and(|policy| policy.starvation.is_some()),
+            swarm: bundle.metadata.swarm.is_some(),
+        })
+        .unwrap_or_default()
 }
 
 /// An encoded filesystem image held open in a temporary file, ready to be
@@ -4423,6 +4631,29 @@ fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> 
     // suffix is applied consistently and a policy mismatch is rejected.
     let yield_points = binary_has_yield_points(&binary)?;
 
+    // Starvation intervals reorder real thread execution adversarially. A guest
+    // whose synchronization is INTERPOSED (mutex/condvar/futex) is always safe —
+    // every wait is a scheduling boundary the aging guarantee can act on. But a
+    // guest with an *invisible atomic spinlock* (e.g. std's queue `RwLock`/`Parker`
+    // fast path) held across an interposed boundary can wedge: the adversarial
+    // deferral schedules the spinner while the lock holder is starved, and the
+    // spinner's atomics-only loop offers no boundary for aging to force the holder
+    // — the exact cooperative-scheduling limitation the vacuous-schedule warning
+    // flags. `--yield-points` closes it (loop backedges become boundaries), so
+    // starvation there is always liveness-safe. Warn loudly when starvation is
+    // enabled on a non-instrumented binary rather than risk a silent hang.
+    if invocation.schedule.starve.is_some() && !yield_points {
+        eprintln!(
+            "PATINA WARNING: starvation intervals (--starve) are enabled on a binary that was NOT \
+built with `--yield-points`. Starvation is liveness-safe for guests whose synchronization is \
+interposed (mutex/condvar/futex), but a guest with an invisible atomic spinlock (e.g. std's queue \
+RwLock/Parker fast path) held across a boundary can WEDGE under adversarial deferral — the same \
+atomics-only window the vacuous-schedule diagnostic flags as unreachable. Rebuild with \
+`cargo patina build --yield-points` to make those windows schedulable so starvation stays \
+liveness-safe."
+        );
+    }
+
     // Capture the mounted host directory into a deterministic filesystem image.
     // The supervisor is not interposed, so it may read the host tree freely; the
     // encoded image travels to the guest over an inherited descriptor and the
@@ -4500,6 +4731,13 @@ fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> 
             command.env(ENV_BUGGIFY_AFTER_SETUP, "1");
         }
     }
+    // Forward the exploration scheduling-policy (PCT / starvation) and swarm
+    // knobs through the same control plane. Recorded into the trace metadata and
+    // OPTIONAL on replay (the trace is authoritative; the fingerprint suffix
+    // rejects a cross-policy replay).
+    for (name, value) in schedule_env_pairs(&invocation.schedule) {
+        command.env(name, value);
+    }
 
     // Hold the trace file open until the child has been spawned so its
     // descriptor is still valid when `pre_exec` duplicates it.
@@ -4531,6 +4769,7 @@ fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> 
                         yield_points,
                         image_hash.as_deref(),
                         invocation.buggify.is_some(),
+                        &SchedulePolicyFingerprint::from_schedule(&invocation.schedule),
                     ),
                 )
                 .env(ENV_TRACE_FD, PATINA_TRACE_CHANNEL_FD.to_string())
@@ -4552,10 +4791,12 @@ fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> 
             let file = fs::File::open(path).map_err(|error| {
                 CliError(format!("failed to open trace {}: {error}", path.display()))
             })?;
-            // Reconstruct the `+buggify` fingerprint component from the trace so
-            // replay is self-contained; a buggify trace replayed against a
-            // non-buggify build still fails closed on the fingerprint.
+            // Reconstruct the `+buggify` and `+pct`/`+starve`/`+swarm` fingerprint
+            // components from the trace so replay is self-contained; a policy
+            // trace replayed against a plain build still fails closed on the
+            // fingerprint.
             let buggify = invocation.buggify.is_some() || trace_has_buggify(path);
+            let policy = native_policy_from_trace(path);
             command
                 .env(ENV_MODE, "replay")
                 .env(
@@ -4565,6 +4806,7 @@ fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> 
                         yield_points,
                         image_hash.as_deref(),
                         buggify,
+                        &policy,
                     ),
                 )
                 .env(ENV_TRACE_FD, PATINA_TRACE_CHANNEL_FD.to_string());
@@ -4622,7 +4864,81 @@ fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> 
         }
     }
 
-    let captured = output::execute_command(&mut command)?;
+    // Starvation stall backstop (diagnostic, NOT a liveness guarantee; armed only
+    // when starvation is enabled, so it has zero effect on any other mode). The
+    // scheduler's aging bounds starvation for interposed synchronization, but a
+    // guest spinning inside a std-internal atomic critical section — which is NOT
+    // yield-point instrumented, so cooperative scheduling has no edge to preempt
+    // it while the lock holder is starved — can livelock. A hung generation
+    // silently eats a sweep slot, so the supervisor (uninterposed, real
+    // wall-clock) converts an already-hung run into a LOUD named fatal with a
+    // distinct nonzero exit so sweeps classify STARVATION_STALL instead of
+    // hanging. The threshold is deliberately generous (default 60 real seconds,
+    // `PATINA_STARVATION_STALL_SECS` override) so it is unreachable on any healthy
+    // run; it never touches the recorded operation stream of a run that completes.
+    // The kill-able wait loop mirrors `output::execute_command`'s capture
+    // semantics (piped when the JSON envelope / render wants guest output,
+    // inherited otherwise) so `--starve` composes with `--format json`.
+    let captured = if invocation.schedule.starve.is_some() {
+        let stall_secs: u64 = std::env::var("PATINA_STARVATION_STALL_SECS")
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(60);
+        let capture = output::capture_active();
+        if capture {
+            command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        }
+        let mut child = command.spawn().map_err(|error| {
+            CliError(format!(
+                "failed to run native program {}: {error}",
+                binary.display()
+            ))
+        })?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(stall_secs);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_status)) => break,
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        eprintln!(
+                            "patina: starvation stall — no scheduler progress in {stall_secs}s under \
+--starve; the guest is likely spinning inside an uninstrumented atomic critical section (std is not \
+yield-point instrumented, so cooperative scheduling cannot preempt a spinner while the lock holder \
+is starved). This is the documented starvation limitation, not a liveness guarantee — see \
+IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
+                        );
+                        drop(trace_file);
+                        drop(image_file);
+                        return Ok(STARVATION_STALL_EXIT);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(error) => {
+                    return Err(CliError(format!(
+                        "failed while waiting on native program {}: {error}",
+                        binary.display()
+                    )));
+                }
+            }
+        }
+        let output = child.wait_with_output().map_err(|error| {
+            CliError(format!(
+                "failed while waiting on native program {}: {error}",
+                binary.display()
+            ))
+        })?;
+        output::Captured {
+            exit_code: exit_code(output.status)?,
+            stdout: output.stdout,
+            stderr: output.stderr,
+            captured: capture,
+        }
+    } else {
+        output::execute_command(&mut command)?
+    };
     drop(trace_file);
     drop(image_file);
     let (trace_path, seed) = match &invocation.mode {
@@ -4650,6 +4966,11 @@ fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> 
         captured,
     )
 }
+
+/// Distinct exit code the supervisor returns when the starvation stall backstop
+/// kills a hung `--starve` run, so a sweep can classify `STARVATION_STALL` rather
+/// than treat the run as an ordinary crash.
+const STARVATION_STALL_EXIT: i32 = 111;
 
 #[cfg(not(unix))]
 fn execute_native_run(_invocation: NativeRunInvocation) -> Result<i32, CliError> {

@@ -184,6 +184,58 @@ Honest limitation: sites register lazily at first evaluation, so a never-reached
 
 The campaign layer (`testbeds/buggify-campaign.sh`) adds two classes on top of the existing sweep classifier without changing any existing gate priority: `ALWAYS_VIOLATION` (per-gen, top severity, fires even on exit 0, never downgraded) and `SOMETIMES_UNMET` (campaign-level: a `sometimes!` site reached but never satisfied fails the campaign). Both are proven fireable — plus a not-downgraded check — by a selftest wired into `raft-harness/fuzz-sweep.sh --selftest`, and the sweep runs clean end to end (the buggify accumulation is inert for the buggify-free raft harness). A vendored, clearly-marked `redb` 4.1.0 fork (`testbeds/redb-fork`) carries real cooperative-SUT sites in its commit/recovery paths (forced 2-phase/quick-repair commits, a delay before the durability flush, two-phase/full-repair/torn-slot coverage oracles, and a quick-repair⇒2-phase invariant); a plain `cargo build` of the fork behaves exactly like upstream redb. A 350-generation dogfood campaign (`testbeds/redb-harness/buggify-sweep.sh`, fresh `out-buggify/`) exercised thousands of commit-path faults with every invariant holding and zero durability violations, and correctly reported one `SOMETIMES_UNMET` coverage gap (torn committed-slot rejection was never produced by the harness's crash geometry — a wide probe confirmed redb's two-slot commit design keeps the committed slot intact, torn data surfacing as fail-closed `OPEN_ERR`). The same campaign layer backs a WASI dogfood (`testbeds/buggify-wasi/wasi-buggify-sweep.sh`, fresh `out-wasi-buggify/`): a buggify-instrumented `wasm32-wasip1` fixture compiled through `build --target wasi`, run under per-generation-derived activation/fire with a per-generation record→replay determinism check, proving the `patina_sdk` guest path parses into the identical `PATINA_SDK_REPORT` classifier the native sweeps use.
 
+### V7: exploration tier (directed schedule/fault steering)
+
+**Partial (wave 12).** Four default-off, seed-derived exploration policies steer
+which interleavings and fault combinations a seed reaches, each recorded into the
+trace metadata, reconciled authoritatively on replay, and folded into the
+compatibility fingerprint so a policy trace fails closed against a plain build.
+The default uniform scheduler path is byte-for-byte unchanged (canonical seed-7
+sequence and every fault/buggify hash preserved).
+
+- **PCT** (`--sched-pct[=D]` / `--sched-pct-steps N`): a `DetScheduler` selection
+  policy — random task priorities plus `d-1` seed-placed priority-change points
+  that preempt the running task over yield-point boundaries. `patina-sched-det`
+  unit tests cover determinism per seed, `d=1` no-preemption, a live change point
+  actually preempting (`change_points_hit`), and the default policy reporting no
+  metrics. `patina-runtime` proves record→replay reproduces the exact selection
+  order and records the policy metadata, and that a conflicting supplied policy
+  fails closed on replay. Demonstrated end to end on `buggy-smoke`: PCT preempts
+  with `pct_change_points_hit>0` and never hangs across many seeds/depths.
+- **Swarm** (`--swarm`): a seed-derived per-class coin masks the enabled fault
+  classes to a subset (swarm testing); the masked config is what the drivers and
+  the recorded `FaultConfigRecord` consume, and a `SwarmConfigRecord` documents
+  the candidate set and selection. `patina-runtime` proves the candidate/selected
+  sets round-trip, the applied config matches the selection, and subsets vary
+  across seeds. `patina-trace` covers the additive `swarm` and `schedule_policy`
+  metadata round-trips and their absence from a plain trace.
+- **Starvation intervals** (`--starve[=N]` / `--starve-max-len M` /
+  `--starve-window W`): bounded seed-chosen intervals not scheduling a residue
+  subset. Liveness is guaranteed at the scheduler level by *aging* — a per-task
+  consecutive-skip cap force-schedules a deferred task, proven by
+  `starvation_aging_bounds_consecutive_skips_guaranteeing_liveness`; a
+  would-starve-everyone step falls back and warns (`starve_vacuous`).
+  **Documented native-shim limitation:** an uninstrumented atomic critical
+  section (std's queue `RwLock`/`Parker` fast path — std is not yield-point
+  instrumented, so a spinner reaches no yield edge) can livelock under adversarial
+  deferral. Mitigations: a loud `PATINA WARNING` on non-`--yield-points` builds; a
+  supervisor wall-clock **stall backstop** armed only under `--starve` (default
+  60 s, `PATINA_STARVATION_STALL_SECS`) that kills an already-hung run with a
+  named `patina: starvation stall` fatal and a distinct exit `111`, classified as
+  `STARVATION_STALL` (a fuzz-sweep `--selftest` case); and starvation kept OPT-IN
+  in the sweep (`PATINA_SWEEP_STARVE=1`) so the always-on canary never wedges.
+- **Bug-depth metrics**: an active policy emits a machine-readable
+  `PATINA_SCHEDULE_POLICY` stderr line (`SchedulerDriver::policy_report`) carrying
+  a `bug_depth` estimate (priority-change points hit + starvation exclusions),
+  which `fuzz-sweep.sh` parses into a per-generation `policy(<mode> bug_depth=N)`
+  annotation extending the `life=`/`cause=` scheme. The `--selftest` covers the
+  `PATINA_SCHEDULE_POLICY` field parsing and vacuous-starvation detection.
+
+The fuzz-sweep SCHEDULE tier gains a seed-derived PCT overlay (starvation
+opt-in) on the yield-points binary; the BREADTH/TRAFFIC tiers gain a seed-derived
+`--swarm` overlay when ≥2 fault classes are enabled. All new `--selftest` cases
+pass; the raft seed-7 canonical `applied_hash` is unchanged.
+
 ## Trace oracle
 
 A valid `.patina` bundle has:

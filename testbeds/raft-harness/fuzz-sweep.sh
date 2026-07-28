@@ -133,6 +133,15 @@ $err"
     echo ALWAYS_VIOLATION; return
   fi
 
+  # 0b. A starvation stall backstop trip (opt-in --starve path only): the
+  #     supervisor killed an already-hung run whose guest was spinning inside an
+  #     uninstrumented atomic critical section. Classified DISTINCTLY as a
+  #     diagnostic (a wedged generation, not a raft/patina safety bug) so a sweep
+  #     records it instead of hanging. The marker never appears on any other mode.
+  if printf '%s' "$combined" | grep -q 'patina: starvation stall'; then
+    echo STARVATION_STALL; return
+  fi
+
   # 1. A safety violation is ALWAYS a bug, regardless of exit code (a planted
   #    RAFT_VIOLATION on exit 0 must still be SAFETY_BUG -- this is what proves
   #    the detector is not vacuous).
@@ -465,12 +474,38 @@ sample_schedule() {
   PKNOBS=(--seed "$G")
   (( drop > 0 )) && PKNOBS+=(--net-drop-permille "$drop")
 
+  # Exploration scheduling-policy overlay: a seed-derived choice between the
+  # default uniform policy and PCT (Probabilistic Concurrency Testing -- random
+  # priorities + d-1 priority-change points that preempt the running task). Both
+  # run on the yield-points binary, so scheduling boundaries stay dense; the
+  # policy steers WHICH interleavings the seed reaches. The policy is recorded
+  # into the trace metadata and folded into the fingerprint (+pct), so a policy
+  # trace fails closed against a plain build.
+  #
+  # Starvation intervals are an OPT-IN overlay (PATINA_SWEEP_STARVE=1), NOT on by
+  # default: adversarial deferral can drive an atomic-spinlock guest (e.g. a std
+  # queue `RwLock`) into a mutual-spin livelock even under the scheduler's aging
+  # liveness guarantee, so enabling it in the always-on canary risks a spurious
+  # non-terminating generation. It is fully wired for deliberate starvation
+  # campaigns; see IMPLEMENTATION.md. When enabled, a third of the policy slots
+  # place starvation intervals instead of PCT.
+  POLICY_SPEC="uniform"
+  local policy_modes=3
+  [[ "${PATINA_SWEEP_STARVE:-0}" == 1 ]] && policy_modes=4
+  case $(( BYTE[22] % policy_modes )) in
+    0) POLICY_SPEC="uniform" ;;
+    1|2) local pdepth=$(( 2 + BYTE[23] % 4 ))        # bug depth d in 2..5
+       PKNOBS+=(--sched-pct="$pdepth"); POLICY_SPEC="pct(d=$pdepth)" ;;
+    3) local sivals=$(( 1 + BYTE[23] % 3 ))          # 1..3 starvation intervals
+       PKNOBS+=(--starve="$sivals"); POLICY_SPEC="starve(intervals=$sivals)" ;;
+  esac
+
   HARGS=(--seed "$G" --proposals "$PROPOSALS" --base-port "$BASE_PORT"
          --data-dir "$DATA_DIR" --timeout-secs "$timeout" --tick-millis "$tick")
 
   HEAVY=0    # no heavy faults in the schedule plane -> a timeout is never honest
 
-  CFG_SUMMARY="seed=$G drop=$drop jitter=off sleep=off fscrash=off recover=0 kill=off proposals=$PROPOSALS tick=$tick timeout=${timeout}s heavy=0 plane=SCHEDULE(yield-points)"
+  CFG_SUMMARY="seed=$G drop=$drop jitter=off sleep=off fscrash=off recover=0 kill=off proposals=$PROPOSALS tick=$tick timeout=${timeout}s heavy=0 plane=SCHEDULE(yield-points) policy=$POLICY_SPEC"
 }
 
 # Pick the tier for G and sample it. The SCHEDULE overlay is gated on BYTE[21]
@@ -484,6 +519,9 @@ derive_config() {
   DET_RUN=0
   IS_SCHEDULE=0
   BIN="$built"
+  # Reset per-gen overlay descriptors so a previous gen never leaks into the log.
+  POLICY_SPEC="uniform"
+  SWARM_SPEC="off"
   if (( BYTE[21] <= 50 )); then     # ~20% SCHEDULE overlay (preserves the
     TIER=SCHEDULE; sample_schedule "$G"   # BYTE[18] mapping for the other ~80%)
     return
@@ -500,6 +538,25 @@ derive_config() {
       1) TIER="DETERMINISM/traffic"; sample_traffic "$G" ;;
       2) TIER="DETERMINISM/schedule"; sample_schedule "$G" ;;
     esac
+  fi
+  # Swarm fault-class-selection overlay (fault tiers only): when >= 2 fault
+  # classes are enabled, a seed-derived ~1/4 of gens apply a random subset of
+  # them (swarm testing) instead of always-all, recorded + fingerprinted
+  # (+swarm). The always-all default is preserved for the rest, so existing
+  # behavior stays available. The SCHEDULE tier is skipped (it isolates the
+  # interleaving plane with faults near-off).
+  if [[ "$TIER" == BREADTH || "$TIER" == TRAFFIC* || "$TIER" == DETERMINISM/breadth || "$TIER" == DETERMINISM/traffic ]]; then
+    local nfault=0 k
+    for k in "${PKNOBS[@]}"; do
+      case "$k" in
+        --net-drop-permille|--net-jitter-nanos|--sleep-jitter-nanos|--fs-crash-at) (( nfault++ )) ;;
+      esac
+    done
+    if (( nfault >= 2 && BYTE[25] < 64 )); then
+      PKNOBS+=(--swarm)
+      SWARM_SPEC="on(candidates=$nfault)"
+      CFG_SUMMARY="$CFG_SUMMARY swarm=$SWARM_SPEC"
+    fi
   fi
 }
 
@@ -533,6 +590,18 @@ selftest() {
   assert_class OK \
     "$(classify 0 20 20 0 0 0 "$ok_stdout" "$clean_stderr
 $vacuous_warn")" "ok-vacuous-warn"
+
+  # STARVATION_STALL: the supervisor's stall backstop killed a wedged --starve run
+  # (distinct exit 111 + named fatal). Classified as a diagnostic, distinct from a
+  # crash, and NOT masked by the exit code -- so an opt-in starvation campaign
+  # records a hung generation instead of hanging or misfiling it.
+  assert_class STARVATION_STALL \
+    "$(classify 111 '' '' 0 0 0 '' 'patina: starvation stall — no scheduler progress in 60s under --starve; the guest is likely spinning inside an uninstrumented atomic critical section')" \
+    "starvation-stall"
+  # It must win over a would-be crash/liveness verdict on the same run.
+  assert_class STARVATION_STALL \
+    "$(classify 1 '' '' 0 0 0 '' 'patina: starvation stall — no scheduler progress in 60s')" \
+    "starvation-stall-not-liveness"
 
   # SAFETY_BUG: a planted RAFT_VIOLATION on exit 0 with committed==proposals
   # must STILL be a safety bug (this is the non-vacuous proof).
@@ -667,6 +736,38 @@ $vacuous_warn")" "ok-vacuous-warn"
   fi
   assert_class OK "$(sched_check 1 OK "$rf_vac" "$rf_tb")" "report-field-nonvacuous"
   rm -f "$sched_stderr_file"
+
+  # Exploration-policy report parsing: the runtime's PATINA_SCHEDULE_POLICY line
+  # carries the bug-depth estimate and the vacuous-starvation counter that the
+  # per-gen annotation reads. Prove report_field pulls the right values -- the
+  # bug_depth (priority-change points hit + starvation exclusions) and a
+  # would-starve-everyone vacuous count -- and that neither collides with the
+  # PATINA_SCHEDULE_REPORT numbers on the same stderr.
+  local policy_stderr_file; policy_stderr_file="$(mktemp)"
+  printf '%s\n%s\n' \
+    'PATINA_SCHEDULE_REPORT tasks_spawned=4 max_concurrent=4 total_boundaries=110574 vacuous_threads=0' \
+    'PATINA_SCHEDULE_POLICY pct=1 pct_depth=3 pct_change_points=2 pct_change_points_hit=2 starvation=0 starve_events=0 starve_vacuous=0 decisions=90 bug_depth=2' \
+    > "$policy_stderr_file"
+  local rf_bd rf_sv rf_tb2
+  rf_bd=$(report_field bug_depth "$policy_stderr_file")
+  rf_sv=$(report_field starve_vacuous "$policy_stderr_file")
+  rf_tb2=$(report_field total_boundaries "$policy_stderr_file")
+  if [[ "$rf_bd" == 2 && "$rf_sv" == 0 && "$rf_tb2" == 110574 ]]; then
+    printf '  ok   %-20s -> bug_depth=%s starve_vacuous=%s tb=%s\n' "policy-field-parse" "$rf_bd" "$rf_sv" "$rf_tb2"
+  else
+    printf '  FAIL %-20s -> bug_depth=%s starve_vacuous=%s tb=%s (want 2/0/110574)\n' "policy-field-parse" "$rf_bd" "$rf_sv" "$rf_tb2"; SELFTEST_FAIL=1
+  fi
+  # A vacuous-starvation report is detectable (nonzero starve_vacuous).
+  printf '%s\n' \
+    'PATINA_SCHEDULE_POLICY pct=0 pct_depth=0 pct_change_points=0 pct_change_points_hit=0 starvation=1 starve_events=12 starve_vacuous=7 decisions=40 bug_depth=12' \
+    > "$policy_stderr_file"
+  local rf_sv2; rf_sv2=$(report_field starve_vacuous "$policy_stderr_file")
+  if [[ -n "$rf_sv2" && "$rf_sv2" -gt 0 ]]; then
+    printf '  ok   %-20s -> starve_vacuous=%s\n' "vacuous-starvation" "$rf_sv2"
+  else
+    printf '  FAIL %-20s -> starve_vacuous=%s (want >0)\n' "vacuous-starvation" "$rf_sv2"; SELFTEST_FAIL=1
+  fi
+  rm -f "$policy_stderr_file"
 
   # Marker precision: an infrastructure "cargo-patina: ..." line must NOT be
   # matched as a patina runtime crash (the bare "patina: " used to false-match
@@ -968,12 +1069,29 @@ run_gen() {
     fi
   fi
 
+  # Bug-depth annotation (exploration-policy tiers). When a PCT/starvation policy
+  # was active, surface the ordering-depth estimate the runtime reported on its
+  # PATINA_SCHEDULE_POLICY line (priority-change points hit + starvation
+  # exclusions). This is most load-bearing on a FAILURE: it estimates how deep an
+  # interleaving the failing schedule required, extending the life=/cause=
+  # annotation scheme. A vacuous starvation configuration (would-starve-everyone)
+  # is surfaced loudly.
+  local policy_note="" bd sv
+  bd=$(report_field bug_depth "$err")
+  sv=$(report_field starve_vacuous "$err")
+  if [[ -n "$bd" ]]; then
+    policy_note=" policy(${POLICY_SPEC:-?} bug_depth=$bd"
+    if [[ -n "$sv" && "$sv" -gt 0 ]]; then
+      policy_note+=" starve_vacuous=$sv VACUOUS_STARVATION"
+    fi
+    policy_note+=")"
+  fi
   bump "$class"
   # Accumulate this gen's cooperative-SUT coverage (inert when the guest emits no
   # PATINA_SDK_REPORT, as the raft harness does today). Checked for unmet
   # sometimes-sites at sweep end.
   campaign_accumulate "$CAMPAIGN_STATE" "$(sdk_report_line "$err")"
-  local logline="gen=$G tier=$TIER class=$class exit=$code committed=${committed:-?}/${proposals:-?} terms=${terms:-?} restarts=${restarts:-0} config='$CFG_SUMMARY'$live_note$det_note$sched_note"
+  local logline="gen=$G tier=$TIER class=$class exit=$code committed=${committed:-?}/${proposals:-?} terms=${terms:-?} restarts=${restarts:-0} config='$CFG_SUMMARY'$live_note$det_note$sched_note$policy_note"
   echo "$logline" >> "$SWEEP_LOG"
   echo "$logline"
 
