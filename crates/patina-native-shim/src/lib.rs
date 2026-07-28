@@ -429,6 +429,11 @@ mod hostapi {
     pub type StartRoutine = extern "C" fn(*mut c_void) -> *mut c_void;
     pub type HostPthreadCreate =
         unsafe extern "C" fn(*mut *mut c_void, *const c_void, StartRoutine, *mut c_void) -> c_int;
+    // The real glibc `pthread_join`, used to reap a completed worker's host thread
+    // at the managed-join point so the worker's std `Arc<thread::Inner>` reference
+    // is dropped BEFORE the joiner returns — making the joiner's own drop the
+    // deterministic last reference (see `patina_thread_join`).
+    pub type HostPthreadJoin = unsafe extern "C" fn(*mut c_void, *mut *mut c_void) -> c_int;
 
     /// Real host vehicles resolved once through `__real_dlsym(RTLD_NEXT, ...)`.
     /// None of these names appears as an undefined external in the shim objects.
@@ -455,6 +460,9 @@ mod hostapi {
         /// and — like `read`/`write`/`sem_*` — keeps `pthread_create` off the
         /// guest import table entirely (no `--wrap`, no named residue).
         pub host_pthread_create: HostPthreadCreate,
+        /// The real glibc `pthread_join` for reaping completed worker host
+        /// threads deterministically at the managed-join point.
+        pub host_pthread_join: HostPthreadJoin,
     }
 
     // SAFETY: the fields are function pointers into glibc; sharing them across
@@ -492,6 +500,9 @@ mod hostapi {
                 host_pthread_create: std::mem::transmute::<*mut c_void, HostPthreadCreate>(
                     resolve(c"pthread_create"),
                 ),
+                host_pthread_join: std::mem::transmute::<*mut c_void, HostPthreadJoin>(resolve(
+                    c"pthread_join",
+                )),
             }
         }
     }
@@ -2058,6 +2069,35 @@ pub extern "C" fn patina_note_main_returned() {
     thread::note_main_returned();
 }
 
+/// Linux interposer-engagement canary. `patina_finalize_atexit` (patina_posix.c)
+/// calls this from the `atexit` hook, which glibc runs AFTER the thread-local
+/// destructors on every exit-chain path that reaches it. On Linux the teardown
+/// flag MUST already be set by then — the natural `main` return sets it through
+/// the `__libc_start_main` wrapper, and an explicit `exit(3)`/`std::process::exit`
+/// through the `exit` interposer. `_exit`/`_Exit`/`abort` skip `atexit` entirely,
+/// so they never reach this. If the flag is UNSET here, the teardown interposer
+/// did not engage on this platform/toolchain (e.g. an unversioned strong def
+/// failing to interpose a versioned crt reference), which means the root task's
+/// `--yield-points` teardown yields were NOT silenced and record/replay would
+/// diverge. Fail LOUDLY and named rather than let that miss surface hours later as
+/// an unexplained op-count divergence. Darwin is excluded by design: its natural
+/// path keeps libSystem's own `exit` (two-level namespace), so the flag is not set
+/// there and Darwin teardown is already deterministic.
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_assert_teardown_engaged() {
+    if !thread::main_returned() {
+        let _ = host_write_all(
+            2,
+            b"patina native shim fatal: teardown interposer did not engage -- main-return \
+silencing is not active on this platform/toolchain (neither the __libc_start_main wrapper nor the \
+exit interposer set the teardown flag before atexit); --yield-points teardown determinism is not \
+guaranteed\n",
+        );
+        std::process::abort();
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_crash() -> c_int {
     match with_context(Context::fs_crash) {
@@ -3532,6 +3572,9 @@ mod thread {
         let retval = match state.begin_join(me, target) {
             Ok(JoinResolve::Ready(retval)) => {
                 state.handles.remove(&key);
+                // Release the state lock before the host reap below so the
+                // worker's exit never contends with a lock this thread holds.
+                drop(state);
                 retval
             }
             Ok(JoinResolve::Blocked(Step::Switch(picked))) => {
@@ -3545,6 +3588,27 @@ mod thread {
             }
             Err(error) => return error.into_posix(),
         };
+        // The managed join is complete (the worker's task has exited the
+        // scheduler). Now REAP the real host thread so the worker fully unwinds
+        // before we return: std drops the worker's `Arc<thread::Inner>` in a
+        // thread-local destructor as the host thread exits, and if that drop
+        // races the joiner's own `Arc<Inner>` drop (std's `JoinInner` cleanup,
+        // which runs right after this returns), whichever is the LAST reference
+        // takes the acquire-fence + destructor slow path — so under
+        // `--yield-points` the joiner records a host-timing-dependent number of
+        // scheduling points (the op-742/12623 x86 divergence). Joining here forces
+        // the worker to drop its reference first, so the joiner's drop is
+        // deterministically the last reference on every run and every host thread
+        // that reaches this. The worker's own teardown runs on a
+        // task-completed-silenced thread, so it records nothing; the join adds no
+        // instrumented guest edges. Linux only: Darwin is already deterministic
+        // here (its thread-exit ordering does not manifest the race) and stays
+        // byte-for-byte untouched.
+        #[cfg(target_os = "linux")]
+        // SAFETY: `handle` is the real joinable host `pthread_t` returned by
+        // `patina_thread_create`; the state lock is released above so the worker's
+        // exit cannot deadlock against a lock this thread holds.
+        let _ = unsafe { (crate::hostapi::get().host_pthread_join)(handle, core::ptr::null_mut()) };
         if !retval_out.is_null() {
             // SAFETY: `retval_out` was checked non-null and is writable.
             unsafe { retval_out.write(retval as *mut c_void) };

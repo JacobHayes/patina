@@ -2218,6 +2218,20 @@ int _NSGetExecutablePath(char *buf, uint32_t *bufsize) {
  * private snapshot accessor before scrubbing environ for guest code.
  */
 static void patina_finalize_atexit(void) {
+#ifdef __linux__
+    /*
+     * Interposer-engagement canary. This atexit hook runs AFTER the thread-local
+     * destructors on every exit-chain path that reaches it, so on Linux the
+     * teardown flag MUST already be set (natural return via the __libc_start_main
+     * wrapper, explicit exit via the `exit` interposer). If it is not, the
+     * teardown interposer did not engage on this platform/toolchain and the root
+     * task's --yield-points teardown yields were not silenced: fail LOUDLY here
+     * (before finalizing the trace) rather than let the miss surface later as an
+     * op-count divergence. `_exit`/`_Exit`/`abort` skip atexit, so a genuinely
+     * abrupt exit never reaches this check.
+     */
+    patina_assert_teardown_engaged();
+#endif
     patina_shutdown();
 }
 

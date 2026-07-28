@@ -57,6 +57,15 @@ _Noreturn void patina_exit(int32_t status);
  * interposer cannot see (glibc calls `exit` through a hidden internal alias).
  */
 void patina_note_main_returned(void);
+#ifdef __linux__
+/*
+ * Linux interposer-engagement canary, called from the atexit finalizer. Aborts
+ * loudly if the post-`main` teardown flag was never set by the time atexit runs
+ * (i.e. neither the __libc_start_main wrapper nor the `exit` interposer engaged),
+ * so an interposition miss is a one-line fatal instead of a later op divergence.
+ */
+void patina_assert_teardown_engaged(void);
+#endif
 /*
  * Flush captured stdout/stderr to the real host descriptors WITHOUT finalizing
  * the run (unlike patina_shutdown). The process-class deny-traps call this
