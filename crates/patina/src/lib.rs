@@ -121,7 +121,14 @@ pub fn is_simulated() -> bool {
         // Authoritative: ask the linked shim whether the runtime is installed.
         unsafe { ffi::patina_is_simulated() != 0 }
     }
-    #[cfg(all(patina, not(patina_shim)))]
+    #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
+    {
+        // Authoritative: ask the WASI host through the `patina_sdk` import. Under
+        // a foreign (non-Patina) wasip1 runtime this import is unresolved and the
+        // module cannot instantiate, so a `true` here always reflects a real host.
+        unsafe { wasm_ffi::is_simulated() != 0 }
+    }
+    #[cfg(all(patina, not(patina_shim), not(target_arch = "wasm32")))]
     {
         true
     }
@@ -132,15 +139,20 @@ pub fn is_simulated() -> bool {
 }
 
 /// A deterministic 64-bit draw. Under Patina it is bridged to the run's root
-/// seed; outside Patina it is a plainly-seeded fallback stream. This is the hook
-/// property-based testing (a later wave) will build on.
+/// seed (through the native shim, or the WASI `patina_sdk` host import); outside
+/// Patina it is a plainly-seeded fallback stream. This is the hook property-based
+/// testing (a later wave) will build on.
 #[inline]
 pub fn rng() -> u64 {
     #[cfg(patina_shim)]
     {
         unsafe { ffi::patina_rng() }
     }
-    #[cfg(not(patina_shim))]
+    #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
+    {
+        unsafe { wasm_ffi::rng() }
+    }
+    #[cfg(all(not(patina_shim), not(all(patina, target_arch = "wasm32"))))]
     {
         fallback::next()
     }
@@ -178,7 +190,19 @@ pub mod __rt {
                 ) != 0
             }
         }
-        #[cfg(not(patina_shim))]
+        #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
+        {
+            unsafe {
+                super::wasm_ffi::buggify(
+                    label.as_ptr(),
+                    label.len(),
+                    site.as_ptr(),
+                    site.len(),
+                    prob_permille,
+                ) != 0
+            }
+        }
+        #[cfg(all(not(patina_shim), not(all(patina, target_arch = "wasm32"))))]
         {
             let _ = (label, site, prob_permille);
             false
@@ -199,7 +223,18 @@ pub mod __rt {
                 ) != 0
             }
         }
-        #[cfg(not(patina_shim))]
+        #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
+        {
+            unsafe {
+                super::wasm_ffi::buggify_delay(
+                    label.as_ptr(),
+                    label.len(),
+                    site.as_ptr(),
+                    site.len(),
+                ) != 0
+            }
+        }
+        #[cfg(all(not(patina_shim), not(all(patina, target_arch = "wasm32"))))]
         {
             let _ = (label, site);
             false
@@ -223,7 +258,21 @@ pub mod __rt {
                 )
             }
         }
-        #[cfg(not(patina_shim))]
+        #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
+        {
+            unsafe {
+                super::wasm_ffi::buggify_knob(
+                    label.as_ptr(),
+                    label.len(),
+                    site.as_ptr(),
+                    site.len(),
+                    default,
+                    lo,
+                    hi,
+                )
+            }
+        }
+        #[cfg(all(not(patina_shim), not(all(patina, target_arch = "wasm32"))))]
         {
             let _ = (label, site, lo, hi);
             default
@@ -247,7 +296,22 @@ pub mod __rt {
                 );
             }
         }
-        #[cfg(all(patina, not(patina_shim)))]
+        #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
+        {
+            // Host-authoritative: on a violation the WASI host emits the
+            // `PATINA_ALWAYS_VIOLATION` marker and traps the guest, so this import
+            // does not return when `condition` is false.
+            unsafe {
+                super::wasm_ffi::always(
+                    i32::from(condition),
+                    label.as_ptr(),
+                    label.len(),
+                    site.as_ptr(),
+                    site.len(),
+                );
+            }
+        }
+        #[cfg(all(patina, not(patina_shim), not(target_arch = "wasm32")))]
         {
             let _ = site;
             assert!(condition, "patina always! invariant violated: {label}");
@@ -274,7 +338,19 @@ pub mod __rt {
                 );
             }
         }
-        #[cfg(not(patina_shim))]
+        #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
+        {
+            unsafe {
+                super::wasm_ffi::sometimes(
+                    i32::from(condition),
+                    label.as_ptr(),
+                    label.len(),
+                    site.as_ptr(),
+                    site.len(),
+                );
+            }
+        }
+        #[cfg(all(not(patina_shim), not(all(patina, target_arch = "wasm32"))))]
         {
             let _ = (condition, label, site);
         }
@@ -294,7 +370,13 @@ pub mod __rt {
                 );
             }
         }
-        #[cfg(not(patina_shim))]
+        #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
+        {
+            unsafe {
+                super::wasm_ffi::reachable(label.as_ptr(), label.len(), site.as_ptr(), site.len());
+            }
+        }
+        #[cfg(all(not(patina_shim), not(all(patina, target_arch = "wasm32"))))]
         {
             let _ = (label, site);
         }
@@ -309,7 +391,13 @@ pub mod __rt {
                 super::ffi::patina_lifecycle_event(label.as_ptr(), label.len());
             }
         }
-        #[cfg(not(patina_shim))]
+        #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
+        {
+            unsafe {
+                super::wasm_ffi::lifecycle_event(label.as_ptr(), label.len());
+            }
+        }
+        #[cfg(all(not(patina_shim), not(all(patina, target_arch = "wasm32"))))]
         {
             let _ = label;
         }
@@ -322,6 +410,12 @@ pub mod __rt {
         {
             unsafe {
                 super::ffi::patina_lifecycle_setup_complete();
+            }
+        }
+        #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
+        {
+            unsafe {
+                super::wasm_ffi::lifecycle_setup_complete();
             }
         }
     }
@@ -389,10 +483,71 @@ mod ffi {
     }
 }
 
-/// Plainly-seeded fallback entropy for [`rng`] outside a Patina build. A
-/// process-local SplitMix64 with a fixed seed, so it is reproducible without
-/// contacting any host source.
-#[cfg(not(patina_shim))]
+/// WASI import surface for the SDK, mirroring the native shim's C ABI. Present
+/// only under a Patina wasm build (`cfg(patina)` without the native shim), so a
+/// plain `cargo build --target wasm32-wasip1` of an adopter references none of
+/// these symbols and its import table stays free of `patina_sdk`. The host side
+/// (`patina-wasi-host`) defines the `patina_sdk` module against the same
+/// deterministic runtime the shim uses; `patina-target`'s WASI audit allowlists
+/// exactly these ten names. `usize`/`*const u8` lower to wasm `i32`, matching the
+/// host's `func_wrap` signatures.
+#[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
+mod wasm_ffi {
+    #[link(wasm_import_module = "patina_sdk")]
+    unsafe extern "C" {
+        pub fn is_simulated() -> i32;
+        pub fn buggify(
+            label: *const u8,
+            label_len: usize,
+            site: *const u8,
+            site_len: usize,
+            prob_permille: i32,
+        ) -> i32;
+        pub fn buggify_delay(
+            label: *const u8,
+            label_len: usize,
+            site: *const u8,
+            site_len: usize,
+        ) -> i32;
+        pub fn buggify_knob(
+            label: *const u8,
+            label_len: usize,
+            site: *const u8,
+            site_len: usize,
+            default_value: i64,
+            lo: i64,
+            hi: i64,
+        ) -> i64;
+        pub fn always(
+            condition: i32,
+            label: *const u8,
+            label_len: usize,
+            site: *const u8,
+            site_len: usize,
+        ) -> i32;
+        pub fn sometimes(
+            condition: i32,
+            label: *const u8,
+            label_len: usize,
+            site: *const u8,
+            site_len: usize,
+        ) -> i32;
+        pub fn reachable(
+            label: *const u8,
+            label_len: usize,
+            site: *const u8,
+            site_len: usize,
+        ) -> i32;
+        pub fn rng() -> u64;
+        pub fn lifecycle_setup_complete() -> i32;
+        pub fn lifecycle_event(label: *const u8, label_len: usize) -> i32;
+    }
+}
+
+/// Plainly-seeded fallback entropy for [`rng`] outside a Patina build (and for a
+/// non-wasm Patina build without the shim). A process-local SplitMix64 with a
+/// fixed seed, so it is reproducible without contacting any host source.
+#[cfg(all(not(patina_shim), not(all(patina, target_arch = "wasm32"))))]
 mod fallback {
     use std::cell::Cell;
 

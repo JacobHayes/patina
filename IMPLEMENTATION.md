@@ -145,7 +145,7 @@ Completed foundations:
 
 Remaining: nothing for this slice's current scope; broader hardening items live in VALIDATION.md.
 
-## Slice 6: cooperative-SUT SDK — Partial (Milestone A)
+## Slice 6: cooperative-SUT SDK — Partial (Milestone C)
 
 Acceptance level: V6 is not complete.
 
@@ -187,11 +187,19 @@ Completed foundations (Milestone A):
    the trace, so a buggify trace never cross-replays with a non-buggify build.
 5. **`run --buggify[=permille]`** plus `--buggify-activation-permille`,
    `--buggify-cutoff-nanos`, and `--buggify-after-setup`, passed to the guest
-   through the `PATINA_BUGGIFY*` control plane and recorded into the trace.
-   `build` injects an internal
-   `--cfg patina_shim` (only on the shim-linked native paths, never on
-   `run`/`test`/`build --target wasi`) so the SDK's shim FFI is referenced only where those
-   symbols resolve.
+   through the `PATINA_BUGGIFY*` control plane and recorded into the trace. The
+   SDK reaches the runtime through two build-selected transports, both resolving
+   to the *same* `patina-runtime` buggify subsystem. On native, `build` injects an
+   internal `--cfg patina_shim` (only on the shim-linked native paths) so the
+   SDK's shim C ABI is referenced only where those symbols resolve. On WASI,
+   `build --target wasi` injects `--cfg patina` (no `patina_shim`), under which the
+   SDK lowers to a dedicated `patina_sdk` wasm import module (`buggify`,
+   `buggify_delay`, `buggify_knob`, `always`, `sometimes`, `reachable`, `rng`,
+   `is_simulated`, `lifecycle_setup_complete`, `lifecycle_event`) that
+   `patina-wasi-host` defines against the runtime. Without `cfg(patina)` — a plain
+   `cargo build --target wasm32-wasip1` — the sites stay no-ops and the guest's
+   import table grows *no* `patina_sdk` reference (proven by wasm inspection in a
+   test), so adopters pay nothing.
 6. **`PATINA_SDK_REPORT`** — one machine-parseable stderr line per run:
    registered/activated/fired counts, cutoff state, and per-site
    `sometimes`/`reachable` coverage and knob values, in the spirit of
@@ -242,6 +250,48 @@ Completed foundations (Milestone B):
     kept the committed slot intact under the crash geometry; torn data surfaced as
     fail-closed `OPEN_ERR` instead), which the campaign reports as a coverage gap
     with a nonzero exit exactly as specified.
+
+Completed foundations (Milestone C — buggify on WASI):
+
+12. **`patina_sdk` wasm import module.** The full cooperative-SUT surface reaches
+    a `wasm32-wasip1` guest at parity with native. The `patina` crate's macros
+    lower, under `cfg(patina)` on wasm, to imports from a dedicated `patina_sdk`
+    module; `patina-wasi-host` defines that module against the **same**
+    `patina-runtime` buggify subsystem the native shim drives (activation, the
+    counter-keyed firing PRF, the labels registry, the 300-virtual-second cutoff,
+    the diagnostics report, and the lifecycle markers are reused, not
+    reimplemented). `patina-target`'s WASI audit allowlists exactly the ten
+    `patina_sdk` names alongside the Preview 1 surface. The fatal outcomes mirror
+    the native shim: an `always!` violation and a duplicate label emit their
+    markers (`PATINA_ALWAYS_VIOLATION` / `PATINA_BUGGIFY_DUPLICATE_LABEL`) to the
+    real process stderr and trap the guest, and the `--buggify-after-setup` gate
+    emits `PATINA_BUGGIFY_SETUP_NEVER_CALLED` at finish. `patina::rng()` routes
+    through the host's `buggify_rng` draw (the seed-bridged buggify entropy
+    stream), not the WASI `random_get` entropy, so it is not double-plumbed.
+13. **CLI + fingerprint parity.** `cargo patina run <mod.wasm>` accepts
+    `--buggify[=permille]`, `--buggify-activation-permille`, `--buggify-cutoff-nanos`,
+    and `--buggify-after-setup`, applied to the in-process runtime through the
+    shared `apply_buggify_env` accessor (the same path the fault knobs take). The
+    buggify configuration records into the trace metadata (`BuggifyConfigRecord`)
+    and is restored on a flag-free `replay`; enabling buggify folds a `+buggify`
+    component into the WASI compatibility fingerprint (conditional, so a
+    non-buggify run fingerprints unchanged), reconciled on replay from the trace,
+    so a buggify trace never cross-replays with a plain one. `replay` refuses a
+    re-supplied `--buggify` — the trace is authoritative.
+14. **Sleep-jitter on WASI.** `Preview1Host::sleep_until` applies the seeded
+    sleep-latency jitter at the single guest-facing sleep entry (which also backs
+    `poll_oneoff` clock timeouts), so `--sleep-jitter-nanos` is now honored on a
+    WASI `run` (the Milestone-B native-only rejection is removed). The draw is
+    owned by the deterministic context, so a jittered run reproduces byte-for-byte
+    on replay.
+15. **WASI dogfood.** A buggify-instrumented `wasm32-wasip1` fixture
+    (`testbeds/buggify-wasi`, several site kinds + a plantable `always!` violation)
+    compiled through `build --target wasi` proves the full guest-side lowering:
+    sites register and fire under `--buggify`, `PATINA_SDK_REPORT` is emitted and
+    parseable by the shared `testbeds/buggify-campaign.sh`, record/replay is
+    byte-identical, and cross-seed firing varies. `wasi-buggify-sweep.sh` runs a
+    deterministic campaign (per-gen derived activation/fire, per-gen record→replay
+    determinism check, fresh `out-wasi-buggify/` dir) reusing the campaign layer.
 
 ## Dependency order
 

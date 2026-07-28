@@ -59,6 +59,33 @@ pub const SUPPORTED_PREVIEW1_IMPORTS: &[&str] = &[
     "sock_shutdown",
 ];
 
+/// The cooperative-SUT SDK import module a patina-built wasm guest links
+/// against (the wasm mirror of the native shim's C ABI).
+pub const PATINA_SDK_MODULE: &str = "patina_sdk";
+
+/// SDK imports implemented by the deterministic WASI host. Allowlisted
+/// UNCONDITIONALLY (not gated on `--buggify`): the import surface is a
+/// link-time fact of a patina-built module, while whether buggify fires is a
+/// run-time decision — sites are inert when disabled, mirroring native. The
+/// security posture of the audit is unchanged: this module's effect surface is
+/// a strict subset of what preview1 already grants (`rng` is the same seeded
+/// entropy as `random_get`; every other function only mutates sandboxed SDK
+/// state — site registries, assertion counters, lifecycle marks — with no
+/// host effect). A module built without `cfg(patina)` carries none of these
+/// imports.
+pub const SUPPORTED_PATINA_SDK_IMPORTS: &[&str] = &[
+    "buggify",
+    "buggify_delay",
+    "buggify_knob",
+    "always",
+    "sometimes",
+    "reachable",
+    "is_simulated",
+    "rng",
+    "lifecycle_setup_complete",
+    "lifecycle_event",
+];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WasmImport {
     pub module: String,
@@ -827,12 +854,16 @@ impl WasiAudit {
                 }
             }
         }
+        fn import_is_supported(import: &WasmImport) -> bool {
+            match import.module.as_str() {
+                WASI_PREVIEW1_MODULE => SUPPORTED_PREVIEW1_IMPORTS.contains(&import.name.as_str()),
+                PATINA_SDK_MODULE => SUPPORTED_PATINA_SDK_IMPORTS.contains(&import.name.as_str()),
+                _ => false,
+            }
+        }
         let unsupported = imports
             .iter()
-            .filter(|import| {
-                import.module != WASI_PREVIEW1_MODULE
-                    || !SUPPORTED_PREVIEW1_IMPORTS.contains(&import.name.as_str())
-            })
+            .filter(|import| !import_is_supported(import))
             .cloned()
             .collect::<Vec<_>>();
         if !unsupported.is_empty() {

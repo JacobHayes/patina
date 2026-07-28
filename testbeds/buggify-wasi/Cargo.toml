@@ -1,0 +1,29 @@
+# Standalone package: its own empty [workspace] table keeps it OUT of the root
+# Patina workspace so `cargo` here never touches crates/ or the root manifest.
+# Built to wasm32-wasip1 via `cargo patina build --target wasi` (which injects
+# `--cfg patina --cfg dst`, routing the SDK macros through the `patina_sdk`
+# imports) and driven by `cargo patina run`. A plain `cargo build --target
+# wasm32-wasip1` (no cfg) leaves every SDK macro a no-op with zero `patina_sdk`
+# imports — the no-import-leakage contract this fixture also proves.
+[workspace]
+
+[package]
+name = "buggify-wasi-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "buggify-wasi-fixture"
+path = "src/main.rs"
+
+[dependencies]
+# The Patina cooperative-SUT SDK (default features = dependency-light SDK). The
+# only dependency: this fixture exists solely to exercise the SDK macros on
+# wasip1, so its dependency tree is `patina` and nothing else.
+patina = { path = "../../crates/patina" }
+
+[profile.release]
+# Keep unwinding so a genuine panic surfaces a message; buggify `always!`
+# violations abort through the host, not a guest panic.
+panic = "unwind"

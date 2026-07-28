@@ -10,7 +10,7 @@ use std::fmt;
 use patina_abi::{
     ClockKind, EffectError, ErrorCode, Fd, FsEntryKind, FsMetadata, OpenFlags, SeekWhence, SocketId,
 };
-use patina_runtime::{Context, RuntimeError};
+use patina_runtime::{Context, RuntimeError, SiteOutcome};
 use patina_target::{TargetError, WasiAudit};
 use wasmi::{
     AsContextMut, Caller, Config as WasmiConfig, Engine, Error as WasmiError, Extern, Linker,
@@ -290,6 +290,13 @@ impl Preview1Host {
             WasiClock::Realtime => ClockKind::Realtime,
             WasiClock::Monotonic => ClockKind::Monotonic,
         };
+        // Apply any configured seeded sleep-latency jitter here, at the single
+        // guest-facing sleep entry, so both a direct `nanosleep`-style wait and a
+        // `poll_oneoff` clock timeout (which routes through this method) sleep to
+        // the same inflated deadline. The draw is owned by the deterministic
+        // context (seeded, replayed), so the jittered deadline reproduces exactly;
+        // an unjittered run is byte-for-byte unchanged.
+        let deadline_nanos = self.context.apply_sleep_jitter(deadline_nanos);
         self.context
             .sleep_until(clock, deadline_nanos)
             .map_err(Into::into)
@@ -1067,7 +1074,20 @@ impl Preview1Host {
             stderr,
             ..
         } = self;
+        // Detect a declared-but-never-reached setup gate before `finish` consumes
+        // the context, mirroring the native shim's `patina_shutdown`. The trace is
+        // still finalized (the run stays reproducible) and `finish` still emits the
+        // `PATINA_SDK_REPORT` line; then the run fails loudly rather than passing as
+        // a silent no-fault run.
+        let setup_violation = context.buggify_setup_violation();
         context.finish()?;
+        if setup_violation {
+            // Emit the marker to the real process stderr, as the native shim writes
+            // it to fd 2, so the campaign classifier sees the same token regardless
+            // of how the caller surfaces the returned error.
+            eprintln!("{BUGGIFY_SETUP_NEVER_CALLED_MARKER}");
+            return Err(WasiHostError::BuggifySetupNeverCalled);
+        }
         Ok((stdout, stderr))
     }
 }
@@ -1294,6 +1314,7 @@ pub fn execute_preview1_with_fuel(
     let module = Module::new(&engine, module_bytes).map_err(WasiRunError::Engine)?;
     let mut linker = Linker::<Preview1Host>::new(&engine);
     define_preview1(&mut linker).map_err(WasiRunError::Engine)?;
+    define_patina_sdk(&mut linker).map_err(WasiRunError::Engine)?;
     let mut store = Store::new(&engine, host);
     store.set_fuel(fuel).map_err(WasiRunError::Engine)?;
     let store_limits = build_store_limits(store.data().limits.max_memory_pages);
@@ -2476,6 +2497,230 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
     Ok(())
 }
 
+/// Read a cooperative-SUT label/site string from guest linear memory. Labels are
+/// tiny, but they still ride the standard `max_io_bytes` ceiling through
+/// [`read_guest_bytes`], and non-UTF-8 is a hard error rather than lossy text so
+/// a mislowered call fails closed.
+fn read_patina_label(
+    caller: &Caller<'_, Preview1Host>,
+    pointer: i32,
+    length: i32,
+) -> Result<String, WasmiError> {
+    let bytes = read_guest_bytes(caller, pointer, length)?;
+    String::from_utf8(bytes).map_err(|_| WasmiError::new("patina_sdk label is not valid UTF-8"))
+}
+
+/// Emit a fatal cooperative-SUT marker and return a trap that terminates the
+/// guest with a nonzero exit. Mirrors the native shim's
+/// `abort_with_buggify_marker`: the marker is a harness diagnostic, so it goes to
+/// the real process stderr (like `PATINA_SDK_REPORT`), where the campaign
+/// classifier greps for it — not into the captured guest stream, whose surfacing
+/// depends on the run's error path.
+fn patina_buggify_fatal(marker: &str, label: &str) -> WasmiError {
+    eprintln!("{marker} label={label}");
+    WasmiError::new(format!("{marker} label={label}"))
+}
+
+/// Shared body for the site-evaluating `patina_sdk` imports: read the label and
+/// call site from guest memory, invoke the context method, and map the outcome to
+/// `1`=fire / `0`=no, trapping on a fatal always-violation or duplicate label.
+/// The runtime side is the SAME [`Context`] buggify subsystem the native shim
+/// drives, so activation, PRF firing, the cutoff, and the diagnostics report are
+/// reused rather than reimplemented.
+fn patina_sdk_site(
+    mut caller: Caller<'_, Preview1Host>,
+    label_ptr: i32,
+    label_len: i32,
+    site_ptr: i32,
+    site_len: i32,
+    invoke: impl FnOnce(&mut Context, &str, &str) -> Result<SiteOutcome, RuntimeError>,
+) -> Result<i32, WasmiError> {
+    let label = read_patina_label(&caller, label_ptr, label_len)?;
+    let site = read_patina_label(&caller, site_ptr, site_len)?;
+    let outcome = invoke(&mut caller.data_mut().context, &label, &site)
+        .map_err(|error| WasmiError::new(error.to_string()))?;
+    match outcome {
+        SiteOutcome::Fire => Ok(1),
+        SiteOutcome::Ok => Ok(0),
+        SiteOutcome::AlwaysViolation => {
+            Err(patina_buggify_fatal("PATINA_ALWAYS_VIOLATION", &label))
+        }
+        SiteOutcome::DuplicateLabel => Err(patina_buggify_fatal(
+            "PATINA_BUGGIFY_DUPLICATE_LABEL",
+            &label,
+        )),
+    }
+}
+
+/// Define the `patina_sdk` import module: the WASI-side mirror of the native
+/// shim's cooperative-SUT C ABI. Every function is backed by the same
+/// [`Context`] buggify subsystem, so a guest compiled with `cfg(patina)` sees
+/// identical activation/firing/coverage semantics on wasip1 and native. The
+/// module is defined unconditionally (like the preview1 imports): when buggify is
+/// disabled the sites register lazily and stay inert, exactly as native, so a
+/// `patina_sdk`-importing guest run without `--buggify` behaves as all-no-op.
+fn define_patina_sdk(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> {
+    const MODULE: &str = "patina_sdk";
+    linker.func_wrap(
+        MODULE,
+        "is_simulated",
+        // The deterministic context is always installed for a WASI run, so this is
+        // authoritative `true`; a foreign runtime never resolves the import.
+        |_caller: Caller<'_, Preview1Host>| -> i32 { 1 },
+    )?;
+    linker.func_wrap(
+        MODULE,
+        "buggify",
+        |caller: Caller<'_, Preview1Host>,
+         label: i32,
+         label_len: i32,
+         site: i32,
+         site_len: i32,
+         prob_permille: i32|
+         -> Result<i32, WasmiError> {
+            patina_sdk_site(
+                caller,
+                label,
+                label_len,
+                site,
+                site_len,
+                move |ctx, l, s| {
+                    let prob = (prob_permille >= 0).then(|| prob_permille.clamp(0, 1000) as u16);
+                    ctx.buggify_evaluate(l, s, prob)
+                },
+            )
+        },
+    )?;
+    linker.func_wrap(
+        MODULE,
+        "buggify_delay",
+        |caller: Caller<'_, Preview1Host>,
+         label: i32,
+         label_len: i32,
+         site: i32,
+         site_len: i32|
+         -> Result<i32, WasmiError> {
+            patina_sdk_site(caller, label, label_len, site, site_len, |ctx, l, s| {
+                ctx.buggify_delay(l, s)
+            })
+        },
+    )?;
+    linker.func_wrap(
+        MODULE,
+        "buggify_knob",
+        |mut caller: Caller<'_, Preview1Host>,
+         label: i32,
+         label_len: i32,
+         site: i32,
+         site_len: i32,
+         default: i64,
+         lo: i64,
+         hi: i64|
+         -> Result<i64, WasmiError> {
+            let label = read_patina_label(&caller, label, label_len)?;
+            let site = read_patina_label(&caller, site, site_len)?;
+            match caller
+                .data_mut()
+                .context
+                .buggify_knob(&label, &site, default, lo, hi)
+                .map_err(|error| WasmiError::new(error.to_string()))?
+            {
+                Ok(value) => Ok(value),
+                Err(()) => Err(patina_buggify_fatal(
+                    "PATINA_BUGGIFY_DUPLICATE_LABEL",
+                    &label,
+                )),
+            }
+        },
+    )?;
+    linker.func_wrap(
+        MODULE,
+        "always",
+        |caller: Caller<'_, Preview1Host>,
+         condition: i32,
+         label: i32,
+         label_len: i32,
+         site: i32,
+         site_len: i32|
+         -> Result<i32, WasmiError> {
+            patina_sdk_site(
+                caller,
+                label,
+                label_len,
+                site,
+                site_len,
+                move |ctx, l, s| ctx.always_check(l, s, condition != 0),
+            )
+        },
+    )?;
+    linker.func_wrap(
+        MODULE,
+        "sometimes",
+        |caller: Caller<'_, Preview1Host>,
+         condition: i32,
+         label: i32,
+         label_len: i32,
+         site: i32,
+         site_len: i32|
+         -> Result<i32, WasmiError> {
+            patina_sdk_site(
+                caller,
+                label,
+                label_len,
+                site,
+                site_len,
+                move |ctx, l, s| ctx.sometimes_check(l, s, condition != 0),
+            )
+        },
+    )?;
+    linker.func_wrap(
+        MODULE,
+        "reachable",
+        |caller: Caller<'_, Preview1Host>,
+         label: i32,
+         label_len: i32,
+         site: i32,
+         site_len: i32|
+         -> Result<i32, WasmiError> {
+            patina_sdk_site(caller, label, label_len, site, site_len, |ctx, l, s| {
+                ctx.reachable_mark(l, s)
+            })
+        },
+    )?;
+    linker.func_wrap(
+        MODULE,
+        "rng",
+        |mut caller: Caller<'_, Preview1Host>| -> u64 { caller.data_mut().context.buggify_rng() },
+    )?;
+    linker.func_wrap(
+        MODULE,
+        "lifecycle_setup_complete",
+        |mut caller: Caller<'_, Preview1Host>| -> i32 {
+            let host = caller.data_mut();
+            host.context.lifecycle_setup_complete();
+            // Mirror the native shim: the lifecycle marker rides the captured guest
+            // stderr stream, flushed to the real stderr at run end.
+            host.stderr
+                .extend_from_slice(b"PATINA_LIFECYCLE setup_complete\n");
+            0
+        },
+    )?;
+    linker.func_wrap(
+        MODULE,
+        "lifecycle_event",
+        |mut caller: Caller<'_, Preview1Host>,
+         label: i32,
+         label_len: i32|
+         -> Result<i32, WasmiError> {
+            let label = read_patina_label(&caller, label, label_len)?;
+            let line = format!("PATINA_LIFECYCLE_EVENT label={label}\n");
+            caller.data_mut().stderr.extend_from_slice(line.as_bytes());
+            Ok(0)
+        },
+    )?;
+    Ok(())
+}
+
 fn read_guest_bytes(
     caller: &Caller<'_, Preview1Host>,
     pointer: i32,
@@ -2807,7 +3052,17 @@ pub enum WasiHostError {
     TooManyPreopens(usize),
     /// A configured preopen path was not a valid absolute path.
     InvalidPreopen(String),
+    /// `--buggify-after-setup` was declared but the guest never called
+    /// `patina::lifecycle::setup_complete()` — a harness bug, not a silent
+    /// no-fault run. Mirrors the native shim's `PATINA_BUGGIFY_SETUP_NEVER_CALLED`.
+    BuggifySetupNeverCalled,
 }
+
+/// The stderr marker line for the `--buggify-after-setup` gate violation, shared
+/// by the [`WasiHostError`] display and the host-side stderr emission so the
+/// campaign classifier sees the same token the native shim emits.
+const BUGGIFY_SETUP_NEVER_CALLED_MARKER: &str = "PATINA_BUGGIFY_SETUP_NEVER_CALLED --buggify-after-setup was declared but the guest never \
+called patina::lifecycle::setup_complete()";
 
 impl fmt::Display for WasiHostError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -2833,6 +3088,7 @@ impl fmt::Display for WasiHostError {
                 write!(f, "WASI preopens exceed the configured limit of {limit}")
             }
             Self::InvalidPreopen(message) => write!(f, "invalid WASI preopen: {message}"),
+            Self::BuggifySetupNeverCalled => f.write_str(BUGGIFY_SETUP_NEVER_CALLED_MARKER),
         }
     }
 }
@@ -3556,6 +3812,131 @@ mod tests {
         let mut replay = Preview1Host::new(context);
         assert_eq!(exercise(&mut replay).unwrap(), expected);
         replay.finish().unwrap();
+    }
+
+    // `Preview1Host::sleep_until` applies the seeded sleep-latency jitter at the
+    // single guest-facing sleep entry (which also backs `poll_oneoff` timeouts):
+    // the same seed and range wake at the same inflated deadline, a different range
+    // changes it, an unjittered run is unchanged, and record/replay reproduces the
+    // wake time byte-for-byte.
+    #[test]
+    fn sleep_jitter_is_deterministic_and_reproduces_on_replay() {
+        fn woke_at(seed: u64, range: Option<&str>) -> u64 {
+            let mut config = RuntimeConfig::seeded(seed);
+            if let Some(range) = range {
+                config = config
+                    .apply_fault_env(|name| {
+                        (name == patina_runtime::ENV_SLEEP_JITTER).then(|| range.to_string())
+                    })
+                    .unwrap();
+            }
+            let mut host = Preview1Host::new(Context::from_config(config).unwrap());
+            host.sleep_until(WasiClock::Monotonic, 1_000).unwrap();
+            host.clock_time_get(WasiClock::Monotonic).unwrap()
+        }
+
+        // No jitter: the clock advances exactly to the requested deadline.
+        assert_eq!(woke_at(1, None), 1_000);
+        // Same seed and range: identical jittered wake, within [1100, 1200].
+        let first = woke_at(7, Some("100..200"));
+        assert_eq!(first, woke_at(7, Some("100..200")));
+        assert!((1_100..=1_200).contains(&first));
+        // A different jitter range changes the schedule.
+        assert_ne!(first, woke_at(7, Some("500..600")));
+
+        // Record with jitter, then a flag-free replay reproduces the exact wake
+        // time: the draw is owned by the deterministic context and restored from
+        // the trace's fault configuration.
+        let directory = tempdir().unwrap();
+        let trace = directory.path().join("jitter.patina");
+        let recorded = {
+            let config = RuntimeConfig::record(7, &trace, "jitter-v1")
+                .apply_fault_env(|name| {
+                    (name == patina_runtime::ENV_SLEEP_JITTER).then(|| "100..200".to_string())
+                })
+                .unwrap();
+            let mut host = Preview1Host::new(Context::from_config(config).unwrap());
+            host.sleep_until(WasiClock::Monotonic, 1_000).unwrap();
+            let now = host.clock_time_get(WasiClock::Monotonic).unwrap();
+            host.finish().unwrap();
+            now
+        };
+        let config = RuntimeConfig::replay(&trace, "jitter-v1");
+        let mut host = Preview1Host::new(Context::from_config(config).unwrap());
+        host.sleep_until(WasiClock::Monotonic, 1_000).unwrap();
+        assert_eq!(host.clock_time_get(WasiClock::Monotonic).unwrap(), recorded);
+        host.finish().unwrap();
+    }
+
+    // The `patina_sdk` host module is backed by the same runtime buggify
+    // subsystem as the native shim: an active site fires (the guest exits with the
+    // decision), `reachable!` registers a site, and the end-of-run diagnostics
+    // report the firing. Instantiated directly (bypassing `WasiAudit`) so this is
+    // a focused unit test of `define_patina_sdk`'s wiring.
+    #[test]
+    fn patina_sdk_module_fires_and_records_diagnostics() {
+        let wasm = wat::parse_str(
+            r#"(module
+                (import "patina_sdk" "buggify"
+                    (func $buggify (param i32 i32 i32 i32 i32) (result i32)))
+                (import "patina_sdk" "reachable"
+                    (func $reachable (param i32 i32 i32 i32) (result i32)))
+                (import "patina_sdk" "lifecycle_setup_complete" (func $setup (result i32)))
+                (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 0) "unit-fault")
+                (data (i32.const 16) "unit:site")
+                (data (i32.const 32) "unit-reach")
+                (data (i32.const 48) "unit:reach")
+                (func (export "_start")
+                    (drop (call $reachable (i32.const 32) (i32.const 10) (i32.const 48) (i32.const 10)))
+                    (drop (call $setup))
+                    (call $proc_exit
+                        (call $buggify (i32.const 0) (i32.const 10)
+                            (i32.const 16) (i32.const 9) (i32.const -1)))))"#,
+        )
+        .unwrap();
+
+        // Enable buggify at full activation and firing so the single site fires.
+        let config = RuntimeConfig::seeded(3)
+            .apply_buggify_env(|name| match name {
+                patina_runtime::ENV_BUGGIFY => Some("1000".to_string()),
+                patina_runtime::ENV_BUGGIFY_ACTIVATION => Some("1000".to_string()),
+                _ => None,
+            })
+            .unwrap();
+
+        let mut wasm_config = WasmiConfig::default();
+        wasm_config.consume_fuel(true);
+        let engine = Engine::new(&wasm_config);
+        let module = Module::new(&engine, &wasm).unwrap();
+        let mut linker = Linker::<Preview1Host>::new(&engine);
+        define_preview1(&mut linker).unwrap();
+        define_patina_sdk(&mut linker).unwrap();
+        let mut store = Store::new(
+            &engine,
+            Preview1Host::new(Context::from_config(config).unwrap()),
+        );
+        store.set_fuel(1_000_000).unwrap();
+        let instance = linker
+            .instantiate(&mut store, &module)
+            .unwrap()
+            .start(&mut store)
+            .unwrap();
+        let start = instance.get_typed_func::<(), ()>(&store, "_start").unwrap();
+        let exit = match start.call(&mut store, ()) {
+            Ok(()) => 0,
+            Err(error) => error.i32_exit_status().unwrap(),
+        };
+        assert_eq!(
+            exit, 1,
+            "an always-active, always-firing buggify site must fire"
+        );
+
+        let diagnostics = store.data_mut().context.buggify_diagnostics();
+        assert!(diagnostics.enabled);
+        assert_eq!(diagnostics.sites_registered, 2);
+        assert_eq!(diagnostics.total_firings, 1);
     }
 
     fn seeded_memfs(files: &[(&str, &[u8])]) -> patina_fs_mem::MemFs {

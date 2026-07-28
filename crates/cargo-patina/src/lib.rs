@@ -125,8 +125,8 @@ Fault options (run/test and run <MODULE.wasm>; seed-driven, default off):
       --fs-crash-at <SPEC>           open|write|sync|close[:N] (bare = :1)
       --fs-torn-granularity <G>      block (default) or byte
       --sleep-jitter-nanos <MIN..MAX>  extra seeded latency per guest sleep
-                                     (native/Cargo only; the wasip1 host does not
-                                     route guest sleeps through the jitter driver)
+                                     (also honored on run <MODULE.wasm> at the
+                                     wasip1 host's sleep entry, incl. poll_oneoff)
       --net-jitter-nanos <MIN..MAX>  seeded per-datagram delivery jitter
       --net-drop-permille <N>        drop datagrams at N per-mille (0..=1000)
 
@@ -258,8 +258,9 @@ fingerprint, so a buggify trace never cross-replays with a non-buggify build.
 
 Reproduce a recorded run with `cargo patina replay <ARTIFACT|SOURCE|PKG>
 <TRACE>`, the sole replay entry point for all three families: it restores every
-semantic input (seed, fault knobs, and, for native, buggify) from the trace — the
-trace is authoritative — and exposes no semantic flags. For native the guest
+semantic input (seed, fault knobs, and buggify — for both the native and WASI
+families) from the trace — the trace is authoritative — and exposes no semantic
+flags. For native the guest
 arguments are restored from the trace, so a run recorded with non-default
 `-- ARGS` replays without re-passing them (a `--` section is allowed only if
 byte-identical to the recording, or the replay is refused up front); for WASI the
@@ -308,10 +309,16 @@ struct WasiInvocation {
     /// `Context::from_config`, so a WASI guest's filesystem and datagram sockets
     /// see the same seeded crash/jitter/drop drivers the native family does.
     /// Recorded into the trace metadata on `--record`; restored from the trace on
-    /// `replay`, so a WASI replay is flag-free. `--sleep-jitter-nanos` is not
-    /// carried here: the wasip1 host does not route guest sleeps through the
-    /// jitter driver, so it is rejected up front rather than recorded inert.
+    /// `replay`, so a WASI replay is flag-free. `--sleep-jitter-nanos` is carried
+    /// here too: the wasip1 host applies it at its single guest-facing sleep entry
+    /// (`Preview1Host::sleep_until`, also covering `poll_oneoff` clock timeouts).
     faults: NativeFaults,
+    /// Cooperative-SUT (buggify) knobs applied to the in-process runtime through
+    /// the same `apply_buggify_env` accessor the native family feeds over its
+    /// control plane. `None` unless `--buggify` was passed. Recorded into the
+    /// trace metadata on `--record` and restored from the trace on `replay`, so a
+    /// WASI buggify replay is flag-free, exactly like the fault knobs.
+    buggify: Option<NativeBuggify>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1451,6 +1458,7 @@ fn wasi_invocation_from(
     mode: Mode,
     inputs: WasiHostInputs,
     faults: NativeFaults,
+    buggify: Option<NativeBuggify>,
 ) -> WasiInvocation {
     WasiInvocation {
         module,
@@ -1462,15 +1470,16 @@ fn wasi_invocation_from(
         preopens: inputs.preopens,
         resource_limits: inputs.resource_limits,
         faults,
+        buggify,
     }
 }
 
 /// (an existing `.wasm` or a build-on-the-fly spec). `run` produces a seeded or
 /// `--record` run: replaying a recording is the `replay` verb's job, so the
 /// replay/branch/timeline flags live there, not here. The seed-driven fault knobs
-/// are accepted and recorded exactly as on the native family, except
-/// `--sleep-jitter-nanos`, which the wasip1 host cannot honor and which is
-/// rejected up front rather than recorded inert.
+/// (including `--sleep-jitter-nanos`, now honored at the wasip1 host's sleep
+/// entry) and the cooperative-SUT (buggify) knobs are accepted and recorded
+/// exactly as on the native family.
 fn parse_wasi_run_from(
     module: ArtifactRef,
     arguments: Vec<OsString>,
@@ -1478,6 +1487,7 @@ fn parse_wasi_run_from(
     let mut seed = None;
     let mut record = None;
     let mut faults = NativeFaults::default();
+    let mut buggify: Option<NativeBuggify> = None;
     let mut inputs = WasiHostInputs::default();
     let mut index = 0;
     while index < arguments.len() {
@@ -1486,6 +1496,37 @@ fn parse_wasi_run_from(
             .ok_or_else(|| CliError::usage("run options must be valid UTF-8"))?
             .to_string();
         index += 1;
+        // Valueless cooperative-SUT flags consume no following argument, so they
+        // are handled before the eager value fetch below (which requires one).
+        match name.as_str() {
+            "--buggify" => {
+                buggify.get_or_insert_with(NativeBuggify::default);
+                continue;
+            }
+            "--buggify-after-setup" => {
+                buggify
+                    .get_or_insert_with(NativeBuggify::default)
+                    .after_setup = true;
+                continue;
+            }
+            other if other.starts_with("--buggify=") => {
+                let permille = parse_u64("--buggify", &other["--buggify=".len()..])?;
+                if permille > 1000 {
+                    return Err(CliError::usage(
+                        "--buggify permille must be within [0, 1000]",
+                    ));
+                }
+                set_once(
+                    &mut buggify
+                        .get_or_insert_with(NativeBuggify::default)
+                        .fire_permille,
+                    permille.to_string(),
+                    "--buggify",
+                )?;
+                continue;
+            }
+            _ => {}
+        }
         let value = arguments
             .get(index)
             .ok_or_else(|| CliError::usage(format!("{name} requires a value")))?;
@@ -1501,12 +1542,40 @@ fn parse_wasi_run_from(
                 "--seed",
             )?,
             "--record" => set_once(&mut record, PathBuf::from(value), "--record")?,
-            "--sleep-jitter-nanos" => {
-                return Err(CliError::usage(
-                    "--sleep-jitter-nanos is not supported for `run` of a WASI module: the wasip1 \
-host does not route guest sleeps through the jitter driver, so the knob would be recorded but never \
-fire",
-                ));
+            "--buggify-activation-permille" => {
+                let permille = parse_u64(
+                    "--buggify-activation-permille",
+                    value.to_str().ok_or_else(|| {
+                        CliError::usage("--buggify-activation-permille requires UTF-8")
+                    })?,
+                )?;
+                if permille > 1000 {
+                    return Err(CliError::usage(
+                        "--buggify-activation-permille must be within [0, 1000]",
+                    ));
+                }
+                set_once(
+                    &mut buggify
+                        .get_or_insert_with(NativeBuggify::default)
+                        .activation_permille,
+                    permille.to_string(),
+                    "--buggify-activation-permille",
+                )?;
+            }
+            "--buggify-cutoff-nanos" => {
+                let nanos = parse_u64(
+                    "--buggify-cutoff-nanos",
+                    value
+                        .to_str()
+                        .ok_or_else(|| CliError::usage("--buggify-cutoff-nanos requires UTF-8"))?,
+                )?;
+                set_once(
+                    &mut buggify
+                        .get_or_insert_with(NativeBuggify::default)
+                        .cutoff_nanos,
+                    nanos.to_string(),
+                    "--buggify-cutoff-nanos",
+                )?;
             }
             option if FAULT_FLAGS.contains(&option) => {
                 let value = value
@@ -1533,7 +1602,7 @@ fire",
             seed: seed.unwrap_or(0),
         },
     };
-    Ok(wasi_invocation_from(module, mode, inputs, faults))
+    Ok(wasi_invocation_from(module, mode, inputs, faults, buggify))
 }
 
 /// Parse the WASI `replay <MODULE.wasm> <TRACE>` verb given an already-resolved
@@ -1595,8 +1664,20 @@ fn parse_wasi_replay(
                 let value = utf8_argument(&arguments, index, "--parent")?;
                 set_once(&mut parent, value.to_string(), "--parent")?;
             }
-            // Semantic inputs are restored from the trace, never re-supplied.
-            other if other == "--seed" || other == "--record" || FAULT_FLAGS.contains(&other) => {
+            // Semantic inputs are restored from the trace, never re-supplied. The
+            // cooperative-SUT (buggify) configuration is likewise authoritative in
+            // the trace metadata and reconciled by `Context::from_config`, so its
+            // knobs are rejected here exactly as on the native replay path.
+            other
+                if other == "--seed"
+                    || other == "--record"
+                    || FAULT_FLAGS.contains(&other)
+                    || other == "--buggify"
+                    || other == "--buggify-after-setup"
+                    || other == "--buggify-activation-permille"
+                    || other == "--buggify-cutoff-nanos"
+                    || other.starts_with("--buggify=") =>
+            {
                 return Err(CliError::usage(format!(
                     "replay restores run semantics from the trace and does not accept {other}; \
 the trace is authoritative"
@@ -1649,6 +1730,7 @@ the trace is authoritative"
         mode,
         inputs,
         NativeFaults::default(),
+        None,
     ))
 }
 
@@ -2044,6 +2126,27 @@ fn fault_env_pairs(faults: &NativeFaults) -> Vec<(&'static str, String)> {
     }
     if let Some(value) = &faults.net_drop_permille {
         pairs.push((ENV_NET_DROP_PERMILLE, value.clone()));
+    }
+    pairs
+}
+
+/// The cooperative-SUT (buggify) control-plane pairs for the in-process WASI
+/// runtime, mirroring the env vars the native family forwards to its subprocess.
+/// Presence of `PATINA_BUGGIFY` (its value, possibly empty, being the firing
+/// per-mille) enables buggify; the optional knobs follow.
+fn buggify_env_pairs(buggify: &NativeBuggify) -> Vec<(&'static str, String)> {
+    let mut pairs = vec![(
+        ENV_BUGGIFY,
+        buggify.fire_permille.clone().unwrap_or_default(),
+    )];
+    if let Some(value) = &buggify.activation_permille {
+        pairs.push((ENV_BUGGIFY_ACTIVATION, value.clone()));
+    }
+    if let Some(value) = &buggify.cutoff_nanos {
+        pairs.push((ENV_BUGGIFY_CUTOFF, value.clone()));
+    }
+    if buggify.after_setup {
+        pairs.push((ENV_BUGGIFY_AFTER_SETUP, "1".to_string()));
     }
     pairs
 }
@@ -2713,7 +2816,14 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
     if let Some(trace) = replay_trace_path(&invocation.mode) {
         invocation.arguments = reconcile_wasi_replay_argv(trace, &invocation.arguments)?;
     }
-    let fingerprint = wasi_compatibility_fingerprint(&bytes, &invocation);
+    // Buggify presence folds into the fingerprint exactly as `+buggify` does on
+    // the native path, so a buggify trace and a plain trace of the same module are
+    // never cross-replayable. On a flag-free replay the operator passes no
+    // `--buggify`, so the trace metadata is authoritative — mirror the native
+    // `trace_has_buggify` reconciliation so the recomputed fingerprint matches.
+    let buggify_enabled = invocation.buggify.is_some()
+        || replay_trace_path(&invocation.mode).is_some_and(trace_has_buggify);
+    let fingerprint = wasi_compatibility_fingerprint(&bytes, &invocation, buggify_enabled);
     let mut config = match &invocation.mode {
         Mode::Seeded { seed } => RuntimeConfig::seeded(*seed),
         Mode::Record { seed, path } => RuntimeConfig::record(*seed, path.clone(), &fingerprint),
@@ -2751,6 +2861,23 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
                     .map(|(_, value)| value.clone())
             })
             .map_err(|error| CliError(error.to_string()))?;
+        // Cooperative-SUT (buggify) knobs configure the same in-process runtime
+        // through the shared `apply_buggify_env` accessor. On `--record` the
+        // runtime captures the resulting `BuggifyConfigRecord` into the trace
+        // metadata; on replay/branch the config carries no buggify and the runtime
+        // restores it from the trace during `Context::from_config`, exactly as the
+        // faults above — so a WASI buggify replay is flag-free.
+        if let Some(buggify) = &invocation.buggify {
+            let pairs = buggify_env_pairs(buggify);
+            config = config
+                .apply_buggify_env(|name| {
+                    pairs
+                        .iter()
+                        .find(|(key, _)| *key == name)
+                        .map(|(_, value)| value.clone())
+                })
+                .map_err(|error| CliError(error.to_string()))?;
+        }
     }
     // Record the guest argv (the `--arg` values) into the trace metadata so a
     // later `replay` restores them flag-free. Always recorded on `--record`, even
@@ -2831,7 +2958,11 @@ fn configured_wasi_host(
     Ok(host)
 }
 
-fn wasi_compatibility_fingerprint(bytes: &[u8], invocation: &WasiInvocation) -> String {
+fn wasi_compatibility_fingerprint(
+    bytes: &[u8],
+    invocation: &WasiInvocation,
+    buggify_enabled: bool,
+) -> String {
     let mut hasher = Sha256::new();
     hash_bytes(&mut hasher, b"patina-wasi-execution-v1");
     hash_bytes(&mut hasher, env!("CARGO_PKG_VERSION").as_bytes());
@@ -2868,6 +2999,15 @@ fn wasi_compatibility_fingerprint(bytes: &[u8], invocation: &WasiInvocation) -> 
     }
     hash_wasi_preopens(&mut hasher, &invocation.preopens);
     hash_wasi_limit_overrides(&mut hasher, &invocation.resource_limits);
+    // Buggify presence is folded in only when enabled, so a plain (non-buggify)
+    // run fingerprints identically to before this component existed — mirroring
+    // the native `+buggify` suffix, which is likewise appended only when on. The
+    // specific knobs live in the trace metadata and are reconciled by the runtime;
+    // the fingerprint carries only the boolean, which is all a flag-free replay
+    // can recover from `trace_has_buggify`.
+    if buggify_enabled {
+        hash_bytes(&mut hasher, b"wasi-buggify-v1");
+    }
     format!("sha256:{}", hex(&hasher.finalize()))
 }
 
@@ -5743,8 +5883,8 @@ mod tests {
         let arguments = wasi_invocation(&["wasi-run", "module.wasm", "--arg", "k", "--arg", "v"]);
         let environment = wasi_invocation(&["wasi-run", "module.wasm", "--env", "k=v"]);
         assert_ne!(
-            wasi_compatibility_fingerprint(module, &arguments),
-            wasi_compatibility_fingerprint(module, &environment)
+            wasi_compatibility_fingerprint(module, &arguments, false),
+            wasi_compatibility_fingerprint(module, &environment, false)
         );
     }
 
@@ -5774,8 +5914,8 @@ mod tests {
         // Reordering preopens changes descriptor assignment, so it must
         // change the fingerprint.
         assert_ne!(
-            wasi_compatibility_fingerprint(module, &ordered),
-            wasi_compatibility_fingerprint(module, &reordered)
+            wasi_compatibility_fingerprint(module, &ordered, false),
+            wasi_compatibility_fingerprint(module, &reordered, false)
         );
 
         let changed_preopen = wasi_invocation(&[
@@ -5789,8 +5929,8 @@ mod tests {
             "64",
         ]);
         assert_ne!(
-            wasi_compatibility_fingerprint(module, &ordered),
-            wasi_compatibility_fingerprint(module, &changed_preopen)
+            wasi_compatibility_fingerprint(module, &ordered, false),
+            wasi_compatibility_fingerprint(module, &changed_preopen, false)
         );
 
         let changed_limit = wasi_invocation(&[
@@ -5804,8 +5944,8 @@ mod tests {
             "65",
         ]);
         assert_ne!(
-            wasi_compatibility_fingerprint(module, &ordered),
-            wasi_compatibility_fingerprint(module, &changed_limit)
+            wasi_compatibility_fingerprint(module, &ordered, false),
+            wasi_compatibility_fingerprint(module, &changed_limit, false)
         );
     }
 
