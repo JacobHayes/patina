@@ -179,4 +179,13 @@ jobs:
           workspaces: |
             .
             testbeds/raft-harness
+      # raft-proto's build script regenerates the eraftpb types with `protoc`
+      # under the prost-codec feature the harness selects (the vendored-codegen,
+      # no-protoc property belongs to the default protobuf-codec path). Hosted
+      # runners ship without protoc; local machines had it via Homebrew, which is
+      # why this only surfaced on the nightly job's first real run.
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        if: runner.os == 'Linux'
+      - run: brew install protobuf
+        if: runner.os == 'macOS'
       - run: testbeds/raft-harness/run-patina.sh
