@@ -57,9 +57,9 @@ Manual smoke test from the repository root:
 
 ```sh
 cargo build -p cargo-patina
-PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst --example deterministic --seed 123
-PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst --example deterministic --seed 123 --record /tmp/demo.patina
-PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina-dst --example deterministic
+PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst --features runtime --example deterministic --seed 123
+PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst --features runtime --example deterministic --seed 123 --record /tmp/demo.patina
+PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina-dst --features runtime --example deterministic
 ```
 
 Expected:

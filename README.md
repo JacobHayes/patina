@@ -44,14 +44,14 @@ See [VALIDATION.md](./VALIDATION.md) for claim-by-claim acceptance gates and [IM
 
 ```sh
 cargo build -p cargo-patina
-PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst --example deterministic --seed 123
+PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst --features runtime --example deterministic --seed 123
 rm -f /tmp/demo.patina
-PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst --example deterministic --seed 123 --record /tmp/demo.patina
-PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina-dst --example deterministic
-PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina-dst --example deterministic --branch --from 1 --branch-seed 456 --branch-id branch-456
-PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina-dst --example deterministic --timeline branch-456
-PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst --example simulation --seed 321
-PATH="$PWD/target/debug:$PATH" cargo patina explore run --seeds 10 -p patina-dst --example deterministic
+PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst --features runtime --example deterministic --seed 123 --record /tmp/demo.patina
+PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina-dst --features runtime --example deterministic
+PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina-dst --features runtime --example deterministic --branch --from 1 --branch-seed 456 --branch-id branch-456
+PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina-dst --features runtime --example deterministic --timeline branch-456
+PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst --features runtime --example simulation --seed 321
+PATH="$PWD/target/debug:$PATH" cargo patina explore run --seeds 10 -p patina-dst --features runtime --example deterministic
 ```
 
 Applications in this slice deliberately perform controlled effects through the context:
