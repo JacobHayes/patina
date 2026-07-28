@@ -1,0 +1,9 @@
+{
+  "format_version": 0,
+  "metadata": {
+    "root_seed": 42,
+    "decision_policy": "splitmix64-v1",
+    "fingerprint": "fixture-fingerprint"
+  },
+  "decisions": []
+}

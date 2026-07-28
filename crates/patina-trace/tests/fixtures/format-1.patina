@@ -1,0 +1,20 @@
+{
+  "format_version": 1,
+  "metadata": {
+    "root_seed": 42,
+    "decision_policy": "splitmix64-v1",
+    "fingerprint": "fixture-fingerprint"
+  },
+  "decisions": [
+    {
+      "sequence": 0,
+      "operation": { "kind": "clock_now", "clock": "monotonic" },
+      "outcome": { "kind": "u64", "value": 1000 }
+    },
+    {
+      "sequence": 1,
+      "operation": { "kind": "entropy_fill", "len": 4 },
+      "outcome": { "kind": "bytes", "value": [1, 2, 3, 4] }
+    }
+  ]
+}

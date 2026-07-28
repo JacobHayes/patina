@@ -11,7 +11,13 @@ concurrency:
 
 jobs:
   stable:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # x86_64 and aarch64 Linux surface different platform gaps (libgcc
+        # split-stack wrap symbols exist only on x86; the dev VM is aarch64).
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

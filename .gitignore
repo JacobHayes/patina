@@ -1,3 +1,5 @@
 /target/
 *.patina
 *.patina.lock
+# Trace-format migration fixtures are hand-built test inputs, not run outputs.
+!crates/patina-trace/tests/fixtures/*.patina
