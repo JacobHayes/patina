@@ -210,24 +210,38 @@ if cmp -s "$tmp/seed-1" "$tmp/seed-other"; then
   echo 'validate-wasi: distinct seeds produced identical output' >&2
   exit 1
 fi
+# The `--arg` values are the recorded guest argv (restored from the trace on
+# replay); `--env` is a genuine host input (not recorded) that is re-supplied and
+# verified through the compatibility fingerprint.
+host=(--env MODE=test)
 "$runner" run "$tmp/probe.wasm" "${guest[@]}" --seed 123 --record "$tmp/run.patina" >"$tmp/record"
-"$runner" run "$tmp/probe.wasm" "${guest[@]}" --replay "$tmp/run.patina" >"$tmp/replay"
+# `replay <mod.wasm> <trace>` is flag-free for semantics: the seed and the `--arg`
+# guest argv are restored from the trace, so `--arg` is NOT re-passed and the
+# output is byte-identical to the recording. Host inputs (`--env`) are re-supplied.
+"$runner" replay "$tmp/probe.wasm" "$tmp/run.patina" "${host[@]}" >"$tmp/replay"
 cmp "$tmp/record" "$tmp/replay"
-"$runner" run "$tmp/probe.wasm" "${guest[@]}" --branch "$tmp/run.patina" \
-  --from 0 --branch-seed 124 --branch-id branch-124 >"$tmp/branch"
-"$runner" run "$tmp/probe.wasm" "${guest[@]}" --replay "$tmp/run.patina" \
+"$runner" replay "$tmp/probe.wasm" "$tmp/run.patina" "${host[@]}" \
+  --branch --from 0 --branch-seed 124 --branch-id branch-124 >"$tmp/branch"
+"$runner" replay "$tmp/probe.wasm" "$tmp/run.patina" "${host[@]}" \
   --timeline branch-124 >"$tmp/branch-replay"
 cmp "$tmp/branch" "$tmp/branch-replay"
 if cmp -s "$tmp/record" "$tmp/branch"; then
   echo 'validate-wasi: seeded branch did not vary the deterministic suffix' >&2
   exit 1
 fi
+# A conflicting re-supplied guest arg is refused up front (the trace is
+# authoritative), naming the conflict.
+if "$runner" replay "$tmp/probe.wasm" "$tmp/run.patina" --arg conflicting >/dev/null 2>&1; then
+  echo 'validate-wasi: a conflicting replay --arg was accepted' >&2
+  exit 1
+fi
 sockets=(--socket '4=node-a->node-b' --socket '5=node-b->node-a')
 "$runner" audit "$tmp/network.wasm" >"$tmp/network-imports"
 "$runner" run "$tmp/network.wasm" "${sockets[@]}" --seed 55 \
   --record "$tmp/network.patina" >"$tmp/network-record"
-"$runner" run "$tmp/network.wasm" "${sockets[@]}" \
-  --replay "$tmp/network.patina" >"$tmp/network-replay"
+# The datagram sockets are genuine host inputs (not recorded), so they are
+# re-supplied on replay; their match is verified through the fingerprint.
+"$runner" replay "$tmp/network.wasm" "$tmp/network.patina" "${sockets[@]}" >"$tmp/network-replay"
 cmp "$tmp/network-record" "$tmp/network-replay"
 printf 'Validated imports:\n'
 cat "$tmp/imports"

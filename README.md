@@ -9,7 +9,7 @@ The goal is to compile Rust programs for a deterministic OS personality: standar
 ```sh
 cargo patina test --seed 123
 cargo patina test --seed 123 --record trace.patina
-cargo patina test --replay trace.patina
+cargo patina replay . trace.patina
 ```
 
 ## Status
@@ -47,9 +47,9 @@ cargo build -p cargo-patina
 PATH="$PWD/target/debug:$PATH" cargo patina run -p patina --example deterministic --seed 123
 rm -f /tmp/demo.patina
 PATH="$PWD/target/debug:$PATH" cargo patina run -p patina --example deterministic --seed 123 --record /tmp/demo.patina
-PATH="$PWD/target/debug:$PATH" cargo patina run -p patina --example deterministic --replay /tmp/demo.patina
-PATH="$PWD/target/debug:$PATH" cargo patina run -p patina --example deterministic --branch /tmp/demo.patina --from 1 --branch-seed 456 --branch-id branch-456
-PATH="$PWD/target/debug:$PATH" cargo patina run -p patina --example deterministic --replay /tmp/demo.patina --timeline branch-456
+PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina --example deterministic
+PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina --example deterministic --branch --from 1 --branch-seed 456 --branch-id branch-456
+PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina --example deterministic --timeline branch-456
 PATH="$PWD/target/debug:$PATH" cargo patina run -p patina --example simulation --seed 321
 PATH="$PWD/target/debug:$PATH" cargo patina explore run --seeds 10 -p patina --example deterministic
 ```
@@ -76,8 +76,8 @@ cargo patina audit path/to/guest.wasm
 cargo patina run path/to/guest.wasm --seed 123
 cargo patina run path/to/guest.wasm --seed 123 --preopen /data:ro --preopen /scratch:rw --max-memory-pages 64
 cargo patina run path/to/guest.wasm --seed 123 --record /tmp/wasi.patina
-cargo patina run path/to/guest.wasm --replay /tmp/wasi.patina
-cargo patina run path/to/guest.wasm --branch /tmp/wasi.patina --from 0 --branch-seed 456 --branch-id branch-456
+cargo patina replay path/to/guest.wasm /tmp/wasi.patina
+cargo patina replay path/to/guest.wasm /tmp/wasi.patina --branch --from 0 --branch-seed 456 --branch-id branch-456
 scripts/validate-wasi.sh
 ```
 
@@ -108,7 +108,7 @@ cargo patina minimize branches.patina --timeline failing-leaf \
   --output reduced.patina -- ./failure-oracle
 ```
 
-`build` compiles a single Rust source against the packaged shim (embedding the POSIX layer and injecting `cfg(patina)`/`cfg(dst)`), and `run` supervises the binary with seeded, record, or replay modes — application code needs no Patina-specific calls. The native validation script builds its ordinary-`std` probes through that packaged path, compiles mixed C/Rust fixtures for the prefixed and POSIX symbols, executes ordinary macOS/Linux `std` filesystem/directory/symlink/time/entropy/stdio/thread/UDP calls through Patina — including mutex/condvar contention with a lock held across a boundary operation and multi-thread datagram exchange with scheduler-decided arrival order — records and replays the fully interposed probes through `PATINA_TRACE_FD`, audits the resulting binaries against the strict allowlist, verifies rejection of direct-syscall/unmanaged-thread and unknown-import fixtures, and on Linux runs the whole-run `strace` containment pass. Linux large-file/stat variants and deterministic startup checks are covered. The smoke script builds one ordinary-`std` program for wasm32-wasip1 and the native host and requires identical seeded, recorded, and replayed output. Beyond single sources, `build` also compiles whole Cargo packages through the same packaged path, audited, recorded, and replayed under the `cargo-patina` end-to-end package test.
+`build` compiles a single Rust source against the packaged shim (embedding the POSIX layer and injecting `cfg(patina)`/`cfg(dst)`), and `run` supervises the binary with seeded or record modes while `replay` reproduces a recording — application code needs no Patina-specific calls. The native validation script builds its ordinary-`std` probes through that packaged path, compiles mixed C/Rust fixtures for the prefixed and POSIX symbols, executes ordinary macOS/Linux `std` filesystem/directory/symlink/time/entropy/stdio/thread/UDP calls through Patina — including mutex/condvar contention with a lock held across a boundary operation and multi-thread datagram exchange with scheduler-decided arrival order — records and replays the fully interposed probes through `PATINA_TRACE_FD`, audits the resulting binaries against the strict allowlist, verifies rejection of direct-syscall/unmanaged-thread and unknown-import fixtures, and on Linux runs the whole-run `strace` containment pass. Linux large-file/stat variants and deterministic startup checks are covered. The smoke script builds one ordinary-`std` program for wasm32-wasip1 and the native host and requires identical seeded, recorded, and replayed output. Beyond single sources, `build` also compiles whole Cargo packages through the same packaged path, audited, recorded, and replayed under the `cargo-patina` end-to-end package test.
 
 ## Why Patina exists
 

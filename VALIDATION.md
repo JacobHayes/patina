@@ -43,7 +43,7 @@ This is the currently implemented acceptance level. The application explicitly e
 | Driver boundary | Runtime effects are expressed as typed ABI operations and use narrow driver traits. |
 | Missing capability | A runtime built without a requested driver returns `missing_driver`; it never falls through to the host. |
 | Record | `--record` reserves a new path, refuses active/existing writers, and writes one parseable trace bundle atomically after a successful or application-error run that reaches finalization. |
-| Replay | `--replay` reproduces recorded results and consumes every event. |
+| Replay | The `replay` verb reproduces recorded results and consumes every event. |
 | Strict matching | Changed operation kind, arguments, event sequence, trailing events, malformed format, and changed fingerprint are errors. |
 | CLI transport | `cargo-patina` forwards Cargo arguments and passes mode, seed, trace path, and fingerprint through the documented environment protocol. |
 
@@ -59,7 +59,7 @@ Manual smoke test from the repository root:
 cargo build -p cargo-patina
 PATH="$PWD/target/debug:$PATH" cargo patina run -p patina --example deterministic --seed 123
 PATH="$PWD/target/debug:$PATH" cargo patina run -p patina --example deterministic --seed 123 --record /tmp/demo.patina
-PATH="$PWD/target/debug:$PATH" cargo patina run -p patina --example deterministic --replay /tmp/demo.patina
+PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina --example deterministic
 ```
 
 Expected:

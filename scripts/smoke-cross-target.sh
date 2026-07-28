@@ -96,7 +96,7 @@ if cmp -s "$tmp/wasi-seed-1" "$tmp/wasi-seed-other"; then
   exit 1
 fi
 "$runner" run "$tmp/smoke.wasm" --seed 123 --record "$tmp/wasi.patina" >"$tmp/wasi-record"
-"$runner" run "$tmp/smoke.wasm" --replay "$tmp/wasi.patina" >"$tmp/wasi-replay"
+"$runner" replay "$tmp/smoke.wasm" "$tmp/wasi.patina" >"$tmp/wasi-replay"
 cmp "$tmp/wasi-record" "$tmp/wasi-replay"
 cmp "$tmp/wasi-seed-1" "$tmp/wasi-replay"
 

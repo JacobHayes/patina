@@ -71,19 +71,34 @@ const PATINA_FS_IMAGE_CHANNEL_FD: i32 = 4;
 const HELP: &str = "Patina deterministic Cargo runner
 
 Usage:
-  cargo patina run [PATINA OPTIONS] [CARGO OPTIONS] [-- PROGRAM OPTIONS]
-  cargo patina run <MODULE.wasm> [PATINA OPTIONS] [--fuel N] [--arg VALUE] [--env K=V] [--socket FD=BIND->PEER] [--preopen GUEST[:ro|:rw]]...
-  cargo patina run <BINARY> [--seed N | --record PATH] [--fingerprint STR] [--mount HOST_DIR] [--net-latency-nanos N] [--fs-crash-at SPEC] [--fs-torn-granularity block|byte] [--sleep-jitter-nanos MIN..MAX] [--net-jitter-nanos MIN..MAX] [--net-drop-permille N] [--buggify[=PERMILLE]] [--buggify-activation-permille N] [--buggify-cutoff-nanos N] [--buggify-after-setup] [--allow SYMBOL]... [--allow-unsupported-symbols <all|name,...>] [-- PROGRAM ARGS]
+  cargo patina run [--seed N | --record PATH] [FAULT OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]
+  cargo patina run <MODULE.wasm> [--seed N | --record PATH] [--fuel N] [--arg VALUE]... [--env K=V]... [--socket FD=BIND->PEER]... [--preopen GUEST[:ro|:rw]]... [--fs-crash-at SPEC] [--fs-torn-granularity block|byte] [--net-jitter-nanos MIN..MAX] [--net-drop-permille N]
+  cargo patina run <BINARY> [--seed N | --record PATH] [--fingerprint STR] [--mount HOST_DIR] [--net-latency-nanos N] [FAULT OPTIONS] [--buggify[=PERMILLE]] [--buggify-activation-permille N] [--buggify-cutoff-nanos N] [--buggify-after-setup] [--allow SYMBOL]... [--allow-unsupported-symbols <all|name,...>] [-- PROGRAM ARGS]
   cargo patina run <SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [RUN OPTIONS]   (builds on the fly, then runs)
-  cargo patina test [PATINA OPTIONS] [CARGO OPTIONS] [-- PROGRAM OPTIONS]
-  cargo patina explore <run|test> [--seeds N] [--start N] [PATINA/CARGO OPTIONS]
+  cargo patina test [--seed N | --record PATH] [FAULT OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]
+  cargo patina explore run <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [--seeds N] [--start N] [RUN OPTIONS]
+  cargo patina explore test [--seeds N] [--start N] [PATINA/CARGO OPTIONS]
   cargo patina build <SOURCE.rs> --output <PATH> [--edition YEAR] [--release] [--yield-points] [-- RUSTC OPTIONS]
   cargo patina build <DIR|Cargo.toml> [--output <PATH>] [--package NAME] [--bin NAME] [--release] [--yield-points]
   cargo patina build <DIR|Cargo.toml> --target wasi [--output PATH] [--package NAME] [--bin NAME] [--release]
   cargo patina audit <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [--allow SYMBOL]...
-  cargo patina replay <BINARY|SOURCE.rs|DIR|Cargo.toml> <TRACE> [--target native|wasi] [--fingerprint STR] [--mount HOST_DIR] [--allow SYMBOL]... [--allow-unsupported-symbols <all|name,...>]
+  cargo patina replay <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> <TRACE> [--target native|wasi] [REPLAY OPTIONS]
   cargo patina minimize <TRACE> --output <PATH> [--timeline ID] [--prune-branches] -- <ORACLE> [ARGS]...
   cargo patina minimize --scenario --seed <U64> [--param K=V]... [--seed-budget N] -- <ORACLE> [ARGS]...
+
+`replay <ARTIFACT|SOURCE|PKG> <TRACE>` routes by the same inference as `run`: a
+WebAssembly module replays under WASI, a native binary under the native
+supervisor, and a directory/Cargo.toml (no `--target`) under the Cargo package
+family. Each restores its recorded semantics from the trace, so replay is
+flag-free (seed, fault knobs, and — for WASI — the `--arg` guest argv are
+restored; any re-supplied value must match the recording or the replay is
+refused). The Cargo and WASI families also carry the timeline/branch controls:
+`replay <PKG|MODULE.wasm> <TRACE> [--timeline ID]` replays a named timeline
+(default `main`), and `replay <PKG|MODULE.wasm> <TRACE> --branch --from N
+--branch-seed S --branch-id ID [--parent ID]` replays the parent prefix then
+appends a new branch timeline. Native traces are single-timeline (native runs
+cannot branch), so native replay accepts only `--fingerprint`, `--mount`, and
+the `--allow`/`--allow-unsupported-symbols` audit surface.
 
 `run`, `audit`, and `replay` are source-first with artifacts accepted uniformly.
 A built artifact (recognized by its leading magic bytes — `\\0asm` for a WASI
@@ -98,23 +113,28 @@ no `--target` stays the Cargo package family (the same seed/record/replay/branch
 machinery as `test`); `--target` opts a source/package argument into build-then-
 run. `build` defaults to `--target native`.
 
-Patina options:
+Patina options (run/test):
       --seed <U64>       Deterministic root seed (default: 0)
       --record <PATH>    Record boundary operations and outcomes
-      --replay <PATH>    Strictly replay a recorded trace
-      --timeline <ID>    Replay a named timeline (default: main)
-      --branch <PATH>    Replay a prefix and append a branch timeline
-      --from <SEQUENCE>  Number of parent events in the exact branch prefix
-      --branch-seed <N>  Root seed for branch suffix decisions
-      --branch-id <ID>   New timeline identifier
-      --parent <ID>      Parent timeline (default: main)
       --budget <STEPS>   Maximum boundary operations before explicit failure
       --param <K=V>      Typed-builder parameter exposed through Context
   -h, --help             Print help
   -V, --version          Print version
 
-`--record`, `--replay`, and `--branch` are mutually exclusive. Replay gets its
-root seed from the trace. All unrecognized options are forwarded to Cargo.
+Fault options (run/test and run <MODULE.wasm>; seed-driven, default off):
+      --fs-crash-at <SPEC>           open|write|sync|close[:N] (bare = :1)
+      --fs-torn-granularity <G>      block (default) or byte
+      --sleep-jitter-nanos <MIN..MAX>  extra seeded latency per guest sleep
+                                     (native/Cargo only; the wasip1 host does not
+                                     route guest sleeps through the jitter driver)
+      --net-jitter-nanos <MIN..MAX>  seeded per-datagram delivery jitter
+      --net-drop-permille <N>        drop datagrams at N per-mille (0..=1000)
+
+Reproducing a recording — strict or branch-append — is the `replay` verb's job,
+so `run`/`test` carry no replay/branch/timeline flags. A `--record` run captures
+its seed, fault knobs, and (for WASI) guest argv into the trace metadata, so
+`replay` restores them and gets its root seed from the trace. All unrecognized
+`run`/`test` options are forwarded to Cargo.
 
 `minimize <TRACE>` shrinks a recorded trace. It chooses the strategy from the
 bundle: an unbranched main timeline or a leaf `--timeline ID` is delta-debugged
@@ -236,16 +256,20 @@ full configuration — fault knobs, buggify, and the guest arguments after `--` 
 into the trace metadata. Enabling buggify folds a +buggify component into the run
 fingerprint, so a buggify trace never cross-replays with a non-buggify build.
 
-Reproduce a recorded run with `cargo patina replay <BINARY> <TRACE>`, the sole
-replay entry point: it restores every semantic input (seed, fault knobs, buggify,
-and the guest arguments) from the trace — the trace is authoritative — and
-exposes no semantic flags, so a run recorded with non-default `-- ARGS` replays
-without re-passing them. Only host/build inputs the trace cannot carry are
-accepted (--fingerprint, --mount, --allow[-unsupported-symbols]). A `--` section
-is allowed only if byte-identical to the recording, or the replay is refused up
-front. The guest always sees a fixed, machine-independent `argv[0]`
-(`patina-guest`), never the host binary path, so traces are portable across
-machines.
+Reproduce a recorded run with `cargo patina replay <ARTIFACT|SOURCE|PKG>
+<TRACE>`, the sole replay entry point for all three families: it restores every
+semantic input (seed, fault knobs, and, for native, buggify) from the trace — the
+trace is authoritative — and exposes no semantic flags. For native the guest
+arguments are restored from the trace, so a run recorded with non-default
+`-- ARGS` replays without re-passing them (a `--` section is allowed only if
+byte-identical to the recording, or the replay is refused up front); for WASI the
+recorded `--arg` guest argv is restored the same way and a re-supplied `--arg`
+must match. Only host/build inputs the trace cannot carry stay as flags: native
+takes --fingerprint/--mount/--allow[-unsupported-symbols]; WASI re-takes its host
+environment (--fuel/--env/--socket/--preopen and resource limits), whose match is
+verified through the compatibility fingerprint. The native guest always sees a
+fixed, machine-independent `argv[0]` (`patina-guest`), never the host binary
+path, so traces are portable across machines.
 ";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -280,6 +304,14 @@ struct WasiInvocation {
     sockets: Vec<WasiSocketConfig>,
     preopens: Vec<WasiPreopenConfig>,
     resource_limits: WasiResourceLimitOverrides,
+    /// Seed-driven fault-injection knobs applied to the in-process runtime before
+    /// `Context::from_config`, so a WASI guest's filesystem and datagram sockets
+    /// see the same seeded crash/jitter/drop drivers the native family does.
+    /// Recorded into the trace metadata on `--record`; restored from the trace on
+    /// `replay`, so a WASI replay is flag-free. `--sleep-jitter-nanos` is not
+    /// carried here: the wasip1 host does not route guest sleeps through the
+    /// jitter driver, so it is rejected up front rather than recorded inert.
+    faults: NativeFaults,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -371,12 +403,34 @@ struct Invocation {
     mode: Mode,
     step_budget: Option<u64>,
     params: BTreeMap<String, String>,
+    /// Seed-driven fault-injection knobs forwarded to the guest through the
+    /// `PATINA_*` control plane (the same knobs the native and WASI families
+    /// accept). Recorded into the trace metadata on `--record`; restored from the
+    /// trace on the `replay` verb, so a cargo-family replay is flag-free. Default
+    /// (all `None`) leaves faults off.
+    faults: NativeFaults,
+    /// Working directory the cargo subprocess runs in, or `None` to inherit the
+    /// caller's. Set by the cargo-family `replay` verb from its `<pkg>` positional
+    /// so a replay can run from anywhere while its fingerprint (which walks the
+    /// package's own source tree) still matches the recording.
+    working_dir: Option<PathBuf>,
 }
 
 struct ExploreInvocation {
-    invocation: Invocation,
+    target: ExploreTarget,
     start_seed: u64,
     seed_count: u64,
+}
+
+/// What `explore` sweeps across seeds. The Cargo package family re-runs the whole
+/// `run`/`test` command per seed (each cargo invocation is cheap next to the
+/// build it caches). The native and WASI families instead build the artifact
+/// once and run that SAME artifact across every seed, so a source/package is
+/// never rebuilt per seed.
+enum ExploreTarget {
+    Cargo(Invocation),
+    Wasi(WasiInvocation),
+    Native(NativeRunInvocation),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -446,6 +500,7 @@ enum ArtifactRef {
     Build(Box<BuildSpec>),
 }
 
+#[derive(Clone)]
 enum NativeRunMode {
     Seeded {
         seed: u64,
@@ -461,6 +516,7 @@ enum NativeRunMode {
     },
 }
 
+#[derive(Clone)]
 struct NativeRunInvocation {
     binary: ArtifactRef,
     mode: NativeRunMode,
@@ -610,12 +666,11 @@ fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
         }
         Some("replay") => {
             arguments.remove(0);
-            // `replay` is the sole native replay entry point: it restores all
-            // semantic config (seed, fault knobs, buggify, guest argv) from the
-            // trace and exposes no semantic flags. It shares `execute_native_run`
-            // with the seeded/record paths, producing a `NativeRunInvocation` in
-            // replay mode.
-            parse_replay(arguments).map(ParseResult::NativeRun)
+            // `replay` is the sole replay entry point for all three families,
+            // routed by the same artifact inference as `run`: it restores each
+            // family's semantic config (seed, fault knobs, buggify, guest argv)
+            // from the trace and exposes no semantic flags.
+            parse_replay(arguments)
         }
         Some("minimize") => {
             arguments.remove(0);
@@ -1048,20 +1103,16 @@ fn parse_wasi_build(mut arguments: Vec<OsString>) -> Result<WasiBuildInvocation,
 }
 
 /// Parse the Cargo package family (`run`/`test` with no diverting artifact): the
-/// seed/record/replay/branch machinery plus typed `--param`s, forwarding every
-/// unrecognized option to Cargo.
+/// seed/record machinery, seed-driven fault knobs, and typed `--param`s,
+/// forwarding every unrecognized option to Cargo. Replaying a recording — strict
+/// or branch-append — is the `replay` verb's job (see [`parse_cargo_replay`]), so
+/// `run`/`test` carry no replay/branch/timeline flags.
 fn parse_cargo(command: String, arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     let mut seed = None;
     let mut record = None;
-    let mut replay = None;
-    let mut timeline = None;
-    let mut branch = None;
-    let mut branch_from = None;
-    let mut branch_seed = None;
-    let mut branch_id = None;
-    let mut parent = None;
     let mut step_budget = None;
     let mut params = BTreeMap::new();
+    let mut faults = NativeFaults::default();
     let mut cargo_args = Vec::new();
     let mut index = 0;
     let mut passthrough = false;
@@ -1103,44 +1154,6 @@ fn parse_cargo(command: String, arguments: Vec<OsString>) -> Result<ParseResult,
                 .get(index)
                 .ok_or_else(|| CliError::usage("--record requires a path"))?;
             set_once(&mut record, PathBuf::from(value), "--record")?;
-        } else if let Some(value) = text.and_then(|value| value.strip_prefix("--replay=")) {
-            set_once(&mut replay, PathBuf::from(value), "--replay")?;
-        } else if text == Some("--replay") {
-            index += 1;
-            let value = arguments
-                .get(index)
-                .ok_or_else(|| CliError::usage("--replay requires a path"))?;
-            set_once(&mut replay, PathBuf::from(value), "--replay")?;
-        } else if text == Some("--timeline") {
-            index += 1;
-            let value = utf8_argument(&arguments, index, "--timeline")?;
-            set_once(&mut timeline, value.into(), "--timeline")?;
-        } else if text == Some("--branch") {
-            index += 1;
-            let value = arguments
-                .get(index)
-                .ok_or_else(|| CliError::usage("--branch requires a path"))?;
-            set_once(&mut branch, PathBuf::from(value), "--branch")?;
-        } else if text == Some("--from") {
-            index += 1;
-            let value = utf8_argument(&arguments, index, "--from")?;
-            set_once(&mut branch_from, parse_u64("--from", value)?, "--from")?;
-        } else if text == Some("--branch-seed") {
-            index += 1;
-            let value = utf8_argument(&arguments, index, "--branch-seed")?;
-            set_once(
-                &mut branch_seed,
-                parse_u64("--branch-seed", value)?,
-                "--branch-seed",
-            )?;
-        } else if text == Some("--branch-id") {
-            index += 1;
-            let value = utf8_argument(&arguments, index, "--branch-id")?;
-            set_once(&mut branch_id, value.into(), "--branch-id")?;
-        } else if text == Some("--parent") {
-            index += 1;
-            let value = utf8_argument(&arguments, index, "--parent")?;
-            set_once(&mut parent, value.into(), "--parent")?;
         } else if text == Some("--budget") {
             index += 1;
             let value = utf8_argument(&arguments, index, "--budget")?;
@@ -1154,56 +1167,21 @@ fn parse_cargo(command: String, arguments: Vec<OsString>) -> Result<ParseResult,
             if key.is_empty() || params.insert(key.into(), value.into()).is_some() {
                 return Err(CliError::usage("--param keys must be non-empty and unique"));
             }
+        } else if text.is_some_and(|option| FAULT_FLAGS.contains(&option)) {
+            let option = text.expect("checked Some above");
+            index += 1;
+            let value = utf8_argument(&arguments, index, option)?;
+            apply_fault_flag(&mut faults, option, value)?;
         } else {
             cargo_args.push(argument.clone());
         }
         index += 1;
     }
 
-    let selected_modes = usize::from(record.is_some())
-        + usize::from(replay.is_some())
-        + usize::from(branch.is_some());
-    if selected_modes > 1 {
-        return Err(CliError::usage(
-            "--record, --replay, and --branch are mutually exclusive",
-        ));
-    }
-    if (replay.is_some() || branch.is_some()) && seed.is_some() {
-        return Err(CliError::usage(
-            "--seed cannot be combined with --replay or --branch",
-        ));
-    }
     let seed = seed.unwrap_or(0);
-    let mode = if let Some(path) = record {
-        reject_branch_only_options(&timeline, &branch_from, &branch_seed, &branch_id, &parent)?;
-        Mode::Record { seed, path }
-    } else if let Some(path) = replay {
-        if branch_from.is_some() || branch_seed.is_some() || branch_id.is_some() || parent.is_some()
-        {
-            return Err(CliError::usage(
-                "branch options require --branch, not --replay",
-            ));
-        }
-        Mode::Replay {
-            path,
-            timeline: timeline.unwrap_or_else(|| "main".into()),
-        }
-    } else if let Some(path) = branch {
-        if timeline.is_some() {
-            return Err(CliError::usage("--timeline is only valid with --replay"));
-        }
-        Mode::Branch {
-            path,
-            parent: parent.unwrap_or_else(|| "main".into()),
-            from_sequence: branch_from
-                .ok_or_else(|| CliError::usage("--branch requires --from"))?,
-            branch_seed: branch_seed
-                .ok_or_else(|| CliError::usage("--branch requires --branch-seed"))?,
-            branch_id: branch_id.ok_or_else(|| CliError::usage("--branch requires --branch-id"))?,
-        }
-    } else {
-        reject_branch_only_options(&timeline, &branch_from, &branch_seed, &branch_id, &parent)?;
-        Mode::Seeded { seed }
+    let mode = match record {
+        Some(path) => Mode::Record { seed, path },
+        None => Mode::Seeded { seed },
     };
 
     Ok(ParseResult::Run(Invocation {
@@ -1212,6 +1190,131 @@ fn parse_cargo(command: String, arguments: Vec<OsString>) -> Result<ParseResult,
         mode,
         step_budget,
         params,
+        faults,
+        working_dir: None,
+    }))
+}
+
+/// Parse the cargo-family `replay <pkg> <trace>` verb. The `<pkg>` positional
+/// (already resolved to its package directory) selects the workspace; the
+/// `<trace>` positional replaces the old `--replay`/`--branch` PATH. Two shapes:
+///
+/// * strict replay — `replay <pkg> <trace> [--timeline ID]` — reproduces a
+///   recorded timeline (default `main`);
+/// * branch-append — `replay <pkg> <trace> --branch --from N --branch-seed S
+///   --branch-id ID [--parent ID]` — replays the parent prefix then records a new
+///   branch timeline (today's `--branch` semantics).
+///
+/// Cargo selectors (`-p NAME`, `--example NAME`, a `-- ARGS` tail, ...) that are
+/// not replay controls are forwarded to Cargo verbatim and folded into the
+/// compatibility fingerprint exactly as on the recording, so they must match the
+/// recorded run (a mismatch fails closed on the fingerprint). Fault knobs are
+/// never accepted here: the trace's recorded fault configuration is authoritative
+/// and restored by the runtime, so replay is flag-free.
+fn parse_cargo_replay(
+    package_dir: PathBuf,
+    trace: PathBuf,
+    arguments: Vec<OsString>,
+) -> Result<ParseResult, CliError> {
+    let mut branch = false;
+    let mut timeline = None;
+    let mut branch_from = None;
+    let mut branch_seed = None;
+    let mut branch_id = None;
+    let mut parent = None;
+    let mut cargo_args = Vec::new();
+    let mut index = 0;
+    let mut passthrough = false;
+    while index < arguments.len() {
+        let argument = &arguments[index];
+        if passthrough {
+            cargo_args.push(argument.clone());
+            index += 1;
+            continue;
+        }
+        if argument == "--" {
+            passthrough = true;
+            cargo_args.push(argument.clone());
+            index += 1;
+            continue;
+        }
+        match argument.to_str() {
+            Some("--branch") => branch = true,
+            Some("--timeline") => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--timeline")?;
+                set_once(&mut timeline, value.to_string(), "--timeline")?;
+            }
+            Some("--from") => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--from")?;
+                set_once(&mut branch_from, parse_u64("--from", value)?, "--from")?;
+            }
+            Some("--branch-seed") => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--branch-seed")?;
+                set_once(
+                    &mut branch_seed,
+                    parse_u64("--branch-seed", value)?,
+                    "--branch-seed",
+                )?;
+            }
+            Some("--branch-id") => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--branch-id")?;
+                set_once(&mut branch_id, value.to_string(), "--branch-id")?;
+            }
+            Some("--parent") => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--parent")?;
+                set_once(&mut parent, value.to_string(), "--parent")?;
+            }
+            // Any other flag or value is a Cargo selector, forwarded verbatim so
+            // it hashes into the fingerprint exactly as it did on the recording.
+            _ => cargo_args.push(argument.clone()),
+        }
+        index += 1;
+    }
+
+    let mode = if branch {
+        if timeline.is_some() {
+            return Err(CliError::usage(
+                "--timeline selects a timeline to replay and is not valid with --branch",
+            ));
+        }
+        Mode::Branch {
+            path: trace,
+            parent: parent.unwrap_or_else(|| "main".into()),
+            from_sequence: branch_from
+                .ok_or_else(|| CliError::usage("replay --branch requires --from"))?,
+            branch_seed: branch_seed
+                .ok_or_else(|| CliError::usage("replay --branch requires --branch-seed"))?,
+            branch_id: branch_id
+                .ok_or_else(|| CliError::usage("replay --branch requires --branch-id"))?,
+        }
+    } else {
+        if branch_from.is_some() || branch_seed.is_some() || branch_id.is_some() || parent.is_some()
+        {
+            return Err(CliError::usage(
+                "--from/--branch-seed/--branch-id/--parent require --branch",
+            ));
+        }
+        Mode::Replay {
+            path: trace,
+            timeline: timeline.unwrap_or_else(|| "main".into()),
+        }
+    };
+
+    Ok(ParseResult::Run(Invocation {
+        // A recording is produced by `run`; its fingerprint hashes the cargo
+        // subcommand, so replaying reproduces the `run` program under the runtime.
+        cargo_command: "run".to_string(),
+        cargo_args,
+        mode,
+        step_budget: None,
+        params: BTreeMap::new(),
+        faults: NativeFaults::default(),
+        working_dir: Some(package_dir),
     }))
 }
 
@@ -1229,35 +1332,164 @@ fn parse_wasi_run(mut arguments: Vec<OsString>) -> Result<WasiInvocation, CliErr
 }
 
 /// Parse the flags of a WASI `run` given an already-resolved module reference
-/// (an existing `.wasm` or a build-on-the-fly spec).
+/// The host-supplied inputs a WASI run/replay shares: fuel, guest argv, guest
+/// environment, datagram sockets, preopens, and resource-limit overrides. These
+/// are genuine host inputs (not recorded semantic state — except `--arg`, which
+/// becomes the recorded guest argv), so both `run` and `replay` accept them and
+/// they feed the WASI compatibility fingerprint.
+#[derive(Default)]
+struct WasiHostInputs {
+    fuel: Option<u64>,
+    arguments: Vec<String>,
+    environment: BTreeMap<String, String>,
+    sockets: Vec<WasiSocketConfig>,
+    preopens: Vec<WasiPreopenConfig>,
+    resource_limits: WasiResourceLimitOverrides,
+    socket_fds: BTreeSet<u32>,
+}
+
+/// Apply one WASI host-input flag (`value` already fetched) to `inputs`,
+/// returning `true` when `option` is a host-input flag and `false` otherwise.
+/// Shared by [`parse_wasi_run_from`] and [`parse_wasi_replay`] so the two verbs
+/// parse the guest environment identically.
+fn apply_wasi_host_input(
+    inputs: &mut WasiHostInputs,
+    option: &str,
+    value: &OsStr,
+) -> Result<bool, CliError> {
+    let utf8 = |name: &str| {
+        value
+            .to_str()
+            .ok_or_else(|| CliError::usage(format!("{name} requires UTF-8")))
+    };
+    match option {
+        "--fuel" => {
+            let parsed = parse_u64("--fuel", utf8("--fuel")?)?;
+            set_once(&mut inputs.fuel, parsed, "--fuel")?;
+            set_once(&mut inputs.resource_limits.fuel, parsed, "--fuel")?;
+        }
+        "--arg" => inputs.arguments.push(utf8("--arg")?.into()),
+        "--socket" => {
+            let value = utf8("--socket")?;
+            let (fd, route) = value
+                .split_once('=')
+                .ok_or_else(|| CliError::usage("--socket requires FD=BIND->PEER"))?;
+            let fd = fd
+                .parse::<u32>()
+                .map_err(|_| CliError::usage("--socket FD must be an unsigned 32-bit integer"))?;
+            let (bind, peer) = route
+                .split_once("->")
+                .ok_or_else(|| CliError::usage("--socket requires FD=BIND->PEER"))?;
+            if fd <= 3 || bind.is_empty() || peer.is_empty() || !inputs.socket_fds.insert(fd) {
+                return Err(CliError::usage(
+                    "--socket requires a unique FD above 3 and non-empty addresses",
+                ));
+            }
+            inputs.sockets.push(WasiSocketConfig {
+                fd,
+                bind: bind.into(),
+                peer: peer.into(),
+            });
+        }
+        "--env" => {
+            let value = utf8("--env")?;
+            let (key, value) = value
+                .split_once('=')
+                .ok_or_else(|| CliError::usage("--env requires KEY=VALUE"))?;
+            if key.is_empty()
+                || inputs
+                    .environment
+                    .insert(key.into(), value.into())
+                    .is_some()
+            {
+                return Err(CliError::usage("--env keys must be non-empty and unique"));
+            }
+        }
+        "--preopen" => inputs
+            .preopens
+            .push(parse_wasi_preopen(utf8("--preopen")?)?),
+        "--max-memory-pages" => set_once(
+            &mut inputs.resource_limits.max_memory_pages,
+            parse_u32("--max-memory-pages", utf8("--max-memory-pages")?)?,
+            "--max-memory-pages",
+        )?,
+        "--max-descriptors" => set_once(
+            &mut inputs.resource_limits.max_descriptors,
+            parse_usize("--max-descriptors", utf8("--max-descriptors")?)?,
+            "--max-descriptors",
+        )?,
+        "--max-preopens" => set_once(
+            &mut inputs.resource_limits.max_preopens,
+            parse_usize("--max-preopens", utf8("--max-preopens")?)?,
+            "--max-preopens",
+        )?,
+        "--max-path-bytes" => set_once(
+            &mut inputs.resource_limits.max_path_bytes,
+            parse_usize("--max-path-bytes", utf8("--max-path-bytes")?)?,
+            "--max-path-bytes",
+        )?,
+        "--max-io-bytes" => set_once(
+            &mut inputs.resource_limits.max_io_bytes,
+            parse_usize("--max-io-bytes", utf8("--max-io-bytes")?)?,
+            "--max-io-bytes",
+        )?,
+        "--max-iovecs" => set_once(
+            &mut inputs.resource_limits.max_iovecs,
+            parse_usize("--max-iovecs", utf8("--max-iovecs")?)?,
+            "--max-iovecs",
+        )?,
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// Assemble a [`WasiInvocation`] from a parsed mode, the shared host inputs, and
+/// the fault knobs. Shared tail of [`parse_wasi_run_from`] and
+/// [`parse_wasi_replay`].
+fn wasi_invocation_from(
+    module: ArtifactRef,
+    mode: Mode,
+    inputs: WasiHostInputs,
+    faults: NativeFaults,
+) -> WasiInvocation {
+    WasiInvocation {
+        module,
+        mode,
+        fuel: inputs.fuel.unwrap_or(DEFAULT_WASM_FUEL),
+        arguments: inputs.arguments,
+        environment: inputs.environment,
+        sockets: inputs.sockets,
+        preopens: inputs.preopens,
+        resource_limits: inputs.resource_limits,
+        faults,
+    }
+}
+
+/// (an existing `.wasm` or a build-on-the-fly spec). `run` produces a seeded or
+/// `--record` run: replaying a recording is the `replay` verb's job, so the
+/// replay/branch/timeline flags live there, not here. The seed-driven fault knobs
+/// are accepted and recorded exactly as on the native family, except
+/// `--sleep-jitter-nanos`, which the wasip1 host cannot honor and which is
+/// rejected up front rather than recorded inert.
 fn parse_wasi_run_from(
     module: ArtifactRef,
     arguments: Vec<OsString>,
 ) -> Result<WasiInvocation, CliError> {
     let mut seed = None;
     let mut record = None;
-    let mut replay = None;
-    let mut branch = None;
-    let mut timeline = None;
-    let mut branch_from = None;
-    let mut branch_seed = None;
-    let mut branch_id = None;
-    let mut parent = None;
-    let mut fuel = None;
-    let mut guest_arguments = Vec::new();
-    let mut guest_environment = BTreeMap::new();
-    let mut guest_sockets = Vec::new();
-    let mut guest_preopens = Vec::new();
-    let mut resource_limits = WasiResourceLimitOverrides::default();
-    let mut socket_fds = BTreeSet::new();
+    let mut faults = NativeFaults::default();
+    let mut inputs = WasiHostInputs::default();
     let mut index = 0;
     while index < arguments.len() {
-        let name = arguments[index].to_string_lossy();
+        let name = arguments[index]
+            .to_str()
+            .ok_or_else(|| CliError::usage("run options must be valid UTF-8"))?
+            .to_string();
         index += 1;
         let value = arguments
             .get(index)
             .ok_or_else(|| CliError::usage(format!("{name} requires a value")))?;
-        match name.as_ref() {
+        match name.as_str() {
             "--seed" => set_once(
                 &mut seed,
                 parse_u64(
@@ -1269,241 +1501,155 @@ fn parse_wasi_run_from(
                 "--seed",
             )?,
             "--record" => set_once(&mut record, PathBuf::from(value), "--record")?,
-            "--replay" => set_once(&mut replay, PathBuf::from(value), "--replay")?,
-            "--branch" => set_once(&mut branch, PathBuf::from(value), "--branch")?,
-            "--from" => set_once(
-                &mut branch_from,
-                parse_u64(
-                    "--from",
-                    value
-                        .to_str()
-                        .ok_or_else(|| CliError::usage("--from requires UTF-8"))?,
-                )?,
-                "--from",
-            )?,
-            "--branch-seed" => set_once(
-                &mut branch_seed,
-                parse_u64(
-                    "--branch-seed",
-                    value
-                        .to_str()
-                        .ok_or_else(|| CliError::usage("--branch-seed requires UTF-8"))?,
-                )?,
-                "--branch-seed",
-            )?,
-            "--branch-id" => set_once(
-                &mut branch_id,
-                value
-                    .to_str()
-                    .ok_or_else(|| CliError::usage("--branch-id requires UTF-8"))?
-                    .into(),
-                "--branch-id",
-            )?,
-            "--parent" => set_once(
-                &mut parent,
-                value
-                    .to_str()
-                    .ok_or_else(|| CliError::usage("--parent requires UTF-8"))?
-                    .into(),
-                "--parent",
-            )?,
-            "--timeline" => set_once(
-                &mut timeline,
-                value
-                    .to_str()
-                    .ok_or_else(|| CliError::usage("--timeline requires UTF-8"))?
-                    .into(),
-                "--timeline",
-            )?,
-            "--fuel" => {
-                let parsed = parse_u64(
-                    "--fuel",
-                    value
-                        .to_str()
-                        .ok_or_else(|| CliError::usage("--fuel requires UTF-8"))?,
-                )?;
-                set_once(&mut fuel, parsed, "--fuel")?;
-                set_once(&mut resource_limits.fuel, parsed, "--fuel")?;
+            "--sleep-jitter-nanos" => {
+                return Err(CliError::usage(
+                    "--sleep-jitter-nanos is not supported for `run` of a WASI module: the wasip1 \
+host does not route guest sleeps through the jitter driver, so the knob would be recorded but never \
+fire",
+                ));
             }
-            "--arg" => guest_arguments.push(
-                value
-                    .to_str()
-                    .ok_or_else(|| CliError::usage("--arg requires UTF-8"))?
-                    .into(),
-            ),
-            "--socket" => {
+            option if FAULT_FLAGS.contains(&option) => {
                 let value = value
                     .to_str()
-                    .ok_or_else(|| CliError::usage("--socket requires UTF-8"))?;
-                let (fd, route) = value
-                    .split_once('=')
-                    .ok_or_else(|| CliError::usage("--socket requires FD=BIND->PEER"))?;
-                let fd = fd.parse::<u32>().map_err(|_| {
-                    CliError::usage("--socket FD must be an unsigned 32-bit integer")
-                })?;
-                let (bind, peer) = route
-                    .split_once("->")
-                    .ok_or_else(|| CliError::usage("--socket requires FD=BIND->PEER"))?;
-                if fd <= 3 || bind.is_empty() || peer.is_empty() || !socket_fds.insert(fd) {
-                    return Err(CliError::usage(
-                        "--socket requires a unique FD above 3 and non-empty addresses",
-                    ));
+                    .ok_or_else(|| CliError::usage(format!("{option} requires UTF-8")))?;
+                apply_fault_flag(&mut faults, option, value)?;
+            }
+            option => {
+                if !apply_wasi_host_input(&mut inputs, option, value)? {
+                    return Err(CliError::usage(format!(
+                        "unsupported option {option:?} for `run` of a WASI module"
+                    )));
                 }
-                guest_sockets.push(WasiSocketConfig {
-                    fd,
-                    bind: bind.into(),
-                    peer: peer.into(),
-                });
-            }
-            "--env" => {
-                let value = value
-                    .to_str()
-                    .ok_or_else(|| CliError::usage("--env requires UTF-8"))?;
-                let (key, value) = value
-                    .split_once('=')
-                    .ok_or_else(|| CliError::usage("--env requires KEY=VALUE"))?;
-                if key.is_empty() || guest_environment.insert(key.into(), value.into()).is_some() {
-                    return Err(CliError::usage("--env keys must be non-empty and unique"));
-                }
-            }
-            "--preopen" => {
-                let value = value
-                    .to_str()
-                    .ok_or_else(|| CliError::usage("--preopen requires UTF-8"))?;
-                guest_preopens.push(parse_wasi_preopen(value)?);
-            }
-            "--max-memory-pages" => {
-                let value = value
-                    .to_str()
-                    .ok_or_else(|| CliError::usage("--max-memory-pages requires UTF-8"))?;
-                set_once(
-                    &mut resource_limits.max_memory_pages,
-                    parse_u32("--max-memory-pages", value)?,
-                    "--max-memory-pages",
-                )?;
-            }
-            "--max-descriptors" => {
-                let value = value
-                    .to_str()
-                    .ok_or_else(|| CliError::usage("--max-descriptors requires UTF-8"))?;
-                set_once(
-                    &mut resource_limits.max_descriptors,
-                    parse_usize("--max-descriptors", value)?,
-                    "--max-descriptors",
-                )?;
-            }
-            "--max-preopens" => {
-                let value = value
-                    .to_str()
-                    .ok_or_else(|| CliError::usage("--max-preopens requires UTF-8"))?;
-                set_once(
-                    &mut resource_limits.max_preopens,
-                    parse_usize("--max-preopens", value)?,
-                    "--max-preopens",
-                )?;
-            }
-            "--max-path-bytes" => {
-                let value = value
-                    .to_str()
-                    .ok_or_else(|| CliError::usage("--max-path-bytes requires UTF-8"))?;
-                set_once(
-                    &mut resource_limits.max_path_bytes,
-                    parse_usize("--max-path-bytes", value)?,
-                    "--max-path-bytes",
-                )?;
-            }
-            "--max-io-bytes" => {
-                let value = value
-                    .to_str()
-                    .ok_or_else(|| CliError::usage("--max-io-bytes requires UTF-8"))?;
-                set_once(
-                    &mut resource_limits.max_io_bytes,
-                    parse_usize("--max-io-bytes", value)?,
-                    "--max-io-bytes",
-                )?;
-            }
-            "--max-iovecs" => {
-                let value = value
-                    .to_str()
-                    .ok_or_else(|| CliError::usage("--max-iovecs requires UTF-8"))?;
-                set_once(
-                    &mut resource_limits.max_iovecs,
-                    parse_usize("--max-iovecs", value)?,
-                    "--max-iovecs",
-                )?;
-            }
-            _ => {
-                return Err(CliError::usage(format!(
-                    "unsupported option {name:?} for `run` of a WASI module"
-                )));
             }
         }
         index += 1;
     }
-    let mode_count = usize::from(record.is_some())
-        + usize::from(replay.is_some())
-        + usize::from(branch.is_some());
-    if mode_count > 1 {
-        return Err(CliError::usage(
-            "run of a WASI module: --record, --replay, and --branch are mutually exclusive",
-        ));
-    }
-    if replay.is_some() && seed.is_some() {
-        return Err(CliError::usage(
-            "run of a WASI module: --seed cannot be combined with --replay",
-        ));
-    }
-    let mode = if let Some(path) = record {
-        reject_branch_only_options(&timeline, &branch_from, &branch_seed, &branch_id, &parent)?;
-        Mode::Record {
+    let mode = match record {
+        Some(path) => Mode::Record {
             seed: seed.unwrap_or(0),
             path,
+        },
+        None => Mode::Seeded {
+            seed: seed.unwrap_or(0),
+        },
+    };
+    Ok(wasi_invocation_from(module, mode, inputs, faults))
+}
+
+/// Parse the WASI `replay <MODULE.wasm> <TRACE>` verb given an already-resolved
+/// module reference and trace path. Flag-free for semantics: the seed and fault
+/// knobs are restored from the trace, and `--arg` values (the recorded guest
+/// argv) are restored and conflict-checked at execution. Only genuine host inputs
+/// stay as flags (`--fuel`/`--env`/`--socket`/`--preopen`/resource limits), plus
+/// the timeline selector and branch controls that the WASI runtime supports:
+///
+/// * strict replay — `replay <mod.wasm> <trace> [--timeline ID]`;
+/// * branch-append — `replay <mod.wasm> <trace> --branch --from N --branch-seed S
+///   --branch-id ID [--parent ID]`.
+fn parse_wasi_replay(
+    module: ArtifactRef,
+    trace: PathBuf,
+    arguments: Vec<OsString>,
+) -> Result<WasiInvocation, CliError> {
+    let mut inputs = WasiHostInputs::default();
+    let mut branch = false;
+    let mut timeline = None;
+    let mut branch_from = None;
+    let mut branch_seed = None;
+    let mut branch_id = None;
+    let mut parent = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        let option = arguments[index]
+            .to_str()
+            .ok_or_else(|| CliError::usage("replay options must be valid UTF-8"))?
+            .to_string();
+        match option.as_str() {
+            "--branch" => branch = true,
+            "--timeline" => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--timeline")?;
+                set_once(&mut timeline, value.to_string(), "--timeline")?;
+            }
+            "--from" => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--from")?;
+                set_once(&mut branch_from, parse_u64("--from", value)?, "--from")?;
+            }
+            "--branch-seed" => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--branch-seed")?;
+                set_once(
+                    &mut branch_seed,
+                    parse_u64("--branch-seed", value)?,
+                    "--branch-seed",
+                )?;
+            }
+            "--branch-id" => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--branch-id")?;
+                set_once(&mut branch_id, value.to_string(), "--branch-id")?;
+            }
+            "--parent" => {
+                index += 1;
+                let value = utf8_argument(&arguments, index, "--parent")?;
+                set_once(&mut parent, value.to_string(), "--parent")?;
+            }
+            // Semantic inputs are restored from the trace, never re-supplied.
+            other if other == "--seed" || other == "--record" || FAULT_FLAGS.contains(&other) => {
+                return Err(CliError::usage(format!(
+                    "replay restores run semantics from the trace and does not accept {other}; \
+the trace is authoritative"
+                )));
+            }
+            _ => {
+                index += 1;
+                let value = arguments
+                    .get(index)
+                    .ok_or_else(|| CliError::usage(format!("{option} requires a value")))?;
+                if !apply_wasi_host_input(&mut inputs, &option, value)? {
+                    return Err(CliError::usage(format!(
+                        "unsupported option {option:?} for `replay` of a WASI module"
+                    )));
+                }
+            }
         }
-    } else if let Some(path) = replay {
-        if branch_from.is_some() || branch_seed.is_some() || branch_id.is_some() || parent.is_some()
-        {
+        index += 1;
+    }
+    let mode = if branch {
+        if timeline.is_some() {
             return Err(CliError::usage(
-                "branch options require --branch for `run` of a WASI module",
-            ));
-        }
-        Mode::Replay {
-            path,
-            timeline: timeline.unwrap_or_else(|| "main".into()),
-        }
-    } else if let Some(path) = branch {
-        if seed.is_some() || timeline.is_some() {
-            return Err(CliError::usage(
-                "run of a WASI module: --branch does not accept --seed or --timeline",
+                "--timeline selects a timeline to replay and is not valid with --branch",
             ));
         }
         Mode::Branch {
-            path,
+            path: trace,
             parent: parent.unwrap_or_else(|| "main".into()),
             from_sequence: branch_from
-                .ok_or_else(|| CliError::usage("run of a WASI module: --branch requires --from"))?,
-            branch_seed: branch_seed.ok_or_else(|| {
-                CliError::usage("run of a WASI module: --branch requires --branch-seed")
-            })?,
-            branch_id: branch_id.ok_or_else(|| {
-                CliError::usage("run of a WASI module: --branch requires --branch-id")
-            })?,
+                .ok_or_else(|| CliError::usage("replay --branch requires --from"))?,
+            branch_seed: branch_seed
+                .ok_or_else(|| CliError::usage("replay --branch requires --branch-seed"))?,
+            branch_id: branch_id
+                .ok_or_else(|| CliError::usage("replay --branch requires --branch-id"))?,
         }
     } else {
-        reject_branch_only_options(&timeline, &branch_from, &branch_seed, &branch_id, &parent)?;
-        Mode::Seeded {
-            seed: seed.unwrap_or(0),
+        if branch_from.is_some() || branch_seed.is_some() || branch_id.is_some() || parent.is_some()
+        {
+            return Err(CliError::usage(
+                "--from/--branch-seed/--branch-id/--parent require --branch",
+            ));
+        }
+        Mode::Replay {
+            path: trace,
+            timeline: timeline.unwrap_or_else(|| "main".into()),
         }
     };
-    Ok(WasiInvocation {
+    Ok(wasi_invocation_from(
         module,
         mode,
-        fuel: fuel.unwrap_or(DEFAULT_WASM_FUEL),
-        arguments: guest_arguments,
-        environment: guest_environment,
-        sockets: guest_sockets,
-        preopens: guest_preopens,
-        resource_limits,
-    })
+        inputs,
+        NativeFaults::default(),
+    ))
 }
 
 fn parse_explore(arguments: Vec<OsString>) -> Result<ExploreInvocation, CliError> {
@@ -1541,19 +1687,26 @@ fn parse_explore(arguments: Vec<OsString>) -> Result<ExploreInvocation, CliError
         }
         index += 1;
     }
-    let invocation = match parse(forwarded)? {
-        ParseResult::Run(invocation) => invocation,
-        _ => {
-            return Err(CliError::usage(
-                "explore requires a Cargo run or test command",
-            ));
+    // `explore run <artifact|src>` sweeps the native or WASI families; `explore
+    // run`/`test` with no diverting artifact stays the Cargo package family. Every
+    // family must be in a plain seeded mode — record/replay/branch pin a single
+    // run and have nothing to sweep.
+    let (target, mode_seed) = match parse(forwarded)? {
+        ParseResult::Run(invocation) => {
+            let seed = explore_seed_of(&invocation.mode)?;
+            (ExploreTarget::Cargo(invocation), seed)
         }
-    };
-    let mode_seed = match &invocation.mode {
-        Mode::Seeded { seed } => *seed,
+        ParseResult::WasiRun(invocation) => {
+            let seed = explore_seed_of(&invocation.mode)?;
+            (ExploreTarget::Wasi(invocation), seed)
+        }
+        ParseResult::NativeRun(invocation) => {
+            let seed = explore_native_seed_of(&invocation.mode)?;
+            (ExploreTarget::Native(invocation), seed)
+        }
         _ => {
             return Err(CliError::usage(
-                "explore does not accept record, replay, or branch mode",
+                "explore requires a `run <artifact|source>`/`test` command",
             ));
         }
     };
@@ -1566,10 +1719,31 @@ fn parse_explore(arguments: Vec<OsString>) -> Result<ExploreInvocation, CliError
         .checked_add(seed_count - 1)
         .ok_or_else(|| CliError::usage("exploration seed range overflows u64"))?;
     Ok(ExploreInvocation {
-        invocation,
+        target,
         start_seed,
         seed_count,
     })
+}
+
+/// The seed of a plain seeded [`Mode`], rejecting record/replay/branch which pin
+/// a single run.
+fn explore_seed_of(mode: &Mode) -> Result<u64, CliError> {
+    match mode {
+        Mode::Seeded { seed } => Ok(*seed),
+        _ => Err(CliError::usage(
+            "explore does not accept record, replay, or branch mode",
+        )),
+    }
+}
+
+/// The seed of a plain seeded [`NativeRunMode`], rejecting record/replay.
+fn explore_native_seed_of(mode: &NativeRunMode) -> Result<u64, CliError> {
+    match mode {
+        NativeRunMode::Seeded { seed } => Ok(*seed),
+        _ => Err(CliError::usage(
+            "explore does not accept record or replay mode",
+        )),
+    }
 }
 
 /// Thin wrapper: treat the leading argument as an already-built binary. Used by
@@ -1774,6 +1948,104 @@ fn validate_nanos_range(name: &str, value: &str) -> Result<(), CliError> {
         )));
     }
     Ok(())
+}
+
+/// The seed-driven fault-injection flags shared by every run family. Kept as a
+/// single list so `run`/`test`/`replay` routing can detect a fault knob without
+/// re-listing the names, and so a knob added here is offered everywhere at once.
+const FAULT_FLAGS: &[&str] = &[
+    "--fs-crash-at",
+    "--fs-torn-granularity",
+    "--sleep-jitter-nanos",
+    "--net-jitter-nanos",
+    "--net-drop-permille",
+];
+
+/// Validate and store a single fault-injection knob into `faults`. Returns `true`
+/// when `option` is one of the [`FAULT_FLAGS`] (having consumed `value`), `false`
+/// when it is not a fault flag at all. Shared by the WASI and cargo-family run
+/// parsers so every family validates the fault protocol identically; the value is
+/// stored verbatim so the runtime re-parses the exact same text on record and
+/// replay.
+fn apply_fault_flag(
+    faults: &mut NativeFaults,
+    option: &str,
+    value: &str,
+) -> Result<bool, CliError> {
+    match option {
+        "--fs-crash-at" => {
+            validate_crash_at(value)?;
+            set_once(&mut faults.fs_crash_at, value.to_string(), "--fs-crash-at")?;
+        }
+        "--fs-torn-granularity" => {
+            if value != "block" && value != "byte" {
+                return Err(CliError::usage(format!(
+                    "--fs-torn-granularity must be block or byte; got {value:?}"
+                )));
+            }
+            set_once(
+                &mut faults.fs_torn_granularity,
+                value.to_string(),
+                "--fs-torn-granularity",
+            )?;
+        }
+        "--sleep-jitter-nanos" => {
+            validate_nanos_range("--sleep-jitter-nanos", value)?;
+            set_once(
+                &mut faults.sleep_jitter_nanos,
+                value.to_string(),
+                "--sleep-jitter-nanos",
+            )?;
+        }
+        "--net-jitter-nanos" => {
+            validate_nanos_range("--net-jitter-nanos", value)?;
+            set_once(
+                &mut faults.net_jitter_nanos,
+                value.to_string(),
+                "--net-jitter-nanos",
+            )?;
+        }
+        "--net-drop-permille" => {
+            let permille = parse_u64("--net-drop-permille", value)?;
+            if permille > 1000 {
+                return Err(CliError::usage(
+                    "--net-drop-permille must be within [0, 1000]",
+                ));
+            }
+            set_once(
+                &mut faults.net_drop_permille,
+                permille.to_string(),
+                "--net-drop-permille",
+            )?;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// The `PATINA_*` control-plane variables carrying a [`NativeFaults`] to the
+/// guest, paired with each set knob's raw value. Used by the WASI in-process
+/// runtime (via [`RuntimeConfig::apply_fault_env`]) and by the cargo-family
+/// subprocess (as real environment variables), so both apply the identical
+/// protocol the native shim reads.
+fn fault_env_pairs(faults: &NativeFaults) -> Vec<(&'static str, String)> {
+    let mut pairs = Vec::new();
+    if let Some(value) = &faults.fs_crash_at {
+        pairs.push((ENV_FS_CRASH_AT, value.clone()));
+    }
+    if let Some(value) = &faults.fs_torn_granularity {
+        pairs.push((ENV_FS_TORN_GRANULARITY, value.clone()));
+    }
+    if let Some(value) = &faults.sleep_jitter_nanos {
+        pairs.push((ENV_SLEEP_JITTER, value.clone()));
+    }
+    if let Some(value) = &faults.net_jitter_nanos {
+        pairs.push((ENV_NET_JITTER, value.clone()));
+    }
+    if let Some(value) = &faults.net_drop_permille {
+        pairs.push((ENV_NET_DROP_PERMILLE, value.clone()));
+    }
+    pairs
 }
 
 /// Thin wrapper: treat the leading argument as an already-built binary. Used by
@@ -2012,51 +2284,86 @@ fn parse_native_run_from(
     })
 }
 
-/// Parse `cargo patina replay <BINARY> <TRACE> [--fingerprint STR] [--mount
-/// HOST_DIR] [--allow SYMBOL]... [--allow-unsupported-symbols <all|name,...>]
-/// [-- GUEST ARGS]`.
-///
-/// `replay` is the sole native replay entry point. It restores every semantic
-/// input from the trace itself — seed, fault knobs, buggify, and the guest
-/// arguments — so it exposes NO semantic flags (not `--seed`, not `--fs-*`, not
-/// `--buggify*`). The only flags are host/build facts the trace cannot carry:
-/// `--fingerprint` (the compatibility fingerprint), `--mount` (re-supply the host
-/// corpus whose hash the fingerprint verifies), and `--allow`/
-/// `--allow-unsupported-symbols` (the machine-local pre-run audit surface). An
-/// optional trailing `--` section is accepted only for script compatibility and
-/// must match the recorded arguments byte-for-byte (enforced downstream by
-/// `reconcile_replay_argv`); for a trace recorded before argv capture the `--`
-/// section is used as-is.
-fn parse_replay(mut arguments: Vec<OsString>) -> Result<NativeRunInvocation, CliError> {
-    let program_args = split_trailing_args(&mut arguments);
-    // `replay` is source-first like `run`/`audit`: the artifact may be a built
-    // binary or a source/package built on the fly (honoring `--target`). The
-    // rebuilt binary is judged against the trace by the existing fail-closed
-    // machinery (fingerprint + operation-mismatch), so no special-casing.
+/// Route `replay <ARTIFACT|SOURCE|PKG> <TRACE>` by the same artifact inference as
+/// `run`: a WebAssembly module replays under WASI, a native binary under the
+/// native supervisor, and a directory/`Cargo.toml` (no `--target`) under the
+/// Cargo package family. Each restores its recorded semantic config from the
+/// trace and exposes only that family's genuine host inputs. The two positionals
+/// (artifact/source/package, then trace) always lead; per-family flags and any
+/// `--` section follow and are handled by the family parser.
+fn parse_replay(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
+    // `replay` is source-first like `run`/`audit`: the artifact may be built or a
+    // source/package built on the fly (honoring `--target`). A rebuilt binary is
+    // judged against the trace by the fail-closed machinery (fingerprint +
+    // operation-mismatch), so no special-casing.
     let (target, mut rest) = extract_target(arguments)?;
-    if rest.is_empty() {
+    if rest.is_empty() || rest[0] == "--" {
         return Err(CliError::usage(
-            "replay requires a binary/source path and a trace path",
+            "replay requires an artifact/source/package path and a trace path",
         ));
     }
     let origin = rest.remove(0);
-    if rest.is_empty() {
+    if rest.is_empty() || rest[0] == "--" {
         return Err(CliError::usage("replay requires a trace path"));
     }
     let trace = PathBuf::from(rest.remove(0));
-    let (family, binary) =
-        resolve_positional(&origin, target.as_deref(), false)?.ok_or_else(|| {
-            CliError::usage(format!(
-                "replay target {} is neither a native binary nor a source/package to build",
-                Path::new(&origin).display()
-            ))
-        })?;
-    if family == ArtifactFamily::Wasm {
-        return Err(CliError::usage(
-            "replay is native-only; for a WASI module use `run <mod.wasm> --replay`",
-        ));
+    let flags = rest;
+    match resolve_positional(&origin, target.as_deref(), true)? {
+        Some((ArtifactFamily::Wasm, module)) => {
+            parse_wasi_replay(module, trace, flags).map(ParseResult::WasiRun)
+        }
+        Some((ArtifactFamily::Native, binary)) => {
+            parse_native_replay(binary, trace, flags).map(ParseResult::NativeRun)
+        }
+        // No diverting artifact and no `--target`: the Cargo package family. The
+        // origin must name a package (a directory or a `Cargo.toml`); its
+        // directory selects the workspace for the replay.
+        None => {
+            let package_dir = cargo_package_dir(&origin)?;
+            parse_cargo_replay(package_dir, trace, flags)
+        }
     }
-    let arguments = rest;
+}
+
+/// Resolve a cargo-family `replay` positional to its package directory. The
+/// origin must be a directory or a `Cargo.toml` (the shapes `resolve_positional`
+/// classifies as the Cargo package family); anything else is neither an artifact
+/// nor a package and is rejected naming the offending path.
+fn cargo_package_dir(origin: &OsStr) -> Result<PathBuf, CliError> {
+    match classify_arg(origin)? {
+        ArgKind::SourcePackage(manifest) => Ok(manifest
+            .parent()
+            .map(Path::to_path_buf)
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| PathBuf::from("."))),
+        _ => Err(CliError::usage(format!(
+            "replay target {} is neither a WASI module, a native binary, nor a Cargo package (a directory or Cargo.toml)",
+            Path::new(origin).display()
+        ))),
+    }
+}
+
+/// Parse the native `replay <BINARY> <TRACE> [--fingerprint STR] [--mount
+/// HOST_DIR] [--allow SYMBOL]... [--allow-unsupported-symbols <all|name,...>]
+/// [-- GUEST ARGS]` given an already-resolved binary reference and trace path.
+///
+/// Native replay restores every semantic input from the trace itself — seed,
+/// fault knobs, buggify, and the guest arguments — so it exposes NO semantic
+/// flags (not `--seed`, not `--fs-*`, not `--buggify*`). The only flags are
+/// host/build facts the trace cannot carry: `--fingerprint` (the compatibility
+/// fingerprint), `--mount` (re-supply the host corpus whose hash the fingerprint
+/// verifies), and `--allow`/`--allow-unsupported-symbols` (the machine-local
+/// pre-run audit surface). An optional trailing `--` section is accepted only for
+/// script compatibility and must match the recorded arguments byte-for-byte
+/// (enforced downstream by `reconcile_replay_argv`); for a trace recorded before
+/// argv capture the `--` section is used as-is. Native traces are single-timeline
+/// and native runs cannot branch, so `--timeline`/`--branch` are not accepted.
+fn parse_native_replay(
+    binary: ArtifactRef,
+    trace: PathBuf,
+    mut arguments: Vec<OsString>,
+) -> Result<NativeRunInvocation, CliError> {
+    let program_args = split_trailing_args(&mut arguments);
     let mut fingerprint = None;
     let mut allow = BTreeSet::new();
     let mut allow_unsupported: Option<UnsupportedPolicy> = None;
@@ -2116,12 +2423,20 @@ fn parse_replay(mut arguments: Vec<OsString>) -> Result<NativeRunInvocation, Cli
                     "--allow-unsupported-symbols",
                 )?;
             }
+            // Branch and timeline replay are the explicit-API (Cargo) and WASI
+            // families' capability; native traces are single-timeline and a
+            // native run cannot branch, so name the family that can.
+            "--branch" | "--timeline" | "--from" | "--branch-seed" | "--branch-id" | "--parent" => {
+                return Err(CliError::usage(format!(
+                    "{option} is not supported for native replay: native traces are single-timeline \
+and native runs cannot branch; branch/timeline replay is the Cargo package and WASI families"
+                )));
+            }
             // Semantic inputs are restored from the trace, never re-supplied.
             // Name the offending flag so the operator is not left guessing why a
             // knob was rejected; the trace is authoritative for all of these.
             "--seed"
             | "--record"
-            | "--branch"
             | "--net-latency-nanos"
             | "--fs-crash-at"
             | "--fs-torn-granularity"
@@ -2313,26 +2628,6 @@ fn utf8_argument<'a>(
         .ok_or_else(|| CliError::usage(format!("{name} requires a UTF-8 value")))
 }
 
-fn reject_branch_only_options(
-    timeline: &Option<String>,
-    branch_from: &Option<u64>,
-    branch_seed: &Option<u64>,
-    branch_id: &Option<String>,
-    parent: &Option<String>,
-) -> Result<(), CliError> {
-    if timeline.is_some()
-        || branch_from.is_some()
-        || branch_seed.is_some()
-        || branch_id.is_some()
-        || parent.is_some()
-    {
-        return Err(CliError::usage(
-            "timeline/branch options require --replay or --branch",
-        ));
-    }
-    Ok(())
-}
-
 fn set_once<T>(slot: &mut Option<T>, value: T, name: &str) -> Result<(), CliError> {
     if slot.replace(value).is_some() {
         return Err(CliError::usage(format!(
@@ -2400,6 +2695,7 @@ fn normalize_cli_preopen_path(path: &str) -> String {
 }
 
 fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
+    let mut invocation = invocation;
     let resolved = resolve_artifact(invocation.module.clone())?;
     let bytes = fs::read(&resolved.path).map_err(|error| {
         CliError(format!(
@@ -2407,8 +2703,18 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
             resolved.path.display()
         ))
     })?;
+    // A replay/branch restores the recorded guest argv from the trace so the run
+    // reproduces without the `--arg` values being re-passed. Any `--arg` the
+    // operator did supply must match the recording byte-for-byte or the replay is
+    // refused up front, naming both — the same authoritative-trace contract the
+    // native family enforces. The restored argv is folded into the WASI
+    // fingerprint below exactly as it was at record time. A pre-argv trace keeps
+    // today's contract: the supplied `--arg` values are used as-is.
+    if let Some(trace) = replay_trace_path(&invocation.mode) {
+        invocation.arguments = reconcile_wasi_replay_argv(trace, &invocation.arguments)?;
+    }
     let fingerprint = wasi_compatibility_fingerprint(&bytes, &invocation);
-    let config = match &invocation.mode {
+    let mut config = match &invocation.mode {
         Mode::Seeded { seed } => RuntimeConfig::seeded(*seed),
         Mode::Record { seed, path } => RuntimeConfig::record(*seed, path.clone(), &fingerprint),
         Mode::Replay { path, timeline } => {
@@ -2429,6 +2735,30 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
             &fingerprint,
         ),
     };
+    // On a seeded or `--record` run the operator's fault knobs configure the
+    // in-process drivers (and, on record, are captured into the trace metadata
+    // via the runtime's record path). On replay/branch the config carries no
+    // faults: the runtime restores the trace's authoritative fault configuration
+    // during `Context::from_config`, so a flag-free replay rebuilds the same
+    // CrashFs/SimNet the recording used.
+    if matches!(invocation.mode, Mode::Seeded { .. } | Mode::Record { .. }) {
+        let pairs = fault_env_pairs(&invocation.faults);
+        config = config
+            .apply_fault_env(|name| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.clone())
+            })
+            .map_err(|error| CliError(error.to_string()))?;
+    }
+    // Record the guest argv (the `--arg` values) into the trace metadata so a
+    // later `replay` restores them flag-free. Always recorded on `--record`, even
+    // when empty, so a zero-argument run reproduces zero arguments rather than
+    // inheriting whatever the replay command line supplies.
+    if matches!(invocation.mode, Mode::Record { .. }) {
+        config = config.with_guest_argv(Some(invocation.arguments.clone()));
+    }
     let context = Context::from_config(config).map_err(|error| CliError(error.to_string()))?;
     let host = configured_wasi_host(&invocation, &resolved.display, context)?;
     let execution = execute_preview1_with_fuel(&bytes, host, invocation.fuel)
@@ -2440,6 +2770,38 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
         .write_all(&execution.stderr)
         .map_err(|error| CliError(format!("failed to write captured WASI stderr: {error}")))?;
     Ok(execution.exit_code)
+}
+
+/// The trace path a replay/branch mode reads its recorded guest argv from, or
+/// `None` for a seeded/record run.
+fn replay_trace_path(mode: &Mode) -> Option<&Path> {
+    match mode {
+        Mode::Replay { path, .. } | Mode::Branch { path, .. } => Some(path),
+        Mode::Seeded { .. } | Mode::Record { .. } => None,
+    }
+}
+
+/// Restore the recorded guest argv from a WASI trace, reconciling it with any
+/// `--arg` values the operator also supplied on the replay. The trace is
+/// authoritative: with no `--arg` the recorded argv is adopted verbatim; supplied
+/// values must match the recording exactly or the replay is refused up front,
+/// naming both. A trace recorded before argv capture (`guest_argv` absent) keeps
+/// the historical contract — the supplied `--arg` values are used as-is.
+fn reconcile_wasi_replay_argv(trace: &Path, supplied: &[String]) -> Result<Vec<String>, CliError> {
+    let bundle = TraceBundle::load(trace)
+        .map_err(|error| CliError(format!("failed to load trace {}: {error}", trace.display())))?;
+    match bundle.metadata.guest_argv {
+        Some(recorded) => {
+            if !supplied.is_empty() && supplied != recorded.as_slice() {
+                return Err(CliError(format!(
+                    "replay --arg values {supplied:?} conflict with the trace's recorded guest \
+arguments {recorded:?}; the trace is authoritative, so omit --arg (or supply matching values)"
+                )));
+            }
+            Ok(recorded)
+        }
+        None => Ok(supplied.to_vec()),
+    }
 }
 
 fn configured_wasi_host(
@@ -2713,23 +3075,62 @@ fn build_on_the_fly(spec: BuildSpec) -> Result<ResolvedArtifact, CliError> {
 }
 
 fn execute_explore(exploration: ExploreInvocation) -> Result<i32, CliError> {
-    for offset in 0..exploration.seed_count {
-        let seed = exploration
-            .start_seed
+    let start = exploration.start_seed;
+    let count = exploration.seed_count;
+    // The native and WASI families build the artifact once, then run that SAME
+    // built artifact across every seed — a source/package is never rebuilt per
+    // seed. The resolved artifact (and its build workspace) is held for the whole
+    // sweep so the built file outlives every run. The Cargo family instead re-runs
+    // the whole command per seed (cargo caches the build).
+    let prebuilt = match &exploration.target {
+        ExploreTarget::Cargo(_) => None,
+        ExploreTarget::Wasi(invocation) => Some(resolve_artifact(invocation.module.clone())?),
+        ExploreTarget::Native(invocation) => Some(resolve_artifact(invocation.binary.clone())?),
+    };
+    let seed_at = |offset: u64| {
+        start
             .checked_add(offset)
-            .expect("exploration range was validated");
-        let mut invocation = exploration.invocation.clone();
-        invocation.mode = Mode::Seeded { seed };
-        let exit = execute(invocation)?;
+            .expect("exploration range was validated")
+    };
+    for offset in 0..count {
+        let seed = seed_at(offset);
+        let exit = match &exploration.target {
+            ExploreTarget::Cargo(invocation) => {
+                let mut invocation = invocation.clone();
+                invocation.mode = Mode::Seeded { seed };
+                execute(invocation)?
+            }
+            ExploreTarget::Wasi(invocation) => {
+                let mut invocation = invocation.clone();
+                invocation.module = ArtifactRef::Prebuilt(
+                    prebuilt
+                        .as_ref()
+                        .expect("wasi explore resolved")
+                        .path
+                        .clone(),
+                );
+                invocation.mode = Mode::Seeded { seed };
+                execute_wasi_run(invocation)?
+            }
+            ExploreTarget::Native(invocation) => {
+                let mut invocation = invocation.clone();
+                invocation.binary = ArtifactRef::Prebuilt(
+                    prebuilt
+                        .as_ref()
+                        .expect("native explore resolved")
+                        .path
+                        .clone(),
+                );
+                invocation.mode = NativeRunMode::Seeded { seed };
+                execute_native_run(invocation)?
+            }
+        };
         if exit != 0 {
             eprintln!("PATINA_EXPLORE_FAILURE seed={seed} exit={exit}");
             return Ok(exit);
         }
     }
-    println!(
-        "PATINA_EXPLORE_COMPLETE start={} seeds={}",
-        exploration.start_seed, exploration.seed_count
-    );
+    println!("PATINA_EXPLORE_COMPLETE start={start} seeds={count}");
     Ok(0)
 }
 
@@ -4081,11 +4482,18 @@ fn execute_minimize_scenario(invocation: ScenarioMinimize) -> Result<i32, CliErr
 }
 
 fn execute(invocation: Invocation) -> Result<i32, CliError> {
-    let workspace = workspace_root(&invocation.cargo_args)?;
+    let workspace = workspace_root_in(invocation.working_dir.as_deref(), &invocation.cargo_args)?;
     ensure_lockfile(&workspace)?;
     let fingerprint = compatibility_fingerprint(&workspace, &invocation)?;
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let mut command = Command::new(cargo);
+    // The cargo-family `replay` verb runs from anywhere: run cargo in the
+    // package's directory so its build and workspace resolution match the
+    // recording (whose fingerprint walks that same source tree), without adding a
+    // `--manifest-path` to the arguments, which would perturb the fingerprint.
+    if let Some(working_dir) = &invocation.working_dir {
+        command.current_dir(working_dir);
+    }
     command
         .arg(&invocation.cargo_command)
         .args(&invocation.cargo_args)
@@ -4100,7 +4508,23 @@ fn execute(invocation: Invocation) -> Result<i32, CliError> {
         .env_remove(ENV_BRANCH_ID)
         .env_remove(ENV_PARENT_TIMELINE)
         .env_remove(ENV_STEP_BUDGET)
-        .env_remove(ENV_PARAMS_JSON);
+        .env_remove(ENV_PARAMS_JSON)
+        // Scrub the fault-injection control plane so only the flags this
+        // invocation parsed reach the child; an ambient `PATINA_FS_CRASH_AT` (or
+        // any sibling) in the caller's environment must never silently perturb a
+        // run that requested no faults.
+        .env_remove(ENV_FS_CRASH_AT)
+        .env_remove(ENV_FS_TORN_GRANULARITY)
+        .env_remove(ENV_SLEEP_JITTER)
+        .env_remove(ENV_NET_JITTER)
+        .env_remove(ENV_NET_DROP_PERMILLE);
+    // Forward this run's fault knobs. On a `--record` run the child's runtime
+    // captures them into the trace metadata; on the `replay` verb none are set
+    // (the trace is authoritative and the runtime restores them), so replay is
+    // flag-free.
+    for (name, value) in fault_env_pairs(&invocation.faults) {
+        command.env(name, value);
+    }
     if let Some(budget) = invocation.step_budget {
         command.env(ENV_STEP_BUDGET, budget.to_string());
     }
@@ -4157,9 +4581,22 @@ fn execute(invocation: Invocation) -> Result<i32, CliError> {
 }
 
 fn workspace_root(cargo_args: &[OsString]) -> Result<PathBuf, CliError> {
+    workspace_root_in(None, cargo_args)
+}
+
+/// Locate the Cargo workspace root, optionally resolving from `working_dir`
+/// (the cargo-family `replay` verb's package directory) rather than the inherited
+/// current directory. An explicit `--manifest-path` in `cargo_args` still wins.
+fn workspace_root_in(
+    working_dir: Option<&Path>,
+    cargo_args: &[OsString],
+) -> Result<PathBuf, CliError> {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let mut command = Command::new(cargo);
     command.args(["locate-project", "--workspace", "--message-format", "plain"]);
+    if let Some(working_dir) = working_dir {
+        command.current_dir(working_dir);
+    }
     if let Some(path) = manifest_path(cargo_args)? {
         command.arg("--manifest-path").arg(path);
     }
@@ -4502,18 +4939,27 @@ mod tests {
                 path: "run.patina".into()
             }
         );
+        // Replaying a Cargo-family recording is the `replay` verb's job. The `.`
+        // package positional routes to the Cargo family (the crate directory the
+        // test runs in) and the trace positional replaces the old `--replay` PATH.
+        let replayed = invocation(&["replay", ".", "run.patina"]);
         assert_eq!(
-            invocation(&["test", "--replay=run.patina"]).mode,
+            replayed.mode,
             Mode::Replay {
                 path: "run.patina".into(),
                 timeline: "main".into(),
             }
         );
+        // A recording is produced by `run`, so replay reproduces the `run`
+        // program under the runtime; its package directory is threaded through.
+        assert_eq!(replayed.cargo_command, "run");
+        assert!(replayed.working_dir.is_some());
         assert_eq!(
             invocation(&[
-                "run",
-                "--branch",
+                "replay",
+                ".",
                 "run.patina",
+                "--branch",
                 "--from",
                 "4",
                 "--branch-seed",
@@ -4532,8 +4978,32 @@ mod tests {
                 branch_id: "branch-99".into(),
             }
         );
-        assert!(parse(strings(&["test", "--record", "a", "--replay", "b"])).is_err());
-        assert!(parse(strings(&["test", "--seed", "1", "--replay", "a"])).is_err());
+        // `--timeline` selects a timeline to replay and cannot combine with the
+        // branch controls; branch controls without `--branch` are also rejected.
+        assert!(
+            parse(strings(&[
+                "replay",
+                ".",
+                "run.patina",
+                "--branch",
+                "--from",
+                "1",
+                "--branch-seed",
+                "2",
+                "--branch-id",
+                "b",
+                "--timeline",
+                "x",
+            ]))
+            .is_err()
+        );
+        assert!(parse(strings(&["replay", ".", "run.patina", "--from", "1"])).is_err());
+        // `run`/`test` no longer parse the replay/branch flags: an unknown flag is
+        // forwarded to Cargo, leaving the Patina mode plainly seeded.
+        assert_eq!(
+            invocation(&["test", "--seed", "1"]).mode,
+            Mode::Seeded { seed: 1 }
+        );
     }
 
     #[test]
@@ -4551,13 +5021,61 @@ mod tests {
             ParseResult::Explore(exploration) => {
                 assert_eq!(exploration.start_seed, 5);
                 assert_eq!(exploration.seed_count, 3);
-                assert_eq!(exploration.invocation.cargo_command, "test");
-                assert_eq!(exploration.invocation.cargo_args, strings(&["--release"]));
+                match exploration.target {
+                    ExploreTarget::Cargo(invocation) => {
+                        assert_eq!(invocation.cargo_command, "test");
+                        assert_eq!(invocation.cargo_args, strings(&["--release"]));
+                    }
+                    _ => panic!("expected a Cargo explore target"),
+                }
             }
             _ => panic!("expected exploration"),
         }
         assert!(parse(strings(&["explore", "test", "--seeds", "0"])).is_err());
         assert!(parse(strings(&["explore", "test", "--record", "run.patina"])).is_err());
+    }
+
+    #[test]
+    fn cargo_family_parses_fault_knobs_and_explore_run_wasi() {
+        // The Cargo family accepts the seed-driven fault knobs on run/test.
+        let parsed = invocation(&[
+            "run",
+            "--fs-crash-at",
+            "close:2",
+            "--net-drop-permille",
+            "300",
+            "--",
+            "app-arg",
+        ]);
+        assert_eq!(parsed.faults.fs_crash_at.as_deref(), Some("close:2"));
+        assert_eq!(parsed.faults.net_drop_permille.as_deref(), Some("300"));
+        // The `--` tail is forwarded to Cargo, unaffected by fault parsing.
+        assert_eq!(parsed.cargo_args, strings(&["--", "app-arg"]));
+
+        // `explore run <MODULE.wasm>` sweeps the WASI family (build once, run the
+        // same artifact across seeds). The module is recognized by magic bytes at
+        // execution; here a real `.wasm` file exercises the routing.
+        let directory = tempfile::tempdir().unwrap();
+        let module = directory.path().join("m.wasm");
+        std::fs::write(&module, b"\0asm\x01\0\0\0").unwrap();
+        match parse(strings(&[
+            "explore",
+            "run",
+            module.to_str().unwrap(),
+            "--seeds",
+            "4",
+            "--start",
+            "2",
+        ]))
+        .unwrap()
+        {
+            ParseResult::Explore(exploration) => {
+                assert_eq!(exploration.start_seed, 2);
+                assert_eq!(exploration.seed_count, 4);
+                assert!(matches!(exploration.target, ExploreTarget::Wasi(_)));
+            }
+            _ => panic!("expected a WASI exploration"),
+        }
     }
 
     fn trace_invocation(values: &[&str]) -> TraceMinimize {
@@ -5043,17 +5561,22 @@ mod tests {
             }
         );
 
-        let branched = parse_wasi_run(strings(&[
-            "module.wasm",
-            "--branch",
-            "run.patina",
-            "--from",
-            "3",
-            "--branch-seed",
-            "8",
-            "--branch-id",
-            "wasi-branch",
-        ]))
+        // Replaying and branching a WASI trace is the `replay` verb's job now:
+        // the trace is a positional and the flags are semantic-free.
+        let module = ArtifactRef::Prebuilt(PathBuf::from("module.wasm"));
+        let branched = parse_wasi_replay(
+            module.clone(),
+            "run.patina".into(),
+            strings(&[
+                "--branch",
+                "--from",
+                "3",
+                "--branch-seed",
+                "8",
+                "--branch-id",
+                "wasi-branch",
+            ]),
+        )
         .unwrap();
         assert_eq!(
             branched.mode,
@@ -5064,6 +5587,32 @@ mod tests {
                 branch_seed: 8,
                 branch_id: "wasi-branch".into(),
             }
+        );
+
+        // Strict replay of a named timeline, and the recorded host inputs
+        // (`--socket`) still re-supplied as genuine host state.
+        let replayed = parse_wasi_replay(
+            module,
+            "run.patina".into(),
+            strings(&["--timeline", "wasi-branch", "--socket", "4=node-a->node-b"]),
+        )
+        .unwrap();
+        assert_eq!(
+            replayed.mode,
+            Mode::Replay {
+                path: "run.patina".into(),
+                timeline: "wasi-branch".into(),
+            }
+        );
+        assert_eq!(replayed.sockets.len(), 1);
+        // A semantic flag on WASI replay is refused: the trace is authoritative.
+        assert!(
+            parse_wasi_replay(
+                ArtifactRef::Prebuilt(PathBuf::from("module.wasm")),
+                "run.patina".into(),
+                strings(&["--fs-crash-at", "close:1"]),
+            )
+            .is_err()
         );
     }
 

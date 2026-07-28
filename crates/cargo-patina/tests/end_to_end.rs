@@ -1,9 +1,64 @@
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::Mutex;
 
 use tempfile::tempdir;
+
+/// Serializes cargo-patina invocations that compile through cargo/rustc. Under
+/// default parallel test threads, concurrent builds race on the shared workspace
+/// `target/` (cold `patina-native-shim` staticlib builds, cached artifacts) and
+/// the global cargo package-cache lock, which surfaces as "Blocking waiting for
+/// file lock" stalls or signal-killed cargo processes — a flake where every test
+/// passes in isolation and serially. Holding this lock for the duration of a
+/// compiling invocation means no two test threads build at once, while
+/// executing an already-built artifact (see [`command_compiles`]) stays parallel.
+static BUILD_LOCK: Mutex<()> = Mutex::new(());
+
+/// Whether a cargo-patina invocation will compile through cargo/rustc, and so
+/// must hold [`BUILD_LOCK`]. `build`/`test`/`explore` always compile.
+/// `run`/`replay`/`audit` compile unless handed an already-built artifact file
+/// (recognized by wasm/native magic bytes, exactly as the CLI infers the family)
+/// — those only execute or inspect it and stay parallel. `minimize` runs an
+/// external oracle whose builds reuse the fixture already compiled by the (locked)
+/// record step, so it needs no lock here; everything else (`help`, `--version`,
+/// usage errors) never compiles.
+fn command_compiles(arguments: &[&str]) -> bool {
+    match arguments.first().copied() {
+        Some("build") | Some("test") | Some("explore") => true,
+        Some("run") | Some("replay") | Some("audit") => {
+            !arguments[1..].iter().any(|arg| arg_is_built_artifact(arg))
+        }
+        _ => false,
+    }
+}
+
+/// Whether `arg` names an existing file whose leading magic bytes mark it as an
+/// already-built artifact (a WebAssembly module or a native Mach-O/ELF image),
+/// mirroring the CLI's own `detect_artifact_family`. A run/replay/audit handed
+/// such a file executes or inspects it without compiling.
+fn arg_is_built_artifact(arg: &str) -> bool {
+    let Ok(mut file) = fs::File::open(arg) else {
+        return false;
+    };
+    let mut prefix = [0u8; 4];
+    let Ok(read) = file.read(&mut prefix) else {
+        return false;
+    };
+    let prefix = &prefix[..read];
+    prefix.starts_with(b"\0asm")
+        || prefix.starts_with(&[0x7f, b'E', b'L', b'F'])
+        || matches!(
+            prefix,
+            [0xfe, 0xed, 0xfa, 0xce]
+                | [0xce, 0xfa, 0xed, 0xfe]
+                | [0xfe, 0xed, 0xfa, 0xcf]
+                | [0xcf, 0xfa, 0xed, 0xfe]
+                | [0xca, 0xfe, 0xba, 0xbe]
+                | [0xbe, 0xba, 0xfe, 0xca]
+        )
+}
 
 #[test]
 fn wasi_run_preopen_policy_controls_write_access() {
@@ -65,6 +120,113 @@ fn wasi_run_preopen_policy_controls_write_access() {
     assert_eq!(ro.status.code(), Some(69));
 }
 
+// A WASI record→`replay` round-trip: the `replay` verb restores the recorded
+// guest argv (the `--arg` values) and fault configuration from the trace, so a
+// replay is flag-free and byte-identical. A re-supplied `--arg` must match the
+// recording or the replay is refused up front, naming both.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn wasi_replay_restores_guest_argv_and_faults_flag_free() {
+    let directory = tempdir().unwrap();
+    let cwd = directory.path();
+    // `_start` reads the argument count and exits with it, so the process exit
+    // code is a pure function of the guest argv — a compact, observable proxy for
+    // "the argv reached the guest".
+    let module = directory.path().join("argc.wasm");
+    fs::write(
+        &module,
+        wat::parse_str(
+            r#"(module
+                (import "wasi_snapshot_preview1" "args_sizes_get"
+                    (func $args_sizes_get (param i32 i32) (result i32)))
+                (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
+                (memory (export "memory") 1)
+                (func (export "_start")
+                    (drop (call $args_sizes_get (i32.const 0) (i32.const 8)))
+                    (call $proc_exit (i32.load (i32.const 0)))))"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let trace = directory.path().join("argc.patina");
+    // Record with two guest arguments and a fault knob that this guest never
+    // triggers (no filesystem ops): both are captured into the trace metadata.
+    let recorded = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        cwd,
+        &[
+            "run",
+            module.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--record",
+            trace.to_str().unwrap(),
+            "--fs-crash-at",
+            "close:1",
+            "--arg",
+            "alpha",
+            "--arg",
+            "beta",
+        ],
+    );
+    let recorded_code = recorded.status.code();
+    assert!(
+        matches!(recorded_code, Some(code) if code > 0),
+        "expected a positive argc exit code, got {recorded_code:?}\nstderr:\n{}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+
+    // Flag-free replay: neither `--arg` nor `--fs-crash-at` is re-passed, yet the
+    // run reproduces byte-identically because the trace is authoritative.
+    let replayed = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        cwd,
+        &["replay", module.to_str().unwrap(), trace.to_str().unwrap()],
+    );
+    assert_eq!(
+        replayed.status.code(),
+        recorded_code,
+        "flag-free WASI replay diverged\nstderr:\n{}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+
+    // A re-supplied `--arg` matching the recording is accepted.
+    let matching = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        cwd,
+        &[
+            "replay",
+            module.to_str().unwrap(),
+            trace.to_str().unwrap(),
+            "--arg",
+            "alpha",
+            "--arg",
+            "beta",
+        ],
+    );
+    assert_eq!(matching.status.code(), recorded_code);
+
+    // A conflicting `--arg` is refused up front, naming the conflict.
+    let conflict = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        cwd,
+        &[
+            "replay",
+            module.to_str().unwrap(),
+            trace.to_str().unwrap(),
+            "--arg",
+            "gamma",
+        ],
+    );
+    assert!(!conflict.status.success());
+    let conflict_stderr = String::from_utf8_lossy(&conflict.stderr);
+    assert!(
+        conflict_stderr.contains("conflict") && conflict_stderr.contains("authoritative"),
+        "missing argv-conflict diagnostic:\n{conflict_stderr}"
+    );
+}
+
 #[test]
 fn separate_processes_repeat_record_and_replay() {
     let directory = tempdir().unwrap();
@@ -95,16 +257,21 @@ fn separate_processes_repeat_record_and_replay() {
         &["run", "--seed", "123", "--record", trace.to_str().unwrap()],
     );
     assert!(trace.is_file());
-    let replayed = invoke(&fixture, &["run", "--replay", trace.to_str().unwrap()]);
+    // Replaying a recording is the `replay` verb's job now. `.` is the package
+    // positional (the fixture is the invocation's working directory), and the
+    // trace positional replaces the old `--replay` PATH; the run's semantics are
+    // restored from the trace, so replay is flag-free.
+    let replayed = invoke(&fixture, &["replay", ".", trace.to_str().unwrap()]);
     assert_eq!(result_line(&recorded), result_line(&replayed));
     assert_eq!(result_line(&replayed), first_result);
 
     let branched = invoke(
         &fixture,
         &[
-            "run",
-            "--branch",
+            "replay",
+            ".",
             trace.to_str().unwrap(),
+            "--branch",
             "--from",
             "1",
             "--branch-seed",
@@ -117,8 +284,8 @@ fn separate_processes_repeat_record_and_replay() {
     let replayed_branch = invoke(
         &fixture,
         &[
-            "run",
-            "--replay",
+            "replay",
+            ".",
             trace.to_str().unwrap(),
             "--timeline",
             "branch-999",
@@ -139,7 +306,7 @@ fn separate_processes_repeat_record_and_replay() {
     let incompatible = invoke_unchecked(
         env!("CARGO_BIN_EXE_cargo-patina"),
         &fixture,
-        &["run", "--replay", trace.to_str().unwrap()],
+        &["replay", ".", trace.to_str().unwrap()],
     );
     assert!(!incompatible.status.success());
     let stderr = String::from_utf8_lossy(&incompatible.stderr);
@@ -341,17 +508,32 @@ fn run_and_audit_infer_target_and_reject_cross_target_flags() {
         "missing --allow-on-wasm diagnostic:\n{allow_stderr}"
     );
 
-    // A native fault knob is refused on a WASI `run`, naming the flag and target.
-    let fault_on_wasm = invoke_unchecked(
-        env!("CARGO_BIN_EXE_cargo-patina"),
+    // The filesystem/network fault knobs are now honored on a WASI `run` (they
+    // route through the same seeded runtime drivers), so a knob the no-op guest
+    // never triggers simply runs clean rather than being refused.
+    invoke_in(
         workspace,
         &["run", module.to_str().unwrap(), "--fs-crash-at", "close:1"],
     );
-    assert!(!fault_on_wasm.status.success());
-    let fault_stderr = String::from_utf8_lossy(&fault_on_wasm.stderr);
+
+    // `--sleep-jitter-nanos` stays refused on a WASI `run`, naming the flag and
+    // target: the wasip1 host does not route guest sleeps through the jitter
+    // driver, so the knob would record inert. A hard error beats silent vacuity.
+    let jitter_on_wasm = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "run",
+            module.to_str().unwrap(),
+            "--sleep-jitter-nanos",
+            "1..2",
+        ],
+    );
+    assert!(!jitter_on_wasm.status.success());
+    let jitter_stderr = String::from_utf8_lossy(&jitter_on_wasm.stderr);
     assert!(
-        fault_stderr.contains("--fs-crash-at") && fault_stderr.contains("WASI"),
-        "missing fault-on-wasm diagnostic:\n{fault_stderr}"
+        jitter_stderr.contains("--sleep-jitter-nanos") && jitter_stderr.contains("wasip1"),
+        "missing sleep-jitter-on-wasm diagnostic:\n{jitter_stderr}"
     );
 
     // A native binary (Mach-O/ELF magic): `build` (default `--target native`),
@@ -1811,8 +1993,9 @@ fn minimize_canonicalizes_a_recorded_schedule_via_replay_oracle() {
     fs::write(
         &oracle,
         format!(
-            "#!/bin/sh\nout=$(\"{}\" run --replay \"$PATINA_MINIMIZE_TRACE\" 2>/dev/null)\ncode=$?\nif [ \"$code\" -eq 3 ] && printf '%s' \"$out\" | grep -q 'interleaved=true'; then\n  exit 1\nfi\nexit 0\n",
-            env!("CARGO_BIN_EXE_cargo-patina")
+            "#!/bin/sh\nout=$(\"{}\" replay \"{}\" \"$PATINA_MINIMIZE_TRACE\" 2>/dev/null)\ncode=$?\nif [ \"$code\" -eq 3 ] && printf '%s' \"$out\" | grep -q 'interleaved=true'; then\n  exit 1\nfi\nexit 0\n",
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            fixture.to_str().unwrap(),
         ),
     )
     .unwrap();
@@ -1843,7 +2026,7 @@ fn minimize_canonicalizes_a_recorded_schedule_via_replay_oracle() {
     let replayed = invoke_unchecked(
         env!("CARGO_BIN_EXE_cargo-patina"),
         &fixture,
-        &["run", "--replay", minimized_path.to_str().unwrap()],
+        &["replay", ".", minimized_path.to_str().unwrap()],
     );
     assert_eq!(
         replayed.status.code(),
@@ -1910,6 +2093,17 @@ fn invoke_with(executable: &str, fixture: &Path, arguments: &[&str]) -> Output {
 }
 
 fn invoke_unchecked(executable: &str, fixture: &Path, arguments: &[&str]) -> Output {
+    // Serialize compiling invocations behind BUILD_LOCK so parallel test threads
+    // never build concurrently; executing an already-built artifact stays
+    // parallel. The guard is held for the whole process lifetime because the
+    // build happens inside it. `unwrap_or_else(into_inner)` tolerates a lock
+    // poisoned by an unrelated test's panic — we only need mutual exclusion of
+    // builds, not the (unit) protected state.
+    let _build_guard = command_compiles(arguments).then(|| {
+        BUILD_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    });
     Command::new(executable)
         .current_dir(fixture)
         .args(arguments)

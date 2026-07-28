@@ -171,8 +171,8 @@ Examples:
 ```sh
 cargo patina test --seed 123
 cargo patina test --seed 123 --record trace.patina
-cargo patina test --replay trace.patina
-cargo patina explore trace.patina --from <moment-id>
+cargo patina replay . trace.patina
+cargo patina explore run ./guest --seeds 100 --start 0
 ```
 
 External controls include:
