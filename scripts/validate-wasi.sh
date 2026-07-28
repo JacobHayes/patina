@@ -243,6 +243,42 @@ sockets=(--socket '4=node-a->node-b' --socket '5=node-b->node-a')
 # re-supplied on replay; their match is verified through the fingerprint.
 "$runner" replay "$tmp/network.wasm" "$tmp/network.patina" "${sockets[@]}" >"$tmp/network-replay"
 cmp "$tmp/network-record" "$tmp/network-replay"
+
+# R20 std HashMap seeding on wasip1: std's `RandomState` seeds its hasher from the
+# entropy source, which on wasm32-wasip1 is `random_get` — serviced by the
+# deterministic wasi host and seeded from the Patina seed. So HashMap iteration
+# order must be a pure function of the seed: byte-identical across separate runs
+# at the same seed (and reproduced on replay), and reordered at a different seed.
+# A fixed order would mean std hashing is NOT drawing from Patina's seeded
+# entropy; an every-run-different order would mean ambient OS randomness leaked
+# in. This gate rejects both.
+cat >"$tmp/hashmap.rs" <<'RS'
+use std::collections::HashMap;
+
+fn main() {
+    let mut map = HashMap::new();
+    for i in 0..16u32 {
+        map.insert(format!("key-{i}"), i);
+    }
+    let order: Vec<String> = map.keys().cloned().collect();
+    println!("WASI_HASHMAP_ORDER {}", order.join(","));
+}
+RS
+rustc --edition 2024 --target wasm32-wasip1 "$tmp/hashmap.rs" -o "$tmp/hashmap.wasm"
+"$runner" run "$tmp/hashmap.wasm" --seed 1 >"$tmp/hashmap-seed-1"
+"$runner" run "$tmp/hashmap.wasm" --seed 1 >"$tmp/hashmap-seed-1-again"
+"$runner" run "$tmp/hashmap.wasm" --seed 2 >"$tmp/hashmap-seed-2"
+cmp "$tmp/hashmap-seed-1" "$tmp/hashmap-seed-1-again"
+grep -Eq 'WASI_HASHMAP_ORDER ([a-z0-9-]+,){15}[a-z0-9-]+$' "$tmp/hashmap-seed-1"
+if cmp -s "$tmp/hashmap-seed-1" "$tmp/hashmap-seed-2"; then
+  echo 'validate-wasi: HashMap iteration order did not vary across seeds (not seed-derived: it is a fixed constant, so std hashing is not drawing from Patina entropy)' >&2
+  exit 1
+fi
+"$runner" run "$tmp/hashmap.wasm" --seed 1 --record "$tmp/hashmap.patina" >"$tmp/hashmap-record"
+"$runner" replay "$tmp/hashmap.wasm" "$tmp/hashmap.patina" >"$tmp/hashmap-replay"
+cmp "$tmp/hashmap-record" "$tmp/hashmap-replay"
+cmp "$tmp/hashmap-seed-1" "$tmp/hashmap-replay"
+
 printf 'Validated imports:\n'
 cat "$tmp/imports"
 printf 'Deterministic output:\n'

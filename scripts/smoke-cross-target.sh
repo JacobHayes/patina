@@ -129,6 +129,23 @@ fi
 cmp "$tmp/native-record" "$tmp/native-replay"
 cmp "$tmp/native-seed-1" "$tmp/native-replay"
 
+# --- R20 config-differential double-run: build-cache cold vs warm ---
+# Rebuild the SAME source a second time (now against a warm cargo cache) and
+# re-record at the same seed through a fresh supervisor process. The recorded
+# trace must be byte-identical to the cold-cache build's, and so must the
+# SMOKE_RESULT line. This closes the gap the same-process/same-binary repeats
+# above leave open: it proves that neither the build-cache state nor an
+# independent build+record invocation perturbs the deterministic result or the
+# trace bytes (debug-info timestamps may differ in the binary; the observable
+# behavior and the trace must not).
+"$runner" build "$tmp/smoke.rs" --output "$tmp/smoke-native-warm" >/dev/null
+"$runner" run "$tmp/smoke-native-warm" --seed 123 --record "$tmp/native-warm.patina" \
+  --fingerprint smoke-native-v1 >"$tmp/native-warm-record"
+cmp "$tmp/native.patina" "$tmp/native-warm.patina"
+grep '^SMOKE_RESULT ' "$tmp/native-record" >"$tmp/native-cold-line"
+grep '^SMOKE_RESULT ' "$tmp/native-warm-record" >"$tmp/native-warm-line"
+cmp "$tmp/native-cold-line" "$tmp/native-warm-line"
+
 # --- Cross-target: the deterministic program output must match ---
 grep '^SMOKE_RESULT ' "$tmp/wasi-replay" >"$tmp/wasi-line"
 grep '^SMOKE_RESULT ' "$tmp/native-replay" >"$tmp/native-line"

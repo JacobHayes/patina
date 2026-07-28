@@ -832,6 +832,65 @@ CANARY_HOST=two "$runner" replay "$tmp/env-probe" "$tmp/env.patina" \
 cmp "$tmp/env-record" "$tmp/env-replay"
 cmp "$tmp/env-seed-1" "$tmp/env-replay"
 
+# R20 std HashMap seeding: std's `RandomState` draws its hashing keys from the
+# process entropy source, which the shim seeds deterministically. So a HashMap's
+# iteration order must be a pure function of the Patina seed — NOT ambient OS
+# randomness (which would make it differ every run) and NOT a fixed constant
+# (which would mean the order is not seed-derived at all). This gate proves both
+# on the native target: the SAME seed yields byte-identical order across separate
+# processes (and reproduces on replay), while a DIFFERENT seed reorders it.
+cat >"$tmp/hashmap_probe.rs" <<'RS'
+// No explicit Patina init/shutdown: the packaged startup path installs and
+// finalizes the runtime around ordinary application code. HashMap iteration
+// order is observed by collecting the keys in iteration order; std's RandomState
+// seeds its hasher from the (Patina-seeded) entropy source.
+use std::collections::HashMap;
+
+fn main() {
+    let mut map = HashMap::new();
+    for i in 0..16u32 {
+        map.insert(format!("key-{i}"), i);
+    }
+    let order: Vec<String> = map.keys().cloned().collect();
+    println!("NATIVE_HASHMAP_ORDER {}", order.join(","));
+}
+RS
+"$runner" build "$tmp/hashmap_probe.rs" --output "$tmp/hashmap-probe" >/dev/null
+"$runner" audit "$tmp/hashmap-probe" "${shim_allow[@]}" >/dev/null
+"$runner" run "$tmp/hashmap-probe" --seed 1 >"$tmp/hashmap-seed-1"
+"$runner" run "$tmp/hashmap-probe" --seed 1 >"$tmp/hashmap-seed-1-again"
+"$runner" run "$tmp/hashmap-probe" --seed 2 >"$tmp/hashmap-seed-2"
+cmp "$tmp/hashmap-seed-1" "$tmp/hashmap-seed-1-again"
+grep -Eq 'NATIVE_HASHMAP_ORDER ([a-z0-9-]+,){15}[a-z0-9-]+$' "$tmp/hashmap-seed-1"
+if cmp -s "$tmp/hashmap-seed-1" "$tmp/hashmap-seed-2"; then
+  echo 'validate-native-shim: HashMap iteration order did not vary across seeds (not seed-derived: it is a fixed constant, so std hashing is not drawing from Patina entropy)' >&2
+  exit 1
+fi
+"$runner" run "$tmp/hashmap-probe" --seed 1 --record "$tmp/hashmap.patina" \
+  --fingerprint native-hashmap-v1 >"$tmp/hashmap-record"
+"$runner" replay "$tmp/hashmap-probe" "$tmp/hashmap.patina" \
+  --fingerprint native-hashmap-v1 >"$tmp/hashmap-replay"
+cmp "$tmp/hashmap-record" "$tmp/hashmap-replay"
+cmp "$tmp/hashmap-seed-1" "$tmp/hashmap-replay"
+
+# R20 config-differential double-run: the SAME single-threaded source built plain
+# and with `--yield-points` must produce a byte-identical RESULT at the same seed.
+# The instrumentation adds scheduling points, but with only one task there is
+# never another task to switch to, so every seeded entropy/clock draw happens in
+# the same program order and the observable output is schedule-invariant. (The
+# recorded traces still DIFFER — the yield-points binary carries extra TaskYield
+# operations — which is exactly why cross-replay between the two fails closed on
+# the +yieldpoints fingerprint; see the end_to_end yield-points test.) This
+# pins that a config change which must NOT alter output indeed does not.
+"$runner" build "$tmp/hashmap_probe.rs" --output "$tmp/hashmap-probe-yp" \
+  --yield-points >/dev/null
+"$runner" run "$tmp/hashmap-probe-yp" --seed 1 >"$tmp/hashmap-yp-seed-1"
+if ! cmp -s "$tmp/hashmap-seed-1" "$tmp/hashmap-yp-seed-1"; then
+  echo 'validate-native-shim: yield-points on/off changed a single-threaded guest RESULT (config-differential identity broken)' >&2
+  diff "$tmp/hashmap-seed-1" "$tmp/hashmap-yp-seed-1" >&2 || true
+  exit 1
+fi
+
 # Whole-Cargo-package native-build: an ordinary-std package with a path
 # dependency (`greeter`) and a build script, driven through its own `cargo
 # build` under Patina control. The shim cfg and link args reach the final binary

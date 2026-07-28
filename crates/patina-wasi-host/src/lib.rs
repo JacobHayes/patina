@@ -1302,47 +1302,60 @@ pub fn execute_preview1(
     execute_preview1_with_fuel(module_bytes, host, fuel)
 }
 
+/// The wasmi engine [`Config`] with every determinism-relevant knob pinned
+/// EXPLICITLY rather than inherited from `Config::default()`, so an upstream
+/// change to wasmi's defaults can never silently alter guest-observable
+/// behavior under a deterministic-replay product. Verified against wasmi
+/// 1.1.0; wasmi is a pure interpreter (no JIT), which shapes how the two
+/// classic sources of cross-engine float divergence are handled:
+///
+///   - NaN bit patterns: wasmi computes floats in software (`wasmi_core`), so
+///     a NaN-producing op yields the same bits on every run and every host.
+///     There is NO NaN-canonicalization knob to set (unlike a JIT engine,
+///     which needs one); the `nan_bits_are_deterministic` test pins that this
+///     stays true.
+///   - relaxed-SIMD: the ONE Wasm proposal whose results are implementation-
+///     defined (relaxed FMA / swizzle / lane-select may legally differ across
+///     engines) and therefore a determinism hole. It is reachable only under
+///     wasmi's `simd` cargo feature, which this workspace deliberately does
+///     NOT enable — `Config::wasm_simd`/`wasm_relaxed_simd` are themselves
+///     gated behind it, so the nondeterministic code path is compiled out of
+///     the engine entirely (a stronger guarantee than a runtime `false`) and
+///     SIMD modules are rejected at validation. The `simd_module_is_rejected`
+///     test pins that the feature stays off; if it is ever turned on, this
+///     config MUST additionally call `config.wasm_relaxed_simd(false)`.
+///
+/// * `consume_fuel(true)` — bounds CPU work AND makes `fuel_consumed` a
+///   deterministic function of the guest's executed instruction stream. wasmi
+///   1.x fixed the `fuel_for_copying_values` rounding (`(len/64)*8` ->
+///   `(len*8)/64`), so absolute fuel for multi-value copies/calls is slightly
+///   higher than under 0.47; that only shifts the fuel-exhaustion trap
+///   boundary — `fuel_consumed` is never recorded in the trace or any
+///   canonical hash (only stdout/stderr/exit_code plus the deterministic host
+///   `Context` drive replay). Within one engine version fuel is fully
+///   deterministic.
+/// * `floats(true)` — f32/f64 stay enabled (default true in 0.47 and 1.1;
+///   pinned so a default flip cannot disable float support out from under a
+///   guest).
+///
+/// All remaining default features (mutable-global, multi-value, multi-memory,
+/// sat-float-to-int, sign-extension, bulk-memory, reference-types, tail-call,
+/// extended-const, memory64) are byte-for-byte identical between wasmi 0.47.2
+/// and 1.1.0 and are all deterministic.
+fn deterministic_wasmi_config() -> WasmiConfig {
+    let mut config = WasmiConfig::default();
+    config.consume_fuel(true);
+    config.floats(true);
+    config
+}
+
 pub fn execute_preview1_with_fuel(
     module_bytes: &[u8],
     host: Preview1Host,
     fuel: u64,
 ) -> Result<WasiExecution, WasiRunError> {
     WasiAudit::audit(module_bytes).map_err(WasiRunError::Target)?;
-    // Determinism contract for the Wasmi engine. Every observable-behavior knob
-    // is pinned EXPLICITLY rather than inherited from `Config::default()`, so a
-    // future Wasmi default flip cannot silently change guest results under a
-    // deterministic-replay product. Verified against Wasmi 1.1.0:
-    //
-    // * `consume_fuel(true)` — fuel metering on; the execution ceiling and the
-    //   `fuel_consumed` we report. Wasmi 1.1 fixed the `fuel_for_copying_values`
-    //   rounding (`(len/64)*8` -> `(len*8)/64`), so the absolute fuel charged for
-    //   multi-value copies/calls can be slightly higher than under 0.47. This
-    //   only shifts the fuel-exhaustion trap boundary; `fuel_consumed` is never
-    //   recorded in the trace or any canonical hash (only stdout/stderr/exit_code
-    //   plus the deterministic host Context drive replay), so byte-identity is
-    //   unaffected. Within one engine version fuel is fully deterministic.
-    // * relaxed-SIMD (the one Wasm proposal whose results are spec-defined as
-    //   implementation-dependent / non-deterministic) and plain SIMD are OFF and
-    //   cannot be turned on here: Wasmi gates both `Config::wasm_simd` and
-    //   `Config::wasm_relaxed_simd` behind its own `simd` cargo feature, which we
-    //   do not enable, so the non-deterministic code path is compiled out of the
-    //   engine entirely — a stronger guarantee than a runtime `false`. This holds
-    //   in both 0.47 and 1.1 (`SIMD`/`RELAXED_SIMD` default to `cfg!(feature =
-    //   "simd")`, i.e. off for us).
-    // * `floats(true)` — f32/f64 stay enabled; Wasmi computes them in software
-    //   (wasmi_core), so NaN bit patterns and rounding are identical across
-    //   hosts. Neither 0.47 nor 1.1 offers a NaN-canonicalization knob because
-    //   none is needed for this interpreter. Default true in both; pinned here so
-    //   a default flip cannot disable float support out from under a guest.
-    //
-    // All remaining default features (mutable-global, multi-value, multi-memory,
-    // sat-float-to-int, sign-extension, bulk-memory, reference-types, tail-call,
-    // extended-const, memory64) are byte-for-byte identical between Wasmi 0.47.2
-    // and 1.1.0 and are all deterministic.
-    let mut config = WasmiConfig::default();
-    config.consume_fuel(true);
-    config.floats(true);
-    let engine = Engine::new(&config);
+    let engine = Engine::new(&deterministic_wasmi_config());
     let module = Module::new(&engine, module_bytes).map_err(WasiRunError::Engine)?;
     let mut linker = Linker::<Preview1Host>::new(&engine);
     define_preview1(&mut linker).map_err(WasiRunError::Engine)?;
@@ -3831,6 +3844,75 @@ mod tests {
             execute_preview1_with_fuel(&module, Preview1Host::new(context), 1_000).unwrap_err();
         assert!(matches!(error, WasiRunError::Engine(_)));
         assert!(error.to_string().to_ascii_lowercase().contains("fuel"));
+    }
+
+    // R20 engine-determinism knob: the `simd` cargo feature is deliberately off,
+    // so a module using a SIMD (v128) instruction must be REJECTED at validation.
+    // This keeps relaxed-SIMD — the one Wasm proposal with implementation-defined
+    // (nondeterministic) results — out of reach: were the feature ever enabled,
+    // relaxed-SIMD is enabled-by-default within it, and this module would load and
+    // run with results that could differ across engines/hosts. If this test ever
+    // starts failing because SIMD was turned on, `deterministic_wasmi_config` must
+    // add `config.wasm_relaxed_simd(false)` before the module is admitted.
+    #[test]
+    fn simd_module_is_rejected() {
+        let module = wat::parse_str(
+            r#"(module
+                (memory (export "memory") 1)
+                (func (export "_start")
+                    (drop (v128.const i32x4 0 0 0 0))))"#,
+        )
+        .unwrap();
+        let engine = Engine::new(&deterministic_wasmi_config());
+        let error = Module::new(&engine, &module)
+            .expect_err("a SIMD module must be rejected while the wasmi `simd` feature is off");
+        // A validation/decoding rejection, not a silent acceptance.
+        let text = error.to_string().to_ascii_lowercase();
+        assert!(
+            text.contains("simd") || text.contains("v128") || text.contains("feature"),
+            "SIMD rejection should name the disabled proposal, got: {error}"
+        );
+    }
+
+    // R20 engine-determinism knob: wasmi is a pure interpreter with no NaN
+    // canonicalization knob, so a NaN-producing float op must yield the SAME bit
+    // pattern on every run. Pinning this means an upstream change that (e.g.)
+    // introduced canonicalization or nondeterministic NaN bits would fail loudly
+    // here rather than silently perturbing guest-observable float results.
+    #[test]
+    fn nan_bits_are_deterministic() {
+        // sqrt(-1) is a canonical NaN source; reinterpret to i64 to observe the
+        // exact bit pattern the interpreter produced.
+        let module = wat::parse_str(
+            r#"(module
+                (func (export "nan_bits") (result i64)
+                    (i64.reinterpret_f64 (f64.sqrt (f64.const -1)))))"#,
+        )
+        .unwrap();
+        let nan_bits = || -> i64 {
+            let engine = Engine::new(&deterministic_wasmi_config());
+            let module = Module::new(&engine, &module).unwrap();
+            let mut store = Store::new(&engine, ());
+            // Fuel metering is on in the pinned config, so the store must be
+            // funded before any guest instruction runs.
+            store.set_fuel(1_000_000).unwrap();
+            let instance = Linker::<()>::new(&engine)
+                .instantiate_and_start(&mut store, &module)
+                .unwrap();
+            instance
+                .get_typed_func::<(), i64>(&store, "nan_bits")
+                .unwrap()
+                .call(&mut store, ())
+                .unwrap()
+        };
+        let first = nan_bits();
+        let second = nan_bits();
+        assert_eq!(first, second, "NaN bit pattern was not reproducible");
+        // It is genuinely a NaN (all exponent bits set, non-zero mantissa), so the
+        // determinism is over a real NaN result rather than a trivial constant.
+        let bits = first as u64;
+        assert_eq!(bits & 0x7ff0_0000_0000_0000, 0x7ff0_0000_0000_0000);
+        assert_ne!(bits & 0x000f_ffff_ffff_ffff, 0);
     }
 
     #[test]
