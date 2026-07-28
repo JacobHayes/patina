@@ -231,11 +231,12 @@ struct StdioCapture {
 // `write`/`sem_*` defs would satisfy any reference the shim made to those names —
 // so a plain `dlsym`-based table would hit the shim's own stub. The Linux
 // primitive is instead `__real_dlsym`, the real glibc resolver reached through
-// `-Wl,--wrap=dlsym` (mirroring the existing `-Wl,--wrap=pthread_create`); guest
+// `-Wl,--wrap=dlsym`; guest
 // `dlsym` binds to the neutering `__wrap_dlsym`, and `dlsym(RTLD_NEXT, "read")`
 // reaches genuine glibc, skipping the shim's strong def. So `__read`/`__write`/
-// `sem_*` leave the guest import table on Linux too, and its `shim_control_plane`
-// residue is `dlsym` plus the wrap-contained `pthread_create`.
+// `sem_*`/`pthread_create` leave the guest import table on Linux too (each
+// interposed by a strong def, its real vehicle resolved through the table), and
+// its `shim_control_plane` residue is the single `dlsym` primitive, as on macOS.
 #[cfg(target_os = "macos")]
 mod hostapi {
     use std::ffi::{CStr, c_char, c_int, c_void};
@@ -374,13 +375,15 @@ mod hostapi {
 // neuter std's optional-symbol probing) — so neither a named import nor a plain
 // `dlsym` can reach the real host vehicles. The resolution primitive is instead
 // `__real_dlsym`, the real glibc resolver reached through `-Wl,--wrap=dlsym`
-// (added by `cargo patina native-build`), exactly mirroring `__real_pthread_create`.
+// (added by `cargo patina native-build`).
 // `dlsym(RTLD_NEXT, "read")` then returns glibc's `read`, not the shim's strong
 // def (RTLD_NEXT searches images *after* the main executable), so the trace-fd
-// I/O and the baton semaphore reach the genuine host functions while their public
-// names never appear as undefined externals in the shim objects. The one
-// escape-surface residue is `dlsym` — matching macOS — plus `pthread_create`,
-// which stays wrap-contained (guest calls bind to the managed `__wrap_pthread_create`).
+// I/O, the baton semaphore, and the managed host-thread creator (`pthread_create`)
+// reach the genuine host functions while their public names never appear as
+// undefined externals in the shim objects. The one escape-surface residue is
+// `dlsym`, matching macOS: `read`/`write`/`sem_*`/`pthread_create` all leave the
+// guest import table because the shim interposes them with strong defs and
+// reaches the real host vehicles through the single `RTLD_NEXT` resolution.
 #[cfg(target_os = "linux")]
 mod hostapi {
     use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
@@ -390,10 +393,11 @@ mod hostapi {
     // `__real_dlsym`. Guest and std `dlsym` references bind to the shim's
     // neutering `__wrap_dlsym` (patina_posix.c); only this shim-internal path
     // reaches the real resolver. Any consumer of the shim staticlib that drives a
-    // host vehicle (managed threads / trace-fd I/O) must link `-Wl,--wrap=dlsym`,
-    // exactly as `__real_pthread_create` requires `-Wl,--wrap=pthread_create`;
-    // `cargo patina native-build` always links both, and the direct-`cc`
-    // validate-native-shim.sh probes pass them explicitly.
+    // host vehicle (managed threads / trace-fd I/O / baton) must link
+    // `-Wl,--wrap=dlsym`, the single wrap the shim needs (thread creation is a
+    // strong-def interposer whose real vehicle this same table resolves, so it
+    // needs no wrap of its own); `cargo patina native-build` always links it, and
+    // the direct-`cc` validate-native-shim.sh probes pass it explicitly.
     unsafe extern "C" {
         fn __real_dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     }
@@ -410,6 +414,9 @@ mod hostapi {
     pub type HostWrite = unsafe extern "C" fn(c_int, *const c_void, usize) -> isize;
     pub type SemInit = unsafe extern "C" fn(*mut c_void, c_int, c_uint) -> c_int;
     pub type SemOp = unsafe extern "C" fn(*mut c_void) -> c_int;
+    pub type StartRoutine = extern "C" fn(*mut c_void) -> *mut c_void;
+    pub type HostPthreadCreate =
+        unsafe extern "C" fn(*mut *mut c_void, *const c_void, StartRoutine, *mut c_void) -> c_int;
 
     /// Real host vehicles resolved once through `__real_dlsym(RTLD_NEXT, ...)`.
     /// None of these names appears as an undefined external in the shim objects.
@@ -424,6 +431,14 @@ mod hostapi {
         pub sem_init: SemInit,
         pub sem_wait: SemOp,
         pub sem_post: SemOp,
+        /// The managed host-thread creation vehicle: the real glibc
+        /// `pthread_create`. The shim interposes `pthread_create` with a strong
+        /// def (patina_posix.c) that routes guest/std threads through the
+        /// scheduler; resolving the genuine creator through `RTLD_NEXT` lets the
+        /// shim spawn a real OS thread without recursing into its own interposer,
+        /// and — like `read`/`write`/`sem_*` — keeps `pthread_create` off the
+        /// guest import table entirely (no `--wrap`, no named residue).
+        pub host_pthread_create: HostPthreadCreate,
     }
 
     // SAFETY: the fields are function pointers into glibc; sharing them across
@@ -457,14 +472,17 @@ mod hostapi {
                 sem_init: std::mem::transmute::<*mut c_void, SemInit>(resolve(c"sem_init")),
                 sem_wait: std::mem::transmute::<*mut c_void, SemOp>(resolve(c"sem_wait")),
                 sem_post: std::mem::transmute::<*mut c_void, SemOp>(resolve(c"sem_post")),
+                host_pthread_create: std::mem::transmute::<*mut c_void, HostPthreadCreate>(
+                    resolve(c"pthread_create"),
+                ),
             }
         }
     }
 
     /// The process-wide host-alias table, resolved on first use. Every entry
-    /// point that reaches it (the baton, trace-fd I/O) runs well after the loader
-    /// has mapped glibc, so lazy resolution is safe; the `OnceLock` makes the
-    /// one-time resolution race-free.
+    /// point that reaches it (the baton, host-thread creation, trace-fd I/O) runs
+    /// well after the loader has mapped glibc, so lazy resolution is safe; the
+    /// `OnceLock` makes the one-time resolution race-free.
     pub fn get() -> &'static HostApi {
         static API: OnceLock<HostApi> = OnceLock::new();
         API.get_or_init(build)
@@ -2216,8 +2234,9 @@ pub unsafe extern "C" fn patina_lifecycle_event(label: *const u8, label_len: usi
 /// # Staying out of its own interposition
 ///
 /// The shim interposes the guest's pthread symbols, so it must never call them
-/// to implement itself, or it would recurse. Two choices keep the shim audit
-/// clean with no `dlsym`:
+/// to implement itself, or it would recurse. Two choices keep the shim off its
+/// own interposers, reaching each host vehicle through the sanctioned host-alias
+/// table instead:
 ///
 /// * Shim-internal synchronization never uses `std::sync` (which lowers to the
 ///   interposed pthread symbols). The short state sections use an atomics
@@ -2226,10 +2245,11 @@ pub unsafe extern "C" fn patina_lifecycle_event(label: *const u8, label_len: usi
 ///   primitives that carry no scheduling decision. Neither touches the
 ///   interposed pthread layer.
 /// * A real host OS thread is created through a *distinct*, non-interposed
-///   symbol: `pthread_create_suspended_np` (plus a mach `thread_resume`) on
-///   macOS. glibc has no such variant, so on Linux the interposer is
-///   `__wrap_pthread_create` and the host vehicle is `__real_pthread_create`,
-///   supplied by `-Wl,--wrap=pthread_create` from `cargo patina native-build`.
+///   path: `pthread_create_suspended_np` (plus a mach `thread_resume`) on
+///   macOS. glibc has no such variant, so on Linux the shim resolves the genuine
+///   glibc `pthread_create` through the host-alias table's `dlsym(RTLD_NEXT, ...)`
+///   primitive (`RTLD_NEXT` skips the shim's own strong-def interposer), exactly
+///   as it reaches the real `read`/`write`/`sem_*`.
 ///
 /// Every scheduling decision — which task runs next at each boundary — is made
 /// by [`DetScheduler`](patina_sched_det) and recorded/replayed; the OS
@@ -2251,17 +2271,18 @@ mod thread {
     /// A guest thread body: `void *start_routine(void *arg)`.
     type StartRoutine = extern "C" fn(*mut c_void) -> *mut c_void;
 
-    // Host thread creation without `dlsym`: the shim interposes `pthread_create`,
-    // so to spawn a real OS thread it reaches the host creator through a
-    // *distinct*, non-interposed symbol. On macOS that is
+    // Host thread creation: the shim interposes `pthread_create` with a strong
+    // def, so to spawn a real OS thread it reaches the host creator through a
+    // *distinct*, non-interposed path. On macOS that is
     // `pthread_create_suspended_np` plus a mach `thread_resume` (the created
     // thread parks on the baton immediately, so the brief suspend/resume is only
     // used to avoid the interposed name). glibc has no suspended variant, so on
-    // Linux the interposer is `__wrap_pthread_create` and the real host vehicle
-    // is `__real_pthread_create`, both supplied by `-Wl,--wrap=pthread_create`
-    // (added by `cargo patina native-build`). The `__real_` reference is marked
-    // weak so unit-test and library links succeed without the flag (it is never
-    // called there); a native binary is always linked with the wrap flag.
+    // Linux the shim resolves the genuine glibc `pthread_create` through the
+    // host-alias table's `dlsym(RTLD_NEXT, ...)` primitive — the same mechanism
+    // that reaches the real `read`/`write`/`sem_*`. `RTLD_NEXT` returns the libc
+    // definition after the main executable, so the resolved vehicle is never this
+    // shim's own interposer and the call cannot recurse. No `--wrap` and no named
+    // import: `pthread_create` stays off the guest import table like the rest.
     /// Create a real, non-interposed host OS thread running `start(arg)` and
     /// write its `pthread_t` into `handle`. The thread's trampoline parks on the
     /// baton before executing any guest code. The creation vehicle is reached
@@ -2292,22 +2313,6 @@ mod thread {
         0
     }
 
-    #[cfg(target_os = "linux")]
-    unsafe extern "C" {
-        fn __real_pthread_create(
-            thread: *mut *mut c_void,
-            attr: *const c_void,
-            start: StartRoutine,
-            arg: *mut c_void,
-        ) -> c_int;
-    }
-
-    // Mark `__real_pthread_create` weak so a library/test link without the wrap
-    // flag resolves it to null instead of failing; only a native-build binary
-    // (which passes `-Wl,--wrap=pthread_create`) ever calls it.
-    #[cfg(target_os = "linux")]
-    core::arch::global_asm!(".weak __real_pthread_create");
-
     /// # Safety
     /// `handle` must be writable and `start`/`arg` a valid thread entry point.
     #[cfg(target_os = "linux")]
@@ -2317,9 +2322,10 @@ mod thread {
         start: StartRoutine,
         arg: *mut c_void,
     ) -> c_int {
-        // SAFETY: `__real_pthread_create` is the wrap-provided real host
-        // pthread_create; forwarded from this function's contract.
-        unsafe { __real_pthread_create(handle, attr, start, arg) }
+        // SAFETY: the real glibc `pthread_create` resolved through
+        // `dlsym(RTLD_NEXT, ...)` (never this shim's strong-def interposer);
+        // forwarded from this function's contract.
+        unsafe { (crate::hostapi::get().host_pthread_create)(handle, attr, start, arg) }
     }
 
     thread_local! {

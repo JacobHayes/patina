@@ -16,6 +16,14 @@ if ! command -v "$cc" >/dev/null 2>&1; then
   exit 2
 fi
 
+# Stock macOS has no `timeout` binary (coreutils is optional; GitHub's macOS
+# runners lack it too). The contention probes rely on it purely as a deadlock
+# guard, so an alarm+exec wrapper preserves that semantic: a hung probe is
+# killed and exits non-zero, which the seed-stability check then reports.
+if ! command -v timeout >/dev/null 2>&1; then
+  timeout() { perl -e 'alarm shift @ARGV; exec @ARGV or die "exec: $!"' "$@"; }
+fi
+
 # A direct staticlib link that drives any host vehicle (the packaged startup
 # constructor's host I/O, managed threads, trace-fd I/O) must reach the shim's
 # host-alias table. On Linux that table resolves through `__real_dlsym`, the real
@@ -517,20 +525,15 @@ fi
 # guest import table. On macOS `dlsym` itself is the sanctioned primitive and the
 # whole control plane is just `dlsym`. On Linux the shim interposes `dlsym`, so
 # the primitive is `__real_dlsym` reached through `-Wl,--wrap=dlsym`, which leaves
-# `dlsym` as the single resolution residue; `pthread_create` also stays, as the
-# wrap-contained managed thread-creation vehicle (guest `pthread_create` binds to
-# `__wrap_pthread_create`, so allowing the name cannot escape). Either way a guest
-# importing semaphore_wait/sem_wait/read$NOCANCEL/__read/... is now DENIED rather
-# than riding a name-based allowance.
-if [[ "$(uname -s)" == Darwin ]]; then
-  control_plane=(
-    --allow dlsym
-  )
-else
-  control_plane=(
-    --allow dlsym --allow pthread_create
-  )
-fi
+# `dlsym` as the single resolution residue; `pthread_create` is swept off the
+# table too (a plain strong def interposes it and the real creator is resolved
+# through the same `dlsym(RTLD_NEXT, ...)` table, so no `--wrap=pthread_create`
+# and no named residue). Either way a guest importing
+# semaphore_wait/sem_wait/read$NOCANCEL/__read/pthread_create/... is now DENIED
+# rather than riding a name-based allowance.
+control_plane=(
+  --allow dlsym
+)
 shim_allow=("${control_plane[@]}")
 "$runner" audit "$tmp/std-probe" \
   "${shim_allow[@]}" >"$tmp/native-imports"

@@ -153,10 +153,13 @@ environment protocol; a non-zero exit means the failure is still present.
 `build` (default `--target native`) packages the native linked-shim target: it
 builds the `patina-native-shim` staticlib, compiles the embedded POSIX C layer,
 injects `cfg(patina)`/`cfg(dst)`, and links the shim below the user program with
-`rustc`. On Linux it also links `-Wl,--wrap=pthread_create` so the shim
-interposes thread creation without dynamic loading, and `-Wl,--wrap=dlsym` so the
-shim reaches the real glibc resolver through `__real_dlsym` (its host-alias
-table) while guest `dlsym` stays neutered; macOS needs neither flag.
+`rustc`. On Linux it also links `-Wl,--wrap=dlsym` so the shim reaches the real
+glibc resolver through `__real_dlsym` (its host-alias table) while guest `dlsym`
+stays neutered; thread creation is interposed by a plain strong `pthread_create`
+def whose real vehicle is resolved through that same table, so no
+`--wrap=pthread_create` is needed (and none is used — glibc ships its own
+`__wrap_pthread_create` in libgcc's x86 split-stack support, which a wrap would
+clash with). macOS needs neither flag.
 A `.rs` path builds that single source directly. A directory (or `Cargo.toml`)
 path instead drives the package's own `cargo build` under Patina control: the
 same cfg flags and shim link arguments are injected through
@@ -3485,24 +3488,26 @@ fn compile_posix_object(workdir: &Path) -> Result<PathBuf, CliError> {
 }
 
 /// Add the platform-specific shim link arguments a native binary needs to
-/// `configure`. On Linux the shim interposes thread creation by wrapping
-/// `pthread_create` at link time, because glibc has no suspended-create variant
-/// and dynamic loading (`dlsym`) stays denied by the audit on every platform;
-/// macOS uses `pthread_create_suspended_np` and needs no wrapping. The shim
-/// objects also land after the toolchain's own `-lc`, and glibc's `atexit`
-/// lives in `libc_nonshared.a` (reached through the `libc.so` linker script);
-/// GNU ld scans archives in a single pass, so libc must be scanned again after
-/// the shim objects introduce their references.
+/// `configure`. On Linux the shim interposes thread creation with a plain strong
+/// `pthread_create` def and reaches the real glibc creator through its host-alias
+/// table (`dlsym(RTLD_NEXT, ...)`), so no link-time wrap is needed — and none is
+/// used: gcc ships its own `__wrap_pthread_create` in libgcc's x86 split-stack
+/// support, so `-Wl,--wrap=pthread_create` would `multiple definition`-clash at
+/// link. macOS uses `pthread_create_suspended_np`. The shim objects also land
+/// after the toolchain's own `-lc`, and glibc's `atexit` lives in
+/// `libc_nonshared.a` (reached through the `libc.so` linker script); GNU ld scans
+/// archives in a single pass, so libc must be scanned again after the shim
+/// objects introduce their references.
 fn push_platform_link_args(mut configure: impl FnMut(&str)) {
     #[cfg(target_os = "linux")]
     {
-        configure("link-arg=-Wl,--wrap=pthread_create");
         // Wrap `dlsym` so the shim's host-alias table can reach the real glibc
         // resolver through `__real_dlsym` while guest/std references to `dlsym`
         // still bind to the shim's neutering `__wrap_dlsym` interposer. This is
         // the Linux half of the host-alias doctrine: `dlsym(RTLD_NEXT, ...)`
-        // resolves the trace-fd I/O and baton-semaphore vehicles at runtime, so
-        // `__read`/`__write`/`sem_*` no longer appear in the guest import table.
+        // resolves the trace-fd I/O, baton-semaphore, and host-thread-creation
+        // vehicles at runtime, so `__read`/`__write`/`sem_*`/`pthread_create` no
+        // longer appear in the guest import table.
         configure("link-arg=-Wl,--wrap=dlsym");
         configure("link-arg=-lc");
     }

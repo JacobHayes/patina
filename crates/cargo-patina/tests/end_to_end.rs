@@ -357,18 +357,13 @@ fn native_build_package_audits_records_and_fails_closed() {
     assert!(clean.is_file());
 
     // The produced binary passes the same strict audit as a single-source
-    // binary, with the shim control-plane symbols allowed per audited binary.
-    // Under the host-alias doctrine the trace-fd and baton vehicles are resolved
-    // at runtime through the `dlsym` primitive, so their names never reach the
-    // guest import table. macOS collapses to the single `dlsym` residue; Linux
-    // reaches the resolver through `-Wl,--wrap=dlsym` (leaving `dlsym` as the
-    // residue) and additionally keeps `pthread_create` as the wrap-contained
-    // managed thread-creation vehicle.
-    let control_plane: &[&str] = if cfg!(target_os = "macos") {
-        &["dlsym"]
-    } else {
-        &["dlsym", "pthread_create"]
-    };
+    // binary, with the shim control-plane symbol allowed per audited binary.
+    // Under the host-alias doctrine the trace-fd, baton, and thread-creation
+    // vehicles are all resolved at runtime through the `dlsym` primitive, so
+    // their names never reach the guest import table — the control plane is the
+    // single `dlsym` residue on both platforms (Linux reaches the resolver
+    // through `-Wl,--wrap=dlsym`).
+    let control_plane: &[&str] = &["dlsym"];
     let mut audit_args = vec!["audit", clean.to_str().unwrap()];
     for symbol in control_plane {
         audit_args.push("--allow");
@@ -545,13 +540,9 @@ fn run_and_audit_infer_target_and_reject_cross_target_flags() {
         ],
     );
     // The pre-run gate auto-allows the shim control-plane vehicle; a standalone
-    // audit names it explicitly (macOS resolves through `dlsym`, Linux also keeps
-    // the wrap-contained `pthread_create`).
-    let control_plane: &[&str] = if cfg!(target_os = "macos") {
-        &["dlsym"]
-    } else {
-        &["dlsym", "pthread_create"]
-    };
+    // audit names it explicitly. The whole control plane is the single `dlsym`
+    // host-alias primitive on both platforms.
+    let control_plane: &[&str] = &["dlsym"];
     let mut audit_args = vec!["audit", bin.to_str().unwrap()];
     for symbol in control_plane {
         audit_args.push("--allow");
@@ -1259,11 +1250,7 @@ fn audit_and_replay_are_source_first() {
             bin.to_str().unwrap(),
         ],
     );
-    let control_plane: &[&str] = if cfg!(target_os = "macos") {
-        &["dlsym"]
-    } else {
-        &["dlsym", "pthread_create"]
-    };
+    let control_plane: &[&str] = &["dlsym"];
     let mut artifact_args = vec!["audit", bin.to_str().unwrap()];
     let mut source_args = vec!["audit", source.to_str().unwrap()];
     for symbol in control_plane {

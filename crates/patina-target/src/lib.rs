@@ -165,10 +165,10 @@ impl NativeAudit {
 /// Linux is swept onto the same table through `-Wl,--wrap=dlsym`: the shim
 /// interposes `dlsym` for guest/std code (`__wrap_dlsym`) while reaching the real
 /// glibc resolver through the wrap alias `__real_dlsym`, so `__read`/`__write`/
-/// `sem_*` leave the guest import table there too. Its residue is two symbols:
-/// `dlsym` (the resolution primitive) and `pthread_create` (the wrap-contained
-/// managed thread-creation vehicle — guest calls bind to `__wrap_pthread_create`,
-/// so allowing the name cannot escape, unlike the swept `sem_*`/`__read`).
+/// `sem_*` — and `pthread_create`, interposed by a plain strong def whose real
+/// creator is resolved through the same table (no `--wrap=pthread_create`) —
+/// all leave the guest import table. Its residue is therefore the single `dlsym`
+/// resolution primitive, matching macOS.
 ///
 /// The pre-run gate in `native-run` bakes this set in (a guest importing
 /// anything else on the blocking/effect surface still fails closed), while
@@ -185,18 +185,13 @@ pub fn shim_control_plane_symbols() -> BTreeSet<String> {
     #[cfg(not(target_os = "macos"))]
     const SYMBOLS: &[&str] = &[
         // The host-alias resolution primitive, reached through `-Wl,--wrap=dlsym`
-        // as `__real_dlsym`. Every trace-fd and baton-semaphore vehicle is
-        // resolved through it at runtime (`dlsym(RTLD_NEXT, ...)`), so `__read`/
-        // `__write`/`sem_*` no longer appear in the guest import table; guest and
-        // std `dlsym` references bind to the shim's neutering `__wrap_dlsym`.
+        // as `__real_dlsym`. Every trace-fd, baton-semaphore, and host-thread
+        // creation vehicle is resolved through it at runtime
+        // (`dlsym(RTLD_NEXT, ...)`), so `__read`/`__write`/`sem_*`/`pthread_create`
+        // no longer appear in the guest import table; guest and std `dlsym`
+        // references bind to the shim's neutering `__wrap_dlsym`. So, as on macOS,
+        // the whole control plane collapses to the single `dlsym` primitive.
         "dlsym",
-        // Managed host-thread creation vehicle: the real import left behind by
-        // `-Wl,--wrap=pthread_create`. It stays a named residue because it is
-        // wrap-contained — guest `pthread_create` binds to the managed
-        // `__wrap_pthread_create`, so allowing the name cannot grant an escape,
-        // unlike the swept `sem_*`/`__read`/`__write` where the name *was* the
-        // vehicle.
-        "pthread_create",
     ];
     SYMBOLS.iter().map(|symbol| (*symbol).to_owned()).collect()
 }
@@ -1232,21 +1227,28 @@ mod tests {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            // The Linux control plane is now two symbols: the `dlsym` resolution
-            // primitive (reached through `-Wl,--wrap=dlsym` as `__real_dlsym`) and
-            // the wrap-contained `pthread_create` thread-creation vehicle.
-            for symbol in ["dlsym", "pthread_create"] {
-                assert_eq!(
-                    native_import_decision(symbol, NativeFormat::Elf, &allow),
-                    NativeImportDecision::Allowed,
-                    "vehicle symbol {symbol} should pass the baked control-plane set"
-                );
-            }
+            // The Linux control plane is now a single symbol — the `dlsym`
+            // resolution primitive (reached through `-Wl,--wrap=dlsym` as
+            // `__real_dlsym`) — matching macOS.
+            assert_eq!(
+                native_import_decision("dlsym", NativeFormat::Elf, &allow),
+                NativeImportDecision::Allowed,
+                "the dlsym resolution primitive should pass the baked control-plane set"
+            );
             // The former named vehicles were swept off the import table (the shim
-            // resolves the real host `read`/`write`/`sem_*` through `dlsym` at
-            // runtime), so a guest importing one is now DENIED rather than riding a
-            // name-based allowance — the structural fix for the sem_* escape class.
-            for symbol in ["sem_wait", "sem_post", "sem_init", "__read", "__write"] {
+            // resolves the real host `read`/`write`/`sem_*`/`pthread_create` through
+            // `dlsym` at runtime), so a guest importing one is now DENIED rather than
+            // riding a name-based allowance — the structural fix for the sem_* escape
+            // class, now extended to `pthread_create` (which no longer needs a
+            // `--wrap` residue, so an unmanaged-thread import fails closed here too).
+            for symbol in [
+                "sem_wait",
+                "sem_post",
+                "sem_init",
+                "__read",
+                "__write",
+                "pthread_create",
+            ] {
                 assert!(
                     matches!(
                         native_import_decision(symbol, NativeFormat::Elf, &allow),

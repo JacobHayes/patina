@@ -103,21 +103,16 @@ cmp "$tmp/wasi-seed-1" "$tmp/wasi-replay"
 # --- Native target: the same source built and driven by the packaged target ---
 "$runner" build "$tmp/smoke.rs" --output "$tmp/smoke-native" >/dev/null
 # Shim control-plane symbols are --allow'ed per binary rather than statically
-# allowlisted (see validate-native-shim.sh for the full rationale).
-if [[ "$(uname -s)" == Darwin ]]; then
-  # Post host-alias doctrine the macOS control plane is a single symbol: the
-  # shim's dlsym resolution primitive (see validate-native-shim.sh). The former
-  # named vehicles (suspended-thread create, Mach semaphores, $NOCANCEL I/O) are
-  # resolved at runtime by the shim and must stay DENIED for guest binaries, so
-  # they are deliberately not allowlisted here.
-  control_plane=(
-    --allow dlsym
-  )
-else
-  control_plane=(
-    --allow dlsym --allow pthread_create
-  )
-fi
+# allowlisted (see validate-native-shim.sh for the full rationale). Post
+# host-alias doctrine the control plane is a single symbol on both platforms: the
+# shim's dlsym resolution primitive. Every former named vehicle (suspended-thread
+# create, Mach/POSIX semaphores, $NOCANCEL/__ I/O, and — on Linux —
+# `pthread_create`, now interposed by a plain strong def with its real creator
+# resolved through the same dlsym table) is resolved at runtime by the shim and
+# must stay DENIED for guest binaries, so none is allowlisted here.
+control_plane=(
+  --allow dlsym
+)
 "$runner" audit "$tmp/smoke-native" "${control_plane[@]}" >/dev/null
 "$runner" run "$tmp/smoke-native" --seed 123 >"$tmp/native-seed-1"
 "$runner" run "$tmp/smoke-native" --seed 123 >"$tmp/native-seed-2"

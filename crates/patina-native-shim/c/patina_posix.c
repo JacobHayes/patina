@@ -581,9 +581,13 @@ long syscall(long number, ...) {
  * The interposer is `__wrap_dlsym`: `cargo patina native-build` links
  * `-Wl,--wrap=dlsym`, so every guest/std reference to `dlsym` binds here while
  * the shim's own host-alias table reaches the real glibc resolver through the
- * distinct `__real_dlsym` (see the shim's Linux `hostapi` module). This mirrors
- * `__wrap_pthread_create` and keeps `dlsym` neutered for guest code without
- * denying the shim its one sanctioned resolution primitive.
+ * distinct `__real_dlsym` (see the shim's Linux `hostapi` module). That table is
+ * in turn how the shim reaches every real host vehicle — including the genuine
+ * `pthread_create` behind the strong-def thread interposer above — so `dlsym`
+ * stays neutered for guest code without denying the shim its one sanctioned
+ * resolution primitive. `dlsym` is the only symbol wrapped at link time;
+ * `pthread_create` deliberately is not (that would clash with libgcc's own
+ * `__wrap_pthread_create` on x86).
  */
 void *__wrap_dlsym(void *handle, const char *symbol) {
     (void)handle;
@@ -1275,23 +1279,20 @@ int rename(const char *from, const char *to) {
  * pthread returns error numbers directly rather than through errno.
  */
 /*
- * The interposer that owns thread creation. On macOS it is the ordinary strong
- * `pthread_create`; the shim reaches the real host vehicle through a distinct
- * symbol (pthread_create_suspended_np). glibc has no such variant, so on Linux
- * the interposer is `__wrap_pthread_create` and the real vehicle is
- * `__real_pthread_create`, both provided by `-Wl,--wrap=pthread_create`.
+ * The strong interposer that owns thread creation on both platforms: every
+ * guest/std `pthread_create` binds here and is routed through Patina's
+ * deterministic scheduler. The shim reaches the *real* host creator through a
+ * distinct, non-interposed vehicle so it never recurses into this definition —
+ * on macOS `pthread_create_suspended_np` plus a mach `thread_resume`, on Linux
+ * the genuine glibc `pthread_create` resolved through `dlsym(RTLD_NEXT, ...)`,
+ * the same host-alias primitive that reaches the real `read`/`write`/`sem_*`.
+ * See the shim's `spawn_host_thread`. (glibc ships `__wrap_pthread_create` in
+ * libgcc's split-stack support on x86, so the shim must NOT use `--wrap` here.)
  */
-#ifdef __linux__
-int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
-                          void *(*start_routine)(void *), void *arg) {
-    return patina_thread_create((void **)thread, (const void *)attr, start_routine, arg);
-}
-#else
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                    void *(*start_routine)(void *), void *arg) {
     return patina_thread_create((void **)thread, (const void *)attr, start_routine, arg);
 }
-#endif
 
 int pthread_join(pthread_t thread, void **retval) {
     return patina_thread_join((void *)thread, retval);
