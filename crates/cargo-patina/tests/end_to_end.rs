@@ -2572,13 +2572,20 @@ fn native_yield_points_main_thread_tls_teardown_is_deterministic() {
 // and could not exercise the gate. `kill` stays uninterposed — the process class
 // is a deterministic-runtime non-goal — so it remains an undefined import the
 // gate must flag as `process`.
+//
+// The `unmanaged-sync` representative is the Mach `semaphore_wait`, NOT
+// `os_unfair_lock_*`: os_unfair_lock is now shim-interposed (routed through
+// DetScheduler), so it is a defined symbol and no longer appears as an import.
+// `semaphore_wait` stays uninterposed (the shim's baton reaches the real Mach
+// semaphore through the host-alias `dlsym`, never a public strong def), so it
+// remains an undefined import the gate must flag as `unmanaged-sync`.
 #[cfg(target_os = "macos")]
 const ESCAPE_CLASSES_SOURCE: &str = r#"
 unsafe extern "C" {
     fn link(a: *const u8, b: *const u8) -> i32;
     fn gethostbyname(name: *const u8) -> *mut u8;
     fn select(n: i32, r: *mut u8, w: *mut u8, e: *mut u8, t: *mut u8) -> i32;
-    fn os_unfair_lock_lock(lock: *mut u8);
+    fn semaphore_wait(s: u32) -> i32;
     fn time(t: *mut i64) -> i64;
     fn arc4random() -> u32;
     fn kill(pid: i32, sig: i32) -> i32;
@@ -2590,7 +2597,7 @@ unsafe extern "C" {
 fn main() {
     let ptrs: &[*const ()] = &[
         link as *const (), gethostbyname as *const (), select as *const (),
-        os_unfair_lock_lock as *const (), time as *const (), arc4random as *const (),
+        semaphore_wait as *const (), time as *const (), arc4random as *const (),
         kill as *const (), dlopen as *const (), shm_open as *const (),
         setitimer as *const (), syscall as *const (),
     ];
@@ -2655,25 +2662,26 @@ fn native_run_prerun_gate_refuses_every_escape_class() {
     );
 }
 
-// A planted escape: a program that reaches an uninterposed blocking primitive
-// (`os_unfair_lock`, in the `unmanaged-sync` class) directly. Uncontended the
-// lock returns without a syscall, so the guest runs, but the calls are host
-// operations the deterministic runtime does not model — exactly the escape
-// class the pre-run gate exists to catch.
+// A planted escape: a program that references two uninterposed blocking
+// primitives (the Mach `semaphore_wait`/`semaphore_signal`, in the
+// `unmanaged-sync` class) directly. Taking their addresses forces the undefined
+// imports without a host call, and they are operations the deterministic runtime
+// does not model — exactly the escape class the pre-run gate exists to catch.
+// (os_unfair_lock is now interposed and accepted, so the still-uninterposed Mach
+// semaphore is the blocking representative for the gate-mechanics test.)
 #[cfg(target_os = "macos")]
 const PLANTED_ESCAPE_SOURCE: &str = r#"
-#[repr(C)]
-struct OsUnfairLock(u32);
 unsafe extern "C" {
-    fn os_unfair_lock_lock(lock: *mut OsUnfairLock);
-    fn os_unfair_lock_unlock(lock: *mut OsUnfairLock);
+    fn semaphore_wait(s: u32) -> i32;
+    fn semaphore_signal(s: u32) -> i32;
 }
 fn main() {
-    let mut lock = OsUnfairLock(0);
-    unsafe {
-        os_unfair_lock_lock(&mut lock);
-        os_unfair_lock_unlock(&mut lock);
+    let ptrs: &[*const ()] = &[semaphore_wait as *const (), semaphore_signal as *const ()];
+    let mut acc = 0usize;
+    for p in ptrs {
+        acc ^= *p as usize;
     }
+    std::hint::black_box(acc);
     println!("planted escape ran");
 }
 "#;
@@ -2715,7 +2723,7 @@ fn native_run_prerun_gate_blocks_and_flags_uninterposed_blocking_symbol() {
     );
     let denied_err = String::from_utf8_lossy(&denied.stderr);
     assert!(
-        denied_err.contains("os_unfair_lock_lock") && denied_err.contains("unmanaged-sync"),
+        denied_err.contains("semaphore_wait") && denied_err.contains("unmanaged-sync"),
         "denial must name and categorize the symbol:\n{denied_err}"
     );
     assert!(
@@ -2760,7 +2768,7 @@ fn native_run_prerun_gate_blocks_and_flags_uninterposed_blocking_symbol() {
             "--seed",
             "1",
             "--allow-unsupported-symbols",
-            "os_unfair_lock_lock",
+            "semaphore_wait",
         ],
     );
     assert!(
@@ -2768,7 +2776,7 @@ fn native_run_prerun_gate_blocks_and_flags_uninterposed_blocking_symbol() {
         "a partial allow list must still fail closed"
     );
     assert!(
-        String::from_utf8_lossy(&partial.stderr).contains("os_unfair_lock_unlock"),
+        String::from_utf8_lossy(&partial.stderr).contains("semaphore_signal"),
         "the remaining un-allowed symbol must be named"
     );
 }

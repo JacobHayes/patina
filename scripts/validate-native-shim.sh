@@ -150,6 +150,57 @@ int main(void) {
 }
 C
 
+cat >"$tmp/openat_probe.c" <<'C'
+#include "patina_native.h"
+#include <errno.h>
+#include <fcntl.h>
+#include <inttypes.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+/*
+ * openat/renameat/unlinkat over the path-based deterministic filesystem. rustix
+ * lowers its `fs` calls onto these; the shim models AT_FDCWD (a plain path) and
+ * fails closed on a real dirfd. Deterministic by construction: a fixed seed and
+ * a crash-free round-trip, so two same-seed runs are byte-identical.
+ */
+int main(int argc, char **argv) {
+    uint64_t seed = argc == 2 ? (uint64_t)strtoull(argv[1], NULL, 10) : 1;
+    if (patina_init_crash(seed) != 0) return 10;
+    if (patina_mkdir("/state") != 0) return 11;
+
+    int fd = openat(AT_FDCWD, "/state/at", O_CREAT | O_TRUNC | O_RDWR, 0600);
+    if (fd < 0) return 12;
+    if (write(fd, "openat", 6) != 6) return 13;
+    if (lseek(fd, 0, SEEK_SET) != 0) return 14;
+    char contents[8] = {0};
+    if (read(fd, contents, sizeof contents) != 6) return 15;
+    if (memcmp(contents, "openat", 6) != 0) return 16;
+    if (close(fd) != 0) return 17;
+
+    /* A real dirfd is not modeled and fails closed. */
+    errno = 0;
+    if (openat(99, "/state/at", O_RDONLY) != -1 || errno != ENOSYS) return 18;
+
+    /* renameat(AT_FDCWD, AT_FDCWD) routes to the deterministic rename. */
+    if (renameat(AT_FDCWD, "/state/at", AT_FDCWD, "/state/at-renamed") != 0) return 19;
+    errno = 0;
+    if (renameat(99, "/state/at-renamed", AT_FDCWD, "/x") != -1 || errno != ENOSYS) return 20;
+
+    /* unlinkat with AT_REMOVEDIR removes a directory; without it, a file. */
+    if (patina_mkdir("/state/at-dir") != 0) return 21;
+    if (unlinkat(AT_FDCWD, "/state/at-dir", AT_REMOVEDIR) != 0) return 22;
+    if (unlinkat(AT_FDCWD, "/state/at-renamed", 0) != 0) return 23;
+    if (patina_rmdir("/state") != 0) return 24;
+    if (patina_shutdown() != 0) return 25;
+
+    printf("NATIVE_OPENAT_RESULT seed=%" PRIu64 " contents=%s\n", seed, contents);
+    return 0;
+}
+C
+
 cat >"$tmp/std_probe.rs" <<'RS'
 // An ordinary Rust program: no Patina-specific init/shutdown calls. The
 // packaged `cargo patina build`/`run` startup path installs and
@@ -472,6 +523,17 @@ cargo test --locked --manifest-path "$root/Cargo.toml" -p cargo-patina \
   "$tmp/posix_probe.c" "$root/crates/patina-native-shim/c/patina_posix.c" \
   "$target_dir/debug/libpatina_dst_native_shim.a" ${native_wrap[@]+"${native_wrap[@]}"} -o "$tmp/posix-probe"
 "$tmp/posix-probe"
+# openat/renameat/unlinkat over the deterministic filesystem, linked against the
+# shim exactly like the posix probe. Two same-seed runs must be byte-identical
+# and the write/read round-trip must read back through the deterministic FS.
+"$cc" -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror \
+  -I"$root/crates/patina-native-shim/include" \
+  "$tmp/openat_probe.c" "$root/crates/patina-native-shim/c/patina_posix.c" \
+  "$target_dir/debug/libpatina_dst_native_shim.a" ${native_wrap[@]+"${native_wrap[@]}"} -o "$tmp/openat-probe"
+"$tmp/openat-probe" 5 >"$tmp/openat-seed-5-1"
+"$tmp/openat-probe" 5 >"$tmp/openat-seed-5-2"
+cmp "$tmp/openat-seed-5-1" "$tmp/openat-seed-5-2"
+grep -qx 'NATIVE_OPENAT_RESULT seed=5 contents=openat' "$tmp/openat-seed-5-1"
 # The interposed ordinary-std probe is built and driven through the packaged
 # `cargo patina` native target: native-build compiles the shim layer, injects
 # cfg(patina)/cfg(dst), and links the shim below the program; native-run wires
@@ -1197,24 +1259,141 @@ fn main() {
 }
 RS
 
-cat >"$tmp/parker_escape_probe.rs" <<'RS'
-// Planted escape: reaches an uninterposed blocking primitive (os_unfair_lock,
-// in the unmanaged-sync class) directly. Uncontended it returns without a
-// syscall so the guest runs, but the calls are host operations the runtime does
-// not model — the pre-run gate must refuse to run it unless overridden.
+cat >"$tmp/os_unfair_lock_probe.rs" <<'RS'
+// os_unfair_lock (parking_lot_core's Darwin word lock) is interposed: the bare
+// u32 word — with NO init call — routes through the deterministic scheduler and
+// the shared mutex table, which lazily registers it on first use. Three threads
+// contend on ONE os_unfair_lock guarding a shared vector across a scheduling
+// point, so the others park on it; the acquisition order is chosen by
+// DetScheduler and is byte-identical per seed. trylock acquires an unheld lock
+// and reports contention on a held one.
+use std::cell::UnsafeCell;
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+
+#[repr(C)]
+struct Shared {
+    word: UnsafeCell<u32>,
+    order: UnsafeCell<Vec<u32>>,
+}
+unsafe impl Sync for Shared {}
+
+unsafe extern "C" {
+    fn os_unfair_lock_lock(lock: *mut u32);
+    fn os_unfair_lock_trylock(lock: *mut u32) -> bool;
+    fn os_unfair_lock_unlock(lock: *mut u32);
+}
+
+fn main() {
+    let shared = Arc::new(Shared {
+        word: UnsafeCell::new(0),
+        order: UnsafeCell::new(Vec::new()),
+    });
+    unsafe {
+        let word = shared.word.get();
+        assert!(os_unfair_lock_trylock(word), "trylock of an unheld lock must acquire");
+        assert!(!os_unfair_lock_trylock(word), "trylock of a held lock must fail");
+        os_unfair_lock_unlock(word);
+    }
+    let mut handles = Vec::new();
+    for id in 0..3u32 {
+        let shared = Arc::clone(&shared);
+        handles.push(thread::spawn(move || {
+            for _ in 0..3 {
+                unsafe {
+                    let word = shared.word.get();
+                    os_unfair_lock_lock(word);
+                    // Guarded by the lock, so serialized under the scheduler.
+                    (*shared.order.get()).push(id);
+                    thread::sleep(Duration::from_nanos(1));
+                    os_unfair_lock_unlock(word);
+                }
+            }
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+    unsafe {
+        println!("OS_UNFAIR_LOCK_RESULT order={:?}", *shared.order.get());
+    }
+}
+RS
+
+cat >"$tmp/os_unfair_lock_misuse_probe.rs" <<'RS'
+// Unlocking a never-locked os_unfair_lock is a programmer error the real
+// primitive traps on (an unlock by a non-owner). The interposer must abort
+// LOUDLY and deterministically rather than silently succeed — these functions
+// have no error channel, so a soft failure would be an invisible escape.
 #[repr(C)]
 struct OsUnfairLock(u32);
 unsafe extern "C" {
-    fn os_unfair_lock_lock(lock: *mut OsUnfairLock);
     fn os_unfair_lock_unlock(lock: *mut OsUnfairLock);
 }
 fn main() {
     let mut lock = OsUnfairLock(0);
     unsafe {
-        os_unfair_lock_lock(&mut lock);
         os_unfair_lock_unlock(&mut lock);
     }
-    println!("PARKER_ESCAPE_RAN");
+    println!("OS_UNFAIR_LOCK_MISUSE_SURVIVED");
+}
+RS
+
+cat >"$tmp/gate_refusal_probe.rs" <<'RS'
+// A genuinely-uninterposed escape: `shm_open` (shared-memory-ipc class) is a
+// truly cross-process primitive the shim never interposes, so the pre-run gate
+// must REFUSE to run this binary — keeping the refusal path covered now that
+// os_unfair_lock is interposed and accepted. The call must be unconditional (a
+// dead branch is stripped and would drop the import), so it uses harmless args:
+// O_RDONLY on a nonexistent name returns ENOENT with no host effect, so even the
+// --allow-unsupported-symbols hatch run stays clean.
+use std::ffi::c_char;
+unsafe extern "C" {
+    fn shm_open(name: *const c_char, oflag: i32, mode: u32) -> i32;
+}
+fn main() {
+    let name = c"/patina-nonexistent-probe";
+    let r = unsafe { shm_open(name.as_ptr(), 0, 0) };
+    std::hint::black_box(r);
+    println!("GATE_REFUSAL_RAN");
+}
+RS
+
+cat >"$tmp/clock_nsec_probe.rs" <<'RS'
+// clock_gettime_nsec_np returns the virtual clock value directly in nanoseconds
+// (rustix's time module). It must map onto the same virtual clock as
+// clock_gettime — CLOCK_UPTIME_RAW/CLOCK_MONOTONIC both read PATINA monotonic —
+// so with no intervening sleep the two reads agree, and two same-seed runs are
+// byte-identical.
+const CLOCK_REALTIME: u32 = 0;
+const CLOCK_MONOTONIC: u32 = 6;
+const CLOCK_UPTIME_RAW: u32 = 8;
+
+#[repr(C)]
+struct Timespec {
+    tv_sec: i64,
+    tv_nsec: i64,
+}
+
+unsafe extern "C" {
+    fn clock_gettime_nsec_np(clock_id: u32) -> u64;
+    fn clock_gettime(clock_id: u32, tp: *mut Timespec) -> i32;
+}
+
+fn main() {
+    unsafe {
+        let mono_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        assert_eq!(clock_gettime(CLOCK_MONOTONIC, &mut ts), 0);
+        let mono_gt = ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64;
+        assert_eq!(
+            mono_ns, mono_gt,
+            "clock_gettime_nsec_np disagreed with clock_gettime on the virtual monotonic clock"
+        );
+        let real_ns = clock_gettime_nsec_np(CLOCK_REALTIME);
+        println!("CLOCK_NSEC_RESULT mono_ns={mono_ns} real_ns={real_ns}");
+    }
 }
 RS
 
@@ -1407,29 +1586,67 @@ if [[ "$rwlock_ffi_distinct" -lt 2 ]]; then
   exit 1
 fi
 
-# Pre-run default-deny gate self-test (macOS). A binary that reaches an
-# uninterposed blocking primitive must be REFUSED by native-run, naming and
-# categorizing the symbol, with the guest never running; and it must run only
-# under --allow-unsupported-symbols, with a loud warning. This gate is
-# demonstrably able to fail: the first check depends on the run being rejected.
+# Pre-run default-deny gate self-test. A binary that reaches a genuinely
+# uninterposed escape (`shm_open`, a cross-process architectural non-goal) must
+# be REFUSED by native-run, naming and categorizing the symbol, with the guest
+# never running; and it must run only under --allow-unsupported-symbols, with a
+# loud warning. This keeps the refusal path covered now that os_unfair_lock is
+# interposed rather than refused. The gate is demonstrably able to fail: the
+# first check depends on the run being rejected.
+"$runner" build "$tmp/gate_refusal_probe.rs" \
+  --output "$tmp/gate-refusal-probe" >/dev/null
+if "$runner" run "$tmp/gate-refusal-probe" --seed 1 \
+    >"$tmp/gate-refusal-out" 2>"$tmp/gate-refusal-err"; then
+  echo 'validate-native-shim: pre-run gate let a genuinely-uninterposed symbol run' >&2
+  exit 1
+fi
+grep -q 'shm_open' "$tmp/gate-refusal-err"
+grep -q 'shared-memory-ipc' "$tmp/gate-refusal-err"
+if grep -q 'GATE_REFUSAL_RAN' "$tmp/gate-refusal-out"; then
+  echo 'validate-native-shim: guest ran despite the pre-run gate denial' >&2
+  exit 1
+fi
+"$runner" run "$tmp/gate-refusal-probe" --seed 1 --allow-unsupported-symbols all \
+  >"$tmp/gate-refusal-hatch-out" 2>"$tmp/gate-refusal-hatch-err"
+grep -qx 'GATE_REFUSAL_RAN' "$tmp/gate-refusal-hatch-out"
+grep -q 'WARNING' "$tmp/gate-refusal-hatch-err"
+
+# os_unfair_lock acceptance (macOS). Now that the symbol is interposed, the
+# contention probe must PASS the pre-run gate with no --allow, audit clean, and
+# be byte-identical across two same-seed runs (the flipped former parker-escape
+# probe). A misuse — unlocking a never-locked lock — must instead abort loudly
+# and deterministically, never printing its survival marker.
 if [[ "$(uname -s)" == Darwin ]]; then
-  "$runner" build "$tmp/parker_escape_probe.rs" \
-    --output "$tmp/parker-escape-probe" >/dev/null
-  if "$runner" run "$tmp/parker-escape-probe" --seed 1 \
-      >"$tmp/parker-escape-out" 2>"$tmp/parker-escape-err"; then
-    echo 'validate-native-shim: pre-run gate let an uninterposed blocking symbol run' >&2
+  "$runner" build "$tmp/os_unfair_lock_probe.rs" \
+    --output "$tmp/os-unfair-lock-probe" >/dev/null
+  "$runner" audit "$tmp/os-unfair-lock-probe" "${shim_allow[@]}" >/dev/null
+  "$runner" run "$tmp/os-unfair-lock-probe" --seed 1 >"$tmp/os-unfair-lock-1"
+  "$runner" run "$tmp/os-unfair-lock-probe" --seed 1 >"$tmp/os-unfair-lock-2"
+  cmp "$tmp/os-unfair-lock-1" "$tmp/os-unfair-lock-2"
+  grep -Eq '^OS_UNFAIR_LOCK_RESULT order=' "$tmp/os-unfair-lock-1"
+
+  "$runner" build "$tmp/os_unfair_lock_misuse_probe.rs" \
+    --output "$tmp/os-unfair-lock-misuse-probe" >/dev/null
+  if "$runner" run "$tmp/os-unfair-lock-misuse-probe" --seed 1 \
+      >"$tmp/os-unfair-lock-misuse-out" 2>"$tmp/os-unfair-lock-misuse-err"; then
+    echo 'validate-native-shim: os_unfair_lock misuse did not abort' >&2
     exit 1
   fi
-  grep -q 'os_unfair_lock_lock' "$tmp/parker-escape-err"
-  grep -q 'unmanaged-sync' "$tmp/parker-escape-err"
-  if grep -q 'PARKER_ESCAPE_RAN' "$tmp/parker-escape-out"; then
-    echo 'validate-native-shim: guest ran despite the pre-run gate denial' >&2
+  grep -q 'os_unfair_lock_unlock' "$tmp/os-unfair-lock-misuse-err"
+  if grep -q 'OS_UNFAIR_LOCK_MISUSE_SURVIVED' "$tmp/os-unfair-lock-misuse-out"; then
+    echo 'validate-native-shim: os_unfair_lock misuse survived a foreign unlock' >&2
     exit 1
   fi
-  "$runner" run "$tmp/parker-escape-probe" --seed 1 --allow-unsupported-symbols all \
-    >"$tmp/parker-escape-hatch-out" 2>"$tmp/parker-escape-hatch-err"
-  grep -qx 'PARKER_ESCAPE_RAN' "$tmp/parker-escape-hatch-out"
-  grep -q 'WARNING' "$tmp/parker-escape-hatch-err"
+
+  # clock_gettime_nsec_np reads the virtual clock and agrees with clock_gettime
+  # (the probe asserts equality internally), and is identical across two same-seed
+  # runs.
+  "$runner" build "$tmp/clock_nsec_probe.rs" --output "$tmp/clock-nsec-probe" >/dev/null
+  "$runner" audit "$tmp/clock-nsec-probe" "${shim_allow[@]}" >/dev/null
+  "$runner" run "$tmp/clock-nsec-probe" --seed 1 >"$tmp/clock-nsec-1"
+  "$runner" run "$tmp/clock-nsec-probe" --seed 1 >"$tmp/clock-nsec-2"
+  cmp "$tmp/clock-nsec-1" "$tmp/clock-nsec-2"
+  grep -Eq '^CLOCK_NSEC_RESULT mono_ns=[0-9]+ real_ns=[0-9]+$' "$tmp/clock-nsec-1"
 fi
 
 "$runner" build "$tmp/sleep_order_probe.rs" --output "$tmp/sleep-order-probe" >/dev/null

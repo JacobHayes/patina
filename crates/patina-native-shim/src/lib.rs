@@ -3766,6 +3766,87 @@ mod thread {
         })
     }
 
+    /// `os_unfair_lock` (macOS) routed through the deterministic scheduler using
+    /// the shared mutex table, keyed on the lock's address. `os_unfair_lock` is a
+    /// bare `u32` with no init call, so the table lazily registers it on first
+    /// lock/trylock (the `or_default` path) exactly as it does for a
+    /// never-`pthread_mutex_init`'d word.
+    ///
+    /// The real primitive is non-recursive and traps on misuse: a recursive lock
+    /// by the current owner (`EDEADLK` here) and an unlock by a non-owner or of a
+    /// never-locked word (`EPERM`/`EINVAL` here) both abort loudly and
+    /// deterministically rather than returning silently — these functions have no
+    /// error channel, so a soft failure would be an invisible escape. A scheduler
+    /// fault at the entry point cannot be surfaced through the `void`/`bool` ABI
+    /// either, so it is ignored: the scheduling point (and any baton handoff) has
+    /// already happened inside `sched_point`, and the real primitive has no such
+    /// failure mode.
+    ///
+    /// # Safety
+    /// `lock` must reference a valid `os_unfair_lock`.
+    #[cfg(target_os = "macos")]
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn patina_os_unfair_lock_lock(lock: *mut c_void) {
+        let _ = sched_point();
+        let key = lock as usize;
+        let me = current_task();
+        let mut state = lock_state();
+        match state.begin_lock(me, key) {
+            Ok(Step::Continue) => {}
+            Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
+            Err(ThreadError::Fatal(message)) => {
+                drop(state);
+                fatal(&message);
+            }
+            Err(ThreadError::Posix(_)) => {
+                drop(state);
+                fatal(
+                    "os_unfair_lock_lock: recursive lock of an os_unfair_lock already held by the \
+                     current task",
+                );
+            }
+        }
+    }
+
+    /// # Safety
+    /// `lock` must reference a valid `os_unfair_lock`.
+    #[cfg(target_os = "macos")]
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn patina_os_unfair_lock_trylock(lock: *mut c_void) -> c_int {
+        let _ = sched_point();
+        let me = current_task();
+        let mut state = lock_state();
+        // Acquired -> 1. Held by another task (EBUSY) or already owned by this
+        // task (EDEADLK) -> 0: the real single-cmpxchg trylock simply fails to
+        // acquire when the word is non-zero, without trapping.
+        c_int::from(state.table.trylock(me, lock as usize) == 0)
+    }
+
+    /// # Safety
+    /// `lock` must reference a valid `os_unfair_lock` the caller holds.
+    #[cfg(target_os = "macos")]
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn patina_os_unfair_lock_unlock(lock: *mut c_void) {
+        let _ = sched_point();
+        let me = current_task();
+        let mut state = lock_state();
+        let mut scheduler = RealScheduler;
+        match state.table.unlock(&mut scheduler, me, lock as usize) {
+            Ok(()) => {}
+            Err(ThreadError::Fatal(message)) => {
+                drop(state);
+                fatal(&message);
+            }
+            Err(ThreadError::Posix(_)) => {
+                drop(state);
+                fatal(
+                    "os_unfair_lock_unlock: unlock of an os_unfair_lock not owned by the current \
+                     task",
+                );
+            }
+        }
+    }
+
     /// Deterministic `pthread_rwlock_*`. Reader/writer contention routes through
     /// the scheduler exactly like the mutex/cond interposition: writer-preferring
     /// grant order, FIFO among writers, and a batch wake of all blocked readers

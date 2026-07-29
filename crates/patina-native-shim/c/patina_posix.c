@@ -47,6 +47,7 @@
 #include <crt_externs.h>
 #include <mach/mach_time.h>
 #include <mach-o/dyld.h>
+#include <os/lock.h>
 
 uint64_t mach_absolute_time(void) {
     uint64_t nanos = 0;
@@ -64,6 +65,51 @@ kern_return_t mach_timebase_info(mach_timebase_info_t info) {
 kern_return_t mach_wait_until(uint64_t deadline) {
     if (patina_sleep_until(PATINA_CLOCK_MONOTONIC, deadline) != 0) __builtin_trap();
     return KERN_SUCCESS;
+}
+
+/*
+ * clock_gettime_nsec_np returns the clock value directly in nanoseconds (a
+ * Darwin extension rustix's time module reaches for). Route it through the same
+ * virtual clock as clock_gettime with the same clock-id mapping. The real API
+ * returns 0 on an unrecognized clock id and sets errno EINVAL, so mirror that
+ * failure return rather than inventing a sentinel.
+ */
+uint64_t clock_gettime_nsec_np(clockid_t clock_id) {
+    uint32_t patina_clock;
+    if (clock_id == CLOCK_REALTIME) patina_clock = PATINA_CLOCK_REALTIME;
+    else if (clock_id == CLOCK_MONOTONIC || clock_id == CLOCK_MONOTONIC_RAW ||
+             clock_id == CLOCK_UPTIME_RAW)
+        patina_clock = PATINA_CLOCK_MONOTONIC;
+    else {
+        errno = EINVAL;
+        return 0;
+    }
+    uint64_t nanos = 0;
+    if (patina_clock_now(patina_clock, &nanos) != 0) {
+        errno = patina_errno();
+        return 0;
+    }
+    return nanos;
+}
+
+/*
+ * os_unfair_lock (parking_lot_core's Darwin word lock). A bare u32 with no init
+ * call, so the deterministic mutex table lazily registers it on first use. The
+ * real primitive is non-recursive and traps on a recursive lock by the owner or
+ * an unlock by a non-owner; the routed implementation aborts loudly on the same
+ * misuse rather than succeeding silently. trylock yields 1 on acquisition and 0
+ * when the lock is already held (by anyone), matching the real single-cmpxchg.
+ */
+void os_unfair_lock_lock(os_unfair_lock_t lock) {
+    patina_os_unfair_lock_lock((void *)lock);
+}
+
+bool os_unfair_lock_trylock(os_unfair_lock_t lock) {
+    return patina_os_unfair_lock_trylock((void *)lock) != 0;
+}
+
+void os_unfair_lock_unlock(os_unfair_lock_t lock) {
+    patina_os_unfair_lock_unlock((void *)lock);
 }
 
 /*
@@ -767,6 +813,22 @@ int open(const char *path, int flags, ...) {
     return patina_posix_open(path, flags);
 }
 
+/*
+ * The deterministic filesystem is path-based with no directory descriptors, so
+ * the *at family is supported only for AT_FDCWD (a plain relative/absolute path)
+ * and fails closed on a real dirfd, exactly like fstatat below. The variadic
+ * mode is dropped just as `open` drops it. rustix's libc backend lowers its `fs`
+ * calls onto these on both platforms, so they are strong defs in the common
+ * section rather than Apple-only.
+ */
+int openat(int dirfd, const char *path, int flags, ...) {
+    if (dirfd != AT_FDCWD) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return patina_posix_open(path, flags);
+}
+
 int fcntl(int fd, int command, ...) {
     /* Virtual sockets: report/adjust the blocking flag; cloexec is a no-op. */
     if (fd >= PATINA_SOCKET_FD_BASE) {
@@ -1268,6 +1330,49 @@ int rmdir(const char *path) {
 int rename(const char *from, const char *to) {
     return fail_int(patina_rename(from, to));
 }
+
+/*
+ * *at removal/rename over the path-based deterministic filesystem: only AT_FDCWD
+ * (a plain path) is modeled, any real dirfd fails closed. unlinkat routes to the
+ * rmdir path when AT_REMOVEDIR is set, otherwise unlink; unknown flags fail
+ * closed. renameat requires both dirfds be AT_FDCWD.
+ */
+int unlinkat(int dirfd, const char *path, int flags) {
+    if (dirfd != AT_FDCWD) {
+        errno = ENOSYS;
+        return -1;
+    }
+    if ((flags & ~AT_REMOVEDIR) != 0) {
+        errno = ENOSYS;
+        return -1;
+    }
+    if (flags & AT_REMOVEDIR) return fail_int(patina_rmdir(path));
+    return fail_int(patina_unlink(path));
+}
+
+int renameat(int olddirfd, const char *old_path, int newdirfd, const char *new_path) {
+    if (olddirfd != AT_FDCWD || newdirfd != AT_FDCWD) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return fail_int(patina_rename(old_path, new_path));
+}
+
+#ifdef __linux__
+/*
+ * glibc exports renameat2 (the flags-carrying rename). Only the plain
+ * flags==0 case maps onto the deterministic rename; RENAME_EXCHANGE/NOREPLACE
+ * are not modeled and fail closed.
+ */
+int renameat2(int olddirfd, const char *old_path, int newdirfd, const char *new_path,
+              unsigned int flags) {
+    if (olddirfd != AT_FDCWD || newdirfd != AT_FDCWD || flags != 0) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return fail_int(patina_rename(old_path, new_path));
+}
+#endif
 
 /*
  * Managed threads and pthread synchronization. These interposers route the

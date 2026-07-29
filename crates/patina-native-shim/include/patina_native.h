@@ -255,6 +255,17 @@ void *patina_dispatch_semaphore_create(intptr_t value);
 intptr_t patina_dispatch_semaphore_wait(void *sem, uint64_t timeout);
 intptr_t patina_dispatch_semaphore_signal(void *sem);
 void patina_dispatch_release(void *object);
+
+/*
+ * os_unfair_lock routing (macOS). parking_lot_core's Darwin word lock is a bare
+ * u32 with no init call; the deterministic mutex table lazily registers it on
+ * first use. Non-recursive: a recursive lock by the owner or an unlock by a
+ * non-owner aborts loudly. trylock returns 1 on acquisition, 0 when the lock is
+ * already held.
+ */
+void patina_os_unfair_lock_lock(void *lock);
+int32_t patina_os_unfair_lock_trylock(void *lock);
+void patina_os_unfair_lock_unlock(void *lock);
 #endif
 
 #ifdef __cplusplus

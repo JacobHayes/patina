@@ -1522,7 +1522,10 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "lseek",
         "ftruncate",
         "unlink",
+        "unlinkat",
         "rename",
+        "renameat",
+        "renameat2",
         "mkdir",
         "rmdir",
         "stat",
@@ -1876,6 +1879,22 @@ mod tests {
         );
         assert_eq!(
             native_escape_category(normalize_native_symbol("_dup2")),
+            Some("filesystem")
+        );
+        assert_eq!(
+            native_escape_category(normalize_native_symbol("_openat")),
+            Some("filesystem")
+        );
+        assert_eq!(
+            native_escape_category(normalize_native_symbol("_unlinkat")),
+            Some("filesystem")
+        );
+        assert_eq!(
+            native_escape_category(normalize_native_symbol("_renameat")),
+            Some("filesystem")
+        );
+        assert_eq!(
+            native_escape_category(normalize_native_symbol("renameat2")),
             Some("filesystem")
         );
         assert_eq!(native_escape_category("malloc"), None);
