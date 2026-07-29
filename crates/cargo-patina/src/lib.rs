@@ -26,7 +26,8 @@ use patina_dst_runtime::{
 };
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
-    native_binary_is_shim_linked, shim_control_plane_symbols,
+    native_binary_has_sud_marker, native_binary_is_shim_linked, native_escape_is_sud_manageable,
+    shim_control_plane_symbols,
 };
 use patina_dst_trace::TraceBundle;
 use patina_dst_wasi_host::{
@@ -230,7 +231,13 @@ scripts and proc macros (which link for the host). Package builds also inject
 syscalls — the natural example of the direct-syscall escape class, invisible to
 the import audit and refused by the instruction scan — and this cfg (rustix's
 own escape hatch) flips it to the libc backend, so its effects become ordinary
-interposable imports instead. Select the member with
+interposable imports instead. On x86_64 Linux this cfg is belt-and-suspenders:
+the shim also arms syscall-user-dispatch (SUD), which traps any remaining raw
+inline syscall into the same deterministic routes via a SIGSYS handler, so a
+`direct-syscall` instruction finding in a SUD-linked binary is downgraded to
+SUD-managed (visible, counted, contained) rather than refused — provided the
+run's kernel has SUD (x86_64 >= 5.11; arm64 lacks it today, so there the run is
+refused and `--cfg rustix_use_libc` remains the answer). Select the member with
 `--package` in a workspace and the binary with `--bin` when the package defines
 more than one; `--output` copies the built binary out (otherwise its Cargo
 artifact path is reported). The `patina-dst-native-shim` staticlib is built from the
@@ -3829,8 +3836,59 @@ fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<i32, CliErr
     // Shim-linked (or built on the fly, or --raw): render the real audit — for a
     // shim-linked artifact this is the true post-interposition residual, and it
     // fails closed on any genuine escape.
-    let audit = NativeAudit::audit(&bytes, &invocation.allow)
-        .map_err(|error| CliError(error.to_string()))?;
+    //
+    // syscall-user-dispatch (SUD-DESIGN.md §7.1): a `direct-syscall` *instruction*
+    // finding in a SUD-dispatch-capable binary is not a hard escape — at run time
+    // it is trapped and routed by SUD (on a kernel that has it). `audit` is
+    // static (no live kernel probe), so it reports BOTH outcomes: runnable under
+    // SUD, refused on kernels without it. Any OTHER denial (or the same finding
+    // without the SUD marker) still fails closed.
+    let audit = match NativeAudit::audit(&bytes, &invocation.allow) {
+        Ok(audit) => audit,
+        Err(TargetError::UnsupportedNativeImports(denied)) => {
+            let sud_marker = native_binary_has_sud_marker(&bytes)
+                .map_err(|error| CliError(error.to_string()))?;
+            let (sud_instructions, hard): (Vec<_>, Vec<_>) = denied
+                .iter()
+                .partition(|escape| sud_marker && native_escape_is_sud_manageable(escape));
+            if !hard.is_empty() || sud_instructions.is_empty() {
+                // A genuine escape remains (or there was nothing SUD could manage):
+                // fail closed exactly as before.
+                return Err(CliError(
+                    TargetError::UnsupportedNativeImports(denied).to_string(),
+                ));
+            }
+            // Only SUD-manageable instruction findings, and the dispatcher is
+            // linked: report them as SUD-managed (both outcomes) and succeed.
+            let sites = sud_instructions.len();
+            if output::options().is_json() {
+                let findings: Vec<String> = sud_instructions
+                    .iter()
+                    .map(|escape| format!("{} (direct-syscall, SUD-managed)", escape.symbol))
+                    .collect();
+                output::emit_audit(
+                    "audit",
+                    "native",
+                    &resolved.path.display().to_string(),
+                    findings,
+                    0,
+                );
+            } else {
+                println!(
+                    "direct-syscall (SUD-managed, {sites} site{}): raw inline syscall instruction(s) \
+trapped into the deterministic runtime via syscall-user-dispatch. Runnable on a SUD kernel \
+(x86_64 >= 5.11); refused on kernels without it (notably arm64 today) — rebuild with \
+`--cfg rustix_use_libc` for those.",
+                    if sites == 1 { "" } else { "s" }
+                );
+                for escape in &sud_instructions {
+                    println!("  {} ({})", escape.symbol, escape.category);
+                }
+            }
+            return Ok(0);
+        }
+        Err(error) => return Err(CliError(error.to_string())),
+    };
     let findings: Vec<String> = audit.imports.iter().map(ToString::to_string).collect();
     if output::options().is_json() {
         output::emit_audit(
@@ -4732,6 +4790,40 @@ fn collect_fs_entries(
     Ok(())
 }
 
+/// Whether the running kernel supports syscall-user-dispatch, probed the same
+/// way the shim's C layer probes it: `prctl(PR_SET_SYSCALL_USER_DISPATCH,
+/// PR_SYS_DISPATCH_OFF, 0, 0, 0)` returns 0 on a SUD kernel and `-EINVAL` where
+/// the feature is absent (arm64 <= 6.18, pre-5.11 x86). Runs in the supervisor
+/// process, the same kernel the guest will run on. Non-Linux always returns
+/// `false` (SUD is Linux-only), so the audit downgrade never fires off-Linux.
+#[cfg(target_os = "linux")]
+fn kernel_supports_sud() -> bool {
+    // prctl SUD op numbers; 6.8 UAPI headers may predate the constants, so pin
+    // the values the design verified against the v6.8 kernel source.
+    const PR_SET_SYSCALL_USER_DISPATCH: std::ffi::c_int = 59;
+    const PR_SYS_DISPATCH_OFF: std::ffi::c_ulong = 0;
+    unsafe extern "C" {
+        fn prctl(option: std::ffi::c_int, ...) -> std::ffi::c_int;
+    }
+    // SAFETY: the OFF form with all-zero args is a pure feature probe — it turns
+    // dispatch off (a no-op when it was never on) and mutates no process state.
+    let rc = unsafe {
+        prctl(
+            PR_SET_SYSCALL_USER_DISPATCH,
+            PR_SYS_DISPATCH_OFF,
+            0usize,
+            0usize,
+            0usize,
+        )
+    };
+    rc == 0
+}
+
+#[cfg(not(target_os = "linux"))]
+fn kernel_supports_sud() -> bool {
+    false
+}
+
 fn native_prerun_gate(
     binary: &Path,
     allow: &BTreeSet<String>,
@@ -4757,11 +4849,44 @@ fn native_prerun_gate(
         }
     };
 
-    let (downgraded, blocked): (Vec<_>, Vec<_>) = denied
+    // syscall-user-dispatch downgrade (SUD-DESIGN.md §7.1): a `direct-syscall`
+    // *instruction* finding is trapped into the deterministic runtime at run time
+    // — not an escape — iff BOTH (a) the binary carries the shim's SUD dispatch
+    // marker and (b) the live kernel probe says SUD is available. Both conditions
+    // together: an old-shim binary (no marker) or a no-SUD kernel keeps today's
+    // refusal. cpu-nondeterminism findings are never SUD-manageable (register
+    // reads SUD cannot trap), so they never enter this split.
+    let sud_ok = native_binary_has_sud_marker(&bytes).unwrap_or(false) && kernel_supports_sud();
+    let (sud_instructions, rest): (Vec<_>, Vec<_>) = denied
+        .into_iter()
+        .partition(native_escape_is_sud_manageable);
+    let mut sud_managed = Vec::new();
+    let mut remaining = rest;
+    if sud_ok {
+        sud_managed = sud_instructions;
+    } else {
+        // Not downgradable here: fold back so these raw-syscall sites are blocked
+        // (with a SUD-specific hint below) — or force-runnable via the operator's
+        // --allow-unsupported-symbols hatch, exactly as before SUD.
+        remaining.extend(sud_instructions);
+    }
+
+    if !sud_managed.is_empty() {
+        eprintln!(
+            "patina: {} direct-syscall instruction site(s) in {} are SUD-managed: trapped into the \
+deterministic runtime via syscall-user-dispatch (kernel SUD present, shim dispatcher linked). \
+These are contained, not escapes — the run stays deterministic.",
+            sud_managed.len(),
+            binary.display()
+        );
+    }
+
+    let (downgraded, blocked): (Vec<_>, Vec<_>) = remaining
         .into_iter()
         .partition(|escape| policy_downgrades(policy, escape));
 
     if !blocked.is_empty() {
+        let has_raw_syscall = blocked.iter().any(native_escape_is_sud_manageable);
         let mut message = format!(
             "refusing to run {}: {} symbol(s) on the blocking/time/scheduling/effect surface are \
 neither interposed by the deterministic runtime nor known-safe (default-deny). Interpose them, or \
@@ -4771,6 +4896,19 @@ pass --allow-unsupported-symbols <all|name,name,...> to run anyway with a warnin
         );
         for escape in &blocked {
             message.push_str(&format!("\n  {} ({})", escape.symbol, escape.category));
+        }
+        if has_raw_syscall {
+            // Raw inline syscall instructions present but not SUD-manageable here:
+            // either this kernel lacks syscall-user-dispatch (notably arm64, which
+            // needs the generic-entry kernels) or the shim linked carries no SUD
+            // dispatcher. Point at the two real fixes.
+            message.push_str(
+                "\nnote: the direct-syscall instruction site(s) above are raw inline syscalls. This \
+kernel lacks syscall-user-dispatch (arm64 needs the generic-entry kernels; x86_64 has it since \
+5.11), so they cannot be trapped here. Rebuild with `--cfg rustix_use_libc` (rustix's libc \
+backend emits interposable imports instead), or run on an x86_64 SUD kernel where the shim traps \
+them.",
+            );
         }
         return Err(CliError(message));
     }

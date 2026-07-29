@@ -2765,6 +2765,301 @@ cmp "$tmp/tokio-record" "$tmp/tokio-replay"
 cmp "$tmp/tokio-seed-1" "$tmp/tokio-replay"
 cat "$tmp/tokio-seed-1"
 
+# ===========================================================================
+# syscall-user-dispatch (SUD) legs (Linux). SUD traps a guest's raw inline
+# `syscall`/`svc` instruction into the deterministic runtime via a SIGSYS
+# handler (SUD-DESIGN.md). It requires the kernel's generic-entry code —
+# x86_64 since 5.11, arm64 not yet — so the legs branch on a live kernel probe:
+# a SUD kernel runs the positive battery, a non-SUD kernel (the arm64 VM) runs
+# the refusal leg plus the kernel-independent legs, and prints a loud, counted
+# SKIPPED line (never a silent pass). Detection-before-fixes: the refusal, the
+# unmapped-syscall abort, the SIGSYS-hijack refusal, and the marker gating are
+# each proved to fire.
+# ===========================================================================
+if [[ "$(uname -s)" == Linux ]]; then
+  # Live kernel SUD probe: the same prctl(PR_SYS_DISPATCH_OFF) probe the shim
+  # and audit use (0 on a SUD kernel, EINVAL where the feature is absent).
+  cat >"$tmp/sud_support.c" <<'C'
+#include <sys/prctl.h>
+#ifndef PR_SET_SYSCALL_USER_DISPATCH
+#define PR_SET_SYSCALL_USER_DISPATCH 59
+#endif
+int main(void) {
+    return prctl(PR_SET_SYSCALL_USER_DISPATCH, 0, 0, 0, 0) == 0 ? 0 : 1;
+}
+C
+  "$cc" "$tmp/sud_support.c" -o "$tmp/sud_support"
+  if "$tmp/sud_support"; then sud_kernel=1; else sud_kernel=0; fi
+
+  # raw_syscall_probe: raw inline syscalls (no libc wrapper, no rustix) for the
+  # clock, filesystem, and entropy families, plus a three-thread fanout that
+  # each read the raw monotonic clock (per-thread arming). Built through the
+  # packaged native target, so it is shim-linked (carries the SUD dispatch
+  # marker) and runs under the supervisor (which sets PATINA_MODE, the arming
+  # trigger). The inline asm is the exact direct-syscall escape class the
+  # instruction scan refuses without SUD.
+  cat >"$tmp/raw_syscall_probe.rs" <<'RS'
+#[cfg(target_arch = "x86_64")]
+mod raw {
+    use std::arch::asm;
+    pub const CLOCK_GETTIME: i64 = 228;
+    pub const OPENAT: i64 = 257;
+    pub const WRITE: i64 = 1;
+    pub const READ: i64 = 0;
+    pub const LSEEK: i64 = 8;
+    pub const CLOSE: i64 = 3;
+    pub const GETRANDOM: i64 = 318;
+    pub unsafe fn syscall6(nr: i64, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64 {
+        let ret: i64;
+        unsafe {
+            asm!("syscall", inlateout("rax") nr => ret, in("rdi") a0, in("rsi") a1,
+                 in("rdx") a2, in("r10") a3, in("r8") a4, in("r9") a5,
+                 out("rcx") _, out("r11") _, options(nostack));
+        }
+        ret
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+mod raw {
+    use std::arch::asm;
+    pub const CLOCK_GETTIME: i64 = 113;
+    pub const OPENAT: i64 = 56;
+    pub const WRITE: i64 = 64;
+    pub const READ: i64 = 63;
+    pub const LSEEK: i64 = 62;
+    pub const CLOSE: i64 = 57;
+    pub const GETRANDOM: i64 = 278;
+    pub unsafe fn syscall6(nr: i64, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64 {
+        let ret: i64;
+        unsafe {
+            asm!("svc #0", in("x8") nr, inlateout("x0") a0 => ret, in("x1") a1,
+                 in("x2") a2, in("x3") a3, in("x4") a4, in("x5") a5, options(nostack));
+        }
+        ret
+    }
+}
+
+const CLOCK_MONOTONIC: i64 = 1;
+const AT_FDCWD: i64 = -100;
+const O_CREAT: i64 = 0o100;
+const O_RDWR: i64 = 2;
+// The virtual clock starts near zero and only advances via sleeps; a wall clock
+// would read ~1.7e18 ns. Anything under this bound proves the read was virtual.
+const VIRTUAL_BOUND: u64 = 1_000_000_000_000_000;
+
+unsafe fn clock_mono() -> u64 {
+    let mut ts = [0i64; 2];
+    let rc = unsafe { raw::syscall6(raw::CLOCK_GETTIME, CLOCK_MONOTONIC, ts.as_mut_ptr() as i64, 0, 0, 0, 0) };
+    assert_eq!(rc, 0, "raw clock_gettime rc");
+    ts[0] as u64 * 1_000_000_000 + ts[1] as u64
+}
+
+fn main() {
+    // REGRESSION SHAPE — keep the raw clock reads FIRST, before any thread spawn:
+    // the main thread gets its managed TaskId lazily (on first thread-subsystem
+    // use), so these deliberately trap on the PRE-ACTIVATION main thread. A
+    // dispatch-side check stricter than the interposer thread-semantics (the CI
+    // failure that removed §4.2 invariant 1's hard abort) turns this leg red.
+    let t0 = unsafe { clock_mono() };
+    let t1 = unsafe { clock_mono() };
+    let path = b"/sud-raw\0";
+    let fd = unsafe { raw::syscall6(raw::OPENAT, AT_FDCWD, path.as_ptr() as i64, O_CREAT | O_RDWR, 0o600, 0, 0) };
+    assert!(fd >= 0, "raw openat fd={fd}");
+    let msg = b"sud";
+    let w = unsafe { raw::syscall6(raw::WRITE, fd, msg.as_ptr() as i64, msg.len() as i64, 0, 0, 0) };
+    assert_eq!(w, 3, "raw write");
+    let _ = unsafe { raw::syscall6(raw::LSEEK, fd, 0, 0, 0, 0, 0) };
+    let mut buf = [0u8; 3];
+    let r = unsafe { raw::syscall6(raw::READ, fd, buf.as_mut_ptr() as i64, 3, 0, 0, 0) };
+    assert_eq!(r, 3, "raw read");
+    let _ = unsafe { raw::syscall6(raw::CLOSE, fd, 0, 0, 0, 0, 0) };
+    let mut rnd = [0u8; 8];
+    let g = unsafe { raw::syscall6(raw::GETRANDOM, rnd.as_mut_ptr() as i64, 8, 0, 0, 0, 0) };
+    assert_eq!(g, 8, "raw getrandom");
+    let handles: Vec<_> = (0..3).map(|_| std::thread::spawn(|| unsafe { clock_mono() })).collect();
+    let mut all_virtual = t0 < VIRTUAL_BOUND && t1 < VIRTUAL_BOUND && t1 >= t0;
+    for h in handles {
+        all_virtual &= h.join().unwrap() < VIRTUAL_BOUND;
+    }
+    let rand_hex: String = rnd.iter().map(|b| format!("{b:02x}")).collect();
+    println!(
+        "RAW_SUD_RESULT fs={} rand={} threads_virtual={}",
+        std::str::from_utf8(&buf).unwrap(),
+        rand_hex,
+        all_virtual
+    );
+}
+RS
+  "$runner" build "$tmp/raw_syscall_probe.rs" --output "$tmp/raw-syscall-probe" >/dev/null
+
+  # Static audit (kernel-independent): `audit` has no live kernel probe, so on
+  # EVERY kernel it reports the raw-syscall sites as SUD-managed with both
+  # potential outcomes (runnable under SUD; refused on kernels without it),
+  # succeeding rather than refusing — the marker makes the difference (contrast
+  # the no-marker planted probe below, which stays refused).
+  "$runner" audit "$tmp/raw-syscall-probe" "${shim_allow[@]}" >"$tmp/raw-audit" 2>&1
+  grep -q 'SUD-managed' "$tmp/raw-audit"
+  grep -q 'refused on kernels without it' "$tmp/raw-audit"
+
+  # sigsys-hijack (kernel-independent): a guest sigaction(SIGSYS,…) is refused —
+  # under SUD the SIGSYS handler IS the deterministic containment, so the guest
+  # may not re-register it. This is proved on every Linux kernel (the symbol-door
+  # interposer does not depend on SUD arming). RED before §7.5 landed: the old
+  # allowlist let it succeed silently.
+  cat >"$tmp/sigsys_probe.rs" <<'RS'
+fn main() {
+    unsafe extern "C" {
+        fn sigaction(sig: i32, act: *const core::ffi::c_void, old: *mut core::ffi::c_void) -> i32;
+    }
+    const SIGSYS: i32 = 31;
+    // The interposer refuses SIGSYS before dereferencing `act`, so null is safe.
+    let rc = unsafe { sigaction(SIGSYS, core::ptr::null(), core::ptr::null_mut()) };
+    println!("SIGSYS_REGISTER_REFUSED={}", rc != 0);
+}
+RS
+  "$runner" build "$tmp/sigsys_probe.rs" --output "$tmp/sigsys-probe" >/dev/null
+  "$runner" run "$tmp/sigsys-probe" --seed 1 >"$tmp/sigsys-out"
+  grep -qx 'SIGSYS_REGISTER_REFUSED=true' "$tmp/sigsys-out"
+
+  # marker-gating (static, kernel-independent): a NON-shim-linked binary with a
+  # planted raw syscall and NO patina_sud_dispatch marker must STILL be refused
+  # by audit — the direct-syscall downgrade is conditional on the marker, never
+  # unconditional. Guards against the gate silently opening.
+  cat >"$tmp/planted_raw.c" <<'C'
+int main(void) {
+#if defined(__x86_64__)
+    __asm__ volatile("mov $39, %%rax\n\tsyscall" ::: "rax", "rcx", "r11");
+#elif defined(__aarch64__)
+    __asm__ volatile("mov x8, #172\n\tsvc #0" ::: "x8", "x0");
+#endif
+    return 0;
+}
+C
+  "$cc" "$tmp/planted_raw.c" -o "$tmp/planted-raw"
+  if "$runner" audit "$tmp/planted-raw" --raw >"$tmp/planted-audit" 2>&1; then
+    echo 'validate-native-shim: SUD marker-gating — a no-marker raw-syscall binary audited clean (downgrade must require the marker)' >&2
+    exit 1
+  fi
+  grep -q 'direct-syscall' "$tmp/planted-audit"
+
+  if [[ $sud_kernel == 1 ]]; then
+    echo "sud: ENABLED (kernel supports syscall-user-dispatch) — running the positive battery"
+
+    # Runs; two same-seed runs are byte-identical; record→replay is byte-identical.
+    "$runner" run "$tmp/raw-syscall-probe" --seed 5 >"$tmp/raw-seed-1"
+    "$runner" run "$tmp/raw-syscall-probe" --seed 5 >"$tmp/raw-seed-2"
+    cmp "$tmp/raw-seed-1" "$tmp/raw-seed-2"
+    grep -q '^RAW_SUD_RESULT fs=sud ' "$tmp/raw-seed-1"
+    # The three-thread fanout: every thread observed virtual (not wall) time,
+    # proving per-thread SUD arming in the trampoline.
+    grep -q 'threads_virtual=true' "$tmp/raw-seed-1"
+    # Entropy is seed-derived: raw getrandom varies across seeds (not wall-random,
+    # not constant).
+    raw_distinct=$(for s in 1 2 3 4; do
+      "$runner" run "$tmp/raw-syscall-probe" --seed "$s"
+    done | grep -o 'rand=[0-9a-f]*' | sort -u | wc -l)
+    if [[ "$raw_distinct" -lt 2 ]]; then
+      echo 'validate-native-shim: SUD raw-syscall entropy did not vary across seeds' >&2
+      exit 1
+    fi
+    "$runner" run "$tmp/raw-syscall-probe" --seed 5 --record "$tmp/raw.patina" \
+      --fingerprint sud-raw-v1 >"$tmp/raw-record"
+    "$runner" replay "$tmp/raw-syscall-probe" "$tmp/raw.patina" \
+      --fingerprint sud-raw-v1 >"$tmp/raw-replay"
+    cmp "$tmp/raw-record" "$tmp/raw-replay"
+    cmp "$tmp/raw-seed-1" "$tmp/raw-replay"
+
+    # unmapped-syscall abort: a raw getpid (un-tabled in slice 1) traps to a
+    # named, deterministic abort — not a silent escape.
+    cat >"$tmp/raw_unmapped_probe.rs" <<'RS'
+use std::arch::asm;
+fn main() {
+    #[cfg(target_arch = "x86_64")]
+    let nr: i64 = 39; // getpid
+    #[cfg(target_arch = "aarch64")]
+    let nr: i64 = 172; // getpid
+    let ret: i64;
+    unsafe {
+        #[cfg(target_arch = "x86_64")]
+        asm!("syscall", inlateout("rax") nr => ret, out("rcx") _, out("r11") _, options(nostack));
+        #[cfg(target_arch = "aarch64")]
+        asm!("svc #0", in("x8") nr, out("x0") ret, options(nostack));
+    }
+    println!("UNMAPPED_PID={ret}"); // unreachable: dispatch aborts before returning
+}
+RS
+    "$runner" build "$tmp/raw_unmapped_probe.rs" --output "$tmp/raw-unmapped-probe" >/dev/null
+    if "$runner" run "$tmp/raw-unmapped-probe" --seed 1 >"$tmp/raw-unmapped-out" 2>&1; then
+      echo 'validate-native-shim: SUD unmapped-syscall probe did not abort' >&2
+      exit 1
+    fi
+    grep -q 'SUD trapped unsupported syscall' "$tmp/raw-unmapped-out"
+
+    # vDSO escape closed: after the auxv scrub, getauxval(AT_SYSINFO_EHDR) is 0,
+    # so a vDSO-resolving crate finds no vDSO and falls back to a raw syscall
+    # (which SUD traps). getauxval is a libc call (no raw syscall), so the probe
+    # audits clean and runs on any kernel — but the scrub only happens on an armed
+    # (SUD) run, so the assertion is SUD-only.
+    cat >"$tmp/auxv_probe.rs" <<'RS'
+fn main() {
+    unsafe extern "C" {
+        fn getauxval(kind: core::ffi::c_ulong) -> core::ffi::c_ulong;
+    }
+    const AT_SYSINFO_EHDR: core::ffi::c_ulong = 33;
+    println!("AUXV_SYSINFO_EHDR={}", unsafe { getauxval(AT_SYSINFO_EHDR) });
+}
+RS
+    "$runner" build "$tmp/auxv_probe.rs" --output "$tmp/auxv-probe" >/dev/null
+    "$runner" run "$tmp/auxv-probe" --seed 1 >"$tmp/auxv-out"
+    grep -qx 'AUXV_SYSINFO_EHDR=0' "$tmp/auxv-out"
+
+    cat "$tmp/raw-seed-1"
+    cat "$tmp/sigsys-out"
+    cat "$tmp/auxv-out"
+    # Loud execution proof for CI-log grepping: this line prints only after every
+    # positive leg above passed, so a skipped-but-green SUD section is impossible
+    # to mistake for an executed one.
+    echo 'SUD_LEGS_RAN branch=positive legs=audit-sud-managed,seed-stable,record-replay,thread-arming,seed-varying-entropy,unmapped-abort,auxv-canary,sigsys-hijack,marker-gating'
+  else
+    echo "sud: SKIPPED (kernel lacks syscall-user-dispatch) — running the refusal + kernel-independent legs"
+
+    # Refusal leg (RED-proved): the raw-syscall probe carries the SUD marker but
+    # this kernel has no SUD, so the pre-run gate refuses it with the extended
+    # hint (rustix_use_libc / x86_64). This is the exact binary class the arm64
+    # VM exercises for real.
+    if "$runner" run "$tmp/raw-syscall-probe" --seed 1 >"$tmp/raw-refuse-out" 2>&1; then
+      echo 'validate-native-shim: SUD raw-syscall probe was NOT refused on a no-SUD kernel' >&2
+      exit 1
+    fi
+    grep -q 'lacks syscall-user-dispatch' "$tmp/raw-refuse-out"
+    grep -q 'direct-syscall' "$tmp/raw-refuse-out"
+
+    # REPLAY refusal: a trace recorded under SUD (on an x86_64 SUD kernel) must
+    # refuse to replay here, pre-exec, naming the real situation — not diverge
+    # mid-run and not fail with a generic trace error. In slice 1 this is
+    # enforced by the same pre-run gate (SUD arming is a pure function of the
+    # binary marker × kernel probe, with NO independent toggle, so the marker
+    # binary the fingerprint already pins subsumes a sud metadata byte; the
+    # explicit `sud` RunMetadata field is slice 2, SUD-DESIGN.md §7.3/§9). The
+    # gate runs before the trace is opened, so a placeholder trace file proves
+    # the refusal is pre-exec.
+    : >"$tmp/sud-foreign.patina"
+    if "$runner" replay "$tmp/raw-syscall-probe" "$tmp/sud-foreign.patina" \
+      >"$tmp/raw-replay-refuse-out" 2>&1; then
+      echo 'validate-native-shim: SUD raw-syscall replay was NOT refused on a no-SUD kernel' >&2
+      exit 1
+    fi
+    grep -q 'lacks syscall-user-dispatch' "$tmp/raw-replay-refuse-out"
+
+    cat "$tmp/raw-refuse-out"
+    cat "$tmp/sigsys-out"
+    # Loud execution proof, mirroring the positive branch: prints only after the
+    # refusal + kernel-independent legs above passed.
+    echo 'SUD_LEGS_RAN branch=refusal legs=audit-sud-managed,run-refusal,replay-refusal,sigsys-hijack,marker-gating'
+  fi
+fi
+
 cat "$tmp/pipe-seed-1-1"
 cat "$tmp/socketpair-seed-1-1"
 cat "$tmp/pipe-epipe-out"

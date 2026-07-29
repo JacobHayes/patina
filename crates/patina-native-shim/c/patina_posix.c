@@ -35,12 +35,17 @@
 #include <sys/utsname.h>
 #ifdef __linux__
 #include <dlfcn.h>
+#include <elf.h>
+#include <link.h>
+#include <linux/audit.h>
 #include <linux/futex.h>
 #include <sched.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/prctl.h>
 #include <sys/random.h>
 #include <sys/syscall.h>
+#include <ucontext.h>
 #endif
 #include <time.h>
 #include <unistd.h>
@@ -1556,6 +1561,415 @@ _Noreturn void exit(int status) {
 }
 
 #ifdef __linux__
+/* ==========================================================================
+ * Syscall-user-dispatch (SUD).
+ *
+ * Arms the kernel's syscall-user-dispatch so a guest's raw inline `syscall`
+ * instruction (rustix's default linux_raw backend, hand-written asm, ...) —
+ * invisible to the import audit and refused by the instruction scan — is trapped
+ * into the deterministic runtime instead of escaping it. Design: SUD-DESIGN.md.
+ *
+ * Mode: allowed region = glibc's single executable segment, NULL selector, so
+ * every syscall instruction OUTSIDE glibc text unconditionally delivers a
+ * thread-directed SIGSYS (there is no guest-writable selector byte to protect).
+ * The shim itself reaches the kernel only through glibc host aliases (audit
+ * proven: shim/guest text contains zero syscall opcodes), so glibc text is the
+ * exact allowed region. Two arming sites, zero selector sites, zero disarm
+ * sites: the main thread here in `__libc_start_main`, every managed thread in
+ * the Rust `thread_trampoline`. The config does not survive clone/fork/exec, so
+ * each thread arms once.
+ *
+ * All host vehicles the SUD paths touch (prctl, sigaction, the /proc/self/maps
+ * reader's open/read/close) are resolved through `__real_dlsym(RTLD_NEXT, ...)`
+ * — the `-Wl,--wrap=dlsym` alias — so those names never appear as undefined
+ * externals in the shim objects (host-alias doctrine) and so `open`/`read`
+ * reach the REAL glibc descriptors rather than this shim's interposed
+ * (deterministic-FS) strong defs.
+ * ========================================================================== */
+
+extern void *__real_dlsym(void *handle, const char *symbol);
+
+/* prctl SUD op numbers (6.8 UAPI headers may predate the constants). */
+#ifndef PR_SET_SYSCALL_USER_DISPATCH
+#define PR_SET_SYSCALL_USER_DISPATCH 59
+#endif
+#ifndef PR_SYS_DISPATCH_OFF
+#define PR_SYS_DISPATCH_OFF 0
+#endif
+#ifndef PR_SYS_DISPATCH_ON
+#define PR_SYS_DISPATCH_ON 1
+#endif
+/* si_code for a syscall-user-dispatch SIGSYS. */
+#ifndef SYS_USER_DISPATCH
+#define SYS_USER_DISPATCH 2
+#endif
+
+typedef int (*patina_prctl_fn)(int, unsigned long, unsigned long, unsigned long,
+                               void *);
+typedef int (*patina_host_open_fn)(const char *, int, ...);
+typedef ssize_t (*patina_host_read_fn)(int, void *, size_t);
+typedef int (*patina_host_close_fn)(int);
+typedef int (*patina_host_sigaction_fn)(int, const struct sigaction *,
+                                        struct sigaction *);
+
+static patina_prctl_fn patina_host_prctl;
+static patina_host_open_fn patina_host_open;
+static patina_host_read_fn patina_host_read_real;
+static patina_host_close_fn patina_host_close_real;
+static patina_host_sigaction_fn patina_host_sigaction;
+
+/* The glibc allowed region (its one executable segment) and the main
+ * executable's text span. Discovered once from /proc/self/maps at arming. */
+static unsigned long patina_sud_libc_off;
+static unsigned long patina_sud_libc_len;
+static uintptr_t patina_sud_text_lo;
+static uintptr_t patina_sud_text_hi;
+static int patina_sud_armed; /* set once the main thread arms; gates thread arming */
+
+/* Rust side of the boundary (see src/sud.rs / lib.rs). */
+extern long patina_sud_dispatch(long nr, unsigned long a0, unsigned long a1,
+                                unsigned long a2, unsigned long a3,
+                                unsigned long a4, unsigned long a5,
+                                uintptr_t call_addr);
+_Noreturn void patina_sud_report_fatal(const char *message);
+_Noreturn void patina_sud_report_fatal_addr(const char *message, long nr,
+                                            uintptr_t addr);
+
+/* Lazily resolve the REAL glibc sigaction through the wrap alias, so the shim's
+ * own SIGSYS-hardening `sigaction` strong def below can forward to it without
+ * naming `sigaction` as an undefined external. Shared by the SIGSYS installer
+ * and the interposer. */
+static patina_host_sigaction_fn patina_real_sigaction(void) {
+    if (patina_host_sigaction == NULL) {
+        patina_host_sigaction =
+            (patina_host_sigaction_fn)__real_dlsym(RTLD_NEXT, "sigaction");
+    }
+    return patina_host_sigaction;
+}
+
+static int patina_env_has(const char *name, char **argv, int argc) {
+    char **envp = argv + argc + 1;
+    size_t nlen = strlen(name);
+    for (char **e = envp; *e != NULL; e++) {
+        if (strncmp(*e, name, nlen) == 0 && (*e)[nlen] == '=') return 1;
+    }
+    return 0;
+}
+
+static uintptr_t patina_parse_hex(const char **cursor) {
+    uintptr_t value = 0;
+    const char *s = *cursor;
+    for (;;) {
+        char c = *s;
+        uintptr_t digit;
+        if (c >= '0' && c <= '9') digit = (uintptr_t)(c - '0');
+        else if (c >= 'a' && c <= 'f') digit = (uintptr_t)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') digit = (uintptr_t)(c - 'A' + 10);
+        else break;
+        value = (value << 4) | digit;
+        s++;
+    }
+    *cursor = s;
+    return value;
+}
+
+/* Slurp /proc/self/maps through the REAL glibc open/read/close (never the
+ * interposed deterministic-FS strong defs). Fails closed (never a partial parse
+ * on a guessed region) if the file is larger than the buffer. */
+static int patina_sud_read_maps(char *buffer, size_t capacity, size_t *out_len) {
+    int fd = patina_host_open("/proc/self/maps", O_RDONLY);
+    if (fd < 0) return -1;
+    size_t total = 0;
+    for (;;) {
+        if (total >= capacity) {
+            patina_host_close_real(fd);
+            return -1;
+        }
+        ssize_t n = patina_host_read_real(fd, buffer + total, capacity - total);
+        if (n < 0) {
+            patina_host_close_real(fd);
+            return -1;
+        }
+        if (n == 0) break;
+        total += (size_t)n;
+    }
+    patina_host_close_real(fd);
+    *out_len = total;
+    return 0;
+}
+
+/* Discover (a) glibc's single executable segment (the allowed region) and (b)
+ * the main executable's text span (which must contain the guest's syscall
+ * sites). The text span is identified as the executable segment that contains
+ * this handler's own code address — guest + shim + std share the one main-exe
+ * r-xp mapping, so no path/readlink is needed. Returns 0 on success; -1 (fail
+ * closed) unless exactly one executable libc segment and a text span are found.
+ */
+static void patina_sud_sigsys(int sig, siginfo_t *info, void *ucontext);
+
+static int patina_sud_discover_regions(void) {
+    /* 1 MiB comfortably covers /proc/self/maps for a statically-shim-linked
+     * program; a larger map fails closed rather than parse a truncated view. */
+    size_t capacity = 1u << 20;
+    char *buffer = (char *)malloc(capacity);
+    if (buffer == NULL) return -1;
+    size_t length = 0;
+    if (patina_sud_read_maps(buffer, capacity, &length) != 0) {
+        free(buffer);
+        return -1;
+    }
+    uintptr_t marker = (uintptr_t)(void *)&patina_sud_sigsys;
+    int libc_exec_segments = 0;
+    int text_found = 0;
+    size_t index = 0;
+    while (index < length) {
+        char *line = buffer + index;
+        /* NUL-terminate this line so string ops stay within it. */
+        char *newline = memchr(line, '\n', length - index);
+        size_t line_len = newline ? (size_t)(newline - line) : (length - index);
+        line[line_len] = '\0';
+        index += line_len + 1;
+
+        const char *cursor = line;
+        uintptr_t start = patina_parse_hex(&cursor);
+        if (*cursor != '-') continue;
+        cursor++;
+        uintptr_t end = patina_parse_hex(&cursor);
+        if (*cursor != ' ') continue;
+        cursor++;
+        /* perms are exactly 4 chars: e.g. "r-xp". */
+        if (cursor[0] == '\0' || cursor[1] == '\0' || cursor[2] == '\0') continue;
+        int executable = cursor[2] == 'x';
+        if (!executable) continue;
+
+        /* Main-executable text: the executable segment containing our own code. */
+        if (marker >= start && marker < end) {
+            patina_sud_text_lo = start;
+            patina_sud_text_hi = end;
+            text_found = 1;
+        }
+
+        /* libc: match the mapped pathname's basename. */
+        const char *path = strchr(line, '/');
+        if (path != NULL) {
+            const char *slash = strrchr(path, '/');
+            const char *base = slash ? slash + 1 : path;
+            if (strncmp(base, "libc.so.6", 9) == 0 ||
+                strncmp(base, "libc-", 5) == 0) {
+                libc_exec_segments++;
+                patina_sud_libc_off = (unsigned long)start;
+                patina_sud_libc_len = (unsigned long)(end - start);
+            }
+        }
+    }
+    free(buffer);
+    if (libc_exec_segments != 1 || !text_found) return -1;
+    return 0;
+}
+
+/* Close the vDSO escape (SUD-DESIGN.md §6): rewrite the initial-stack auxv
+ * entry AT_SYSINFO_EHDR to AT_IGNORE. glibc's getauxval walks this same array
+ * (only AT_HWCAP is cached), so rustix's `getauxval(AT_SYSINFO_EHDR)` then
+ * returns 0, its vDSO pointer is null, and it falls back to raw `clock_gettime`
+ * — which SUD traps. glibc consumed the auxv before this scrub (host aliases
+ * keep working). */
+static void patina_sud_scrub_auxv(int argc, char **argv) {
+    char **envp = argv + argc + 1;
+    char **walk = envp;
+    while (*walk != NULL) walk++;
+    walk++; /* step over envp's NULL terminator to the auxv array */
+    ElfW(auxv_t) *aux = (ElfW(auxv_t) *)walk;
+    for (; aux->a_type != AT_NULL; aux++) {
+        if (aux->a_type == AT_SYSINFO_EHDR) aux->a_type = AT_IGNORE;
+    }
+}
+
+/* The SIGSYS dispatch handler. A syscall-user-dispatch SIGSYS is SYNCHRONOUS —
+ * delivered on the faulting thread at the exact IP of the guest's own syscall
+ * instruction (the kernel already rolled it back), semantically identical to the
+ * guest having called an interposed effect. So re-entering the deterministic
+ * runtime (which the Rust dispatch does) is sound; see SUD-DESIGN.md §4.2. This
+ * handler decodes the number and six argument registers per arch, validates the
+ * provenance, and hands off to the arch-agnostic Rust dispatcher, then writes the
+ * raw return value back into the syscall's return register. */
+static void patina_sud_sigsys(int sig, siginfo_t *info, void *ucontext) {
+    (void)sig;
+    long nr = info->si_syscall;
+    uintptr_t call_addr = (uintptr_t)info->si_call_addr;
+    /* Provenance: only a genuine syscall-user-dispatch SIGSYS is ours. A seccomp
+     * or `kill -SYS` SIGSYS is a determinism escape and aborts loudly. */
+    if (info->si_code != SYS_USER_DISPATCH) {
+        patina_sud_report_fatal_addr(
+            "SUD: SIGSYS with unexpected si_code (not syscall-user-dispatch)", nr,
+            call_addr);
+    }
+#if defined(__x86_64__)
+    if (info->si_arch != AUDIT_ARCH_X86_64) {
+        patina_sud_report_fatal_addr("SUD: SIGSYS with unexpected si_arch", nr,
+                                     call_addr);
+    }
+#elif defined(__aarch64__)
+    if (info->si_arch != AUDIT_ARCH_AARCH64) {
+        patina_sud_report_fatal_addr("SUD: SIGSYS with unexpected si_arch", nr,
+                                     call_addr);
+    }
+#endif
+    /* The faulting IP must lie in the main executable's text. Anything else — a
+     * syscall from ld.so or another DSO — is unmodeled and aborts by name (§2.3),
+     * rather than being emulated as if it were guest code. */
+    if (call_addr < patina_sud_text_lo || call_addr >= patina_sud_text_hi) {
+        patina_sud_report_fatal_addr(
+            "SUD: trapped a syscall outside the main executable text (ld.so / DSO / "
+            "vDSO); this path is not modeled",
+            nr, call_addr);
+    }
+
+    ucontext_t *uc = (ucontext_t *)ucontext;
+    int saved_errno = errno;
+    unsigned long a0, a1, a2, a3, a4, a5;
+#if defined(__x86_64__)
+    greg_t *r = uc->uc_mcontext.gregs;
+    a0 = (unsigned long)r[REG_RDI];
+    a1 = (unsigned long)r[REG_RSI];
+    a2 = (unsigned long)r[REG_RDX];
+    a3 = (unsigned long)r[REG_R10];
+    a4 = (unsigned long)r[REG_R8];
+    a5 = (unsigned long)r[REG_R9];
+#elif defined(__aarch64__)
+    a0 = (unsigned long)uc->uc_mcontext.regs[0];
+    a1 = (unsigned long)uc->uc_mcontext.regs[1];
+    a2 = (unsigned long)uc->uc_mcontext.regs[2];
+    a3 = (unsigned long)uc->uc_mcontext.regs[3];
+    a4 = (unsigned long)uc->uc_mcontext.regs[4];
+    a5 = (unsigned long)uc->uc_mcontext.regs[5];
+#else
+#error "SUD SIGSYS handler: unsupported architecture"
+#endif
+    long ret = patina_sud_dispatch(nr, a0, a1, a2, a3, a4, a5, call_addr);
+#if defined(__x86_64__)
+    uc->uc_mcontext.gregs[REG_RAX] = (greg_t)ret;
+#elif defined(__aarch64__)
+    uc->uc_mcontext.regs[0] = (unsigned long long)ret;
+#endif
+    /* Raw-syscall callers read the return register, not errno, but outer guest
+     * frames may have a live errno the dispatch path clobbered — restore it. */
+    errno = saved_errno;
+}
+
+/* Arm SUD on the calling thread from the cached region. Called on the main
+ * thread at startup and on every managed thread from the Rust trampoline (the
+ * config does not survive clone, so each thread arms once). A no-op when SUD was
+ * not armed for this run (non-SUD kernel or standalone binary). */
+void patina_sud_arm_thread(void) {
+    if (!patina_sud_armed) return;
+    if (patina_host_prctl(PR_SET_SYSCALL_USER_DISPATCH, PR_SYS_DISPATCH_ON,
+                          patina_sud_libc_off, patina_sud_libc_len, NULL) != 0) {
+        patina_sud_report_fatal(
+            "SUD: failed to arm syscall-user-dispatch on a managed thread");
+    }
+}
+
+/* Main-thread SUD setup, called from the `__libc_start_main` interposer BEFORE
+ * guest constructors run. Arms only a managed run on a SUD-capable kernel; every
+ * other case is a deliberate no-op (a binary that actually needs SUD was already
+ * refused by the pre-run gate, and one that does not runs fine unarmed). */
+static void patina_sud_init(int argc, char **argv) {
+    /* A standalone run (no PATINA_MODE) is left unarmed: its first interposed
+     * boundary already fails closed via ensure_runtime, and an unarmed raw
+     * syscall there is no worse than today. environ is still intact here (the
+     * ctor's scrub runs later), so read it directly. */
+    if (!patina_env_has("PATINA_MODE", argv, argc)) return;
+
+    patina_host_prctl = (patina_prctl_fn)__real_dlsym(RTLD_NEXT, "prctl");
+    patina_host_open = (patina_host_open_fn)__real_dlsym(RTLD_NEXT, "open");
+    patina_host_read_real = (patina_host_read_fn)__real_dlsym(RTLD_NEXT, "read");
+    patina_host_close_real = (patina_host_close_fn)__real_dlsym(RTLD_NEXT, "close");
+    (void)patina_real_sigaction();
+    if (patina_host_prctl == NULL || patina_host_open == NULL ||
+        patina_host_read_real == NULL || patina_host_close_real == NULL ||
+        patina_host_sigaction == NULL) {
+        /* Defensive: these are core glibc symbols. Leave unarmed rather than arm
+         * with a missing vehicle. */
+        return;
+    }
+
+    /* Kernel support probe: PR_SYS_DISPATCH_OFF with all-zero args returns 0 on a
+     * SUD kernel and -EINVAL where the feature is absent (arm64 <= 6.18, pre-5.11
+     * x86). Same process, same kernel as the guest. */
+    if (patina_host_prctl(PR_SET_SYSCALL_USER_DISPATCH, PR_SYS_DISPATCH_OFF, 0, 0,
+                          NULL) != 0) {
+        return; /* no kernel SUD: do not arm (pre-run gate handles refusal) */
+    }
+
+    if (patina_sud_discover_regions() != 0) {
+        patina_sud_report_fatal(
+            "SUD: could not determine glibc's single executable segment and the "
+            "main-executable text from /proc/self/maps; refusing to arm on a "
+            "guessed region");
+    }
+
+    patina_sud_scrub_auxv(argc, argv);
+
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    action.sa_sigaction = patina_sud_sigsys;
+    action.sa_flags = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+    if (patina_host_sigaction(SIGSYS, &action, NULL) != 0) {
+        patina_sud_report_fatal("SUD: failed to install the SIGSYS dispatch handler");
+    }
+
+    patina_sud_armed = 1;
+    patina_sud_arm_thread(); /* arm the main thread */
+}
+
+/*
+ * SIGSYS-registration hardening (SUD-DESIGN.md §7.5, slice 1). Under SUD the
+ * SIGSYS handler IS the deterministic containment; a guest `sigaction(SIGSYS,…)`
+ * would replace it. Interpose `sigaction`/`signal` with strong defs that forward
+ * every other signal to the real glibc registration (preserving std's
+ * SIGSEGV/SIGBUS stack-overflow guard exactly) and fail closed for SIGSYS. The
+ * raw door (a trapped `rt_sigaction(SIGSYS)`) is closed by the dispatch table.
+ * The shim's own handler install above uses the resolved real sigaction, never
+ * this interposer, so it is not self-blocked.
+ */
+int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact) {
+    if (signum == SIGSYS) {
+        patina_posix_deny(
+            "patina: sigaction(SIGSYS) refused: a guest may not register the "
+            "syscall-dispatch signal (it would disable deterministic containment)\n");
+        errno = EPERM;
+        return -1;
+    }
+    return patina_real_sigaction()(signum, act, oldact);
+}
+
+void (*signal(int signum, void (*handler)(int)))(int) {
+    if (signum == SIGSYS) {
+        patina_posix_deny(
+            "patina: signal(SIGSYS) refused: a guest may not register the "
+            "syscall-dispatch signal (it would disable deterministic containment)\n");
+        errno = EPERM;
+        return SIG_ERR;
+    }
+    /* Emulate signal() over the real sigaction to avoid a second host-alias:
+     * install the handler with the classic (restarting) semantics and return the
+     * previous handler. */
+    struct sigaction action;
+    struct sigaction previous;
+    memset(&action, 0, sizeof action);
+    action.sa_handler = handler;
+    action.sa_flags = SA_RESTART;
+    sigemptyset(&action.sa_mask);
+    if (patina_real_sigaction()(signum, &action, &previous) != 0) {
+        return SIG_ERR;
+    }
+    return previous.sa_handler;
+}
+
+#endif /* __linux__ SUD */
+
+#ifdef __linux__
 /*
  * `__libc_start_main` interposer (Linux only). The `exit` interposer above
  * catches only EXPLICIT `exit(3)` calls from guest/executable code: on the
@@ -1599,6 +2013,12 @@ static int patina_main_wrapper(int argc, char **argv, char **envp) {
 int __libc_start_main(patina_main_fn main_fn, int argc, char **argv, void *init,
                       void *fini, void *rtld_fini, void *stack_end) {
     patina_real_main = main_fn;
+    /* Arm syscall-user-dispatch (managed run on a SUD kernel) BEFORE the real
+     * __libc_start_main runs the guest constructors: parse the libc region,
+     * scrub AT_SYSINFO_EHDR from the auxv, install the SIGSYS handler, and arm
+     * the main thread. environ is still intact here (the ctor scrub runs later),
+     * so PATINA_MODE is readable. A no-op on a non-SUD kernel or standalone run. */
+    patina_sud_init(argc, argv);
     patina_libc_start_main_fn real =
         (patina_libc_start_main_fn)__real_dlsym(RTLD_NEXT, "__libc_start_main");
     if (real == NULL) {
