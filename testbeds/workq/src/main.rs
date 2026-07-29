@@ -187,6 +187,7 @@ fn orchestrate(options: Options) -> i32 {
             shutdown: shutdown.clone(),
             poll_timeout: options.tick * 2,
             backoff: options.tick,
+            bug: options.bug,
         };
         joins.push(std::thread::spawn(move || worker::run(spec)));
     }

@@ -276,6 +276,12 @@ bug_leg dedup-ignore-producer 1 "" "--timeout-secs 20 --bug dedup-ignore-produce
 # skip-redelivery-commit: a redelivered job's durable Complete record is skipped,
 # so the WAL loses an acked completion -> the no-loss invariant fires.
 bug_leg skip-redelivery-commit 2 "--buggify=500 --buggify-after-setup" "--bug skip-redelivery-commit" WORKQ_VIOLATION
+# apply-check-outside-lock: the worker's exactly-once "already applied?" check sits
+# OUTSIDE the apply critical section, so two workers holding early-redelivered
+# duplicates of one job both pass it and double-apply -> the exactly-once invariant
+# fires. early-redelivery (buggify) forces the concurrent duplicate; the small tick
+# shrinks redelivery latency into the apply window so the race is deterministic.
+bug_leg apply-check-outside-lock 1 "--buggify=500 --buggify-after-setup" "--tick-ms 2 --bug apply-check-outside-lock" WORKQ_VIOLATION
 
 elapsed=$(( SECONDS - start_secs ))
 echo "==> wall time: ${elapsed}s"

@@ -44,14 +44,23 @@ pub enum Bug {
     /// A redelivered job (attempt > 1) is acked + marked done in memory but its
     /// durable Complete record is skipped, so the log loses an acked completion.
     SkipRedeliveryCommit,
+    /// The worker's exactly-once "already applied?" check happens OUTSIDE the
+    /// mutex-held apply critical section, so two workers holding duplicate
+    /// deliveries of one job can both pass the check and double-apply it.
+    ApplyCheckOutsideLock,
 }
 
 impl Bug {
-    pub const NAMES: &'static [&'static str] = &["dedup-ignore-producer", "skip-redelivery-commit"];
+    pub const NAMES: &'static [&'static str] = &[
+        "dedup-ignore-producer",
+        "skip-redelivery-commit",
+        "apply-check-outside-lock",
+    ];
     pub fn parse(name: &str) -> Option<Bug> {
         match name {
             "dedup-ignore-producer" => Some(Bug::DedupIgnoreProducer),
             "skip-redelivery-commit" => Some(Bug::SkipRedeliveryCommit),
+            "apply-check-outside-lock" => Some(Bug::ApplyCheckOutsideLock),
             _ => None,
         }
     }

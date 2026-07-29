@@ -82,9 +82,11 @@ cargo patina run ./target/patina/workq --seed 1 -- --jobs 24 --data-dir /workq
 
 ## The one-command bug-catch demo
 
-The queue ships with two deliberately planted bugs, off by default and enabled
+The queue ships with three deliberately planted bugs, off by default and enabled
 with `--bug NAME`. Each is a subtle mistake a real engineer could make, and each
-is caught by the queue's *own* invariants — no special test assertion:
+is caught by the queue's *own* invariants — no special test assertion. Together
+they cover the three classic ways a queue like this breaks: a logic slip, a
+durability slip, and a threading race.
 
 - **`dedup-ignore-producer`** — the server de-duplicates retried enqueues by the
   request number alone, forgetting *which* producer sent it. Two producers using
@@ -93,6 +95,10 @@ is caught by the queue's *own* invariants — no special test assertion:
 - **`skip-redelivery-commit`** — when a re-delivered job finally completes, the
   server acknowledges it but skips writing the "done" record, assuming an earlier
   delivery already logged it. The durable log quietly loses a completed job.
+- **`apply-check-outside-lock`** — the worker asks "have we already applied this
+  job?" *before* taking the lock that guards the apply, instead of inside it. When
+  the same job is delivered to two workers at once, both can answer "no" and each
+  applies it — a classic check-then-act race that does the work twice.
 
 Watch Patina catch one (it fails, loudly and reproducibly):
 
