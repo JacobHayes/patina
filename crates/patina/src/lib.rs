@@ -1,7 +1,6 @@
-//! Patina's public surface: a dependency-light cooperative-SUT SDK by default,
-//! and the explicit deterministic-execution facade behind the `runtime` feature.
+//! Patina's public SDK surface: a dependency-light cooperative-SUT SDK.
 //!
-//! # Cooperative-SUT SDK (default features)
+//! # Cooperative-SUT SDK
 //!
 //! The SDK lets a system-under-test cooperate with Patina's deterministic
 //! simulator in the style of FoundationDB's `BUGGIFY` and Antithesis-style
@@ -41,74 +40,25 @@
 //! buggify is armed from the start and `setup_complete()` is a boundary/coverage
 //! marker; place workload sites after it to keep setup buggify-free.
 //!
-//! # Explicit facade (`runtime` feature)
+//! # Running applications under Patina
 //!
-//! With `--features runtime`, this crate additionally re-exports the explicit
-//! boundary: the `run`/`run_with` functions, `Context`, the async `rt` module,
-//! and the ABI types.
+//! This crate is a pure SDK: it does not run applications. Under `cargo patina
+//! build`/`run` the native shim or WASI host supplies the deterministic runtime
+//! below ordinary `std::fs`/`std::net`/clock/thread calls, so SDK-instrumented
+//! production code needs no explicit runtime dependency (usage mode 1 of
+//! `HARNESS-DESIGN.md`).
+//!
+//! - To configure Patina and then drive normal application code through the same
+//!   shims, use the shim-backed harness crate `patina-dst-harness` (mode 2).
+//! - For the low-level explicit-`Context` API — `run`/`run_with`, `Context`,
+//!   `RuntimeBuilder`, `RuntimeConfig`, and ABI types — depend on
+//!   [`patina-dst-runtime`] directly (mode 3); the deterministic async surface
+//!   lives in `patina-dst-async` over that same `Context`. This API creates an
+//!   explicit context and does not control unrelated `std` calls.
+//!
+//! [`patina-dst-runtime`]: https://docs.rs/patina-dst-runtime
 
-// ---- Explicit-boundary facade (behind the `runtime` feature) -----------------
-
-#[cfg(feature = "runtime")]
-pub use patina_dst_abi::{
-    ClockKind, Datagram, EffectError, ErrorCode, Fd, FsDirectoryEntry, FsEntryKind, FsMetadata,
-    OpenFlags, SeekWhence, SendDisposition, SendReport, ShutdownHow, SocketId, TaskId,
-};
-#[cfg(feature = "runtime")]
-pub use patina_dst_async::block_on;
-#[cfg(feature = "runtime")]
-pub use patina_dst_runtime::{Context, ExecutionMode, RuntimeBuilder, RuntimeConfig, RuntimeError};
-
-/// Deterministic async executor and network futures over the explicit boundary.
-#[cfg(feature = "runtime")]
-pub mod rt {
-    pub use patina_dst_abi::{Datagram, SendReport, ShutdownHow};
-    pub use patina_dst_async::{
-        JoinHandle, TcpListener, TcpStream, UdpSocket, block_on, sleep, sleep_until, spawn,
-        timeout, yield_now,
-    };
-}
-
-/// Run a closure with deterministic default drivers configured from `PATINA_*`.
-///
-/// The context is always finalized. If both the closure and finalization fail,
-/// the returned error retains both failures.
-#[cfg(feature = "runtime")]
-pub fn run<T>(
-    operation: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
-) -> Result<T, RuntimeError> {
-    run_with(|builder| builder, operation)
-}
-
-/// Run with deterministic defaults after allowing typed driver replacement.
-#[cfg(feature = "runtime")]
-pub fn run_with<T>(
-    configure: impl FnOnce(RuntimeBuilder) -> RuntimeBuilder,
-    operation: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
-) -> Result<T, RuntimeError> {
-    let builder = RuntimeBuilder::new(RuntimeConfig::from_env()?).with_default_drivers();
-    run_with_context(configure(builder).build()?, operation)
-}
-
-#[cfg(feature = "runtime")]
-fn run_with_context<T>(
-    mut context: Context,
-    operation: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
-) -> Result<T, RuntimeError> {
-    let run_result = operation(&mut context);
-    let finish_result = context.finish();
-    match (run_result, finish_result) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-        (Err(run), Err(finalize)) => Err(RuntimeError::RunAndFinalize {
-            run: Box::new(run),
-            finalize: Box::new(finalize),
-        }),
-    }
-}
-
-// ---- Cooperative-SUT SDK (always present) ------------------------------------
+// ---- Cooperative-SUT SDK ------------------------------------------------------
 
 /// Whether execution is under Patina's deterministic simulator.
 ///
@@ -667,30 +617,6 @@ macro_rules! lifecycle_event {
     ($label:expr) => {
         $crate::__rt::lifecycle_event($label)
     };
-}
-
-#[cfg(all(test, feature = "runtime"))]
-mod runtime_tests {
-    use super::*;
-
-    #[test]
-    fn facade_reexports_explicit_configuration() {
-        let mut context = Context::from_config(RuntimeConfig::seeded(5)).unwrap();
-        assert_eq!(context.entropy_bytes(4).unwrap().len(), 4);
-        context.finish().unwrap();
-    }
-
-    #[test]
-    fn finalizes_recording_when_the_application_returns_an_error() {
-        let directory = tempfile::tempdir().unwrap();
-        let trace = directory.path().join("failed-run.patina");
-        let context = Context::from_config(RuntimeConfig::record(5, &trace, "fixture-v1")).unwrap();
-        let result = run_with_context(context, |_| {
-            Err::<(), _>(EffectError::new(ErrorCode::Denied, "application failed").into())
-        });
-        assert!(matches!(result, Err(RuntimeError::Effect(_))));
-        assert!(trace.is_file());
-    }
 }
 
 #[cfg(test)]

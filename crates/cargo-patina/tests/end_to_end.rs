@@ -3013,12 +3013,12 @@ fn create_schedule_fixture(path: &Path) {
         .unwrap()
         .parent()
         .unwrap();
-    let patina_path = workspace.join("crates/patina");
-    let patina_path = patina_path.to_string_lossy().replace('\\', "\\\\");
+    let runtime_path = workspace.join("crates/patina-runtime");
+    let runtime_path = runtime_path.to_string_lossy().replace('\\', "\\\\");
     fs::write(
         path.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"patina-sched-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina-dst = {{ path = \"{patina_path}\", features = [\"runtime\"] }}\n"
+            "[package]\nname = \"patina-sched-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina-dst-runtime = {{ path = \"{runtime_path}\" }}\n"
         ),
     )
     .unwrap();
@@ -3026,10 +3026,10 @@ fn create_schedule_fixture(path: &Path) {
         path.join("src/main.rs"),
         r#"use std::collections::BTreeMap;
 
-use patina_dst::RuntimeError;
+use patina_dst_runtime::RuntimeError;
 
 fn scenario() -> Result<(String, bool), RuntimeError> {
-    patina_dst::run(|context| {
+    patina_dst_runtime::run(|context| {
         let a = context.task_spawn("a")?;
         let b = context.task_spawn("b")?;
         let c = context.task_spawn("c")?;
@@ -3079,21 +3079,24 @@ fn create_fixture(path: &Path) {
         .unwrap()
         .parent()
         .unwrap();
-    let patina_path = workspace.join("crates/patina");
-    let patina_path = patina_path.to_string_lossy().replace('\\', "\\\\");
+    let runtime_path = workspace.join("crates/patina-runtime");
+    let runtime_path = runtime_path.to_string_lossy().replace('\\', "\\\\");
+    let abi_path = workspace.join("crates/patina-abi");
+    let abi_path = abi_path.to_string_lossy().replace('\\', "\\\\");
     fs::write(
         path.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"patina-e2e-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina-dst = {{ path = \"{patina_path}\", features = [\"runtime\"] }}\n"
+            "[package]\nname = \"patina-e2e-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina-dst-runtime = {{ path = \"{runtime_path}\" }}\npatina-dst-abi = {{ path = \"{abi_path}\" }}\n"
         ),
     )
     .unwrap();
     fs::write(
         path.join("src/main.rs"),
-        r#"use patina_dst::{ClockKind, RuntimeError};
+        r#"use patina_dst_abi::ClockKind;
+use patina_dst_runtime::RuntimeError;
 
 fn scenario() -> Result<String, RuntimeError> {
-    patina_dst::run(|context| {
+    patina_dst_runtime::run(|context| {
         let prefix = context.entropy_bytes(8)?;
         let suffix = context.entropy_bytes(8)?;
         context.write_file("/state/value", &suffix)?;

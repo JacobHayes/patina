@@ -1,10 +1,22 @@
-use patina_dst::RuntimeError;
+//! Low-level explicit-context simulator example (usage mode 3 of
+//! `HARNESS-DESIGN.md`).
+//!
+//! This drives Patina's virtual scheduler and network APIs directly through an
+//! explicit [`Context`], swapping in a faulted, latency-wrapped `SimNet` before
+//! `patina_dst_runtime::run_with` builds the context. It is a simulator-native
+//! example: it exercises the virtual APIs directly and does NOT interpose
+//! ordinary `std` calls. Configuring Patina and then driving real application
+//! code is the job of the shim-backed `patina-dst-harness` crate.
+//!
+//! [`Context`]: patina_dst_runtime::Context
+
 use patina_dst_net_sim::SimNet;
+use patina_dst_runtime::RuntimeError;
 use patina_dst_wrapper_fault::FaultNet;
 use patina_dst_wrapper_latency::LatencyNet;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let summary = patina_dst::run_with(
+    let summary = patina_dst_runtime::run_with(
         |builder| {
             let network = SimNet::builder()
                 .build()

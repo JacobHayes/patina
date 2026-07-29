@@ -36,7 +36,7 @@ redb.
 
 ### V1: deterministic Rust-level vertical slice
 
-This is the currently implemented acceptance level. The application explicitly enters `patina_dst::run` and performs effects through `patina_dst::Context`.
+This is the currently implemented acceptance level. The application explicitly enters `patina_dst_runtime::run` and performs effects through `patina_dst_runtime::Context`.
 
 | Contract | Verification |
 | --- | --- |
@@ -56,15 +56,15 @@ Automated evidence:
 
 - crate unit tests cover ABI serialization, each concrete driver, trace validation, runtime modes, and CLI parsing;
 - `crates/cargo-patina/tests/end_to_end.rs` creates an independent fixture package and verifies seeded runs plus record/replay through separate child processes;
-- the `patina` example provides a manual smoke path.
+- the `patina-dst-runtime` examples provide a manual smoke path.
 
 Manual smoke test from the repository root:
 
 ```sh
 cargo build -p cargo-patina
-PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst --features runtime --example deterministic --seed 123
-PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst --features runtime --example deterministic --seed 123 --record /tmp/demo.patina
-PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina-dst --features runtime --example deterministic
+PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst-runtime --example deterministic --seed 123
+PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst-runtime --example deterministic --seed 123 --record /tmp/demo.patina
+PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina-dst-runtime --example deterministic
 ```
 
 Expected:
@@ -169,7 +169,7 @@ Required before claiming broad libc/POSIX compatibility or stable traces:
 
 ### V6: cooperative-SUT SDK
 
-**Partial (Milestone A).** The `patina` crate ships a FoundationDB-`BUGGIFY`- and Antithesis-style SDK under a feature inversion: default features are the dependency-light SDK, and the explicit facade (`run`/`run_with`, `Context`, `rt`) is behind the `runtime` feature. Every SDK macro (`buggify!`, `buggify_with_prob!`, `buggify_delay!`, `buggify_knob!`, `always!`, `sometimes!`, `reachable!`, `lifecycle::event!`) plus `is_simulated()`/`rng()` is a no-op or plain fallback outside a Patina build, and no `cfg(patina)` appears in adopter code.
+**Partial (Milestone A).** The `patina` crate ships a FoundationDB-`BUGGIFY`- and Antithesis-style SDK as its whole dependency-light surface; the explicit-context API (`run`/`run_with`, `Context`) lives in the separate `patina-dst-runtime` crate. Every SDK macro (`buggify!`, `buggify_with_prob!`, `buggify_delay!`, `buggify_knob!`, `always!`, `sometimes!`, `reachable!`, `lifecycle::event!`) plus `is_simulated()`/`rng()` is a no-op or plain fallback outside a Patina build, and no `cfg(patina)` appears in adopter code.
 
 Automated evidence:
 
@@ -278,7 +278,7 @@ A failure report must retain the command, seed, trace bundle when one exists, Pa
 
 ## Current boundary of confidence
 
-Passing V0-V2 proves the CLI-to-runtime-to-driver-to-trace loop for explicit `patina_dst::Context` effects. V3 proves the entire audited Preview 1 surface with preopen policy and resource limits, within the documented semantic limitations. The native script proves a controlled slice of ordinary `std` behavior — filesystem (including directory listing and symlinks), time, sleep, entropy, stdio, threads, and UDP datagrams — and mixed C ABI calls, built through the packaged `build`/`run` path with auto-initialization and record/replay over the descriptor trace channel — for single Rust sources and whole Cargo packages (path dependencies and build scripts included), though not yet a packaged native target with a recompiled deterministic `std`. Containment is enforced from two directions: the strict import allowlist fails closed on any unknown symbol, and the Linux `strace` pass shows the probe's guest section performing zero host syscalls over the whole run. Both platforms are verified locally: macOS directly, Linux in a VM (pthread interposition on macOS; futex-level `syscall` interposition on Linux). The cross-target smoke script proves one ordinary-`std` program behaves identically under seeds, record, and replay on wasm32-wasip1, native macOS, and native Linux. Crash models, trace migration, host capture, minimization reducers, and performance budgets have focused evidence.
+Passing V0-V2 proves the CLI-to-runtime-to-driver-to-trace loop for explicit `patina_dst_runtime::Context` effects. V3 proves the entire audited Preview 1 surface with preopen policy and resource limits, within the documented semantic limitations. The native script proves a controlled slice of ordinary `std` behavior — filesystem (including directory listing and symlinks), time, sleep, entropy, stdio, threads, and UDP datagrams — and mixed C ABI calls, built through the packaged `build`/`run` path with auto-initialization and record/replay over the descriptor trace channel — for single Rust sources and whole Cargo packages (path dependencies and build scripts included), though not yet a packaged native target with a recompiled deterministic `std`. Containment is enforced from two directions: the strict import allowlist fails closed on any unknown symbol, and the Linux `strace` pass shows the probe's guest section performing zero host syscalls over the whole run. Both platforms are verified locally: macOS directly, Linux in a VM (pthread interposition on macOS; futex-level `syscall` interposition on Linux). The cross-target smoke script proves one ordinary-`std` program behaves identically under seeds, record, and replay on wasm32-wasip1, native macOS, and native Linux. Crash models, trace migration, host capture, minimization reducers, and performance budgets have focused evidence.
 
 One record path still represents one finalized context; multi-test aggregation is unsupported. Native async-runtime interposition, native TCP/IPv6/DNS, process spawning, arbitrary FFI, dynamic loading, and full POSIX compatibility remain outside the confidence boundary (the explicit-boundary `patina-dst-async` executor is inside it, under V2).
 ## Gate taxonomy: point pins vs class detectors

@@ -18,8 +18,8 @@ Patina is experimental. V1 and V2 are implemented end-to-end at the **explicit R
 
 - `cargo-patina` configures seeded, record, replay, named-timeline, branch, budgeted, parameterized, and multi-seed exploration runs;
 - both `cfg(patina)` and `cfg(dst)` are injected into Cargo builds;
-- seeded entropy, virtual time, in-memory and crash-checkpoint filesystems, cooperative scheduling, and virtual datagrams are available through `patina_dst::Context`;
-- deterministic async is available at the explicit boundary through `patina-dst-async` (re-exported as `patina_dst::rt`, plus `patina_dst::block_on`): a single-threaded `block_on`/`spawn` executor with virtual-time `sleep`/`timeout` and async TCP/UDP futures, all riding the existing recorded scheduler, network, and clock operations so runs stay record/replay byte-identical (`crates/patina-async/examples/async_echo.rs`);
+- seeded entropy, virtual time, in-memory and crash-checkpoint filesystems, cooperative scheduling, and virtual datagrams are available through `patina_dst_runtime::Context`;
+- deterministic async is available at the explicit boundary through `patina-dst-async`: a single-threaded `block_on`/`spawn` executor with virtual-time `sleep`/`timeout` and async TCP/UDP futures, all riding the existing recorded scheduler, network, and clock operations so runs stay record/replay byte-identical (`crates/patina-async/examples/async_echo.rs`);
 - fault and latency wrappers model packet loss, duplication, delay, jitter, reorder, and partitions;
 - trace format 2 strictly matches operations/outcomes and stores exact-prefix, seeded-suffix branch timelines;
 - failure-oracle delta debugging minimizes main timelines and leaf branch suffixes;
@@ -34,7 +34,7 @@ Patina is experimental. V1 and V2 are implemented end-to-end at the **explicit R
 - `audit` is a strict per-platform import allowlist: any import that is not an explicitly listed effect-free host-deferred symbol (or caller-`--allow`ed control plane) fails closed as unknown, so a missed interposer is an audit failure rather than a silent escape; alias forms (`$NOCANCEL`, `__`-prefixes) are normalized, known host-effect names keep descriptive categories, and direct syscall / CPU clock/entropy instructions are still rejected by scanning. `run` enforces this audit as a pre-run default-deny gate before the guest executes and hard-errors, naming the symbols, on any unmodeled blocking/time/scheduling surface (with `--allow-unsupported-symbols` as a loud, recorded escape hatch); on macOS std's thread `Parker` blocks on a libdispatch semaphore, which the shim interposes and routes through the scheduler and virtual clock so `thread::park`/`recv_timeout` stay deterministic;
 - a Linux `strace` containment pass verifies the validation probe performs zero file/network/clock/entropy syscalls outside an exact loader/runtime prelude across the whole run (vDSO reads are covered by the libc-interposition probes instead);
 - crash-consistency models cover seeded torn writes, rename atomicity, directory durability, and crash/restart; traces migrate from prior supported formats in memory; `patina-dst-bench` gates trace bytes per event in CI;
-- a cooperative-SUT SDK (FoundationDB `BUGGIFY`- and Antithesis-style) lives in the `patina` crate under a feature inversion — default features are the dependency-light SDK, and the explicit facade (`run`/`run_with`, `Context`, `rt`) is behind the `runtime` feature. `buggify!`/`buggify_with_prob!`/`buggify_delay!`/`buggify_knob!` inject seed-deterministic faults at labeled sites, `always!`/`sometimes!`/`reachable!` are assertion and coverage oracles, and `patina_dst::rng()` bridges to the run seed. Every macro is a no-op or plain fallback outside a Patina build (no `cfg(patina)` in adopter code). `cargo patina run --buggify[=permille]` enables it; decisions are pure functions of the seed (never recorded per evaluation), the active-site set/knobs/cutoff go in the trace metadata for self-contained replay, and a `+buggify` fingerprint keeps buggify traces from cross-replaying with a non-buggify build. A `PATINA_SDK_REPORT` line reports registered/activated/fired sites and coverage.
+- a cooperative-SUT SDK (FoundationDB `BUGGIFY`- and Antithesis-style) is the whole surface of the dependency-light `patina-dst` crate; the explicit-context API (`run`/`run_with`, `Context`, `rt`) is the separate `patina-dst-runtime` crate. `buggify!`/`buggify_with_prob!`/`buggify_delay!`/`buggify_knob!` inject seed-deterministic faults at labeled sites, `always!`/`sometimes!`/`reachable!` are assertion and coverage oracles, and `patina_dst::rng()` bridges to the run seed. Every macro is a no-op or plain fallback outside a Patina build (no `cfg(patina)` in adopter code). `cargo patina run --buggify[=permille]` enables it; decisions are pure functions of the seed (never recorded per evaluation), the active-site set/knobs/cutoff go in the trace metadata for self-contained replay, and a `+buggify` fingerprint keeps buggify traces from cross-replaying with a non-buggify build. A `PATINA_SDK_REPORT` line reports registered/activated/fired sites and coverage.
 
 Native interposition of third-party async runtimes and non-zero TCP latency over SimNet remain unfinished. Calling host APIs directly without the controlled shim remains outside Patina. APIs and the trace format are expected to change.
 
@@ -59,37 +59,42 @@ testbeds such as raft or redb. On Linux, `validate-native-shim.sh` soft-skips th
 syscall-containment pass if `strace` is absent; CI installs `strace` and
 hard-requires that gate.
 
-The `patina-dst` crate keeps its default feature set dependency-light for
-cooperative-SUT adoption. Applications that only use the SDK macros can depend on
-`patina-dst` with default features and ordinary production builds will not link
-the explicit runtime. Patina's native/WASI `build` and `run` paths provide the
-runtime externally through the shim or host.
+There are three usage modes (see [HARNESS-DESIGN.md](./HARNESS-DESIGN.md)):
 
-The explicit facade (`patina_dst::run`, `Context`, `patina_dst::rt`) remains
-behind the `runtime` feature. Code that directly calls that facade must compile
-with the feature enabled, either as a normal dependency feature or behind an
-application-local test/simulation feature if production builds should stay
-runtime-free. The repository demo commands below spell out `--features runtime`
-because they run examples from the `patina-dst` crate itself.
+1. **SDK-only (`patina-dst`)** — depend on `patina-dst` with default features and
+   use the SDK macros. Ordinary production builds link no runtime; Patina's
+   native/WASI `build` and `run` paths supply the deterministic runtime externally
+   through the shim or host, below ordinary `std` calls.
+2. **Shim-backed harness (`patina-dst-harness`)** — configure Patina and then
+   drive normal application code whose ordinary `std::fs`/`std::net`/clock/thread
+   effects are interposed by the same shim/host.
+3. **Low-level explicit-context (`patina-dst-runtime`)** — depend on
+   `patina-dst-runtime` directly for `run`/`run_with`, `Context`, `RuntimeBuilder`,
+   and ABI types (the deterministic async surface is `patina-dst-async` over that
+   same `Context`). This creates an explicit context and does not control
+   unrelated `std` calls; it is a simulator-native API.
 
 ## Try the vertical slice
 
+The demo runs the low-level explicit-context examples that ship with the
+`patina-dst-runtime` crate:
+
 ```sh
 cargo build -p cargo-patina
-PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst --features runtime --example deterministic --seed 123
+PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst-runtime --example deterministic --seed 123
 rm -f /tmp/demo.patina
-PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst --features runtime --example deterministic --seed 123 --record /tmp/demo.patina
-PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina-dst --features runtime --example deterministic
-PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina-dst --features runtime --example deterministic --branch --from 1 --branch-seed 456 --branch-id branch-456
-PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina-dst --features runtime --example deterministic --timeline branch-456
-PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst --features runtime --example simulation --seed 321
-PATH="$PWD/target/debug:$PATH" cargo patina explore run --seeds 10 -p patina-dst --features runtime --example deterministic
+PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst-runtime --example deterministic --seed 123 --record /tmp/demo.patina
+PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina-dst-runtime --example deterministic
+PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina-dst-runtime --example deterministic --branch --from 1 --branch-seed 456 --branch-id branch-456
+PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina-dst-runtime --example deterministic --timeline branch-456
+PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst-runtime --example simulation --seed 321
+PATH="$PWD/target/debug:$PATH" cargo patina explore run --seeds 10 -p patina-dst-runtime --example deterministic
 ```
 
-Applications in this slice deliberately perform controlled effects through the context:
+Those explicit-context examples deliberately perform controlled effects through the context:
 
 ```rust
-patina_dst::run(|ctx| {
+patina_dst_runtime::run(|ctx| {
     let bytes = ctx.entropy_bytes(16)?;
     ctx.write_file("/state/value", &bytes)?;
     ctx.sleep_for(1_000_000)?;
@@ -97,7 +102,7 @@ patina_dst::run(|ctx| {
 })?;
 ```
 
-A changed source/Cargo input, Rust toolchain, command shape, event argument, event order, or deterministic driver outcome makes strict replay fail rather than fall back. Record mode also refuses an existing trace path or active recorder; the current implementation does not aggregate multiple `patina_dst::run` contexts into one bundle.
+A changed source/Cargo input, Rust toolchain, command shape, event argument, event order, or deterministic driver outcome makes strict replay fail rather than fall back. Record mode also refuses an existing trace path or active recorder; the current implementation does not aggregate multiple `patina_dst_runtime::run` contexts into one bundle.
 
 WASI foundation commands:
 

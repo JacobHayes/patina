@@ -27,9 +27,6 @@ run = [
   "cargo clippy --workspace --all-targets --locked -- -D warnings",
   "cargo test --workspace --locked",
   "cargo doc --workspace --no-deps --locked",
-  "cargo clippy -p patina-dst --all-targets --features runtime --locked -- -D warnings",
-  "cargo test -p patina-dst --features runtime --locked",
-  "cargo doc -p patina-dst --no-deps --features runtime --locked",
   "cargo +1.86.0 test --workspace --locked",
   "scripts/validate-wasi.sh",
   "scripts/validate-native-shim.sh",
@@ -49,17 +46,17 @@ run = [
 ]
 
 [tasks.demo]
-description = "Run the explicit-runtime vertical-slice demo"
+description = "Run the explicit-context vertical-slice demo"
 run = '''
 set -euo pipefail
 cargo build -p cargo-patina
 export PATH="$PWD/target/debug:$PATH"
 rm -f /tmp/demo.patina
-cargo patina run -p patina-dst --features runtime --example deterministic --seed 123
-cargo patina run -p patina-dst --features runtime --example deterministic --seed 123 --record /tmp/demo.patina
-cargo patina replay . /tmp/demo.patina -p patina-dst --features runtime --example deterministic
-cargo patina replay . /tmp/demo.patina -p patina-dst --features runtime --example deterministic --branch --from 1 --branch-seed 456 --branch-id branch-456
-cargo patina replay . /tmp/demo.patina -p patina-dst --features runtime --example deterministic --timeline branch-456
-cargo patina run -p patina-dst --features runtime --example simulation --seed 321
-cargo patina explore run --seeds 10 -p patina-dst --features runtime --example deterministic
+cargo patina run -p patina-dst-runtime --example deterministic --seed 123
+cargo patina run -p patina-dst-runtime --example deterministic --seed 123 --record /tmp/demo.patina
+cargo patina replay . /tmp/demo.patina -p patina-dst-runtime --example deterministic
+cargo patina replay . /tmp/demo.patina -p patina-dst-runtime --example deterministic --branch --from 1 --branch-seed 456 --branch-id branch-456
+cargo patina replay . /tmp/demo.patina -p patina-dst-runtime --example deterministic --timeline branch-456
+cargo patina run -p patina-dst-runtime --example simulation --seed 321
+cargo patina explore run --seeds 10 -p patina-dst-runtime --example deterministic
 '''

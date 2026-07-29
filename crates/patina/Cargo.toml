@@ -8,27 +8,13 @@ rust-version.workspace = true
 repository.workspace = true
 
 [features]
-# Default is the dependency-light cooperative-SUT SDK: the `buggify!`,
-# `always!`, `sometimes!`, `reachable!`, and lifecycle macros plus
-# `is_simulated`/`rng`. Outside a Patina build every macro compiles to a no-op or
-# a plain fallback, so a plain `cargo build` of an adopter stays lightweight and
-# warning-free and links no runtime.
+# The dependency-light cooperative-SUT SDK: the `buggify!`, `always!`,
+# `sometimes!`, `reachable!`, and lifecycle macros plus `is_simulated`/`rng`.
+# Outside a Patina build every macro compiles to a no-op or a plain fallback, so
+# a plain `cargo build` of an adopter stays lightweight and warning-free and
+# links no runtime. The explicit-context runtime surface lives in the separate
+# `patina-dst-runtime` crate; this crate carries no optional runtime deps.
 default = []
-# The explicit-boundary facade: `patina_dst::run`/`run_with`, `Context`, the async
-# `rt` module, and the ABI re-exports. Pulls in the runtime crates. Enable it in
-# consumers that drive Patina through the explicit API.
-runtime = ["dep:patina-dst-abi", "dep:patina-dst-async", "dep:patina-dst-runtime"]
-
-[dependencies]
-patina-dst-abi = { workspace = true, optional = true }
-patina-dst-async = { workspace = true, optional = true }
-patina-dst-runtime = { workspace = true, optional = true }
-
-[dev-dependencies]
-patina-dst-net-sim.workspace = true
-patina-dst-wrapper-fault.workspace = true
-patina-dst-wrapper-latency.workspace = true
-tempfile.workspace = true
 
 # `cargo patina build` injects these cfgs workspace-wide; `patina_shim` is
 # additionally injected only by the native `build` paths (which link the shim), so
@@ -40,11 +26,3 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(dst)',
     'cfg(patina_shim)',
 ] }
-
-[[example]]
-name = "deterministic"
-required-features = ["runtime"]
-
-[[example]]
-name = "simulation"
-required-features = ["runtime"]

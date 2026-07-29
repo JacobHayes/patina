@@ -40,7 +40,7 @@ Acceptance level: V0 and V1.
 ### Runtime and facade
 
 - Build a runtime from explicit configuration or the CLI environment protocol.
-- Install deterministic default drivers for `patina_dst::run`.
+- Install deterministic default drivers for `patina_dst_runtime::run`.
 - Expose primitive filesystem, clock, and entropy effects through `Context` plus `read_file`/`write_file` conveniences.
 - Finalize recording/replay on both successful closures and closures returning a Patina error.
 - Return errors when a requested capability has no installed driver.
@@ -65,9 +65,9 @@ Acceptance level: V2.
 - CLI controls replay timelines, branches, and step budgets.
 - `cargo patina minimize` runs an external failure oracle against unbranched main timelines or leaf branch suffixes.
 
-CLI key/value parameters are exposed through `Context::param`, typed driver setup is available through `patina_dst::run_with`, and `cargo patina explore` runs bounded independent-process seed campaigns. Named scenario profiles remain a future experiment-plane convenience.
+CLI key/value parameters are exposed through `Context::param`, typed driver setup is available through `patina_dst_runtime::run_with`, and `cargo patina explore` runs bounded independent-process seed campaigns. Named scenario profiles remain a future experiment-plane convenience.
 
-The `patina-dst-async` crate builds a deterministic single-threaded futures executor over these same recorded operations: `block_on`/`spawn`/`JoinHandle`/`yield_now`, virtual-time `sleep`/`sleep_for`/`sleep_until`/`timeout`, and async TCP and UDP futures. It adds no new boundary operations — task creation, interleaving, parking, waking, yielding, completion, clock reads, and every net effect route through the existing `Context` recorded ops, so record/replay stays byte-identical. The executor makes exactly one recorded scheduling decision per poll: leaf futures perform their recorded effect, register an interest or deadline on the current poll scope, and return `Pending`, while an executor-internal FIFO wake queue (deduplicated per task) is drained into recorded `TaskWake`/`TaskYield` at fixed points. Timer futures ride the virtual-clock timer queue and its deadlock rescue (`task_park_timed` plus rescued `SleepUntil`/`TaskWake`); net futures translate would-block outcomes into interest registration plus a `NetNextDelivery` timed park, so wrapper-added latency stays visible. The `patina` facade re-exports the surface as `patina_dst::rt` (plus `patina_dst::block_on`), and `crates/patina-async/examples/async_echo.rs` runs a seeded TCP echo. Native interposition of third-party async runtimes (tokio/async-std under the shim) is a separate concern tracked in Slice 4.
+The `patina-dst-async` crate builds a deterministic single-threaded futures executor over these same recorded operations: `block_on`/`spawn`/`JoinHandle`/`yield_now`, virtual-time `sleep`/`sleep_for`/`sleep_until`/`timeout`, and async TCP and UDP futures. It adds no new boundary operations — task creation, interleaving, parking, waking, yielding, completion, clock reads, and every net effect route through the existing `Context` recorded ops, so record/replay stays byte-identical. The executor makes exactly one recorded scheduling decision per poll: leaf futures perform their recorded effect, register an interest or deadline on the current poll scope, and return `Pending`, while an executor-internal FIFO wake queue (deduplicated per task) is drained into recorded `TaskWake`/`TaskYield` at fixed points. Timer futures ride the virtual-clock timer queue and its deadlock rescue (`task_park_timed` plus rescued `SleepUntil`/`TaskWake`); net futures translate would-block outcomes into interest registration plus a `NetNextDelivery` timed park, so wrapper-added latency stays visible. The surface is used directly from `patina_dst_async` (`block_on`, `spawn`, the TCP/UDP futures) over a `patina_dst_runtime::Context`, and `crates/patina-async/examples/async_echo.rs` runs a seeded TCP echo. Native interposition of third-party async runtimes (tokio/async-std under the shim) is a separate concern tracked in Slice 4.
 
 ## Slice 3: WASI target boundary — Complete
 
@@ -155,12 +155,12 @@ Acceptance level: V6 is not complete.
 
 A FoundationDB-`BUGGIFY`- and Antithesis-style SDK lets a system-under-test
 cooperate with the deterministic simulator. It lives in the existing `patina`
-crate under a feature inversion: default features are the dependency-light SDK
-(the `buggify!`, `buggify_with_prob!`, `buggify_delay!`, `buggify_knob!`,
-`always!`, `sometimes!`, `reachable!`, and lifecycle macros plus
-`patina_dst::is_simulated()`/`patina_dst::rng()`); the explicit-boundary facade
-(`run`/`run_with`, `Context`, `rt`, the ABI re-exports) moved behind a new
-`runtime` feature. A plain `cargo build` of an adopter links no runtime and every
+crate as a dependency-light SDK (the `buggify!`, `buggify_with_prob!`,
+`buggify_delay!`, `buggify_knob!`, `always!`, `sometimes!`, `reachable!`, and
+lifecycle macros plus `patina_dst::is_simulated()`/`patina_dst::rng()`). The
+explicit-context API (`run`/`run_with`, `Context`, the ABI re-exports) lives in
+the separate `patina-dst-runtime` crate, so the SDK carries no runtime
+dependencies. A plain `cargo build` of an adopter links no runtime and every
 macro is a no-op or a plain fallback, so instrumented code compiles and runs
 normally outside Patina — no `cfg(patina)` appears in adopter code.
 

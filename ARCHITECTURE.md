@@ -56,9 +56,9 @@ The shim is a compatibility layer, not the center of the system. It shares the P
 
 ```text
 cargo-patina              # cargo subcommand
-patina                    # cooperative-SUT SDK (default) + explicit facade (runtime feature)
+patina                    # cooperative-SUT SDK (dependency-light, no runtime deps)
 patina-dst-abi                # stable deterministic boundary contracts
-patina-dst-runtime            # runtime registry, driver installation, scheduling, params
+patina-dst-runtime            # runtime registry, driver installation, scheduling, params; explicit-context `run`/`run_with`/`Context`
 patina-dst-async              # deterministic futures executor over the explicit boundary
 patina-dst-trace              # trace bundle format, event logs, branch metadata, replay matching
 patina-dst-minimize           # pluggable minimization interfaces and reducers for traces/scenarios
@@ -137,7 +137,7 @@ Concrete drivers expose rich typed builders. Driver-specific configuration lives
 
 ```rust
 #[cfg(patina)]
-fn configure_patina(ctx: &mut patina_dst::Context) {
+fn configure_patina(ctx: &mut patina_dst_runtime::Context) {
     let net = patina_dst_net_sim::SimNet::builder()
         .route_host("s3.amazonaws.com", fake_s3_http())
         .route_cidr("10.0.0.0/8", simulated_tcp())
@@ -299,7 +299,7 @@ Registration may be explicit:
 ```rust
 #[cfg(patina)]
 fn main() {
-    patina_dst::run(|ctx| {
+    patina_dst_runtime::run(|ctx| {
         configure_patina(ctx);
         app::main();
     });
@@ -396,7 +396,7 @@ flowchart TD
 
 ## Cooperative-SUT SDK
 
-The `patina` crate is a cooperative-SUT SDK by default and the explicit facade behind the `runtime` feature. The SDK — `buggify!`/`buggify_with_prob!`/`buggify_delay!`/`buggify_knob!`, the `always!`/`sometimes!`/`reachable!` oracles, `is_simulated()`/`rng()`, and the `lifecycle` markers — expands to calls into hidden crate functions, not to `cfg(patina)` in adopter code. Those functions bridge to the runtime only under `cfg(patina_shim)`, an internal cfg injected exclusively by the shim-linked native `build` paths (never by `run`/`test`/`build --target wasi`, which also set `cfg(patina)`); everywhere else they compile to no-ops or plain fallbacks, so a plain `cargo build` links no runtime.
+The `patina` crate is a dependency-light cooperative-SUT SDK; the explicit-context API lives separately in `patina-dst-runtime`. The SDK — `buggify!`/`buggify_with_prob!`/`buggify_delay!`/`buggify_knob!`, the `always!`/`sometimes!`/`reachable!` oracles, `is_simulated()`/`rng()`, and the `lifecycle` markers — expands to calls into hidden crate functions, not to `cfg(patina)` in adopter code. Those functions bridge to the runtime only under `cfg(patina_shim)`, an internal cfg injected exclusively by the shim-linked native `build` paths (never by `run`/`test`/`build --target wasi`, which also set `cfg(patina)`); everywhere else they compile to no-ops or plain fallbacks, so a plain `cargo build` links no runtime.
 
 Under a native build the bridge is a thin prefixed C ABI (`patina_buggify`, `patina_always`, `patina_rng`, …) the shim exports and resolves against the auto-initialized global `Context`. All randomness is a pure deterministic function of the root seed and the site's explicit label: per-run activation and per-evaluation firing derive from a splitmix PRF and are **never recorded per evaluation**, so replay re-derives them from the seed and the trace's recorded config with no trace bloat. The realized config, active-site set, knob picks, and virtual-time cutoff live in an additive `buggify` field of the trace metadata (old traces migrate clean; conflicting replay knobs fail closed like the fault knobs), and enabling buggify folds a `+buggify` fingerprint component so a buggify trace never cross-replays with a non-buggify build. Fatal signals — an `always!` violation, a duplicate label — flush captured output, emit a distinct marker line, and abort; per-run coverage and firing counts surface in a one-line `PATINA_SDK_REPORT`.
 

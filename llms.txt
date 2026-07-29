@@ -95,8 +95,9 @@ Instrument a system-under-test; every macro is a no-op under a plain
 - `patina_dst::sometimes!(cond, "label")`, `patina_dst::reachable!("label")`: coverage.
 - `patina_dst::lifecycle::setup_complete()`, `patina_dst::lifecycle::event!("name")`.
 - `patina_dst::rng()`: seed-bridged deterministic entropy. `patina_dst::is_simulated()`.
-- Explicit boundary API (feature `runtime`): `patina_dst::run` / `run_with`,
-  `Context`, `patina_dst::rt` (async), `patina_dst::block_on`.
+- Explicit-context API (crate `patina-dst-runtime`): `patina_dst_runtime::run` /
+  `run_with`, `Context`, `RuntimeBuilder`. Deterministic async lives in
+  `patina-dst-async` (`block_on`, `spawn`, TCP/UDP futures) over that `Context`.
 
 ## Interpreting results
 

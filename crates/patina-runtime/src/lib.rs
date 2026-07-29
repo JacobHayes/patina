@@ -1047,6 +1047,53 @@ impl RuntimeConfig {
     }
 }
 
+/// Low-level explicit-context entry point: run a closure against a [`Context`]
+/// with deterministic default drivers configured from `PATINA_*`.
+///
+/// This is the mode-3 explicit-context API of `HARNESS-DESIGN.md`. It creates an
+/// explicit context and does **not** control unrelated `std::fs`/`std::net`/clock
+/// calls in the rest of the program — those are interposed by the native shim or
+/// WASI host under `cargo patina build`/`run`. To configure Patina and then drive
+/// ordinary application code, use the shim-backed `patina-dst-harness` crate.
+///
+/// The context is always finalized. If both the closure and finalization fail,
+/// the returned error retains both failures.
+pub fn run<T>(
+    operation: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
+) -> Result<T, RuntimeError> {
+    run_with(|builder| builder, operation)
+}
+
+/// Like [`run`] but allows typed driver replacement before the context is built.
+///
+/// The builder starts from [`RuntimeConfig::from_env`] with the default drivers
+/// installed; `configure` may swap in alternative drivers (network, filesystem,
+/// clock, …) before the context runs.
+pub fn run_with<T>(
+    configure: impl FnOnce(RuntimeBuilder) -> RuntimeBuilder,
+    operation: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
+) -> Result<T, RuntimeError> {
+    let builder = RuntimeBuilder::new(RuntimeConfig::from_env()?).with_default_drivers();
+    run_with_context(configure(builder).build()?, operation)
+}
+
+fn run_with_context<T>(
+    mut context: Context,
+    operation: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
+) -> Result<T, RuntimeError> {
+    let run_result = operation(&mut context);
+    let finish_result = context.finish();
+    match (run_result, finish_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(run), Err(finalize)) => Err(RuntimeError::RunAndFinalize {
+            run: Box::new(run),
+            finalize: Box::new(finalize),
+        }),
+    }
+}
+
 pub struct RuntimeBuilder {
     config: RuntimeConfig,
     install_defaults: bool,
@@ -6552,5 +6599,19 @@ mod tests {
             Context::from_config(RuntimeConfig::replay(&path, "wd-replay-v1")).unwrap();
         replay.write_file("/f", b"data").unwrap();
         replay.finish().unwrap();
+    }
+
+    #[test]
+    fn run_with_context_finalizes_recording_when_the_application_returns_an_error() {
+        // The explicit-context `run` path always finalizes: a recorded run whose
+        // closure fails still flushes the trace and surfaces the closure error.
+        let directory = tempdir().unwrap();
+        let trace = directory.path().join("failed-run.patina");
+        let context = Context::from_config(RuntimeConfig::record(5, &trace, "fixture-v1")).unwrap();
+        let result = run_with_context(context, |_| {
+            Err::<(), _>(EffectError::new(ErrorCode::Denied, "application failed").into())
+        });
+        assert!(matches!(result, Err(RuntimeError::Effect(_))));
+        assert!(trace.is_file());
     }
 }
