@@ -92,7 +92,7 @@ The exact crate names are conventional, but the separation is intentional: the A
 ### Shim-backed harness (`patina-dst-harness`)
 
 `patina-dst-harness` is the configure-then-run harness for driving ordinary
-application code under Patina (usage mode 2 of `HARNESS-DESIGN.md`). A harness
+application code under Patina (usage mode 2 of `USAGE-MODES.md`). A harness
 binary calls `patina_dst_harness::run`/`run_with`, configures the run through a
 `HarnessBuilder`, and then executes normal `std`-using application code whose
 effects are interposed by the native shim — the SAME global runtime context the

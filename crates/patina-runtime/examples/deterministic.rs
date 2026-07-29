@@ -1,5 +1,5 @@
 //! Low-level explicit-context simulator example (usage mode 3 of
-//! `HARNESS-DESIGN.md`).
+//! `USAGE-MODES.md`).
 //!
 //! This drives Patina's virtual APIs directly through an explicit [`Context`]:
 //! `patina_dst_runtime::run` builds a context with deterministic default drivers

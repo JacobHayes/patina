@@ -1,6 +1,6 @@
 //! Configure-then-run harness for ordinary application code under Patina.
 //!
-//! This is *usage mode 2* of `HARNESS-DESIGN.md`: a harness binary configures
+//! This is *usage mode 2* of `USAGE-MODES.md`: a harness binary configures
 //! the deterministic runtime and then calls **ordinary application code** whose
 //! `std::fs`, `std::net`, clock, thread, and entropy effects are interposed by
 //! Patina's native shim — the same global runtime context the shim installs for a

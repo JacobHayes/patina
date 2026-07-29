@@ -4633,7 +4633,7 @@ fn trace_event_count(trace: &Path) -> usize {
 
 // ---- patina-dst-harness (shim-backed configure-then-run harness) --------------
 //
-// Validation gates for HARNESS-DESIGN.md usage mode 2 (startup Option B, deferred
+// Validation gates for USAGE-MODES.md usage mode 2 (startup Option B, deferred
 // init). A harness binary depends on `patina-dst-harness` and is built and run
 // through `cargo patina run --harness`; ordinary `std` effects in the application
 // closure are interposed by the native shim, and the harness's `HarnessBuilder`

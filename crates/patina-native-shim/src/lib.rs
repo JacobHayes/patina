@@ -730,7 +730,7 @@ static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 
 /// Set once any deterministic boundary effect has run against the installed
 /// context (in [`with_context`]/[`with_context_raw`]). The shim-backed harness
-/// (`patina-dst-harness`, HARNESS-DESIGN.md Option B) consults this in
+/// (`patina-dst-harness`, USAGE-MODES.md Option B) consults this in
 /// [`patina_harness_install`]: a boundary observed BEFORE the harness installs
 /// means the run already produced events, so reconfiguring the context would
 /// make replay semantics ambiguous — the install fails closed. The harness's own
@@ -1204,7 +1204,7 @@ pub extern "C" fn patina_init_from_env() -> c_int {
 }
 
 /// Install the deterministic runtime for a shim-backed harness (see
-/// `patina-dst-harness`, HARNESS-DESIGN.md startup Option B). Called by
+/// `patina-dst-harness`, USAGE-MODES.md startup Option B). Called by
 /// `patina_dst_harness::run`/`run_with` under `cargo patina run --harness`
 /// (`PATINA_DEFER_INIT=1`), after the harness has injected its configuration
 /// overlay onto the captured control plane via [`patina_control_set_entry`]. The

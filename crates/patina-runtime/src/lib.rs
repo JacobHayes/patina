@@ -35,7 +35,7 @@ pub const ENV_TRACE_FD: &str = "PATINA_TRACE_FD";
 pub const ENV_FS_IMAGE_FD: &str = "PATINA_FS_IMAGE_FD";
 pub const ENV_FINGERPRINT: &str = "PATINA_FINGERPRINT";
 /// Deferred-initialization flag for the shim-backed harness (see
-/// `patina-dst-harness`, HARNESS-DESIGN.md startup Option B). When present (`=1`)
+/// `patina-dst-harness`, USAGE-MODES.md startup Option B). When present (`=1`)
 /// alongside `PATINA_MODE`, the packaged native constructor captures and scrubs
 /// the control plane and registers finalization but does NOT install the runtime;
 /// `patina_dst_harness::run`/`run_with` installs it explicitly, after applying
@@ -1080,7 +1080,7 @@ impl RuntimeConfig {
 /// Low-level explicit-context entry point: run a closure against a [`Context`]
 /// with deterministic default drivers configured from `PATINA_*`.
 ///
-/// This is the mode-3 explicit-context API of `HARNESS-DESIGN.md`. It creates an
+/// This is the mode-3 explicit-context API of `USAGE-MODES.md`. It creates an
 /// explicit context and does **not** control unrelated `std::fs`/`std::net`/clock
 /// calls in the rest of the program — those are interposed by the native shim or
 /// WASI host under `cargo patina build`/`run`. To configure Patina and then drive

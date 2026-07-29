@@ -46,7 +46,7 @@
 //! build`/`run` the native shim or WASI host supplies the deterministic runtime
 //! below ordinary `std::fs`/`std::net`/clock/thread calls, so SDK-instrumented
 //! production code needs no explicit runtime dependency (usage mode 1 of
-//! `HARNESS-DESIGN.md`).
+//! `USAGE-MODES.md`).
 //!
 //! - To configure Patina and then drive normal application code through the same
 //!   shims, use the shim-backed harness crate `patina-dst-harness` (mode 2).

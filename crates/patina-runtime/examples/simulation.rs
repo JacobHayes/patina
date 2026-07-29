@@ -1,5 +1,5 @@
 //! Low-level explicit-context simulator example (usage mode 3 of
-//! `HARNESS-DESIGN.md`).
+//! `USAGE-MODES.md`).
 //!
 //! This drives Patina's virtual scheduler and network APIs directly through an
 //! explicit [`Context`], swapping in a faulted, latency-wrapped `SimNet` before

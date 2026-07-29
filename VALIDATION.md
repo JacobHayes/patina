@@ -90,7 +90,7 @@ This acceptance level is implemented at the explicit Context boundary:
 - repeated `--param KEY=VALUE` controls fingerprinted parameters exposed through `Context::param`;
 - `patina-dst-async` drives a deterministic single-threaded futures executor over those same scheduler, network, and clock operations, and its suite asserts seed-stable and seed-varying executor polling order, exact virtual-time timer rescue and `timeout` ties, async TCP echo over `SimNet` with a real park/peer-wake ordering, async UDP echo under `LatencyNet` advancing to exact delivery deadlines, TCP backpressure, and byte-identical record/replay with strict divergence rejection — all under the workspace `cargo test`, with no new boundary operations and no dedicated validation script.
 
-This level controls Patina's cooperative task state machine, which now also drives the `patina-dst-async` explicit-boundary futures executor; it does not itself intercept native Rust threads or interpose third-party async runtimes such as tokio (native thread interception is validated under V4, and native async-runtime interposition remains out of scope there). The async determinism evidence is at the explicit-API level only.
+This level controls Patina's cooperative task state machine, which now also drives the `patina-dst-async` explicit-boundary futures executor; it does not itself intercept native Rust threads or interpose third-party async runtimes such as tokio (native thread interception and native async-runtime interposition — the kqueue/epoll readiness reactors — are validated under V4). This level's async determinism evidence is at the explicit-API level.
 
 ### V3: WASI Patina target
 
@@ -117,7 +117,7 @@ The deny/interposed/known-safe lists are organized by an explicit escape-class t
 
 | Escape class | Detection mechanism | Fixture / test (red-before, green-after) | Residual the symbol audit cannot see |
 |---|---|---|---|
-| Blocking / scheduling (`__ulock`/`__psynch`/dispatch/mach-sem; `poll`/`select`/`kqueue`; interposed `os_unfair_lock`) | import audit | `native_run_prerun_gate_refuses_every_escape_class` (`semaphore_wait`, `select`); planted-`semaphore_wait` e2e; `os_unfair_lock` acceptance + misuse-abort legs; `recv_timeout` & `rwlock` determinism | an inlined `__ulock_wait` `svc` — Linux `strace`; **honestly absent on macOS** |
+| Blocking / scheduling (`__ulock`/`__psynch`/dispatch/mach-sem; `poll`/`select`; interposed `os_unfair_lock` and the `kqueue`/`kevent` + `epoll`/`eventfd` readiness reactors) | import audit | `native_run_prerun_gate_refuses_every_escape_class` (`semaphore_wait`, `select`); planted-`semaphore_wait` e2e; `os_unfair_lock` acceptance + misuse-abort legs; `recv_timeout` & `rwlock` determinism; reactor legs (raw kqueue/epoll edge+timeout+waker, tokio ping-pong on both platforms) | an inlined `__ulock_wait` `svc` — Linux `strace`; **honestly absent on macOS** |
 | Time | import audit **+** instruction scan (aarch64 `mrs CNTVCT_EL0`, x86 `rdtsc`) | `native_run_prerun_gate_refuses_every_escape_class` (`time`) | the **Darwin commpage** time path: `mach_absolute_time`/`gettimeofday` fast paths read a kernel-mapped page with an ordinary `ldr`, **not** an `mrs`, so the instruction scan does **not** catch it — coverage comes from *interposing* `mach_absolute_time`/`clock_gettime`/`gettimeofday` (what libc/std actually call); a hand-rolled commpage reader that bypasses libc is an uncaught residual |
 | Entropy | import audit **+** instruction scan (x86 `rdrand`, aarch64 `RNDR`) | `native_run_prerun_gate_refuses_every_escape_class` (`arc4random`) | `rdseed`/novel entropy instruction encodings |
 | Thread lifecycle | import audit | C `escape_probe` (audit rejects `pthread_create` as `unmanaged-thread`) + classifier unit | `pthread_create` is interposed, so a shim-linked guest can only reach uninterposed thread creation through non-exported private stubs (not linkable) |
@@ -141,7 +141,7 @@ Native UDP datagrams and zero-latency TCP streams run over `SimNet` through ordi
 
 Required before claiming general native `std` control:
 
-- native async-runtime interposition (a shim-level readiness reactor for tokio/async-std) and non-zero TCP latency over `SimNet` — the explicit-boundary `patina-dst-async` executor is already validated under V2;
+- non-zero TCP latency over `SimNet` (native async-runtime interposition is delivered: the interposed kqueue/epoll readiness reactors run stock tokio under the shim on both platforms, exercised by the tokio + parking_lot + rustix `validate-native-shim.sh` leg — seed-stable, replay-identical, no allowances);
 - cross-machine stress and a usable macOS whole-run syscall trace if a future `ktrace`/OS version exposes enough path context for a default-deny gate;
 - deterministic stress across fresh processes and machines.
 
@@ -163,7 +163,7 @@ Required before claiming general native `std` control:
 
 Required before claiming broad libc/POSIX compatibility or stable traces:
 
-- broader libc network/process symbol *coverage* (modeling more behavior): the remaining items are either a documented non-goal (process/spawn symbols, which the audit rejects) or tracked in Slice 4 (async reactor, non-zero TCP latency). Unsupported-symbol *diagnostics* are complete — the strict audit default-denies any unmodeled import as `unknown-import`, interposed-but-unsupported operations fail closed at runtime through `patina_posix_deny` (ENOSYS plus a loud `patina: … failing closed` line), and the `unknown_import_probe` gate proves the rejection fires.
+- broader libc network/process symbol *coverage* (modeling more behavior): the remaining items are either a documented non-goal (process/spawn symbols, which the audit rejects) or tracked in Slice 4 (non-zero TCP latency; the async readiness reactors are delivered). Unsupported-symbol *diagnostics* are complete — the strict audit default-denies any unmodeled import as `unknown-import`, interposed-but-unsupported operations fail closed at runtime through `patina_posix_deny` (ENOSYS plus a loud `patina: … failing closed` line), and the `unknown_import_probe` gate proves the rejection fires.
 
 `CrashFs` modeling simplifications stated honestly: directory renames are always atomic (no subtree tearing); directory-durability loss covers explicitly created entries, not implicitly created parents; defaults preserve the prior conservative behavior (4096-byte granularity, torn probability 1.0, atomic renames, directory durability off).
 
@@ -280,7 +280,7 @@ A failure report must retain the command, seed, trace bundle when one exists, Pa
 
 Passing V0-V2 proves the CLI-to-runtime-to-driver-to-trace loop for explicit `patina_dst_runtime::Context` effects. V3 proves the entire audited Preview 1 surface with preopen policy and resource limits, within the documented semantic limitations. The native script proves a controlled slice of ordinary `std` behavior — filesystem (including directory listing and symlinks), time, sleep, entropy, stdio, threads, and UDP datagrams — and mixed C ABI calls, built through the packaged `build`/`run` path with auto-initialization and record/replay over the descriptor trace channel — for single Rust sources and whole Cargo packages (path dependencies and build scripts included), though not yet a packaged native target with a recompiled deterministic `std`. Containment is enforced from two directions: the strict import allowlist fails closed on any unknown symbol, and the Linux `strace` pass shows the probe's guest section performing zero host syscalls over the whole run. Both platforms are verified locally: macOS directly, Linux in a VM (pthread interposition on macOS; futex-level `syscall` interposition on Linux). The cross-target smoke script proves one ordinary-`std` program behaves identically under seeds, record, and replay on wasm32-wasip1, native macOS, and native Linux. Crash models, trace migration, host capture, minimization reducers, and performance budgets have focused evidence.
 
-One record path still represents one finalized context; multi-test aggregation is unsupported. Native async-runtime interposition, native TCP/IPv6/DNS, process spawning, arbitrary FFI, dynamic loading, and full POSIX compatibility remain outside the confidence boundary (the explicit-boundary `patina-dst-async` executor is inside it, under V2).
+One record path still represents one finalized context; multi-test aggregation is unsupported. Native IPv6/DNS, non-zero TCP latency, process spawning, arbitrary FFI, dynamic loading, and full POSIX compatibility remain outside the confidence boundary (the explicit-boundary `patina-dst-async` executor and native tokio under the interposed readiness reactors are inside it).
 ## Gate taxonomy: point pins vs class detectors
 
 Every validation gate in Patina is one of two kinds. A **class-level detector** is
