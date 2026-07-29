@@ -224,6 +224,22 @@ int32_t patina_net_is_nonblocking(int32_t fd);
 int32_t patina_net_close(int32_t fd);
 
 /*
+ * In-process pipe / socketpair. Both endpoints live inside this one guest
+ * process (an async runtime's IO-driver / signal self-pipe), so they are modeled
+ * as deterministic in-memory byte channels sharing the virtual-fd space above
+ * (numbered from PATINA_SOCKET_FD_BASE) and the same baton/waiter machinery. The
+ * interposed read/write/close/fcntl route these fds via patina_pipe_is_endpoint.
+ */
+int32_t patina_pipe(int32_t *read_fd_out, int32_t *write_fd_out, int32_t nonblocking);
+int32_t patina_socketpair(int32_t *fd0_out, int32_t *fd1_out, int32_t nonblocking);
+int32_t patina_pipe_is_endpoint(int32_t fd);
+intptr_t patina_pipe_read(int32_t fd, void *buf, size_t len);
+intptr_t patina_pipe_write(int32_t fd, const void *buf, size_t len);
+int32_t patina_pipe_close(int32_t fd);
+int32_t patina_pipe_is_nonblocking(int32_t fd);
+int32_t patina_pipe_set_nonblocking(int32_t fd, int32_t nonblocking);
+
+/*
  * Linux SYS_futex routing. Rust std on Linux implements Mutex/Condvar/thread
  * parking with raw futexes reached through libc's syscall() wrapper; the
  * interposed syscall() delegates FUTEX_WAIT/WAKE here so they run under the

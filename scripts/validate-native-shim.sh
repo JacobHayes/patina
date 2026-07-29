@@ -1717,6 +1717,258 @@ cmp "$tmp/tcp.patina" "$tmp/tcp-repeat.patina"
 cmp "$tmp/tcp-record" "$tmp/tcp-replay"
 cmp "$tmp/tcp-seed-5-1" "$tmp/tcp-replay"
 
+# -----------------------------------------------------------------------------
+# Class g, in-process slice: pipe / pipe2 / socketpair modeled as deterministic
+# in-memory byte channels wired to the scheduler baton (ESCAPE-CLASSES.md row g).
+# Both endpoints live inside the one guest (an async runtime's IO-driver / signal
+# self-pipe), so no cross-address-space escape is involved: the channels reuse
+# the SAME waiter machinery the virtual sockets do, so the sources import
+# pipe/socketpair with NO new allowance and are byte-identical per seed, and
+# record + flag-free replay converge. The cross-process siblings stay refused
+# (the eventfd/shm_open leg at the end).
+cat >"$tmp/pipe_probe.rs" <<'RS'
+// Two managed tasks exchange bytes through an in-process pipe(). The reader
+// (main) blocks on the empty pipe and is woken through the baton when the writer
+// thread writes; partial writes (4-byte buffer vs 9-byte message) and EOF on the
+// writer's close are exercised. The result is a pure function of the transfer,
+// so it is byte-identical across same-seed runs.
+use std::thread;
+unsafe extern "C" {
+    fn pipe(fds: *mut i32) -> i32;
+    fn read(fd: i32, buf: *mut u8, len: usize) -> isize;
+    fn write(fd: i32, buf: *const u8, len: usize) -> isize;
+    fn close(fd: i32) -> i32;
+}
+fn main() {
+    let mut fds = [0i32; 2];
+    assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0, "pipe() failed");
+    let (r, w) = (fds[0], fds[1]);
+    let writer = thread::spawn(move || {
+        let msg = b"ping-pong";
+        let mut off = 0usize;
+        while off < msg.len() {
+            let n = unsafe { write(w, msg[off..].as_ptr(), msg.len() - off) };
+            assert!(n > 0, "write returned {n}");
+            off += n as usize;
+        }
+        unsafe { close(w) };
+    });
+    let mut got = Vec::new();
+    let mut buf = [0u8; 4];
+    loop {
+        let n = unsafe { read(r, buf.as_mut_ptr(), buf.len()) };
+        assert!(n >= 0, "read returned {n}");
+        if n == 0 { break; } // EOF: the writer closed its end.
+        got.extend_from_slice(&buf[..n as usize]);
+    }
+    writer.join().unwrap();
+    unsafe { close(r) };
+    println!("NATIVE_PIPE_RESULT got={}", String::from_utf8_lossy(&got));
+}
+RS
+cat >"$tmp/socketpair_probe.rs" <<'RS'
+// A duplex AF_UNIX/SOCK_STREAM socketpair: a server task reads a request on one
+// endpoint and writes the uppercased reply back through the SAME endpoint; main
+// writes the request and reads the reply on the other. Both directions flow
+// through the deterministic scheduler.
+use std::thread;
+const AF_UNIX: i32 = 1;
+const SOCK_STREAM: i32 = 1;
+unsafe extern "C" {
+    fn socketpair(domain: i32, ty: i32, protocol: i32, sv: *mut i32) -> i32;
+    fn read(fd: i32, buf: *mut u8, len: usize) -> isize;
+    fn write(fd: i32, buf: *const u8, len: usize) -> isize;
+    fn close(fd: i32) -> i32;
+}
+fn write_all(fd: i32, bytes: &[u8]) {
+    let mut off = 0usize;
+    while off < bytes.len() {
+        let n = unsafe { write(fd, bytes[off..].as_ptr(), bytes.len() - off) };
+        assert!(n > 0, "write returned {n}");
+        off += n as usize;
+    }
+}
+fn main() {
+    let mut sv = [0i32; 2];
+    assert_eq!(unsafe { socketpair(AF_UNIX, SOCK_STREAM, 0, sv.as_mut_ptr()) }, 0);
+    let (a, b) = (sv[0], sv[1]);
+    let server = thread::spawn(move || {
+        let mut buf = [0u8; 16];
+        let n = unsafe { read(b, buf.as_mut_ptr(), buf.len()) };
+        assert!(n > 0);
+        let reply: Vec<u8> =
+            buf[..n as usize].iter().map(|c| c.to_ascii_uppercase()).collect();
+        write_all(b, &reply);
+        unsafe { close(b) };
+    });
+    write_all(a, b"ping");
+    let mut reply = Vec::new();
+    let mut buf = [0u8; 16];
+    loop {
+        let n = unsafe { read(a, buf.as_mut_ptr(), buf.len()) };
+        assert!(n >= 0);
+        if n == 0 { break; }
+        reply.extend_from_slice(&buf[..n as usize]);
+    }
+    server.join().unwrap();
+    unsafe { close(a) };
+    println!("NATIVE_SOCKETPAIR_RESULT reply={}", String::from_utf8_lossy(&reply));
+}
+RS
+cat >"$tmp/pipe_epipe_probe.rs" <<'RS'
+// EOF + EPIPE semantics. Writing to a pipe whose read end is closed returns
+// EPIPE (errno 32) and, crucially, raises NO SIGPIPE — reaching the println at
+// all proves the process was not killed by a signal. EOF: a pipe whose write end
+// is closed reads 0.
+const EPIPE: i32 = 32;
+unsafe extern "C" {
+    fn pipe(fds: *mut i32) -> i32;
+    fn read(fd: i32, buf: *mut u8, len: usize) -> isize;
+    fn write(fd: i32, buf: *const u8, len: usize) -> isize;
+    fn close(fd: i32) -> i32;
+}
+fn errno() -> i32 { std::io::Error::last_os_error().raw_os_error().unwrap_or(0) }
+fn main() {
+    let mut fds = [0i32; 2];
+    assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
+    let (r, w) = (fds[0], fds[1]);
+    unsafe { close(r) };
+    let n = unsafe { write(w, b"x".as_ptr(), 1) };
+    let epipe = n == -1 && errno() == EPIPE;
+    unsafe { close(w) };
+    let mut fds2 = [0i32; 2];
+    assert_eq!(unsafe { pipe(fds2.as_mut_ptr()) }, 0);
+    let (r2, w2) = (fds2[0], fds2[1]);
+    unsafe { close(w2) };
+    let mut buf = [0u8; 4];
+    let eof = unsafe { read(r2, buf.as_mut_ptr(), buf.len()) } == 0;
+    unsafe { close(r2) };
+    println!("NATIVE_PIPE_EPIPE_RESULT epipe={epipe} eof={eof}");
+}
+RS
+cat >"$tmp/pipe_nonblock_probe.rs" <<'RS'
+// O_NONBLOCK honored on an in-process pipe: an empty non-blocking read returns
+// EWOULDBLOCK instead of parking. The fcntl(F_SETFL) path (set later) is
+// portable; the pipe2(O_NONBLOCK) creation path is Linux-only. `ok` ANDs every
+// applicable sub-check so the output line is stable across platforms.
+#[cfg(target_os = "macos")] const O_NONBLOCK: i32 = 0x0004;
+#[cfg(target_os = "linux")] const O_NONBLOCK: i32 = 0o4000;
+#[cfg(target_os = "macos")] const EWOULDBLOCK: i32 = 35;
+#[cfg(target_os = "linux")] const EWOULDBLOCK: i32 = 11;
+const F_SETFL: i32 = 4;
+unsafe extern "C" {
+    fn pipe(fds: *mut i32) -> i32;
+    fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    fn read(fd: i32, buf: *mut u8, len: usize) -> isize;
+    fn write(fd: i32, buf: *const u8, len: usize) -> isize;
+    fn close(fd: i32) -> i32;
+}
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn pipe2(fds: *mut i32, flags: i32) -> i32;
+}
+fn errno() -> i32 { std::io::Error::last_os_error().raw_os_error().unwrap_or(0) }
+fn main() {
+    let mut buf = [0u8; 4];
+    let mut ok = true;
+    // fcntl(F_SETFL, O_NONBLOCK) on a plain pipe — the "set later" path, portable.
+    let mut b = [0i32; 2];
+    assert_eq!(unsafe { pipe(b.as_mut_ptr()) }, 0);
+    assert_eq!(unsafe { fcntl(b[0], F_SETFL, O_NONBLOCK) }, 0);
+    ok &= unsafe { read(b[0], buf.as_mut_ptr(), buf.len()) } == -1 && errno() == EWOULDBLOCK;
+    unsafe { write(b[1], b"hi".as_ptr(), 2) };
+    ok &= unsafe { read(b[0], buf.as_mut_ptr(), buf.len()) } == 2;
+    unsafe { close(b[0]) };
+    unsafe { close(b[1]) };
+    // Creation-time O_NONBLOCK via pipe2 (Linux exports it).
+    #[cfg(target_os = "linux")]
+    {
+        let mut a = [0i32; 2];
+        assert_eq!(unsafe { pipe2(a.as_mut_ptr(), O_NONBLOCK) }, 0);
+        ok &= unsafe { read(a[0], buf.as_mut_ptr(), buf.len()) } == -1 && errno() == EWOULDBLOCK;
+        unsafe { close(a[0]) };
+        unsafe { close(a[1]) };
+    }
+    println!("NATIVE_PIPE_NONBLOCK_RESULT ok={ok}");
+}
+RS
+
+# (a) pipe round-trip: byte-identical across two same-seed runs, at two seeds.
+# The imports resolve to shim defs, so the source audits clean (no allowance).
+"$runner" build "$tmp/pipe_probe.rs" --output "$tmp/pipe-probe" >/dev/null
+"$runner" audit "$tmp/pipe-probe" "${shim_allow[@]}" >/dev/null
+for seed in 1 2; do
+  "$runner" run "$tmp/pipe-probe" --seed "$seed" >"$tmp/pipe-seed-$seed-1"
+  "$runner" run "$tmp/pipe-probe" --seed "$seed" >"$tmp/pipe-seed-$seed-2"
+  cmp "$tmp/pipe-seed-$seed-1" "$tmp/pipe-seed-$seed-2"
+  grep -qx 'NATIVE_PIPE_RESULT got=ping-pong' "$tmp/pipe-seed-$seed-1"
+done
+"$runner" run "$tmp/pipe-probe" --seed 1 --record "$tmp/pipe.patina" \
+  --fingerprint native-pipe-v1 >"$tmp/pipe-record"
+"$runner" run "$tmp/pipe-probe" --seed 1 --record "$tmp/pipe-repeat.patina" \
+  --fingerprint native-pipe-v1 >/dev/null
+cmp "$tmp/pipe.patina" "$tmp/pipe-repeat.patina"
+"$runner" replay "$tmp/pipe-probe" "$tmp/pipe.patina" \
+  --fingerprint native-pipe-v1 >"$tmp/pipe-replay"
+cmp "$tmp/pipe-record" "$tmp/pipe-replay"
+cmp "$tmp/pipe-seed-1-1" "$tmp/pipe-replay"
+
+# (b) socketpair duplex round-trip.
+"$runner" build "$tmp/socketpair_probe.rs" --output "$tmp/socketpair-probe" >/dev/null
+"$runner" audit "$tmp/socketpair-probe" "${shim_allow[@]}" >/dev/null
+for seed in 1 2; do
+  "$runner" run "$tmp/socketpair-probe" --seed "$seed" >"$tmp/socketpair-seed-$seed-1"
+  "$runner" run "$tmp/socketpair-probe" --seed "$seed" >"$tmp/socketpair-seed-$seed-2"
+  cmp "$tmp/socketpair-seed-$seed-1" "$tmp/socketpair-seed-$seed-2"
+  grep -qx 'NATIVE_SOCKETPAIR_RESULT reply=PING' "$tmp/socketpair-seed-$seed-1"
+done
+"$runner" run "$tmp/socketpair-probe" --seed 1 --record "$tmp/socketpair.patina" \
+  --fingerprint native-socketpair-v1 >"$tmp/socketpair-record"
+"$runner" replay "$tmp/socketpair-probe" "$tmp/socketpair.patina" \
+  --fingerprint native-socketpair-v1 >"$tmp/socketpair-replay"
+cmp "$tmp/socketpair-record" "$tmp/socketpair-replay"
+cmp "$tmp/socketpair-seed-1-1" "$tmp/socketpair-replay"
+
+# (c) EOF + EPIPE (no SIGPIPE): reaching the result line proves no signal fired.
+"$runner" build "$tmp/pipe_epipe_probe.rs" --output "$tmp/pipe-epipe-probe" >/dev/null
+"$runner" audit "$tmp/pipe-epipe-probe" "${shim_allow[@]}" >/dev/null
+"$runner" run "$tmp/pipe-epipe-probe" --seed 1 >"$tmp/pipe-epipe-out"
+grep -qx 'NATIVE_PIPE_EPIPE_RESULT epipe=true eof=true' "$tmp/pipe-epipe-out"
+
+# (d) O_NONBLOCK → EWOULDBLOCK, set at creation (pipe2, Linux) and via fcntl.
+"$runner" build "$tmp/pipe_nonblock_probe.rs" --output "$tmp/pipe-nonblock-probe" >/dev/null
+"$runner" audit "$tmp/pipe-nonblock-probe" "${shim_allow[@]}" >/dev/null
+"$runner" run "$tmp/pipe-nonblock-probe" --seed 1 >"$tmp/pipe-nonblock-out"
+grep -qx 'NATIVE_PIPE_NONBLOCK_RESULT ok=true' "$tmp/pipe-nonblock-out"
+
+# (e) The cross-process class-g siblings stay REFUSED: interposing the in-process
+# pipe/socketpair must not weaken the gate for a real IPC escape. eventfd is the
+# still-denied sibling on Linux; macOS has no eventfd, so shm_open (same class)
+# stands in there. Either way the audit must refuse it as `shared-memory-ipc`.
+cat >"$tmp/shared_ipc_refusal_probe.c" <<'C'
+#include <fcntl.h>
+#include <sys/mman.h>
+#ifdef __linux__
+#include <sys/eventfd.h>
+int main(void) { return eventfd(0, 0) < 0; }
+#else
+int main(void) { return shm_open("/patina-refused", O_RDONLY, 0) < 0; }
+#endif
+C
+"$cc" -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror \
+  "$tmp/shared_ipc_refusal_probe.c" -o "$tmp/shared-ipc-refusal-probe"
+if "$runner" audit "$tmp/shared-ipc-refusal-probe" --raw \
+  >"$tmp/shared-ipc-refusal-out" 2>"$tmp/shared-ipc-refusal-error"; then
+  echo 'validate-native-shim: cross-process shared-memory-ipc symbol unexpectedly passed audit' >&2
+  exit 1
+fi
+grep -q 'shared-memory-ipc' "$tmp/shared-ipc-refusal-error"
+
+cat "$tmp/pipe-seed-1-1"
+cat "$tmp/socketpair-seed-1-1"
+cat "$tmp/pipe-epipe-out"
+cat "$tmp/pipe-nonblock-out"
+
 cat "$tmp/replay"
 cat "$tmp/std-replay"
 cat "$tmp/tcp-replay"

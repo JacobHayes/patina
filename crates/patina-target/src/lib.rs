@@ -1694,6 +1694,15 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
     // (`mmap` is deliberately absent: it is allowlisted as process-local memory
     // and the audit cannot see its `MAP_SHARED` flag — that residual is
     // documented in the coverage matrix, not papered over with a dead label.)
+    // `pipe`/`pipe2`/`socketpair` are the IN-PROCESS slice of class g: both ends
+    // stay inside the one guest (an async runtime's IO-driver / signal self-pipe),
+    // so they are now INTERPOSED as deterministic in-memory channels (strong shim
+    // defs — see `c/patina_posix.c` and ESCAPE-CLASSES.md row g) and drop off a
+    // shim-linked binary's import table. They stay classified here — exactly like
+    // the interposed `os_unfair_lock_*`/`dispatch_semaphore_*` above — so a NON-
+    // shim binary that imports one raw still reads as a class-g escape rather than
+    // a bare unknown import. The cross-process members
+    // (`shm_open`/`mach_*`/`mq_*`/`eventfd`) are NOT interposed and stay refused.
     const SHARED_MEMORY_IPC: &[&str] = &[
         "shm_open",
         "shm_unlink",

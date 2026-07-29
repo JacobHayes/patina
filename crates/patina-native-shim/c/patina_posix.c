@@ -830,6 +830,35 @@ int openat(int dirfd, const char *path, int flags, ...) {
 }
 
 int fcntl(int fd, int command, ...) {
+    /* Virtual pipe/socketpair endpoints: same blocking-flag surface as sockets,
+     * routed to the pipe table (cloexec is a no-op; dup is not modeled). */
+    if (fd >= PATINA_SOCKET_FD_BASE && patina_pipe_is_endpoint(fd)) {
+        if (command == F_GETFL) {
+            int nonblocking = patina_pipe_is_nonblocking(fd);
+            if (nonblocking < 0) {
+                errno = EBADF;
+                return -1;
+            }
+            return nonblocking ? O_NONBLOCK : 0;
+        }
+        if (command == F_SETFL) {
+            va_list ap;
+            va_start(ap, command);
+            int flags = va_arg(ap, int);
+            va_end(ap);
+            return patina_pipe_set_nonblocking(fd, (flags & O_NONBLOCK) ? 1 : 0);
+        }
+        if (command == F_GETFD) return FD_CLOEXEC;
+        if (command == F_SETFD) return 0;
+        if (command == F_DUPFD
+#ifdef F_DUPFD_CLOEXEC
+            || command == F_DUPFD_CLOEXEC
+#endif
+        )
+            return patina_posix_deny("patina: duplicating a virtual pipe descriptor is not modeled; failing closed\n");
+        errno = EINVAL;
+        return -1;
+    }
     /* Virtual sockets: report/adjust the blocking flag; cloexec is a no-op. */
     if (fd >= PATINA_SOCKET_FD_BASE) {
         if (command == F_GETFL) {
@@ -903,6 +932,7 @@ ssize_t read(int fd, void *destination, size_t length) {
         int kind = patina_net_kind(fd);
         if (kind == 3) return fail_size(patina_net_stream_recv(fd, destination, length));
         if (kind == 0) return fail_size(patina_net_recv(fd, destination, length));
+        if (patina_pipe_is_endpoint(fd)) return fail_size(patina_pipe_read(fd, destination, length));
         errno = kind < 0 ? EBADF : ENOTCONN;
         return -1;
     }
@@ -915,6 +945,7 @@ ssize_t write(int fd, const void *source, size_t length) {
         int kind = patina_net_kind(fd);
         if (kind == 3) return fail_size(patina_net_stream_send(fd, source, length));
         if (kind == 0) return fail_size(patina_net_send(fd, source, length));
+        if (patina_pipe_is_endpoint(fd)) return fail_size(patina_pipe_write(fd, source, length));
         errno = kind < 0 ? EBADF : ENOTCONN;
         return -1;
     }
@@ -968,7 +999,10 @@ int flock(int fd, int operation) {
 }
 
 int close(int fd) {
-    if (fd >= PATINA_SOCKET_FD_BASE) return fail_int(patina_net_close(fd));
+    if (fd >= PATINA_SOCKET_FD_BASE) {
+        if (patina_pipe_is_endpoint(fd)) return fail_int(patina_pipe_close(fd));
+        return fail_int(patina_net_close(fd));
+    }
     return fail_int(patina_close(fd));
 }
 
@@ -985,7 +1019,10 @@ int dup2(int oldfd, int newfd) {
         /* POSIX: equal descriptors validate oldfd and return newfd unchanged. */
         if (oldfd >= 0 && oldfd <= 2) return newfd;
         if (oldfd >= PATINA_SOCKET_FD_BASE) {
-            if (patina_net_is_nonblocking(oldfd) < 0) { errno = EBADF; return -1; }
+            if (patina_net_is_nonblocking(oldfd) < 0 && patina_pipe_is_endpoint(oldfd) == 0) {
+                errno = EBADF;
+                return -1;
+            }
             return newfd;
         }
         uint32_t kind;
@@ -1996,6 +2033,58 @@ void freeaddrinfo(struct addrinfo *res) {
 }
 
 /*
+ * In-process pipe / socketpair (class g, in-process slice). Both endpoints stay
+ * inside this one guest process — the common case is an async runtime's own
+ * IO-driver / signal self-pipe wakeup — so there is NO cross-address-space
+ * escape: they are modeled as deterministic in-memory byte channels wired to the
+ * scheduler's wakeup path (see the "in-process pipe / socketpair" section in the
+ * Rust shim). Descriptors come from the shared virtual-fd space above, so the
+ * interposed read/write/close/fcntl route them to the pipe class via
+ * patina_pipe_is_endpoint. The truly cross-process class-g members (shm_open,
+ * the mach_msg / mach_port / mq families, eventfd) stay refused.
+ */
+int pipe(int fildes[2]) {
+    if (fildes == NULL) {
+        errno = EFAULT;
+        return -1;
+    }
+    return fail_int(patina_pipe(&fildes[0], &fildes[1], 0));
+}
+
+int socketpair(int domain, int type, int protocol, int sv[2]) {
+    if (sv == NULL) {
+        errno = EFAULT;
+        return -1;
+    }
+    /* AF_LOCAL is the same constant as AF_UNIX; only a Unix-domain STREAM pair is
+     * a deterministic in-process duplex. Anything else fails closed. */
+    if (domain != AF_UNIX) {
+        errno = EAFNOSUPPORT;
+        return -1;
+    }
+    int nonblocking = 0;
+    int base = type;
+#ifdef SOCK_NONBLOCK
+    if (base & SOCK_NONBLOCK) {
+        nonblocking = 1;
+        base &= ~SOCK_NONBLOCK;
+    }
+#endif
+#ifdef SOCK_CLOEXEC
+    base &= ~SOCK_CLOEXEC; /* no exec under the runtime: accept and ignore */
+#endif
+    if (base != SOCK_STREAM) {
+        errno = EOPNOTSUPP;
+        return -1;
+    }
+    if (protocol != 0) {
+        errno = EPROTONOSUPPORT;
+        return -1;
+    }
+    return fail_int(patina_socketpair(&sv[0], &sv[1], nonblocking));
+}
+
+/*
  * Deterministic process-state values (getuid/geteuid/... below). The process
  * class itself — spawning, exec, reaping, credential and session changes — is a
  * deterministic-runtime non-goal, handled by the deny-traps just below.
@@ -2071,10 +2160,6 @@ pid_t waitpid(pid_t pid, int *status, int options) {
     (void)status;
     (void)options;
     patina_process_trap("waitpid");
-}
-int pipe(int fildes[2]) {
-    (void)fildes;
-    patina_process_trap("pipe");
 }
 pid_t setsid(void) { patina_process_trap("setsid"); }
 int setgid(gid_t gid) {
@@ -2202,17 +2287,36 @@ int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options) {
     (void)options;
     patina_process_trap("waitid");
 }
+
+/*
+ * pipe2 is the Linux flag-taking pipe (macOS has no such symbol). Same
+ * deterministic in-process channel as pipe() above, honoring O_NONBLOCK at
+ * creation; O_CLOEXEC is accepted-and-ignored (no exec under the runtime),
+ * O_DIRECT (packet-mode pipes) is not modeled and fails ENOSYS, and any other
+ * flag fails EINVAL.
+ */
 int pipe2(int pipefd[2], int flags) {
-    (void)pipefd;
-    (void)flags;
-    patina_process_trap("pipe2");
-}
-int socketpair(int domain, int type, int protocol, int sv[2]) {
-    (void)domain;
-    (void)type;
-    (void)protocol;
-    (void)sv;
-    patina_process_trap("socketpair");
+    if (pipefd == NULL) {
+        errno = EFAULT;
+        return -1;
+    }
+    int nonblocking = (flags & O_NONBLOCK) ? 1 : 0;
+    int remaining = flags & ~O_NONBLOCK;
+#ifdef O_CLOEXEC
+    remaining &= ~O_CLOEXEC;
+#endif
+#ifdef O_DIRECT
+    if (remaining & O_DIRECT) {
+        errno = ENOSYS;
+        return -1;
+    }
+    remaining &= ~O_DIRECT;
+#endif
+    if (remaining != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    return fail_int(patina_pipe(&pipefd[0], &pipefd[1], nonblocking));
 }
 
 /*

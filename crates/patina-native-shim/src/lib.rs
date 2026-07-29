@@ -4478,6 +4478,14 @@ mod thread {
         bound: BTreeMap<String, c_int>,
         tcp_listeners: BTreeMap<String, c_int>,
         tcp_streams: BTreeMap<(String, String), c_int>,
+        // In-process pipe/socketpair channels. Endpoints share the socket
+        // virtual-fd space (`next_fd`) so a virtual fd is a socket XOR a pipe
+        // endpoint, never both — the C dispatch tells them apart by table
+        // membership. `pipe_channels` are the directed byte buffers each endpoint
+        // reads from / writes to; see the "in-process pipe / socketpair" section.
+        pipe_ends: BTreeMap<c_int, PipeEnd>,
+        pipe_channels: BTreeMap<u64, PipeChannel>,
+        next_channel: u64,
         next_fd: c_int,
         next_ephemeral: u16,
     }
@@ -4489,6 +4497,9 @@ mod thread {
                 bound: BTreeMap::new(),
                 tcp_listeners: BTreeMap::new(),
                 tcp_streams: BTreeMap::new(),
+                pipe_ends: BTreeMap::new(),
+                pipe_channels: BTreeMap::new(),
+                next_channel: 0,
                 next_fd: SOCKET_FD_BASE,
                 next_ephemeral: 49152,
             }
@@ -5411,6 +5422,437 @@ mod thread {
     }
 
     // ------------------------------------------------------------------
+    // In-process pipe / socketpair. Both endpoints of a `pipe`/`pipe2`/
+    // `socketpair` live inside this one guest process (the common case: an async
+    // runtime's IO-driver / signal self-pipe wakeup), so there is no cross-
+    // address-space escape — they are modeled as deterministic in-memory byte
+    // channels whose reads/writes are scheduler-visible, reusing the SAME baton /
+    // waiter machinery the virtual sockets use (block / switch_and_park / wake).
+    // Being pure in-process memory that only ever mutates while the acting task
+    // holds the baton, the transfer is deterministic GIVEN the schedule — exactly
+    // like the futex / mutex words — so it carries NO trace events of its own: the
+    // recorded scheduler steps already pin every interleaving, so record and
+    // flag-free replay converge on that. No host call is ever made.
+
+    /// A bounded, directed byte channel: one writer endpoint feeds it, one reader
+    /// endpoint drains it. A simplex `pipe` is a single channel; a duplex
+    /// `socketpair` is two of them (one per direction).
+    struct PipeChannel {
+        buffer: VecDeque<u8>,
+        capacity: usize,
+        /// The reader endpoint has been closed: further writes get `EPIPE`.
+        read_closed: bool,
+        /// The writer endpoint has been closed: reads return EOF once drained.
+        write_closed: bool,
+        /// Tasks parked in a blocking read, waiting for bytes to arrive.
+        recv_waiters: VecDeque<TaskId>,
+        /// Tasks parked in a blocking write, waiting for buffer space.
+        send_waiters: VecDeque<TaskId>,
+    }
+
+    /// Real pipes carry a fixed-capacity kernel buffer (Linux's default is 64 KiB);
+    /// match it so a writer that outruns its reader parks on a full buffer exactly
+    /// as it would on the host, rather than buffering without bound.
+    const PIPE_CAPACITY: usize = 64 * 1024;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum PipeRead {
+        Read(usize),
+        Eof,
+        WouldBlock,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum PipeWrite {
+        Wrote(usize),
+        BrokenPipe,
+        WouldBlock,
+    }
+
+    impl PipeChannel {
+        fn new(capacity: usize) -> Self {
+            Self {
+                buffer: VecDeque::new(),
+                capacity,
+                read_closed: false,
+                write_closed: false,
+                recv_waiters: VecDeque::new(),
+                send_waiters: VecDeque::new(),
+            }
+        }
+
+        /// Pull up to `dst.len()` bytes. `WouldBlock` only when the buffer is empty
+        /// and the writer is still open; drained + writer-closed is `Eof`.
+        fn try_read(&mut self, dst: &mut [u8]) -> PipeRead {
+            if !self.buffer.is_empty() {
+                let count = dst.len().min(self.buffer.len());
+                for (slot, byte) in dst[..count].iter_mut().zip(self.buffer.drain(..count)) {
+                    *slot = byte;
+                }
+                PipeRead::Read(count)
+            } else if self.write_closed {
+                PipeRead::Eof
+            } else {
+                PipeRead::WouldBlock
+            }
+        }
+
+        /// Push as many of `src`'s bytes as fit. `WouldBlock` when the buffer is
+        /// full and the reader is open (the caller parks); a closed reader is
+        /// `BrokenPipe` (the caller returns `EPIPE`, never a signal).
+        fn try_write(&mut self, src: &[u8]) -> PipeWrite {
+            if self.read_closed {
+                return PipeWrite::BrokenPipe;
+            }
+            let space = self.capacity - self.buffer.len();
+            if space == 0 {
+                return PipeWrite::WouldBlock;
+            }
+            let count = src.len().min(space);
+            self.buffer.extend(&src[..count]);
+            PipeWrite::Wrote(count)
+        }
+    }
+
+    /// One end of a pipe/socketpair. `read_channel`/`write_channel` name the
+    /// directed [`PipeChannel`]s this endpoint may drain / feed; a simplex pipe
+    /// end holds exactly one of them, a duplex socketpair end holds both.
+    struct PipeEnd {
+        read_channel: Option<u64>,
+        write_channel: Option<u64>,
+        nonblocking: bool,
+    }
+
+    fn drain_channel_recv_waiters(state: &mut ThreadRuntime, channel: u64) -> Vec<TaskId> {
+        state
+            .net
+            .pipe_channels
+            .get_mut(&channel)
+            .map(|channel| channel.recv_waiters.drain(..).collect())
+            .unwrap_or_default()
+    }
+
+    fn drain_channel_send_waiters(state: &mut ThreadRuntime, channel: u64) -> Vec<TaskId> {
+        state
+            .net
+            .pipe_channels
+            .get_mut(&channel)
+            .map(|channel| channel.send_waiters.drain(..).collect())
+            .unwrap_or_default()
+    }
+
+    /// Create a simplex pipe: `read_fd_out` is the read end, `write_fd_out` the
+    /// write end, both non-blocking when `nonblocking != 0`. Endpoints and the
+    /// backing channel are allocated from the shared virtual-fd / channel
+    /// counters, so their numbering is a pure function of the schedule. Activates
+    /// the thread subsystem so a later blocking read/write can park via the baton.
+    ///
+    /// # Safety
+    /// `read_fd_out`/`write_fd_out` must be writable.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn patina_pipe(
+        read_fd_out: *mut c_int,
+        write_fd_out: *mut c_int,
+        nonblocking: c_int,
+    ) -> c_int {
+        if read_fd_out.is_null() || write_fd_out.is_null() {
+            return super::fail(EINVAL);
+        }
+        let mut state = lock_state();
+        if let Err(error) = state.ensure_active() {
+            return super::fail(error.into_posix());
+        }
+        let channel = state.net.next_channel;
+        state.net.next_channel = state.net.next_channel.wrapping_add(1);
+        state
+            .net
+            .pipe_channels
+            .insert(channel, PipeChannel::new(PIPE_CAPACITY));
+        let read_fd = state.net.next_fd;
+        state.net.next_fd = state.net.next_fd.wrapping_add(1);
+        let write_fd = state.net.next_fd;
+        state.net.next_fd = state.net.next_fd.wrapping_add(1);
+        state.net.pipe_ends.insert(
+            read_fd,
+            PipeEnd {
+                read_channel: Some(channel),
+                write_channel: None,
+                nonblocking: nonblocking != 0,
+            },
+        );
+        state.net.pipe_ends.insert(
+            write_fd,
+            PipeEnd {
+                read_channel: None,
+                write_channel: Some(channel),
+                nonblocking: nonblocking != 0,
+            },
+        );
+        unsafe {
+            read_fd_out.write(read_fd);
+            write_fd_out.write(write_fd);
+        }
+        0
+    }
+
+    /// Create a duplex AF_UNIX/SOCK_STREAM pair: `fd0_out` and `fd1_out` are
+    /// interchangeable bidirectional endpoints. Two directed channels back them
+    /// (fd0 → fd1 and fd1 → fd0), so each end reads what the other writes.
+    ///
+    /// # Safety
+    /// `fd0_out`/`fd1_out` must be writable.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn patina_socketpair(
+        fd0_out: *mut c_int,
+        fd1_out: *mut c_int,
+        nonblocking: c_int,
+    ) -> c_int {
+        if fd0_out.is_null() || fd1_out.is_null() {
+            return super::fail(EINVAL);
+        }
+        let mut state = lock_state();
+        if let Err(error) = state.ensure_active() {
+            return super::fail(error.into_posix());
+        }
+        let channel_0to1 = state.net.next_channel;
+        let channel_1to0 = channel_0to1.wrapping_add(1);
+        state.net.next_channel = channel_1to0.wrapping_add(1);
+        state
+            .net
+            .pipe_channels
+            .insert(channel_0to1, PipeChannel::new(PIPE_CAPACITY));
+        state
+            .net
+            .pipe_channels
+            .insert(channel_1to0, PipeChannel::new(PIPE_CAPACITY));
+        let fd0 = state.net.next_fd;
+        state.net.next_fd = state.net.next_fd.wrapping_add(1);
+        let fd1 = state.net.next_fd;
+        state.net.next_fd = state.net.next_fd.wrapping_add(1);
+        state.net.pipe_ends.insert(
+            fd0,
+            PipeEnd {
+                read_channel: Some(channel_1to0),
+                write_channel: Some(channel_0to1),
+                nonblocking: nonblocking != 0,
+            },
+        );
+        state.net.pipe_ends.insert(
+            fd1,
+            PipeEnd {
+                read_channel: Some(channel_0to1),
+                write_channel: Some(channel_1to0),
+                nonblocking: nonblocking != 0,
+            },
+        );
+        unsafe {
+            fd0_out.write(fd0);
+            fd1_out.write(fd1);
+        }
+        0
+    }
+
+    /// C dispatch predicate: is `fd` a pipe/socketpair endpoint? Lets the
+    /// interposed read/write/close/fcntl route the shared virtual-fd space to the
+    /// pipe class versus the socket class.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn patina_pipe_is_endpoint(fd: c_int) -> c_int {
+        c_int::from(lock_state().net.pipe_ends.contains_key(&fd))
+    }
+
+    /// Blocking (or `O_NONBLOCK`) read from a pipe/socketpair endpoint.
+    ///
+    /// # Safety
+    /// `buf` must be writable for `len` bytes when nonzero.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn patina_pipe_read(fd: c_int, buf: *mut c_void, len: usize) -> isize {
+        if let Err(errno) = sched_point() {
+            return super::fail(errno) as isize;
+        }
+        if len != 0 && buf.is_null() {
+            return super::fail(EINVAL) as isize;
+        }
+        if len == 0 {
+            return 0;
+        }
+        let me = current_task();
+        loop {
+            let mut state = lock_state();
+            let (channel, nonblocking) = match state.net.pipe_ends.get(&fd) {
+                // A read on the write-only end of a simplex pipe is EBADF (the end
+                // is O_WRONLY), matching the kernel.
+                Some(end) => match end.read_channel {
+                    Some(channel) => (channel, end.nonblocking),
+                    None => return super::fail(super::EBADF) as isize,
+                },
+                None => return super::fail(super::EBADF) as isize,
+            };
+            // Reborrowed each iteration; only one `&mut` to the caller's buffer is
+            // ever live (the previous is dropped when the iteration ends).
+            let dst = unsafe { std::slice::from_raw_parts_mut(buf.cast::<u8>(), len) };
+            let outcome = state
+                .net
+                .pipe_channels
+                .get_mut(&channel)
+                .map(|channel| channel.try_read(dst))
+                // A live endpoint always references a live channel.
+                .unwrap_or(PipeRead::Eof);
+            match outcome {
+                PipeRead::Read(count) => {
+                    let waiters = drain_channel_send_waiters(&mut state, channel);
+                    drop(state);
+                    wake_all(waiters);
+                    return isize::try_from(count).unwrap_or(isize::MAX);
+                }
+                PipeRead::Eof => return 0,
+                PipeRead::WouldBlock => {
+                    if nonblocking {
+                        return super::fail(EWOULDBLOCK) as isize;
+                    }
+                    if let Some(channel) = state.net.pipe_channels.get_mut(&channel) {
+                        channel.recv_waiters.push_back(me);
+                    }
+                    let step = state.block(me, "pipe-read");
+                    match step {
+                        Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
+                        Ok(Step::Continue) => drop(state),
+                        Err(error) => return error.into_posix() as isize,
+                    }
+                    lock_state().timed_out.remove(&me);
+                }
+            }
+        }
+    }
+
+    /// Blocking (or `O_NONBLOCK`) write to a pipe/socketpair endpoint.
+    ///
+    /// # Safety
+    /// `buf` must be readable for `len` bytes when nonzero.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn patina_pipe_write(fd: c_int, buf: *const c_void, len: usize) -> isize {
+        if let Err(errno) = sched_point() {
+            return super::fail(errno) as isize;
+        }
+        if len != 0 && buf.is_null() {
+            return super::fail(EINVAL) as isize;
+        }
+        if len == 0 {
+            return 0;
+        }
+        let src = unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), len) };
+        let me = current_task();
+        loop {
+            let mut state = lock_state();
+            let (channel, nonblocking) = match state.net.pipe_ends.get(&fd) {
+                // A write on the read-only end of a simplex pipe is EBADF.
+                Some(end) => match end.write_channel {
+                    Some(channel) => (channel, end.nonblocking),
+                    None => return super::fail(super::EBADF) as isize,
+                },
+                None => return super::fail(super::EBADF) as isize,
+            };
+            let outcome = state
+                .net
+                .pipe_channels
+                .get_mut(&channel)
+                .map(|channel| channel.try_write(src))
+                .unwrap_or(PipeWrite::BrokenPipe);
+            match outcome {
+                PipeWrite::Wrote(count) => {
+                    let waiters = drain_channel_recv_waiters(&mut state, channel);
+                    drop(state);
+                    wake_all(waiters);
+                    return isize::try_from(count).unwrap_or(isize::MAX);
+                }
+                // Peer reader closed: EPIPE, and crucially NO SIGPIPE — the shim
+                // delivers no signals, so a broken-pipe write is a clean errno the
+                // guest handles, never a process-killing signal.
+                PipeWrite::BrokenPipe => return super::fail(super::EPIPE) as isize,
+                PipeWrite::WouldBlock => {
+                    if nonblocking {
+                        return super::fail(EWOULDBLOCK) as isize;
+                    }
+                    if let Some(channel) = state.net.pipe_channels.get_mut(&channel) {
+                        channel.send_waiters.push_back(me);
+                    }
+                    let step = state.block(me, "pipe-write");
+                    match step {
+                        Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
+                        Ok(Step::Continue) => drop(state),
+                        Err(error) => return error.into_posix() as isize,
+                    }
+                    lock_state().timed_out.remove(&me);
+                }
+            }
+        }
+    }
+
+    /// Close a pipe/socketpair endpoint, waking any peer parked on the state
+    /// change (EPIPE for blocked writers, EOF for blocked readers).
+    #[unsafe(no_mangle)]
+    pub extern "C" fn patina_pipe_close(fd: c_int) -> c_int {
+        let mut state = lock_state();
+        let Some(end) = state.net.pipe_ends.remove(&fd) else {
+            return super::fail(super::EBADF);
+        };
+        let mut waiters = Vec::new();
+        // Closing the READER of a channel: writers to it now get EPIPE.
+        if let Some(channel) = end.read_channel {
+            if let Some(channel) = state.net.pipe_channels.get_mut(&channel) {
+                channel.read_closed = true;
+                waiters.extend(channel.send_waiters.drain(..));
+            }
+        }
+        // Closing the WRITER of a channel: readers now see EOF once drained.
+        if let Some(channel) = end.write_channel {
+            if let Some(channel) = state.net.pipe_channels.get_mut(&channel) {
+                channel.write_closed = true;
+                waiters.extend(channel.recv_waiters.drain(..));
+            }
+        }
+        // Reclaim any channel now closed at both ends. Channel ids come from a
+        // monotonic counter and are never reused, so no stale entry can survive.
+        for channel in [end.read_channel, end.write_channel].into_iter().flatten() {
+            let both_closed = state
+                .net
+                .pipe_channels
+                .get(&channel)
+                .is_some_and(|channel| channel.read_closed && channel.write_closed);
+            if both_closed {
+                state.net.pipe_channels.remove(&channel);
+            }
+        }
+        drop(state);
+        wake_all(waiters);
+        0
+    }
+
+    /// Report whether a pipe/socketpair endpoint is non-blocking (1), blocking
+    /// (0), or not a pipe endpoint (-1).
+    #[unsafe(no_mangle)]
+    pub extern "C" fn patina_pipe_is_nonblocking(fd: c_int) -> c_int {
+        let state = lock_state();
+        match state.net.pipe_ends.get(&fd) {
+            Some(end) => c_int::from(end.nonblocking),
+            None => -1,
+        }
+    }
+
+    /// Set a pipe/socketpair endpoint blocking (0) or non-blocking (nonzero), the
+    /// `fcntl(F_SETFL, O_NONBLOCK)` path.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn patina_pipe_set_nonblocking(fd: c_int, nonblocking: c_int) -> c_int {
+        let mut state = lock_state();
+        match state.net.pipe_ends.get_mut(&fd) {
+            Some(end) => {
+                end.nonblocking = nonblocking != 0;
+                0
+            }
+            None => super::fail(super::EBADF),
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Linux futex routing. Rust std on Linux lowers Mutex/Condvar/thread
     // parking to raw SYS_futex through libc's `syscall` wrapper rather than the
     // pthread primitives the shim interposes, so the interposed `syscall` routes
@@ -5676,6 +6118,43 @@ mod thread {
                 .unwrap();
             MAIN_RETURNED.store(false, std::sync::atomic::Ordering::SeqCst);
             assert!(!main_returned());
+        }
+
+        // Pure pipe-channel semantics (the scheduler-integrated parking is covered
+        // end-to-end by the pipe/socketpair legs in validate-native-shim.sh):
+        // bounded capacity, partial reads/writes, and EOF only after drain.
+        #[test]
+        fn pipe_channel_transfers_bytes_with_bounded_capacity_and_eof() {
+            let mut channel = PipeChannel::new(4);
+            let mut dst = [0u8; 8];
+            // Empty + writer open → WouldBlock (the reader parks).
+            assert_eq!(channel.try_read(&mut dst), PipeRead::WouldBlock);
+            // Bounded capacity: only 4 of 6 bytes fit; the writer must loop.
+            assert_eq!(channel.try_write(b"abcdef"), PipeWrite::Wrote(4));
+            assert_eq!(channel.try_write(b"ef"), PipeWrite::WouldBlock);
+            // A short read frees space for the writer's remaining bytes.
+            assert_eq!(channel.try_read(&mut dst[..2]), PipeRead::Read(2));
+            assert_eq!(&dst[..2], b"ab");
+            assert_eq!(channel.try_write(b"ef"), PipeWrite::Wrote(2));
+            assert_eq!(channel.try_read(&mut dst), PipeRead::Read(4));
+            assert_eq!(&dst[..4], b"cdef");
+            // Drained but writer still open → WouldBlock, not EOF.
+            assert_eq!(channel.try_read(&mut dst), PipeRead::WouldBlock);
+            // Buffered bytes are delivered before EOF even after the writer closes.
+            channel.try_write(b"hi");
+            channel.write_closed = true;
+            assert_eq!(channel.try_read(&mut dst), PipeRead::Read(2));
+            assert_eq!(&dst[..2], b"hi");
+            assert_eq!(channel.try_read(&mut dst), PipeRead::Eof);
+        }
+
+        // Writing to a channel whose reader closed is a broken pipe surfaced as an
+        // errno (EPIPE) — never a signal.
+        #[test]
+        fn pipe_channel_write_to_closed_reader_is_broken_pipe() {
+            let mut channel = PipeChannel::new(4);
+            channel.read_closed = true;
+            assert_eq!(channel.try_write(b"x"), PipeWrite::BrokenPipe);
         }
 
         #[test]
