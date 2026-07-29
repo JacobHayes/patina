@@ -51,8 +51,8 @@ fn main() {
 ```
 
 ```
-cargo patina build ./Cargo.toml --bin mre --output ./mre.patina --release
-cargo patina run ./mre.patina --seed 1
+cargo patina build ./Cargo.toml --bin mre --output ./mre --release
+cargo patina run ./mre --seed 1
 ```
 
 Refuses with (verified on this host):
