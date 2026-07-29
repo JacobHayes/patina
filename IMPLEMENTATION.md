@@ -6,6 +6,10 @@ This plan turns the architecture into independently verifiable vertical slices. 
 - **Partial**: useful code exists, but the gate is not complete.
 - **Planned**: no supported implementation exists yet.
 
+Related proposal: [`HARNESS-DESIGN.md`](./HARNESS-DESIGN.md) describes the
+planned split between the production-safe SDK, a shim-backed application harness,
+and the lower-level explicit-context API. That proposal is not implemented yet.
+
 ## Slice 1: deterministic Rust-level execution — Complete
 
 Acceptance level: V0 and V1.
