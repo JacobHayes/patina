@@ -4499,6 +4499,19 @@ mod thread {
         kq_fds: BTreeMap<c_int, u64>,
         #[cfg(target_os = "macos")]
         next_kq: u64,
+        // Virtual epoll readiness reactors — the Linux mirror of the kqueue
+        // tables above, with the same refcounted-dup shape (mio clones its
+        // selector through `F_DUPFD_CLOEXEC` on Linux exactly as on macOS).
+        #[cfg(target_os = "linux")]
+        epolls: BTreeMap<u64, EpollSlot>,
+        #[cfg(target_os = "linux")]
+        epoll_fds: BTreeMap<c_int, u64>,
+        #[cfg(target_os = "linux")]
+        next_epoll: u64,
+        // Deterministic in-process eventfd counters (Linux; mio's `Waker`
+        // vehicle, the EVFILT_USER analogue), sharing the virtual-fd space.
+        #[cfg(target_os = "linux")]
+        eventfds: BTreeMap<c_int, EventFd>,
         next_fd: c_int,
         next_ephemeral: u16,
     }
@@ -4519,6 +4532,14 @@ mod thread {
                 kq_fds: BTreeMap::new(),
                 #[cfg(target_os = "macos")]
                 next_kq: 0,
+                #[cfg(target_os = "linux")]
+                epolls: BTreeMap::new(),
+                #[cfg(target_os = "linux")]
+                epoll_fds: BTreeMap::new(),
+                #[cfg(target_os = "linux")]
+                next_epoll: 0,
+                #[cfg(target_os = "linux")]
+                eventfds: BTreeMap::new(),
                 next_fd: SOCKET_FD_BASE,
                 next_ephemeral: 49152,
             }
@@ -5474,6 +5495,17 @@ mod thread {
         recv_waiters: VecDeque<TaskId>,
         /// Tasks parked in a blocking write, waiting for buffer space.
         send_waiters: VecDeque<TaskId>,
+        /// Read-direction arrival sequence: bumped on every event that could
+        /// newly satisfy a reader (bytes written, writer close). The epoll
+        /// frontend's EPOLLET latch compares sequences so an edge re-fires per
+        /// arrival — the kernel's semantics — even when readiness never dropped
+        /// (a partially drained buffer). Linux-only: the kqueue frontend's
+        /// EV_CLEAR latch re-arms only on a readiness drop.
+        #[cfg(target_os = "linux")]
+        read_events: u64,
+        /// Write-direction sequence: bumped on space creation / reader close.
+        #[cfg(target_os = "linux")]
+        write_events: u64,
     }
 
     /// Real pipes carry a fixed-capacity kernel buffer (Linux's default is 64 KiB);
@@ -5508,6 +5540,10 @@ mod thread {
                 write_closed: false,
                 recv_waiters: VecDeque::new(),
                 send_waiters: VecDeque::new(),
+                #[cfg(target_os = "linux")]
+                read_events: 0,
+                #[cfg(target_os = "linux")]
+                write_events: 0,
             }
         }
 
@@ -5518,6 +5554,10 @@ mod thread {
                 let count = dst.len().min(self.buffer.len());
                 for (slot, byte) in dst[..count].iter_mut().zip(self.buffer.drain(..count)) {
                     *slot = byte;
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    self.write_events = self.write_events.wrapping_add(1);
                 }
                 PipeRead::Read(count)
             } else if self.write_closed {
@@ -5540,6 +5580,10 @@ mod thread {
             }
             let count = src.len().min(space);
             self.buffer.extend(&src[..count]);
+            #[cfg(target_os = "linux")]
+            {
+                self.read_events = self.read_events.wrapping_add(1);
+            }
             PipeWrite::Wrote(count)
         }
     }
@@ -5881,6 +5925,10 @@ mod thread {
                 channel.read_refs -= 1;
                 if channel.read_refs == 0 {
                     channel.read_closed = true;
+                    #[cfg(target_os = "linux")]
+                    {
+                        channel.write_events = channel.write_events.wrapping_add(1);
+                    }
                     waiters.extend(channel.send_waiters.drain(..));
                 }
             }
@@ -5892,6 +5940,10 @@ mod thread {
                 channel.write_refs -= 1;
                 if channel.write_refs == 0 {
                     channel.write_closed = true;
+                    #[cfg(target_os = "linux")]
+                    {
+                        channel.read_events = channel.read_events.wrapping_add(1);
+                    }
                     waiters.extend(channel.recv_waiters.drain(..));
                 }
             }
@@ -5940,6 +5992,195 @@ mod thread {
     }
 
     // ------------------------------------------------------------------
+    // eventfd (Linux). A deterministic in-process model of the kernel's 64-bit
+    // event counter — mio's `Waker` vehicle on Linux, the EVFILT_USER analogue.
+    // The fd shares the virtual-fd space (a virtual fd is a socket XOR a pipe
+    // endpoint XOR an eventfd XOR an epoll fd); the C read/write/close route it
+    // here by table membership. Like the pipe channels, the counter is
+    // deterministic given the recorded schedule and carries NO trace events;
+    // only the scheduler parks/wakes are recorded.
+
+    /// A virtual eventfd: the counter, its creation-flag semantics, and the
+    /// tasks parked on readability (blocking reads of a zero counter, and
+    /// `epoll_wait` callers watching it through the shared fan-in core).
+    #[cfg(target_os = "linux")]
+    struct EventFd {
+        value: u64,
+        /// EFD_SEMAPHORE: reads return 1 and decrement, instead of
+        /// return-and-reset.
+        semaphore: bool,
+        nonblocking: bool,
+        /// Arrival sequence, bumped once per value-adding write so the epoll
+        /// EPOLLET latch re-fires per wake even when the counter never drains —
+        /// mio's `Waker` writes without reading back, relying on the kernel's
+        /// per-arrival edge semantics.
+        write_events: u64,
+        read_waiters: VecDeque<TaskId>,
+    }
+
+    /// eventfd(2) / eventfd2. Syscall-shaped (`eventfd2(initval, flags)`) so a
+    /// future syscall-user-dispatch SIGSYS dispatcher can call it with raw
+    /// register arguments; the C interposer is thin marshaling over this.
+    /// EFD_CLOEXEC is accepted as a no-op (no exec under the runtime); unknown
+    /// flags are `EINVAL`. Activates the thread subsystem so a later blocking
+    /// read or epoll park can reach the baton.
+    #[cfg(target_os = "linux")]
+    #[unsafe(no_mangle)]
+    pub extern "C" fn patina_eventfd(initval: u32, flags: c_int) -> c_int {
+        const EFD_SEMAPHORE: c_int = 0o1;
+        const EFD_CLOEXEC: c_int = 0o2000000;
+        const EFD_NONBLOCK: c_int = 0o4000;
+        if flags & !(EFD_SEMAPHORE | EFD_CLOEXEC | EFD_NONBLOCK) != 0 {
+            return super::fail(EINVAL);
+        }
+        let mut state = lock_state();
+        if let Err(error) = state.ensure_active() {
+            return super::fail(error.into_posix());
+        }
+        let fd = state.net.next_fd;
+        state.net.next_fd = state.net.next_fd.wrapping_add(1);
+        state.net.eventfds.insert(
+            fd,
+            EventFd {
+                value: u64::from(initval),
+                semaphore: flags & EFD_SEMAPHORE != 0,
+                nonblocking: flags & EFD_NONBLOCK != 0,
+                write_events: 0,
+                read_waiters: VecDeque::new(),
+            },
+        );
+        fd
+    }
+
+    /// C dispatch predicate: is `fd` a virtual eventfd?
+    #[cfg(target_os = "linux")]
+    #[unsafe(no_mangle)]
+    pub extern "C" fn patina_eventfd_is(fd: c_int) -> c_int {
+        c_int::from(lock_state().net.eventfds.contains_key(&fd))
+    }
+
+    /// Read a virtual eventfd: 8 bytes, returns-and-resets the counter (or
+    /// returns 1 and decrements under EFD_SEMAPHORE). A zero counter is
+    /// `EWOULDBLOCK` under EFD_NONBLOCK, otherwise the caller parks until a
+    /// write arrives.
+    ///
+    /// # Safety
+    /// `buf` must be writable for `len` bytes.
+    #[cfg(target_os = "linux")]
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn patina_eventfd_read(fd: c_int, buf: *mut c_void, len: usize) -> isize {
+        if let Err(errno) = sched_point() {
+            return super::fail(errno) as isize;
+        }
+        if buf.is_null() || len < 8 {
+            return super::fail(EINVAL) as isize;
+        }
+        let me = current_task();
+        loop {
+            let mut state = lock_state();
+            let Some(efd) = state.net.eventfds.get_mut(&fd) else {
+                return super::fail(super::EBADF) as isize;
+            };
+            if efd.value != 0 {
+                let taken = if efd.semaphore {
+                    efd.value -= 1;
+                    1u64
+                } else {
+                    std::mem::replace(&mut efd.value, 0)
+                };
+                // SAFETY: `buf` is writable for >= 8 bytes per this function's
+                // contract (checked above).
+                unsafe {
+                    buf.cast::<u8>()
+                        .copy_from_nonoverlapping(taken.to_ne_bytes().as_ptr(), 8)
+                };
+                return 8;
+            }
+            if efd.nonblocking {
+                return super::fail(EWOULDBLOCK) as isize;
+            }
+            efd.read_waiters.push_back(me);
+            let step = state.block(me, "eventfd-read");
+            match step {
+                Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
+                Ok(Step::Continue) => drop(state),
+                Err(error) => return super::fail(error.into_posix()) as isize,
+            }
+            lock_state().timed_out.remove(&me);
+        }
+    }
+
+    /// Write a virtual eventfd: 8 bytes adding to the counter, waking parked
+    /// readers and epoll watchers. The kernel parks a writer whose addition
+    /// would exceed `u64::MAX - 1`; no supported caller writes near the bound
+    /// (mio's `Waker` adds 1 per wake), so that fails closed loudly instead of
+    /// modeling a blocked-writer queue.
+    ///
+    /// # Safety
+    /// `buf` must be readable for `len` bytes.
+    #[cfg(target_os = "linux")]
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn patina_eventfd_write(
+        fd: c_int,
+        buf: *const c_void,
+        len: usize,
+    ) -> isize {
+        if let Err(errno) = sched_point() {
+            return super::fail(errno) as isize;
+        }
+        if buf.is_null() || len < 8 {
+            return super::fail(EINVAL) as isize;
+        }
+        let mut add = [0u8; 8];
+        // SAFETY: `buf` is readable for >= 8 bytes per this function's contract.
+        unsafe {
+            add.as_mut_ptr()
+                .copy_from_nonoverlapping(buf.cast::<u8>(), 8)
+        };
+        let add = u64::from_ne_bytes(add);
+        if add == u64::MAX {
+            return super::fail(EINVAL) as isize;
+        }
+        let mut state = lock_state();
+        let Some(efd) = state.net.eventfds.get_mut(&fd) else {
+            return super::fail(super::EBADF) as isize;
+        };
+        let Some(sum) = efd.value.checked_add(add).filter(|sum| *sum < u64::MAX) else {
+            fatal(&format!(
+                "eventfd write overflows the counter ({} + {add}): blocking eventfd \
+                 writers are not modeled; failing closed",
+                efd.value
+            ));
+        };
+        if add == 0 {
+            // Adding zero changes no readiness; the kernel reports success
+            // without waking anyone.
+            return 8;
+        }
+        efd.value = sum;
+        efd.write_events = efd.write_events.wrapping_add(1);
+        let waiters: Vec<TaskId> = efd.read_waiters.drain(..).collect();
+        drop(state);
+        wake_all(waiters);
+        8
+    }
+
+    /// Close a virtual eventfd, waking any parked readers (they observe EBADF —
+    /// loud, deterministic — rather than parking forever on a dead counter).
+    #[cfg(target_os = "linux")]
+    #[unsafe(no_mangle)]
+    pub extern "C" fn patina_eventfd_close(fd: c_int) -> c_int {
+        let mut state = lock_state();
+        let Some(efd) = state.net.eventfds.remove(&fd) else {
+            return super::fail(super::EBADF);
+        };
+        let waiters: Vec<TaskId> = efd.read_waiters.into_iter().collect();
+        drop(state);
+        wake_all(waiters);
+        0
+    }
+
+    // ------------------------------------------------------------------
     // kqueue / kevent readiness reactor (macOS). A deterministic in-process
     // model of the BSD readiness multiplexer that mio (and therefore tokio)
     // builds its IO driver on. A `kqueue` fd is drawn from the shared virtual-fd
@@ -5975,10 +6216,11 @@ mod thread {
         udata: usize,
     }
 
-    /// Level-triggered readiness of a virtual descriptor, for the kqueue reactor.
-    /// A pipe/socketpair endpoint is read from in-shim channel state; a SimNet
-    /// socket is read from the runtime's unrecorded `net_readiness`.
-    #[cfg(target_os = "macos")]
+    /// Level-triggered readiness of a virtual descriptor, for the kqueue/epoll
+    /// reactors. A pipe/socketpair endpoint is read from in-shim channel state;
+    /// an eventfd (Linux) from its in-shim counter; a SimNet socket from the
+    /// runtime's unrecorded `net_readiness`.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[derive(Clone, Copy)]
     struct FdReadiness {
         readable: bool,
@@ -5991,7 +6233,7 @@ mod thread {
     /// bytes or recording a boundary op. A descriptor that no longer exists (it
     /// was closed after registration) reports ready-with-EOF so the reactor wakes
     /// and the subsequent operation surfaces the error, and the knote drops out.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn fd_readiness(state: &ThreadRuntime, fd: c_int) -> FdReadiness {
         // Pipe/socketpair endpoint: readiness is pure in-shim channel state, so
         // it needs no runtime op and emits no trace event.
@@ -6046,6 +6288,18 @@ mod thread {
                 },
             };
         }
+        // Deterministic eventfd counter (Linux): readable iff nonzero; always
+        // writable (a write that would overflow fails closed loudly instead of
+        // parking, so writability never drops).
+        #[cfg(target_os = "linux")]
+        if let Some(efd) = state.net.eventfds.get(&fd) {
+            return FdReadiness {
+                readable: efd.value > 0,
+                writable: true,
+                read_eof: false,
+                write_eof: false,
+            };
+        }
         // The descriptor was closed after registration: report EV_EOF once.
         FdReadiness {
             readable: true,
@@ -6057,8 +6311,8 @@ mod thread {
 
     /// A readiness direction to watch on a virtual descriptor. Deliberately
     /// reactor-neutral (not an `EVFILT_*`/`EPOLL*` value): the OS-agnostic fan-in
-    /// core below is shared by the kqueue frontend and a future epoll frontend.
-    #[cfg(target_os = "macos")]
+    /// core below is shared by the kqueue (macOS) and epoll (Linux) frontends.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum ReadyDir {
         Read,
@@ -6068,12 +6322,16 @@ mod thread {
     /// Where a task parked on a readiness fan-in enqueued itself, so it can be
     /// unlinked on resume regardless of which source woke it. Reactor-neutral: a
     /// kqueue or epoll frontend both watch the same virtual pipe/socket queues.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     enum WaiterLoc {
         PipeRecv(u64),
         PipeSend(u64),
         SockRecv(c_int),
         SockSend(c_int),
+        /// Linux: parked on an eventfd's readable queue (an eventfd is always
+        /// writable, so there is no write-direction queue).
+        #[cfg(target_os = "linux")]
+        EventFdRecv(c_int),
     }
 
     /// Register `me` on the waiter queue of every watched `(direction, fd)`
@@ -6083,7 +6341,7 @@ mod thread {
     /// keying (kqueue `(ident, filter)`, epoll interest masks) leaks into the
     /// shared core. The readiness sources — pipe channels and SimNet socket
     /// queues — and the readiness predicate [`fd_readiness`] are equally neutral.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn register_readiness_waiters(
         state: &mut ThreadRuntime,
         me: TaskId,
@@ -6091,6 +6349,16 @@ mod thread {
     ) -> Vec<WaiterLoc> {
         let mut locs = Vec::new();
         for &(dir, fd) in watched {
+            // Eventfd (Linux): only the readable direction has a queue; a write
+            // watch needs no waiter because an eventfd is always writable.
+            #[cfg(target_os = "linux")]
+            if dir == ReadyDir::Read {
+                if let Some(efd) = state.net.eventfds.get_mut(&fd) {
+                    efd.read_waiters.push_back(me);
+                    locs.push(WaiterLoc::EventFdRecv(fd));
+                    continue;
+                }
+            }
             if let Some(end) = state.net.pipe_ends.get(&fd) {
                 let channel = match dir {
                     ReadyDir::Read => end.read_channel,
@@ -6128,7 +6396,7 @@ mod thread {
 
     /// Unlink `me` from every queue [`register_readiness_waiters`] enqueued it on,
     /// so a later wake of that queue never targets an already-resumed task.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn unregister_readiness_waiters(state: &mut ThreadRuntime, me: TaskId, locs: &[WaiterLoc]) {
         let remove = |queue: &mut VecDeque<TaskId>| {
             if let Some(index) = queue.iter().position(|task| *task == me) {
@@ -6155,6 +6423,12 @@ mod thread {
                 WaiterLoc::SockSend(fd) => {
                     if let Some(socket) = state.net.sockets.get_mut(&fd) {
                         remove(&mut socket.send_waiters);
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                WaiterLoc::EventFdRecv(fd) => {
+                    if let Some(efd) = state.net.eventfds.get_mut(&fd) {
+                        remove(&mut efd.read_waiters);
                     }
                 }
             }
@@ -6818,6 +7092,569 @@ mod thread {
                 if let Some(index) = slot.kq.waiters.iter().position(|task| *task == me) {
                     slot.kq.waiters.remove(index);
                 }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    use epoll::EpollSlot;
+
+    // ------------------------------------------------------------------
+    // epoll readiness reactor (Linux) — the mirror of `mod kqueue` above over
+    // the same OS-agnostic readiness core (`fd_readiness`,
+    // `register_readiness_waiters`). An epoll fd is drawn from the shared
+    // virtual-fd space; `epoll_ctl` keeps one interest per watched fd (epoll
+    // semantics) over the virtual pipe/socketpair, eventfd, and SimNet socket
+    // fds; `epoll_wait` gathers ready events — parking on the scheduler baton
+    // with multi-fd fan-in when nothing is ready, bounded by the millisecond
+    // timeout on the virtual clock. mio's `Waker` analogue needs no
+    // epoll-specific wake path: it is an ordinary watched eventfd whose write
+    // drains the shared read-waiter queue.
+    //
+    // Event delivery under EPOLLET compares per-direction ARRIVAL SEQUENCES
+    // (`PipeChannel::read_events`/`write_events`, `EventFd::write_events`): an
+    // edge re-fires whenever the source's sequence has advanced since the last
+    // delivery, not merely after readiness dropped — the kernel fires
+    // edge-triggered events per arrival, and mio's eventfd Waker depends on it
+    // (it writes without draining the counter). SimNet sockets expose no
+    // sequence (constant 0), so they degrade to the drop-only latch the kqueue
+    // frontend uses — sound for mio, which drains to EWOULDBLOCK. Returned
+    // events are ordered by the interest table's fd key order (a `BTreeMap`),
+    // so the gathered slice is a pure function of the registry and the
+    // schedule. Like the kqueue registry, everything here is deterministic
+    // GIVEN the recorded schedule and carries NO trace events; only the
+    // scheduler parks/wakes are recorded.
+    #[cfg(target_os = "linux")]
+    mod epoll {
+        use std::collections::BTreeMap;
+        use std::ffi::{c_int, c_void};
+
+        use patina_dst_abi::ClockKind;
+
+        use super::{
+            ReadyDir, Step, ThreadRuntime, current_task, fatal, fd_readiness, lock_state,
+            register_readiness_waiters, sched_point, switch_and_park, unregister_readiness_waiters,
+            with_context_raw,
+        };
+
+        // <sys/epoll.h> control ops and event bits (the reactor is Linux-only).
+        const EPOLL_CTL_ADD: c_int = 1;
+        const EPOLL_CTL_DEL: c_int = 2;
+        const EPOLL_CTL_MOD: c_int = 3;
+
+        const EPOLLIN: u32 = 0x001;
+        const EPOLLOUT: u32 = 0x004;
+        const EPOLLERR: u32 = 0x008;
+        const EPOLLHUP: u32 = 0x010;
+        const EPOLLRDHUP: u32 = 0x2000;
+        const EPOLLET: u32 = 1 << 31;
+        /// EPOLL_CLOEXEC == O_CLOEXEC; accepted no-op (no exec under the runtime).
+        const EPOLL_CLOEXEC: c_int = 0o2000000;
+
+        /// The kernel's `struct epoll_event`, written directly into the guest's
+        /// buffer with the kernel ABI layout: packed on x86_64 (the ABI keeps
+        /// the i386 12-byte layout there), natural alignment elsewhere. Pinned
+        /// against the platform definition by `_Static_assert`s in the C layer.
+        #[cfg_attr(target_arch = "x86_64", repr(C, packed))]
+        #[cfg_attr(not(target_arch = "x86_64"), repr(C))]
+        #[derive(Clone, Copy)]
+        pub(crate) struct EpollEvent {
+            events: u32,
+            data: u64,
+        }
+
+        /// One watched fd's interest (epoll semantics: at most one per fd).
+        struct Interest {
+            /// Requested EPOLLIN/EPOLLOUT/EPOLLRDHUP plus the EPOLLET mode bit.
+            events: u32,
+            /// The caller's `epoll_data`, returned verbatim in delivered events.
+            data: u64,
+            /// EPOLLET per-direction latch: `Some(seq)` after a delivery at
+            /// arrival sequence `seq` — silent until readiness drops (re-arm to
+            /// `None`) or the sequence advances (a new arrival re-fires).
+            delivered_read: Option<u64>,
+            delivered_write: Option<u64>,
+        }
+
+        /// A virtual epoll instance: its per-fd interest table, ordered by fd.
+        #[derive(Default)]
+        struct Epoll {
+            interests: BTreeMap<c_int, Interest>,
+        }
+
+        /// A reference-counted epoll registry: `refs` is the number of live fds
+        /// aliasing it (one per `epoll_create1`, plus one per `dup`/`F_DUPFD` —
+        /// mio clones its selector through `F_DUPFD_CLOEXEC` on Linux exactly as
+        /// it does the kqueue fd), and the registry drops when the last closes.
+        pub(super) struct EpollSlot {
+            ep: Epoll,
+            refs: usize,
+        }
+
+        /// Resolve an epoll fd to its registry id, or `None` if `fd` is not a
+        /// live epoll descriptor.
+        fn ep_id(state: &ThreadRuntime, fd: c_int) -> Option<u64> {
+            state.net.epoll_fds.get(&fd).copied()
+        }
+
+        /// Allocate a virtual epoll instance. Syscall-shaped
+        /// (`epoll_create1(flags)`) so a future syscall-user-dispatch SIGSYS
+        /// dispatcher can call it with raw register arguments; the C interposer
+        /// is thin marshaling over this. Activates the thread subsystem so a
+        /// later blocking `epoll_wait` can park through the baton.
+        ///
+        /// # Safety
+        /// C ABI entry point.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn patina_epoll_create1(flags: c_int) -> c_int {
+            if flags & !EPOLL_CLOEXEC != 0 {
+                return super::super::fail(super::EINVAL);
+            }
+            let mut state = lock_state();
+            if let Err(error) = state.ensure_active() {
+                return super::super::fail(error.into_posix());
+            }
+            let id = state.net.next_epoll;
+            state.net.next_epoll = state.net.next_epoll.wrapping_add(1);
+            state.net.epolls.insert(
+                id,
+                EpollSlot {
+                    ep: Epoll::default(),
+                    refs: 1,
+                },
+            );
+            let fd = state.net.next_fd;
+            state.net.next_fd = state.net.next_fd.wrapping_add(1);
+            state.net.epoll_fds.insert(fd, id);
+            fd
+        }
+
+        /// C dispatch predicate: is `fd` a virtual epoll descriptor? Lets the
+        /// interposed `close`/`dup`/`fcntl` route the shared virtual-fd space to
+        /// the epoll class.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn patina_epoll_is_epoll(fd: c_int) -> c_int {
+            c_int::from(lock_state().net.epoll_fds.contains_key(&fd))
+        }
+
+        /// Duplicate an epoll fd: the new fd aliases the SAME registry (mio's
+        /// selector clone). Returns the new fd or -1 with `patina_errno` EBADF.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn patina_epoll_dup(fd: c_int) -> c_int {
+            let mut state = lock_state();
+            let Some(id) = ep_id(&state, fd) else {
+                return super::super::fail(super::super::EBADF);
+            };
+            state
+                .net
+                .epolls
+                .get_mut(&id)
+                .expect("epoll fd maps to a live registry")
+                .refs += 1;
+            let new_fd = state.net.next_fd;
+            state.net.next_fd = state.net.next_fd.wrapping_add(1);
+            state.net.epoll_fds.insert(new_fd, id);
+            new_fd
+        }
+
+        /// Close an epoll fd; the registry drops when the last aliasing fd
+        /// closes. A task parked in `epoll_wait` is NOT woken — the kernel's
+        /// wait holds its own file reference and keeps blocking, and mio's
+        /// single-threaded driver never closes underneath a wait.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn patina_epoll_close(fd: c_int) -> c_int {
+            let mut state = lock_state();
+            let Some(id) = state.net.epoll_fds.remove(&fd) else {
+                return super::super::fail(super::super::EBADF);
+            };
+            let slot = state
+                .net
+                .epolls
+                .get_mut(&id)
+                .expect("epoll fd maps to a live registry");
+            slot.refs -= 1;
+            if slot.refs == 0 {
+                state.net.epolls.remove(&id);
+            }
+            0
+        }
+
+        /// Apply one `epoll_ctl` op. Syscall-shaped (`epoll_ctl(epfd, op, fd,
+        /// event)`) for the future SIGSYS dispatcher. Registry mutation only —
+        /// no scheduling point, no trace event. Kernel-faithful errno: EEXIST on
+        /// a double ADD, ENOENT on MOD/DEL of an unregistered fd. Unmodeled
+        /// event flags and non-virtual descriptors fail closed loudly.
+        ///
+        /// # Safety
+        /// `event` must point to a live `struct epoll_event` for ADD/MOD.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn patina_epoll_ctl(
+            epfd: c_int,
+            op: c_int,
+            fd: c_int,
+            event: *const EpollEvent,
+        ) -> c_int {
+            let mut state = lock_state();
+            let Some(id) = ep_id(&state, epfd) else {
+                return super::super::fail(super::super::EBADF);
+            };
+            if op == EPOLL_CTL_DEL {
+                // Removal validates nothing else about `fd`: the descriptor may
+                // already be closed (mio deregisters around close).
+                return match state
+                    .net
+                    .epolls
+                    .get_mut(&id)
+                    .expect("epoll was checked")
+                    .ep
+                    .interests
+                    .remove(&fd)
+                {
+                    Some(_) => 0,
+                    None => super::super::fail(super::super::ENOENT),
+                };
+            }
+            if !matches!(op, EPOLL_CTL_ADD | EPOLL_CTL_MOD) {
+                return super::super::fail(super::EINVAL);
+            }
+            if event.is_null() {
+                return super::super::fail(super::EINVAL);
+            }
+            // SAFETY: non-null `event` points to a live epoll_event per this
+            // function's contract; fields are copied out by value.
+            let (events, data) = unsafe { ((*event).events, (*event).data) };
+            // Fail closed LOUDLY on interest flags the reactor does not model
+            // (EPOLLONESHOT, EPOLLEXCLUSIVE, EPOLLWAKEUP, EPOLLPRI, ...): a
+            // silent EINVAL a caller swallowed would be an invisible escape.
+            // EPOLLHUP/EPOLLERR are always-monitored no-ops in a request mask,
+            // accepted exactly as the kernel accepts them.
+            const MODELED: u32 = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLERR | EPOLLHUP | EPOLLET;
+            if events & !MODELED != 0 {
+                fatal(&format!(
+                    "epoll_ctl events {events:#x} carry unmodeled flags (only EPOLLIN/EPOLLOUT/\
+                     EPOLLRDHUP/EPOLLERR/EPOLLHUP/EPOLLET are modeled); failing closed"
+                ));
+            }
+            // Registration-time fd validation: readiness is defined only over
+            // virtual pipe/socketpair, eventfd, and SimNet socket descriptors.
+            // A real file, stdio, another epoll instance, or an otherwise
+            // unknown descriptor fails closed loudly here.
+            let known = state.net.pipe_ends.contains_key(&fd)
+                || state.net.sockets.contains_key(&fd)
+                || state.net.eventfds.contains_key(&fd);
+            if !known {
+                fatal(&format!(
+                    "epoll_ctl registered non-virtual descriptor {fd}: readiness for real host \
+                     descriptors is not modeled; failing closed"
+                ));
+            }
+            let interests = &mut state
+                .net
+                .epolls
+                .get_mut(&id)
+                .expect("epoll was checked")
+                .ep
+                .interests;
+            let armed = Interest {
+                events,
+                data,
+                delivered_read: None,
+                delivered_write: None,
+            };
+            match op {
+                EPOLL_CTL_ADD => {
+                    if interests.contains_key(&fd) {
+                        return super::super::fail(super::super::EEXIST);
+                    }
+                    interests.insert(fd, armed);
+                }
+                _ => {
+                    // EPOLL_CTL_MOD replaces the interest and re-arms the
+                    // EPOLLET latches, matching the kernel.
+                    let Some(interest) = interests.get_mut(&fd) else {
+                        return super::super::fail(super::super::ENOENT);
+                    };
+                    *interest = armed;
+                }
+            }
+            0
+        }
+
+        /// Monotonic per-direction arrival sequences for `fd` (see the section
+        /// comment). SimNet sockets and closed descriptors report constant 0.
+        fn fd_event_seqs(state: &ThreadRuntime, fd: c_int) -> (u64, u64) {
+            if let Some(end) = state.net.pipe_ends.get(&fd) {
+                let read_seq = end
+                    .read_channel
+                    .and_then(|id| state.net.pipe_channels.get(&id))
+                    .map_or(0, |channel| channel.read_events);
+                let write_seq = end
+                    .write_channel
+                    .and_then(|id| state.net.pipe_channels.get(&id))
+                    .map_or(0, |channel| channel.write_events);
+                return (read_seq, write_seq);
+            }
+            if let Some(efd) = state.net.eventfds.get(&fd) {
+                return (efd.write_events, 0);
+            }
+            (0, 0)
+        }
+
+        /// An event ready to deliver, plus the latch edits its delivery entails.
+        struct ReadyEvent {
+            event: EpollEvent,
+            fd: c_int,
+            /// Latch the EPOLLET read direction at this arrival sequence.
+            latch_read: Option<u64>,
+            latch_write: Option<u64>,
+        }
+
+        /// Does a watched direction fire? Level-triggered interest fires
+        /// whenever ready; EPOLLET fires when ready AND the latch is armed or
+        /// the arrival sequence has advanced since the last delivery.
+        fn dir_fires(edge: bool, ready: bool, delivered: Option<u64>, seq: u64) -> bool {
+            ready && (!edge || delivered != Some(seq))
+        }
+
+        /// Scan the instance's interests, collecting the events ready to
+        /// deliver (in fd order) and the re-arm edits for directions observed
+        /// not-ready.
+        fn scan(state: &ThreadRuntime, id: u64) -> (Vec<ReadyEvent>, Vec<(c_int, bool, bool)>) {
+            let ep = &state.net.epolls.get(&id).expect("epoll exists").ep;
+            let mut ready = Vec::new();
+            let mut rearms = Vec::new();
+            for (&fd, interest) in &ep.interests {
+                let r = fd_readiness(state, fd);
+                let (read_seq, write_seq) = fd_event_seqs(state, fd);
+                let watch_read = interest.events & (EPOLLIN | EPOLLRDHUP) != 0;
+                let watch_write = interest.events & EPOLLOUT != 0;
+                let edge = interest.events & EPOLLET != 0;
+
+                let rearm_read = watch_read && !r.readable && interest.delivered_read.is_some();
+                let rearm_write = watch_write && !r.writable && interest.delivered_write.is_some();
+                if rearm_read || rearm_write {
+                    rearms.push((fd, rearm_read, rearm_write));
+                }
+
+                let read_fires =
+                    watch_read && dir_fires(edge, r.readable, interest.delivered_read, read_seq);
+                let write_fires =
+                    watch_write && dir_fires(edge, r.writable, interest.delivered_write, write_seq);
+                if !(read_fires || write_fires) {
+                    continue;
+                }
+                // The delivered mask is the full current state of the watched
+                // directions (an ET edge reports everything ready, like the
+                // kernel). EPOLLERR/EPOLLHUP are reported unmasked: a broken
+                // write side is EPOLLERR (the pipe-write-end shape), a fully
+                // hung-up descriptor EPOLLHUP.
+                let mut mask = 0u32;
+                if r.readable && interest.events & EPOLLIN != 0 {
+                    mask |= EPOLLIN;
+                }
+                if r.read_eof && interest.events & EPOLLRDHUP != 0 {
+                    mask |= EPOLLRDHUP;
+                }
+                if r.writable && interest.events & EPOLLOUT != 0 {
+                    mask |= EPOLLOUT;
+                }
+                if r.write_eof {
+                    mask |= EPOLLERR;
+                }
+                if r.read_eof && r.write_eof {
+                    mask |= EPOLLHUP;
+                }
+                if mask == 0 {
+                    // A watched direction rose but nothing in the request mask
+                    // is reportable (e.g. an EPOLLRDHUP-only interest with data
+                    // but no EOF): nothing to deliver, nothing to latch.
+                    continue;
+                }
+                ready.push(ReadyEvent {
+                    event: EpollEvent {
+                        events: mask,
+                        data: interest.data,
+                    },
+                    fd,
+                    latch_read: (edge && watch_read && r.readable).then_some(read_seq),
+                    latch_write: (edge && watch_write && r.writable).then_some(write_seq),
+                });
+            }
+            (ready, rearms)
+        }
+
+        /// The watched fds as reactor-neutral `(direction, fd)` pairs for the
+        /// shared fan-in park. Latched directions still register: a wake simply
+        /// rescans, and an arrival that woke us has advanced its sequence.
+        fn watched_sources(state: &ThreadRuntime, id: u64) -> Vec<(ReadyDir, c_int)> {
+            let ep = &state.net.epolls.get(&id).expect("epoll exists").ep;
+            let mut watched = Vec::new();
+            for (&fd, interest) in &ep.interests {
+                if interest.events & (EPOLLIN | EPOLLRDHUP) != 0 {
+                    watched.push((ReadyDir::Read, fd));
+                }
+                if interest.events & EPOLLOUT != 0 {
+                    watched.push((ReadyDir::Write, fd));
+                }
+            }
+            watched
+        }
+
+        /// Apply the latch edits for the events actually delivered this gather.
+        fn commit_delivered(state: &mut ThreadRuntime, id: u64, delivered: &[ReadyEvent]) {
+            let ep = &mut state.net.epolls.get_mut(&id).expect("epoll exists").ep;
+            for event in delivered {
+                if let Some(interest) = ep.interests.get_mut(&event.fd) {
+                    if event.latch_read.is_some() {
+                        interest.delivered_read = event.latch_read;
+                    }
+                    if event.latch_write.is_some() {
+                        interest.delivered_write = event.latch_write;
+                    }
+                }
+            }
+        }
+
+        /// Re-arm the EPOLLET latches for directions observed not-ready.
+        fn commit_rearm(state: &mut ThreadRuntime, id: u64, rearms: &[(c_int, bool, bool)]) {
+            let ep = &mut state.net.epolls.get_mut(&id).expect("epoll exists").ep;
+            for &(fd, rearm_read, rearm_write) in rearms {
+                if let Some(interest) = ep.interests.get_mut(&fd) {
+                    if rearm_read {
+                        interest.delivered_read = None;
+                    }
+                    if rearm_write {
+                        interest.delivered_write = None;
+                    }
+                }
+            }
+        }
+
+        /// Gather up to `maxevents` ready events into `events`, blocking per the
+        /// millisecond `timeout_ms` (-1 = block until ready, 0 = poll, > 0 =
+        /// relative virtual-clock deadline). Syscall-shaped (`epoll_wait(epfd,
+        /// events, maxevents, timeout)`) for the future SIGSYS dispatcher; the
+        /// C epoll_wait/epoll_pwait interposers are thin marshaling over this.
+        ///
+        /// # Safety
+        /// `events` must be writable for `maxevents` `struct epoll_event`s.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn patina_epoll_wait(
+            epfd: c_int,
+            events: *mut c_void,
+            maxevents: c_int,
+            timeout_ms: c_int,
+        ) -> c_int {
+            if let Err(errno) = sched_point() {
+                return super::super::fail(errno);
+            }
+            if maxevents <= 0 || events.is_null() {
+                return super::super::fail(super::EINVAL);
+            }
+            let capacity = maxevents as usize;
+            let me = current_task();
+            // Absolute deadline for a positive timeout, fixed on the first scan
+            // so it does not drift across rescans.
+            let mut timeout_deadline: Option<u64> = None;
+            loop {
+                let mut state = lock_state();
+                let Some(id) = ep_id(&state, epfd) else {
+                    return super::super::fail(super::super::EBADF);
+                };
+                let now = match with_context_raw(|c| c.monotonic_now_unrecorded()) {
+                    Ok(now) => now,
+                    Err(errno) => return super::super::fail(errno),
+                };
+                let (ready, rearms) = scan(&state, id);
+                commit_rearm(&mut state, id, &rearms);
+
+                if !ready.is_empty() {
+                    let count = ready.len().min(capacity);
+                    let delivered = &ready[..count];
+                    // SAFETY: `events` is writable for `maxevents >= count`
+                    // entries per this function's contract.
+                    let slots = unsafe {
+                        std::slice::from_raw_parts_mut(events.cast::<EpollEvent>(), count)
+                    };
+                    for (slot, event) in slots.iter_mut().zip(delivered) {
+                        *slot = event.event;
+                    }
+                    commit_delivered(&mut state, id, delivered);
+                    return c_int::try_from(count).unwrap_or(c_int::MAX);
+                }
+
+                if timeout_ms == 0 {
+                    return 0;
+                }
+                // A bounded gather whose deadline has passed with nothing ready
+                // returns zero events — never re-parks on an elapsed deadline
+                // (which would live-lock the deadlock rescue).
+                if timeout_ms > 0 {
+                    let deadline = *timeout_deadline
+                        .get_or_insert(now.saturating_add(timeout_ms as u64 * 1_000_000));
+                    if now >= deadline {
+                        return 0;
+                    }
+                }
+
+                // Nothing ready: park with multi-fd fan-in on the shared core.
+                let watched = watched_sources(&state, id);
+                let locs = register_readiness_waiters(&mut state, me, &watched);
+                let step = if timeout_ms > 0 {
+                    let deadline = timeout_deadline.expect("timeout deadline fixed above");
+                    state.block_timed(me, "epoll-wait", ClockKind::Monotonic, deadline)
+                } else {
+                    state.block(me, "epoll-wait")
+                };
+                match step {
+                    Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
+                    Ok(Step::Continue) => drop(state),
+                    Err(error) => {
+                        let mut state = lock_state();
+                        unregister_readiness_waiters(&mut state, me, &locs);
+                        return super::super::fail(error.into_posix());
+                    }
+                }
+                let mut state = lock_state();
+                unregister_readiness_waiters(&mut state, me, &locs);
+                state.timed_out.remove(&me);
+                drop(state);
+            }
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::{EpollEvent, dir_fires};
+
+            /// The Rust struct is written straight into the guest's buffer, so
+            /// its layout must be the kernel ABI (also pinned from the C side
+            /// by `_Static_assert`s against the platform `struct epoll_event`).
+            #[test]
+            fn epoll_event_layout_matches_kernel_abi() {
+                assert_eq!(std::mem::offset_of!(EpollEvent, events), 0);
+                if cfg!(target_arch = "x86_64") {
+                    assert_eq!(std::mem::size_of::<EpollEvent>(), 12);
+                    assert_eq!(std::mem::offset_of!(EpollEvent, data), 4);
+                } else {
+                    assert_eq!(std::mem::size_of::<EpollEvent>(), 16);
+                    assert_eq!(std::mem::offset_of!(EpollEvent, data), 8);
+                }
+            }
+
+            #[test]
+            fn edge_latch_fires_per_arrival_and_stays_silent_while_latched() {
+                // Armed and ready: fires.
+                assert!(dir_fires(true, true, None, 5));
+                // Delivered at this arrival, still ready, nothing new: silent
+                // (the partial-drain case).
+                assert!(!dir_fires(true, true, Some(5), 5));
+                // A new arrival while still ready re-fires (the kernel's
+                // per-arrival edge; mio's undrained eventfd Waker needs this).
+                assert!(dir_fires(true, true, Some(5), 6));
+                // Not ready never fires.
+                assert!(!dir_fires(true, false, Some(5), 6));
+                // Level-triggered interest ignores the latch entirely.
+                assert!(dir_fires(false, true, Some(5), 5));
             }
         }
     }

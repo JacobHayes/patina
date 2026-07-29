@@ -225,7 +225,12 @@ A `.rs` path builds that single source directly. A directory (or `Cargo.toml`)
 path instead drives the package's own `cargo build` under Patina control: the
 same cfg flags and shim link arguments are injected through
 `CARGO_ENCODED_RUSTFLAGS`, and an explicit host `--target` keeps them off build
-scripts and proc macros (which link for the host). Select the member with
+scripts and proc macros (which link for the host). Package builds also inject
+`--cfg rustix_use_libc`: rustix's default Linux backend performs raw inline
+syscalls — the natural example of the direct-syscall escape class, invisible to
+the import audit and refused by the instruction scan — and this cfg (rustix's
+own escape hatch) flips it to the libc backend, so its effects become ordinary
+interposable imports instead. Select the member with
 `--package` in a workspace and the binary with `--bin` when the package defines
 more than one; `--output` copies the built binary out (otherwise its Cargo
 artifact path is reported). The `patina-dst-native-shim` staticlib is built from the
@@ -4397,6 +4402,14 @@ fn native_package_rustflags(
     // buggify FFI is gated on `patina_shim` rather than `patina`.
     tokens.push(OsString::from("--cfg"));
     tokens.push(OsString::from("patina_shim"));
+    // rustix's DEFAULT Linux backend emits raw inline syscall instructions —
+    // invisible to the import audit and refused by the instruction scan. This
+    // cfg (rustix's own escape hatch) flips it to the libc backend, so those
+    // effects surface as ordinary interposable imports (`openat64` and
+    // friends) instead. Unconditional: on macOS rustix already uses libc and
+    // the cfg is inert, and a guest without rustix never reads it.
+    tokens.push(OsString::from("--cfg"));
+    tokens.push(OsString::from("rustix_use_libc"));
     tokens.push(OsString::from("-C"));
     tokens.push(link_arg(object));
     tokens.push(OsString::from("-C"));

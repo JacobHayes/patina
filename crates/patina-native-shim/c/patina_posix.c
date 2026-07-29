@@ -37,6 +37,8 @@
 #include <dlfcn.h>
 #include <linux/futex.h>
 #include <sched.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/random.h>
 #include <sys/syscall.h>
 #endif
@@ -853,6 +855,23 @@ int fcntl(int fd, int command, ...) {
         return -1;
     }
 #endif
+#ifdef __linux__
+    /* Virtual epoll descriptors: the Linux mirror of the kqueue branch above.
+     * F_DUPFD/F_DUPFD_CLOEXEC clone into a second fd sharing the SAME registry
+     * (mio clones its selector this way); the requested minimum is honored
+     * implicitly because the deterministic fd counter always allocates above
+     * it. cloexec and the blocking flag are no-ops on an epoll fd. */
+    if (fd >= PATINA_SOCKET_FD_BASE && patina_epoll_is_epoll(fd)) {
+        if (command == F_DUPFD || command == F_DUPFD_CLOEXEC)
+            return fail_int(patina_epoll_dup(fd));
+        if (command == F_GETFD) return FD_CLOEXEC;
+        if (command == F_SETFD) return 0;
+        if (command == F_SETFL) return 0;
+        if (command == F_GETFL) return 0;
+        errno = EINVAL;
+        return -1;
+    }
+#endif
     /* Virtual pipe/socketpair endpoints: same blocking-flag surface as sockets,
      * routed to the pipe table (cloexec is a no-op). F_DUPFD/F_DUPFD_CLOEXEC
      * alias the endpoint's channel side(s) refcounted (std's try_clone — tokio's
@@ -952,6 +971,16 @@ int fcntl(int fd, int command, ...) {
 int open64(const char *path, int flags, ...) {
     return patina_posix_open(path, flags);
 }
+
+/* glibc's LFS alias of openat (rustix's libc backend lowers its fs calls onto
+ * the *64 names on 64-bit Linux). Same AT_FDCWD-only contract as openat. */
+int openat64(int dirfd, const char *path, int flags, ...) {
+    if (dirfd != AT_FDCWD) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return patina_posix_open(path, flags);
+}
 #endif
 
 ssize_t read(int fd, void *destination, size_t length) {
@@ -960,6 +989,9 @@ ssize_t read(int fd, void *destination, size_t length) {
         if (kind == 3) return fail_size(patina_net_stream_recv(fd, destination, length));
         if (kind == 0) return fail_size(patina_net_recv(fd, destination, length));
         if (patina_pipe_is_endpoint(fd)) return fail_size(patina_pipe_read(fd, destination, length));
+#ifdef __linux__
+        if (patina_eventfd_is(fd)) return fail_size(patina_eventfd_read(fd, destination, length));
+#endif
         errno = kind < 0 ? EBADF : ENOTCONN;
         return -1;
     }
@@ -973,6 +1005,9 @@ ssize_t write(int fd, const void *source, size_t length) {
         if (kind == 3) return fail_size(patina_net_stream_send(fd, source, length));
         if (kind == 0) return fail_size(patina_net_send(fd, source, length));
         if (patina_pipe_is_endpoint(fd)) return fail_size(patina_pipe_write(fd, source, length));
+#ifdef __linux__
+        if (patina_eventfd_is(fd)) return fail_size(patina_eventfd_write(fd, source, length));
+#endif
         errno = kind < 0 ? EBADF : ENOTCONN;
         return -1;
     }
@@ -1030,6 +1065,10 @@ int close(int fd) {
 #ifdef __APPLE__
         if (patina_kqueue_is_kq(fd)) return fail_int(patina_kqueue_close(fd));
 #endif
+#ifdef __linux__
+        if (patina_epoll_is_epoll(fd)) return fail_int(patina_epoll_close(fd));
+        if (patina_eventfd_is(fd)) return fail_int(patina_eventfd_close(fd));
+#endif
         if (patina_pipe_is_endpoint(fd)) return fail_int(patina_pipe_close(fd));
         return fail_int(patina_net_close(fd));
     }
@@ -1044,6 +1083,12 @@ int dup(int fd) {
         /* A kqueue fd duplicates into a second fd sharing the SAME registry
          * (tokio's IO driver clones its selector this way). */
         if (patina_kqueue_is_kq(fd)) return fail_int(patina_kqueue_dup(fd));
+#endif
+#ifdef __linux__
+        /* Same registry-aliasing dup for an epoll fd (mio's selector clone). */
+        if (patina_epoll_is_epoll(fd)) return fail_int(patina_epoll_dup(fd));
+        if (patina_eventfd_is(fd))
+            return patina_posix_deny("patina: duplicating a virtual eventfd descriptor is not modeled; failing closed\n");
 #endif
         /* A pipe/socketpair endpoint duplicates into a refcounted alias of the
          * same channel side(s); virtual sockets still fail closed. */
@@ -2117,8 +2162,11 @@ void freeaddrinfo(struct addrinfo *res) {
  * scheduler's wakeup path (see the "in-process pipe / socketpair" section in the
  * Rust shim). Descriptors come from the shared virtual-fd space above, so the
  * interposed read/write/close/fcntl route them to the pipe class via
- * patina_pipe_is_endpoint. The truly cross-process class-g members (shm_open,
- * the mach_msg / mach_port / mq families, eventfd) stay refused.
+ * patina_pipe_is_endpoint. eventfd (Linux) is likewise in-process — a single
+ * 64-bit counter inside this guest, mio's Waker vehicle — and is interposed as
+ * a deterministic counter (see the eventfd section in the Rust shim and the
+ * Linux reactor block below). The truly cross-process class-g members
+ * (shm_open, the mach_msg / mach_port / mq families) stay refused.
  */
 int pipe(int fildes[2]) {
     if (fildes == NULL) {
@@ -2336,6 +2384,57 @@ int kevent64(int kq, const struct kevent64_s *changelist, int nchanges,
     }
     free(scratch);
     return count;
+}
+#endif
+
+#ifdef __linux__
+/*
+ * epoll / eventfd readiness reactor (Linux) — the mirror of the kqueue block
+ * above. The Rust reactor owns the interest registry, readiness, deterministic
+ * ordering, and the multi-fd fan-in park (see the "epoll readiness reactor"
+ * section in the Rust shim); these interposers are deliberately thin because
+ * patina_epoll_create1 / patina_epoll_ctl / patina_epoll_wait / patina_eventfd
+ * are already syscall-shaped for the future syscall-user-dispatch SIGSYS
+ * dispatcher. Being strong defs, the guest's epoll and eventfd references bind
+ * here and the libc symbols drop off the import table, so the pre-run
+ * wait-multiplex / shared-memory-ipc gates clear with no allowance.
+ *
+ * The Rust side reads and writes `struct epoll_event` with the kernel ABI
+ * layout (packed on x86_64, natural alignment elsewhere); pin the platform
+ * struct against that expectation.
+ */
+_Static_assert(offsetof(struct epoll_event, events) == 0, "epoll_event.events offset");
+#ifdef __x86_64__
+_Static_assert(sizeof(struct epoll_event) == 12, "epoll_event packed size");
+_Static_assert(offsetof(struct epoll_event, data) == 4, "epoll_event.data offset");
+#else
+_Static_assert(sizeof(struct epoll_event) == 16, "epoll_event natural size");
+_Static_assert(offsetof(struct epoll_event, data) == 8, "epoll_event.data offset");
+#endif
+
+int epoll_create1(int flags) {
+    return fail_int(patina_epoll_create1(flags));
+}
+
+int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event) {
+    return fail_int(patina_epoll_ctl(epfd, op, fd, event));
+}
+
+int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout) {
+    return fail_int(patina_epoll_wait(epfd, events, maxevents, timeout));
+}
+
+int epoll_pwait(int epfd, struct epoll_event *events, int maxevents, int timeout,
+                const sigset_t *sigmask) {
+    /* Patina delivers no ambient signals, so a NULL mask is the plain wait. A
+     * real mask swap has no deterministic meaning; fail closed loudly. */
+    if (sigmask != NULL)
+        return patina_posix_deny("patina: epoll_pwait with a signal mask is not modeled; failing closed\n");
+    return fail_int(patina_epoll_wait(epfd, events, maxevents, timeout));
+}
+
+int eventfd(unsigned int initval, int flags) {
+    return fail_int(patina_eventfd(initval, flags));
 }
 #endif
 
@@ -2653,6 +2752,17 @@ int getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen,
     *result = NULL;
     return 0;
 }
+#ifdef __linux__
+/*
+ * glibc's RT-signal-range probe (libc::SIGRTMAX() reads it; tokio's signal
+ * machinery links it). A pure host-configuration query with no boundary
+ * effect: return glibc's own upper bound (64 — NPTL reserves 32/33 below
+ * SIGRTMIN, which does not move the max) as a fixed deterministic value, the
+ * gethostname doctrine above. tokio does not import __libc_current_sigrtmin,
+ * so only the max probe is defined.
+ */
+int __libc_current_sigrtmax(void) { return 64; }
+#endif
 #ifdef __APPLE__
 /*
  * _NSGetExecutablePath hands back the host executable's real path (std's

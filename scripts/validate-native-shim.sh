@@ -1725,7 +1725,7 @@ cmp "$tmp/tcp-seed-5-1" "$tmp/tcp-replay"
 # the SAME waiter machinery the virtual sockets do, so the sources import
 # pipe/socketpair with NO new allowance and are byte-identical per seed, and
 # record + flag-free replay converge. The cross-process siblings stay refused
-# (the eventfd/shm_open leg at the end).
+# (the shm_open leg at the end).
 cat >"$tmp/pipe_probe.rs" <<'RS'
 // Two managed tasks exchange bytes through an in-process pipe(). The reader
 // (main) blocks on the empty pipe and is woken through the baton when the writer
@@ -2007,19 +2007,16 @@ grep -qx 'NATIVE_PIPE_NONBLOCK_RESULT ok=true' "$tmp/pipe-nonblock-out"
 cmp "$tmp/pipe-dup-1" "$tmp/pipe-dup-2"
 grep -qx 'NATIVE_PIPE_DUP_RESULT ok=true eof=true epipe=true' "$tmp/pipe-dup-1"
 
-# (f) The cross-process class-g siblings stay REFUSED: interposing the in-process
-# pipe/socketpair must not weaken the gate for a real IPC escape. eventfd is the
-# still-denied sibling on Linux; macOS has no eventfd, so shm_open (same class)
-# stands in there. Either way the audit must refuse it as `shared-memory-ipc`.
+# (f) The cross-process class-g siblings stay REFUSED: interposing the
+# in-process pipe/socketpair/eventfd must not weaken the gate for a real IPC
+# escape. eventfd used to stand in here on Linux, but it is now interposed (the
+# real interposer supersedes the deny — the pipe row-g precedent), so shm_open —
+# genuinely cross-address-space on BOTH platforms — carries the leg's detection
+# power. The audit must refuse it as `shared-memory-ipc`.
 cat >"$tmp/shared_ipc_refusal_probe.c" <<'C'
 #include <fcntl.h>
 #include <sys/mman.h>
-#ifdef __linux__
-#include <sys/eventfd.h>
-int main(void) { return eventfd(0, 0) < 0; }
-#else
 int main(void) { return shm_open("/patina-refused", O_RDONLY, 0) < 0; }
-#endif
 C
 "$cc" -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror \
   "$tmp/shared_ipc_refusal_probe.c" -o "$tmp/shared-ipc-refusal-probe"
@@ -2031,13 +2028,14 @@ fi
 grep -q 'shared-memory-ipc' "$tmp/shared-ipc-refusal-error"
 
 # -----------------------------------------------------------------------------
-# kqueue / kevent readiness reactor (macOS). The last macOS interposition item:
-# a deterministic in-process model of the BSD readiness multiplexer that mio (and
-# therefore tokio) builds its IO driver on. macOS-only — kqueue/kevent have no
-# Linux counterpart — so the whole block is gated on Darwin. The reactor carries
-# NO trace events of its own (the registry is deterministic given the recorded
-# schedule, like the pipe channels and mutex words); only the scheduler
-# parks/wakes are recorded, so record and flag-free replay converge.
+# kqueue / kevent readiness reactor (macOS): a deterministic in-process model
+# of the BSD readiness multiplexer that mio (and therefore tokio) builds its IO
+# driver on. kqueue/kevent have no Linux counterpart, so the raw-libc legs are
+# gated on Darwin (the Linux mirror is the epoll block below; the shared tokio
+# acceptance leg runs un-gated after both). The reactor carries NO trace events
+# of its own (the registry is deterministic given the recorded schedule, like
+# the pipe channels and mutex words); only the scheduler parks/wakes are
+# recorded, so record and flag-free replay converge.
 # -----------------------------------------------------------------------------
 if [[ "$(uname -s)" == Darwin ]]; then
   # (a) Raw-libc kqueue: EVFILT_READ interest over a socketpair endpoint. A
@@ -2189,18 +2187,257 @@ RS
   cmp "$tmp/kqueue-user-1" "$tmp/kqueue-user-2"
   grep -qx 'NATIVE_KQUEUE_USER_TIMEOUT user_ok=true timeout_ms=50' "$tmp/kqueue-user-1"
 
-  # (d) The acceptance workload: a real tokio current-thread runtime driving an
-  # async socketpair ping-pong entirely through the deterministic kqueue reactor
-  # (mio's kevent readiness + EVFILT_USER Waker) and the in-process net shim. The
-  # `signal` feature matters: with it compiled, `enable_all()` also arms tokio's
-  # signal driver, which creates a UnixStream::pair and try_clones one end —
-  # fcntl(F_DUPFD_CLOEXEC) on a virtual socketpair endpoint, the refcounted pipe
-  # dup path. It builds via `cargo patina build`, audits with NO allowance beyond
-  # the existing shim residue, runs seed-stable, and records/replays
-  # byte-identically. The dependency tree is pinned by the committed Cargo.lock
-  # for a reproducible build.
-  mkdir -p "$tmp/tokio-probe-src/src"
-  cat >"$tmp/tokio-probe-src/Cargo.toml" <<'TOML'
+  cat "$tmp/kqueue-seed-1-1"
+  cat "$tmp/kqueue-user-1"
+fi
+
+# -----------------------------------------------------------------------------
+# epoll / eventfd readiness reactor (Linux). The Linux mirror of the Darwin
+# kqueue block above: the same shared readiness core behind an epoll frontend
+# (one interest per fd, EPOLLET arrival-sequence edge latch, millisecond
+# timeouts on the virtual clock) plus the deterministic eventfd counter (mio's
+# Waker vehicle). Like the kqueue registry, it carries NO trace events of its
+# own, so record and flag-free replay converge.
+# -----------------------------------------------------------------------------
+if [[ "$(uname -s)" == Linux ]]; then
+  # (a) Raw-libc epoll, EPOLLIN|EPOLLET over a socketpair endpoint. A blocking
+  # epoll_wait parks until a writer task writes and reports the registered
+  # epoll_data. THE EDGE ASSERTION: after a PARTIAL drain the fd is still
+  # readable but the edge is latched, so a poll (timeout 0) must report
+  # NOTHING; new data must re-fire (the kernel's per-arrival edge). Two
+  # same-seed runs are byte-identical; record + flag-free replay converge.
+  cat >"$tmp/epoll_probe.rs" <<'RS'
+// A reader (main) registers EPOLLIN|EPOLLET on a socketpair endpoint and blocks
+// in epoll_wait; a writer task writes, waking the fan-in park through the
+// baton. Then the edge-latch discipline is asserted with the writes issued from
+// main itself, so the sequence is schedule-independent.
+use std::ffi::{c_int, c_void};
+
+#[cfg_attr(target_arch = "x86_64", repr(C, packed))]
+#[cfg_attr(not(target_arch = "x86_64"), repr(C))]
+#[derive(Clone, Copy)]
+struct EpollEvent { events: u32, data: u64 }
+
+const AF_UNIX: c_int = 1;
+const SOCK_STREAM: c_int = 1;
+const EPOLL_CTL_ADD: c_int = 1;
+const EPOLLIN: u32 = 0x001;
+const EPOLLET: u32 = 1 << 31;
+
+unsafe extern "C" {
+    fn socketpair(domain: c_int, ty: c_int, protocol: c_int, sv: *mut c_int) -> c_int;
+    fn epoll_create1(flags: c_int) -> c_int;
+    fn epoll_ctl(epfd: c_int, op: c_int, fd: c_int, ev: *mut EpollEvent) -> c_int;
+    fn epoll_wait(epfd: c_int, evs: *mut EpollEvent, max: c_int, timeout: c_int) -> c_int;
+    fn write(fd: c_int, buf: *const c_void, n: usize) -> isize;
+    fn read(fd: c_int, buf: *mut c_void, n: usize) -> isize;
+}
+fn zero() -> EpollEvent { EpollEvent { events: 0, data: 0 } }
+
+fn main() {
+    let mut sv = [0 as c_int; 2];
+    assert_eq!(unsafe { socketpair(AF_UNIX, SOCK_STREAM, 0, sv.as_mut_ptr()) }, 0, "socketpair");
+    let (a, b) = (sv[0], sv[1]);
+    let ep = unsafe { epoll_create1(0) };
+    assert!(ep >= 0, "epoll_create1");
+    let mut reg = EpollEvent { events: EPOLLIN | EPOLLET, data: 0x1234 };
+    assert_eq!(unsafe { epoll_ctl(ep, EPOLL_CTL_ADD, a, &mut reg) }, 0, "epoll_ctl add");
+
+    let writer = std::thread::spawn(move || {
+        let msg = b"ping";
+        assert_eq!(unsafe { write(b, msg.as_ptr() as *const c_void, msg.len()) }, 4);
+    });
+    let mut evs = [zero()];
+    let n = unsafe { epoll_wait(ep, evs.as_mut_ptr(), 1, -1) };
+    assert_eq!(n, 1, "one ready event");
+    assert_eq!({ evs[0].data }, 0x1234, "event data");
+    assert!({ evs[0].events } & EPOLLIN != 0, "EPOLLIN set");
+    writer.join().unwrap();
+
+    // Partial drain: 2 of the 4 bytes. The fd stays readable, but the ET edge
+    // is latched — a poll must NOT re-report it.
+    let mut buf = [0u8; 2];
+    assert_eq!(unsafe { read(a, buf.as_mut_ptr() as *mut c_void, 2) }, 2);
+    assert_eq!(&buf, b"pi");
+    let latched = unsafe { epoll_wait(ep, evs.as_mut_ptr(), 1, 0) };
+    assert_eq!(latched, 0, "latched edge must not re-report after partial drain");
+
+    // New data re-fires the edge even though readiness never dropped.
+    assert_eq!(unsafe { write(b, b"!!".as_ptr() as *const c_void, 2) }, 2);
+    let refired = unsafe { epoll_wait(ep, evs.as_mut_ptr(), 1, 0) };
+    assert_eq!(refired, 1, "new arrival must re-fire the edge");
+    let mut rest = [0u8; 4];
+    assert_eq!(unsafe { read(a, rest.as_mut_ptr() as *mut c_void, 4) }, 4);
+    assert_eq!(&rest, b"ng!!");
+    println!("NATIVE_EPOLL_RESULT latched={latched} refired={refired}");
+}
+RS
+  "$runner" build "$tmp/epoll_probe.rs" --output "$tmp/epoll-probe" >/dev/null
+  "$runner" audit "$tmp/epoll-probe" "${shim_allow[@]}" >/dev/null
+  for seed in 1 2; do
+    "$runner" run "$tmp/epoll-probe" --seed "$seed" >"$tmp/epoll-seed-$seed-1"
+    "$runner" run "$tmp/epoll-probe" --seed "$seed" >"$tmp/epoll-seed-$seed-2"
+    cmp "$tmp/epoll-seed-$seed-1" "$tmp/epoll-seed-$seed-2"
+    grep -qx 'NATIVE_EPOLL_RESULT latched=0 refired=1' "$tmp/epoll-seed-$seed-1"
+  done
+  # Same seed is byte-identical across a record and its flag-free replay.
+  "$runner" run "$tmp/epoll-probe" --seed 1 --record "$tmp/epoll.patina" \
+    --fingerprint native-epoll-v1 >"$tmp/epoll-record"
+  "$runner" replay "$tmp/epoll-probe" "$tmp/epoll.patina" \
+    --fingerprint native-epoll-v1 >"$tmp/epoll-replay"
+  cmp "$tmp/epoll-record" "$tmp/epoll-replay"
+  cmp "$tmp/epoll-seed-1-1" "$tmp/epoll-replay"
+
+  # (b) eventfd wakeup (mio's Waker shape): an eventfd registered EPOLLIN|EPOLLET
+  # with a blocked epoll_wait is unparked by a second thread's 8-byte write. A
+  # SECOND write re-fires the edge without the counter ever being drained (the
+  # kernel's per-arrival edge, which mio's Waker depends on); the read then
+  # returns-and-resets, and a drained nonblocking read is EAGAIN.
+  cat >"$tmp/eventfd_probe.rs" <<'RS'
+use std::ffi::{c_int, c_void};
+
+#[cfg_attr(target_arch = "x86_64", repr(C, packed))]
+#[cfg_attr(not(target_arch = "x86_64"), repr(C))]
+#[derive(Clone, Copy)]
+struct EpollEvent { events: u32, data: u64 }
+
+const EPOLL_CTL_ADD: c_int = 1;
+const EPOLLIN: u32 = 0x001;
+const EPOLLET: u32 = 1 << 31;
+const EFD_CLOEXEC: c_int = 0o2000000;
+const EFD_NONBLOCK: c_int = 0o4000;
+const EFD_SEMAPHORE: c_int = 0o1;
+const EAGAIN: i32 = 11;
+
+unsafe extern "C" {
+    fn eventfd(initval: u32, flags: c_int) -> c_int;
+    fn epoll_create1(flags: c_int) -> c_int;
+    fn epoll_ctl(epfd: c_int, op: c_int, fd: c_int, ev: *mut EpollEvent) -> c_int;
+    fn epoll_wait(epfd: c_int, evs: *mut EpollEvent, max: c_int, timeout: c_int) -> c_int;
+    fn write(fd: c_int, buf: *const c_void, n: usize) -> isize;
+    fn read(fd: c_int, buf: *mut c_void, n: usize) -> isize;
+    fn __errno_location() -> *mut i32;
+}
+fn zero() -> EpollEvent { EpollEvent { events: 0, data: 0 } }
+fn wr1(fd: c_int) { let one: u64 = 1; assert_eq!(unsafe { write(fd, &one as *const u64 as *const c_void, 8) }, 8); }
+
+fn main() {
+    let efd = unsafe { eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK) };
+    assert!(efd >= 0, "eventfd");
+    let ep = unsafe { epoll_create1(0) };
+    let mut reg = EpollEvent { events: EPOLLIN | EPOLLET, data: 7 };
+    assert_eq!(unsafe { epoll_ctl(ep, EPOLL_CTL_ADD, efd, &mut reg) }, 0);
+
+    // A second thread's write unparks the blocked epoll_wait.
+    let waker = std::thread::spawn(move || wr1(efd));
+    let mut evs = [zero()];
+    let woke = unsafe { epoll_wait(ep, evs.as_mut_ptr(), 1, -1) };
+    assert_eq!(woke, 1, "eventfd write unparks epoll_wait");
+    assert_eq!({ evs[0].data }, 7);
+    waker.join().unwrap();
+
+    // Undrained counter: the latch holds until a NEW write arrives.
+    assert_eq!(unsafe { epoll_wait(ep, evs.as_mut_ptr(), 1, 0) }, 0, "latched");
+    wr1(efd);
+    let refired = unsafe { epoll_wait(ep, evs.as_mut_ptr(), 1, 0) };
+    assert_eq!(refired, 1, "undrained re-arrival re-fires");
+
+    // Read returns-and-resets; a drained nonblocking read is EAGAIN.
+    let mut val: u64 = 0;
+    assert_eq!(unsafe { read(efd, (&raw mut val).cast(), 8) }, 8);
+    assert_eq!(val, 2, "counter accumulated both writes");
+    assert_eq!(unsafe { read(efd, (&raw mut val).cast(), 8) }, -1);
+    assert_eq!(unsafe { *__errno_location() }, EAGAIN, "drained read is EAGAIN");
+
+    // EFD_SEMAPHORE decrements by one per read.
+    let sem = unsafe { eventfd(2, EFD_SEMAPHORE) };
+    assert_eq!(unsafe { read(sem, (&raw mut val).cast(), 8) }, 8);
+    assert_eq!(val, 1);
+    assert_eq!(unsafe { read(sem, (&raw mut val).cast(), 8) }, 8);
+    assert_eq!(val, 1);
+    println!("NATIVE_EVENTFD_RESULT woke={woke} refired={refired} sem_ok=true");
+}
+RS
+  "$runner" build "$tmp/eventfd_probe.rs" --output "$tmp/eventfd-probe" >/dev/null
+  "$runner" audit "$tmp/eventfd-probe" "${shim_allow[@]}" >/dev/null
+  "$runner" run "$tmp/eventfd-probe" --seed 1 >"$tmp/eventfd-1"
+  "$runner" run "$tmp/eventfd-probe" --seed 1 >"$tmp/eventfd-2"
+  cmp "$tmp/eventfd-1" "$tmp/eventfd-2"
+  grep -qx 'NATIVE_EVENTFD_RESULT woke=1 refired=1 sem_ok=true' "$tmp/eventfd-1"
+
+  # (c) Timeout: epoll_wait with a 50ms timeout and nothing ready returns 0
+  # after EXACTLY the virtual-clock duration (Instant reads the virtual clock).
+  cat >"$tmp/epoll_timeout_probe.rs" <<'RS'
+use std::ffi::c_int;
+use std::time::Instant;
+
+#[cfg_attr(target_arch = "x86_64", repr(C, packed))]
+#[cfg_attr(not(target_arch = "x86_64"), repr(C))]
+#[derive(Clone, Copy)]
+struct EpollEvent { events: u32, data: u64 }
+
+const AF_UNIX: c_int = 1;
+const SOCK_STREAM: c_int = 1;
+const EPOLL_CTL_ADD: c_int = 1;
+const EPOLLIN: u32 = 0x001;
+const EPOLLET: u32 = 1 << 31;
+
+unsafe extern "C" {
+    fn socketpair(domain: c_int, ty: c_int, protocol: c_int, sv: *mut c_int) -> c_int;
+    fn epoll_create1(flags: c_int) -> c_int;
+    fn epoll_ctl(epfd: c_int, op: c_int, fd: c_int, ev: *mut EpollEvent) -> c_int;
+    fn epoll_wait(epfd: c_int, evs: *mut EpollEvent, max: c_int, timeout: c_int) -> c_int;
+}
+
+fn main() {
+    let mut sv = [0 as c_int; 2];
+    assert_eq!(unsafe { socketpair(AF_UNIX, SOCK_STREAM, 0, sv.as_mut_ptr()) }, 0);
+    let ep = unsafe { epoll_create1(0) };
+    let mut reg = EpollEvent { events: EPOLLIN | EPOLLET, data: 0 };
+    assert_eq!(unsafe { epoll_ctl(ep, EPOLL_CTL_ADD, sv[0], &mut reg) }, 0);
+    let before = Instant::now();
+    let mut evs = [EpollEvent { events: 0, data: 0 }];
+    let n = unsafe { epoll_wait(ep, evs.as_mut_ptr(), 1, 50) };
+    let elapsed_ms = before.elapsed().as_millis();
+    assert_eq!(n, 0, "timeout returns zero events");
+    assert_eq!(elapsed_ms, 50, "timeout elapsed exactly the virtual duration");
+    println!("NATIVE_EPOLL_TIMEOUT timeout_ms={elapsed_ms}");
+}
+RS
+  "$runner" build "$tmp/epoll_timeout_probe.rs" --output "$tmp/epoll-timeout-probe" >/dev/null
+  "$runner" audit "$tmp/epoll-timeout-probe" "${shim_allow[@]}" >/dev/null
+  "$runner" run "$tmp/epoll-timeout-probe" --seed 1 >"$tmp/epoll-timeout-1"
+  "$runner" run "$tmp/epoll-timeout-probe" --seed 1 >"$tmp/epoll-timeout-2"
+  cmp "$tmp/epoll-timeout-1" "$tmp/epoll-timeout-2"
+  grep -qx 'NATIVE_EPOLL_TIMEOUT timeout_ms=50' "$tmp/epoll-timeout-1"
+
+  cat "$tmp/epoll-seed-1-1"
+  cat "$tmp/eventfd-1"
+  cat "$tmp/epoll-timeout-1"
+fi
+
+# -----------------------------------------------------------------------------
+# The cross-platform acceptance workload: a real tokio current-thread runtime
+# driving an async socketpair ping-pong entirely through the deterministic
+# readiness reactor — mio's kqueue selector + EVFILT_USER Waker on macOS, mio's
+# epoll selector + eventfd Waker on Linux — and the in-process net shim. The
+# `signal` feature matters: with it compiled, `enable_all()` also arms tokio's
+# signal driver, which creates a UnixStream::pair and try_clones one end —
+# fcntl(F_DUPFD_CLOEXEC) on a virtual socketpair endpoint, the refcounted pipe
+# dup path. parking_lot and rustix ride along so their surfaces are exercised
+# on EVERY validate run, not only when someone happens to build such a guest:
+# parking_lot locks through its interposed platform primitive (os_unfair_lock
+# on macOS, futex-via-syscall on Linux), and rustix — flipped onto its libc
+# backend by the `--cfg rustix_use_libc` the package build injects (its DEFAULT
+# Linux backend emits raw inline syscalls the audit refuses) — reads back a
+# file through the interposed openat/openat64 into the deterministic FS. It
+# builds via `cargo patina build`, audits with NO allowance beyond the existing
+# shim residue, runs seed-stable, and records/replays byte-identically. The
+# dependency tree is pinned by the committed Cargo.lock for a reproducible
+# build.
+# -----------------------------------------------------------------------------
+mkdir -p "$tmp/tokio-probe-src/src"
+cat >"$tmp/tokio-probe-src/Cargo.toml" <<'TOML'
 [package]
 name = "patina-tokio-probe"
 version = "0.0.0"
@@ -2209,21 +2446,35 @@ publish = false
 
 [dependencies]
 tokio = { version = "=1.53.1", features = ["rt", "net", "io-util", "macros", "time", "signal"] }
+parking_lot = "=0.12.5"
+rustix = { version = "=1.1.4", features = ["fs"] }
 
 [[bin]]
 name = "patina-tokio-probe"
 path = "src/main.rs"
 TOML
-  cat >"$tmp/tokio-probe-src/Cargo.lock" <<'LOCK'
+cat >"$tmp/tokio-probe-src/Cargo.lock" <<'LOCK'
 # This file is automatically @generated by Cargo.
 # It is not intended for manual editing.
 version = 4
+
+[[package]]
+name = "bitflags"
+version = "2.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
 name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+
+[[package]]
+name = "cfg-if"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "errno"
@@ -2242,6 +2493,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
+name = "linux-raw-sys"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+
+[[package]]
+name = "lock_api"
+version = "0.4.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
+dependencies = [
+ "scopeguard",
+]
+
+[[package]]
 name = "mio"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2253,9 +2519,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "parking_lot"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
+dependencies = [
+ "lock_api",
+ "parking_lot_core",
+]
+
+[[package]]
+name = "parking_lot_core"
+version = "0.9.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "redox_syscall",
+ "smallvec",
+ "windows-link",
+]
+
+[[package]]
 name = "patina-tokio-probe"
 version = "0.0.0"
 dependencies = [
+ "parking_lot",
+ "rustix",
  "tokio",
 ]
 
@@ -2284,6 +2575,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "redox_syscall"
+version = "0.5.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
+dependencies = [
+ "bitflags",
+]
+
+[[package]]
+name = "rustix"
+version = "1.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+dependencies = [
+ "bitflags",
+ "errno",
+ "libc",
+ "linux-raw-sys",
+ "windows-sys",
+]
+
+[[package]]
+name = "scopeguard"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
 name = "signal-hook-registry"
 version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2292,6 +2611,12 @@ dependencies = [
  "errno",
  "libc",
 ]
+
+[[package]]
+name = "smallvec"
+version = "1.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
 name = "socket2"
@@ -2368,11 +2693,17 @@ dependencies = [
  "windows-link",
 ]
 LOCK
-  cat >"$tmp/tokio-probe-src/src/main.rs" <<'RS'
+cat >"$tmp/tokio-probe-src/src/main.rs" <<'RS'
 // A real tokio current-thread runtime driving an async socketpair ping-pong.
 // UnixStream::pair lowers to socketpair(2); tokio's IO driver registers the
-// endpoints with mio's kqueue selector and wakes itself through an EVFILT_USER
-// Waker — all serviced by the deterministic reactor + net shim.
+// endpoints with mio's selector (kqueue on macOS, epoll on Linux) and wakes
+// itself through mio's Waker (EVFILT_USER / eventfd) — all serviced by the
+// deterministic reactor + net shim. parking_lot rides its interposed platform
+// primitive (os_unfair_lock on macOS, futex-via-syscall on Linux), and rustix
+// — carried onto its libc backend by the injected --cfg rustix_use_libc —
+// reaches the deterministic FS through the interposed openat/openat64.
+use std::io::Read;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
@@ -2395,30 +2726,44 @@ fn main() {
         let server_got = server.await.unwrap();
         (buf, server_got)
     });
+
+    let lock = parking_lot::Mutex::new(0u64);
+    *lock.lock() += 41;
+    let lock_val = *lock.lock() + 1;
+
+    std::fs::write("/tmp/patina-tokio-probe-data", b"rustix-ok").unwrap();
+    let fd = rustix::fs::openat(
+        rustix::fs::CWD,
+        "/tmp/patina-tokio-probe-data",
+        rustix::fs::OFlags::RDONLY,
+        rustix::fs::Mode::empty(),
+    )
+    .unwrap();
+    let mut contents = String::new();
+    std::fs::File::from(fd).read_to_string(&mut contents).unwrap();
+
     println!(
-        "NATIVE_TOKIO_RESULT client_got={} server_got={}",
+        "NATIVE_TOKIO_RESULT client_got={} server_got={} lock={} rustix_read={}",
         std::str::from_utf8(&out.0).unwrap(),
-        std::str::from_utf8(&out.1).unwrap()
+        std::str::from_utf8(&out.1).unwrap(),
+        lock_val,
+        contents
     );
 }
 RS
-  "$runner" build "$tmp/tokio-probe-src" --bin patina-tokio-probe --output "$tmp/tokio-probe" >/dev/null
-  "$runner" audit "$tmp/tokio-probe" "${shim_allow[@]}" >/dev/null
-  "$runner" run "$tmp/tokio-probe" --seed 1 >"$tmp/tokio-seed-1"
-  "$runner" run "$tmp/tokio-probe" --seed 1 >"$tmp/tokio-seed-2"
-  cmp "$tmp/tokio-seed-1" "$tmp/tokio-seed-2"
-  grep -qx 'NATIVE_TOKIO_RESULT client_got=pong server_got=ping' "$tmp/tokio-seed-1"
-  "$runner" run "$tmp/tokio-probe" --seed 1 --record "$tmp/tokio.patina" \
-    --fingerprint native-tokio-v1 >"$tmp/tokio-record"
-  "$runner" replay "$tmp/tokio-probe" "$tmp/tokio.patina" \
-    --fingerprint native-tokio-v1 >"$tmp/tokio-replay"
-  cmp "$tmp/tokio-record" "$tmp/tokio-replay"
-  cmp "$tmp/tokio-seed-1" "$tmp/tokio-replay"
-
-  cat "$tmp/kqueue-seed-1-1"
-  cat "$tmp/kqueue-user-1"
-  cat "$tmp/tokio-seed-1"
-fi
+"$runner" build "$tmp/tokio-probe-src" --bin patina-tokio-probe --output "$tmp/tokio-probe" >/dev/null
+"$runner" audit "$tmp/tokio-probe" "${shim_allow[@]}" >/dev/null
+"$runner" run "$tmp/tokio-probe" --seed 1 >"$tmp/tokio-seed-1"
+"$runner" run "$tmp/tokio-probe" --seed 1 >"$tmp/tokio-seed-2"
+cmp "$tmp/tokio-seed-1" "$tmp/tokio-seed-2"
+grep -qx 'NATIVE_TOKIO_RESULT client_got=pong server_got=ping lock=42 rustix_read=rustix-ok' "$tmp/tokio-seed-1"
+"$runner" run "$tmp/tokio-probe" --seed 1 --record "$tmp/tokio.patina" \
+  --fingerprint native-tokio-v1 >"$tmp/tokio-record"
+"$runner" replay "$tmp/tokio-probe" "$tmp/tokio.patina" \
+  --fingerprint native-tokio-v1 >"$tmp/tokio-replay"
+cmp "$tmp/tokio-record" "$tmp/tokio-replay"
+cmp "$tmp/tokio-seed-1" "$tmp/tokio-replay"
+cat "$tmp/tokio-seed-1"
 
 cat "$tmp/pipe-seed-1-1"
 cat "$tmp/socketpair-seed-1-1"

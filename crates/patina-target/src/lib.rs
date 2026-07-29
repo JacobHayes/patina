@@ -1562,12 +1562,18 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "gethostbyname",
     ];
     // (a) Blocking/scheduling — readiness multiplexing. A host `poll`/`select`/
-    // `kqueue` wait blocks the calling thread outside the scheduler.
+    // `kqueue`/`epoll` wait blocks the calling thread outside the scheduler.
+    // The kqueue family (macOS) and the epoll family (Linux) are interposed by
+    // the deterministic readiness reactors, so a shim-linked binary defines
+    // them; they stay classified so a raw non-shim import reads as a
+    // wait-multiplex escape rather than a bare unknown import.
     const WAIT_MULTIPLEX: &[&str] = &[
         "poll",
         "ppoll",
         "select",
         "pselect",
+        "epoll_create1",
+        "epoll_ctl",
         "epoll_wait",
         "epoll_pwait",
         "kevent",
@@ -1701,8 +1707,11 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
     // shim-linked binary's import table. They stay classified here — exactly like
     // the interposed `os_unfair_lock_*`/`dispatch_semaphore_*` above — so a NON-
     // shim binary that imports one raw still reads as a class-g escape rather than
-    // a bare unknown import. The cross-process members
-    // (`shm_open`/`mach_*`/`mq_*`/`eventfd`) are NOT interposed and stay refused.
+    // a bare unknown import. `eventfd`/`eventfd2` (Linux, mio's Waker vehicle)
+    // joined that in-process interposed slice — a single 64-bit counter inside
+    // the one guest — and follow the same stay-classified convention. The
+    // cross-process members (`shm_open`/`mach_*`/`mq_*`) are NOT interposed and
+    // stay refused.
     const SHARED_MEMORY_IPC: &[&str] = &[
         "shm_open",
         "shm_unlink",
@@ -1721,6 +1730,7 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "pipe2",
         "socketpair",
         "eventfd",
+        "eventfd2",
     ];
     // Environment mutation/reads; the deterministic environment is empty and
     // immutable.
@@ -2077,6 +2087,9 @@ mod tests {
             ("filesystem", "open", NativeFormat::Elf),
             ("network", "socket", NativeFormat::Elf),
             ("wait-multiplex", "kqueue", NativeFormat::MachO),
+            ("wait-multiplex", "epoll_create1", NativeFormat::Elf),
+            ("wait-multiplex", "epoll_ctl", NativeFormat::Elf),
+            ("shared-memory-ipc", "eventfd", NativeFormat::Elf),
             ("unmanaged-sync", "os_unfair_lock_lock", NativeFormat::MachO),
             (
                 "unmanaged-sync",

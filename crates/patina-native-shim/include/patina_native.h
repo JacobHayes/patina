@@ -262,6 +262,42 @@ int32_t patina_futex_wait_timed(uintptr_t addr, uint32_t expected, uint32_t cloc
 int32_t patina_futex_wake(uintptr_t addr, int32_t count);
 
 /*
+ * epoll / eventfd readiness reactor (Linux). The Linux mirror of the macOS
+ * kqueue reactor below, over the same shared readiness core. A virtual epoll or
+ * eventfd descriptor is drawn from the shared virtual-fd space (numbered from
+ * PATINA_SOCKET_FD_BASE); the interposed read/write/close/dup/fcntl route them
+ * via patina_epoll_is_epoll / patina_eventfd_is. patina_epoll_create1,
+ * patina_epoll_ctl, patina_epoll_wait, and patina_eventfd are SYSCALL-SHAPED —
+ * they take the raw epoll_create1/epoll_ctl/epoll_wait/eventfd2 argument forms —
+ * so a future syscall-user-dispatch SIGSYS dispatcher can call them with
+ * register arguments directly; the C interposers are thin marshaling over them.
+ * epoll_ctl/epoll_wait take the platform `struct epoll_event` pointers
+ * directly: the Rust side reads/writes the kernel ABI layout (packed on x86_64,
+ * natural elsewhere), pinned by _Static_asserts in the C layer.
+ */
+#ifdef __linux__
+int32_t patina_epoll_create1(int32_t flags);
+int32_t patina_epoll_is_epoll(int32_t fd);
+int32_t patina_epoll_dup(int32_t fd);
+int32_t patina_epoll_close(int32_t fd);
+int32_t patina_epoll_ctl(int32_t epfd, int32_t op, int32_t fd, const void *event);
+/* timeout_ms: -1 blocks until ready, 0 polls, > 0 is a relative virtual-clock
+ * deadline in milliseconds. */
+int32_t patina_epoll_wait(int32_t epfd, void *events, int32_t maxevents, int32_t timeout_ms);
+/*
+ * Deterministic in-process eventfd counter (mio's Waker vehicle; the
+ * EVFILT_USER analogue). Readable iff the counter is nonzero; always writable —
+ * a write that would overflow the kernel's u64-2 bound fails closed loudly
+ * instead of modeling a blocked-writer queue.
+ */
+int32_t patina_eventfd(uint32_t initval, int32_t flags);
+int32_t patina_eventfd_is(int32_t fd);
+intptr_t patina_eventfd_read(int32_t fd, void *buf, size_t len);
+intptr_t patina_eventfd_write(int32_t fd, const void *buf, size_t len);
+int32_t patina_eventfd_close(int32_t fd);
+#endif
+
+/*
  * libdispatch semaphore routing (macOS). Rust std's Darwin thread Parker blocks
  * on a libdispatch semaphore; the interposed dispatch_time /
  * dispatch_semaphore_create/wait/signal / dispatch_release forward here so
