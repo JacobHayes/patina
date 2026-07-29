@@ -85,7 +85,10 @@ const FD_CLOEXEC: i32 = 1;
 
 #[cfg(unix)]
 unsafe extern "C" {
-    fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32;
+    // Declared with the variadic tail it really has: Darwin arm64 reads anonymous
+    // varargs from the stack, so a non-variadic declaration passes `arg` in a
+    // register the callee never reads and `F_SETFD` writes stack garbage instead.
+    fn fcntl(fd: i32, cmd: i32, ...) -> i32;
 }
 
 const HELP: &str = "Patina deterministic Cargo runner

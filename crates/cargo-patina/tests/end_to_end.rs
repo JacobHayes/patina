@@ -1670,6 +1670,40 @@ fn main() {
 // already-open fd numbers through `PATINA_TRACE_FD` / `PATINA_FS_IMAGE_FD` and
 // clears close-on-exec only for those descriptors. Asserts a clean record AND
 // replay that see the mounted content.
+// A hand-declared libc binding with the wrong arity is an ABI break the compiler
+// cannot see: Darwin arm64 passes anonymous varargs on the STACK, so calling the
+// variadic `fcntl` through a non-variadic declaration leaves the argument in a
+// register the callee never reads, and `F_SETFD` writes whatever the stack slot
+// holds. Whether that misbehaves depends on stack contents (argv/env size), so
+// no runtime test reproduces it reliably — the guard has to be static. Every
+// extern declaration of a known-variadic libc function must declare the `...`
+// tail (the crate deliberately hand-declares instead of depending on `libc`).
+#[test]
+fn extern_declarations_of_variadic_libc_functions_declare_the_variadic_tail() {
+    const VARIADIC_LIBC: &[&str] = &["fcntl", "ioctl", "open", "openat", "syscall"];
+    let source = include_str!("../src/lib.rs");
+    for name in VARIADIC_LIBC {
+        for (index, line) in source.lines().enumerate() {
+            let Some(rest) = line.trim_start().strip_prefix("fn ") else {
+                continue;
+            };
+            let Some(rest) = rest.strip_prefix(name) else {
+                continue;
+            };
+            if !rest.starts_with('(') {
+                continue; // longer identifier sharing the prefix
+            }
+            assert!(
+                rest.contains("..."),
+                "src/lib.rs:{}: extern declaration of variadic libc `{name}` lacks the `...` \
+                 tail; non-variadic arity is an ABI break on Darwin arm64, where varargs are \
+                 read from the stack",
+                index + 1
+            );
+        }
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn native_mount_composes_with_record_and_replay_two_inherited_descriptors() {
