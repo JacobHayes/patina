@@ -16,48 +16,64 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  stable:
+  platform:
+    name: ${{ matrix.toolchain }} / ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
+        toolchain: [stable, msrv]
         # x86_64 and aarch64 Linux surface different platform gaps (libgcc
         # split-stack wrap symbols exist only on x86; the dev VM is aarch64).
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - if: matrix.toolchain == 'stable'
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: wasm32-wasip1
+      - if: matrix.toolchain == 'msrv'
+        uses: dtolnay/rust-toolchain@1.86.0
+        with:
           targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
       # strace is the Linux whole-run syscall-containment class detector invoked
       # by validate-native-shim.sh. Install it and require it (PATINA_REQUIRE_STRACE=1
       # below) so a runner image without strace hard-fails instead of silently
       # dropping the containment gate.
-      - run: sudo apt-get update && sudo apt-get install -y strace
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y strace
+      - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
+        run: cargo fmt --all -- --check
+      - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
-      - run: cargo doc --workspace --no-deps --locked
+      - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
+        run: cargo doc --workspace --no-deps --locked
       # The `patina-dst` facade (`run`/`run_with`, `Context`, `rt`, ABI re-exports)
       # lives behind the non-default `runtime` feature; the default-feature build
       # is the dependency-light cooperative-SUT SDK. Cover the facade explicitly.
-      - run: cargo clippy -p patina-dst --all-targets --features runtime --locked -- -D warnings
-      - run: cargo test -p patina-dst --features runtime --locked
-      - run: cargo doc -p patina-dst --no-deps --features runtime --locked
+      - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
+        run: cargo clippy -p patina-dst --all-targets --features runtime --locked -- -D warnings
+      - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
+        run: cargo test -p patina-dst --features runtime --locked
+      - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
+        run: cargo doc -p patina-dst --no-deps --features runtime --locked
       - run: scripts/validate-wasi.sh
       - run: scripts/validate-native-shim.sh
         env:
-          PATINA_REQUIRE_STRACE: 1
+          PATINA_REQUIRE_STRACE: ${{ runner.os == 'Linux' && '1' || '0' }}
       - run: scripts/smoke-cross-target.sh
       # Fast, build-free classifier selftests (pure functions over canned tuples;
       # ~1.4s + ~0.5s locally). The fuzz-sweep bash classifier is NOT otherwise
       # covered by a Rust test; the campaign selftest is ALSO exercised by the
       # `campaign_selftest_passes` integration test but kept here as a direct
       # CLI-level gate against the shipped subcommand.
-      - run: testbeds/workq/fuzz-sweep.sh --selftest
-      - run: cargo run -p cargo-patina --quiet -- campaign --selftest
+      - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
+        run: testbeds/workq/fuzz-sweep.sh --selftest
+      - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
+        run: cargo run -p cargo-patina --quiet -- campaign --selftest
       # The flagship durable-work-queue testbed's full self-checking gate
       # (determinism, record/replay, net/fs faults, crash-recovery, buggify
       # sweep). Its dependency tree is tiny (patina-dst + sha2 only) and its own
@@ -65,51 +81,8 @@ jobs:
       # / ~35s cold (dominated by the release cargo-patina + shim compile it
       # shares), well under two minutes. The heavier randomized fault-combination
       # sweep over this same testbed runs nightly (see the `nightly` job).
-      - run: testbeds/workq/run-patina.sh
-
-  msrv:
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.86.0
-        with:
-          targets: wasm32-wasip1
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y strace
-      - run: cargo test --workspace --locked
-      - run: scripts/validate-wasi.sh
-      - run: scripts/validate-native-shim.sh
-        env:
-          PATINA_REQUIRE_STRACE: 1
-      - run: scripts/smoke-cross-target.sh
-
-  macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --locked
-      - run: scripts/validate-wasi.sh
-      # macOS runtime syscall containment is not verifiable via ktrace (BSC_*
-      # events carry no path context and the runtime defers all output, so the
-      # loader prelude cannot be separated from post-init guest syscalls), so
-      # PATINA_REQUIRE_KTRACE is deliberately NOT set here — it would hard-fail.
-      # The static instruction scan + import audit are the macOS containment
-      # evidence, and PATINA_REQUIRE_STRACE is a Linux-only concern (the macOS
-      # branch never reaches the strace check); the strace default-deny gate runs
-      # on the Linux jobs.
-      - run: scripts/validate-native-shim.sh
-      - run: scripts/smoke-cross-target.sh
-      # The workq testbed's full Patina gate also runs per-push on macOS (see the
-      # justification on the stable job); it is bash-3.2-safe for the macOS runner.
-      - run: testbeds/workq/run-patina.sh
+      - if: matrix.toolchain == 'stable'
+        run: testbeds/workq/run-patina.sh
 
   # Advisory audit (RustSec). The root workspace lockfile is STRICT — any
   # advisory (including any protobuf appearance) fails the job. The testbeds are
