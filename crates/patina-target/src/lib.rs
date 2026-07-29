@@ -176,6 +176,42 @@ pub fn native_binary_is_shim_linked(bytes: &[u8]) -> Result<bool, TargetError> {
     }))
 }
 
+/// The shim's SUD dispatch entry symbol, defined only when a dispatch-capable
+/// shim (one that arms syscall-user-dispatch and services SIGSYS) is linked.
+/// Its *defined* presence in the symbol table is condition (a) of the
+/// `direct-syscall` instruction-finding audit downgrade: an older shim without
+/// SUD does not define it, so its raw-syscall binaries keep today's refusal.
+/// This is the exact marker the SIGSYS handler calls (`patina_sud_dispatch`),
+/// so it can never be present without the dispatcher being linked.
+const SUD_DISPATCH_MARKER: &str = "patina_sud_dispatch";
+
+/// Whether a native binary carries the shim's SUD dispatch marker
+/// ([`SUD_DISPATCH_MARKER`]) as a *defined* symbol — i.e. a dispatch-capable
+/// shim is linked. Used by the audit to decide whether a `direct-syscall`
+/// instruction finding may be downgraded to "SUD-managed" (the live kernel probe
+/// is the second condition; see `cargo-patina`). Fails closed on a parse error
+/// or unsupported format, so a malformed input is never treated as SUD-capable.
+pub fn native_binary_has_sud_marker(bytes: &[u8]) -> Result<bool, TargetError> {
+    let file = object::File::parse(bytes).map_err(TargetError::NativeParse)?;
+    NativeFormat::from_binary(file.format())?;
+    Ok(file.symbols().chain(file.dynamic_symbols()).any(|symbol| {
+        symbol.is_definition()
+            && symbol
+                .name()
+                .map(|name| normalize_native_symbol(name) == SUD_DISPATCH_MARKER)
+                .unwrap_or(false)
+    }))
+}
+
+/// Whether a denied native escape is a `direct-syscall` finding that
+/// syscall-user-dispatch can trap and route — i.e. a raw inline `syscall`/`svc`
+/// *instruction* (`instruction@…`), as opposed to a `cpu-nondeterminism`
+/// register read (`rdtsc`/`mrs CNTVCT`), which SUD cannot trap and which still
+/// refuses. This is the escape set the SUD audit downgrade applies to.
+pub fn native_escape_is_sud_manageable(escape: &NativeEscape) -> bool {
+    escape.category == "direct-syscall" && escape.symbol.starts_with("instruction@")
+}
+
 /// The shim's own host control-plane symbols the pre-run gate tolerates in a
 /// `cargo patina native-build` binary for the current platform.
 ///
@@ -1926,6 +1962,38 @@ mod tests {
             Some("cpu-nondeterminism")
         );
         // The x86-64 boundary-aware scan is covered in `x86_scan::tests`.
+    }
+
+    #[test]
+    fn sud_manageability_is_instruction_direct_syscall_only() {
+        // The SUD audit downgrade applies to raw inline syscall *instruction*
+        // findings and nothing else. A by-name `syscall` import is already
+        // interposed/refused on its own terms, and `cpu-nondeterminism` register
+        // reads (rdtsc/mrs CNTVCT) cannot be trapped by SUD — downgrading either
+        // would silently widen the gate. RED: flip any arm below and the
+        // downgrade would admit an untappable escape.
+        let trappable = NativeEscape {
+            symbol: "instruction@.text+0x42".into(),
+            category: "direct-syscall",
+        };
+        assert!(native_escape_is_sud_manageable(&trappable));
+        let by_name = NativeEscape {
+            symbol: "syscall".into(),
+            category: "direct-syscall",
+        };
+        assert!(!native_escape_is_sud_manageable(&by_name));
+        let register_read = NativeEscape {
+            symbol: "instruction@.text+0x42".into(),
+            category: "cpu-nondeterminism",
+        };
+        assert!(!native_escape_is_sud_manageable(&register_read));
+    }
+
+    #[test]
+    fn sud_marker_detection_fails_closed_on_unparseable_input() {
+        // A malformed binary must never be treated as SUD-capable: the marker
+        // check is a downgrade precondition, so parse failure ⇒ error, not false.
+        assert!(native_binary_has_sud_marker(b"not an object file").is_err());
     }
 
     #[test]

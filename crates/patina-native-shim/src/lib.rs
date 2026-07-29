@@ -15,6 +15,13 @@ pub const POSIX_C_SOURCE: &str = include_str!("../c/patina_posix.c");
 /// The companion C header for [`POSIX_C_SOURCE`] (`include/patina_native.h`).
 pub const NATIVE_HEADER: &str = include_str!("../include/patina_native.h");
 
+// Syscall-user-dispatch (SUD) dispatch table — Linux only. The C layer arms SUD
+// and installs the SIGSYS handler; this module owns the per-arch decode and the
+// routing of trapped raw syscalls into the same `patina_*` entry points the C
+// interposers use. See `sud.rs` and `SUD-DESIGN.md`.
+#[cfg(target_os = "linux")]
+mod sud;
+
 use std::cell::{Cell, UnsafeCell};
 use std::collections::BTreeMap;
 use std::ffi::{CStr, c_char, c_int, c_void};
@@ -413,7 +420,7 @@ mod hostapi {
 // reaches the real host vehicles through the single `RTLD_NEXT` resolution.
 #[cfg(target_os = "linux")]
 mod hostapi {
-    use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
+    use std::ffi::{CStr, c_char, c_int, c_long, c_uint, c_void};
     use std::sync::OnceLock;
 
     // The real glibc resolver, reached through the `-Wl,--wrap=dlsym` alias
@@ -452,6 +459,14 @@ mod hostapi {
     // is dropped BEFORE the joiner returns — making the joiner's own drop the
     // deterministic last reference (see `patina_thread_join`).
     pub type HostPthreadJoin = unsafe extern "C" fn(*mut c_void, *mut *mut c_void) -> c_int;
+    // The real glibc `syscall(2)` wrapper, the pass-through vehicle for the SUD
+    // dispatcher's process-local memory rows (mmap-anon/munmap/mprotect/…). Its
+    // kernel entry sits in glibc text — the SUD-allowed region — so a syscall it
+    // issues never re-traps. Declared with the six integer argument registers the
+    // Linux syscall ABI uses; the glibc entry is variadic but every argument is an
+    // integer passed in registers, so a fixed-arity call is ABI-compatible.
+    pub type HostSyscall =
+        unsafe extern "C" fn(c_long, c_long, c_long, c_long, c_long, c_long, c_long) -> c_long;
 
     /// Real host vehicles resolved once through `__real_dlsym(RTLD_NEXT, ...)`.
     /// None of these names appears as an undefined external in the shim objects.
@@ -481,6 +496,9 @@ mod hostapi {
         /// The real glibc `pthread_join` for reaping completed worker host
         /// threads deterministically at the managed-join point.
         pub host_pthread_join: HostPthreadJoin,
+        /// The real glibc `syscall(2)` wrapper, the SUD dispatcher's pass-through
+        /// vehicle for process-local memory-management rows.
+        pub host_syscall: HostSyscall,
     }
 
     // SAFETY: the fields are function pointers into glibc; sharing them across
@@ -521,6 +539,7 @@ mod hostapi {
                 host_pthread_join: std::mem::transmute::<*mut c_void, HostPthreadJoin>(resolve(
                     c"pthread_join",
                 )),
+                host_syscall: std::mem::transmute::<*mut c_void, HostSyscall>(resolve(c"syscall")),
             }
         }
     }
@@ -683,6 +702,77 @@ fn set_errno(errno: c_int) {
 fn fail(errno: c_int) -> c_int {
     set_errno(errno);
     -1
+}
+
+/// Loud fail-closed for the SUD dispatcher: one deterministic diagnostic line on
+/// the real host stderr, then abort. Mirrors the thread module's `fatal` but is
+/// reachable from the crate-level `sud` module. Used for the unmapped-syscall
+/// abort and the containment-invariant violations (§4.4, §7.4).
+#[cfg(target_os = "linux")]
+pub(crate) fn sud_fatal(message: &str) -> ! {
+    let text = format!("patina: {message}\n");
+    let _ = host_write_all(2, text.as_bytes());
+    std::process::abort();
+}
+
+/// C-callable loud fail-closed for the SUD C layer (arming failures, region
+/// discovery). The C side formats no message text of its own (it references no
+/// non-allowlisted stdio), so the diagnostic is emitted here through the glibc
+/// host-write alias before aborting.
+///
+/// # Safety
+/// `message` must be a valid NUL-terminated C string.
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_sud_report_fatal(message: *const c_char) -> ! {
+    // SAFETY: the caller passes a valid NUL-terminated C string.
+    let text = unsafe { CStr::from_ptr(message) }
+        .to_string_lossy()
+        .into_owned();
+    sud_fatal(&text);
+}
+
+/// As [`patina_sud_report_fatal`] with the trapped syscall number and faulting
+/// instruction address appended — used by the SIGSYS handler's provenance and
+/// out-of-text aborts (§4.4).
+///
+/// # Safety
+/// `message` must be a valid NUL-terminated C string.
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_sud_report_fatal_addr(
+    message: *const c_char,
+    nr: std::ffi::c_long,
+    addr: usize,
+) -> ! {
+    // SAFETY: the caller passes a valid NUL-terminated C string.
+    let text = unsafe { CStr::from_ptr(message) }
+        .to_string_lossy()
+        .into_owned();
+    sud_fatal(&format!("{text} (syscall {nr} at {addr:#x})"));
+}
+
+/// Pass a process-local memory syscall through to the host kernel via glibc's
+/// `syscall(2)` wrapper, resolved as a host alias (its kernel entry sits in
+/// glibc text, the SUD-allowed region). See [`sud`] `mem_passthrough`.
+///
+/// # Safety
+/// The arguments are the guest's own for a process-local memory-management
+/// syscall (mmap-anon/munmap/mprotect/madvise/mremap/brk); no other numbers are
+/// routed here.
+#[cfg(target_os = "linux")]
+pub(crate) unsafe fn sud_host_syscall(
+    nr: std::ffi::c_long,
+    a0: std::ffi::c_long,
+    a1: std::ffi::c_long,
+    a2: std::ffi::c_long,
+    a3: std::ffi::c_long,
+    a4: std::ffi::c_long,
+    a5: std::ffi::c_long,
+) -> std::ffi::c_long {
+    // SAFETY: `host_syscall` is glibc's real `syscall` wrapper resolved through
+    // `dlsym(RTLD_NEXT, "syscall")`, never this shim's interposed `syscall`.
+    unsafe { (hostapi::get().host_syscall)(nr, a0, a1, a2, a3, a4, a5) }
 }
 
 fn runtime_errno(error: &RuntimeError) -> c_int {
@@ -3647,11 +3737,43 @@ mod thread {
         arg: *mut c_void,
     }
 
+    // Arm syscall-user-dispatch on the calling managed thread. The real
+    // definition is in the C layer (patina_posix.c); it is a no-op unless SUD was
+    // armed for this run. The Rust half of the shim also ships in probes that link
+    // the staticlib WITHOUT the C layer (the C-ABI-only host-alias probe/test),
+    // where this call would be an unresolved reference. Provide a WEAK no-op
+    // definition so those links resolve; when the C layer is linked its STRONG
+    // definition overrides this weak one and real arming happens. Mirrors the
+    // `.weak __real_dlsym` idiom used for the wrap alias.
+    #[cfg(target_os = "linux")]
+    unsafe extern "C" {
+        fn patina_sud_arm_thread();
+    }
+    #[cfg(target_os = "linux")]
+    core::arch::global_asm!(
+        ".text",
+        ".weak patina_sud_arm_thread",
+        ".p2align 2",
+        "patina_sud_arm_thread:",
+        "ret",
+    );
+
     extern "C" fn thread_trampoline(raw: *mut c_void) -> *mut c_void {
         // SAFETY: `raw` is the `Box<ThreadStart>` leaked in patina_thread_create.
         let start = unsafe { Box::from_raw(raw.cast::<ThreadStart>()) };
         let ThreadStart { task, routine, arg } = *start;
         set_current_task(task);
+        // Arm syscall-user-dispatch on this managed thread. The SUD config does
+        // not survive clone(2), so every thread must re-arm; this is the second
+        // (and only other) arming site besides the main thread in
+        // `__libc_start_main`. A no-op when SUD was not armed for this run
+        // (non-SUD kernel or standalone binary).
+        #[cfg(target_os = "linux")]
+        // SAFETY: the C symbol takes no arguments and is a no-op unless the main
+        // thread armed SUD for this run.
+        unsafe {
+            patina_sud_arm_thread()
+        };
         // Park on this task's baton semaphore until it is first scheduled.
         let sem = lock_state().task_sem(task);
         sem.wait();

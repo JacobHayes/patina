@@ -59,6 +59,20 @@ _Noreturn void patina_exit(int32_t status);
 void patina_note_main_returned(void);
 #ifdef __linux__
 /*
+ * Syscall-user-dispatch (SUD) boundary (Linux only). `patina_sud_dispatch` is
+ * the arch-agnostic dispatcher the C SIGSYS handler calls with a trapped
+ * syscall's number, its six argument registers, and the faulting instruction
+ * address; it returns the raw value written back into the return register (a
+ * negative value is `-errno`). Its *defined* presence in a binary's symbol table
+ * is also the audit's SUD marker (a dispatch-capable shim is linked).
+ * `patina_sud_arm_thread` re-arms SUD on a managed thread (the config does not
+ * survive clone(2)); it is a no-op unless the run armed SUD.
+ */
+long patina_sud_dispatch(long nr, unsigned long a0, unsigned long a1,
+                         unsigned long a2, unsigned long a3, unsigned long a4,
+                         unsigned long a5, uintptr_t call_addr);
+void patina_sud_arm_thread(void);
+/*
  * Linux interposer-engagement canary, called from the atexit finalizer. Aborts
  * loudly if the post-`main` teardown flag was never set by the time atexit runs
  * (i.e. neither the __libc_start_main wrapper nor the `exit` interposer engaged),
