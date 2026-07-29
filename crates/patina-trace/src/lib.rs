@@ -7,7 +7,7 @@ use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use patina_dst_abi::{Operation, Outcome};
+use patina_dst_abi::{Operation, Outcome, TaskId};
 use serde::{Deserialize, Serialize};
 
 /// The trace bundle format this runtime writes. It is the only version ever
@@ -828,6 +828,16 @@ impl Replayer {
 
     pub fn total(&self) -> usize {
         self.decisions.len()
+    }
+
+    /// How many `TaskYield` operations the full recorded timeline holds for
+    /// `task`. Divergence diagnostics use this to report record-vs-replay yield
+    /// accounting instead of a bare "trace ended" cursor position.
+    pub fn recorded_yields_for(&self, task: TaskId) -> usize {
+        self.decisions
+            .iter()
+            .filter(|event| event.operation == Operation::TaskYield { task })
+            .count()
     }
 
     pub fn finish(self) -> Result<(), TraceError> {

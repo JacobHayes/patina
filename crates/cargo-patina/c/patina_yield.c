@@ -19,8 +19,9 @@
 #include <stdint.h>
 
 /* Provided by the patina-dst-native-shim staticlib; offers the deterministic
- * scheduler a chance to switch tasks. */
-extern int patina_sched_yield(void);
+ * scheduler a chance to switch tasks. The instrumented call site rides along so
+ * a record/replay yield divergence can name the exact guest location. */
+extern void patina_yield_point(const void *site);
 
 /* A distinctive marker so `cargo patina run` can detect a yield-point
  * binary from its bytes and fold that into the compatibility fingerprint, so a
@@ -39,8 +40,9 @@ void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
     patina_yield_points_anchor = PATINA_YIELD_POINTS_MARKER;
 }
 
-/* Fired at every instrumented basic block in the guest. */
+/* Fired at every instrumented basic block in the guest. The return address is
+ * the instrumented site itself. */
 void __sanitizer_cov_trace_pc_guard(uint32_t *guard) {
     (void)guard;
-    patina_sched_yield();
+    patina_yield_point(__builtin_return_address(0));
 }

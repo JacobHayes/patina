@@ -1867,6 +1867,22 @@ impl ScheduleTracker {
         }
     }
 
+    /// Total `TaskYield` boundaries this run has taken for `task` so far,
+    /// whether the task is still live or already completed. Divergence
+    /// diagnostics use this for record-vs-replay yield accounting.
+    fn yields_for(&self, task: TaskId) -> u64 {
+        self.live
+            .get(&task)
+            .map(|live| live.yields)
+            .or_else(|| {
+                self.completed
+                    .iter()
+                    .find(|done| done.task == task)
+                    .map(|done| done.yields)
+            })
+            .unwrap_or(0)
+    }
+
     fn diagnostics(&self) -> ScheduleDiagnostics {
         // Each record carries the completion step as `Option`: `Some` for a task
         // the runtime saw complete, `None` for one still live at run end (whose
@@ -3961,7 +3977,10 @@ impl Context {
         match &mut self.execution {
             Execution::Replay(replayer) => {
                 let sequence = replayer.consumed();
-                Ok(Some((sequence, replayer.expect(operation)?)))
+                match replayer.expect(operation) {
+                    Ok(outcome) => Ok(Some((sequence, outcome))),
+                    Err(error) => Err(classify_yield_divergence(&self.schedule, replayer, error)),
+                }
             }
             Execution::Branch { session, .. } => {
                 session.expect_prefix(operation).map_err(Into::into)
@@ -4006,6 +4025,63 @@ impl Context {
     }
 }
 
+/// Detection for the yield-accounting failure class: a replayed scheduler-op
+/// stream that stops matching the recording at a `TaskYield`. The bare trace
+/// error ("trace ended before operation N") says nothing about WHY; when a
+/// `TaskYield` sits on either side of the divergence, fold in per-task
+/// record-vs-replay yield accounting so a guard hit count that is not a pure
+/// function of the program surfaces as a specific, self-explaining failure.
+/// Any other divergence passes through unchanged.
+fn classify_yield_divergence(
+    schedule: &ScheduleTracker,
+    replayer: &Replayer,
+    error: TraceError,
+) -> RuntimeError {
+    let yield_task = |operation: &Operation| match operation {
+        Operation::TaskYield { task } => Some(*task),
+        _ => None,
+    };
+    let (task, run_ahead) = match &error {
+        // The run produced a TaskYield the recording does not have (either past
+        // the end of the trace or where the recording expects a different op).
+        TraceError::ReplayExhausted { actual, .. } => match yield_task(actual) {
+            Some(task) => (task, true),
+            None => return error.into(),
+        },
+        TraceError::OperationMismatch {
+            expected, actual, ..
+        } => match (yield_task(actual), yield_task(expected)) {
+            (Some(task), _) => (task, true),
+            // The recording expects a TaskYield the run did not produce.
+            (None, Some(task)) => (task, false),
+            (None, None) => return error.into(),
+        },
+        _ => return error.into(),
+    };
+    let executed = schedule.yields_for(task);
+    let recorded = replayer.recorded_yields_for(task);
+    let direction = if run_ahead {
+        format!("this run reached TaskYield #{} for that task", executed + 1)
+    } else {
+        format!(
+            "this run has taken {executed} TaskYield operations for that task and now performs a \
+different operation where the recording expects another TaskYield"
+        )
+    };
+    RuntimeError::ScheduleDivergence {
+        detail: format!(
+            "yield-point replay divergence on task {}: {direction}, but the recording holds \
+{recorded} TaskYield operations for it ({} recorded operations in total). Yield-point guard hits \
+must be a pure function of the program; a record/replay count difference means instrumented guest \
+code branched differently between the two runs (canonical cause: a host-timing-dependent branch, \
+e.g. racing reference-count drops against a still-exiting host thread). Underlying trace error: \
+{error}",
+            task.0,
+            replayer.total(),
+        ),
+    }
+}
+
 #[derive(Debug)]
 pub enum RuntimeError {
     Config(String),
@@ -4034,6 +4110,12 @@ pub enum RuntimeError {
         run: Box<RuntimeError>,
         finalize: Box<RuntimeError>,
     },
+    /// A replayed scheduler-op stream diverged from the recording at a
+    /// `TaskYield` (see [`classify_yield_divergence`]). `detail` carries the
+    /// full record-vs-replay yield accounting and the underlying trace error.
+    ScheduleDivergence {
+        detail: String,
+    },
 }
 
 impl fmt::Display for RuntimeError {
@@ -4060,6 +4142,7 @@ impl fmt::Display for RuntimeError {
                 f,
                 "Patina run failed ({run}) and trace finalization also failed ({finalize})"
             ),
+            Self::ScheduleDivergence { detail } => f.write_str(detail),
         }
     }
 }

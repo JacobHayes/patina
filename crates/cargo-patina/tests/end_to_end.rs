@@ -2431,10 +2431,13 @@ fn native_yield_points_survive_thread_local_teardown() {
 // disagree on a final yield and abort the replay with "trace ended before
 // operation N; actual operation was TaskYield { task: TaskId(1) }" + a signal
 // death. The root task must now record exactly ZERO teardown yields, so
-// record/replay is byte-identical across repeats. On macOS the natural `main`
-// return keeps libSystem's own `exit` (two-level namespace) and teardown is
-// already deterministic, so this passes there too; the fix bites on Linux, where
-// ELF interposition routes the crt `exit` through the shim.
+// record/replay is byte-identical across repeats. On macOS (where the natural
+// `main` return keeps libSystem's own `exit` and the root task's teardown
+// yields stay recorded) the same guest exposed a second race: the joiner's
+// `Arc<thread::Inner>` drop against the worker's still-exiting host thread,
+// worth ±2 root-task yields under host load. `patina_thread_join` reaps the
+// worker's host thread on every platform, so that drop ordering is fixed and
+// the count is load-independent.
 const MAIN_TLS_TEARDOWN_SOURCE: &str = r#"
 use std::cell::Cell;
 use std::sync::mpsc;
@@ -2553,6 +2556,96 @@ fn native_yield_points_main_thread_tls_teardown_is_deterministic() {
             "re-recorded main-thread TLS teardown replay diverged"
         );
     }
+}
+
+// Detection for the yield-accounting failure class: a `--yield-points` replay
+// whose guard-driven TaskYield stream stops matching the recording must fail
+// with the classified diagnostic — per-task record-vs-replay yield accounting
+// plus the instrumented guest site of the unmatched yield — never the bare
+// "trace ended before operation N" cursor error. Doctoring a recording by
+// dropping its final TaskYield(+scheduler_next) pair synthesizes the exact
+// on-disk shape the Darwin join-teardown race produced (a recording one root
+// yield short of what replay executes), so this proves the detector on the
+// class without needing the host-timing race to fire.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_yield_points_divergence_reports_accounting_and_site() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("main_tls.rs");
+    fs::write(&source, MAIN_TLS_TEARDOWN_SOURCE).unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("main-tls");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+            "--yield-points",
+        ],
+    );
+    let trace = directory.path().join("full.patina");
+    invoke_in(
+        workspace,
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--record",
+            trace.to_str().unwrap(),
+        ],
+    );
+    let short = directory.path().join("short.patina");
+    drop_trailing_task_yield(&trace, &short);
+
+    let replayed = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["replay", bin.to_str().unwrap(), short.to_str().unwrap()],
+    );
+    assert!(
+        !replayed.status.success(),
+        "replaying a yield-short recording must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&replayed.stderr);
+    assert!(
+        stderr.contains("yield-point replay divergence on task"),
+        "divergence must be classified with yield accounting, not a bare trace error:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("TaskYield operations for it"),
+        "the diagnostic must report the recording's per-task yield count:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("divergent yield point: guest pc"),
+        "the diagnostic must name the instrumented site of the unmatched yield:\n{stderr}"
+    );
+}
+
+// Rewrite `source` into `dest` with the final TaskYield decision (and the
+// scheduler_next recorded after it) removed, synthesizing a recording whose
+// root-task yield count is one short of what a faithful replay executes.
+// Traces are compact, greppable JSON, so editing the decision list directly is
+// a faithful stand-in for a genuinely divergent recording.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn drop_trailing_task_yield(source: &Path, dest: &Path) {
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(source).unwrap()).unwrap();
+    let timeline = &mut value["timelines"][0];
+    assert_eq!(timeline["id"], "main", "expected the main timeline first");
+    let decisions = timeline["decisions"].as_array_mut().unwrap();
+    let next = decisions.pop().unwrap();
+    assert_eq!(
+        next["operation"]["kind"], "scheduler_next",
+        "expected the recording to end with a scheduler_next decision"
+    );
+    let yielded = decisions.pop().unwrap();
+    assert_eq!(
+        yielded["operation"]["kind"], "task_yield",
+        "expected a trailing task_yield decision before the final scheduler_next"
+    );
+    fs::write(dest, serde_json::to_vec(&value).unwrap()).unwrap();
 }
 
 // One uninterposed symbol per escape class in a single guest. Taking each as a

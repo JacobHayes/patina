@@ -121,6 +121,11 @@ int32_t patina_symlink(const char *target, const char *link_path);
 intptr_t patina_read_link(const char *path, char *buf, size_t len);
 int32_t patina_thread_id(void);
 int32_t patina_sched_yield(void);
+/*
+ * --yield-points guard hook (patina_yield.c): a deterministic scheduling point
+ * carrying the instrumented guest site for divergence diagnostics.
+ */
+void patina_yield_point(const void *site);
 int32_t patina_mkdir(const char *path);
 int32_t patina_unlink(const char *path);
 int32_t patina_rmdir(const char *path);

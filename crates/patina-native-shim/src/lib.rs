@@ -276,6 +276,7 @@ mod hostapi {
     pub type StartRoutine = extern "C" fn(*mut c_void) -> *mut c_void;
     pub type PthreadCreateSuspended =
         unsafe extern "C" fn(*mut *mut c_void, *const c_void, StartRoutine, *mut c_void) -> c_int;
+    pub type PthreadJoin = unsafe extern "C" fn(*mut c_void, *mut *mut c_void) -> c_int;
     pub type PthreadMachThread = unsafe extern "C" fn(*mut c_void) -> MachPort;
     pub type ThreadResume = unsafe extern "C" fn(MachPort) -> c_int;
     pub type HostRead = unsafe extern "C" fn(c_int, *mut c_void, usize) -> isize;
@@ -300,6 +301,10 @@ mod hostapi {
         pub dispatch_semaphore_signal: DispatchSemaphoreSignal,
         pub dispatch_release: DispatchRelease,
         pub pthread_create_suspended_np: PthreadCreateSuspended,
+        /// The real host `pthread_join`, used by `patina_thread_join` to reap
+        /// the worker's host thread so its teardown makes the joiner's
+        /// deterministic last reference (see `patina_thread_join`).
+        pub host_pthread_join: PthreadJoin,
         pub pthread_mach_thread_np: PthreadMachThread,
         pub thread_resume: ThreadResume,
         /// The non-cancel-point host `read`/`write` for the trace control plane
@@ -362,6 +367,9 @@ mod hostapi {
                     PthreadCreateSuspended,
                 >(resolve(
                     c"pthread_create_suspended_np",
+                )),
+                host_pthread_join: std::mem::transmute::<*mut c_void, PthreadJoin>(resolve(
+                    c"pthread_join",
                 )),
                 pthread_mach_thread_np: std::mem::transmute::<*mut c_void, PthreadMachThread>(
                     resolve(c"pthread_mach_thread_np"),
@@ -691,7 +699,8 @@ fn runtime_errno(error: &RuntimeError) -> c_int {
         | RuntimeError::Io { .. }
         | RuntimeError::Trace(_)
         | RuntimeError::InvalidOutcome { .. }
-        | RuntimeError::RunAndFinalize { .. } => EIO,
+        | RuntimeError::RunAndFinalize { .. }
+        | RuntimeError::ScheduleDivergence { .. } => EIO,
     }
 }
 
@@ -850,7 +859,14 @@ fn with_context_msg<T>(
     let context = guard
         .as_mut()
         .ok_or_else(|| "Patina context is not installed".to_string())?;
-    invoke(context).map_err(|error| error.to_string())
+    invoke(context).map_err(|error| match &error {
+        // A classified yield divergence gains the one fact only the shim knows:
+        // the instrumented guest site of the in-flight guard hit (if any).
+        RuntimeError::ScheduleDivergence { .. } => {
+            format!("{error}{}", thread::yield_site_context())
+        }
+        _ => error.to_string(),
+    })
 }
 
 /// Run a closure against the installed [`Context`] behind a deterministic
@@ -2162,6 +2178,15 @@ pub extern "C" fn patina_sched_yield() -> c_int {
     0
 }
 
+/// The `--yield-points` guard hook: `patina_yield.c` forwards every
+/// SanitizerCoverage guard hit here with the instrumented call site, so a
+/// record/replay yield divergence can name the exact guest location that took
+/// the extra scheduling point. Otherwise identical to [`patina_sched_yield`].
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_yield_point(site: *const c_void) {
+    thread::yield_point_from(site as usize);
+}
+
 /// The runtime side of the packaged `exit` interposer (patina_posix.c). It runs
 /// at the process's main-return / `exit(3)` boundary — the one point that
 /// executes on the exiting thread AFTER its managed body but BEFORE the C runtime
@@ -2212,7 +2237,9 @@ pub extern "C" fn patina_note_main_returned() {
 /// diverge. Fail LOUDLY and named rather than let that miss surface hours later as
 /// an unexplained op-count divergence. Darwin is excluded by design: its natural
 /// path keeps libSystem's own `exit` (two-level namespace), so the flag is not set
-/// there and Darwin teardown is already deterministic.
+/// there and the root task's teardown yields stay recorded — deterministically,
+/// now that `patina_thread_join`'s host reap fixes the one known load-dependent
+/// branch (the joiner-vs-worker `Arc<thread::Inner>` teardown race).
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_assert_teardown_engaged() {
@@ -2587,6 +2614,10 @@ mod thread {
         /// loudly through the unchanged `reschedule` path, never silently proceeds
         /// unscheduled.
         static TASK_COMPLETED: Cell<bool> = const { Cell::new(false) };
+        /// The guest pc of the in-flight `--yield-points` guard hit, captured by
+        /// [`yield_point_from`] so a replay divergence can name the instrumented
+        /// site that took the extra scheduling point; 0 outside a guard hit.
+        static YIELD_SITE: Cell<usize> = const { Cell::new(0) };
     }
 
     fn set_current_task(task: TaskId) {
@@ -3520,6 +3551,36 @@ mod thread {
         thread_runtime().lock()
     }
 
+    /// Take a guard-driven scheduling point, remembering the instrumented call
+    /// site for the divergence diagnostic. On the failure path `sched_point`
+    /// aborts with the site still set, which is exactly when
+    /// [`yield_site_context`] reads it.
+    pub(crate) fn yield_point_from(site: usize) {
+        YIELD_SITE.with(|cell| cell.set(site));
+        let _ = sched_point();
+        YIELD_SITE.with(|cell| cell.set(0));
+    }
+
+    /// Divergence-diagnostic context: where the in-flight scheduling point came
+    /// from. ASLR makes a raw pc unusable offline, so the site is also reported
+    /// relative to the shim's own `patina_yield_point` in the same executable
+    /// image — a delta that is stable across runs of one binary. Symbolize by
+    /// adding the delta to `nm <binary> | grep patina_yield_point`.
+    pub(crate) fn yield_site_context() -> String {
+        let site = YIELD_SITE.with(Cell::get);
+        if site == 0 {
+            return "; the divergent scheduling point came from an interposed boundary call, not a \
+--yield-points guard".into();
+        }
+        let anchor = crate::patina_yield_point as *const () as usize;
+        let delta = site.wrapping_sub(anchor) as isize;
+        let sign = if delta < 0 { '-' } else { '+' };
+        format!(
+            "; divergent yield point: guest pc {site:#x} = patina_yield_point{sign}{:#x}",
+            delta.unsigned_abs()
+        )
+    }
+
     /// Take a deterministic scheduling point at a boundary call. A no-op until
     /// the thread subsystem activates, so single-threaded programs are
     /// unaffected.
@@ -3726,15 +3787,13 @@ mod thread {
         // which runs right after this returns), whichever is the LAST reference
         // takes the acquire-fence + destructor slow path — so under
         // `--yield-points` the joiner records a host-timing-dependent number of
-        // scheduling points (the op-742/12623 x86 divergence). Joining here forces
-        // the worker to drop its reference first, so the joiner's drop is
-        // deterministically the last reference on every run and every host thread
-        // that reaches this. The worker's own teardown runs on a
-        // task-completed-silenced thread, so it records nothing; the join adds no
-        // instrumented guest edges. Linux only: Darwin is already deterministic
-        // here (its thread-exit ordering does not manifest the race) and stays
-        // byte-for-byte untouched.
-        #[cfg(target_os = "linux")]
+        // scheduling points (the op-742/12623 x86 divergence on Linux; the
+        // ±2-yield main-tls record/replay divergence under load on Darwin).
+        // Joining here forces the worker to drop its reference first, so the
+        // joiner's drop is deterministically the last reference on every run and
+        // every host thread that reaches this. The worker's own teardown runs on
+        // a task-completed-silenced thread, so it records nothing; the join adds
+        // no instrumented guest edges.
         // SAFETY: `handle` is the real joinable host `pthread_t` returned by
         // `patina_thread_create`; the state lock is released above so the worker's
         // exit cannot deadlock against a lock this thread holds.

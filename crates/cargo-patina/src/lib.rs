@@ -525,7 +525,7 @@ struct NativeBuildInvocation {
     output: Option<PathBuf>,
     release: bool,
     /// Instrument the guest with deterministic yield points (LLVM
-    /// SanitizerCoverage → `patina_sched_yield`) so atomics-only race windows are
+    /// SanitizerCoverage → `patina_yield_point`) so atomics-only race windows are
     /// schedulable. Off by default; native builds never see it.
     yield_points: bool,
 }
@@ -3919,7 +3919,7 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
         // distinct (denser) policy recorded in its fingerprint.
         let yield_note = format!(
             "PATINA_NATIVE_BUILD_YIELD_POINTS instrumentation=llvm-sancov-trace-pc-guard \
-scheduler-hook=patina_sched_yield fingerprint-suffix={PATINA_YIELD_FINGERPRINT_SUFFIX}"
+scheduler-hook=patina_yield_point fingerprint-suffix={PATINA_YIELD_FINGERPRINT_SUFFIX}"
         );
         if output::options().is_json() {
             eprintln!("{yield_note}");
@@ -3966,7 +3966,7 @@ scheduler-hook=patina_sched_yield fingerprint-suffix={PATINA_YIELD_FINGERPRINT_S
 }
 
 /// Stage and compile the `--yield-points` hook object. Compiled without the
-/// SanitizerCoverage flags themselves, so the hook (and thus `patina_sched_yield`
+/// SanitizerCoverage flags themselves, so the hook (and thus `patina_yield_point`
 /// it calls) is never itself instrumented and cannot recurse.
 fn compile_yield_object(workdir: &Path) -> Result<PathBuf, CliError> {
     let c_source = workdir.join("patina_yield.c");
@@ -3998,7 +3998,7 @@ fn compile_yield_object(workdir: &Path) -> Result<PathBuf, CliError> {
 
 /// The rustc flags that turn on LLVM SanitizerCoverage trace-pc-guard
 /// instrumentation at basic-block granularity (level 3 reaches loop backedges),
-/// so `__sanitizer_cov_trace_pc_guard` — routed to `patina_sched_yield` by the
+/// so `__sanitizer_cov_trace_pc_guard` — routed to `patina_yield_point` by the
 /// linked hook — fires inside hot loops, not only at function entry. `-Cpasses`
 /// and `-Cllvm-args` are stable rustc codegen flags, so this needs no nightly
 /// toolchain and no `RUSTC_BOOTSTRAP`. The only version coupling is to LLVM's
