@@ -1892,6 +1892,63 @@ fn main() {
     println!("NATIVE_PIPE_NONBLOCK_RESULT ok={ok}");
 }
 RS
+cat >"$tmp/pipe_dup_probe.rs" <<'RS'
+// dup aliases a pipe endpoint into the same channel side: bytes written through
+// either fd reach the one reader, EOF appears only after the LAST write-side fd
+// closes, and EPIPE only after the LAST read-side fd closes. Both entry points
+// are exercised: raw dup(2) and fcntl(F_DUPFD_CLOEXEC) (std's try_clone path).
+#[cfg(target_os = "macos")] const O_NONBLOCK: i32 = 0x0004;
+#[cfg(target_os = "linux")] const O_NONBLOCK: i32 = 0o4000;
+#[cfg(target_os = "macos")] const EWOULDBLOCK: i32 = 35;
+#[cfg(target_os = "linux")] const EWOULDBLOCK: i32 = 11;
+#[cfg(target_os = "macos")] const F_DUPFD_CLOEXEC: i32 = 67;
+#[cfg(target_os = "linux")] const F_DUPFD_CLOEXEC: i32 = 1030;
+const EPIPE: i32 = 32;
+const F_SETFL: i32 = 4;
+unsafe extern "C" {
+    fn pipe(fds: *mut i32) -> i32;
+    fn dup(fd: i32) -> i32;
+    fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    fn read(fd: i32, buf: *mut u8, len: usize) -> isize;
+    fn write(fd: i32, buf: *const u8, len: usize) -> isize;
+    fn close(fd: i32) -> i32;
+}
+fn errno() -> i32 { std::io::Error::last_os_error().raw_os_error().unwrap_or(0) }
+fn main() {
+    let mut ok = true;
+    let mut buf = [0u8; 4];
+    // Write-side alias: close the ORIGINAL writer first — the drained reader
+    // must see would-block (side still open), not EOF, until the dup closes too.
+    let mut fds = [0i32; 2];
+    assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
+    let (r, w) = (fds[0], fds[1]);
+    assert_eq!(unsafe { fcntl(r, F_SETFL, O_NONBLOCK) }, 0);
+    let w_dup = unsafe { dup(w) };
+    ok &= w_dup >= 0;
+    ok &= unsafe { write(w, b"a".as_ptr(), 1) } == 1;
+    unsafe { close(w) };
+    ok &= unsafe { read(r, buf.as_mut_ptr(), buf.len()) } == 1 && buf[0] == b'a';
+    ok &= unsafe { read(r, buf.as_mut_ptr(), buf.len()) } == -1 && errno() == EWOULDBLOCK;
+    ok &= unsafe { write(w_dup, b"b".as_ptr(), 1) } == 1;
+    ok &= unsafe { read(r, buf.as_mut_ptr(), buf.len()) } == 1 && buf[0] == b'b';
+    unsafe { close(w_dup) };
+    let eof = unsafe { read(r, buf.as_mut_ptr(), buf.len()) } == 0;
+    unsafe { close(r) };
+    // Read-side alias: writes succeed while EITHER read fd lives; EPIPE only
+    // after the last one closes.
+    let mut fds2 = [0i32; 2];
+    assert_eq!(unsafe { pipe(fds2.as_mut_ptr()) }, 0);
+    let (r2, w2) = (fds2[0], fds2[1]);
+    let r2_dup = unsafe { fcntl(r2, F_DUPFD_CLOEXEC, 0) };
+    ok &= r2_dup >= 0;
+    unsafe { close(r2) };
+    ok &= unsafe { write(w2, b"x".as_ptr(), 1) } == 1;
+    unsafe { close(r2_dup) };
+    let epipe = unsafe { write(w2, b"y".as_ptr(), 1) } == -1 && errno() == EPIPE;
+    unsafe { close(w2) };
+    println!("NATIVE_PIPE_DUP_RESULT ok={ok} eof={eof} epipe={epipe}");
+}
+RS
 
 # (a) pipe round-trip: byte-identical across two same-seed runs, at two seeds.
 # The imports resolve to shim defs, so the source audits clean (no allowance).
@@ -1941,7 +1998,16 @@ grep -qx 'NATIVE_PIPE_EPIPE_RESULT epipe=true eof=true' "$tmp/pipe-epipe-out"
 "$runner" run "$tmp/pipe-nonblock-probe" --seed 1 >"$tmp/pipe-nonblock-out"
 grep -qx 'NATIVE_PIPE_NONBLOCK_RESULT ok=true' "$tmp/pipe-nonblock-out"
 
-# (e) The cross-process class-g siblings stay REFUSED: interposing the in-process
+# (e) dup/F_DUPFD_CLOEXEC alias a pipe endpoint refcounted: EOF only after the
+# LAST write-side fd closes, EPIPE only after the LAST read-side fd closes.
+"$runner" build "$tmp/pipe_dup_probe.rs" --output "$tmp/pipe-dup-probe" >/dev/null
+"$runner" audit "$tmp/pipe-dup-probe" "${shim_allow[@]}" >/dev/null
+"$runner" run "$tmp/pipe-dup-probe" --seed 1 >"$tmp/pipe-dup-1"
+"$runner" run "$tmp/pipe-dup-probe" --seed 1 >"$tmp/pipe-dup-2"
+cmp "$tmp/pipe-dup-1" "$tmp/pipe-dup-2"
+grep -qx 'NATIVE_PIPE_DUP_RESULT ok=true eof=true epipe=true' "$tmp/pipe-dup-1"
+
+# (f) The cross-process class-g siblings stay REFUSED: interposing the in-process
 # pipe/socketpair must not weaken the gate for a real IPC escape. eventfd is the
 # still-denied sibling on Linux; macOS has no eventfd, so shm_open (same class)
 # stands in there. Either way the audit must refuse it as `shared-memory-ipc`.
@@ -1964,10 +2030,401 @@ if "$runner" audit "$tmp/shared-ipc-refusal-probe" --raw \
 fi
 grep -q 'shared-memory-ipc' "$tmp/shared-ipc-refusal-error"
 
+# -----------------------------------------------------------------------------
+# kqueue / kevent readiness reactor (macOS). The last macOS interposition item:
+# a deterministic in-process model of the BSD readiness multiplexer that mio (and
+# therefore tokio) builds its IO driver on. macOS-only — kqueue/kevent have no
+# Linux counterpart — so the whole block is gated on Darwin. The reactor carries
+# NO trace events of its own (the registry is deterministic given the recorded
+# schedule, like the pipe channels and mutex words); only the scheduler
+# parks/wakes are recorded, so record and flag-free replay converge.
+# -----------------------------------------------------------------------------
+if [[ "$(uname -s)" == Darwin ]]; then
+  # (a) Raw-libc kqueue: EVFILT_READ interest over a socketpair endpoint. A
+  # register call returns its EV_ERROR receipt (data 0 = success); a blocking
+  # kevent then parks until a writer task writes, and reports the correct event
+  # fields (ident/filter/udata). Two same-seed runs are byte-identical.
+  cat >"$tmp/kqueue_probe.rs" <<'RS'
+// A reader (main) registers EVFILT_READ on a socketpair endpoint and blocks in
+// kevent; a writer task writes, waking the fan-in park through the baton.
+use std::ffi::{c_int, c_void};
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KEvent { ident: usize, filter: i16, flags: u16, fflags: u32, data: isize, udata: *mut c_void }
+
+const AF_UNIX: c_int = 1;
+const SOCK_STREAM: c_int = 1;
+const EVFILT_READ: i16 = -1;
+const EV_ADD: u16 = 0x0001;
+const EV_CLEAR: u16 = 0x0020;
+const EV_RECEIPT: u16 = 0x0040;
+const EV_ERROR: u16 = 0x4000;
+
+unsafe extern "C" {
+    fn socketpair(domain: c_int, ty: c_int, protocol: c_int, sv: *mut c_int) -> c_int;
+    fn kqueue() -> c_int;
+    fn kevent(kq: c_int, cl: *const KEvent, nc: c_int, el: *mut KEvent, ne: c_int, ts: *const c_void) -> c_int;
+    fn write(fd: c_int, buf: *const c_void, n: usize) -> isize;
+    fn read(fd: c_int, buf: *mut c_void, n: usize) -> isize;
+}
+fn zero() -> KEvent { KEvent { ident: 0, filter: 0, flags: 0, fflags: 0, data: 0, udata: std::ptr::null_mut() } }
+
+fn main() {
+    let mut sv = [0 as c_int; 2];
+    assert_eq!(unsafe { socketpair(AF_UNIX, SOCK_STREAM, 0, sv.as_mut_ptr()) }, 0, "socketpair");
+    let (a, b) = (sv[0], sv[1]);
+    let kq = unsafe { kqueue() };
+    assert!(kq >= 0, "kqueue");
+
+    let change = KEvent { ident: a as usize, filter: EVFILT_READ, flags: EV_ADD | EV_CLEAR | EV_RECEIPT, fflags: 0, data: 0, udata: 0x1234 as *mut c_void };
+    let mut receipt = [zero()];
+    assert_eq!(unsafe { kevent(kq, &change, 1, receipt.as_mut_ptr(), 1, std::ptr::null()) }, 1, "register receipt");
+    assert!(receipt[0].flags & EV_ERROR != 0 && receipt[0].data == 0, "receipt ok");
+
+    let writer = std::thread::spawn(move || {
+        let msg = b"ping";
+        assert_eq!(unsafe { write(b, msg.as_ptr() as *const c_void, msg.len()) }, 4);
+    });
+
+    let mut events = [zero()];
+    let n = unsafe { kevent(kq, std::ptr::null(), 0, events.as_mut_ptr(), 1, std::ptr::null()) };
+    assert_eq!(n, 1, "one ready event");
+    assert_eq!(events[0].ident, a as usize, "event ident");
+    assert_eq!(events[0].filter, EVFILT_READ, "event filter");
+    assert_eq!(events[0].udata, 0x1234 as *mut c_void, "event udata");
+
+    let mut buf = [0u8; 8];
+    let got = unsafe { read(a, buf.as_mut_ptr() as *mut c_void, buf.len()) };
+    assert_eq!(got, 4);
+    writer.join().unwrap();
+    println!("NATIVE_KQUEUE_RESULT got={}", std::str::from_utf8(&buf[..got as usize]).unwrap());
+}
+RS
+  "$runner" build "$tmp/kqueue_probe.rs" --output "$tmp/kqueue-probe" >/dev/null
+  "$runner" audit "$tmp/kqueue-probe" "${shim_allow[@]}" >/dev/null
+  for seed in 1 2; do
+    "$runner" run "$tmp/kqueue-probe" --seed "$seed" >"$tmp/kqueue-seed-$seed-1"
+    "$runner" run "$tmp/kqueue-probe" --seed "$seed" >"$tmp/kqueue-seed-$seed-2"
+    cmp "$tmp/kqueue-seed-$seed-1" "$tmp/kqueue-seed-$seed-2"
+    grep -qx 'NATIVE_KQUEUE_RESULT got=ping' "$tmp/kqueue-seed-$seed-1"
+  done
+  # Same seed is byte-identical across a record and its flag-free replay.
+  "$runner" run "$tmp/kqueue-probe" --seed 1 --record "$tmp/kqueue.patina" \
+    --fingerprint native-kqueue-v1 >"$tmp/kqueue-record"
+  "$runner" replay "$tmp/kqueue-probe" "$tmp/kqueue.patina" \
+    --fingerprint native-kqueue-v1 >"$tmp/kqueue-replay"
+  cmp "$tmp/kqueue-record" "$tmp/kqueue-replay"
+  cmp "$tmp/kqueue-seed-1-1" "$tmp/kqueue-replay"
+
+  # (b) EVFILT_USER self-wakeup (mio's Waker): another task triggers NOTE_TRIGGER,
+  # unparking main's blocked kevent. (c) EVFILT-free timeout: a kevent with a
+  # timespec and nothing ready returns 0 after EXACTLY the virtual-clock duration
+  # (asserted via Instant, which reads the virtual clock).
+  cat >"$tmp/kqueue_user_probe.rs" <<'RS'
+use std::ffi::{c_int, c_void};
+use std::time::Instant;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KEvent { ident: usize, filter: i16, flags: u16, fflags: u32, data: isize, udata: *mut c_void }
+#[repr(C)]
+struct TimeSpec { tv_sec: isize, tv_nsec: isize }
+
+const AF_UNIX: c_int = 1;
+const SOCK_STREAM: c_int = 1;
+const EVFILT_READ: i16 = -1;
+const EVFILT_USER: i16 = -10;
+const EV_ADD: u16 = 0x0001;
+const EV_CLEAR: u16 = 0x0020;
+const EV_RECEIPT: u16 = 0x0040;
+const NOTE_TRIGGER: u32 = 0x0100_0000;
+
+unsafe extern "C" {
+    fn socketpair(domain: c_int, ty: c_int, protocol: c_int, sv: *mut c_int) -> c_int;
+    fn kqueue() -> c_int;
+    fn kevent(kq: c_int, cl: *const KEvent, nc: c_int, el: *mut KEvent, ne: c_int, ts: *const TimeSpec) -> c_int;
+}
+fn zero() -> KEvent { KEvent { ident: 0, filter: 0, flags: 0, fflags: 0, data: 0, udata: std::ptr::null_mut() } }
+
+fn main() {
+    // EVFILT_USER: a writer task triggers, main's blocked kevent returns it.
+    let kq = unsafe { kqueue() };
+    let reg = KEvent { ident: 42, filter: EVFILT_USER, flags: EV_ADD | EV_CLEAR | EV_RECEIPT, fflags: 0, data: 0, udata: 0 as *mut c_void };
+    let mut r = [zero()];
+    assert_eq!(unsafe { kevent(kq, &reg, 1, r.as_mut_ptr(), 1, std::ptr::null()) }, 1);
+    let t = std::thread::spawn(move || {
+        let trig = KEvent { ident: 42, filter: EVFILT_USER, flags: EV_ADD | EV_RECEIPT, fflags: NOTE_TRIGGER, data: 0, udata: 0 as *mut c_void };
+        let mut rr = [zero()];
+        assert_eq!(unsafe { kevent(kq, &trig, 1, rr.as_mut_ptr(), 1, std::ptr::null()) }, 1);
+    });
+    let mut ev = [zero()];
+    let user_n = unsafe { kevent(kq, std::ptr::null(), 0, ev.as_mut_ptr(), 1, std::ptr::null()) };
+    assert_eq!(user_n, 1, "user event");
+    assert_eq!(ev[0].filter, EVFILT_USER);
+    assert_eq!(ev[0].ident, 42);
+    t.join().unwrap();
+
+    // Timeout: nothing ready, kevent returns 0 after exactly 50ms virtual time.
+    let mut sv = [0 as c_int; 2];
+    assert_eq!(unsafe { socketpair(AF_UNIX, SOCK_STREAM, 0, sv.as_mut_ptr()) }, 0);
+    let kq2 = unsafe { kqueue() };
+    let reg2 = KEvent { ident: sv[0] as usize, filter: EVFILT_READ, flags: EV_ADD | EV_CLEAR | EV_RECEIPT, fflags: 0, data: 0, udata: 0 as *mut c_void };
+    let mut r2 = [zero()];
+    assert_eq!(unsafe { kevent(kq2, &reg2, 1, r2.as_mut_ptr(), 1, std::ptr::null()) }, 1);
+    let ts = TimeSpec { tv_sec: 0, tv_nsec: 50_000_000 };
+    let before = Instant::now();
+    let mut ev2 = [zero()];
+    let n2 = unsafe { kevent(kq2, std::ptr::null(), 0, ev2.as_mut_ptr(), 1, &ts) };
+    let elapsed_ms = before.elapsed().as_millis();
+    assert_eq!(n2, 0, "timeout returns zero events");
+    assert_eq!(elapsed_ms, 50, "timeout elapsed exactly the virtual duration");
+    println!("NATIVE_KQUEUE_USER_TIMEOUT user_ok={} timeout_ms={}", user_n == 1, elapsed_ms);
+}
+RS
+  "$runner" build "$tmp/kqueue_user_probe.rs" --output "$tmp/kqueue-user-probe" >/dev/null
+  "$runner" audit "$tmp/kqueue-user-probe" "${shim_allow[@]}" >/dev/null
+  "$runner" run "$tmp/kqueue-user-probe" --seed 1 >"$tmp/kqueue-user-1"
+  "$runner" run "$tmp/kqueue-user-probe" --seed 1 >"$tmp/kqueue-user-2"
+  cmp "$tmp/kqueue-user-1" "$tmp/kqueue-user-2"
+  grep -qx 'NATIVE_KQUEUE_USER_TIMEOUT user_ok=true timeout_ms=50' "$tmp/kqueue-user-1"
+
+  # (d) The acceptance workload: a real tokio current-thread runtime driving an
+  # async socketpair ping-pong entirely through the deterministic kqueue reactor
+  # (mio's kevent readiness + EVFILT_USER Waker) and the in-process net shim. The
+  # `signal` feature matters: with it compiled, `enable_all()` also arms tokio's
+  # signal driver, which creates a UnixStream::pair and try_clones one end —
+  # fcntl(F_DUPFD_CLOEXEC) on a virtual socketpair endpoint, the refcounted pipe
+  # dup path. It builds via `cargo patina build`, audits with NO allowance beyond
+  # the existing shim residue, runs seed-stable, and records/replays
+  # byte-identically. The dependency tree is pinned by the committed Cargo.lock
+  # for a reproducible build.
+  mkdir -p "$tmp/tokio-probe-src/src"
+  cat >"$tmp/tokio-probe-src/Cargo.toml" <<'TOML'
+[package]
+name = "patina-tokio-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+tokio = { version = "=1.53.1", features = ["rt", "net", "io-util", "macros", "time", "signal"] }
+
+[[bin]]
+name = "patina-tokio-probe"
+path = "src/main.rs"
+TOML
+  cat >"$tmp/tokio-probe-src/Cargo.lock" <<'LOCK'
+# This file is automatically @generated by Cargo.
+# It is not intended for manual editing.
+version = 4
+
+[[package]]
+name = "bytes"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+
+[[package]]
+name = "errno"
+version = "0.3.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+dependencies = [
+ "libc",
+ "windows-sys",
+]
+
+[[package]]
+name = "libc"
+version = "0.2.189"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+
+[[package]]
+name = "mio"
+version = "1.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30d65c71f1ce40ab09135ce117d742b9f8a19ff91a41a8b57ed50bc2de59c427"
+dependencies = [
+ "libc",
+ "wasi",
+ "windows-sys",
+]
+
+[[package]]
+name = "patina-tokio-probe"
+version = "0.0.0"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
+name = "pin-project-lite"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[package]]
+name = "proc-macro2"
+version = "1.0.107"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
+dependencies = [
+ "unicode-ident",
+]
+
+[[package]]
+name = "quote"
+version = "1.0.47"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
+dependencies = [
+ "proc-macro2",
+]
+
+[[package]]
+name = "signal-hook-registry"
+version = "1.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
+dependencies = [
+ "errno",
+ "libc",
+]
+
+[[package]]
+name = "socket2"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
+dependencies = [
+ "libc",
+ "windows-sys",
+]
+
+[[package]]
+name = "syn"
+version = "3.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
+name = "tokio"
+version = "1.53.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+dependencies = [
+ "bytes",
+ "libc",
+ "mio",
+ "pin-project-lite",
+ "signal-hook-registry",
+ "socket2",
+ "tokio-macros",
+ "windows-sys",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "unicode-ident"
+version = "1.0.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "wasi"
+version = "0.11.1+wasi-snapshot-preview1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
+
+[[package]]
+name = "windows-link"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "windows-sys"
+version = "0.61.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
+dependencies = [
+ "windows-link",
+]
+LOCK
+  cat >"$tmp/tokio-probe-src/src/main.rs" <<'RS'
+// A real tokio current-thread runtime driving an async socketpair ping-pong.
+// UnixStream::pair lowers to socketpair(2); tokio's IO driver registers the
+// endpoints with mio's kqueue selector and wakes itself through an EVFILT_USER
+// Waker — all serviced by the deterministic reactor + net shim.
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
+
+fn main() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let out = rt.block_on(async {
+        let (mut a, mut b) = UnixStream::pair().unwrap();
+        let server = tokio::spawn(async move {
+            let mut buf = [0u8; 4];
+            b.read_exact(&mut buf).await.unwrap();
+            b.write_all(b"pong").await.unwrap();
+            buf
+        });
+        a.write_all(b"ping").await.unwrap();
+        let mut buf = [0u8; 4];
+        a.read_exact(&mut buf).await.unwrap();
+        let server_got = server.await.unwrap();
+        (buf, server_got)
+    });
+    println!(
+        "NATIVE_TOKIO_RESULT client_got={} server_got={}",
+        std::str::from_utf8(&out.0).unwrap(),
+        std::str::from_utf8(&out.1).unwrap()
+    );
+}
+RS
+  "$runner" build "$tmp/tokio-probe-src" --bin patina-tokio-probe --output "$tmp/tokio-probe" >/dev/null
+  "$runner" audit "$tmp/tokio-probe" "${shim_allow[@]}" >/dev/null
+  "$runner" run "$tmp/tokio-probe" --seed 1 >"$tmp/tokio-seed-1"
+  "$runner" run "$tmp/tokio-probe" --seed 1 >"$tmp/tokio-seed-2"
+  cmp "$tmp/tokio-seed-1" "$tmp/tokio-seed-2"
+  grep -qx 'NATIVE_TOKIO_RESULT client_got=pong server_got=ping' "$tmp/tokio-seed-1"
+  "$runner" run "$tmp/tokio-probe" --seed 1 --record "$tmp/tokio.patina" \
+    --fingerprint native-tokio-v1 >"$tmp/tokio-record"
+  "$runner" replay "$tmp/tokio-probe" "$tmp/tokio.patina" \
+    --fingerprint native-tokio-v1 >"$tmp/tokio-replay"
+  cmp "$tmp/tokio-record" "$tmp/tokio-replay"
+  cmp "$tmp/tokio-seed-1" "$tmp/tokio-replay"
+
+  cat "$tmp/kqueue-seed-1-1"
+  cat "$tmp/kqueue-user-1"
+  cat "$tmp/tokio-seed-1"
+fi
+
 cat "$tmp/pipe-seed-1-1"
 cat "$tmp/socketpair-seed-1-1"
 cat "$tmp/pipe-epipe-out"
 cat "$tmp/pipe-nonblock-out"
+cat "$tmp/pipe-dup-1"
 
 cat "$tmp/replay"
 cat "$tmp/std-replay"

@@ -48,6 +48,8 @@
 #include <mach/mach_time.h>
 #include <mach-o/dyld.h>
 #include <os/lock.h>
+#include <stddef.h>
+#include <sys/event.h>
 
 uint64_t mach_absolute_time(void) {
     uint64_t nanos = 0;
@@ -830,8 +832,33 @@ int openat(int dirfd, const char *path, int flags, ...) {
 }
 
 int fcntl(int fd, int command, ...) {
+#ifdef __APPLE__
+    /* Virtual kqueue descriptors. F_DUPFD/F_DUPFD_CLOEXEC clone into a second fd
+     * sharing the SAME registry (tokio's IO driver clones its selector through
+     * F_DUPFD_CLOEXEC); the requested minimum is honored implicitly because the
+     * deterministic fd counter always allocates above it. cloexec and the
+     * blocking flag are no-ops on a kqueue. */
+    if (fd >= PATINA_SOCKET_FD_BASE && patina_kqueue_is_kq(fd)) {
+        if (command == F_DUPFD
+#ifdef F_DUPFD_CLOEXEC
+            || command == F_DUPFD_CLOEXEC
+#endif
+        )
+            return fail_int(patina_kqueue_dup(fd));
+        if (command == F_GETFD) return FD_CLOEXEC;
+        if (command == F_SETFD) return 0;
+        if (command == F_SETFL) return 0;
+        if (command == F_GETFL) return 0;
+        errno = EINVAL;
+        return -1;
+    }
+#endif
     /* Virtual pipe/socketpair endpoints: same blocking-flag surface as sockets,
-     * routed to the pipe table (cloexec is a no-op; dup is not modeled). */
+     * routed to the pipe table (cloexec is a no-op). F_DUPFD/F_DUPFD_CLOEXEC
+     * alias the endpoint's channel side(s) refcounted (std's try_clone — tokio's
+     * signal driver clones a socketpair end this way); as with kqueue fds the
+     * requested minimum is honored implicitly because the deterministic fd
+     * counter always allocates above it. */
     if (fd >= PATINA_SOCKET_FD_BASE && patina_pipe_is_endpoint(fd)) {
         if (command == F_GETFL) {
             int nonblocking = patina_pipe_is_nonblocking(fd);
@@ -855,7 +882,7 @@ int fcntl(int fd, int command, ...) {
             || command == F_DUPFD_CLOEXEC
 #endif
         )
-            return patina_posix_deny("patina: duplicating a virtual pipe descriptor is not modeled; failing closed\n");
+            return fail_int(patina_pipe_dup(fd));
         errno = EINVAL;
         return -1;
     }
@@ -1000,6 +1027,9 @@ int flock(int fd, int operation) {
 
 int close(int fd) {
     if (fd >= PATINA_SOCKET_FD_BASE) {
+#ifdef __APPLE__
+        if (patina_kqueue_is_kq(fd)) return fail_int(patina_kqueue_close(fd));
+#endif
         if (patina_pipe_is_endpoint(fd)) return fail_int(patina_pipe_close(fd));
         return fail_int(patina_net_close(fd));
     }
@@ -1009,8 +1039,17 @@ int close(int fd) {
 int dup(int fd) {
     if (fd >= 0 && fd <= 2)
         return patina_posix_deny("patina: duplicating a captured stdio descriptor is not modeled; failing closed\n");
-    if (fd >= PATINA_SOCKET_FD_BASE)
+    if (fd >= PATINA_SOCKET_FD_BASE) {
+#ifdef __APPLE__
+        /* A kqueue fd duplicates into a second fd sharing the SAME registry
+         * (tokio's IO driver clones its selector this way). */
+        if (patina_kqueue_is_kq(fd)) return fail_int(patina_kqueue_dup(fd));
+#endif
+        /* A pipe/socketpair endpoint duplicates into a refcounted alias of the
+         * same channel side(s); virtual sockets still fail closed. */
+        if (patina_pipe_is_endpoint(fd)) return fail_int(patina_pipe_dup(fd));
         return patina_posix_deny("patina: duplicating a virtual socket descriptor is not modeled; failing closed\n");
+    }
     return fail_int(patina_dup(fd));
 }
 
@@ -1764,8 +1803,23 @@ static int patina_stream_flags_supported(int flags) {
     return flags == 0;
 }
 
+/* A socketpair endpoint is a connected AF_UNIX stream, so the message-based
+ * socket I/O (send/recv/sendto/recvfrom) is the same in-process byte channel as
+ * write/read — tokio's UnixStream reaches the fd through send/recv, not
+ * write/read. An addressed sendto/recvfrom on a connected pair is EISCONN. */
 ssize_t sendto(int fd, const void *buf, size_t len, int flags,
                const struct sockaddr *addr, socklen_t alen) {
+    if (fd >= PATINA_SOCKET_FD_BASE && patina_pipe_is_endpoint(fd)) {
+        if (addr != NULL) {
+            errno = EISCONN;
+            return -1;
+        }
+        if (!patina_stream_flags_supported(flags)) {
+            errno = EOPNOTSUPP;
+            return -1;
+        }
+        return fail_size(patina_pipe_write(fd, buf, len));
+    }
     int kind = fd >= PATINA_SOCKET_FD_BASE ? patina_net_kind(fd) : -1;
     if (kind == 3) {
         if (addr != NULL) {
@@ -1791,6 +1845,13 @@ ssize_t sendto(int fd, const void *buf, size_t len, int flags,
 }
 
 ssize_t send(int fd, const void *buf, size_t len, int flags) {
+    if (fd >= PATINA_SOCKET_FD_BASE && patina_pipe_is_endpoint(fd)) {
+        if (!patina_stream_flags_supported(flags)) {
+            errno = EOPNOTSUPP;
+            return -1;
+        }
+        return fail_size(patina_pipe_write(fd, buf, len));
+    }
     int kind = fd >= PATINA_SOCKET_FD_BASE ? patina_net_kind(fd) : -1;
     if (kind == 3) {
         if (!patina_stream_flags_supported(flags)) {
@@ -1804,6 +1865,15 @@ ssize_t send(int fd, const void *buf, size_t len, int flags) {
 
 ssize_t recvfrom(int fd, void *buf, size_t len, int flags,
                  struct sockaddr *addr, socklen_t *alen) {
+    if (fd >= PATINA_SOCKET_FD_BASE && patina_pipe_is_endpoint(fd)) {
+        if (!patina_stream_flags_supported(flags)) {
+            errno = EOPNOTSUPP;
+            return -1;
+        }
+        (void)addr;
+        (void)alen;
+        return fail_size(patina_pipe_read(fd, buf, len));
+    }
     int kind = fd >= PATINA_SOCKET_FD_BASE ? patina_net_kind(fd) : -1;
     if (kind == 3) {
         if (addr != NULL) {
@@ -1824,6 +1894,13 @@ ssize_t recvfrom(int fd, void *buf, size_t len, int flags,
 }
 
 ssize_t recv(int fd, void *buf, size_t len, int flags) {
+    if (fd >= PATINA_SOCKET_FD_BASE && patina_pipe_is_endpoint(fd)) {
+        if (!patina_stream_flags_supported(flags)) {
+            errno = EOPNOTSUPP;
+            return -1;
+        }
+        return fail_size(patina_pipe_read(fd, buf, len));
+    }
     int kind = fd >= PATINA_SOCKET_FD_BASE ? patina_net_kind(fd) : -1;
     if (kind == 3) {
         if (!patina_stream_flags_supported(flags)) {
@@ -2081,8 +2158,186 @@ int socketpair(int domain, int type, int protocol, int sv[2]) {
         errno = EPROTONOSUPPORT;
         return -1;
     }
-    return fail_int(patina_socketpair(&sv[0], &sv[1], nonblocking));
+    {
+        int rc = patina_socketpair(&sv[0], &sv[1], nonblocking);
+        return fail_int(rc);
+    }
 }
+
+#ifdef __APPLE__
+/*
+ * kqueue / kevent / kevent64 (macOS readiness reactor). The Rust reactor owns
+ * the knote registry, readiness, deterministic ordering, and the multi-fd
+ * fan-in park (see the "kqueue / kevent readiness reactor" section in the Rust
+ * shim); these interposers only marshal the platform struct kevent/kevent64_s
+ * changelists and eventlists to and from the platform-neutral patina_kevent and
+ * decode the timeout into the reactor's blocking mode. Being strong defs, the
+ * guest's kqueue/kevent/kevent64 bind here and the libc symbols drop off the
+ * import table, so the pre-run wait-multiplex gate clears with no allowance.
+ *
+ * `struct patina_kevent` is laid out to match `struct kevent` field for field,
+ * so a kevent eventlist is marshalled by a direct reinterpret. kevent64_s carries
+ * an `ext[2]` tail struct kevent lacks, so its eventlist is widened field by field.
+ */
+_Static_assert(sizeof(struct patina_kevent) == sizeof(struct kevent),
+               "patina_kevent must match struct kevent size");
+_Static_assert(offsetof(struct patina_kevent, ident) == offsetof(struct kevent, ident),
+               "patina_kevent.ident offset");
+_Static_assert(offsetof(struct patina_kevent, filter) == offsetof(struct kevent, filter),
+               "patina_kevent.filter offset");
+_Static_assert(offsetof(struct patina_kevent, flags) == offsetof(struct kevent, flags),
+               "patina_kevent.flags offset");
+_Static_assert(offsetof(struct patina_kevent, fflags) == offsetof(struct kevent, fflags),
+               "patina_kevent.fflags offset");
+_Static_assert(offsetof(struct patina_kevent, data) == offsetof(struct kevent, data),
+               "patina_kevent.data offset");
+_Static_assert(offsetof(struct patina_kevent, udata) == offsetof(struct kevent, udata),
+               "patina_kevent.udata offset");
+
+
+int kqueue(void) {
+    int fd = patina_kqueue();
+    if (fd < 0) errno = patina_errno();
+    return fd;
+}
+
+/*
+ * Decode the kevent timeout into the reactor's (mode, nanos): NULL blocks until
+ * ready, a zero timespec is a non-blocking poll, and a positive one is a
+ * relative virtual-clock deadline.
+ */
+static int patina_kevent_mode(const struct timespec *timeout, uint64_t *nanos) {
+    *nanos = 0;
+    if (timeout == NULL) return 1;
+    if (timeout->tv_sec == 0 && timeout->tv_nsec == 0) return 0;
+    *nanos = (uint64_t)timeout->tv_sec * UINT64_C(1000000000) + (uint64_t)timeout->tv_nsec;
+    return 2;
+}
+
+int kevent(int kq, const struct kevent *changelist, int nchanges, struct kevent *eventlist,
+           int nevents, const struct timespec *timeout) {
+    if (patina_kqueue_is_kq(kq) == 0) {
+        errno = EBADF;
+        return -1;
+    }
+    if ((nchanges > 0 && changelist == NULL) ||
+        (timeout != NULL && (timeout->tv_sec < 0 || timeout->tv_nsec < 0))) {
+        errno = EINVAL;
+        return -1;
+    }
+    /* Apply the changelist. A change carrying EV_RECEIPT (mio sets it on every
+     * register), or one that fails, yields an EV_ERROR receipt whose data is the
+     * errno (0 on success) — the standard bulk-change protocol mio reads back. */
+    int nout = 0;
+    for (int index = 0; index < nchanges; ++index) {
+        const struct kevent *change = &changelist[index];
+        int rc = patina_kqueue_apply(kq, (uint64_t)change->ident, change->filter, change->flags,
+                                     change->fflags, (int64_t)change->data,
+                                     (uintptr_t)change->udata);
+        if ((change->flags & EV_RECEIPT) || rc != 0) {
+            if (eventlist != NULL && nout < nevents) {
+                /* eventlist may alias changelist (mio reuses the buffer); copy
+                 * the change's identity out before overwriting the slot. */
+                uintptr_t ident = change->ident;
+                int16_t filter = change->filter;
+                void *udata = change->udata;
+                struct kevent *event = &eventlist[nout++];
+                event->ident = ident;
+                event->filter = filter;
+                event->flags = EV_ERROR;
+                event->fflags = 0;
+                event->data = rc;
+                event->udata = udata;
+            } else if (rc != 0) {
+                errno = rc;
+                return -1;
+            }
+        }
+    }
+    if (nout > 0) return nout;
+    uint64_t nanos;
+    int mode = patina_kevent_mode(timeout, &nanos);
+    int count = patina_kevent_gather(kq, (struct patina_kevent *)eventlist,
+                                     nevents < 0 ? 0 : nevents, mode, nanos);
+    if (count < 0) {
+        errno = patina_errno();
+        return -1;
+    }
+    return count;
+}
+
+int kevent64(int kq, const struct kevent64_s *changelist, int nchanges,
+             struct kevent64_s *eventlist, int nevents, unsigned int flags,
+             const struct timespec *timeout) {
+    (void)flags; /* KEVENT_FLAG_* immediacy is governed by `timeout` here. */
+    if (patina_kqueue_is_kq(kq) == 0) {
+        errno = EBADF;
+        return -1;
+    }
+    if ((nchanges > 0 && changelist == NULL) ||
+        (timeout != NULL && (timeout->tv_sec < 0 || timeout->tv_nsec < 0))) {
+        errno = EINVAL;
+        return -1;
+    }
+    int nout = 0;
+    for (int index = 0; index < nchanges; ++index) {
+        const struct kevent64_s *change = &changelist[index];
+        int rc = patina_kqueue_apply(kq, change->ident, change->filter, change->flags,
+                                     change->fflags, (int64_t)change->data,
+                                     (uintptr_t)change->udata);
+        if ((change->flags & EV_RECEIPT) || rc != 0) {
+            if (eventlist != NULL && nout < nevents) {
+                uint64_t ident = change->ident;
+                uint64_t udata = change->udata;
+                int16_t filter = change->filter;
+                struct kevent64_s *event = &eventlist[nout++];
+                event->ident = ident;
+                event->filter = filter;
+                event->flags = EV_ERROR;
+                event->fflags = 0;
+                event->data = rc;
+                event->udata = udata;
+                event->ext[0] = 0;
+                event->ext[1] = 0;
+            } else if (rc != 0) {
+                errno = rc;
+                return -1;
+            }
+        }
+    }
+    if (nout > 0) return nout;
+    uint64_t nanos;
+    int mode = patina_kevent_mode(timeout, &nanos);
+    int capacity = nevents < 0 ? 0 : nevents;
+    struct patina_kevent *scratch = NULL;
+    if (capacity > 0) {
+        scratch = calloc((size_t)capacity, sizeof *scratch);
+        if (scratch == NULL) {
+            errno = ENOMEM;
+            return -1;
+        }
+    }
+    int count = patina_kevent_gather(kq, scratch, capacity, mode, nanos);
+    if (count < 0) {
+        free(scratch);
+        errno = patina_errno();
+        return -1;
+    }
+    for (int index = 0; index < count; ++index) {
+        struct kevent64_s *event = &eventlist[index];
+        event->ident = scratch[index].ident;
+        event->filter = scratch[index].filter;
+        event->flags = scratch[index].flags;
+        event->fflags = scratch[index].fflags;
+        event->data = scratch[index].data;
+        event->udata = (uint64_t)(uintptr_t)scratch[index].udata;
+        event->ext[0] = 0;
+        event->ext[1] = 0;
+    }
+    free(scratch);
+    return count;
+}
+#endif
 
 /*
  * Deterministic process-state values (getuid/geteuid/... below). The process

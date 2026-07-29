@@ -1,7 +1,7 @@
 //! Deterministic fault injection around data-plane drivers.
 
 use patina_dst_abi::{Datagram, SendDisposition, SendReport, ShutdownHow, SocketId, TcpAccepted};
-use patina_dst_driver_api::{DriverResult, NetDriver};
+use patina_dst_driver_api::{DriverResult, NetDriver, NetReadiness};
 use patina_dst_rng_seeded::SplitMix64;
 
 /// Injects seeded packet loss and duplication around another network driver.
@@ -133,6 +133,10 @@ impl<D: NetDriver> NetDriver for FaultNet<D> {
 
     fn tcp_shutdown(&mut self, socket: SocketId, how: ShutdownHow) -> DriverResult<()> {
         self.inner.tcp_shutdown(socket, how)
+    }
+
+    fn readiness(&self, socket: SocketId, now_nanos: u64) -> DriverResult<NetReadiness> {
+        self.inner.readiness(socket, now_nanos)
     }
 
     fn close(&mut self, socket: SocketId) -> DriverResult<()> {

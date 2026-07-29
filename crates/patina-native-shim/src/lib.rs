@@ -4486,6 +4486,19 @@ mod thread {
         pipe_ends: BTreeMap<c_int, PipeEnd>,
         pipe_channels: BTreeMap<u64, PipeChannel>,
         next_channel: u64,
+        // Virtual kqueue readiness reactors. A kqueue fd (drawn from the shared
+        // `next_fd` space, so a virtual fd is a socket XOR a pipe endpoint XOR a
+        // kqueue fd) maps through `kq_fds` to a reference-counted registry in
+        // `kqueues`: a `dup`/`F_DUPFD` of a kqueue fd (tokio's IO driver clones
+        // its selector this way) yields a second fd sharing the SAME registry, so
+        // the registry outlives any one fd and drops only when the last closes.
+        // macOS-only: kqueue/kevent have no Linux counterpart.
+        #[cfg(target_os = "macos")]
+        kqueues: BTreeMap<u64, KqueueSlot>,
+        #[cfg(target_os = "macos")]
+        kq_fds: BTreeMap<c_int, u64>,
+        #[cfg(target_os = "macos")]
+        next_kq: u64,
         next_fd: c_int,
         next_ephemeral: u16,
     }
@@ -4500,6 +4513,12 @@ mod thread {
                 pipe_ends: BTreeMap::new(),
                 pipe_channels: BTreeMap::new(),
                 next_channel: 0,
+                #[cfg(target_os = "macos")]
+                kqueues: BTreeMap::new(),
+                #[cfg(target_os = "macos")]
+                kq_fds: BTreeMap::new(),
+                #[cfg(target_os = "macos")]
+                next_kq: 0,
                 next_fd: SOCKET_FD_BASE,
                 next_ephemeral: 49152,
             }
@@ -5440,9 +5459,16 @@ mod thread {
     struct PipeChannel {
         buffer: VecDeque<u8>,
         capacity: usize,
-        /// The reader endpoint has been closed: further writes get `EPIPE`.
+        /// Number of live fds referencing the READ side (one per reader endpoint,
+        /// plus one per `dup`/`F_DUPFD` of one). The reader side is "closed" —
+        /// `read_closed`, further writes get `EPIPE` — only when this hits 0.
+        read_refs: usize,
+        /// Number of live fds referencing the WRITE side. The writer side is
+        /// "closed" — `write_closed`, drained reads return EOF — only at 0.
+        write_refs: usize,
+        /// Every reader fd of this side has closed: further writes get `EPIPE`.
         read_closed: bool,
-        /// The writer endpoint has been closed: reads return EOF once drained.
+        /// Every writer fd of this side has closed: reads return EOF once drained.
         write_closed: bool,
         /// Tasks parked in a blocking read, waiting for bytes to arrive.
         recv_waiters: VecDeque<TaskId>,
@@ -5474,6 +5500,10 @@ mod thread {
             Self {
                 buffer: VecDeque::new(),
                 capacity,
+                // Every channel is created with exactly one reader endpoint and
+                // one writer endpoint; `dup` raises the matching side later.
+                read_refs: 1,
+                write_refs: 1,
                 read_closed: false,
                 write_closed: false,
                 recv_waiters: VecDeque::new(),
@@ -5787,8 +5817,56 @@ mod thread {
         }
     }
 
-    /// Close a pipe/socketpair endpoint, waking any peer parked on the state
-    /// change (EPIPE for blocked writers, EOF for blocked readers).
+    /// Duplicate a pipe/socketpair endpoint: the new fd aliases the SAME channel
+    /// side(s), raising the per-side reference count so the peer sees EOF/EPIPE
+    /// only once EVERY aliasing fd of that side has closed. `std`'s `try_clone`
+    /// (reached via `fcntl(F_DUPFD_CLOEXEC)`) drives this — tokio's signal driver
+    /// clones a socketpair endpoint at runtime build. The clone inherits the
+    /// blocking flag, matching a real `F_DUPFD_CLOEXEC` (which copies the file
+    /// description, so `O_NONBLOCK` is shared). Returns the new fd or -1/EBADF.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn patina_pipe_dup(fd: c_int) -> c_int {
+        let mut state = lock_state();
+        let Some(&PipeEnd {
+            read_channel,
+            write_channel,
+            nonblocking,
+        }) = state.net.pipe_ends.get(&fd)
+        else {
+            return super::fail(super::EBADF);
+        };
+        if let Some(channel) = read_channel {
+            state
+                .net
+                .pipe_channels
+                .get_mut(&channel)
+                .expect("live endpoint references a live channel")
+                .read_refs += 1;
+        }
+        if let Some(channel) = write_channel {
+            state
+                .net
+                .pipe_channels
+                .get_mut(&channel)
+                .expect("live endpoint references a live channel")
+                .write_refs += 1;
+        }
+        let new_fd = state.net.next_fd;
+        state.net.next_fd = state.net.next_fd.wrapping_add(1);
+        state.net.pipe_ends.insert(
+            new_fd,
+            PipeEnd {
+                read_channel,
+                write_channel,
+                nonblocking,
+            },
+        );
+        new_fd
+    }
+
+    /// Close a pipe/socketpair endpoint. A channel SIDE closes — waking the peer
+    /// with EPIPE (readers gone) or EOF (writers gone) — only on the LAST fd of
+    /// that side; a surviving `dup` keeps it open.
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_pipe_close(fd: c_int) -> c_int {
         let mut state = lock_state();
@@ -5796,29 +5874,38 @@ mod thread {
             return super::fail(super::EBADF);
         };
         let mut waiters = Vec::new();
-        // Closing the READER of a channel: writers to it now get EPIPE.
+        // Dropping a READER reference: writers get EPIPE only once the last one
+        // goes, and only then are blocked writers woken to observe it.
         if let Some(channel) = end.read_channel {
             if let Some(channel) = state.net.pipe_channels.get_mut(&channel) {
-                channel.read_closed = true;
-                waiters.extend(channel.send_waiters.drain(..));
+                channel.read_refs -= 1;
+                if channel.read_refs == 0 {
+                    channel.read_closed = true;
+                    waiters.extend(channel.send_waiters.drain(..));
+                }
             }
         }
-        // Closing the WRITER of a channel: readers now see EOF once drained.
+        // Dropping a WRITER reference: readers see EOF (once drained) only after
+        // the last writer closes, and only then are blocked readers woken.
         if let Some(channel) = end.write_channel {
             if let Some(channel) = state.net.pipe_channels.get_mut(&channel) {
-                channel.write_closed = true;
-                waiters.extend(channel.recv_waiters.drain(..));
+                channel.write_refs -= 1;
+                if channel.write_refs == 0 {
+                    channel.write_closed = true;
+                    waiters.extend(channel.recv_waiters.drain(..));
+                }
             }
         }
-        // Reclaim any channel now closed at both ends. Channel ids come from a
-        // monotonic counter and are never reused, so no stale entry can survive.
+        // Reclaim any channel with no references left on either side. Channel ids
+        // come from a monotonic counter and are never reused, so no stale entry
+        // can survive.
         for channel in [end.read_channel, end.write_channel].into_iter().flatten() {
-            let both_closed = state
+            let drained = state
                 .net
                 .pipe_channels
                 .get(&channel)
-                .is_some_and(|channel| channel.read_closed && channel.write_closed);
-            if both_closed {
+                .is_some_and(|channel| channel.read_refs == 0 && channel.write_refs == 0);
+            if drained {
                 state.net.pipe_channels.remove(&channel);
             }
         }
@@ -5849,6 +5936,889 @@ mod thread {
                 0
             }
             None => super::fail(super::EBADF),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // kqueue / kevent readiness reactor (macOS). A deterministic in-process
+    // model of the BSD readiness multiplexer that mio (and therefore tokio)
+    // builds its IO driver on. A `kqueue` fd is drawn from the shared virtual-fd
+    // space; `kevent`/`kevent64` register EVFILT_READ/WRITE interest over the
+    // virtual pipe/socketpair and SimNet socket fds, an EVFILT_USER self-wakeup
+    // (mio's `Waker`), and EVFILT_TIMER against the virtual clock, then gather
+    // ready events — parking on the scheduler baton with multi-fd fan-in when
+    // nothing is ready. Readiness for a pipe fd is pure in-shim channel state;
+    // readiness for a SimNet socket fd is the runtime's UNRECORDED
+    // `net_readiness` (a deterministic function of the recorded send/recv history
+    // and the virtual clock). Like the mutex words and the pipe channels, the
+    // registry itself is deterministic GIVEN the recorded schedule, so it carries
+    // NO trace events of its own; only the scheduler parks/wakes are recorded.
+    //
+    // Event delivery is edge-triggered (mio always registers with EV_CLEAR): a
+    // READ/WRITE knote fires on the not-ready -> ready transition and re-arms once
+    // readiness drops, so a level condition (e.g. a peer-closed EV_EOF that stays
+    // set) fires exactly once rather than busy-looping the reactor. Returned
+    // events are ordered by `(ident, filter)` — the `BTreeMap` key order — so the
+    // gathered slice is a pure function of the registry and the schedule.
+    /// The C-facing kqueue event, matching `struct patina_kevent` in the header
+    /// (a platform-neutral projection of the macOS `struct kevent` the C layer
+    /// marshals to and from). Field order and padding match the header exactly.
+    #[cfg(target_os = "macos")]
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub(crate) struct PatinaKevent {
+        ident: u64,
+        filter: i16,
+        flags: u16,
+        fflags: u32,
+        data: i64,
+        udata: usize,
+    }
+
+    /// Level-triggered readiness of a virtual descriptor, for the kqueue reactor.
+    /// A pipe/socketpair endpoint is read from in-shim channel state; a SimNet
+    /// socket is read from the runtime's unrecorded `net_readiness`.
+    #[cfg(target_os = "macos")]
+    #[derive(Clone, Copy)]
+    struct FdReadiness {
+        readable: bool,
+        writable: bool,
+        read_eof: bool,
+        write_eof: bool,
+    }
+
+    /// Compute the readiness of virtual descriptor `fd` without consuming any
+    /// bytes or recording a boundary op. A descriptor that no longer exists (it
+    /// was closed after registration) reports ready-with-EOF so the reactor wakes
+    /// and the subsequent operation surfaces the error, and the knote drops out.
+    #[cfg(target_os = "macos")]
+    fn fd_readiness(state: &ThreadRuntime, fd: c_int) -> FdReadiness {
+        // Pipe/socketpair endpoint: readiness is pure in-shim channel state, so
+        // it needs no runtime op and emits no trace event.
+        if let Some(end) = state.net.pipe_ends.get(&fd) {
+            let mut readiness = FdReadiness {
+                readable: false,
+                writable: false,
+                read_eof: false,
+                write_eof: false,
+            };
+            if let Some(channel) = end
+                .read_channel
+                .and_then(|id| state.net.pipe_channels.get(&id))
+            {
+                readiness.read_eof = channel.write_closed && channel.buffer.is_empty();
+                readiness.readable = !channel.buffer.is_empty() || readiness.read_eof;
+            }
+            if let Some(channel) = end
+                .write_channel
+                .and_then(|id| state.net.pipe_channels.get(&id))
+            {
+                readiness.write_eof = channel.read_closed;
+                readiness.writable = readiness.write_eof || channel.buffer.len() < channel.capacity;
+            }
+            return readiness;
+        }
+        // Virtual SimNet socket: readiness lives in the runtime network driver.
+        // `net_readiness` reads it plus the virtual clock WITHOUT recording, so it
+        // is deterministic given the recorded schedule and emits no trace event.
+        if let Some(socket) = state.net.sockets.get(&fd) {
+            let Some(socket_id) = socket.socket_id else {
+                // An unbound/unconnected stream has no buffers yet: nothing ready.
+                return FdReadiness {
+                    readable: false,
+                    writable: false,
+                    read_eof: false,
+                    write_eof: false,
+                };
+            };
+            return match with_context_raw(|context| context.net_readiness(socket_id)) {
+                Ok(bits) => FdReadiness {
+                    readable: bits & (1 << 0) != 0,
+                    writable: bits & (1 << 1) != 0,
+                    read_eof: bits & (1 << 2) != 0,
+                    write_eof: bits & (1 << 3) != 0,
+                },
+                Err(_) => FdReadiness {
+                    readable: true,
+                    writable: true,
+                    read_eof: true,
+                    write_eof: true,
+                },
+            };
+        }
+        // The descriptor was closed after registration: report EV_EOF once.
+        FdReadiness {
+            readable: true,
+            writable: true,
+            read_eof: true,
+            write_eof: true,
+        }
+    }
+
+    /// A readiness direction to watch on a virtual descriptor. Deliberately
+    /// reactor-neutral (not an `EVFILT_*`/`EPOLL*` value): the OS-agnostic fan-in
+    /// core below is shared by the kqueue frontend and a future epoll frontend.
+    #[cfg(target_os = "macos")]
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ReadyDir {
+        Read,
+        Write,
+    }
+
+    /// Where a task parked on a readiness fan-in enqueued itself, so it can be
+    /// unlinked on resume regardless of which source woke it. Reactor-neutral: a
+    /// kqueue or epoll frontend both watch the same virtual pipe/socket queues.
+    #[cfg(target_os = "macos")]
+    enum WaiterLoc {
+        PipeRecv(u64),
+        PipeSend(u64),
+        SockRecv(c_int),
+        SockSend(c_int),
+    }
+
+    /// Register `me` on the waiter queue of every watched `(direction, fd)`
+    /// source, returning the locations to unlink on resume. This is the reusable
+    /// multi-fd fan-in primitive a readiness reactor parks on: the frontend
+    /// supplies the watched set from its OWN registry, so no reactor-specific
+    /// keying (kqueue `(ident, filter)`, epoll interest masks) leaks into the
+    /// shared core. The readiness sources — pipe channels and SimNet socket
+    /// queues — and the readiness predicate [`fd_readiness`] are equally neutral.
+    #[cfg(target_os = "macos")]
+    fn register_readiness_waiters(
+        state: &mut ThreadRuntime,
+        me: TaskId,
+        watched: &[(ReadyDir, c_int)],
+    ) -> Vec<WaiterLoc> {
+        let mut locs = Vec::new();
+        for &(dir, fd) in watched {
+            if let Some(end) = state.net.pipe_ends.get(&fd) {
+                let channel = match dir {
+                    ReadyDir::Read => end.read_channel,
+                    ReadyDir::Write => end.write_channel,
+                };
+                if let Some(channel) = channel {
+                    if let Some(ch) = state.net.pipe_channels.get_mut(&channel) {
+                        match dir {
+                            ReadyDir::Read => {
+                                ch.recv_waiters.push_back(me);
+                                locs.push(WaiterLoc::PipeRecv(channel));
+                            }
+                            ReadyDir::Write => {
+                                ch.send_waiters.push_back(me);
+                                locs.push(WaiterLoc::PipeSend(channel));
+                            }
+                        }
+                    }
+                }
+            } else if let Some(socket) = state.net.sockets.get_mut(&fd) {
+                match dir {
+                    ReadyDir::Read => {
+                        socket.recv_waiters.push_back(me);
+                        locs.push(WaiterLoc::SockRecv(fd));
+                    }
+                    ReadyDir::Write => {
+                        socket.send_waiters.push_back(me);
+                        locs.push(WaiterLoc::SockSend(fd));
+                    }
+                }
+            }
+        }
+        locs
+    }
+
+    /// Unlink `me` from every queue [`register_readiness_waiters`] enqueued it on,
+    /// so a later wake of that queue never targets an already-resumed task.
+    #[cfg(target_os = "macos")]
+    fn unregister_readiness_waiters(state: &mut ThreadRuntime, me: TaskId, locs: &[WaiterLoc]) {
+        let remove = |queue: &mut VecDeque<TaskId>| {
+            if let Some(index) = queue.iter().position(|task| *task == me) {
+                queue.remove(index);
+            }
+        };
+        for loc in locs {
+            match *loc {
+                WaiterLoc::PipeRecv(channel) => {
+                    if let Some(ch) = state.net.pipe_channels.get_mut(&channel) {
+                        remove(&mut ch.recv_waiters);
+                    }
+                }
+                WaiterLoc::PipeSend(channel) => {
+                    if let Some(ch) = state.net.pipe_channels.get_mut(&channel) {
+                        remove(&mut ch.send_waiters);
+                    }
+                }
+                WaiterLoc::SockRecv(fd) => {
+                    if let Some(socket) = state.net.sockets.get_mut(&fd) {
+                        remove(&mut socket.recv_waiters);
+                    }
+                }
+                WaiterLoc::SockSend(fd) => {
+                    if let Some(socket) = state.net.sockets.get_mut(&fd) {
+                        remove(&mut socket.send_waiters);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    use kqueue::KqueueSlot;
+
+    #[cfg(target_os = "macos")]
+    mod kqueue {
+        use std::collections::{BTreeMap, VecDeque};
+        use std::ffi::{c_int, c_void};
+
+        use patina_dst_abi::ClockKind;
+
+        use super::{
+            PatinaKevent, ReadyDir, Step, TaskId, ThreadRuntime, current_task, fatal, fd_readiness,
+            lock_state, register_readiness_waiters, sched_point, switch_and_park,
+            unregister_readiness_waiters, wake_all, with_context_raw,
+        };
+
+        // macOS <sys/event.h> filter identifiers (the reactor is macOS-only).
+        pub(super) const EVFILT_READ: i16 = -1;
+        pub(super) const EVFILT_WRITE: i16 = -2;
+        pub(super) const EVFILT_TIMER: i16 = -7;
+        pub(super) const EVFILT_USER: i16 = -10;
+
+        // <sys/event.h> flags (the u16 `flags` field). EV_RECEIPT/EV_ERROR are
+        // handled entirely in the C marshalling layer.
+        const EV_ADD: u16 = 0x0001;
+        const EV_DELETE: u16 = 0x0002;
+        const EV_ENABLE: u16 = 0x0004;
+        const EV_DISABLE: u16 = 0x0008;
+        const EV_ONESHOT: u16 = 0x0010;
+        pub(super) const EV_EOF: u16 = 0x8000;
+
+        // EVFILT_USER / EVFILT_TIMER fflags.
+        const NOTE_TRIGGER: u32 = 0x0100_0000;
+        const NOTE_SECONDS: u32 = 0x0000_0001;
+        const NOTE_USECONDS: u32 = 0x0000_0002;
+        const NOTE_NSECONDS: u32 = 0x0000_0004;
+        const NOTE_ABSOLUTE: u32 = 0x0000_0008;
+
+        // Gather blocking modes handed down from the C `timeout` argument.
+        const MODE_POLL: c_int = 0; // zero timespec: non-blocking poll
+        const MODE_FOREVER: c_int = 1; // NULL timeout: block until ready
+        const MODE_TIMEOUT: c_int = 2; // non-zero timespec: relative deadline
+
+        /// One registered `(ident, filter)` knote.
+        pub(super) struct KFilterState {
+            udata: usize,
+            enabled: bool,
+            oneshot: bool,
+            /// EVFILT_USER: pending NOTE_TRIGGER, cleared on delivery (edge).
+            user_triggered: bool,
+            /// EVFILT_TIMER: next fire time in absolute virtual nanoseconds.
+            timer_deadline: u64,
+            /// EVFILT_TIMER: repeat interval in nanoseconds; 0 = one-shot.
+            timer_interval: u64,
+            /// EVFILT_READ/WRITE edge latch: readiness already delivered, awaiting
+            /// a not-ready observation before it may fire again (models EV_CLEAR).
+            delivered: bool,
+        }
+
+        /// A registered knote sorts by `(ident, filter)`, giving deterministic
+        /// gather order straight from the `BTreeMap`.
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+        pub(super) struct FilterKey {
+            ident: u64,
+            filter: i16,
+        }
+
+        /// A virtual kqueue: its registered knotes plus the tasks parked in
+        /// `kevent` on it (woken by an EVFILT_USER NOTE_TRIGGER from any thread).
+        #[derive(Default)]
+        struct Kqueue {
+            filters: BTreeMap<FilterKey, KFilterState>,
+            waiters: VecDeque<TaskId>,
+        }
+
+        /// A reference-counted kqueue registry: `refs` is the number of live fds
+        /// aliasing it (one per `kqueue()`, plus one per `dup`/`F_DUPFD`), and the
+        /// registry drops when the last fd closes.
+        pub(super) struct KqueueSlot {
+            kq: Kqueue,
+            refs: usize,
+        }
+
+        /// Resolve a kqueue fd to its registry id, or `None` if `fd` is not a live
+        /// kqueue descriptor.
+        fn kq_id(state: &ThreadRuntime, fd: c_int) -> Option<u64> {
+            state.net.kq_fds.get(&fd).copied()
+        }
+
+        fn fatal_filter(filter: i16, fd: c_int, direction: &str) -> ! {
+            fatal(&format!(
+                "kevent EVFILT_{direction} registered on non-virtual descriptor {fd} \
+                 (filter {filter}): readiness for real host descriptors is not modeled; \
+                 failing closed"
+            ));
+        }
+
+        /// Allocate a virtual kqueue. Activates the thread subsystem so a later
+        /// blocking `kevent` gather can park through the baton.
+        ///
+        /// # Safety
+        /// C ABI entry point.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn patina_kqueue() -> c_int {
+            let mut state = lock_state();
+            if let Err(error) = state.ensure_active() {
+                return super::super::fail(error.into_posix());
+            }
+            let id = state.net.next_kq;
+            state.net.next_kq = state.net.next_kq.wrapping_add(1);
+            state.net.kqueues.insert(
+                id,
+                KqueueSlot {
+                    kq: Kqueue::default(),
+                    refs: 1,
+                },
+            );
+            let fd = state.net.next_fd;
+            state.net.next_fd = state.net.next_fd.wrapping_add(1);
+            state.net.kq_fds.insert(fd, id);
+            fd
+        }
+
+        /// C dispatch predicate: is `fd` a virtual kqueue? Lets the interposed
+        /// `close`/`dup`/`fcntl` route the shared virtual-fd space to the kqueue
+        /// class.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn patina_kqueue_is_kq(fd: c_int) -> c_int {
+            c_int::from(lock_state().net.kq_fds.contains_key(&fd))
+        }
+
+        /// Duplicate a kqueue fd: the new fd aliases the SAME registry (tokio's IO
+        /// driver clones its selector through `F_DUPFD_CLOEXEC`). Returns the new
+        /// fd or -1 with `patina_errno` EBADF if `fd` is not a live kqueue.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn patina_kqueue_dup(fd: c_int) -> c_int {
+            let mut state = lock_state();
+            let Some(id) = kq_id(&state, fd) else {
+                return super::super::fail(super::super::EBADF);
+            };
+            state
+                .net
+                .kqueues
+                .get_mut(&id)
+                .expect("kq fd maps to a live registry")
+                .refs += 1;
+            let new_fd = state.net.next_fd;
+            state.net.next_fd = state.net.next_fd.wrapping_add(1);
+            state.net.kq_fds.insert(new_fd, id);
+            new_fd
+        }
+
+        /// Close a kqueue fd. The registry drops (waking any task parked in
+        /// `kevent` on it) only when the last aliasing fd closes.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn patina_kqueue_close(fd: c_int) -> c_int {
+            let mut state = lock_state();
+            let Some(id) = state.net.kq_fds.remove(&fd) else {
+                return super::super::fail(super::super::EBADF);
+            };
+            let slot = state
+                .net
+                .kqueues
+                .get_mut(&id)
+                .expect("kq fd maps to a live registry");
+            slot.refs -= 1;
+            if slot.refs > 0 {
+                return 0;
+            }
+            let slot = state.net.kqueues.remove(&id).expect("registry was present");
+            let waiters: Vec<TaskId> = slot.kq.waiters.into_iter().collect();
+            drop(state);
+            wake_all(waiters);
+            0
+        }
+
+        /// Apply one changelist entry to a kqueue. Returns 0 on success or a
+        /// positive errno the C layer places in an EV_ERROR receipt. Registry
+        /// mutation only — no scheduling point, no trace event — except an
+        /// EVFILT_USER NOTE_TRIGGER, which wakes the kq's parked `kevent` callers
+        /// (like a condvar signal).
+        ///
+        /// # Safety
+        /// C ABI entry point; `ident` for EVFILT_READ/WRITE is a descriptor.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn patina_kqueue_apply(
+            kq_fd: c_int,
+            ident: u64,
+            filter: i16,
+            flags: u16,
+            fflags: u32,
+            data: i64,
+            udata: usize,
+        ) -> c_int {
+            let me_wake: Vec<TaskId>;
+            {
+                let mut state = lock_state();
+                let Some(id) = kq_id(&state, kq_fd) else {
+                    return super::super::EBADF;
+                };
+                // Fail closed LOUDLY on filters the reactor does not model: a
+                // silent ENOSYS/EINVAL that tokio swallowed would be an invisible
+                // escape (a real host kqueue would then service them off-model).
+                if !matches!(
+                    filter,
+                    EVFILT_READ | EVFILT_WRITE | EVFILT_USER | EVFILT_TIMER
+                ) {
+                    fatal(&format!(
+                        "kevent filter {filter} is not modeled (only EVFILT_READ/WRITE/USER/TIMER \
+                         are supported); failing closed"
+                    ));
+                }
+                let key = FilterKey { ident, filter };
+
+                if flags & EV_DELETE != 0 {
+                    // Removal validates nothing about the fd: the descriptor may
+                    // already be closed (mio deregisters around close).
+                    if state
+                        .net
+                        .kqueues
+                        .get_mut(&id)
+                        .expect("kqueue was checked")
+                        .kq
+                        .filters
+                        .remove(&key)
+                        .is_none()
+                    {
+                        return super::super::ENOENT;
+                    }
+                    return 0;
+                }
+
+                if flags & EV_ADD != 0 {
+                    // Registration-time fd validation: EVFILT_READ/WRITE readiness
+                    // is defined only over virtual pipe/socketpair and SimNet
+                    // socket descriptors. A real file, stdio, or otherwise unknown
+                    // descriptor fails closed loudly here.
+                    if matches!(filter, EVFILT_READ | EVFILT_WRITE) {
+                        let fd = c_int::try_from(ident).unwrap_or(-1);
+                        let known = state.net.pipe_ends.contains_key(&fd)
+                            || state.net.sockets.contains_key(&fd);
+                        if !known {
+                            let direction = if filter == EVFILT_READ {
+                                "READ"
+                            } else {
+                                "WRITE"
+                            };
+                            fatal_filter(filter, fd, direction);
+                        }
+                    }
+                    let now = match with_context_raw(|c| c.monotonic_now_unrecorded()) {
+                        Ok(now) => now,
+                        Err(errno) => return errno,
+                    };
+                    let (timer_deadline, timer_interval) = if filter == EVFILT_TIMER {
+                        let period = timer_nanos(data, fflags);
+                        let deadline = if fflags & NOTE_ABSOLUTE != 0 {
+                            data.max(0) as u64
+                        } else {
+                            now.saturating_add(period)
+                        };
+                        let interval = if flags & EV_ONESHOT != 0 { 0 } else { period };
+                        (deadline, interval)
+                    } else {
+                        (0, 0)
+                    };
+                    let kq = &mut state
+                        .net
+                        .kqueues
+                        .get_mut(&id)
+                        .expect("kqueue was checked")
+                        .kq;
+                    let entry = kq.filters.entry(key).or_insert(KFilterState {
+                        udata,
+                        enabled: true,
+                        oneshot: false,
+                        user_triggered: false,
+                        timer_deadline,
+                        timer_interval,
+                        delivered: false,
+                    });
+                    entry.udata = udata;
+                    entry.enabled = flags & EV_DISABLE == 0;
+                    entry.oneshot = flags & EV_ONESHOT != 0;
+                    if filter == EVFILT_TIMER {
+                        // Re-adding a timer restarts it from now.
+                        entry.timer_deadline = timer_deadline;
+                        entry.timer_interval = timer_interval;
+                        entry.delivered = false;
+                    }
+                } else if flags & (EV_ENABLE | EV_DISABLE) != 0 {
+                    let Some(entry) = state
+                        .net
+                        .kqueues
+                        .get_mut(&id)
+                        .expect("kqueue was checked")
+                        .kq
+                        .filters
+                        .get_mut(&key)
+                    else {
+                        return super::super::ENOENT;
+                    };
+                    if flags & EV_ENABLE != 0 {
+                        entry.enabled = true;
+                    }
+                    if flags & EV_DISABLE != 0 {
+                        entry.enabled = false;
+                    }
+                }
+
+                // EVFILT_USER NOTE_TRIGGER: latch the trigger and wake every task
+                // parked in `kevent` on this kq. mio's `Waker::wake` sends exactly
+                // this (EV_ADD | NOTE_TRIGGER) from another thread.
+                if filter == EVFILT_USER && fflags & NOTE_TRIGGER != 0 {
+                    let kq = &mut state
+                        .net
+                        .kqueues
+                        .get_mut(&id)
+                        .expect("kqueue was checked")
+                        .kq;
+                    if let Some(entry) = kq.filters.get_mut(&key) {
+                        entry.user_triggered = true;
+                    }
+                    me_wake = kq.waiters.drain(..).collect();
+                } else {
+                    me_wake = Vec::new();
+                }
+            }
+            wake_all(me_wake);
+            0
+        }
+
+        /// EVFILT_TIMER period in nanoseconds from `data` and the unit fflags.
+        /// The macOS default (no unit flag) is milliseconds.
+        fn timer_nanos(data: i64, fflags: u32) -> u64 {
+            let magnitude = data.max(0) as u64;
+            if fflags & NOTE_NSECONDS != 0 {
+                magnitude
+            } else if fflags & NOTE_USECONDS != 0 {
+                magnitude.saturating_mul(1_000)
+            } else if fflags & NOTE_SECONDS != 0 {
+                magnitude.saturating_mul(1_000_000_000)
+            } else {
+                magnitude.saturating_mul(1_000_000)
+            }
+        }
+
+        /// A knote ready to deliver, plus the registry edits its delivery entails.
+        struct ReadyEvent {
+            event: PatinaKevent,
+            key: FilterKey,
+            /// Latch EV_CLEAR edge state after delivering a READ/WRITE event.
+            set_delivered: bool,
+            /// Clear the EVFILT_USER trigger after delivery.
+            clear_user: bool,
+            /// One-shot: remove the knote after delivery.
+            remove: bool,
+            /// EVFILT_TIMER re-arm to this absolute deadline (0 = no re-arm).
+            rearm_timer: u64,
+        }
+
+        /// Scan the kq's enabled knotes at virtual time `now`, collecting the
+        /// events ready to deliver (in `(ident, filter)` order) and the re-arm
+        /// edits for knotes observed not-ready. `earliest_timer` returns the
+        /// soonest enabled timer deadline so a blocking gather can bound its park.
+        fn scan(
+            state: &ThreadRuntime,
+            id: u64,
+            now: u64,
+        ) -> (Vec<ReadyEvent>, Vec<FilterKey>, Option<u64>) {
+            let kq = &state.net.kqueues.get(&id).expect("kqueue exists").kq;
+            let mut ready = Vec::new();
+            let mut rearm_not_ready = Vec::new();
+            let mut earliest_timer = None;
+            for (key, st) in &kq.filters {
+                if !st.enabled {
+                    continue;
+                }
+                match key.filter {
+                    EVFILT_READ | EVFILT_WRITE => {
+                        let fd = c_int::try_from(key.ident).unwrap_or(-1);
+                        let r = fd_readiness(state, fd);
+                        let (ready_now, eof) = if key.filter == EVFILT_READ {
+                            (r.readable, r.read_eof)
+                        } else {
+                            (r.writable, r.write_eof)
+                        };
+                        if ready_now && !st.delivered {
+                            let mut flags = 0u16;
+                            if eof {
+                                flags |= EV_EOF;
+                            }
+                            ready.push(ReadyEvent {
+                                event: PatinaKevent {
+                                    ident: key.ident,
+                                    filter: key.filter,
+                                    flags,
+                                    fflags: 0,
+                                    data: 0,
+                                    udata: st.udata,
+                                },
+                                key: *key,
+                                set_delivered: true,
+                                clear_user: false,
+                                remove: st.oneshot,
+                                rearm_timer: 0,
+                            });
+                        } else if !ready_now && st.delivered {
+                            // Readiness dropped: re-arm the EV_CLEAR edge latch so
+                            // the next rising edge fires again.
+                            rearm_not_ready.push(*key);
+                        }
+                    }
+                    EVFILT_USER => {
+                        if st.user_triggered {
+                            ready.push(ReadyEvent {
+                                event: PatinaKevent {
+                                    ident: key.ident,
+                                    filter: key.filter,
+                                    flags: 0,
+                                    fflags: 0,
+                                    data: 0,
+                                    udata: st.udata,
+                                },
+                                key: *key,
+                                set_delivered: false,
+                                clear_user: true,
+                                remove: st.oneshot,
+                                rearm_timer: 0,
+                            });
+                        }
+                    }
+                    EVFILT_TIMER => {
+                        if now >= st.timer_deadline {
+                            let rearm = if st.oneshot || st.timer_interval == 0 {
+                                0
+                            } else {
+                                // Advance past `now` so a long-overdue periodic
+                                // timer fires once and re-arms to the future.
+                                let mut next = st.timer_deadline.saturating_add(st.timer_interval);
+                                while next <= now {
+                                    next = next.saturating_add(st.timer_interval);
+                                }
+                                next
+                            };
+                            ready.push(ReadyEvent {
+                                event: PatinaKevent {
+                                    ident: key.ident,
+                                    filter: key.filter,
+                                    flags: 0,
+                                    fflags: 0,
+                                    data: 1,
+                                    udata: st.udata,
+                                },
+                                key: *key,
+                                set_delivered: false,
+                                clear_user: false,
+                                remove: st.oneshot || st.timer_interval == 0,
+                                rearm_timer: rearm,
+                            });
+                        } else {
+                            earliest_timer = Some(
+                                earliest_timer
+                                    .map_or(st.timer_deadline, |e: u64| e.min(st.timer_deadline)),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            (ready, rearm_not_ready, earliest_timer)
+        }
+
+        /// The enabled EVFILT_READ/WRITE knotes as reactor-neutral `(direction,
+        /// fd)` pairs the shared fan-in primitive parks on, plus whether an
+        /// enabled EVFILT_USER knote is present (its wakeup is the kq's own
+        /// waiter list, a kqueue-specific source with no descriptor).
+        fn watched_sources(state: &ThreadRuntime, id: u64) -> (Vec<(ReadyDir, c_int)>, bool) {
+            let kq = &state.net.kqueues.get(&id).expect("kqueue exists").kq;
+            let mut has_user = false;
+            let watched = kq
+                .filters
+                .iter()
+                .filter(|(_, st)| st.enabled)
+                .filter_map(|(key, _)| match key.filter {
+                    EVFILT_READ => Some((ReadyDir::Read, c_int::try_from(key.ident).unwrap_or(-1))),
+                    EVFILT_WRITE => {
+                        Some((ReadyDir::Write, c_int::try_from(key.ident).unwrap_or(-1)))
+                    }
+                    EVFILT_USER => {
+                        has_user = true;
+                        None
+                    }
+                    _ => None,
+                })
+                .collect();
+            (watched, has_user)
+        }
+
+        /// Apply the registry edits for the events actually delivered this gather:
+        /// latch EV_CLEAR edges, clear EVFILT_USER triggers, remove one-shots, and
+        /// re-arm periodic timers.
+        fn commit_delivered(state: &mut ThreadRuntime, id: u64, delivered: &[ReadyEvent]) {
+            let kq = &mut state.net.kqueues.get_mut(&id).expect("kqueue exists").kq;
+            for event in delivered {
+                if event.remove {
+                    kq.filters.remove(&event.key);
+                    continue;
+                }
+                if let Some(st) = kq.filters.get_mut(&event.key) {
+                    if event.set_delivered {
+                        st.delivered = true;
+                    }
+                    if event.clear_user {
+                        st.user_triggered = false;
+                    }
+                    if event.rearm_timer != 0 {
+                        st.timer_deadline = event.rearm_timer;
+                    }
+                }
+            }
+        }
+
+        /// Apply the readiness "not-ready" re-arms to the EV_CLEAR edge latches.
+        fn commit_rearm(state: &mut ThreadRuntime, id: u64, keys: &[FilterKey]) {
+            let kq = &mut state.net.kqueues.get_mut(&id).expect("kqueue exists").kq;
+            for key in keys {
+                if let Some(st) = kq.filters.get_mut(key) {
+                    st.delivered = false;
+                }
+            }
+        }
+
+        /// Gather up to `nevents` ready events into `out`, blocking per `mode`.
+        /// Applies the changelist beforehand from C via [`patina_kqueue_apply`];
+        /// this call is only the readiness gather + deterministic park.
+        ///
+        /// # Safety
+        /// `out` must be writable for `nevents` [`PatinaKevent`]s.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn patina_kevent_gather(
+            kq_fd: c_int,
+            out: *mut c_void,
+            nevents: c_int,
+            mode: c_int,
+            timeout_nanos: u64,
+        ) -> c_int {
+            if let Err(errno) = sched_point() {
+                return super::super::fail(errno);
+            }
+            let capacity = nevents.max(0) as usize;
+            let me = current_task();
+            // Absolute deadline for a MODE_TIMEOUT gather, fixed on the first park.
+            let mut timeout_deadline: Option<u64> = None;
+            loop {
+                let mut state = lock_state();
+                let Some(id) = kq_id(&state, kq_fd) else {
+                    return super::super::fail(super::super::EBADF);
+                };
+                let now = match with_context_raw(|c| c.monotonic_now_unrecorded()) {
+                    Ok(now) => now,
+                    Err(errno) => return super::super::fail(errno),
+                };
+                let (ready, rearm_not_ready, earliest_timer) = scan(&state, id, now);
+                commit_rearm(&mut state, id, &rearm_not_ready);
+
+                if !ready.is_empty() || capacity == 0 {
+                    let count = ready.len().min(capacity);
+                    let delivered = &ready[..count];
+                    if !out.is_null() {
+                        let slots = unsafe {
+                            std::slice::from_raw_parts_mut(out.cast::<PatinaKevent>(), count)
+                        };
+                        for (slot, event) in slots.iter_mut().zip(delivered) {
+                            *slot = event.event;
+                        }
+                    }
+                    commit_delivered(&mut state, id, delivered);
+                    return c_int::try_from(count).unwrap_or(c_int::MAX);
+                }
+
+                if mode == MODE_POLL {
+                    return 0;
+                }
+
+                // A bounded gather whose deadline has passed with nothing ready
+                // returns zero events — never re-parks on an elapsed deadline
+                // (which would live-lock the deadlock rescue). The absolute
+                // deadline is fixed on entry so it does not drift across scans.
+                if mode == MODE_TIMEOUT {
+                    let deadline =
+                        *timeout_deadline.get_or_insert(now.saturating_add(timeout_nanos));
+                    if now >= deadline {
+                        return 0;
+                    }
+                }
+
+                // Nothing ready: park with multi-fd fan-in, bounded by the earlier
+                // of the gather timeout and the soonest EVFILT_TIMER deadline.
+                let park_deadline = if mode == MODE_TIMEOUT {
+                    let deadline = timeout_deadline.expect("timeout deadline fixed above");
+                    Some(match earliest_timer {
+                        Some(timer) => deadline.min(timer),
+                        None => deadline,
+                    })
+                } else {
+                    // MODE_FOREVER (MODE_POLL returned above): the park is bounded
+                    // only by the soonest EVFILT_TIMER deadline, if any.
+                    debug_assert!(mode == MODE_FOREVER, "unexpected kevent gather mode {mode}");
+                    earliest_timer
+                };
+                // Fan-in on the reactor-neutral readiness sources (shared core),
+                // plus the kqueue-specific EVFILT_USER trigger, whose wakeup is
+                // the kq's own waiter list rather than a descriptor.
+                let (watched, has_user) = watched_sources(&state, id);
+                let locs = register_readiness_waiters(&mut state, me, &watched);
+                if has_user {
+                    state
+                        .net
+                        .kqueues
+                        .get_mut(&id)
+                        .expect("kqueue exists")
+                        .kq
+                        .waiters
+                        .push_back(me);
+                }
+                let step = match park_deadline {
+                    Some(deadline) => {
+                        state.block_timed(me, "kevent", ClockKind::Monotonic, deadline)
+                    }
+                    None => state.block(me, "kevent"),
+                };
+                match step {
+                    Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
+                    Ok(Step::Continue) => drop(state),
+                    Err(error) => {
+                        let mut state = lock_state();
+                        unregister_readiness_waiters(&mut state, me, &locs);
+                        detach_user_waiter(&mut state, id, me);
+                        return super::super::fail(error.into_posix());
+                    }
+                }
+                let mut state = lock_state();
+                unregister_readiness_waiters(&mut state, me, &locs);
+                detach_user_waiter(&mut state, id, me);
+                state.timed_out.remove(&me);
+                drop(state);
+            }
+        }
+
+        /// Unlink `me` from the kq's EVFILT_USER waiter list. Idempotent, so the
+        /// gather resume paths call it unconditionally.
+        fn detach_user_waiter(state: &mut ThreadRuntime, id: u64, me: TaskId) {
+            if let Some(slot) = state.net.kqueues.get_mut(&id) {
+                if let Some(index) = slot.kq.waiters.iter().position(|task| *task == me) {
+                    slot.kq.waiters.remove(index);
+                }
+            }
         }
     }
 

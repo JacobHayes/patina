@@ -228,13 +228,17 @@ int32_t patina_net_close(int32_t fd);
  * process (an async runtime's IO-driver / signal self-pipe), so they are modeled
  * as deterministic in-memory byte channels sharing the virtual-fd space above
  * (numbered from PATINA_SOCKET_FD_BASE) and the same baton/waiter machinery. The
- * interposed read/write/close/fcntl route these fds via patina_pipe_is_endpoint.
+ * interposed read/write/close/dup/fcntl route these fds via
+ * patina_pipe_is_endpoint. patina_pipe_dup aliases an endpoint (dup /
+ * F_DUPFD[_CLOEXEC]): a channel side reports EOF/EPIPE only once its LAST
+ * aliasing fd has closed.
  */
 int32_t patina_pipe(int32_t *read_fd_out, int32_t *write_fd_out, int32_t nonblocking);
 int32_t patina_socketpair(int32_t *fd0_out, int32_t *fd1_out, int32_t nonblocking);
 int32_t patina_pipe_is_endpoint(int32_t fd);
 intptr_t patina_pipe_read(int32_t fd, void *buf, size_t len);
 intptr_t patina_pipe_write(int32_t fd, const void *buf, size_t len);
+int32_t patina_pipe_dup(int32_t fd);
 int32_t patina_pipe_close(int32_t fd);
 int32_t patina_pipe_is_nonblocking(int32_t fd);
 int32_t patina_pipe_set_nonblocking(int32_t fd, int32_t nonblocking);
@@ -282,6 +286,50 @@ void patina_dispatch_release(void *object);
 void patina_os_unfair_lock_lock(void *lock);
 int32_t patina_os_unfair_lock_trylock(void *lock);
 void patina_os_unfair_lock_unlock(void *lock);
+
+/*
+ * kqueue / kevent readiness reactor (macOS). A virtual kqueue descriptor is
+ * drawn from the shared virtual-fd space (numbered from PATINA_SOCKET_FD_BASE),
+ * so the interposed close routes it here via patina_kqueue_is_kq. The C kevent
+ * interposers marshal the platform struct kevent/kevent64_s changelists and
+ * eventlists to and from this platform-neutral projection; the Rust reactor owns
+ * the knote registry, readiness, deterministic event ordering, and the multi-fd
+ * fan-in park. `struct patina_kevent` is laid out to match the macOS `struct
+ * kevent` field for field (asserted in the C layer), so a kevent eventlist is
+ * marshalled by a direct reinterpret and a kevent64_s eventlist field by field.
+ */
+struct patina_kevent {
+    uint64_t ident;
+    int16_t filter;
+    uint16_t flags;
+    uint32_t fflags;
+    int64_t data;
+    void *udata;
+};
+
+int32_t patina_kqueue(void);
+int32_t patina_kqueue_is_kq(int32_t fd);
+/*
+ * Duplicate a kqueue fd: the new fd aliases the SAME registry (tokio's IO driver
+ * clones its selector through F_DUPFD_CLOEXEC), which drops only when the last
+ * aliasing fd closes.
+ */
+int32_t patina_kqueue_dup(int32_t fd);
+int32_t patina_kqueue_close(int32_t fd);
+/*
+ * Apply one changelist entry. Returns 0 on success or a POSIX errno the caller
+ * places in an EV_ERROR receipt. An EVFILT_USER NOTE_TRIGGER wakes the kq's
+ * parked kevent callers. Unmodeled filters fail closed loudly (SIGABRT).
+ */
+int32_t patina_kqueue_apply(int32_t kq, uint64_t ident, int16_t filter, uint16_t flags,
+                            uint32_t fflags, int64_t data, uintptr_t udata);
+/*
+ * Gather up to `nevents` ready events into `out`, blocking per `mode`:
+ * 0 = non-blocking poll, 1 = block until ready, 2 = block until `timeout_nanos`
+ * of virtual time elapse. Returns the event count (>= 0) or -1 with patina_errno.
+ */
+int32_t patina_kevent_gather(int32_t kq, struct patina_kevent *out, int32_t nevents,
+                             int32_t mode, uint64_t timeout_nanos);
 #endif
 
 #ifdef __cplusplus

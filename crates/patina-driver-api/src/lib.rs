@@ -129,6 +129,20 @@ fn checked_offset(offset: u64) -> DriverResult<i64> {
     })
 }
 
+/// Level-triggered readiness of a virtual socket at a given virtual instant,
+/// for a readiness reactor (`kqueue`/`kevent`). `read_eof`/`write_eof` carry the
+/// `EV_EOF` conditions: the peer will send no more (`read_eof`) or will read no
+/// more / the stream is torn down (`write_eof`). A pure inspection — no bytes
+/// are consumed and no state changes — so a reactor may call it repeatedly while
+/// gathering events without perturbing the run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NetReadiness {
+    pub readable: bool,
+    pub writable: bool,
+    pub read_eof: bool,
+    pub write_eof: bool,
+}
+
 fn unsupported_network_operation(operation: &str) -> EffectError {
     EffectError::new(
         patina_dst_abi::ErrorCode::Denied,
@@ -303,6 +317,18 @@ pub trait NetDriver: Send {
     /// Close one or both directions of an established stream.
     fn tcp_shutdown(&mut self, _socket: SocketId, _how: ShutdownHow) -> DriverResult<()> {
         Err(unsupported_network_operation("tcp shutdown"))
+    }
+
+    /// Level-triggered readiness of `socket` at `now_nanos`, for a `kqueue`/
+    /// `kevent` reactor. The conditions mirror the blocking `recv`/`send` paths
+    /// exactly: `readable` iff a receive would return data or end-of-stream,
+    /// `writable` iff a send would make progress or fail closed rather than
+    /// would-block. A pure `&self` inspection that consumes nothing, so a
+    /// reactor gathers events without recording a boundary observation. The
+    /// default reports "not ready"; drivers that model byte buffers override it
+    /// and wrappers forward it so wrapped latency stays visible.
+    fn readiness(&self, _socket: SocketId, _now_nanos: u64) -> DriverResult<NetReadiness> {
+        Ok(NetReadiness::default())
     }
 
     fn close(&mut self, socket: SocketId) -> DriverResult<()>;

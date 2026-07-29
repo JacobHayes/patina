@@ -3544,6 +3544,52 @@ impl Context {
         decode_optional_u64(&operation, outcome)
     }
 
+    /// Level-triggered readiness of `socket` as a bitmask, for a `kqueue`/
+    /// `kevent` readiness reactor in an embedder (the native shim): bit 0
+    /// readable, bit 1 writable, bit 2 read-EOF (`EV_EOF` on read), bit 3
+    /// write-EOF (`EV_EOF` on write). Deliberately UNRECORDED: readiness is a
+    /// pure function of the recorded send/recv/shutdown history and the virtual
+    /// clock — both reconstructed identically on replay — so a reactor may poll
+    /// it every scheduling scan without emitting a boundary op, exactly as pipe
+    /// readiness and mutex words carry no trace of their own. Virtual time is
+    /// read through [`Self::current_monotonic`], the same unrecorded clock read
+    /// the deadlock rescue uses.
+    pub fn net_readiness(&mut self, socket: SocketId) -> Result<u32, RuntimeError> {
+        if self.network.is_none() {
+            return Err(EffectError::missing_driver("network").into());
+        }
+        let now_nanos = self.current_monotonic()?;
+        let readiness = self
+            .network
+            .as_ref()
+            .expect("driver was checked")
+            .readiness(socket, now_nanos)?;
+        let mut bits = 0u32;
+        if readiness.readable {
+            bits |= 1 << 0;
+        }
+        if readiness.writable {
+            bits |= 1 << 1;
+        }
+        if readiness.read_eof {
+            bits |= 1 << 2;
+        }
+        if readiness.write_eof {
+            bits |= 1 << 3;
+        }
+        Ok(bits)
+    }
+
+    /// The current monotonic virtual time in nanoseconds, UNRECORDED. A
+    /// readiness reactor (the native shim's `kqueue`/`kevent`) compares
+    /// `EVFILT_TIMER` deadlines against it every scan; recording those reads
+    /// would emit a `ClockNow` op per poll and diverge record from replay. Safe
+    /// because virtual time only advances through recorded `SleepUntil`/rescue,
+    /// so a bare read reproduces identically (see [`Self::current_monotonic`]).
+    pub fn monotonic_now_unrecorded(&mut self) -> Result<u64, RuntimeError> {
+        self.current_monotonic()
+    }
+
     pub fn net_close(&mut self, socket: SocketId) -> Result<(), RuntimeError> {
         if self.network.is_none() {
             return Err(EffectError::missing_driver("network").into());

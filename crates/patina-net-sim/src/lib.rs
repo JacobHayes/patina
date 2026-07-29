@@ -6,7 +6,7 @@ use patina_dst_abi::{
     Datagram, EffectError, ErrorCode, SendDisposition, SendReport, ShutdownHow, SocketId,
     TcpAccepted,
 };
-use patina_dst_driver_api::{DriverResult, NetDriver};
+use patina_dst_driver_api::{DriverResult, NetDriver, NetReadiness};
 use patina_dst_rng_seeded::SplitMix64;
 
 #[derive(Default)]
@@ -595,6 +595,76 @@ impl NetDriver for SimNet {
             }
         }
         Ok(())
+    }
+
+    fn readiness(&self, socket: SocketId, now_nanos: u64) -> DriverResult<NetReadiness> {
+        // Datagram: readable once a packet addressed here is deliverable at
+        // `now_nanos` (the exact condition `recv` returns `Some` on); a virtual
+        // datagram send never blocks, so it is always writable and has no EOF.
+        if let Some(address) = self.bindings.get(&socket) {
+            let readable = self
+                .packets
+                .iter()
+                .any(|packet| packet.to == *address && packet.delivery_nanos <= now_nanos);
+            return Ok(NetReadiness {
+                readable,
+                writable: true,
+                read_eof: false,
+                write_eof: false,
+            });
+        }
+        if let Some(endpoint) = self.tcp_endpoints.get(&socket) {
+            // A reset stream fails both directions on the next op; report both
+            // ready-with-EOF so a reactor wakes and the op surfaces the reset.
+            if endpoint.reset {
+                return Ok(NetReadiness {
+                    readable: true,
+                    writable: true,
+                    read_eof: true,
+                    write_eof: true,
+                });
+            }
+            // Mirror `tcp_recv`: `Some(nonempty)` = data, `Some(empty)` = EOF,
+            // `None` = would-block. Readable iff a receive would not would-block.
+            let has_due_data = endpoint
+                .inbox
+                .iter()
+                .any(|segment| segment.delivery_nanos <= now_nanos);
+            let read_eof =
+                endpoint.read_closed || (endpoint.remote_write_closed && endpoint.inbox.is_empty());
+            let readable = has_due_data || read_eof;
+            // Mirror `tcp_send`: `Ok(0)` (would-block) only when the peer's
+            // receive buffer is full and the peer is still reading; a shut-for-
+            // write, gone, or non-reading peer fails closed rather than blocks,
+            // which a reactor reports as writable-with-EOF.
+            let write_eof = endpoint.write_closed
+                || endpoint
+                    .peer
+                    .and_then(|peer| self.tcp_endpoints.get(&peer))
+                    .is_none_or(|peer| peer.read_closed);
+            let peer_has_space = endpoint
+                .peer
+                .and_then(|peer| self.tcp_endpoints.get(&peer))
+                .is_none_or(|peer| peer.read_closed || peer.inbox_bytes < self.tcp_buffer_bytes);
+            let writable = write_eof || peer_has_space;
+            return Ok(NetReadiness {
+                readable,
+                writable,
+                read_eof,
+                write_eof,
+            });
+        }
+        if let Some(listener) = self.tcp_listeners.get(&socket) {
+            // A listener is "readable" once a connection is pending: `accept`
+            // would return `Some`. A listener is never writable.
+            return Ok(NetReadiness {
+                readable: !listener.pending.is_empty(),
+                writable: false,
+                read_eof: false,
+                write_eof: false,
+            });
+        }
+        Err(invalid_socket(socket))
     }
 
     fn close(&mut self, socket: SocketId) -> DriverResult<()> {

@@ -3,7 +3,7 @@
 use patina_dst_abi::{
     Datagram, EffectError, ErrorCode, SendReport, ShutdownHow, SocketId, TcpAccepted,
 };
-use patina_dst_driver_api::{DriverResult, NetDriver};
+use patina_dst_driver_api::{DriverResult, NetDriver, NetReadiness};
 use patina_dst_rng_seeded::SplitMix64;
 
 /// Adds fixed latency and seeded inclusive jitter to virtual packet delivery.
@@ -137,6 +137,13 @@ impl<D: NetDriver> NetDriver for LatencyNet<D> {
 
     fn tcp_shutdown(&mut self, socket: SocketId, how: ShutdownHow) -> DriverResult<()> {
         self.inner.tcp_shutdown(socket, how)
+    }
+
+    fn readiness(&self, socket: SocketId, now_nanos: u64) -> DriverResult<NetReadiness> {
+        // Readiness reflects the inbox delivery times the latency wrapper has
+        // already stretched (via `tcp_send`), so a straight forward keeps the
+        // wrapped latency visible without re-applying it.
+        self.inner.readiness(socket, now_nanos)
     }
 
     fn close(&mut self, socket: SocketId) -> DriverResult<()> {
