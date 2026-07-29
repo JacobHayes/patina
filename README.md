@@ -127,10 +127,12 @@ scripts/validate-native-shim.sh
 scripts/smoke-cross-target.sh
 cargo patina build path/to/program.rs --output /tmp/program
 cargo patina run /tmp/program --seed 123 --record /tmp/native.patina
-cargo patina audit path/to/native-binary
+cargo patina audit path/to/program.rs                    # source-first: links the shim, audits the true residual
 ```
 
 `run`, `audit`, and `replay` are source-first: pass a built artifact to use it as-is, or a `SOURCE.rs`/`DIR`/`Cargo.toml` (with `--target native|wasi`, default native) to build it on the fly through the same pipeline as `build` and then run/audit/replay the product. An implicit build prints a one-line `PATINA_BUILD_ON_RUN` note (source, artifact, content hash) so it never silently changes what ran; sweeps and campaigns keep passing a prebuilt artifact for build-once-run-many stability.
+
+Audit source-first for the true residual. Only a shim-linked binary shows the post-interposition residual — the handful of effect-surface symbols that genuinely escape. A stock `cargo build` output, by contrast, lists every libc call the shim *would* interpose (`open`, `clock_gettime`, `pthread_mutex_*`, ...) as an unsupported import — the opposite of the truth — so `cargo patina audit <prebuilt-binary>` fails closed unless the binary came from `cargo patina build`. Auditing a `SOURCE.rs`/`DIR`/`Cargo.toml` (or a Patina-built artifact) gives the correct residual; `--raw` overrides the gate and runs the full audit anyway (instruction scan and escape categories included) under a loud banner marking the import findings as pre-interposition.
 
 ```sh
 cargo patina run path/to/program.rs --seed 123          # builds native, then runs

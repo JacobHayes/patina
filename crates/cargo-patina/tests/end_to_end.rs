@@ -1477,6 +1477,108 @@ fn audit_and_replay_are_source_first() {
     );
 }
 
+// Auditing a *prebuilt* native binary that was NOT produced by `cargo patina
+// build` fails closed: its imports are unsatisfied libc calls (the surface the
+// shim interposes once linked), not the post-interposition residual, so a raw
+// listing is the opposite of the truth. The refusal names the source-first form.
+// `--raw` overrides the gate and runs the full audit (instruction scan and
+// escape categories stay meaningful) under a loud stderr banner. A
+// Patina-built binary is unaffected: it defines the shim control-plane marker,
+// so it audits normally with no banner. (Source-first equivalence and the WASI
+// path are covered by `audit_and_replay_are_source_first` / the WASI audit tests.)
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn audit_prebuilt_non_shim_binary_fails_closed_unless_raw() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+
+    // A stock binary built by plain `rustc` — no `cargo patina build`, so the
+    // shim staticlib is not linked and `patina_init_from_env` is undefined.
+    let source = directory.path().join("stock.rs");
+    fs::write(&source, "fn main() { println!(\"STOCK\"); }").unwrap();
+    let stock = directory.path().join("stock");
+    let compiled = Command::new("rustc")
+        .arg(&source)
+        .arg("-o")
+        .arg(&stock)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "rustc failed to build the stock fixture:\nstderr:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    // (a) A bare audit of the stock binary is refused, not silently listed.
+    let refused = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["audit", stock.to_str().unwrap()],
+    );
+    assert!(
+        !refused.status.success(),
+        "audit of a non-shim-linked binary must fail closed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let refusal = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        refusal.contains("not built with `cargo patina build`")
+            && refusal.contains("cargo patina audit ./Cargo.toml")
+            && refusal.contains("--raw"),
+        "refusal must explain the shim-link gap and point to source-first + --raw:\n{refusal}"
+    );
+
+    // (b) `--raw` runs the full audit anyway under the loud banner. The stock
+    // binary's unsatisfied libc surface is denied, so the audit still fails
+    // closed — but now with the real categorized findings, which is what makes
+    // `--raw` useful for planted-escape fixtures (instruction scan included).
+    let raw = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["audit", stock.to_str().unwrap(), "--raw"],
+    );
+    assert!(
+        !raw.status.success(),
+        "--raw audit of a stock binary must still fail closed on its denied imports\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&raw.stdout),
+        String::from_utf8_lossy(&raw.stderr)
+    );
+    let raw_stderr = String::from_utf8_lossy(&raw.stderr);
+    assert!(
+        raw_stderr.contains("PATINA_RAW_AUDIT"),
+        "--raw audit must lead with the raw-audit banner:\n{raw_stderr}"
+    );
+    assert!(
+        raw_stderr.contains("unsupported native imports"),
+        "--raw audit must render the real categorized findings:\n{raw_stderr}"
+    );
+
+    // (c) A Patina-built binary is unaffected: it defines the shim marker, so a
+    // bare audit (control-plane vehicle allowed) succeeds with no banner.
+    let shim_source = directory.path().join("shim.rs");
+    fs::write(&shim_source, "fn main() { println!(\"SHIM\"); }").unwrap();
+    let shim_bin = directory.path().join("shim");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            shim_source.to_str().unwrap(),
+            "--output",
+            shim_bin.to_str().unwrap(),
+        ],
+    );
+    let shim_audit = invoke_in(
+        workspace,
+        &["audit", shim_bin.to_str().unwrap(), "--allow", "dlsym"],
+    );
+    assert!(
+        !String::from_utf8_lossy(&shim_audit.stdout).contains("PATINA_RAW_AUDIT"),
+        "a Patina-built binary must audit without the raw banner:\n{}",
+        String::from_utf8_lossy(&shim_audit.stdout)
+    );
+}
+
 // `run <pkg> --target wasi` builds the package for wasip1 on the fly and runs the
 // produced module, inferred by the shared resolution step.
 #[cfg(any(target_os = "linux", target_os = "macos"))]

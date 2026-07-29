@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use object::{Architecture, BinaryFormat, Object, ObjectSection, SectionKind};
+use object::{Architecture, BinaryFormat, Object, ObjectSection, ObjectSymbol, SectionKind};
 use wasmparser::{Parser, Payload};
 
 pub const WASI_PREVIEW1_TARGET: &str = "wasm32-wasip1";
@@ -140,6 +140,40 @@ impl NativeAudit {
         }
         Ok(Self { imports })
     }
+}
+
+/// The shim's control-plane entry symbol, defined (`#[no_mangle] extern "C"`)
+/// only in a `cargo patina build` binary — the packaged startup constructor
+/// calls it, so it is present and not dead-stripped. Its *defined* presence is
+/// the marker that a native binary was linked against the shim staticlib: a
+/// stock `cargo build` output has no such symbol. Mach-O decorates it with a
+/// leading underscore (`_patina_init_from_env`), which `normalize_native_symbol`
+/// strips, so the same name matches on both formats.
+const SHIM_CONTROL_PLANE_MARKER: &str = "patina_init_from_env";
+
+/// Whether a native binary was linked against the Patina shim staticlib, judged
+/// by the *defined* presence of the shim control-plane marker
+/// ([`SHIM_CONTROL_PLANE_MARKER`]) in its symbol table. A stock `cargo build`
+/// binary does not define it and returns `false`; auditing such a binary raw
+/// reports unsatisfied libc imports (`open`, `clock_gettime`, `pthread_mutex_*`,
+/// ...) — the whole surface the shim *interposes* once linked — not the true
+/// post-interposition residual, which misleads badly. Callers use this to fail
+/// closed (refuse, or demand an explicit `--raw`) on a non-shim-linked binary.
+///
+/// Fails closed on a parse error or an unsupported binary format so a
+/// malformed/foreign input is never silently treated as shim-linked.
+pub fn native_binary_is_shim_linked(bytes: &[u8]) -> Result<bool, TargetError> {
+    let file = object::File::parse(bytes).map_err(TargetError::NativeParse)?;
+    // Reject non-native formats up front; the marker only means anything for a
+    // Mach-O/ELF native binary.
+    NativeFormat::from_binary(file.format())?;
+    Ok(file.symbols().chain(file.dynamic_symbols()).any(|symbol| {
+        symbol.is_definition()
+            && symbol
+                .name()
+                .map(|name| normalize_native_symbol(name) == SHIM_CONTROL_PLANE_MARKER)
+                .unwrap_or(false)
+    }))
 }
 
 /// The shim's own host control-plane symbols the pre-run gate tolerates in a
@@ -1228,6 +1262,117 @@ fn common_native_allowlisted_import(symbol: &str) -> bool {
         "sigdelset",
         "sigismember",
     ];
+    // Pure libm math: each is a mathematical function of its floating-point
+    // argument(s) — the pointer-out variants (`frexp`/`modf`) write only the
+    // caller-owned integer/fraction slot the caller passed. None reads host time,
+    // draws entropy, touches a descriptor, blocks, or otherwise crosses the
+    // boundary Patina models. Some set `errno` (`ERANGE`/`EDOM`) or raise IEEE
+    // floating-point flags on out-of-domain inputs; neither is a host effect
+    // Patina observes, so the result stays deterministic for the same operands.
+    // Rust's `f64`/`f32` methods (`powf`, `hypot`, `exp`, the rounding family,
+    // ...) lower to these; on macOS they resolve as undefined libm imports
+    // (`_pow`, ...) that the default-deny audit would otherwise refuse. This is
+    // an EXPLICIT list only — no prefix/glob matching, which could mask an
+    // effectful symbol that merely shares a math-looking name. It covers the
+    // pure, no-boundary-effect math surface only: `random`/`drand48` (PRNG
+    // draws), `time`, and CoreFoundation/Security-framework math helpers are
+    // deliberately NOT here and stay refused.
+    const MATH_LIBM: &[&str] = &[
+        // Powers, exponentials, logarithms.
+        "pow",
+        "powf",
+        "exp",
+        "expf",
+        "exp2",
+        "exp2f",
+        "expm1",
+        "expm1f",
+        "log",
+        "logf",
+        "log2",
+        "log2f",
+        "log10",
+        "log10f",
+        "log1p",
+        "log1pf",
+        // Trigonometric and inverse-trigonometric.
+        "sin",
+        "sinf",
+        "cos",
+        "cosf",
+        "tan",
+        "tanf",
+        "asin",
+        "asinf",
+        "acos",
+        "acosf",
+        "atan",
+        "atanf",
+        "atan2",
+        "atan2f",
+        // Hyperbolic and inverse-hyperbolic.
+        "sinh",
+        "sinhf",
+        "cosh",
+        "coshf",
+        "tanh",
+        "tanhf",
+        "asinh",
+        "asinhf",
+        "acosh",
+        "acoshf",
+        "atanh",
+        "atanhf",
+        // Roots and magnitude combinations.
+        "sqrt",
+        "sqrtf",
+        "cbrt",
+        "cbrtf",
+        "hypot",
+        "hypotf",
+        // Remainder and fused multiply-add.
+        "fmod",
+        "fmodf",
+        "fma",
+        "fmaf",
+        // Decomposition (the pointer-out slot is caller-owned).
+        "ldexp",
+        "ldexpf",
+        "frexp",
+        "frexpf",
+        "modf",
+        "modff",
+        // Rounding and truncation.
+        "ceil",
+        "ceilf",
+        "floor",
+        "floorf",
+        "trunc",
+        "truncf",
+        "round",
+        "roundf",
+        "rint",
+        "rintf",
+        "nearbyint",
+        "nearbyintf",
+        "lround",
+        "lroundf",
+        "llround",
+        "llroundf",
+        "lrint",
+        "lrintf",
+        "llrint",
+        "llrintf",
+        // Sign and min/max.
+        "fabs",
+        "fabsf",
+        "copysign",
+        "copysignf",
+        "fmin",
+        "fminf",
+        "fmax",
+        "fmaxf",
+    ];
     symbol.starts_with("Unwind_")
         || ALLOCATOR.contains(&symbol)
         || MEMORY_AND_STRING.contains(&symbol)
@@ -1240,6 +1385,7 @@ fn common_native_allowlisted_import(symbol: &str) -> bool {
         || ENVIRONMENT_STORAGE.contains(&symbol)
         || PROCESS_LOCAL_MEMORY.contains(&symbol)
         || SIGNAL_SET_MANIPULATION.contains(&symbol)
+        || MATH_LIBM.contains(&symbol)
 }
 
 fn macho_native_allowlisted_import(symbol: &str) -> bool {
@@ -1830,6 +1976,54 @@ mod tests {
             NativeImportDecision::Denied("unknown-import")
         );
 
+        // Pure libm math is known-safe on both formats with no `--allow`: the
+        // MRE's `_pow` (and the rest of the pure math surface) resolves as an
+        // undefined libm import that used to land in `unknown-import` and block
+        // the run. It is now allowlisted — but ONLY the explicitly-listed pure
+        // functions, never an effectful symbol that merely looks math-adjacent.
+        for symbol in ["pow", "sqrtf", "hypot", "fma", "nearbyint", "llround"] {
+            assert_eq!(
+                native_import_decision(symbol, NativeFormat::MachO, &empty),
+                NativeImportDecision::Allowed,
+                "{symbol} is pure libm and must be known-safe on Mach-O"
+            );
+            assert_eq!(
+                native_import_decision(symbol, NativeFormat::Elf, &empty),
+                NativeImportDecision::Allowed,
+                "{symbol} is pure libm and must be known-safe on ELF"
+            );
+        }
+        // The `_pow` alias form (Mach-O underscore decoration) normalizes onto the
+        // same entry, so the exact symbol the MRE audit reported is now cleared.
+        assert_eq!(
+            native_import_decision("_pow", NativeFormat::MachO, &empty),
+            NativeImportDecision::Allowed
+        );
+        // Guard: genuinely-effectful symbols that share the math neighborhood must
+        // NOT be swept in by the libm allowance. `random`/`drand48` draw from a
+        // host PRNG; `system` spawns a process; `srand` mutates PRNG state. The
+        // explicit-list discipline keeps all of them denied.
+        assert_eq!(
+            native_import_decision("random", NativeFormat::MachO, &empty),
+            NativeImportDecision::Denied("unknown-import")
+        );
+        assert_eq!(
+            native_import_decision("random", NativeFormat::Elf, &empty),
+            NativeImportDecision::Denied("unknown-import")
+        );
+        assert_eq!(
+            native_import_decision("drand48", NativeFormat::Elf, &empty),
+            NativeImportDecision::Denied("unknown-import")
+        );
+        assert_eq!(
+            native_import_decision("srand", NativeFormat::Elf, &empty),
+            NativeImportDecision::Denied("unknown-import")
+        );
+        assert_eq!(
+            native_import_decision("system", NativeFormat::MachO, &empty),
+            NativeImportDecision::Denied("process")
+        );
+
         let mut allow = BTreeSet::new();
         allow.insert("definitely_not_known".into());
         allow.insert("read".into());
@@ -2109,6 +2303,59 @@ mod tests {
                 );
             }
         }
+        // Pure libm math is a function of its floating-point operands with no
+        // boundary effect, on both formats. Sample across each sub-family so a
+        // dropped line is caught. `f64`/`f32` method lowering (`powf`, `hypot`,
+        // the rounding family) reaches these as undefined libm imports.
+        for format in [NativeFormat::MachO, NativeFormat::Elf] {
+            for symbol in [
+                "pow",
+                "powf",
+                "exp",
+                "log2",
+                "sin",
+                "cosf",
+                "atan2",
+                "tanh",
+                "acosh",
+                "sqrt",
+                "cbrt",
+                "hypot",
+                "fmod",
+                "fma",
+                "ldexp",
+                "frexp",
+                "modf",
+                "ceil",
+                "floorf",
+                "round",
+                "rint",
+                "nearbyint",
+                "fabs",
+                "copysign",
+                "fmax",
+                "fminf",
+                "lround",
+                "llrint",
+            ] {
+                assert_eq!(
+                    native_import_decision(symbol, format, &empty),
+                    NativeImportDecision::Allowed,
+                    "{symbol} is pure libm and carries no boundary effect"
+                );
+            }
+        }
+        // The libm allowance is explicit, not a prefix match: effectful symbols in
+        // the same neighborhood stay refused. `random`/`drand48` are PRNG draws;
+        // `system` spawns a process.
+        assert_eq!(
+            native_import_decision("random", NativeFormat::Elf, &empty),
+            NativeImportDecision::Denied("unknown-import")
+        );
+        assert_eq!(
+            native_import_decision("system", NativeFormat::MachO, &empty),
+            NativeImportDecision::Denied("process")
+        );
     }
 
     #[test]

@@ -25,7 +25,7 @@ use patina_dst_runtime::{
 };
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
-    shim_control_plane_symbols,
+    native_binary_is_shim_linked, shim_control_plane_symbols,
 };
 use patina_dst_trace::TraceBundle;
 use patina_dst_wasi_host::{
@@ -106,7 +106,8 @@ Usage:
   cargo patina build <SOURCE.rs> --output <PATH> [--edition YEAR] [--release] [--yield-points] [-- RUSTC OPTIONS]
   cargo patina build <DIR|Cargo.toml> [--output <PATH>] [--package NAME] [--bin NAME] [--release] [--yield-points]
   cargo patina build <DIR|Cargo.toml> --target wasi [--output PATH] [--package NAME] [--bin NAME] [--release]
-  cargo patina audit <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [--allow SYMBOL]...
+  cargo patina audit <SOURCE.rs|DIR|Cargo.toml> [--package NAME] [--bin NAME] [--target native|wasi] [--allow SYMBOL]...   (builds with the shim linked, then audits the true residual)
+  cargo patina audit <ARTIFACT> [--allow SYMBOL]... [--raw]   (a prebuilt binary; must be `cargo patina build`-linked unless --raw)
   cargo patina replay <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> <TRACE> [--target native|wasi] [REPLAY OPTIONS]
   cargo patina minimize <TRACE> --output <PATH> [--timeline ID] [--prune-branches] -- <ORACLE> [ARGS]...
   cargo patina minimize --scenario --seed <U64> [--param K=V]... [--seed-budget N] -- <ORACLE> [ARGS]...
@@ -137,6 +138,18 @@ operation mismatch). A `run` with a directory, a `Cargo.toml`, or no artifact an
 no `--target` stays the Cargo package family (the same seed/record/replay/branch
 machinery as `test`); `--target` opts a source/package argument into build-then-
 run. `build` defaults to `--target native`.
+
+`audit` is source-first for a reason: only a shim-linked binary shows the true
+post-interposition residual. Auditing a source/package (`audit ./Cargo.toml
+--bin X`, or a bare `.rs`) links the shim first, so the report is the handful of
+effect-surface symbols that genuinely escape. A stock `cargo build` binary, by
+contrast, lists every libc call the shim *would* interpose (`open`,
+`clock_gettime`, `pthread_mutex_*`, ...) as an unsupported import — the opposite
+of the truth — so `audit <prebuilt>` fails closed unless the binary was produced
+by `cargo patina build`. `--raw` overrides that gate and runs the full audit
+anyway (instruction scan and escape categories included) under a loud banner
+marking the import findings as pre-interposition. (A Patina-built artifact
+audits normally; the WASI import audit is unaffected.)
 
 Patina options (run/test):
       --seed <U64>       Deterministic root seed (default: 0)
@@ -424,6 +437,12 @@ struct WasiSocketConfig {
 struct NativeAuditInvocation {
     binary: ArtifactRef,
     allow: BTreeSet<String>,
+    /// Audit a prebuilt native binary even when it is not shim-linked. Without
+    /// it, `execute_native_audit` fails closed on a stock `cargo build` output
+    /// (whose imports are unsatisfied libc calls, not the post-interposition
+    /// residual). With it, the full audit runs anyway under a loud banner
+    /// marking the import findings as pre-interposition.
+    raw: bool,
 }
 
 /// A `minimize` request: either shrinking a recorded trace bundle or reducing
@@ -2018,8 +2037,14 @@ fn parse_native_audit_from(
     arguments: Vec<OsString>,
 ) -> Result<NativeAuditInvocation, CliError> {
     let mut allow = BTreeSet::new();
+    let mut raw = false;
     let mut index = 0;
     while index < arguments.len() {
+        if arguments[index] == "--raw" {
+            raw = true;
+            index += 1;
+            continue;
+        }
         if arguments[index] != "--allow" {
             return Err(CliError::usage(format!(
                 "unsupported option {:?} for `audit` of a native binary",
@@ -2036,7 +2061,7 @@ fn parse_native_audit_from(
         allow.insert(symbol.into());
         index += 2;
     }
-    Ok(NativeAuditInvocation { binary, allow })
+    Ok(NativeAuditInvocation { binary, allow, raw })
 }
 
 fn split_trailing_args(arguments: &mut Vec<OsString>) -> Vec<OsString> {
@@ -3708,6 +3733,10 @@ fn execute_explore(exploration: ExploreInvocation) -> Result<i32, CliError> {
 }
 
 fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<i32, CliError> {
+    // A build-on-the-fly artifact is always shim-linked (it comes through the
+    // same pipeline `build` uses), so the shim-linked gate only concerns a
+    // prebuilt binary the caller handed us.
+    let was_prebuilt = matches!(invocation.binary, ArtifactRef::Prebuilt(_));
     let resolved = resolve_artifact(invocation.binary)?;
     let bytes = fs::read(&resolved.path).map_err(|error| {
         CliError(format!(
@@ -3715,6 +3744,46 @@ fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<i32, CliErr
             resolved.path.display()
         ))
     })?;
+    // Fail closed on a prebuilt binary that was not built with `cargo patina
+    // build`: its import table lists the unsatisfied libc calls the shim would
+    // interpose once linked (`open`, `clock_gettime`, `pthread_mutex_*`, ...),
+    // not the true post-interposition residual. Auditing it raw reports ~the
+    // whole libc surface as "unsupported", the exact opposite of the truth. The
+    // audit is only meaningful against a shim-linked artifact, so steer to
+    // source-first (which links the shim before auditing) or a Patina-built
+    // binary — with `--raw` as the explicit escape hatch.
+    let shim_linked = if was_prebuilt {
+        native_binary_is_shim_linked(&bytes).map_err(|error| CliError(error.to_string()))?
+    } else {
+        true
+    };
+    if !shim_linked && !invocation.raw {
+        return Err(CliError(format!(
+            "refusing to audit {}: this binary was not built with `cargo patina build`, so its \
+             imports are unsatisfied libc calls (open, clock_gettime, pthread_mutex_*, ...) — the \
+             surface the shim *interposes* once linked — not the post-interposition residual. The \
+             audit would be the opposite of the truth. Audit source-first so the shim is linked \
+             first:\n    cargo patina audit ./Cargo.toml --bin <NAME>\nor pass a Patina-built \
+             artifact (`cargo patina build ... --output <PATH>`). To list the raw imports of this \
+             exact binary anyway, re-run with --raw.",
+            resolved.path.display()
+        )));
+    }
+    // `--raw` on a NON-shim-linked binary: run the full audit anyway — the
+    // instruction scan and escape categorization stay meaningful — but under a
+    // loud banner, because the *import* findings are the pre-interposition libc
+    // surface, not the post-interposition residual a shim-linked audit reports.
+    if !shim_linked && invocation.raw {
+        eprintln!(
+            "PATINA_RAW_AUDIT: auditing a NON-shim-linked binary. Import findings reflect \
+             unsatisfied libc imports — most are symbols the shim interposes once `cargo patina \
+             build` links it in — NOT the post-interposition residual. Audit source-first \
+             (`cargo patina audit ./Cargo.toml --bin <NAME>`) for the true residual."
+        );
+    }
+    // Shim-linked (or built on the fly, or --raw): render the real audit — for a
+    // shim-linked artifact this is the true post-interposition residual, and it
+    // fails closed on any genuine escape.
     let audit = NativeAudit::audit(&bytes, &invocation.allow)
         .map_err(|error| CliError(error.to_string()))?;
     let findings: Vec<String> = audit.imports.iter().map(ToString::to_string).collect();

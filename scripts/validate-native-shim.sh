@@ -706,14 +706,24 @@ if "$runner" audit "$tmp/std-probe" >/dev/null 2>"$tmp/audit-error"; then
   exit 1
 fi
 "$cc" -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror "$tmp/escape_probe.c" -o "$tmp/escape-probe"
-if "$runner" audit "$tmp/escape-probe" \
+# The cc-built probes are deliberately NOT shim-linked, so a bare audit is
+# refused by the shim-link gate before classification; the planted-escape legs
+# use --raw, which runs the real audit (instruction scan and escape categories
+# included) under the PATINA_RAW_AUDIT banner.
+if "$runner" audit "$tmp/escape-probe" >/dev/null 2>"$tmp/shim-gate-error"; then
+  echo 'validate-native-shim: audit of a non-shim-linked binary unexpectedly passed' >&2
+  exit 1
+fi
+grep -q 'not built with `cargo patina build`' "$tmp/shim-gate-error"
+if "$runner" audit "$tmp/escape-probe" --raw \
   >"$tmp/escape-out" 2>"$tmp/escape-error"; then
   echo 'validate-native-shim: native escape probe unexpectedly passed audit' >&2
   exit 1
 fi
+grep -q 'PATINA_RAW_AUDIT' "$tmp/escape-error"
 grep -Eq 'direct-syscall|unmanaged-thread' "$tmp/escape-error"
 "$cc" -std=c11 -Wall -Wextra -Werror "$tmp/unknown_import_probe.c" -o "$tmp/unknown-import-probe"
-if "$runner" audit "$tmp/unknown-import-probe" \
+if "$runner" audit "$tmp/unknown-import-probe" --raw \
   >"$tmp/unknown-import-out" 2>"$tmp/unknown-import-error"; then
   echo 'validate-native-shim: unknown import probe unexpectedly passed audit' >&2
   exit 1
