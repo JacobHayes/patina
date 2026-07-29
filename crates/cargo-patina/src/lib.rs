@@ -16,12 +16,13 @@ use patina_dst_minimize::{
 };
 use patina_dst_runtime::{
     Context, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION,
-    ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN, ENV_FINGERPRINT,
-    ENV_FS_CRASH_AT, ENV_FS_IMAGE_FD, ENV_FS_TORN_GRANULARITY, ENV_GUEST_ARGV, ENV_HEAL_AFTER,
-    ENV_LIVENESS_WATCHDOG, ENV_MODE, ENV_NET_DROP_PERMILLE, ENV_NET_JITTER, ENV_NET_LATENCY,
-    ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS, ENV_SCHED_STARVE,
-    ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED, ENV_SLEEP_JITTER, ENV_STEP_BUDGET,
-    ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, RuntimeConfig,
+    ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN, ENV_DEFER_INIT,
+    ENV_FINGERPRINT, ENV_FS_CRASH_AT, ENV_FS_IMAGE_FD, ENV_FS_TORN_GRANULARITY, ENV_GUEST_ARGV,
+    ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG, ENV_MODE, ENV_NET_DROP_PERMILLE, ENV_NET_JITTER,
+    ENV_NET_LATENCY, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS,
+    ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED,
+    ENV_SLEEP_JITTER, ENV_STEP_BUDGET, ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD,
+    RuntimeConfig,
 };
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
@@ -96,7 +97,7 @@ const HELP: &str = "Patina deterministic Cargo runner
 Usage:
   cargo patina run [--seed N | --record PATH] [FAULT OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]
   cargo patina run <MODULE.wasm> [--seed N | --record PATH] [--fuel N] [--arg VALUE]... [--env K=V]... [--socket FD=BIND->PEER]... [--preopen GUEST[:ro|:rw]]... [--fs-crash-at SPEC] [--fs-torn-granularity block|byte] [--net-jitter-nanos MIN..MAX] [--net-drop-permille N]
-  cargo patina run <BINARY> [--seed N | --record PATH] [--fingerprint STR] [--mount HOST_DIR] [--net-latency-nanos N] [FAULT OPTIONS] [--buggify[=PERMILLE]] [--buggify-activation-permille N] [--buggify-cutoff-nanos N] [--buggify-after-setup] [--liveness-watchdog[=NANOS]] [--converge-within[=NANOS]] [--heal-after NANOS] [--allow SYMBOL]... [--allow-unsupported-symbols <all|name,...>] [-- PROGRAM ARGS]
+  cargo patina run <BINARY> [--seed N | --record PATH] [--fingerprint STR] [--mount HOST_DIR] [--harness] [--net-latency-nanos N] [FAULT OPTIONS] [--buggify[=PERMILLE]] [--buggify-activation-permille N] [--buggify-cutoff-nanos N] [--buggify-after-setup] [--liveness-watchdog[=NANOS]] [--converge-within[=NANOS]] [--heal-after NANOS] [--allow SYMBOL]... [--allow-unsupported-symbols <all|name,...>] [-- PROGRAM ARGS]
   cargo patina run <SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [RUN OPTIONS]   (builds on the fly, then runs)
   cargo patina test [--seed N | --record PATH] [FAULT OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]
   cargo patina explore run <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [--seeds N] [--start N] [RUN OPTIONS]
@@ -123,8 +124,14 @@ refused). The Cargo and WASI families also carry the timeline/branch controls:
 (default `main`), and `replay <PKG|MODULE.wasm> <TRACE> --branch --from N
 --branch-seed S --branch-id ID [--parent ID]` replays the parent prefix then
 appends a new branch timeline. Native traces are single-timeline (native runs
-cannot branch), so native replay accepts only `--fingerprint`, `--mount`, and
-the `--allow`/`--allow-unsupported-symbols` audit surface.
+cannot branch), so native replay accepts only `--fingerprint`, `--mount`,
+`--harness`, and the `--allow`/`--allow-unsupported-symbols` audit surface.
+
+`--harness` marks the binary as a `patina-dst-harness` (configure-then-run)
+program: it defers runtime installation (`PATINA_DEFER_INIT=1`) so the harness's
+`run`/`run_with` installs and configures the context, then drives ordinary
+application code whose std effects are interposed. Supply it on both the record
+`run` and the `replay` of a harness binary.
 
 `run`, `audit`, and `replay` are source-first with artifacts accepted uniformly.
 A built artifact (recognized by its leading magic bytes — `\\0asm` for a WASI
@@ -625,6 +632,14 @@ struct NativeRunInvocation {
     /// deterministic filesystem. The image hash is folded into the run
     /// fingerprint so replay rejects a different corpus.
     mount: Option<PathBuf>,
+    /// `--harness`: the guest is a `patina-dst-harness` binary (usage mode 2). Sets
+    /// `PATINA_DEFER_INIT=1` so the packaged constructor captures/scrubs the
+    /// control plane and registers finalization but does NOT install the runtime;
+    /// `patina_dst_harness::run`/`run_with` installs it explicitly after applying
+    /// its configuration overlay. Applies to both record/seeded runs and replay of
+    /// a harness binary (replay must defer too, or the constructor would install a
+    /// context the harness could not own).
+    harness: bool,
 }
 
 /// Seed-driven fault-injection knobs for `native-run`, all default-off. Stored
@@ -1131,6 +1146,15 @@ fn parse_run(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     };
     match resolve_positional(first, target.as_deref(), true)? {
         Some((ArtifactFamily::Wasm, module)) => {
+            // `--harness` is native-only (usage mode 2 of the shim-backed harness).
+            // Under WASI the supervisor owns run configuration, so reject the
+            // combination loudly rather than silently ignore the flag.
+            if rest[1..].iter().any(|argument| argument == "--harness") {
+                return Err(CliError::usage(
+                    "--harness is native-only; a WASI run configures the runtime through the \
+                     supervisor, not a patina-dst-harness binary",
+                ));
+            }
             parse_wasi_run_from(module, rest[1..].to_vec()).map(ParseResult::WasiRun)
         }
         Some((ArtifactFamily::Native, binary)) => {
@@ -2464,12 +2488,16 @@ fn parse_native_run_from(
     let mut allow = BTreeSet::new();
     let mut allow_unsupported: Option<UnsupportedPolicy> = None;
     let mut mount = None;
+    let mut harness = false;
     let mut index = 0;
     while index < arguments.len() {
         let option = arguments[index]
             .to_str()
             .ok_or_else(|| CliError::usage("run options must be valid UTF-8"))?;
         match option {
+            "--harness" => {
+                harness = true;
+            }
             "--allow" => {
                 index += 1;
                 let symbol = utf8_argument(&arguments, index, "--allow")?;
@@ -2749,6 +2777,7 @@ fn parse_native_run_from(
         allow,
         allow_unsupported: allow_unsupported.unwrap_or(UnsupportedPolicy::Deny),
         mount,
+        harness,
     })
 }
 
@@ -2836,12 +2865,22 @@ fn parse_native_replay(
     let mut allow = BTreeSet::new();
     let mut allow_unsupported: Option<UnsupportedPolicy> = None;
     let mut mount = None;
+    let mut harness = false;
     let mut index = 0;
     while index < arguments.len() {
         let option = arguments[index]
             .to_str()
             .ok_or_else(|| CliError::usage("replay options must be valid UTF-8"))?;
         match option {
+            // Replaying a harness binary needs the same deferred init as its
+            // record run: without it the constructor would install a context the
+            // harness cannot own, so `run_with` would fail closed on a boundary or
+            // already-installed runtime. `--harness` is a host/build fact (not a
+            // recorded semantic), so it is supplied at replay just like
+            // `--fingerprint`/`--mount`.
+            "--harness" => {
+                harness = true;
+            }
             "--fingerprint" => {
                 index += 1;
                 let value = utf8_argument(&arguments, index, "--fingerprint")?;
@@ -2965,6 +3004,7 @@ trace is authoritative",
         allow,
         allow_unsupported: allow_unsupported.unwrap_or(UnsupportedPolicy::Deny),
         mount,
+        harness,
     })
 }
 
@@ -5007,6 +5047,14 @@ liveness-safe."
         .args(&program_args)
         .arg0(NATIVE_GUEST_ARGV0)
         .env_clear();
+    // A `patina-dst-harness` binary (usage mode 2) defers runtime installation to
+    // its `run`/`run_with` call: tell the packaged constructor to capture/scrub the
+    // control plane and register finalization but NOT install the runtime. Applies
+    // uniformly to seeded/record and replay so the harness owns installation on
+    // every path. An interposed effect before the harness installs fails closed.
+    if invocation.harness {
+        command.env(ENV_DEFER_INIT, "1");
+    }
     if let Some(image) = &image_file {
         command.env(ENV_FS_IMAGE_FD, image.file.as_raw_fd().to_string());
     }

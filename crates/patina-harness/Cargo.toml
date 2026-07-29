@@ -1,0 +1,18 @@
+[package]
+name = "patina-dst-harness"
+description = "Configure-then-run harness that drives ordinary application code under Patina's native shim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+patina-dst-runtime.workspace = true
+serde_json.workspace = true
+
+# `cargo patina build` injects `patina_shim` (only on the native paths that link
+# the shim below the guest), so the shim FFI here is referenced only where those
+# symbols actually resolve. Declaring the cfg keeps `-D warnings` clean.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(patina_shim)'] }

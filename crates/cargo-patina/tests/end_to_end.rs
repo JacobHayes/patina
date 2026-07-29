@@ -4630,3 +4630,452 @@ fn trace_event_count(trace: &Path) -> usize {
     let value: serde_json::Value = serde_json::from_slice(&fs::read(trace).unwrap()).unwrap();
     value["timelines"][0]["decisions"].as_array().unwrap().len()
 }
+
+// ---- patina-dst-harness (shim-backed configure-then-run harness) --------------
+//
+// Validation gates for HARNESS-DESIGN.md usage mode 2 (startup Option B, deferred
+// init). A harness binary depends on `patina-dst-harness` and is built and run
+// through `cargo patina run --harness`; ordinary `std` effects in the application
+// closure are interposed by the native shim, and the harness's `HarnessBuilder`
+// overlay flows through the same `RuntimeConfig` fields the CLI env path sets.
+// Gate 7 (SDK dependency-lightness) belongs to the facade builder; gate 8
+// (explicit-context separateness) is out of scope here — the explicit `Context`
+// API lives in `patina-dst-runtime` and is exercised by `create_fixture`'s
+// `patina_dst::run` scenarios, which never install the shim's global context.
+
+/// Write a harness fixture crate at `dir` whose `main.rs` is `main_rs`, with a
+/// path dependency on the workspace `patina-dst-harness`. Modeled on
+/// `create_fixture`, but the dependency is the harness crate, not the SDK.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn write_harness_fixture(dir: &Path, name: &str, main_rs: &str) {
+    fs::create_dir_all(dir.join("src")).unwrap();
+    let harness_path = native_workspace().join("crates/patina-harness");
+    let harness_path = harness_path.to_string_lossy().replace('\\', "\\\\");
+    fs::write(
+        dir.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina-dst-harness = {{ path = \"{harness_path}\" }}\n"
+        ),
+    )
+    .unwrap();
+    fs::write(dir.join("src/main.rs"), main_rs).unwrap();
+}
+
+/// Build a harness fixture into `out` through `cargo patina build`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn build_harness_bin(dir: &Path, out: &Path) {
+    invoke_in(
+        native_workspace(),
+        &[
+            "build",
+            dir.join("Cargo.toml").to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ],
+    );
+}
+
+/// The single `HARNESS_OUT ...` line the harness fixtures print.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn harness_out_line(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find(|line| line.starts_with("HARNESS_OUT"))
+        .unwrap_or_else(|| {
+            panic!(
+                "missing HARNESS_OUT in stdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })
+        .to_owned()
+}
+
+/// Parse `elapsed=N` (virtual monotonic nanoseconds observed through std's clock)
+/// from a harness fixture's output line.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn harness_elapsed(output: &Output) -> u128 {
+    harness_out_line(output)
+        .split("elapsed=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("missing elapsed= in harness output"))
+}
+
+// A harness fixture that reads a file back through `std::fs` and times a
+// `std::thread::sleep` through std's clock — all interposed by the shim, so the
+// output (including the elapsed virtual-time reading) is a pure function of the
+// seed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const HARNESS_DETERMINISM_SRC: &str = r#"
+use std::time::Instant;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    patina_dst_harness::run(|| {
+        std::fs::create_dir_all("/state")?;
+        std::fs::write("/state/v", b"hello")?;
+        let read = std::fs::read_to_string("/state/v")?;
+        let start = Instant::now();
+        std::thread::sleep(std::time::Duration::from_nanos(10));
+        let elapsed = start.elapsed().as_nanos();
+        println!("HARNESS_OUT read={read} elapsed={elapsed}");
+        Ok::<(), std::io::Error>(())
+    })?;
+    Ok(())
+}
+"#;
+
+// Gate 1: a harness binary executed directly (no Patina control plane) fails
+// loudly with NotUnderPatina BEFORE any application code runs — never a silent
+// host-effect fallback.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn harness_direct_exec_without_patina_fails_closed() {
+    let directory = tempdir().unwrap();
+    let fixture = directory.path().join("det");
+    write_harness_fixture(&fixture, "harness-det-direct", HARNESS_DETERMINISM_SRC);
+    let bin = directory.path().join("harness-det-direct-bin");
+    build_harness_bin(&fixture, &bin);
+
+    // Direct exec with a scrubbed environment: no PATINA_MODE, so the shim's
+    // constructor installs nothing and `run` fails closed.
+    let output = Command::new(&bin).env_clear().output().unwrap();
+    assert!(
+        !output.status.success(),
+        "harness binary ran to success without Patina"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not running under `cargo patina run`"),
+        "missing NotUnderPatina diagnostic:\nstderr:\n{stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("HARNESS_OUT"),
+        "application code ran before the fail-closed check"
+    );
+}
+
+// Gate 2: `cargo patina run --harness --target native` succeeds with std::fs and
+// the std clock interposed, and is byte-identical across repeated runs at the same
+// seed (determinism, including the std clock reads).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn harness_run_is_deterministic_with_std_interposed() {
+    let directory = tempdir().unwrap();
+    let fixture = directory.path().join("det");
+    write_harness_fixture(&fixture, "harness-det", HARNESS_DETERMINISM_SRC);
+    let bin = directory.path().join("harness-det-bin");
+    build_harness_bin(&fixture, &bin);
+
+    let first = invoke_in(
+        native_workspace(),
+        &["run", bin.to_str().unwrap(), "--harness", "--seed", "1"],
+    );
+    let baseline = harness_out_line(&first);
+    assert!(
+        baseline.contains("read=hello"),
+        "std::fs was not interposed (unexpected output): {baseline}"
+    );
+    for _ in 0..2 {
+        let again = invoke_in(
+            native_workspace(),
+            &["run", bin.to_str().unwrap(), "--harness", "--seed", "1"],
+        );
+        assert_eq!(
+            baseline,
+            harness_out_line(&again),
+            "harness output (incl. std clock reads) is not byte-identical across runs"
+        );
+    }
+}
+
+// A harness fixture whose configuration is toggled by a guest argument: with
+// `--jitter` the harness adds a fixed seeded sleep jitter, observable through the
+// same std clock the application reads.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const HARNESS_JITTER_TOGGLE_SRC: &str = r#"
+use std::time::Instant;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    patina_dst_harness::run_with(
+        |harness| {
+            if std::env::args().any(|arg| arg == "--jitter") {
+                Ok(harness.sleep_jitter_nanos(1_000_000, 1_000_000))
+            } else {
+                Ok(harness)
+            }
+        },
+        || {
+            let start = Instant::now();
+            std::thread::sleep(std::time::Duration::from_nanos(10));
+            println!("HARNESS_OUT elapsed={}", start.elapsed().as_nanos());
+            Ok::<(), std::io::Error>(())
+        },
+    )?;
+    Ok(())
+}
+"#;
+
+// Gate 3: a harness-configured knob observably affects behavior seen through
+// ordinary application code. A configured sleep jitter shifts the std-clock
+// elapsed reading by exactly the jitter, proving the overlay reached the same
+// `RuntimeConfig` field the CLI `--sleep-jitter-nanos` sets.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn harness_configured_knob_affects_std_observed_behavior() {
+    let directory = tempdir().unwrap();
+    let fixture = directory.path().join("jitter");
+    write_harness_fixture(&fixture, "harness-jitter", HARNESS_JITTER_TOGGLE_SRC);
+    let bin = directory.path().join("harness-jitter-bin");
+    build_harness_bin(&fixture, &bin);
+
+    let base = invoke_in(
+        native_workspace(),
+        &["run", bin.to_str().unwrap(), "--harness", "--seed", "1"],
+    );
+    let jittered = invoke_in(
+        native_workspace(),
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--harness",
+            "--seed",
+            "1",
+            "--",
+            "--jitter",
+        ],
+    );
+    let base_elapsed = harness_elapsed(&base);
+    let jittered_elapsed = harness_elapsed(&jittered);
+    assert_eq!(
+        base_elapsed, 10,
+        "baseline sleep should advance virtual time by exactly the requested 10ns"
+    );
+    assert_eq!(
+        jittered_elapsed,
+        base_elapsed + 1_000_000,
+        "harness-configured sleep jitter did not shift the std-observed elapsed time"
+    );
+}
+
+// Gate 4: record then flag-free replay of a harness-driven application is
+// byte-identical. Replay of a harness binary carries `--harness` (deferred init)
+// but no semantic flags — the trace is authoritative.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn harness_record_then_flag_free_replay_is_byte_identical() {
+    let directory = tempdir().unwrap();
+    let fixture = directory.path().join("det");
+    write_harness_fixture(&fixture, "harness-replay", HARNESS_DETERMINISM_SRC);
+    let bin = directory.path().join("harness-replay-bin");
+    build_harness_bin(&fixture, &bin);
+
+    let trace = directory.path().join("harness.patina");
+    let recorded = invoke_in(
+        native_workspace(),
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--harness",
+            "--seed",
+            "1",
+            "--record",
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "harness-replay",
+        ],
+    );
+    let replayed = invoke_in(
+        native_workspace(),
+        &[
+            "replay",
+            bin.to_str().unwrap(),
+            trace.to_str().unwrap(),
+            "--harness",
+            "--fingerprint",
+            "harness-replay",
+        ],
+    );
+    assert_eq!(
+        harness_out_line(&recorded),
+        harness_out_line(&replayed),
+        "record and flag-free harness replay diverged"
+    );
+}
+
+// A harness fixture that unconditionally sets a fixed sleep jitter, so two builds
+// with different jitter values embed conflicting fault configuration.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn harness_fixed_jitter_src(jitter: u64) -> String {
+    format!(
+        r#"
+fn main() -> Result<(), Box<dyn std::error::Error>> {{
+    patina_dst_harness::run_with(
+        |harness| Ok(harness.sleep_jitter_nanos({jitter}, {jitter})),
+        || {{
+            std::thread::sleep(std::time::Duration::from_nanos(1));
+            println!("HARNESS_OUT ok");
+            Ok::<(), std::io::Error>(())
+        }},
+    )?;
+    Ok(())
+}}
+"#
+    )
+}
+
+// Gate 5: replaying with a conflicting harness configuration fails closed. The
+// harness overlay flows through the same `RuntimeConfig::faults` field the CLI
+// sets, so the runtime's `reconcile_replay_faults` (the trace is authoritative)
+// catches a divergent harness-configured knob exactly like a CLI flag conflict.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn harness_replay_with_conflicting_config_fails_closed() {
+    let directory = tempdir().unwrap();
+    let fixture_a = directory.path().join("jit-a");
+    let fixture_b = directory.path().join("jit-b");
+    write_harness_fixture(
+        &fixture_a,
+        "harness-jit-a",
+        &harness_fixed_jitter_src(1_000_000),
+    );
+    write_harness_fixture(
+        &fixture_b,
+        "harness-jit-b",
+        &harness_fixed_jitter_src(2_000_000),
+    );
+    let bin_a = directory.path().join("harness-jit-a-bin");
+    let bin_b = directory.path().join("harness-jit-b-bin");
+    build_harness_bin(&fixture_a, &bin_a);
+    build_harness_bin(&fixture_b, &bin_b);
+
+    let trace = directory.path().join("jit.patina");
+    invoke_in(
+        native_workspace(),
+        &[
+            "run",
+            bin_a.to_str().unwrap(),
+            "--harness",
+            "--seed",
+            "1",
+            "--record",
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "harness-jit",
+        ],
+    );
+
+    // Binary B embeds a different (conflicting) sleep jitter; both share the same
+    // fingerprint (faults are reconciled from trace metadata, not fingerprinted),
+    // so the run reaches fault reconciliation and fails closed there.
+    let conflict = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        native_workspace(),
+        &[
+            "replay",
+            bin_b.to_str().unwrap(),
+            trace.to_str().unwrap(),
+            "--harness",
+            "--fingerprint",
+            "harness-jit",
+        ],
+    );
+    assert!(
+        !conflict.status.success(),
+        "replay with a conflicting harness config succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&conflict.stderr);
+    assert!(
+        stderr.contains("conflict with the trace's recorded configuration"),
+        "missing fault-reconciliation conflict diagnostic:\nstderr:\n{stderr}"
+    );
+
+    // The original binary (matching config) replays cleanly.
+    let matching = invoke_in(
+        native_workspace(),
+        &[
+            "replay",
+            bin_a.to_str().unwrap(),
+            trace.to_str().unwrap(),
+            "--harness",
+            "--fingerprint",
+            "harness-jit",
+        ],
+    );
+    assert!(harness_out_line(&matching).contains("ok"));
+}
+
+// A harness fixture that performs an interposed std effect BEFORE calling the
+// harness — the classic configure-after-boundary mistake.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const HARNESS_BOUNDARY_SRC: &str = r#"
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Interposed std effect before the harness installs the runtime.
+    std::fs::create_dir_all("/early")?;
+    println!("HARNESS_APP_RAN");
+    patina_dst_harness::run(|| Ok::<(), std::io::Error>(()))?;
+    Ok(())
+}
+"#;
+
+// Gate 6: an interposed effect before the harness installs the runtime fails
+// closed. Under deferred init the effect reaches the boundary with no context
+// installed and no auto-init is allowed, so the shim aborts loudly and the
+// application code never proceeds.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn harness_effect_before_install_fails_closed() {
+    let directory = tempdir().unwrap();
+    let fixture = directory.path().join("boundary");
+    write_harness_fixture(&fixture, "harness-boundary", HARNESS_BOUNDARY_SRC);
+    let bin = directory.path().join("harness-boundary-bin");
+    build_harness_bin(&fixture, &bin);
+
+    let output = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        native_workspace(),
+        &["run", bin.to_str().unwrap(), "--harness", "--seed", "1"],
+    );
+    assert!(
+        !output.status.success(),
+        "an effect before the harness install did not fail the run"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("harness has not installed the runtime yet"),
+        "missing boundary-before-install diagnostic:\nstderr:\n{stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("HARNESS_APP_RAN"),
+        "application code ran past the pre-install boundary"
+    );
+}
+
+// `--harness` is native-only: on a WASI run it is rejected up front (the WASI
+// supervisor owns run configuration), never silently ignored.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn harness_flag_rejected_for_wasi_target() {
+    let directory = tempdir().unwrap();
+    let module = directory.path().join("app.wasm");
+    fs::write(
+        &module,
+        wat::parse_str("(module (func (export \"_start\")))").unwrap(),
+    )
+    .unwrap();
+    let output = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        native_workspace(),
+        &["run", module.to_str().unwrap(), "--harness"],
+    );
+    assert!(
+        !output.status.success(),
+        "--harness on a WASI run succeeded"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--harness is native-only"),
+        "missing native-only rejection:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

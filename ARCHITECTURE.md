@@ -57,6 +57,7 @@ The shim is a compatibility layer, not the center of the system. It shares the P
 ```text
 cargo-patina              # cargo subcommand
 patina                    # cooperative-SUT SDK (dependency-light, no runtime deps)
+patina-dst-harness            # configure-then-run harness for ordinary app code under the shim
 patina-dst-abi                # stable deterministic boundary contracts
 patina-dst-runtime            # runtime registry, driver installation, scheduling, params; explicit-context `run`/`run_with`/`Context`
 patina-dst-async              # deterministic futures executor over the explicit boundary
@@ -87,6 +88,26 @@ patina-dst-bench              # performance qualification workload and budget ga
 ```
 
 The exact crate names are conventional, but the separation is intentional: the ABI and trace format are shared, drivers are modular, and native compatibility remains separate from the Rust-first core.
+
+### Shim-backed harness (`patina-dst-harness`)
+
+`patina-dst-harness` is the configure-then-run harness for driving ordinary
+application code under Patina (usage mode 2 of `HARNESS-DESIGN.md`). A harness
+binary calls `patina_dst_harness::run`/`run_with`, configures the run through a
+`HarnessBuilder`, and then executes normal `std`-using application code whose
+effects are interposed by the native shim — the SAME global runtime context the
+shim installs for a transparent run, not a second explicit `Context`. It is
+built and run through `cargo patina run <manifest> --target native --harness`,
+which sets `PATINA_DEFER_INIT=1`: the packaged constructor captures and scrubs
+the control plane and registers finalization but leaves the runtime uninstalled,
+and the harness installs it (`patina_harness_install`) after applying its
+configuration overlay. The overlay flows through the same `PATINA_*` control-plane
+values and `RuntimeConfig` fields the CLI env path sets, so there is no separate
+harness fingerprint component and the runtime's `reconcile_replay_*` checks catch
+overlay conflicts on replay. Fail-closed throughout: run without Patina and it
+returns `NotUnderPatina` before any application code runs; an interposed effect
+before the harness installs aborts loudly rather than auto-initializing. WASI is
+out of scope for v1 (the WASI supervisor owns run configuration there).
 
 ## Data plane: small stable interfaces
 

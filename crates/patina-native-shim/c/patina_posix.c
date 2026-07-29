@@ -2343,7 +2343,15 @@ static void patina_finalize_atexit(void) {
 __attribute__((constructor)) static void patina_native_start(void) {
     atexit(patina_finalize_atexit);
     patina_capture_control_plane();
-    if (patina_control_getenv("PATINA_MODE") != NULL) {
+    /* Deferred harness init (PATINA_DEFER_INIT=1, set by `cargo patina run
+     * --harness`): still capture the control plane, still register finalization,
+     * still scrub the environment — but leave the runtime UNINSTALLED so
+     * patina-dst-harness can apply its configuration overlay and install
+     * explicitly. An interposed effect before that install fails closed in the
+     * Rust ensure_runtime (never auto-inits under defer). */
+    const char *defer = patina_control_getenv("PATINA_DEFER_INIT");
+    int deferred = defer != NULL && strcmp(defer, "1") == 0;
+    if (patina_control_getenv("PATINA_MODE") != NULL && !deferred) {
         patina_init_from_env();
     }
     patina_scrub_environ();

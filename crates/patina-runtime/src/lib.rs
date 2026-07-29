@@ -34,6 +34,16 @@ pub const ENV_TRACE_FD: &str = "PATINA_TRACE_FD";
 /// different corpus. Off when unset.
 pub const ENV_FS_IMAGE_FD: &str = "PATINA_FS_IMAGE_FD";
 pub const ENV_FINGERPRINT: &str = "PATINA_FINGERPRINT";
+/// Deferred-initialization flag for the shim-backed harness (see
+/// `patina-dst-harness`, HARNESS-DESIGN.md startup Option B). When present (`=1`)
+/// alongside `PATINA_MODE`, the packaged native constructor captures and scrubs
+/// the control plane and registers finalization but does NOT install the runtime;
+/// `patina_dst_harness::run`/`run_with` installs it explicitly, after applying
+/// the harness's configuration overlay. An interposed effect that reaches the
+/// boundary before the harness installs fails closed loudly (never auto-inits).
+/// Set by `cargo patina run --harness` (and the matching `replay`). Off when
+/// unset (the ordinary constructor-installs-at-startup path).
+pub const ENV_DEFER_INIT: &str = "PATINA_DEFER_INIT";
 pub const ENV_BRANCH_FROM: &str = "PATINA_BRANCH_FROM";
 pub const ENV_BRANCH_SEED: &str = "PATINA_BRANCH_SEED";
 pub const ENV_BRANCH_ID: &str = "PATINA_BRANCH_ID";
@@ -142,6 +152,26 @@ pub const ENV_HEAL_AFTER: &str = "PATINA_HEAL_AFTER_NANOS";
 /// Suppress the default-on end-of-run liveness-watchdog diagnostic
 /// (`PATINA_LIVENESS_REPORT`) when set to a false-y value.
 pub const ENV_LIVENESS_REPORT: &str = "PATINA_LIVENESS_REPORT";
+
+// Return codes for the shim's `patina_harness_install` C ABI, shared by the
+// native shim (which returns them) and `patina-dst-harness` (which maps them to
+// its `HarnessError` variants). Distinct, stable sentinels so the harness can
+// discriminate the fail-closed reasons without parsing stderr; the shim also
+// prints a loud diagnostic for each nonzero case.
+/// Harness install succeeded: the runtime is installed with the overlay applied.
+pub const HARNESS_OK: i32 = 0;
+/// No `PATINA_MODE` in the control plane: the harness binary was not run under
+/// `cargo patina run --harness` (plain execution or missing supervisor protocol).
+pub const HARNESS_ERR_NOT_UNDER_PATINA: i32 = -1;
+/// The runtime is already installed (a non-deferred startup, or a second
+/// `run`/`run_with`): the harness cannot install a second context.
+pub const HARNESS_ERR_ALREADY_INSTALLED: i32 = -2;
+/// A deterministic boundary effect was already observed before the harness
+/// installed: reconfiguring after events would make replay semantics ambiguous.
+pub const HARNESS_ERR_BOUNDARY_BEFORE_INSTALL: i32 = -3;
+/// The runtime configuration built from the (overlaid) control plane failed to
+/// validate/build (bad knob value, fingerprint/replay reconciliation conflict).
+pub const HARNESS_ERR_CONFIG: i32 = -4;
 
 /// Default generic no-progress budget: 600 virtual seconds. Generous by design —
 /// the budget must exceed the longest legitimate quiescent (single-sleep) period,

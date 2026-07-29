@@ -728,6 +728,15 @@ fn effect_errno(error: &EffectError) -> c_int {
 /// with `ENOSYS` instead of re-initializing a torn-down runtime.
 static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Set once any deterministic boundary effect has run against the installed
+/// context (in [`with_context`]/[`with_context_raw`]). The shim-backed harness
+/// (`patina-dst-harness`, HARNESS-DESIGN.md Option B) consults this in
+/// [`patina_harness_install`]: a boundary observed BEFORE the harness installs
+/// means the run already produced events, so reconfiguring the context would
+/// make replay semantics ambiguous — the install fails closed. The harness's own
+/// `install` does not route through those functions, so it never self-trips this.
+static BOUNDARY_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Guarantee a deterministic runtime is installed before a boundary call, or
 /// fail closed. Ordinary programs built with `cargo patina native-build` do not
 /// call `patina_init_from_env` themselves: the packaged startup path installs
@@ -750,6 +759,20 @@ fn ensure_runtime() -> Result<(), c_int> {
     // a degraded "empty trace" parse error.
     if let Some(message) = init_error().lock().clone() {
         abort_with_init_error(&message);
+    }
+    // Deferred harness init (PATINA_DEFER_INIT=1, `cargo patina run --harness`):
+    // the harness owns installation. Reaching here with no context installed means
+    // an interposed effect ran BEFORE `patina_harness_install`. Do NOT auto-init
+    // from the env — that would race the harness's overlay and silently run
+    // against a config the harness never got to apply. Fail closed, loudly and
+    // named, so the boundary is attributed to the missing harness install.
+    if control_env(patina_dst_runtime::ENV_DEFER_INIT).is_some() {
+        let _ = flush_captured_stdio();
+        let message: &[u8] = b"patina: harness has not installed the runtime yet; an interposed \
+effect reached the deterministic boundary before patina_dst_harness::run/run_with installed the \
+runtime. Do all configuration and application effects inside the harness closure.\n";
+        let _ = host_write_all(2, message);
+        std::process::abort();
     }
     if control_env(patina_dst_runtime::ENV_MODE).is_some() {
         let _ = init_from_env();
@@ -792,6 +815,7 @@ fn abort_with_init_error(message: &str) -> ! {
 fn with_context_raw<T>(
     invoke: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
 ) -> Result<T, c_int> {
+    BOUNDARY_SEEN.store(true, std::sync::atomic::Ordering::Relaxed);
     let mut guard = slot().lock();
     let context = guard.as_mut().ok_or(ENOSYS)?;
     invoke(context).map_err(|error| runtime_errno(&error))
@@ -837,6 +861,7 @@ fn with_context_msg<T>(
 fn with_context<T>(
     invoke: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
 ) -> Result<T, c_int> {
+    BOUNDARY_SEEN.store(true, std::sync::atomic::Ordering::Relaxed);
     ensure_runtime()?;
     thread::sched_point()?;
     with_context_raw(invoke)
@@ -1176,6 +1201,76 @@ pub extern "C" fn patina_init_from_env() -> c_int {
         return 0;
     }
     init_from_env()
+}
+
+/// Install the deterministic runtime for a shim-backed harness (see
+/// `patina-dst-harness`, HARNESS-DESIGN.md startup Option B). Called by
+/// `patina_dst_harness::run`/`run_with` under `cargo patina run --harness`
+/// (`PATINA_DEFER_INIT=1`), after the harness has injected its configuration
+/// overlay onto the captured control plane via [`patina_control_set_entry`]. The
+/// runtime is then built from the (overlaid) control plane through the SAME
+/// parsers the constructor path uses ([`init_from_env`]), so every fault/buggify/
+/// schedule/liveness knob folds into the identical `RuntimeConfig` fields — the
+/// existing fingerprint folds and `reconcile_replay_*` conflict checks apply with
+/// no new fingerprint component.
+///
+/// Fails closed, returning a distinct [`patina_dst_runtime`] `HARNESS_ERR_*`
+/// sentinel and printing a loud diagnostic, when: a boundary effect already ran
+/// (`HARNESS_ERR_BOUNDARY_BEFORE_INSTALL`); the runtime is already installed
+/// (`HARNESS_ERR_ALREADY_INSTALLED`); there is no `PATINA_MODE` in the control
+/// plane, i.e. not under `cargo patina run` (`HARNESS_ERR_NOT_UNDER_PATINA`); or
+/// the configuration failed to build/validate (`HARNESS_ERR_CONFIG`).
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_harness_install() -> c_int {
+    // Ordering matters: report the most specific fail-closed reason first. A
+    // boundary already seen is the sharpest diagnostic (the run produced events
+    // before configuration), so it precedes the generic already-installed check.
+    if BOUNDARY_SEEN.load(std::sync::atomic::Ordering::Relaxed) {
+        let _ = flush_captured_stdio();
+        let _ = host_write_all(
+            2,
+            b"patina: patina_dst_harness cannot install the runtime: a deterministic boundary \
+effect already ran before the harness configured the context; do all configuration and application \
+effects inside the harness closure so replay stays unambiguous\n",
+        );
+        return patina_dst_runtime::HARNESS_ERR_BOUNDARY_BEFORE_INSTALL;
+    }
+    if slot().lock().is_some() {
+        let _ = flush_captured_stdio();
+        let _ = host_write_all(
+            2,
+            b"patina: patina_dst_harness cannot install the runtime: a deterministic runtime is \
+already installed. Run the harness binary with `cargo patina run --harness` so startup defers \
+initialization to the harness (PATINA_DEFER_INIT), and call run/run_with exactly once\n",
+        );
+        return patina_dst_runtime::HARNESS_ERR_ALREADY_INSTALLED;
+    }
+    if control_env(patina_dst_runtime::ENV_MODE).is_none() {
+        let _ = flush_captured_stdio();
+        let _ = host_write_all(
+            2,
+            b"patina: patina_dst_harness cannot install the runtime: this binary is not running \
+under `cargo patina run` (no PATINA_MODE control plane). A shim-backed harness must be built and \
+run through Patina, e.g. `cargo patina run <manifest> --target native --harness`\n",
+        );
+        return patina_dst_runtime::HARNESS_ERR_NOT_UNDER_PATINA;
+    }
+    let _ = init_from_env();
+    if slot().lock().is_some() {
+        set_errno(0);
+        return patina_dst_runtime::HARNESS_OK;
+    }
+    // Configuration failed to build: surface the runtime's own diagnostic (bad
+    // knob value, replay fingerprint/reconciliation conflict, bad `--mount`
+    // corpus, ...) rather than a bare code.
+    if let Some(message) = init_error().lock().clone() {
+        let _ = flush_captured_stdio();
+        let line = format!(
+            "patina: patina_dst_harness could not build the runtime configuration: {message}\n"
+        );
+        let _ = host_write_all(2, line.as_bytes());
+    }
+    patina_dst_runtime::HARNESS_ERR_CONFIG
 }
 
 /// Finalize the runtime, writing any recorded trace and flushing captured

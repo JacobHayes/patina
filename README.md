@@ -139,6 +139,28 @@ cargo patina run path/to/program.rs --seed 123          # builds native, then ru
 cargo patina run path/to/guest --target wasi --seed 123  # builds wasip1 package, then runs
 ```
 
+When a test wants to *configure* Patina and then drive ordinary application code
+— rather than let transparent defaults apply — the `patina-dst-harness` crate is
+the way. A harness binary calls `patina_dst_harness::run_with(|h| Ok(h.sleep_jitter_nanos(..).buggify()..), || my_app::run())`,
+and the closure body uses plain `std::fs`/`std::net`/clocks/threads, all
+interposed by the same shim runtime a transparent run uses (there is no second
+explicit `Context`). It is built and run through `--harness`, which defers
+runtime installation to the harness so it owns configuration:
+
+```sh
+cargo patina run path/to/harness/Cargo.toml --target native --harness --seed 123
+cargo patina run path/to/harness/Cargo.toml --target native --harness --record /tmp/h.patina
+cargo patina replay path/to/harness/Cargo.toml /tmp/h.patina --target native --harness
+```
+
+Configuration flows through the same control-plane/`RuntimeConfig` fields the CLI
+flags set, so record/replay identity and the replay-config-conflict checks apply
+unchanged. Run a harness binary without Patina and it fails closed
+(`NotUnderPatina`) before any application code executes; an interposed effect
+before the harness installs the runtime aborts loudly rather than running against
+host effects. WASI harnesses are not supported in v1 (the WASI supervisor owns
+run configuration).
+
 Failure-oracle minimization writes each candidate to `PATINA_MINIMIZE_TRACE`; the oracle exits nonzero only when the selected failure is preserved:
 
 ```sh
