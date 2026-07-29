@@ -66,9 +66,19 @@ ARGS=(--seed 7 --jobs "$JOBS" --workers 3 --producers 2 --base-port 5001 --data-
 
 cd "$repo_root"
 echo "==> building cargo-patina and the workq harness under Patina"
-cargo build --release --quiet -p cargo-patina
-mkdir -p "$here/target/patina"
-"$PATINA" patina build "$here" --output "$built" --release >/dev/null
+# The legs below run without `set -e` (each handles its own nonzero exits), so
+# the build prelude must fail CLOSED explicitly: a gate that cannot build must
+# certify nothing — silently reusing a stale prebuilt binary would be a false
+# green (the fuzz-sweep FATAL convention).
+if ! cargo build --release --quiet -p cargo-patina; then
+  echo "FATAL: cargo build -p cargo-patina failed" >&2; exit 3
+fi
+if ! mkdir -p "$here/target/patina"; then
+  echo "FATAL: mkdir $here/target/patina failed" >&2; exit 3
+fi
+if ! "$PATINA" patina build "$here" --output "$built" --release >/dev/null; then
+  echo "FATAL: patina build of the workq harness failed" >&2; exit 3
+fi
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
