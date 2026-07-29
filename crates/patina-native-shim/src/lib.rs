@@ -5047,7 +5047,7 @@ mod thread {
                     match step {
                         Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                         Ok(Step::Continue) => drop(state),
-                        Err(error) => return error.into_posix() as isize,
+                        Err(error) => return super::fail(error.into_posix()) as isize,
                     }
                     lock_state().timed_out.remove(&me);
                 }
@@ -5166,7 +5166,7 @@ mod thread {
                     match step {
                         Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                         Ok(Step::Continue) => drop(state),
-                        Err(error) => return error.into_posix() as isize,
+                        Err(error) => return super::fail(error.into_posix()) as isize,
                     }
                     lock_state().timed_out.remove(&me);
                 }
@@ -5261,7 +5261,7 @@ mod thread {
                     match step {
                         Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                         Ok(Step::Continue) => drop(state),
-                        Err(error) => return error.into_posix() as isize,
+                        Err(error) => return super::fail(error.into_posix()) as isize,
                     }
                     lock_state().timed_out.remove(&me);
                 }
@@ -5790,7 +5790,7 @@ mod thread {
                     match step {
                         Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                         Ok(Step::Continue) => drop(state),
-                        Err(error) => return error.into_posix() as isize,
+                        Err(error) => return super::fail(error.into_posix()) as isize,
                     }
                     lock_state().timed_out.remove(&me);
                 }
@@ -5853,7 +5853,7 @@ mod thread {
                     match step {
                         Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                         Ok(Step::Continue) => drop(state),
-                        Err(error) => return error.into_posix() as isize,
+                        Err(error) => return super::fail(error.into_posix()) as isize,
                     }
                     lock_state().timed_out.remove(&me);
                 }
@@ -8192,5 +8192,27 @@ mod thread {
             scheduler.park(b, "wait-a").unwrap();
             assert!(scheduler.next().is_err());
         }
+    }
+}
+
+/// Source-level convention lint: `isize`-returning interposer paths (read/
+/// write/send/recv shapes) must report errors as `fail(errno) as isize` — `-1`
+/// with the errno cell set — never by returning `ThreadError::into_posix()`'s
+/// positive errno directly, which a guest would read as a successful byte
+/// count (a deadlock-rescue errno of 35 becomes "35 bytes transferred").
+/// The positive-return form is correct only for the pthread-convention `c_int`
+/// sites, which this pattern does not match.
+#[cfg(test)]
+mod source_lints {
+    #[test]
+    fn no_bare_into_posix_on_isize_paths() {
+        let source = include_str!("lib.rs");
+        // Assembled at runtime so this test's own text cannot match itself.
+        let needle = format!(".{}() as isize", "into_posix");
+        assert!(
+            !source.contains(&needle),
+            "an isize-returning interposer path returns a positive errno as a \
+             byte count; wrap it in fail(..) so the guest sees -1 with errno"
+        );
     }
 }
