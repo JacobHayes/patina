@@ -1,0 +1,31 @@
+# Standalone package: its own empty [workspace] table keeps it OUT of the root
+# Patina workspace so `cargo` here never touches crates/ or the root manifest.
+# The dependency tree is tokio (the app's reason to exist: readiness-multiplexed
+# connection fan-in), the cooperative-SUT SDK, and sha2 for the outcome hash.
+[workspace]
+
+[package]
+name = "pubsub"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "pubsub"
+path = "src/main.rs"
+
+[dependencies]
+# The runtime under test-by-proxy: the broker is a real tokio app (current-thread
+# event loop, TcpListener fan-in, per-subscriber bounded queues, timers), and
+# under Patina its mio selector runs on the deterministic readiness reactor
+# (kqueue on macOS, epoll on Linux). Pinned exactly; the committed Cargo.lock
+# pins the transitive tree.
+tokio = { version = "=1.53.1", features = ["rt", "net", "io-util", "time", "sync", "macros"] }
+# The cooperative-SUT (buggify) SDK, no-op outside a Patina build — used only
+# for the setup/workload lifecycle boundary.
+patina-dst = { path = "../../crates/patina" }
+# 256-bit digest for the PUBSUB_RESULT outcome hash (workq convention).
+sha2 = "0.11"
+
+[profile.release]
+panic = "unwind"
