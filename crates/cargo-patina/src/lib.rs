@@ -45,6 +45,16 @@ mod render;
 
 const PATINA_CFG_FLAGS: &str = "--cfg patina --cfg dst";
 
+/// Crate names whose presence in a package's declared dependencies means the
+/// package integrates the Patina deterministic runtime at the library level. This
+/// is the routing pivot between the two execution models a `run`/`replay` of a
+/// Cargo package can take: a runtime-linked package stays on the cargo-family
+/// path (seed/param/budget/branch and record/replay honored by the linked
+/// runtime), while a plain package is built shim-linked and run under the native
+/// pre-run gate. `patina-dst` (the SDK) re-exports the runtime, so either name
+/// counts.
+const PATINA_RUNTIME_CRATES: &[&str] = &["patina-dst-runtime", "patina-dst"];
+
 // The native link recipe is packaged into `cargo patina` so `native-build` can
 // reproduce it without the source tree: the POSIX shim C layer and its header
 // are embedded, compiled below the user program, and linked against the
@@ -1163,14 +1173,19 @@ fn apply_package_selection(
 }
 
 /// Resolve a run/audit/replay positional to an [`ArtifactRef`], honoring
-/// `--target` (default native) and building a source/package on the fly. When
-/// `cargo_family` is true (only `run`), a directory/`Cargo.toml` with no
-/// `--target` is NOT built — it stays the explicit-API Cargo package family and
-/// this returns `None` so the caller falls through to `parse_cargo`.
+/// `--target` (default native) and building a source/package on the fly. A
+/// directory/`Cargo.toml` resolves to a native (or, under `--target wasi`, WASI)
+/// build-on-the-fly exactly like a `.rs` source — the SAME path `audit` uses, so
+/// a positional naming an existing package is never silently reinterpreted as
+/// guest argv. `None` is returned only when the positional is neither an
+/// artifact nor a source (a leading flag or a plain file); the caller then falls
+/// through to its no-artifact behavior. Whether a runtime-linked package is
+/// instead kept on the cargo-family path is a routing decision the `run`/`replay`
+/// callers make up front via [`package_integrates_patina`]; this resolver is pure
+/// classification.
 fn resolve_positional(
     raw: &OsStr,
     target: Option<&str>,
-    cargo_family: bool,
 ) -> Result<Option<(ArtifactFamily, ArtifactRef)>, CliError> {
     match classify_arg(raw)? {
         ArgKind::Artifact(family) => {
@@ -1202,7 +1217,6 @@ fn resolve_positional(
             )))
         }
         ArgKind::SourcePackage(manifest) => match target {
-            None if cargo_family => Ok(None),
             None => Ok(Some((
                 ArtifactFamily::Native,
                 ArtifactRef::Build(Box::new(native_package_spec(PathBuf::from(raw), manifest))),
@@ -1235,6 +1249,60 @@ fn family_label(family: ArtifactFamily) -> &'static str {
     }
 }
 
+/// Does the Cargo package integrate the Patina runtime? True iff `cargo metadata
+/// --no-deps` reports a declared dependency in [`PATINA_RUNTIME_CRATES`]. This is
+/// the routing predicate that keeps a runtime-linked package on the cargo-family
+/// path (where the linked runtime provides seeding, recording, replay, and
+/// library-level determinism) while a plain package is built shim-linked and run
+/// under the native pre-run gate. Any failure to resolve the metadata (no cargo,
+/// an unreadable or invalid manifest, ...) answers `false`: a package we cannot
+/// prove integrates the runtime is treated as plain — routed to the gated native
+/// path or refused loudly — never silently trusted to a no-op cargo-family run.
+///
+/// `manifest` scopes the query to a positional package path; `cwd` scopes it to a
+/// working directory (the cwd-package `run`). At most one is set.
+fn package_integrates_patina(manifest: Option<&Path>, cwd: Option<&Path>) -> bool {
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let mut command = Command::new(&cargo);
+    command
+        .arg("metadata")
+        .arg("--no-deps")
+        .arg("--format-version")
+        .arg("1")
+        .stderr(Stdio::null());
+    if let Some(manifest) = manifest {
+        command.arg("--manifest-path").arg(manifest);
+    }
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let stdout = match command.output() {
+        Ok(output) if output.status.success() => output.stdout,
+        _ => return false,
+    };
+    let metadata: serde_json::Value = match serde_json::from_slice(&stdout) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    metadata
+        .get("packages")
+        .and_then(|value| value.as_array())
+        .is_some_and(|packages| {
+            packages.iter().any(|package| {
+                package
+                    .get("dependencies")
+                    .and_then(|value| value.as_array())
+                    .is_some_and(|deps| {
+                        deps.iter().any(|dep| {
+                            dep.get("name")
+                                .and_then(|value| value.as_str())
+                                .is_some_and(|name| PATINA_RUNTIME_CRATES.contains(&name))
+                        })
+                    })
+            })
+        })
+}
+
 /// Route `run`: source-first with artifacts accepted uniformly. A built
 /// artifact runs as-is (family from magic); a `.rs`/dir/`Cargo.toml` with
 /// `--target` (or a lone `.rs`) builds on the fly then runs; a dir/`Cargo.toml`
@@ -1250,7 +1318,21 @@ fn parse_run(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
         }
         return parse_cargo("run".to_string(), rest);
     };
-    match resolve_positional(first, target.as_deref(), true)? {
+    // A directory/`Cargo.toml` positional (no `--target`) that integrates the
+    // Patina runtime stays the cargo-family path — the linked runtime owns
+    // seeding, recording, replay, and `--param`/`--budget`. A plain package has no
+    // such runtime, so it falls through to `resolve_positional`, which builds it
+    // shim-linked and runs it under the native pre-run gate exactly like `audit`
+    // (and exactly like a prebuilt binary). Either way an existing directory
+    // resolves as a source and is NEVER passed through as guest argv.
+    if target.is_none() {
+        if let ArgKind::SourcePackage(manifest) = classify_arg(first)? {
+            if package_integrates_patina(Some(&manifest), None) {
+                return parse_cargo("run".to_string(), rest);
+            }
+        }
+    }
+    match resolve_positional(first, target.as_deref())? {
         Some((ArtifactFamily::Wasm, mut module)) => {
             // `--harness` is native-only (usage mode 2 of the shim-backed harness).
             // Under WASI the supervisor owns run configuration, so reject the
@@ -1285,7 +1367,7 @@ fn parse_audit(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     let Some(first) = rest.first() else {
         return Err(CliError::usage("audit requires an artifact or source path"));
     };
-    let (family, mut artifact) = resolve_positional(first, target.as_deref(), false)?
+    let (family, mut artifact) = resolve_positional(first, target.as_deref())?
         .ok_or_else(|| {
             CliError::usage(format!(
                 "audit target {} is neither a WebAssembly module, a native binary, nor a source/package to build",
@@ -2921,16 +3003,28 @@ fn parse_replay(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     }
     let trace = PathBuf::from(rest.remove(0));
     let flags = rest;
-    match resolve_positional(&origin, target.as_deref(), true)? {
+    // A package that integrates the Patina runtime replays through the cargo
+    // family (the linked runtime restores seed/faults/timeline and honors
+    // `--branch`/`--timeline`); a plain package rebuilds shim-linked and replays
+    // through the native path, where the trace is loaded and fail-closed BEFORE
+    // any guest execution.
+    if target.is_none() {
+        if let ArgKind::SourcePackage(manifest) = classify_arg(&origin)? {
+            if package_integrates_patina(Some(&manifest), None) {
+                let package_dir = cargo_package_dir(&origin)?;
+                return parse_cargo_replay(package_dir, trace, flags);
+            }
+        }
+    }
+    match resolve_positional(&origin, target.as_deref())? {
         Some((ArtifactFamily::Wasm, module)) => {
             parse_wasi_replay(module, trace, flags).map(ParseResult::WasiRun)
         }
         Some((ArtifactFamily::Native, binary)) => {
             parse_native_replay(binary, trace, flags).map(ParseResult::NativeRun)
         }
-        // No diverting artifact and no `--target`: the Cargo package family. The
-        // origin must name a package (a directory or a `Cargo.toml`); its
-        // directory selects the workspace for the replay.
+        // Neither an artifact nor a source/package (a leading flag or a plain
+        // file): let `cargo_package_dir` produce the precise "neither ..." error.
         None => {
             let package_dir = cargo_package_dir(&origin)?;
             parse_cargo_replay(package_dir, trace, flags)
@@ -4022,13 +4116,38 @@ fn link_arg(path: &Path) -> OsString {
     arg
 }
 
+/// The Patina source workspace root, baked in at compile time. Build-on-the-fly
+/// links the `patina-dst-native-shim` staticlib, whose crate lives in this
+/// workspace, so the shim build is pinned here rather than to the caller's CWD —
+/// letting `build`/`run`/`audit`/`replay` of a source or package succeed from any
+/// working directory.
+fn patina_source_workspace() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
+
 /// Build the `patina-dst-native-shim` staticlib and return its path. The shim's
 /// Rust boundary is produced by Cargo; the C POSIX layer and header are packaged
 /// into this binary and compiled at link time by [`execute_native_build`].
 fn build_native_shim(release: bool) -> Result<PathBuf, CliError> {
+    // The shim crate lives in the Patina source workspace, so `cargo build -p
+    // patina-dst-native-shim` must run THERE, not in the caller's CWD. Pinning it
+    // is what lets `build .`/`run <DIR>`/`audit <DIR>` succeed from inside the
+    // target package (or any other directory): otherwise cargo resolves `-p
+    // patina-dst-native-shim` against the caller's workspace and fails with
+    // "package ID specification `patina-dst-native-shim` did not match any
+    // packages" — the observed `build .` regression.
+    let workspace = patina_source_workspace();
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let mut command = Command::new(&cargo);
-    command.arg("build").arg("-p").arg("patina-dst-native-shim");
+    command
+        .current_dir(&workspace)
+        .arg("build")
+        .arg("-p")
+        .arg("patina-dst-native-shim");
     if release {
         command.arg("--release");
     }
@@ -4042,7 +4161,7 @@ fn build_native_shim(release: bool) -> Result<PathBuf, CliError> {
     }
     let target_dir = match env::var_os("CARGO_TARGET_DIR") {
         Some(dir) => PathBuf::from(dir),
-        None => workspace_root(&[])?.join("target"),
+        None => workspace.join("target"),
     };
     let profile = if release { "release" } else { "debug" };
     let staticlib = target_dir.join(profile).join(NATIVE_SHIM_STATICLIB);
@@ -5820,6 +5939,47 @@ fn execute_minimize_scenario(invocation: ScenarioMinimize) -> Result<i32, CliErr
 
 fn execute(invocation: Invocation) -> Result<i32, CliError> {
     let workspace = workspace_root_in(invocation.working_dir.as_deref(), &invocation.cargo_args)?;
+
+    // The cargo-family `run` (and its cargo-family `replay`, which reuses the
+    // `run` command) derives ALL of its determinism — seeding, recording, replay,
+    // and the escape surface — from the runtime the guest package LINKS. A package
+    // that does not integrate the Patina runtime links no such runtime, so this
+    // path would silently degrade to a plain `cargo run`: no pre-run gate, a
+    // no-op `--record`, and a fail-open `replay`. Refuse it loudly here — before
+    // any guest executes — and point at the native path, which builds the package
+    // shim-linked and runs it under the pre-run default-deny gate. `test` is left
+    // to Cargo (a plain `cargo test` is a legitimate thing to ask for).
+    if invocation.cargo_command == "run"
+        && !package_integrates_patina(None, invocation.working_dir.as_deref())
+    {
+        let where_ = match &invocation.working_dir {
+            Some(dir) => format!("the package at {}", dir.display()),
+            None => "the current package".to_string(),
+        };
+        return Err(CliError(format!(
+            "refusing to run {where_}: it does not depend on the Patina runtime \
+(patina-dst / patina-dst-runtime), so a cargo-family run links no deterministic \
+runtime and CANNOT apply the pre-run escape gate, record a trace, or replay — it \
+would run the guest as a plain `cargo run`. Run it under the native deterministic \
+runtime instead, which builds it shim-linked and applies the pre-run default-deny \
+gate:\n  cargo patina run <DIR|Cargo.toml> [--seed N] [--record <PATH>]\nor build it \
+and run/audit the artifact (cargo patina build <DIR|Cargo.toml> --output <PATH>)."
+        )));
+    }
+
+    // Replay/branch read a recorded trace; a missing or unreadable one must fail
+    // closed BEFORE the guest runs, never fall through to a plain run (the
+    // cargo-family fail-open replay defect). The native replay path validates the
+    // trace the same way via `reconcile_replay_argv`.
+    if let Mode::Replay { path, .. } | Mode::Branch { path, .. } = &invocation.mode {
+        fs::read(path).map_err(|error| {
+            CliError(format!(
+                "failed to read trace {} for replay: {error}",
+                path.display()
+            ))
+        })?;
+    }
+
     ensure_lockfile(&workspace)?;
     let fingerprint = compatibility_fingerprint(&workspace, &invocation)?;
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
@@ -5912,6 +6072,23 @@ fn execute(invocation: Invocation) -> Result<i32, CliError> {
     }
 
     let captured = output::execute_command(&mut command)?;
+
+    // A successful `--record` run MUST have produced the trace. If the guest exited
+    // 0 but wrote nothing, its runtime never engaged the recorder — a silent no-op
+    // `--record` (exit 0, no file, no error), the worst outcome. Fail closed so the
+    // caller cannot mistake it for a recording. (Only on success: a guest that
+    // failed legitimately may not have reached the point of writing a trace.)
+    if let Mode::Record { path, .. } = &invocation.mode {
+        if captured.exit_code == 0 && !path.is_file() {
+            return Err(CliError(format!(
+                "record run exited 0 but wrote no trace to {}: the guest's runtime did \
+not engage the recorder, so `--record` was a silent no-op. Ensure the package \
+integrates the Patina runtime, or record under the native runtime: cargo patina run \
+<DIR|Cargo.toml> --record <PATH>.",
+                path.display()
+            )));
+        }
+    }
     let (trace_path, seed, timeline) = match &invocation.mode {
         Mode::Seeded { seed } => (None, Some(*seed), "main".to_string()),
         Mode::Record { seed, path } => (Some(path.clone()), Some(*seed), "main".to_string()),
@@ -5933,10 +6110,6 @@ fn execute(invocation: Invocation) -> Result<i32, CliError> {
         },
         captured,
     )
-}
-
-fn workspace_root(cargo_args: &[OsString]) -> Result<PathBuf, CliError> {
-    workspace_root_in(None, cargo_args)
 }
 
 /// Locate the Cargo workspace root, optionally resolving from `working_dir`
@@ -6800,30 +6973,33 @@ mod tests {
         // Resolution: a lone `.rs` builds native; `--target wasi` on a `.rs`
         // errors (native-only); a prebuilt artifact with a mismatched --target
         // errors.
-        let (family, artifact) = resolve_positional(source.as_os_str(), None, false)
+        let (family, artifact) = resolve_positional(source.as_os_str(), None)
             .unwrap()
             .unwrap();
         assert_eq!(family, ArtifactFamily::Native);
         assert!(matches!(artifact, ArtifactRef::Build(_)));
-        assert!(resolve_positional(source.as_os_str(), Some("wasi"), false).is_err());
-        assert!(resolve_positional(wasm.as_os_str(), Some("native"), false).is_err());
+        assert!(resolve_positional(source.as_os_str(), Some("wasi")).is_err());
+        assert!(resolve_positional(wasm.as_os_str(), Some("native")).is_err());
 
-        // A package directory: cargo family (None) under `run` with no --target;
-        // a native build under `audit`/`replay` (cargo_family = false).
-        assert!(
-            resolve_positional(pkg.as_os_str(), None, true)
-                .unwrap()
-                .is_none()
-        );
-        let (family, artifact) = resolve_positional(pkg.as_os_str(), None, false)
-            .unwrap()
-            .unwrap();
+        // A package directory resolves to a native build-on-the-fly with no
+        // `--target` — the SAME path `audit` uses, so an existing directory is
+        // never reinterpreted as guest argv. (Keeping a runtime-linked package on
+        // the cargo family is a `run`/`replay` routing decision made upstream via
+        // `package_integrates_patina`, not by this pure resolver.) `--target wasi`
+        // selects the WASI package build.
+        let (family, artifact) = resolve_positional(pkg.as_os_str(), None).unwrap().unwrap();
         assert_eq!(family, ArtifactFamily::Native);
         assert!(matches!(artifact, ArtifactRef::Build(_)));
-        let (family, _) = resolve_positional(pkg.as_os_str(), Some("wasi"), true)
+        let (family, _) = resolve_positional(pkg.as_os_str(), Some("wasi"))
             .unwrap()
             .unwrap();
         assert_eq!(family, ArtifactFamily::Wasm);
+        // A leading flag resolves to nothing (the caller's no-artifact path).
+        assert!(
+            resolve_positional(OsStr::new("--seed"), None)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
