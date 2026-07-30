@@ -178,6 +178,11 @@ impl<T> SpinMutex<T> {
                 std::hint::spin_loop();
             }
         }
+        // Mark that this thread now holds a shim spinlock, so a reentrant lock
+        // interposer (reached only via an allocator-internal allocation on the
+        // scheduler path) forwards to the real host primitive instead of
+        // deadlocking on this very lock. See `SPIN_DEPTH`.
+        spin_depth_inc();
         SpinGuard { mutex: self }
     }
 }
@@ -204,11 +209,73 @@ impl<T> DerefMut for SpinGuard<'_, T> {
 impl<T> Drop for SpinGuard<'_, T> {
     fn drop(&mut self) {
         self.mutex.locked.store(false, Ordering::Release);
+        spin_depth_dec();
     }
 }
 
 static CONTEXT: OnceLock<SpinMutex<Option<Context>>> = OnceLock::new();
 static STDIO: OnceLock<SpinMutex<StdioCapture>> = OnceLock::new();
+
+/// True from process start until the shim constructor finishes installing the
+/// deterministic runtime ([`patina_init_from_env`] clears it at the end). This is
+/// the window in which a custom global allocator's OWN eager, constructor-driven
+/// initialization runs (tikv-jemallocator installs a `__attribute__((constructor))`
+/// that calls `malloc_init_hard` before `main`). During it the shim runs the
+/// allocator's init-reachable interposers NATIVELY rather than through the
+/// deterministic model: the allocator's init locks/reads are allocator-internal,
+/// single-threaded, and — crucially — must not allocate through the shim (a shim
+/// allocation re-enters the half-initialized guest allocator and deadlocks or trips
+/// its non-recursive init lock). Started `true` (before ANY constructor runs, so it
+/// covers the allocator's constructor whichever order it is scheduled in) and
+/// cleared exactly once, before `main`; a single-threaded guest's later, legitimate
+/// deterministic calls (e.g. `readlink` in `main`) are therefore unaffected.
+static SHIM_BOOTSTRAP: AtomicBool = AtomicBool::new(true);
+
+/// Whether the process is still in the shim-bootstrap window (see
+/// [`SHIM_BOOTSTRAP`]). Read lock-free so the interposers can branch on it on
+/// entry, before touching any shim lock or the guest allocator.
+#[inline]
+fn in_shim_bootstrap() -> bool {
+    SHIM_BOOTSTRAP.load(Ordering::Acquire)
+}
+
+thread_local! {
+    /// How many shim [`SpinMutex`]es this thread currently holds. Incremented when
+    /// a guard is acquired and decremented on drop, so `> 0` means the thread is
+    /// executing shim-internal code with a spinlock held.
+    ///
+    /// This is what makes a custom global allocator (jemalloc) work AFTER the
+    /// bootstrap window too: the shim holds its `thread_runtime` spinlock while
+    /// calling the scheduler (in `patina-dst-runtime`), whose ordinary Rust
+    /// allocations go through the guest allocator. A reentrant `os_unfair_lock` the
+    /// allocator takes from inside that allocation would re-acquire the held
+    /// spinlock and deadlock — so when a spinlock is held, the lock interposers
+    /// forward the (allocator-internal) lock to the real host primitive instead.
+    /// The guest never runs guest code with a spinlock held (`switch_and_park`
+    /// drops the guard before the baton handoff), so a held spinlock uniquely marks
+    /// allocator-internal reentrancy. With the DEFAULT allocator this never fires:
+    /// libc malloc's own locks are bound inside libc, not interposed.
+    static SPIN_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+#[inline]
+fn spin_depth_inc() {
+    SPIN_DEPTH.with(|depth| depth.set(depth.get() + 1));
+}
+
+#[inline]
+fn spin_depth_dec() {
+    SPIN_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+}
+
+/// Whether this thread currently holds any shim spinlock — i.e. a lock-interposer
+/// call now would be allocator-internal reentrancy that must run natively rather
+/// than re-acquire the held spinlock. See [`SPIN_DEPTH`].
+#[cfg(target_os = "macos")]
+#[inline]
+fn in_shim_critical() -> bool {
+    SPIN_DEPTH.with(Cell::get) > 0
+}
 
 #[derive(Default)]
 struct StdioCapture {
@@ -292,6 +359,32 @@ mod hostapi {
     // (which marks post-`main` teardown) can terminate the process without
     // recursing into itself. `exit` does not return.
     pub type HostExit = unsafe extern "C" fn(c_int) -> !;
+    // The real libc allocator, resolved through `RTLD_NEXT`. A Rust
+    // `#[global_allocator]` replaces `__rust_alloc`, NOT the C `malloc`/`free`
+    // symbols, so `RTLD_NEXT` reaches libSystem's allocator even when the guest
+    // installs jemalloc — and libSystem malloc's own internal locks are bound
+    // inside libSystem (two-level namespace), never through the shim's
+    // interposers, so the shim's synchronization-table storage can allocate here
+    // without recursing into the guest allocator or the shim's own lock gate. This
+    // is what keeps the interposer-reachable sync tables OFF the guest allocator
+    // (see `hostcoll`), so a custom global allocator whose init takes an
+    // interposed lock cannot re-enter and deadlock before `main`.
+    pub type HostMalloc = unsafe extern "C" fn(usize) -> *mut c_void;
+    pub type HostFree = unsafe extern "C" fn(*mut c_void);
+    pub type HostRealloc = unsafe extern "C" fn(*mut c_void, usize) -> *mut c_void;
+    // The real `os_unfair_lock` primitive. The lock interposers forward here — run
+    // the lock natively instead of routing through the scheduler — for an
+    // allocator-INTERNAL `os_unfair_lock` (tikv-jemallocator's `malloc_mutex`): in
+    // the bootstrap window while the allocator's own eager init runs
+    // (`SHIM_BOOTSTRAP`), and reentrantly while the shim already holds a spinlock
+    // (`SPIN_DEPTH`, the scheduler-path allocation re-entering the initialized
+    // allocator). Both are single-owner, allocator-internal locks that must not
+    // route through the deterministic model — doing so would trip the
+    // non-recursive-lock guard on the allocator's init reentrancy or deadlock on the
+    // held spinlock. An `os_unfair_lock` is a bare zero-initialized `u32` with no
+    // init call, so forwarding needs no paired init. `trylock` returns a C `bool`.
+    pub type OsUnfairLockOp = unsafe extern "C" fn(*mut c_void);
+    pub type OsUnfairLockTry = unsafe extern "C" fn(*mut c_void) -> bool;
 
     /// Real host vehicles resolved once through `dlsym(RTLD_NEXT, ...)`. None of
     /// these names appears as an undefined external in the shim objects.
@@ -324,6 +417,16 @@ mod hostapi {
         /// marks post-`main` teardown; resolving it here keeps the interposer from
         /// naming (and recursing into) the public `exit` it defines.
         pub host_exit: HostExit,
+        /// The real libc allocator (libSystem), backing the shim's off-guest-
+        /// allocator synchronization tables. See [`HostMalloc`].
+        pub host_malloc: HostMalloc,
+        pub host_free: HostFree,
+        pub host_realloc: HostRealloc,
+        /// The real `os_unfair_lock` primitive, used to run an allocator's
+        /// pre-activation init locks natively. See [`OsUnfairLockOp`].
+        pub host_os_unfair_lock_lock: OsUnfairLockOp,
+        pub host_os_unfair_lock_trylock: OsUnfairLockTry,
+        pub host_os_unfair_lock_unlock: OsUnfairLockOp,
     }
 
     // SAFETY: the fields are all function pointers into libSystem/libdispatch;
@@ -389,6 +492,18 @@ mod hostapi {
                     c"write$NOCANCEL",
                 )),
                 host_exit: std::mem::transmute::<*mut c_void, HostExit>(resolve(c"exit")),
+                host_malloc: std::mem::transmute::<*mut c_void, HostMalloc>(resolve(c"malloc")),
+                host_free: std::mem::transmute::<*mut c_void, HostFree>(resolve(c"free")),
+                host_realloc: std::mem::transmute::<*mut c_void, HostRealloc>(resolve(c"realloc")),
+                host_os_unfair_lock_lock: std::mem::transmute::<*mut c_void, OsUnfairLockOp>(
+                    resolve(c"os_unfair_lock_lock"),
+                ),
+                host_os_unfair_lock_trylock: std::mem::transmute::<*mut c_void, OsUnfairLockTry>(
+                    resolve(c"os_unfair_lock_trylock"),
+                ),
+                host_os_unfair_lock_unlock: std::mem::transmute::<*mut c_void, OsUnfairLockOp>(
+                    resolve(c"os_unfair_lock_unlock"),
+                ),
             }
         }
     }
@@ -467,6 +582,15 @@ mod hostapi {
     // integer passed in registers, so a fixed-arity call is ABI-compatible.
     pub type HostSyscall =
         unsafe extern "C" fn(c_long, c_long, c_long, c_long, c_long, c_long, c_long) -> c_long;
+    // The real glibc allocator, resolved through `RTLD_NEXT`. A Rust
+    // `#[global_allocator]` replaces `__rust_alloc`, NOT the C `malloc`/`free`
+    // symbols, so this reaches glibc's allocator even when the guest installs
+    // jemalloc, and glibc malloc's own locks are internal to libc, never the
+    // shim's interposers — so the shim's synchronization-table storage allocates
+    // here without recursing into the guest allocator (see `hostcoll`).
+    pub type HostMalloc = unsafe extern "C" fn(usize) -> *mut c_void;
+    pub type HostFree = unsafe extern "C" fn(*mut c_void);
+    pub type HostRealloc = unsafe extern "C" fn(*mut c_void, usize) -> *mut c_void;
 
     /// Real host vehicles resolved once through `__real_dlsym(RTLD_NEXT, ...)`.
     /// None of these names appears as an undefined external in the shim objects.
@@ -499,6 +623,11 @@ mod hostapi {
         /// The real glibc `syscall(2)` wrapper, the SUD dispatcher's pass-through
         /// vehicle for process-local memory-management rows.
         pub host_syscall: HostSyscall,
+        /// The real glibc allocator, backing the shim's off-guest-allocator
+        /// synchronization tables. See [`HostMalloc`].
+        pub host_malloc: HostMalloc,
+        pub host_free: HostFree,
+        pub host_realloc: HostRealloc,
     }
 
     // SAFETY: the fields are function pointers into glibc; sharing them across
@@ -540,6 +669,9 @@ mod hostapi {
                     c"pthread_join",
                 )),
                 host_syscall: std::mem::transmute::<*mut c_void, HostSyscall>(resolve(c"syscall")),
+                host_malloc: std::mem::transmute::<*mut c_void, HostMalloc>(resolve(c"malloc")),
+                host_free: std::mem::transmute::<*mut c_void, HostFree>(resolve(c"free")),
+                host_realloc: std::mem::transmute::<*mut c_void, HostRealloc>(resolve(c"realloc")),
             }
         }
     }
@@ -551,6 +683,334 @@ mod hostapi {
     pub fn get() -> &'static HostApi {
         static API: OnceLock<HostApi> = OnceLock::new();
         API.get_or_init(build)
+    }
+}
+
+// Host-libc-backed containers for the shim's interposer-reachable synchronization
+// tables. These MUST NOT allocate through the guest's global allocator: the
+// lock/sync interposers (`os_unfair_lock`/`pthread_mutex`/`cond`/`rwlock`) register
+// each lock lazily on first touch WHILE HOLDING the shim spinlock, and a custom
+// `#[global_allocator]` (e.g. tikv-jemallocator) whose OWN initialization takes an
+// interposed lock would re-enter the guest allocator from inside that
+// registration and deadlock/double-init before `main` (the tikv-jemallocator
+// blocker: `malloc_init_hard` -> `os_unfair_lock` -> shim interposer ->
+// `entry().or_default()` -> guest `__rust_alloc` -> `malloc_init_hard` again).
+// Backing them with the real libc `malloc`/`free`/`realloc` resolved through the
+// host-alias table keeps them entirely off the guest allocator: a Rust
+// `#[global_allocator]` replaces `__rust_alloc`, never the C `malloc` symbol, so
+// `RTLD_NEXT` reaches libSystem/glibc's allocator, whose internal locks are bound
+// inside libc and are not interposed — exactly why the DEFAULT-allocator shim
+// never deadlocked here. Minimal by design (unsorted linear probing over a
+// host-`realloc`'d array; the number of live locks is tiny) and never touched by
+// the fingerprint (map order is never iterated). No `allocator_api` (stable-only).
+mod hostcoll {
+    use std::ffi::c_void;
+    use std::marker::PhantomData;
+    use std::mem;
+    use std::ptr;
+    use std::slice;
+
+    unsafe fn host_grow(ptr: *mut u8, size: usize) -> *mut u8 {
+        // SAFETY: `ptr` is either null (fresh allocation via `malloc`) or a live
+        // host block from this module (grown via `realloc`); `size` is a valid
+        // nonzero byte count.
+        let grown = unsafe {
+            if ptr.is_null() {
+                (super::hostapi::get().host_malloc)(size)
+            } else {
+                (super::hostapi::get().host_realloc)(ptr.cast(), size)
+            }
+        };
+        assert!(
+            !grown.is_null(),
+            "patina shim: host allocation failed for an interposer table"
+        );
+        grown.cast()
+    }
+
+    unsafe fn host_free(ptr: *mut u8) {
+        if !ptr.is_null() {
+            // SAFETY: `ptr` is a live host-`malloc` block from this module.
+            unsafe { (super::hostapi::get().host_free)(ptr.cast::<c_void>()) };
+        }
+    }
+
+    /// A growable array whose storage is the real libc allocator, never the guest
+    /// global allocator. Elements are dropped in place on removal and on `Drop`.
+    pub struct HostVec<T> {
+        ptr: *mut T,
+        len: usize,
+        cap: usize,
+        _marker: PhantomData<T>,
+    }
+
+    // SAFETY: the raw pointer uniquely OWNS a host-`malloc` block; there is no
+    // aliasing. A `HostVec` (and the `HostMap`/`HostDeque` built on it) only ever
+    // lives inside a `SpinMutex`-guarded `ThreadRuntime`, so all access is
+    // serialized — mirroring `SpinMutex`'s own `Send`/`Sync` reasoning. Sending or
+    // sharing is therefore sound whenever the elements are.
+    unsafe impl<T: Send> Send for HostVec<T> {}
+    // SAFETY: as above; access is always exclusive under the shim spinlock.
+    unsafe impl<T: Send> Sync for HostVec<T> {}
+
+    impl<T> HostVec<T> {
+        pub const fn new() -> Self {
+            Self {
+                ptr: ptr::null_mut(),
+                len: 0,
+                cap: 0,
+                _marker: PhantomData,
+            }
+        }
+
+        fn grow(&mut self) {
+            let new_cap = if self.cap == 0 { 4 } else { self.cap * 2 };
+            let bytes = new_cap
+                .checked_mul(mem::size_of::<T>())
+                .expect("patina shim: HostVec capacity overflow");
+            // SAFETY: growing our own (possibly null) host block to `bytes`.
+            let new_ptr = unsafe { host_grow(self.ptr.cast::<u8>(), bytes) };
+            self.ptr = new_ptr.cast::<T>();
+            self.cap = new_cap;
+        }
+
+        pub fn push(&mut self, value: T) {
+            if self.len == self.cap {
+                self.grow();
+            }
+            // SAFETY: `self.len < self.cap` after `grow`, so the slot is in bounds.
+            unsafe { ptr::write(self.ptr.add(self.len), value) };
+            self.len += 1;
+        }
+
+        pub fn len(&self) -> usize {
+            self.len
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.len == 0
+        }
+
+        pub fn get(&self, index: usize) -> &T {
+            debug_assert!(index < self.len);
+            // SAFETY: index is in bounds per the caller's contract / debug assert.
+            unsafe { &*self.ptr.add(index) }
+        }
+
+        pub fn get_mut(&mut self, index: usize) -> &mut T {
+            debug_assert!(index < self.len);
+            // SAFETY: as above; `&mut self` guarantees exclusive access.
+            unsafe { &mut *self.ptr.add(index) }
+        }
+
+        pub fn as_slice(&self) -> &[T] {
+            if self.ptr.is_null() {
+                &[]
+            } else {
+                // SAFETY: `ptr..ptr+len` is an initialized, live run of `T`.
+                unsafe { slice::from_raw_parts(self.ptr, self.len) }
+            }
+        }
+
+        pub fn as_mut_slice(&mut self) -> &mut [T] {
+            if self.ptr.is_null() {
+                &mut []
+            } else {
+                // SAFETY: as above; `&mut self` guarantees exclusive access.
+                unsafe { slice::from_raw_parts_mut(self.ptr, self.len) }
+            }
+        }
+
+        /// Remove the element at `index`, moving the last element into its place
+        /// (order not preserved). Used where iteration order is irrelevant.
+        pub fn swap_remove(&mut self, index: usize) -> T {
+            debug_assert!(index < self.len);
+            let last = self.len - 1;
+            // SAFETY: both indices are in bounds; `read` moves the value out and
+            // the length shrinks so no slot is double-owned.
+            unsafe {
+                let removed = ptr::read(self.ptr.add(index));
+                if index != last {
+                    let tail = ptr::read(self.ptr.add(last));
+                    ptr::write(self.ptr.add(index), tail);
+                }
+                self.len = last;
+                removed
+            }
+        }
+
+        /// Remove the element at `index`, shifting the tail down (order
+        /// preserved). Used by the FIFO waiter queues, whose order is
+        /// determinism-relevant.
+        pub fn remove(&mut self, index: usize) -> T {
+            debug_assert!(index < self.len);
+            // SAFETY: `index` in bounds; the tail shift keeps every live slot
+            // initialized and the length shrinks by one.
+            unsafe {
+                let removed = ptr::read(self.ptr.add(index));
+                let tail = self.len - index - 1;
+                if tail > 0 {
+                    ptr::copy(self.ptr.add(index + 1), self.ptr.add(index), tail);
+                }
+                self.len -= 1;
+                removed
+            }
+        }
+    }
+
+    impl<T> Drop for HostVec<T> {
+        fn drop(&mut self) {
+            // SAFETY: drop the live prefix in place, then free the host block.
+            unsafe {
+                for index in 0..self.len {
+                    ptr::drop_in_place(self.ptr.add(index));
+                }
+                host_free(self.ptr.cast::<u8>());
+            }
+        }
+    }
+
+    impl<T> Default for HostVec<T> {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    /// A FIFO queue over [`HostVec`] (push at the back, pop from the front). Order
+    /// is preserved because waiter wake order is a determinism input.
+    pub struct HostDeque<T> {
+        inner: HostVec<T>,
+    }
+
+    impl<T> HostDeque<T> {
+        pub const fn new() -> Self {
+            Self {
+                inner: HostVec::new(),
+            }
+        }
+
+        pub fn push_back(&mut self, value: T) {
+            self.inner.push(value);
+        }
+
+        pub fn pop_front(&mut self) -> Option<T> {
+            if self.inner.is_empty() {
+                None
+            } else {
+                Some(self.inner.remove(0))
+            }
+        }
+
+        /// Remove the element at `index`, preserving FIFO order of the rest.
+        pub fn remove(&mut self, index: usize) -> T {
+            self.inner.remove(index)
+        }
+
+        pub fn iter(&self) -> slice::Iter<'_, T> {
+            self.inner.as_slice().iter()
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.inner.is_empty()
+        }
+
+        pub fn len(&self) -> usize {
+            self.inner.len()
+        }
+    }
+
+    impl<T> Default for HostDeque<T> {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    /// A tiny map over [`HostVec`] of `(key, value)` pairs with linear lookup. The
+    /// synchronization tables are keyed by a lock/task address and never iterated
+    /// in order, so linear probing over host storage is both sufficient and
+    /// order-independent (no fingerprint impact).
+    pub struct HostMap<K, V> {
+        entries: HostVec<(K, V)>,
+    }
+
+    impl<K: Copy + PartialEq, V> HostMap<K, V> {
+        pub const fn new() -> Self {
+            Self {
+                entries: HostVec::new(),
+            }
+        }
+
+        fn index_of(&self, key: &K) -> Option<usize> {
+            (0..self.entries.len()).find(|&index| self.entries.get(index).0 == *key)
+        }
+
+        pub fn get(&self, key: &K) -> Option<&V> {
+            self.index_of(key).map(|index| &self.entries.get(index).1)
+        }
+
+        pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+            match self.index_of(key) {
+                Some(index) => Some(&mut self.entries.get_mut(index).1),
+                None => None,
+            }
+        }
+
+        pub fn insert(&mut self, key: K, value: V) {
+            match self.index_of(&key) {
+                // Assignment drops the previous value (freeing its host storage).
+                Some(index) => self.entries.get_mut(index).1 = value,
+                None => self.entries.push((key, value)),
+            }
+        }
+
+        pub fn remove(&mut self, key: &K) -> Option<V> {
+            self.index_of(key)
+                .map(|index| self.entries.swap_remove(index).1)
+        }
+
+        pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
+            self.entries
+                .as_mut_slice()
+                .iter_mut()
+                .map(|(_, value)| value)
+        }
+    }
+
+    impl<K: Copy + PartialEq, V: Default> HostMap<K, V> {
+        /// Return a mutable reference to the value for `key`, inserting a default
+        /// value first if absent — the [`std::collections::btree_map::Entry`]
+        /// `or_default` the sync tables relied on.
+        pub fn entry_or_default(&mut self, key: K) -> &mut V {
+            let index = match self.index_of(&key) {
+                Some(index) => index,
+                None => {
+                    self.entries.push((key, V::default()));
+                    self.entries.len() - 1
+                }
+            };
+            &mut self.entries.get_mut(index).1
+        }
+    }
+
+    impl<K: Copy + PartialEq, V> Default for HostMap<K, V> {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    // `BTreeMap`-style panicking key indexing, so shim unit tests that assert on a
+    // table entry (`table.mutexes[&key]`) read unchanged.
+    impl<K: Copy + PartialEq, V> std::ops::Index<&K> for HostMap<K, V> {
+        type Output = V;
+        fn index(&self, key: &K) -> &V {
+            self.get(key).expect("no entry found for key")
+        }
+    }
+
+    impl<K: Copy + PartialEq, V> std::ops::IndexMut<&K> for HostMap<K, V> {
+        fn index_mut(&mut self, key: &K) -> &mut V {
+            self.get_mut(key).expect("no entry found for key")
+        }
     }
 }
 
@@ -1204,6 +1664,18 @@ fn install(context: Result<Context, RuntimeError>) -> c_int {
     }
     *guard = Some(context);
     set_errno(0);
+    // The deterministic runtime is now installed, so the bootstrap window is over.
+    // Before ending it, force the guest global allocator to finish initializing
+    // while the init-reachable interposers still run natively (see `SHIM_BOOTSTRAP`):
+    // a custom `#[global_allocator]` (jemalloc) initializes lazily / via its own
+    // constructor, and this guarantees that init has happened during bootstrap
+    // regardless of the order its constructor is scheduled relative to this one, so
+    // its init can never re-enter the shim after the window closes. `black_box`
+    // keeps the probe allocation from being elided.
+    let probe = Box::new(0u8);
+    std::hint::black_box(probe.as_ref());
+    drop(probe);
+    SHIM_BOOTSTRAP.store(false, Ordering::Release);
     0
 }
 
@@ -1528,6 +2000,19 @@ pub unsafe extern "C" fn patina_entropy(destination: *mut c_void, length: usize)
 pub unsafe extern "C" fn patina_clock_now(clock_id: u32, nanos: *mut u64) -> c_int {
     if nanos.is_null() {
         return fail(EINVAL);
+    }
+    // Bootstrap window (see `SHIM_BOOTSTRAP`): a custom global allocator's own
+    // constructor reads the clock for internal timing (tikv-jemallocator's
+    // `arena_new` calls `nstime_update` -> `mach_absolute_time`) BEFORE the shim
+    // has installed the runtime. That value is allocator-internal, never
+    // guest-observable, so answer a fixed zero without touching the runtime — going
+    // through `with_context`/`ensure_runtime` here would try to auto-install the
+    // runtime in the middle of the allocator's own initialization and re-enter it.
+    if in_shim_bootstrap() {
+        // SAFETY: `nanos` was checked non-null and is writable per the C ABI.
+        unsafe { nanos.write(0) };
+        set_errno(0);
+        return 0;
     }
     let clock = match clock(clock_id) {
         Ok(clock) => clock,
@@ -2229,6 +2714,17 @@ pub unsafe extern "C" fn patina_read_link(
     if len != 0 && buf.is_null() {
         return fail(EINVAL) as isize;
     }
+    // Bootstrap window (see `SHIM_BOOTSTRAP`): this is an allocator's init-time
+    // config probe — tikv-jemallocator's `obtain_malloc_conf` does
+    // `readlink("/etc/malloc.conf")` while holding its init lock. The deterministic
+    // FS carries no such file, and — crucially — this MUST NOT allocate (the
+    // `String` path would re-enter the half-initialized guest allocator and trip its
+    // non-recursive init lock / deadlock), so answer ENOENT without building a path
+    // or touching the runtime. A guest's own deterministic `read_link` runs after
+    // bootstrap and is unaffected.
+    if in_shim_bootstrap() {
+        return fail(ENOENT) as isize;
+    }
     let path = match path_from_c(path) {
         Ok(path) => path,
         Err(errno) => return fail(errno) as isize,
@@ -2625,6 +3121,7 @@ mod thread {
 
     use patina_dst_abi::{ClockKind, Datagram, ShutdownHow, SocketId};
 
+    use super::hostcoll::{HostDeque, HostMap};
     use super::{
         EBUSY, EDEADLK, EINVAL, EISCONN, ENOTCONN, EOPNOTSUPP, EOVERFLOW, EPERM, ESRCH, ETIMEDOUT,
         EWOULDBLOCK, SpinGuard, SpinMutex, TaskId, host_write_all, with_context_msg,
@@ -2868,12 +3365,12 @@ mod thread {
     #[derive(Default)]
     struct MutexEntry {
         owner: Option<TaskId>,
-        waiters: VecDeque<TaskId>,
+        waiters: HostDeque<TaskId>,
     }
 
     #[derive(Default)]
     struct CondEntry {
-        waiters: VecDeque<(TaskId, usize)>,
+        waiters: HostDeque<(TaskId, usize)>,
     }
 
     /// A deterministic reader/writer lock. Writer-preferring: a new reader
@@ -2888,8 +3385,8 @@ mod thread {
         readers: usize,
         /// The task currently holding the write lock, if any.
         writer: Option<TaskId>,
-        write_waiters: VecDeque<TaskId>,
-        read_waiters: VecDeque<TaskId>,
+        write_waiters: HostDeque<TaskId>,
+        read_waiters: HostDeque<TaskId>,
     }
 
     struct ThreadEntry {
@@ -2917,9 +3414,16 @@ mod thread {
     /// ownership directly to the next waiter so no thundering herd occurs.
     #[derive(Default)]
     struct ThreadTable {
-        mutexes: BTreeMap<usize, MutexEntry>,
-        conds: BTreeMap<usize, CondEntry>,
-        rwlocks: BTreeMap<usize, RwLockEntry>,
+        // The synchronization tables are host-libc-backed (see `hostcoll`): the
+        // lock/sync interposers register each lock lazily on first touch while
+        // holding the shim spinlock, so they must never allocate through the
+        // guest global allocator (a custom `#[global_allocator]` whose init takes
+        // an interposed lock would re-enter and deadlock before `main`).
+        mutexes: HostMap<usize, MutexEntry>,
+        conds: HostMap<usize, CondEntry>,
+        rwlocks: HostMap<usize, RwLockEntry>,
+        // Thread lifecycle only — grown by explicit `pthread_create`/join, never
+        // reentrantly from an allocation, so it stays on the ordinary allocator.
         threads: BTreeMap<TaskId, ThreadEntry>,
     }
 
@@ -2941,7 +3445,7 @@ mod thread {
         }
 
         fn lock(&mut self, me: TaskId, key: usize) -> Result<LockStep, ThreadError> {
-            let entry = self.mutexes.entry(key).or_default();
+            let entry = self.mutexes.entry_or_default(key);
             match entry.owner {
                 None => {
                     entry.owner = Some(me);
@@ -2956,7 +3460,7 @@ mod thread {
         }
 
         fn trylock(&mut self, me: TaskId, key: usize) -> c_int {
-            let entry = self.mutexes.entry(key).or_default();
+            let entry = self.mutexes.entry_or_default(key);
             match entry.owner {
                 None => {
                     entry.owner = Some(me);
@@ -3006,7 +3510,7 @@ mod thread {
         /// Acquire the read lock. Writer-preferring: block while a writer holds
         /// the lock or any writer is waiting.
         fn rwlock_rdlock(&mut self, me: TaskId, key: usize) -> Result<LockStep, ThreadError> {
-            let entry = self.rwlocks.entry(key).or_default();
+            let entry = self.rwlocks.entry_or_default(key);
             if entry.writer == Some(me) {
                 return Err(ThreadError::Posix(EDEADLK));
             }
@@ -3022,7 +3526,7 @@ mod thread {
         /// Acquire the write lock: exclusive, so block unless the lock is fully
         /// idle (no readers and no writer).
         fn rwlock_wrlock(&mut self, me: TaskId, key: usize) -> Result<LockStep, ThreadError> {
-            let entry = self.rwlocks.entry(key).or_default();
+            let entry = self.rwlocks.entry_or_default(key);
             if entry.writer == Some(me) {
                 return Err(ThreadError::Posix(EDEADLK));
             }
@@ -3036,7 +3540,7 @@ mod thread {
         }
 
         fn rwlock_tryrdlock(&mut self, me: TaskId, key: usize) -> c_int {
-            let entry = self.rwlocks.entry(key).or_default();
+            let entry = self.rwlocks.entry_or_default(key);
             if entry.writer == Some(me) {
                 EDEADLK
             } else if entry.writer.is_none() && entry.write_waiters.is_empty() {
@@ -3048,7 +3552,7 @@ mod thread {
         }
 
         fn rwlock_trywrlock(&mut self, me: TaskId, key: usize) -> c_int {
-            let entry = self.rwlocks.entry(key).or_default();
+            let entry = self.rwlocks.entry_or_default(key);
             if entry.writer == Some(me) {
                 EDEADLK
             } else if entry.writer.is_none() && entry.readers == 0 {
@@ -3088,10 +3592,20 @@ mod thread {
                 entry.writer = Some(next);
                 scheduler.wake(next)?;
             } else {
-                let readers: Vec<TaskId> = entry.read_waiters.drain(..).collect();
-                entry.readers = readers.len();
-                for reader in readers {
-                    scheduler.wake(reader)?;
+                // Batch-wake every blocked reader in FIFO order. Drained one at a
+                // time (re-borrowing the entry each step) rather than collected
+                // into a `Vec` — the collection would allocate through the guest
+                // global allocator, which the sync path must never touch.
+                entry.readers = entry.read_waiters.len();
+                loop {
+                    let reader = self
+                        .rwlocks
+                        .get_mut(&key)
+                        .and_then(|entry| entry.read_waiters.pop_front());
+                    match reader {
+                        Some(reader) => scheduler.wake(reader)?,
+                        None => break,
+                    }
                 }
             }
             Ok(())
@@ -3128,8 +3642,7 @@ mod thread {
         ) -> Result<(), ThreadError> {
             self.unlock(scheduler, me, mutex_key)?;
             self.conds
-                .entry(cond_key)
-                .or_default()
+                .entry_or_default(cond_key)
                 .waiters
                 .push_back((me, mutex_key));
             Ok(())
@@ -3145,7 +3658,7 @@ mod thread {
                 .get_mut(&cond_key)
                 .and_then(|cond| cond.waiters.pop_front());
             if let Some((task, mutex_key)) = woken {
-                let entry = self.mutexes.entry(mutex_key).or_default();
+                let entry = self.mutexes.entry_or_default(mutex_key);
                 match entry.owner {
                     None => {
                         entry.owner = Some(task);
@@ -4063,6 +4576,21 @@ mod thread {
     #[cfg(target_os = "macos")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_os_unfair_lock_lock(lock: *mut c_void) {
+        // Run the lock natively — never through the deterministic model — for an
+        // allocator-internal `os_unfair_lock` in either of the two windows where
+        // one appears: (1) the bootstrap window, where a custom global allocator's
+        // own eager init takes its `malloc_mutex`; (2) reentrantly while this
+        // thread already holds a shim spinlock, which happens only when the shim's
+        // scheduler-path allocation re-enters the (now-initialized) allocator. Both
+        // are allocator-internal, single-owner locks that must not route through
+        // the scheduler (it would trip the non-recursive guard or deadlock on the
+        // held spinlock). See `SHIM_BOOTSTRAP` and `SPIN_DEPTH`.
+        if super::in_shim_bootstrap() || super::in_shim_critical() {
+            // SAFETY: the resolved real `os_unfair_lock_lock`; `lock` is a valid
+            // `os_unfair_lock` per the caller's contract.
+            unsafe { (super::hostapi::get().host_os_unfair_lock_lock)(lock) };
+            return;
+        }
         let _ = sched_point();
         let key = lock as usize;
         let me = current_task();
@@ -4089,6 +4617,14 @@ mod thread {
     #[cfg(target_os = "macos")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_os_unfair_lock_trylock(lock: *mut c_void) -> c_int {
+        // Allocator-internal lock: run natively (see `patina_os_unfair_lock_lock`).
+        // The real `os_unfair_lock_trylock` returns a C `bool`.
+        if super::in_shim_bootstrap() || super::in_shim_critical() {
+            // SAFETY: the resolved real `os_unfair_lock_trylock`; valid `lock`.
+            return c_int::from(unsafe {
+                (super::hostapi::get().host_os_unfair_lock_trylock)(lock)
+            });
+        }
         let _ = sched_point();
         let me = current_task();
         let mut state = lock_state();
@@ -4103,6 +4639,15 @@ mod thread {
     #[cfg(target_os = "macos")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_os_unfair_lock_unlock(lock: *mut c_void) {
+        // Allocator-internal lock: run natively (see `patina_os_unfair_lock_lock`).
+        // A lock taken natively (bootstrap, or reentrant under a held spinlock) is
+        // released natively too; the allocator's lock/unlock pair is balanced
+        // within the same window, so none spans a transition.
+        if super::in_shim_bootstrap() || super::in_shim_critical() {
+            // SAFETY: the resolved real `os_unfair_lock_unlock`; valid `lock`.
+            unsafe { (super::hostapi::get().host_os_unfair_lock_unlock)(lock) };
+            return;
+        }
         let _ = sched_point();
         let me = current_task();
         let mut state = lock_state();

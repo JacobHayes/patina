@@ -122,6 +122,18 @@ void os_unfair_lock_unlock(os_unfair_lock_t lock) {
 }
 
 /*
+ * issetugid(): "was this process started setuid/setgid?" Interposed to a fixed
+ * deterministic 0 (never running as a set-id binary under Patina), so guest code
+ * that gates on it (allocators reading environment/config — tikv-jemallocator's
+ * malloc-conf lookup calls it) behaves identically regardless of the host's real
+ * id state. A pure boolean of fixed process identity, no boundary effect; being
+ * a strong def it also drops off the guest import table.
+ */
+int issetugid(void) {
+    return 0;
+}
+
+/*
  * libdispatch semaphores. Rust std's Darwin thread Parker blocks on a
  * libdispatch semaphore, so std::thread::park / park_timeout and everything
  * layered on them (mpsc/mpmc recv and recv_timeout, blocking channel and Once
@@ -836,6 +848,18 @@ int openat(int dirfd, const char *path, int flags, ...) {
         return -1;
     }
     return patina_posix_open(path, flags);
+}
+
+/*
+ * `creat(path, mode)` is exactly `open(path, O_WRONLY|O_CREAT|O_TRUNC, mode)`, so
+ * route it through the deterministic filesystem like `open`. The mode is dropped
+ * (the deterministic FS is path-based with no permission bits), matching `open`.
+ * A raw host `creat` would write the real filesystem; interposing keeps it in the
+ * deterministic FS. Being a strong def it also drops off the guest import table.
+ */
+int creat(const char *path, mode_t mode) {
+    (void)mode;
+    return patina_posix_open(path, O_WRONLY | O_CREAT | O_TRUNC);
 }
 
 int fcntl(int fd, int command, ...) {
@@ -1965,6 +1989,75 @@ void (*signal(int signum, void (*handler)(int)))(int) {
         return SIG_ERR;
     }
     return previous.sa_handler;
+}
+
+/*
+ * glibc init-reachable helpers a custom global allocator (tikv-jemallocator)
+ * links on Linux, made deterministic so the guest audits clean and runs
+ * reproducibly. Each is a strong def, so it also drops off the guest import table.
+ */
+
+/* Live CPU id → a fixed 0. `sched_getcpu` is host-scheduling nondeterminism
+ * (which core happens to run this thread); pinning it to a constant makes an
+ * allocator's per-CPU arena selection deterministic, like the pid/uname
+ * constants. Distinct from `__sched_cpucount` (the pure `CPU_COUNT` popcount over
+ * caller memory), which is allowlisted rather than interposed. */
+int sched_getcpu(void) {
+    return 0;
+}
+
+/* CPU affinity is inert under the single-baton scheduler — exactly one managed
+ * thread runs at a time regardless — so setting it is a deterministic no-op
+ * success rather than a real host scheduling effect. */
+int sched_setaffinity(pid_t pid, size_t cpusetsize, const cpu_set_t *mask) {
+    (void)pid;
+    (void)cpusetsize;
+    (void)mask;
+    return 0;
+}
+
+/* `secure_getenv`, like the interposed `getenv`, reads the deterministic (empty,
+ * startup-scrubbed) guest environment, so it always returns NULL. */
+char *secure_getenv(const char *name) {
+    (void)name;
+    return NULL;
+}
+
+/* A thread's name is host/kernel state (`/proc/self/task/<tid>/comm`); return a
+ * fixed empty name so a guest cannot observe where, or as what, it ran — the same
+ * stance as `gethostname` → "patina". */
+int pthread_getname_np(pthread_t thread, char *name, size_t len) {
+    (void)thread;
+    /* glibc declares `name` nonnull (a NULL comparison is a -Werror on gcc);
+     * only guard the zero-length buffer. */
+    if (len > 0) {
+        name[0] = '\0';
+    }
+    return 0;
+}
+
+/* Signal masking is inert under Patina (no ambient signals are ever delivered),
+ * so forward to the real glibc mask op for faithful `oldset` semantics — but NEVER
+ * let the guest block SIGSYS: under syscall-user-dispatch a blocked synchronous
+ * SIGSYS would kill the process and disable deterministic containment. Strip SIGSYS
+ * from any block/setmask set, mirroring the `sigaction(SIGSYS)` hardening above.
+ * The shim uses no `pthread_sigmask` internally, so this never self-blocks. */
+typedef int (*patina_host_pthread_sigmask_fn)(int, const sigset_t *, sigset_t *);
+static patina_host_pthread_sigmask_fn patina_host_pthread_sigmask_ptr;
+static patina_host_pthread_sigmask_fn patina_real_pthread_sigmask(void) {
+    if (patina_host_pthread_sigmask_ptr == NULL) {
+        patina_host_pthread_sigmask_ptr =
+            (patina_host_pthread_sigmask_fn)__real_dlsym(RTLD_NEXT, "pthread_sigmask");
+    }
+    return patina_host_pthread_sigmask_ptr;
+}
+int pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset) {
+    if (set != NULL && (how == SIG_BLOCK || how == SIG_SETMASK)) {
+        sigset_t adjusted = *set;
+        sigdelset(&adjusted, SIGSYS);
+        return patina_real_pthread_sigmask()(how, &adjusted, oldset);
+    }
+    return patina_real_pthread_sigmask()(how, set, oldset);
 }
 
 #endif /* __linux__ SUD */

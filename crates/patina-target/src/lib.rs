@@ -203,55 +203,6 @@ pub fn native_binary_has_sud_marker(bytes: &[u8]) -> Result<bool, TargetError> {
     }))
 }
 
-/// Whether a shim-linked native binary installs a custom `#[global_allocator]`
-/// in place of the default (System) allocator.
-///
-/// Signature: every Rust binary defines the allocator-ABI entry `__rust_alloc`.
-/// With the DEFAULT allocator, rustc additionally emits the `__rdl_alloc` shim
-/// (mangled `___rustc::__rdl_alloc`) that `__rust_alloc` forwards to; installing a
-/// custom `#[global_allocator]` instead points `__rust_alloc` straight at the
-/// user allocator and OMITS `__rdl_alloc`. So a defined `__rust_alloc` with NO
-/// defined `__rdl_alloc` is the marker of a custom global allocator. Matched as a
-/// substring of the (v0-mangled) defined-symbol names so it is independent of the
-/// leading-underscore decoration and the exact mangling prefix.
-///
-/// This is load-bearing for the pre-run gate: the shim's synchronization
-/// interposers allocate through the global allocator (the lock table registers
-/// each lock lazily on first touch), so a custom allocator whose OWN lazy
-/// initialization takes an interposed lock re-enters the half-initialized
-/// allocator while the shim holds its non-reentrant runtime lock and DEADLOCKS
-/// before `main`. tikv-jemallocator hits this exactly: `malloc_init_hard` →
-/// `os_unfair_lock` → the shim's `os_unfair_lock` interposer → BTreeMap allocate →
-/// jemalloc `malloc` → `malloc_init_hard` (a self-deadlock, silent pre-main hang).
-/// The gate refuses the whole class up front rather than let that reach a sweep.
-///
-/// Fails closed on a parse error or unsupported format so a malformed/foreign
-/// input is never silently treated as the default allocator.
-pub fn native_binary_installs_custom_global_allocator(bytes: &[u8]) -> Result<bool, TargetError> {
-    let file = object::File::parse(bytes).map_err(TargetError::NativeParse)?;
-    NativeFormat::from_binary(file.format())?;
-    let mut defines_rust_alloc = false;
-    let mut defines_default_shim = false;
-    for symbol in file.symbols().chain(file.dynamic_symbols()) {
-        if !symbol.is_definition() {
-            continue;
-        }
-        let Ok(name) = symbol.name() else {
-            continue;
-        };
-        // `__rust_alloc` also matches `__rust_alloc_zeroed`/`__rust_alloc_error_handler`
-        // and `__rdl_alloc` also matches `__rdl_alloc_zeroed` — either member of a
-        // family is a sufficient presence signal.
-        if name.contains("__rust_alloc") {
-            defines_rust_alloc = true;
-        }
-        if name.contains("__rdl_alloc") {
-            defines_default_shim = true;
-        }
-    }
-    Ok(defines_rust_alloc && !defines_default_shim)
-}
-
 /// Whether a denied native escape is a `direct-syscall` finding that
 /// syscall-user-dispatch can trap and route — i.e. a raw inline `syscall`/`svc`
 /// *instruction* (`instruction@…`), as opposed to a `cpu-nondeterminism`
@@ -1268,11 +1219,16 @@ fn common_native_allowlisted_import(symbol: &str) -> bool {
         "strcat_chk",
         "strchr",
         "strcmp",
+        // Plain and fortified string copies: write only into the caller-owned
+        // destination buffer (the fortified `_chk` forms add a compile-time bound),
+        // a pure caller-memory operation exactly like `memcpy`, no boundary effect.
+        "strcpy",
         "strcpy_chk",
         "strerror_r",
         "strlen",
         "strncasecmp",
         "strncmp",
+        "strncpy",
         "strncpy_chk",
         "strnlen",
         "strrchr",
@@ -1511,6 +1467,13 @@ fn macho_native_allowlisted_import(symbol: &str) -> bool {
     // by the validation scripts, so an unmanaged binary importing them to
     // spawn or block outside the scheduler still fails the audit.
     const STACK_EXTENT_HELPERS: &[&str] = &["pthread_get_stackaddr_np", "pthread_get_stacksize_np"];
+    // Darwin stack-growth probe: `___chkstk_darwin` (compiler-inserted before a
+    // large stack frame — tikv-jemallocator's init frames reach it) merely touches
+    // successive stack guard pages to fault-in / overflow-check the callee's own
+    // stack. Pure caller-stack access with no boundary effect and a value-free,
+    // deterministic outcome (it either returns or the process dies on a genuine
+    // stack overflow, exactly as native), so it is known-safe.
+    const STACK_PROBE: &[&str] = &["chkstk_darwin"];
     // Returns pointers to in-process environment and argument-vector storage.
     // The shim scrubs environ at startup; argv is the supervisor-controlled
     // program arguments (native-run sets them and clears the child environment),
@@ -1524,6 +1487,7 @@ fn macho_native_allowlisted_import(symbol: &str) -> bool {
         || FINALIZERS.contains(&symbol)
         || PROCESS_LOCAL_MEMORY.contains(&symbol)
         || STACK_EXTENT_HELPERS.contains(&symbol)
+        || STACK_PROBE.contains(&symbol)
         || ARGV_ENV_STORAGE.contains(&symbol)
 }
 
@@ -1550,11 +1514,25 @@ fn elf_native_allowlisted_import(symbol: &str) -> bool {
     const FIXED_PROCESS_METADATA: &[&str] = &["getauxval", "gnu_get_libc_version"];
     // Backtrace metadata walks already-loaded ELF program headers.
     const BACKTRACE_IMAGE_GLUE: &[&str] = &["dl_iterate_phdr"];
-    // glibc's 64-bit mmap alias; mprotect/munmap live on the common list.
-    const PROCESS_LOCAL_MEMORY: &[&str] = &["mmap64"];
+    // Process-local memory extent. `mmap`/`mmap64` are the same 64-bit mapping on
+    // an LP64 glibc (a guest built against plain `mmap` imports that name; the
+    // allocator backs its arenas with it); `sbrk` adjusts the program break — both
+    // grow only this process's own address space, exactly like the allocator's
+    // `mmap` on macOS. `mprotect`/`munmap` live on the common list. Addresses are
+    // never virtualized (like `malloc`/`mmap` pointers), so they carry no
+    // cross-boundary effect; `mmap`'s invisible `MAP_SHARED` flag is the documented
+    // residual (see the coverage matrix), unchanged by adding the plain alias.
+    const PROCESS_LOCAL_MEMORY: &[&str] = &["mmap", "mmap64", "sbrk"];
     // Pure in-register byte-order conversion; referenced by the shim's own
     // sockaddr translation.
     const BYTE_ORDER: &[&str] = &["htonl", "htons", "ntohl", "ntohs"];
+    // Pure, boundary-effect-free glibc compute helpers. `__ctype_b_loc` returns a
+    // pointer to the current locale's constant ctype classification table (behind
+    // `isalpha`/`isdigit`/…) — a read-only table, constant for the C locale, no host
+    // state read. `__sched_cpucount` is `CPU_COUNT`: it pops the set bits of a
+    // caller-owned `cpu_set_t`, pure arithmetic over caller memory (distinct from
+    // `sched_getcpu`, which reads the live CPU id and IS interposed to a constant).
+    const PURE_COMPUTE: &[&str] = &["ctype_b_loc", "sched_cpucount"];
     // glibc-only pthread introspection: reads the current thread's attributes
     // for Rust's stack-overflow guard. The XPG strerror_r alias is the pure
     // message formatter behind std::io::Error display.
@@ -1568,6 +1546,7 @@ fn elf_native_allowlisted_import(symbol: &str) -> bool {
         || BACKTRACE_IMAGE_GLUE.contains(&symbol)
         || PROCESS_LOCAL_MEMORY.contains(&symbol)
         || BYTE_ORDER.contains(&symbol)
+        || PURE_COMPUTE.contains(&symbol)
         || GLIBC_THREAD_AND_ERROR_HELPERS.contains(&symbol)
 }
 
@@ -1593,6 +1572,7 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "open",
         "open64",
         "openat",
+        "creat",
         "read",
         "readv",
         "preadv",
@@ -1824,7 +1804,7 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
     ];
     // Environment mutation/reads; the deterministic environment is empty and
     // immutable.
-    const ENVIRONMENT: &[&str] = &["getenv", "setenv", "unsetenv", "putenv"];
+    const ENVIRONMENT: &[&str] = &["getenv", "secure_getenv", "setenv", "unsetenv", "putenv"];
     // Dynamic loading can pull in arbitrary uninterposed host code.
     const DYNAMIC: &[&str] = &["dlopen", "dlsym", "dlclose", "dlmopen"];
     // (d) Thread lifecycle: anything that mints a new runnable host context must
@@ -2054,9 +2034,12 @@ mod tests {
         }
         // The prefix rule is a refinement of the unknown fallback only: a plain
         // libc/Rust name near those prefixes stays unclassified (deny as
-        // unknown-import), and a real classification always wins.
+        // unknown-import), and a real classification always wins. `secure_getenv`
+        // starts with a lowercase `sec` (never the Apple `Sec` framework prefix)
+        // and is a real environment-class symbol, so it classifies as such — not as
+        // `macos-framework` and not as unknown.
         assert_eq!(native_escape_category("close"), Some("filesystem"));
-        assert_eq!(native_escape_category("secure_getenv"), None);
+        assert_eq!(native_escape_category("secure_getenv"), Some("environment"));
         assert_eq!(
             aarch64_instruction_category(0xd400_0001),
             Some("direct-syscall")
@@ -2098,16 +2081,6 @@ mod tests {
         // A malformed binary must never be treated as SUD-capable: the marker
         // check is a downgrade precondition, so parse failure ⇒ error, not false.
         assert!(native_binary_has_sud_marker(b"not an object file").is_err());
-    }
-
-    #[test]
-    fn custom_global_allocator_detection_fails_closed_on_unparseable_input() {
-        // The custom-global-allocator gate refuses a class that DEADLOCKS pre-main,
-        // so an input it cannot parse must be an error (the caller refuses), never
-        // a silent `false` that would let a foreign/corrupt binary skip the check.
-        // (Positive/negative discrimination on real Mach-O/ELF binaries is covered
-        // end-to-end by cargo-patina's `native_run_and_audit_refuse_a_custom_global_allocator`.)
-        assert!(native_binary_installs_custom_global_allocator(b"not an object file").is_err());
     }
 
     #[test]
@@ -2254,6 +2227,55 @@ mod tests {
         assert_eq!(
             native_import_decision("_read$NOCANCEL", NativeFormat::MachO, &allow),
             NativeImportDecision::Allowed
+        );
+    }
+
+    // The Linux tikv-jemallocator MRE audit surface: the classification half of
+    // the 12 imports the glibc build carries. The PURE/memory ones are allowlisted
+    // (cleared with no `--allow`); the effectful ones classify as their escape
+    // class for defense-in-depth (they are interposed by strong defs in
+    // `patina_posix.c`, so they drop off a shim-linked binary's import table, but a
+    // NON-shim binary importing them raw must still read as the right class, never
+    // slip through). The remaining four (`sched_getcpu`/`sched_setaffinity`/
+    // `pthread_sigmask`/`pthread_getname_np`) are interposed-only strong defs, like
+    // `issetugid` — not classified here, denied as `unknown-import` for a non-shim
+    // binary (fail-safe) and defined for a shim binary (verified by the Linux audit).
+    #[test]
+    fn classifies_linux_jemalloc_audit_surface() {
+        let empty = BTreeSet::new();
+        // Pure / process-local-memory imports: known-safe with no `--allow`.
+        for symbol in ["mmap", "mmap64", "sbrk", "strcpy", "strncpy"] {
+            assert_eq!(
+                native_import_decision(symbol, NativeFormat::Elf, &empty),
+                NativeImportDecision::Allowed,
+                "{symbol} must be known-safe on ELF"
+            );
+        }
+        // The glibc `__`-prefixed pure helpers normalize (leading underscores
+        // stripped) onto their allowlist entries.
+        for symbol in ["__ctype_b_loc", "__sched_cpucount"] {
+            assert_eq!(
+                native_import_decision(symbol, NativeFormat::Elf, &empty),
+                NativeImportDecision::Allowed,
+                "{symbol} (pure compute) must be known-safe on ELF"
+            );
+        }
+        // Effectful imports classify as their escape class (interposed by strong
+        // defs; this is the non-shim-binary defense-in-depth).
+        assert_eq!(
+            native_import_decision("creat", NativeFormat::Elf, &empty),
+            NativeImportDecision::Denied("filesystem")
+        );
+        assert_eq!(
+            native_import_decision("secure_getenv", NativeFormat::Elf, &empty),
+            NativeImportDecision::Denied("environment")
+        );
+        // `sched_getcpu` (live CPU id) must NOT be mistaken for the pure
+        // `__sched_cpucount`: it is interposed to a constant, and a non-shim import
+        // stays denied rather than allowlisted.
+        assert_eq!(
+            native_import_decision("sched_getcpu", NativeFormat::Elf, &empty),
+            NativeImportDecision::Denied("unknown-import")
         );
     }
 

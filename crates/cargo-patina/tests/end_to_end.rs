@@ -605,31 +605,56 @@ fn audit_and_run_agree_on_the_shim_control_plane_symbol() {
     );
 }
 
-// A custom `#[global_allocator]` deadlocks before `main` under the shim
-// (interposer-allocates-through-the-allocator reentrancy; tikv-jemallocator hits
-// it via `malloc_init_hard` -> `os_unfair_lock`). The gate detects the class
-// STATICALLY — a shim-linked binary that defines `__rust_alloc` but omits the
-// default-allocator `__rdl_alloc` shim — and refuses it BEFORE spawning, turning a
-// silent pre-main hang into a named `custom-global-allocator` diagnostic. `audit`
-// reports the same class (parity). The blanket `--allow-unsupported-symbols all`
-// hatch downgrades it to a warning and runs (this System-wrapping allocator does
-// not deadlock, proving the refusal is a policy gate, not a build failure).
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+// A custom `#[global_allocator]` is SUPPORTED — it audits clean and runs
+// deterministically, with no flags. This is the support regression for the
+// tikv-jemallocator blocker: the shim's synchronization interposers register each
+// lock in host-libc-backed tables (never the guest allocator), and an allocator's
+// own `os_unfair_lock` runs natively during the bootstrap window / reentrantly
+// under a held spinlock, so the allocator's init cannot re-enter the shim and
+// deadlock. The fixture's allocator takes an interposed `os_unfair_lock` from
+// INSIDE the global-allocator path (mimicking jemalloc's `malloc_mutex`), which is
+// the exact reentrancy that used to deadlock: pre-fix, the shim's lock-table
+// registration allocated through this very allocator; the RED proof is the real
+// tikv-jemallocator MRE hanging/aborting when the fix is reverted (see the shim
+// crate). macOS-specific (`os_unfair_lock`).
+#[cfg(target_os = "macos")]
 #[test]
-fn native_run_and_audit_refuse_a_custom_global_allocator() {
+fn native_run_supports_a_custom_global_allocator() {
     let directory = tempdir().unwrap();
     let workspace = native_workspace();
     let source = directory.path().join("custom-alloc.rs");
     fs::write(
         &source,
         r#"use std::alloc::{GlobalAlloc, Layout, System};
-struct Tracking;
-unsafe impl GlobalAlloc for Tracking {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 { unsafe { System.alloc(layout) } }
+use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+// `os_unfair_lock` is a bare `u32` (OS_UNFAIR_LOCK_INIT == 0), interposed by the
+// shim. This allocator guards its one-time setup with it — reached from inside the
+// global-allocator path, exactly like jemalloc's `malloc_mutex` during init.
+unsafe extern "C" {
+    fn os_unfair_lock_lock(lock: *mut u32);
+    fn os_unfair_lock_unlock(lock: *mut u32);
+}
+
+struct LockingAlloc { lock: UnsafeCell<u32>, ready: AtomicU32 }
+unsafe impl Sync for LockingAlloc {}
+
+unsafe impl GlobalAlloc for LockingAlloc {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if self.ready.load(Ordering::Acquire) == 0 {
+            unsafe { os_unfair_lock_lock(self.lock.get()) };
+            self.ready.store(1, Ordering::Release);
+            unsafe { os_unfair_lock_unlock(self.lock.get()) };
+        }
+        unsafe { System.alloc(layout) }
+    }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) { unsafe { System.dealloc(ptr, layout) } }
 }
+
 #[global_allocator]
-static GLOBAL: Tracking = Tracking;
+static GLOBAL: LockingAlloc = LockingAlloc { lock: UnsafeCell::new(0), ready: AtomicU32::new(0) };
+
 fn main() { let v: Vec<u8> = vec![1, 2, 3]; println!("CUSTOM_ALLOC_OK len={}", v.len()); }
 "#,
     )
@@ -645,68 +670,29 @@ fn main() { let v: Vec<u8> = vec![1, 2, 3]; println!("CUSTOM_ALLOC_OK len={}", v
         ],
     );
 
-    // Default gate: refused pre-spawn with the named class (no hang).
-    let refused = invoke_unchecked(
-        env!("CARGO_BIN_EXE_cargo-patina"),
-        workspace,
-        &["run", bin.to_str().unwrap(), "--seed", "1"],
-    );
-    assert!(!refused.status.success());
+    // Audits clean with NO flags: a custom global allocator is no longer refused.
+    let audited = invoke_in(workspace, &["audit", bin.to_str().unwrap()]);
     assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("custom-global-allocator"),
-        "missing custom-global-allocator diagnostic:\n{}",
-        String::from_utf8_lossy(&refused.stderr)
+        !String::from_utf8_lossy(&audited.stderr).contains("custom-global-allocator"),
+        "custom global allocator is still refused by audit:\n{}",
+        String::from_utf8_lossy(&audited.stderr)
     );
 
-    // A NARROW downgrade (a named symbol list) does NOT hatch the allocator class —
-    // exactly the bug-report scenario that used to hang.
-    let narrow = invoke_unchecked(
-        env!("CARGO_BIN_EXE_cargo-patina"),
-        workspace,
-        &[
-            "run",
-            bin.to_str().unwrap(),
-            "--allow-unsupported-symbols",
-            "some_symbol",
-            "--seed",
-            "1",
-        ],
-    );
-    assert!(!narrow.status.success());
-    assert!(String::from_utf8_lossy(&narrow.stderr).contains("custom-global-allocator"));
-
-    // audit reports the same class (parity): a binary `run` would refuse must not
-    // look clean under `audit`.
-    let audited = invoke_unchecked(
-        env!("CARGO_BIN_EXE_cargo-patina"),
-        workspace,
-        &["audit", bin.to_str().unwrap()],
-    );
-    assert!(!audited.status.success());
-    assert!(String::from_utf8_lossy(&audited.stderr).contains("custom-global-allocator"));
-
-    // Blanket `--allow-unsupported-symbols all`: warns and runs (System wrapper
-    // does not deadlock).
-    let hatched = invoke_in(
-        workspace,
-        &[
-            "run",
-            bin.to_str().unwrap(),
-            "--allow-unsupported-symbols",
-            "all",
-            "--seed",
-            "1",
-        ],
-    );
+    // Runs with NO flags and prints — the allocator's interposed `os_unfair_lock`
+    // never re-enters the shim.
+    let ran = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     assert!(
-        String::from_utf8_lossy(&hatched.stdout).contains("CUSTOM_ALLOC_OK len=3"),
-        "hatched run did not execute:\n{}",
-        String::from_utf8_lossy(&hatched.stdout)
+        String::from_utf8_lossy(&ran.stdout).contains("CUSTOM_ALLOC_OK len=3"),
+        "custom-allocator guest did not run:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
     );
-    assert!(
-        String::from_utf8_lossy(&hatched.stderr).contains("WARNING"),
-        "hatched run did not warn:\n{}",
-        String::from_utf8_lossy(&hatched.stderr)
+
+    // Deterministic: two same-seed runs are byte-identical.
+    let again = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    assert_eq!(
+        ran.stdout, again.stdout,
+        "custom-allocator run is not seed-stable"
     );
 }
 

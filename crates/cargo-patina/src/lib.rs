@@ -26,8 +26,8 @@ use patina_dst_runtime::{
 };
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
-    native_binary_has_sud_marker, native_binary_installs_custom_global_allocator,
-    native_binary_is_shim_linked, native_escape_is_sud_manageable, shim_control_plane_symbols,
+    native_binary_has_sud_marker, native_binary_is_shim_linked, native_escape_is_sud_manageable,
+    shim_control_plane_symbols,
 };
 use patina_dst_trace::TraceBundle;
 use patina_dst_wasi_host::{
@@ -3937,22 +3937,6 @@ fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<i32, CliErr
              (`cargo patina audit ./Cargo.toml --bin <NAME>`) for the true residual."
         );
     }
-    // A shim-linked binary that installs a custom `#[global_allocator]` is refused
-    // by the pre-run gate (it deadlocks before `main`; see
-    // `CUSTOM_GLOBAL_ALLOCATOR_DIAGNOSTIC`). `audit` reports the surface `run`
-    // enforces, so it fails closed on the same class — never letting a binary that
-    // `run` would refuse look clean under `audit`. Skipped for a `--raw`
-    // non-shim-linked binary (raw is the explicit "show me everything" hatch).
-    if shim_linked
-        && native_binary_installs_custom_global_allocator(&bytes)
-            .map_err(|error| CliError(error.to_string()))?
-    {
-        return Err(CliError(format!(
-            "refusing to audit {}: {}",
-            resolved.path.display(),
-            CUSTOM_GLOBAL_ALLOCATOR_DIAGNOSTIC
-        )));
-    }
     // Shim-linked (or built on the fly, or --raw): render the real audit — for a
     // shim-linked artifact this is the true post-interposition residual, and it
     // fails closed on any genuine escape.
@@ -4950,19 +4934,6 @@ fn kernel_supports_sud() -> bool {
     false
 }
 
-/// The named diagnostic for a guest that installs a custom `#[global_allocator]`.
-/// Shared by the pre-run `run` gate and standalone `audit` so the two never
-/// disagree on the class. Phrased to follow a `{binary} ` prefix. The class name
-/// (`custom-global-allocator`) is embedded so sweeps can grep it.
-const CUSTOM_GLOBAL_ALLOCATOR_DIAGNOSTIC: &str = "installs a custom #[global_allocator] (custom-global-allocator): the deterministic runtime's \
-synchronization interposers allocate through the global allocator (the lock table registers each \
-lock lazily on first touch), so a custom allocator whose OWN lazy initialization takes an \
-interposed lock re-enters the half-initialized allocator while the shim holds its non-reentrant \
-runtime lock and DEADLOCKS before main — a silent pre-main hang. tikv-jemallocator hits this \
-exactly (malloc_init_hard -> os_unfair_lock -> shim interposer -> malloc -> malloc_init_hard). \
-Remove the #[global_allocator] and use the default (System) allocator. To run anyway (determinism \
-unqualified, and the guest may hang before main), pass --allow-unsupported-symbols all.";
-
 /// The effective symbol allow set the native gate audits against: the shim's own
 /// control-plane vehicle (auto-allowed on every `cargo patina build` binary —
 /// `dlsym` on both platforms) plus the operator's explicit `--allow` symbols.
@@ -4990,34 +4961,6 @@ fn native_prerun_gate(
             binary.display()
         ))
     })?;
-    // Refuse a custom `#[global_allocator]` up front (before the symbol audit and
-    // before the process is even spawned): the shim's synchronization interposers
-    // allocate through the global allocator, so a custom allocator whose lazy init
-    // takes an interposed lock deadlocks before `main` — a silent pre-main hang
-    // (tikv-jemallocator does exactly this). `--allow-unsupported-symbols all` is
-    // the blanket "run anyway, determinism unqualified" hatch; anything narrower
-    // keeps the refusal, so the gate stays default-deny for the class.
-    if native_binary_installs_custom_global_allocator(&bytes)
-        .map_err(|error| CliError(format!("refusing to run {}: {error}", binary.display())))?
-    {
-        if matches!(policy, UnsupportedPolicy::All) {
-            eprintln!(
-                "patina: WARNING: {} {}",
-                binary.display(),
-                CUSTOM_GLOBAL_ALLOCATOR_DIAGNOSTIC
-            );
-            eprintln!(
-                "patina: downgraded by --allow-unsupported-symbols all; this run's determinism is \
-NOT guaranteed and it may DEADLOCK before main if the allocator's init takes an interposed lock."
-            );
-        } else {
-            return Err(CliError(format!(
-                "refusing to run {}: {}",
-                binary.display(),
-                CUSTOM_GLOBAL_ALLOCATOR_DIAGNOSTIC
-            )));
-        }
-    }
     let effective = effective_native_allow(allow);
     let denied = match NativeAudit::audit(&bytes, &effective) {
         Ok(_) => return Ok(Vec::new()),
