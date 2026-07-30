@@ -1906,6 +1906,8 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "readlink",
         "symlink",
         "link",
+        "linkat",
+        "fdopendir",
     ];
     // (f) Network: BSD sockets. Modeled over SimNet when interposed.
     const NETWORK: &[&str] = &[
@@ -2367,6 +2369,17 @@ mod tests {
         );
         assert_eq!(
             native_escape_category(normalize_native_symbol("renameat2")),
+            Some("filesystem")
+        );
+        // Hard links and the openat-traversal directory stream: a raw import of
+        // either (a prebuilt binary the shim strong defs did not absorb) is a host
+        // filesystem escape, not a bare unknown import.
+        assert_eq!(
+            native_escape_category(normalize_native_symbol("_linkat")),
+            Some("filesystem")
+        );
+        assert_eq!(
+            native_escape_category(normalize_native_symbol("_fdopendir")),
             Some("filesystem")
         );
         assert_eq!(native_escape_category("malloc"), None);

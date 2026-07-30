@@ -144,6 +144,27 @@ int32_t patina_read_dir(const char *path, void **state);
 int32_t patina_read_dir_next(void *state, char *name_buf, size_t buf_len, uint32_t *kind);
 void patina_read_dir_free(void *state);
 int32_t patina_symlink(const char *target, const char *link_path);
+/*
+ * Create a hard link. Mirrors patina_symlink: the driver shares one inode
+ * between `from` and `to`, or duplicates the symlink entry when `from` is itself
+ * a symlink (linkat's no-AT_SYMLINK_FOLLOW behavior). The C linkat interposer
+ * canonicalizes `from` before calling this when AT_SYMLINK_FOLLOW is set.
+ */
+int32_t patina_link(const char *from, const char *to);
+/*
+ * Virtual directory descriptors backing the openat/fdopendir/unlinkat family.
+ * patina_diropen records an fd->path handle (the caller validates that `path`
+ * names a directory and resolves any trailing symlink first) drawn from the
+ * shared virtual-fd space; patina_dirpath recovers the bound path (buf gets a
+ * NUL-terminated copy when it fits; returns the length, or -1/EBADF for an
+ * unknown fd); patina_dir_is_dirfd tells a dir fd apart from other virtual fds;
+ * patina_dirclose releases it (closedir/close). fdopendir transfers fd ownership
+ * into the DIR, so closedir is what calls patina_dirclose.
+ */
+int32_t patina_diropen(const char *path);
+intptr_t patina_dirpath(int32_t fd, char *buf, size_t len);
+int32_t patina_dir_is_dirfd(int32_t fd);
+int32_t patina_dirclose(int32_t fd);
 intptr_t patina_read_link(const char *path, char *buf, size_t len);
 /*
  * Canonicalize a guest path to its deterministic absolute form (realpath). On

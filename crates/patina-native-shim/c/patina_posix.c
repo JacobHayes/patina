@@ -684,6 +684,9 @@ struct patina_dir {
     void *state;
     char *path;
     uint64_t index;
+    /* fdopendir transfers a virtual directory descriptor into the DIR, which
+     * closedir then releases; -1 for an opendir DIR that owns no descriptor. */
+    int owned_fd;
     struct dirent entry;
 #ifdef __linux__
     struct dirent64 entry64;
@@ -731,6 +734,51 @@ DIR *opendir(const char *path) {
     }
     memcpy(directory->path, path, path_size);
     directory->state = state;
+    directory->owned_fd = -1;
+    return (DIR *)(void *)directory;
+}
+
+/*
+ * fdopendir: build the same DIR opendir builds, but from the directory a virtual
+ * dir fd is bound to, and TRANSFER the fd's ownership into the DIR (POSIX: the
+ * descriptor is closed by closedir, not the caller). std's remove_dir_all opens
+ * each directory with openat(..., O_DIRECTORY) and hands the fd here, then reads
+ * entries and removes children through unlinkat(dirfd, ...). The entry snapshot
+ * is taken now, exactly like opendir, so iteration is stable across the removals.
+ */
+DIR *fdopendir(int fd) {
+    char path[PATH_MAX];
+    intptr_t length = patina_dirpath(fd, path, sizeof path);
+    if (length < 0) {
+        errno = patina_errno();
+        return NULL;
+    }
+    if ((size_t)length >= sizeof path) {
+        errno = ENAMETOOLONG;
+        return NULL;
+    }
+    void *state = NULL;
+    if (patina_read_dir(path, &state) != 0) {
+        errno = patina_errno();
+        return NULL;
+    }
+    struct patina_dir *directory = calloc(1, sizeof *directory);
+    if (directory == NULL) {
+        patina_read_dir_free(state);
+        errno = ENOMEM;
+        return NULL;
+    }
+    size_t path_size = (size_t)length + 1;
+    directory->path = malloc(path_size);
+    if (directory->path == NULL) {
+        free(directory);
+        patina_read_dir_free(state);
+        errno = ENOMEM;
+        return NULL;
+    }
+    memcpy(directory->path, path, path_size);
+    directory->state = state;
+    directory->owned_fd = fd;
     return (DIR *)(void *)directory;
 }
 
@@ -787,6 +835,9 @@ struct dirent64 *readdir64(DIR *dirp) {
 int closedir(DIR *dirp) {
     struct patina_dir *directory = (struct patina_dir *)(void *)dirp;
     patina_read_dir_free(directory->state);
+    /* Release the transferred descriptor for an fdopendir DIR (POSIX: closedir
+     * closes the fd fdopendir took ownership of). An opendir DIR owns none. */
+    if (directory->owned_fd >= 0) patina_dirclose(directory->owned_fd);
     free(directory->path);
     free(directory);
     return 0;
@@ -805,13 +856,20 @@ void rewinddir(DIR *dirp) {
 }
 
 int dirfd(DIR *dirp) {
-    (void)dirp;
+    struct patina_dir *directory = (struct patina_dir *)(void *)dirp;
+    /* An fdopendir DIR exposes the descriptor it took ownership of; an opendir
+     * DIR owns no descriptor, so it stays fail-closed as before. */
+    if (directory->owned_fd >= 0) return directory->owned_fd;
     errno = ENOTSUP;
     return -1;
 }
 
 int symlink(const char *target, const char *link_path) {
     return fail_int(patina_symlink(target, link_path));
+}
+
+int link(const char *from, const char *to) {
+    return fail_int(patina_link(from, to));
 }
 
 ssize_t readlink(const char *restrict path, char *restrict destination, size_t length) {
@@ -852,19 +910,132 @@ int open(const char *path, int flags, ...) {
 }
 
 /*
- * The deterministic filesystem is path-based with no directory descriptors, so
- * the *at family is supported only for AT_FDCWD (a plain relative/absolute path)
- * and fails closed on a real dirfd, exactly like fstatat below. The variadic
- * mode is dropped just as `open` drops it. rustix's libc backend lowers its `fs`
- * calls onto these on both platforms, so they are strong defs in the common
- * section rather than Apple-only.
+ * Resolve `path` for the *at family against a directory descriptor. Called only
+ * when `dirfd != AT_FDCWD`. The descriptor must be a virtual directory descriptor
+ * (issued by openat(..., O_DIRECTORY)); a real/unknown kernel descriptor the
+ * deterministic filesystem never issued fails closed with ENOSYS (matching the
+ * rest of the *at family) rather than silently escaping to the host -- even for
+ * an absolute path, so an arbitrary bogus fd is never honored. Given a valid
+ * descriptor, an absolute `path` ignores it (POSIX) and a relative `path` is
+ * joined onto its bound directory path.
  */
-int openat(int dirfd, const char *path, int flags, ...) {
-    if (dirfd != AT_FDCWD) {
+static int patina_resolve_at(int dirfd, const char *path, char *out, size_t out_len) {
+    if (!patina_dir_is_dirfd(dirfd)) {
         errno = ENOSYS;
         return -1;
     }
-    return patina_posix_open(path, flags);
+    if (path[0] == '/') {
+        size_t path_len = strlen(path);
+        if (path_len + 1 > out_len) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        memcpy(out, path, path_len + 1);
+        return 0;
+    }
+    char base[PATH_MAX];
+    intptr_t base_len = patina_dirpath(dirfd, base, sizeof base);
+    if (base_len < 0) {
+        errno = patina_errno();
+        return -1;
+    }
+    if ((size_t)base_len >= sizeof base) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    size_t path_len = strlen(path);
+    int separator = ((size_t)base_len > 0 && base[base_len - 1] == '/') ? 0 : 1;
+    if ((size_t)base_len + (size_t)separator + path_len + 1 > out_len) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    memcpy(out, base, (size_t)base_len);
+    size_t offset = (size_t)base_len;
+    if (separator) out[offset++] = '/';
+    memcpy(out + offset, path, path_len + 1);
+    return 0;
+}
+
+/*
+ * openat(..., O_DIRECTORY): validate that `path` names a directory and hand back
+ * a virtual directory descriptor. patina_metadata reports the entry's own kind
+ * (no trailing-symlink follow, like lstat), so O_NOFOLLOW on a symlink fails with
+ * ELOOP -- exactly what std's remove_dir_all treats as "not a directory, unlink
+ * it". Without O_NOFOLLOW a trailing symlink is resolved through realpath and
+ * re-checked, so a symlink-to-directory opens honestly. A non-directory is
+ * ENOTDIR.
+ */
+static int patina_open_directory(const char *path, int flags) {
+    (void)flags;
+    uint32_t kind = 0;
+    uint64_t length = 0;
+    if (patina_metadata(path, &kind, &length) != 0) {
+        errno = patina_errno();
+        return -1;
+    }
+    if (kind == PATINA_ENTRY_SYMLINK) {
+#ifdef O_NOFOLLOW
+        if (flags & O_NOFOLLOW) {
+            errno = ELOOP;
+            return -1;
+        }
+#endif
+        char resolved[PATH_MAX];
+        intptr_t resolved_len = patina_canonicalize(path, resolved, sizeof resolved);
+        if (resolved_len < 0) {
+            errno = patina_errno();
+            return -1;
+        }
+        if ((size_t)resolved_len >= sizeof resolved) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        if (patina_metadata(resolved, &kind, &length) != 0) {
+            errno = patina_errno();
+            return -1;
+        }
+        if (kind != PATINA_ENTRY_DIRECTORY) {
+            errno = ENOTDIR;
+            return -1;
+        }
+        return fail_int(patina_diropen(resolved));
+    }
+    if (kind != PATINA_ENTRY_DIRECTORY) {
+        errno = ENOTDIR;
+        return -1;
+    }
+    return fail_int(patina_diropen(path));
+}
+
+/*
+ * openat over the path-based deterministic filesystem. AT_FDCWD is a plain path;
+ * a virtual directory descriptor (from a prior openat(..., O_DIRECTORY)) joins
+ * its bound path with a relative `path` -- the resolution std's remove_dir_all
+ * needs to recurse and remove children. O_DIRECTORY yields a virtual directory
+ * descriptor; everything else routes to the ordinary file open. A real kernel
+ * dirfd the deterministic filesystem never issued still fails closed (ENOSYS,
+ * matching the rest of the *at family).
+ * The variadic mode is dropped just as `open` drops it. rustix's libc backend
+ * lowers its `fs` calls onto these on both platforms, so they are strong defs in
+ * the common section rather than Apple-only.
+ */
+static int patina_openat_impl(int dirfd, const char *path, int flags) {
+    char resolved[PATH_MAX];
+    const char *effective = path;
+    if (dirfd != AT_FDCWD) {
+        if (patina_resolve_at(dirfd, path, resolved, sizeof resolved) != 0) return -1;
+        effective = resolved;
+    }
+#ifdef O_DIRECTORY
+    if (flags & O_DIRECTORY) {
+        return patina_open_directory(effective, flags);
+    }
+#endif
+    return patina_posix_open(effective, flags);
+}
+
+int openat(int dirfd, const char *path, int flags, ...) {
+    return patina_openat_impl(dirfd, path, flags);
 }
 
 /*
@@ -1019,13 +1190,9 @@ int open64(const char *path, int flags, ...) {
 }
 
 /* glibc's LFS alias of openat (rustix's libc backend lowers its fs calls onto
- * the *64 names on 64-bit Linux). Same AT_FDCWD-only contract as openat. */
+ * the *64 names on 64-bit Linux). Shares openat's directory-descriptor handling. */
 int openat64(int dirfd, const char *path, int flags, ...) {
-    if (dirfd != AT_FDCWD) {
-        errno = ENOSYS;
-        return -1;
-    }
-    return patina_posix_open(path, flags);
+    return patina_openat_impl(dirfd, path, flags);
 }
 #endif
 
@@ -1108,6 +1275,10 @@ int flock(int fd, int operation) {
 
 int close(int fd) {
     if (fd >= PATINA_SOCKET_FD_BASE) {
+        /* A virtual directory descriptor is released here as well as by closedir,
+         * so a guest that close()s the raw fd (rather than the DIR) still frees
+         * it. Checked first: dir fds share the virtual-fd space with sockets. */
+        if (patina_dir_is_dirfd(fd)) return fail_int(patina_dirclose(fd));
 #ifdef __APPLE__
         if (patina_kqueue_is_kq(fd)) return fail_int(patina_kqueue_close(fd));
 #endif
@@ -1499,22 +1670,70 @@ int rename(const char *from, const char *to) {
 }
 
 /*
- * *at removal/rename over the path-based deterministic filesystem: only AT_FDCWD
- * (a plain path) is modeled, any real dirfd fails closed. unlinkat routes to the
- * rmdir path when AT_REMOVEDIR is set, otherwise unlink; unknown flags fail
- * closed. renameat requires both dirfds be AT_FDCWD.
+ * *at removal/rename over the path-based deterministic filesystem. AT_FDCWD is a
+ * plain path; a virtual directory descriptor joins its bound path with a relative
+ * `path` (std's remove_dir_all removes children with unlinkat(dirfd, name, ...)).
+ * unlinkat routes to rmdir when AT_REMOVEDIR is set, otherwise unlink; unknown
+ * flags fail closed. renameat still requires both dirfds be AT_FDCWD (no ecosystem
+ * path exercises a dir-fd-relative rename; adding it would be speculative surface).
  */
 int unlinkat(int dirfd, const char *path, int flags) {
-    if (dirfd != AT_FDCWD) {
-        errno = ENOSYS;
-        return -1;
-    }
     if ((flags & ~AT_REMOVEDIR) != 0) {
         errno = ENOSYS;
         return -1;
     }
-    if (flags & AT_REMOVEDIR) return fail_int(patina_rmdir(path));
-    return fail_int(patina_unlink(path));
+    char resolved[PATH_MAX];
+    const char *effective = path;
+    if (dirfd != AT_FDCWD) {
+        if (patina_resolve_at(dirfd, path, resolved, sizeof resolved) != 0) return -1;
+        effective = resolved;
+    }
+    if (flags & AT_REMOVEDIR) return fail_int(patina_rmdir(effective));
+    return fail_int(patina_unlink(effective));
+}
+
+/*
+ * link/linkat: create a hard link. std::fs::hard_link lowers to
+ * linkat(AT_FDCWD, original, AT_FDCWD, link, 0) on Linux and macOS. AT_FDCWD and
+ * absolute paths pass straight through; a virtual directory descriptor resolves
+ * its bound path for symmetry with the openat/unlinkat family. AT_SYMLINK_FOLLOW
+ * is the only defined flag: when set, `from` is canonicalized (its trailing
+ * symlink resolved) before linking, so the link targets the resolved file rather
+ * than duplicating the symlink -- the driver's link duplicates a symlink entry
+ * as-is, which is precisely the no-AT_SYMLINK_FOLLOW behavior. Any other flag bit
+ * is EINVAL rather than silently ignored.
+ */
+int linkat(int fromfd, const char *from, int tofd, const char *to, int flags) {
+    if ((flags & ~AT_SYMLINK_FOLLOW) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    char from_resolved[PATH_MAX];
+    char to_resolved[PATH_MAX];
+    const char *from_effective = from;
+    const char *to_effective = to;
+    if (fromfd != AT_FDCWD) {
+        if (patina_resolve_at(fromfd, from, from_resolved, sizeof from_resolved) != 0) return -1;
+        from_effective = from_resolved;
+    }
+    if (tofd != AT_FDCWD) {
+        if (patina_resolve_at(tofd, to, to_resolved, sizeof to_resolved) != 0) return -1;
+        to_effective = to_resolved;
+    }
+    if (flags & AT_SYMLINK_FOLLOW) {
+        char canonical[PATH_MAX];
+        intptr_t canonical_len = patina_canonicalize(from_effective, canonical, sizeof canonical);
+        if (canonical_len < 0) {
+            errno = patina_errno();
+            return -1;
+        }
+        if ((size_t)canonical_len >= sizeof canonical) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        return fail_int(patina_link(canonical, to_effective));
+    }
+    return fail_int(patina_link(from_effective, to_effective));
 }
 
 int renameat(int olddirfd, const char *old_path, int newdirfd, const char *new_path) {

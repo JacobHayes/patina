@@ -3506,6 +3506,139 @@ fn native_recv_timeout_is_deterministic_across_seeds_and_replay() {
     );
 }
 
+// Exercises the two std filesystem APIs that lower onto `linkat` and
+// `fdopendir` -- both unsupported native imports before this shim wave, so a
+// guest using either was refused by the pre-run audit up front.
+//
+// Part (a) hard links (`std::fs::hard_link` -> `linkat(AT_FDCWD, .., 0)`): after
+// linking, a write through one path is observed through the other, the
+// same-inode/same-content contract of a hard link (a copy would not see the
+// mutation). Part (b) recursive removal (`std::fs::remove_dir_all`, which on
+// both macOS and Linux std opens each directory with `openat(.., O_DIRECTORY)`,
+// reads it via `fdopendir`, and removes children with `unlinkat(dirfd, ..)`):
+// a nested tree is built and removed, and its absence is asserted.
+const HARD_LINK_AND_REMOVE_TREE_SOURCE: &str = r#"
+use std::fs;
+
+fn main() {
+    // (a) hard link: mutate through one name, observe through the other.
+    fs::write("/original.txt", b"one").unwrap();
+    fs::hard_link("/original.txt", "/alias.txt").unwrap();
+    fs::write("/original.txt", b"two-longer").unwrap();
+    let via_alias = fs::read_to_string("/alias.txt").unwrap();
+
+    // (b) recursive removal of a nested tree via the openat/fdopendir/unlinkat path.
+    fs::create_dir_all("/tree/sub/deep").unwrap();
+    fs::write("/tree/top.txt", b"x").unwrap();
+    fs::write("/tree/sub/mid.txt", b"y").unwrap();
+    fs::write("/tree/sub/deep/leaf.txt", b"z").unwrap();
+    fs::remove_dir_all("/tree").unwrap();
+
+    println!("via_alias={via_alias}");
+    println!("tree_exists={}", fs::metadata("/tree").is_ok());
+}
+"#;
+
+// `linkat` (hard links) and `fdopendir` (the openat-traversal `remove_dir_all`
+// uses) are strong-def'd by the shim: the audit is clean (no unsupported-import
+// note, no allowances), the guest runs deterministically, same-seed double runs
+// are byte-identical, and a recorded run replays byte-identically. Before this
+// wave the audit refused the binary outright ("unsupported native imports:
+// _fdopendir _linkat"), which is the RED evidence this test's fix clears.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_hard_link_and_remove_dir_all_are_supported_and_deterministic() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("hard_link_tree.rs");
+    fs::write(&source, HARD_LINK_AND_REMOVE_TREE_SOURCE).unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("hard-link-tree");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    // Audit is clean: `invoke_in` already asserts exit 0, and neither `linkat`
+    // nor `fdopendir` may surface as an unsupported/unknown import or force an
+    // allowance -- the strong defs drop them off the import table entirely.
+    let audited = invoke_in(workspace, &["audit", bin.to_str().unwrap()]);
+    let audit_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&audited.stdout),
+        String::from_utf8_lossy(&audited.stderr)
+    );
+    for needle in [
+        "unsupported native imports",
+        "unknown-import",
+        "linkat",
+        "fdopendir",
+    ] {
+        assert!(
+            !audit_text.contains(needle),
+            "audit must be clean but mentioned {needle:?}:\n{audit_text}"
+        );
+    }
+
+    const EXPECTED: &str = "via_alias=two-longer\ntree_exists=false\n";
+
+    // Runs deterministically: byte-identical across repeated same-seed runs at
+    // several seeds. The hard link observes the mutation (same inode) and the
+    // tree is gone.
+    for seed in ["0", "3", "8"] {
+        let first = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
+        let baseline = String::from_utf8_lossy(&first.stdout).into_owned();
+        assert_eq!(
+            baseline, EXPECTED,
+            "unexpected hard-link/remove-tree output at seed {seed}: {baseline}"
+        );
+        for _ in 0..2 {
+            let again = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
+            assert_eq!(
+                baseline,
+                String::from_utf8_lossy(&again.stdout),
+                "output not byte-identical across runs at seed {seed}"
+            );
+        }
+    }
+
+    // A recorded run replays byte-identically under strict replay.
+    let trace = directory.path().join("hard-link.patina");
+    let recorded = invoke_in(
+        workspace,
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "8",
+            "--record",
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "hard-link-tree",
+        ],
+    );
+    assert_eq!(String::from_utf8_lossy(&recorded.stdout), EXPECTED);
+    let replayed = invoke_in(
+        workspace,
+        &[
+            "replay",
+            bin.to_str().unwrap(),
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "hard-link-tree",
+        ],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&recorded.stdout),
+        String::from_utf8_lossy(&replayed.stdout),
+        "record and strict replay diverged"
+    );
+}
+
 // A guest that reads a file the supervisor mounted into the deterministic
 // filesystem. Used to exercise `--mount` composing with `--record`/`replay`,
 // which hands the child TWO inherited descriptors at once.
@@ -4646,7 +4779,10 @@ fn drop_trailing_task_yield(source: &Path, dest: &Path) {
 #[cfg(target_os = "macos")]
 const ESCAPE_CLASSES_SOURCE: &str = r#"
 unsafe extern "C" {
-    fn link(a: *const u8, b: *const u8) -> i32;
+    // pwritev: an uninterposed positional vectored write -- the filesystem-class
+    // representative. (`link` used to serve here, but hard links are now routed
+    // through the deterministic filesystem, so it is no longer an escape.)
+    fn pwritev(fd: i32, iov: *const u8, iovcnt: i32, offset: i64) -> isize;
     fn gethostbyname(name: *const u8) -> *mut u8;
     fn select(n: i32, r: *mut u8, w: *mut u8, e: *mut u8, t: *mut u8) -> i32;
     fn semaphore_wait(s: u32) -> i32;
@@ -4660,7 +4796,7 @@ unsafe extern "C" {
 }
 fn main() {
     let ptrs: &[*const ()] = &[
-        link as *const (), gethostbyname as *const (), select as *const (),
+        pwritev as *const (), gethostbyname as *const (), select as *const (),
         semaphore_wait as *const (), time as *const (), arc4random as *const (),
         killpg as *const (), dlopen as *const (), shm_open as *const (),
         setitimer as *const (), syscall as *const (),

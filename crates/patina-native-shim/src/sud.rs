@@ -94,6 +94,8 @@ unsafe extern "C" {
     fn patina_rmdir(path: *const c_char) -> c_int;
     fn patina_rename(from: *const c_char, to: *const c_char) -> c_int;
     fn patina_symlink(target: *const c_char, link_path: *const c_char) -> c_int;
+    fn patina_link(from: *const c_char, to: *const c_char) -> c_int;
+    fn patina_canonicalize(path: *const c_char, buf: *mut c_char, len: usize) -> isize;
     fn patina_read_link(path: *const c_char, buf: *mut c_char, buf_len: usize) -> isize;
     fn patina_pipe(read_fd_out: *mut c_int, write_fd_out: *mut c_int, nonblocking: c_int) -> c_int;
 
@@ -241,6 +243,7 @@ const S_IFLNK: u32 = 0o120000;
 // `*at` flag bits.
 const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 const AT_REMOVEDIR: u64 = 0x200;
+const AT_SYMLINK_FOLLOW: u64 = 0x400;
 const AT_EMPTY_PATH: u64 = 0x1000;
 
 // `fcntl(2)` commands (identical on x86_64 and aarch64 Linux).
@@ -517,6 +520,7 @@ mod nr {
     pub const NEWFSTATAT: i64 = 262;
     pub const UNLINKAT: i64 = 263;
     pub const RENAMEAT: i64 = 264;
+    pub const LINKAT: i64 = 265;
     pub const SYMLINKAT: i64 = 266;
     pub const READLINKAT: i64 = 267;
     pub const DUP3: i64 = 292;
@@ -580,6 +584,7 @@ mod nr {
     pub const MKDIR: i64 = 83;
     pub const RMDIR: i64 = 84;
     pub const CREAT: i64 = 85;
+    pub const LINK: i64 = 86;
     pub const UNLINK: i64 = 87;
     pub const SYMLINK: i64 = 88;
     pub const READLINK: i64 = 89;
@@ -636,6 +641,7 @@ mod nr {
     pub const MKDIRAT: i64 = 34;
     pub const NEWFSTATAT: i64 = 79;
     pub const UNLINKAT: i64 = 35;
+    pub const LINKAT: i64 = 37;
     pub const RENAMEAT: i64 = 38;
     pub const SYMLINKAT: i64 = 36;
     pub const READLINKAT: i64 = 78;
@@ -821,6 +827,7 @@ fn dispatch(nr: i64, args: [u64; 6]) -> i64 {
         nr::UNLINKAT => sys_unlinkat(arg_fd(args[0]), args[1], args[2]),
         nr::SYMLINKAT => sys_symlinkat(args[0], arg_fd(args[1]), args[2]),
         nr::READLINKAT => sys_readlinkat(arg_fd(args[0]), args[1], args[2], args[3]),
+        nr::LINKAT => sys_linkat(arg_fd(args[0]), args[1], arg_fd(args[2]), args[3], args[4]),
         nr::RENAMEAT => sys_renameat(arg_fd(args[0]), args[1], arg_fd(args[2]), args[3], 0),
         nr::RENAMEAT2 => sys_renameat(arg_fd(args[0]), args[1], arg_fd(args[2]), args[3], args[4]),
 
@@ -905,6 +912,8 @@ fn dispatch(nr: i64, args: [u64; 6]) -> i64 {
         nr::MKDIR => sys_mkdirat(AT_FDCWD, args[0]),
         #[cfg(target_arch = "x86_64")]
         nr::RENAME => sys_renameat(AT_FDCWD, args[0], AT_FDCWD, args[1], 0),
+        #[cfg(target_arch = "x86_64")]
+        nr::LINK => sys_linkat(AT_FDCWD, args[0], AT_FDCWD, args[1], 0),
         #[cfg(target_arch = "x86_64")]
         nr::SYMLINK => sys_symlinkat(args[0], AT_FDCWD, args[1]),
         #[cfg(target_arch = "x86_64")]
@@ -2278,6 +2287,50 @@ fn sys_symlinkat(target: u64, newdirfd: i64, linkpath: u64) -> i64 {
     }
     // SAFETY: both are guest C strings.
     ret_i32(unsafe { patina_symlink(target as *const c_char, linkpath as *const c_char) })
+}
+
+/// Raw `linkat`/`link` -> the same deterministic hard link the `patina_link`
+/// interposer creates (std::fs::hard_link lowers to
+/// `linkat(AT_FDCWD, .., AT_FDCWD, .., 0)`). Only AT_FDCWD is modeled here, like
+/// the rest of the SUD `*at` family. AT_SYMLINK_FOLLOW is the sole defined flag:
+/// when set, `oldpath` is canonicalized (its trailing symlink resolved) before
+/// linking, so a raw caller sees the identical follow/no-follow behavior as the C
+/// `linkat` interposer; any other flag bit is EINVAL rather than silently ignored.
+fn sys_linkat(olddirfd: i64, oldpath: u64, newdirfd: i64, newpath: u64, flags: u64) -> i64 {
+    if olddirfd != AT_FDCWD || newdirfd != AT_FDCWD {
+        return -ENOSYS;
+    }
+    if flags & !AT_SYMLINK_FOLLOW != 0 {
+        return -EINVAL;
+    }
+    if flags & AT_SYMLINK_FOLLOW != 0 {
+        let mut canonical = [0u8; 4096];
+        // SAFETY: `oldpath` is a guest C string; the buffer is writable for its len.
+        let length = unsafe {
+            patina_canonicalize(
+                oldpath as *const c_char,
+                canonical.as_mut_ptr() as *mut c_char,
+                canonical.len(),
+            )
+        };
+        if length < 0 {
+            // SAFETY: plain thread-local read.
+            return -(unsafe { patina_errno() } as i64);
+        }
+        if length as usize >= canonical.len() {
+            return -ENAMETOOLONG;
+        }
+        // SAFETY: `canonical` is NUL-terminated (length < buffer size) and `newpath`
+        // is a guest C string.
+        return ret_i32(unsafe {
+            patina_link(
+                canonical.as_ptr() as *const c_char,
+                newpath as *const c_char,
+            )
+        });
+    }
+    // SAFETY: both are guest C strings.
+    ret_i32(unsafe { patina_link(oldpath as *const c_char, newpath as *const c_char) })
 }
 
 fn sys_readlinkat(dirfd: i64, path: u64, buf: u64, bufsize: u64) -> i64 {

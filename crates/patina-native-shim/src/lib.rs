@@ -2752,6 +2752,33 @@ pub unsafe extern "C" fn patina_symlink(target: *const c_char, link_path: *const
     }
 }
 
+/// Create a deterministic hard link (`link`/`linkat`).
+///
+/// Mirrors [`patina_symlink`]: both paths route through the driver, which shares
+/// one inode between `from` and `to` (or, when `from` is itself a symlink,
+/// duplicates the symlink entry -- the POSIX "hard link the symlink itself"
+/// behavior of `linkat` without `AT_SYMLINK_FOLLOW`). The C `linkat` interposer
+/// canonicalizes `from` before calling this when `AT_SYMLINK_FOLLOW` is set, so
+/// the follow/no-follow distinction is resolved above this boundary.
+///
+/// # Safety
+/// `from` and `to` must point to valid NUL-terminated UTF-8 strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_link(from: *const c_char, to: *const c_char) -> c_int {
+    let from = match path_from_c(from) {
+        Ok(path) => path,
+        Err(errno) => return fail(errno),
+    };
+    let to = match path_from_c(to) {
+        Ok(path) => path,
+        Err(errno) => return fail(errno),
+    };
+    match with_context(|context| context.fs_link(&from, &to)) {
+        Ok(()) => 0,
+        Err(errno) => fail(errno),
+    }
+}
+
 /// Read a deterministic symbolic link's target bytes.
 ///
 /// Returns the byte count copied, with no trailing NUL added.
@@ -3246,6 +3273,7 @@ pub unsafe extern "C" fn patina_lifecycle_event(label: *const u8, label_len: usi
 mod thread {
     use std::cell::Cell;
     use std::collections::{BTreeMap, VecDeque};
+    use std::ffi::c_char;
     use std::ffi::{c_int, c_void};
     use std::sync::{Arc, OnceLock};
 
@@ -5368,6 +5396,15 @@ mod thread {
         // vehicle, the EVFILT_USER analogue), sharing the virtual-fd space.
         #[cfg(target_os = "linux")]
         eventfds: BTreeMap<c_int, EventFd>,
+        // Virtual directory descriptors for the openat/fdopendir/unlinkat family
+        // (std's `remove_dir_all` opens each directory with `openat(...,
+        // O_DIRECTORY)`, hands the fd to `fdopendir`, and removes children with
+        // `unlinkat(dirfd, name, ...)`). A dir fd is a pure fd->path handle: it
+        // carries no I/O, so it needs no readiness state, only the canonical
+        // directory path the *at interposers join child names against. Drawn from
+        // the shared `next_fd` space so a virtual fd is a socket XOR pipe XOR
+        // kqueue/epoll/eventfd XOR dir fd, never two at once.
+        dir_fds: BTreeMap<c_int, String>,
         next_fd: c_int,
         next_ephemeral: u16,
     }
@@ -5396,6 +5433,7 @@ mod thread {
                 next_epoll: 0,
                 #[cfg(target_os = "linux")]
                 eventfds: BTreeMap::new(),
+                dir_fds: BTreeMap::new(),
                 next_fd: SOCKET_FD_BASE,
                 next_ephemeral: 49152,
             }
@@ -6469,6 +6507,83 @@ mod thread {
             .get_mut(&channel)
             .map(|channel| channel.send_waiters.drain(..).collect())
             .unwrap_or_default()
+    }
+
+    /// Open a virtual directory descriptor bound to `path`, drawn from the shared
+    /// virtual-fd space. The caller (the C `openat(..., O_DIRECTORY)` interposer)
+    /// has already validated that `path` names a directory and resolved any
+    /// trailing symlink, so this only records the fd->path mapping the
+    /// `fdopendir`/`unlinkat`/`openat` interposers consult. Does NOT activate the
+    /// thread subsystem: a directory handle carries no scheduling, so a
+    /// single-threaded `remove_dir_all` stays single-threaded.
+    ///
+    /// # Safety
+    /// `path` must point to a valid NUL-terminated UTF-8 string.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn patina_diropen(path: *const c_char) -> c_int {
+        let path = match super::path_from_c(path) {
+            Ok(path) => path,
+            Err(errno) => return super::fail(errno),
+        };
+        let mut state = lock_state();
+        let fd = state.net.next_fd;
+        state.net.next_fd = state.net.next_fd.wrapping_add(1);
+        state.net.dir_fds.insert(fd, path);
+        super::set_errno(0);
+        fd
+    }
+
+    /// C dispatch predicate: is `fd` a virtual directory descriptor? Lets the
+    /// interposed `close` (and the *at resolver) tell a dir fd apart from a
+    /// socket/pipe/kqueue endpoint in the shared virtual-fd space.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn patina_dir_is_dirfd(fd: c_int) -> c_int {
+        c_int::from(lock_state().net.dir_fds.contains_key(&fd))
+    }
+
+    /// Copy the canonical path a directory descriptor is bound to into `buf`,
+    /// NUL-terminated when it fits, returning the path length in bytes (excluding
+    /// the terminator). A negative return sets `patina_errno` to `EBADF` for an
+    /// unknown fd. Mirrors [`patina_canonicalize`]'s length/terminator contract.
+    ///
+    /// # Safety
+    /// `buf` must be writable for `len` bytes when `len` is nonzero.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn patina_dirpath(fd: c_int, buf: *mut c_char, len: usize) -> isize {
+        if len != 0 && buf.is_null() {
+            return super::fail(super::EINVAL) as isize;
+        }
+        let state = lock_state();
+        let Some(path) = state.net.dir_fds.get(&fd) else {
+            return super::fail(super::EBADF) as isize;
+        };
+        let bytes = path.as_bytes();
+        let needed = bytes.len();
+        if len != 0 && needed < len {
+            // SAFETY: `buf` is writable for `len` bytes and `needed < len` leaves
+            // room for the trailing NUL.
+            unsafe {
+                let destination = std::slice::from_raw_parts_mut(buf.cast::<u8>(), len);
+                destination[..needed].copy_from_slice(bytes);
+                destination[needed] = 0;
+            }
+        }
+        super::set_errno(0);
+        isize::try_from(needed).unwrap_or_else(|_| super::fail(super::EOVERFLOW) as isize)
+    }
+
+    /// Release a virtual directory descriptor (the `closedir`/`close` owner). Its
+    /// fd number is not recycled -- the shared counter only advances -- so a
+    /// stale reference fails closed rather than aliasing a later fd. Returns
+    /// `EBADF` for an unknown fd.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn patina_dirclose(fd: c_int) -> c_int {
+        if lock_state().net.dir_fds.remove(&fd).is_some() {
+            super::set_errno(0);
+            0
+        } else {
+            super::fail(super::EBADF)
+        }
     }
 
     /// Create a simplex pipe: `read_fd_out` is the read end, `write_fd_out` the
