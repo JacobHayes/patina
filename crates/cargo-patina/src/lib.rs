@@ -6603,23 +6603,6 @@ mod tests {
     }
 
     #[test]
-    fn native_run_rejects_malformed_fault_knobs() {
-        for bad in [
-            &["native-run", "bin", "--fs-crash-at", "flush:1"][..],
-            &["native-run", "bin", "--fs-crash-at", "close:0"][..],
-            &["native-run", "bin", "--fs-torn-granularity", "page"][..],
-            &["native-run", "bin", "--sleep-jitter-nanos", "1500..500"][..],
-            &["native-run", "bin", "--net-jitter-nanos", "10"][..],
-            &["native-run", "bin", "--net-drop-permille", "1001"][..],
-        ] {
-            assert!(
-                parse_native_run(strings(&bad[1..])).is_err(),
-                "expected rejection for {bad:?}"
-            );
-        }
-    }
-
-    #[test]
     fn strips_cargo_plugin_name_and_forwards_unknown_arguments() {
         let parsed = invocation(&[
             "patina",
@@ -7433,19 +7416,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_malformed_wasi_preopens_and_limits() {
+    fn rejects_missing_and_duplicate_wasi_option_values() {
+        // Value-GRAMMAR rejection is covered generically by
+        // `registry_value_grammars_match_the_parsers`; what stays here are the
+        // non-grammar shapes: a required-value flag with no value at all, and a
+        // repeated non-repeatable flag.
         assert!(parse_wasi_run(strings(&["module.wasm", "--preopen"])).is_err());
-        assert!(parse_wasi_run(strings(&["module.wasm", "--preopen", ":ro"])).is_err());
-        assert!(parse_wasi_run(strings(&["module.wasm", "--preopen", "/data:rx"])).is_err());
-        assert!(
-            parse_wasi_run(strings(&[
-                "module.wasm",
-                "--max-memory-pages",
-                "4294967296"
-            ]))
-            .is_err()
-        );
-        assert!(parse_wasi_run(strings(&["module.wasm", "--max-descriptors", "-1"])).is_err());
         assert!(
             parse_wasi_run(strings(&[
                 "module.wasm",
