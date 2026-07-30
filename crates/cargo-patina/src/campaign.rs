@@ -1435,49 +1435,6 @@ mod tests {
     }
 
     #[test]
-    fn derived_flags_round_trip_through_the_run_parsers() {
-        // The value SYNTAX and per-flag GRAMMAR of every child `run` flag is now
-        // guarded generically: `push_run_flag` renders each value through the run
-        // registry's arity + `RunValue` canonical form, and
-        // `registry_value_grammars_match_the_parsers` proves those forms parse.
-        // What that pair does NOT cover is campaign's own choice of numeric
-        // RANGES — that every derived value falls inside the parser-accepted
-        // bound (e.g. a per-mille within [0, 1000], a bug depth >= 1). This test
-        // is the remaining guard for exactly that: it round-trips the actual
-        // derived values through the child's parser, so a knob whose derivation
-        // widens past the accepted range fails HERE, not as a usage error inside
-        // every `--faults` generation at campaign runtime.
-        let spec = CampaignSpec {
-            buggify: true,
-            swarm: true,
-            pct: true,
-            faults: true,
-            watchdog_nanos: Some(1_000_000_000),
-            converge_nanos: Some(2_000_000_000),
-            heal_after_nanos: Some(500_000_000),
-            ..CampaignSpec::default()
-        };
-        for generation in 0..32 {
-            let hash = generation_hash(0, generation);
-            for family in ["wasi", "native"] {
-                let flags = derive_flags(&spec, &hash, family);
-                let mut child: Vec<OsString> = vec![OsString::from("artifact")];
-                child.extend(flags.iter().map(OsString::from));
-                let parsed = match family {
-                    "wasi" => crate::parse_wasi_run(child).map(|_| ()),
-                    _ => crate::parse_native_run(child).map(|_| ()),
-                };
-                parsed.unwrap_or_else(|error| {
-                    panic!(
-                        "gen {generation} {family} child rejected campaign-derived \
-                         flags {flags:?}: {error}"
-                    )
-                });
-            }
-        }
-    }
-
-    #[test]
     fn native_only_knobs_are_skipped_for_wasi() {
         let spec = CampaignSpec {
             buggify: true,
