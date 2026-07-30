@@ -6,14 +6,22 @@ process-global runtime context, the same seed/config surface, and the same
 record/replay machinery. A workspace can mix them (an SDK-instrumented library
 inside a harness-configured binary is the expected shape).
 
+| You want to… | Mode | Crate |
+|---|---|---|
+| instrument application code with fault sites and oracles, shipped inert | 1 — SDK-only | `patina-dst` |
+| configure a run in code, then execute ordinary `std` code under full interposition | 2 — harness | `patina-dst-harness` |
+| write simulator/test code that owns its world through an explicit context | 3 — explicit context | `patina-dst-runtime` (+ `patina-dst-async`) |
+
 ## 1. SDK-only transparent application code — `patina-dst`
 
 Ordinary application code instrumented with the cooperative-SUT SDK:
 `buggify!`/`buggify_with_prob!`/`buggify_delay!`/`buggify_knob!` fault sites,
-`always!`/`sometimes!`/`reachable!` oracles, `patina_dst::rng()`. The crate is
-dependency-free; every macro is a no-op or plain fallback outside a Patina
-build, so adopters ship it unconditionally with no `cfg(patina)` in their code.
-The runtime enters through `cargo patina build`/`run` (the shim), or not at all.
+`always!`/`sometimes!`/`reachable!` oracles, the `lifecycle` markers
+(`setup_complete()`, `event!`), and `patina_dst::rng()`/`is_simulated()`. The
+crate is dependency-free; every macro is a no-op or plain fallback outside a
+Patina build, so adopters ship it unconditionally with no `cfg(patina)` in
+their code. The runtime enters through `cargo patina build`/`run` (the shim) or
+`build --target wasi` (the `patina_sdk` host imports), or not at all.
 
 ## 2. Shim-backed harness for normal application code — `patina-dst-harness`
 
@@ -22,8 +30,8 @@ code under the full shim interposition surface:
 
 ```rust
 patina_dst_harness::run_with(
-    |harness| harness.step_budget(1_000_000).net_drop_permille(30),
-    || app_main(),
+    |harness| Ok(harness.step_budget(1_000_000).net_drop_permille(30)),
+    || app_main(), // ordinary std code; returns Result<(), E>
 )
 ```
 
@@ -49,17 +57,21 @@ Simulator-shaped code that owns its world: `run`/`run_with` build a `Context`
 effects through it explicitly. Nothing is interposed — `std` calls made by the
 same program do not go through Patina — so this mode is for tests and
 simulators written against the runtime API, not for running unmodified
-programs. `patina-dst-async` layers the deterministic futures executor over
-the same `Context`.
+programs. `patina-dst-async` layers the deterministic futures executor
+(`block_on`, `spawn`, virtual-time timers, TCP/UDP futures) over the same
+`Context`.
 
 ## Crate map
 
-| Crate | Role |
-|---|---|
-| `patina-dst` | mode-1 SDK; dependency-free |
-| `patina-dst-harness` | mode-2 configure-then-run harness (deps: `patina-dst-runtime`, `serde_json`) |
-| `patina-dst-runtime` | mode-3 explicit-context API; also the runtime every other mode drives |
-| `patina-dst-async` | explicit-boundary futures executor over mode 3 |
+Package names are `patina-dst-*`; the workspace directories drop the `-dst-`
+(e.g. `crates/patina-runtime`). See ARCHITECTURE.md for the full layout.
+
+| Crate | Directory | Role |
+|---|---|---|
+| `patina-dst` | `crates/patina` | mode-1 SDK; dependency-free; used as `patina_dst::` |
+| `patina-dst-harness` | `crates/patina-harness` | mode-2 configure-then-run harness (deps: `patina-dst-runtime`, `serde_json`) |
+| `patina-dst-runtime` | `crates/patina-runtime` | mode-3 explicit-context API; also the runtime every other mode drives |
+| `patina-dst-async` | `crates/patina-async` | explicit-boundary futures executor over mode 3 |
 
 There is no separate context crate and no compatibility re-exports: mode-3
 symbols live in `patina-dst-runtime` directly.

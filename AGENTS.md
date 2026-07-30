@@ -1,19 +1,110 @@
 # Agent Guidance
 
-This repository contains **Patina**: an experimental deterministic execution and simulation-testing system for Rust.
+This repository contains **Patina**: an experimental deterministic execution and
+simulation-testing (DST) runtime for Rust. Read this file before changing
+anything; it tells you where truth lives and which gates must stay green.
 
-The key documents are:
+## Document map
 
-1. @INTENTS.md for project goals, non-goals, trade-offs, and design principles.
-2. @ARCHITECTURE.md for the source of truth for crate boundaries, interfaces, target model, wrappers, traces, and runtime architecture.
-3. @VALIDATION.md for capability acceptance gates and required evidence.
-4. @IMPLEMENTATION.md for completed and planned implementation slices.
-5. @README.md for the user-facing project summary and current status.
+| Document | Read it for |
+|---|---|
+| [INTENTS.md](./INTENTS.md) | goals, non-goals, trade-offs, design principles |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | crate boundaries, targets, drivers, traces, the native shim, the WASI host — the source of truth for system shape |
+| [VALIDATION.md](./VALIDATION.md) | capability acceptance gates (V0–V7), required evidence, the gate taxonomy |
+| [IMPLEMENTATION.md](./IMPLEMENTATION.md) | completed and planned implementation slices |
+| [USAGE-MODES.md](./USAGE-MODES.md) | the three adoption levels and the crate map |
+| [README.md](./README.md) | the user-facing summary; must stay honest about status |
+| [TUTORIAL.md](./TUTORIAL.md) | the command-by-command walkthrough (every command verified) |
+| `llms.txt` | compact machine-oriented CLI/SDK map |
+| [crates/patina-target/ESCAPE-CLASSES.md](./crates/patina-target/ESCAPE-CLASSES.md) | the guest-escape taxonomy behind the audit gate |
+| [testbeds/README.md](./testbeds/README.md) | the dogfooding guests and their conventions |
 
-When changing intent, architecture, or user-visible behavior, update the relevant docs in the same change.
+**When changing intent, architecture, or user-visible behavior, update the
+relevant docs in the same change.** Doc drift is treated as a bug; part of it is
+mechanically gated (see below).
+
+## The CLI: verbs, and where its truth lives
+
+`cargo patina` is verb-first: `build`, `run`, `test`, `audit`, `replay`,
+`explore`, `campaign`, `minimize`. Verbs infer the artifact family (Cargo
+package / native binary / WASI module) from the argument; `run`, `audit`, and
+`replay` are source-first (a `.rs` file, directory, or `Cargo.toml` builds on
+the fly).
+
+Never guess flag names — the CLI has gone through renames. The authoritative
+registry is generated from `crates/cargo-patina/src/help.rs`:
+
+```sh
+cargo run -q -p cargo-patina -- patina --help                 # human
+cargo run -q -p cargo-patina -- patina --help --format json   # full machine-readable registry
+cargo run -q -p cargo-patina -- patina run --help             # per-verb help
+```
+
+Every verb also accepts `--format json`, emitting one `patina.result/v1`
+envelope on stdout — prefer it when parsing results programmatically.
+
+## Check ladder (run before claiming done)
+
+With [mise](https://mise.jdx.dev/) (one-time `mise run setup` installs
+toolchains/targets, including the 1.86 MSRV toolchain with `wasm32-wasip1`):
+
+- `mise run check` — the full pre-landing battery, laddered fast → slow:
+  fmt, clippy (host + cross-target `x86_64-unknown-linux-gnu` for Linux-cfg
+  code), docs, workspace tests, `scripts/check-docs-flags.sh`, MSRV tests, then
+  the WASI / cross-target / native-shim validation scripts. **This is the
+  landing gate.**
+- `mise run check:fast` — the inner-loop tier (skips the slowest e2e tests, the
+  MSRV re-run, `cargo doc`, the docs-flags gate, and
+  `validate-native-shim.sh`). Not sufficient for landing.
+- `mise run smoke`, `mise run msrv`, `mise run audit-corpus`, `mise run demo` —
+  the individual pieces.
+
+Without mise, run the `[tasks.check]` commands from `mise.toml` directly.
+
+Gates worth knowing individually:
+
+- `scripts/check-docs-flags.sh` — extracts every flag-shaped token from the gated
+  docs (the `DOCS` list in the script: README, TUTORIAL, USAGE-MODES,
+  ARCHITECTURE, IMPLEMENTATION, VALIDATION, INTENTS, AGENTS, `llms.txt`, and the
+  testbed READMEs) and fails on any flag the CLI registry does not define.
+  If you mention a flag in a doc, it must exist; if you rename a flag, the gate
+  finds every stale doc mention.
+- `scripts/validate-native-shim.sh`, `scripts/validate-wasi.sh`,
+  `scripts/smoke-cross-target.sh` — the runtime acceptance batteries
+  (VALIDATION.md defines what each proves).
+- `testbeds/workq/fuzz-sweep.sh --selftest` and
+  `cargo patina campaign --selftest` — the sweep/campaign outcome classifiers
+  prove every class fireable; these run per-push in CI.
+- `testbeds/audit-corpus/run.sh` (`--selftest` to prove the drift detection
+  bites) — the strict-xfail ecosystem symbol-audit corpus.
+
+## Project doctrine
+
+- **Fail closed, loudly.** An unmodeled effect is a refusal or a named abort,
+  never a silent fallback to the host. Do not add permissive fallbacks.
+- **Detection before fixes.** A new bug class needs a standalone detector that
+  provably fires (red-before/green-after) before or alongside the point fix.
+  Every new point-level regression pin must name its class-level pairing
+  (VALIDATION.md, "Maintenance rule").
+- **No cruft.** No deprecation aliases, compatibility shims, or dual code
+  paths for renamed surfaces — migrate every caller and doc in the same change.
+- **Determinism claims are verified, not asserted.** Byte-identical repeats,
+  record→replay identity, and seed variation are the standard evidence shape;
+  a check that cannot fail is treated as a bug (see the selftests above).
+
+## Naming
+
+- Crate directories are `crates/patina-*`, but published package names are
+  `patina-dst-*` (e.g. `crates/patina-runtime` is `patina-dst-runtime`). The
+  SDK crate at `crates/patina` is `patina-dst`, used as `patina_dst::` in code.
+- Family names are **cargo** (in-process Cargo package/test), **native**
+  (shim-linked binary), and **WASI** (`wasm32-wasip1` module).
 
 ## Style
 
 - Write project docs in clear, concise language.
-- Avoid implementation-phase language in `INTENTS.md` and `ARCHITECTURE.md`; they should describe the system in present tense.
+- Avoid implementation-phase language in `INTENTS.md` and `ARCHITECTURE.md`;
+  they describe the system in present tense.
 - `README.md` should remain honest about the project status.
+- Shell scripts must be loud on failure and never vacuously pass; testbed
+  scripts carry `--help` and (where they classify outcomes) `--selftest`.

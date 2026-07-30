@@ -2,6 +2,24 @@
 
 Patina is a deterministic OS personality for Rust. `cargo patina` builds a program for a Patina target, routes platform effects through a stable deterministic ABI, installs virtual drivers, wraps those drivers with trace/replay/fault behavior, and runs the program under a deterministic scheduler.
 
+Find your subsystem:
+
+| You care about… | Section | Main crates |
+|---|---|---|
+| the overall model and its three planes | [System shape](#system-shape) | — |
+| how programs reach the runtime (WASI / native / Cargo) | [Targets](#targets) | `patina-dst-target`, `patina-dst-native-shim`, `patina-dst-wasi-host` |
+| what crate does what | [Crate layout](#crate-layout) | all |
+| the effect interfaces `std`/shims call | [Data plane](#data-plane-small-stable-interfaces) | `patina-dst-abi`, `patina-dst-driver-api` |
+| configuring drivers in code | [Construction plane](#construction-plane-typed-driver-setup) | `patina-dst-runtime`, driver crates |
+| seeds, budgets, record/replay control | [Experiment plane](#experiment-plane-external-controls) | `cargo-patina` |
+| the drivers and fault/latency wrappers | [Drivers and wrappers](#drivers-and-wrappers) | `patina-dst-fs-*`, `patina-dst-net-sim`, `patina-dst-wrapper-*` |
+| trace format, branching, minimization | [Trace model](#trace-model) | `patina-dst-trace`, `patina-dst-minimize` |
+| fail-closed enforcement and the audit | [Enforcement](#enforcement) | `patina-dst-target` (and its `ESCAPE-CLASSES.md`) |
+| the libc/pthread interposition layer | [Native ABI shim](#native-abi-shim) | `patina-dst-native-shim` |
+| how the shim reaches the host without leaking symbols | [Host-alias doctrine](#host-alias-doctrine) | `patina-dst-native-shim` |
+| the WASI host | [WASI host](#wasi-host) | `patina-dst-wasi-host` |
+| the buggify/oracle SDK | [Cooperative-SUT SDK](#cooperative-sut-sdk) | `patina-dst` |
+
 ## System shape
 
 ```mermaid
@@ -10,7 +28,7 @@ flowchart TD
     Std[Rust std / async runtimes / libc-compatible shims]
     ABI[Patina deterministic ABI]
     Runtime[patina-dst-runtime]
-    Wrappers[Wrappers: record, replay, fault, latency, logging]
+    Wrappers[Boundary record/replay + fault/latency wrappers]
     Drivers[Concrete drivers: fs, net, time, rng, scheduler]
     Host[Host OS, only through explicit policy]
     Trace[patina-dst-trace]
@@ -32,62 +50,66 @@ Patina has three planes:
 
 ## Targets
 
-Patina supports deterministic targets rather than relying on ad hoc library substitution.
+One CLI serves three artifact families, inferred from the argument: a **Cargo package/test** (directory or `Cargo.toml`), a **native binary** (Mach-O/ELF), and a **WASI module** (`wasm32-wasip1`). All three drive the same runtime, drivers, and trace format.
 
-### WASI Patina
+### Native (linked shim)
 
-The WASI target is a clean Patina target because WASI already represents host effects as explicit imports. Rust code uses a WASI `std`; Patina supplies deterministic host implementations for clocks, random, filesystem, network capabilities, and process state.
+The primary family for programs written mostly in Rust. `cargo patina build` compiles the guest with the **stock host target and prebuilt `std`** (not a recompiled deterministic `std`) and statically links the native ABI shim below it. Link-time interposition — strong shim definitions of the libc/pthread/dispatch/syscall surface — routes what `std` and C dependencies actually call into the deterministic runtime; real host threads are gated one-at-a-time through the deterministic scheduler. On x86_64 Linux, syscall-user-dispatch (SUD) additionally traps raw *inline* syscall instructions (rustix's default `linux_raw` backend, hand-written asm) into the same runtime entry points via a `SIGSYS` handler, so even importless raw syscalls stay in-model.
+
+Before a native guest runs, a default-deny audit over its imports (plus an instruction scan for raw syscall/clock/entropy opcodes) refuses anything the shim does not model — see [Enforcement](#enforcement).
+
+### WASI
+
+The WASI target is a clean Patina target because WASI already represents host effects as explicit imports. Rust code uses the stock `wasm32-wasip1` `std`; `patina-dst-wasi-host` supplies deterministic implementations of the entire audited Preview 1 import surface (clocks, entropy, filesystem, configured datagram sockets, process state) over the same drivers.
 
 WASI is useful when portability and a small host-effect surface matter. Its limitations include weaker native FFI support, less representative platform-specific behavior, immature threading semantics compared with native platforms, and possible performance/layout differences from native ARM64/x86_64 targets.
 
-### Native Rust Patina
+### Cargo package (in-process boundary)
 
-Native Linux and macOS Patina targets rebuild Rust `std` against the Patina platform layer. Standard Rust APIs route into Patina drivers instead of the host OS.
-
-Native Rust Patina is the primary target for programs written mostly in Rust. It preserves more native behavior than WASI while still failing closed on unsupported escape hatches.
-
-### Native ABI shim
-
-The native ABI shim provides libc/pthread/syscall-compatible symbols that delegate to Patina. It extends compatibility for crates and dependencies that use C/POSIX APIs.
-
-The shim is a compatibility layer, not the center of the system. It shares the Patina ABI, trace format, drivers, and scheduler with the Rust targets.
+`cargo patina run`/`test` on a package with no `--target` runs it in-process at the explicit `patina_dst_runtime::Context` boundary (usage mode 3): the code performs effects through the context rather than through interposed `std`. This is the family the explicit-context API, branch replay, and the workspace's own examples use.
 
 ## Crate layout
 
+Package names are `patina-dst-*`; workspace directories drop the `-dst-`
+(shown in parentheses where they differ).
+
 ```text
-cargo-patina              # cargo subcommand
-patina-dst                # cooperative-SUT SDK (dependency-light, no runtime deps)
-patina-dst-harness            # configure-then-run harness for ordinary app code under the shim
-patina-dst-abi                # stable deterministic boundary contracts
-patina-dst-runtime            # runtime registry, driver installation, scheduling, params; explicit-context `run`/`run_with`/`Context`
-patina-dst-async              # deterministic futures executor over the explicit boundary
-patina-dst-trace              # trace bundle format, event logs, branch metadata, replay matching
-patina-dst-minimize           # pluggable minimization interfaces and reducers for traces/scenarios
-patina-dst-target             # target specs and build integration
-patina-std                # std/sys integration for Patina targets
-patina-macros             # optional registration/test macros
+cargo-patina                # the CLI: build/run/test/audit/replay/explore/campaign/minimize
+patina-dst (crates/patina)  # cooperative-SUT SDK (dependency-free)
+patina-dst-harness          # configure-then-run harness for ordinary app code under the shim
+patina-dst-abi              # stable deterministic boundary contracts (typed operations/outcomes)
+patina-dst-runtime          # runtime context, driver installation, record/replay orchestration,
+                            #   params; explicit-context `run`/`run_with`/`Context`
+patina-dst-async            # deterministic futures executor over the explicit boundary
+patina-dst-trace            # trace bundle format, migration, branch metadata, strict replay matching
+patina-dst-minimize         # pluggable failure-oracle reducers for traces/schedules/scenarios
+patina-dst-target           # target metadata, import audit + escape classes, instruction scan
+patina-dst-proptest         # proptest compatibility: case generation from the run's seeded entropy
 
-patina-dst-driver-api         # common driver traits and helper types
-patina-dst-fs-mem             # in-memory virtual filesystem
-patina-dst-fs-crash           # crash-consistency filesystem model
-patina-dst-fs-host            # explicit allowlisted read-only host capture
-patina-dst-net-sim            # deterministic virtual network
-patina-dst-time-virtual       # virtual clock and timers
-patina-dst-rng-seeded         # deterministic entropy source
-patina-dst-sched-det          # deterministic scheduler policies
+patina-dst-driver-api       # common driver traits (Fs/Net/Clock/Entropy/SchedulerDriver)
+patina-dst-fs-mem           # in-memory virtual filesystem
+patina-dst-fs-crash         # crash-consistency filesystem model
+patina-dst-fs-host          # explicit allowlisted read-only host capture
+patina-dst-net-sim          # deterministic virtual network (datagrams + TCP streams)
+patina-dst-time-virtual     # virtual clock and timers
+patina-dst-rng-seeded       # deterministic entropy source
+patina-dst-sched-det        # deterministic scheduler policies (uniform, PCT, starvation)
 
-patina-wrapper-record     # records boundary decisions
-patina-wrapper-replay     # replays boundary decisions
-patina-dst-wrapper-fault      # generic fault injection wrappers
-patina-dst-wrapper-latency    # generic delay and jitter wrappers
+patina-dst-wrapper-fault    # generic fault injection wrapper drivers
+patina-dst-wrapper-latency  # generic delay and jitter wrapper drivers
 
-patina-dst-native-shim        # libc/pthread/syscall compatibility layer
-patina-dst-wasi-host          # deterministic WASI host implementation
+patina-dst-native-shim      # libc/pthread/dispatch/syscall interposition layer + SUD dispatcher
+patina-dst-wasi-host        # deterministic WASI Preview 1 host
 
-patina-dst-bench              # performance qualification workload and budget gates
+patina-dst-bench            # performance qualification workload and budget gates
 ```
 
-The exact crate names are conventional, but the separation is intentional: the ABI and trace format are shared, drivers are modular, and native compatibility remains separate from the Rust-first core.
+Record and replay are not separate crates: `patina-dst-trace` provides the
+`Recorder`/`Replayer` machinery and `patina-dst-runtime` drives it at the
+boundary, so recording composes around any driver stack (see
+[Drivers and wrappers](#drivers-and-wrappers)). The separation above is
+intentional: the ABI and trace format are shared, drivers are modular, and
+native compatibility remains separate from the Rust-first core.
 
 ### Shim-backed harness (`patina-dst-harness`)
 
@@ -157,27 +179,33 @@ The `Async<...>` returns sketched above are realized by the `patina-dst-async` c
 Concrete drivers expose rich typed builders. Driver-specific configuration lives here, not in the common ABI.
 
 ```rust
-#[cfg(patina)]
-fn configure_patina(ctx: &mut patina_dst_runtime::Context) {
-    let net = patina_dst_net_sim::SimNet::builder()
-        .route_host("s3.amazonaws.com", fake_s3_http())
-        .route_cidr("10.0.0.0/8", simulated_tcp())
-        .build();
+patina_dst_runtime::run_with(
+    |builder| {
+        let net = patina_dst_net_sim::SimNet::builder()
+            .base_latency_nanos(50_000)
+            .jitter_nanos(0, 20_000)
+            .partition("10.0.0.1:9000", "10.0.0.2:9000")
+            .build()
+            .expect("valid network configuration");
 
-    let fs = patina_dst_fs_crash::CrashFs::builder()
-        .filesystem(patina_dst_fs_mem::MemFs::new())
-        .seed(7)
-        .torn_write_probability(0.5)
-        .model_rename_atomicity(false)
-        .build()
-        .expect("valid crash-model configuration");
+        let fs = patina_dst_fs_crash::CrashFs::builder()
+            .filesystem(patina_dst_fs_mem::MemFs::new())
+            .seed(7)
+            .torn_write_probability(0.5)
+            .model_rename_atomicity(false)
+            .build()
+            .expect("valid crash-model configuration");
 
-    ctx.install_net(net);
-    ctx.install_fs(fs);
-}
+        builder.with_network(net).with_filesystem(fs)
+    },
+    |ctx| app_scenario(ctx),
+)
 ```
 
-The `CrashFs` configuration above matches the implemented builder; the `SimNet` routing methods shown are aspirational (the implemented `SimNet` models datagram endpoints, delivery, and partitions).
+Both builders match the implemented API (`SimNetBuilder`, `CrashFsBuilder`, and
+`RuntimeBuilder::with_*`). Richer routing — named host routes, per-CIDR
+protocol handlers — is the intended growth direction for `SimNet` builders,
+not yet implemented.
 
 After installation, concrete drivers erase to the small data-plane interfaces. This lets Patina keep `NetDriver` minimal while allowing `SimNet` to expose routing, protocol handlers, latency zones, partitions, or other domain-specific features.
 
@@ -199,14 +227,15 @@ cargo patina explore run ./guest --seeds 100 --seed-start 0
 External controls include:
 
 - seed;
-- run budget;
-- trace path;
-- record/replay mode;
-- replay mismatch policy;
-- explicit host-capture allowlists;
-- named scenario/profile selection;
-- decision-policy selection and parameters;
-- simple key/value parameters consumed by driver builders.
+- run budget (`--budget`);
+- trace path (`--record`, the `replay` verb);
+- explicit host-capture allowlists (`--mount`);
+- fault knobs (`--fs-crash-at`, `--net-drop-permille`, …) and buggify knobs;
+- exploration-policy selection (`--sched-pct`, `--starve`, `--swarm`);
+- liveness oracles (`--liveness-watchdog`, `--converge-within`);
+- simple key/value parameters (`--param`, exposed through `Context::param`).
+
+Named scenario/profile selection remains a planned experiment-plane convenience.
 
 Driver-specific scenario logic remains Rust code. Parameters let CI vary knobs without requiring Patina to define every possible option:
 
@@ -236,8 +265,8 @@ Patina distinguishes concrete drivers from wrapper drivers.
 ```mermaid
 flowchart LR
     ABI[Patina ABI call]
-    Record[record wrapper]
-    Replay[replay wrapper]
+    Record[boundary recorder]
+    Replay[boundary replayer]
     Fault[fault wrapper]
     Latency[latency wrapper]
     Concrete[concrete driver: SimNet / CrashFs / MemFs]
@@ -250,22 +279,20 @@ flowchart LR
 Concrete drivers implement capabilities:
 
 - `MemFs`: deterministic in-memory filesystem.
-- `CrashFs`: filesystem model with crash-consistency behavior.
-- `SimNet`: deterministic virtual network.
-- `VirtualClock`: controlled time source and timers.
+- `CrashFs`: filesystem model with crash-consistency behavior (checkpoints, seeded torn writes, rename atomicity, directory durability).
+- `SimNet`: deterministic virtual network (datagrams and TCP streams, partitions, seeded stream faults).
+- `VirtualClock`: controlled time source and timer queue.
 - `SeededEntropy`: deterministic entropy source.
-- `DetScheduler`: deterministic task/thread scheduler.
-- `Deny*`: terminal drivers that error on use.
+- `DetScheduler`: deterministic task/thread scheduler with selectable exploration policies (uniform, PCT, starvation intervals).
+
+A runtime built without a requested driver returns `missing_driver`; it never falls through to the host.
 
 Wrapper drivers compose around concrete drivers:
 
-- `Record`: logs boundary calls and decisions.
-- `Replay`: consumes prior decisions and errors on mismatch.
-- `Fault`: injects generic failures such as `EIO`, packet loss, resets, or wakeup perturbations.
-- `Latency`: injects deterministic delay and jitter.
-- `Logging`: emits human-readable debugging events.
+- `FaultNet` (`patina-dst-wrapper-fault`): seeded packet loss and duplication decisions.
+- `LatencyNet` (`patina-dst-wrapper-latency`): deterministic fixed delay, seeded jitter, and reorder.
 
-Record and replay are wrappers because they operate at the boundary regardless of the underlying driver.
+Record and replay compose the same way but live at the runtime boundary rather than in per-driver wrappers: `patina-dst-runtime` records every boundary operation/outcome through `patina-dst-trace`'s `Recorder`, and replay consumes the recorded decisions through its `Replayer`, erroring on any mismatch — so they operate identically regardless of which drivers (or wrappers) are installed.
 
 ## Trace model
 
@@ -313,54 +340,55 @@ Existing events replay instantly in wall-clock time while preserving virtual eff
 
 ## Registration
 
-Patina uses code-first registration for topology.
+Patina uses code-first registration for topology; there is no declarative
+configuration language. Two shapes exist today:
 
-Registration may be explicit:
-
-```rust
-#[cfg(patina)]
-fn main() {
-    patina_dst_runtime::run(|ctx| {
-        configure_patina(ctx);
-        app::main();
-    });
-}
-```
-
-or macro-assisted:
-
-```rust
-patina_dst::register!(configure_patina);
-```
+- **Explicit context** (usage mode 3): `patina_dst_runtime::run(|ctx| …)` runs a
+  closure against a default-driver `Context`; `run_with(configure, operation)`
+  lets `configure` swap drivers on the `RuntimeBuilder` first (the construction
+  plane example above).
+- **Harness** (usage mode 2): `patina_dst_harness::run_with(configure, entry)`
+  configures the run in code, installs the process-global runtime, then executes
+  ordinary interposed `std` code (see USAGE-MODES.md).
 
 The registration mechanism is deliberately small. It installs drivers and scenario hooks; it does not define a large declarative configuration system.
 
 ## Enforcement
 
-Patina fails closed.
+Patina fails closed. Enforcement is layered:
 
-Compile-time checks reject known unsupported constructs where possible:
+Static, pre-run checks reject a native binary before it executes:
 
-- unsupported target APIs;
-- unsupported FFI declarations;
-- inline assembly patterns that access clocks, entropy, or syscalls;
-- direct platform intrinsics outside Patina support;
-- native threading operations not routed through Patina.
+- a **default-deny import audit**: every externally resolved symbol must be
+  interposed, provably effect-free, or explicitly `--allow`ed; anything unknown
+  is a refusal (`cargo patina audit` reports the same surface `run` enforces);
+- an **instruction scan** for raw syscall/clock/entropy opcodes (`svc`/`syscall`,
+  `rdtsc`/`rdrand`, aarch64 `CNTVCT`/`RNDR`) and the x86_64 vsyscall-page
+  address; on x86_64 Linux a raw-syscall finding is downgraded to
+  *SUD-managed* (trapped at runtime) instead of refused, never silently;
+- WASI module imports are audited against the host's explicit allowlist before
+  instantiation.
 
 Runtime checks catch effects that cannot be rejected statically:
 
-- missing drivers;
-- denied capabilities;
-- dynamic library loading;
-- unexpected host access;
-- trace mismatch;
-- unsupported syscalls in native shim mode.
+- missing drivers and denied capabilities;
+- deny-trap interposers (e.g. the process-spawn family) that abort
+  deterministically if a dormant escape path is actually reached;
+- dynamic library loading (`dlopen` refused; `dlsym` neutered on Linux);
+- SUD-trapped syscalls outside the dispatch table (a named, deterministic abort);
+- trace fingerprint or operation mismatch on replay.
+
+The full per-class taxonomy — what each escape class is, how it is detected,
+and the honest residuals a symbol audit cannot see — lives in
+[`crates/patina-target/ESCAPE-CLASSES.md`](./crates/patina-target/ESCAPE-CLASSES.md).
 
 Escape hatches are explicit:
 
 - `cfg(patina)` and `cfg(dst)` allow deterministic replacement code;
-- allowlists permit specific FFI or host access;
-- passthrough drivers require declared policy.
+- `--allow` / `--allow-unsupported-symbols` permit named symbols, loudly and
+  recorded beside the trace;
+- host capture (`patina-dst-fs-host`, `--mount`) is read-only, allowlisted, and
+  fingerprinted — never ambient.
 
 ## Native ABI shim
 
@@ -402,7 +430,7 @@ Linux is swept onto the same table, with one wrinkle: the shim interposes `dlsym
 
 ## WASI host
 
-The WASI host implements WASI imports using Patina drivers. WASI’s explicit import model makes it a clean expression of the Patina architecture:
+The WASI host implements WASI imports using Patina drivers. WASI's explicit import model makes it a clean expression of the Patina architecture:
 
 ```mermaid
 flowchart TD
@@ -427,7 +455,7 @@ Patina maintains these architectural invariants:
 
 1. `std` and shims do not access the host directly.
 2. Core driver traits remain smaller than concrete driver builders.
-3. Record and replay are wrappers, not mandatory features of every driver.
+3. Record and replay operate at the runtime boundary, not inside each driver.
 4. Seeds and traces are experiment-plane concerns.
 5. Topology and service behavior are code-first.
 6. Unsupported nondeterminism fails loudly.

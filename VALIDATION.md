@@ -2,6 +2,23 @@
 
 This document defines how an implementation of Patina is tested and what evidence is required before a capability is described as working. The checks are layered so the current Rust-level vertical slice can be verified without implying that the eventual deterministic target boundary already exists.
 
+Lookup map — the capability levels and the cross-cutting sections:
+
+| Section | Scope | Status |
+|---|---|---|
+| [V0](#v0-workspace-quality) | workspace quality gates (fmt/clippy/tests/docs/MSRV + validation scripts) | standing |
+| [V1](#v1-deterministic-rust-level-vertical-slice) | deterministic vertical slice at the explicit `Context` boundary | complete |
+| [V2](#v2-cooperative-scheduling-and-simulation-drivers) | cooperative scheduling, SimNet, wrappers, branching, async executor | complete |
+| [V3](#v3-wasi-patina-target) | WASI Preview 1 target | complete (entire audited surface) |
+| [V4](#v4-native-rust-patina-target) | native linked-shim target (interposition, audit gate, SUD) | partial |
+| [V5](#v5-native-abi-shim-and-production-hardening) | trace hardening, crash models, capture, minimization, budgets | partial |
+| [V6](#v6-cooperative-sut-sdk) | cooperative-SUT (buggify) SDK, native + WASI | partial (Milestone C) |
+| [V7](#v7-exploration-tier-directed-schedulefault-steering) | directed exploration policies (PCT, swarm, starvation) | partial (wave 12) |
+| [Trace oracle](#trace-oracle) | what a valid `.patina` bundle must satisfy; strict-replay check order | — |
+| [Reproducibility matrix](#reproducibility-matrix) | pre-release matrix and what CI actually runs | — |
+| [Current boundary of confidence](#current-boundary-of-confidence) | the honest summary of what is and is not proven | — |
+| [Gate taxonomy](#gate-taxonomy-point-pins-vs-class-detectors) | class detectors vs point pins, unpaired classes, maintenance rule | — |
+
 ## Validation principles
 
 1. **Test observable contracts, not implementation details.** Seeds, traces, replay failures, virtual effects, and CLI behavior are public contracts.
@@ -20,9 +37,11 @@ Required:
 
 - `cargo fmt --all -- --check`
 - `cargo test --workspace`
-- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo clippy --workspace --all-targets -- -D warnings` (plus the same run with
+  `--target x86_64-unknown-linux-gnu`, so Linux-cfg code lints from any host)
 - `cargo doc --workspace --no-deps`
 - `cargo +1.86.0 test --workspace`
+- `scripts/check-docs-flags.sh` (doc/CLI flag drift gate over the user-facing docs)
 - `scripts/validate-wasi.sh` when validating V3
 - `scripts/validate-native-shim.sh` when validating native foundations
 - `scripts/smoke-cross-target.sh` when validating cross-target determinism
@@ -180,7 +199,7 @@ Required before claiming broad libc/POSIX compatibility or stable traces:
 
 ### V6: cooperative-SUT SDK
 
-**Partial (Milestone A).** The `patina-dst` crate ships a FoundationDB-`BUGGIFY`- and Antithesis-style SDK as its whole dependency-light surface; the explicit-context API (`run`/`run_with`, `Context`) lives in the separate `patina-dst-runtime` crate. Every SDK macro (`buggify!`, `buggify_with_prob!`, `buggify_delay!`, `buggify_knob!`, `always!`, `sometimes!`, `reachable!`, `lifecycle::event!`) plus `is_simulated()`/`rng()` is a no-op or plain fallback outside a Patina build, and no `cfg(patina)` appears in adopter code.
+**Partial (Milestone C).** The `patina-dst` crate ships a FoundationDB-`BUGGIFY`- and Antithesis-style SDK as its whole dependency-light surface; the explicit-context API (`run`/`run_with`, `Context`) lives in the separate `patina-dst-runtime` crate. Every SDK macro (`buggify!`, `buggify_with_prob!`, `buggify_delay!`, `buggify_knob!`, `always!`, `sometimes!`, `reachable!`, `lifecycle::event!`) plus `is_simulated()`/`rng()` is a no-op or plain fallback outside a Patina build, and no `cfg(patina)` appears in adopter code.
 
 Automated evidence:
 

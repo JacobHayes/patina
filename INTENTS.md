@@ -1,16 +1,16 @@
 # Patina Intent
 
-**Patina**: Weather your Rust into a fine protective patina - before production does.
+**Patina**: Weather your Rust into a fine protective patina — before production does.
 
-Patina is a deterministic execution and simulation-testing system for Rust programs. It compiles code for a deterministic OS personality, routes platform effects through a virtual runtime, and lets tests explore time, scheduling, storage, networking, entropy, crashes, and other production-shaped failures under seed control.
+Patina is a deterministic execution and simulation-testing system for Rust programs. It builds code for a deterministic OS personality, routes platform effects through a virtual runtime, and lets tests explore time, scheduling, storage, networking, entropy, crashes, and other production-shaped failures under seed control.
 
 The primary user interface is `cargo patina`.
 
 ## Core idea
 
-Patina is not an application mocking framework. The user should not need to audit every dependency to confirm that it uses the “right” traits or test doubles. Ordinary Rust platform APIs such as filesystem access, networking, clocks, randomness, process state, and thread coordination flow through Patina’s deterministic boundary.
+Patina is not an application mocking framework. The user should not need to audit every dependency to confirm that it uses the "right" traits or test doubles. Ordinary Rust platform APIs such as filesystem access, networking, clocks, randomness, process state, and thread coordination flow through Patina's deterministic boundary.
 
-Patina’s boundary sits below application code and above the real OS:
+Patina's boundary sits below application code and above the real OS:
 
 ```text
 Rust application and dependencies
@@ -27,16 +27,18 @@ This gives Rust code a deterministic OS personality rather than asking every lib
 Patina exists to make these workflows normal:
 
 - Run a Rust program repeatedly with the same seed and get the same behavior.
-- Explore many scheduler, timing, network, filesystem, and crash interleavings quickly.
+- Explore many scheduler, timing, network, filesystem, and crash interleavings quickly, with directed policies (priority-based preemption, starvation, fault-subset swarms) when uniform exploration is not enough.
 - Reproduce a failure from a seed and trace.
 - Record boundary effects from one run and replay them later.
 - Fail loudly when code escapes the deterministic boundary.
+- Let application code cooperate with the simulator — seed-driven fault sites (`buggify!`) and `always!`/`sometimes!` oracles — while shipping the same instrumentation inert in production builds.
+- Sweep seeds and run multi-generation fault campaigns with classified, deduplicated, reproducible failures.
 - Swap virtual drivers without rewriting application logic.
 - Let users write code-first simulation topology without a config-based DSL.
 
 ## Non-goals
 
-Patina does not try to be a general deterministic hypervisor. It is for programs written primarily in Rust and compiled into Patina’s world.
+Patina does not try to be a general deterministic hypervisor. It is for programs written primarily in Rust and compiled into Patina's world.
 
 Patina does not promise to make arbitrary native code deterministic. Native libraries, dynamic loading, inline assembly, direct syscalls, CPU entropy instructions, GPUs, and OS-specific behavior are supported only when they pass through an explicit Patina shim or are allowed by policy.
 
@@ -57,7 +59,7 @@ Patina occupies the middle between application-level simulator libraries and det
 - fail-closed;
 - pluggable at the Rust platform boundary.
 
-The intended result is closer to “compile this Rust program for a deterministic platform” than “rewrite this app around testing traits.”
+The intended result is closer to "compile this Rust program for a deterministic platform" than "rewrite this app around testing traits."
 
 ## Determinism, replay, and simulation
 
@@ -81,14 +83,15 @@ Replay of real external I/O is useful, but narrower than simulation. It reproduc
 
 Patina prefers explicit failure over silent nondeterminism.
 
-Unsupported effects are compile-time errors when possible and runtime errors otherwise. Examples include:
+Unsupported effects are pre-run refusals when they can be detected statically (the default-deny import audit and instruction scan) and loud runtime errors otherwise. Examples include:
 
-- direct syscalls outside Patina shims;
-- unsupported FFI;
+- unsupported FFI and un-interposed host symbols;
 - inline assembly that reads clocks or entropy;
 - native thread operations not routed through the scheduler;
 - host filesystem or network access without explicit policy;
 - CPU instructions such as `rdtsc` or `rdrand` when not virtualized.
+
+Raw inline syscalls follow the same rule with one deepening: where the platform allows it (syscall-user-dispatch on x86_64 Linux), they are trapped *into* the deterministic runtime instead of refused; everywhere else they remain a refusal. Either way, never a silent escape.
 
 `cfg(patina)` and `cfg(dst)` exist as escape hatches for code that genuinely needs deterministic replacements, but they are secondary mechanisms. The primary mechanism is the deterministic platform boundary.
 

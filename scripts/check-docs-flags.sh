@@ -32,7 +32,11 @@ esac
 cd "$(dirname "$0")/.."
 
 DOCS=(README.md TUTORIAL.md USAGE-MODES.md ARCHITECTURE.md IMPLEMENTATION.md
-      VALIDATION.md INTENTS.md AGENTS.md llms.txt)
+      VALIDATION.md INTENTS.md AGENTS.md llms.txt
+      crates/patina-target/ESCAPE-CLASSES.md
+      testbeds/README.md testbeds/workq/README.md testbeds/pubsub/README.md
+      testbeds/audit-corpus/README.md testbeds/rustix-default/README.md
+      testbeds/buggify-wasi/README.md)
 
 # Allowlist: non-patina flags the docs legitimately mention. Keep this minimal —
 # every entry must say whose flag it is. A patina flag NEVER belongs here; if
@@ -51,6 +55,12 @@ ALLOWED_FLAGS='
 --help
 --version
 --iters
+--bug
+--jobs
+--data-dir
+--update
+--dry-run
+--emit
 '
 # --all/--all-targets/--check/--locked/--no-deps/--workspace: cargo fmt/clippy/
 #   doc/package flags quoted in VALIDATION.md's V0 gates.
@@ -60,6 +70,11 @@ ALLOWED_FLAGS='
 # --wrap: the linker flag `-Wl,--wrap=dlsym` in the host-alias doctrine docs.
 # --help/--version: CLI meta-flags, accepted anywhere but not registry rows.
 # --iters: an example guest program's own argument in IMPLEMENTATION.md.
+# --bug/--jobs/--data-dir: the workq/pubsub guest binaries' own arguments,
+#   documented in the testbed READMEs.
+# --update: testbeds/audit-corpus/run.sh's re-record mode.
+# --dry-run: the fuzz-sweep/wasi-buggify-sweep scripts' no-run mode.
+# --emit: a rustc flag (`rustc --emit=obj` in ESCAPE-CLASSES.md).
 
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
@@ -94,8 +109,11 @@ if [ -n "$unknown" ]; then
   echo >&2
   for flag in $unknown; do
     echo "  $flag" >&2
+    # `|| true`: a token with no boundary-matching occurrence (e.g. one extracted
+    # from inside an anchor slug) must not abort the listing under `set -e` —
+    # every drift gets reported, locations or not.
     grep -nE -e "(^|[^A-Za-z0-9-])${flag}([^A-Za-z0-9-]|$)" "${DOCS[@]}" /dev/null \
-      | sed 's/^/      /' | head -5 >&2
+      | sed 's/^/      /' | head -5 >&2 || true
   done
   echo >&2
   echo "Fix the doc (or, for a genuinely non-patina flag, extend the commented" >&2
