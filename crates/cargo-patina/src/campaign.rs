@@ -899,7 +899,7 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
         flags.push(drop.to_string());
         let jitter_hi = u64::from(hash[13]) * 10_000; // up to 2.55 ms
         flags.push("--sleep-jitter-nanos".to_string());
-        flags.push(format!("0:{jitter_hi}"));
+        flags.push(format!("0..{jitter_hi}"));
     }
     if spec.swarm && native {
         flags.push("--swarm".to_string());
@@ -1371,6 +1371,43 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(generation_hash(0, 7), generation_hash(0, 8));
         assert_ne!(generation_hash(1, 7), generation_hash(0, 7));
+    }
+
+    #[test]
+    fn derived_flags_round_trip_through_the_run_parsers() {
+        // Every flag campaign hands a child `run` must be accepted by the child's
+        // own parser. This is the detection gate for the flag-grammar drift class
+        // (the `--sleep-jitter-nanos 0:N` vs `0..N` regression): a campaign knob
+        // whose emitted spelling the run parser rejects fails HERE, not as a
+        // usage error inside every `--faults` generation at campaign runtime.
+        let spec = CampaignSpec {
+            buggify: true,
+            swarm: true,
+            pct: true,
+            faults: true,
+            watchdog_nanos: Some(1_000_000_000),
+            converge_nanos: Some(2_000_000_000),
+            heal_after_nanos: Some(500_000_000),
+            ..CampaignSpec::default()
+        };
+        for generation in 0..32 {
+            let hash = generation_hash(0, generation);
+            for family in ["wasi", "native"] {
+                let flags = derive_flags(&spec, &hash, family);
+                let mut child: Vec<OsString> = vec![OsString::from("artifact")];
+                child.extend(flags.iter().map(OsString::from));
+                let parsed = match family {
+                    "wasi" => crate::parse_wasi_run(child).map(|_| ()),
+                    _ => crate::parse_native_run(child).map(|_| ()),
+                };
+                parsed.unwrap_or_else(|error| {
+                    panic!(
+                        "gen {generation} {family} child rejected campaign-derived \
+                         flags {flags:?}: {error}"
+                    )
+                });
+            }
+        }
     }
 
     #[test]
