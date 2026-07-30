@@ -653,6 +653,22 @@ pub unsafe extern "C" fn patina_sud_dispatch(
     with_dispatch_guard(nr, || dispatch(nr, args))
 }
 
+/// Interpret a syscall-argument register as a 32-bit `int` fd/dirfd — exactly as
+/// the kernel does. The kernel reads fd/dirfd arguments as `int` (the low 32
+/// bits), so a caller may fill the upper 32 register bits either way:
+/// hand-written asm sign-extends a negative `AT_FDCWD` (-100 → `..FFFF_FF9C`),
+/// but rustix's `linux_raw` backend ZERO-extends it (`raw_fd` does
+/// `fd as c_uint as usize` → `0x0000_0000_FFFF_FF9C`). Reading the full 64-bit
+/// register as `i64` would then see `AT_FDCWD` as a large positive number and
+/// reject it (this exact gap made a rustix-default `openat(CWD, …)` return
+/// EINVAL). Truncating to `i32` first recovers the kernel's view regardless of
+/// how the upper bits were filled, and leaves every ordinary (small, positive)
+/// fd unchanged.
+#[inline]
+fn arg_fd(reg: u64) -> i64 {
+    reg as i32 as i64
+}
+
 fn dispatch(nr: i64, args: [u64; 6]) -> i64 {
     match nr {
         nr::CLOCK_GETTIME => sys_clock_gettime(args[0], args[1] as *mut Timespec),
@@ -661,11 +677,11 @@ fn dispatch(nr: i64, args: [u64; 6]) -> i64 {
         nr::NANOSLEEP => sys_nanosleep(args[0] as *const Timespec),
         nr::CLOCK_NANOSLEEP => sys_clock_nanosleep(args[0], args[1], args[2] as *const Timespec),
         nr::FUTEX => sys_futex(args),
-        nr::READ => sys_read(args[0] as i64, args[1], args[2]),
-        nr::WRITE => sys_write(args[0] as i64, args[1], args[2]),
-        nr::OPENAT => sys_openat(args[0] as i64, args[1], args[2]),
-        nr::CLOSE => sys_close(args[0] as i64),
-        nr::LSEEK => sys_lseek(args[0] as i64, args[1] as i64, args[2]),
+        nr::READ => sys_read(arg_fd(args[0]), args[1], args[2]),
+        nr::WRITE => sys_write(arg_fd(args[0]), args[1], args[2]),
+        nr::OPENAT => sys_openat(arg_fd(args[0]), args[1], args[2]),
+        nr::CLOSE => sys_close(arg_fd(args[0])),
+        nr::LSEEK => sys_lseek(arg_fd(args[0]), args[1] as i64, args[2]),
         nr::GETRANDOM => sys_getrandom(args[0], args[1], args[2]),
         nr::SCHED_YIELD => {
             // SAFETY: plain runtime entry, no pointers.
@@ -699,66 +715,70 @@ fn dispatch(nr: i64, args: [u64; 6]) -> i64 {
         nr::RT_SIGACTION => sys_rt_sigaction(args[0] as i64),
 
         // ---- Slice 2: filesystem ----
-        nr::PREAD64 => sys_pread(args[0] as i64, args[1], args[2], args[3] as i64),
-        nr::PWRITE64 => sys_pwrite(args[0] as i64, args[1], args[2], args[3] as i64),
-        nr::READV => sys_readv(args[0] as i64, args[1], args[2] as i64),
-        nr::WRITEV => sys_writev(args[0] as i64, args[1], args[2] as i64),
-        nr::FSYNC | nr::FDATASYNC => sys_fsync(args[0] as i64),
-        nr::FTRUNCATE => sys_ftruncate(args[0] as i64, args[1] as i64),
-        nr::FLOCK => sys_flock(args[0] as i64, args[1] as i64),
-        nr::DUP => sys_dup(args[0] as i64),
-        nr::DUP3 => sys_dup3(args[0] as i64, args[1] as i64, args[2] as i64),
-        nr::FCNTL => sys_fcntl(args[0] as i64, args[1], args[2]),
-        nr::IOCTL => sys_ioctl(args[0] as i64, args[1], args[2]),
+        // (fd/dirfd args go through `arg_fd`; `AT_FDCWD` and any negative fd are
+        // 32-bit `int`s the kernel reads from the low register bits.)
+        nr::PREAD64 => sys_pread(arg_fd(args[0]), args[1], args[2], args[3] as i64),
+        nr::PWRITE64 => sys_pwrite(arg_fd(args[0]), args[1], args[2], args[3] as i64),
+        nr::READV => sys_readv(arg_fd(args[0]), args[1], args[2] as i64),
+        nr::WRITEV => sys_writev(arg_fd(args[0]), args[1], args[2] as i64),
+        nr::FSYNC | nr::FDATASYNC => sys_fsync(arg_fd(args[0])),
+        nr::FTRUNCATE => sys_ftruncate(arg_fd(args[0]), args[1] as i64),
+        nr::FLOCK => sys_flock(arg_fd(args[0]), args[1] as i64),
+        nr::DUP => sys_dup(arg_fd(args[0])),
+        nr::DUP3 => sys_dup3(arg_fd(args[0]), arg_fd(args[1]), args[2] as i64),
+        nr::FCNTL => sys_fcntl(arg_fd(args[0]), args[1], args[2]),
+        nr::IOCTL => sys_ioctl(arg_fd(args[0]), args[1], args[2]),
         nr::PIPE2 => sys_pipe2(args[0], args[1]),
-        nr::FSTAT => sys_fstat(args[0] as i64, args[1]),
-        nr::NEWFSTATAT => sys_newfstatat(args[0] as i64, args[1], args[2], args[3]),
-        nr::STATX => sys_statx(args[0] as i64, args[1], args[2], args[4]),
-        nr::GETDENTS64 => sys_getdents64(args[0] as i64, args[1], args[2]),
-        nr::MKDIRAT => sys_mkdirat(args[0] as i64, args[1]),
-        nr::UNLINKAT => sys_unlinkat(args[0] as i64, args[1], args[2]),
-        nr::SYMLINKAT => sys_symlinkat(args[0], args[1] as i64, args[2]),
-        nr::READLINKAT => sys_readlinkat(args[0] as i64, args[1], args[2], args[3]),
-        nr::RENAMEAT => sys_renameat(args[0] as i64, args[1], args[2] as i64, args[3], 0),
-        nr::RENAMEAT2 => sys_renameat(args[0] as i64, args[1], args[2] as i64, args[3], args[4]),
+        nr::FSTAT => sys_fstat(arg_fd(args[0]), args[1]),
+        nr::NEWFSTATAT => sys_newfstatat(arg_fd(args[0]), args[1], args[2], args[3]),
+        nr::STATX => sys_statx(arg_fd(args[0]), args[1], args[2], args[4]),
+        nr::GETDENTS64 => sys_getdents64(arg_fd(args[0]), args[1], args[2]),
+        nr::MKDIRAT => sys_mkdirat(arg_fd(args[0]), args[1]),
+        nr::UNLINKAT => sys_unlinkat(arg_fd(args[0]), args[1], args[2]),
+        nr::SYMLINKAT => sys_symlinkat(args[0], arg_fd(args[1]), args[2]),
+        nr::READLINKAT => sys_readlinkat(arg_fd(args[0]), args[1], args[2], args[3]),
+        nr::RENAMEAT => sys_renameat(arg_fd(args[0]), args[1], arg_fd(args[2]), args[3], 0),
+        nr::RENAMEAT2 => sys_renameat(arg_fd(args[0]), args[1], arg_fd(args[2]), args[3], args[4]),
 
         // ---- Slice 2: network ----
         nr::SOCKET => sys_socket(args[0], args[1], args[2]),
-        nr::BIND => sys_bind(args[0] as i64, args[1], args[2] as u32),
-        nr::LISTEN => sys_listen(args[0] as i64, args[1] as i64),
-        nr::CONNECT => sys_connect(args[0] as i64, args[1], args[2] as u32),
-        nr::ACCEPT => sys_accept(args[0] as i64, args[1], args[2], 0),
-        nr::ACCEPT4 => sys_accept(args[0] as i64, args[1], args[2], args[3]),
+        nr::BIND => sys_bind(arg_fd(args[0]), args[1], args[2] as u32),
+        nr::LISTEN => sys_listen(arg_fd(args[0]), args[1] as i64),
+        nr::CONNECT => sys_connect(arg_fd(args[0]), args[1], args[2] as u32),
+        nr::ACCEPT => sys_accept(arg_fd(args[0]), args[1], args[2], 0),
+        nr::ACCEPT4 => sys_accept(arg_fd(args[0]), args[1], args[2], args[3]),
         nr::SENDTO => sys_sendto(
-            args[0] as i64,
+            arg_fd(args[0]),
             args[1],
             args[2],
             args[3],
             args[4],
             args[5] as u32,
         ),
-        nr::RECVFROM => sys_recvfrom(args[0] as i64, args[1], args[2], args[3], args[4], args[5]),
-        nr::SENDMSG => sys_sendmsg(args[0] as i64, args[1], args[2]),
-        nr::RECVMSG => sys_recvmsg(args[0] as i64, args[1], args[2]),
-        nr::SHUTDOWN => sys_shutdown(args[0] as i64, args[1]),
-        nr::GETSOCKNAME => sys_getsockname(args[0] as i64, args[1], args[2]),
-        nr::GETPEERNAME => sys_getpeername(args[0] as i64, args[1], args[2]),
-        nr::SETSOCKOPT => sys_setsockopt(args[0] as i64, args[1], args[2], args[3], args[4] as u32),
-        nr::GETSOCKOPT => sys_getsockopt(args[0] as i64, args[3], args[4]),
+        nr::RECVFROM => sys_recvfrom(arg_fd(args[0]), args[1], args[2], args[3], args[4], args[5]),
+        nr::SENDMSG => sys_sendmsg(arg_fd(args[0]), args[1], args[2]),
+        nr::RECVMSG => sys_recvmsg(arg_fd(args[0]), args[1], args[2]),
+        nr::SHUTDOWN => sys_shutdown(arg_fd(args[0]), args[1]),
+        nr::GETSOCKNAME => sys_getsockname(arg_fd(args[0]), args[1], args[2]),
+        nr::GETPEERNAME => sys_getpeername(arg_fd(args[0]), args[1], args[2]),
+        nr::SETSOCKOPT => {
+            sys_setsockopt(arg_fd(args[0]), args[1], args[2], args[3], args[4] as u32)
+        }
+        nr::GETSOCKOPT => sys_getsockopt(arg_fd(args[0]), args[3], args[4]),
 
         // ---- Slice 2: readiness reactor + eventfd ----
         nr::EPOLL_CREATE1 => sys_epoll_create1(args[0]),
-        nr::EPOLL_CTL => sys_epoll_ctl(args[0] as i64, args[1] as i64, args[2] as i64, args[3]),
-        nr::EPOLL_WAIT => sys_epoll_wait(args[0] as i64, args[1], args[2] as i64, args[3] as i64),
+        nr::EPOLL_CTL => sys_epoll_ctl(arg_fd(args[0]), args[1] as i64, arg_fd(args[2]), args[3]),
+        nr::EPOLL_WAIT => sys_epoll_wait(arg_fd(args[0]), args[1], args[2] as i64, args[3] as i64),
         nr::EPOLL_PWAIT => sys_epoll_pwait(
-            args[0] as i64,
+            arg_fd(args[0]),
             args[1],
             args[2] as i64,
             args[3] as i64,
             args[4],
         ),
         nr::EPOLL_PWAIT2 => {
-            sys_epoll_pwait2(args[0] as i64, args[1], args[2] as i64, args[3], args[4])
+            sys_epoll_pwait2(arg_fd(args[0]), args[1], args[2] as i64, args[3], args[4])
         }
         nr::EVENTFD2 => sys_eventfd2(args[0], args[1] as i64),
 
@@ -2434,6 +2454,30 @@ fn unmapped(nr: i64, args: [u64; 6]) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arg_fd_reads_int_fds_the_way_the_kernel_does() {
+        // The kernel reads fd/dirfd as a 32-bit `int` (low register bits). A
+        // caller may sign-extend a negative fd (hand asm) OR zero-extend it
+        // (rustix's linux_raw `raw_fd` does `fd as c_uint as usize`): both leave
+        // the same low 32 bits, and `arg_fd` must recover the same `int`.
+        // RED: reading the raw register as `i64` (the pre-fix behavior) makes the
+        // zero-extended cases below large positive numbers, so `AT_FDCWD`
+        // miscompares and a rustix `openat(CWD, …)` returns EINVAL.
+        assert_eq!(arg_fd(0x0000_0000_FFFF_FF9C), AT_FDCWD); // rustix zero-extended AT_FDCWD
+        assert_eq!(arg_fd(0xFFFF_FFFF_FFFF_FF9C), AT_FDCWD); // hand-asm sign-extended AT_FDCWD
+        assert_eq!(arg_fd(0x0000_0000_FFFF_FFFF), -1); // zero-extended -1
+        assert_eq!(arg_fd(0), 0);
+        assert_eq!(arg_fd(5), 5);
+        assert_eq!(
+            arg_fd(PATINA_SOCKET_FD_BASE as u64 + 5),
+            PATINA_SOCKET_FD_BASE + 5
+        );
+        assert_eq!(
+            arg_fd(PATINA_SUD_DIR_FD_BASE as u64),
+            PATINA_SUD_DIR_FD_BASE as i64
+        );
+    }
 
     #[test]
     fn sendmsg_recvmsg_mirror_the_interposer_enosys_never_fragment() {
