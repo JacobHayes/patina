@@ -235,7 +235,9 @@ pub type NativeDenyTrapSymbol = (&'static str, &'static str);
 /// `__APPLE__`-only, `pidfd_*`/`waitid`/`posix_spawn_file_actions_addchdir*` are
 /// `__linux__`-only — so [`native_deny_trap_armed`] reports exactly the
 /// platform-correct subset by intersecting this union with the binary's real
-/// symbol table. The data-symbol bindings the shim also defines (`kCFAllocator*`,
+/// symbol table (macOS ld64 further narrows it to the *referenced* traps; ELF
+/// structurally cannot — see [`native_deny_trap_armed`]).
+/// The data-symbol bindings the shim also defines (`kCFAllocator*`,
 /// `mach_task_self_`, ...) are deliberately absent: reading a data symbol does not
 /// abort, so it is not deny-trap armed.
 ///
@@ -319,11 +321,18 @@ pub struct NativeDenyTrap {
 /// strong def drops the symbol off the *import* table, so a defined match is the
 /// only post-link evidence the binary carries the armed surface at all. The naive
 /// worry is that every shim-linked binary defines the whole shim object and so
-/// would report identically — but the final link dead-strips an unreferenced trap:
-/// macOS `ld64` at atom granularity, and ELF `--gc-sections` (rustc's default)
-/// when the shim object is per-function-sectioned. So a trap symbol survives into
-/// the binary essentially iff the guest (transitively) references it, which is
-/// exactly the "this run can fail later HERE" set we want to surface. A binary
+/// would report identically — and on ELF that is exactly what happens, by
+/// STRUCTURAL necessity: the linker auto-exports every executable definition that
+/// shadows a libc symbol to `.dynsym` (that export is what lets the shim interpose
+/// glibc-internal calls at all), and a dynamic-exported symbol is a permanent GC
+/// root, so no sectioning or `--gc-sections` arrangement can drop an unreferenced
+/// trap (empirically confirmed: per-function-sectioned traps survived the link in
+/// `.dynsym`). Suppressing the export (hidden visibility / dynamic lists) would
+/// let a shared-library-internal call to a trapped symbol ESCAPE the trap — a
+/// weakened runtime guarantee — so ELF deliberately reports the truthful full
+/// armed union. On macOS, ld64 dead-strips at atom granularity and two-level
+/// namespace means no `.dynsym`-style root, so a trap symbol survives essentially
+/// iff the guest (transitively) references it — the note is precise there. A binary
 /// whose target did not compile a given member simply never defines it, so the
 /// platform-correct subset falls out for free. Fails closed on a parse error or a
 /// non-native format (a foreign input is never reported as clean).
@@ -351,6 +360,62 @@ pub fn native_deny_trap_armed(bytes: &[u8]) -> Result<Vec<NativeDenyTrap>, Targe
             symbol: symbol.to_owned(),
             class,
         })
+        .collect())
+}
+
+/// Load-bearing Linux shim interposers that MUST survive every guest link even
+/// when the guest references NONE of them directly (normalized names, ELF).
+///
+/// These are reached through paths a defined/undefined-reference scan cannot see —
+/// the `printf` family and the `stdout`/`stderr` sentinel globals are what keep
+/// glibc's OWN internal stdio away from the sentinel `FILE` handles (an
+/// un-interposed glibc `printf` aborts on the sentinel), and the deterministic-IO
+/// interposers (`open`/`read`/`write`/`close`, `pthread_create`) are the runtime's
+/// containment surface. If any future link change (gc flags, sectioning,
+/// visibility, object staging) dropped one, a determinism hole (host stdio leak or
+/// the sentinel abort) would reopen SILENTLY; [`native_missing_live_interposers`]
+/// turns that into a loud, fail-closed check.
+pub const NATIVE_LINUX_LIVE_INTERPOSERS: &[&str] = &[
+    "printf",
+    "fprintf",
+    "vfprintf",
+    "fputs",
+    "fwrite",
+    "puts",
+    "putchar",
+    "fputc",
+    "stdout",
+    "stderr",
+    "open",
+    "read",
+    "write",
+    "close",
+    "pthread_create",
+];
+
+/// The names in `required` that the native binary `bytes` does NOT define
+/// (normalized, sorted). An empty result means every required interposer survived
+/// the link. Fails closed on a foreign/unparseable format (never reports a
+/// non-native blob as fully satisfied). This is the guard that turns "the link
+/// dropped a load-bearing interposer" from a silent determinism hole into a loud
+/// failure; see [`NATIVE_LINUX_LIVE_INTERPOSERS`].
+pub fn native_missing_live_interposers(
+    bytes: &[u8],
+    required: &[&str],
+) -> Result<Vec<String>, TargetError> {
+    let file = object::File::parse(bytes).map_err(TargetError::NativeParse)?;
+    NativeFormat::from_binary(file.format())?;
+    let defined: BTreeSet<String> = file
+        .symbols()
+        .chain(file.dynamic_symbols())
+        .filter(|symbol| symbol.is_definition())
+        .filter_map(|symbol| symbol.name().ok())
+        .map(|name| normalize_native_symbol(name).to_owned())
+        .collect();
+    Ok(required
+        .iter()
+        .filter(|name| !defined.contains(**name))
+        .map(|name| (*name).to_owned())
         .collect())
 }
 
@@ -3366,6 +3431,18 @@ mod tests {
         assert!(
             native_deny_trap_armed(&wasm).is_err(),
             "a foreign input must never be reported as carrying no armed surface"
+        );
+    }
+
+    #[test]
+    fn live_interposer_scan_fails_closed_on_a_foreign_input() {
+        // The guard must never report a foreign blob as fully satisfying the
+        // required set (which would read as "all interposers present"); a
+        // non-native input is an error, not an empty missing-list.
+        let wasm = module_importing(WASI_PREVIEW1_MODULE, "random_get");
+        assert!(
+            native_missing_live_interposers(&wasm, NATIVE_LINUX_LIVE_INTERPOSERS).is_err(),
+            "a foreign input must fail closed, never report zero missing interposers"
         );
     }
 }

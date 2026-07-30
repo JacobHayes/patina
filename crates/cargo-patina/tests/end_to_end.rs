@@ -1936,9 +1936,13 @@ fn main() {
 // print a non-blocking stderr note naming EXACTLY the referenced armed symbol and
 // its class, so the "fails later" contract is visible before the guest launches —
 // while the dormant guest still runs to completion (the note never blocks).
-// macOS-gated like its sibling deny-trap tests: the note's precision relies on the
-// final link dead-stripping an *unreferenced* trap, which ld64 does at atom
-// granularity, so a defined match means the guest genuinely references it.
+// The note's precision relies on the final link dead-stripping an *unreferenced*
+// trap so a defined match means the guest genuinely references it. Only ld64 can do
+// that (atom granularity), so this test is macOS-only: on ELF every libc-shadowing
+// definition is auto-exported to `.dynsym` (that export is what lets the shim
+// interpose glibc-internal calls at all) and a dynamic-exported symbol is a
+// permanent GC root, so the ELF note truthfully reports the full armed union
+// instead (see `native_deny_trap_armed`).
 #[cfg(target_os = "macos")]
 #[test]
 fn native_audit_and_run_note_a_referenced_deny_trap_symbol() {
@@ -2040,6 +2044,89 @@ fn native_audit_and_run_emit_no_deny_trap_note_when_none_referenced() {
     assert!(
         String::from_utf8_lossy(&ran.stdout).contains("PLAIN_OK"),
         "the plain guest must run to completion"
+    );
+}
+
+// Detection guard (RED-proven): no future link change (gc flags, sectioning,
+// visibility, staging) may silently drop a load-bearing interposer. On ELF the
+// printf family, the stdout/stderr sentinels, and the deterministic-IO interposers
+// are reached through glibc-internal paths a defined/undefined scan cannot see, so
+// a plain guest references none of them directly — yet ALL must survive the link.
+// If one ever went missing, a determinism hole (host stdio leak / sentinel abort)
+// would reopen silently; this turns that into a loud test failure.
+#[cfg(target_os = "linux")]
+#[test]
+fn native_live_interposers_survive_the_link() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("plain.rs");
+    fs::write(&source, "fn main() { println!(\"PLAIN_OK\"); }\n").unwrap();
+    let bin = directory.path().join("plain-bin");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let bytes = fs::read(&bin).unwrap();
+    let missing = patina_dst_target::native_missing_live_interposers(
+        &bytes,
+        patina_dst_target::NATIVE_LINUX_LIVE_INTERPOSERS,
+    )
+    .unwrap();
+    assert!(
+        missing.is_empty(),
+        "the link dropped load-bearing interposer(s) from the emitted ELF: {missing:?}"
+    );
+}
+
+// The live-interposer guard's detection logic, proven both directions on a real
+// binary (macOS-gated because it only needs to build one; the Linux gc-safety
+// invariant is `native_live_interposers_survive_the_link`). A guest that calls
+// `printf` links+defines it, so the guard confirms a present interposer and, with a
+// name no binary defines, flags an absent one — the assertion is non-vacuous.
+#[cfg(target_os = "macos")]
+#[test]
+fn native_live_interposer_guard_detects_presence_and_absence() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("printer.rs");
+    fs::write(
+        &source,
+        r#"unsafe extern "C" {
+    fn printf(format: *const u8, ...) -> i32;
+}
+fn main() {
+    unsafe { printf(b"HELLO\n\0".as_ptr()); }
+}
+"#,
+    )
+    .unwrap();
+    let bin = directory.path().join("printer-bin");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let bytes = fs::read(&bin).unwrap();
+    assert!(
+        patina_dst_target::native_missing_live_interposers(&bytes, &["printf"])
+            .unwrap()
+            .is_empty(),
+        "a referenced interposer must be reported present"
+    );
+    assert_eq!(
+        patina_dst_target::native_missing_live_interposers(&bytes, &["patina_absent_marker_xyz"])
+            .unwrap(),
+        vec!["patina_absent_marker_xyz".to_string()],
+        "the guard must flag a name the binary does not define"
     );
 }
 
