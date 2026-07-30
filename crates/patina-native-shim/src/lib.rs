@@ -359,19 +359,6 @@ mod hostapi {
     // (which marks post-`main` teardown) can terminate the process without
     // recursing into itself. `exit` does not return.
     pub type HostExit = unsafe extern "C" fn(c_int) -> !;
-    // The real libc allocator, resolved through `RTLD_NEXT`. A Rust
-    // `#[global_allocator]` replaces `__rust_alloc`, NOT the C `malloc`/`free`
-    // symbols, so `RTLD_NEXT` reaches libSystem's allocator even when the guest
-    // installs jemalloc — and libSystem malloc's own internal locks are bound
-    // inside libSystem (two-level namespace), never through the shim's
-    // interposers, so the shim's synchronization-table storage can allocate here
-    // without recursing into the guest allocator or the shim's own lock gate. This
-    // is what keeps the interposer-reachable sync tables OFF the guest allocator
-    // (see `hostcoll`), so a custom global allocator whose init takes an
-    // interposed lock cannot re-enter and deadlock before `main`.
-    pub type HostMalloc = unsafe extern "C" fn(usize) -> *mut c_void;
-    pub type HostFree = unsafe extern "C" fn(*mut c_void);
-    pub type HostRealloc = unsafe extern "C" fn(*mut c_void, usize) -> *mut c_void;
     // The real `os_unfair_lock` primitive. The lock interposers forward here — run
     // the lock natively instead of routing through the scheduler — for an
     // allocator-INTERNAL `os_unfair_lock` (tikv-jemallocator's `malloc_mutex`): in
@@ -417,11 +404,6 @@ mod hostapi {
         /// marks post-`main` teardown; resolving it here keeps the interposer from
         /// naming (and recursing into) the public `exit` it defines.
         pub host_exit: HostExit,
-        /// The real libc allocator (libSystem), backing the shim's off-guest-
-        /// allocator synchronization tables. See [`HostMalloc`].
-        pub host_malloc: HostMalloc,
-        pub host_free: HostFree,
-        pub host_realloc: HostRealloc,
         /// The real `os_unfair_lock` primitive, used to run an allocator's
         /// pre-activation init locks natively. See [`OsUnfairLockOp`].
         pub host_os_unfair_lock_lock: OsUnfairLockOp,
@@ -492,9 +474,6 @@ mod hostapi {
                     c"write$NOCANCEL",
                 )),
                 host_exit: std::mem::transmute::<*mut c_void, HostExit>(resolve(c"exit")),
-                host_malloc: std::mem::transmute::<*mut c_void, HostMalloc>(resolve(c"malloc")),
-                host_free: std::mem::transmute::<*mut c_void, HostFree>(resolve(c"free")),
-                host_realloc: std::mem::transmute::<*mut c_void, HostRealloc>(resolve(c"realloc")),
                 host_os_unfair_lock_lock: std::mem::transmute::<*mut c_void, OsUnfairLockOp>(
                     resolve(c"os_unfair_lock_lock"),
                 ),
@@ -582,15 +561,6 @@ mod hostapi {
     // integer passed in registers, so a fixed-arity call is ABI-compatible.
     pub type HostSyscall =
         unsafe extern "C" fn(c_long, c_long, c_long, c_long, c_long, c_long, c_long) -> c_long;
-    // The real glibc allocator, resolved through `RTLD_NEXT`. A Rust
-    // `#[global_allocator]` replaces `__rust_alloc`, NOT the C `malloc`/`free`
-    // symbols, so this reaches glibc's allocator even when the guest installs
-    // jemalloc, and glibc malloc's own locks are internal to libc, never the
-    // shim's interposers — so the shim's synchronization-table storage allocates
-    // here without recursing into the guest allocator (see `hostcoll`).
-    pub type HostMalloc = unsafe extern "C" fn(usize) -> *mut c_void;
-    pub type HostFree = unsafe extern "C" fn(*mut c_void);
-    pub type HostRealloc = unsafe extern "C" fn(*mut c_void, usize) -> *mut c_void;
 
     /// Real host vehicles resolved once through `__real_dlsym(RTLD_NEXT, ...)`.
     /// None of these names appears as an undefined external in the shim objects.
@@ -623,11 +593,6 @@ mod hostapi {
         /// The real glibc `syscall(2)` wrapper, the SUD dispatcher's pass-through
         /// vehicle for process-local memory-management rows.
         pub host_syscall: HostSyscall,
-        /// The real glibc allocator, backing the shim's off-guest-allocator
-        /// synchronization tables. See [`HostMalloc`].
-        pub host_malloc: HostMalloc,
-        pub host_free: HostFree,
-        pub host_realloc: HostRealloc,
     }
 
     // SAFETY: the fields are function pointers into glibc; sharing them across
@@ -669,9 +634,6 @@ mod hostapi {
                     c"pthread_join",
                 )),
                 host_syscall: std::mem::transmute::<*mut c_void, HostSyscall>(resolve(c"syscall")),
-                host_malloc: std::mem::transmute::<*mut c_void, HostMalloc>(resolve(c"malloc")),
-                host_free: std::mem::transmute::<*mut c_void, HostFree>(resolve(c"free")),
-                host_realloc: std::mem::transmute::<*mut c_void, HostRealloc>(resolve(c"realloc")),
             }
         }
     }
@@ -695,14 +657,21 @@ mod hostapi {
 // registration and deadlock/double-init before `main` (the tikv-jemallocator
 // blocker: `malloc_init_hard` -> `os_unfair_lock` -> shim interposer ->
 // `entry().or_default()` -> guest `__rust_alloc` -> `malloc_init_hard` again).
-// Backing them with the real libc `malloc`/`free`/`realloc` resolved through the
-// host-alias table keeps them entirely off the guest allocator: a Rust
-// `#[global_allocator]` replaces `__rust_alloc`, never the C `malloc` symbol, so
-// `RTLD_NEXT` reaches libSystem/glibc's allocator, whose internal locks are bound
-// inside libc and are not interposed — exactly why the DEFAULT-allocator shim
-// never deadlocked here. Minimal by design (unsorted linear probing over a
-// host-`realloc`'d array; the number of live locks is tiny) and never touched by
-// the fingerprint (map order is never iterated). No `allocator_api` (stable-only).
+// Backing them with the real libc `malloc`/`free`/`realloc` keeps them entirely
+// off the guest allocator: a Rust `#[global_allocator]` replaces `__rust_alloc`,
+// never the C `malloc` symbol, so these bind to libSystem/glibc's allocator, whose
+// internal locks are bound inside libc and are not interposed — exactly why the
+// DEFAULT-allocator shim never deadlocked here. The allocator is bound DIRECTLY as
+// an `extern "C"` symbol (below), NOT resolved through the host-alias `dlsym`
+// table: that table's Linux resolver reaches the real glibc `dlsym` through
+// `__real_dlsym` (the `-Wl,--wrap=dlsym` alias), which only a `cargo patina build`
+// binary links — the plain Rust lib-test binary links neither `patina_posix.c` nor
+// the wrap, so `__real_dlsym` is an UNRESOLVED WEAK NULL and calling it SIGSEGVs.
+// A direct `extern "C"` reference makes `hostcoll` self-sufficient in ANY link
+// context (interposing guest, default guest, unit-test lib) with no `cfg(test)`
+// divergence. Minimal by design (unsorted linear probing over a host-`realloc`'d
+// array; the number of live locks is tiny) and never touched by the fingerprint
+// (map order is never iterated). No `allocator_api` (stable-only).
 mod hostcoll {
     use std::ffi::c_void;
     use std::marker::PhantomData;
@@ -710,15 +679,25 @@ mod hostcoll {
     use std::ptr;
     use std::slice;
 
+    // The real host libc allocator. A Rust `#[global_allocator]` (jemalloc) only
+    // replaces `__rust_alloc`, so the C `malloc`/`free`/`realloc` symbols still
+    // resolve to libSystem/glibc in every link context — including the lib-test
+    // binary, where they are the ordinary (non-interposed) host allocator.
+    unsafe extern "C" {
+        fn malloc(size: usize) -> *mut c_void;
+        fn free(ptr: *mut c_void);
+        fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
+    }
+
     unsafe fn host_grow(ptr: *mut u8, size: usize) -> *mut u8 {
         // SAFETY: `ptr` is either null (fresh allocation via `malloc`) or a live
         // host block from this module (grown via `realloc`); `size` is a valid
         // nonzero byte count.
         let grown = unsafe {
             if ptr.is_null() {
-                (super::hostapi::get().host_malloc)(size)
+                malloc(size)
             } else {
-                (super::hostapi::get().host_realloc)(ptr.cast(), size)
+                realloc(ptr.cast(), size)
             }
         };
         assert!(
@@ -731,7 +710,7 @@ mod hostcoll {
     unsafe fn host_free(ptr: *mut u8) {
         if !ptr.is_null() {
             // SAFETY: `ptr` is a live host-`malloc` block from this module.
-            unsafe { (super::hostapi::get().host_free)(ptr.cast::<c_void>()) };
+            unsafe { free(ptr.cast::<c_void>()) };
         }
     }
 
