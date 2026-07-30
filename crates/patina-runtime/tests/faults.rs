@@ -327,3 +327,46 @@ fn net_jitter_reorders_datagrams_relative_to_send_order() {
         "net jitter never reordered across seeds"
     );
 }
+
+#[test]
+fn net_faults_delay_the_tcp_stream_without_losing_data() {
+    // Establish one loopback stream and push a segment, returning whether it was
+    // readable at the send instant (t=0) and after advancing the virtual clock.
+    fn stream_once<F: Fn(RuntimeConfig) -> RuntimeConfig>(configure: F) -> (bool, Vec<u8>) {
+        let mut context = Context::from_config(configure(RuntimeConfig::seeded(4))).unwrap();
+        let listener = context.net_tcp_listen("server", 8).unwrap();
+        let client = context.net_tcp_connect("client", "server").unwrap();
+        let server = context.net_tcp_accept(listener).unwrap().unwrap().socket;
+        context.net_tcp_send(client, b"hello").unwrap();
+        let at_send = context.net_tcp_recv(server, 64).unwrap();
+        let mut delivered = at_send.clone().unwrap_or_default();
+        // Advance well past the bounded retransmit + jitter ceiling.
+        context.sleep_for(1_000_000_000).unwrap();
+        if let Some(bytes) = context.net_tcp_recv(server, 64).unwrap() {
+            delivered.extend_from_slice(&bytes);
+        }
+        context.finish().unwrap();
+        (at_send.is_some(), delivered)
+    }
+
+    // Control: no fault knobs -> the stream delivers immediately and intact.
+    let (clean_ready, clean_bytes) = stream_once(|config| config);
+    assert!(clean_ready, "without faults a TCP segment is readable at once");
+    assert_eq!(clean_bytes, b"hello");
+
+    // Jitter: the fault reaches the TCP path through the runtime, so the segment
+    // is NOT readable at the send instant, yet the reliable stream never loses
+    // it once the clock advances.
+    let (jitter_ready, jitter_bytes) = stream_once(|config| config.with_net_jitter_nanos(1, 50_000));
+    assert!(
+        !jitter_ready,
+        "net jitter must delay TCP delivery — the fault knob is inert on the stream path otherwise"
+    );
+    assert_eq!(jitter_bytes, b"hello", "TCP jitter must never lose data");
+
+    // Drop: a reliable stream retransmits, so a dropped segment is delayed, not
+    // lost — the TCP contract the datagram drop knob would otherwise violate.
+    let (drop_ready, drop_bytes) = stream_once(|config| config.with_net_drop_permille(1000));
+    assert!(!drop_ready, "a dropped TCP segment is retransmitted (delayed)");
+    assert_eq!(drop_bytes, b"hello", "TCP drop must never lose data");
+}

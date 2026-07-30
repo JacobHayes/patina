@@ -6,8 +6,18 @@ use patina_dst_abi::{
     Datagram, EffectError, ErrorCode, SendDisposition, SendReport, ShutdownHow, SocketId,
     TcpAccepted,
 };
-use patina_dst_driver_api::{DriverResult, NetDriver, NetReadiness};
+use patina_dst_driver_api::{DriverResult, NetDriver, NetFaultReport, NetReadiness};
 use patina_dst_rng_seeded::SplitMix64;
+
+/// TCP drop-retransmit backoff. A stream is reliable, so a "dropped" segment is
+/// never lost — it is retransmitted after a retransmission timeout that doubles
+/// per loss, is capped, and gives up after a bounded number of attempts (the
+/// segment then delivers anyway). The base is deliberately small relative to
+/// the millisecond-scale application timers a stream app uses, so a fault run
+/// perturbs the delivery schedule without starving a liveness deadline.
+const TCP_RETRANSMIT_BASE_NANOS: u64 = 200_000;
+const TCP_RETRANSMIT_CAP_NANOS: u64 = 2_000_000;
+const TCP_MAX_RETRANSMITS: u32 = 6;
 
 #[derive(Default)]
 pub struct SimNetBuilder {
@@ -101,6 +111,8 @@ impl SimNetBuilder {
             fault_rng: SplitMix64::new(self.fault_seed),
             jitter_nanos: self.jitter_nanos,
             drop_permille: self.drop_permille,
+            fault_send_ops: 0,
+            faults_applied: 0,
         })
     }
 }
@@ -160,6 +172,14 @@ pub struct SimNet {
     fault_rng: SplitMix64,
     jitter_nanos: Option<(u64, u64)>,
     drop_permille: u16,
+    /// Fault-eligible send operations observed: datagram `send`s that reached
+    /// the fault-decision point (not pre-empted by a partition) plus `tcp_send`s
+    /// that enqueued a segment. Backs the vacuity diagnostic.
+    fault_send_ops: u64,
+    /// Fault-eligible sends that actually had a fault effect applied — a dropped
+    /// datagram, or a send whose delivery was pushed later by jitter or a TCP
+    /// drop-retransmit backoff.
+    faults_applied: u64,
 }
 
 impl SimNet {
@@ -207,6 +227,46 @@ impl SimNet {
                 min + (self.fault_rng.next_u64() % span)
             }
         }
+    }
+
+    /// Seeded fault delivery time for one enqueued TCP segment. TCP is
+    /// reliable, so a drop is NOT data loss: it is a retransmit that delays the
+    /// segment by an RTO-style backoff (doubling per loss, capped, bounded
+    /// attempts), after which it delivers regardless. Per-segment jitter then
+    /// adds delivery latency. In-stream ordering is preserved by never letting a
+    /// segment's deadline fall before the last already-buffered one (a later
+    /// segment can be delayed relative to another connection — reorder across
+    /// streams — but never ahead of an earlier byte on its own stream).
+    ///
+    /// Draws from the same seeded stream as the datagram path, in a fixed order
+    /// (drop-retransmit, then jitter), so consumption is a pure function of the
+    /// send sequence and reproduces byte-identically across record and replay.
+    /// Decision-free configs (drop 0/1000, no jitter, jitter min==max) draw
+    /// nothing, so a run with the knobs off never perturbs the stream.
+    fn draw_tcp_fault_delivery(&mut self, base_delivery: u64, last_delivery: Option<u64>) -> u64 {
+        self.fault_send_ops += 1;
+        let mut delivery = base_delivery;
+        let mut applied = false;
+        let mut backoff = TCP_RETRANSMIT_BASE_NANOS;
+        let mut retries = 0u32;
+        while retries < TCP_MAX_RETRANSMITS && self.decide_drop() {
+            delivery = delivery.saturating_add(backoff);
+            backoff = backoff.saturating_mul(2).min(TCP_RETRANSMIT_CAP_NANOS);
+            retries += 1;
+            applied = true;
+        }
+        let jitter = self.draw_jitter();
+        if jitter > 0 {
+            delivery = delivery.saturating_add(jitter);
+            applied = true;
+        }
+        if let Some(last) = last_delivery {
+            delivery = delivery.max(last);
+        }
+        if applied {
+            self.faults_applied += 1;
+        }
+        delivery
     }
 
     fn allocate_socket(&mut self) -> DriverResult<SocketId> {
@@ -275,7 +335,12 @@ impl NetDriver for SimNet {
         // the stream is a stable function of the send sequence. A dropped
         // datagram still reports the bytes as written — a lossy UDP send
         // succeeds locally — but queues no packet, so the peer never receives it.
+        // Count this as a fault-eligible send (the vacuity diagnostic) — it
+        // reached the knob-decision point rather than being pre-empted by a
+        // partition. Counting does not consume the fault RNG or alter outcomes.
+        self.fault_send_ops += 1;
         if self.decide_drop() {
+            self.faults_applied += 1;
             return Ok(SendReport {
                 written: bytes.len(),
                 copies: 0,
@@ -284,6 +349,9 @@ impl NetDriver for SimNet {
             });
         }
         let jitter = self.draw_jitter();
+        if jitter > 0 {
+            self.faults_applied += 1;
+        }
         let delivery_nanos = delivery_nanos
             .checked_add(self.base_latency_nanos)
             .and_then(|value| value.checked_add(jitter))
@@ -506,22 +574,38 @@ impl NetDriver for SimNet {
         if bytes.is_empty() {
             return Ok(0);
         }
+        // Read the peer's buffer state, then release the borrow before drawing
+        // faults (which mutably borrows the shared fault RNG).
+        let (available, last_delivery) = {
+            let peer_endpoint = self
+                .tcp_endpoints
+                .get(&peer)
+                .ok_or_else(|| tcp_reset(socket))?;
+            if peer_endpoint.read_closed {
+                return Ok(bytes.len());
+            }
+            (
+                self.tcp_buffer_bytes - peer_endpoint.inbox_bytes,
+                peer_endpoint.inbox.back().map(|segment| segment.delivery_nanos),
+            )
+        };
+        let accepted = bytes.len().min(available);
+        if accepted == 0 {
+            return Ok(0);
+        }
+        // Seeded stream faults: retransmit backoff (never loses data) + jitter,
+        // clamped to preserve in-stream ordering. Drawn only for a segment that
+        // is actually enqueued, so a would-block send consumes no fault RNG.
+        let delivery = self.draw_tcp_fault_delivery(delivery_nanos, last_delivery);
         let peer_endpoint = self
             .tcp_endpoints
             .get_mut(&peer)
             .ok_or_else(|| tcp_reset(socket))?;
-        if peer_endpoint.read_closed {
-            return Ok(bytes.len());
-        }
-        let available = self.tcp_buffer_bytes - peer_endpoint.inbox_bytes;
-        let accepted = bytes.len().min(available);
-        if accepted > 0 {
-            peer_endpoint.inbox.push_back(TcpSegment {
-                delivery_nanos,
-                bytes: bytes[..accepted].to_vec(),
-            });
-            peer_endpoint.inbox_bytes += accepted;
-        }
+        peer_endpoint.inbox.push_back(TcpSegment {
+            delivery_nanos: delivery,
+            bytes: bytes[..accepted].to_vec(),
+        });
+        peer_endpoint.inbox_bytes += accepted;
         Ok(accepted)
     }
 
@@ -665,6 +749,18 @@ impl NetDriver for SimNet {
             });
         }
         Err(invalid_socket(socket))
+    }
+
+    fn fault_report(&self) -> Option<NetFaultReport> {
+        let could_apply = self.drop_permille > 0
+            || self
+                .jitter_nanos
+                .is_some_and(|(_, max)| max > 0);
+        Some(NetFaultReport {
+            could_apply,
+            send_ops: self.fault_send_ops,
+            faults_applied: self.faults_applied,
+        })
     }
 
     fn close(&mut self, socket: SocketId) -> DriverResult<()> {
@@ -1076,5 +1172,188 @@ mod tests {
         assert_eq!(net.tcp_recv(server, 16, 99).unwrap(), None);
         assert_eq!(net.tcp_recv(server, 16, 100).unwrap().unwrap(), b"later");
         assert_eq!(net.next_delivery(server, 100).unwrap(), None);
+    }
+
+    // --- TCP stream fault injection (jitter + drop-retransmit) ---
+
+    /// Open one client->server stream, send each payload as its own segment
+    /// (retrying through backpressure without advancing time), then drain the
+    /// server at `t=u64::MAX` (all deadlines due). Returns the concatenated
+    /// delivered bytes — the byte content and order the receiver observes.
+    fn tcp_stream_delivered(net: &mut SimNet, payloads: &[&[u8]]) -> Vec<u8> {
+        let listener = net.tcp_listen("server", payloads.len().max(1)).unwrap();
+        let client = net.tcp_connect("client", "server", 0).unwrap();
+        let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
+        for payload in payloads {
+            let mut offset = 0;
+            while offset < payload.len() {
+                offset += net.tcp_send(client, &payload[offset..], 0).unwrap();
+            }
+        }
+        let mut out = Vec::new();
+        while let Some(chunk) = net.tcp_recv(server, 4096, u64::MAX).unwrap() {
+            if chunk.is_empty() {
+                break;
+            }
+            out.extend_from_slice(&chunk);
+        }
+        out
+    }
+
+    #[test]
+    fn tcp_jitter_delays_delivery_preserves_order_and_reproduces_per_seed() {
+        // A nonzero jitter floor pushes every segment past t=0.
+        let mut net = SimNet::builder()
+            .fault_seed(9)
+            .jitter_nanos(1_000, 5_000)
+            .build()
+            .unwrap();
+        let listener = net.tcp_listen("server", 8).unwrap();
+        let client = net.tcp_connect("client", "server", 0).unwrap();
+        let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
+        assert_eq!(net.tcp_send(client, b"aa", 0).unwrap(), 2);
+        assert_eq!(
+            net.tcp_recv(server, 16, 0).unwrap(),
+            None,
+            "jitter must delay TCP delivery past the send instant"
+        );
+        assert_eq!(net.tcp_recv(server, 16, u64::MAX).unwrap().unwrap(), b"aa");
+
+        // Same seed reproduces byte-for-byte; order preserved; nothing lost.
+        let payloads: [&[u8]; 4] = [b"aa", b"bb", b"cc", b"dd"];
+        let mut first = SimNet::builder()
+            .fault_seed(9)
+            .jitter_nanos(1_000, 5_000)
+            .build()
+            .unwrap();
+        let mut second = SimNet::builder()
+            .fault_seed(9)
+            .jitter_nanos(1_000, 5_000)
+            .build()
+            .unwrap();
+        let delivered = tcp_stream_delivered(&mut first, &payloads);
+        assert_eq!(
+            delivered,
+            tcp_stream_delivered(&mut second, &payloads),
+            "same seed must reproduce the delivered byte stream"
+        );
+        assert_eq!(
+            delivered, b"aabbccdd",
+            "TCP is reliable and in-order: jitter reorders across streams, never within one"
+        );
+        let report = first.fault_report().unwrap();
+        assert!(report.could_apply);
+        assert!(report.send_ops >= 4);
+        assert!(report.faults_applied > 0, "jitter must register as applied");
+        assert!(!report.is_vacuous());
+    }
+
+    #[test]
+    fn tcp_drop_retransmits_and_never_loses_data() {
+        // Certain drop: every segment exhausts the retransmit budget, so
+        // delivery is delayed, but a reliable stream still delivers every byte.
+        let mut net = SimNet::builder()
+            .fault_seed(1)
+            .drop_permille(1000)
+            .build()
+            .unwrap();
+        let listener = net.tcp_listen("server", 1).unwrap();
+        let client = net.tcp_connect("client", "server", 0).unwrap();
+        let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
+        assert_eq!(net.tcp_send(client, b"reliable", 0).unwrap(), 8);
+        assert_eq!(
+            net.tcp_recv(server, 16, 0).unwrap(),
+            None,
+            "a dropped segment is retransmitted (delayed), not readable immediately"
+        );
+        assert_eq!(
+            net.tcp_recv(server, 16, u64::MAX).unwrap().unwrap(),
+            b"reliable",
+            "TCP drop must never lose data"
+        );
+        let report = net.fault_report().unwrap();
+        assert!(report.could_apply);
+        assert_eq!(report.faults_applied, 1);
+    }
+
+    #[test]
+    fn tcp_jitter_delivery_time_varies_across_seeds() {
+        fn first_delivery(seed: u64) -> u64 {
+            let mut net = SimNet::builder()
+                .fault_seed(seed)
+                .jitter_nanos(1, 1_000_000)
+                .build()
+                .unwrap();
+            let listener = net.tcp_listen("server", 1).unwrap();
+            let client = net.tcp_connect("client", "server", 0).unwrap();
+            let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
+            net.tcp_send(client, b"x", 0).unwrap();
+            net.next_delivery(server, 0)
+                .unwrap()
+                .expect("a delayed segment has a future delivery time")
+        }
+        // Different seeds draw different jitter, so the delivery schedule differs
+        // — the fault is not a constant.
+        let distinct = (0..8u64).map(first_delivery).collect::<BTreeSet<_>>();
+        assert!(
+            distinct.len() > 1,
+            "jitter delivery time must vary across seeds, got {distinct:?}"
+        );
+    }
+
+    #[test]
+    fn tcp_without_fault_knobs_perturbs_nothing() {
+        // The knobs-off default draws no fault RNG and delivers immediately, so
+        // every pre-fault TCP test stays byte-identical.
+        let mut net = SimNet::new();
+        let listener = net.tcp_listen("server", 1).unwrap();
+        let client = net.tcp_connect("client", "server", 0).unwrap();
+        let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
+        net.tcp_send(client, b"hi", 0).unwrap();
+        assert_eq!(
+            net.tcp_recv(server, 16, 0).unwrap().unwrap(),
+            b"hi",
+            "no delay without fault knobs"
+        );
+        let report = net.fault_report().unwrap();
+        assert!(!report.could_apply);
+        assert_eq!(report.faults_applied, 0);
+        assert_eq!(report.send_ops, 1);
+        assert!(!report.is_vacuous());
+    }
+
+    #[test]
+    fn fault_report_is_vacuous_exactly_on_the_silent_inertness_signature() {
+        use patina_dst_driver_api::NetFaultReport;
+        // The signature the pre-fix inert TCP path produced: knobs armed to
+        // perturb, traffic occurred, yet zero effects — the bug this diagnostic
+        // exists to catch.
+        assert!(NetFaultReport {
+            could_apply: true,
+            send_ops: 5,
+            faults_applied: 0,
+        }
+        .is_vacuous());
+        // Faults actually landed.
+        assert!(!NetFaultReport {
+            could_apply: true,
+            send_ops: 5,
+            faults_applied: 3,
+        }
+        .is_vacuous());
+        // Knobs incapable of any effect — silence is correct.
+        assert!(!NetFaultReport {
+            could_apply: false,
+            send_ops: 5,
+            faults_applied: 0,
+        }
+        .is_vacuous());
+        // No fault-eligible traffic — nothing to perturb.
+        assert!(!NetFaultReport {
+            could_apply: true,
+            send_ops: 0,
+            faults_applied: 0,
+        }
+        .is_vacuous());
     }
 }

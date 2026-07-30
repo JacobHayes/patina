@@ -143,6 +143,39 @@ pub struct NetReadiness {
     pub write_eof: bool,
 }
 
+/// End-of-run summary of network fault-injection activity, for the default-on
+/// vacuity diagnostic. A driver that models faults reports whether the
+/// configured knobs COULD apply (a nonzero drop probability or a nonzero jitter
+/// ceiling), how many fault-eligible send operations the run performed, and how
+/// many of those actually had a fault effect applied (a dropped datagram, or a
+/// send whose delivery time was pushed later by jitter or a drop-retransmit
+/// backoff). The runtime folds these into the machine-readable
+/// `PATINA_NET_FAULT_REPORT` line; when faults could apply and traffic occurred
+/// yet ZERO effects were applied, it raises a loud warning — the analogue of the
+/// vacuous-schedule diagnostic, catching the class where a fault knob is
+/// silently inert on a code path (historically: TCP streams).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NetFaultReport {
+    /// The configured knobs are capable of a nonzero effect (drop per-mille > 0
+    /// or a jitter ceiling > 0). A `false` here means the run was never asked to
+    /// perturb anything, so silence is expected and no warning is warranted.
+    pub could_apply: bool,
+    /// Fault-eligible send operations observed: datagram `send`s plus TCP
+    /// `tcp_send`s that enqueued bytes. Traffic that faults could have acted on.
+    pub send_ops: u64,
+    /// Send operations that actually had a fault effect applied.
+    pub faults_applied: u64,
+}
+
+impl NetFaultReport {
+    /// Whether this run's fault configuration went vacuously inert: the knobs
+    /// could have perturbed delivery, fault-eligible traffic occurred, yet not a
+    /// single fault effect landed. This is the silent-inertness bug signature.
+    pub fn is_vacuous(&self) -> bool {
+        self.could_apply && self.send_ops > 0 && self.faults_applied == 0
+    }
+}
+
 fn unsupported_network_operation(operation: &str) -> EffectError {
     EffectError::new(
         patina_dst_abi::ErrorCode::Denied,
@@ -329,6 +362,15 @@ pub trait NetDriver: Send {
     /// and wrappers forward it so wrapped latency stays visible.
     fn readiness(&self, _socket: SocketId, _now_nanos: u64) -> DriverResult<NetReadiness> {
         Ok(NetReadiness::default())
+    }
+
+    /// End-of-run network fault-injection summary for the default-on vacuity
+    /// diagnostic. A driver that models faults reports its counts; the default
+    /// (a driver with no fault model) reports `None` and is never diagnosed as
+    /// vacuous. A pure `&self` inspection read once at run finalization.
+    /// Wrappers forward it so a wrapped fault-modeling driver stays visible.
+    fn fault_report(&self) -> Option<NetFaultReport> {
+        None
     }
 
     fn close(&mut self, socket: SocketId) -> DriverResult<()>;

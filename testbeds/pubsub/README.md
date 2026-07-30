@@ -98,10 +98,20 @@ failing run to record + replay byte-identically.
 3. a recorded run strict-replays byte-identically;
 4. planted-bug catch: each `--bug` on its pinned seed MUST be caught with its
    expected marker (fail-closed: a clean pass fails the leg), and the failing
-   run records + replays byte-identically.
+   run records + replays byte-identically;
+5. TCP-stream fault leg: with `--net-jitter-nanos` + `--net-drop-permille` set,
+   each seed's run must still converge to the same order-invariant outcome hash
+   (a reliable stream reorders/delays but never loses data), the default-on
+   vacuity diagnostic must report the faults as APPLIED (`PATINA_NET_FAULT_REPORT
+   … vacuous=0`, never the "net fault knobs inert" warning), the faulted trace
+   must differ from the no-fault trace at the same seed (non-vacuity), and the
+   faulted run must record + strict-replay byte-identically.
 
-Honest scope notes: Patina's `--net-jitter-nanos` / `--net-drop-permille`
-fault knobs act on SimNet *datagrams* and are inert on the TCP stream path
-this app uses (verified: 100‰ drop converges byte-identically), so the gate
-carries no jitter/drop leg — schedule seeds are the perturbation axis here.
-That TCP-fault gap is recorded as a Patina finding, not designed around.
+Fault model: Patina's `--net-jitter-nanos` / `--net-drop-permille` knobs act on
+the SimNet TCP *stream* path this app uses (task #37). Jitter adds a seeded
+per-segment delivery delay; a "drop" is a reliable-transport retransmit — the
+segment's delivery is delayed by a bounded RTO backoff, never lost — and
+in-stream byte order is always preserved. Earlier revisions left these knobs
+inert on the stream path (they only touched datagrams); that silent inertness
+is now both fixed and guarded, by leg 5 above and by the default-on
+`PATINA_NET_FAULT_REPORT` vacuity diagnostic.

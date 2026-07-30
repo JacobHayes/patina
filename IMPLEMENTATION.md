@@ -59,7 +59,7 @@ Acceptance level: V0 and V1.
 Acceptance level: V2.
 
 - Scheduler ABI operations route explicit spawn, choose, yield, park, wake, and completion through `DetScheduler`.
-- `SimNet` provides bound datagram endpoints, delivery queues, timing, reorder, partition, routing, and close state.
+- `SimNet` provides bound datagram endpoints, delivery queues, timing, reorder, partition, routing, and close state. The seeded fault knobs (`--net-jitter-nanos`/`--net-drop-permille`) act on BOTH the datagram path (jitter reorders, drop loses — lossy UDP) and the TCP stream path (per-segment delivery jitter, and a "drop" as a reliable-transport retransmit — a bounded RTO-style delivery delay that never loses data and preserves in-stream byte order). A default-on vacuity diagnostic (`PATINA_NET_FAULT_REPORT`, the `NetDriver::fault_report` surface) fires a loud warning when the knobs could perturb delivery and fault-eligible traffic occurred yet no fault effect landed — catching the class where a fault knob is silently inert on a code path (the analogue of the vacuous-schedule diagnostic).
 - Seeded fault and latency wrappers compose around the network data plane.
 - Runtime traces cross scheduler, network, clock, filesystem, and entropy effects.
 - Trace format 2 stores branch relationships and seeds, resolves inherited decisions, and supports exact-prefix/new-suffix execution.

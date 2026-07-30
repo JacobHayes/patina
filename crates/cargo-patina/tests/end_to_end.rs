@@ -2078,6 +2078,168 @@ fn native_replay_rejects_fault_knobs_and_reproduces_flag_free() {
     );
 }
 
+// A single-process loopback TCP echo: a listener thread reads a fixed 16-byte
+// payload and answers with its checksum; main streams the payload as eight
+// 2-byte segments and prints a deterministic result line. Exercises the SimNet
+// TCP *stream* path — the surface the `--net-jitter-nanos`/`--net-drop-permille`
+// knobs historically ignored.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const TCP_ECHO_SOURCE: &str = r#"
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::thread;
+
+fn main() {
+    let listener = TcpListener::bind("127.0.0.1:6123").expect("bind");
+    let server = thread::spawn(move || {
+        let (mut sock, _) = listener.accept().expect("accept");
+        let mut got = vec![0u8; 16];
+        sock.read_exact(&mut got).expect("read_exact");
+        let sum: u32 = got.iter().map(|&b| b as u32).sum();
+        sock.write_all(&sum.to_le_bytes()).expect("reply");
+        sum
+    });
+    let mut client = TcpStream::connect("127.0.0.1:6123").expect("connect");
+    for i in 0u8..8 {
+        client.write_all(&[i, i.wrapping_add(100)]).expect("write");
+    }
+    let mut reply = [0u8; 4];
+    client.read_exact(&mut reply).expect("read reply");
+    let sum = server.join().unwrap();
+    println!("TCP_ECHO_RESULT sum={} reply={}", sum, u32::from_le_bytes(reply));
+}
+"#;
+
+// TCP-stream fault injection end to end. The datagram-only reputation of the net
+// fault knobs was a real bug (they were inert on the stream path); this locks in
+// the fixed contract: on the SimNet TCP path the knobs (a) reproduce a
+// same-seed run byte-identically, (b) record + strict-replay byte-identically,
+// (c) differ across seeds, (d) differ from the no-fault run at the same seed
+// (non-vacuity — the fault is not silently ignored), while NEVER losing data (a
+// reliable stream: the checksum is invariant), and (e) the default-on vacuity
+// diagnostic reports the faults as APPLIED (`vacuous=0`) and stays silent — no
+// "net fault knobs inert" warning — precisely because they now bite.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_tcp_stream_faults_are_deterministic_replayable_and_non_vacuous() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("tcp_echo.rs");
+    fs::write(&source, TCP_ECHO_SOURCE).unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("tcp-echo");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    let bin_str = bin.to_str().unwrap().to_owned();
+    let trace_path = |name: &str| directory.path().join(name);
+    let run_fault = |seed: &str, trace: &Path| {
+        invoke_in(
+            workspace,
+            &[
+                "run",
+                &bin_str,
+                "--seed",
+                seed,
+                "--record",
+                trace.to_str().unwrap(),
+                "--net-jitter-nanos",
+                "1000..50000",
+                "--net-drop-permille",
+                "100",
+            ],
+        )
+    };
+
+    let f1 = trace_path("fault1.patina");
+    let f2 = trace_path("fault2.patina");
+    let nf = trace_path("nofault.patina");
+    let f_seed2 = trace_path("fault_seed2.patina");
+
+    let out1 = run_fault("1", &f1);
+    let out2 = run_fault("1", &f2);
+    let out_seed2 = run_fault("2", &f_seed2);
+    let out_nofault = invoke_in(
+        workspace,
+        &[
+            "run",
+            &bin_str,
+            "--seed",
+            "1",
+            "--record",
+            nf.to_str().unwrap(),
+        ],
+    );
+
+    let result1 = stdout_line_with(&out1, "TCP_ECHO_RESULT");
+    // (a) same-seed byte-identical: identical result line AND identical trace.
+    assert_eq!(
+        result1,
+        stdout_line_with(&out2, "TCP_ECHO_RESULT"),
+        "same-seed fault runs must produce the same result line"
+    );
+    let f1_bytes = fs::read(&f1).unwrap();
+    assert_eq!(
+        f1_bytes,
+        fs::read(&f2).unwrap(),
+        "same-seed fault runs must record byte-identical traces"
+    );
+
+    // (b) record + strict replay byte-identical.
+    let replayed = invoke_in(workspace, &["replay", &bin_str, f1.to_str().unwrap()]);
+    assert_eq!(
+        result1,
+        stdout_line_with(&replayed, "TCP_ECHO_RESULT"),
+        "strict replay of a faulted TCP run must reproduce the result line"
+    );
+    assert!(
+        !String::from_utf8_lossy(&replayed.stderr).contains("net fault knobs inert"),
+        "replay of a genuinely-faulted run must not raise the vacuity warning"
+    );
+
+    // (c) different seed differs.
+    assert_ne!(
+        f1_bytes,
+        fs::read(&f_seed2).unwrap(),
+        "a different seed must draw a different fault schedule"
+    );
+    let _ = &out_seed2;
+
+    // (d) non-vacuity: the faulted trace differs from the no-fault trace at the
+    // same seed — the knobs are NOT silently ignored on the stream path.
+    assert_ne!(
+        f1_bytes,
+        fs::read(&nf).unwrap(),
+        "the fault knobs must perturb the TCP trace (non-vacuity)"
+    );
+
+    // Reliability: a stream never loses data, so the checksum is invariant
+    // across the fault and no-fault runs.
+    assert_eq!(
+        result1,
+        stdout_line_with(&out_nofault, "TCP_ECHO_RESULT"),
+        "TCP faults must reorder/delay but never lose data — result invariant"
+    );
+
+    // (e) the default-on diagnostic reports the faults as applied and stays
+    // silent (no false-positive vacuity warning).
+    let stderr1 = String::from_utf8_lossy(&out1.stderr);
+    assert!(
+        stderr1.contains("PATINA_NET_FAULT_REPORT") && stderr1.contains("vacuous=0"),
+        "the net fault report must show the faults were applied:\nstderr:\n{stderr1}"
+    );
+    assert!(
+        !stderr1.contains("net fault knobs inert"),
+        "the vacuity warning must NOT fire when faults actually applied:\nstderr:\n{stderr1}"
+    );
+}
+
 // Two threads contending on a std::sync::RwLock. On the toolchain in use std's
 // queue-based RwLock takes its contended `write()` path through
 // lock_contended → thread::park → dispatch_semaphore_wait — i.e. the interposed

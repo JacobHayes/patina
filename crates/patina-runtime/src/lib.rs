@@ -85,6 +85,12 @@ pub const ENV_FS_TORN_GRANULARITY: &str = "PATINA_FS_TORN_GRANULARITY";
 /// Suppress the default-on end-of-run schedule diagnostic when set to a false-y
 /// value (`0`, `off`, `false`, `no`). The diagnostic is on by default.
 pub const ENV_SCHEDULE_REPORT: &str = "PATINA_SCHEDULE_REPORT";
+/// Suppress the default-on end-of-run network fault-injection diagnostic when
+/// set to a false-y value (`0`, `off`, `false`, `no`). The diagnostic is on by
+/// default: it fires a loud warning when the net fault knobs could perturb
+/// delivery and fault-eligible traffic occurred, yet ZERO fault effects landed
+/// (the silent-inertness class — historically the inert TCP stream path).
+pub const ENV_NET_FAULT_REPORT: &str = "PATINA_NET_FAULT_REPORT";
 /// Enable cooperative-SUT (buggify) fault injection. Its value is the
 /// per-evaluation firing probability in per-mille for an active site (0..=1000);
 /// an empty value uses the FoundationDB default of 25% (250). Presence of the
@@ -3821,6 +3827,12 @@ impl Context {
         if let Some(report) = self.scheduler.as_ref().and_then(|s| s.policy_report()) {
             emit_schedule_policy_report(&report);
         }
+        // Network fault-injection diagnostic. Default-on so a run configured with
+        // net fault knobs that never actually perturbed any send (the knobs being
+        // silently inert on the exercised code path) is never a false green.
+        if let Some(report) = self.network.as_ref().and_then(|net| net.fault_report()) {
+            emit_net_fault_report(&report);
+        }
         // Liveness-watchdog diagnostic: prove the watchdog was actually armed and
         // ran to a clean finish (it did NOT fire — a fired watchdog aborts before
         // finish()). Default-on so "watchdog enabled, run OK" is never silently
@@ -4674,6 +4686,45 @@ are UNREACHABLE at any seed and a clean result here does NOT mean the concurrenc
 Rebuild with `cargo patina build --yield-points` to make atomics-only race windows \
 schedulable.",
             diag.vacuous.len(),
+        );
+    }
+}
+
+/// Emit the default-on network fault-injection diagnostic to stderr. A driver
+/// with no fault model reports `None` and stays silent; a driver whose knobs
+/// cannot perturb anything (`could_apply == false`) is also silent. When the
+/// knobs could perturb delivery, the machine-readable `PATINA_NET_FAULT_REPORT`
+/// line lets a campaign tell a genuinely-perturbed run from an inert one, and a
+/// loud warning fires when fault-eligible traffic occurred yet ZERO fault
+/// effects landed — the silent-inertness class (historically: the SimNet TCP
+/// stream path ignoring the datagram-only fault knobs). Suppressed by a false-y
+/// [`ENV_NET_FAULT_REPORT`].
+fn emit_net_fault_report(report: &patina_dst_driver_api::NetFaultReport) {
+    if !report.could_apply {
+        return;
+    }
+    if let Ok(value) = env::var(ENV_NET_FAULT_REPORT) {
+        if matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "false" | "no"
+        ) {
+            return;
+        }
+    }
+    eprintln!(
+        "PATINA_NET_FAULT_REPORT could_apply=1 send_ops={} faults_applied={} vacuous={}",
+        report.send_ops,
+        report.faults_applied,
+        u8::from(report.is_vacuous()),
+    );
+    if report.is_vacuous() {
+        eprintln!(
+            "PATINA WARNING: net fault knobs inert — {} fault-eligible send(s) occurred with the \
+drop/jitter knobs configured to perturb delivery, yet ZERO fault effects were applied. The \
+configured network faults are SILENTLY INERT on the code path this run exercised (historically the \
+SimNet TCP stream path ignored the datagram-only fault knobs), so a clean result here does NOT mean \
+the faults were tested. Verify the fault knobs reach the send path the workload uses.",
+            report.send_ops,
         );
     }
 }

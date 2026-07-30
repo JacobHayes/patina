@@ -19,14 +19,17 @@
 #   [4] planted-bug catch: each `--bug` on its pinned seed MUST be caught with
 #       its expected marker (fail-closed: a clean pass means the demo went
 #       vacuous and the leg FAILS), and the failing run records +
-#       strict-replays byte-identically.
+#       strict-replays byte-identically;
+#   [5] TCP-stream fault leg: Patina's `--net-jitter-nanos`/`--net-drop-permille`
+#       knobs now bite on the SimNet TCP stream path (task #37). Each faulted
+#       run MUST still converge to the SAME order-invariant outcome hash (a
+#       reliable stream reorders/delays but never loses data), the default-on
+#       vacuity diagnostic MUST report the faults as APPLIED (never the "net
+#       fault knobs inert" warning), the faulted trace MUST differ from the
+#       no-fault trace at the same seed (non-vacuity — else the leg is
+#       green-by-inertness), and the faulted run MUST record + strict-replay
+#       byte-identically.
 # The overriding guard: a PUBSUB_VIOLATION on any clean run fails the script.
-#
-# No jitter/drop legs, deliberately: Patina's net fault knobs act on SimNet
-# datagrams and are inert on this app's TCP stream path (verified — 100 permille
-# drop converges byte-identically), so such a leg would be vacuous. Schedule
-# seeds are the perturbation axis; the TCP-fault gap is a recorded Patina
-# finding, not designed around (see README).
 ###############################################################################
 set -uo pipefail
 
@@ -52,6 +55,10 @@ fi
 ARGS=(--seed 7 --base-port 6001 --timeout-secs 30)
 EXPECTED_PUBLISHED=32
 EXPECTED_DELIVERED=64
+# The order-invariant outcome digest for the fixed workload. Schedule- AND
+# fault-invariant: reordering/delaying the stream must never change it (a
+# reliable stream loses no data), so the fault leg asserts against it directly.
+EXPECTED_HASH=8b988e7c57005dac2b5144ba9a6d1ffea7a789719bff6f0a7478e05786664a3d
 
 cd "$repo_root"
 echo "==> [1] building cargo-patina + the pubsub harness; explicit audit"
@@ -164,6 +171,45 @@ bug_leg drop-read-remainder 1 "PUBSUB_VIOLATION.*seq-gap"
 # stale-timeout: the never-re-armed idle deadline expires mid-run despite live
 # heartbeats/messages.
 bug_leg stale-timeout 1 "PUBSUB_VIOLATION.*liveness-timeout"
+
+echo "==> [5] TCP-stream fault leg: jitter+drop perturb the stream, never lose data"
+# The knobs act on the SimNet TCP path this app uses. Each seed's faulted run
+# must still converge to EXPECTED_HASH, apply faults (vacuity diagnostic
+# vacuous=0, no inert warning), perturb the trace vs the no-fault run at the
+# same seed, and record + strict-replay byte-identically.
+FAULTS=(--net-jitter-nanos 1000..50000 --net-drop-permille 50)
+for s in 2 4; do
+  ftr="$work/fault.$s.trace"; ferr="$work/fault.$s.err"; nftr="$work/fault.$s.nofault.trace"
+  fout="$(run --seed "$s" --record "$ftr" ${ALLOW[@]+"${ALLOW[@]}"} "${FAULTS[@]}" -- "${ARGS[@]}" 2>"$ferr")" || {
+    echo "    FAIL: fault seed $s exited nonzero"; fail=1; stderr_tail "$ferr"; }
+  fres="$(result_of <<<"$fout")"
+  pub="$(field_of published <<<"$fres")"; del="$(field_of delivered <<<"$fres")"; fh="$(hash_of <<<"$fres")"
+  if [[ "$pub" != "$EXPECTED_PUBLISHED" || "$del" != "$EXPECTED_DELIVERED" ]]; then
+    echo "    FAIL: fault seed $s published=$pub delivered=$del expected $EXPECTED_PUBLISHED/$EXPECTED_DELIVERED"; fail=1
+  fi
+  if [[ "$fh" != "$EXPECTED_HASH" ]]; then
+    echo "    FAIL: fault seed $s outcome hash $fh != $EXPECTED_HASH (a TCP fault must NOT lose data)"; fail=1
+  fi
+  if violated <"$ferr"; then echo "    FAIL: PUBSUB_VIOLATION on fault seed $s"; fail=1; fi
+  # Non-vacuity #1: the diagnostic proves the faults were applied, not inert.
+  if ! grep -q 'PATINA_NET_FAULT_REPORT .*vacuous=0' "$ferr" || grep -q 'net fault knobs inert' "$ferr"; then
+    echo "    FAIL: fault seed $s applied no faults (vacuity diagnostic did not confirm vacuous=0)"; fail=1; stderr_tail "$ferr"
+  fi
+  # Non-vacuity #2: the faulted trace differs from the no-fault trace, same seed.
+  run --seed "$s" --record "$nftr" ${ALLOW[@]+"${ALLOW[@]}"} -- "${ARGS[@]}" >/dev/null 2>&1 || true
+  fth="$(shasum -a256 "$ftr" | cut -d' ' -f1)"; nfth="$(shasum -a256 "$nftr" | cut -d' ' -f1)"
+  if [[ "$fth" == "$nfth" ]]; then
+    echo "    FAIL: fault seed $s trace equals the no-fault trace (green-by-inertness)"; fail=1
+  fi
+  # Record -> strict replay byte-identical (result line + trace hash).
+  rout="$(replay "$ftr" ${ALLOW[@]+"${ALLOW[@]}"} 2>/dev/null)"
+  if [[ "$(result_of <<<"$rout")" != "$fres" || "$(shasum -a256 "$ftr" | cut -d' ' -f1)" != "$fth" ]]; then
+    echo "    FAIL: fault seed $s replay not byte-identical to record"; fail=1
+  fi
+  nfr="$(sed -n 's/.*\(PATINA_NET_FAULT_REPORT[^\n]*\)/\1/p' "$ferr" | head -1)"
+  echo "    fault seed $s: $fres"
+  echo "        $nfr | fault-trace=${fth:0:12} nofault-trace=${nfth:0:12} (differ) replayed-identical"
+done
 
 elapsed=$(( SECONDS - start_secs ))
 echo "==> wall time: ${elapsed}s"
