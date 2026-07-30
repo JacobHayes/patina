@@ -1658,6 +1658,19 @@ extern long patina_sud_dispatch(long nr, unsigned long a0, unsigned long a1,
 _Noreturn void patina_sud_report_fatal(const char *message);
 _Noreturn void patina_sud_report_fatal_addr(const char *message, long nr,
                                             uintptr_t addr);
+/* The arming flag is OWNED by the Rust lib (an exported AtomicU8 in a writable
+ * section); the C arming path stores into it so `sud_armed_metadata` can read it
+ * without the C→Rust link direction that left the lib's own test binary with an
+ * undefined symbol. C is only ever linked where the Rust lib is present. */
+extern unsigned char PATINA_SUD_ARMED;
+/* The scrubbed auxv region (base pointer + byte length through AT_NULL,
+ * inclusive), captured during the init scrub below and OWNED by the Rust lib
+ * (exported AtomicUsize, same C→Rust direction and rationale as
+ * PATINA_SUD_ARMED). The Rust PR_GET_AUXV dispatch row copies from here so a raw
+ * prctl(PR_GET_AUXV) serves the shim's determinized auxv, never the kernel's
+ * pristine saved_auxv. */
+extern uintptr_t PATINA_SUD_AUXV_BASE;
+extern uintptr_t PATINA_SUD_AUXV_LEN;
 
 /* Lazily resolve the REAL glibc sigaction through the wrap alias, so the shim's
  * own SIGSYS-hardening `sigaction` strong def below can forward to it without
@@ -1803,8 +1816,77 @@ static void patina_sud_scrub_auxv(int argc, char **argv) {
     while (*walk != NULL) walk++;
     walk++; /* step over envp's NULL terminator to the auxv array */
     ElfW(auxv_t) *aux = (ElfW(auxv_t) *)walk;
+    ElfW(auxv_t) *base = aux;
     for (; aux->a_type != AT_NULL; aux++) {
         if (aux->a_type == AT_SYSINFO_EHDR) aux->a_type = AT_IGNORE;
+    }
+    /* `aux` now points at the terminating AT_NULL entry. Publish the scrubbed
+     * auxv region — base and length through AT_NULL inclusive — to the Rust-owned
+     * cells so the PR_GET_AUXV dispatch row copies THIS determinized array (this
+     * runs after AT_RANDOM determinization and the AT_SYSINFO_EHDR rename, both
+     * before SUD is armed, so no trap can observe an un-scrubbed region). */
+    PATINA_SUD_AUXV_BASE = (uintptr_t)base;
+    PATINA_SUD_AUXV_LEN = (uintptr_t)((char *)(aux + 1) - (char *)base);
+}
+
+/* AT_RANDOM determinization (SUD-DESIGN.md §9 slice 3). The kernel seeds the
+ * auxv AT_RANDOM entry with 16 real-random bytes that glibc consumes at startup
+ * for the stack canary and pointer guard AND that a guest can read directly via
+ * getauxval(AT_RANDOM) — a nondeterminism/entropy leak. Unlike AT_SYSINFO_EHDR
+ * (scrubbed to AT_IGNORE), AT_RANDOM must be REPLACED in place: glibc
+ * dereferences the pointer during startup, so AT_IGNORE-ing it (a null return)
+ * would crash the canary setup. Overwrite the 16 bytes with seed-derived
+ * deterministic bytes. Kernel-INDEPENDENT: this runs on every managed run,
+ * before guest ctors, whether or not SUD is armed. */
+#ifndef AT_RANDOM
+#define AT_RANDOM 25
+#endif
+
+static uint64_t patina_sud_splitmix64(uint64_t *state) {
+    uint64_t z = (*state += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+/* Read the PATINA_SEED value from the still-intact environ (the ctor scrub runs
+ * later), or 0 if absent/unset. */
+static uint64_t patina_sud_env_seed(int argc, char **argv) {
+    char **envp = argv + argc + 1;
+    static const char prefix[] = "PATINA_SEED=";
+    size_t plen = sizeof prefix - 1;
+    for (char **e = envp; *e != NULL; e++) {
+        if (strncmp(*e, prefix, plen) == 0) {
+            const char *v = *e + plen;
+            uint64_t seed = 0;
+            while (*v >= '0' && *v <= '9') {
+                seed = seed * 10 + (uint64_t)(*v - '0');
+                v++;
+            }
+            return seed;
+        }
+    }
+    return 0;
+}
+
+static void patina_sud_determinize_at_random(int argc, char **argv) {
+    /* Domain-separate the AT_RANDOM stream from every other seeded draw. */
+    uint64_t state = patina_sud_env_seed(argc, argv) ^ 0x52414E444F4D0001ULL;
+    char **envp = argv + argc + 1;
+    char **walk = envp;
+    while (*walk != NULL) walk++;
+    walk++; /* step over envp's NULL terminator to the auxv array */
+    ElfW(auxv_t) *aux = (ElfW(auxv_t) *)walk;
+    for (; aux->a_type != AT_NULL; aux++) {
+        if (aux->a_type == AT_RANDOM) {
+            unsigned char *bytes = (unsigned char *)(uintptr_t)aux->a_un.a_val;
+            if (bytes != NULL) {
+                uint64_t lo = patina_sud_splitmix64(&state);
+                uint64_t hi = patina_sud_splitmix64(&state);
+                memcpy(bytes, &lo, sizeof lo);
+                memcpy(bytes + sizeof lo, &hi, sizeof hi);
+            }
+        }
     }
 }
 
@@ -1904,6 +1986,11 @@ static void patina_sud_init(int argc, char **argv) {
      * ctor's scrub runs later), so read it directly. */
     if (!patina_env_has("PATINA_MODE", argv, argc)) return;
 
+    /* AT_RANDOM determinization is kernel-independent: close the entropy leak on
+     * EVERY managed run (SUD kernel or not), before the SUD kernel probe gate
+     * below can early-return. */
+    patina_sud_determinize_at_random(argc, argv);
+
     patina_host_prctl = (patina_prctl_fn)__real_dlsym(RTLD_NEXT, "prctl");
     patina_host_open = (patina_host_open_fn)__real_dlsym(RTLD_NEXT, "open");
     patina_host_read_real = (patina_host_read_fn)__real_dlsym(RTLD_NEXT, "read");
@@ -1944,6 +2031,9 @@ static void patina_sud_init(int argc, char **argv) {
     }
 
     patina_sud_armed = 1;
+    /* Publish the armed state to the Rust-owned flag (writable section) so the
+     * config path records the `sud` trace-metadata field. */
+    PATINA_SUD_ARMED = 1;
     patina_sud_arm_thread(); /* arm the main thread */
 }
 

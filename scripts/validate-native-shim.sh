@@ -2953,6 +2953,66 @@ C
   fi
   grep -q 'direct-syscall' "$tmp/planted-audit"
 
+  # AT_RANDOM determinization (SUD-DESIGN.md §9 slice 3, kernel-INDEPENDENT): the
+  # shim overwrites the auxv AT_RANDOM 16 bytes with seed-derived deterministic
+  # bytes on EVERY managed run (whether or not SUD arms), closing the entropy
+  # leak glibc's canary and a guest's getauxval(AT_RANDOM) both read. getauxval
+  # is allowlisted (a libc call, no raw syscall), so this probe audits clean and
+  # runs on any Linux kernel — the assertion is that the same seed yields the
+  # same 16 bytes and distinct seeds differ. RED mutation (documented): drop the
+  # patina_sud_determinize_at_random call in patina_sud_init and the same-seed
+  # runs diverge (the kernel hands fresh random per exec).
+  cat >"$tmp/at_random_probe.rs" <<'RS'
+fn main() {
+    unsafe extern "C" {
+        fn getauxval(kind: core::ffi::c_ulong) -> core::ffi::c_ulong;
+    }
+    const AT_RANDOM: core::ffi::c_ulong = 25;
+    let p = unsafe { getauxval(AT_RANDOM) } as *const u8;
+    assert!(!p.is_null(), "AT_RANDOM pointer is null");
+    // SAFETY: the kernel places 16 random bytes at the AT_RANDOM pointer.
+    let bytes = unsafe { core::slice::from_raw_parts(p, 16) };
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    println!("AT_RANDOM={hex}");
+}
+RS
+  "$runner" build "$tmp/at_random_probe.rs" --output "$tmp/at-random-probe" >/dev/null
+  ar_s1a="$("$runner" run "$tmp/at-random-probe" --seed 1 2>/dev/null)"
+  ar_s1b="$("$runner" run "$tmp/at-random-probe" --seed 1 2>/dev/null)"
+  ar_s2="$("$runner" run "$tmp/at-random-probe" --seed 2 2>/dev/null)"
+  if [[ "$ar_s1a" != "$ar_s1b" ]]; then
+    echo "validate-native-shim: AT_RANDOM not deterministic across same-seed runs ($ar_s1a vs $ar_s1b)" >&2
+    exit 1
+  fi
+  if [[ "$ar_s1a" == "$ar_s2" ]]; then
+    echo "validate-native-shim: AT_RANDOM did not vary across seeds ($ar_s1a)" >&2
+    exit 1
+  fi
+
+  # vsyscall-page audit refusal (SUD-DESIGN.md §6.3, x86_64-only, kernel-
+  # INDEPENDENT static audit): a binary whose text materializes the legacy
+  # vsyscall page address (0xffffffffff600000) as a 64-bit immediate is refused
+  # — that page is kernel-emulated with no `syscall` instruction, invisible to
+  # both the scan and SUD. RED mutation (documented): neuter
+  # scan_vsyscall_references and this hand-built binary audits clean.
+  if [[ "$(uname -m)" == x86_64 ]]; then
+    cat >"$tmp/vsyscall_probe.c" <<'C'
+int main(void) {
+    void *p;
+    /* movabs $0xffffffffff600000, %reg — a single 64-bit immediate in .text. */
+    __asm__ volatile("movabs $0xffffffffff600000, %0" : "=r"(p));
+    return p != 0;
+}
+C
+    "$cc" "$tmp/vsyscall_probe.c" -o "$tmp/vsyscall-probe"
+    if "$runner" audit "$tmp/vsyscall-probe" --raw >"$tmp/vsyscall-audit" 2>&1; then
+      echo 'validate-native-shim: vsyscall-page reference audited clean (must be refused)' >&2
+      cat "$tmp/vsyscall-audit" >&2
+      exit 1
+    fi
+    grep -q 'vsyscall' "$tmp/vsyscall-audit"
+  fi
+
   if [[ $sud_kernel == 1 ]]; then
     echo "sud: ENABLED (kernel supports syscall-user-dispatch) — running the positive battery"
 
@@ -2980,23 +3040,25 @@ C
     cmp "$tmp/raw-record" "$tmp/raw-replay"
     cmp "$tmp/raw-seed-1" "$tmp/raw-replay"
 
-    # unmapped-syscall abort: a raw getpid (un-tabled in slice 1) traps to a
-    # named, deterministic abort — not a silent escape.
+    # unmapped-syscall abort: a raw reboot (a syscall the dispatch table must
+    # never map) traps to a named, deterministic abort — not a silent escape.
+    # Bad magic numbers mean the kernel would reject it harmlessly even if the
+    # trap were broken, and the leg still fails loudly on that escape.
     cat >"$tmp/raw_unmapped_probe.rs" <<'RS'
 use std::arch::asm;
 fn main() {
     #[cfg(target_arch = "x86_64")]
-    let nr: i64 = 39; // getpid
+    let nr: i64 = 169; // reboot
     #[cfg(target_arch = "aarch64")]
-    let nr: i64 = 172; // getpid
+    let nr: i64 = 142; // reboot
     let ret: i64;
     unsafe {
         #[cfg(target_arch = "x86_64")]
-        asm!("syscall", inlateout("rax") nr => ret, out("rcx") _, out("r11") _, options(nostack));
+        asm!("syscall", inlateout("rax") nr => ret, in("rdi") 0, in("rsi") 0, in("rdx") 0, in("r10") 0, out("rcx") _, out("r11") _, options(nostack));
         #[cfg(target_arch = "aarch64")]
-        asm!("svc #0", in("x8") nr, out("x0") ret, options(nostack));
+        asm!("svc #0", in("x8") nr, inlateout("x0") 0i64 => ret, in("x1") 0, in("x2") 0, in("x3") 0, options(nostack));
     }
-    println!("UNMAPPED_PID={ret}"); // unreachable: dispatch aborts before returning
+    println!("UNMAPPED_RET={ret}"); // unreachable: dispatch aborts before returning
 }
 RS
     "$runner" build "$tmp/raw_unmapped_probe.rs" --output "$tmp/raw-unmapped-probe" >/dev/null
@@ -3024,13 +3086,465 @@ RS
     "$runner" run "$tmp/auxv-probe" --seed 1 >"$tmp/auxv-out"
     grep -qx 'AUXV_SYSINFO_EHDR=0' "$tmp/auxv-out"
 
+    # ---- Slice 2 rows ----
+    # (a) The committed rustix-default MRE testbed: a std+rustix program on the
+    # DEFAULT (linux_raw) backend exercising raw clocks, fs (openat/write/read/
+    # fstat=statx), directory iteration (getdents64 over a SUD directory fd),
+    # getrandom, sleep, and SimNet (socket/bind/sendto/recvfrom/getsockname +
+    # TCP socket lifecycle). Its own run-patina.sh asserts audit→SUD-managed,
+    # seed-stable, and record/replay byte-identical, then prints RUSTIX_LEGS_RAN.
+    # This is the acceptance MRE — the exact binary class refused before SUD.
+    if bash "$root/testbeds/rustix-default/run-patina.sh" >"$tmp/rustix-mre.out" 2>&1; then
+      grep -q 'RUSTIX_LEGS_RAN branch=sud' "$tmp/rustix-mre.out" || {
+        echo 'validate-native-shim: rustix-default MRE did not run its SUD battery' >&2
+        cat "$tmp/rustix-mre.out" >&2; exit 1; }
+    else
+      echo 'validate-native-shim: rustix-default MRE run-patina.sh failed' >&2
+      cat "$tmp/rustix-mre.out" >&2; exit 1
+    fi
+
+    # The remaining raw-syscall probes are x86_64 asm (the positive SUD battery
+    # is x86_64 today; a future arm64 SUD kernel would extend them).
+    if [[ "$(uname -m)" == x86_64 ]]; then
+      # (b) Deterministic process-state constants: raw getpid=1, getuid=1000,
+      # uname=-ENOSYS — the same values the interposers return. RED mutation:
+      # drop the nr::GETPID/GETUID/UNAME arms and dispatch aborts (unmapped).
+      cat >"$tmp/raw_procstate.rs" <<'RS'
+use std::arch::asm;
+unsafe fn sc(nr: i64, a0: i64) -> i64 {
+    let r: i64;
+    unsafe { asm!("syscall", inlateout("rax") nr => r, in("rdi") a0,
+        out("rcx") _, out("r11") _, options(nostack)); }
+    r
+}
+fn main() {
+    let pid = unsafe { sc(39, 0) };
+    let uid = unsafe { sc(102, 0) };
+    let mut utsname = [0u8; 390];
+    let uname_rc = unsafe { sc(63, utsname.as_mut_ptr() as i64) };
+    assert_eq!(pid, 1, "getpid");
+    assert_eq!(uid, 1000, "getuid");
+    assert!(uname_rc < 0, "uname must be ENOSYS, got {uname_rc}");
+    println!("RAW_PROCSTATE pid={pid} uid={uid} uname_rc={uname_rc}");
+}
+RS
+      "$runner" build "$tmp/raw_procstate.rs" --output "$tmp/raw-procstate" >/dev/null
+      "$runner" run "$tmp/raw-procstate" --seed 1 >"$tmp/raw-procstate-out"
+      grep -qx 'RAW_PROCSTATE pid=1 uid=1000 uname_rc=-38' "$tmp/raw-procstate-out"
+
+      # (c) Readiness rows: raw eventfd2 + epoll_create1 + epoll_ctl(ADD,EPOLLIN)
+      # + a raw write to the eventfd + epoll_wait returns the armed fd with the
+      # registered data. Proves the SUD rows call the SAME epoll frontend the C
+      # interposers do. RED mutation: drop the nr::EPOLL_* arms → unmapped abort.
+      cat >"$tmp/raw_epoll.rs" <<'RS'
+use std::arch::asm;
+unsafe fn sc(nr: i64, a0: i64, a1: i64, a2: i64, a3: i64) -> i64 {
+    let r: i64;
+    unsafe { asm!("syscall", inlateout("rax") nr => r, in("rdi") a0, in("rsi") a1,
+        in("rdx") a2, in("r10") a3, out("rcx") _, out("r11") _, options(nostack)); }
+    r
+}
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct Ev { events: u32, data: u64 }
+fn main() {
+    let efd = unsafe { sc(290, 0, 0, 0, 0) };       // eventfd2(0, 0)
+    assert!(efd >= 0, "eventfd2 {efd}");
+    let ep = unsafe { sc(291, 0, 0, 0, 0) };        // epoll_create1(0)
+    assert!(ep >= 0, "epoll_create1 {ep}");
+    let mut ev = Ev { events: 0x1, data: 0xC0FFEE }; // EPOLLIN
+    let ctl = unsafe { sc(233, ep, 1, efd, &mut ev as *mut Ev as i64) }; // ADD
+    assert_eq!(ctl, 0, "epoll_ctl ADD {ctl}");
+    let one: u64 = 1;
+    let w = unsafe { sc(1, efd, &one as *const u64 as i64, 8, 0) }; // write(efd, &1, 8)
+    assert_eq!(w, 8, "eventfd write {w}");
+    let mut out = [Ev { events: 0, data: 0 }; 4];
+    let n = unsafe { sc(232, ep, out.as_mut_ptr() as i64, 4, 0) }; // epoll_wait(-1 via r10=0? use timeout 0)
+    assert!(n >= 1, "epoll_wait {n}");
+    let data = { out[0].data };
+    assert_eq!(data, 0xC0FFEE, "epoll data {data:#x}");
+    println!("RAW_EPOLL n={n} data={data:#x}");
+}
+RS
+      "$runner" build "$tmp/raw_epoll.rs" --output "$tmp/raw-epoll" >/dev/null
+      "$runner" run "$tmp/raw-epoll" --seed 1 >"$tmp/raw-epoll-out"
+      grep -q '^RAW_EPOLL n=' "$tmp/raw-epoll-out"
+
+      # (d) sendmsg/recvmsg mirror the C interposers EXACTLY: both fail closed
+      # with ENOSYS (the deterministic net layer models only sendto/recvfrom).
+      # The raw rows must therefore return -ENOSYS (-38) — NOT a per-iovec
+      # sendto/recvfrom loop, which for a DATAGRAM socket would fragment one
+      # message into N datagrams (silently-wrong; house doctrine forbids it).
+      # RED mutation: reinstating a per-iovec fragmenting sendmsg/recvmsg makes
+      # this leg red (the calls would return a byte count, not -38).
+      cat >"$tmp/raw_msg.rs" <<'RS'
+use std::arch::asm;
+unsafe fn sc(nr: i64, a0: i64, a1: i64, a2: i64) -> i64 {
+    let r: i64;
+    unsafe { asm!("syscall", inlateout("rax") nr => r, in("rdi") a0, in("rsi") a1,
+        in("rdx") a2, out("rcx") _, out("r11") _, options(nostack)); }
+    r
+}
+#[repr(C)] struct SockaddrIn { family: u16, port: u16, addr: u32, zero: [u8; 8] }
+#[repr(C)] struct Iovec { base: *mut u8, len: usize }
+#[repr(C)] struct Msghdr {
+    name: *mut u8, namelen: u32, _pad0: u32,
+    iov: *mut Iovec, iovlen: u64,
+    control: *mut u8, controllen: u64, flags: i32, _pad1: u32,
+}
+fn main() {
+    let sock = unsafe { sc(41, 2, 2, 0) }; // socket(AF_INET, SOCK_DGRAM, 0)
+    assert!(sock >= 0, "socket {sock}");
+    let mut sa = SockaddrIn { family: 2, port: 34569u16.to_be(), addr: 0x7f000001u32.to_be(), zero: [0; 8] };
+    let b = unsafe { sc(49, sock, &mut sa as *mut SockaddrIn as i64, core::mem::size_of::<SockaddrIn>() as i64) };
+    assert_eq!(b, 0, "bind {b}");
+    // A TWO-iovec datagram: a fragmenting implementation would send two
+    // datagrams; the correct (interposer-mirroring) row refuses with ENOSYS.
+    let a = *b"frag-";
+    let c = *b"ment";
+    let (mut abuf, mut cbuf) = (a, c);
+    let mut iov = [
+        Iovec { base: abuf.as_mut_ptr(), len: abuf.len() },
+        Iovec { base: cbuf.as_mut_ptr(), len: cbuf.len() },
+    ];
+    let msg = Msghdr {
+        name: &mut sa as *mut SockaddrIn as *mut u8, namelen: core::mem::size_of::<SockaddrIn>() as u32, _pad0: 0,
+        iov: iov.as_mut_ptr(), iovlen: 2, control: core::ptr::null_mut(), controllen: 0, flags: 0, _pad1: 0,
+    };
+    let sent = unsafe { sc(46, sock, &msg as *const Msghdr as i64, 0) }; // sendmsg
+    assert_eq!(sent, -38, "sendmsg must mirror the interposer ENOSYS, got {sent}");
+    let mut recv_buf = [0u8; 32];
+    let mut riov = Iovec { base: recv_buf.as_mut_ptr(), len: recv_buf.len() };
+    let mut rmsg = Msghdr {
+        name: core::ptr::null_mut(), namelen: 0, _pad0: 0,
+        iov: &mut riov as *mut Iovec, iovlen: 1, control: core::ptr::null_mut(), controllen: 0, flags: 0, _pad1: 0,
+    };
+    let got = unsafe { sc(47, sock, &mut rmsg as *mut Msghdr as i64, 0) }; // recvmsg
+    assert_eq!(got, -38, "recvmsg must mirror the interposer ENOSYS, got {got}");
+    println!("RAW_MSG sendmsg={sent} recvmsg={got}");
+}
+RS
+      "$runner" build "$tmp/raw_msg.rs" --output "$tmp/raw-msg" >/dev/null
+      "$runner" run "$tmp/raw-msg" --seed 1 >"$tmp/raw-msg-out"
+      grep -qx 'RAW_MSG sendmsg=-38 recvmsg=-38' "$tmp/raw-msg-out"
+
+      # (e) prctl(PR_GET_AUXV): rustix's linux_raw init reads the aux vector with
+      # a raw prctl(PR_GET_AUXV, buf, size, 0, 0) (Linux >= 6.4) — the syscall
+      # that crashed the rustix-default MRE before this row existed. The row must
+      # serve the shim's SCRUBBED auxv, not the kernel's pristine saved_auxv:
+      # walking the returned buffer, AT_RANDOM must equal the seed-derived bytes
+      # getauxval(AT_RANDOM) reads (determinized, identical across same-seed runs)
+      # and AT_SYSINFO_EHDR must be gone (scrubbed to AT_IGNORE) — proving the row
+      # copies the live scrubbed array rather than re-asking the kernel. RED
+      # mutation: drop the nr::PRCTL arm and this run aborts (unmapped), or serve
+      # the kernel's saved_auxv and AT_SYSINFO_EHDR reappears / AT_RANDOM diverges.
+      cat >"$tmp/raw_prctl_auxv.rs" <<'RS'
+use std::arch::asm;
+unsafe fn prctl(option: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64 {
+    let r: i64;
+    unsafe { asm!("syscall", inlateout("rax") 157i64 => r, in("rdi") option,
+        in("rsi") a2, in("rdx") a3, in("r10") a4, in("r8") a5,
+        out("rcx") _, out("r11") _, options(nostack)); }
+    r
+}
+fn main() {
+    const PR_GET_AUXV: i64 = 0x4155_5856;
+    const AT_NULL: u64 = 0;
+    const AT_RANDOM: u64 = 25;
+    const AT_SYSINFO_EHDR: u64 = 33;
+    unsafe extern "C" {
+        fn getauxval(kind: core::ffi::c_ulong) -> core::ffi::c_ulong;
+    }
+    let mut buf = [0u8; 4096];
+    let ret = unsafe { prctl(PR_GET_AUXV, buf.as_mut_ptr() as i64, buf.len() as i64, 0, 0) };
+    assert!(ret > 0, "PR_GET_AUXV returned {ret}");
+    let full = ret as usize;
+    assert!(full <= buf.len(), "auxv ({full}) larger than probe buffer");
+    // Walk the returned copy: 16-byte (a_type: u64, a_val: u64) entries to AT_NULL.
+    let mut at_random_ptr: u64 = 0;
+    let mut saw_sysinfo = false;
+    let mut terminated = false;
+    let mut i = 0usize;
+    while i + 16 <= full {
+        let t = u64::from_ne_bytes(buf[i..i + 8].try_into().unwrap());
+        let v = u64::from_ne_bytes(buf[i + 8..i + 16].try_into().unwrap());
+        if t == AT_NULL { terminated = true; break; }
+        if t == AT_RANDOM { at_random_ptr = v; }
+        if t == AT_SYSINFO_EHDR { saw_sysinfo = true; }
+        i += 16;
+    }
+    assert!(terminated, "PR_GET_AUXV buffer had no AT_NULL terminator");
+    assert!(!saw_sysinfo, "AT_SYSINFO_EHDR must be scrubbed from the served auxv");
+    assert!(at_random_ptr != 0, "AT_RANDOM missing from the served auxv");
+    // The AT_RANDOM entry must point at the SAME scrubbed 16 bytes getauxval reads.
+    let ga = unsafe { getauxval(AT_RANDOM as core::ffi::c_ulong) } as u64;
+    assert!(ga != 0, "getauxval(AT_RANDOM) null");
+    // SAFETY: both pointers address the 16 seed-derived AT_RANDOM bytes.
+    let via_prctl = unsafe { core::slice::from_raw_parts(at_random_ptr as *const u8, 16) };
+    let via_getaux = unsafe { core::slice::from_raw_parts(ga as *const u8, 16) };
+    assert_eq!(via_prctl, via_getaux, "PR_GET_AUXV AT_RANDOM != getauxval(AT_RANDOM)");
+    let hex: String = via_prctl.iter().map(|b| format!("{b:02x}")).collect();
+    println!("PR_GET_AUXV len={full} random={hex}");
+}
+RS
+      "$runner" build "$tmp/raw_prctl_auxv.rs" --output "$tmp/raw-prctl-auxv" >/dev/null
+      "$runner" run "$tmp/raw-prctl-auxv" --seed 1 >"$tmp/raw-prctl-auxv-1"
+      "$runner" run "$tmp/raw-prctl-auxv" --seed 1 >"$tmp/raw-prctl-auxv-2"
+      cmp "$tmp/raw-prctl-auxv-1" "$tmp/raw-prctl-auxv-2"
+      grep -q '^PR_GET_AUXV len=' "$tmp/raw-prctl-auxv-1"
+
+      # A denied prctl option (PR_SET_NAME=15) must abort with the NAMED prctl
+      # message — never route to the host. RED: routing non-GET_AUXV options would
+      # let the run succeed (no abort) and this leg would fail to find the message.
+      cat >"$tmp/raw_prctl_deny.rs" <<'RS'
+use std::arch::asm;
+fn main() {
+    let name = b"patina\0";
+    let r: i64;
+    unsafe { asm!("syscall", inlateout("rax") 157i64 => r, in("rdi") 15i64,
+        in("rsi") name.as_ptr() as i64, in("rdx") 0i64, in("r10") 0i64, in("r8") 0i64,
+        out("rcx") _, out("r11") _, options(nostack)); }
+    println!("PR_SET_NAME_RET={r}"); // unreachable: dispatch aborts before returning
+}
+RS
+      "$runner" build "$tmp/raw_prctl_deny.rs" --output "$tmp/raw-prctl-deny" >/dev/null
+      if "$runner" run "$tmp/raw-prctl-deny" --seed 1 >"$tmp/raw-prctl-deny-out" 2>&1; then
+        echo 'validate-native-shim: denied prctl option did not abort' >&2
+        cat "$tmp/raw-prctl-deny-out" >&2; exit 1
+      fi
+      grep -q 'SUD trapped prctl' "$tmp/raw-prctl-deny-out"
+
+      # (f) x86_64 LEGACY fs aliases route to the SAME deterministic FS as their
+      # modern *at forms. rustix's linux_raw backend emits raw legacy `open`(2)
+      # on x86_64 (the round-5 failure), and hand-asm/older code emits creat(85)
+      # and unlink(87). Each must alias to openat(AT_FDCWD)/unlinkat: create+write
+      # via legacy open, read-back via legacy open, create via legacy creat (flags
+      # SYNTHESIZED), remove via legacy unlink, then a legacy open of the removed
+      # path fails. It THEN reproduces rustix `Dir::read_from` in raw asm — legacy
+      # open(2) of a DIRECTORY, fcntl(F_GETFL), openat(dir_fd, "."), getdents64 —
+      # which is the round-6 failure: a SUD directory fd must accept fcntl(F_GETFL)
+      # and openat(".") (before the fix, fcntl returned EBADF as a "virtual socket"
+      # and Dir::read_from failed). RED mutations: drop the nr::OPEN/CREAT/UNLINK
+      # arms → unmapped abort; mis-synthesize creat's flags → creat fails; drop the
+      # SUD-dir-fd fcntl/openat handling → fcntl(F_GETFL)=EBADF or openat(".")=EINVAL
+      # and no entries are listed.
+      cat >"$tmp/raw_legacy_fs.rs" <<'RS'
+use std::arch::asm;
+unsafe fn sc(nr: i64, a0: i64, a1: i64, a2: i64) -> i64 {
+    let r: i64;
+    unsafe { asm!("syscall", inlateout("rax") nr => r, in("rdi") a0, in("rsi") a1,
+        in("rdx") a2, in("r10") 0i64, out("rcx") _, out("r11") _, options(nostack)); }
+    r
+}
+fn main() {
+    const OPEN: i64 = 2; const READ: i64 = 0; const WRITE: i64 = 1; const CLOSE: i64 = 3;
+    const CREAT: i64 = 85; const UNLINK: i64 = 87; const MKDIR: i64 = 83;
+    const OPENAT: i64 = 257; const GETDENTS64: i64 = 217; const FCNTL: i64 = 72;
+    const O_WRONLY: i64 = 0o1; const O_CREAT: i64 = 0o100; const O_TRUNC: i64 = 0o1000;
+    const O_DIRECTORY: i64 = 0o200000; const F_GETFL: i64 = 3;
+    let path = b"/legacy-open.txt\0";
+    let msg = b"legacy-alias";
+    // legacy open(2) create+write.
+    let fd = unsafe { sc(OPEN, path.as_ptr() as i64, O_WRONLY | O_CREAT | O_TRUNC, 0o600) };
+    assert!(fd >= 0, "legacy open(create) {fd}");
+    let w = unsafe { sc(WRITE, fd, msg.as_ptr() as i64, msg.len() as i64) };
+    assert_eq!(w, msg.len() as i64, "write {w}");
+    assert_eq!(unsafe { sc(CLOSE, fd, 0, 0) }, 0, "close");
+    // legacy open(2) read-back.
+    let rfd = unsafe { sc(OPEN, path.as_ptr() as i64, 0 /*O_RDONLY*/, 0) };
+    assert!(rfd >= 0, "legacy open(read) {rfd}");
+    let mut buf = [0u8; 32];
+    let n = unsafe { sc(READ, rfd, buf.as_mut_ptr() as i64, buf.len() as i64) };
+    assert_eq!(&buf[..n as usize], msg, "legacy open read-back mismatch");
+    let _ = unsafe { sc(CLOSE, rfd, 0, 0) };
+    // legacy creat(85): flags synthesized to O_CREAT|O_WRONLY|O_TRUNC.
+    let path2 = b"/legacy-creat.txt\0";
+    let cfd = unsafe { sc(CREAT, path2.as_ptr() as i64, 0o600, 0) };
+    assert!(cfd >= 0, "legacy creat {cfd}");
+    let _ = unsafe { sc(CLOSE, cfd, 0, 0) };
+    // legacy unlink(87) removes it; a subsequent legacy open must fail.
+    assert_eq!(unsafe { sc(UNLINK, path2.as_ptr() as i64, 0, 0) }, 0, "legacy unlink");
+    let gone = unsafe { sc(OPEN, path2.as_ptr() as i64, 0, 0) };
+    assert!(gone < 0, "legacy open of unlinked path must fail, got {gone}");
+
+    // ---- directory listing through the raw rustix `Dir::read_from` dance ----
+    let dir = b"/legacy-dir\0";
+    assert_eq!(unsafe { sc(MKDIR, dir.as_ptr() as i64, 0o755, 0) }, 0, "legacy mkdir");
+    for f in [b"/legacy-dir/alpha\0".as_ref(), b"/legacy-dir/beta\0".as_ref()] {
+        let cfd = unsafe { sc(OPEN, f.as_ptr() as i64, O_WRONLY | O_CREAT | O_TRUNC, 0o600) };
+        assert!(cfd >= 0, "create-in-dir {cfd}");
+        let _ = unsafe { sc(CLOSE, cfd, 0, 0) };
+    }
+    // legacy open(2) of the DIRECTORY yields a SUD directory fd.
+    let dfd = unsafe { sc(OPEN, dir.as_ptr() as i64, O_DIRECTORY, 0) };
+    assert!(dfd >= 0, "legacy open(dir) {dfd}");
+    // rustix Dir::read_from: fcntl(F_GETFL) then openat(dir_fd, ".", flags).
+    let fl = unsafe { sc(FCNTL, dfd, F_GETFL, 0) };
+    assert!(fl >= 0, "fcntl(F_GETFL) on SUD dir fd was EBADF before the fix, got {fl}");
+    let dot = b".\0";
+    let dfd2 = unsafe { sc(OPENAT, dfd, dot.as_ptr() as i64, fl) };
+    assert!(dfd2 >= 0, "openat(dir_fd, \".\") {dfd2}");
+    // raw getdents64 over the fresh handle.
+    let mut dbuf = [0u8; 1024];
+    let mut names: Vec<String> = Vec::new();
+    loop {
+        let g = unsafe { sc(GETDENTS64, dfd2, dbuf.as_mut_ptr() as i64, dbuf.len() as i64) };
+        assert!(g >= 0, "getdents64 {g}");
+        if g == 0 { break; }
+        let mut off = 0usize;
+        while off < g as usize {
+            let reclen = u16::from_ne_bytes([dbuf[off + 16], dbuf[off + 17]]) as usize;
+            assert!(reclen >= 19 && off + reclen <= g as usize, "bad d_reclen {reclen}");
+            let nb = &dbuf[off + 19..off + reclen];
+            let end = nb.iter().position(|&b| b == 0).unwrap_or(nb.len());
+            let name = String::from_utf8_lossy(&nb[..end]).into_owned();
+            if name != "." && name != ".." { names.push(name); }
+            off += reclen;
+        }
+    }
+    names.sort();
+    assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()], "legacy dir listing {names:?}");
+    let _ = unsafe { sc(CLOSE, dfd2, 0, 0) };
+    let _ = unsafe { sc(CLOSE, dfd, 0, 0) };
+    println!("LEGACY_ALIASES open+creat+unlink+getdents ok");
+}
+RS
+      "$runner" build "$tmp/raw_legacy_fs.rs" --output "$tmp/raw-legacy-fs" >/dev/null
+      "$runner" run "$tmp/raw-legacy-fs" --seed 1 >"$tmp/raw-legacy-fs-out"
+      grep -qx 'LEGACY_ALIASES open+creat+unlink+getdents ok' "$tmp/raw-legacy-fs-out"
+
+      # (g) raw socketpair: interposed socketpair works but raw aborted before the
+      # row existed (the strongest raw-vs-interposed asymmetry). Create an AF_UNIX
+      # STREAM pair, write one end, read the other, assert the bytes, close both.
+      # Then dup2(eventfd, eventfd) must be EBADF — the C dup2 validity accepts
+      # only net/pipe fds, NOT epoll/eventfd. RED: drop nr::SOCKETPAIR → abort;
+      # re-widen dup2 validity to accept eventfd → the EBADF assert fails.
+      cat >"$tmp/raw_socketpair.rs" <<'RS'
+use std::arch::asm;
+unsafe fn sc(nr: i64, a0: i64, a1: i64, a2: i64, a3: i64) -> i64 {
+    let r: i64;
+    unsafe { asm!("syscall", inlateout("rax") nr => r, in("rdi") a0, in("rsi") a1,
+        in("rdx") a2, in("r10") a3, out("rcx") _, out("r11") _, options(nostack)); }
+    r
+}
+fn main() {
+    const SOCKETPAIR: i64 = 53; const WRITE: i64 = 1; const READ: i64 = 0; const CLOSE: i64 = 3;
+    const EVENTFD2: i64 = 290; const DUP2: i64 = 33;
+    const AF_UNIX: i64 = 1; const SOCK_STREAM: i64 = 1;
+    let mut sv = [0i32; 2];
+    let rc = unsafe { sc(SOCKETPAIR, AF_UNIX, SOCK_STREAM, 0, sv.as_mut_ptr() as i64) };
+    assert_eq!(rc, 0, "socketpair rc {rc}");
+    let (a, b) = (sv[0] as i64, sv[1] as i64);
+    assert!(a >= 0 && b >= 0, "socketpair fds {a} {b}");
+    let msg = b"pair-ping";
+    let w = unsafe { sc(WRITE, a, msg.as_ptr() as i64, msg.len() as i64, 0) };
+    assert_eq!(w, msg.len() as i64, "socketpair write {w}");
+    let mut buf = [0u8; 16];
+    let n = unsafe { sc(READ, b, buf.as_mut_ptr() as i64, buf.len() as i64, 0) };
+    assert_eq!(&buf[..n as usize], msg, "socketpair payload mismatch");
+    let _ = unsafe { sc(CLOSE, a, 0, 0, 0) };
+    let _ = unsafe { sc(CLOSE, b, 0, 0, 0) };
+    // dup2(eventfd, eventfd): the equal-fd validity must reject an eventfd (EBADF),
+    // mirroring the C dup2 interposer exactly.
+    let efd = unsafe { sc(EVENTFD2, 0, 0, 0, 0) };
+    assert!(efd >= 0, "eventfd2 {efd}");
+    let d = unsafe { sc(DUP2, efd, efd, 0, 0) };
+    assert_eq!(d, -9, "dup2(eventfd,eventfd) must be EBADF(-9), got {d}");
+    let _ = unsafe { sc(CLOSE, efd, 0, 0, 0) };
+    println!("SOCKETPAIR_ROW pair+dup2ebadf ok");
+}
+RS
+      "$runner" build "$tmp/raw_socketpair.rs" --output "$tmp/raw-socketpair" >/dev/null
+      "$runner" run "$tmp/raw-socketpair" --seed 1 >"$tmp/raw-socketpair-out"
+      grep -qx 'SOCKETPAIR_ROW pair+dup2ebadf ok' "$tmp/raw-socketpair-out"
+
+      # (h) raw ppoll: an empty descriptor set with a 5ms timeout returns 0 after
+      # advancing VIRTUAL time by >= 5ms (deterministic — a second same-seed run is
+      # byte-identical), and a real-events ppoll (POLLIN on an fd) is a SOFT -ENOSYS
+      # the probe survives. RED: drop nr::PPOLL → abort; make the real-events path
+      # fatal → the run aborts instead of printing the marker.
+      cat >"$tmp/raw_ppoll.rs" <<'RS'
+use std::arch::asm;
+#[repr(C)] struct Ts { sec: i64, nsec: i64 }
+#[repr(C)] struct Pollfd { fd: i32, events: i16, revents: i16 }
+unsafe fn sc5(nr: i64, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64) -> i64 {
+    let r: i64;
+    unsafe { asm!("syscall", inlateout("rax") nr => r, in("rdi") a0, in("rsi") a1,
+        in("rdx") a2, in("r10") a3, in("r8") a4, out("rcx") _, out("r11") _, options(nostack)); }
+    r
+}
+fn mono_ns() -> i64 {
+    let mut ts = Ts { sec: 0, nsec: 0 };
+    unsafe { sc5(228 /*clock_gettime*/, 1 /*MONOTONIC*/, &mut ts as *mut Ts as i64, 0, 0, 0); }
+    ts.sec * 1_000_000_000 + ts.nsec
+}
+fn main() {
+    const PPOLL: i64 = 271;
+    let before = mono_ns();
+    let tmo = Ts { sec: 0, nsec: 5_000_000 }; // 5ms
+    let rc = unsafe { sc5(PPOLL, 0, 0, &tmo as *const Ts as i64, 0, 0) };
+    assert_eq!(rc, 0, "ppoll empty+timeout rc {rc}");
+    let delta = mono_ns() - before;
+    assert!(delta >= 5_000_000, "ppoll must advance virtual time >= 5ms, got {delta}");
+    // Real events with an fd: the deterministic layer models no readiness → soft ENOSYS.
+    let mut pfd = Pollfd { fd: 0, events: 1 /*POLLIN*/, revents: 0 };
+    let z = Ts { sec: 0, nsec: 0 };
+    let r2 = unsafe { sc5(PPOLL, &mut pfd as *mut Pollfd as i64, 1, &z as *const Ts as i64, 0, 0) };
+    assert_eq!(r2, -38, "real-events ppoll must be soft -ENOSYS(-38), got {r2}");
+    println!("PPOLL_ROW empty_sleep={delta} real_enosys={r2}");
+}
+RS
+      "$runner" build "$tmp/raw_ppoll.rs" --output "$tmp/raw-ppoll" >/dev/null
+      "$runner" run "$tmp/raw-ppoll" --seed 1 >"$tmp/raw-ppoll-1"
+      "$runner" run "$tmp/raw-ppoll" --seed 1 >"$tmp/raw-ppoll-2"
+      cmp "$tmp/raw-ppoll-1" "$tmp/raw-ppoll-2"   # deterministic virtual-time delta
+      grep -q '^PPOLL_ROW empty_sleep=' "$tmp/raw-ppoll-1"
+
+      # (i) fcntl(F_GETFL) parity: the SAME op via TWO vehicles — a raw syscall and
+      # the interposed libc symbol — must give the SAME result on a regular file:
+      # a soft ENOSYS (raw returns -38; libc returns -1 with errno 38). This pins
+      # the round-8 fcntl-tail alignment: neither vehicle returns 0 or aborts.
+      cat >"$tmp/raw_fcntl_parity.rs" <<'RS'
+use std::arch::asm;
+use std::os::fd::AsRawFd;
+fn main() {
+    let f = std::fs::File::create("/fcntl-parity.txt").expect("create");
+    let fd = f.as_raw_fd();
+    const FCNTL: i64 = 72; const F_GETFL: i64 = 3;
+    let raw: i64;
+    unsafe { asm!("syscall", inlateout("rax") FCNTL => raw, in("rdi") fd as i64,
+        in("rsi") F_GETFL, in("rdx") 0i64, in("r10") 0i64,
+        out("rcx") _, out("r11") _, options(nostack)); }
+    assert_eq!(raw, -38, "raw fcntl(F_GETFL) must be -ENOSYS(-38), got {raw}");
+    unsafe extern "C" { fn fcntl(fd: i32, cmd: i32, ...) -> i32; }
+    let lib = unsafe { fcntl(fd, 3) };
+    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    assert_eq!(lib, -1, "libc fcntl(F_GETFL) must fail, got {lib}");
+    assert_eq!(errno, 38, "libc fcntl(F_GETFL) errno must be ENOSYS(38), got {errno}");
+    println!("FCNTL_PARITY raw={raw} libc_errno={errno}");
+}
+RS
+      "$runner" build "$tmp/raw_fcntl_parity.rs" --output "$tmp/raw-fcntl-parity" >/dev/null
+      "$runner" run "$tmp/raw-fcntl-parity" --seed 1 >"$tmp/raw-fcntl-parity-out"
+      grep -qx 'FCNTL_PARITY raw=-38 libc_errno=38' "$tmp/raw-fcntl-parity-out"
+
+      cat "$tmp/raw-procstate-out"
+      cat "$tmp/raw-epoll-out"
+      cat "$tmp/raw-msg-out"
+      cat "$tmp/raw-prctl-auxv-1"
+      cat "$tmp/raw-legacy-fs-out"
+      cat "$tmp/raw-socketpair-out"
+      cat "$tmp/raw-ppoll-1"
+      cat "$tmp/raw-fcntl-parity-out"
+    fi
+
     cat "$tmp/raw-seed-1"
     cat "$tmp/sigsys-out"
     cat "$tmp/auxv-out"
     # Loud execution proof for CI-log grepping: this line prints only after every
     # positive leg above passed, so a skipped-but-green SUD section is impossible
     # to mistake for an executed one.
-    echo 'SUD_LEGS_RAN branch=positive legs=audit-sud-managed,seed-stable,record-replay,thread-arming,seed-varying-entropy,unmapped-abort,auxv-canary,sigsys-hijack,marker-gating'
+    echo 'SUD_LEGS_RAN branch=positive legs=audit-sud-managed,seed-stable,record-replay,thread-arming,seed-varying-entropy,unmapped-abort,auxv-canary,sigsys-hijack,marker-gating,at-random,vsyscall-audit,rustix-mre,procstate-constants,epoll-rows,sendmsg-recvmsg,prctl-get-auxv,legacy-fs-aliases,socketpair-row,ppoll-row,fcntl-getfl-parity'
   else
     echo "sud: SKIPPED (kernel lacks syscall-user-dispatch) — running the refusal + kernel-independent legs"
 
@@ -3066,7 +3580,7 @@ RS
     cat "$tmp/sigsys-out"
     # Loud execution proof, mirroring the positive branch: prints only after the
     # refusal + kernel-independent legs above passed.
-    echo 'SUD_LEGS_RAN branch=refusal legs=audit-sud-managed,run-refusal,replay-refusal,sigsys-hijack,marker-gating'
+    echo 'SUD_LEGS_RAN branch=refusal legs=audit-sud-managed,run-refusal,replay-refusal,sigsys-hijack,marker-gating,at-random'
   fi
 fi
 

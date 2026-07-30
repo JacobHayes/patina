@@ -1,0 +1,38 @@
+# Standalone package: its own empty [workspace] table keeps it OUT of the root
+# Patina workspace so `cargo` here never touches crates/ or the root manifest.
+#
+# The acceptance MRE for syscall-user-dispatch (SUD): this guest uses rustix's
+# DEFAULT backend (linux_raw on Linux — raw inline `syscall` instructions, no
+# libc wrappers). That is exactly the binary class the import audit could not
+# see and the instruction scan refused before SUD. Built through the packaged
+# native path, `cargo patina build` DROPS `--cfg rustix_use_libc` on x86_64
+# (SUD-capable), so the raw syscalls stay raw and are trapped at run time by the
+# SIGSYS dispatcher. There is deliberately NO buggify/patina dependency: the
+# same source is a plain std+rustix program.
+[workspace]
+
+[package]
+name = "rustix-default"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "rustix-default"
+path = "src/main.rs"
+
+[dependencies]
+# rustix on its DEFAULT backend. `default-features = false` drops the "use-libc"
+# escape hatch so linux_raw is selected on Linux; the feature set below is the
+# minimum the probe exercises. Pinned exactly, per testbeds convention.
+rustix = { version = "=1.1.4", default-features = false, features = [
+    "std",
+    "time",
+    "fs",
+    "net",
+    "system",
+    "rand",
+] }
+
+[profile.release]
+panic = "unwind"

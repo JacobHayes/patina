@@ -450,6 +450,12 @@ pub struct RuntimeConfig {
     /// byte-for-byte unchanged; enabling it only ADDS a possible violation report
     /// and is deliberately NOT a fingerprint input (schedule-invariant).
     liveness: LivenessConfig,
+    /// Whether syscall-user-dispatch was armed for this run (Linux/x86_64 managed
+    /// run on a SUD kernel). Recorded into the trace's [`RunMetadata::sud`] so a
+    /// cross-kernel replay is refused up front. `None` on every non-SUD run
+    /// (macOS, non-SUD kernel, standalone). Set by the native shim from the C
+    /// arming state; not a fingerprint input. SUD-DESIGN.md §7.3.
+    sud: Option<bool>,
 }
 
 impl RuntimeConfig {
@@ -467,6 +473,7 @@ impl RuntimeConfig {
             swarm: false,
             guest_argv: None,
             liveness: LivenessConfig::default(),
+            sud: None,
         }
     }
 
@@ -484,6 +491,7 @@ impl RuntimeConfig {
             swarm: false,
             guest_argv: None,
             liveness: LivenessConfig::default(),
+            sud: None,
         }
     }
 
@@ -506,6 +514,7 @@ impl RuntimeConfig {
             swarm: false,
             guest_argv: None,
             liveness: LivenessConfig::default(),
+            sud: None,
         }
     }
 
@@ -529,6 +538,7 @@ impl RuntimeConfig {
             swarm: false,
             guest_argv: None,
             liveness: LivenessConfig::default(),
+            sud: None,
         }
     }
 
@@ -553,6 +563,7 @@ impl RuntimeConfig {
             swarm: false,
             guest_argv: None,
             liveness: LivenessConfig::default(),
+            sud: None,
         }
     }
 
@@ -583,6 +594,7 @@ impl RuntimeConfig {
             swarm: false,
             guest_argv: None,
             liveness: LivenessConfig::default(),
+            sud: None,
         }
     }
 
@@ -741,6 +753,21 @@ impl RuntimeConfig {
     #[must_use]
     pub fn with_guest_argv(mut self, guest_argv: Option<Vec<String>>) -> Self {
         self.guest_argv = guest_argv;
+        self
+    }
+
+    /// Whether syscall-user-dispatch was armed for this run, or `None` when SUD
+    /// is not applicable.
+    pub const fn sud(&self) -> Option<bool> {
+        self.sud
+    }
+
+    /// Set whether syscall-user-dispatch was armed for this run. The native shim
+    /// calls this from the C arming state so record captures it into the trace
+    /// and replay reconciles it. `Some(true)` when armed; `None` otherwise.
+    #[must_use]
+    pub fn with_sud(mut self, sud: Option<bool>) -> Self {
+        self.sud = sud;
         self
     }
 
@@ -1287,7 +1314,8 @@ impl RuntimeBuilder {
                             .with_schedule_policy(schedule_policy_record(&self.config))
                             .with_swarm(swarm_record.clone())
                             .with_watchdog(watchdog_record(&self.config))
-                            .with_guest_argv(self.config.guest_argv.clone()),
+                            .with_guest_argv(self.config.guest_argv.clone())
+                            .with_sud(self.config.sud),
                     ),
                     sink: RecordSink::Path {
                         path: path.clone(),
@@ -1305,7 +1333,8 @@ impl RuntimeBuilder {
                             .with_schedule_policy(schedule_policy_record(&self.config))
                             .with_swarm(swarm_record.clone())
                             .with_watchdog(watchdog_record(&self.config))
-                            .with_guest_argv(self.config.guest_argv.clone()),
+                            .with_guest_argv(self.config.guest_argv.clone())
+                            .with_sud(self.config.sud),
                     ),
                     sink: RecordSink::Transport(
                         self.trace_transport.take().expect("transport was checked"),
@@ -1323,6 +1352,7 @@ impl RuntimeBuilder {
                     reconcile_replay_buggify(&self.config, replayer.buggify_config())?;
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
+                reconcile_replay_sud(&self.config, replayer.sud())?;
                 (Execution::Replay(replayer), root_seed)
             }
             ExecutionMode::ReplayTransport { timeline } => {
@@ -1340,6 +1370,7 @@ impl RuntimeBuilder {
                     reconcile_replay_buggify(&self.config, replayer.buggify_config())?;
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
+                reconcile_replay_sud(&self.config, replayer.sud())?;
                 (Execution::Replay(replayer), root_seed)
             }
             ExecutionMode::Branch {
@@ -4513,6 +4544,40 @@ fn reconcile_replay_schedule_policy(
     Ok(Some(stored))
 }
 
+/// Reconcile the trace's recorded syscall-user-dispatch state against this
+/// replay run's arming, and REFUSE a mismatch UP FRONT (before the first op is
+/// replayed) rather than diverging mid-run. A binary with raw inline syscalls
+/// can only run armed, so replaying its `sud:true` trace on a kernel without SUD
+/// (or replaying a non-SUD trace on a run that armed SUD) cannot reproduce the
+/// recorded op-stream — the message names the real situation. `Some(true)` means
+/// armed; `None` (absent) means not armed (macOS / non-SUD kernel / standalone /
+/// pre-SUD trace). SUD-DESIGN.md §7.3.
+fn reconcile_replay_sud(
+    config: &RuntimeConfig,
+    recorded: Option<bool>,
+) -> Result<(), RuntimeError> {
+    let recorded_armed = recorded == Some(true);
+    let now_armed = config.sud == Some(true);
+    if recorded_armed && !now_armed {
+        return Err(RuntimeError::Config(
+            "this trace was recorded under syscall-user-dispatch (SUD), but this run did not arm \
+             it — the kernel lacks SUD (arm64 needs the generic-entry kernels; x86_64 needs \
+             >= 5.11), or this is macOS. Replay on a matching x86_64 SUD kernel, or rebuild the \
+             guest with `--cfg rustix_use_libc` and re-record."
+                .into(),
+        ));
+    }
+    if !recorded_armed && now_armed {
+        return Err(RuntimeError::Config(
+            "this run armed syscall-user-dispatch (SUD), but the trace was recorded WITHOUT it — \
+             the two observe raw syscalls at different boundaries, so the recorded op-stream \
+             cannot be reproduced. Replay on the kernel/platform the trace was recorded on."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Apply swarm fault-class selection to a record/seeded run's configuration: for
 /// each enabled fault class, a domain-separated seed-derived coin decides whether
 /// it stays active this generation. The masked configuration is what every driver
@@ -5385,6 +5450,37 @@ mod tests {
                 .len()
                 > 1
         );
+    }
+
+    #[test]
+    fn reconcile_replay_sud_refuses_a_mismatch_in_both_directions() {
+        // Matching states reconcile clean: armed↔armed, and not-armed↔not-armed
+        // (the latter covers macOS, non-SUD kernels, and every pre-SUD trace).
+        let armed = RuntimeConfig::seeded(0).with_sud(Some(true));
+        let unarmed = RuntimeConfig::seeded(0).with_sud(None);
+        assert!(reconcile_replay_sud(&armed, Some(true)).is_ok());
+        assert!(reconcile_replay_sud(&unarmed, None).is_ok());
+        assert!(reconcile_replay_sud(&unarmed, Some(false)).is_ok());
+
+        // RED direction 1: a trace recorded under SUD replayed where SUD did not
+        // arm (kernel lacks it / macOS) is refused up front, naming the kernel.
+        let err = reconcile_replay_sud(&unarmed, Some(true)).unwrap_err();
+        let text = format!("{err}");
+        assert!(
+            text.contains("recorded under syscall-user-dispatch"),
+            "{text}"
+        );
+        assert!(
+            text.contains("rustix_use_libc") || text.contains("lacks SUD"),
+            "{text}"
+        );
+
+        // RED direction 2: a run that armed SUD replaying a trace recorded WITHOUT
+        // it is refused too — the converse mismatch, never a silent divergence.
+        let err = reconcile_replay_sud(&armed, None).unwrap_err();
+        let text = format!("{err}");
+        assert!(text.contains("armed syscall-user-dispatch"), "{text}");
+        assert!(text.contains("recorded WITHOUT it"), "{text}");
     }
 
     #[test]
