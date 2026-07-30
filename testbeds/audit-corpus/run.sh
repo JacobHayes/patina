@@ -147,6 +147,43 @@ build_cargo_patina() {
   fi
 }
 
+# ---- help ------------------------------------------------------------------
+help() {
+  cat <<'EOF'
+audit-corpus — the ecosystem symbol-audit corpus, run as a strict-xfail gate.
+
+Builds + audits 20 minimal reproducers (one per popular crate) through the
+packaged native path (`cargo patina audit <dir>`), normalizes each residual set
+of unsupported native imports to sorted `symbol class` lines, and compares them
+EXACTLY and in BOTH directions against the committed per-crate, per-platform
+expectation files under expected/. A regression (an expected-CLEAN crate going
+dirty) or any drift (new/dropped/reclassified symbol) FAILs; an improvement must
+be CLAIMED with --update. A platform whose expectations were never recorded (all
+PLACEHOLDER) prints a loud SKIP and exits 0.
+
+Usage:
+  run.sh              build+audit every MRE, compare to this platform's committed
+                      expectations, print a PASS/FAIL table, exit nonzero on any
+                      failure.
+  run.sh --update     re-record this platform's expectation files from the current
+                      audit output (the explicit claim mechanism).
+  run.sh --selftest   prove BOTH failure directions fire (injected symbol, dropped
+                      symbol) against tampered copies in $TMPDIR, touching no
+                      committed file.
+  run.sh -h | --help  show this help.
+
+Environment:
+  TMPDIR   base directory for the scratch work/log dirs (default /tmp).
+
+The platform is auto-detected (macos / linux); arch is not distinguished. Bump
+procedure and the full contract live in README.md. Exit status: 0 = PASS or SKIP;
+1 = FAIL (drift/regression/missing); 2 = usage error; 3 = build/audit error.
+EOF
+}
+case "${1:-}" in
+  -h|--help) help; exit 0 ;;
+esac
+
 # ===========================================================================
 # --selftest : prove BOTH strict failure directions fire, on tampered COPIES.
 # ===========================================================================
@@ -223,8 +260,8 @@ update=0
 if [[ "${1:-}" == "--update" ]]; then
   update=1
 elif [[ -n "${1:-}" ]]; then
-  echo "FATAL: unknown argument '$1' (expected --update or --selftest)" >&2
-  exit 3
+  echo "run.sh: unknown argument '$1' (expected --update, --selftest, or --help)" >&2
+  exit 2
 fi
 
 build_cargo_patina

@@ -182,13 +182,63 @@ PY
   fi
 }
 
+usage() {
+  echo "usage: wasi-buggify-sweep.sh [START [END]]        run gens START..END (default 1 40)" >&2
+  echo "       wasi-buggify-sweep.sh --dry-run [START [END]]  print derived config(s), no run" >&2
+  echo "       wasi-buggify-sweep.sh --selftest           shared campaign selftest" >&2
+  echo "       wasi-buggify-sweep.sh -h | --help          show full help" >&2
+}
+help() {
+  cat <<'EOF'
+wasi-buggify-sweep — WASI cooperative-SUT (buggify) campaign, the dogfood proving
+the wasm32-wasip1 path has full parity with the native buggify family. Compiles
+the buggify-instrumented fixture (src/main.rs) via `cargo patina build --target
+wasi` and runs a deterministic campaign with buggify ENABLED: sites register +
+fire under --buggify on wasip1 (PATINA_SDK_REPORT parsed by the SHARED
+../buggify-campaign.sh classifier), record/replay is byte-identical per gen, and
+distinct seeds vary the firing profile. Every knob for generation G is a pure
+function of SHA-256("wasi-buggify-G"), so the campaign reproduces from the range
+alone. The fixture carries no planted defect: a clean campaign is all-OK.
+
+Usage:
+  wasi-buggify-sweep.sh [START [END]]            run generations START..END
+                                                 inclusive. Default 1 40.
+  wasi-buggify-sweep.sh --dry-run [START [END]]  print each generation's derived
+                                                 config and command, no run.
+                                                 Default START=1 END=START.
+  wasi-buggify-sweep.sh --selftest               run the shared campaign-layer
+                                                 selftest (proves the classifiers
+                                                 bite).
+  wasi-buggify-sweep.sh -h | --help              show this help.
+
+Environment:
+  WASI_BUGGIFY_OUT=DIR   output/scratch directory (default <here>/out-wasi-buggify).
+
+Exit status: 0 = campaign clean (or --help/--selftest ok); 1 = one or more
+findings; 2 = usage error; 3 = build/environment failure; 4 = another sweep
+holds the lock; 7 = a sometimes! site was reached but never satisfied.
+EOF
+}
+is_num() { [[ "$1" =~ ^[0-9]+$ ]]; }
+
 main() {
+  local derive_only=0
   case "${1:-}" in
-    --selftest) buggify_campaign_selftest; exit $? ;;
-    --dry-run) build_dry=1; shift; derive_only=1 ;;
+    -h|--help) help; exit 0 ;;
+    --selftest)
+      [[ $# -gt 1 ]] && { echo "wasi-buggify-sweep.sh: --selftest takes no arguments" >&2; usage; exit 2; }
+      buggify_campaign_selftest; exit $? ;;
+    --dry-run) derive_only=1; shift ;;
+    -*) echo "wasi-buggify-sweep.sh: unknown option '${1}'" >&2; usage; exit 2 ;;
   esac
-  local start="${1:-1}" end="${2:-40}"
-  if [[ "${derive_only:-0}" == 1 ]]; then dry_run "$start" "$end"; exit 0; fi
+  if [[ $# -gt 2 ]]; then echo "wasi-buggify-sweep.sh: too many arguments" >&2; usage; exit 2; fi
+  # A campaign defaults to the full 1..40 range; --dry-run defaults to a single
+  # generation (END=START), matching the pubsub/workq sweeps.
+  local start="${1:-1}" end
+  if (( derive_only == 1 )); then end="${2:-$start}"; else end="${2:-40}"; fi
+  if ! is_num "$start" || ! is_num "$end"; then echo "wasi-buggify-sweep.sh: START/END must be non-negative integers" >&2; usage; exit 2; fi
+  if (( end < start )); then echo "wasi-buggify-sweep.sh: END ($end) must be >= START ($start)" >&2; usage; exit 2; fi
+  if (( derive_only == 1 )); then dry_run "$start" "$end"; exit 0; fi
 
   if ! mkdir "$LOCK" 2>/dev/null; then
     echo "REFUSING TO RUN: another wasi-buggify-sweep holds $LOCK" >&2; exit 4

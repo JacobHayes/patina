@@ -1,6 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+help() {
+  cat <<'EOF'
+validate-wasi.sh — validate the deterministic wasm32-wasip1 (WASI) host path.
+
+Compiles real Rust wasm32-wasip1 probes (filesystem/time, datagram sockets,
+hard-link/symlink/readlink, set-times, and seed-derived HashMap ordering) and
+drives each through `cargo patina` to prove seeded determinism, record/replay
+identity, and the exact set of validated WASI imports. Prints the validated
+imports and the deterministic output on success.
+
+Usage: validate-wasi.sh [-h|--help]
+
+Takes no positional arguments. Requires the wasm32-wasip1 target
+(rustup target add wasm32-wasip1).
+
+Environment:
+  CARGO_TARGET_DIR   override the Cargo target directory (default <repo>/target).
+
+Exit status: 0 = validated; 1 = a determinism/replay/import check failed;
+2 = usage error or a missing prerequisite (target/toolchain).
+EOF
+}
+case "${1:-}" in
+  -h|--help) help; exit 0 ;;
+  "") ;;
+  *) echo "validate-wasi.sh: unexpected argument '$1' (takes no positional arguments; see --help)" >&2; exit 2 ;;
+esac
+
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 target_dir=${CARGO_TARGET_DIR:-$root/target}
 tmp=$(mktemp -d)

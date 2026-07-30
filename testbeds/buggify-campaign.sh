@@ -203,3 +203,41 @@ PATINA_SDK_REPORT enabled=1 sites_registered=3' 'PATINA_ALWAYS_VIOLATION label=x
   echo "BUGGIFY CAMPAIGN SELFTEST PASSED"
   return 0
 }
+
+###############################################################################
+# Direct-invocation CLI. This file is a LIBRARY meant to be SOURCED; the guard
+# below is inert when sourced (BASH_SOURCE[0] != $0) so a caller's own $1 is never
+# consumed. Executed directly it only self-checks or prints help.
+###############################################################################
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  case "${1:-}" in
+    -h|--help)
+      cat <<'EOF'
+buggify-campaign.sh — shared cooperative-SUT (buggify) campaign LIBRARY.
+
+This file is meant to be SOURCED by the buggify-aware sweeps
+(testbeds/workq/fuzz-sweep.sh, testbeds/workq/run-patina.sh, and
+testbeds/buggify-wasi/wasi-buggify-sweep.sh). It provides the buggify classifier
+(ALWAYS_VIOLATION / the buggify fatal markers), the SOMETIMES_UNMET campaign
+oracle, the PATINA_SDK_REPORT parser, the cross-generation campaign-state
+accumulator, and their selftest. Sourced, it defines functions only and honors no
+arguments; it runs no campaign on its own.
+
+Usage (direct invocation is only for its own self-check):
+  buggify-campaign.sh --selftest    run the shared campaign-layer selftest.
+  buggify-campaign.sh -h | --help   show this help.
+
+Exit status: 0 = help or selftest passed; 1 = selftest failed; 2 = usage error.
+EOF
+      exit 0 ;;
+    --selftest)
+      [[ $# -gt 1 ]] && { echo "buggify-campaign.sh: --selftest takes no arguments" >&2; exit 2; }
+      buggify_campaign_selftest; exit $? ;;
+    "")
+      echo "buggify-campaign.sh is a sourced library; run --selftest to self-check or --help for details" >&2
+      exit 2 ;;
+    *)
+      echo "buggify-campaign.sh: unknown argument '${1}' (expected --selftest or --help)" >&2
+      exit 2 ;;
+  esac
+fi

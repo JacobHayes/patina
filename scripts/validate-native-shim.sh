@@ -1,6 +1,38 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+help() {
+  cat <<'EOF'
+validate-native-shim.sh — validate the native (macOS/Linux) linked-shim path.
+
+Builds and drives many C and Rust probes through the packaged native shim to
+prove std::fs, filesystem metadata, SystemTime/Instant/thread::sleep, captured
+stdio, std entropy, and real thread spawn/join + mutex/condvar contention all run
+deterministically under DetScheduler — with seeded determinism and record/replay
+identity — and that host-effect symbols stay correctly interposed/denied. Fails
+loudly on any divergence.
+
+Usage: validate-native-shim.sh [-h|--help]
+
+Takes no positional arguments. Requires a C compiler.
+
+Environment:
+  CC                       C compiler to use (default cc).
+  CARGO_TARGET_DIR         override the Cargo target directory (default <repo>/target).
+  KEEP_PATINA_TMP=1        preserve the scratch temp dir instead of deleting it on exit.
+  PATINA_REQUIRE_STRACE=1  require strace-based syscall checks (Linux; fail if unavailable).
+  PATINA_REQUIRE_KTRACE=1  require ktrace-based syscall checks (macOS; fail if unavailable).
+
+Exit status: 0 = validated; 1 = a determinism/interposition check failed;
+2 = usage error or a missing prerequisite (C compiler).
+EOF
+}
+case "${1:-}" in
+  -h|--help) help; exit 0 ;;
+  "") ;;
+  *) echo "validate-native-shim.sh: unexpected argument '$1' (takes no positional arguments; see --help)" >&2; exit 2 ;;
+esac
+
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 target_dir=${CARGO_TARGET_DIR:-$root/target}
 tmp=$(mktemp -d)

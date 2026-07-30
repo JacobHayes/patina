@@ -6,6 +6,35 @@ set -euo pipefail
 # shim. Each target runs seeded smoke tests with recorded and replayable
 # traces, and the deterministic program output must match across targets.
 
+help() {
+  cat <<'EOF'
+smoke-cross-target.sh — cross-target deterministic-output smoke test.
+
+Builds ONE ordinary-std Rust smoke program for every Patina target this host
+supports (wasm32-wasip1 WASI and the native macOS/Linux linked shim), runs seeded
+smoke tests with record/replay on each, and asserts the deterministic SMOKE_RESULT
+(including a pinned seeded-entropy anchor) is byte-identical across seeds, across
+record vs replay, across cold vs warm build cache, and ACROSS targets.
+
+Usage: smoke-cross-target.sh [-h|--help]
+
+Takes no positional arguments. Requires the wasm32-wasip1 target
+(rustup target add wasm32-wasip1) and a C compiler.
+
+Environment:
+  CARGO_TARGET_DIR   override the Cargo target directory (default <repo>/target).
+  CC                 C compiler to use (default cc).
+
+Exit status: 0 = cross-target determinism validated; 1 = a determinism/entropy
+check failed; 2 = usage error or a missing prerequisite (target/compiler).
+EOF
+}
+case "${1:-}" in
+  -h|--help) help; exit 0 ;;
+  "") ;;
+  *) echo "smoke-cross-target.sh: unexpected argument '$1' (takes no positional arguments; see --help)" >&2; exit 2 ;;
+esac
+
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 target_dir=${CARGO_TARGET_DIR:-$root/target}
 tmp=$(mktemp -d)

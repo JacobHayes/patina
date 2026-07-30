@@ -860,26 +860,75 @@ usage() {
   echo "       fuzz-sweep.sh --gen N [--dry-run]         run (or just print) a single generation" >&2
   echo "       fuzz-sweep.sh --dry-run [START [END]]     print derived config(s), no build/run" >&2
   echo "       fuzz-sweep.sh --selftest                  classifier selftest" >&2
+  echo "       fuzz-sweep.sh -h | --help                 show full help" >&2
+}
+help() {
+  cat <<'EOF'
+workq fuzz-sweep — randomized-but-deterministic fault-COMBINATION campaign over
+the durable work queue under Patina. Every knob AND the tier for generation G is
+a pure function of SHA-256("patina-fuzz-G") (no $RANDOM, no date), so any
+generation re-runs by number and the whole campaign is a pure function of its
+[START,END] range. Two planes: the MESSAGE/FAULT plane (BREADTH/TRAFFIC tiers,
+plain binary) crosses net/storage/crash/buggify faults; the SCHEDULE plane
+(~20% of gens, yield-points binary) isolates thread INTERLEAVINGS at atomics
+granularity. A ~4% DETERMINISM tier double-runs the identical config and requires
+a byte-identical WORKQ_RESULT + trace hash. The classifier is pure and
+non-vacuous (a planted WORKQ_VIOLATION is a SAFETY_BUG even on exit 0).
+
+Usage:
+  fuzz-sweep.sh [START_GEN] [END_GEN]   run generations START..END inclusive.
+                                        Default 1..100.
+  fuzz-sweep.sh --gen N [--dry-run]     run (or, with --dry-run, just print) a
+                                        single generation N.
+  fuzz-sweep.sh --dry-run [START [END]] print each generation's derived config
+                                        and exact command, no build/run.
+                                        Default START=1 END=START.
+  fuzz-sweep.sh --selftest              drive the classifier over canned tuples
+                                        covering EVERY outcome class.
+  fuzz-sweep.sh -h | --help             show this help.
+
+Environment:
+  PATINA_FUZZ_OUT=DIR         output/scratch directory (default <here>/out-fuzz).
+  PATINA_FUZZ_SKIP_BUILD=1    continue a campaign against the EXISTING binaries
+                              (no rebuild); still hard-fails if a binary or the
+                              yield-points marker is missing.
+  PATINA_SWEEP_STARVE=1       enable the opt-in adversarial-starvation policy
+                              overlay on the SCHEDULE tier (off by default: it can
+                              wedge an atomic-spinlock guest; a wedged gen is
+                              classified STARVATION_STALL by the backstop).
+
+Runtime: the nightly CI campaign sweeps 1..200; a full 200-gen run is minutes,
+far longer than the per-push budget. Exit status: 0 = no failure classes; 1 =
+one or more findings (or infrastructure errors); 2 = usage error; 3 =
+build/environment failure; 4 = another sweep holds the lock.
+EOF
 }
 is_num() { [[ "$1" =~ ^[0-9]+$ ]]; }
 
 main() {
   case "${1:-}" in
-    --selftest) selftest; exit $? ;;
+    -h|--help) help; exit 0 ;;
+    --selftest)
+      [[ $# -gt 1 ]] && { echo "fuzz-sweep.sh: --selftest takes no arguments" >&2; usage; exit 2; }
+      selftest; exit $? ;;
     --dry-run)
+      [[ $# -gt 3 ]] && { echo "fuzz-sweep.sh: too many arguments" >&2; usage; exit 2; }
       local s="${2:-1}" e="${3:-${2:-1}}"
       if ! is_num "$s" || ! is_num "$e"; then usage; exit 2; fi
       dry_run "$s" "$e"; exit 0 ;;
     --gen)
+      [[ $# -gt 3 ]] && { echo "fuzz-sweep.sh: too many arguments" >&2; usage; exit 2; }
       local g="${2:-}"
       if ! is_num "$g"; then usage; exit 2; fi
+      if [[ -n "${3:-}" && "${3:-}" != "--dry-run" ]]; then echo "fuzz-sweep.sh: unknown argument '${3}'" >&2; usage; exit 2; fi
       if [[ "${3:-}" == "--dry-run" ]]; then dry_run "$g" "$g"; exit 0; fi
       sweep "$g" "$g"; exit $? ;;
-    -h|--help) usage; exit 0 ;;
+    -*) echo "fuzz-sweep.sh: unknown option '${1}'" >&2; usage; exit 2 ;;
   esac
+  [[ $# -gt 2 ]] && { echo "fuzz-sweep.sh: too many arguments" >&2; usage; exit 2; }
   local start="${1:-1}" end="${2:-100}"
   if ! is_num "$start" || ! is_num "$end"; then usage; exit 2; fi
-  if (( end < start )); then echo "END_GEN ($end) must be >= START_GEN ($start)" >&2; exit 2; fi
+  if (( end < start )); then echo "END_GEN ($end) must be >= START_GEN ($start)" >&2; usage; exit 2; fi
   sweep "$start" "$end"; exit $?
 }
 

@@ -4,10 +4,10 @@
 # pub-sub broker under Patina. Every generation's config is a pure function of
 # its integer tag G (SHA-256 -> BYTE[]), so any finding re-runs from G alone.
 #
-# Usage:
-#   fuzz-sweep.sh [GENS [START]]        run GENS generations from START (default 200 0)
+# Usage (see --help for the full block):
+#   fuzz-sweep.sh [START [END]]         run generations START..END (default 0 199)
 #   fuzz-sweep.sh --selftest            drive the pure classifier over canned tuples
-#   fuzz-sweep.sh --dry-run [S [E]]     print derived configs without building/running
+#   fuzz-sweep.sh --dry-run [START [END]]  print derived configs without building/running
 #   SKIP_BUILD=1 fuzz-sweep.sh ...      reuse the prebuilt harness (skip the build prelude)
 #
 # Two perturbation planes:
@@ -191,7 +191,47 @@ derive_config() {
 ###############################################################################
 # Entry points.
 ###############################################################################
-[[ "${1:-}" == "--selftest" ]] && { selftest; exit 0; }
+usage() {
+  cat >&2 <<'EOF'
+usage: fuzz-sweep.sh [START [END]]            run generations START..END (default 0 199)
+       fuzz-sweep.sh --dry-run [START [END]]  print derived config(s), no build/run
+       fuzz-sweep.sh --selftest               classifier selftest
+       fuzz-sweep.sh -h | --help              show full help
+EOF
+}
+help() {
+  cat <<'EOF'
+pubsub fuzz-sweep — deterministic, re-runnable generations over the tokio pub-sub
+broker under Patina. Every generation G derives its ENTIRE config from
+SHA-256("patina-pubsub-fuzz-G"), so any finding re-runs from its integer tag alone.
+Tiers (a pure function of G): NET_FAULT (SimNet TCP jitter + drop; faults must
+reorder/delay WITHOUT changing the order-invariant outcome hash — a vacuous fault
+is a VACUOUS_NET_FAULT finding), SCHEDULE (plain --seed interleaving variation),
+and DETERMINISM (identical-config double run; byte-identical result + trace hash
+required). Every clean run: exit 0, published=32, delivered=64, the fixed outcome
+hash, no PUBSUB_VIOLATION.
+
+Usage:
+  fuzz-sweep.sh [START [END]]            run generations START..END inclusive.
+                                         Default START=0 END=199 (200 generations).
+  fuzz-sweep.sh --dry-run [START [END]]  print each generation's derived config and
+                                         exact patina command, no build/run.
+                                         Default START=0 END=START (one generation).
+  fuzz-sweep.sh --selftest               drive the pure classifiers over canned
+                                         tuples covering every outcome class.
+  fuzz-sweep.sh -h | --help              show this help.
+
+Environment:
+  SKIP_BUILD=1   reuse the already-built harness at target/patina/pubsub instead
+                 of rebuilding cargo-patina + the harness (fails loudly if the
+                 binary is missing). Any other PATINA_* net-fault report vars are
+                 emitted by the runtime and parsed from each run's stderr.
+
+Exit status: 0 = all generations clean (or --help/--selftest ok); 1 = one or more
+findings; 2 = usage error; 3 = build/environment failure.
+EOF
+}
+is_num() { [[ "$1" =~ ^[0-9]+$ ]]; }
 
 report_field() { /usr/bin/grep -o "$1=[0-9][0-9]*" "$2" 2>/dev/null | head -1 | cut -d= -f2; }
 result_line()  { grep '^PUBSUB_RESULT' "$1" 2>/dev/null | head -1 || true; }
@@ -201,21 +241,34 @@ sha_of()       { if [[ -f "$1" ]]; then shasum -a256 "$1" | cut -d' ' -f1; else 
 # a representative spawned-worker life/cause from PATINA_SCHEDULE_REPORT
 life_cause()   { /usr/bin/grep -o 'life=[0-9]*/cause=[a-z-]*' "$1" 2>/dev/null | head -1; }
 
-if [[ "${1:-}" == "--dry-run" ]]; then
-  s="${2:-0}"; e="${3:-$s}"
-  for (( G = s; G <= e; G++ )); do
-    derive_config "$G"
-    printf 'gen=%s tier=%s det_run=%s net=%s %s\n' "$G" "$TIER" "$DET_RUN" "$IS_NET_FAULT" "$CFG_SUMMARY"
-    printf '    cmd: '; printf '%q ' "$PATINA" patina run "$built" "${PKNOBS[@]}" -- "${GUEST_ARGS[@]}"; echo
-  done
-  exit 0
-fi
+case "${1:-}" in
+  -h|--help) help; exit 0 ;;
+  --selftest)
+    [[ $# -gt 1 ]] && { echo "fuzz-sweep.sh: --selftest takes no arguments" >&2; usage; exit 2; }
+    selftest; exit 0 ;;
+  --dry-run)
+    [[ $# -gt 3 ]] && { echo "fuzz-sweep.sh: too many arguments" >&2; usage; exit 2; }
+    s="${2:-0}"; e="${3:-$s}"
+    if ! is_num "$s" || ! is_num "$e"; then echo "fuzz-sweep.sh: START/END must be non-negative integers" >&2; usage; exit 2; fi
+    if (( e < s )); then echo "fuzz-sweep.sh: END ($e) must be >= START ($s)" >&2; usage; exit 2; fi
+    for (( G = s; G <= e; G++ )); do
+      derive_config "$G"
+      printf 'gen=%s tier=%s det_run=%s net=%s %s\n' "$G" "$TIER" "$DET_RUN" "$IS_NET_FAULT" "$CFG_SUMMARY"
+      printf '    cmd: '; printf '%q ' "$PATINA" patina run "$built" "${PKNOBS[@]}" -- "${GUEST_ARGS[@]}"; echo
+    done
+    exit 0 ;;
+  -*) echo "fuzz-sweep.sh: unknown option '${1}'" >&2; usage; exit 2 ;;
+esac
 
-GENS="${1:-200}"; START="${2:-0}"
+[[ $# -gt 2 ]] && { echo "fuzz-sweep.sh: too many arguments" >&2; usage; exit 2; }
+START="${1:-0}"; END="${2:-199}"
+if ! is_num "$START" || ! is_num "$END"; then echo "fuzz-sweep.sh: START/END must be non-negative integers" >&2; usage; exit 2; fi
+if (( END < START )); then echo "fuzz-sweep.sh: END ($END) must be >= START ($START)" >&2; usage; exit 2; fi
+GENS=$(( END - START + 1 ))
 OUTDIR="$(mktemp -d)"
 SWEEP_LOG="$OUTDIR/sweep.log"
 
-echo "==> pubsub fuzz sweep: $GENS generations from $START (out=$OUTDIR)"
+echo "==> pubsub fuzz sweep: generations $START..$END ($GENS gens, out=$OUTDIR)"
 cd "$repo_root"
 if [[ "${SKIP_BUILD:-0}" != 1 ]]; then
   echo "==> building cargo-patina + the pubsub harness"
