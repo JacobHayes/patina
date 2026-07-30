@@ -2761,7 +2761,12 @@ fn main() {
     );
 }
 RS
-"$runner" build "$tmp/tokio-probe-src" --bin patina-tokio-probe --output "$tmp/tokio-probe" >/dev/null
+# The probe's dep graph (tokio + friends) is identical across runs; a persistent
+# target dir under the repo's target/ turns the ~14s cold build into ~3s warm and
+# rides the same CI cache as everything else. The source lives in a fresh tempdir
+# each run, so a stale cache can never mask a source change (fingerprints differ).
+CARGO_TARGET_DIR="$target_dir/tokio-probe-cache" \
+  "$runner" build "$tmp/tokio-probe-src" --bin patina-tokio-probe --output "$tmp/tokio-probe" >/dev/null
 "$runner" audit "$tmp/tokio-probe" "${shim_allow[@]}" >/dev/null
 "$runner" run "$tmp/tokio-probe" --seed 1 >"$tmp/tokio-seed-1"
 "$runner" run "$tmp/tokio-probe" --seed 1 >"$tmp/tokio-seed-2"
