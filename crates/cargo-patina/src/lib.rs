@@ -5052,6 +5052,21 @@ native certificates under the deterministic runtime, or pass --allow-unsupported
 store the guest reads is whatever the host holds at run time.",
             );
         }
+        if blocked
+            .iter()
+            .any(|escape| escape.category == "host-introspection")
+        {
+            // Mach/BSD/IOKit host-state reads: name the determinism problem and
+            // the interpose-or-refuse posture (these must never be allowlisted).
+            message.push_str(
+                "\nnote: the host-introspection symbol(s) above (sysctl/sysctlbyname, getrusage, \
+task_info, host_statistics64, proc_pidinfo, the IOKit registry walk, ...) read host \
+CPU/memory/hardware/process state — nondeterministic across hosts and runs; interpose-or-refuse, \
+never allowlist. A run that reaches them is not reproducible, so it is refused; pass \
+--allow-unsupported-symbols <all|name,name,...> to run anyway with a warning, but determinism is \
+then only qualified.",
+            );
+        }
         return Err(CliError(message));
     }
 

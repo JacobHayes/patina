@@ -1232,6 +1232,14 @@ fn common_native_allowlisted_import(symbol: &str) -> bool {
         "strncpy_chk",
         "strnlen",
         "strrchr",
+        // Numeric parse of a caller-owned NUL-terminated string into an integer,
+        // optionally writing an end pointer back into caller memory. Pure
+        // caller-memory read/compute with no boundary effect, same family as the
+        // `strlen`/`strcmp` intrinsics above. Both Mach-O `_strtol` and ELF
+        // `strtol` normalize onto this common entry. (`strtoul` and the other
+        // radix/float parsers are deliberately NOT here — this is an exact list,
+        // never a prefix, so an unlisted parser stays denied as `unknown-import`.)
+        "strtol",
     ];
     // Compiler-rt/libgcc 128-bit integer arithmetic intrinsics: pure functions
     // of their register/stack operands with no boundary effect. Rust u128/i128
@@ -1450,8 +1458,13 @@ fn macho_native_allowlisted_import(symbol: &str) -> bool {
         "tlv_bootstrap",
     ];
     // Rust/libSystem finalizer registration for thread-local and process-local
-    // destructors; registration is process-local and deterministic.
-    const FINALIZERS: &[&str] = &["atexit"];
+    // destructors; registration is process-local and deterministic. `cxa_atexit`
+    // (Mach-O `___cxa_atexit`) is the C++/`__attribute__((destructor))` finalizer
+    // registrar — same process-local family as `atexit`/`tlv_atexit`, mirroring
+    // the ELF `cxa_atexit` entry on `STARTUP_AND_TLS_GLUE` (a C custom allocator's
+    // static init reaches it). Registration only records a callback in
+    // process-local storage; nothing crosses the boundary Patina models.
+    const FINALIZERS: &[&str] = &["atexit", "cxa_atexit"];
     // Darwin's 64-bit mmap import backs the allocator and thread stacks;
     // mprotect/munmap live on the common list.
     const PROCESS_LOCAL_MEMORY: &[&str] = &["mmap"];
@@ -1705,6 +1718,15 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "mach_absolute_time",
         "mach_continuous_time",
         "mach_wait_until",
+        // Broken-down local-time conversion and its timezone-table primer. Both
+        // read the host's timezone database / `TZ` to render a `time_t` into a
+        // `struct tm` (or seed the global `tzname`/`timezone`), so the result
+        // varies by where the run happens — a host-timezone-dependent time read.
+        // Cross-platform (Mach-O `_localtime_r`, ELF `localtime_r`). Classified
+        // only: a raw import is still refused; a deterministic runtime must feed
+        // conversions a fixed virtual zone, never the host's.
+        "localtime_r",
+        "tzset",
     ];
     // (c) Entropy: deterministic bytes come from the seeded RNG; a raw import
     // draws real host entropy.
@@ -1849,7 +1871,54 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
     // refusal note. Matched by Apple's reserved framework prefixes as a REFINEMENT
     // of the unknown fallback (a real classification above always wins), so it can
     // never relax a decision — these symbols are denied either way.
-    classified.or_else(|| is_macos_framework_symbol(symbol).then_some("macos-framework"))
+    classified
+        .or_else(|| is_macos_framework_symbol(symbol).then_some("macos-framework"))
+        .or_else(|| is_host_introspection_symbol(symbol).then_some("host-introspection"))
+}
+
+/// Whether a normalized import name reads host CPU/memory/hardware/process state
+/// through the macOS Mach/BSD/IOKit introspection surface (`sysctl`,
+/// `getrusage`, `task_info`, `host_statistics64`, `proc_pidinfo`, the IOKit
+/// registry walk, ...). These are NOT interposed and read live per-host,
+/// per-run machine state — core counts, memory pressure, thermal/battery/device
+/// inventory, per-process resource usage — so a run that reaches one is not
+/// reproducible across hosts or even across runs on one host. `sysinfo`,
+/// `num_cpus`-style probes, and hardware-inventory crates pull in this surface.
+///
+/// Like [`is_macos_framework_symbol`], this is a fail-closed REFINEMENT of the
+/// bare `unknown-import` fallback (a real classification above always wins, and
+/// these symbols are denied either way), so it can only sharpen the label and
+/// drive the determinism note — never relax a decision. The IOKit members are
+/// matched by their reserved entry-point prefixes (`IOService`/`IORegistry`/
+/// `IOIterator`/`IOObject`) rather than a bare `IO` prefix: `IO` alone would
+/// capture arbitrary user symbols that merely start with those two letters
+/// (`IOWidget`, ...), whereas the four namespace prefixes cover the whole
+/// observed IOKit surface without that overreach. Everything else is an exact
+/// list.
+fn is_host_introspection_symbol(symbol: &str) -> bool {
+    // macOS Mach/BSD host- and process-state reads. Exact names (no prefix), so
+    // an unrelated symbol that merely shares a stem stays unclassified.
+    const HOST_STATE: &[&str] = &[
+        "sysctl",
+        "sysctlbyname",
+        "getrusage",
+        "task_info",
+        "mach_task_self_",
+        "mach_host_self",
+        "host_statistics64",
+        "host_processor_info",
+        "vm_page_size",
+        "vm_deallocate",
+        "proc_listallpids",
+        "proc_pidinfo",
+        "proc_pid_rusage",
+        "proc_pidpath",
+    ];
+    HOST_STATE.contains(&symbol)
+        || symbol.starts_with("IOService")
+        || symbol.starts_with("IORegistry")
+        || symbol.starts_with("IOIterator")
+        || symbol.starts_with("IOObject")
 }
 
 /// Whether a normalized import name is a macOS CoreFoundation (`CF`/`kCF`) or
@@ -2277,6 +2346,110 @@ mod tests {
             native_import_decision("sched_getcpu", NativeFormat::Elf, &empty),
             NativeImportDecision::Denied("unknown-import")
         );
+    }
+
+    // The 20-crate ecosystem-audit symbol batch (task #42): two known-safe
+    // allowlist additions and two classification-only refinements. RED by
+    // construction — before the batch, `__cxa_atexit`/`strtol` were denied,
+    // `localtime_r`/`tzset` were `unknown-import`, and the whole host-
+    // introspection surface was `unknown-import`.
+    #[test]
+    fn classifies_ecosystem_audit_symbol_batch() {
+        let empty = BTreeSet::new();
+
+        // Tier 1 — known-safe allowlist additions, resolving on the exact format
+        // the scout MREs surfaced them (and their normalized underscore forms).
+        // `__cxa_atexit` is the macOS finalizer registrar (Mach-O `___cxa_atexit`
+        // normalizes to `cxa_atexit`), mirroring the ELF `cxa_atexit` entry.
+        for symbol in ["___cxa_atexit", "_cxa_atexit", "cxa_atexit"] {
+            assert_eq!(
+                native_import_decision(symbol, NativeFormat::MachO, &empty),
+                NativeImportDecision::Allowed,
+                "{symbol} (macOS finalizer registrar) must be known-safe on Mach-O"
+            );
+        }
+        assert_eq!(
+            native_import_decision("cxa_atexit", NativeFormat::Elf, &empty),
+            NativeImportDecision::Allowed,
+            "the ELF cxa_atexit entry this mirrors must stay known-safe"
+        );
+        // `strtol` is a pure caller-memory numeric parse on the common list, so
+        // BOTH Mach-O `_strtol` and ELF `strtol` resolve.
+        for (symbol, format) in [
+            ("_strtol", NativeFormat::MachO),
+            ("strtol", NativeFormat::MachO),
+            ("strtol", NativeFormat::Elf),
+        ] {
+            assert_eq!(
+                native_import_decision(symbol, format, &empty),
+                NativeImportDecision::Allowed,
+                "{symbol} (pure numeric parse) must be known-safe on {format:?}"
+            );
+        }
+
+        // Tier 2 — classification-only refinements: the decision stays REFUSE,
+        // only the label sharpens from `unknown-import` to a named class.
+        // `localtime_r`/`tzset` are host-timezone-dependent time conversion on
+        // BOTH formats (Mach-O `_localtime_r`, ELF `localtime_r`).
+        for (symbol, format) in [
+            ("_localtime_r", NativeFormat::MachO),
+            ("localtime_r", NativeFormat::Elf),
+            ("_tzset", NativeFormat::MachO),
+            ("tzset", NativeFormat::Elf),
+        ] {
+            assert_eq!(
+                native_import_decision(symbol, format, &empty),
+                NativeImportDecision::Denied("time"),
+                "{symbol} must classify as time (still denied) on {format:?}"
+            );
+        }
+
+        // The new `host-introspection` class over a representative sample of the
+        // Mach/BSD/IOKit host-state surface (from the sysinfo/mimalloc MREs),
+        // including one member of each IOKit namespace prefix.
+        for symbol in [
+            "_sysctl",
+            "_task_info",
+            "_proc_pidinfo",
+            "_vm_page_size",
+            "_mach_host_self",
+            "_host_statistics64",
+            "_IOServiceMatching",
+            "_IORegistryEntryGetName",
+            "_IOIteratorNext",
+            "_IOObjectRelease",
+        ] {
+            assert_eq!(
+                native_import_decision(symbol, NativeFormat::MachO, &empty),
+                NativeImportDecision::Denied("host-introspection"),
+                "{symbol} should report the host-introspection class"
+            );
+        }
+
+        // RED-guards.
+        // (1) A classification is NOT an allowance: `sysctlbyname` stays DENIED.
+        assert_eq!(
+            native_import_decision("_sysctlbyname", NativeFormat::MachO, &empty),
+            NativeImportDecision::Denied("host-introspection"),
+            "sysctlbyname must stay denied — the class must never relax the deny"
+        );
+        // (2) The IOKit prefixes are namespace-scoped, not a bare `IO`: an
+        // arbitrary user symbol starting `IO` must NOT match (no overreach).
+        assert!(!is_host_introspection_symbol("IOWidget"));
+        assert_eq!(
+            native_import_decision("_IOWidget", NativeFormat::MachO, &empty),
+            NativeImportDecision::Denied("unknown-import"),
+            "a user IO* symbol must not be captured by the IOKit prefixes"
+        );
+        // (3) The `strtol` allowlist is exact, not a prefix: the sibling
+        // `strtoul` (not in the batch) stays denied as an unknown import.
+        for format in [NativeFormat::MachO, NativeFormat::Elf] {
+            assert_eq!(
+                native_import_decision("strtoul", format, &empty),
+                NativeImportDecision::Denied("unknown-import"),
+                "strtoul is not on the list; the strtol allowlist must be exact"
+            );
+        }
     }
 
     // Per-class detection proof: every escape class in the taxonomy
