@@ -1190,7 +1190,33 @@ fn runtime_config_from_control_plane() -> Result<(RuntimeConfig, Option<i32>), R
     // Guest argv (recorded into the trace metadata) travels the same control
     // plane, so record mode captures the arguments the supervisor forwarded.
     config = config.apply_guest_argv_env(control_env)?;
+    // Record whether syscall-user-dispatch was armed for this run (the C layer's
+    // arming state), so a cross-kernel replay is refused up front rather than
+    // diverging mid-run (SUD-DESIGN.md §7.3). `None` on every non-SUD run.
+    config = config.with_sud(sud_armed_metadata());
     Ok((config, trace_fd))
+}
+
+/// Whether SUD was armed for this run, shaped for [`RunMetadata::sud`]:
+/// `Some(true)` iff the C layer armed syscall-user-dispatch, else `None`
+/// (macOS, a non-SUD kernel, a standalone binary). Never records `Some(false)`,
+/// so old and non-SUD traces stay byte-identical.
+#[cfg(target_os = "linux")]
+fn sud_armed_metadata() -> Option<bool> {
+    unsafe extern "C" {
+        fn patina_sud_is_armed() -> c_int;
+    }
+    // SAFETY: a plain read of the C arming flag.
+    if unsafe { patina_sud_is_armed() } != 0 {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sud_armed_metadata() -> Option<bool> {
+    None
 }
 
 fn install(context: Result<Context, RuntimeError>) -> c_int {

@@ -433,7 +433,10 @@ fn scan_forbidden_instructions(file: &object::File<'_>) -> Result<Vec<NativeEsca
                     }
                 }
             }
-            Architecture::X86_64 => x86_scan::scan(data, name, &mut escapes),
+            Architecture::X86_64 => {
+                x86_scan::scan(data, name, &mut escapes);
+                scan_vsyscall_references(data, name, &mut escapes);
+            }
             // Unreachable: the guard above refuses every other architecture. Kept
             // explicit (never a silent `_ => {}`) so a newly-supported arch must be
             // wired into both the guard and a real decoder here.
@@ -441,6 +444,44 @@ fn scan_forbidden_instructions(file: &object::File<'_>) -> Result<Vec<NativeEsca
         }
     }
     Ok(escapes)
+}
+
+/// Refuse a binary whose text materializes an address inside the x86-64 legacy
+/// vsyscall page (`0xffffffffff600000..+0x1000`) as a 64-bit immediate. That
+/// page's three entries (`gettimeofday`/`time`/`getcpu`) are KERNEL-EMULATED at
+/// a fixed address with NO `syscall` instruction — invisible to both the
+/// instruction scan and syscall-user-dispatch — so a caller that reads the wall
+/// clock or a real CPU id through it escapes determinism entirely. Unlike an
+/// auxv key (a bare integer, undetectable), the full 64-bit page address is a
+/// reliable immediate signal: the fixed 6 high bytes `60 ff ff ff ff ff` (LE)
+/// plus the top nibble of the low-12-bit page offset being zero is a ~2^-52
+/// per-offset false-positive, effectively never a coincidence. A `vsyscall`
+/// finding is NOT `direct-syscall`, so it is never SUD-downgradable — it always
+/// refuses (see [`native_escape_is_sud_manageable`]). SUD-DESIGN.md §6.3.
+fn scan_vsyscall_references(data: &[u8], name: &str, escapes: &mut Vec<NativeEscape>) {
+    // Little-endian encoding of any address in [0xffffffffff600000, +0x1000):
+    //   b[7..2] == [0xff,0xff,0xff,0xff,0xff,0x60]  (bytes 2..8)
+    //   b[1] high nibble == 0                       (page offset < 0x1000)
+    // b[0] is unconstrained (the low byte of the offset).
+    if data.len() < 8 {
+        return;
+    }
+    for offset in 0..=data.len() - 8 {
+        let w = &data[offset..offset + 8];
+        if w[2] == 0x60
+            && w[3] == 0xff
+            && w[4] == 0xff
+            && w[5] == 0xff
+            && w[6] == 0xff
+            && w[7] == 0xff
+            && (w[1] & 0xf0) == 0
+        {
+            escapes.push(NativeEscape {
+                symbol: format!("immediate@{name}+0x{offset:x}"),
+                category: "vsyscall",
+            });
+        }
+    }
 }
 
 fn aarch64_instruction_category(instruction: u32) -> Option<&'static str> {
@@ -2091,6 +2132,41 @@ mod tests {
             category: "cpu-nondeterminism",
         };
         assert!(!native_escape_is_sud_manageable(&register_read));
+    }
+
+    #[test]
+    fn vsyscall_reference_scan_detects_the_page_and_refuses_it() {
+        // A `movabs rax, 0xffffffffff600000` (48 b8 <imm64>) — materializing the
+        // vsyscall gettimeofday entry — is caught by the immediate signal.
+        let mut text = vec![0x48u8, 0xb8];
+        text.extend_from_slice(&0xffffffffff600000u64.to_le_bytes());
+        let mut escapes = Vec::new();
+        scan_vsyscall_references(&text, ".text", &mut escapes);
+        assert_eq!(
+            escapes.len(),
+            1,
+            "vsyscall immediate must be found: {escapes:?}"
+        );
+        assert_eq!(escapes[0].category, "vsyscall");
+        // A `vsyscall` finding is never SUD-downgradable (kernel-emulated, no
+        // syscall instruction), so it always refuses.
+        assert!(!native_escape_is_sud_manageable(&escapes[0]));
+
+        // The `time` entry at +0x400 is also on the page and caught.
+        let mut text2 = vec![0x48u8, 0xb8];
+        text2.extend_from_slice(&0xffffffffff600400u64.to_le_bytes());
+        let mut escapes2 = Vec::new();
+        scan_vsyscall_references(&text2, ".text", &mut escapes2);
+        assert_eq!(escapes2.len(), 1, "vsyscall time entry must be found");
+
+        // RED control: ordinary text (including a nearby-but-not-on-page address)
+        // yields no finding — the detector is not a blanket 0xff... matcher.
+        let mut clean = vec![0x48u8, 0xb8];
+        clean.extend_from_slice(&0xffffffffff700000u64.to_le_bytes()); // wrong page
+        clean.extend_from_slice(&[0x90; 16]); // nops
+        let mut none = Vec::new();
+        scan_vsyscall_references(&clean, ".text", &mut none);
+        assert!(none.is_empty(), "off-page address must not match: {none:?}");
     }
 
     #[test]

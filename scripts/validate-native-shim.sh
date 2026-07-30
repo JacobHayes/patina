@@ -2953,6 +2953,66 @@ C
   fi
   grep -q 'direct-syscall' "$tmp/planted-audit"
 
+  # AT_RANDOM determinization (SUD-DESIGN.md §9 slice 3, kernel-INDEPENDENT): the
+  # shim overwrites the auxv AT_RANDOM 16 bytes with seed-derived deterministic
+  # bytes on EVERY managed run (whether or not SUD arms), closing the entropy
+  # leak glibc's canary and a guest's getauxval(AT_RANDOM) both read. getauxval
+  # is allowlisted (a libc call, no raw syscall), so this probe audits clean and
+  # runs on any Linux kernel — the assertion is that the same seed yields the
+  # same 16 bytes and distinct seeds differ. RED mutation (documented): drop the
+  # patina_sud_determinize_at_random call in patina_sud_init and the same-seed
+  # runs diverge (the kernel hands fresh random per exec).
+  cat >"$tmp/at_random_probe.rs" <<'RS'
+fn main() {
+    unsafe extern "C" {
+        fn getauxval(kind: core::ffi::c_ulong) -> core::ffi::c_ulong;
+    }
+    const AT_RANDOM: core::ffi::c_ulong = 25;
+    let p = unsafe { getauxval(AT_RANDOM) } as *const u8;
+    assert!(!p.is_null(), "AT_RANDOM pointer is null");
+    // SAFETY: the kernel places 16 random bytes at the AT_RANDOM pointer.
+    let bytes = unsafe { core::slice::from_raw_parts(p, 16) };
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    println!("AT_RANDOM={hex}");
+}
+RS
+  "$runner" build "$tmp/at_random_probe.rs" --output "$tmp/at-random-probe" >/dev/null
+  ar_s1a="$("$runner" run "$tmp/at-random-probe" --seed 1 2>/dev/null)"
+  ar_s1b="$("$runner" run "$tmp/at-random-probe" --seed 1 2>/dev/null)"
+  ar_s2="$("$runner" run "$tmp/at-random-probe" --seed 2 2>/dev/null)"
+  if [[ "$ar_s1a" != "$ar_s1b" ]]; then
+    echo "validate-native-shim: AT_RANDOM not deterministic across same-seed runs ($ar_s1a vs $ar_s1b)" >&2
+    exit 1
+  fi
+  if [[ "$ar_s1a" == "$ar_s2" ]]; then
+    echo "validate-native-shim: AT_RANDOM did not vary across seeds ($ar_s1a)" >&2
+    exit 1
+  fi
+
+  # vsyscall-page audit refusal (SUD-DESIGN.md §6.3, x86_64-only, kernel-
+  # INDEPENDENT static audit): a binary whose text materializes the legacy
+  # vsyscall page address (0xffffffffff600000) as a 64-bit immediate is refused
+  # — that page is kernel-emulated with no `syscall` instruction, invisible to
+  # both the scan and SUD. RED mutation (documented): neuter
+  # scan_vsyscall_references and this hand-built binary audits clean.
+  if [[ "$(uname -m)" == x86_64 ]]; then
+    cat >"$tmp/vsyscall_probe.c" <<'C'
+int main(void) {
+    void *p;
+    /* movabs $0xffffffffff600000, %reg — a single 64-bit immediate in .text. */
+    __asm__ volatile("movabs $0xffffffffff600000, %0" : "=r"(p));
+    return p != 0;
+}
+C
+    "$cc" "$tmp/vsyscall_probe.c" -o "$tmp/vsyscall-probe"
+    if "$runner" audit "$tmp/vsyscall-probe" --raw >"$tmp/vsyscall-audit" 2>&1; then
+      echo 'validate-native-shim: vsyscall-page reference audited clean (must be refused)' >&2
+      cat "$tmp/vsyscall-audit" >&2
+      exit 1
+    fi
+    grep -q 'vsyscall' "$tmp/vsyscall-audit"
+  fi
+
   if [[ $sud_kernel == 1 ]]; then
     echo "sud: ENABLED (kernel supports syscall-user-dispatch) — running the positive battery"
 
@@ -3024,13 +3084,160 @@ RS
     "$runner" run "$tmp/auxv-probe" --seed 1 >"$tmp/auxv-out"
     grep -qx 'AUXV_SYSINFO_EHDR=0' "$tmp/auxv-out"
 
+    # ---- Slice 2 rows ----
+    # (a) The committed rustix-default MRE testbed: a std+rustix program on the
+    # DEFAULT (linux_raw) backend exercising raw clocks, fs (openat/write/read/
+    # fstat=statx), directory iteration (getdents64 over a SUD directory fd),
+    # getrandom, sleep, and SimNet (socket/bind/sendto/recvfrom/getsockname +
+    # TCP socket lifecycle). Its own run-patina.sh asserts audit→SUD-managed,
+    # seed-stable, and record/replay byte-identical, then prints RUSTIX_LEGS_RAN.
+    # This is the acceptance MRE — the exact binary class refused before SUD.
+    if bash "$root/testbeds/rustix-default/run-patina.sh" >"$tmp/rustix-mre.out" 2>&1; then
+      grep -q 'RUSTIX_LEGS_RAN branch=sud' "$tmp/rustix-mre.out" || {
+        echo 'validate-native-shim: rustix-default MRE did not run its SUD battery' >&2
+        cat "$tmp/rustix-mre.out" >&2; exit 1; }
+    else
+      echo 'validate-native-shim: rustix-default MRE run-patina.sh failed' >&2
+      cat "$tmp/rustix-mre.out" >&2; exit 1
+    fi
+
+    # The remaining raw-syscall probes are x86_64 asm (the positive SUD battery
+    # is x86_64 today; a future arm64 SUD kernel would extend them).
+    if [[ "$(uname -m)" == x86_64 ]]; then
+      # (b) Deterministic process-state constants: raw getpid=1, getuid=1000,
+      # uname=-ENOSYS — the same values the interposers return. RED mutation:
+      # drop the nr::GETPID/GETUID/UNAME arms and dispatch aborts (unmapped).
+      cat >"$tmp/raw_procstate.rs" <<'RS'
+use std::arch::asm;
+unsafe fn sc(nr: i64, a0: i64) -> i64 {
+    let r: i64;
+    unsafe { asm!("syscall", inlateout("rax") nr => r, in("rdi") a0,
+        out("rcx") _, out("r11") _, options(nostack)); }
+    r
+}
+fn main() {
+    let pid = unsafe { sc(39, 0) };
+    let uid = unsafe { sc(102, 0) };
+    let mut utsname = [0u8; 390];
+    let uname_rc = unsafe { sc(63, utsname.as_mut_ptr() as i64) };
+    assert_eq!(pid, 1, "getpid");
+    assert_eq!(uid, 1000, "getuid");
+    assert!(uname_rc < 0, "uname must be ENOSYS, got {uname_rc}");
+    println!("RAW_PROCSTATE pid={pid} uid={uid} uname_rc={uname_rc}");
+}
+RS
+      "$runner" build "$tmp/raw_procstate.rs" --output "$tmp/raw-procstate" >/dev/null
+      "$runner" run "$tmp/raw-procstate" --seed 1 >"$tmp/raw-procstate-out"
+      grep -qx 'RAW_PROCSTATE pid=1 uid=1000 uname_rc=-38' "$tmp/raw-procstate-out"
+
+      # (c) Readiness rows: raw eventfd2 + epoll_create1 + epoll_ctl(ADD,EPOLLIN)
+      # + a raw write to the eventfd + epoll_wait returns the armed fd with the
+      # registered data. Proves the SUD rows call the SAME epoll frontend the C
+      # interposers do. RED mutation: drop the nr::EPOLL_* arms → unmapped abort.
+      cat >"$tmp/raw_epoll.rs" <<'RS'
+use std::arch::asm;
+unsafe fn sc(nr: i64, a0: i64, a1: i64, a2: i64, a3: i64) -> i64 {
+    let r: i64;
+    unsafe { asm!("syscall", inlateout("rax") nr => r, in("rdi") a0, in("rsi") a1,
+        in("rdx") a2, in("r10") a3, out("rcx") _, out("r11") _, options(nostack)); }
+    r
+}
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct Ev { events: u32, data: u64 }
+fn main() {
+    let efd = unsafe { sc(290, 0, 0, 0, 0) };       // eventfd2(0, 0)
+    assert!(efd >= 0, "eventfd2 {efd}");
+    let ep = unsafe { sc(291, 0, 0, 0, 0) };        // epoll_create1(0)
+    assert!(ep >= 0, "epoll_create1 {ep}");
+    let mut ev = Ev { events: 0x1, data: 0xC0FFEE }; // EPOLLIN
+    let ctl = unsafe { sc(233, ep, 1, efd, &mut ev as *mut Ev as i64) }; // ADD
+    assert_eq!(ctl, 0, "epoll_ctl ADD {ctl}");
+    let one: u64 = 1;
+    let w = unsafe { sc(1, efd, &one as *const u64 as i64, 8, 0) }; // write(efd, &1, 8)
+    assert_eq!(w, 8, "eventfd write {w}");
+    let mut out = [Ev { events: 0, data: 0 }; 4];
+    let n = unsafe { sc(232, ep, out.as_mut_ptr() as i64, 4, 0) }; // epoll_wait(-1 via r10=0? use timeout 0)
+    assert!(n >= 1, "epoll_wait {n}");
+    let data = { out[0].data };
+    assert_eq!(data, 0xC0FFEE, "epoll data {data:#x}");
+    println!("RAW_EPOLL n={n} data={data:#x}");
+}
+RS
+      "$runner" build "$tmp/raw_epoll.rs" --output "$tmp/raw-epoll" >/dev/null
+      "$runner" run "$tmp/raw-epoll" --seed 1 >"$tmp/raw-epoll-out"
+      grep -q '^RAW_EPOLL n=' "$tmp/raw-epoll-out"
+
+      # (d) sendmsg/recvmsg mirror the C interposers EXACTLY: both fail closed
+      # with ENOSYS (the deterministic net layer models only sendto/recvfrom).
+      # The raw rows must therefore return -ENOSYS (-38) — NOT a per-iovec
+      # sendto/recvfrom loop, which for a DATAGRAM socket would fragment one
+      # message into N datagrams (silently-wrong; house doctrine forbids it).
+      # RED mutation: reinstating a per-iovec fragmenting sendmsg/recvmsg makes
+      # this leg red (the calls would return a byte count, not -38).
+      cat >"$tmp/raw_msg.rs" <<'RS'
+use std::arch::asm;
+unsafe fn sc(nr: i64, a0: i64, a1: i64, a2: i64) -> i64 {
+    let r: i64;
+    unsafe { asm!("syscall", inlateout("rax") nr => r, in("rdi") a0, in("rsi") a1,
+        in("rdx") a2, out("rcx") _, out("r11") _, options(nostack)); }
+    r
+}
+#[repr(C)] struct SockaddrIn { family: u16, port: u16, addr: u32, zero: [u8; 8] }
+#[repr(C)] struct Iovec { base: *mut u8, len: usize }
+#[repr(C)] struct Msghdr {
+    name: *mut u8, namelen: u32, _pad0: u32,
+    iov: *mut Iovec, iovlen: u64,
+    control: *mut u8, controllen: u64, flags: i32, _pad1: u32,
+}
+fn main() {
+    let sock = unsafe { sc(41, 2, 2, 0) }; // socket(AF_INET, SOCK_DGRAM, 0)
+    assert!(sock >= 0, "socket {sock}");
+    let mut sa = SockaddrIn { family: 2, port: 34569u16.to_be(), addr: 0x7f000001u32.to_be(), zero: [0; 8] };
+    let b = unsafe { sc(49, sock, &mut sa as *mut SockaddrIn as i64, core::mem::size_of::<SockaddrIn>() as i64) };
+    assert_eq!(b, 0, "bind {b}");
+    // A TWO-iovec datagram: a fragmenting implementation would send two
+    // datagrams; the correct (interposer-mirroring) row refuses with ENOSYS.
+    let a = *b"frag-";
+    let c = *b"ment";
+    let (mut abuf, mut cbuf) = (a, c);
+    let mut iov = [
+        Iovec { base: abuf.as_mut_ptr(), len: abuf.len() },
+        Iovec { base: cbuf.as_mut_ptr(), len: cbuf.len() },
+    ];
+    let msg = Msghdr {
+        name: &mut sa as *mut SockaddrIn as *mut u8, namelen: core::mem::size_of::<SockaddrIn>() as u32, _pad0: 0,
+        iov: iov.as_mut_ptr(), iovlen: 2, control: core::ptr::null_mut(), controllen: 0, flags: 0, _pad1: 0,
+    };
+    let sent = unsafe { sc(46, sock, &msg as *const Msghdr as i64, 0) }; // sendmsg
+    assert_eq!(sent, -38, "sendmsg must mirror the interposer ENOSYS, got {sent}");
+    let mut recv_buf = [0u8; 32];
+    let mut riov = Iovec { base: recv_buf.as_mut_ptr(), len: recv_buf.len() };
+    let mut rmsg = Msghdr {
+        name: core::ptr::null_mut(), namelen: 0, _pad0: 0,
+        iov: &mut riov as *mut Iovec, iovlen: 1, control: core::ptr::null_mut(), controllen: 0, flags: 0, _pad1: 0,
+    };
+    let got = unsafe { sc(47, sock, &mut rmsg as *mut Msghdr as i64, 0) }; // recvmsg
+    assert_eq!(got, -38, "recvmsg must mirror the interposer ENOSYS, got {got}");
+    println!("RAW_MSG sendmsg={sent} recvmsg={got}");
+}
+RS
+      "$runner" build "$tmp/raw_msg.rs" --output "$tmp/raw-msg" >/dev/null
+      "$runner" run "$tmp/raw-msg" --seed 1 >"$tmp/raw-msg-out"
+      grep -qx 'RAW_MSG sendmsg=-38 recvmsg=-38' "$tmp/raw-msg-out"
+
+      cat "$tmp/raw-procstate-out"
+      cat "$tmp/raw-epoll-out"
+      cat "$tmp/raw-msg-out"
+    fi
+
     cat "$tmp/raw-seed-1"
     cat "$tmp/sigsys-out"
     cat "$tmp/auxv-out"
     # Loud execution proof for CI-log grepping: this line prints only after every
     # positive leg above passed, so a skipped-but-green SUD section is impossible
     # to mistake for an executed one.
-    echo 'SUD_LEGS_RAN branch=positive legs=audit-sud-managed,seed-stable,record-replay,thread-arming,seed-varying-entropy,unmapped-abort,auxv-canary,sigsys-hijack,marker-gating'
+    echo 'SUD_LEGS_RAN branch=positive legs=audit-sud-managed,seed-stable,record-replay,thread-arming,seed-varying-entropy,unmapped-abort,auxv-canary,sigsys-hijack,marker-gating,at-random,vsyscall-audit,rustix-mre,procstate-constants,epoll-rows,sendmsg-recvmsg'
   else
     echo "sud: SKIPPED (kernel lacks syscall-user-dispatch) — running the refusal + kernel-independent legs"
 
@@ -3066,7 +3273,7 @@ RS
     cat "$tmp/sigsys-out"
     # Loud execution proof, mirroring the positive branch: prints only after the
     # refusal + kernel-independent legs above passed.
-    echo 'SUD_LEGS_RAN branch=refusal legs=audit-sud-managed,run-refusal,replay-refusal,sigsys-hijack,marker-gating'
+    echo 'SUD_LEGS_RAN branch=refusal legs=audit-sud-managed,run-refusal,replay-refusal,sigsys-hijack,marker-gating,at-random'
   fi
 fi
 

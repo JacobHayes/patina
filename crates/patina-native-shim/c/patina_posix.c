@@ -1784,6 +1784,67 @@ static void patina_sud_scrub_auxv(int argc, char **argv) {
     }
 }
 
+/* AT_RANDOM determinization (SUD-DESIGN.md §9 slice 3). The kernel seeds the
+ * auxv AT_RANDOM entry with 16 real-random bytes that glibc consumes at startup
+ * for the stack canary and pointer guard AND that a guest can read directly via
+ * getauxval(AT_RANDOM) — a nondeterminism/entropy leak. Unlike AT_SYSINFO_EHDR
+ * (scrubbed to AT_IGNORE), AT_RANDOM must be REPLACED in place: glibc
+ * dereferences the pointer during startup, so AT_IGNORE-ing it (a null return)
+ * would crash the canary setup. Overwrite the 16 bytes with seed-derived
+ * deterministic bytes. Kernel-INDEPENDENT: this runs on every managed run,
+ * before guest ctors, whether or not SUD is armed. */
+#ifndef AT_RANDOM
+#define AT_RANDOM 25
+#endif
+
+static uint64_t patina_sud_splitmix64(uint64_t *state) {
+    uint64_t z = (*state += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+/* Read the PATINA_SEED value from the still-intact environ (the ctor scrub runs
+ * later), or 0 if absent/unset. */
+static uint64_t patina_sud_env_seed(int argc, char **argv) {
+    char **envp = argv + argc + 1;
+    static const char prefix[] = "PATINA_SEED=";
+    size_t plen = sizeof prefix - 1;
+    for (char **e = envp; *e != NULL; e++) {
+        if (strncmp(*e, prefix, plen) == 0) {
+            const char *v = *e + plen;
+            uint64_t seed = 0;
+            while (*v >= '0' && *v <= '9') {
+                seed = seed * 10 + (uint64_t)(*v - '0');
+                v++;
+            }
+            return seed;
+        }
+    }
+    return 0;
+}
+
+static void patina_sud_determinize_at_random(int argc, char **argv) {
+    /* Domain-separate the AT_RANDOM stream from every other seeded draw. */
+    uint64_t state = patina_sud_env_seed(argc, argv) ^ 0x52414E444F4D0001ULL;
+    char **envp = argv + argc + 1;
+    char **walk = envp;
+    while (*walk != NULL) walk++;
+    walk++; /* step over envp's NULL terminator to the auxv array */
+    ElfW(auxv_t) *aux = (ElfW(auxv_t) *)walk;
+    for (; aux->a_type != AT_NULL; aux++) {
+        if (aux->a_type == AT_RANDOM) {
+            unsigned char *bytes = (unsigned char *)(uintptr_t)aux->a_un.a_val;
+            if (bytes != NULL) {
+                uint64_t lo = patina_sud_splitmix64(&state);
+                uint64_t hi = patina_sud_splitmix64(&state);
+                memcpy(bytes, &lo, sizeof lo);
+                memcpy(bytes + sizeof lo, &hi, sizeof hi);
+            }
+        }
+    }
+}
+
 /* The SIGSYS dispatch handler. A syscall-user-dispatch SIGSYS is SYNCHRONOUS —
  * delivered on the faulting thread at the exact IP of the guest's own syscall
  * instruction (the kernel already rolled it back), semantically identical to the
@@ -1860,6 +1921,11 @@ static void patina_sud_sigsys(int sig, siginfo_t *info, void *ucontext) {
  * thread at startup and on every managed thread from the Rust trampoline (the
  * config does not survive clone, so each thread arms once). A no-op when SUD was
  * not armed for this run (non-SUD kernel or standalone binary). */
+/* Whether SUD was armed for this run (managed run on a SUD-capable kernel).
+ * Read by the Rust config path to record the `sud` trace-metadata field so a
+ * cross-kernel replay is refused up front (SUD-DESIGN.md §7.3). */
+int patina_sud_is_armed(void) { return patina_sud_armed; }
+
 void patina_sud_arm_thread(void) {
     if (!patina_sud_armed) return;
     if (patina_host_prctl(PR_SET_SYSCALL_USER_DISPATCH, PR_SYS_DISPATCH_ON,
@@ -1879,6 +1945,11 @@ static void patina_sud_init(int argc, char **argv) {
      * syscall there is no worse than today. environ is still intact here (the
      * ctor's scrub runs later), so read it directly. */
     if (!patina_env_has("PATINA_MODE", argv, argc)) return;
+
+    /* AT_RANDOM determinization is kernel-independent: close the entropy leak on
+     * EVERY managed run (SUD kernel or not), before the SUD kernel probe gate
+     * below can early-return. */
+    patina_sud_determinize_at_random(argc, argv);
 
     patina_host_prctl = (patina_prctl_fn)__real_dlsym(RTLD_NEXT, "prctl");
     patina_host_open = (patina_host_open_fn)__real_dlsym(RTLD_NEXT, "open");

@@ -312,6 +312,16 @@ pub struct RunMetadata {
     /// [`WatchdogConfigRecord`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watchdog: Option<WatchdogConfigRecord>,
+    /// Whether syscall-user-dispatch (SUD) was armed for this run — recorded only
+    /// when it was (`Some(true)`); absent (`None`) on every other run (macOS,
+    /// a non-SUD kernel, a standalone binary, and all pre-SUD traces). Additive
+    /// exactly like [`faults`](RunMetadata::faults). It exists so a cross-kernel
+    /// replay is refused UP FRONT rather than diverging mid-run: a binary with
+    /// raw inline syscalls can only run armed, so replaying its `sud:true` trace
+    /// on a kernel without SUD (or vice versa) is reconciled fail-closed before
+    /// the first op is replayed. SUD-DESIGN.md §7.3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sud: Option<bool>,
 }
 
 impl RunMetadata {
@@ -326,6 +336,7 @@ impl RunMetadata {
             schedule_policy: None,
             swarm: None,
             watchdog: None,
+            sud: None,
         }
     }
 
@@ -373,6 +384,14 @@ impl RunMetadata {
     #[must_use]
     pub fn with_watchdog(mut self, watchdog: Option<WatchdogConfigRecord>) -> Self {
         self.watchdog = watchdog;
+        self
+    }
+
+    /// Attach whether syscall-user-dispatch was armed for this run. `Some(true)`
+    /// records it; `None` records nothing (see [`RunMetadata::sud`]).
+    #[must_use]
+    pub fn with_sud(mut self, sud: Option<bool>) -> Self {
+        self.sud = sud;
         self
     }
 }
@@ -785,6 +804,12 @@ impl Replayer {
     /// recorded before argv capture; `Some` (possibly empty) otherwise.
     pub fn guest_argv(&self) -> Option<&[String]> {
         self.metadata.guest_argv.as_deref()
+    }
+
+    /// Whether the trace was recorded under syscall-user-dispatch. `Some(true)`
+    /// when it was; `None` otherwise (see [`RunMetadata::sud`]).
+    pub const fn sud(&self) -> Option<bool> {
+        self.metadata.sud
     }
 
     pub fn expect(&mut self, operation: &Operation) -> Result<Outcome, TraceError> {
@@ -1449,6 +1474,29 @@ mod tests {
         let plain = TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new());
         let text = String::from_utf8(plain.to_bytes().unwrap()).unwrap();
         assert!(!text.contains("swarm"), "{text}");
+    }
+
+    #[test]
+    fn sud_metadata_round_trips_and_is_additive() {
+        // An armed run records `sud:true` and round-trips.
+        let metadata = RunMetadata::new(7, "fingerprint").with_sud(Some(true));
+        let bundle = TraceBundle::new(metadata, Vec::new());
+        let text = String::from_utf8(bundle.to_bytes().unwrap()).unwrap();
+        assert!(text.contains("\"sud\":true"), "{text}");
+        let reloaded = TraceBundle::from_slice(bundle.to_bytes().unwrap().as_slice()).unwrap();
+        assert_eq!(reloaded.metadata.sud, Some(true));
+
+        // Every other run (macOS, non-SUD kernel, standalone, pre-SUD trace)
+        // records nothing: the field is omitted, so old and new traces are
+        // byte-identical.
+        let plain = TraceBundle::new(
+            RunMetadata::new(7, "fingerprint").with_sud(None),
+            Vec::new(),
+        );
+        let text = String::from_utf8(plain.to_bytes().unwrap()).unwrap();
+        assert!(!text.contains("sud"), "{text}");
+        let reloaded_plain = TraceBundle::from_slice(plain.to_bytes().unwrap().as_slice()).unwrap();
+        assert_eq!(reloaded_plain.metadata.sud, None);
     }
 
     #[test]

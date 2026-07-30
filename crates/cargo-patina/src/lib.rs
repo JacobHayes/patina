@@ -4339,7 +4339,7 @@ fn build_native_package(
     }
     let selected = select_native_package_bin(manifest, package, bin)?;
     let host_target = host_target_triple()?;
-    let rustflags = native_package_rustflags(object, staticlib, yield_object);
+    let rustflags = native_package_rustflags(object, staticlib, yield_object, &host_target);
 
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let mut command = Command::new(&cargo);
@@ -4571,6 +4571,7 @@ fn native_package_rustflags(
     object: &Path,
     staticlib: &Path,
     yield_object: Option<&Path>,
+    target: &str,
 ) -> OsString {
     let mut tokens: Vec<OsString> = Vec::new();
     if let Some(existing) = env::var_os("RUSTFLAGS") {
@@ -4587,13 +4588,18 @@ fn native_package_rustflags(
     tokens.push(OsString::from("--cfg"));
     tokens.push(OsString::from("patina_shim"));
     // rustix's DEFAULT Linux backend emits raw inline syscall instructions —
-    // invisible to the import audit and refused by the instruction scan. This
-    // cfg (rustix's own escape hatch) flips it to the libc backend, so those
-    // effects surface as ordinary interposable imports (`openat64` and
-    // friends) instead. Unconditional: on macOS rustix already uses libc and
-    // the cfg is inert, and a guest without rustix never reads it.
-    tokens.push(OsString::from("--cfg"));
-    tokens.push(OsString::from("rustix_use_libc"));
+    // invisible to the import audit and refused by the instruction scan. On
+    // targets WITHOUT syscall-user-dispatch (aarch64 Linux today; macOS uses
+    // libc anyway so the cfg is inert), flip rustix to its libc backend with
+    // its own escape hatch so those effects surface as interposable imports.
+    // On a SUD-capable target (x86_64 Linux) we DROP the injection: the shim
+    // arms SUD and traps the raw syscalls into the deterministic runtime, so
+    // the workaround is unnecessary — and keeping it would be a permanent dual
+    // path (SUD-DESIGN.md §9). No-cruft: a single conditional, no dead config.
+    if !target_has_sud(target) {
+        tokens.push(OsString::from("--cfg"));
+        tokens.push(OsString::from("rustix_use_libc"));
+    }
     tokens.push(OsString::from("-C"));
     tokens.push(link_arg(object));
     tokens.push(OsString::from("-C"));
@@ -4977,6 +4983,18 @@ fn effective_native_allow(user_allow: &BTreeSet<String>) -> BTreeSet<String> {
     let mut allow = shim_control_plane_symbols();
     allow.extend(user_allow.iter().cloned());
     allow
+}
+
+/// Whether a *build* target has kernel syscall-user-dispatch, so a shim-linked
+/// guest's raw inline syscalls are trapped at runtime rather than needing the
+/// `--cfg rustix_use_libc` interposition workaround. x86_64 Linux has SUD since
+/// 5.11; arm64 Linux does not yet (it needs the generic-entry kernels), so it
+/// keeps the workaround. macOS never reaches here for rustix (it uses libc), so
+/// its classification is moot. This is a build-time target decision (which cfg
+/// to inject), distinct from the run-time [`kernel_supports_sud`] probe (whether
+/// THIS kernel can trap). SUD-DESIGN.md §9.
+fn target_has_sud(target: &str) -> bool {
+    target.starts_with("x86_64") && target.contains("linux")
 }
 
 fn native_prerun_gate(
@@ -6225,6 +6243,27 @@ impl std::error::Error for CliError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rustix_use_libc_is_dropped_only_on_sud_capable_targets() {
+        // x86_64 Linux has kernel SUD, so the raw-syscall workaround is dropped
+        // (SUD traps the raw syscalls); every other target keeps it. Guards the
+        // no-cruft retirement against silently re-widening or over-dropping.
+        assert!(target_has_sud("x86_64-unknown-linux-gnu"));
+        assert!(target_has_sud("x86_64-unknown-linux-musl"));
+        assert!(!target_has_sud("aarch64-unknown-linux-gnu")); // no SUD yet
+        assert!(!target_has_sud("aarch64-apple-darwin")); // rustix uses libc
+        assert!(!target_has_sud("x86_64-apple-darwin"));
+
+        // The injected flags reflect it: present for aarch64-linux, absent for
+        // x86_64-linux.
+        let obj = Path::new("/tmp/o.o");
+        let lib = Path::new("/tmp/l.a");
+        let x86 = native_package_rustflags(obj, lib, None, "x86_64-unknown-linux-gnu");
+        let arm = native_package_rustflags(obj, lib, None, "aarch64-unknown-linux-gnu");
+        assert!(!x86.to_string_lossy().contains("rustix_use_libc"));
+        assert!(arm.to_string_lossy().contains("rustix_use_libc"));
+    }
 
     fn strings(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
