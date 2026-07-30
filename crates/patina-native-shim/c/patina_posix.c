@@ -1639,6 +1639,14 @@ _Noreturn void patina_sud_report_fatal_addr(const char *message, long nr,
  * without the C→Rust link direction that left the lib's own test binary with an
  * undefined symbol. C is only ever linked where the Rust lib is present. */
 extern unsigned char PATINA_SUD_ARMED;
+/* The scrubbed auxv region (base pointer + byte length through AT_NULL,
+ * inclusive), captured during the init scrub below and OWNED by the Rust lib
+ * (exported AtomicUsize, same C→Rust direction and rationale as
+ * PATINA_SUD_ARMED). The Rust PR_GET_AUXV dispatch row copies from here so a raw
+ * prctl(PR_GET_AUXV) serves the shim's determinized auxv, never the kernel's
+ * pristine saved_auxv. */
+extern uintptr_t PATINA_SUD_AUXV_BASE;
+extern uintptr_t PATINA_SUD_AUXV_LEN;
 
 /* Lazily resolve the REAL glibc sigaction through the wrap alias, so the shim's
  * own SIGSYS-hardening `sigaction` strong def below can forward to it without
@@ -1784,9 +1792,17 @@ static void patina_sud_scrub_auxv(int argc, char **argv) {
     while (*walk != NULL) walk++;
     walk++; /* step over envp's NULL terminator to the auxv array */
     ElfW(auxv_t) *aux = (ElfW(auxv_t) *)walk;
+    ElfW(auxv_t) *base = aux;
     for (; aux->a_type != AT_NULL; aux++) {
         if (aux->a_type == AT_SYSINFO_EHDR) aux->a_type = AT_IGNORE;
     }
+    /* `aux` now points at the terminating AT_NULL entry. Publish the scrubbed
+     * auxv region — base and length through AT_NULL inclusive — to the Rust-owned
+     * cells so the PR_GET_AUXV dispatch row copies THIS determinized array (this
+     * runs after AT_RANDOM determinization and the AT_SYSINFO_EHDR rename, both
+     * before SUD is armed, so no trap can observe an un-scrubbed region). */
+    PATINA_SUD_AUXV_BASE = (uintptr_t)base;
+    PATINA_SUD_AUXV_LEN = (uintptr_t)((char *)(aux + 1) - (char *)base);
 }
 
 /* AT_RANDOM determinization (SUD-DESIGN.md §9 slice 3). The kernel seeds the

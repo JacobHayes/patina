@@ -3228,9 +3228,96 @@ RS
       "$runner" run "$tmp/raw-msg" --seed 1 >"$tmp/raw-msg-out"
       grep -qx 'RAW_MSG sendmsg=-38 recvmsg=-38' "$tmp/raw-msg-out"
 
+      # (e) prctl(PR_GET_AUXV): rustix's linux_raw init reads the aux vector with
+      # a raw prctl(PR_GET_AUXV, buf, size, 0, 0) (Linux >= 6.4) — the syscall
+      # that crashed the rustix-default MRE before this row existed. The row must
+      # serve the shim's SCRUBBED auxv, not the kernel's pristine saved_auxv:
+      # walking the returned buffer, AT_RANDOM must equal the seed-derived bytes
+      # getauxval(AT_RANDOM) reads (determinized, identical across same-seed runs)
+      # and AT_SYSINFO_EHDR must be gone (scrubbed to AT_IGNORE) — proving the row
+      # copies the live scrubbed array rather than re-asking the kernel. RED
+      # mutation: drop the nr::PRCTL arm and this run aborts (unmapped), or serve
+      # the kernel's saved_auxv and AT_SYSINFO_EHDR reappears / AT_RANDOM diverges.
+      cat >"$tmp/raw_prctl_auxv.rs" <<'RS'
+use std::arch::asm;
+unsafe fn prctl(option: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64 {
+    let r: i64;
+    unsafe { asm!("syscall", inlateout("rax") 157i64 => r, in("rdi") option,
+        in("rsi") a2, in("rdx") a3, in("r10") a4, in("r8") a5,
+        out("rcx") _, out("r11") _, options(nostack)); }
+    r
+}
+fn main() {
+    const PR_GET_AUXV: i64 = 0x4155_5856;
+    const AT_NULL: u64 = 0;
+    const AT_RANDOM: u64 = 25;
+    const AT_SYSINFO_EHDR: u64 = 33;
+    unsafe extern "C" {
+        fn getauxval(kind: core::ffi::c_ulong) -> core::ffi::c_ulong;
+    }
+    let mut buf = [0u8; 4096];
+    let ret = unsafe { prctl(PR_GET_AUXV, buf.as_mut_ptr() as i64, buf.len() as i64, 0, 0) };
+    assert!(ret > 0, "PR_GET_AUXV returned {ret}");
+    let full = ret as usize;
+    assert!(full <= buf.len(), "auxv ({full}) larger than probe buffer");
+    // Walk the returned copy: 16-byte (a_type: u64, a_val: u64) entries to AT_NULL.
+    let mut at_random_ptr: u64 = 0;
+    let mut saw_sysinfo = false;
+    let mut terminated = false;
+    let mut i = 0usize;
+    while i + 16 <= full {
+        let t = u64::from_ne_bytes(buf[i..i + 8].try_into().unwrap());
+        let v = u64::from_ne_bytes(buf[i + 8..i + 16].try_into().unwrap());
+        if t == AT_NULL { terminated = true; break; }
+        if t == AT_RANDOM { at_random_ptr = v; }
+        if t == AT_SYSINFO_EHDR { saw_sysinfo = true; }
+        i += 16;
+    }
+    assert!(terminated, "PR_GET_AUXV buffer had no AT_NULL terminator");
+    assert!(!saw_sysinfo, "AT_SYSINFO_EHDR must be scrubbed from the served auxv");
+    assert!(at_random_ptr != 0, "AT_RANDOM missing from the served auxv");
+    // The AT_RANDOM entry must point at the SAME scrubbed 16 bytes getauxval reads.
+    let ga = unsafe { getauxval(AT_RANDOM as core::ffi::c_ulong) } as u64;
+    assert!(ga != 0, "getauxval(AT_RANDOM) null");
+    // SAFETY: both pointers address the 16 seed-derived AT_RANDOM bytes.
+    let via_prctl = unsafe { core::slice::from_raw_parts(at_random_ptr as *const u8, 16) };
+    let via_getaux = unsafe { core::slice::from_raw_parts(ga as *const u8, 16) };
+    assert_eq!(via_prctl, via_getaux, "PR_GET_AUXV AT_RANDOM != getauxval(AT_RANDOM)");
+    let hex: String = via_prctl.iter().map(|b| format!("{b:02x}")).collect();
+    println!("PR_GET_AUXV len={full} random={hex}");
+}
+RS
+      "$runner" build "$tmp/raw_prctl_auxv.rs" --output "$tmp/raw-prctl-auxv" >/dev/null
+      "$runner" run "$tmp/raw-prctl-auxv" --seed 1 >"$tmp/raw-prctl-auxv-1"
+      "$runner" run "$tmp/raw-prctl-auxv" --seed 1 >"$tmp/raw-prctl-auxv-2"
+      cmp "$tmp/raw-prctl-auxv-1" "$tmp/raw-prctl-auxv-2"
+      grep -q '^PR_GET_AUXV len=' "$tmp/raw-prctl-auxv-1"
+
+      # A denied prctl option (PR_SET_NAME=15) must abort with the NAMED prctl
+      # message — never route to the host. RED: routing non-GET_AUXV options would
+      # let the run succeed (no abort) and this leg would fail to find the message.
+      cat >"$tmp/raw_prctl_deny.rs" <<'RS'
+use std::arch::asm;
+fn main() {
+    let name = b"patina\0";
+    let r: i64;
+    unsafe { asm!("syscall", inlateout("rax") 157i64 => r, in("rdi") 15i64,
+        in("rsi") name.as_ptr() as i64, in("rdx") 0i64, in("r10") 0i64, in("r8") 0i64,
+        out("rcx") _, out("r11") _, options(nostack)); }
+    println!("PR_SET_NAME_RET={r}"); // unreachable: dispatch aborts before returning
+}
+RS
+      "$runner" build "$tmp/raw_prctl_deny.rs" --output "$tmp/raw-prctl-deny" >/dev/null
+      if "$runner" run "$tmp/raw-prctl-deny" --seed 1 >"$tmp/raw-prctl-deny-out" 2>&1; then
+        echo 'validate-native-shim: denied prctl option did not abort' >&2
+        cat "$tmp/raw-prctl-deny-out" >&2; exit 1
+      fi
+      grep -q 'SUD trapped prctl' "$tmp/raw-prctl-deny-out"
+
       cat "$tmp/raw-procstate-out"
       cat "$tmp/raw-epoll-out"
       cat "$tmp/raw-msg-out"
+      cat "$tmp/raw-prctl-auxv-1"
     fi
 
     cat "$tmp/raw-seed-1"
@@ -3239,7 +3326,7 @@ RS
     # Loud execution proof for CI-log grepping: this line prints only after every
     # positive leg above passed, so a skipped-but-green SUD section is impossible
     # to mistake for an executed one.
-    echo 'SUD_LEGS_RAN branch=positive legs=audit-sud-managed,seed-stable,record-replay,thread-arming,seed-varying-entropy,unmapped-abort,auxv-canary,sigsys-hijack,marker-gating,at-random,vsyscall-audit,rustix-mre,procstate-constants,epoll-rows,sendmsg-recvmsg'
+    echo 'SUD_LEGS_RAN branch=positive legs=audit-sud-managed,seed-stable,record-replay,thread-arming,seed-varying-entropy,unmapped-abort,auxv-canary,sigsys-hijack,marker-gating,at-random,vsyscall-audit,rustix-mre,procstate-constants,epoll-rows,sendmsg-recvmsg,prctl-get-auxv'
   else
     echo "sud: SKIPPED (kernel lacks syscall-user-dispatch) — running the refusal + kernel-independent legs"
 

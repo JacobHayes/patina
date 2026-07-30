@@ -363,7 +363,7 @@ fn with_dispatch_guard<F: FnOnce() -> i64>(nr: i64, body: F) -> i64 {
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
 /// SUD-private directory descriptors are drawn from a high, distinct range so
 /// they never collide with the runtime's regular fds (small, from 3) or the
@@ -414,6 +414,30 @@ fn ret_isize(result: isize) -> i64 {
         result as i64
     }
 }
+
+/// The one `prctl(2)` option the dispatch table routes: `PR_GET_AUXV` (Linux
+/// 6.4 and later). rustix's `linux_raw` backend calls `prctl(PR_GET_AUXV, buf,
+/// size, 0, 0)` to read the aux vector during init. Read as an `unsigned int`
+/// exactly as the kernel does (`option = (unsigned int) arg`); see
+/// [`prctl_option`].
+const PR_GET_AUXV: u32 = 0x4155_5856;
+
+/// The shim's own **scrubbed** auxv region, captured once at init by the C
+/// arming path (`patina_sud_scrub_auxv`): the base pointer of the initial-stack
+/// aux array and its byte length through the terminating `AT_NULL` pair
+/// (inclusive). OWNED by Rust and written by C — the same C→Rust ownership
+/// direction as [`crate::PATINA_SUD_ARMED`], so the lib's own test binary (which
+/// links no C) still defines the symbols. The `PR_GET_AUXV` dispatch row copies
+/// from here so a raw `prctl(PR_GET_AUXV)` serves the SAME determinized auxv the
+/// shim already produced in memory — `AT_RANDOM` replaced with seed-derived
+/// bytes and `AT_SYSINFO_EHDR` renamed to `AT_IGNORE` — instead of the kernel's
+/// pristine `saved_auxv`, which would reintroduce the entropy / vDSO escape
+/// (SUD-DESIGN.md §6, §9). `0` until C captures it; a trap seeing `0` fails
+/// closed rather than serve garbage (see [`sys_prctl`]).
+#[unsafe(no_mangle)]
+pub static PATINA_SUD_AUXV_BASE: AtomicUsize = AtomicUsize::new(0);
+#[unsafe(no_mangle)]
+pub static PATINA_SUD_AUXV_LEN: AtomicUsize = AtomicUsize::new(0);
 
 /// The syscall numbers slice 1 routes, selected per target arch at compile time.
 /// x86_64 is the shipping arch; the aarch64 set compiles so the dispatcher is
@@ -508,6 +532,10 @@ mod nr {
     pub const GETEGID: i64 = 108;
     pub const GETPPID: i64 = 110;
     pub const UNAME: i64 = 63;
+
+    // Slice 2 — the ONLY prctl option routed is PR_GET_AUXV (below); every other
+    // option is the process/escape class and fails closed in the dispatch arm.
+    pub const PRCTL: i64 = 157;
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -601,6 +629,10 @@ mod nr {
     pub const GETEGID: i64 = 177;
     pub const GETPPID: i64 = 173;
     pub const UNAME: i64 = 160;
+
+    // Slice 2 — the ONLY prctl option routed is PR_GET_AUXV (below); every other
+    // option is the process/escape class and fails closed in the dispatch arm.
+    pub const PRCTL: i64 = 167;
 }
 
 /// The SIGSYS dispatch entry point. The C handler passes the decoded syscall
@@ -791,6 +823,12 @@ fn dispatch(nr: i64, args: [u64; 6]) -> i64 {
         // The C `uname` interposer returns ENOSYS (the runtime models no host
         // uname); the raw row matches it byte-for-byte.
         nr::UNAME => -ENOSYS,
+
+        // `prctl` is the process/escape class — but rustix's linux_raw init reads
+        // the aux vector with a raw `prctl(PR_GET_AUXV, …)`. Route ONLY that
+        // option (serving the shim's scrubbed auxv, never the kernel's pristine
+        // one); every other option fails closed with a named prctl abort.
+        nr::PRCTL => sys_prctl(args[0], args[1], args[2], args[3], args[4]),
 
         // Everything else — the process/escape class (clone/execve/ptrace/prctl/
         // seccomp/io_uring/…) and any un-tabled number — is fatal by default.
@@ -2441,6 +2479,88 @@ fn sys_eventfd2(initval: u64, flags: i64) -> i64 {
     ret_i32(unsafe { patina_eventfd(initval as u32, flags as c_int) })
 }
 
+/// Read a `prctl` option register as the kernel does. The kernel's prctl entry
+/// is `SYSCALL_DEFINE5(prctl, int, option, …)` and immediately narrows it to an
+/// `unsigned int` for its option dispatch (`option = (unsigned int) arg`), so a
+/// caller's upper 32 register bits — sign-extended by hand asm or zero-extended
+/// by rustix — never affect the comparison. Truncating to `u32` recovers that
+/// exact view (mirrors [`arg_fd`]'s treatment of `int` fd args).
+#[inline]
+fn prctl_option(reg: u64) -> u32 {
+    reg as u32
+}
+
+/// Serve `PR_GET_AUXV` from the shim's captured, already-scrubbed auxv `saved`,
+/// mirroring the kernel's `prctl_get_auxv` (kernel/sys.c) byte-for-byte EXCEPT
+/// the source is our determinized auxv rather than the kernel's pristine
+/// `saved_auxv`:
+///  - `arg4`/`arg5` nonzero ⇒ `-EINVAL` (the kernel rejects a non-zero tail).
+///  - copy `min(user_size, saved.len())` bytes into the user buffer.
+///  - return the FULL auxv byte length (`saved.len()`, NOT the copied count) —
+///    the value rustix uses to size a second, exact-fit buffer (its dynamic path
+///    asserts the re-query returns that same length) and, in the static path,
+///    the slice length it then walks until `AT_NULL`. Because `saved` runs
+///    through the terminating `AT_NULL` pair inclusively, a full copy always
+///    contains the terminator rustix's unbounded `AuxPointer` walk stops on.
+fn pr_get_auxv_copy(
+    saved: &[u8],
+    user_buf: *mut u8,
+    user_size: usize,
+    arg4: u64,
+    arg5: u64,
+) -> i64 {
+    if arg4 != 0 || arg5 != 0 {
+        return -EINVAL;
+    }
+    let copy = user_size.min(saved.len());
+    if copy > 0 {
+        if user_buf.is_null() {
+            // The kernel's copy_to_user would fault on a bad/absent buffer.
+            return -EFAULT;
+        }
+        // SAFETY: `user_buf` is the guest's buffer, valid for at least
+        // `user_size >= copy` bytes; `saved` is the shim-owned scrubbed auxv,
+        // valid for its whole length. The regions never overlap (distinct
+        // allocations: guest buffer vs. the initial-stack auxv).
+        unsafe {
+            std::ptr::copy_nonoverlapping(saved.as_ptr(), user_buf, copy);
+        }
+    }
+    saved.len() as i64
+}
+
+/// `prctl(2)`: the ONLY routed option is `PR_GET_AUXV`. Every other option is
+/// the process/escape class (`PR_SET_SECCOMP`, `PR_SET_SYSCALL_USER_DISPATCH`,
+/// `PR_SET_NAME`, …) and must never reach the host — it fails closed with a
+/// named, diagnosable abort exactly like an unmapped syscall.
+fn sys_prctl(option_reg: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i64 {
+    let option = prctl_option(option_reg);
+    if option != PR_GET_AUXV {
+        crate::sud_fatal(&format!(
+            "SUD trapped prctl(option={option:#x}): only PR_GET_AUXV is a deterministic route. Every \
+             other prctl option is the process/escape class (PR_SET_SECCOMP, \
+             PR_SET_SYSCALL_USER_DISPATCH, PR_SET_NAME, …) and fails closed — routing it would let a \
+             guest reconfigure the process behind the deterministic runtime"
+        ));
+    }
+    let base = PATINA_SUD_AUXV_BASE.load(Ordering::Relaxed);
+    let len = PATINA_SUD_AUXV_LEN.load(Ordering::Relaxed);
+    if base == 0 || len == 0 {
+        // Init never captured the auxv: refuse rather than serve the kernel's
+        // pristine (un-scrubbed, vDSO/AT_RANDOM-leaking) auxv or return 0/garbage.
+        crate::sud_fatal(
+            "SUD trapped prctl(PR_GET_AUXV) but the shim never captured the scrubbed auxv at init: \
+             refusing to serve auxv bytes (serving the kernel's pristine saved_auxv would reintroduce \
+             the AT_RANDOM entropy and AT_SYSINFO_EHDR vDSO escapes)",
+        );
+    }
+    // SAFETY: `base`/`len` describe the shim's own scrubbed auxv region on the
+    // initial stack, captured once during init and never mutated thereafter, so
+    // the slice is valid for the whole (synchronous) dispatch.
+    let saved = unsafe { std::slice::from_raw_parts(base as *const u8, len) };
+    pr_get_auxv_copy(saved, arg2 as *mut u8, arg3 as usize, arg4, arg5)
+}
+
 fn unmapped(nr: i64, args: [u64; 6]) -> i64 {
     crate::sud_fatal(&format!(
         "SUD trapped unsupported syscall {nr} (args {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}); guest raw \
@@ -2492,5 +2612,64 @@ mod tests {
         assert_eq!(sys_sendmsg(0x4000_0000, 0xdead_beef, 0x4000), -ENOSYS);
         assert_eq!(sys_recvmsg(0, 0, 0), -ENOSYS);
         assert_eq!(sys_recvmsg(0x4000_0000, 0xdead_beef, 0x4000), -ENOSYS);
+    }
+
+    #[test]
+    fn prctl_option_narrows_to_unsigned_int_like_the_kernel() {
+        // The kernel reads `option = (unsigned int) arg`, so only the low 32 bits
+        // decide the route. rustix passes a clean 32-bit PR_GET_AUXV; hand asm may
+        // sign-/zero-extend. RED: comparing the full 64-bit register would make a
+        // sign-extended PR_GET_AUXV (or a high-bit-dirty PR_SET_NAME) miscompare —
+        // either wrongly denying the auxv route or wrongly accepting an escape.
+        assert_eq!(prctl_option(0x4155_5856), PR_GET_AUXV); // exact
+        assert_eq!(prctl_option(0xFFFF_FFFF_4155_5856), PR_GET_AUXV); // dirty high bits ignored
+        assert_ne!(prctl_option(15), PR_GET_AUXV); // PR_SET_NAME is denied
+        assert_eq!(prctl_option(0x1_0000_000F), 15); // truncation: still PR_SET_NAME (denied)
+    }
+
+    #[test]
+    fn pr_get_auxv_copy_mirrors_the_kernel_semantics() {
+        // A stand-in scrubbed auxv (bytes are irrelevant to the copy math; the
+        // real region runs through the AT_NULL pair inclusively).
+        let saved: Vec<u8> = (0..48u8).collect();
+
+        // Full copy: user buffer >= auxv. Returns the FULL length, copies it all.
+        let mut user = vec![0xAAu8; 512];
+        assert_eq!(
+            pr_get_auxv_copy(&saved, user.as_mut_ptr(), user.len(), 0, 0),
+            48
+        );
+        assert_eq!(&user[..48], &saved[..]);
+        assert!(user[48..].iter().all(|&b| b == 0xAA)); // nothing past the auxv touched
+
+        // Truncated copy: a small user buffer gets a prefix, but the return value
+        // is STILL the full auxv length (what rustix uses to size its retry). RED:
+        // returning the copied count would break rustix's `assert_eq!(len, buf)`.
+        let mut small = vec![0u8; 16];
+        assert_eq!(
+            pr_get_auxv_copy(&saved, small.as_mut_ptr(), small.len(), 0, 0),
+            48
+        );
+        assert_eq!(&small[..], &saved[..16]);
+
+        // Nonzero arg4 or arg5 ⇒ -EINVAL, and NO bytes are copied.
+        let mut untouched = vec![0x5Au8; 64];
+        assert_eq!(
+            pr_get_auxv_copy(&saved, untouched.as_mut_ptr(), untouched.len(), 1, 0),
+            -EINVAL
+        );
+        assert_eq!(
+            pr_get_auxv_copy(&saved, untouched.as_mut_ptr(), untouched.len(), 0, 1),
+            -EINVAL
+        );
+        assert!(untouched.iter().all(|&b| b == 0x5A));
+
+        // A zero-length user request copies nothing but still reports the length.
+        assert_eq!(pr_get_auxv_copy(&saved, std::ptr::null_mut(), 0, 0, 0), 48);
+        // A nonzero request with a null buffer faults (mirrors copy_to_user).
+        assert_eq!(
+            pr_get_auxv_copy(&saved, std::ptr::null_mut(), 8, 0, 0),
+            -EFAULT
+        );
     }
 }
