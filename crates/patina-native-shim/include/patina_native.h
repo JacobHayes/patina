@@ -133,6 +133,14 @@ int32_t patina_read_dir_next(void *state, char *name_buf, size_t buf_len, uint32
 void patina_read_dir_free(void *state);
 int32_t patina_symlink(const char *target, const char *link_path);
 intptr_t patina_read_link(const char *path, char *buf, size_t len);
+/*
+ * Canonicalize a guest path to its deterministic absolute form (realpath). On
+ * success writes the NUL-terminated canonical path into buf when it fits and
+ * returns its length in bytes (excluding the terminator); a negative return sets
+ * patina_errno. Resolution is driven entirely by the deterministic filesystem,
+ * so both realpath calling conventions receive byte-identical results.
+ */
+intptr_t patina_canonicalize(const char *path, char *buf, size_t len);
 int32_t patina_thread_id(void);
 int32_t patina_sched_yield(void);
 /*

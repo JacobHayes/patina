@@ -194,9 +194,72 @@ int main(int argc, char **argv) {
     if (unlinkat(AT_FDCWD, "/state/at-dir", AT_REMOVEDIR) != 0) return 22;
     if (unlinkat(AT_FDCWD, "/state/at-renamed", 0) != 0) return 23;
     if (patina_rmdir("/state") != 0) return 24;
-    if (patina_shutdown() != 0) return 25;
 
+    /* printf is the shim's captured stdio now, not host stdio: print while the
+     * context is live, then drain the capture to the real descriptors so the
+     * harness can read it. */
     printf("NATIVE_OPENAT_RESULT seed=%" PRIu64 " contents=%s\n", seed, contents);
+    if (patina_flush_captured_stdio() != 0) return 26;
+    if (patina_shutdown() != 0) return 25;
+    return 0;
+}
+C
+
+cat >"$tmp/realpath_probe.c" <<'C'
+/*
+ * Mirror patina_posix.c's feature-test macros: on macOS `realpath` is asm-renamed
+ * to `realpath$DARWIN_EXTSN` (the malloc-on-NULL variant Rust std/libc reference),
+ * so the shim defines and the probe must call that same symbol -- without
+ * _DARWIN_C_SOURCE the probe would bind the plain host `_realpath` and never
+ * exercise the shim.
+ */
+#ifdef __linux__
+#define _GNU_SOURCE 1
+#elif defined(__APPLE__)
+#define _DARWIN_C_SOURCE 1
+#endif
+#include "patina_native.h"
+#include <errno.h>
+#include <inttypes.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/*
+ * realpath over the deterministic filesystem: std::fs::canonicalize reaches
+ * realpath(path, NULL) on macOS (the allocating convention) and realpath(path,
+ * buf) on Linux. Both must resolve an existing guest path -- including a
+ * `..`/`.`/`//`-laden spelling of the same directory -- to the same canonical
+ * absolute path, and the result must be byte-identical across two same-seed
+ * runs. Before patina_canonicalize the NULL convention returned ENOSYS.
+ */
+int main(int argc, char **argv) {
+    uint64_t seed = argc == 2 ? (uint64_t)strtoull(argv[1], NULL, 10) : 1;
+    if (patina_init_crash(seed) != 0) return 10;
+    if (patina_mkdir("/root") != 0) return 11;
+    if (patina_mkdir("/root/fragments") != 0) return 12;
+
+    char *allocated = realpath("/root/fragments", NULL);
+    if (allocated == NULL) return 13;
+
+    char buffer[PATH_MAX];
+    char *filled = realpath("/root/../root/./fragments//", buffer);
+    if (filled != buffer) return 14;
+
+    if (strcmp(allocated, "/root/fragments") != 0) return 15;
+    if (strcmp(allocated, filled) != 0) return 16;
+
+    free(allocated);
+    if (patina_rmdir("/root/fragments") != 0) return 17;
+    if (patina_rmdir("/root") != 0) return 18;
+
+    /* printf is the shim's captured stdio now, not host stdio: print while the
+     * context is live, then drain the capture to the real descriptors so the
+     * harness can read it. */
+    printf("NATIVE_REALPATH_RESULT seed=%" PRIu64 " canonical=%s\n", seed, filled);
+    if (patina_flush_captured_stdio() != 0) return 20;
+    if (patina_shutdown() != 0) return 19;
     return 0;
 }
 C
@@ -534,6 +597,18 @@ cargo test --locked --manifest-path "$root/Cargo.toml" -p cargo-patina \
 "$tmp/openat-probe" 5 >"$tmp/openat-seed-5-2"
 cmp "$tmp/openat-seed-5-1" "$tmp/openat-seed-5-2"
 grep -qx 'NATIVE_OPENAT_RESULT seed=5 contents=openat' "$tmp/openat-seed-5-1"
+# realpath over the deterministic filesystem, linked against the shim exactly
+# like the openat probe. Both realpath conventions -- allocating (destination
+# NULL) and caller-buffer -- must agree on the canonical path, and two same-seed
+# runs must be byte-identical.
+"$cc" -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror \
+  -I"$root/crates/patina-native-shim/include" \
+  "$tmp/realpath_probe.c" "$root/crates/patina-native-shim/c/patina_posix.c" \
+  "$target_dir/debug/libpatina_dst_native_shim.a" ${native_wrap[@]+"${native_wrap[@]}"} -o "$tmp/realpath-probe"
+"$tmp/realpath-probe" 5 >"$tmp/realpath-seed-5-1"
+"$tmp/realpath-probe" 5 >"$tmp/realpath-seed-5-2"
+cmp "$tmp/realpath-seed-5-1" "$tmp/realpath-seed-5-2"
+grep -qx 'NATIVE_REALPATH_RESULT seed=5 canonical=/root/fragments' "$tmp/realpath-seed-5-1"
 # The interposed ordinary-std probe is built and driven through the packaged
 # `cargo patina` native target: native-build compiles the shim layer, injects
 # cfg(patina)/cfg(dst), and links the shim below the program; native-run wires
@@ -1040,16 +1115,17 @@ fn main() {
 }
 RS
 cat >"$pkg/app/src/bin/leaky.rs" <<'RS'
-// Imports an uninterposed process-class libc symbol (`kill`) the audit denies as
-// "process". The spawn family (fork/posix_spawn*/waitpid/...) is now shim-defined
-// (deny-traps), so a Command::spawn leaves no process *import* to flag; this
-// reaches for a still-uninterposed member of the class. Taking its address forces
-// the undefined import; building succeeds, the audit must reject the product.
+// Imports an uninterposed process-class libc symbol (`killpg`) the audit denies
+// as "process". The spawn family (fork/posix_spawn*/waitpid/kill/...) is now
+// shim-defined (deny-traps), so a Command::spawn — or a kill — leaves no process
+// *import* to flag; this reaches for a still-uninterposed member of the class.
+// Taking its address forces the undefined import; building succeeds, the audit
+// must reject the product.
 unsafe extern "C" {
-    fn kill(pid: i32, sig: i32) -> i32;
+    fn killpg(pgrp: i32, sig: i32) -> i32;
 }
 fn main() {
-    let reached = kill as *const ();
+    let reached = killpg as *const ();
     std::process::exit((reached as usize & 1) as i32);
 }
 RS

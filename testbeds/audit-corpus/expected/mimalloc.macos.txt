@@ -1,8 +1,1 @@
-__stderrp unknown-import
-__stdoutp unknown-import
-fputs unknown-import
-getrusage host-introspection
-mach_task_self_ host-introspection
-sleep time
-sysctl host-introspection
-task_info host-introspection
+CLEAN

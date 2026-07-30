@@ -12,11 +12,11 @@ crate-type = ["rlib", "staticlib"]
 
 [dependencies]
 patina-dst-abi.workspace = true
+patina-dst-driver-api.workspace = true
 patina-dst-fs-crash.workspace = true
 patina-dst-fs-mem.workspace = true
 patina-dst-runtime.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-patina-dst-driver-api.workspace = true
 patina-dst-sched-det.workspace = true

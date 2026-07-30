@@ -36,6 +36,7 @@ use patina_dst_abi::{
     TaskId,
 };
 
+use patina_dst_driver_api::canonicalize_path;
 use patina_dst_fs_crash::CrashFs;
 use patina_dst_fs_mem::{FsImage, MemFs};
 use patina_dst_runtime::{
@@ -2758,6 +2759,82 @@ pub unsafe extern "C" fn patina_read_link(
         }
         Err(errno) => fail(errno) as isize,
     }
+}
+
+/// Canonicalize a guest path to its deterministic absolute form (`realpath`).
+///
+/// Writes the NUL-terminated canonical path into `buf` when it fits and returns
+/// the canonical length in bytes (excluding the terminator); a `-1` return sets
+/// `patina_errno`. The result is produced entirely from the virtual filesystem
+/// -- lexical `.`/`..`/`//` normalization (shared with the drivers via
+/// [`canonicalize_path`]), an existence check through the driver, and
+/// trailing-symlink resolution through the driver's `read_link` -- so it never
+/// consults host state and both `realpath` calling conventions receive the same
+/// bytes. Unlike [`patina_read_link`] this takes no bootstrap guard: `realpath`
+/// is not part of any allocator-init probe (the guarded case is
+/// tikv-jemallocator's `readlink("/etc/malloc.conf")`), so it only ever runs
+/// against a live runtime, and a guard would merely mask a legitimate early call.
+///
+/// # Safety
+/// `path` must point to a valid NUL-terminated string and `buf` must be writable
+/// for `len` bytes when `len` is nonzero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_canonicalize(
+    path: *const c_char,
+    buf: *mut c_char,
+    len: usize,
+) -> isize {
+    if len != 0 && buf.is_null() {
+        return fail(EINVAL) as isize;
+    }
+    let path = match path_from_c(path) {
+        Ok(path) => path,
+        Err(errno) => return fail(errno) as isize,
+    };
+    // fs-mem rejects intermediate-symlink traversal, so only a genuinely
+    // trailing symlink is ever resolved here; the cap fails a symlink cycle
+    // closed rather than looping.
+    const SYMLINK_RESOLUTION_LIMIT: usize = 40;
+    let canonical = with_context(|context| {
+        let mut current = canonicalize_path(&path)?;
+        for _ in 0..SYMLINK_RESOLUTION_LIMIT {
+            let metadata = context.fs_metadata(&current)?;
+            if metadata.kind != FsEntryKind::Symlink {
+                return Ok(current);
+            }
+            let target = context.fs_read_link(&current)?;
+            let base = if target.starts_with('/') {
+                target
+            } else {
+                let parent = current.rsplit_once('/').map_or("/", |(parent, _)| parent);
+                let parent = if parent.is_empty() { "/" } else { parent };
+                format!("{parent}/{target}")
+            };
+            current = canonicalize_path(&base)?;
+        }
+        Err(RuntimeError::from(EffectError::new(
+            ErrorCode::InvalidInput,
+            format!("too many levels of symbolic links: {path:?}"),
+        )))
+    });
+    let canonical = match canonical {
+        Ok(canonical) => canonical,
+        Err(errno) => return fail(errno) as isize,
+    };
+    let bytes = canonical.as_bytes();
+    let needed = bytes.len();
+    if len != 0 && needed < len {
+        // SAFETY: The destination buffer is required to be writable for `len`
+        // bytes by this function's C ABI, and `needed < len` leaves room for the
+        // trailing NUL.
+        unsafe {
+            let destination = slice::from_raw_parts_mut(buf.cast::<u8>(), len);
+            destination[..needed].copy_from_slice(bytes);
+            destination[needed] = 0;
+        }
+    }
+    set_errno(0);
+    isize::try_from(needed).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
 }
 
 #[unsafe(no_mangle)]

@@ -1,0 +1,22 @@
+# Standalone package: its own empty [workspace] table keeps this probe OUT
+# of the root Patina workspace (the testbeds convention), so `cargo` here never
+# touches crates/ or the root manifest and it carries its own committed
+# Cargo.lock.
+#
+# NOT part of the CORPUS: this is the selftest's reliably-dirty probe. It
+# imports `dlopen`, which the static-audit architecture refuses BY DESIGN
+# forever (runtime dynamic loading defeats symbol-reachability auditing), so
+# unlike real corpus crates it can never drift to CLEAN.
+[workspace]
+
+[package]
+name = "mre_selftest_dlopen"
+version = "0.0.0"
+edition = "2021"
+
+[[bin]]
+name = "mre_selftest_dlopen"
+path = "src/main.rs"
+
+[profile.dev]
+debug = false

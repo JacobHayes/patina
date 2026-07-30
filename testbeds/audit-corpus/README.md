@@ -112,7 +112,9 @@ git add testbeds/audit-corpus/expected/*.linux.txt
 
 ## Self-test (detection-first)
 
-`run.sh --selftest` audits one reliably-dirty crate (`time`) once, then proves —
+`run.sh --selftest` audits the dedicated probe crate (`selftest-dlopen`, not in
+the corpus: it imports `dlopen`, refused by design forever, so it can never
+drift to CLEAN as real-crate support grows) once, then proves —
 on **copies** in `$TMPDIR`, never touching a committed file — that the strict
 comparison fails in every direction it must:
 

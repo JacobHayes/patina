@@ -26,8 +26,10 @@
 #include <sys/socket.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -39,11 +41,13 @@
 #include <link.h>
 #include <linux/audit.h>
 #include <linux/futex.h>
+#include <linux/prctl.h>
 #include <sched.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/prctl.h>
 #include <sys/random.h>
+#include <sys/sysinfo.h>
 #include <sys/syscall.h>
 #include <ucontext.h>
 #endif
@@ -52,11 +56,13 @@
 
 #ifdef __APPLE__
 #include <crt_externs.h>
+#include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <mach-o/dyld.h>
 #include <os/lock.h>
 #include <stddef.h>
 #include <sys/event.h>
+#include <sys/sysctl.h>
 
 uint64_t mach_absolute_time(void) {
     uint64_t nanos = 0;
@@ -374,24 +380,29 @@ char *getcwd(char *destination, size_t length) {
 }
 
 char *realpath(const char *restrict path, char *restrict destination) {
-    if (destination == NULL) {
-        errno = ENOSYS;
-        return NULL;
-    }
-    uint32_t kind = 0;
-    uint64_t length = 0;
-    if (patina_metadata(path, &kind, &length) != 0) {
+    char resolved[PATH_MAX];
+    intptr_t length = patina_canonicalize(path, resolved, sizeof resolved);
+    if (length < 0) {
         errno = patina_errno();
         return NULL;
     }
-    (void)kind;
-    (void)length;
-    size_t path_length = strlen(path);
-    if (path_length >= PATH_MAX) {
+    if ((size_t)length >= PATH_MAX) {
         errno = ENAMETOOLONG;
         return NULL;
     }
-    memcpy(destination, path, path_length + 1);
+    // `resolved` now holds the NUL-terminated canonical path. When the caller
+    // provides no buffer, malloc the result with the guest allocator so the
+    // guest's own free(3) reclaims it (the opendir/closedir ownership model).
+    if (destination == NULL) {
+        char *owned = malloc((size_t)length + 1);
+        if (owned == NULL) {
+            errno = ENOMEM;
+            return NULL;
+        }
+        memcpy(owned, resolved, (size_t)length + 1);
+        return owned;
+    }
+    memcpy(destination, resolved, (size_t)length + 1);
     return destination;
 }
 
@@ -3078,6 +3089,634 @@ long sysconf(int name) {
 }
 
 /*
+ * ==========================================================================
+ * Deterministic time / host-query / stdio surface.
+ *
+ * Real crates (mimalloc, the `time`/`chrono` crates, sysinfo, aws-lc-rs, zstd)
+ * link a libc surface that reads host wall-clock timezone data, host
+ * CPU/memory/hardware inventory, and libc `FILE*` stdio. Left as host imports
+ * these taint the run's determinism claim and the pre-run gate refuses them.
+ * Each is interposed with a strong definition that returns a value that is a
+ * pure function of the virtual clock / a fixed world-model constant, so the
+ * guest audits clean, the symbol drops off the import table, and the same seed
+ * yields the same bytes regardless of the host. The world-model constants match
+ * the ones the shim already exposes elsewhere (one CPU — sched_getcpu/
+ * sched_getaffinity/sysconf(_SC_NPROCESSORS_*); a 4096-byte page —
+ * sysconf(_SC_PAGESIZE)).
+ * ==========================================================================
+ */
+
+/* Fixed physical-memory world-model constant (8 GiB). mimalloc's arena sizing
+ * and sysinfo's total-memory probe read it; neither value is guest-observable
+ * output, but a fixed nonzero constant keeps their heuristics deterministic
+ * regardless of the host's real RAM. */
+#define PATINA_PHYSICAL_MEMORY_BYTES (UINT64_C(8) * 1024 * 1024 * 1024)
+
+/* The single fixed timezone the runtime models. A mutable static (not a string
+ * literal) so it binds to `struct tm::tm_zone` whether the platform types that
+ * field as `char *` (Darwin/BSD) or `const char *` (glibc) without a cast. */
+static char patina_tm_zone_utc[] = "UTC";
+
+/*
+ * Broken-down UTC from a time_t, as a PURE function of the input seconds — no
+ * host timezone database, /etc/localtime, or environment. The runtime models a
+ * single fixed timezone (UTC): tm_gmtoff is 0 and tm_zone is "UTC" (the BSD/GNU
+ * `struct tm` extension fields, visible here under _DARWIN_C_SOURCE/_GNU_SOURCE),
+ * so a local-offset probe observes a zero offset and `now_local()` collapses
+ * onto `now_utc()`. The civil-from-days decomposition is Howard Hinnant's
+ * algorithm (proleptic Gregorian, whole time_t range), so identical seconds
+ * always yield identical fields regardless of host locale or clock.
+ */
+static void patina_utc_from_time(time_t seconds, struct tm *out) {
+    int64_t secs = (int64_t)seconds;
+    int64_t days = secs / 86400;
+    int64_t rem = secs % 86400;
+    if (rem < 0) {
+        rem += 86400;
+        days -= 1;
+    }
+    int sec_of_day = (int)rem;
+    out->tm_hour = sec_of_day / 3600;
+    out->tm_min = (sec_of_day % 3600) / 60;
+    out->tm_sec = sec_of_day % 60;
+    /* 1970-01-01 was a Thursday (=4). Floor-mod into 0..6 with Sunday=0. */
+    int wday = (int)(((days % 7) + 4) % 7);
+    if (wday < 0) {
+        wday += 7;
+    }
+    out->tm_wday = wday;
+    /* days-from-civil inverse (epoch shifted to 0000-03-01 so leap days fall at
+     * the end of the 400-year era). */
+    int64_t z = days + 719468;
+    int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    unsigned doe = (unsigned)(z - era * 146097);                          /* [0, 146096] */
+    unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; /* [0, 399]   */
+    int64_t y = (int64_t)yoe + era * 400;
+    unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100); /* [0, 365] */
+    unsigned mp = (5 * doy + 2) / 153;                      /* [0, 11]  */
+    unsigned d = doy - (153 * mp + 2) / 5 + 1;              /* [1, 31]  */
+    unsigned m = mp < 10 ? mp + 3 : mp - 9;                 /* [1, 12]  */
+    if (m <= 2) {
+        y += 1;
+    }
+    out->tm_mday = (int)d;
+    out->tm_mon = (int)m - 1;
+    out->tm_year = (int)(y - 1900);
+    static const int cumulative[] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
+    int leap = ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0) ? 1 : 0;
+    out->tm_yday = cumulative[out->tm_mon] + (int)d - 1 + (out->tm_mon > 1 ? leap : 0);
+    out->tm_isdst = 0;
+    out->tm_gmtoff = 0;
+    out->tm_zone = patina_tm_zone_utc;
+}
+
+struct tm *localtime_r(const time_t *timep, struct tm *result) {
+    if (timep == NULL || result == NULL) {
+        errno = EFAULT;
+        return NULL;
+    }
+    memset(result, 0, sizeof *result);
+    patina_utc_from_time(*timep, result);
+    return result;
+}
+
+/*
+ * sleep(): the second-granularity blocking sleep (mimalloc's `mi_atomic_yield`
+ * fallback issues `sleep(0)`). Route it through the virtual clock exactly like
+ * nanosleep/usleep so it never blocks a real host thread. Always returns 0: under
+ * virtual time the full interval elapses, so no seconds remain.
+ */
+unsigned int sleep(unsigned int seconds) {
+    uint64_t now = 0;
+    if (patina_clock_now(PATINA_CLOCK_MONOTONIC, &now) != 0) {
+        return 0;
+    }
+    uint64_t delta = (uint64_t)seconds * UINT64_C(1000000000);
+    if (delta <= UINT64_MAX - now) {
+        (void)patina_sleep_until(PATINA_CLOCK_MONOTONIC, now + delta);
+    }
+    return 0;
+}
+
+/*
+ * getrusage(): per-process resource accounting is host state (real CPU time,
+ * peak RSS, page faults) that varies run to run. Report a fixed zeroed usage and
+ * succeed, so a guest that reads it (mimalloc's process-info probe) sees a
+ * deterministic constant instead of live host counters. Both platforms. The
+ * first-argument type follows the platform's own prototype: glibc types it as
+ * `__rusage_who_t` (an enum under _GNU_SOURCE), Darwin as plain `int`.
+ */
+#ifdef __linux__
+int getrusage(__rusage_who_t who, struct rusage *usage) {
+#else
+int getrusage(int who, struct rusage *usage) {
+#endif
+    (void)who;
+    if (usage == NULL) {
+        errno = EFAULT;
+        return -1;
+    }
+    memset(usage, 0, sizeof *usage);
+    return 0;
+}
+
+/*
+ * libc `FILE*` stdio, deterministic sink edition. mimalloc and aws-lc write
+ * warnings/errors through `fputs`/`fprintf`/`fwrite` to `stdout`/`stderr`
+ * (`__stdoutp`/`__stderrp` on Darwin). Define the two stream globals as
+ * shim-owned SENTINELS pointing at opaque static storage, and interpose the
+ * three FILE* writers to route a sentinel stream to the deterministic captured
+ * stdio (fd 1 / fd 2) via patina_stdio_write. The guest never dereferences the
+ * sentinel: pointer identity alone selects the descriptor. A NON-sentinel FILE*
+ * reaching an interposer means an un-interposed `fopen` leaked a real host
+ * stream through, so it fails closed LOUDLY (flush + abort naming the symbol),
+ * the patina_process_trap shape. Being strong defs, the guest's references bind
+ * here and the libc stdio symbols drop off the import table.
+ */
+static FILE patina_sentinel_stdout_storage;
+static FILE patina_sentinel_stderr_storage;
+#ifdef __APPLE__
+FILE *__stdoutp = &patina_sentinel_stdout_storage;
+FILE *__stderrp = &patina_sentinel_stderr_storage;
+#else
+FILE *stdout = &patina_sentinel_stdout_storage;
+FILE *stderr = &patina_sentinel_stderr_storage;
+#endif
+
+/* Map a stream to its captured descriptor: 1 for the stdout sentinel, 2 for the
+ * stderr sentinel, -1 for any other (a leaked host FILE*). */
+static int patina_sentinel_fd(FILE *stream) {
+    if (stream == &patina_sentinel_stdout_storage) {
+        return 1;
+    }
+    if (stream == &patina_sentinel_stderr_storage) {
+        return 2;
+    }
+    return -1;
+}
+
+__attribute__((noreturn)) static void patina_stdio_trap(const char *symbol) {
+    static const char prefix[] = "patina: stdio call on a non-sentinel FILE* reached under patina: ";
+    write(2, prefix, sizeof prefix - 1);
+    write(2, symbol, strlen(symbol));
+    static const char suffix[] =
+        "; a host FILE* means an un-interposed fopen leaked through; failing closed\n";
+    write(2, suffix, sizeof suffix - 1);
+    patina_flush_captured_stdio();
+    abort();
+}
+
+int fputs(const char *string, FILE *stream) {
+    int fd = patina_sentinel_fd(stream);
+    if (fd < 0) {
+        patina_stdio_trap("fputs");
+    }
+    /* `string` is declared nonnull by libc (a NULL compare is -Werror under
+     * gcc), so the contract is trusted, the gethostname/getpwuid_r precedent. */
+    if (patina_stdio_write(fd, string, strlen(string)) < 0) {
+        return EOF;
+    }
+    return 0;
+}
+
+size_t fwrite(const void *pointer, size_t size, size_t count, FILE *stream) {
+    int fd = patina_sentinel_fd(stream);
+    if (fd < 0) {
+        patina_stdio_trap("fwrite");
+    }
+    if (size == 0 || count == 0) {
+        return 0;
+    }
+    intptr_t written = patina_stdio_write(fd, pointer, size * count);
+    if (written < 0) {
+        return 0;
+    }
+    return (size_t)written / size;
+}
+
+/* Shared printf-family engine: format once into a stack buffer (heap fallback
+ * for the rare long message, sized from the vsnprintf length probe), then write
+ * once to the captured descriptor. */
+static int patina_stream_vprintf(int fd, const char *format, va_list arguments) {
+    char stack[512];
+    va_list second;
+    va_copy(second, arguments);
+    int needed = vsnprintf(stack, sizeof stack, format, arguments);
+    if (needed < 0) {
+        va_end(second);
+        return needed;
+    }
+    if ((size_t)needed < sizeof stack) {
+        va_end(second);
+        (void)patina_stdio_write(fd, stack, (size_t)needed);
+        return needed;
+    }
+    char *heap = malloc((size_t)needed + 1);
+    if (heap == NULL) {
+        va_end(second);
+        errno = ENOMEM;
+        return -1;
+    }
+    int written = vsnprintf(heap, (size_t)needed + 1, format, second);
+    va_end(second);
+    if (written > 0) {
+        (void)patina_stdio_write(fd, heap, (size_t)written);
+    }
+    free(heap);
+    return written;
+}
+
+int vfprintf(FILE *stream, const char *format, va_list arguments) {
+    int fd = patina_sentinel_fd(stream);
+    if (fd < 0) {
+        patina_stdio_trap("vfprintf");
+    }
+    return patina_stream_vprintf(fd, format, arguments);
+}
+
+int fprintf(FILE *stream, const char *format, ...) {
+    int fd = patina_sentinel_fd(stream);
+    if (fd < 0) {
+        patina_stdio_trap("fprintf");
+    }
+    va_list arguments;
+    va_start(arguments, format);
+    int written = patina_stream_vprintf(fd, format, arguments);
+    va_end(arguments);
+    return written;
+}
+
+/* `printf`/`puts`/`putchar` bind implicitly to the stdout sentinel, so no
+ * sentinel check is needed: they can never see a leaked host FILE*. On ELF this
+ * family is also what keeps glibc's own printf away from the sentinel globals —
+ * a probe or guest calling printf must reach the shim, never glibc's stdio
+ * (whose vtable hardening aborts on a foreign FILE). */
+int printf(const char *format, ...) {
+    va_list arguments;
+    va_start(arguments, format);
+    int written = patina_stream_vprintf(1, format, arguments);
+    va_end(arguments);
+    return written;
+}
+
+int puts(const char *string) {
+    if (patina_stdio_write(1, string, strlen(string)) < 0) {
+        return EOF;
+    }
+    static const char newline = '\n';
+    if (patina_stdio_write(1, &newline, 1) < 0) {
+        return EOF;
+    }
+    return 0;
+}
+
+int putchar(int character) {
+    unsigned char byte = (unsigned char)character;
+    if (patina_stdio_write(1, &byte, 1) < 0) {
+        return EOF;
+    }
+    return byte;
+}
+
+int fputc(int character, FILE *stream) {
+    int fd = patina_sentinel_fd(stream);
+    if (fd < 0) {
+        patina_stdio_trap("fputc");
+    }
+    unsigned char byte = (unsigned char)character;
+    if (patina_stdio_write(fd, &byte, 1) < 0) {
+        return EOF;
+    }
+    return byte;
+}
+
+/* The sentinel streams are unbuffered (every write goes straight to the
+ * captured descriptor), so a flush is always trivially satisfied. NULL means
+ * "flush everything" and is equally a no-op. */
+int fflush(FILE *stream) {
+    if (stream != NULL && patina_sentinel_fd(stream) < 0) {
+        patina_stdio_trap("fflush");
+    }
+    return 0;
+}
+
+/*
+ * pthread_once: run `init_routine` exactly once across all managed threads,
+ * concurrent callers blocking until the first completes (aws-lc's lazy library
+ * init reaches it). The pthread_once_t storage layout is not portable (glibc's
+ * is a bare zeroed int; Darwin's carries a nonzero signature word), so state is
+ * tracked in a shim-side registry keyed on the control-block ADDRESS — the
+ * os_unfair_lock lazy-registration convention — guarded by a deterministic
+ * mutex + condvar that route through the scheduler (the interposed pthread_mutex
+ * and pthread_cond families above). This is deadlock-free and deterministic under the cooperative
+ * scheduler: exactly one thread transitions the entry to "running", runs the
+ * init with the guard released, then wakes any waiters. A strong def, so the
+ * symbol drops off the import table.
+ */
+struct patina_once_entry {
+    pthread_once_t *key;
+    int state; /* 0 = fresh, 1 = running, 2 = done */
+    struct patina_once_entry *next;
+};
+static struct patina_once_entry *patina_once_registry;
+static pthread_mutex_t patina_once_guard = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t patina_once_cond = PTHREAD_COND_INITIALIZER;
+
+int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
+    /* Both parameters are declared nonnull by libc (a NULL compare is -Werror
+     * under gcc), so the contract is trusted — the gethostname precedent. */
+    pthread_mutex_lock(&patina_once_guard);
+    struct patina_once_entry *entry = patina_once_registry;
+    while (entry != NULL && entry->key != once_control) {
+        entry = entry->next;
+    }
+    if (entry == NULL) {
+        entry = malloc(sizeof *entry);
+        if (entry == NULL) {
+            pthread_mutex_unlock(&patina_once_guard);
+            return ENOMEM;
+        }
+        entry->key = once_control;
+        entry->state = 0;
+        entry->next = patina_once_registry;
+        patina_once_registry = entry;
+    }
+    while (entry->state == 1) {
+        pthread_cond_wait(&patina_once_cond, &patina_once_guard);
+    }
+    if (entry->state == 2) {
+        pthread_mutex_unlock(&patina_once_guard);
+        return 0;
+    }
+    entry->state = 1;
+    pthread_mutex_unlock(&patina_once_guard);
+    init_routine();
+    pthread_mutex_lock(&patina_once_guard);
+    entry->state = 2;
+    pthread_cond_broadcast(&patina_once_cond);
+    pthread_mutex_unlock(&patina_once_guard);
+    return 0;
+}
+
+#ifdef __APPLE__
+/*
+ * __assert_rtn (Darwin `assert` failure hook, reached by aws-lc). It only fires
+ * when an assertion has already failed, so aborting is the correct deterministic
+ * outcome; route the diagnostic to the captured stderr sink first (flush + abort
+ * like patina_process_trap) so it reaches the operator. NOT allowlisted — a
+ * genuine assertion failure must be a loud, reproducible abort, not a host
+ * passthrough.
+ */
+__attribute__((noreturn)) void __assert_rtn(const char *function, const char *file, int line,
+                                            const char *expression) {
+    char message[512];
+    int needed = snprintf(message, sizeof message,
+                          "patina: assertion failed: (%s), function %s, file %s, line %d.\n",
+                          expression ? expression : "", function ? function : "",
+                          file ? file : "", line);
+    if (needed > 0) {
+        size_t length = (size_t)needed < sizeof message ? (size_t)needed : sizeof message - 1;
+        (void)patina_stdio_write(2, message, length);
+    }
+    patina_flush_captured_stdio();
+    abort();
+}
+
+/* Deterministic sysctl emit: copy a fixed value into the caller's oldp per the
+ * BSD length protocol (report the size when oldp is NULL; ENOMEM on a short
+ * buffer). Shared by the mib `sysctl` and the name-keyed `sysctlbyname`. */
+static int patina_sysctl_emit(const void *value, size_t value_len, void *oldp, size_t *oldlenp) {
+    if (oldp != NULL) {
+        if (oldlenp == NULL) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (*oldlenp < value_len) {
+            errno = ENOMEM;
+            return -1;
+        }
+        memcpy(oldp, value, value_len);
+        *oldlenp = value_len;
+    } else if (oldlenp != NULL) {
+        *oldlenp = value_len;
+    }
+    return 0;
+}
+
+static int patina_sysctl_emit_int(int value, void *oldp, size_t *oldlenp) {
+    return patina_sysctl_emit(&value, sizeof value, oldp, oldlenp);
+}
+
+static int patina_sysctl_emit_int64(int64_t value, void *oldp, size_t *oldlenp) {
+    return patina_sysctl_emit(&value, sizeof value, oldp, oldlenp);
+}
+
+/*
+ * sysctl (mib form) / sysctlbyname (name form): host hardware/kernel state reads
+ * (mimalloc's physical-memory probe, sysinfo's totals, aws-lc's CPU-feature
+ * detection). Serve the small set of keys real crates query as fixed
+ * world-model constants: physical memory = 8 GiB, CPU count = 1, page size =
+ * 4096 (matching sysconf), and EVERY optional CPU feature (`hw.optional.*`)
+ * reported ABSENT (0) so crypto libraries fall back to portable, deterministic
+ * code paths. Writes (newp) are refused (EPERM — a guest may not mutate kernel
+ * state), and any unmodeled key fails ENOENT per the sysctl convention, so an
+ * unhandled query is a deterministic miss rather than a host read.
+ */
+int sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    if (newp != NULL || newlen != 0) {
+        errno = EPERM;
+        return -1;
+    }
+    if (name == NULL || namelen < 2) {
+        errno = ENOENT;
+        return -1;
+    }
+    if (name[0] == CTL_HW) {
+        switch (name[1]) {
+#ifdef HW_MEMSIZE
+        case HW_MEMSIZE:
+            return patina_sysctl_emit_int64((int64_t)PATINA_PHYSICAL_MEMORY_BYTES, oldp, oldlenp);
+#endif
+#ifdef HW_PHYSMEM64
+        case HW_PHYSMEM64:
+            return patina_sysctl_emit_int64((int64_t)PATINA_PHYSICAL_MEMORY_BYTES, oldp, oldlenp);
+#endif
+#ifdef HW_NCPU
+        case HW_NCPU:
+            return patina_sysctl_emit_int(1, oldp, oldlenp);
+#endif
+#ifdef HW_AVAILCPU
+        case HW_AVAILCPU:
+            return patina_sysctl_emit_int(1, oldp, oldlenp);
+#endif
+#ifdef HW_PAGESIZE
+        case HW_PAGESIZE:
+            return patina_sysctl_emit_int(4096, oldp, oldlenp);
+#endif
+        default:
+            break;
+        }
+    }
+    errno = ENOENT;
+    return -1;
+}
+
+int sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    if (newp != NULL || newlen != 0) {
+        errno = EPERM;
+        return -1;
+    }
+    if (name == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (strcmp(name, "hw.memsize") == 0) {
+        return patina_sysctl_emit_int64((int64_t)PATINA_PHYSICAL_MEMORY_BYTES, oldp, oldlenp);
+    }
+    if (strcmp(name, "hw.pagesize") == 0) {
+        return patina_sysctl_emit_int(4096, oldp, oldlenp);
+    }
+    if (strcmp(name, "hw.ncpu") == 0 || strcmp(name, "hw.logicalcpu") == 0 ||
+        strcmp(name, "hw.logicalcpu_max") == 0 || strcmp(name, "hw.physicalcpu") == 0 ||
+        strcmp(name, "hw.physicalcpu_max") == 0 || strcmp(name, "hw.activecpu") == 0) {
+        return patina_sysctl_emit_int(1, oldp, oldlenp);
+    }
+    /* Optional CPU-feature flags → absent (0): safe and deterministic, crypto
+     * libraries take the portable path. */
+    if (strncmp(name, "hw.optional.", 12) == 0) {
+        return patina_sysctl_emit_int(0, oldp, oldlenp);
+    }
+    errno = ENOENT;
+    return -1;
+}
+
+/*
+ * task_info: Mach per-task introspection (mimalloc reads MACH_TASK_BASIC_INFO
+ * for current RSS). Fill the caller's info array with a fixed zeroed flavor and
+ * report KERN_SUCCESS — a deterministic "no resident pages / no accounting"
+ * rather than a live Mach read. The task port argument (mach_task_self) is
+ * ignored. */
+kern_return_t task_info(task_name_t target_task, task_flavor_t flavor, task_info_t task_info_out,
+                        mach_msg_type_number_t *task_info_count) {
+    (void)target_task;
+    (void)flavor;
+    if (task_info_out != NULL && task_info_count != NULL) {
+        memset(task_info_out, 0, (size_t)(*task_info_count) * sizeof(natural_t));
+    }
+    return KERN_SUCCESS;
+}
+#endif /* __APPLE__ */
+
+#ifdef __linux__
+/*
+ * sysinfo(2): Linux host memory/uptime/load summary (mimalloc's physical-memory
+ * probe on Linux). Report a fixed deterministic struct — uptime from the virtual
+ * monotonic clock, total memory = the 8 GiB world-model constant with a 1-byte
+ * mem_unit, one process — so a guest reading it sees the same values regardless
+ * of the host.
+ */
+int sysinfo(struct sysinfo *info) {
+    if (info == NULL) {
+        errno = EFAULT;
+        return -1;
+    }
+    memset(info, 0, sizeof *info);
+    uint64_t nanos = 0;
+    if (patina_clock_now(PATINA_CLOCK_MONOTONIC, &nanos) == 0) {
+        info->uptime = (long)(nanos / UINT64_C(1000000000));
+    }
+    info->mem_unit = 1;
+    info->totalram = (unsigned long)PATINA_PHYSICAL_MEMORY_BYTES;
+    info->freeram = (unsigned long)(PATINA_PHYSICAL_MEMORY_BYTES / 2);
+    info->procs = 1;
+    return 0;
+}
+
+/*
+ * prctl: mimalloc issues three process-local memory-attribute ops on Linux —
+ * PR_SET_VMA (name an anonymous mapping), PR_SET_THP_DISABLE, and the
+ * PR_GET_THP_DISABLE probe. None is a guest-observable effect under Patina (the
+ * runtime does not model transparent-hugepage state or VMA names), so the two
+ * setters are deterministic no-op successes and the getter reports a fixed
+ * "THP disabled" (1). Every other option fails closed with ENOSYS, the `uname`
+ * doctrine — a guest reaching an unmodeled prctl op is a deterministic miss, not
+ * a host passthrough. Variadic like glibc's declaration; the extra arguments are
+ * inert for the handled ops.
+ */
+int prctl(int option, ...) {
+    switch (option) {
+#ifdef PR_SET_VMA
+    case PR_SET_VMA:
+#endif
+#ifdef PR_SET_THP_DISABLE
+    case PR_SET_THP_DISABLE:
+#endif
+        return 0;
+#ifdef PR_GET_THP_DISABLE
+    case PR_GET_THP_DISABLE:
+        return 1;
+#endif
+    default:
+        errno = ENOSYS;
+        return -1;
+    }
+}
+
+/*
+ * getrlimit/setrlimit (the sysinfo crate reads limits). getrlimit reports a
+ * fixed generous limit — RLIM_INFINITY, except RLIMIT_NOFILE which reports 1024
+ * to match sysconf(_SC_OPEN_MAX) so fd-counting code stays sane — as a
+ * deterministic constant independent of the host's real ulimits. setrlimit
+ * refuses with EPERM: a truthful "cannot mutate host resource limits" rather
+ * than a lying success (a guest cannot change limits the runtime does not model).
+ */
+int getrlimit(__rlimit_resource_t resource, struct rlimit *rlim) {
+    /* `rlim` is declared nonnull by glibc (a NULL compare is -Werror under gcc). */
+    rlim_t value = RLIM_INFINITY;
+#ifdef RLIMIT_NOFILE
+    if (resource == RLIMIT_NOFILE) {
+        value = 1024;
+    }
+#endif
+    rlim->rlim_cur = value;
+    rlim->rlim_max = value;
+    return 0;
+}
+
+int setrlimit(__rlimit_resource_t resource, const struct rlimit *rlim) {
+    (void)resource;
+    (void)rlim;
+    errno = EPERM;
+    return -1;
+}
+
+/*
+ * zstd's static library references these weak tracing hooks (Linux corpus only;
+ * the macOS zstd build config does not surface them). The zstd_trace.h contract
+ * is that a begin() returning 0 disables tracing, so provide no-op strong defs —
+ * begin returns 0, end is inert — which satisfy the weak references so the
+ * symbols drop off the import table. Opaque pointer parameters: C linkage does
+ * not encode argument types, so the names bind regardless of the real structs.
+ */
+unsigned long long ZSTD_trace_compress_begin(const void *cctx) {
+    (void)cctx;
+    return 0;
+}
+void ZSTD_trace_compress_end(unsigned long long ctx, const void *trace) {
+    (void)ctx;
+    (void)trace;
+}
+unsigned long long ZSTD_trace_decompress_begin(const void *dctx) {
+    (void)dctx;
+    return 0;
+}
+void ZSTD_trace_decompress_end(unsigned long long ctx, const void *trace) {
+    (void)ctx;
+    (void)trace;
+}
+#endif /* __linux__ */
+
+/*
  * Process-class deny-traps. The fork/exec/spawn/reap/credential/session surface
  * is a deterministic-runtime non-goal: a managed guest never legitimately enters
  * it and the runtime models none of it. Real guests still LINK this
@@ -3381,6 +4020,178 @@ int _NSGetExecutablePath(char *buf, uint32_t *bufsize) {
     return -1;
 }
 #endif
+
+/*
+ * Dormant-path deny-traps: the native-trust-root (rustls-native-certs) and
+ * host-inventory (sysinfo / chrono-timezone) surfaces, plus the cross-platform
+ * `kill` / `if_nametoindex` members.
+ *
+ * These generalize the process-spawn deny-trap doctrine above (ESCAPE-CLASSES.md
+ * row e, "Why symbol-reachability, not static call-graph"). A large native
+ * binary commonly LINKS an optional TLS-trust-root loader or a host-inventory
+ * crate whose call sites are statically wired but runtime-flag dormant — the
+ * scenario never reaches them — yet a reachability audit cannot clear a
+ * statically-wired path, so the pre-run gate would refuse the whole binary. A
+ * strong shim definition binds the guest reference at link (the symbol drops off
+ * the import table, so the gate passes when the path is dormant) and fails LOUD +
+ * reproducibly at FIRST CALL, naming the symbol, if a scenario genuinely reaches
+ * it. Merely linking the surface is inert; only a real call trips the trap.
+ *
+ * Scope is exactly the enumerated dormant surface. The LIVE-path members these
+ * families also expose — `sysctl`/`sysctlbyname`/`getrusage`/`task_info`, the
+ * stdio surface, `localtime_r` — are deliberately NOT trapped here (a tier-3
+ * interposer change owns those): a strong def would silently swallow a path a
+ * normal startup actually reaches, so they stay refused pre-run.
+ */
+__attribute__((noreturn)) static void patina_native_trap(const char *klass,
+                                                         const char *symbol) {
+    static const char prefix[] = "patina: ";
+    write(2, prefix, sizeof prefix - 1);
+    write(2, klass, strlen(klass));
+    static const char mid[] = " reached under patina: ";
+    write(2, mid, sizeof mid - 1);
+    write(2, symbol, strlen(symbol));
+    static const char suffix[] =
+        "; not interposed by the deterministic runtime; failing closed\n";
+    write(2, suffix, sizeof suffix - 1);
+    /* abort() skips the atexit shutdown flush (patina_process_trap precedent), so
+     * push the captured guest output and this diagnostic to the real descriptors
+     * before terminating. */
+    patina_flush_captured_stdio();
+    abort();
+}
+
+/*
+ * Cross-platform members. `kill` joins the process deny-trap family: signalling a
+ * process is the same deterministic-runtime non-goal as spawning one, so it
+ * shares patina_process_trap's message. `if_nametoindex` is the interface-index
+ * network lookup a host networking utility stack (hyper-util) links dormant.
+ */
+int kill(pid_t pid, int sig) {
+    (void)pid;
+    (void)sig;
+    patina_process_trap("kill");
+}
+unsigned int if_nametoindex(const char *ifname) {
+    (void)ifname;
+    patina_native_trap("network", "if_nametoindex");
+}
+
+#ifdef __APPLE__
+/*
+ * macOS CoreFoundation / Security framework deny-traps (the rustls-native-certs /
+ * security-framework / chrono-timezone surface) and Mach/BSD/IOKit
+ * host-introspection deny-traps (the sysinfo / num_cpus / hardware-inventory
+ * surface). Each trap is noreturn and binds its guest reference by NAME alone, so
+ * a uniform `void name(void)` shadows the framework/Mach symbol at link (it drops
+ * off the import table) and aborts at first call regardless of the real arity —
+ * no framework headers, no opaque-type spelling needed.
+ */
+#define PATINA_FRAMEWORK_TRAP(name)                                            \
+    void name(void) { patina_native_trap("macos-framework", #name); }
+#define PATINA_INTROSPECTION_TRAP(name)                                        \
+    void name(void) { patina_native_trap("host-introspection", #name); }
+
+PATINA_FRAMEWORK_TRAP(CFArrayCreate)
+PATINA_FRAMEWORK_TRAP(CFArrayGetCount)
+PATINA_FRAMEWORK_TRAP(CFArrayGetValueAtIndex)
+PATINA_FRAMEWORK_TRAP(CFDataGetBytePtr)
+PATINA_FRAMEWORK_TRAP(CFDataGetLength)
+PATINA_FRAMEWORK_TRAP(CFDataGetBytes)
+PATINA_FRAMEWORK_TRAP(CFDataGetTypeID)
+PATINA_FRAMEWORK_TRAP(CFGetTypeID)
+PATINA_FRAMEWORK_TRAP(CFDictionaryGetValueIfPresent)
+PATINA_FRAMEWORK_TRAP(CFEqual)
+PATINA_FRAMEWORK_TRAP(CFNumberGetValue)
+PATINA_FRAMEWORK_TRAP(CFRelease)
+PATINA_FRAMEWORK_TRAP(CFRetain)
+PATINA_FRAMEWORK_TRAP(CFStringCreateWithBytesNoCopy)
+PATINA_FRAMEWORK_TRAP(CFStringCreateWithCStringNoCopy)
+PATINA_FRAMEWORK_TRAP(CFStringGetBytes)
+PATINA_FRAMEWORK_TRAP(CFStringGetCStringPtr)
+PATINA_FRAMEWORK_TRAP(CFStringGetLength)
+PATINA_FRAMEWORK_TRAP(CFTimeZoneCopySystem)
+PATINA_FRAMEWORK_TRAP(CFTimeZoneGetName)
+PATINA_FRAMEWORK_TRAP(CFTimeZoneResetSystem)
+PATINA_FRAMEWORK_TRAP(SecCertificateCopyData)
+PATINA_FRAMEWORK_TRAP(SecCopyErrorMessageString)
+PATINA_FRAMEWORK_TRAP(SecTrustSettingsCopyCertificates)
+PATINA_FRAMEWORK_TRAP(SecTrustSettingsCopyTrustSettings)
+
+PATINA_INTROSPECTION_TRAP(IOIteratorNext)
+PATINA_INTROSPECTION_TRAP(IOObjectRelease)
+PATINA_INTROSPECTION_TRAP(IORegistryEntryCreateCFProperty)
+PATINA_INTROSPECTION_TRAP(IORegistryEntryGetName)
+PATINA_INTROSPECTION_TRAP(IOServiceGetMatchingServices)
+PATINA_INTROSPECTION_TRAP(IOServiceMatching)
+PATINA_INTROSPECTION_TRAP(proc_listallpids)
+PATINA_INTROSPECTION_TRAP(proc_pid_rusage)
+PATINA_INTROSPECTION_TRAP(proc_pidinfo)
+PATINA_INTROSPECTION_TRAP(proc_pidpath)
+
+#undef PATINA_FRAMEWORK_TRAP
+#undef PATINA_INTROSPECTION_TRAP
+
+/* These four are prototyped by <mach/mach.h> (included for the deterministic
+ * task_info interposer above), so their traps must spell the real signatures. */
+kern_return_t host_processor_info(host_t host, processor_flavor_t flavor,
+                                  natural_t *out_processor_count,
+                                  processor_info_array_t *out_processor_info,
+                                  mach_msg_type_number_t *out_processor_infoCnt) {
+    (void)host;
+    (void)flavor;
+    (void)out_processor_count;
+    (void)out_processor_info;
+    (void)out_processor_infoCnt;
+    patina_native_trap("host-introspection", "host_processor_info");
+}
+kern_return_t host_statistics64(host_t host_priv, host_flavor_t flavor,
+                                host_info64_t host_info64_out,
+                                mach_msg_type_number_t *host_info64_outCnt) {
+    (void)host_priv;
+    (void)flavor;
+    (void)host_info64_out;
+    (void)host_info64_outCnt;
+    patina_native_trap("host-introspection", "host_statistics64");
+}
+mach_port_t mach_host_self(void) {
+    patina_native_trap("host-introspection", "mach_host_self");
+}
+kern_return_t vm_deallocate(vm_map_t target_task, vm_address_t address,
+                            vm_size_t size) {
+    (void)target_task;
+    (void)address;
+    (void)size;
+    patina_native_trap("host-introspection", "vm_deallocate");
+}
+
+/*
+ * Data symbols cannot be trapped on read, so they get fixed deterministic
+ * values. Every consumer of each is a trap above (the value is only ever passed
+ * straight into a call that aborts), so these bindings exist solely to satisfy
+ * the data reference and drop the symbol off the import table.
+ */
+void *const kCFAllocatorDefault = NULL; /* CF's own "default allocator" sentinel */
+void *const kCFAllocatorNull = NULL;
+/* CFArrayCallBacks {version, retain, release, copyDescription, equal}: a zeroed
+ * "no custom management" struct, only ever handed to CFArrayCreate (which traps). */
+const struct {
+    long version;
+    void *retain;
+    void *release;
+    void *copy_description;
+    void *equal;
+} kCFTypeArrayCallBacks = {0, NULL, NULL, NULL, NULL};
+unsigned int kIOMasterPortDefault = 0; /* the IOKit default master port */
+/* mach_task_self_ is the task's send-right port name (a mach_port_t). A
+ * synthetic, obviously-non-real value: every consumer (semaphore/vm/proc calls)
+ * traps, so it is never used as a real port. */
+unsigned int mach_task_self_ = 0x50415400u; /* 'PAT\0' */
+/* vm_page_size (vm_size_t): the shim's single world-model page size, matching
+ * sysconf(_SC_PAGESIZE) and sysctl(HW_PAGESIZE). Only read by host-inventory
+ * code whose companion calls trap. */
+unsigned long vm_page_size = 4096;
+#endif /* __APPLE__ */
 
 /*
  * Packaged startup. An ordinary program built with `cargo patina native-build`

@@ -464,6 +464,58 @@ fn native_build_package_audits_records_and_fails_closed() {
     );
 }
 
+// Building the same package twice unchanged must hit Cargo's fingerprint cache
+// the second time: the shim POSIX object (and the yield-point hook object under
+// `--yield-points`) is staged at a stable content-addressed path in the shim's
+// own target dir, not a fresh tempdir, so the `-Clink-arg=<object>` rustflag
+// Cargo hashes into every crate fingerprint is byte-identical across runs. Cargo
+// prints `Compiling` on stderr (which `build_native_package` inherits) only for
+// crates it actually recompiles, so a cache hit leaves the second build's stderr
+// free of any `Compiling` line.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn second_native_package_build_reuses_cargo_cache() {
+    let directory = tempdir().unwrap();
+    let package = directory.path().join("pkg");
+    create_package_fixture(directory.path());
+    let workspace = native_workspace();
+    let package = package.to_str().unwrap();
+    let plain: &[&str] = &[
+        "build",
+        package,
+        "--bin",
+        "patina-native-pkg-fixture",
+        "--release",
+    ];
+    let yielded: &[&str] = &[
+        "build",
+        package,
+        "--bin",
+        "patina-native-pkg-fixture",
+        "--release",
+        "--yield-points",
+    ];
+
+    // Cold build compiles the graph; the warm build must recompile nothing.
+    invoke_in(workspace, plain);
+    let warm = invoke_in(workspace, plain);
+    let warm_stderr = String::from_utf8_lossy(&warm.stderr);
+    assert!(
+        !warm_stderr.contains("Compiling "),
+        "second unchanged build recompiled the guest graph (cache miss):\n{warm_stderr}"
+    );
+
+    // The same must hold for `--yield-points`, whose second object is also
+    // content-addressed rather than tempdir-staged.
+    invoke_in(workspace, yielded);
+    let warm_yield = invoke_in(workspace, yielded);
+    let warm_yield_stderr = String::from_utf8_lossy(&warm_yield.stderr);
+    assert!(
+        !warm_yield_stderr.contains("Compiling "),
+        "second unchanged --yield-points build recompiled the guest graph (cache miss):\n{warm_yield_stderr}"
+    );
+}
+
 // Source-first `audit` and `run` honor `--package`/`--bin` against a WORKSPACE
 // manifest — the exact form the help advertises (`audit <Cargo.toml> --package X
 // --bin Y`) and the one the bug report showed rejected. A virtual workspace (no
@@ -727,7 +779,7 @@ fn replay_missing_trace_hard_errors_without_running_the_guest() {
 // DEFECT 4 (SEVERE, gate bypass): package-mode `run <dir>` must apply the SAME
 // pre-run default-deny symbol gate the prebuilt-binary path applies. The
 // regression ran a denied-import guest to completion from package/cwd mode. A
-// plain package that imports an uninterposed process-class symbol (`kill`) is
+// plain package that imports an uninterposed process-class symbol (`killpg`) is
 // refused on BOTH paths, and the parity assertion checks both stderrs name the
 // SAME symbol (one gate, not two independent checks).
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -738,12 +790,14 @@ fn run_package_dir_and_prebuilt_gate_deny_the_same_symbol() {
     write_plain_package(
         &pkg,
         "patina-gate-pkg",
-        // Imports `kill` (process class, denied) behind an opaque branch so it is
-        // never actually called but stays in the import table.
-        "unsafe extern \"C\" { fn kill(pid: i32, sig: i32) -> i32; }\n\
+        // Imports `killpg` (process class, denied) behind an opaque branch so it
+        // is never actually called but stays in the import table. `kill` itself is
+        // now a shim deny-trap (it drops off the import table), so `killpg` is the
+        // still-uninterposed process-class member the gate must flag.
+        "unsafe extern \"C\" { fn killpg(pgrp: i32, sig: i32) -> i32; }\n\
          fn main() {\n\
          let g = std::hint::black_box(0i32);\n\
-         if g != 0 { unsafe { kill(g, 0); } }\n\
+         if g != 0 { unsafe { killpg(g, 0); } }\n\
          println!(\"GATE_PKG_RAN\");\n\
          }\n",
     );
@@ -803,7 +857,7 @@ fn run_package_dir_and_prebuilt_gate_deny_the_same_symbol() {
         denied_line(&dir_run),
         "the two paths named different denied symbols (gate not shared)",
     );
-    assert!(denied_line(&prebuilt).contains("kill"));
+    assert!(denied_line(&prebuilt).contains("killpg"));
 }
 
 // DEFECT 4 corollary (cwd/no-positional): `cargo patina run --seed N` from inside
@@ -979,11 +1033,388 @@ fn main() { let v: Vec<u8> = vec![1, 2, 3]; println!("CUSTOM_ALLOC_OK len={}", v
     );
 }
 
-// A guest importing a macOS Security-framework symbol (the rustls-native-certs
-// surface) is classified `macos-framework` and refused with a determinism note
+// `localtime_r` (the `time`/`chrono` crates' local-offset path) is interposed as
+// a PURE UTC conversion: fixed timezone, tm_gmtoff=0, tm_zone="UTC". A guest that
+// breaks down a fixed time_t sees the exact civil fields with no dependence on
+// the host timezone, and two same-seed runs are byte-identical. Before the change
+// `localtime_r` was an uninterposed `time`-class import and the run was refused
+// before `main`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_localtime_r_is_pure_utc_and_deterministic() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("localtime.rs");
+    fs::write(
+        &source,
+        r#"use std::ffi::CStr;
+use std::os::raw::{c_char, c_int, c_long};
+
+#[repr(C)]
+struct Tm {
+    tm_sec: c_int,
+    tm_min: c_int,
+    tm_hour: c_int,
+    tm_mday: c_int,
+    tm_mon: c_int,
+    tm_year: c_int,
+    tm_wday: c_int,
+    tm_yday: c_int,
+    tm_isdst: c_int,
+    tm_gmtoff: c_long,
+    tm_zone: *const c_char,
+}
+
+unsafe extern "C" {
+    fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
+}
+
+fn main() {
+    // 2001-09-09 01:46:40 UTC — a Sunday, day-of-year 251.
+    let t: i64 = 1_000_000_000;
+    let mut tm: Tm = unsafe { std::mem::zeroed() };
+    let returned = unsafe { localtime_r(&t, &mut tm) };
+    assert!(!returned.is_null(), "localtime_r returned null");
+    let zone = unsafe { CStr::from_ptr(tm.tm_zone) }.to_str().unwrap();
+    println!(
+        "LT y={} mon={} mday={} h={} m={} s={} wday={} yday={} isdst={} gmtoff={} zone={}",
+        tm.tm_year, tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, tm.tm_wday,
+        tm.tm_yday, tm.tm_isdst, tm.tm_gmtoff, zone
+    );
+}
+"#,
+    )
+    .unwrap();
+    let bin = directory.path().join("localtime-bin");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    let ran = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let out = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        out.contains(
+            "LT y=101 mon=8 mday=9 h=1 m=46 s=40 wday=0 yday=251 isdst=0 gmtoff=0 zone=UTC"
+        ),
+        "localtime_r did not produce the exact UTC fields:\nstdout:\n{out}\nstderr:\n{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+
+    let again = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    assert_eq!(
+        ran.stdout, again.stdout,
+        "localtime_r run is not seed-stable"
+    );
+}
+
+// `sleep` (mimalloc's yield fallback) is interposed onto the virtual clock: it
+// returns 0 promptly under virtual time and the run completes rather than
+// blocking a real host thread. Before the change `sleep` was an uninterposed
+// `time`-class import and the run was refused before `main`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_sleep_uses_virtual_clock_and_returns_promptly() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("sleep.rs");
+    fs::write(
+        &source,
+        r#"unsafe extern "C" {
+    fn sleep(seconds: u32) -> u32;
+}
+
+fn main() {
+    // A one-hour sleep completes instantly under the virtual clock, returning 0
+    // (no seconds remaining). sleep(0) is mimalloc's actual yield-fallback call.
+    let remaining = unsafe { sleep(3600) };
+    let zero = unsafe { sleep(0) };
+    println!("SLEEP remaining={remaining} zero={zero} done");
+}
+"#,
+    )
+    .unwrap();
+    let bin = directory.path().join("sleep-bin");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let ran = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    assert!(
+        String::from_utf8_lossy(&ran.stdout).contains("SLEEP remaining=0 zero=0 done"),
+        "sleep did not return promptly under virtual time:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+}
+
+// libc `FILE*` stdio (`fputs`/`fprintf`/`fwrite` to the `stdout`/`stderr`
+// sentinels — mimalloc + aws-lc error output) routes to the deterministic
+// captured stdio: stdout writes land on the run's captured stdout, stderr writes
+// on captured stderr, byte-identically across runs. Before the change these were
+// uninterposed `unknown-import` symbols (`fputs`/`fprintf`/`fwrite` and the
+// `__stdoutp`/`__stderrp`/`stdout`/`stderr` data symbols) and the run was refused.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_libc_file_stdio_routes_to_captured_streams() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("stdio.rs");
+    fs::write(
+        &source,
+        r#"use std::ffi::CString;
+use std::os::raw::{c_char, c_int, c_void};
+
+unsafe extern "C" {
+    fn fputs(string: *const c_char, stream: *mut c_void) -> c_int;
+    fn fprintf(stream: *mut c_void, format: *const c_char, ...) -> c_int;
+    fn fwrite(pointer: *const c_void, size: usize, count: usize, stream: *mut c_void) -> usize;
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    static __stdoutp: *mut c_void;
+    static __stderrp: *mut c_void;
+}
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    static stdout: *mut c_void;
+    static stderr: *mut c_void;
+}
+
+#[cfg(target_os = "macos")]
+fn streams() -> (*mut c_void, *mut c_void) {
+    unsafe { (__stdoutp, __stderrp) }
+}
+#[cfg(target_os = "linux")]
+fn streams() -> (*mut c_void, *mut c_void) {
+    unsafe { (stdout, stderr) }
+}
+
+fn main() {
+    let (out, err) = streams();
+    let line = CString::new("FPUTS_OUT line\n").unwrap();
+    unsafe { fputs(line.as_ptr(), out) };
+    let fmt = CString::new("FPRINTF n=%d\n").unwrap();
+    unsafe { fprintf(out, fmt.as_ptr(), 42) };
+    let e = CString::new("FWRITE_ERR line\n").unwrap();
+    unsafe { fwrite(e.as_ptr() as *const c_void, 1, e.as_bytes().len(), err) };
+    println!("STDIO_DONE");
+}
+"#,
+    )
+    .unwrap();
+    let bin = directory.path().join("stdio-bin");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let ran = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let out = String::from_utf8_lossy(&ran.stdout);
+    let err = String::from_utf8_lossy(&ran.stderr);
+    assert!(
+        out.contains("FPUTS_OUT line")
+            && out.contains("FPRINTF n=42")
+            && out.contains("STDIO_DONE"),
+        "stdout-sentinel writes did not reach captured stdout:\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    assert!(
+        err.contains("FWRITE_ERR line"),
+        "stderr-sentinel write did not reach captured stderr:\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    let again = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    assert_eq!(
+        ran.stdout, again.stdout,
+        "stdio run is not seed-stable (stdout)"
+    );
+    assert_eq!(
+        ran.stderr, again.stderr,
+        "stdio run is not seed-stable (stderr)"
+    );
+}
+
+// `pthread_once` (aws-lc's lazy init) runs the init routine exactly once through
+// the shim-side registry keyed on the control-block address, guarded by the
+// deterministic scheduler's mutex/condvar. Two calls on the same control block
+// run the init exactly once. Before the change `pthread_once` was an uninterposed
+// `unknown-import` and the run was refused before `main`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_pthread_once_runs_init_exactly_once() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("once.rs");
+    fs::write(
+        &source,
+        r#"use std::os::raw::c_int;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+// 16 bytes with 8-byte alignment covers both pthread_once_t layouts (glibc's
+// bare int and Darwin's signature-word struct). The shim keys on the address and
+// ignores the contents, so zeroed storage is valid under the interposed once.
+#[repr(C, align(8))]
+struct Once([u8; 16]);
+
+unsafe extern "C" {
+    fn pthread_once(once_control: *mut Once, init_routine: extern "C" fn()) -> c_int;
+}
+
+static COUNT: AtomicU32 = AtomicU32::new(0);
+extern "C" fn init() {
+    COUNT.fetch_add(1, Ordering::SeqCst);
+}
+
+fn main() {
+    static mut ONCE: Once = Once([0u8; 16]);
+    let control = &raw mut ONCE;
+    let a = unsafe { pthread_once(control, init) };
+    let b = unsafe { pthread_once(control, init) };
+    println!("ONCE a={a} b={b} count={}", COUNT.load(Ordering::SeqCst));
+}
+"#,
+    )
+    .unwrap();
+    let bin = directory.path().join("once-bin");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let ran = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    assert!(
+        String::from_utf8_lossy(&ran.stdout).contains("ONCE a=0 b=0 count=1"),
+        "pthread_once did not run the init exactly once:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+}
+
+// macOS `sysctlbyname`/`sysctl` (mimalloc, sysinfo, aws-lc) serve a small set of
+// known keys as fixed world-model constants and fail unmodeled keys with a
+// deterministic ENOENT. Before the change `sysctlbyname` was an uninterposed
+// `host-introspection` import and the run was refused before `main`.
+#[cfg(target_os = "macos")]
+#[test]
+fn native_sysctlbyname_serves_fixed_values_and_fails_unknown() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("sysctl.rs");
+    fs::write(
+        &source,
+        r#"use std::ffi::CString;
+use std::os::raw::{c_char, c_int, c_void};
+
+unsafe extern "C" {
+    fn sysctlbyname(
+        name: *const c_char,
+        oldp: *mut c_void,
+        oldlenp: *mut usize,
+        newp: *mut c_void,
+        newlen: usize,
+    ) -> c_int;
+}
+
+fn query_i64(key: &str) -> (c_int, i64) {
+    let name = CString::new(key).unwrap();
+    let mut value: i64 = -1;
+    let mut len = std::mem::size_of::<i64>();
+    let r = unsafe {
+        sysctlbyname(
+            name.as_ptr(),
+            &mut value as *mut i64 as *mut c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (r, value)
+}
+
+fn query_i32(key: &str) -> (c_int, i32) {
+    let name = CString::new(key).unwrap();
+    let mut value: i32 = -1;
+    let mut len = std::mem::size_of::<i32>();
+    let r = unsafe {
+        sysctlbyname(
+            name.as_ptr(),
+            &mut value as *mut i32 as *mut c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (r, value)
+}
+
+fn main() {
+    let (mem_r, mem) = query_i64("hw.memsize");
+    let (ncpu_r, ncpu) = query_i32("hw.ncpu");
+    let unknown = CString::new("hw.this.key.does.not.exist").unwrap();
+    let mut junk: i64 = 0;
+    let mut junk_len = std::mem::size_of::<i64>();
+    let unknown_r = unsafe {
+        sysctlbyname(
+            unknown.as_ptr(),
+            &mut junk as *mut i64 as *mut c_void,
+            &mut junk_len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    println!("MEMSIZE r={mem_r} val={mem} NCPU r={ncpu_r} val={ncpu} UNKNOWN r={unknown_r}");
+}
+"#,
+    )
+    .unwrap();
+    let bin = directory.path().join("sysctl-bin");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let ran = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    assert!(
+        String::from_utf8_lossy(&ran.stdout)
+            .contains("MEMSIZE r=0 val=8589934592 NCPU r=0 val=1 UNKNOWN r=-1"),
+        "sysctlbyname did not serve fixed values / fail unknown key deterministically:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+}
+
+// A guest importing a macOS Security-framework symbol that the shim does NOT
+// deny-trap is classified `macos-framework` and refused with a determinism note
 // that names the host-trust-store problem and the explicit allow path. `audit`
-// reports the same class. macOS-only: the Security framework and its symbols do
-// not exist on Linux (there the import is a bare unknown, still denied).
+// reports the same class. The representative is `SecTrustEvaluateWithError`,
+// deliberately NOT one of the enumerated dormant rustls-native-certs symbols
+// (`SecTrustSettingsCopy*`, `SecCertificateCopyData`, the `CF*` helpers): those
+// are now shim deny-traps that drop off the import table, so a still-refused
+// (non-enumerated) framework symbol is what exercises the pre-run refusal path.
+// macOS-only: the Security framework and its symbols do not exist on Linux (there
+// the import is a bare unknown, still denied).
 #[cfg(target_os = "macos")]
 #[test]
 fn native_gate_classifies_and_refuses_a_security_framework_symbol() {
@@ -995,12 +1426,12 @@ fn native_gate_classifies_and_refuses_a_security_framework_symbol() {
         r#"use std::ffi::c_void;
 #[link(name = "Security", kind = "framework")]
 unsafe extern "C" {
-    fn SecTrustSettingsCopyCertificates(domain: i32, out: *mut *const c_void) -> i32;
+    fn SecTrustEvaluateWithError(trust: *const c_void, error: *mut *const c_void) -> bool;
 }
 fn main() {
-    let mut out: *const c_void = std::ptr::null();
-    let status = unsafe { SecTrustSettingsCopyCertificates(0, &mut out) };
-    println!("SEC status={status}");
+    let mut error: *const c_void = std::ptr::null();
+    let ok = unsafe { SecTrustEvaluateWithError(std::ptr::null(), &mut error) };
+    println!("SEC ok={ok}");
 }
 "#,
     )
@@ -1046,6 +1477,157 @@ fn main() {
         String::from_utf8_lossy(&audited.stderr).contains("macos-framework"),
         "audit did not report the macos-framework class:\n{}",
         String::from_utf8_lossy(&audited.stderr)
+    );
+}
+
+// A guest that LINKS the enumerated dormant native-trust-root / host-inventory
+// surface (`SecTrustSettingsCopyCertificates` + `CFRelease` + `IOServiceMatching`)
+// but never reaches it — the references sit behind a runtime-false branch so they
+// are real imports the linker must resolve — RUNS to completion. Those symbols are
+// now shim deny-traps: a strong def binds each reference at link (dropping it off
+// the import table), so the pre-run gate passes and the dormant path never fires.
+// This is the Issue-1/Issue-2 fix: an unrelated scenario no longer needs
+// `--allow-unsupported-symbols` just because the binary links optional TLS-trust /
+// host-inventory code. macOS-only (the symbols are Darwin framework/Mach names).
+#[cfg(target_os = "macos")]
+#[test]
+fn native_run_deny_trap_lets_a_guest_with_a_dormant_framework_path_run() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("dormant.rs");
+    fs::write(
+        &source,
+        r#"use std::ffi::c_void;
+#[link(name = "Security", kind = "framework")]
+#[link(name = "CoreFoundation", kind = "framework")]
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    fn SecTrustSettingsCopyCertificates(domain: i32, out: *mut *const c_void) -> i32;
+    fn CFRelease(cf: *const c_void);
+    fn IOServiceMatching(name: *const u8) -> *mut c_void;
+}
+fn main() {
+    // A runtime-false branch keeps the three symbols as real imports (the linker
+    // must resolve them) without ever calling them.
+    if std::hint::black_box(false) {
+        let mut out: *const c_void = std::ptr::null();
+        unsafe { SecTrustSettingsCopyCertificates(0, &mut out) };
+        unsafe { CFRelease(out) };
+        let _ = unsafe { IOServiceMatching(b"x\0".as_ptr()) };
+    }
+    println!("DORMANT_PATH_OK");
+}
+"#,
+    )
+    .unwrap();
+    let bin = directory.path().join("dormant-bin");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    let ran = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["run", bin.to_str().unwrap(), "--seed", "1"],
+    );
+    assert!(
+        ran.status.success(),
+        "a guest with only a DORMANT framework path must run:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&ran.stdout).contains("DORMANT_PATH_OK"),
+        "the dormant-path guest must reach its marker:\nstdout:\n{}",
+        String::from_utf8_lossy(&ran.stdout)
+    );
+}
+
+// The can-fail companion to the dormant test: a guest that ACTUALLY reaches one
+// of the enumerated host-introspection symbols aborts deterministically with the
+// deny-trap diagnostic naming the symbol. `IOServiceMatching` is now shim-defined,
+// so the pre-run gate passes (it is no longer an import) and the runtime deny-trap
+// is what fires when the guest genuinely calls it — the distinct guarantee this
+// proves, mirroring `native_run_deny_trap_aborts_a_guest_that_actually_spawns`.
+// Run twice with the same seed and assert byte-identical output (determinism).
+#[cfg(target_os = "macos")]
+#[test]
+fn native_run_deny_trap_aborts_a_guest_that_reaches_host_introspection() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("trap.rs");
+    fs::write(
+        &source,
+        r#"use std::ffi::c_void;
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    fn IOServiceMatching(name: *const u8) -> *mut c_void;
+}
+fn main() {
+    println!("BEFORE_INTROSPECTION");
+    if std::hint::black_box(true) {
+        let _ = unsafe { IOServiceMatching(b"x\0".as_ptr()) };
+    }
+    println!("AFTER_INTROSPECTION");
+}
+"#,
+    )
+    .unwrap();
+    let bin = directory.path().join("trap-bin");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    let run_once = || {
+        invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &["run", bin.to_str().unwrap(), "--seed", "1"],
+        )
+    };
+    let first = run_once();
+    assert!(
+        !first.status.success(),
+        "a guest that reaches IOServiceMatching must abort under the deny-trap"
+    );
+    let first_stderr = String::from_utf8_lossy(&first.stderr).into_owned();
+    let first_stdout = String::from_utf8_lossy(&first.stdout).into_owned();
+    assert!(
+        first_stderr.contains("host-introspection reached under patina: IOServiceMatching"),
+        "the deny-trap must name the reached host-introspection symbol:\n{first_stderr}"
+    );
+    assert!(
+        first_stdout.contains("BEFORE_INTROSPECTION"),
+        "the guest must run up to the introspection call:\n{first_stdout}"
+    );
+    assert!(
+        !first_stdout.contains("AFTER_INTROSPECTION"),
+        "the guest must not continue past the deny-trap:\n{first_stdout}"
+    );
+
+    // Determinism: a second identical-seed run produces byte-identical output.
+    let second = run_once();
+    assert_eq!(
+        first_stdout,
+        String::from_utf8_lossy(&second.stdout),
+        "deny-trap stdout is not deterministic across runs"
+    );
+    assert_eq!(
+        first_stderr,
+        String::from_utf8_lossy(&second.stderr),
+        "deny-trap stderr is not deterministic across runs"
     );
 }
 
@@ -2562,6 +3144,59 @@ fn native_flock_contends_on_a_second_open_and_releases_on_close() {
     );
 }
 
+// `std::fs::canonicalize` on macOS reaches `realpath(path, NULL)` (the
+// allocating convention) and on Linux `realpath(path, buf)`; both must resolve
+// an existing guest path to the same canonical absolute spelling driven purely
+// by the deterministic filesystem. The guest canonicalizes the path two ways --
+// its exact spelling and a `..`/`.`/`//`-laden spelling of the same directory --
+// so the assertion catches both the destination==NULL ENOSYS regression and a
+// verbatim (non-canonicalizing) result.
+const CANONICALIZE_SOURCE: &str = r#"
+use std::fs;
+
+fn main() {
+    fs::create_dir_all("/tmp/patina-root/fragments").unwrap();
+    let direct = fs::canonicalize("/tmp/patina-root/fragments").unwrap();
+    let noisy = fs::canonicalize("/tmp/patina-root/../patina-root/./fragments//").unwrap();
+    println!("direct={}", direct.display());
+    println!("noisy={}", noisy.display());
+}
+"#;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_canonicalize_resolves_an_existing_guest_path_deterministically() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("canonicalize.rs");
+    fs::write(&source, CANONICALIZE_SOURCE).unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("canonicalize");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let first = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let first_stdout = String::from_utf8_lossy(&first.stdout);
+    assert!(
+        first_stdout.contains("direct=/tmp/patina-root/fragments")
+            && first_stdout.contains("noisy=/tmp/patina-root/fragments"),
+        "canonicalize must resolve both spellings to the same canonical guest path:\nstdout:\n{first_stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&first.stderr),
+    );
+    let second = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    assert_eq!(
+        first.stdout,
+        second.stdout,
+        "a same-seed canonicalize run must be byte-identical:\nstderr:\n{}",
+        String::from_utf8_lossy(&second.stderr),
+    );
+}
+
 // A guest that touches the deterministic filesystem, so its first effect
 // boundary routes through `ensure_runtime` (a guest that only writes stdout is
 // captured without a runtime check and would never observe a failed init). The
@@ -3406,12 +4041,12 @@ fn drop_trailing_task_yield(source: &Path, dest: &Path) {
 // interposed; the C `escape_probe` in validate-native-shim.sh imports it and
 // native-audit rejects it as `unmanaged-thread`).
 //
-// The `process` representative is `kill`, deliberately NOT a spawn-family symbol
-// (`fork`/`posix_spawn*`/`waitpid`/...): those are now shim-*defined* deny-traps
-// (they abort deterministically if reached), so they no longer appear as imports
-// and could not exercise the gate. `kill` stays uninterposed — the process class
-// is a deterministic-runtime non-goal — so it remains an undefined import the
-// gate must flag as `process`.
+// The `process` representative is `killpg`, deliberately NOT a spawn-family or
+// signal symbol (`fork`/`posix_spawn*`/`waitpid`/`kill`/...): those are now
+// shim-*defined* deny-traps (they abort deterministically if reached), so they no
+// longer appear as imports and could not exercise the gate. `killpg` stays
+// uninterposed — the process class is a deterministic-runtime non-goal — so it
+// remains an undefined import the gate must flag as `process`.
 //
 // The `unmanaged-sync` representative is the Mach `semaphore_wait`, NOT
 // `os_unfair_lock_*`: os_unfair_lock is now shim-interposed (routed through
@@ -3428,7 +4063,7 @@ unsafe extern "C" {
     fn semaphore_wait(s: u32) -> i32;
     fn time(t: *mut i64) -> i64;
     fn arc4random() -> u32;
-    fn kill(pid: i32, sig: i32) -> i32;
+    fn killpg(pgrp: i32, sig: i32) -> i32;
     fn dlopen(path: *const u8, mode: i32) -> *mut u8;
     fn shm_open(name: *const u8, oflag: i32) -> i32;
     fn setitimer(which: i32, nv: *const u8, ov: *mut u8) -> i32;
@@ -3438,7 +4073,7 @@ fn main() {
     let ptrs: &[*const ()] = &[
         link as *const (), gethostbyname as *const (), select as *const (),
         semaphore_wait as *const (), time as *const (), arc4random as *const (),
-        kill as *const (), dlopen as *const (), shm_open as *const (),
+        killpg as *const (), dlopen as *const (), shm_open as *const (),
         setitimer as *const (), syscall as *const (),
     ];
     let mut acc = 0usize;
@@ -3932,17 +4567,17 @@ fn main() {
     .unwrap();
     fs::write(
         package.join("src/bin/leaky.rs"),
-        r#"// Imports an uninterposed process-class libc symbol (`kill`) that the native
-// audit denies as "process". The spawn family (fork/posix_spawn*/waitpid/...) is
-// now shim-defined (deny-traps), so a `Command::spawn` would leave no process
-// *import* to flag; this reaches for a still-uninterposed member of the class
-// instead. Taking its address forces the undefined import. Building succeeds; the
-// audit must reject the product with the "process" category.
+        r#"// Imports an uninterposed process-class libc symbol (`killpg`) that the native
+// audit denies as "process". The spawn family (fork/posix_spawn*/waitpid/kill/...)
+// is now shim-defined (deny-traps), so a `Command::spawn` — or a `kill` — would
+// leave no process *import* to flag; this reaches for a still-uninterposed member
+// of the class instead. Taking its address forces the undefined import. Building
+// succeeds; the audit must reject the product with the "process" category.
 unsafe extern "C" {
-    fn kill(pid: i32, sig: i32) -> i32;
+    fn killpg(pgrp: i32, sig: i32) -> i32;
 }
 fn main() {
-    let reached = kill as *const ();
+    let reached = killpg as *const ();
     std::process::exit((reached as usize & 1) as i32);
 }
 "#,

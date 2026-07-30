@@ -1378,6 +1378,11 @@ fn common_native_allowlisted_import(symbol: &str) -> bool {
         "powf",
         "exp",
         "expf",
+        // Base-10 exponential (DataFusion's numeric SQL expression code reaches
+        // it). macOS libm spells it `__exp10` (Mach-O import `___exp10`) and glibc
+        // spells it `exp10`; `normalize_native_symbol` strips ALL leading
+        // underscores, so both forms arrive here as the single entry `exp10`.
+        "exp10",
         "exp2",
         "exp2f",
         "expm1",
@@ -1468,6 +1473,33 @@ fn common_native_allowlisted_import(symbol: &str) -> bool {
         "fmax",
         "fmaxf",
     ];
+    // Pure formatting/parsing and generic search over CALLER-OWNED memory, in the
+    // C locale (the deterministic environment carries no LC_* so the locale is
+    // fixed). `vsnprintf` formats into the caller's buffer; `sscanf` parses the
+    // caller's NUL-terminated string; `bsearch` binary-searches a caller array
+    // with a caller-supplied comparator. None reads host time/entropy, touches a
+    // descriptor, or blocks — a pure caller-memory computation like the
+    // `memcpy`/`strtol` intrinsics above (aws-lc and DataFusion reach them). An
+    // EXPLICIT list, never a prefix: the effectful stdio `*printf`/`*scanf`
+    // variants that touch a real stream stay refused. The `_chk` forms
+    // (`vsnprintf_chk`/`snprintf_chk`) are the fortified bounds-checked entries
+    // libc lowers a constant-sized buffer onto — the same "add bounds checks
+    // before doing the same work" family as the already-listed `memcpy_chk`; the
+    // shim's own C layer formats through them in its interposed `fprintf`/
+    // `__assert_rtn`, and dead-stripping keeps only the ones a guest reaches.
+    const FORMAT_PARSE_SEARCH: &[&str] = &[
+        "bsearch",
+        "snprintf_chk",
+        "sscanf",
+        "vsnprintf",
+        "vsnprintf_chk",
+    ];
+    // Floating-point rounding-mode environment. `fegetround`/`fesetround` read
+    // and set the CURRENT-THREAD FP rounding mode — thread-local, process-local
+    // CPU state, not a boundary Patina models — so they are deterministic for a
+    // given call sequence (aws-lc/DataFusion numeric code sets a rounding mode
+    // around a computation). No host effect crosses the runtime boundary.
+    const FLOAT_ENVIRONMENT: &[&str] = &["fegetround", "fesetround"];
     symbol.starts_with("Unwind_")
         || ALLOCATOR.contains(&symbol)
         || MEMORY_AND_STRING.contains(&symbol)
@@ -1481,6 +1513,8 @@ fn common_native_allowlisted_import(symbol: &str) -> bool {
         || PROCESS_LOCAL_MEMORY.contains(&symbol)
         || SIGNAL_SET_MANIPULATION.contains(&symbol)
         || MATH_LIBM.contains(&symbol)
+        || FORMAT_PARSE_SEARCH.contains(&symbol)
+        || FLOAT_ENVIRONMENT.contains(&symbol)
 }
 
 fn macho_native_allowlisted_import(symbol: &str) -> bool {
@@ -1684,6 +1718,11 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "getaddrinfo",
         "getnameinfo",
         "gethostbyname",
+        // Interface-index lookup (a host networking utility stack — hyper-util —
+        // links it dormant). The shim deny-traps it (dropped from a shim-linked
+        // import table); classified so a raw non-shim import reads as `network`
+        // rather than a bare unknown import.
+        "if_nametoindex",
     ];
     // (a) Blocking/scheduling — readiness multiplexing. A host `poll`/`select`/
     // `kqueue`/`epoll` wait blocks the calling thread outside the scheduler.
@@ -2373,6 +2412,70 @@ mod tests {
             native_import_decision("_read$NOCANCEL", NativeFormat::MachO, &allow),
             NativeImportDecision::Allowed
         );
+    }
+
+    // aws-lc / DataFusion pure-compute surface: formatting/parsing/search over
+    // caller memory, the thread-local FP rounding env, and base-10 exp are
+    // allowlisted with NO `--allow` on both formats. These resolve to host libc as
+    // pure functions with no boundary effect; the shim's own interposed
+    // `fprintf`/`__assert_rtn` also format through `vsnprintf`.
+    #[test]
+    fn allowlists_aws_lc_and_datafusion_pure_compute() {
+        let empty = BTreeSet::new();
+        for symbol in [
+            "bsearch",
+            "vsnprintf",
+            "sscanf",
+            "fegetround",
+            "fesetround",
+            "exp10",
+        ] {
+            assert_eq!(
+                native_import_decision(symbol, NativeFormat::MachO, &empty),
+                NativeImportDecision::Allowed,
+                "{symbol} is aws-lc/DataFusion pure-compute and must be known-safe on Mach-O"
+            );
+            assert_eq!(
+                native_import_decision(symbol, NativeFormat::Elf, &empty),
+                NativeImportDecision::Allowed,
+                "{symbol} is aws-lc/DataFusion pure-compute and must be known-safe on ELF"
+            );
+        }
+        // The EXACT Mach-O import string DataFusion's audit reports for base-10 exp
+        // is `___exp10` (C name `__exp10`, plus the Mach-O leading underscore).
+        // normalize_native_symbol strips ALL leading underscores onto `exp10`, so
+        // the observed symbol is cleared.
+        assert_eq!(
+            normalize_native_symbol("___exp10"),
+            "exp10",
+            "the ___exp10 Mach-O import must normalize onto the exp10 allowlist entry"
+        );
+        assert_eq!(
+            native_import_decision("___exp10", NativeFormat::MachO, &empty),
+            NativeImportDecision::Allowed
+        );
+        // The `_vsnprintf`/`_bsearch` Mach-O underscore forms normalize onto the
+        // same entries, so the exact audit-reported symbols are cleared.
+        assert_eq!(
+            native_import_decision("_vsnprintf", NativeFormat::MachO, &empty),
+            NativeImportDecision::Allowed
+        );
+        assert_eq!(
+            native_import_decision("_bsearch", NativeFormat::MachO, &empty),
+            NativeImportDecision::Allowed
+        );
+        // Guard: effectful stdio/parse neighbors that touch a real stream must NOT
+        // be swept in — the explicit-list discipline keeps them denied. (`fprintf`,
+        // `sprintf`, `fscanf`, `snprintf`, `scanf`, `printf` are not on the pure
+        // list; `fprintf`/`__assert_rtn` are interposed by strong shim defs, and a
+        // NON-shim binary importing `fprintf` raw stays denied here.)
+        for symbol in ["fprintf", "sprintf", "fscanf", "scanf", "printf"] {
+            assert_eq!(
+                native_import_decision(symbol, NativeFormat::MachO, &empty),
+                NativeImportDecision::Denied("unknown-import"),
+                "{symbol} touches a real stream and must stay denied"
+            );
+        }
     }
 
     // The Linux tikv-jemallocator MRE audit surface: the classification half of

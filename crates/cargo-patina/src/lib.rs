@@ -73,6 +73,10 @@ const PATINA_YIELD_MARKER: &[u8] = b"PATINA_YIELD_POINTS_V1";
 /// a plain one, so their recorded traces never cross-replay.
 const PATINA_YIELD_FINGERPRINT_SUFFIX: &str = "+yieldpoints";
 const NATIVE_SHIM_STATICLIB: &str = "libpatina_dst_native_shim.a";
+/// Subdirectory of the shim's own profile target dir where the content-addressed
+/// POSIX/yield helper objects are staged, so their `-Clink-arg` paths stay stable
+/// across builds and Cargo's crate fingerprints stay warm.
+const NATIVE_SHIM_OBJECTS_DIR: &str = "patina-shim-objects";
 const DEFAULT_NATIVE_EDITION: &str = "2024";
 const DEFAULT_NATIVE_FINGERPRINT: &str = "patina-native";
 /// The fixed, machine-independent `argv[0]` every native guest sees. `native-run`
@@ -4190,13 +4194,19 @@ fn execute_native_build(invocation: NativeBuildInvocation) -> Result<i32, CliErr
 /// source): both go through exactly this code.
 fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliError> {
     let staticlib = build_native_shim(invocation.release)?;
+    let host_target = host_target_triple()?;
 
-    // Materialize the embedded POSIX shim layer and compile it below the user
-    // program, matching the flags the deterministic linked target requires. The
-    // workspace outlives both build paths so the object stays valid for linking.
-    let workdir = tempfile::tempdir()
-        .map_err(|error| CliError(format!("failed to create native build workspace: {error}")))?;
-    let object = compile_posix_object(workdir.path())?;
+    // Stage the embedded POSIX shim layer at a stable content-addressed path in
+    // the shim's own profile target dir (beside the staticlib), compiled below
+    // the user program with the flags the deterministic linked target requires.
+    // The object lives in the persistent target dir — not a per-invocation
+    // tempdir — so its `-Clink-arg` path is byte-identical across builds and
+    // Cargo's crate fingerprints stay warm; it outlives every child cargo/rustc.
+    let objects_base = staticlib
+        .parent()
+        .expect("shim staticlib path has a profile directory parent")
+        .join(NATIVE_SHIM_OBJECTS_DIR);
+    let object = stage_shim_object(&objects_base, &PATINA_POSIX_OBJECT, &host_target)?;
     // The yield-point hook object is compiled and linked only under
     // `--yield-points`; a plain build never references SanitizerCoverage symbols.
     let yield_object = if invocation.yield_points {
@@ -4213,7 +4223,11 @@ scheduler-hook=patina_yield_point fingerprint-suffix={PATINA_YIELD_FINGERPRINT_S
         } else {
             println!("{yield_note}");
         }
-        Some(compile_yield_object(workdir.path())?)
+        Some(stage_shim_object(
+            &objects_base,
+            &PATINA_YIELD_OBJECT,
+            &host_target,
+        )?)
     } else {
         None
     };
@@ -4245,6 +4259,7 @@ scheduler-hook=patina_yield_point fingerprint-suffix={PATINA_YIELD_FINGERPRINT_S
             bin.as_deref(),
             invocation.output.as_deref(),
             invocation.release,
+            &host_target,
             &object,
             &staticlib,
             yield_object.as_deref(),
@@ -4252,35 +4267,151 @@ scheduler-hook=patina_yield_point fingerprint-suffix={PATINA_YIELD_FINGERPRINT_S
     }
 }
 
-/// Stage and compile the `--yield-points` hook object. Compiled without the
-/// SanitizerCoverage flags themselves, so the hook (and thus `patina_yield_point`
-/// it calls) is never itself instrumented and cannot recurse.
-fn compile_yield_object(workdir: &Path) -> Result<PathBuf, CliError> {
-    let c_source = workdir.join("patina_yield.c");
-    fs::write(&c_source, PATINA_YIELD_C)
-        .map_err(|error| CliError(format!("failed to stage the yield-point hook: {error}")))?;
-    let object = workdir.join("patina_yield.o");
+/// A shim helper object compiled below the guest and linked into every native
+/// build. Both variants are content-addressed by [`stage_shim_object`]: the POSIX
+/// layer always, the `--yield-points` hook only under that flag.
+struct ShimObject {
+    /// Final object file name, e.g. `patina_posix.o`.
+    object_name: &'static str,
+    /// C translation-unit file name written into the compile sandbox.
+    source_name: &'static str,
+    /// Embedded C source compiled into the object.
+    source: &'static str,
+    /// Header staged beside the source and reached through `-I`, if any.
+    header: Option<(&'static str, &'static str)>,
+    /// `cc` flags, excluding `-c`/`-I`/the input path/`-o` (added by the stager).
+    cc_flags: &'static [&'static str],
+    /// What the object is, for staging/compilation diagnostics.
+    what: &'static str,
+}
+
+/// The embedded POSIX shim C layer, compiled below the user program with the
+/// flags the deterministic linked target requires.
+const PATINA_POSIX_OBJECT: ShimObject = ShimObject {
+    object_name: "patina_posix.o",
+    source_name: "patina_posix.c",
+    source: PATINA_POSIX_C,
+    header: Some(("patina_native.h", PATINA_NATIVE_H)),
+    cc_flags: &[
+        "-std=c11",
+        "-D_POSIX_C_SOURCE=200809L",
+        "-fno-stack-protector",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    ],
+    what: "the Patina POSIX shim layer",
+};
+
+/// The `--yield-points` hook object. Compiled without the SanitizerCoverage flags
+/// themselves, so the hook (and thus `patina_yield_point` it calls) is never
+/// itself instrumented and cannot recurse.
+const PATINA_YIELD_OBJECT: ShimObject = ShimObject {
+    object_name: "patina_yield.o",
+    source_name: "patina_yield.c",
+    source: PATINA_YIELD_C,
+    header: None,
+    cc_flags: &[
+        "-std=c11",
+        "-fno-stack-protector",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    ],
+    what: "the Patina yield-point hook",
+};
+
+/// Hash the inputs that determine a shim object's bytes: the compiler identity
+/// and its `--version` banner, the target triple, the object name, the exact cc
+/// flags, and the embedded C header/source. The staged path changes only when one
+/// of these does, so a rebuild of the same Patina against the same toolchain
+/// reuses the object and the `-Clink-arg` path stays stable.
+fn shim_object_hash(cc: &OsStr, object: &ShimObject, target: &str) -> Result<String, CliError> {
+    let version = Command::new(cc)
+        .arg("--version")
+        .output()
+        .map_err(|error| CliError(format!("failed to query C compiler {cc:?}: {error}")))?;
+    if !version.status.success() {
+        return Err(CliError(format!("C compiler {cc:?} --version failed")));
+    }
+    let mut hasher = Sha256::new();
+    hash_os(&mut hasher, cc);
+    hash_bytes(&mut hasher, &version.stdout);
+    hash_bytes(&mut hasher, target.as_bytes());
+    hash_bytes(&mut hasher, object.object_name.as_bytes());
+    for flag in object.cc_flags {
+        hash_bytes(&mut hasher, flag.as_bytes());
+    }
+    if let Some((header_name, header_source)) = object.header {
+        hash_bytes(&mut hasher, header_name.as_bytes());
+        hash_bytes(&mut hasher, header_source.as_bytes());
+    }
+    hash_bytes(&mut hasher, object.source.as_bytes());
+    Ok(hex(&hasher.finalize()))
+}
+
+/// Compile `object` to a stable, content-addressed path under `base` and return
+/// it, reusing an already-staged object without recompiling. Staging is
+/// race-safe: the object is compiled in a private sandbox to a unique temp file
+/// in the destination dir, then atomically renamed into place — concurrent
+/// invocations produce byte-identical content, so a late writer only re-stamps
+/// the same object. The staged object lives in the persistent target dir with no
+/// RAII cleanup; the cache is bounded because the hash changes only when Patina's
+/// embedded C, the cc flags, the target, or the compiler itself changes.
+fn stage_shim_object(base: &Path, object: &ShimObject, target: &str) -> Result<PathBuf, CliError> {
     let cc = env::var_os("CC").unwrap_or_else(|| OsString::from("cc"));
-    let cc_status = Command::new(&cc)
-        .args([
-            "-std=c11",
-            "-fno-stack-protector",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-            "-c",
-        ])
-        .arg(&c_source)
+    let hash = shim_object_hash(&cc, object, target)?;
+    let dir = base.join(hash);
+    let staged = dir.join(object.object_name);
+    if staged.exists() {
+        return Ok(staged);
+    }
+    fs::create_dir_all(&dir).map_err(|error| {
+        CliError(format!(
+            "failed to create the shim object cache {}: {error}",
+            dir.display()
+        ))
+    })?;
+    let sandbox = tempfile::tempdir().map_err(|error| {
+        CliError(format!(
+            "failed to create the shim compile sandbox: {error}"
+        ))
+    })?;
+    let mut command = Command::new(&cc);
+    command.args(object.cc_flags);
+    if let Some((header_name, header_source)) = object.header {
+        fs::write(sandbox.path().join(header_name), header_source)
+            .map_err(|error| CliError(format!("failed to stage {}: {error}", object.what)))?;
+        command.arg("-I").arg(sandbox.path());
+    }
+    let source_path = sandbox.path().join(object.source_name);
+    fs::write(&source_path, object.source)
+        .map_err(|error| CliError(format!("failed to stage {}: {error}", object.what)))?;
+    let temp_object = tempfile::Builder::new()
+        .prefix(object.object_name)
+        .suffix(".tmp")
+        .tempfile_in(&dir)
+        .map_err(|error| CliError(format!("failed to stage {}: {error}", object.what)))?
+        .into_temp_path();
+    command
+        .arg("-c")
+        .arg(&source_path)
         .arg("-o")
-        .arg(&object)
+        .arg(&temp_object);
+    let cc_status = command
         .status()
         .map_err(|error| CliError(format!("failed to run C compiler {cc:?}: {error}")))?;
     if !cc_status.success() {
-        return Err(CliError(
-            "compiling the Patina yield-point hook failed".into(),
-        ));
+        return Err(CliError(format!("compiling {} failed", object.what)));
     }
-    Ok(object)
+    temp_object.persist(&staged).map_err(|error| {
+        CliError(format!(
+            "failed to stage {} at {}: {error}",
+            object.what,
+            staged.display()
+        ))
+    })?;
+    Ok(staged)
 }
 
 /// The rustc flags that turn on LLVM SanitizerCoverage trace-pc-guard
@@ -4300,42 +4431,6 @@ fn sancov_rustc_flags() -> [&'static str; 6] {
         "-C",
         "llvm-args=-sanitizer-coverage-trace-pc-guard",
     ]
-}
-
-/// Stage the embedded POSIX shim C layer in `workdir` and compile it to an
-/// object below the user program. Shared by the single-source and package build
-/// paths.
-fn compile_posix_object(workdir: &Path) -> Result<PathBuf, CliError> {
-    fs::write(workdir.join("patina_native.h"), PATINA_NATIVE_H)
-        .map_err(|error| CliError(format!("failed to stage the shim header: {error}")))?;
-    let c_source = workdir.join("patina_posix.c");
-    fs::write(&c_source, PATINA_POSIX_C)
-        .map_err(|error| CliError(format!("failed to stage the shim C layer: {error}")))?;
-    let object = workdir.join("patina_posix.o");
-    let cc = env::var_os("CC").unwrap_or_else(|| OsString::from("cc"));
-    let cc_status = Command::new(&cc)
-        .args([
-            "-std=c11",
-            "-D_POSIX_C_SOURCE=200809L",
-            "-fno-stack-protector",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-            "-c",
-        ])
-        .arg("-I")
-        .arg(workdir)
-        .arg(&c_source)
-        .arg("-o")
-        .arg(&object)
-        .status()
-        .map_err(|error| CliError(format!("failed to run C compiler {cc:?}: {error}")))?;
-    if !cc_status.success() {
-        return Err(CliError(
-            "compiling the Patina POSIX shim layer failed".into(),
-        ));
-    }
-    Ok(object)
 }
 
 /// Add the platform-specific shim link arguments a native binary needs to
@@ -4430,6 +4525,7 @@ fn build_native_package(
     bin: Option<&str>,
     output: Option<&Path>,
     release: bool,
+    host_target: &str,
     object: &Path,
     staticlib: &Path,
     yield_object: Option<&Path>,
@@ -4441,8 +4537,7 @@ fn build_native_package(
         )));
     }
     let selected = select_native_package_bin(manifest, package, bin)?;
-    let host_target = host_target_triple()?;
-    let rustflags = native_package_rustflags(object, staticlib, yield_object, &host_target);
+    let rustflags = native_package_rustflags(object, staticlib, yield_object, host_target);
 
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let mut command = Command::new(&cargo);
@@ -4455,7 +4550,7 @@ fn build_native_package(
         .arg("--bin")
         .arg(&selected.bin)
         .arg("--target")
-        .arg(&host_target)
+        .arg(host_target)
         .arg("--message-format=json-render-diagnostics")
         .env_remove("RUSTFLAGS")
         .env("CARGO_ENCODED_RUSTFLAGS", rustflags)
@@ -5180,11 +5275,14 @@ them.",
             // and the explicit allow path with its qualified-determinism caveat.
             message.push_str(
                 "\nnote: the macos-framework symbol(s) above are macOS CoreFoundation/Security \
-framework calls that the deterministic runtime does not interpose. The Security-framework subset \
-(SecTrustSettingsCopy*, SecCertificateCopyData, ...) reads the host keychain and system trust \
-store — mutable host state that varies by machine and over time — so a run that reaches them is \
-NOT reproducible (this is the rustls-native-certs / native TLS trust-root surface). Avoid loading \
-native certificates under the deterministic runtime, or pass --allow-unsupported-symbols \
+framework calls that the deterministic runtime does not interpose. The common dormant \
+native-trust-root surface (rustls-native-certs: SecTrustSettingsCopy*, SecCertificateCopyData, the \
+CF* helpers, kCFAllocator*) is now deny-trap interposed — a binary that merely LINKS it runs, and a \
+genuine call aborts deterministically, so it never reaches this refusal. A macos-framework symbol \
+reaching HERE is one the shim does not deny-trap (a non-enumerated framework symbol, or a prebuilt \
+non-shim binary): the Security-framework subset reads the host keychain and system trust store — \
+mutable host state that varies by machine and over time — so a run that reaches it is NOT \
+reproducible. Compile the framework path out, or pass --allow-unsupported-symbols \
 <all|name,name,...> to run anyway with a warning; determinism is then only qualified — the trust \
 store the guest reads is whatever the host holds at run time.",
             );
@@ -5196,12 +5294,15 @@ store the guest reads is whatever the host holds at run time.",
             // Mach/BSD/IOKit host-state reads: name the determinism problem and
             // the interpose-or-refuse posture (these must never be allowlisted).
             message.push_str(
-                "\nnote: the host-introspection symbol(s) above (sysctl/sysctlbyname, getrusage, \
-task_info, host_statistics64, proc_pidinfo, the IOKit registry walk, ...) read host \
-CPU/memory/hardware/process state — nondeterministic across hosts and runs; interpose-or-refuse, \
-never allowlist. A run that reaches them is not reproducible, so it is refused; pass \
---allow-unsupported-symbols <all|name,name,...> to run anyway with a warning, but determinism is \
-then only qualified.",
+                "\nnote: the host-introspection symbol(s) above read host CPU/memory/hardware/process \
+state — nondeterministic across hosts and runs; interpose-or-refuse, never allowlist. The dormant \
+hardware-inventory surface (sysinfo: host_statistics64/host_processor_info, the IOKit registry \
+walk, mach_host_self, proc_*, vm_deallocate) is now deny-trap interposed — a binary that merely \
+LINKS it runs, and a genuine call aborts deterministically. A host-introspection symbol reaching \
+HERE is a live-path member a normal startup actually reaches (sysctl/sysctlbyname, getrusage, \
+task_info) that stays refused pending a deterministic interposer, or a prebuilt non-shim binary. A \
+run that reaches one is not reproducible, so it is refused; pass --allow-unsupported-symbols \
+<all|name,name,...> to run anyway with a warning, but determinism is then only qualified.",
             );
         }
         return Err(CliError(message));

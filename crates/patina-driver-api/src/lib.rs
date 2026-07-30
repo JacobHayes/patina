@@ -117,6 +117,42 @@ fn unsupported_filesystem_operation(operation: &str) -> EffectError {
     )
 }
 
+/// Resolve a guest path to the absolute, symlink-free *spelling* the
+/// deterministic filesystems key their entries under: reject a relative or
+/// NUL-bearing path, drop `.` and empty (`//`) components, and resolve `..`
+/// lexically against the accumulated prefix (a `..` at the root stays at the
+/// root, as it does on a real filesystem). This performs no I/O -- it is the
+/// pure lexical half of `realpath`, shared here so the C-ABI shim and any driver
+/// produce ONE canonical spelling rather than each risking a subtly different
+/// one. The output is idempotent under the drivers' own entry normalization, so
+/// a canonicalized path fed straight back into a driver operation names the
+/// identical entry.
+pub fn canonicalize_path(path: &str) -> DriverResult<String> {
+    if !path.starts_with('/') {
+        return Err(EffectError::new(
+            patina_dst_abi::ErrorCode::InvalidInput,
+            format!("virtual filesystem path must be absolute: {path:?}"),
+        ));
+    }
+    if path.contains('\0') {
+        return Err(EffectError::new(
+            patina_dst_abi::ErrorCode::InvalidInput,
+            "virtual filesystem path contains NUL",
+        ));
+    }
+    let mut components: Vec<&str> = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            value => components.push(value),
+        }
+    }
+    Ok(format!("/{}", components.join("/")))
+}
+
 /// Convert an unsigned byte offset to the signed offset `seek` takes, rejecting
 /// values past `i64::MAX` (unreachable for the in-memory filesystems but kept
 /// sound rather than silently wrapping).
