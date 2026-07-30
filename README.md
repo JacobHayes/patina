@@ -1,236 +1,259 @@
 # Patina
 
-**Weather your Rust into a fine protective patina - before production does.**
+**Weather your Rust into a fine protective patina — before production does.**
 
-Patina is an experimental deterministic execution and simulation-testing system for Rust.
-
-The goal is to compile Rust programs for a deterministic OS personality: standard platform effects such as filesystem access, networking, clocks, randomness, process state, and scheduling route through Patina instead of escaping directly to the host OS.
-
-```sh
-cargo patina test --seed 123
-cargo patina test --seed 123 --record trace.patina
-cargo patina replay . trace.patina
-```
-
-## Status
-
-Patina is experimental. V1 and V2 are implemented end-to-end at the **explicit Rust API boundary**, V3 covers the **entire audited WASI Preview 1 surface**, and V4/V5 have substantial foundations:
-
-- `cargo-patina` configures seeded, record, replay, named-timeline, branch, budgeted, parameterized, and multi-seed exploration runs;
-- both `cfg(patina)` and `cfg(dst)` are injected into Cargo builds;
-- seeded entropy, virtual time, in-memory and crash-checkpoint filesystems, cooperative scheduling, and virtual datagrams are available through `patina_dst_runtime::Context`;
-- deterministic async is available at the explicit boundary through `patina-dst-async`: a single-threaded `block_on`/`spawn` executor with virtual-time `sleep`/`timeout` and async TCP/UDP futures, all riding the existing recorded scheduler, network, and clock operations so runs stay record/replay byte-identical (`crates/patina-async/examples/async_echo.rs`);
-- fault and latency wrappers model packet loss, duplication, delay, jitter, reorder, and partitions;
-- trace format 2 strictly matches operations/outcomes and stores exact-prefix, seeded-suffix branch timelines;
-- failure-oracle delta debugging minimizes main timelines and leaf branch suffixes;
-- explicitly allowlisted read-only host files can be captured, then replayed without host access; branch capture misses fail closed;
-- WASI Preview 1 execution supports the entire audited import surface (46 functions) — arguments, environment, clocks, entropy, virtual files/directories with hard links, symlinks, and timestamp mutation, descriptor flag/rights mutation and renumbering, polling, configured datagrams, stdio, and exit — plus read-only/read-write preopens, fail-closed resource limits, fuel, record/replay, and branching;
-- a prefixed native C ABI and an opt-in POSIX symbol layer route filesystem, clock, sleep, entropy, captured-stdio, and pthread calls into Patina;
-- `cargo patina build`/`run` package the shim build/link/startup path for single-source Rust programs, with constructor auto-initialization from the `PATINA_*` protocol (no explicit init calls in application code);
-- native threads are managed deterministically on macOS and Linux: real host threads are gated one-at-a-time through the deterministic scheduler (interposed pthread symbols on macOS; interposed `syscall`/`SYS_futex` routing on Linux, where Rust `std` sync bypasses pthread), so locks held across boundary operations cannot deadlock;
-- native UDP datagrams and zero-latency TCP streams flow through `SimNet` via ordinary `std::net::{UdpSocket,TcpListener,TcpStream}` — sockets are fully virtual, blocking receives/accepts/writes park through the scheduler, and IPv6/DNS fail closed; process-state reads return deterministic constants while process spawning stays denied;
-- stock tokio guests run deterministically under the shim on both platforms: the readiness reactors (`kqueue`/`kevent`/`kevent64` on macOS, `epoll`/`eventfd` on Linux) are interposed over the same virtual sockets, in-process pipes/socketpairs, and virtual clock, with mio's Waker (EVFILT_USER / eventfd) and edge-triggered semantics modeled — a tokio + parking_lot + rustix probe passes the pre-run gate with no allowances and record/replays byte-identically (rustix's default raw-syscall Linux backend is flipped to interposable libc imports by an injected `--cfg rustix_use_libc`; raw-syscall binaries otherwise still fail closed at the instruction scan);
-- macOS and Linux probes verify ordinary `std::fs` (including `read_dir` over driver-ordered deterministic listings, and symlink create/read/stat with one-hop terminal follow), `SystemTime`, `Instant`, sleep, printing, threads with deterministic thread ids, and standard-library entropy through that linked shim, including cross-process seed stability and record/replay through a supervisor-provided trace descriptor (`PATINA_TRACE_FD`);
-- one ordinary-`std` smoke program builds for wasm32-wasip1, native macOS, and native Linux and produces byte-identical deterministic output on all three;
-- `audit` is a strict per-platform import allowlist: any import that is not an explicitly listed effect-free host-deferred symbol (or caller-`--allow`ed control plane) fails closed as unknown, so a missed interposer is an audit failure rather than a silent escape; alias forms (`$NOCANCEL`, `__`-prefixes) are normalized, known host-effect names keep descriptive categories, and direct syscall / CPU clock/entropy instructions are still rejected by scanning. `run` enforces this audit as a pre-run default-deny gate before the guest executes and hard-errors, naming the symbols, on any unmodeled blocking/time/scheduling surface (with `--allow-unsupported-symbols` as a loud, recorded escape hatch); on macOS std's thread `Parker` blocks on a libdispatch semaphore, which the shim interposes and routes through the scheduler and virtual clock so `thread::park`/`recv_timeout` stay deterministic;
-- a Linux `strace` containment pass verifies the validation probe performs zero file/network/clock/entropy syscalls outside an exact loader/runtime prelude across the whole run (vDSO reads are covered by the libc-interposition probes instead);
-- crash-consistency models cover seeded torn writes, rename atomicity, directory durability, and crash/restart; traces migrate from prior supported formats in memory; `patina-dst-bench` gates trace bytes per event in CI;
-- a cooperative-SUT SDK (FoundationDB `BUGGIFY`- and Antithesis-style) is the whole surface of the dependency-light `patina-dst` crate; the explicit-context API (`run`/`run_with`, `Context`, `rt`) is the separate `patina-dst-runtime` crate. `buggify!`/`buggify_with_prob!`/`buggify_delay!`/`buggify_knob!` inject seed-deterministic faults at labeled sites, `always!`/`sometimes!`/`reachable!` are assertion and coverage oracles, and `patina_dst::rng()` bridges to the run seed. Every macro is a no-op or plain fallback outside a Patina build (no `cfg(patina)` in adopter code). `cargo patina run --buggify[=permille]` enables it; decisions are pure functions of the seed (never recorded per evaluation), the active-site set/knobs/cutoff go in the trace metadata for self-contained replay, and a `+buggify` fingerprint keeps buggify traces from cross-replaying with a non-buggify build. A `PATINA_SDK_REPORT` line reports registered/activated/fired sites and coverage.
-
-Non-zero TCP latency over SimNet remains unfinished. Calling host APIs directly without the controlled shim remains outside Patina. APIs and the trace format are expected to change.
-
-See [VALIDATION.md](./VALIDATION.md) for claim-by-claim acceptance gates and [IMPLEMENTATION.md](./IMPLEMENTATION.md) for completed and planned slices.
-
-## Local setup
-
-If you use [mise](https://mise.jdx.dev/), the root workspace has local setup and
-validation tasks:
+Patina is a deterministic simulation testing (DST) runtime for Rust. It runs
+*ordinary* `std` programs — no framework, no simulator-aware rewrite — under a
+deterministic OS personality: clocks, sleeps, entropy, the filesystem, the
+network, threads, and scheduling all route through a seeded virtual runtime
+instead of the host OS. Same seed, same run, byte for byte. Different seed,
+different schedule and different faults — a reproducible searchlight for the
+bugs that normally only show up in production.
 
 ```sh
-mise run setup
-mise run check
-mise run demo
+cargo patina run ./my-server --seed 42                       # a deterministic run
+cargo patina run ./my-server --seed 42 --record run.patina   # record it
+cargo patina replay ./my-server run.patina                   # reproduce it exactly, flag-free
+cargo patina explore run ./my-server --seeds 1000            # hunt for a failing seed
 ```
 
-`setup` installs the stable Rust components, the documented MSRV toolchain
-(`1.86.0`), the `wasm32-wasip1` target, and verifies that a C compiler is
-available. `check` runs root-workspace validation plus the core WASI/native smoke
-scripts; it deliberately does not install or exercise heavyweight standalone
-testbeds such as raft or redb. On Linux, `validate-native-shim.sh` soft-skips the
-syscall-containment pass if `strace` is absent; CI installs `strace` and
-hard-requires that gate.
+Patina is **experimental**. It is developed in the open, validated hard (see
+[VALIDATION.md](./VALIDATION.md)), and not yet published to crates.io — build it
+from source. APIs and the trace format will change.
 
-There are three usage modes (see [USAGE-MODES.md](./USAGE-MODES.md)):
+## Why
 
-1. **SDK-only (`patina-dst`)** — depend on `patina-dst` with default features and
-   use the SDK macros. Ordinary production builds link no runtime; Patina's
-   native/WASI `build` and `run` paths supply the deterministic runtime externally
-   through the shim or host, below ordinary `std` calls.
-2. **Shim-backed harness (`patina-dst-harness`)** — configure Patina and then
-   drive normal application code whose ordinary `std::fs`/`std::net`/clock/thread
-   effects are interposed by the same shim/host.
-3. **Low-level explicit-context (`patina-dst-runtime`)** — depend on
-   `patina-dst-runtime` directly for `run`/`run_with`, `Context`, `RuntimeBuilder`,
-   and ABI types (the deterministic async surface is `patina-dst-async` over that
-   same `Context`). This creates an explicit context and does not control
-   unrelated `std` calls; it is a simulator-native API.
+Distributed systems, storage engines, and concurrent code fail under schedules
+and fault timings that ordinary tests almost never produce and never reproduce.
+The FoundationDB / Antithesis lineage showed the fix: make the whole world —
+time, randomness, I/O, scheduling — a pure function of a seed, then search seeds
+for disasters and replay the ones you find. No more flaky tests: a failure is a
+seed, and a seed is a repro.
 
-## Try the vertical slice
-
-The demo runs the low-level explicit-context examples that ship with the
-`patina-dst-runtime` crate:
-
-```sh
-cargo build -p cargo-patina
-PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst-runtime --example deterministic --seed 123
-rm -f /tmp/demo.patina
-PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst-runtime --example deterministic --seed 123 --record /tmp/demo.patina
-PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina-dst-runtime --example deterministic
-PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina-dst-runtime --example deterministic --branch --from 1 --branch-seed 456 --branch-id branch-456
-PATH="$PWD/target/debug:$PATH" cargo patina replay . /tmp/demo.patina -p patina-dst-runtime --example deterministic --timeline branch-456
-PATH="$PWD/target/debug:$PATH" cargo patina run -p patina-dst-runtime --example simulation --seed 321
-PATH="$PWD/target/debug:$PATH" cargo patina explore run --seeds 10 -p patina-dst-runtime --example deterministic
-```
-
-Those explicit-context examples deliberately perform controlled effects through the context:
-
-```rust
-patina_dst_runtime::run(|ctx| {
-    let bytes = ctx.entropy_bytes(16)?;
-    ctx.write_file("/state/value", &bytes)?;
-    ctx.sleep_for(1_000_000)?;
-    Ok(())
-})?;
-```
-
-A changed source/Cargo input, Rust toolchain, command shape, event argument, event order, or deterministic driver outcome makes strict replay fail rather than fall back. Record mode also refuses an existing trace path or active recorder; the current implementation does not aggregate multiple `patina_dst_runtime::run` contexts into one bundle.
-
-WASI foundation commands:
-
-```sh
-rustup target add wasm32-wasip1
-cargo patina build path/to/guest/Cargo.toml --target wasi
-cargo patina audit path/to/guest.wasm
-cargo patina run path/to/guest.wasm --seed 123
-cargo patina run path/to/guest.wasm --seed 123 --preopen /data:ro --preopen /scratch:rw --max-memory-pages 64
-cargo patina run path/to/guest.wasm --seed 123 --record /tmp/wasi.patina
-cargo patina replay path/to/guest.wasm /tmp/wasi.patina
-cargo patina replay path/to/guest.wasm /tmp/wasi.patina --branch --from 0 --branch-seed 456 --branch-id branch-456
-scripts/validate-wasi.sh
-```
-
-The audit and runner reject non-WASI modules and Preview 1 imports outside the explicit host allowlist. Filesystem and polling work over Patina drivers; `--preopen GUEST[:ro|:rw]` mounts virtual directories with host-enforced write policy, and `--max-*` flags override the fail-closed resource limits (both are part of the replay fingerprint). Preview 1 datagrams use explicitly configured `--socket 'FD=BIND->PEER'` descriptors; ambient host sockets are never inherited.
-
-Native shim and audit validation, plus the cross-target smoke test:
-
-```sh
-scripts/validate-native-shim.sh
-scripts/smoke-cross-target.sh
-cargo patina build path/to/program.rs --output /tmp/program
-cargo patina run /tmp/program --seed 123 --record /tmp/native.patina
-cargo patina audit path/to/program.rs                    # source-first: links the shim, audits the true residual
-```
-
-`run`, `audit`, and `replay` are source-first: pass a built artifact to use it as-is, or a `SOURCE.rs`/`DIR`/`Cargo.toml` (with `--target native|wasi`, default native) to build it on the fly through the same pipeline as `build` and then run/audit/replay the product. An implicit build prints a one-line `PATINA_BUILD_ON_RUN` note (source, artifact, content hash) so it never silently changes what ran; sweeps and campaigns keep passing a prebuilt artifact for build-once-run-many stability.
-
-Audit source-first for the true residual. Only a shim-linked binary shows the post-interposition residual — the handful of effect-surface symbols that genuinely escape. A stock `cargo build` output, by contrast, lists every libc call the shim *would* interpose (`open`, `clock_gettime`, `pthread_mutex_*`, ...) as an unsupported import — the opposite of the truth — so `cargo patina audit <prebuilt-binary>` fails closed unless the binary came from `cargo patina build`. Auditing a `SOURCE.rs`/`DIR`/`Cargo.toml` (or a Patina-built artifact) gives the correct residual; `--raw` overrides the gate and runs the full audit anyway (instruction scan and escape categories included) under a loud banner marking the import findings as pre-interposition.
-
-```sh
-cargo patina run path/to/program.rs --seed 123          # builds native, then runs
-cargo patina run path/to/guest --target wasi --seed 123  # builds wasip1 package, then runs
-```
-
-When a test wants to *configure* Patina and then drive ordinary application code
-— rather than let transparent defaults apply — the `patina-dst-harness` crate is
-the way. A harness binary calls `patina_dst_harness::run_with(|h| Ok(h.sleep_jitter_nanos(..).buggify()..), || my_app::run())`,
-and the closure body uses plain `std::fs`/`std::net`/clocks/threads, all
-interposed by the same shim runtime a transparent run uses (there is no second
-explicit `Context`). It is built and run through `--harness`, which defers
-runtime installation to the harness so it owns configuration:
-
-```sh
-cargo patina run path/to/harness/Cargo.toml --target native --harness --seed 123
-cargo patina run path/to/harness/Cargo.toml --target native --harness --record /tmp/h.patina
-cargo patina replay path/to/harness/Cargo.toml /tmp/h.patina --target native --harness
-```
-
-Configuration flows through the same control-plane/`RuntimeConfig` fields the CLI
-flags set, so record/replay identity and the replay-config-conflict checks apply
-unchanged. Run a harness binary without Patina and it fails closed
-(`NotUnderPatina`) before any application code executes; an interposed effect
-before the harness installs the runtime aborts loudly rather than running against
-host effects. WASI harnesses are not supported in v1 (the WASI supervisor owns
-run configuration).
-
-Failure-oracle minimization writes each candidate to `PATINA_MINIMIZE_TRACE`; the oracle exits nonzero only when the selected failure is preserved:
-
-```sh
-cargo patina minimize failure.patina --output reduced.patina -- ./failure-oracle
-cargo patina minimize branches.patina --timeline failing-leaf \
-  --output reduced.patina -- ./failure-oracle
-```
-
-`build` compiles a single Rust source against the packaged shim (embedding the POSIX layer and injecting `cfg(patina)`/`cfg(dst)`), and `run` supervises the binary with seeded or record modes while `replay` reproduces a recording — application code needs no Patina-specific calls. The native validation script builds its ordinary-`std` probes through that packaged path, compiles mixed C/Rust fixtures for the prefixed and POSIX symbols, executes ordinary macOS/Linux `std` filesystem/directory/symlink/time/entropy/stdio/thread/UDP calls through Patina — including mutex/condvar contention with a lock held across a boundary operation and multi-thread datagram exchange with scheduler-decided arrival order — records and replays the fully interposed probes through `PATINA_TRACE_FD`, audits the resulting binaries against the strict allowlist, verifies rejection of direct-syscall/unmanaged-thread and unknown-import fixtures, and on Linux runs the whole-run `strace` containment pass. Linux large-file/stat variants and deterministic startup checks are covered. The smoke script builds one ordinary-`std` program for wasm32-wasip1 and the native host and requires identical seeded, recorded, and replayed output. Beyond single sources, `build` also compiles whole Cargo packages through the same packaged path, audited, recorded, and replayed under the `cargo-patina` end-to-end package test.
-
-## Why Patina exists
-
-Distributed systems, storage systems, concurrent code, and I/O-heavy programs fail under schedules and faults that are hard to reproduce with ordinary tests.
-
-Existing Rust deterministic simulation tools prove the value of simulated runtimes and virtual environments, but they usually require applications and dependencies to use simulator-aware libraries. Deterministic hypervisors, such as Antithesis, solve this from the other direction by controlling the whole machine boundary.
-
-Patina targets the layer between those approaches: less intrusive than rewriting code around simulator-aware libraries, but Rust-specific and toolchain-integrated rather than a full VM. It puts the deterministic boundary at the Rust platform layer:
+Existing Rust DST tools (MadSim, Turmoil) prove the value but ask your code and
+every dependency to use simulator-aware libraries. Deterministic hypervisors
+(Antithesis) attack it from the other side by controlling the entire machine.
+Patina sits between: it puts the deterministic boundary at the *Rust platform
+layer*, below your application and dependencies, using link-time interposition —
+so plain `std::fs`, `std::net`, `std::thread`, `SystemTime`, and seeded entropy
+just work deterministically, and stock async runtimes like tokio run unmodified
+over interposed kqueue/epoll reactors.
 
 ```text
-Rust app and dependencies
-  -> std / runtime / shims
+your app and its dependencies      (unchanged)
+  -> std / libc-compatible shims
   -> Patina deterministic ABI
-  -> virtual drivers and deterministic scheduler
+  -> virtual drivers + deterministic scheduler + trace
 ```
 
-The user should not need to audit every dependency to check whether it used the correct mockable interface. If code uses `std::fs`, `std::net`, clocks, entropy, or compatible native APIs, those effects should flow through Patina’s deterministic boundary.
+The boundary **fails closed**: an effect Patina does not model is a loud,
+pre-run refusal — never a silent escape to the host.
 
-## What Patina is designed to provide
+## Quickstart
 
-The complete design combines several related capabilities:
+Requires stable Rust (MSRV 1.86) and a C compiler.
 
-- **Deterministic execution**: rerun with the same seed and get the same behavior.
-- **Simulation testing**: explore adverse schedules, network behavior, filesystem faults, time, crashes, and randomness.
-- **Replay**: reproduce a previous run from a trace.
-- **Branching from traces**: replay to a recorded moment, then explore a different deterministic suffix from there.
-- **Trace bundles**: store the seed, decision policy metadata, decision logs, and branch relationships in a `.patina` file.
-- **Explicit host capture**: record permitted host I/O for exact replay. Open-ended exploration requires deterministic drivers.
-- **Fail-closed enforcement**: unsupported nondeterminism errors instead of silently reaching the host.
-- **Pluggable drivers**: swap virtual filesystems, networks, clocks, entropy sources, and schedulers.
+```sh
+git clone https://github.com/JacobHayes/patina
+cd patina
+cargo build --release -p cargo-patina
+export PATH="$PWD/target/release:$PATH"    # `cargo patina` now resolves
+```
 
-## Design summary
+Save this as `lottery.rs` — plain `std`, nothing Patina-specific:
 
-Patina separates three concerns:
+```rust
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-1. **Data plane**: small stable interfaces for effects like fs, net, time, entropy, and scheduling.
-2. **Construction plane**: typed Rust code configures concrete drivers and scenario topology.
-3. **Experiment plane**: CLI/runtime parameters control seeds, traces, budgets, record/replay modes, and simple knobs.
+fn main() {
+    let start = Instant::now();
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write(b"lottery");
+    let ticket = h.finish() % 1_000_000;
+    std::thread::sleep(std::time::Duration::from_secs(3600)); // costs no wall time
+    println!(
+        "ticket={ticket:06} epoch={}s elapsed={}s",
+        now.as_secs(),
+        start.elapsed().as_secs()
+    );
+}
+```
 
-Driver-specific behavior is code-first. For example, a simulated network driver may expose route registration or fake HTTP handlers, but those methods do not belong to the core network interface.
+Run it under the deterministic runtime (`run` builds sources on the fly):
 
-A seed is interpreted by deterministic decision policies: scheduler, network, filesystem, and exploration logic that choose outcomes for sources of nondeterminism. Record, replay, fault injection, and latency are wrapper drivers that compose around concrete drivers such as `MemFs`, `CrashFs`, `SimNet`, `VirtualClock`, and `SeededEntropy`.
+```sh
+$ cargo patina run lottery.rs --seed 1
+ticket=817442 epoch=0s elapsed=3600s
+$ cargo patina run lottery.rs --seed 1
+ticket=817442 epoch=0s elapsed=3600s      # identical: entropy is seeded
+$ cargo patina run lottery.rs --seed 2
+ticket=361331 epoch=0s elapsed=3600s      # a different world
+```
 
-## Target model
+The hour-long sleep finished instantly — time is virtual — yet `elapsed` still
+reads 3600 seconds, and `RandomState` (normally fresh OS entropy per process)
+is a pure function of the seed.
 
-Patina is Rust-first.
+Now record a run, replay it byte-for-byte, and sweep seeds:
 
-It targets:
+```sh
+cargo patina build lottery.rs --output lottery       # build once for run-many stability
+cargo patina run ./lottery --seed 1 --record run.patina
+cargo patina replay ./lottery run.patina             # no flags: the trace is authoritative
+cargo patina explore run ./lottery --seeds 100       # per-seed outcomes, stops at first failure
+```
 
-- **WASI Patina**: a clean target where host effects are explicit imports;
-- **native Linux/macOS Rust Patina**: the primary long-term target for mostly Rust programs;
-- **native ABI shims**: compatibility layers for libc/POSIX-style dependencies.
+From here, the [tutorial](./TUTORIAL.md) walks a small program from
+instrumentation to a caught, replayed, HTML-rendered bug in about ten minutes.
 
-Patina is not a deterministic hypervisor and does not promise to make arbitrary native applications deterministic. Unsupported FFI, direct syscalls, inline assembly, dynamic loading, and CPU nondeterminism are denied unless explicitly supported.
+## How to use it
 
-## Documentation
+One CLI, three artifact families, inferred automatically: a **Cargo
+package/test** (directory or `Cargo.toml`, run in-process), a **native binary**
+(Mach-O/ELF, linked against the deterministic shim), and a **WASI module**
+(`wasm32-wasip1`, run under a deterministic host). `run`, `audit`, and `replay`
+are source-first: hand them a `.rs` file, a directory, or a `Cargo.toml` and
+they build through the same pipeline as `build` first.
 
-- [INTENTS.md](./INTENTS.md): project intent, goals, non-goals, trade-offs, and niche.
-- [ARCHITECTURE.md](./ARCHITECTURE.md): system architecture, crate layout, interfaces, wrappers, tracing, and target model.
-- [VALIDATION.md](./VALIDATION.md): acceptance levels and verification commands.
-- [IMPLEMENTATION.md](./IMPLEMENTATION.md): implementation slices, status, and dependency order.
-- [AGENTS.md](./AGENTS.md): guidance for coding agents working in this repository.
+| Verb | What it does | Example |
+|---|---|---|
+| `run` | Build (if needed) and run an artifact deterministically. | `cargo patina run app.rs --seed 7` |
+| `test` | Run a Cargo test target under the deterministic runtime. | `cargo patina test --seed 123` |
+| `build` | Build the shim-linked native binary (default) or a wasip1 package. | `cargo patina build ./pkg --output app` |
+| `audit` | Report the true residual effect surface of a binary; default-deny. | `cargo patina audit app.rs` |
+| `replay` | Reproduce a recorded trace; seed/faults/argv restored from it. | `cargo patina replay ./app run.patina` |
+| `explore` | Sweep a seed range, reporting per-seed outcomes. | `cargo patina explore run ./app --seeds 500` |
+| `campaign` | Config-driven fault-and-schedule sweep with failure dedup. | `cargo patina campaign ./app --gens 200 --buggify --out-dir out/` |
+| `minimize` | Shrink a failing trace (or seed/params) against an oracle. | `cargo patina minimize bug.patina --output small.patina -- ./oracle` |
 
+Every verb has `--help`, and `--help --format json` emits the full CLI registry
+(verbs, flags, environment protocol) as machine-readable JSON — handy for
+scripts and AI agents. Every result is available as a single JSON envelope via
+`--format json`, and `--render out.html` writes a self-contained HTML timeline
+of any traced run.
+
+### Fault injection and schedule exploration
+
+Faults are seed-driven, default-off, and recorded into the trace so replay
+reproduces them flag-free:
+
+- **Filesystem crashes**: `--fs-crash-at open|write|sync|close[:N]` with
+  block- or byte-granularity torn writes (`--fs-torn-granularity`).
+- **Network faults**: `--net-drop-permille`, `--net-jitter-nanos MIN..MAX`,
+  `--net-latency-nanos`.
+- **Timing**: `--sleep-jitter-nanos MIN..MAX` on every guest sleep.
+- **Schedule exploration** (native): `--sched-pct` (PCT priority scheduling),
+  `--starve` (bounded starvation intervals), `--swarm` (seed-derived fault-class
+  subsets). Pair with `cargo patina build --yield-points`, which instruments
+  basic blocks so even atomics-only race windows become schedulable.
+- **Liveness oracles**: `--liveness-watchdog` (virtual-time no-progress
+  detector) and `--converge-within` (heal-then-converge budget).
+
+### The buggify SDK
+
+For faults the runtime cannot inject from outside — "what if this batch path
+ran?", "what if this retry fired?" — instrument your code with the
+cooperative-SUT SDK, in the style of FoundationDB's `BUGGIFY` and Antithesis
+assertions:
+
+```rust
+if patina_dst::buggify!("batch-commit") {
+    // rare path, taken only under Patina on seed-chosen runs
+}
+patina_dst::always!(invariant_holds(), "ledger-sorted");   // fatal if ever false
+patina_dst::sometimes!(cache_hit, "cache-hit-seen");       // coverage oracle
+```
+
+The `patina-dst` crate is dependency-light and every macro is a no-op outside a
+Patina build — adopters ship it unconditionally, with no `cfg(patina)` in their
+code. Enable at run time with `cargo patina run --buggify`; decisions are pure
+functions of the seed, and a `PATINA_SDK_REPORT` line proves sites actually
+fired (no vacuous "all clean").
+
+### Record, replay, branch
+
+`--record` captures every boundary decision into a compact JSON `.patina` trace
+(inspect with `jq`). Replay is strict: the trace carries the seed, fault knobs,
+buggify config, and guest argv, and any mismatch — changed binary, changed
+config, diverging operation — fails closed rather than lying. Cargo and WASI
+traces also support *branch timelines*: replay a recorded prefix, then explore a
+different seeded suffix from that moment
+(`replay … --branch --from N --branch-seed S --branch-id ID`).
+
+## Supported today
+
+- **Seeded determinism** for ordinary `std`: filesystem (including directories
+  and symlinks), virtual clocks (`SystemTime`/`Instant`/sleeps), entropy,
+  UDP datagrams and zero-latency TCP over a simulated network, threads with
+  mutex/condvar/parking gated one-at-a-time through a deterministic scheduler,
+  and deterministic process-state constants.
+- **Stock tokio** on macOS and Linux: kqueue/epoll readiness reactors are
+  interposed over virtual sockets, pipes, and the virtual clock.
+- **Record/replay** with byte-identical traces, trace-format migration, branch
+  timelines (Cargo/WASI), and failure-oracle **trace minimization**.
+- **Default-deny audit gate**: before a native guest runs, every externally
+  resolved symbol must be interposed or provably effect-free; unknown imports
+  and raw syscall/clock/entropy instructions are refusals
+  (`--allow-unsupported-symbols` is the loud, recorded escape hatch).
+- **WASI Preview 1**: the entire 46-function audited import surface, with
+  read-only/read-write preopens, resource limits, fuel, sockets via configured
+  descriptors, record/replay, and branching.
+- **Campaigns**: deterministic multi-generation sweeps with a seven-class
+  outcome classifier, failure-signature dedup, and per-failure repro commands.
+- **Three adoption modes** (see [USAGE-MODES.md](./USAGE-MODES.md)): SDK-only
+  (`patina-dst`), a configure-then-run harness (`patina-dst-harness`), and the
+  explicit-context simulator API (`patina-dst-runtime`, with deterministic
+  async in `patina-dst-async`).
+
+### Platforms
+
+| Platform | Status |
+|---|---|
+| macOS | Supported; static instruction scan + import audit for containment. |
+| Linux x86_64 | Supported; adds syscall-user-dispatch, which traps raw inline syscalls (e.g. rustix's default `linux_raw` backend) into the runtime, plus a whole-run `strace` containment gate in CI. |
+| Linux arm64 | Supported for libc-path binaries; arm64 kernels lack syscall-user-dispatch, so raw-inline-syscall binaries are *refused* (fail closed), not run. |
+| `wasm32-wasip1` | Supported via the deterministic WASI host. |
+
+If you use [mise](https://mise.jdx.dev/): `mise run setup` installs toolchains
+and targets, `mise run check` runs the validation battery, `mise run demo` runs
+a small end-to-end demo.
+
+## What Patina is not (yet)
+
+Honesty is a feature. Current limits, all of which fail loudly rather than
+silently:
+
+- **Experimental**: APIs, CLI, and the trace format are unstable; traces are
+  tied to the exact binary and config that produced them (by design).
+- **Not on crates.io**: build from source. The workspace crates are published
+  under `patina-dst-*` names; the SDK crate is `patina-dst`, used as
+  `patina_dst::` in code.
+- **No process spawning**: `fork`/`posix_spawn` and friends are denied
+  (a guest that reaches them aborts deterministically). One process per run.
+- **IPv6 and DNS fail closed**; TCP over the simulated network is
+  zero-latency only (non-zero TCP latency is unfinished; UDP latency works).
+- **Not a hypervisor**: unsupported FFI, dynamic loading, inline assembly
+  reading clocks/entropy, and direct host APIs are refused, not virtualized.
+  Patina makes *mostly-Rust* programs deterministic; it does not promise to run
+  arbitrary native code.
+- Host-facing escape hatches (allowlisted host file capture, `--mount`) are
+  explicit, read-only, and fingerprinted — never ambient.
+
+## Going deeper
+
+- [TUTORIAL.md](./TUTORIAL.md) — hands-on: instrument, sweep, catch, replay,
+  and render a planted bug.
+- [USAGE-MODES.md](./USAGE-MODES.md) — the three adoption levels and crate map.
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — system design: targets, drivers,
+  wrappers, traces, the native shim, and the WASI host.
+- [INTENTS.md](./INTENTS.md) — goals, non-goals, trade-offs, and the niche
+  Patina occupies.
+- [VALIDATION.md](./VALIDATION.md) — claim-by-claim acceptance gates and the
+  honest boundary of confidence.
+- [IMPLEMENTATION.md](./IMPLEMENTATION.md) — completed and planned slices.
+- [AGENTS.md](./AGENTS.md) — guidance for coding agents working in this repo.
+- `llms.txt` — a compact machine-oriented map of the CLI and SDK.
+- `testbeds/` — real dogfooding targets (`workq`, a durable work queue, is the
+  flagship end-to-end demonstration).

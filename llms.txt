@@ -40,12 +40,18 @@ with no `--target` -> the Cargo package family (in-process boundary API). A
   closed with a nonzero exit.
 - `cargo patina audit <ARTIFACT|SOURCE> [--allow SYMBOL]...`
   Strict fail-closed import allowlist. Any un-interposed effect symbol is a
-  finding. Native `audit` of a shim binary flags its control-plane symbols
-  (`dlsym`, `pthread_create`) unless `--allow`ed.
+  finding. Audit source-first (or a `cargo patina build` artifact): only a
+  shim-linked binary shows the true post-interposition residual, so a stock
+  prebuilt binary is refused unless `--raw`.
 - `cargo patina explore run <ARTIFACT|SOURCE> [--seeds N] [--seed-start N] [RUN OPTIONS]`
   Sweep seeds, building once and running that artifact per seed. Stops at the
   first failing seed with `PATINA_EXPLORE_FAILURE seed=S exit=E`; otherwise
   `PATINA_EXPLORE_COMPLETE start=... seeds=...`.
+- `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--buggify] [--swarm] [--sched-pct] [--faults]`
+  Config-driven deterministic fault-and-schedule sweep: every generation's seed
+  and knobs are a pure function of the generation number, outcomes are
+  classified into seven classes, and novel failure signatures are deduped with
+  saved traces and a reproduce command.
 - `cargo patina minimize <TRACE> --output PATH -- <ORACLE>` / `minimize --scenario --seed N -- <ORACLE>`
   Delta-debug a failing trace, or shrink the seed/params that trigger a failure.
 
@@ -82,7 +88,7 @@ One line of JSON on stdout. Always: `schema`, `verb`, `result`
 metadata}` where `metadata` is the raw trace metadata (seed, faults, buggify,
 guest_argv, and any future fields, rendered generically).
 
-## SDK macros (crate `patina`, default features = dependency-light SDK)
+## SDK macros (crate `patina-dst`, default features = dependency-light SDK)
 
 Instrument a system-under-test; every macro is a no-op under a plain
 `cargo build` (adopters pay nothing) and lowers to the runtime only under Patina.
@@ -117,7 +123,6 @@ Instrument a system-under-test; every macro is a no-op under a plain
   planted bug, replay it, and render the timeline.
 - `ARCHITECTURE.md`, `IMPLEMENTATION.md`, `VALIDATION.md`: design, slice status,
   and the verification gates.
-- `testbeds/`: `workq` (the flagship durable-work-queue demo) and `raft-harness`
-  (a 3-node tikv/raft cluster) run the full end-to-end battery; see each testbed's
-  `run-patina.sh`. VALIDATION.md "Historical campaigns" records the archived redb
-  and ripgrep campaigns.
+- `testbeds/`: real end-to-end guests — `workq` (the flagship durable-work-queue
+  demo), `pubsub` (a tokio broker on the interposed reactors), and more; see
+  `testbeds/README.md` and each testbed's `run-patina.sh`.

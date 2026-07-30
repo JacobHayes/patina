@@ -259,7 +259,7 @@ Completed foundations (Milestone B):
 Completed foundations (Milestone C — buggify on WASI):
 
 10. **`patina_sdk` wasm import module.** The full cooperative-SUT surface reaches
-    a `wasm32-wasip1` guest at parity with native. The `patina` crate's macros
+    a `wasm32-wasip1` guest at parity with native. The `patina-dst` crate's macros
     lower, under `cfg(patina)` on wasm, to imports from a dedicated `patina_sdk`
     module; `patina-dst-wasi-host` defines that module against the **same**
     `patina-dst-runtime` buggify subsystem the native shim drives (activation, the

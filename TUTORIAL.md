@@ -26,9 +26,10 @@ publish = false
 name = "ledger"
 path = "src/main.rs"
 [dependencies]
-# Path to your checkout's crates/patina. The SDK's default features are the
-# dependency-light macro set; a plain `cargo build` leaves every macro a no-op.
-patina = { path = "../patina/crates/patina" }
+# Path to your checkout's crates/patina (package name `patina-dst`, used as
+# `patina_dst::` in code). The SDK's default features are the dependency-light
+# macro set; a plain `cargo build` leaves every macro a no-op.
+patina-dst = { path = "../patina/crates/patina" }
 ```
 
 `ledger/src/main.rs`
