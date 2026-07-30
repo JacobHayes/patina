@@ -1,0 +1,42 @@
+# WIP — DO NOT LAND. Throwaway fast-iteration job for the ci/sud-slice2 rounds:
+# a single x86_64 job running only the SUD-relevant gates (~minutes instead of
+# the full 6-job matrix). The landing round must be the full matrix (delete this
+# file and merge main so ci.yml's ci/** push trigger takes over).
+name: sud-fast
+
+on:
+  push:
+    branches: ["ci/**"]
+
+concurrency:
+  group: sud-fast-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sud:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            testbeds/rustix-default
+      # Anti-whack-a-mole: enumerate EVERY raw syscall the rustix MRE issues
+      # natively, so missing dispatch rows surface as a complete list in one
+      # round instead of one abort at a time under patina.
+      - name: native syscall inventory (rustix MRE)
+        run: |
+          cd testbeds/rustix-default
+          cargo build
+          strace -f -qq -o /tmp/rustix-strace.txt ./target/debug/rustix-default || true
+          echo "SYSCALL_INVENTORY_BEGIN"
+          awk -F'(' '{print $1}' /tmp/rustix-strace.txt | awk '{print $NF}' | grep -E '^[a-z_0-9]+$' | sort -u
+          echo "SYSCALL_INVENTORY_END"
+      - name: shim unit tests
+        run: cargo test -p patina-dst-native-shim --locked
+      - name: validate-native-shim (incl. SUD positive battery)
+        run: scripts/validate-native-shim.sh
