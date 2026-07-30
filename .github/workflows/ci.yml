@@ -38,6 +38,14 @@ jobs:
         with:
           targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
+        with:
+          # The testbed gates below build their own standalone workspaces;
+          # without caching them, pubsub's tokio tree compiles cold on every
+          # push (workq's tree is tiny, but cache it uniformly).
+          workspaces: |
+            .
+            testbeds/workq
+            testbeds/pubsub
       # strace is the Linux whole-run syscall-containment class detector invoked
       # by validate-native-shim.sh. Install it and require it (PATINA_REQUIRE_STRACE=1
       # below) so a runner image without strace hard-fails instead of silently
@@ -74,6 +82,12 @@ jobs:
       # sweep over this same testbed runs nightly (see the `nightly` job).
       - if: matrix.toolchain == 'stable'
         run: testbeds/workq/run-patina.sh
+      # The async-native testbed's full self-checking gate (multi-seed
+      # determinism + cross-seed outcome invariance, record/strict-replay,
+      # fail-closed planted-bug legs). Its dependency tree adds tokio, cached
+      # via the rust-cache workspaces above.
+      - if: matrix.toolchain == 'stable'
+        run: testbeds/pubsub/run-patina.sh
 
   # Advisory audit (RustSec). The root workspace lockfile is STRICT — any
   # advisory (including any protobuf appearance) fails the job. The testbeds are
@@ -91,7 +105,7 @@ jobs:
         run: |
           # Testbeds are standalone workspaces (publish=false) with their own
           # lockfiles. Every one is strict — no advisory is ignored anywhere.
-          for tb in buggify-wasi liveness-campaign workq; do
+          for tb in buggify-wasi liveness-campaign pubsub workq; do
             echo "== audit testbeds/$tb =="
             cargo audit --file "testbeds/$tb/Cargo.lock"
           done
