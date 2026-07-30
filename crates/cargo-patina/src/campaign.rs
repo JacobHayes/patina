@@ -38,7 +38,7 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
-use crate::CliError;
+use crate::{CliError, reject_inline, required_value, split_opt};
 
 /// The stable schema identifier for the campaign JSON envelope, extending the
 /// `patina.result/v1` family.
@@ -194,57 +194,89 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
             "campaign requires an artifact path (a .wasm module or native binary), or --selftest",
         ));
     }
+    // The artifact always leads. A first token that looks like a flag is never an
+    // artifact path, so reject it loudly (fail-closed) rather than treating it as
+    // an artifact and failing later with a confusing "failed to read artifact".
+    if let Some(first) = arguments[0].to_str() {
+        if first.starts_with('-') {
+            return Err(CliError::usage(format!(
+                "unsupported option {first:?} for `campaign` (the artifact path must lead)"
+            )));
+        }
+    }
     let artifact = PathBuf::from(arguments.remove(0));
     let mut spec = CampaignSpec::default();
     let mut out_dir: Option<PathBuf> = None;
 
     let mut index = 0;
     while index < arguments.len() {
-        let option = arguments[index]
+        let text = arguments[index]
             .to_str()
-            .ok_or_else(|| CliError::usage("campaign options must be valid UTF-8"))?
-            .to_string();
-        let mut value_of = |flag: &str| -> Result<String, CliError> {
-            index += 1;
-            arguments
-                .get(index)
-                .and_then(|v| v.to_str())
-                .map(str::to_string)
-                .ok_or_else(|| CliError::usage(format!("{flag} requires a value")))
-        };
-        match option.as_str() {
+            .ok_or_else(|| CliError::usage("campaign options must be valid UTF-8"))?;
+        let opt = split_opt(text);
+        match opt.name {
             "--spec" => {
-                let path = value_of("--spec")?;
+                let path = required_value(opt, &arguments, &mut index)?.to_string();
                 let text = std::fs::read_to_string(&path)
                     .map_err(|e| CliError(format!("failed to read campaign spec {path}: {e}")))?;
                 let json: serde_json::Value = serde_json::from_str(&text)
                     .map_err(|e| CliError(format!("campaign spec {path} is invalid JSON: {e}")))?;
                 spec.apply_json(&json)?;
             }
-            "--out" => out_dir = Some(PathBuf::from(value_of("--out")?)),
-            "--gens" => {
-                spec.generations = parse_u64_flag("--gens", &value_of("--gens")?)?;
+            "--out-dir" => {
+                out_dir = Some(PathBuf::from(required_value(opt, &arguments, &mut index)?));
             }
-            "--seed-base" => {
-                spec.seed_base = parse_u64_flag("--seed-base", &value_of("--seed-base")?)?;
+            "--gens" => {
+                spec.generations =
+                    parse_u64_flag("--gens", required_value(opt, &arguments, &mut index)?)?;
+            }
+            "--seed-start" => {
+                spec.seed_base =
+                    parse_u64_flag("--seed-start", required_value(opt, &arguments, &mut index)?)?;
             }
             "--timeout-secs" => {
-                spec.timeout_secs = parse_u64_flag("--timeout-secs", &value_of("--timeout-secs")?)?;
+                spec.timeout_secs = parse_u64_flag(
+                    "--timeout-secs",
+                    required_value(opt, &arguments, &mut index)?,
+                )?;
             }
-            "--buggify" => spec.buggify = true,
-            "--swarm" => spec.swarm = true,
-            "--pct" => spec.pct = true,
-            "--faults" => spec.faults = true,
-            "--report" => spec.report = true,
+            "--buggify" => {
+                reject_inline(opt)?;
+                spec.buggify = true;
+            }
+            "--swarm" => {
+                reject_inline(opt)?;
+                spec.swarm = true;
+            }
+            "--sched-pct" => {
+                reject_inline(opt)?;
+                spec.pct = true;
+            }
+            "--faults" => {
+                reject_inline(opt)?;
+                spec.faults = true;
+            }
+            "--report" => {
+                reject_inline(opt)?;
+                spec.report = true;
+            }
             "--liveness-watchdog" => {
-                spec.watchdog_nanos = Some(parse_budget(&mut value_of, "--liveness-watchdog")?);
+                spec.watchdog_nanos = Some(parse_u64_flag(
+                    "--liveness-watchdog",
+                    required_value(opt, &arguments, &mut index)?,
+                )?);
             }
             "--converge-within" => {
-                spec.converge_nanos = Some(parse_budget(&mut value_of, "--converge-within")?);
+                spec.converge_nanos = Some(parse_u64_flag(
+                    "--converge-within",
+                    required_value(opt, &arguments, &mut index)?,
+                )?);
             }
             "--heal-after" => {
-                spec.heal_after_nanos =
-                    Some(parse_u64_flag("--heal-after", &value_of("--heal-after")?)?);
+                spec.heal_after_nanos = Some(parse_u64_flag(
+                    "--heal-after",
+                    required_value(opt, &arguments, &mut index)?,
+                )?);
             }
             other => {
                 return Err(CliError::usage(format!(
@@ -270,16 +302,6 @@ fn parse_u64_flag(name: &str, value: &str) -> Result<u64, CliError> {
     value
         .parse()
         .map_err(|_| CliError::usage(format!("{name} must be an unsigned integer; got {value:?}")))
-}
-
-/// A budget flag accepts an optional value: the next token if it looks numeric,
-/// else the runtime default (encoded here as a large virtual-time budget).
-fn parse_budget(
-    value_of: &mut impl FnMut(&str) -> Result<String, CliError>,
-    name: &str,
-) -> Result<u64, CliError> {
-    let raw = value_of(name)?;
-    parse_u64_flag(name, &raw)
 }
 
 /// Route the `campaign` verb.
@@ -1368,6 +1390,40 @@ mod tests {
         let native = derive_flags(&spec, &hash, "native");
         assert!(native.iter().any(|f| f == "--swarm"));
         assert!(native.iter().any(|f| f.starts_with("--sched-pct")));
+    }
+
+    #[test]
+    fn renamed_flags_parse_and_old_spellings_error() {
+        let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+        // New spellings parse and set the right fields; the `=VALUE` form works too.
+        let inv = parse(args(&[
+            "art",
+            "--sched-pct",
+            "--seed-start",
+            "7",
+            "--out-dir",
+            "d",
+            "--gens=3",
+        ]))
+        .unwrap();
+        assert!(inv.spec.pct);
+        assert_eq!(inv.spec.seed_base, 7);
+        assert_eq!(inv.out_dir, PathBuf::from("d"));
+        assert_eq!(inv.spec.generations, 3);
+
+        // Old spellings are unknown-flag errors (no aliases).
+        for old in [
+            &["art", "--pct"][..],
+            &["art", "--out", "d"][..],
+            &["art", "--seed-base", "1"][..],
+        ] {
+            assert!(parse(args(old)).is_err(), "old spelling {old:?} must error");
+        }
+
+        // A leading flag (no artifact) fails closed with the unsupported-option
+        // usage error, not a later "failed to read artifact --nonsense".
+        assert!(parse(args(&["--nonsense"])).is_err());
+        assert!(parse(args(&["--gens", "3"])).is_err());
     }
 
     #[test]

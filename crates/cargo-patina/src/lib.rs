@@ -596,18 +596,30 @@ fn current_verb() -> Option<&'static str> {
     CURRENT_VERB.with(|cell| *cell.borrow())
 }
 
-/// Whether `-h`/`--help` appears anywhere before a literal `--` separator. After
-/// `--` the token belongs to the guest/oracle and is left untouched.
-fn help_requested(arguments: &[OsString]) -> bool {
+/// Whether `flag`/`short` appears anywhere before a literal `--` separator. After
+/// `--` the token belongs to the guest/oracle and is left untouched. The name may
+/// be inline (`--flag=...` never applies to these valueless switches, so an exact
+/// match is what matters).
+fn flag_before_separator(arguments: &[OsString], long: &str, short: &str) -> bool {
     for argument in arguments {
         if argument == "--" {
             return false;
         }
-        if argument == "-h" || argument == "--help" {
+        if argument == long || argument == short {
             return true;
         }
     }
     false
+}
+
+/// Whether `-h`/`--help` appears anywhere before a literal `--` separator.
+fn help_requested(arguments: &[OsString]) -> bool {
+    flag_before_separator(arguments, "--help", "-h")
+}
+
+/// Whether `-V`/`--version` appears anywhere before a literal `--` separator.
+fn version_requested(arguments: &[OsString]) -> bool {
+    flag_before_separator(arguments, "--version", "-V")
 }
 
 fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
@@ -639,6 +651,12 @@ fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
             }
             if help_requested(&arguments) {
                 return Ok(ParseResult::Help(topic));
+            }
+            // `-V`/`--version` is intercepted everywhere before `--`, exactly like
+            // `--help`, so every verb honors it (not just the top level and the
+            // cargo family).
+            if version_requested(&arguments) {
+                return Ok(ParseResult::Version);
             }
             return match name {
                 "campaign" => campaign::parse(arguments).map(ParseResult::Campaign),
@@ -791,9 +809,28 @@ enum ArgKind {
     Other,
 }
 
+/// Whether a positional token is unmistakably a filesystem path (so a
+/// nonexistent one is a mistake to surface, not a plausible bare Cargo argument):
+/// it names a `.wasm`/`.rs`/`Cargo.toml`, or contains a path separator.
+fn looks_like_path(raw: &OsStr) -> bool {
+    let Some(text) = raw.to_str() else {
+        // A non-UTF-8 token is never a bare Cargo argument; treat it as a path.
+        return true;
+    };
+    text.ends_with(".wasm")
+        || text.ends_with(".rs")
+        || Path::new(text).file_name() == Some(OsStr::new("Cargo.toml"))
+        || text.contains('/')
+        || text.contains(std::path::MAIN_SEPARATOR)
+}
+
 /// Classify a run/audit/replay positional argument. A built artifact is
-/// recognized by leading magic bytes (used directly); a `.rs`, directory, or
-/// `Cargo.toml` is a source/package to build; everything else is `Other`.
+/// recognized by leading magic bytes (used directly); an existing `.rs`,
+/// directory, or `Cargo.toml` is a source/package to build; a bare name that does
+/// not exist is `Other` (a plausible Cargo argument, left to the cargo family).
+/// A token that clearly names a file path (`.wasm`/`.rs`/`Cargo.toml`, or with a
+/// separator) but does not exist is a hard error — fail closed rather than let
+/// `run nonexistent.wasm` fall through to a confusing `cargo run` failure.
 fn classify_arg(raw: &OsStr) -> Result<ArgKind, CliError> {
     if raw.to_str().is_some_and(|value| value.starts_with('-')) {
         return Ok(ArgKind::Other);
@@ -806,12 +843,19 @@ fn classify_arg(raw: &OsStr) -> Result<ArgKind, CliError> {
         if let Some(family) = artifact_family(path)? {
             return Ok(ArgKind::Artifact(family));
         }
+        if path.file_name() == Some(OsStr::new("Cargo.toml")) {
+            return Ok(ArgKind::SourcePackage(path.to_path_buf()));
+        }
+        if path.extension().and_then(OsStr::to_str) == Some("rs") {
+            return Ok(ArgKind::SourceFile(path.to_path_buf()));
+        }
+        // An existing file that is neither an artifact nor a source: not ours.
+        return Ok(ArgKind::Other);
     }
-    if path.file_name() == Some(OsStr::new("Cargo.toml")) {
-        return Ok(ArgKind::SourcePackage(path.to_path_buf()));
-    }
-    if path.extension().and_then(OsStr::to_str) == Some("rs") {
-        return Ok(ArgKind::SourceFile(path.to_path_buf()));
+    // The token does not exist. If it plainly names a file path, fail closed;
+    // otherwise it is a bare name the cargo family may interpret.
+    if looks_like_path(raw) {
+        return Err(CliError::usage(format!("no such file: {}", path.display())));
     }
     Ok(ArgKind::Other)
 }
@@ -889,18 +933,17 @@ fn take_package_bin(flags: Vec<OsString>) -> Result<SourceFirstSelection, CliErr
     let mut rest = Vec::with_capacity(flags.len());
     let mut index = 0;
     while index < flags.len() {
-        match flags[index].to_str() {
+        let opt = flags[index].to_str().map(split_opt);
+        match opt.map(|opt| opt.name) {
             Some("--package") | Some("-p") => {
-                index += 1;
-                let value = utf8_argument(&flags, index, "--package")?;
+                let value = required_value(opt.expect("matched name"), &flags, &mut index)?;
                 set_once(&mut package, value.to_string(), "--package")?;
             }
             Some("--bin") => {
-                index += 1;
-                let value = utf8_argument(&flags, index, "--bin")?;
+                let value = required_value(opt.expect("matched name"), &flags, &mut index)?;
                 set_once(&mut bin, value.to_string(), "--bin")?;
             }
-            Some("--") => {
+            Some("--") if flags[index] == "--" => {
                 rest.extend_from_slice(&flags[index..]);
                 break;
             }
@@ -1225,26 +1268,25 @@ fn parse_wasi_build(mut arguments: Vec<OsString>) -> Result<WasiBuildInvocation,
     let mut output = None;
     let mut index = 0;
     while index < arguments.len() {
-        let option = arguments[index]
+        let text = arguments[index]
             .to_str()
             .ok_or_else(|| CliError::usage("build --target wasi options must be valid UTF-8"))?;
-        match option {
+        let opt = split_opt(text);
+        match opt.name {
             "--package" | "-p" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--package")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 set_once(&mut package, value.to_string(), "--package")?;
             }
             "--bin" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--bin")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 set_once(&mut bin, value.to_string(), "--bin")?;
             }
-            "--release" => release = true,
+            "--release" => {
+                reject_inline(opt)?;
+                release = true;
+            }
             "--output" | "-o" => {
-                index += 1;
-                let value = arguments
-                    .get(index)
-                    .ok_or_else(|| CliError::usage("--output requires a path"))?;
+                let value = required_os_value(opt, &arguments, &mut index)?;
                 set_once(&mut output, PathBuf::from(value), "--output")?;
             }
             "--yield-points" => {
@@ -1254,7 +1296,8 @@ fn parse_wasi_build(mut arguments: Vec<OsString>) -> Result<WasiBuildInvocation,
             }
             _ => {
                 return Err(CliError::usage(format!(
-                    "unsupported build --target wasi option {option:?}"
+                    "unsupported build --target wasi option {:?}",
+                    opt.name
                 )));
             }
         }
@@ -1297,55 +1340,50 @@ fn parse_cargo(command: String, arguments: Vec<OsString>) -> Result<ParseResult,
             continue;
         }
 
-        let text = argument.to_str();
-        if matches!(text, Some("-h" | "--help")) {
-            // The top-level pre-scan intercepts `--help` before routing here, so
-            // this is a belt-and-suspenders path (e.g. a direct `parse_cargo`
-            // caller); surface the current verb's section.
-            return Ok(ParseResult::Help(help::topic_for(
-                current_verb().unwrap_or("run"),
-            )));
-        }
-        if matches!(text, Some("-V" | "--version")) {
-            return Ok(ParseResult::Version);
-        }
-        if let Some(value) = text.and_then(|value| value.strip_prefix("--seed=")) {
-            set_once(&mut seed, parse_u64("--seed", value)?, "--seed")?;
-        } else if text == Some("--seed") {
-            index += 1;
-            let value = arguments
-                .get(index)
-                .and_then(|value| value.to_str())
-                .ok_or_else(|| CliError::usage("--seed requires a UTF-8 value"))?;
-            set_once(&mut seed, parse_u64("--seed", value)?, "--seed")?;
-        } else if let Some(value) = text.and_then(|value| value.strip_prefix("--record=")) {
-            set_once(&mut record, PathBuf::from(value), "--record")?;
-        } else if text == Some("--record") {
-            index += 1;
-            let value = arguments
-                .get(index)
-                .ok_or_else(|| CliError::usage("--record requires a path"))?;
-            set_once(&mut record, PathBuf::from(value), "--record")?;
-        } else if text == Some("--budget") {
-            index += 1;
-            let value = utf8_argument(&arguments, index, "--budget")?;
-            set_once(&mut step_budget, parse_u64("--budget", value)?, "--budget")?;
-        } else if text == Some("--param") {
-            index += 1;
-            let value = utf8_argument(&arguments, index, "--param")?;
-            let (key, value) = value
-                .split_once('=')
-                .ok_or_else(|| CliError::usage("--param requires KEY=VALUE"))?;
-            if key.is_empty() || params.insert(key.into(), value.into()).is_some() {
-                return Err(CliError::usage("--param keys must be non-empty and unique"));
-            }
-        } else if text.is_some_and(|option| FAULT_FLAGS.contains(&option)) {
-            let option = text.expect("checked Some above");
-            index += 1;
-            let value = utf8_argument(&arguments, index, option)?;
-            apply_fault_flag(&mut faults, option, value)?;
-        } else {
+        let Some(text) = argument.to_str() else {
+            // A non-UTF-8 argument is never a Patina flag; forward it to Cargo.
             cargo_args.push(argument.clone());
+            index += 1;
+            continue;
+        };
+        let opt = split_opt(text);
+        match opt.name {
+            "-h" | "--help" => {
+                // The top-level pre-scan intercepts `--help` before routing here,
+                // so this is a belt-and-suspenders path (e.g. a direct
+                // `parse_cargo` caller); surface the current verb's section.
+                return Ok(ParseResult::Help(help::topic_for(
+                    current_verb().unwrap_or("run"),
+                )));
+            }
+            "-V" | "--version" => return Ok(ParseResult::Version),
+            "--seed" => {
+                let value = required_value(opt, &arguments, &mut index)?;
+                set_once(&mut seed, parse_u64("--seed", value)?, "--seed")?;
+            }
+            "--record" => {
+                let value = required_os_value(opt, &arguments, &mut index)?;
+                set_once(&mut record, PathBuf::from(value), "--record")?;
+            }
+            "--budget" => {
+                let value = required_value(opt, &arguments, &mut index)?;
+                set_once(&mut step_budget, parse_u64("--budget", value)?, "--budget")?;
+            }
+            "--param" => {
+                let value = required_value(opt, &arguments, &mut index)?;
+                let (key, value) = value
+                    .split_once('=')
+                    .ok_or_else(|| CliError::usage("--param requires KEY=VALUE"))?;
+                if key.is_empty() || params.insert(key.into(), value.into()).is_some() {
+                    return Err(CliError::usage("--param keys must be non-empty and unique"));
+                }
+            }
+            name if FAULT_FLAGS.contains(&name) => {
+                let value = required_value(opt, &arguments, &mut index)?;
+                apply_fault_flag(&mut faults, name, value)?;
+            }
+            // Any unrecognized option is forwarded to Cargo verbatim.
+            _ => cargo_args.push(argument.clone()),
         }
         index += 1;
     }
@@ -1410,21 +1448,22 @@ fn parse_cargo_replay(
             index += 1;
             continue;
         }
-        match argument.to_str() {
-            Some("--branch") => branch = true,
+        let opt = argument.to_str().map(split_opt);
+        match opt.map(|opt| opt.name) {
+            Some("--branch") => {
+                reject_inline(opt.expect("matched name"))?;
+                branch = true;
+            }
             Some("--timeline") => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--timeline")?;
+                let value = required_value(opt.expect("matched name"), &arguments, &mut index)?;
                 set_once(&mut timeline, value.to_string(), "--timeline")?;
             }
             Some("--from") => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--from")?;
+                let value = required_value(opt.expect("matched name"), &arguments, &mut index)?;
                 set_once(&mut branch_from, parse_u64("--from", value)?, "--from")?;
             }
             Some("--branch-seed") => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--branch-seed")?;
+                let value = required_value(opt.expect("matched name"), &arguments, &mut index)?;
                 set_once(
                     &mut branch_seed,
                     parse_u64("--branch-seed", value)?,
@@ -1432,13 +1471,11 @@ fn parse_cargo_replay(
                 )?;
             }
             Some("--branch-id") => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--branch-id")?;
+                let value = required_value(opt.expect("matched name"), &arguments, &mut index)?;
                 set_once(&mut branch_id, value.to_string(), "--branch-id")?;
             }
             Some("--parent") => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--parent")?;
+                let value = required_value(opt.expect("matched name"), &arguments, &mut index)?;
                 set_once(&mut parent, value.to_string(), "--parent")?;
             }
             // Any other flag or value is a Cargo selector, forwarded verbatim so
@@ -1520,29 +1557,28 @@ struct WasiHostInputs {
     socket_fds: BTreeSet<u32>,
 }
 
-/// Apply one WASI host-input flag (`value` already fetched) to `inputs`,
-/// returning `true` when `option` is a host-input flag and `false` otherwise.
-/// Shared by [`parse_wasi_run_from`] and [`parse_wasi_replay`] so the two verbs
-/// parse the guest environment identically.
+/// Apply one WASI host-input flag to `inputs`, returning `true` when `opt` is a
+/// host-input flag (having fetched its required value inline-or-next) and `false`
+/// otherwise (consuming nothing). Shared by [`parse_wasi_run_from`] and
+/// [`parse_wasi_replay`] so the two verbs parse the guest environment
+/// identically, both forms (`--flag VALUE` and `--flag=VALUE`).
 fn apply_wasi_host_input(
     inputs: &mut WasiHostInputs,
-    option: &str,
-    value: &OsStr,
+    opt: Opt<'_>,
+    arguments: &[OsString],
+    index: &mut usize,
 ) -> Result<bool, CliError> {
-    let utf8 = |name: &str| {
-        value
-            .to_str()
-            .ok_or_else(|| CliError::usage(format!("{name} requires UTF-8")))
-    };
-    match option {
+    match opt.name {
         "--fuel" => {
-            let parsed = parse_u64("--fuel", utf8("--fuel")?)?;
+            let parsed = parse_u64("--fuel", required_value(opt, arguments, index)?)?;
             set_once(&mut inputs.fuel, parsed, "--fuel")?;
             set_once(&mut inputs.resource_limits.fuel, parsed, "--fuel")?;
         }
-        "--arg" => inputs.arguments.push(utf8("--arg")?.into()),
+        "--arg" => inputs
+            .arguments
+            .push(required_value(opt, arguments, index)?.into()),
         "--socket" => {
-            let value = utf8("--socket")?;
+            let value = required_value(opt, arguments, index)?;
             let (fd, route) = value
                 .split_once('=')
                 .ok_or_else(|| CliError::usage("--socket requires FD=BIND->PEER"))?;
@@ -1564,7 +1600,7 @@ fn apply_wasi_host_input(
             });
         }
         "--env" => {
-            let value = utf8("--env")?;
+            let value = required_value(opt, arguments, index)?;
             let (key, value) = value
                 .split_once('=')
                 .ok_or_else(|| CliError::usage("--env requires KEY=VALUE"))?;
@@ -1579,35 +1615,35 @@ fn apply_wasi_host_input(
         }
         "--preopen" => inputs
             .preopens
-            .push(parse_wasi_preopen(utf8("--preopen")?)?),
+            .push(parse_wasi_preopen(required_value(opt, arguments, index)?)?),
         "--max-memory-pages" => set_once(
             &mut inputs.resource_limits.max_memory_pages,
-            parse_u32("--max-memory-pages", utf8("--max-memory-pages")?)?,
+            parse_u32("--max-memory-pages", required_value(opt, arguments, index)?)?,
             "--max-memory-pages",
         )?,
         "--max-descriptors" => set_once(
             &mut inputs.resource_limits.max_descriptors,
-            parse_usize("--max-descriptors", utf8("--max-descriptors")?)?,
+            parse_usize("--max-descriptors", required_value(opt, arguments, index)?)?,
             "--max-descriptors",
         )?,
         "--max-preopens" => set_once(
             &mut inputs.resource_limits.max_preopens,
-            parse_usize("--max-preopens", utf8("--max-preopens")?)?,
+            parse_usize("--max-preopens", required_value(opt, arguments, index)?)?,
             "--max-preopens",
         )?,
         "--max-path-bytes" => set_once(
             &mut inputs.resource_limits.max_path_bytes,
-            parse_usize("--max-path-bytes", utf8("--max-path-bytes")?)?,
+            parse_usize("--max-path-bytes", required_value(opt, arguments, index)?)?,
             "--max-path-bytes",
         )?,
         "--max-io-bytes" => set_once(
             &mut inputs.resource_limits.max_io_bytes,
-            parse_usize("--max-io-bytes", utf8("--max-io-bytes")?)?,
+            parse_usize("--max-io-bytes", required_value(opt, arguments, index)?)?,
             "--max-io-bytes",
         )?,
         "--max-iovecs" => set_once(
             &mut inputs.resource_limits.max_iovecs,
-            parse_usize("--max-iovecs", utf8("--max-iovecs")?)?,
+            parse_usize("--max-iovecs", required_value(opt, arguments, index)?)?,
             "--max-iovecs",
         )?,
         _ => return Ok(false),
@@ -1659,90 +1695,54 @@ fn parse_wasi_run_from(
     let mut inputs = WasiHostInputs::default();
     let mut index = 0;
     while index < arguments.len() {
-        let name = arguments[index]
-            .to_str()
-            .ok_or_else(|| CliError::usage("run options must be valid UTF-8"))?
-            .to_string();
-        index += 1;
-        // Valueless cooperative-SUT flags consume no following argument, so they
-        // are handled before the eager value fetch below (which requires one).
-        match name.as_str() {
+        let Some(text) = arguments[index].to_str() else {
+            return Err(CliError::usage("run options must be valid UTF-8"));
+        };
+        let opt = split_opt(text);
+        match opt.name {
+            // Optional-value cooperative-SUT/liveness switches: bare form or
+            // `=VALUE`, never a following token.
             "--liveness-watchdog" => {
-                liveness.watchdog = Some(String::new());
-                continue;
-            }
-            other if other.starts_with("--liveness-watchdog=") => {
-                let nanos = &other["--liveness-watchdog=".len()..];
-                parse_u64("--liveness-watchdog", nanos)?;
-                liveness.watchdog = Some(nanos.to_string());
-                continue;
+                liveness.watchdog = Some(optional_u64_arg(opt, "--liveness-watchdog")?);
             }
             "--converge-within" => {
-                liveness.converge = Some(String::new());
-                continue;
-            }
-            other if other.starts_with("--converge-within=") => {
-                let nanos = &other["--converge-within=".len()..];
-                parse_u64("--converge-within", nanos)?;
-                liveness.converge = Some(nanos.to_string());
-                continue;
-            }
-            other if other.starts_with("--heal-after=") => {
-                let nanos = &other["--heal-after=".len()..];
-                parse_u64("--heal-after", nanos)?;
-                liveness.heal_after = Some(nanos.to_string());
-                continue;
+                liveness.converge = Some(optional_u64_arg(opt, "--converge-within")?);
             }
             "--buggify" => {
-                buggify.get_or_insert_with(NativeBuggify::default);
-                continue;
+                let entry = buggify.get_or_insert_with(NativeBuggify::default);
+                if let Some(value) = opt.inline {
+                    let permille = parse_u64("--buggify", value)?;
+                    if permille > 1000 {
+                        return Err(CliError::usage(
+                            "--buggify permille must be within [0, 1000]",
+                        ));
+                    }
+                    set_once(&mut entry.fire_permille, permille.to_string(), "--buggify")?;
+                }
             }
             "--buggify-after-setup" => {
+                reject_inline(opt)?;
                 buggify
                     .get_or_insert_with(NativeBuggify::default)
                     .after_setup = true;
-                continue;
             }
-            other if other.starts_with("--buggify=") => {
-                let permille = parse_u64("--buggify", &other["--buggify=".len()..])?;
-                if permille > 1000 {
-                    return Err(CliError::usage(
-                        "--buggify permille must be within [0, 1000]",
-                    ));
-                }
-                set_once(
-                    &mut buggify
-                        .get_or_insert_with(NativeBuggify::default)
-                        .fire_permille,
-                    permille.to_string(),
-                    "--buggify",
-                )?;
-                continue;
+            // Required-value flags: `--flag VALUE` or `--flag=VALUE`.
+            "--heal-after" => {
+                let value = required_value(opt, &arguments, &mut index)?;
+                parse_u64("--heal-after", value)?;
+                liveness.heal_after = Some(value.to_string());
             }
-            _ => {}
-        }
-        let value = arguments
-            .get(index)
-            .ok_or_else(|| CliError::usage(format!("{name} requires a value")))?;
-        match name.as_str() {
-            "--seed" => set_once(
-                &mut seed,
-                parse_u64(
-                    "--seed",
-                    value
-                        .to_str()
-                        .ok_or_else(|| CliError::usage("--seed requires a UTF-8 value"))?,
-                )?,
-                "--seed",
-            )?,
-            "--record" => set_once(&mut record, PathBuf::from(value), "--record")?,
+            "--seed" => {
+                let value = required_value(opt, &arguments, &mut index)?;
+                set_once(&mut seed, parse_u64("--seed", value)?, "--seed")?;
+            }
+            "--record" => {
+                let value = required_os_value(opt, &arguments, &mut index)?;
+                set_once(&mut record, PathBuf::from(value), "--record")?;
+            }
             "--buggify-activation-permille" => {
-                let permille = parse_u64(
-                    "--buggify-activation-permille",
-                    value.to_str().ok_or_else(|| {
-                        CliError::usage("--buggify-activation-permille requires UTF-8")
-                    })?,
-                )?;
+                let value = required_value(opt, &arguments, &mut index)?;
+                let permille = parse_u64("--buggify-activation-permille", value)?;
                 if permille > 1000 {
                     return Err(CliError::usage(
                         "--buggify-activation-permille must be within [0, 1000]",
@@ -1757,12 +1757,8 @@ fn parse_wasi_run_from(
                 )?;
             }
             "--buggify-cutoff-nanos" => {
-                let nanos = parse_u64(
-                    "--buggify-cutoff-nanos",
-                    value
-                        .to_str()
-                        .ok_or_else(|| CliError::usage("--buggify-cutoff-nanos requires UTF-8"))?,
-                )?;
+                let value = required_value(opt, &arguments, &mut index)?;
+                let nanos = parse_u64("--buggify-cutoff-nanos", value)?;
                 set_once(
                     &mut buggify
                         .get_or_insert_with(NativeBuggify::default)
@@ -1771,23 +1767,15 @@ fn parse_wasi_run_from(
                     "--buggify-cutoff-nanos",
                 )?;
             }
-            "--heal-after" => {
-                let nanos = value
-                    .to_str()
-                    .ok_or_else(|| CliError::usage("--heal-after requires UTF-8"))?;
-                parse_u64("--heal-after", nanos)?;
-                liveness.heal_after = Some(nanos.to_string());
+            name if FAULT_FLAGS.contains(&name) => {
+                let value = required_value(opt, &arguments, &mut index)?;
+                apply_fault_flag(&mut faults, name, value)?;
             }
-            option if FAULT_FLAGS.contains(&option) => {
-                let value = value
-                    .to_str()
-                    .ok_or_else(|| CliError::usage(format!("{option} requires UTF-8")))?;
-                apply_fault_flag(&mut faults, option, value)?;
-            }
-            option => {
-                if !apply_wasi_host_input(&mut inputs, option, value)? {
+            _ => {
+                if !apply_wasi_host_input(&mut inputs, opt, &arguments, &mut index)? {
                     return Err(CliError::usage(format!(
-                        "unsupported option {option:?} for `run` of a WASI module"
+                        "unsupported option {:?} for `run` of a WASI module",
+                        opt.name
                     )));
                 }
             }
@@ -1832,25 +1820,25 @@ fn parse_wasi_replay(
     let mut parent = None;
     let mut index = 0;
     while index < arguments.len() {
-        let option = arguments[index]
-            .to_str()
-            .ok_or_else(|| CliError::usage("replay options must be valid UTF-8"))?
-            .to_string();
-        match option.as_str() {
-            "--branch" => branch = true,
+        let Some(text) = arguments[index].to_str() else {
+            return Err(CliError::usage("replay options must be valid UTF-8"));
+        };
+        let opt = split_opt(text);
+        match opt.name {
+            "--branch" => {
+                reject_inline(opt)?;
+                branch = true;
+            }
             "--timeline" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--timeline")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 set_once(&mut timeline, value.to_string(), "--timeline")?;
             }
             "--from" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--from")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 set_once(&mut branch_from, parse_u64("--from", value)?, "--from")?;
             }
             "--branch-seed" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--branch-seed")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 set_once(
                     &mut branch_seed,
                     parse_u64("--branch-seed", value)?,
@@ -1858,13 +1846,11 @@ fn parse_wasi_replay(
                 )?;
             }
             "--branch-id" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--branch-id")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 set_once(&mut branch_id, value.to_string(), "--branch-id")?;
             }
             "--parent" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--parent")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 set_once(&mut parent, value.to_string(), "--parent")?;
             }
             // Semantic inputs are restored from the trace, never re-supplied. The
@@ -1878,8 +1864,7 @@ fn parse_wasi_replay(
                     || other == "--buggify"
                     || other == "--buggify-after-setup"
                     || other == "--buggify-activation-permille"
-                    || other == "--buggify-cutoff-nanos"
-                    || other.starts_with("--buggify=") =>
+                    || other == "--buggify-cutoff-nanos" =>
             {
                 return Err(CliError::usage(format!(
                     "replay restores run semantics from the trace and does not accept {other}; \
@@ -1887,13 +1872,10 @@ the trace is authoritative"
                 )));
             }
             _ => {
-                index += 1;
-                let value = arguments
-                    .get(index)
-                    .ok_or_else(|| CliError::usage(format!("{option} requires a value")))?;
-                if !apply_wasi_host_input(&mut inputs, &option, value)? {
+                if !apply_wasi_host_input(&mut inputs, opt, &arguments, &mut index)? {
                     return Err(CliError::usage(format!(
-                        "unsupported option {option:?} for `replay` of a WASI module"
+                        "unsupported option {:?} for `replay` of a WASI module",
+                        opt.name
                     )));
                 }
             }
@@ -1948,28 +1930,19 @@ fn parse_explore(arguments: Vec<OsString>) -> Result<ExploreInvocation, CliError
             forwarded.extend(arguments[index..].iter().cloned());
             break;
         }
-        let name = arguments[index].to_string_lossy();
-        let (option, inline) = name
-            .split_once('=')
-            .map_or((name.as_ref(), None), |(name, value)| (name, Some(value)));
-        if matches!(option, "--seeds" | "--start") {
-            let value = if let Some(value) = inline {
-                value
-            } else {
-                index += 1;
-                arguments
-                    .get(index)
-                    .and_then(|value| value.to_str())
-                    .ok_or_else(|| CliError::usage(format!("{option} requires a value")))?
-            };
-            let value = parse_u64(option, value)?;
-            if option == "--seeds" {
-                set_once(&mut seeds, value, option)?;
-            } else {
-                set_once(&mut start, value, option)?;
+        let opt = arguments[index].to_str().map(split_opt);
+        match opt.map(|opt| opt.name) {
+            Some(name @ ("--seeds" | "--seed-start")) => {
+                let opt = opt.expect("matched name");
+                let value = parse_u64(name, required_value(opt, &arguments, &mut index)?)?;
+                if name == "--seeds" {
+                    set_once(&mut seeds, value, name)?;
+                } else {
+                    set_once(&mut start, value, name)?;
+                }
             }
-        } else {
-            forwarded.push(arguments[index].clone());
+            // Everything else is the wrapped `run`/`test` command's; forward it.
+            _ => forwarded.push(arguments[index].clone()),
         }
         index += 1;
     }
@@ -2059,26 +2032,27 @@ fn parse_native_audit_from(
     let mut raw = false;
     let mut index = 0;
     while index < arguments.len() {
-        if arguments[index] == "--raw" {
-            raw = true;
-            index += 1;
-            continue;
+        let opt = arguments[index].to_str().map(split_opt);
+        match opt.map(|opt| opt.name) {
+            Some("--raw") => {
+                reject_inline(opt.expect("matched name"))?;
+                raw = true;
+            }
+            Some("--allow") => {
+                let symbol = required_value(opt.expect("matched name"), &arguments, &mut index)?;
+                if symbol.is_empty() {
+                    return Err(CliError::usage("--allow symbol must not be empty"));
+                }
+                allow.insert(symbol.to_string());
+            }
+            _ => {
+                return Err(CliError::usage(format!(
+                    "unsupported option {:?} for `audit` of a native binary",
+                    arguments[index]
+                )));
+            }
         }
-        if arguments[index] != "--allow" {
-            return Err(CliError::usage(format!(
-                "unsupported option {:?} for `audit` of a native binary",
-                arguments[index]
-            )));
-        }
-        let symbol = arguments
-            .get(index + 1)
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| CliError::usage("--allow requires a UTF-8 symbol"))?;
-        if symbol.is_empty() {
-            return Err(CliError::usage("--allow symbol must not be empty"));
-        }
-        allow.insert(symbol.into());
-        index += 2;
+        index += 1;
     }
     Ok(NativeAuditInvocation { binary, allow, raw })
 }
@@ -2110,41 +2084,39 @@ fn parse_native_build(mut arguments: Vec<OsString>) -> Result<NativeBuildInvocat
     let mut yield_points = false;
     let mut index = 0;
     while index < arguments.len() {
-        let option = arguments[index]
+        let text = arguments[index]
             .to_str()
             .ok_or_else(|| CliError::usage("build options must be valid UTF-8"))?;
-        match option {
+        let opt = split_opt(text);
+        match opt.name {
             "--output" | "-o" => {
-                index += 1;
-                let path = arguments
-                    .get(index)
-                    .ok_or_else(|| CliError::usage("--output requires a path"))?;
-                set_once(&mut output, PathBuf::from(path), "--output")?;
+                let value = required_os_value(opt, &arguments, &mut index)?;
+                set_once(&mut output, PathBuf::from(value), "--output")?;
             }
             "--edition" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--edition")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 set_once(&mut edition, value.to_string(), "--edition")?;
             }
             "--release" => {
+                reject_inline(opt)?;
                 release = true;
             }
             "--yield-points" => {
+                reject_inline(opt)?;
                 yield_points = true;
             }
             "--package" | "-p" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--package")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 set_once(&mut package, value.to_string(), "--package")?;
             }
             "--bin" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--bin")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 set_once(&mut bin, value.to_string(), "--bin")?;
             }
             _ => {
                 return Err(CliError::usage(format!(
-                    "unsupported build option {option:?}"
+                    "unsupported build option {:?}",
+                    opt.name
                 )));
             }
         }
@@ -2416,34 +2388,24 @@ fn liveness_env_pairs(liveness: &NativeLiveness) -> Vec<(&'static str, String)> 
 /// `run` family so `--liveness-watchdog`, `--converge-within`, and `--heal-after`
 /// parse identically. A supplied budget is validated as an unsigned integer.
 fn parse_liveness_flag(
-    option: &str,
+    opt: Opt<'_>,
     arguments: &[OsString],
     index: &mut usize,
     liveness: &mut NativeLiveness,
 ) -> Result<bool, CliError> {
-    match option {
-        "--liveness-watchdog" => liveness.watchdog = Some(String::new()),
-        value if value.starts_with("--liveness-watchdog=") => {
-            let nanos = &value["--liveness-watchdog=".len()..];
-            parse_u64("--liveness-watchdog", nanos)?;
-            liveness.watchdog = Some(nanos.to_string());
+    match opt.name {
+        // Optional-value: bare switch (runtime default) or `=VALUE`.
+        "--liveness-watchdog" => {
+            liveness.watchdog = Some(optional_u64_arg(opt, "--liveness-watchdog")?);
         }
-        "--converge-within" => liveness.converge = Some(String::new()),
-        value if value.starts_with("--converge-within=") => {
-            let nanos = &value["--converge-within=".len()..];
-            parse_u64("--converge-within", nanos)?;
-            liveness.converge = Some(nanos.to_string());
+        "--converge-within" => {
+            liveness.converge = Some(optional_u64_arg(opt, "--converge-within")?);
         }
+        // Required-value: `--heal-after VALUE` or `--heal-after=VALUE`.
         "--heal-after" => {
-            *index += 1;
-            let value = utf8_argument(arguments, *index, "--heal-after")?;
+            let value = required_value(opt, arguments, index)?;
             parse_u64("--heal-after", value)?;
             liveness.heal_after = Some(value.to_string());
-        }
-        value if value.starts_with("--heal-after=") => {
-            let nanos = &value["--heal-after=".len()..];
-            parse_u64("--heal-after", nanos)?;
-            liveness.heal_after = Some(nanos.to_string());
         }
         _ => return Ok(false),
     }
@@ -2486,24 +2448,24 @@ fn parse_native_run_from(
     let mut harness = false;
     let mut index = 0;
     while index < arguments.len() {
-        let option = arguments[index]
-            .to_str()
-            .ok_or_else(|| CliError::usage("run options must be valid UTF-8"))?;
-        match option {
+        let Some(text) = arguments[index].to_str() else {
+            return Err(CliError::usage("run options must be valid UTF-8"));
+        };
+        let opt = split_opt(text);
+        match opt.name {
             "--harness" => {
+                reject_inline(opt)?;
                 harness = true;
             }
             "--allow" => {
-                index += 1;
-                let symbol = utf8_argument(&arguments, index, "--allow")?;
+                let symbol = required_value(opt, &arguments, &mut index)?;
                 if symbol.is_empty() {
                     return Err(CliError::usage("--allow symbol must not be empty"));
                 }
                 allow.insert(symbol.to_string());
             }
             "--allow-unsupported-symbols" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--allow-unsupported-symbols")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 let policy = if value == "all" {
                     UnsupportedPolicy::All
                 } else {
@@ -2527,13 +2489,11 @@ fn parse_native_run_from(
                 )?;
             }
             "--seed" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--seed")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 set_once(&mut seed, parse_u64("--seed", value)?, "--seed")?;
             }
             "--net-latency-nanos" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--net-latency-nanos")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 set_once(
                     &mut net_latency_nanos,
                     parse_u64("--net-latency-nanos", value)?,
@@ -2541,83 +2501,29 @@ fn parse_native_run_from(
                 )?;
             }
             "--mount" => {
-                index += 1;
-                let path = arguments
-                    .get(index)
-                    .ok_or_else(|| CliError::usage("--mount requires a host directory path"))?;
-                set_once(&mut mount, PathBuf::from(path), "--mount")?;
+                let value = required_os_value(opt, &arguments, &mut index)?;
+                set_once(&mut mount, PathBuf::from(value), "--mount")?;
             }
-            "--fs-crash-at" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--fs-crash-at")?;
-                validate_crash_at(value)?;
-                set_once(&mut faults.fs_crash_at, value.to_string(), "--fs-crash-at")?;
-            }
-            "--fs-torn-granularity" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--fs-torn-granularity")?;
-                if value != "block" && value != "byte" {
-                    return Err(CliError::usage(format!(
-                        "--fs-torn-granularity must be block or byte; got {value:?}"
-                    )));
-                }
-                set_once(
-                    &mut faults.fs_torn_granularity,
-                    value.to_string(),
-                    "--fs-torn-granularity",
-                )?;
-            }
-            "--sleep-jitter-nanos" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--sleep-jitter-nanos")?;
-                validate_nanos_range("--sleep-jitter-nanos", value)?;
-                set_once(
-                    &mut faults.sleep_jitter_nanos,
-                    value.to_string(),
-                    "--sleep-jitter-nanos",
-                )?;
-            }
-            "--net-jitter-nanos" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--net-jitter-nanos")?;
-                validate_nanos_range("--net-jitter-nanos", value)?;
-                set_once(
-                    &mut faults.net_jitter_nanos,
-                    value.to_string(),
-                    "--net-jitter-nanos",
-                )?;
-            }
-            "--net-drop-permille" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--net-drop-permille")?;
-                let permille = parse_u64("--net-drop-permille", value)?;
-                if permille > 1000 {
-                    return Err(CliError::usage(
-                        "--net-drop-permille must be within [0, 1000]",
-                    ));
-                }
-                set_once(
-                    &mut faults.net_drop_permille,
-                    permille.to_string(),
-                    "--net-drop-permille",
-                )?;
+            // The five seed-driven fault knobs, validated by the shared
+            // `apply_fault_flag` exactly as on the cargo and WASI families.
+            name if FAULT_FLAGS.contains(&name) => {
+                let value = required_value(opt, &arguments, &mut index)?;
+                apply_fault_flag(&mut faults, name, value)?;
             }
             "--buggify" => {
-                buggify.get_or_insert_with(NativeBuggify::default);
-            }
-            value if value.starts_with("--buggify=") => {
-                let permille = parse_u64("--buggify", &value["--buggify=".len()..])?;
-                if permille > 1000 {
-                    return Err(CliError::usage(
-                        "--buggify permille must be within [0, 1000]",
-                    ));
-                }
                 let entry = buggify.get_or_insert_with(NativeBuggify::default);
-                set_once(&mut entry.fire_permille, permille.to_string(), "--buggify")?;
+                if let Some(value) = opt.inline {
+                    let permille = parse_u64("--buggify", value)?;
+                    if permille > 1000 {
+                        return Err(CliError::usage(
+                            "--buggify permille must be within [0, 1000]",
+                        ));
+                    }
+                    set_once(&mut entry.fire_permille, permille.to_string(), "--buggify")?;
+                }
             }
             "--buggify-activation-permille" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--buggify-activation-permille")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 let permille = parse_u64("--buggify-activation-permille", value)?;
                 if permille > 1000 {
                     return Err(CliError::usage(
@@ -2632,8 +2538,7 @@ fn parse_native_run_from(
                 )?;
             }
             "--buggify-cutoff-nanos" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--buggify-cutoff-nanos")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 let nanos = parse_u64("--buggify-cutoff-nanos", value)?;
                 let entry = buggify.get_or_insert_with(NativeBuggify::default);
                 set_once(
@@ -2643,24 +2548,26 @@ fn parse_native_run_from(
                 )?;
             }
             "--buggify-after-setup" => {
+                reject_inline(opt)?;
                 buggify
                     .get_or_insert_with(NativeBuggify::default)
                     .after_setup = true;
             }
             "--sched-pct" => {
-                set_once(&mut schedule.pct, String::new(), "--sched-pct")?;
-            }
-            value if value.starts_with("--sched-pct=") => {
-                let depth = &value["--sched-pct=".len()..];
-                let parsed = parse_u64("--sched-pct", depth)?;
-                if parsed < 1 {
-                    return Err(CliError::usage("--sched-pct bug depth must be >= 1"));
-                }
-                set_once(&mut schedule.pct, parsed.to_string(), "--sched-pct")?;
+                let value = match opt.inline {
+                    Some(value) => {
+                        let parsed = parse_u64("--sched-pct", value)?;
+                        if parsed < 1 {
+                            return Err(CliError::usage("--sched-pct bug depth must be >= 1"));
+                        }
+                        parsed.to_string()
+                    }
+                    None => String::new(),
+                };
+                set_once(&mut schedule.pct, value, "--sched-pct")?;
             }
             "--sched-pct-steps" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--sched-pct-steps")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 let steps = parse_u64("--sched-pct-steps", value)?;
                 if steps < 1 {
                     return Err(CliError::usage("--sched-pct-steps must be >= 1"));
@@ -2672,19 +2579,20 @@ fn parse_native_run_from(
                 )?;
             }
             "--starve" => {
-                set_once(&mut schedule.starve, String::new(), "--starve")?;
-            }
-            value if value.starts_with("--starve=") => {
-                let count = &value["--starve=".len()..];
-                let parsed = parse_u64("--starve", count)?;
-                if parsed < 1 {
-                    return Err(CliError::usage("--starve interval count must be >= 1"));
-                }
-                set_once(&mut schedule.starve, parsed.to_string(), "--starve")?;
+                let value = match opt.inline {
+                    Some(value) => {
+                        let parsed = parse_u64("--starve", value)?;
+                        if parsed < 1 {
+                            return Err(CliError::usage("--starve interval count must be >= 1"));
+                        }
+                        parsed.to_string()
+                    }
+                    None => String::new(),
+                };
+                set_once(&mut schedule.starve, value, "--starve")?;
             }
             "--starve-max-len" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--starve-max-len")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 let len = parse_u64("--starve-max-len", value)?;
                 if len < 1 {
                     return Err(CliError::usage("--starve-max-len must be >= 1"));
@@ -2696,8 +2604,7 @@ fn parse_native_run_from(
                 )?;
             }
             "--starve-window" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--starve-window")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 let window = parse_u64("--starve-window", value)?;
                 if window < 1 {
                     return Err(CliError::usage("--starve-window must be >= 1"));
@@ -2709,24 +2616,22 @@ fn parse_native_run_from(
                 )?;
             }
             "--swarm" => {
+                reject_inline(opt)?;
                 schedule.swarm = true;
             }
             "--record" => {
-                index += 1;
-                let path = arguments
-                    .get(index)
-                    .ok_or_else(|| CliError::usage("--record requires a path"))?;
-                set_once(&mut record, PathBuf::from(path), "--record")?;
+                let value = required_os_value(opt, &arguments, &mut index)?;
+                set_once(&mut record, PathBuf::from(value), "--record")?;
             }
             "--fingerprint" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--fingerprint")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 set_once(&mut fingerprint, value.to_string(), "--fingerprint")?;
             }
-            other => {
-                if !parse_liveness_flag(other, &arguments, &mut index, &mut liveness)? {
+            _ => {
+                if !parse_liveness_flag(opt, &arguments, &mut index, &mut liveness)? {
                     return Err(CliError::usage(format!(
-                        "unsupported option {option:?} for `run` of a native binary"
+                        "unsupported option {:?} for `run` of a native binary",
+                        opt.name
                     )));
                 }
             }
@@ -2875,10 +2780,12 @@ fn parse_native_replay(
     let mut harness = false;
     let mut index = 0;
     while index < arguments.len() {
-        let option = arguments[index]
-            .to_str()
-            .ok_or_else(|| CliError::usage("replay options must be valid UTF-8"))?;
-        match option {
+        let Some(text) = arguments[index].to_str() else {
+            return Err(CliError::usage("replay options must be valid UTF-8"));
+        };
+        let opt = split_opt(text);
+        let option = opt.name;
+        match opt.name {
             // Replaying a harness binary needs the same deferred init as its
             // record run: without it the constructor would install a context the
             // harness cannot own, so `run_with` would fail closed on a boundary or
@@ -2886,11 +2793,11 @@ fn parse_native_replay(
             // recorded semantic), so it is supplied at replay just like
             // `--fingerprint`/`--mount`.
             "--harness" => {
+                reject_inline(opt)?;
                 harness = true;
             }
             "--fingerprint" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--fingerprint")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 set_once(&mut fingerprint, value.to_string(), "--fingerprint")?;
             }
             // `--mount` re-supplies the host corpus, a host input the trace cannot
@@ -2898,23 +2805,18 @@ fn parse_native_replay(
             // still rejects a wrong corpus). So, like `--fingerprint`, it is a
             // host/build input rather than a semantic knob restored from metadata.
             "--mount" => {
-                index += 1;
-                let path = arguments
-                    .get(index)
-                    .ok_or_else(|| CliError::usage("--mount requires a host directory path"))?;
-                set_once(&mut mount, PathBuf::from(path), "--mount")?;
+                let value = required_os_value(opt, &arguments, &mut index)?;
+                set_once(&mut mount, PathBuf::from(value), "--mount")?;
             }
             "--allow" => {
-                index += 1;
-                let symbol = utf8_argument(&arguments, index, "--allow")?;
+                let symbol = required_value(opt, &arguments, &mut index)?;
                 if symbol.is_empty() {
                     return Err(CliError::usage("--allow symbol must not be empty"));
                 }
                 allow.insert(symbol.to_string());
             }
             "--allow-unsupported-symbols" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--allow-unsupported-symbols")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 let policy = if value == "all" {
                     UnsupportedPolicy::All
                 } else {
@@ -2971,16 +2873,6 @@ and native runs cannot branch; branch/timeline replay is the Cargo package and W
                     "replay restores run semantics from the trace and does not accept {option}; \
 the trace is authoritative"
                 )));
-            }
-            other
-                if other.starts_with("--buggify=")
-                    || other.starts_with("--sched-pct=")
-                    || other.starts_with("--starve=") =>
-            {
-                return Err(CliError::usage(
-                    "replay restores run semantics from the trace and does not accept this flag; the \
-trace is authoritative",
-                ));
             }
             _ => {
                 return Err(CliError::usage(format!(
@@ -3047,28 +2939,27 @@ fn parse_minimize_trace(
     let mut prune = false;
     let mut index = 0;
     while index < arguments.len() {
-        let option = arguments[index]
+        let text = arguments[index]
             .to_str()
             .ok_or_else(|| CliError::usage("minimize options must be valid UTF-8"))?;
-        match option {
-            "--output" => {
-                index += 1;
-                let path = arguments
-                    .get(index)
-                    .ok_or_else(|| CliError::usage("--output requires a path"))?;
-                set_once(&mut output, PathBuf::from(path), "--output")?;
+        let opt = split_opt(text);
+        match opt.name {
+            "--output" | "-o" => {
+                let value = required_os_value(opt, &arguments, &mut index)?;
+                set_once(&mut output, PathBuf::from(value), "--output")?;
             }
             "--timeline" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--timeline")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 set_once(&mut timeline, value.into(), "--timeline")?;
             }
             "--prune-branches" => {
+                reject_inline(opt)?;
                 prune = true;
             }
             _ => {
                 return Err(CliError::usage(format!(
-                    "unsupported minimize option {option:?}"
+                    "unsupported minimize option {:?}",
+                    opt.name
                 )));
             }
         }
@@ -3098,19 +2989,18 @@ fn parse_minimize_scenario(
     let mut params = BTreeMap::new();
     let mut index = 0;
     while index < arguments.len() {
-        let option = arguments[index]
+        let text = arguments[index]
             .to_str()
             .ok_or_else(|| CliError::usage("minimize options must be valid UTF-8"))?;
-        match option {
-            "--scenario" => {}
+        let opt = split_opt(text);
+        match opt.name {
+            "--scenario" => reject_inline(opt)?,
             "--seed" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--seed")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 set_once(&mut seed, parse_u64("--seed", value)?, "--seed")?;
             }
             "--seed-budget" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--seed-budget")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 set_once(
                     &mut seed_budget,
                     parse_u64("--seed-budget", value)?,
@@ -3118,8 +3008,7 @@ fn parse_minimize_scenario(
                 )?;
             }
             "--param" => {
-                index += 1;
-                let value = utf8_argument(&arguments, index, "--param")?;
+                let value = required_value(opt, &arguments, &mut index)?;
                 let (key, param_value) = value
                     .split_once('=')
                     .ok_or_else(|| CliError::usage("--param requires KEY=VALUE"))?;
@@ -3127,14 +3016,16 @@ fn parse_minimize_scenario(
                     return Err(CliError::usage("--param keys must be non-empty and unique"));
                 }
             }
-            "--output" | "--timeline" | "--prune-branches" => {
+            "--output" | "-o" | "--timeline" | "--prune-branches" => {
                 return Err(CliError::usage(format!(
-                    "minimize --scenario reduces experiment inputs and does not accept {option}"
+                    "minimize --scenario reduces experiment inputs and does not accept {}",
+                    opt.name
                 )));
             }
             _ => {
                 return Err(CliError::usage(format!(
-                    "unsupported minimize option {option:?}"
+                    "unsupported minimize option {:?}",
+                    opt.name
                 )));
             }
         }
@@ -3158,6 +3049,89 @@ fn utf8_argument<'a>(
         .get(index)
         .and_then(|value| value.to_str())
         .ok_or_else(|| CliError::usage(format!("{name} requires a UTF-8 value")))
+}
+
+/// A tokenized CLI option: its flag name and any inline `=VALUE`. Splitting on
+/// the first `=` is what lets every family accept both `--flag VALUE` and
+/// `--flag=VALUE` for a required value (and `--flag=VALUE` for an optional one)
+/// through one code path instead of scattered `starts_with` surgery. An
+/// unrecognized flag is forwarded by cloning its original `OsString`, so this
+/// carries only the split-off name and value.
+#[derive(Clone, Copy)]
+struct Opt<'a> {
+    name: &'a str,
+    inline: Option<&'a str>,
+}
+
+/// Split a UTF-8 option token into `(name, inline)`. Only a leading-dash token is
+/// treated as a flag with an inline value; a positional like `zone=a` is returned
+/// whole so it is never mistaken for a flag.
+fn split_opt(token: &str) -> Opt<'_> {
+    match token.split_once('=') {
+        Some((name, value)) if name.starts_with('-') => Opt {
+            name,
+            inline: Some(value),
+        },
+        _ => Opt {
+            name: token,
+            inline: None,
+        },
+    }
+}
+
+/// The value for a required-value flag: the inline `=VALUE` if present, else the
+/// next token (advancing `index`). Both forms, one path.
+fn required_value<'a>(
+    opt: Opt<'a>,
+    arguments: &'a [OsString],
+    index: &mut usize,
+) -> Result<&'a str, CliError> {
+    if let Some(value) = opt.inline {
+        return Ok(value);
+    }
+    *index += 1;
+    utf8_argument(arguments, *index, opt.name)
+}
+
+/// Like [`required_value`] but yields an owned [`OsString`], so a space-form path
+/// value may be non-UTF-8. An inline `=VALUE` is necessarily UTF-8 (the token was
+/// split as a string).
+fn required_os_value(
+    opt: Opt<'_>,
+    arguments: &[OsString],
+    index: &mut usize,
+) -> Result<OsString, CliError> {
+    if let Some(value) = opt.inline {
+        return Ok(OsString::from(value));
+    }
+    *index += 1;
+    arguments
+        .get(*index)
+        .cloned()
+        .ok_or_else(|| CliError::usage(format!("{} requires a value", opt.name)))
+}
+
+/// Reject an inline `=VALUE` on a valueless switch, so `--release=x` fails loudly
+/// rather than silently ignoring the value.
+fn reject_inline(opt: Opt<'_>) -> Result<(), CliError> {
+    if opt.inline.is_some() {
+        return Err(CliError::usage(format!("{} takes no value", opt.name)));
+    }
+    Ok(())
+}
+
+/// The stored representation of an optional-value nanos flag: the validated
+/// inline `=VALUE`, or the empty string for the bare switch (runtime default).
+/// The space form is intentionally unsupported for optional-value flags — it
+/// would be ambiguous with a following positional.
+fn optional_u64_arg(opt: Opt<'_>, name: &str) -> Result<String, CliError> {
+    match opt.inline {
+        Some(value) => {
+            parse_u64(name, value)?;
+            Ok(value.to_string())
+        }
+        None => Ok(String::new()),
+    }
 }
 
 fn set_once<T>(slot: &mut Option<T>, value: T, name: &str) -> Result<(), CliError> {
@@ -6519,7 +6493,7 @@ mod tests {
             "explore",
             "test",
             "--seeds=3",
-            "--start",
+            "--seed-start",
             "5",
             "--release",
         ]))
@@ -6571,7 +6545,7 @@ mod tests {
             module.to_str().unwrap(),
             "--seeds",
             "4",
-            "--start",
+            "--seed-start",
             "2",
         ]))
         .unwrap()
@@ -7803,16 +7777,16 @@ mod tests {
                 "--allow-unsupported-symbols",
                 "--target",
             ],
-            "explore" => &["--seeds", "--start"],
+            "explore" => &["--seeds", "--seed-start"],
             "campaign" => &[
                 "--spec",
-                "--out",
+                "--out-dir",
                 "--gens",
-                "--seed-base",
+                "--seed-start",
                 "--timeout-secs",
                 "--buggify",
                 "--swarm",
-                "--pct",
+                "--sched-pct",
                 "--faults",
                 "--report",
                 "--liveness-watchdog",
@@ -7822,6 +7796,7 @@ mod tests {
             ],
             "minimize" => &[
                 "--output",
+                "-o",
                 "--timeline",
                 "--prune-branches",
                 "--scenario",
@@ -7874,5 +7849,157 @@ mod tests {
         ] {
             assert!(verbs.contains_key(verb), "JSON help missing verb {verb}");
         }
+    }
+
+    // ---- Phase 2: renames, uniform value syntax, fail-closed positionals ----
+
+    #[test]
+    fn explore_seed_start_replaces_start() {
+        // The new spelling sets the range start.
+        match parse(strings(&["explore", "test", "--seed-start=5"])).unwrap() {
+            ParseResult::Explore(exploration) => assert_eq!(exploration.start_seed, 5),
+            _ => panic!("expected exploration"),
+        }
+        // The old `--start` is no longer an explore flag; it forwards to the
+        // wrapped command, so the range start falls back to the default (0).
+        match parse(strings(&["explore", "test", "--start", "5"])).unwrap() {
+            ParseResult::Explore(exploration) => assert_eq!(exploration.start_seed, 0),
+            _ => panic!("expected exploration"),
+        }
+    }
+
+    #[test]
+    fn required_value_flags_accept_both_space_and_equals_forms() {
+        // Cargo family.
+        assert_eq!(
+            invocation(&["run", "--budget", "100"]).step_budget,
+            Some(100)
+        );
+        assert_eq!(invocation(&["run", "--budget=100"]).step_budget, Some(100));
+        // WASI family (previously `--fuel=100` was rejected).
+        assert_eq!(
+            parse_wasi_run(strings(&["m.wasm", "--fuel", "128"]))
+                .unwrap()
+                .fuel,
+            128
+        );
+        assert_eq!(
+            parse_wasi_run(strings(&["m.wasm", "--fuel=128"]))
+                .unwrap()
+                .fuel,
+            128
+        );
+        // Native family.
+        assert_eq!(
+            parse_native_run(strings(&["bin", "--net-latency-nanos", "50"]))
+                .unwrap()
+                .net_latency_nanos,
+            Some(50)
+        );
+        assert_eq!(
+            parse_native_run(strings(&["bin", "--net-latency-nanos=50"]))
+                .unwrap()
+                .net_latency_nanos,
+            Some(50)
+        );
+        // Build.
+        match parse_native_build(strings(&["x.rs", "--output", "o", "--edition=2021"]))
+            .unwrap()
+            .target
+        {
+            NativeBuildTarget::Source { edition, .. } => assert_eq!(edition, "2021"),
+            _ => panic!("expected a source build"),
+        }
+        // Minimize scenario (both `=` forms) and the new trace `-o` short.
+        match parse_minimize(strings(&[
+            "--scenario",
+            "--seed=4",
+            "--seed-budget=9",
+            "--",
+            "oracle",
+        ]))
+        .unwrap()
+        {
+            MinimizeInvocation::Scenario(scenario) => {
+                assert_eq!(scenario.seed, 4);
+                assert_eq!(scenario.seed_budget, 9);
+            }
+            _ => panic!("expected a scenario minimization"),
+        }
+        match parse_minimize(strings(&["t", "-o", "out", "--", "oracle"])).unwrap() {
+            MinimizeInvocation::Trace(trace) => assert_eq!(trace.output, PathBuf::from("out")),
+            _ => panic!("expected a trace minimization"),
+        }
+    }
+
+    #[test]
+    fn inline_arg_passes_a_literal_help_token() {
+        // `--arg=--help` delivers a literal `--help` to the WASI guest argv; the
+        // inline form is the only way, since a bare `--help` before `--` is
+        // intercepted as Patina help (see `help_is_intercepted_for_every_verb`).
+        let inv = parse_wasi_run(strings(&["m.wasm", "--arg=--help", "--arg", "tail"])).unwrap();
+        assert_eq!(
+            inv.arguments,
+            vec!["--help".to_string(), "tail".to_string()]
+        );
+    }
+
+    #[test]
+    fn optional_value_flags_reject_the_space_form_value() {
+        // `--buggify` is optional-value: `--buggify=250` sets the permille, a bare
+        // `--buggify` enables it, and a following `250` is NOT consumed as a value
+        // (it would be a positional/unknown, here a guest binary already given).
+        let inline = parse_native_run(strings(&["bin", "--buggify=250"])).unwrap();
+        assert_eq!(
+            inline.buggify.and_then(|b| b.fire_permille),
+            Some("250".to_string())
+        );
+    }
+
+    #[test]
+    fn nonexistent_pathlike_positional_fails_closed() {
+        // A token that clearly names a file path but does not exist is a hard
+        // error, not a silent cargo-family fallthrough.
+        assert!(classify_arg(OsStr::new("nonexistent.wasm")).is_err());
+        assert!(classify_arg(OsStr::new("missing.rs")).is_err());
+        assert!(classify_arg(OsStr::new("sub/dir/thing")).is_err());
+        assert!(classify_arg(OsStr::new("no/such/Cargo.toml")).is_err());
+        // A bare name (no extension, no separator) stays a cargo argument.
+        assert!(matches!(
+            classify_arg(OsStr::new("mycrate")).unwrap(),
+            ArgKind::Other
+        ));
+        // Routed through the verbs.
+        assert!(parse(strings(&["run", "nope.wasm"])).is_err());
+        assert!(parse(strings(&["audit", "nope.wasm"])).is_err());
+        assert!(parse(strings(&["replay", "nope.wasm", "trace"])).is_err());
+    }
+
+    #[test]
+    fn version_intercepted_across_verbs_before_separator() {
+        for verb in [
+            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize",
+        ] {
+            assert!(
+                matches!(
+                    parse(strings(&[verb, "--version"])),
+                    Ok(ParseResult::Version)
+                ),
+                "{verb} --version"
+            );
+            assert!(
+                matches!(parse(strings(&[verb, "-V"])), Ok(ParseResult::Version)),
+                "{verb} -V"
+            );
+        }
+        assert!(matches!(
+            parse(strings(&["--version"])),
+            Ok(ParseResult::Version)
+        ));
+        // After `--` it belongs to the guest and is not intercepted.
+        assert!(!matches!(
+            parse(strings(&["run", "mycrate", "--", "--version"])),
+            Ok(ParseResult::Version)
+        ));
     }
 }

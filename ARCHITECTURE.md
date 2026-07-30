@@ -193,7 +193,7 @@ Examples:
 cargo patina test --seed 123
 cargo patina test --seed 123 --record trace.patina
 cargo patina replay . trace.patina
-cargo patina explore run ./guest --seeds 100 --start 0
+cargo patina explore run ./guest --seeds 100 --seed-start 0
 ```
 
 External controls include:

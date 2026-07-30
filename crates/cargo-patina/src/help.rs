@@ -835,8 +835,8 @@ const EXPLORE: Verb = Verb {
     name: "explore",
     summary: "Sweep a seed range of `run`/`test`, reporting per-seed outcomes.",
     synopsis: &[
-        "cargo patina explore run <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [--seeds N] [--start N] [RUN OPTIONS]",
-        "cargo patina explore test [--seeds N] [--start N] [PATINA/CARGO OPTIONS]",
+        "cargo patina explore run <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [--seeds N] [--seed-start N] [RUN OPTIONS]",
+        "cargo patina explore test [--seeds N] [--seed-start N] [PATINA/CARGO OPTIONS]",
     ],
     prose: "\
 `explore run`/`explore test` sweeps a contiguous seed range over one artifact or \
@@ -856,7 +856,7 @@ for those.",
                 false,
             ),
             f(
-                "--start",
+                "--seed-start",
                 None,
                 Value::Required("N"),
                 "First seed in the range (default: the wrapped command's seed).",
@@ -870,7 +870,7 @@ const CAMPAIGN: Verb = Verb {
     name: "campaign",
     summary: "Config-driven deterministic fault-and-schedule sweep over one artifact.",
     synopsis: &[
-        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out DIR] [--spec FILE.json] [--seed-base N] [--buggify] [--swarm] [--pct] [--faults] [--liveness-watchdog N] [--converge-within N] [--report] [-- GUEST ARGS]",
+        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--buggify] [--swarm] [--sched-pct] [--faults] [--liveness-watchdog N] [--converge-within N] [--report] [-- GUEST ARGS]",
         "cargo patina campaign --selftest",
     ],
     prose: "\
@@ -893,7 +893,7 @@ classifier class and the signature store.",
                 false,
             ),
             f(
-                "--out",
+                "--out-dir",
                 None,
                 Value::Required("DIR"),
                 "Output directory (default patina-campaign-out).",
@@ -907,7 +907,7 @@ classifier class and the signature store.",
                 false,
             ),
             f(
-                "--seed-base",
+                "--seed-start",
                 None,
                 Value::Required("N"),
                 "Base for the per-generation seed derivation (default 0).",
@@ -935,7 +935,7 @@ classifier class and the signature store.",
                 false,
             ),
             f(
-                "--pct",
+                "--sched-pct",
                 None,
                 Value::None,
                 "Randomize a PCT bug depth per generation (native only).",
@@ -991,7 +991,7 @@ const MINIMIZE: Verb = Verb {
     name: "minimize",
     summary: "Shrink a recorded trace, or shrink experiment inputs (--scenario).",
     synopsis: &[
-        "cargo patina minimize <TRACE> --output <PATH> [--timeline ID] [--prune-branches] -- <ORACLE> [ARGS]...",
+        "cargo patina minimize <TRACE> --output <PATH> [-o <PATH>] [--timeline ID] [--prune-branches] -- <ORACLE> [ARGS]...",
         "cargo patina minimize --scenario --seed <U64> [--param K=V]... [--seed-budget N] -- <ORACLE> [ARGS]...",
     ],
     prose: "\
@@ -1012,7 +1012,7 @@ PATINA_SEED/PATINA_PARAMS_JSON protocol.",
             flags: &[
                 f(
                     "--output",
-                    None,
+                    Some("-o"),
                     Value::Required("PATH"),
                     "Write the minimized trace to PATH (required).",
                     false,
@@ -1321,6 +1321,16 @@ fn render_overview() -> String {
         push_flag(&mut out, flag);
     }
 
+    out.push_str("\nFlag value syntax:\n");
+    push_prose(
+        &mut out,
+        "A flag that takes a required value accepts both `--flag VALUE` and `--flag=VALUE` in \
+every family. A flag with an OPTIONAL value (e.g. --buggify, --sched-pct, --starve, \
+--liveness-watchdog, --converge-within) accepts only the bare `--flag` or `--flag=VALUE` — the \
+space form is ambiguous with a positional. Everything after a `--` separator is passed to the \
+guest/oracle untouched, so `--arg=--help` is how a WASI guest receives a literal `--help`.",
+    );
+
     out.push_str("\nArtifact inference:\n");
     push_prose(
         &mut out,
@@ -1328,7 +1338,8 @@ fn render_overview() -> String {
 built artifact is recognized by its leading magic bytes (\\0asm for a WASI module, Mach-O/ELF \
 for a native binary) and used as-is; a <SOURCE.rs|DIR|Cargo.toml> is built on the fly through \
 the same pipeline as `build` (honoring --target, default native). A directory, a Cargo.toml, \
-or no artifact with no --target stays the Cargo package family.",
+or no artifact with no --target stays the Cargo package family. A positional that names a file \
+path (.wasm/.rs/Cargo.toml, or with a separator) but does not exist is a hard error.",
     );
 
     out.push_str("\nENVIRONMENT:\n");

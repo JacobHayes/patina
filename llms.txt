@@ -42,7 +42,7 @@ with no `--target` -> the Cargo package family (in-process boundary API). A
   Strict fail-closed import allowlist. Any un-interposed effect symbol is a
   finding. Native `audit` of a shim binary flags its control-plane symbols
   (`dlsym`, `pthread_create`) unless `--allow`ed.
-- `cargo patina explore run <ARTIFACT|SOURCE> [--seeds N] [--start N] [RUN OPTIONS]`
+- `cargo patina explore run <ARTIFACT|SOURCE> [--seeds N] [--seed-start N] [RUN OPTIONS]`
   Sweep seeds, building once and running that artifact per seed. Stops at the
   first failing seed with `PATINA_EXPLORE_FAILURE seed=S exit=E`; otherwise
   `PATINA_EXPLORE_COMPLETE start=... seeds=...`.

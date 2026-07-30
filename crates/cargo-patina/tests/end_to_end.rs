@@ -2377,7 +2377,7 @@ fn campaign_catches_planted_liveness_bug_dedups_and_reproduces() {
             "--buggify".to_string(),
             "--liveness-watchdog".to_string(),
             "600000000000".to_string(),
-            "--out".to_string(),
+            "--out-dir".to_string(),
             out.to_str().unwrap().to_string(),
         ]
     };
@@ -7341,4 +7341,68 @@ fn per_verb_help_and_json_registry() {
             String::from_utf8_lossy(&json.stdout)
         );
     }
+}
+
+// Phase 2: `--arg=--help` is the only way to deliver a literal `--help` to a WASI
+// guest, because a bare `--help` before `--` is intercepted as Patina help. This
+// pins both halves: the inline form runs the guest; the space form shows help.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn inline_arg_delivers_literal_help_while_space_form_shows_help() {
+    let directory = tempdir().unwrap();
+    let module = directory.path().join("noop.wasm");
+    fs::write(
+        &module,
+        wat::parse_str("(module (func (export \"_start\")))").unwrap(),
+    )
+    .unwrap();
+    let module = module.to_str().unwrap();
+
+    // Inline: the guest runs and exits 0; Patina help is NOT shown.
+    let inline = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        directory.path(),
+        &["run", module, "--arg=--help"],
+    );
+    assert!(
+        inline.status.success(),
+        "inline --arg=--help failed: {}\n{}",
+        inline.status,
+        String::from_utf8_lossy(&inline.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&inline.stdout).contains("cargo patina run"),
+        "inline --arg=--help wrongly triggered Patina help"
+    );
+
+    // Space form: the bare `--help` is intercepted and prints run help (exit 0).
+    let spaced = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        directory.path(),
+        &["run", module, "--arg", "--help"],
+    );
+    assert!(spaced.status.success(), "run --arg --help should exit 0");
+    assert!(
+        String::from_utf8_lossy(&spaced.stdout).contains("cargo patina run"),
+        "space-form --help should show run help:\n{}",
+        String::from_utf8_lossy(&spaced.stdout)
+    );
+}
+
+// Phase 2: a path-like positional that does not exist fails closed with a clear
+// "no such file" (exit 2), instead of falling through to a confusing `cargo run`.
+#[test]
+fn nonexistent_wasm_positional_fails_closed() {
+    let directory = tempdir().unwrap();
+    let output = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        directory.path(),
+        &["run", "definitely-missing.wasm"],
+    );
+    assert_eq!(output.status.code(), Some(2), "expected a usage-error exit");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("no such file"),
+        "missing the fail-closed message:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
