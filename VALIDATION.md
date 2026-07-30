@@ -41,7 +41,7 @@ Required:
   `--target x86_64-unknown-linux-gnu`, so Linux-cfg code lints from any host)
 - `cargo doc --workspace --no-deps`
 - `cargo +1.86.0 test --workspace`
-- `scripts/check-docs-flags.sh` (doc/CLI flag drift gate over the user-facing docs)
+- `scripts/check-flag-drift.sh` (CLI flag drift gate over the user-facing docs and every shell script)
 - `scripts/validate-wasi.sh` when validating V3
 - `scripts/validate-native-shim.sh` when validating native foundations
 - `scripts/smoke-cross-target.sh` when validating cross-target determinism

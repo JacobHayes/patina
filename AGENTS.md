@@ -50,11 +50,11 @@ toolchains/targets, including the 1.86 MSRV toolchain with `wasm32-wasip1`):
 
 - `mise run check` — the full pre-landing battery, laddered fast → slow:
   fmt, clippy (host + cross-target `x86_64-unknown-linux-gnu` for Linux-cfg
-  code), docs, workspace tests, `scripts/check-docs-flags.sh`, MSRV tests, then
+  code), docs, workspace tests, `scripts/check-flag-drift.sh`, MSRV tests, then
   the WASI / cross-target / native-shim validation scripts. **This is the
   landing gate.**
 - `mise run check:fast` — the inner-loop tier (skips the slowest e2e tests, the
-  MSRV re-run, `cargo doc`, the docs-flags gate, and
+  MSRV re-run, `cargo doc`, the flag-drift gate, and
   `validate-native-shim.sh`). Not sufficient for landing.
 - `mise run smoke`, `mise run msrv`, `mise run audit-corpus`, `mise run demo` —
   the individual pieces.
@@ -63,12 +63,14 @@ Without mise, run the `[tasks.check]` commands from `mise.toml` directly.
 
 Gates worth knowing individually:
 
-- `scripts/check-docs-flags.sh` — extracts every flag-shaped token from the gated
+- `scripts/check-flag-drift.sh` — extracts every flag-shaped token from the gated
   docs (the `DOCS` list in the script: README, TUTORIAL, USAGE-MODES,
   ARCHITECTURE, IMPLEMENTATION, VALIDATION, INTENTS, AGENTS, `llms.txt`, and the
-  testbed READMEs) and fails on any flag the CLI registry does not define.
-  If you mention a flag in a doc, it must exist; if you rename a flag, the gate
-  finds every stale doc mention.
+  testbed READMEs) AND from every shell script (`scripts/*.sh`,
+  `testbeds/**/*.sh`), and fails on any flag the CLI registry does not define
+  (beyond a small allowlist of non-patina guest/tool/script flags). If you
+  mention or invoke a patina flag anywhere, it must exist; if you rename a flag,
+  the gate finds every stale mention — in prose or in a script's flag arrays.
 - `scripts/validate-native-shim.sh`, `scripts/validate-wasi.sh`,
   `scripts/smoke-cross-target.sh` — the runtime acceptance batteries
   (VALIDATION.md defines what each proves).

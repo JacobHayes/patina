@@ -61,10 +61,11 @@ jobs:
       - run: cargo test --workspace --locked
       - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
         run: cargo doc --workspace --no-deps --locked
-      # Docs↔CLI drift gate: every --flag mentioned in the docs must exist in the
-      # CLI's own machine-readable registry (or the script's small allowlist).
+      # Flag drift gate: every --flag mentioned in the docs OR in any shell script
+      # must exist in the CLI's own machine-readable registry (or the script's
+      # small allowlist of non-patina flags).
       - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
-        run: scripts/check-docs-flags.sh
+        run: scripts/check-flag-drift.sh
       - run: scripts/validate-wasi.sh
       - run: scripts/validate-native-shim.sh
         env:
