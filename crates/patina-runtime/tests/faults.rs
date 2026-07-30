@@ -351,13 +351,17 @@ fn net_faults_delay_the_tcp_stream_without_losing_data() {
 
     // Control: no fault knobs -> the stream delivers immediately and intact.
     let (clean_ready, clean_bytes) = stream_once(|config| config);
-    assert!(clean_ready, "without faults a TCP segment is readable at once");
+    assert!(
+        clean_ready,
+        "without faults a TCP segment is readable at once"
+    );
     assert_eq!(clean_bytes, b"hello");
 
     // Jitter: the fault reaches the TCP path through the runtime, so the segment
     // is NOT readable at the send instant, yet the reliable stream never loses
     // it once the clock advances.
-    let (jitter_ready, jitter_bytes) = stream_once(|config| config.with_net_jitter_nanos(1, 50_000));
+    let (jitter_ready, jitter_bytes) =
+        stream_once(|config| config.with_net_jitter_nanos(1, 50_000));
     assert!(
         !jitter_ready,
         "net jitter must delay TCP delivery — the fault knob is inert on the stream path otherwise"
@@ -367,6 +371,9 @@ fn net_faults_delay_the_tcp_stream_without_losing_data() {
     // Drop: a reliable stream retransmits, so a dropped segment is delayed, not
     // lost — the TCP contract the datagram drop knob would otherwise violate.
     let (drop_ready, drop_bytes) = stream_once(|config| config.with_net_drop_permille(1000));
-    assert!(!drop_ready, "a dropped TCP segment is retransmitted (delayed)");
+    assert!(
+        !drop_ready,
+        "a dropped TCP segment is retransmitted (delayed)"
+    );
     assert_eq!(drop_bytes, b"hello", "TCP drop must never lose data");
 }

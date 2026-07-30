@@ -586,7 +586,10 @@ impl NetDriver for SimNet {
             }
             (
                 self.tcp_buffer_bytes - peer_endpoint.inbox_bytes,
-                peer_endpoint.inbox.back().map(|segment| segment.delivery_nanos),
+                peer_endpoint
+                    .inbox
+                    .back()
+                    .map(|segment| segment.delivery_nanos),
             )
         };
         let accepted = bytes.len().min(available);
@@ -752,10 +755,8 @@ impl NetDriver for SimNet {
     }
 
     fn fault_report(&self) -> Option<NetFaultReport> {
-        let could_apply = self.drop_permille > 0
-            || self
-                .jitter_nanos
-                .is_some_and(|(_, max)| max > 0);
+        let could_apply =
+            self.drop_permille > 0 || self.jitter_nanos.is_some_and(|(_, max)| max > 0);
         Some(NetFaultReport {
             could_apply,
             send_ops: self.fault_send_ops,
@@ -1328,32 +1329,40 @@ mod tests {
         // The signature the pre-fix inert TCP path produced: knobs armed to
         // perturb, traffic occurred, yet zero effects — the bug this diagnostic
         // exists to catch.
-        assert!(NetFaultReport {
-            could_apply: true,
-            send_ops: 5,
-            faults_applied: 0,
-        }
-        .is_vacuous());
+        assert!(
+            NetFaultReport {
+                could_apply: true,
+                send_ops: 5,
+                faults_applied: 0,
+            }
+            .is_vacuous()
+        );
         // Faults actually landed.
-        assert!(!NetFaultReport {
-            could_apply: true,
-            send_ops: 5,
-            faults_applied: 3,
-        }
-        .is_vacuous());
+        assert!(
+            !NetFaultReport {
+                could_apply: true,
+                send_ops: 5,
+                faults_applied: 3,
+            }
+            .is_vacuous()
+        );
         // Knobs incapable of any effect — silence is correct.
-        assert!(!NetFaultReport {
-            could_apply: false,
-            send_ops: 5,
-            faults_applied: 0,
-        }
-        .is_vacuous());
+        assert!(
+            !NetFaultReport {
+                could_apply: false,
+                send_ops: 5,
+                faults_applied: 0,
+            }
+            .is_vacuous()
+        );
         // No fault-eligible traffic — nothing to perturb.
-        assert!(!NetFaultReport {
-            could_apply: true,
-            send_ops: 0,
-            faults_applied: 0,
-        }
-        .is_vacuous());
+        assert!(
+            !NetFaultReport {
+                could_apply: true,
+                send_ops: 0,
+                faults_applied: 0,
+            }
+            .is_vacuous()
+        );
     }
 }
