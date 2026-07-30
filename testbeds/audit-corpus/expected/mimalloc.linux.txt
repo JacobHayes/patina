@@ -1,0 +1,7 @@
+fputs unknown-import
+getrusage host-introspection
+prctl unknown-import
+sleep time
+stderr unknown-import
+stdout unknown-import
+sysinfo unknown-import

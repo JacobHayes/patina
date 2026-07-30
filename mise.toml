@@ -68,6 +68,10 @@ run = [
   "scripts/smoke-cross-target.sh",
 ]
 
+[tasks."audit-corpus"]
+description = "Ecosystem symbol-audit corpus: build+audit 20 MREs, strict-xfail vs committed per-platform expectations"
+run = "testbeds/audit-corpus/run.sh"
+
 [tasks.demo]
 description = "Run the explicit-context vertical-slice demo"
 run = '''

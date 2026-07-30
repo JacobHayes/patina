@@ -90,6 +90,18 @@ jobs:
       # via the rust-cache workspaces above.
       - if: matrix.toolchain == 'stable'
         run: testbeds/pubsub/run-patina.sh
+      # The ecosystem symbol-audit corpus: 20 per-crate MREs built + audited,
+      # each compared strictly (both directions) to a committed per-platform
+      # expectation file — the standing punchlist for the classification work.
+      # STABLE macOS + STABLE Linux x86_64 ONLY: msrv and the arm runners are
+      # skipped to bound cost (the audited symbol surface is toolchain-
+      # independent, and Linux arm shares the x86_64 expectation once recorded).
+      # crates.io network access on the runners is fine (the MREs are version-
+      # pinned by their committed Cargo.lock). Until the coordinator records
+      # expected/*.linux.txt on real Linux, run.sh self-SKIPs on Linux with a
+      # loud notice and exits 0, so this step never reddens CI pre-recording.
+      - if: matrix.toolchain == 'stable' && (runner.os == 'macOS' || matrix.runner == 'ubuntu-latest')
+        run: testbeds/audit-corpus/run.sh
 
   # Advisory audit (RustSec). The root workspace lockfile is STRICT — any
   # advisory (including any protobuf appearance) fails the job. The testbeds are

@@ -1,0 +1,20 @@
+# Standalone package: its own empty [workspace] table keeps this MRE OUT
+# of the root Patina workspace (the testbeds convention), so `cargo` here never
+# touches crates/ or the root manifest and it carries its own committed
+# Cargo.lock.
+[workspace]
+
+[package]
+name = "mre_flate2"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+flate2 = "1"
+
+[[bin]]
+name = "mre_flate2"
+path = "src/main.rs"
+
+[profile.dev]
+debug = false

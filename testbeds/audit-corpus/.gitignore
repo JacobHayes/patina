@@ -1,0 +1,4 @@
+# Each MRE builds into its own crates/<name>/target/ (and cargo-patina writes a
+# build-on-run artifact to a scratch tempdir, not committed). Ignore all of it;
+# the committed surface is Cargo.toml + Cargo.lock + src/ + expected/ + run.sh.
+crates/*/target/

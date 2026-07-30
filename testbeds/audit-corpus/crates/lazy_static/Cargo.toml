@@ -1,0 +1,20 @@
+# Standalone package: its own empty [workspace] table keeps this MRE OUT
+# of the root Patina workspace (the testbeds convention), so `cargo` here never
+# touches crates/ or the root manifest and it carries its own committed
+# Cargo.lock.
+[workspace]
+
+[package]
+name = "mre_lazy_static"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+lazy_static = "1"
+
+[[bin]]
+name = "mre_lazy_static"
+path = "src/main.rs"
+
+[profile.dev]
+debug = false

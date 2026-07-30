@@ -1,0 +1,4 @@
+ZSTD_trace_compress_begin unknown-import
+ZSTD_trace_compress_end unknown-import
+ZSTD_trace_decompress_begin unknown-import
+ZSTD_trace_decompress_end unknown-import
