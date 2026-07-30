@@ -529,7 +529,7 @@ const RUN: Verb = Verb {
         "cargo patina run [--seed N | --record PATH] [FAULT OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]",
         "cargo patina run <MODULE.wasm> [--seed N | --record PATH] [--fuel N] [--arg VALUE]... [--env K=V]... [--preopen GUEST[:ro|:rw]]... [FAULT OPTIONS] [BUGGIFY/LIVENESS OPTIONS]",
         "cargo patina run <BINARY> [--seed N | --record PATH] [--fingerprint STR] [--mount HOST_DIR] [--harness] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL]... [-- PROGRAM ARGS]",
-        "cargo patina run <SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [RUN OPTIONS]   (builds on the fly, then runs)",
+        "cargo patina run <SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [--release] [RUN OPTIONS]   (builds on the fly, then runs)",
     ],
     prose: "\
 `run` is source-first with artifacts accepted uniformly. A built artifact \
@@ -588,6 +588,16 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
         Group {
             title: "Source-first selection (building a source/package on the fly)",
             flags: SOURCE_SELECT,
+        },
+        Group {
+            title: "Build profile (source-first)",
+            flags: &[f(
+                "--release",
+                None,
+                Value::None,
+                "Build the on-the-fly guest in release mode (default debug; debug is the bug-finding profile — see the debug-vs-release note).",
+                false,
+            )],
         },
         Group {
             title: "Fault options (seed-driven, default off)",

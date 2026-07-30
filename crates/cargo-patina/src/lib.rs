@@ -1016,6 +1016,57 @@ fn apply_package_selection(
     }
 }
 
+/// Extract a source-first `--release` switch from the head of a `run` flag list,
+/// stopping at `--` so a guest/program `--release` after the separator passes
+/// through untouched. Mirrors [`take_package_bin`]: the flag is consumed here so
+/// the family parser (which rejects unknown options) never sees it. Repeats are
+/// idempotent, matching the `build` parser; an inline `--release=VALUE` is
+/// rejected because the switch takes no value.
+fn take_release(flags: Vec<OsString>) -> Result<(bool, Vec<OsString>), CliError> {
+    let mut release = false;
+    let mut rest = Vec::with_capacity(flags.len());
+    let mut index = 0;
+    while index < flags.len() {
+        let opt = flags[index].to_str().map(split_opt);
+        match opt.map(|opt| opt.name) {
+            Some("--release") => {
+                reject_inline(opt.expect("matched name"))?;
+                release = true;
+            }
+            Some("--") if flags[index] == "--" => {
+                rest.extend_from_slice(&flags[index..]);
+                break;
+            }
+            _ => rest.push(flags[index].clone()),
+        }
+        index += 1;
+    }
+    Ok((release, rest))
+}
+
+/// Apply a source-first `--release` to a build-on-the-fly artifact: it selects the
+/// release profile for the guest `run` builds itself (default debug). Release is a
+/// build profile, so it applies only to a source/package built on the fly; an
+/// already-built artifact carries no profile of its own, so `--release` on a
+/// prebuilt positional fails closed rather than being silently ignored.
+fn apply_release(artifact: &mut ArtifactRef, release: bool) -> Result<(), CliError> {
+    if !release {
+        return Ok(());
+    }
+    match artifact {
+        ArtifactRef::Build(spec) => {
+            match &mut spec.kind {
+                BuildSpecKind::Native(invocation) => invocation.release = true,
+                BuildSpecKind::Wasi(invocation) => invocation.release = true,
+            }
+            Ok(())
+        }
+        ArtifactRef::Prebuilt(_) => Err(CliError::usage(
+            "--release selects a build profile for a source/package built on the fly; an already-built artifact has no build profile",
+        )),
+    }
+}
+
 /// Resolve a run/audit/replay positional to an [`ArtifactRef`], honoring
 /// `--target` (default native) and building a source/package on the fly. A
 /// directory/`Cargo.toml` resolves to a native (or, under `--target wasi`, WASI)
@@ -1382,12 +1433,16 @@ fn parse_run(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
             }
             let selection = take_package_bin(scan.rest)?;
             apply_package_selection(&mut module, selection.package, selection.bin)?;
-            parse_wasi_run_from(module, selection.rest).map(ParseResult::WasiRun)
+            let (release, rest) = take_release(selection.rest)?;
+            apply_release(&mut module, release)?;
+            parse_wasi_run_from(module, rest).map(ParseResult::WasiRun)
         }
         Some((ArtifactFamily::Native, mut binary)) => {
             let selection = take_package_bin(scan.rest)?;
             apply_package_selection(&mut binary, selection.package, selection.bin)?;
-            parse_native_run_from(binary, selection.rest).map(ParseResult::NativeRun)
+            let (release, rest) = take_release(selection.rest)?;
+            apply_release(&mut binary, release)?;
+            parse_native_run_from(binary, rest).map(ParseResult::NativeRun)
         }
         // Cargo package family: forward the whole argument list (including the
         // positional dir/Cargo.toml, which Cargo interprets) to `parse_cargo`.
@@ -7275,6 +7330,56 @@ mod tests {
     }
 
     #[test]
+    fn source_first_release_threads_into_the_build_spec() {
+        // `--release` is extracted from the head (before any `--`); the rest passes
+        // through, and a `--release` in the guest section stays untouched.
+        let (release, rest) =
+            take_release(strings(&["--release", "--seed", "1", "--", "--release"])).unwrap();
+        assert!(release);
+        assert_eq!(rest, strings(&["--seed", "1", "--", "--release"]));
+
+        // Absent, it defaults off; an inline value is rejected (valueless switch).
+        let (release, rest) = take_release(strings(&["--seed", "1"])).unwrap();
+        assert!(!release);
+        assert_eq!(rest, strings(&["--seed", "1"]));
+        assert!(take_release(strings(&["--release=yes"])).is_err());
+
+        // Applied to a native source/package build, it flips the release profile;
+        // a WASI package build spec flips too.
+        for mut artifact in [
+            ArtifactRef::Build(Box::new(native_source_spec(PathBuf::from("main.rs")))),
+            ArtifactRef::Build(Box::new(native_package_spec(
+                PathBuf::from("ws"),
+                PathBuf::from("ws/Cargo.toml"),
+            ))),
+            ArtifactRef::Build(Box::new(wasi_package_spec(
+                PathBuf::from("ws"),
+                PathBuf::from("ws/Cargo.toml"),
+            ))),
+        ] {
+            apply_release(&mut artifact, true).unwrap();
+            let released = match &artifact {
+                ArtifactRef::Build(spec) => match &spec.kind {
+                    BuildSpecKind::Native(inv) => inv.release,
+                    BuildSpecKind::Wasi(inv) => inv.release,
+                },
+                _ => panic!("expected a build spec"),
+            };
+            assert!(
+                released,
+                "release profile did not thread into the build spec"
+            );
+        }
+
+        // An already-built artifact carries no build profile, so `--release` on a
+        // prebuilt positional fails closed rather than being silently ignored; a
+        // false (absent) release is a no-op on any artifact.
+        let mut prebuilt = ArtifactRef::Prebuilt(PathBuf::from("bin"));
+        assert!(apply_release(&mut prebuilt, true).is_err());
+        assert!(apply_release(&mut prebuilt, false).is_ok());
+    }
+
+    #[test]
     fn parses_wasi_run_record_and_branch_modes() {
         let invocation = parse_wasi_run(strings(&[
             "module.wasm",
@@ -7952,6 +8057,8 @@ mod tests {
                 "-p",
                 "--bin",
                 "--target",
+                // source-first build profile
+                "--release",
             ],
             "test" => &[
                 "--seed",

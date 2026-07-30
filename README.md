@@ -185,6 +185,45 @@ traces also support *branch timelines*: replay a recorded prefix, then explore a
 different seeded suffix from that moment
 (`replay … --branch --from N --branch-seed S --branch-id ID`).
 
+### Debug vs release guest builds
+
+Guests build **debug by default**, and debug is the right profile for *finding*
+bugs — release is for measuring a guest you already trust. The profile applies to
+whichever guest Patina builds on the fly (`run`, `test`); an already-built
+artifact carries the profile it was built with.
+
+Why debug finds more bugs:
+
+- **Free failure oracles.** `debug_assert!` in your guest *and every dependency*,
+  plus arithmetic overflow checks, are live in debug and compiled out in release.
+  They are extra invariants the same seed sweep can trip, so a release build finds
+  strictly fewer bugs on the identical seeds.
+- **Sharper triage.** Un-inlined frames and exact line numbers keep the
+  minimize → replay → backtrace loop pointed at the real culprit instead of an
+  optimized-away frame.
+- **Denser schedule exploration.** `cargo patina build --yield-points` plants a
+  scheduling point at each basic-block coverage guard; optimization collapses
+  basic blocks, so a release guest hands the seeded scheduler *fewer* windows to
+  preempt an atomics-only race.
+- **Faster inner loop.** Debug compiles quicker, which dominates when you rebuild
+  between every edit.
+
+When release earns its place:
+
+- **Performance measurement.** Timing and throughput numbers are only meaningful
+  on an optimized build.
+- **Long campaigns.** Debug guests are slow; a multi-thousand-generation sweep or
+  a soak run finishes far sooner on a release guest once the bug hunt is over.
+- **Release-only codegen.** Optimization changes which code paths — and even which
+  machine instructions — the guest takes, so a bug can live only on the release
+  path. Release also surfaces CPU-feature backends the audit's instruction scanner
+  must handle (the `sha2` crate's x86 SSSE3/SHA-NI path — `pshufb`,
+  `sha256rnds2`, … — is the in-repo example).
+
+Build release with `cargo patina run --release <source|package>` (the on-the-fly
+guest is compiled optimized), or in two steps — `cargo patina build --release …`
+then `run` the resulting artifact.
+
 ## Supported today
 
 - **Seeded determinism** for ordinary `std`: filesystem (including directories
