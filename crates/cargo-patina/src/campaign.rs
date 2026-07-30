@@ -880,6 +880,51 @@ fn run_generation(
     ))
 }
 
+/// A typed value for a child `run` flag, rendered to the exact canonical syntax
+/// the run parser accepts. Campaign builds every child-flag value through this so
+/// it can never emit a value shape the run parser rejects — the general fix for
+/// the value-syntax drift class (e.g. `--sleep-jitter-nanos 0:N` vs `0..N`). The
+/// generic property test (`registry_value_grammars_match_the_parsers`) proves
+/// each rendering is a run-parser-accepted form of its registry [`help::Kind`].
+enum RunValue {
+    /// A decimal integer (per-mille, count, or nanosecond scalar).
+    Int(u64),
+    /// An inclusive `lo..hi` nanosecond range (`help::Kind::NanosRange`).
+    NanosRange { lo: u64, hi: u64 },
+    /// A valueless switch (`help::Kind`-less, `Value::None`).
+    Switch,
+}
+
+impl RunValue {
+    fn render(&self) -> String {
+        match self {
+            RunValue::Int(value) => value.to_string(),
+            RunValue::NanosRange { lo, hi } => format!("{lo}..{hi}"),
+            RunValue::Switch => String::new(),
+        }
+    }
+}
+
+/// Push a child `run` flag onto `flags`, rendering the exact CLI syntax the run
+/// parser accepts: the run registry decides the value form — an optional-value
+/// flag inlines (`--flag=VALUE`), a required-value flag uses the space form
+/// (`--flag VALUE`), a switch takes no value — and [`RunValue`] renders the value
+/// in its canonical grammar. Routing every child flag through here (rather than
+/// hand-formatting strings) makes it structurally impossible for a campaign to
+/// emit syntax the child `run` rejects.
+fn push_run_flag(flags: &mut Vec<String>, name: &str, value: RunValue) {
+    match crate::help::flag_arity("run", name) {
+        Some(crate::help::Value::Optional(..)) => flags.push(format!("{name}={}", value.render())),
+        Some(crate::help::Value::Required(..)) => {
+            flags.push(name.to_string());
+            flags.push(value.render());
+        }
+        // A valueless switch (`--swarm`), or an unregistered name (a programming
+        // error the registry drift gate catches): emit the bare flag.
+        Some(crate::help::Value::None) | None => flags.push(name.to_string()),
+    }
+}
+
 /// Derive the per-generation `run` flags from the generation hash. Native-only
 /// exploration knobs (`--swarm`, `--sched-pct`) are skipped for a WASI module
 /// (single-threaded; the WASI `run` does not accept them).
@@ -894,33 +939,44 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
         // still leaving clean generations (neither always nor never firing).
         let activation = 300 + (u32::from(hash[8]) * 600 / 255);
         let fire = 300 + (u32::from(hash[9]) * 600 / 255);
-        flags.push(format!("--buggify={fire}"));
-        flags.push("--buggify-activation-permille".to_string());
-        flags.push(activation.to_string());
+        push_run_flag(&mut flags, "--buggify", RunValue::Int(u64::from(fire)));
+        push_run_flag(
+            &mut flags,
+            "--buggify-activation-permille",
+            RunValue::Int(u64::from(activation)),
+        );
     }
     if spec.faults {
         let drop = u32::from(hash[12]) * 200 / 255; // [0, 200] permille
-        flags.push("--net-drop-permille".to_string());
-        flags.push(drop.to_string());
+        push_run_flag(
+            &mut flags,
+            "--net-drop-permille",
+            RunValue::Int(u64::from(drop)),
+        );
         let jitter_hi = u64::from(hash[13]) * 10_000; // up to 2.55 ms
-        flags.push("--sleep-jitter-nanos".to_string());
-        flags.push(format!("0..{jitter_hi}"));
+        push_run_flag(
+            &mut flags,
+            "--sleep-jitter-nanos",
+            RunValue::NanosRange {
+                lo: 0,
+                hi: jitter_hi,
+            },
+        );
     }
     if spec.swarm && native {
-        flags.push("--swarm".to_string());
+        push_run_flag(&mut flags, "--swarm", RunValue::Switch);
     }
     if spec.pct && native {
         let depth = 1 + u32::from(hash[11] % 5); // [1, 5]
-        flags.push(format!("--sched-pct={depth}"));
+        push_run_flag(&mut flags, "--sched-pct", RunValue::Int(u64::from(depth)));
     }
     if let Some(nanos) = spec.watchdog_nanos {
-        flags.push(format!("--liveness-watchdog={nanos}"));
+        push_run_flag(&mut flags, "--liveness-watchdog", RunValue::Int(nanos));
     }
     if let Some(nanos) = spec.converge_nanos {
-        flags.push(format!("--converge-within={nanos}"));
+        push_run_flag(&mut flags, "--converge-within", RunValue::Int(nanos));
         if let Some(heal) = spec.heal_after_nanos {
-            flags.push("--heal-after".to_string());
-            flags.push(heal.to_string());
+            push_run_flag(&mut flags, "--heal-after", RunValue::Int(heal));
         }
     }
     flags
@@ -1380,11 +1436,17 @@ mod tests {
 
     #[test]
     fn derived_flags_round_trip_through_the_run_parsers() {
-        // Every flag campaign hands a child `run` must be accepted by the child's
-        // own parser. This is the detection gate for the flag-grammar drift class
-        // (the `--sleep-jitter-nanos 0:N` vs `0..N` regression): a campaign knob
-        // whose emitted spelling the run parser rejects fails HERE, not as a
-        // usage error inside every `--faults` generation at campaign runtime.
+        // The value SYNTAX and per-flag GRAMMAR of every child `run` flag is now
+        // guarded generically: `push_run_flag` renders each value through the run
+        // registry's arity + `RunValue` canonical form, and
+        // `registry_value_grammars_match_the_parsers` proves those forms parse.
+        // What that pair does NOT cover is campaign's own choice of numeric
+        // RANGES — that every derived value falls inside the parser-accepted
+        // bound (e.g. a per-mille within [0, 1000], a bug depth >= 1). This test
+        // is the remaining guard for exactly that: it round-trips the actual
+        // derived values through the child's parser, so a knob whose derivation
+        // widens past the accepted range fails HERE, not as a usage error inside
+        // every `--faults` generation at campaign runtime.
         let spec = CampaignSpec {
             buggify: true,
             swarm: true,

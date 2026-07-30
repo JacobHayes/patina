@@ -1190,7 +1190,7 @@ pub(crate) fn locate_positionals(
             if text.starts_with('-') {
                 let opt = split_opt(text);
                 match help::flag_arity(verb, opt.name) {
-                    Some(help::Value::Required(_)) if opt.inline.is_none() => {
+                    Some(help::Value::Required(..)) if opt.inline.is_none() => {
                         // A registered value-taking flag consumes the next token.
                         index += 2;
                         continue;
@@ -1290,7 +1290,7 @@ pub(crate) fn reject_stranded_artifact(verb: &str, tail: &[OsString]) -> Result<
             if text.starts_with('-') {
                 let opt = split_opt(text);
                 match help::flag_arity(verb, opt.name) {
-                    Some(help::Value::Required(_)) if opt.inline.is_none() => {
+                    Some(help::Value::Required(..)) if opt.inline.is_none() => {
                         index += 2;
                         after_unknown_flag = false;
                         continue;
@@ -8084,6 +8084,325 @@ mod tests {
             "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize",
         ] {
             assert!(verbs.contains_key(verb), "JSON help missing verb {verb}");
+        }
+    }
+
+    // ---- Value-grammar drift gate (registry Kind <-> real parsers) ----
+
+    /// Valid and invalid sample values for a registry value grammar. Every valid
+    /// sample must parse through the real verb parser that owns the flag; every
+    /// invalid sample must be rejected (a usage error, never a panic or silent
+    /// acceptance). The samples are the intersection-safe set for every flag of a
+    /// kind: a valid `PositiveU64` stays small so it also satisfies `--seeds`'
+    /// tighter `1..=1000000` bound, and a valid `U64` never triggers `--seed-start`
+    /// overflow (its driver pins `--seeds 1`). A `Path`/`Str` grammar accepts any
+    /// string, so it has no invalid samples.
+    fn kind_samples(kind: help::Kind) -> (Vec<&'static str>, Vec<&'static str>) {
+        use help::Kind;
+        match kind {
+            Kind::U64 => (
+                vec!["0", "1", "42", "18446744073709551615"],
+                vec!["-1", "abc", "", "1.5", "99999999999999999999999"],
+            ),
+            Kind::U32 => (
+                vec!["0", "1", "4294967295"],
+                vec!["-1", "abc", "", "4294967296"],
+            ),
+            Kind::Usize => (vec!["0", "1", "65536"], vec!["-1", "abc", ""]),
+            Kind::PositiveU64 => (vec!["1", "5", "100"], vec!["0", "-1", "abc", ""]),
+            Kind::Permille => (
+                vec!["0", "1", "250", "1000"],
+                vec!["1001", "2000", "-1", "abc", ""],
+            ),
+            Kind::NanosRange => (
+                vec!["0..0", "0..1000", "5..10", "0..18446744073709551615"],
+                vec!["0:1000", "abc", "", "10..5", "0..", "..5", "5", "0..abc"],
+            ),
+            Kind::CrashSpec => (
+                vec![
+                    "open", "write", "sync", "close", "open:1", "write:3", "close:10",
+                ],
+                vec!["read", "", "open:0", "open:abc", "open:", ":3", "OPEN"],
+            ),
+            Kind::KeyValue => (
+                vec!["k=v", "key=", "a=b=c", "x=1"],
+                vec!["=v", "novalue", "", "= "],
+            ),
+            Kind::Socket => (
+                vec!["4=a->b", "5=x->y", "100=addr1->addr2"],
+                vec!["3=a->b", "4=a->", "4=->b", "foo=a->b", "4=ab", "", "0=a->b"],
+            ),
+            Kind::Preopen => (
+                vec!["/data", "/data:ro", "/data:rw", "rel", "/a/b"],
+                vec!["", "/data:xx", ":ro"],
+            ),
+            Kind::UnsupportedSymbols => (
+                vec!["all", "memcpy", "a,b", "foo , bar"],
+                vec!["", ",", " , "],
+            ),
+            Kind::Enum(choices) => (choices.to_vec(), vec!["bogus", ""]),
+            Kind::Symbol => (vec!["memcpy", "foo_bar", "x"], vec![""]),
+            Kind::Path => (vec!["/tmp/x", "out.html", "x", ""], vec![]),
+            Kind::Str => (vec!["x", "hello", ""], vec![]),
+        }
+    }
+
+    // Family-parser drivers. Each feeds an argument list to the real per-family
+    // parser exactly as routing would, with a leading binary/module label where
+    // the parser strips one, so a sample exercises the true value validation.
+    fn drv_wasi_run(args: &[&str]) -> Result<(), CliError> {
+        let mut argv = vec![OsString::from("m.wasm")];
+        argv.extend(args.iter().map(OsString::from));
+        parse_wasi_run(argv).map(|_| ())
+    }
+    fn drv_native_run(args: &[&str]) -> Result<(), CliError> {
+        let mut argv = vec![OsString::from("bin")];
+        argv.extend(args.iter().map(OsString::from));
+        parse_native_run(argv).map(|_| ())
+    }
+    fn drv_cargo(command: &str, args: &[&str]) -> Result<(), CliError> {
+        parse_cargo(command.to_string(), strings(args)).map(|_| ())
+    }
+    fn drv_wasi_replay(args: &[&str]) -> Result<(), CliError> {
+        parse_wasi_replay(
+            ArtifactRef::Prebuilt(PathBuf::from("m.wasm")),
+            PathBuf::from("t.patina"),
+            strings(args),
+        )
+        .map(|_| ())
+    }
+    fn drv_native_replay(args: &[&str]) -> Result<(), CliError> {
+        parse_native_replay(
+            ArtifactRef::Prebuilt(PathBuf::from("bin")),
+            PathBuf::from("t.patina"),
+            strings(args),
+        )
+        .map(|_| ())
+    }
+
+    /// Parse a single flag with `value` through the real family parser that owns
+    /// it under `verb`, threading any companion flag a dependency requires (e.g.
+    /// `--sched-pct-steps` needs `--sched-pct`). Returns `None` when no driver
+    /// covers the flag — the coverage gate that keeps this mirror honest as flags
+    /// are added. The inline `--flag=VALUE` form is used throughout: it is
+    /// accepted for both required- and optional-value flags, so one form drives
+    /// every kind.
+    fn drive_flag(verb: &str, flag: &str, value: &str) -> Option<Result<(), CliError>> {
+        let inline = format!("{flag}={value}");
+        let inline = inline.as_str();
+        let outcome = match (verb, flag) {
+            // run: route each flag to the family parser that owns it.
+            ("run", "--budget" | "--param") => drv_cargo("run", &[inline]),
+            (
+                "run",
+                "--fuel" | "--arg" | "--env" | "--socket" | "--preopen" | "--max-memory-pages"
+                | "--max-descriptors" | "--max-preopens" | "--max-path-bytes" | "--max-io-bytes"
+                | "--max-iovecs",
+            ) => drv_wasi_run(&[inline]),
+            (
+                "run",
+                "--seed"
+                | "--record"
+                | "--fs-crash-at"
+                | "--fs-torn-granularity"
+                | "--sleep-jitter-nanos"
+                | "--net-jitter-nanos"
+                | "--net-drop-permille"
+                | "--buggify"
+                | "--buggify-activation-permille"
+                | "--buggify-cutoff-nanos"
+                | "--liveness-watchdog"
+                | "--converge-within"
+                | "--heal-after",
+            ) => drv_wasi_run(&[inline]),
+            (
+                "run",
+                "--net-latency-nanos"
+                | "--mount"
+                | "--fingerprint"
+                | "--allow"
+                | "--allow-unsupported-symbols"
+                | "--sched-pct"
+                | "--starve",
+            ) => drv_native_run(&[inline]),
+            ("run", "--sched-pct-steps") => drv_native_run(&["--sched-pct=1", inline]),
+            ("run", "--starve-max-len" | "--starve-window") => {
+                drv_native_run(&["--starve=1", inline])
+            }
+            ("run", "--package" | "--bin") => take_package_bin(strings(&[inline])).map(|_| ()),
+            ("run" | "audit" | "replay", "--target") => target_family(value).map(|_| ()),
+
+            // test: every flag is the Cargo package family's.
+            ("test", _) => drv_cargo("test", &[inline]),
+
+            // build: the native/wasi build parsers; --target through parse_build.
+            ("build", "--output") => parse_native_build(strings(&["x.rs", inline])).map(|_| ()),
+            ("build", "--edition") => {
+                parse_native_build(strings(&["x.rs", "--output=/tmp/o", inline])).map(|_| ())
+            }
+            ("build", "--package" | "--bin") => {
+                parse_native_build(strings(&["sub/Cargo.toml", inline])).map(|_| ())
+            }
+            ("build", "--target") => parse_build(strings(&[inline, "sub/Cargo.toml"])).map(|_| ()),
+
+            // audit: --allow through the native audit parser.
+            ("audit", "--allow") => parse_native_audit(strings(&["bin", inline])).map(|_| ()),
+            ("audit", "--package" | "--bin") => take_package_bin(strings(&[inline])).map(|_| ()),
+
+            // replay: native host facts, WASI host inputs, and the WASI-family
+            // timeline/branch controls (branch flags need the full branch quorum).
+            ("replay", "--fingerprint" | "--mount" | "--allow" | "--allow-unsupported-symbols") => {
+                drv_native_replay(&[inline])
+            }
+            (
+                "replay",
+                "--fuel" | "--arg" | "--env" | "--socket" | "--preopen" | "--max-memory-pages"
+                | "--max-descriptors" | "--max-preopens" | "--max-path-bytes" | "--max-io-bytes"
+                | "--max-iovecs" | "--timeline",
+            ) => drv_wasi_replay(&[inline]),
+            ("replay", "--from") => drv_wasi_replay(&[
+                "--branch",
+                "--branch-seed=1",
+                "--branch-id=b",
+                "--parent=main",
+                inline,
+            ]),
+            ("replay", "--branch-seed") => drv_wasi_replay(&[
+                "--branch",
+                "--from=0",
+                "--branch-id=b",
+                "--parent=main",
+                inline,
+            ]),
+            ("replay", "--branch-id") => drv_wasi_replay(&[
+                "--branch",
+                "--from=0",
+                "--branch-seed=1",
+                "--parent=main",
+                inline,
+            ]),
+            ("replay", "--parent") => drv_wasi_replay(&[
+                "--branch",
+                "--from=0",
+                "--branch-seed=1",
+                "--branch-id=b",
+                inline,
+            ]),
+
+            // explore: --seed-start pins --seeds 1 so a max-u64 start never
+            // overflows the swept range.
+            ("explore", "--seeds") => parse_explore(strings(&[inline, "test"])).map(|_| ()),
+            ("explore", "--seed-start") => {
+                parse_explore(strings(&["--seeds=1", inline, "test"])).map(|_| ())
+            }
+
+            // campaign: --spec reads a JSON file at parse time, so it is driven
+            // against a real, minimal spec rather than a synthetic path sample.
+            ("campaign", "--spec") => {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let path = dir.path().join("spec.json");
+                std::fs::write(&path, b"{}").expect("write spec");
+                let arg = format!("--spec={}", path.display());
+                campaign::parse(strings(&["art.wasm", &arg])).map(|_| ())
+            }
+            ("campaign", _) => campaign::parse(strings(&["art.wasm", inline])).map(|_| ()),
+
+            // minimize: --output/--timeline are trace-mode; --seed/--seed-budget/
+            // --param are scenario-mode (need --scenario and a --seed).
+            ("minimize", "--output") => {
+                parse_minimize(strings(&["t.patina", inline, "--", "oracle"])).map(|_| ())
+            }
+            ("minimize", "--timeline") => parse_minimize(strings(&[
+                "t.patina",
+                "--output=/tmp/o",
+                inline,
+                "--",
+                "oracle",
+            ]))
+            .map(|_| ()),
+            ("minimize", "--seed") => {
+                parse_minimize(strings(&["--scenario", inline, "--", "oracle"])).map(|_| ())
+            }
+            ("minimize", "--seed-budget" | "--param") => {
+                parse_minimize(strings(&["--scenario", "--seed=0", inline, "--", "oracle"]))
+                    .map(|_| ())
+            }
+
+            _ => return None,
+        };
+        Some(outcome)
+    }
+
+    #[test]
+    fn registry_value_grammars_match_the_parsers() {
+        // The generic drift gate: every registered value-bearing flag's declared
+        // `help::Kind` is exercised against the REAL parser that consumes it, in
+        // both directions. Valid samples of the kind must parse; invalid samples
+        // must be rejected. A parser that tightens or loosens a value grammar
+        // without updating the registry kind (or a kind that does not match parser
+        // reality) fails here — the general form of the `--sleep-jitter-nanos
+        // 0:N` vs `0..N` regression, for every flag at once.
+
+        // Global output options are parsed once, before routing, by output::extract.
+        for flag in help::GLOBAL_OUTPUT {
+            let Some(kind) = flag.value.grammar() else {
+                continue;
+            };
+            let (valid, invalid) = kind_samples(kind);
+            for sample in valid {
+                let arg = format!("{}={sample}", flag.name);
+                output::extract(strings(&[&arg])).unwrap_or_else(|error| {
+                    panic!("global `{}` rejected valid {sample:?}: {error}", flag.name)
+                });
+            }
+            for sample in invalid {
+                let arg = format!("{}={sample}", flag.name);
+                assert!(
+                    output::extract(strings(&[&arg])).is_err(),
+                    "global `{}` accepted invalid {sample:?}",
+                    flag.name
+                );
+            }
+        }
+
+        // Every per-verb flag, driven through its owning family parser.
+        for verb in help::VERBS {
+            let mut seen: BTreeSet<&str> = BTreeSet::new();
+            for flag in verb.groups.iter().flat_map(|group| group.flags.iter()) {
+                let Some(kind) = flag.value.grammar() else {
+                    continue;
+                };
+                if !seen.insert(flag.name) {
+                    continue;
+                }
+                let (valid, invalid) = kind_samples(kind);
+                for sample in &valid {
+                    let outcome = drive_flag(verb.name, flag.name, sample).unwrap_or_else(|| {
+                        panic!(
+                            "verb `{}` flag `{}` has no value-grammar driver; add one to \
+                             `drive_flag`",
+                            verb.name, flag.name
+                        )
+                    });
+                    outcome.unwrap_or_else(|error| {
+                        panic!(
+                            "verb `{}` flag `{}` ({kind:?}) rejected VALID sample {sample:?}: \
+                             {error}",
+                            verb.name, flag.name
+                        )
+                    });
+                }
+                for sample in &invalid {
+                    let outcome = drive_flag(verb.name, flag.name, sample)
+                        .expect("driver present (proven by the valid loop above)");
+                    assert!(
+                        outcome.is_err(),
+                        "verb `{}` flag `{}` ({kind:?}) ACCEPTED invalid sample {sample:?}",
+                        verb.name,
+                        flag.name
+                    );
+                }
+            }
         }
     }
 

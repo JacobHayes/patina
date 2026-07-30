@@ -15,16 +15,81 @@
 //! asserts every parsed flag is registered, so adding a parsed flag without
 //! registering it fails a test — the structural drift gate.
 
+/// The value grammar a flag's argument must satisfy — the typed shape the
+/// parsers accept, declared once here so a value-syntax mismatch between what a
+/// component emits/documents and what a parser accepts is caught by one generic
+/// property test (`tests::registry_value_grammars_match_the_parsers` in `lib.rs`)
+/// rather than a per-flag point test. Every variant is derived from the actual
+/// value validation in `lib.rs`/`campaign.rs`; the test feeds valid and invalid
+/// samples per kind through the real verb parsers, so a parser that tightens or
+/// loosens a grammar without updating the kind here (or vice versa) fails.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// An unsigned 64-bit integer (`parse_u64`), no further bound.
+    U64,
+    /// An unsigned 32-bit integer (`parse_u32`).
+    U32,
+    /// A non-negative machine integer (`parse_usize`).
+    Usize,
+    /// An unsigned integer required to be `>= 1` (a positive count).
+    PositiveU64,
+    /// A per-mille in `[0, 1000]`.
+    Permille,
+    /// An inclusive `MIN..MAX` nanosecond range with `MIN <= MAX`.
+    NanosRange,
+    /// A filesystem crash spec `open|write|sync|close[:N]` (`N >= 1`).
+    CrashSpec,
+    /// A `KEY=VALUE` pair with a non-empty key.
+    KeyValue,
+    /// A datagram socket `FD=BIND->PEER` (FD a u32 above 3, non-empty addresses).
+    Socket,
+    /// A preopen `GUEST[:ro|:rw]` with a non-empty guest path.
+    Preopen,
+    /// `all`, or a comma-separated list of at least one non-empty symbol.
+    UnsupportedSymbols,
+    /// One of a fixed set of string literals.
+    Enum(&'static [&'static str]),
+    /// A non-empty free-form string (rejected only when empty).
+    Symbol,
+    /// A filesystem path — any string, accepted verbatim (no value grammar).
+    Path,
+    /// A free-form string the parser stores verbatim (no value grammar).
+    Str,
+}
+
+impl Kind {
+    /// The grammar tag exposed in the JSON payload.
+    fn tag(self) -> &'static str {
+        match self {
+            Kind::U64 => "u64",
+            Kind::U32 => "u32",
+            Kind::Usize => "usize",
+            Kind::PositiveU64 => "positive-u64",
+            Kind::Permille => "permille",
+            Kind::NanosRange => "nanos-range",
+            Kind::CrashSpec => "crash-spec",
+            Kind::KeyValue => "key-value",
+            Kind::Socket => "socket",
+            Kind::Preopen => "preopen",
+            Kind::UnsupportedSymbols => "unsupported-symbols",
+            Kind::Enum(_) => "enum",
+            Kind::Symbol => "symbol",
+            Kind::Path => "path",
+            Kind::Str => "string",
+        }
+    }
+}
+
 /// How a flag takes its value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Value {
     /// A valueless switch (`--release`, `--swarm`).
     None,
-    /// A required value with the given placeholder (`--seed <U64>`).
-    Required(&'static str),
+    /// A required value with the given placeholder and grammar (`--seed <U64>`).
+    Required(&'static str, Kind),
     /// An optional value (`--buggify[=<PERMILLE>]`): the switch alone is valid,
-    /// and an `=VALUE` form supplies the value.
-    Optional(&'static str),
+    /// and an `=VALUE` form supplies a value of the given grammar.
+    Optional(&'static str, Kind),
 }
 
 impl Value {
@@ -32,15 +97,24 @@ impl Value {
     fn kind(self) -> &'static str {
         match self {
             Value::None => "none",
-            Value::Required(_) => "required",
-            Value::Optional(_) => "optional",
+            Value::Required(..) => "required",
+            Value::Optional(..) => "optional",
         }
     }
 
     fn placeholder(self) -> Option<&'static str> {
         match self {
             Value::None => None,
-            Value::Required(p) | Value::Optional(p) => Some(p),
+            Value::Required(p, _) | Value::Optional(p, _) => Some(p),
+        }
+    }
+
+    /// The value grammar this flag's argument must satisfy, or `None` for a
+    /// valueless switch. The single source the value-grammar property test walks.
+    pub fn grammar(self) -> Option<Kind> {
+        match self {
+            Value::None => None,
+            Value::Required(_, kind) | Value::Optional(_, kind) => Some(kind),
         }
     }
 }
@@ -118,21 +192,21 @@ pub const GLOBAL_OUTPUT: &[Flag] = &[
     f(
         "--format",
         None,
-        Value::Required("human|json"),
+        Value::Required("human|json", Kind::Enum(&["human", "json"])),
         "Result format (default human). `json` prints one machine-readable result envelope (schema patina.result/v1) on stdout; `--help --format json` prints this registry as JSON.",
         false,
     ),
     f(
         "--render",
         None,
-        Value::Required("OUT.html"),
+        Value::Required("OUT.html", Kind::Path),
         "For a run/replay with a trace, write a self-contained HTML timeline to OUT.html.",
         false,
     ),
     f(
         "--report",
         None,
-        Value::Required("OUT.html"),
+        Value::Required("OUT.html", Kind::Path),
         "Like --render but only when the run fails; the HTML leads with a failure summary.",
         false,
     ),
@@ -158,7 +232,7 @@ pub const HELP_FLAGS: &[Flag] = &[
 const TARGET_FLAG: Flag = f(
     "--target",
     None,
-    Value::Required("native|wasi"),
+    Value::Required("native|wasi", Kind::Enum(&["native", "wasi"])),
     "Select the family for a source/package argument (default native); stripped before routing.",
     false,
 );
@@ -167,14 +241,14 @@ const SOURCE_SELECT: &[Flag] = &[
     f(
         "--package",
         Some("-p"),
-        Value::Required("NAME"),
+        Value::Required("NAME", Kind::Str),
         "Select a workspace member to build on the fly.",
         false,
     ),
     f(
         "--bin",
         None,
-        Value::Required("NAME"),
+        Value::Required("NAME", Kind::Str),
         "Select the binary when the package defines more than one.",
         false,
     ),
@@ -185,35 +259,35 @@ const FAULT_FLAGS: &[Flag] = &[
     f(
         "--fs-crash-at",
         None,
-        Value::Required("SPEC"),
+        Value::Required("SPEC", Kind::CrashSpec),
         "Inject a filesystem crash after the Nth boundary op: open|write|sync|close[:N] (bare = :1).",
         false,
     ),
     f(
         "--fs-torn-granularity",
         None,
-        Value::Required("block|byte"),
+        Value::Required("block|byte", Kind::Enum(&["block", "byte"])),
         "Torn-write granularity for --fs-crash-at: block (default) or byte.",
         false,
     ),
     f(
         "--sleep-jitter-nanos",
         None,
-        Value::Required("MIN..MAX"),
+        Value::Required("MIN..MAX", Kind::NanosRange),
         "Add seeded latency drawn from [MIN, MAX] to every guest sleep.",
         false,
     ),
     f(
         "--net-jitter-nanos",
         None,
-        Value::Required("MIN..MAX"),
+        Value::Required("MIN..MAX", Kind::NanosRange),
         "Add seeded per-datagram delivery jitter drawn from [MIN, MAX].",
         false,
     ),
     f(
         "--net-drop-permille",
         None,
-        Value::Required("N"),
+        Value::Required("N", Kind::Permille),
         "Drop datagrams at N per-mille (0..=1000).",
         false,
     ),
@@ -223,77 +297,77 @@ const WASI_HOST_FLAGS: &[Flag] = &[
     f(
         "--fuel",
         None,
-        Value::Required("N"),
+        Value::Required("N", Kind::U64),
         "Maximum wasm fuel (execution budget).",
         false,
     ),
     f(
         "--arg",
         None,
-        Value::Required("VALUE"),
+        Value::Required("VALUE", Kind::Str),
         "Append a guest argv entry (recorded and restored on replay).",
         true,
     ),
     f(
         "--env",
         None,
-        Value::Required("K=V"),
+        Value::Required("K=V", Kind::KeyValue),
         "Set a guest environment variable.",
         true,
     ),
     f(
         "--socket",
         None,
-        Value::Required("FD=BIND->PEER"),
+        Value::Required("FD=BIND->PEER", Kind::Socket),
         "Configure a datagram socket at a unique FD above 3.",
         true,
     ),
     f(
         "--preopen",
         None,
-        Value::Required("GUEST[:ro|:rw]"),
+        Value::Required("GUEST[:ro|:rw]", Kind::Preopen),
         "Preopen an absolute guest path (default rw; first explicit preopen replaces the implicit rw `/`).",
         true,
     ),
     f(
         "--max-memory-pages",
         None,
-        Value::Required("N"),
+        Value::Required("N", Kind::U32),
         "Maximum guest memory pages (64 KiB each).",
         false,
     ),
     f(
         "--max-descriptors",
         None,
-        Value::Required("N"),
+        Value::Required("N", Kind::Usize),
         "Maximum open WASI descriptors.",
         false,
     ),
     f(
         "--max-preopens",
         None,
-        Value::Required("N"),
+        Value::Required("N", Kind::Usize),
         "Maximum configured preopened directories.",
         false,
     ),
     f(
         "--max-path-bytes",
         None,
-        Value::Required("N"),
+        Value::Required("N", Kind::Usize),
         "Maximum bytes in a single guest path.",
         false,
     ),
     f(
         "--max-io-bytes",
         None,
-        Value::Required("N"),
+        Value::Required("N", Kind::Usize),
         "Maximum bytes in one WASI I/O operation.",
         false,
     ),
     f(
         "--max-iovecs",
         None,
-        Value::Required("N"),
+        Value::Required("N", Kind::Usize),
         "Maximum iovec entries in one WASI operation.",
         false,
     ),
@@ -303,21 +377,21 @@ const BUGGIFY_FLAGS: &[Flag] = &[
     f(
         "--buggify",
         None,
-        Value::Optional("PERMILLE"),
+        Value::Optional("PERMILLE", Kind::Permille),
         "Enable cooperative-SUT (buggify) fault injection; PERMILLE is the per-evaluation firing probability (default 250 = 25%).",
         false,
     ),
     f(
         "--buggify-activation-permille",
         None,
-        Value::Required("N"),
+        Value::Required("N", Kind::Permille),
         "Fraction of buggify sites made active this run (default 250). Implies --buggify.",
         false,
     ),
     f(
         "--buggify-cutoff-nanos",
         None,
-        Value::Required("N"),
+        Value::Required("N", Kind::U64),
         "Virtual-time cutoff after which buggify stops firing (default 300000000000). Implies --buggify.",
         false,
     ),
@@ -334,21 +408,21 @@ const LIVENESS_FLAGS_OPTIONAL: &[Flag] = &[
     f(
         "--liveness-watchdog",
         None,
-        Value::Optional("NANOS"),
+        Value::Optional("NANOS", Kind::U64),
         "Arm a no-progress watchdog over virtual time (bare = runtime default budget).",
         false,
     ),
     f(
         "--converge-within",
         None,
-        Value::Optional("NANOS"),
+        Value::Optional("NANOS", Kind::U64),
         "Require convergence within NANOS of the last injected fault (bare = default).",
         false,
     ),
     f(
         "--heal-after",
         None,
-        Value::Required("NANOS"),
+        Value::Required("NANOS", Kind::U64),
         "Fault-free convergence arm-time override; requires --converge-within.",
         false,
     ),
@@ -358,35 +432,35 @@ const NATIVE_SCHEDULE_FLAGS: &[Flag] = &[
     f(
         "--sched-pct",
         None,
-        Value::Optional("N"),
+        Value::Optional("N", Kind::PositiveU64),
         "PCT priority-scheduling exploration; N is the bug depth (>= 1).",
         false,
     ),
     f(
         "--sched-pct-steps",
         None,
-        Value::Required("N"),
+        Value::Required("N", Kind::PositiveU64),
         "Number of PCT priority-change points (>= 1). Requires --sched-pct.",
         false,
     ),
     f(
         "--starve",
         None,
-        Value::Optional("N"),
+        Value::Optional("N", Kind::PositiveU64),
         "Starvation exploration; N is the interval count (>= 1).",
         false,
     ),
     f(
         "--starve-max-len",
         None,
-        Value::Required("N"),
+        Value::Required("N", Kind::PositiveU64),
         "Maximum starvation run length (>= 1). Requires --starve.",
         false,
     ),
     f(
         "--starve-window",
         None,
-        Value::Required("N"),
+        Value::Required("N", Kind::PositiveU64),
         "Starvation window (>= 1). Requires --starve.",
         false,
     ),
@@ -403,7 +477,7 @@ const REPLAY_TIMELINE_FLAGS: &[Flag] = &[
     f(
         "--timeline",
         None,
-        Value::Required("ID"),
+        Value::Required("ID", Kind::Str),
         "Replay a named timeline (default main).",
         false,
     ),
@@ -417,28 +491,28 @@ const REPLAY_TIMELINE_FLAGS: &[Flag] = &[
     f(
         "--from",
         None,
-        Value::Required("N"),
+        Value::Required("N", Kind::U64),
         "Branch point sequence number. Requires --branch.",
         false,
     ),
     f(
         "--branch-seed",
         None,
-        Value::Required("S"),
+        Value::Required("S", Kind::U64),
         "Seed for the appended branch. Requires --branch.",
         false,
     ),
     f(
         "--branch-id",
         None,
-        Value::Required("ID"),
+        Value::Required("ID", Kind::Str),
         "Id for the appended branch timeline. Requires --branch.",
         false,
     ),
     f(
         "--parent",
         None,
-        Value::Required("ID"),
+        Value::Required("ID", Kind::Str),
         "Parent timeline to branch from (default main). Requires --branch.",
         false,
     ),
@@ -484,28 +558,28 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
                 f(
                     "--seed",
                     None,
-                    Value::Required("U64"),
+                    Value::Required("U64", Kind::U64),
                     "Deterministic root seed (default 0).",
                     false,
                 ),
                 f(
                     "--record",
                     None,
-                    Value::Required("PATH"),
+                    Value::Required("PATH", Kind::Path),
                     "Record boundary operations and outcomes to PATH.",
                     false,
                 ),
                 f(
                     "--budget",
                     None,
-                    Value::Required("STEPS"),
+                    Value::Required("STEPS", Kind::U64),
                     "Maximum boundary operations before explicit failure (cargo family).",
                     false,
                 ),
                 f(
                     "--param",
                     None,
-                    Value::Required("K=V"),
+                    Value::Required("K=V", Kind::KeyValue),
                     "Typed-builder parameter exposed through Context (cargo family).",
                     true,
                 ),
@@ -532,35 +606,35 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
                 f(
                     "--mount",
                     None,
-                    Value::Required("HOST_DIR"),
+                    Value::Required("HOST_DIR", Kind::Path),
                     "Capture a host directory read-only into the guest filesystem at `/`.",
                     false,
                 ),
                 f(
                     "--net-latency-nanos",
                     None,
-                    Value::Required("N"),
+                    Value::Required("N", Kind::U64),
                     "Base per-datagram delivery latency.",
                     false,
                 ),
                 f(
                     "--fingerprint",
                     None,
-                    Value::Required("STR"),
+                    Value::Required("STR", Kind::Str),
                     "Compatibility fingerprint label (default patina-native).",
                     false,
                 ),
                 f(
                     "--allow",
                     None,
-                    Value::Required("SYMBOL"),
+                    Value::Required("SYMBOL", Kind::Symbol),
                     "Add a known-safe symbol to the pre-run gate allow list.",
                     true,
                 ),
                 f(
                     "--allow-unsupported-symbols",
                     None,
-                    Value::Required("all|name,..."),
+                    Value::Required("all|name,...", Kind::UnsupportedSymbols),
                     "Downgrade matching unsupported-symbol denials to a warning.",
                     false,
                 ),
@@ -604,28 +678,28 @@ into the trace metadata so `replay` restores them.",
                 f(
                     "--seed",
                     None,
-                    Value::Required("U64"),
+                    Value::Required("U64", Kind::U64),
                     "Deterministic root seed (default 0).",
                     false,
                 ),
                 f(
                     "--record",
                     None,
-                    Value::Required("PATH"),
+                    Value::Required("PATH", Kind::Path),
                     "Record boundary operations and outcomes to PATH.",
                     false,
                 ),
                 f(
                     "--budget",
                     None,
-                    Value::Required("STEPS"),
+                    Value::Required("STEPS", Kind::U64),
                     "Maximum boundary operations before explicit failure.",
                     false,
                 ),
                 f(
                     "--param",
                     None,
-                    Value::Required("K=V"),
+                    Value::Required("K=V", Kind::KeyValue),
                     "Typed-builder parameter exposed through Context.",
                     true,
                 ),
@@ -666,14 +740,14 @@ native-only).",
             f(
                 "--output",
                 Some("-o"),
-                Value::Required("PATH"),
+                Value::Required("PATH", Kind::Path),
                 "Copy the built binary out to PATH (required for a single .rs source).",
                 false,
             ),
             f(
                 "--edition",
                 None,
-                Value::Required("YEAR"),
+                Value::Required("YEAR", Kind::Str),
                 "Rust edition for a single-source build (default 2024).",
                 false,
             ),
@@ -694,14 +768,14 @@ native-only).",
             f(
                 "--package",
                 Some("-p"),
-                Value::Required("NAME"),
+                Value::Required("NAME", Kind::Str),
                 "Select a workspace member.",
                 false,
             ),
             f(
                 "--bin",
                 None,
-                Value::Required("NAME"),
+                Value::Required("NAME", Kind::Str),
                 "Select the binary when the package defines more than one.",
                 false,
             ),
@@ -733,7 +807,7 @@ and takes no --allow (the allow list is native-only).",
                 f(
                     "--allow",
                     None,
-                    Value::Required("SYMBOL"),
+                    Value::Required("SYMBOL", Kind::Symbol),
                     "Treat SYMBOL as known-safe (native only).",
                     true,
                 ),
@@ -782,14 +856,14 @@ audit surface.",
                 f(
                     "--fingerprint",
                     None,
-                    Value::Required("STR"),
+                    Value::Required("STR", Kind::Str),
                     "Compatibility fingerprint label (default patina-native).",
                     false,
                 ),
                 f(
                     "--mount",
                     None,
-                    Value::Required("HOST_DIR"),
+                    Value::Required("HOST_DIR", Kind::Path),
                     "Re-supply the host corpus whose hash the fingerprint verifies.",
                     false,
                 ),
@@ -803,14 +877,14 @@ audit surface.",
                 f(
                     "--allow",
                     None,
-                    Value::Required("SYMBOL"),
+                    Value::Required("SYMBOL", Kind::Symbol),
                     "Add a known-safe symbol to the pre-run gate allow list.",
                     true,
                 ),
                 f(
                     "--allow-unsupported-symbols",
                     None,
-                    Value::Required("all|name,..."),
+                    Value::Required("all|name,...", Kind::UnsupportedSymbols),
                     "Downgrade matching unsupported-symbol denials to a warning.",
                     false,
                 ),
@@ -851,14 +925,14 @@ for those.",
             f(
                 "--seeds",
                 None,
-                Value::Required("N"),
+                Value::Required("N", Kind::PositiveU64),
                 "Number of seeds to sweep (1..=1000000, default 100).",
                 false,
             ),
             f(
                 "--seed-start",
                 None,
-                Value::Required("N"),
+                Value::Required("N", Kind::U64),
                 "First seed in the range (default: the wrapped command's seed).",
                 false,
             ),
@@ -888,35 +962,35 @@ classifier class and the signature store.",
             f(
                 "--gens",
                 None,
-                Value::Required("N"),
+                Value::Required("N", Kind::U64),
                 "Number of generations (default 40).",
                 false,
             ),
             f(
                 "--out-dir",
                 None,
-                Value::Required("DIR"),
+                Value::Required("DIR", Kind::Path),
                 "Output directory (default patina-campaign-out).",
                 false,
             ),
             f(
                 "--spec",
                 None,
-                Value::Required("FILE.json"),
+                Value::Required("FILE.json", Kind::Path),
                 "JSON spec of campaign overrides.",
                 false,
             ),
             f(
                 "--seed-start",
                 None,
-                Value::Required("N"),
+                Value::Required("N", Kind::U64),
                 "Base for the per-generation seed derivation (default 0).",
                 false,
             ),
             f(
                 "--timeout-secs",
                 None,
-                Value::Required("N"),
+                Value::Required("N", Kind::U64),
                 "Per-generation child timeout in seconds (default 60).",
                 false,
             ),
@@ -958,21 +1032,21 @@ classifier class and the signature store.",
             f(
                 "--liveness-watchdog",
                 None,
-                Value::Required("N"),
+                Value::Required("N", Kind::U64),
                 "Liveness-watchdog budget (virtual nanoseconds) applied every generation.",
                 false,
             ),
             f(
                 "--converge-within",
                 None,
-                Value::Required("N"),
+                Value::Required("N", Kind::U64),
                 "Heal-then-converge budget (virtual nanoseconds) applied every generation.",
                 false,
             ),
             f(
                 "--heal-after",
                 None,
-                Value::Required("N"),
+                Value::Required("N", Kind::U64),
                 "Explicit heal-then-converge arm-time override (virtual nanoseconds).",
                 false,
             ),
@@ -1013,14 +1087,14 @@ PATINA_SEED/PATINA_PARAMS_JSON protocol.",
                 f(
                     "--output",
                     Some("-o"),
-                    Value::Required("PATH"),
+                    Value::Required("PATH", Kind::Path),
                     "Write the minimized trace to PATH (required).",
                     false,
                 ),
                 f(
                     "--timeline",
                     None,
-                    Value::Required("ID"),
+                    Value::Required("ID", Kind::Str),
                     "Minimize a specific leaf timeline.",
                     false,
                 ),
@@ -1046,21 +1120,21 @@ PATINA_SEED/PATINA_PARAMS_JSON protocol.",
                 f(
                     "--seed",
                     None,
-                    Value::Required("U64"),
+                    Value::Required("U64", Kind::U64),
                     "The failing seed to canonicalize toward zero (required).",
                     false,
                 ),
                 f(
                     "--seed-budget",
                     None,
-                    Value::Required("N"),
+                    Value::Required("N", Kind::U64),
                     "Seed canonicalization budget (default 256).",
                     false,
                 ),
                 f(
                     "--param",
                     None,
-                    Value::Required("K=V"),
+                    Value::Required("K=V", Kind::KeyValue),
                     "A scenario parameter to drop/shrink.",
                     true,
                 ),
@@ -1235,8 +1309,8 @@ fn flag_left(flag: &Flag) -> String {
     }
     match flag.value {
         Value::None => {}
-        Value::Required(p) => left.push_str(&format!(" <{p}>")),
-        Value::Optional(p) => left.push_str(&format!("[=<{p}>]")),
+        Value::Required(p, _) => left.push_str(&format!(" <{p}>")),
+        Value::Optional(p, _) => left.push_str(&format!("[=<{p}>]")),
     }
     if flag.repeatable {
         left.push_str("...");
@@ -1479,6 +1553,20 @@ fn flag_json(flag: &Flag) -> serde_json::Value {
         "placeholder".into(),
         flag.value.placeholder().map_or(J::Null, J::from),
     );
+    // The typed value grammar (patina.help/v1, additive): the syntax a value
+    // must satisfy, plus the allowed literals for an `enum` grammar. `null` for a
+    // valueless switch. Lets an agent construct a well-formed value without
+    // guessing from the placeholder.
+    m.insert(
+        "value_grammar".into(),
+        match flag.value.grammar() {
+            Some(kind) => J::from(kind.tag()),
+            None => J::Null,
+        },
+    );
+    if let Some(Kind::Enum(choices)) = flag.value.grammar() {
+        m.insert("choices".into(), J::from(choices.to_vec()));
+    }
     m.insert("doc".into(), J::from(flag.doc));
     m.insert("repeatable".into(), J::from(flag.repeatable));
     J::Object(m)
