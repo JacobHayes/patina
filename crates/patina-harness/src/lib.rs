@@ -1,6 +1,6 @@
-//! Configure-then-run harness for ordinary application code under Patina.
+//! Configure-then-run harness for ordinary application code under [Patina].
 //!
-//! This is *usage mode 2* of `USAGE-MODES.md`: a harness binary configures
+//! This is *usage mode 2* of [USAGE-MODES.md]: a harness binary configures
 //! the deterministic runtime and then calls **ordinary application code** whose
 //! `std::fs`, `std::net`, clock, thread, and entropy effects are interposed by
 //! Patina's native shim — the same global runtime context the shim installs for a
@@ -71,6 +71,9 @@
 //! out of scope for v1: the CLI `--mount` owns the filesystem image. WASI is
 //! unsupported — the WASI supervisor owns run configuration there, so this crate's
 //! ABI targets the native shim only.
+//!
+//! [Patina]: https://github.com/JacobHayes/patina
+//! [USAGE-MODES.md]: https://github.com/JacobHayes/patina/blob/main/USAGE-MODES.md
 
 use std::collections::BTreeMap;
 use std::error::Error;

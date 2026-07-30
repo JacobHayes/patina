@@ -1,8 +1,15 @@
 //! Deterministic WASI Preview 1 host functions and Wasmi guest-memory bridges.
 //!
-//! The allowlisted surface covers process inputs, clocks, entropy, virtual
-//! files, polling, configured datagrams, stdio, and exit. Every other import
-//! is rejected before instantiation.
+//! Internal crate: the host side of `cargo patina run` for `wasm32-wasip1`
+//! guests. It implements the audited WASI Preview 1 import surface — plus the
+//! `patina_sdk` module the `patina-dst` macros bridge to — against the same
+//! deterministic runtime the native shim drives. The allowlisted surface covers
+//! process inputs, clocks, entropy, virtual files, polling, configured
+//! datagrams, stdio, and exit. Every other import is rejected before
+//! instantiation, so an unmodeled effect is a loud refusal rather than a host
+//! escape. Adopters use the CLI; see [ARCHITECTURE.md] for the WASI host design.
+//!
+//! [ARCHITECTURE.md]: https://github.com/JacobHayes/patina/blob/main/ARCHITECTURE.md
 
 use std::collections::BTreeMap;
 use std::fmt;

@@ -1,4 +1,13 @@
 //! Target metadata and fail-closed import auditing.
+//!
+//! Internal crate: the analysis behind `cargo patina audit` and the pre-run
+//! default-deny gate. It parses native (Mach-O/ELF) and `wasm32-wasip1`
+//! artifacts, classifies every externally resolved import against the
+//! interposed/known-safe allowlists, and reports the residual effect surface —
+//! an unknown import is a refusal, never a silent escape. Adopters drive this
+//! through the CLI; see [ARCHITECTURE.md] for the containment story.
+//!
+//! [ARCHITECTURE.md]: https://github.com/JacobHayes/patina/blob/main/ARCHITECTURE.md
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

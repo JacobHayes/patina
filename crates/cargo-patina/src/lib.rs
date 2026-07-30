@@ -1,4 +1,15 @@
 //! Process-level implementation behind the `cargo-patina` binary.
+//!
+//! Internal crate: the `cargo patina` CLI — verb parsing (`build`, `run`,
+//! `test`, `audit`, `replay`, `explore`, `campaign`, `minimize`), artifact
+//! family inference (Cargo package / shim-linked native binary / WASI module),
+//! build orchestration, the supervisor protocol that hands the `PATINA_*`
+//! control plane to a guest, and result rendering (`--format json`,
+//! `--render`). The user-facing contract is `cargo patina <verb> --help` (and
+//! `--help --format json` for the machine-readable registry), not this crate's
+//! API. See [ARCHITECTURE.md] for how the CLI drives the runtime.
+//!
+//! [ARCHITECTURE.md]: https://github.com/JacobHayes/patina/blob/main/ARCHITECTURE.md
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;

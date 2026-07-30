@@ -1,13 +1,55 @@
-//! Deterministic single-threaded futures executor over Patina's explicit boundary.
+//! Deterministic async for [Patina]: a single-threaded futures executor over the
+//! explicit [`Context`] boundary, with virtual-time timers and simulated TCP/UDP.
 //!
-//! This crate controls futures that perform effects through the Patina [`Context`]
-//! boundary. It does not interpose foreign async runtimes, host OS I/O, real
-//! threads, or third-party futures that wait on non-Patina reactors.
+//! [`block_on`] drives a future to completion against a `patina-dst-runtime`
+//! [`Context`], so every await point — task wakeups, [`sleep`]s, [`timeout`]s,
+//! socket readiness — resolves through the deterministic scheduler and virtual
+//! clock and is a pure function of the run seed. [`spawn`] adds cooperatively
+//! scheduled tasks; [`TcpListener`]/[`TcpStream`]/[`UdpSocket`] provide async
+//! I/O over the simulated network. Timers cost no wall-clock time, and a given
+//! seed replays the same interleaving every run.
+//!
+//! ```
+//! use patina_dst_async::{block_on, sleep, spawn};
+//! use patina_dst_runtime::{run, RuntimeError};
+//!
+//! let value = run(|ctx| {
+//!     block_on(ctx, async {
+//!         let worker = spawn("worker", async {
+//!             sleep(1_000_000_000).await.unwrap(); // 1s of virtual time, instantly
+//!             41
+//!         })
+//!         .unwrap();
+//!         worker.await.unwrap() + 1
+//!     })
+//! })?;
+//! assert_eq!(value, 42);
+//! # Ok::<(), RuntimeError>(())
+//! ```
+//!
+//! # Where this crate sits
+//!
+//! This is the async layer of *usage mode 3* ([USAGE-MODES.md]): simulator-shaped
+//! code that owns its world and performs effects through an explicit [`Context`].
+//! It controls only futures built from this crate's primitives. It does **not**
+//! interpose foreign async runtimes, host OS I/O, real threads, or third-party
+//! futures that wait on non-Patina reactors — to run *stock tokio* unmodified,
+//! use `cargo patina run`, which interposes the kqueue/epoll reactors below an
+//! unchanged binary instead (see the [README]).
+//!
+//! # Determinism model
 //!
 //! Leaf futures in this crate never park or wake scheduler tasks directly. They
 //! perform existing recorded boundary operations, register interests/deadlines in
 //! the current poll scope, and return `Pending`; the executor emits exactly one
-//! recorded scheduling operation for each pending poll.
+//! recorded scheduling operation for each pending poll. Task selection is the
+//! deterministic scheduler's choice, so record/replay reproduces the exact poll
+//! order, and the executor fails closed on misuse (nested [`block_on`], leaf
+//! futures polled outside it, a task still live when the main future completes).
+//!
+//! [Patina]: https://github.com/JacobHayes/patina
+//! [README]: https://github.com/JacobHayes/patina/blob/main/README.md
+//! [USAGE-MODES.md]: https://github.com/JacobHayes/patina/blob/main/USAGE-MODES.md
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -39,6 +81,12 @@ thread_local! {
 }
 
 /// Run `future` to completion on a deterministic single-threaded executor.
+///
+/// The main future becomes a scheduler task on `context`; every pending poll
+/// and wakeup is a recorded boundary operation, so the interleaving is a pure
+/// function of the run seed. Nesting `block_on` (from within a polled future)
+/// fails closed, and a spawned task still live when the main future completes
+/// is an error — join or let every [`spawn`]ed task finish first.
 pub fn block_on<F: Future>(context: &mut Context, future: F) -> Result<F::Output, RuntimeError> {
     if SCOPE.with(|scope| scope.get().is_some()) {
         return Err(invalid_state(
@@ -48,9 +96,14 @@ pub fn block_on<F: Future>(context: &mut Context, future: F) -> Result<F::Output
     Executor::new(context)?.run(future)
 }
 
-/// Spawn a future onto the current Patina async executor.
+/// Spawn a future onto the current Patina async executor as a new
+/// deterministic task.
 ///
 /// This function must be called while a future is being polled by [`block_on`].
+/// `label` names the task in traces and diagnostics. The returned
+/// [`JoinHandle`] resolves to the task's output; dropping it detaches the task,
+/// but every spawned task must still complete before the main future does
+/// (see [`block_on`]).
 pub fn spawn<F>(label: &str, future: F) -> Result<JoinHandle<F::Output>, RuntimeError>
 where
     F: Future + 'static,
@@ -68,12 +121,17 @@ pub fn yield_now() -> YieldNow {
     YieldNow { yielded: false }
 }
 
-/// Sleep for a monotonic duration in nanoseconds.
+/// Sleep for a monotonic duration in nanoseconds of *virtual* time.
+///
+/// The deadline registers on the virtual clock, so an hour-long sleep resolves
+/// as soon as the scheduler advances time there — no wall-clock time passes,
+/// and the wake order relative to other timers is deterministic. Alias of
+/// [`sleep_for`].
 pub fn sleep(duration_nanos: u64) -> Sleep {
     sleep_for(duration_nanos)
 }
 
-/// Sleep for a monotonic duration in nanoseconds.
+/// Sleep for a monotonic duration in nanoseconds of virtual time. See [`sleep`].
 pub fn sleep_for(duration_nanos: u64) -> Sleep {
     Sleep {
         kind: SleepKind::For(duration_nanos),
@@ -95,6 +153,22 @@ pub fn sleep_until(clock: ClockKind, deadline_nanos: u64) -> Sleep {
 ///
 /// `Ok(None)` means the timeout elapsed before the inner future completed. If the
 /// inner future and timeout are both ready in the same poll, the inner future wins.
+/// Because the deadline lives on the virtual clock, whether a timeout fires is a
+/// deterministic property of the seed — never of host scheduling luck:
+///
+/// ```
+/// use patina_dst_async::{block_on, sleep, timeout};
+/// use patina_dst_runtime::{run, RuntimeError};
+///
+/// let outcome = run(|ctx| {
+///     block_on(ctx, async {
+///         // A 5s sleep under a 1s budget: elapses in virtual time, instantly.
+///         timeout(1_000_000_000, sleep(5_000_000_000)).await.unwrap()
+///     })
+/// })?;
+/// assert!(outcome.is_none(), "the timeout deterministically fires first");
+/// # Ok::<(), RuntimeError>(())
+/// ```
 pub fn timeout<F: Future>(duration_nanos: u64, future: F) -> Timeout<F> {
     Timeout {
         inner: Box::pin(future),
@@ -770,6 +844,23 @@ impl<T> Future for JoinHandle<T> {
 ///
 /// Dropping a listener records no boundary operation. Use explicit protocol
 /// shutdown on accepted streams when close semantics matter.
+///
+/// ```
+/// use patina_dst_async::{block_on, TcpListener, TcpStream};
+/// use patina_dst_runtime::{run, RuntimeError};
+///
+/// run(|ctx| {
+///     block_on(ctx, async {
+///         let listener = TcpListener::listen("server", 4).await?;
+///         let client = TcpStream::connect("client", "server").await?;
+///         let peer = listener.accept().await?;
+///         client.write_all(b"ping").await?;
+///         assert_eq!(peer.read(64).await?, b"ping");
+///         Ok::<_, RuntimeError>(())
+///     })?
+/// })?;
+/// # Ok::<(), RuntimeError>(())
+/// ```
 #[derive(Clone, Debug)]
 pub struct TcpListener {
     socket: SocketId,

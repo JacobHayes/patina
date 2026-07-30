@@ -1,12 +1,20 @@
 //! Explicit native C ABI entry points for Patina.
 //!
-//! These prefixed symbols are the verified foundation for the future libc
-//! interposition layer. They deliberately do not export ambient `open`,
-//! `read`, or pthread symbols yet, so linking this crate cannot silently alter
-//! unrelated host operations.
+//! Internal crate: the native interposition layer that `cargo patina build`
+//! links below a guest binary. The Rust side here exposes prefixed
+//! `patina_*` C ABI entry points over the deterministic runtime; the bundled C
+//! interposer (`c/patina_posix.c`, exported as [`POSIX_C_SOURCE`])
+//! provides the libc-compatible symbols (file, socket, clock, thread, entropy)
+//! that route a guest's ordinary `std` calls into it. The prefixed Rust surface
+//! deliberately does not export ambient `open`/`read`/pthread symbols, so
+//! linking this crate alone cannot silently alter unrelated host operations.
+//! Adopters never depend on this crate; see [ARCHITECTURE.md] for the shim
+//! design and its fail-closed doctrine.
+//!
+//! [ARCHITECTURE.md]: https://github.com/JacobHayes/patina/blob/main/ARCHITECTURE.md
 
 /// The POSIX interposer C source, exposed as text so out-of-tree tooling
-/// (`cargo patina native-build`) can reproduce the native link recipe from the
+/// (`cargo patina build`) can reproduce the native link recipe from the
 /// installed crate without the workspace source tree. It lives here — the crate
 /// that owns `c/patina_posix.c` — so the shim's C and any embedded copy can
 /// never drift, and so both this crate and `cargo-patina` package cleanly for

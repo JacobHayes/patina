@@ -1,4 +1,14 @@
 //! Versioned trace bundles and strict replay matching.
+//!
+//! Internal crate: the `.patina` trace format — recording boundary events into a
+//! versioned JSON bundle (run metadata, timelines, branch sessions), migrating
+//! older format versions forward, and replaying with strict reconciliation
+//! (any operation/outcome divergence fails closed rather than lying). Adopters
+//! produce and consume traces through `cargo patina run --record` / `replay`
+//! and the `patina-dst-runtime` execution modes, not this crate directly.
+//! See [ARCHITECTURE.md] for the trace design and its guarantees.
+//!
+//! [ARCHITECTURE.md]: https://github.com/JacobHayes/patina/blob/main/ARCHITECTURE.md
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

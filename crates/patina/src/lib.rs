@@ -1,13 +1,38 @@
-//! Patina's public SDK surface: a dependency-light cooperative-SUT SDK.
+//! The [Patina] SDK: cooperative fault injection and test oracles, in the style
+//! of FoundationDB's `BUGGIFY` and Antithesis assertions.
 //!
-//! # Cooperative-SUT SDK
+//! Patina is a deterministic simulation testing (DST) runtime that runs ordinary
+//! `std` programs under a seeded virtual OS personality — same seed, same run,
+//! byte for byte. This crate is the one Patina crate an application depends on
+//! directly: it marks the fault sites and invariants that the runtime cannot
+//! know about from outside ("what if this batch path ran?", "this must *always*
+//! hold"). It has **zero dependencies and no feature flags**, and every entry
+//! point is a no-op or a plain fallback outside a Patina build, so you ship it
+//! unconditionally — no `cfg(patina)`, no test-only dependency graph, no cost in
+//! production:
 //!
-//! The SDK lets a system-under-test cooperate with Patina's deterministic
-//! simulator in the style of FoundationDB's `BUGGIFY` and Antithesis-style
-//! assertions. Every entry point is a no-op or a plain fallback outside a Patina
-//! build, so a program instrumented with these macros still compiles and runs
-//! normally under an ordinary `cargo build` — no `cfg(patina)` ever appears in
-//! adopter code.
+//! ```
+//! fn flush(batch: &[u64]) -> usize {
+//!     // A rare path, taken only under Patina on seed-chosen runs. Under a
+//!     // plain `cargo build` this is a constant `false`.
+//!     if patina_dst::buggify!("flush-early-drop") {
+//!         return 0;
+//!     }
+//!     patina_dst::always!(batch.len() <= 1_000_000, "batch-bounded"); // fatal if false
+//!     patina_dst::sometimes!(batch.len() > 100, "large-batch-seen"); // coverage oracle
+//!     batch.len()
+//! }
+//!
+//! assert_eq!(flush(&[1, 2, 3]), 3); // outside Patina: buggify! never fires
+//! ```
+//!
+//! Instrumented programs run under the deterministic runtime with
+//! `cargo patina build` / `cargo patina run`; fault sites arm with
+//! `cargo patina run --buggify`, and every decision is a pure function of
+//! `--seed`. See the repository [README] and [TUTORIAL] for the ten-minute
+//! version.
+//!
+//! # The SDK surface
 //!
 //! - [`buggify!`] / [`buggify_with_prob!`] — a probabilistic fault trigger at a
 //!   labeled site. Under Patina, an activated site fires deterministically from
@@ -22,6 +47,13 @@
 //!
 //! Site labels are explicit strings and must be unique across the program;
 //! a label reused at a different call site is a fatal error at first evaluation.
+//!
+//! # No vacuous "all clean"
+//!
+//! A fault site that never fires proves nothing. Under `--buggify` the runtime
+//! prints a `PATINA_SDK_REPORT` line at the end of the run showing how many
+//! sites registered, activated, and actually fired, so a green run with inert
+//! instrumentation is visible instead of silently reassuring.
 //!
 //! ## Determinism and the never-reached-site blind spot
 //!
@@ -40,22 +72,32 @@
 //! buggify is armed from the start and `setup_complete()` is a boundary/coverage
 //! marker; place workload sites after it to keep setup buggify-free.
 //!
-//! # Running applications under Patina
+//! # Where this crate sits (the SDK / runtime split)
 //!
-//! This crate is a pure SDK: it does not run applications. Under `cargo patina
-//! build`/`run` the native shim or WASI host supplies the deterministic runtime
-//! below ordinary `std::fs`/`std::net`/clock/thread calls, so SDK-instrumented
-//! production code needs no explicit runtime dependency (usage mode 1 of
-//! `USAGE-MODES.md`).
+//! This crate is a pure SDK: it does not run applications, and it never links
+//! the simulator. Under `cargo patina build`/`run` the native shim or WASI host
+//! supplies the deterministic runtime below ordinary
+//! `std::fs`/`std::net`/clock/thread calls, so SDK-instrumented production code
+//! needs no explicit runtime dependency (usage mode 1 of [USAGE-MODES.md]).
+//! The `cfg(patina)`/`cfg(patina_shim)` markers this crate compiles against are
+//! injected by `cargo patina build` — an adopter never sets them.
 //!
-//! - To configure Patina and then drive normal application code through the same
-//!   shims, use the shim-backed harness crate `patina-dst-harness` (mode 2).
+//! - To configure Patina in code and then drive normal application code through
+//!   the same shims, use the shim-backed harness crate `patina-dst-harness`
+//!   (mode 2).
 //! - For the low-level explicit-`Context` API — `run`/`run_with`, `Context`,
 //!   `RuntimeBuilder`, `RuntimeConfig`, and ABI types — depend on
 //!   [`patina-dst-runtime`] directly (mode 3); the deterministic async surface
 //!   lives in `patina-dst-async` over that same `Context`. This API creates an
 //!   explicit context and does not control unrelated `std` calls.
+//! - For proptest properties whose case generation is a pure function of the
+//!   Patina seed, see `patina-dst-proptest`, which builds on this crate's
+//!   [`rng`].
 //!
+//! [Patina]: https://github.com/JacobHayes/patina
+//! [README]: https://github.com/JacobHayes/patina/blob/main/README.md
+//! [TUTORIAL]: https://github.com/JacobHayes/patina/blob/main/TUTORIAL.md
+//! [USAGE-MODES.md]: https://github.com/JacobHayes/patina/blob/main/USAGE-MODES.md
 //! [`patina-dst-runtime`]: https://docs.rs/patina-dst-runtime
 
 // ---- Cooperative-SUT SDK ------------------------------------------------------
@@ -63,7 +105,14 @@
 /// Whether execution is under Patina's deterministic simulator.
 ///
 /// Analogous to FoundationDB's `g_network->isSimulated()`. `true` inside any
-/// Patina build, `false` in an ordinary build.
+/// Patina build, `false` in an ordinary build. Prefer keeping code identical in
+/// and out of simulation; reserve this for the rare simulation-only affordance
+/// (extra validation, a simulation-visible log line).
+///
+/// ```
+/// // Under a plain `cargo build`/`cargo test` this is always false.
+/// assert!(!patina_dst::is_simulated());
+/// ```
 #[inline]
 pub fn is_simulated() -> bool {
     #[cfg(patina_shim)]
@@ -89,9 +138,20 @@ pub fn is_simulated() -> bool {
 }
 
 /// A deterministic 64-bit draw. Under Patina it is bridged to the run's root
-/// seed (through the native shim, or the WASI `patina_sdk` host import); outside
-/// Patina it is a plainly-seeded fallback stream. This is the hook property-based
-/// testing (a later wave) will build on.
+/// seed (through the native shim, or the WASI `patina_sdk` host import), so the
+/// stream — and everything derived from it — is a pure function of `--seed`.
+/// Outside Patina it is a plainly-seeded per-thread fallback stream, so callers
+/// still get reproducible values without touching OS entropy.
+///
+/// This is the hook `patina-dst-proptest` builds on to make property-test case
+/// generation a pure function of the run seed.
+///
+/// ```
+/// let a = patina_dst::rng();
+/// let b = patina_dst::rng();
+/// // Consecutive draws advance the stream.
+/// assert_ne!(a, b);
+/// ```
 #[inline]
 pub fn rng() -> u64 {
     #[cfg(patina_shim)]
@@ -109,11 +169,23 @@ pub fn rng() -> u64 {
 }
 
 /// Lifecycle markers for cooperating with the simulator's run phases.
+///
+/// ```
+/// // Build fixtures, open stores, spawn workers ... then:
+/// patina_dst::lifecycle::setup_complete();
+/// patina_dst::lifecycle::event!("workload-started");
+/// // Both are no-ops outside Patina.
+/// ```
 pub mod lifecycle {
     pub use crate::lifecycle_event as event;
 
     /// Mark the boundary between setup and the workload under test. Emits a
     /// `PATINA_LIFECYCLE setup_complete` marker under Patina; a no-op outside.
+    ///
+    /// Pair with `cargo patina run --buggify --buggify-after-setup`, which gates
+    /// fault injection off until this call (and fails the run loudly if the
+    /// guest never makes it). See the crate docs for the honest limits of
+    /// lifecycle gating.
     #[inline]
     pub fn setup_complete() {
         crate::__rt::lifecycle_setup_complete();
@@ -519,10 +591,22 @@ mod fallback {
 /// Trigger a probabilistic fault at a labeled site. Under Patina an activated
 /// site fires deterministically from the run seed; outside Patina always `false`.
 ///
-/// ```ignore
-/// if patina_dst::buggify!("commit-early-return") {
-///     return Err(commit_conflict());
+/// Use it to make rare paths — retries, evictions, early returns, error
+/// branches — reachable on seed-chosen runs. Enable with
+/// `cargo patina run --buggify`; without that flag (and always outside Patina)
+/// every site is inert.
+///
+/// ```
+/// fn commit(dirty: bool) -> Result<(), &'static str> {
+///     if patina_dst::buggify!("commit-conflict") {
+///         return Err("simulated commit conflict");
+///     }
+///     let _ = dirty;
+///     Ok(())
 /// }
+///
+/// // Outside a Patina build the site never fires.
+/// assert_eq!(commit(true), Ok(()));
 /// ```
 #[macro_export]
 macro_rules! buggify {
@@ -535,7 +619,13 @@ macro_rules! buggify {
     };
 }
 
-/// Like [`buggify!`] but with an explicit per-evaluation probability in `0.0..=1.0`.
+/// Like [`buggify!`] but with an explicit per-evaluation probability in `0.0..=1.0`,
+/// overriding the run-default firing probability for this site.
+///
+/// ```
+/// // Outside Patina this is always false, even at probability 1.0.
+/// assert!(!patina_dst::buggify_with_prob!("aggressive-retry", 1.0));
+/// ```
 #[macro_export]
 macro_rules! buggify_with_prob {
     ($label:expr, $probability:expr) => {
@@ -549,6 +639,15 @@ macro_rules! buggify_with_prob {
 
 /// Inject a deterministic delay at a labeled site through the virtual clock
 /// (never a real sleep). Returns whether a delay was injected.
+///
+/// Under Patina the delay advances virtual time, so it costs no wall-clock time
+/// while still perturbing timers, timeouts, and interleavings. Outside Patina it
+/// does nothing and returns `false`.
+///
+/// ```
+/// // Outside a Patina build: no delay, and no real time passes.
+/// assert!(!patina_dst::buggify_delay!("pre-heartbeat-stall"));
+/// ```
 #[macro_export]
 macro_rules! buggify_delay {
     ($label:expr) => {
@@ -561,6 +660,15 @@ macro_rules! buggify_delay {
 
 /// A per-run perturbed value within `[lo, hi]` (deterministic from the seed and
 /// label) under Patina; `default` outside. Values are `i64`.
+///
+/// Use it for tunables whose extremes hide bugs — buffer sizes, batch limits,
+/// timeouts — so each seed explores a different configuration:
+///
+/// ```
+/// let batch_size = patina_dst::buggify_knob!("batch-size", 64_i64, 1, 1024);
+/// // Outside Patina the default is returned unchanged.
+/// assert_eq!(batch_size, 64);
+/// ```
 #[macro_export]
 macro_rules! buggify_knob {
     ($label:expr, $default:expr, $lo:expr, $hi:expr) => {
@@ -575,8 +683,15 @@ macro_rules! buggify_knob {
 }
 
 /// Assert an invariant. Under Patina a violation emits a
-/// `PATINA_ALWAYS_VIOLATION label=<label>` marker and aborts; outside it is a
-/// `debug_assert`.
+/// `PATINA_ALWAYS_VIOLATION label=<label>` marker and aborts the run — the
+/// violation classifies the seed as a failure a campaign can dedup and a replay
+/// can reproduce. Outside Patina it is a `debug_assert` (checked in debug and
+/// test builds, free in release).
+///
+/// ```
+/// let ledger = [1, 5, 9];
+/// patina_dst::always!(ledger.windows(2).all(|w| w[0] <= w[1]), "ledger-sorted");
+/// ```
 #[macro_export]
 macro_rules! always {
     ($condition:expr, $label:expr) => {
@@ -589,6 +704,21 @@ macro_rules! always {
 }
 
 /// Coverage oracle: record that `condition` was true at least once at this site.
+///
+/// The inverse of [`always!`]: instead of "this must never be false", it claims
+/// "this should be true on at least some runs" — a cache hit observed, a retry
+/// path taken, a conflict actually detected. It never affects control flow; on
+/// a `--buggify` run the end-of-run `PATINA_SDK_REPORT` shows which
+/// `sometimes!` claims were satisfied, and outside Patina it is a no-op.
+///
+/// ```
+/// fn lookup(cache: &[u32], key: u32) -> bool {
+///     let hit = cache.contains(&key);
+///     patina_dst::sometimes!(hit, "cache-hit-seen");
+///     hit
+/// }
+/// assert!(lookup(&[7], 7));
+/// ```
 #[macro_export]
 macro_rules! sometimes {
     ($condition:expr, $label:expr) => {
@@ -600,7 +730,14 @@ macro_rules! sometimes {
     };
 }
 
-/// Coverage oracle: record that this site was reached.
+/// Coverage oracle: record that this site was reached. The companion of
+/// [`sometimes!`] for paths ("recovery ran", "compaction triggered") whose
+/// mere execution is the interesting fact — no condition to evaluate.
+/// No effect on control flow; a no-op outside Patina.
+///
+/// ```
+/// patina_dst::reachable!("startup-recovery-path");
+/// ```
 #[macro_export]
 macro_rules! reachable {
     ($label:expr) => {
@@ -611,7 +748,8 @@ macro_rules! reachable {
     };
 }
 
-/// Emit a lifecycle marker. Reachable through [`lifecycle::event`].
+/// Emit a named lifecycle marker (`PATINA_LIFECYCLE_EVENT label=<label>`) under
+/// Patina; a no-op outside. Invoke as [`lifecycle::event!`](crate::lifecycle::event).
 #[macro_export]
 macro_rules! lifecycle_event {
     ($label:expr) => {

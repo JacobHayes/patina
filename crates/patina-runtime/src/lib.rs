@@ -1,4 +1,74 @@
-//! Runtime registry, deterministic drivers, and trace execution modes.
+//! The [Patina] deterministic runtime: seeded drivers, record/replay traces,
+//! and the explicit [`Context`] API.
+//!
+//! This crate *is* the simulator. It assembles the deterministic drivers —
+//! virtual clock, in-memory filesystem, simulated network, seeded entropy, and
+//! the deterministic scheduler — behind one [`Context`], makes every effect a
+//! pure function of a root seed, and records/replays those effects as traces.
+//! Every Patina usage mode ultimately drives this runtime: the native shim and
+//! WASI host route interposed `std` calls into it, and this crate's own API
+//! exposes it directly.
+//!
+//! # Where this crate sits (the SDK / runtime split)
+//!
+//! Application code should *not* depend on this crate. The crate an application
+//! ships is `patina-dst` — dependency-light, every macro a no-op outside a
+//! Patina build. `patina-dst-runtime` is the other side of the split: the
+//! simulator itself, for code that *knows* it is simulator-shaped —
+//!
+//! - **Mode 3 (this crate):** tests and simulators written against the
+//!   explicit-context API. [`run`]/[`run_with`] build a [`Context`] and the code
+//!   performs effects *through it* — nothing is interposed, so plain
+//!   `std::fs`/`std::net` calls in the same program do **not** go through
+//!   Patina. Deterministic async ([`block_on`]/`spawn`, virtual-time
+//!   sleep/timeout) layers over the same `Context` in `patina-dst-async`.
+//! - **Modes 1–2 (via `cargo patina`):** unmodified programs run under the
+//!   native shim or WASI host, which drive this same runtime below ordinary
+//!   `std` calls; `patina-dst-harness` configures such a run in code.
+//!
+//! See [USAGE-MODES.md] for the full map and [ARCHITECTURE.md] for the design.
+//!
+//! # Example
+//!
+//! Effects performed through the `Context` are deterministic and free of host
+//! I/O — the filesystem is in-memory, and time is virtual:
+//!
+//! ```
+//! use patina_dst_runtime::run;
+//!
+//! let contents = run(|ctx| {
+//!     ctx.write_file("/greeting", b"hello")?; // deterministic in-memory fs
+//!     ctx.sleep_for(3_600_000_000_000)?; // an hour of virtual time, instantly
+//!     ctx.read_file("/greeting")
+//! })?;
+//! assert_eq!(contents, b"hello");
+//! # Ok::<(), patina_dst_runtime::RuntimeError>(())
+//! ```
+//!
+//! # Configuration and the `PATINA_*` control plane
+//!
+//! [`run`] configures itself from [`RuntimeConfig::from_env`]: the `PATINA_*`
+//! environment variables documented on the `ENV_*` constants in this crate
+//! (seed, record/replay mode, fault knobs, buggify, schedule exploration,
+//! liveness watchdogs). `cargo patina run`/`test` set exactly these variables
+//! from its CLI flags, so an in-process test picks up `--seed`, `--record`,
+//! `--fs-crash-at`, and friends with no extra plumbing. With nothing set, the
+//! default is a seeded run with seed 0. For full control, build a
+//! [`RuntimeConfig`] directly (e.g. [`RuntimeConfig::seeded`]) and hand it to a
+//! [`RuntimeBuilder`], which can also swap individual drivers.
+//!
+//! # Record, replay, fail closed
+//!
+//! In record mode every boundary decision is captured into a versioned trace
+//! bundle; replay is strict — a diverging operation, changed fingerprint, or
+//! conflicting configuration is a loud error, never a silent divergence
+//! (see [`ExecutionMode`] and the fail-closed doctrine in the [README]).
+//!
+//! [Patina]: https://github.com/JacobHayes/patina
+//! [README]: https://github.com/JacobHayes/patina/blob/main/README.md
+//! [USAGE-MODES.md]: https://github.com/JacobHayes/patina/blob/main/USAGE-MODES.md
+//! [ARCHITECTURE.md]: https://github.com/JacobHayes/patina/blob/main/ARCHITECTURE.md
+//! [`block_on`]: https://docs.rs/patina-dst-async
 
 use std::collections::BTreeMap;
 use std::env;
@@ -426,6 +496,16 @@ impl LivenessConfig {
     }
 }
 
+/// Everything that determines a run: seed, [`ExecutionMode`], compatibility
+/// fingerprint, fault/buggify/schedule/liveness knobs, and optional trace
+/// metadata (guest argv, params).
+///
+/// Construct one with [`RuntimeConfig::seeded`] (or
+/// [`record`](RuntimeConfig::record)/[`replay`](RuntimeConfig::replay)/
+/// [`branch`](RuntimeConfig::branch)) and refine it with the `with_*` builder
+/// methods, or read the whole thing from the `PATINA_*` control plane with
+/// [`RuntimeConfig::from_env`]. Two runs with equal configs (and an identical
+/// guest) produce byte-identical effect sequences.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeConfig {
     seed: u64,
@@ -1157,6 +1237,16 @@ fn run_with_context<T>(
     }
 }
 
+/// Assembles a [`Context`] from a [`RuntimeConfig`] plus a driver per effect
+/// family (filesystem, clock, entropy, scheduler, network).
+///
+/// [`with_default_drivers`](RuntimeBuilder::with_default_drivers) installs the
+/// standard deterministic set; any `with_*` driver call overrides one slot with
+/// a caller-supplied implementation of the `patina-dst-driver-api` trait —
+/// this is how [`run_with`] callers add latency/fault wrapper drivers or a
+/// custom network. [`build`](RuntimeBuilder::build) validates the combination
+/// and is the single choke point that wires config-driven fault injection
+/// (e.g. the crash filesystem) so a parsed knob can never be silently dropped.
 pub struct RuntimeBuilder {
     config: RuntimeConfig,
     install_defaults: bool,
@@ -2397,6 +2487,24 @@ impl Buggify {
 }
 
 /// The runtime context through which initial Patina effects are performed.
+/// The installed deterministic world: one seeded run's clock, filesystem,
+/// network, entropy, scheduler, and (in record/replay modes) its trace.
+///
+/// Every method that performs an effect is a *boundary operation*: it consults
+/// the deterministic drivers, records the outcome when recording, and — on
+/// replay — reconciles against the recorded outcome, failing closed on any
+/// divergence. Effects are grouped by prefix: `fs_*` (plus the
+/// [`write_file`](Context::write_file)/[`read_file`](Context::read_file)
+/// conveniences), `net_*` and `net_tcp_*`, `task_*` for scheduler-visible
+/// tasks, [`now`](Context::now)/[`sleep_for`](Context::sleep_for)/
+/// [`sleep_until`](Context::sleep_until) for the virtual clock, and
+/// [`entropy_bytes`](Context::entropy_bytes).
+///
+/// Obtain one through [`run`]/[`run_with`] (which also finalize it) or
+/// [`Context::from_config`]; when managing it manually, call
+/// [`finish`](Context::finish) so diagnostics and any recorded trace are
+/// written. A `Context` controls only effects performed through its own
+/// methods — it does not interpose the rest of the process.
 pub struct Context {
     root_seed: u64,
     step_budget: Option<u64>,
@@ -2450,18 +2558,27 @@ pub struct Context {
 }
 
 impl Context {
+    /// A context over `config` with the default deterministic drivers. The
+    /// caller owns finalization: call [`Context::finish`] when done (or use
+    /// [`run`]/[`run_with`], which do).
     pub fn from_config(config: RuntimeConfig) -> Result<Self, RuntimeError> {
         RuntimeBuilder::new(config).with_default_drivers().build()
     }
 
+    /// Like [`Context::from_config`] with a config read from the `PATINA_*`
+    /// control plane ([`RuntimeConfig::from_env`]).
     pub fn from_env() -> Result<Self, RuntimeError> {
         Self::from_config(RuntimeConfig::from_env()?)
     }
 
+    /// The run's root seed — the single input every deterministic decision
+    /// derives from.
     pub const fn root_seed(&self) -> u64 {
         self.root_seed
     }
 
+    /// Boundary operations performed so far (the step counter the optional
+    /// step budget is enforced against).
     pub const fn steps(&self) -> u64 {
         self.steps
     }
@@ -3813,6 +3930,8 @@ impl Context {
         decode_unit(&operation, outcome)
     }
 
+    /// Convenience: create/truncate `path` and write `bytes` through the
+    /// ordinary `fs_open`/`fs_write`/`fs_close` boundary operations.
     pub fn write_file(&mut self, path: &str, bytes: &[u8]) -> Result<(), RuntimeError> {
         let fd = self.fs_open(path, OpenFlags::create_truncate_write())?;
         let written = self.fs_write(fd, bytes)?;
@@ -3829,6 +3948,8 @@ impl Context {
         self.fs_close(fd)
     }
 
+    /// Convenience: read all of `path` through the ordinary
+    /// `fs_open`/`fs_read`/`fs_close` boundary operations.
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, RuntimeError> {
         let fd = self.fs_open(path, OpenFlags::read_only())?;
         let mut contents = Vec::new();
@@ -3850,6 +3971,10 @@ impl Context {
         Ok(contents)
     }
 
+    /// Finalize the run: emit the end-of-run diagnostics (schedule, buggify,
+    /// liveness, net-fault), enforce end-of-run oracles, and — in record mode —
+    /// write the trace. Consumes the context; [`run`]/[`run_with`] call this
+    /// automatically, on error paths too.
     pub fn finish(mut self) -> Result<(), RuntimeError> {
         emit_schedule_report(&self.schedule.diagnostics());
         // Exploration-policy diagnostic (PCT / starvation). Populated from live

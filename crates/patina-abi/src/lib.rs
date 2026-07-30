@@ -1,4 +1,13 @@
 //! Serializable contracts at Patina's deterministic effect boundary.
+//!
+//! Internal crate: this is the shared vocabulary — [`Operation`], [`Outcome`],
+//! error codes, descriptor/socket/task ids — that the runtime, drivers, trace
+//! format, native shim, and WASI host all speak. Adopters interact with these
+//! types only indirectly (through `patina-dst-runtime`'s `Context` or by reading
+//! recorded traces); depend on `patina-dst` or `patina-dst-runtime` instead.
+//! See [ARCHITECTURE.md] for how the boundary fits the wider system.
+//!
+//! [ARCHITECTURE.md]: https://github.com/JacobHayes/patina/blob/main/ARCHITECTURE.md
 
 use std::fmt;
 

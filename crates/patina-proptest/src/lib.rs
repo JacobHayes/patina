@@ -70,6 +70,14 @@
 //!   `fork`/`timeout` features, so proptest cannot fork a child process — which
 //!   would escape Patina's single deterministic scheduler and virtual clock.
 //!
+//! # Stateful (model-based) testing
+//!
+//! The [`state`] module layers a small state-machine harness over the same
+//! seeded runner: implement [`state::StateMachine`] to generate whole command
+//! sequences, execute them against both a reference model and the real system,
+//! and shrink a diverging sequence to a minimal counterexample — all still a
+//! pure function of the Patina run seed.
+//!
 //! # Reproducing a failure
 //!
 //! When a property fails under `cargo patina run`, the failing run is
