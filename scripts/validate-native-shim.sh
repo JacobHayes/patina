@@ -3040,23 +3040,25 @@ C
     cmp "$tmp/raw-record" "$tmp/raw-replay"
     cmp "$tmp/raw-seed-1" "$tmp/raw-replay"
 
-    # unmapped-syscall abort: a raw getpid (un-tabled in slice 1) traps to a
-    # named, deterministic abort — not a silent escape.
+    # unmapped-syscall abort: a raw reboot (a syscall the dispatch table must
+    # never map) traps to a named, deterministic abort — not a silent escape.
+    # Bad magic numbers mean the kernel would reject it harmlessly even if the
+    # trap were broken, and the leg still fails loudly on that escape.
     cat >"$tmp/raw_unmapped_probe.rs" <<'RS'
 use std::arch::asm;
 fn main() {
     #[cfg(target_arch = "x86_64")]
-    let nr: i64 = 39; // getpid
+    let nr: i64 = 169; // reboot
     #[cfg(target_arch = "aarch64")]
-    let nr: i64 = 172; // getpid
+    let nr: i64 = 142; // reboot
     let ret: i64;
     unsafe {
         #[cfg(target_arch = "x86_64")]
-        asm!("syscall", inlateout("rax") nr => ret, out("rcx") _, out("r11") _, options(nostack));
+        asm!("syscall", inlateout("rax") nr => ret, in("rdi") 0, in("rsi") 0, in("rdx") 0, in("r10") 0, out("rcx") _, out("r11") _, options(nostack));
         #[cfg(target_arch = "aarch64")]
-        asm!("svc #0", in("x8") nr, out("x0") ret, options(nostack));
+        asm!("svc #0", in("x8") nr, inlateout("x0") 0i64 => ret, in("x1") 0, in("x2") 0, in("x3") 0, options(nostack));
     }
-    println!("UNMAPPED_PID={ret}"); // unreachable: dispatch aborts before returning
+    println!("UNMAPPED_RET={ret}"); // unreachable: dispatch aborts before returning
 }
 RS
     "$runner" build "$tmp/raw_unmapped_probe.rs" --output "$tmp/raw-unmapped-probe" >/dev/null
