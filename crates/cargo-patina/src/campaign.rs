@@ -222,7 +222,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
                 spec.apply_json(&json)?;
             }
             "--out" => out_dir = Some(PathBuf::from(value_of("--out")?)),
-            "--gens" | "--generations" => {
+            "--gens" => {
                 spec.generations = parse_u64_flag("--gens", &value_of("--gens")?)?;
             }
             "--seed-base" => {

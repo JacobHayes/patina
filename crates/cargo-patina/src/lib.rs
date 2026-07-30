@@ -40,6 +40,7 @@ use sha2::{Digest, Sha256};
 // semantics — they never record, replay, or mutate a trace — so rendering or
 // emitting an envelope cannot perturb replay hashes.
 mod campaign;
+mod help;
 mod output;
 mod render;
 
@@ -106,262 +107,6 @@ unsafe extern "C" {
     // register the callee never reads and `F_SETFD` writes stack garbage instead.
     fn fcntl(fd: i32, cmd: i32, ...) -> i32;
 }
-
-const HELP: &str = "Patina deterministic Cargo runner
-
-Usage:
-  cargo patina run [--seed N | --record PATH] [FAULT OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]
-  cargo patina run <MODULE.wasm> [--seed N | --record PATH] [--fuel N] [--arg VALUE]... [--env K=V]... [--socket FD=BIND->PEER]... [--preopen GUEST[:ro|:rw]]... [--fs-crash-at SPEC] [--fs-torn-granularity block|byte] [--net-jitter-nanos MIN..MAX] [--net-drop-permille N]
-  cargo patina run <BINARY> [--seed N | --record PATH] [--fingerprint STR] [--mount HOST_DIR] [--harness] [--net-latency-nanos N] [FAULT OPTIONS] [--buggify[=PERMILLE]] [--buggify-activation-permille N] [--buggify-cutoff-nanos N] [--buggify-after-setup] [--liveness-watchdog[=NANOS]] [--converge-within[=NANOS]] [--heal-after NANOS] [--allow SYMBOL]... [--allow-unsupported-symbols <all|name,...>] [-- PROGRAM ARGS]
-  cargo patina run <SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [RUN OPTIONS]   (builds on the fly, then runs)
-  cargo patina test [--seed N | --record PATH] [FAULT OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]
-  cargo patina explore run <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [--seeds N] [--start N] [RUN OPTIONS]
-  cargo patina explore test [--seeds N] [--start N] [PATINA/CARGO OPTIONS]
-  cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out DIR] [--spec FILE.json] [--seed-base N] [--buggify] [--swarm] [--pct] [--faults] [--liveness-watchdog N] [--converge-within N] [--report] [-- GUEST ARGS]
-  cargo patina campaign --selftest
-  cargo patina build <SOURCE.rs> --output <PATH> [--edition YEAR] [--release] [--yield-points] [-- RUSTC OPTIONS]
-  cargo patina build <DIR|Cargo.toml> [--output <PATH>] [--package NAME] [--bin NAME] [--release] [--yield-points]
-  cargo patina build <DIR|Cargo.toml> --target wasi [--output PATH] [--package NAME] [--bin NAME] [--release]
-  cargo patina audit <SOURCE.rs|DIR|Cargo.toml> [--package NAME] [--bin NAME] [--target native|wasi] [--allow SYMBOL]...   (builds with the shim linked, then audits the true residual)
-  cargo patina audit <ARTIFACT> [--allow SYMBOL]... [--raw]   (a prebuilt binary; must be `cargo patina build`-linked unless --raw)
-  cargo patina replay <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> <TRACE> [--target native|wasi] [REPLAY OPTIONS]
-  cargo patina minimize <TRACE> --output <PATH> [--timeline ID] [--prune-branches] -- <ORACLE> [ARGS]...
-  cargo patina minimize --scenario --seed <U64> [--param K=V]... [--seed-budget N] -- <ORACLE> [ARGS]...
-
-`replay <ARTIFACT|SOURCE|PKG> <TRACE>` routes by the same inference as `run`: a
-WebAssembly module replays under WASI, a native binary under the native
-supervisor, and a directory/Cargo.toml (no `--target`) under the Cargo package
-family. Each restores its recorded semantics from the trace, so replay is
-flag-free (seed, fault knobs, and — for WASI — the `--arg` guest argv are
-restored; any re-supplied value must match the recording or the replay is
-refused). The Cargo and WASI families also carry the timeline/branch controls:
-`replay <PKG|MODULE.wasm> <TRACE> [--timeline ID]` replays a named timeline
-(default `main`), and `replay <PKG|MODULE.wasm> <TRACE> --branch --from N
---branch-seed S --branch-id ID [--parent ID]` replays the parent prefix then
-appends a new branch timeline. Native traces are single-timeline (native runs
-cannot branch), so native replay accepts only `--fingerprint`, `--mount`,
-`--harness`, and the `--allow`/`--allow-unsupported-symbols` audit surface.
-
-`--harness` marks the binary as a `patina-dst-harness` (configure-then-run)
-program: it defers runtime installation (`PATINA_DEFER_INIT=1`) so the harness's
-`run`/`run_with` installs and configures the context, then drives ordinary
-application code whose std effects are interposed. Supply it on both the record
-`run` and the `replay` of a harness binary.
-
-`run`, `audit`, and `replay` are source-first with artifacts accepted uniformly.
-A built artifact (recognized by its leading magic bytes — `\\0asm` for a WASI
-module, Mach-O/ELF for a native binary) is used as-is. A `<SOURCE.rs|DIR|
-Cargo.toml>` argument is built on the fly through the same pipeline as `build`
-(honoring `--target`, default native) and its product is used; a one-line
-`PATINA_BUILD_ON_RUN` note reports the built artifact and its content hash so an
-implicit rebuild never silently changes what ran. `replay` judges a rebuilt
-binary against the trace with the usual fail-closed machinery (fingerprint +
-operation mismatch). A `run` with a directory, a `Cargo.toml`, or no artifact and
-no `--target` stays the Cargo package family (the same seed/record/replay/branch
-machinery as `test`); `--target` opts a source/package argument into build-then-
-run. `build` defaults to `--target native`.
-
-`audit` is source-first for a reason: only a shim-linked binary shows the true
-post-interposition residual. Auditing a source/package (`audit ./Cargo.toml
---bin X`, or a bare `.rs`) links the shim first, so the report is the handful of
-effect-surface symbols that genuinely escape. A stock `cargo build` binary, by
-contrast, lists every libc call the shim *would* interpose (`open`,
-`clock_gettime`, `pthread_mutex_*`, ...) as an unsupported import — the opposite
-of the truth — so `audit <prebuilt>` fails closed unless the binary was produced
-by `cargo patina build`. `--raw` overrides that gate and runs the full audit
-anyway (instruction scan and escape categories included) under a loud banner
-marking the import findings as pre-interposition. (A Patina-built artifact
-audits normally; the WASI import audit is unaffected.)
-
-Patina options (run/test):
-      --seed <U64>       Deterministic root seed (default: 0)
-      --record <PATH>    Record boundary operations and outcomes
-      --budget <STEPS>   Maximum boundary operations before explicit failure
-      --param <K=V>      Typed-builder parameter exposed through Context
-  -h, --help             Print help
-  -V, --version          Print version
-
-Output options (all verbs; stripped before routing, never reach the guest):
-      --format <human|json>  Default human. `json` prints one machine-readable
-                             result envelope (schema \"patina.result/v1\") on
-                             stdout: result (ok|violation|failure|error),
-                             exit_code, family, artifact, fingerprint, seed,
-                             trace {path, format_version, timelines, event_count,
-                             metadata}, findings, markers, and captured
-                             stdout/stderr. Human output is unchanged by default.
-                             (`--output` is the build/minimize artifact path.)
-      --render <OUT.html>    For a run/replay with a trace (record or replay),
-                             write a self-contained HTML timeline (per-task lanes,
-                             scheduling/sleep/net/fs/crash events) to OUT.html.
-      --report <OUT.html>    Like --render but only when the run fails; the HTML
-                             leads with a failure summary (what fired, exit code,
-                             the result/violation lines).
-
-Fault options (run/test and run <MODULE.wasm>; seed-driven, default off):
-      --fs-crash-at <SPEC>           open|write|sync|close[:N] (bare = :1)
-      --fs-torn-granularity <G>      block (default) or byte
-      --sleep-jitter-nanos <MIN..MAX>  extra seeded latency per guest sleep
-                                     (also honored on run <MODULE.wasm> at the
-                                     wasip1 host's sleep entry, incl. poll_oneoff)
-      --net-jitter-nanos <MIN..MAX>  seeded per-datagram delivery jitter
-      --net-drop-permille <N>        drop datagrams at N per-mille (0..=1000)
-
-Reproducing a recording — strict or branch-append — is the `replay` verb's job,
-so `run`/`test` carry no replay/branch/timeline flags. A `--record` run captures
-its seed, fault knobs, and (for WASI) guest argv into the trace metadata, so
-`replay` restores them and gets its root seed from the trace. All unrecognized
-`run`/`test` options are forwarded to Cargo.
-
-`minimize <TRACE>` shrinks a recorded trace. It chooses the strategy from the
-bundle: an unbranched main timeline or a leaf `--timeline ID` is delta-debugged
-directly, while a branched bundle or a non-leaf timeline is shrunk under the
-branch-tree policy that never touches an inherited replay prefix.
-`--prune-branches` also drops whole branch subtrees the failure does not need.
-The oracle runs once per candidate with the candidate written to
-`$PATINA_MINIMIZE_TRACE`; a non-zero exit means the failure is still present.
-
-`minimize --scenario` shrinks experiment inputs instead of a trace: it drops and
-shrinks `--param` values and canonicalizes `--seed` toward zero, bounded by
-`--seed-budget`. Each candidate re-runs the oracle as a fresh seeded child that
-receives the candidate through the usual `PATINA_SEED`/`PATINA_PARAMS_JSON`
-environment protocol; a non-zero exit means the failure is still present.
-
-`build` (default `--target native`) packages the native linked-shim target: it
-builds the `patina-dst-native-shim` staticlib, compiles the embedded POSIX C layer,
-injects `cfg(patina)`/`cfg(dst)`, and links the shim below the user program with
-`rustc`. On Linux it also links `-Wl,--wrap=dlsym` so the shim reaches the real
-glibc resolver through `__real_dlsym` (its host-alias table) while guest `dlsym`
-stays neutered; thread creation is interposed by a plain strong `pthread_create`
-def whose real vehicle is resolved through that same table, so no
-`--wrap=pthread_create` is needed (and none is used — glibc ships its own
-`__wrap_pthread_create` in libgcc's x86 split-stack support, which a wrap would
-clash with). macOS needs neither flag.
-A `.rs` path builds that single source directly. A directory (or `Cargo.toml`)
-path instead drives the package's own `cargo build` under Patina control: the
-same cfg flags and shim link arguments are injected through
-`CARGO_ENCODED_RUSTFLAGS`, and an explicit host `--target` keeps them off build
-scripts and proc macros (which link for the host). Package builds also inject
-`--cfg rustix_use_libc`: rustix's default Linux backend performs raw inline
-syscalls — the natural example of the direct-syscall escape class, invisible to
-the import audit and refused by the instruction scan — and this cfg (rustix's
-own escape hatch) flips it to the libc backend, so its effects become ordinary
-interposable imports instead. On x86_64 Linux this cfg is belt-and-suspenders:
-the shim also arms syscall-user-dispatch (SUD), which traps any remaining raw
-inline syscall into the same deterministic routes via a SIGSYS handler, so a
-`direct-syscall` instruction finding in a SUD-linked binary is downgraded to
-SUD-managed (visible, counted, contained) rather than refused — provided the
-run's kernel has SUD (x86_64 >= 5.11; arm64 lacks it today, so there the run is
-refused and `--cfg rustix_use_libc` remains the answer). Select the member with
-`--package` in a workspace and the binary with `--bin` when the package defines
-more than one; `--output` copies the built binary out (otherwise its Cargo
-artifact path is reported). The `patina-dst-native-shim` staticlib is built from the
-surrounding Patina workspace, so run `build` from within it.
-`build --target wasi` instead compiles a Cargo package for `wasm32-wasip1`; it is
-package-only (a single `.rs` source is native-only) and `--yield-points` is
-rejected (wasip1 has no threads to preempt).
-`--yield-points` additionally instruments the native guest with deterministic
-cooperative preemption: LLVM SanitizerCoverage emits a hook at every basic block
-(reaching loop backedges) that routes into the scheduler, so a race window that
-lives entirely in atomics-only code — a `std::sync::RwLock` read-modify-write,
-say — becomes reachable by the seeded scheduler instead of running to completion
-uninterrupted. It is off by default and touches only the Patina build; a plain
-native build is unaffected. `run` detects a yield-point binary and folds
-it into the compatibility fingerprint so its traces never cross-replay with a
-plain binary.
-`run <BINARY>` executes such a binary under the deterministic runtime; for
-`--record` (and for the `replay` subcommand) it opens the trace on the host and
-hands the child an inherited `PATINA_TRACE_FD` descriptor so a fully interposed
-program never recurses into the deterministic filesystem while finalizing its
-trace. Before
-the guest runs it applies a pre-run default-deny audit: every externally
-resolved symbol must be interposed or known-safe (the shim's own control-plane
-vehicle is allowed automatically), and any unsupported symbol on the
-blocking/time/scheduling/effect surface hard-errors with the names listed.
-`--allow SYMBOL` adds a known-safe symbol; `--allow-unsupported-symbols
-<all|name,...>` downgrades matching denials to a loud warning (recorded beside a
-`--record` trace) for programs that carry unsupported surface the scenario never
-reaches.
-
-WASI options:
-      --preopen <GUEST[:ro|:rw]>  Preopen an absolute guest path (repeatable;
-                                  default policy: rw). The first explicit
-                                  preopen replaces the implicit rw `/` root.
-      --max-memory-pages <N>      Maximum guest memory pages (64 KiB each)
-      --max-descriptors <N>       Maximum open WASI descriptors
-      --max-preopens <N>          Maximum configured preopened directories
-      --max-path-bytes <N>        Maximum bytes in a single guest path
-      --max-io-bytes <N>          Maximum bytes in one WASI I/O operation
-      --max-iovecs <N>            Maximum iovec entries in one WASI operation
-
-Native filesystem options (run <BINARY>):
-      --mount <HOST_DIR>          Capture a host directory read-only into the
-                                  guest filesystem, mounted at the guest root
-                                  `/`. The supervisor walks it into a
-                                  deterministic in-memory image (sorted; host
-                                  readdir order never leaks) and streams it to
-                                  the guest, which never touches the host FS.
-                                  Symlinks are preserved as inert (not followed).
-                                  The image hash folds into the run fingerprint
-                                  so replay rejects a different corpus.
-
-Native fault options (run <BINARY>; seed-driven, default off):
-      --fs-crash-at <SPEC>        Inject a filesystem crash after the Nth boundary
-                                  op: open|write|sync|close[:N] (bare = :1). The
-                                  filesystem becomes a CrashFs and unsynced data
-                                  is dropped, exposing missing-fsync durability
-                                  bugs.
-      --fs-torn-granularity <G>   Torn-write granularity for --fs-crash-at:
-                                  block (default, whole-block revert) or byte
-                                  (the final unsynced write may survive
-                                  partially at sub-block byte granularity,
-                                  modeling a torn in-flight page).
-      --sleep-jitter-nanos <MIN..MAX>
-                                  Add seeded latency drawn from [MIN, MAX] to
-                                  every guest sleep, inflating virtual elapsed
-                                  time past wall-clock deadline assumptions.
-      --net-jitter-nanos <MIN..MAX>
-                                  Add seeded per-datagram delivery jitter drawn
-                                  from [MIN, MAX], reordering datagrams relative
-                                  to send order.
-      --net-drop-permille <N>     Drop datagrams with probability N per-mille
-                                  (0..=1000).
-      --buggify[=<PERMILLE>]      Enable cooperative-SUT (buggify) fault
-                                  injection. PERMILLE is the per-evaluation
-                                  firing probability for an active site
-                                  (default 250 = 25%).
-      --buggify-activation-permille <N>
-                                  Fraction of buggify sites made active this run
-                                  (default 250 = 25%). Implies --buggify.
-      --buggify-cutoff-nanos <N>  Virtual-time cutoff after which buggify stops
-                                  firing (default 300000000000 = 300s). Implies
-                                  --buggify.
-      --buggify-after-setup       Declare that the guest calls
-                                  patina_dst::lifecycle::setup_complete(); buggify
-                                  stays inert until it does. If the guest never
-                                  calls it, the run fails loudly. Implies
-                                  --buggify.
-
-Fault and buggify knobs are seeded by the run seed. A --record run captures its
-full configuration — fault knobs, buggify, and the guest arguments after `--` —
-into the trace metadata. Enabling buggify folds a +buggify component into the run
-fingerprint, so a buggify trace never cross-replays with a non-buggify build.
-
-Reproduce a recorded run with `cargo patina replay <ARTIFACT|SOURCE|PKG>
-<TRACE>`, the sole replay entry point for all three families: it restores every
-semantic input (seed, fault knobs, and buggify — for both the native and WASI
-families) from the trace — the trace is authoritative — and exposes no semantic
-flags. For native the guest
-arguments are restored from the trace, so a run recorded with non-default
-`-- ARGS` replays without re-passing them (a `--` section is allowed only if
-byte-identical to the recording, or the replay is refused up front); for WASI the
-recorded `--arg` guest argv is restored the same way and a re-supplied `--arg`
-must match. Only host/build inputs the trace cannot carry stay as flags: native
-takes --fingerprint/--mount/--allow[-unsupported-symbols]; WASI re-takes its host
-environment (--fuel/--env/--socket/--preopen and resource limits), whose match is
-verified through the compatibility fingerprint. The native guest always sees a
-fixed, machine-independent `argv[0]` (`patina-guest`), never the host binary
-path, so traces are portable across machines.
-";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Mode {
@@ -791,8 +536,15 @@ pub fn entrypoint() -> Result<i32, CliError> {
 
 fn dispatch(arguments: Vec<OsString>) -> Result<i32, CliError> {
     match parse(arguments)? {
-        ParseResult::Help => {
-            print!("{HELP}");
+        ParseResult::Help(topic) => {
+            // `--help --format json` (the output pre-pass already stripped and
+            // installed the format) emits the machine-readable registry; the
+            // human form prints the focused section. Both exit 0.
+            if output::options().is_json() {
+                print!("{}", help::render_json());
+            } else {
+                print!("{}", help::render(topic));
+            }
             Ok(0)
         }
         ParseResult::Version => {
@@ -813,7 +565,7 @@ fn dispatch(arguments: Vec<OsString>) -> Result<i32, CliError> {
 }
 
 enum ParseResult {
-    Help,
+    Help(help::Topic),
     Version,
     Run(Invocation),
     Campaign(campaign::CampaignInvocation),
@@ -827,6 +579,37 @@ enum ParseResult {
     Minimize(MinimizeInvocation),
 }
 
+thread_local! {
+    /// The verb a usage error should print the synopsis for, set as soon as
+    /// routing identifies it. Unset (`None`) before verb resolution, so a
+    /// top-level error prints the compact synopsis list. A CLI process parses
+    /// once, single-threaded, so a thread-local is ample.
+    static CURRENT_VERB: std::cell::RefCell<Option<&'static str>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn set_current_verb(verb: Option<&'static str>) {
+    CURRENT_VERB.with(|cell| *cell.borrow_mut() = verb);
+}
+
+fn current_verb() -> Option<&'static str> {
+    CURRENT_VERB.with(|cell| *cell.borrow())
+}
+
+/// Whether `-h`/`--help` appears anywhere before a literal `--` separator. After
+/// `--` the token belongs to the guest/oracle and is left untouched.
+fn help_requested(arguments: &[OsString]) -> bool {
+    for argument in arguments {
+        if argument == "--" {
+            return false;
+        }
+        if argument == "-h" || argument == "--help" {
+            return true;
+        }
+    }
+    false
+}
+
 fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     // `cargo patina ...` invokes this binary with a leading `patina` argument.
     if arguments.first().and_then(|value| value.to_str()) == Some("patina") {
@@ -837,44 +620,45 @@ fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
             "missing command (expected run, test, campaign, explore, build, audit, replay, or minimize)",
         ));
     }
-    match arguments.first().and_then(|value| value.to_str()) {
-        Some("campaign") => {
+    // The routed verb (if any). Every known verb records itself so a usage error
+    // prints that verb's synopsis, and `-h`/`--help` anywhere before `--` returns
+    // that verb's focused help instead of being consumed as a positional. Owned so
+    // the `arguments.remove(0)` below does not conflict with the borrow.
+    let verb = arguments
+        .first()
+        .and_then(|value| value.to_str())
+        .map(str::to_string);
+    if let Some(name) = verb.as_deref() {
+        if help::verb(name).is_some() {
             arguments.remove(0);
-            campaign::parse(arguments).map(ParseResult::Campaign)
+            let topic = help::topic_for(name);
+            // Record the canonical verb name (a `'static` from the registry) so
+            // later usage errors in the family parser point at the right section.
+            if let help::Topic::Verb(canonical) = topic {
+                set_current_verb(Some(canonical));
+            }
+            if help_requested(&arguments) {
+                return Ok(ParseResult::Help(topic));
+            }
+            return match name {
+                "campaign" => campaign::parse(arguments).map(ParseResult::Campaign),
+                "explore" => parse_explore(arguments).map(ParseResult::Explore),
+                "build" => parse_build(arguments),
+                "audit" => parse_audit(arguments),
+                "run" => parse_run(arguments),
+                "test" => parse_cargo("test".to_string(), arguments),
+                // `replay` is the sole replay entry point for all three families,
+                // routed by the same artifact inference as `run`: it restores each
+                // family's semantic config (seed, fault knobs, buggify, guest argv)
+                // from the trace and exposes no semantic flags.
+                "replay" => parse_replay(arguments),
+                "minimize" => parse_minimize(arguments).map(ParseResult::Minimize),
+                _ => unreachable!("verb() gated the known-verb set"),
+            };
         }
-        Some("explore") => {
-            arguments.remove(0);
-            parse_explore(arguments).map(ParseResult::Explore)
-        }
-        Some("build") => {
-            arguments.remove(0);
-            parse_build(arguments)
-        }
-        Some("audit") => {
-            arguments.remove(0);
-            parse_audit(arguments)
-        }
-        Some("run") => {
-            arguments.remove(0);
-            parse_run(arguments)
-        }
-        Some("test") => {
-            arguments.remove(0);
-            parse_cargo("test".to_string(), arguments)
-        }
-        Some("replay") => {
-            arguments.remove(0);
-            // `replay` is the sole replay entry point for all three families,
-            // routed by the same artifact inference as `run`: it restores each
-            // family's semantic config (seed, fault knobs, buggify, guest argv)
-            // from the trace and exposes no semantic flags.
-            parse_replay(arguments)
-        }
-        Some("minimize") => {
-            arguments.remove(0);
-            parse_minimize(arguments).map(ParseResult::Minimize)
-        }
-        Some("-h" | "--help") => Ok(ParseResult::Help),
+    }
+    match verb.as_deref() {
+        Some("-h" | "--help") => Ok(ParseResult::Help(help::Topic::Overview)),
         Some("-V" | "--version") => Ok(ParseResult::Version),
         _ => Err(CliError::usage(format!(
             "unsupported command {:?}; expected run, test, campaign, explore, build, audit, replay, or minimize",
@@ -1515,7 +1299,12 @@ fn parse_cargo(command: String, arguments: Vec<OsString>) -> Result<ParseResult,
 
         let text = argument.to_str();
         if matches!(text, Some("-h" | "--help")) {
-            return Ok(ParseResult::Help);
+            // The top-level pre-scan intercepts `--help` before routing here, so
+            // this is a belt-and-suspenders path (e.g. a direct `parse_cargo`
+            // caller); surface the current verb's section.
+            return Ok(ParseResult::Help(help::topic_for(
+                current_verb().unwrap_or("run"),
+            )));
         }
         if matches!(text, Some("-V" | "--version")) {
             return Ok(ParseResult::Version);
@@ -2187,8 +1976,12 @@ fn parse_explore(arguments: Vec<OsString>) -> Result<ExploreInvocation, CliError
     // `explore run <artifact|src>` sweeps the native or WASI families; `explore
     // run`/`test` with no diverting artifact stays the Cargo package family. Every
     // family must be in a plain seeded mode — record/replay/branch pin a single
-    // run and have nothing to sweep.
-    let (target, mode_seed) = match parse(forwarded)? {
+    // run and have nothing to sweep. The recursive `parse` re-points the current
+    // verb at the wrapped `run`/`test`; restore `explore` so any later usage error
+    // here prints the explore synopsis.
+    let parsed = parse(forwarded)?;
+    set_current_verb(Some("explore"));
+    let (target, mode_seed) = match parsed {
         ParseResult::Run(invocation) => {
             let seed = explore_seed_of(&invocation.mode)?;
             (ExploreTarget::Cargo(invocation), seed)
@@ -6498,8 +6291,15 @@ fn exit_code(status: ExitStatus) -> Result<i32, CliError> {
 pub struct CliError(String);
 
 impl CliError {
+    /// A usage error: the specific message, then the offending verb's synopsis
+    /// lines (or the compact top-level list before a verb is resolved) and a
+    /// `--help` pointer — never the whole help wall.
     fn usage(message: impl Into<String>) -> Self {
-        Self(format!("{}\n\n{HELP}", message.into()))
+        Self(format!(
+            "{}\n\n{}",
+            message.into(),
+            help::usage_synopsis(current_verb())
+        ))
     }
 }
 
@@ -7852,5 +7652,227 @@ mod tests {
                 .unwrap(),
             OsStr::new("nested/Cargo.toml")
         );
+    }
+
+    fn is_help(values: &[&str]) -> bool {
+        matches!(parse(strings(values)), Ok(ParseResult::Help(_)))
+    }
+
+    #[test]
+    fn help_is_intercepted_for_every_verb_and_position() {
+        // `-h`/`--help` in the first flag position of every verb and subcommand
+        // routes to Help — never consumed as a positional, never an error.
+        for verb in [
+            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize",
+        ] {
+            assert!(is_help(&[verb, "--help"]), "{verb} --help");
+            assert!(is_help(&[verb, "-h"]), "{verb} -h");
+        }
+        // Explore subcommands.
+        assert!(is_help(&["explore", "run", "--help"]));
+        assert!(is_help(&["explore", "test", "--help"]));
+        // After a positional (the old bug: `--help` swallowed as an artifact/trace
+        // path or an unsupported option).
+        assert!(is_help(&["run", "./bin", "--help"]));
+        assert!(is_help(&["campaign", "artifact", "--help"]));
+        assert!(is_help(&["replay", "a.wasm", "trace", "--help"]));
+        assert!(is_help(&["audit", "artifact", "--help"]));
+        assert!(is_help(&["build", "src.rs", "--help"]));
+        assert!(is_help(&["minimize", "trace.patina", "--help"]));
+        assert!(is_help(&["explore", "run", "artifact", "--help"]));
+        // Top-level.
+        assert!(is_help(&["--help"]));
+        assert!(is_help(&["-h"]));
+        assert!(is_help(&["patina", "--help"]));
+    }
+
+    #[test]
+    fn help_after_double_dash_belongs_to_the_guest() {
+        // A `--help` after the `--` separator is the guest's/oracle's, never
+        // intercepted as Patina help.
+        assert!(!is_help(&["run", "mod.wasm", "--", "--help"]));
+        assert!(!is_help(&["campaign", "artifact", "--", "--help"]));
+        assert!(!is_help(&["test", "--", "--help"]));
+    }
+
+    /// Every flag literal a verb's parsers accept, mirroring the parser match
+    /// arms. This is the drift gate feeding `registry_covers_every_parsed_flag`:
+    /// a flag added to a parser must be listed here (co-located discipline) and
+    /// then registered in `help.rs`, or the coverage test fails. Rejection-only
+    /// arms (e.g. native `replay` naming a semantic flag it refuses) are NOT
+    /// accepted flags and are intentionally omitted.
+    fn accepted_flags(verb: &str) -> &'static [&'static str] {
+        match verb {
+            "run" => &[
+                // cargo family
+                "--seed",
+                "--record",
+                "--budget",
+                "--param",
+                "--fs-crash-at",
+                "--fs-torn-granularity",
+                "--sleep-jitter-nanos",
+                "--net-jitter-nanos",
+                "--net-drop-permille",
+                // WASI family
+                "--liveness-watchdog",
+                "--converge-within",
+                "--heal-after",
+                "--buggify",
+                "--buggify-after-setup",
+                "--buggify-activation-permille",
+                "--buggify-cutoff-nanos",
+                "--fuel",
+                "--arg",
+                "--socket",
+                "--env",
+                "--preopen",
+                "--max-memory-pages",
+                "--max-descriptors",
+                "--max-preopens",
+                "--max-path-bytes",
+                "--max-io-bytes",
+                "--max-iovecs",
+                // native family
+                "--harness",
+                "--allow",
+                "--allow-unsupported-symbols",
+                "--net-latency-nanos",
+                "--mount",
+                "--sched-pct",
+                "--sched-pct-steps",
+                "--starve",
+                "--starve-max-len",
+                "--starve-window",
+                "--swarm",
+                "--fingerprint",
+                // source-first selection + target
+                "--package",
+                "-p",
+                "--bin",
+                "--target",
+            ],
+            "test" => &[
+                "--seed",
+                "--record",
+                "--budget",
+                "--param",
+                "--fs-crash-at",
+                "--fs-torn-granularity",
+                "--sleep-jitter-nanos",
+                "--net-jitter-nanos",
+                "--net-drop-permille",
+            ],
+            "build" => &[
+                "--output",
+                "-o",
+                "--edition",
+                "--release",
+                "--yield-points",
+                "--package",
+                "-p",
+                "--bin",
+                "--target",
+            ],
+            "audit" => &["--raw", "--allow", "--package", "-p", "--bin", "--target"],
+            "replay" => &[
+                // cargo + WASI timeline/branch
+                "--branch",
+                "--timeline",
+                "--from",
+                "--branch-seed",
+                "--branch-id",
+                "--parent",
+                // WASI host inputs
+                "--fuel",
+                "--arg",
+                "--socket",
+                "--env",
+                "--preopen",
+                "--max-memory-pages",
+                "--max-descriptors",
+                "--max-preopens",
+                "--max-path-bytes",
+                "--max-io-bytes",
+                "--max-iovecs",
+                // native host/build facts
+                "--harness",
+                "--fingerprint",
+                "--mount",
+                "--allow",
+                "--allow-unsupported-symbols",
+                "--target",
+            ],
+            "explore" => &["--seeds", "--start"],
+            "campaign" => &[
+                "--spec",
+                "--out",
+                "--gens",
+                "--seed-base",
+                "--timeout-secs",
+                "--buggify",
+                "--swarm",
+                "--pct",
+                "--faults",
+                "--report",
+                "--liveness-watchdog",
+                "--converge-within",
+                "--heal-after",
+                "--selftest",
+            ],
+            "minimize" => &[
+                "--output",
+                "--timeline",
+                "--prune-branches",
+                "--scenario",
+                "--seed",
+                "--seed-budget",
+                "--param",
+            ],
+            other => panic!("unknown verb {other}"),
+        }
+    }
+
+    #[test]
+    fn registry_covers_every_parsed_flag() {
+        // The whole flag universe a verb may present: its registered groups plus
+        // the always-available global help/output flags.
+        for verb_name in [
+            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize",
+        ] {
+            let verb = help::verb(verb_name).expect("verb registered");
+            let mut registered: BTreeSet<&str> = BTreeSet::new();
+            let all_groups = verb
+                .groups
+                .iter()
+                .flat_map(|group| group.flags.iter())
+                .chain(help::GLOBAL_OUTPUT.iter())
+                .chain(help::HELP_FLAGS.iter());
+            for flag in all_groups {
+                registered.insert(flag.name);
+                if let Some(short) = flag.short {
+                    registered.insert(short);
+                }
+            }
+            for flag in accepted_flags(verb_name) {
+                assert!(
+                    registered.contains(flag),
+                    "verb `{verb_name}`: parser accepts `{flag}` but it is not in the help registry"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn json_help_lists_all_eight_verbs() {
+        let json: serde_json::Value =
+            serde_json::from_str(&help::render_json()).expect("help JSON parses");
+        assert_eq!(json["schema"], "patina.help/v1");
+        let verbs = json["verbs"].as_object().expect("verbs object");
+        for verb in [
+            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize",
+        ] {
+            assert!(verbs.contains_key(verb), "JSON help missing verb {verb}");
+        }
     }
 }

@@ -1,0 +1,1498 @@
+//! The declarative flag registry and the help/usage renderers it generates.
+//!
+//! Every flag the CLI parsers accept is described once here — canonical name,
+//! optional short form, value kind, placeholder, one-line doc, repeatability —
+//! grouped per verb (and per family within a verb, where the accepted flags
+//! differ). This registry is the SINGLE SOURCE that generates all help text:
+//! the compact top-level overview, each verb's focused `--help` section, the
+//! machine-readable `--help --format json` payload, and the synopsis lines a
+//! usage error prints. It also documents the `PATINA_*` environment protocol and
+//! the honored tool variables.
+//!
+//! The parsers stay hand-rolled `match` loops (no clap, no added deps); the
+//! registry does not drive parsing. A test-only enumeration of each parser's
+//! accepted flags (see `tests::registry_covers_every_parsed_flag` in `lib.rs`)
+//! asserts every parsed flag is registered, so adding a parsed flag without
+//! registering it fails a test — the structural drift gate.
+
+/// How a flag takes its value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Value {
+    /// A valueless switch (`--release`, `--swarm`).
+    None,
+    /// A required value with the given placeholder (`--seed <U64>`).
+    Required(&'static str),
+    /// An optional value (`--buggify[=<PERMILLE>]`): the switch alone is valid,
+    /// and an `=VALUE` form supplies the value.
+    Optional(&'static str),
+}
+
+impl Value {
+    /// The value-kind tag used in the JSON payload.
+    fn kind(self) -> &'static str {
+        match self {
+            Value::None => "none",
+            Value::Required(_) => "required",
+            Value::Optional(_) => "optional",
+        }
+    }
+
+    fn placeholder(self) -> Option<&'static str> {
+        match self {
+            Value::None => None,
+            Value::Required(p) | Value::Optional(p) => Some(p),
+        }
+    }
+}
+
+/// One flag the parsers accept.
+#[derive(Clone, Copy, Debug)]
+pub struct Flag {
+    pub name: &'static str,
+    pub short: Option<&'static str>,
+    pub value: Value,
+    pub doc: &'static str,
+    pub repeatable: bool,
+}
+
+/// Terse constructor so the registry tables stay one-flag-per-line.
+const fn f(
+    name: &'static str,
+    short: Option<&'static str>,
+    value: Value,
+    doc: &'static str,
+    repeatable: bool,
+) -> Flag {
+    Flag {
+        name,
+        short,
+        value,
+        doc,
+        repeatable,
+    }
+}
+
+/// A titled group of flags within a verb's help section.
+#[derive(Clone, Copy, Debug)]
+pub struct Group {
+    pub title: &'static str,
+    pub flags: &'static [Flag],
+}
+
+/// A verb's full help entry.
+#[derive(Clone, Copy, Debug)]
+pub struct Verb {
+    pub name: &'static str,
+    pub summary: &'static str,
+    pub synopsis: &'static [&'static str],
+    pub prose: &'static str,
+    pub groups: &'static [Group],
+}
+
+/// A `PATINA_*` environment variable's documentation.
+#[derive(Clone, Copy, Debug)]
+pub struct EnvVar {
+    pub name: &'static str,
+    /// `"user"` (an operator-facing knob), `"protocol"` (an internal
+    /// supervisor↔guest / oracle protocol var, set for you), or `"tool"`.
+    pub scope: &'static str,
+    pub doc: &'static str,
+}
+
+/// Which help section to render.
+#[derive(Clone, Copy, Debug)]
+pub enum Topic {
+    /// The compact top-level overview.
+    Overview,
+    /// A single verb's focused section.
+    Verb(&'static str),
+}
+
+// ===========================================================================
+// Shared flag groups
+// ===========================================================================
+
+/// Output options, parsed once globally (before routing) and honored by every
+/// verb. Documented in the overview and appended to each verb section.
+pub const GLOBAL_OUTPUT: &[Flag] = &[
+    f(
+        "--format",
+        None,
+        Value::Required("human|json"),
+        "Result format (default human). `json` prints one machine-readable result envelope (schema patina.result/v1) on stdout; `--help --format json` prints this registry as JSON.",
+        false,
+    ),
+    f(
+        "--render",
+        None,
+        Value::Required("OUT.html"),
+        "For a run/replay with a trace, write a self-contained HTML timeline to OUT.html.",
+        false,
+    ),
+    f(
+        "--report",
+        None,
+        Value::Required("OUT.html"),
+        "Like --render but only when the run fails; the HTML leads with a failure summary.",
+        false,
+    ),
+];
+
+pub const HELP_FLAGS: &[Flag] = &[
+    f(
+        "--help",
+        Some("-h"),
+        Value::None,
+        "Print help (accepted anywhere before `--`).",
+        false,
+    ),
+    f(
+        "--version",
+        Some("-V"),
+        Value::None,
+        "Print version.",
+        false,
+    ),
+];
+
+const TARGET_FLAG: Flag = f(
+    "--target",
+    None,
+    Value::Required("native|wasi"),
+    "Select the family for a source/package argument (default native); stripped before routing.",
+    false,
+);
+
+const SOURCE_SELECT: &[Flag] = &[
+    f(
+        "--package",
+        Some("-p"),
+        Value::Required("NAME"),
+        "Select a workspace member to build on the fly.",
+        false,
+    ),
+    f(
+        "--bin",
+        None,
+        Value::Required("NAME"),
+        "Select the binary when the package defines more than one.",
+        false,
+    ),
+    TARGET_FLAG,
+];
+
+const FAULT_FLAGS: &[Flag] = &[
+    f(
+        "--fs-crash-at",
+        None,
+        Value::Required("SPEC"),
+        "Inject a filesystem crash after the Nth boundary op: open|write|sync|close[:N] (bare = :1).",
+        false,
+    ),
+    f(
+        "--fs-torn-granularity",
+        None,
+        Value::Required("block|byte"),
+        "Torn-write granularity for --fs-crash-at: block (default) or byte.",
+        false,
+    ),
+    f(
+        "--sleep-jitter-nanos",
+        None,
+        Value::Required("MIN..MAX"),
+        "Add seeded latency drawn from [MIN, MAX] to every guest sleep.",
+        false,
+    ),
+    f(
+        "--net-jitter-nanos",
+        None,
+        Value::Required("MIN..MAX"),
+        "Add seeded per-datagram delivery jitter drawn from [MIN, MAX].",
+        false,
+    ),
+    f(
+        "--net-drop-permille",
+        None,
+        Value::Required("N"),
+        "Drop datagrams at N per-mille (0..=1000).",
+        false,
+    ),
+];
+
+const WASI_HOST_FLAGS: &[Flag] = &[
+    f(
+        "--fuel",
+        None,
+        Value::Required("N"),
+        "Maximum wasm fuel (execution budget).",
+        false,
+    ),
+    f(
+        "--arg",
+        None,
+        Value::Required("VALUE"),
+        "Append a guest argv entry (recorded and restored on replay).",
+        true,
+    ),
+    f(
+        "--env",
+        None,
+        Value::Required("K=V"),
+        "Set a guest environment variable.",
+        true,
+    ),
+    f(
+        "--socket",
+        None,
+        Value::Required("FD=BIND->PEER"),
+        "Configure a datagram socket at a unique FD above 3.",
+        true,
+    ),
+    f(
+        "--preopen",
+        None,
+        Value::Required("GUEST[:ro|:rw]"),
+        "Preopen an absolute guest path (default rw; first explicit preopen replaces the implicit rw `/`).",
+        true,
+    ),
+    f(
+        "--max-memory-pages",
+        None,
+        Value::Required("N"),
+        "Maximum guest memory pages (64 KiB each).",
+        false,
+    ),
+    f(
+        "--max-descriptors",
+        None,
+        Value::Required("N"),
+        "Maximum open WASI descriptors.",
+        false,
+    ),
+    f(
+        "--max-preopens",
+        None,
+        Value::Required("N"),
+        "Maximum configured preopened directories.",
+        false,
+    ),
+    f(
+        "--max-path-bytes",
+        None,
+        Value::Required("N"),
+        "Maximum bytes in a single guest path.",
+        false,
+    ),
+    f(
+        "--max-io-bytes",
+        None,
+        Value::Required("N"),
+        "Maximum bytes in one WASI I/O operation.",
+        false,
+    ),
+    f(
+        "--max-iovecs",
+        None,
+        Value::Required("N"),
+        "Maximum iovec entries in one WASI operation.",
+        false,
+    ),
+];
+
+const BUGGIFY_FLAGS: &[Flag] = &[
+    f(
+        "--buggify",
+        None,
+        Value::Optional("PERMILLE"),
+        "Enable cooperative-SUT (buggify) fault injection; PERMILLE is the per-evaluation firing probability (default 250 = 25%).",
+        false,
+    ),
+    f(
+        "--buggify-activation-permille",
+        None,
+        Value::Required("N"),
+        "Fraction of buggify sites made active this run (default 250). Implies --buggify.",
+        false,
+    ),
+    f(
+        "--buggify-cutoff-nanos",
+        None,
+        Value::Required("N"),
+        "Virtual-time cutoff after which buggify stops firing (default 300000000000). Implies --buggify.",
+        false,
+    ),
+    f(
+        "--buggify-after-setup",
+        None,
+        Value::None,
+        "Buggify stays inert until the guest calls patina_dst::lifecycle::setup_complete(). Implies --buggify.",
+        false,
+    ),
+];
+
+const LIVENESS_FLAGS_OPTIONAL: &[Flag] = &[
+    f(
+        "--liveness-watchdog",
+        None,
+        Value::Optional("NANOS"),
+        "Arm a no-progress watchdog over virtual time (bare = runtime default budget).",
+        false,
+    ),
+    f(
+        "--converge-within",
+        None,
+        Value::Optional("NANOS"),
+        "Require convergence within NANOS of the last injected fault (bare = default).",
+        false,
+    ),
+    f(
+        "--heal-after",
+        None,
+        Value::Required("NANOS"),
+        "Fault-free convergence arm-time override; requires --converge-within.",
+        false,
+    ),
+];
+
+const NATIVE_SCHEDULE_FLAGS: &[Flag] = &[
+    f(
+        "--sched-pct",
+        None,
+        Value::Optional("N"),
+        "PCT priority-scheduling exploration; N is the bug depth (>= 1).",
+        false,
+    ),
+    f(
+        "--sched-pct-steps",
+        None,
+        Value::Required("N"),
+        "Number of PCT priority-change points (>= 1). Requires --sched-pct.",
+        false,
+    ),
+    f(
+        "--starve",
+        None,
+        Value::Optional("N"),
+        "Starvation exploration; N is the interval count (>= 1).",
+        false,
+    ),
+    f(
+        "--starve-max-len",
+        None,
+        Value::Required("N"),
+        "Maximum starvation run length (>= 1). Requires --starve.",
+        false,
+    ),
+    f(
+        "--starve-window",
+        None,
+        Value::Required("N"),
+        "Starvation window (>= 1). Requires --starve.",
+        false,
+    ),
+    f(
+        "--swarm",
+        None,
+        Value::None,
+        "Seed-derived swarm selection of a fault-class subset.",
+        false,
+    ),
+];
+
+const REPLAY_TIMELINE_FLAGS: &[Flag] = &[
+    f(
+        "--timeline",
+        None,
+        Value::Required("ID"),
+        "Replay a named timeline (default main).",
+        false,
+    ),
+    f(
+        "--branch",
+        None,
+        Value::None,
+        "Replay the parent prefix then append a new branch timeline.",
+        false,
+    ),
+    f(
+        "--from",
+        None,
+        Value::Required("N"),
+        "Branch point sequence number. Requires --branch.",
+        false,
+    ),
+    f(
+        "--branch-seed",
+        None,
+        Value::Required("S"),
+        "Seed for the appended branch. Requires --branch.",
+        false,
+    ),
+    f(
+        "--branch-id",
+        None,
+        Value::Required("ID"),
+        "Id for the appended branch timeline. Requires --branch.",
+        false,
+    ),
+    f(
+        "--parent",
+        None,
+        Value::Required("ID"),
+        "Parent timeline to branch from (default main). Requires --branch.",
+        false,
+    ),
+];
+
+// ===========================================================================
+// The verb registry
+// ===========================================================================
+
+const RUN: Verb = Verb {
+    name: "run",
+    summary: "Build (on the fly) and/or run an artifact under the deterministic runtime.",
+    synopsis: &[
+        "cargo patina run [--seed N | --record PATH] [FAULT OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]",
+        "cargo patina run <MODULE.wasm> [--seed N | --record PATH] [--fuel N] [--arg VALUE]... [--env K=V]... [--preopen GUEST[:ro|:rw]]... [FAULT OPTIONS] [BUGGIFY/LIVENESS OPTIONS]",
+        "cargo patina run <BINARY> [--seed N | --record PATH] [--fingerprint STR] [--mount HOST_DIR] [--harness] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL]... [-- PROGRAM ARGS]",
+        "cargo patina run <SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [RUN OPTIONS]   (builds on the fly, then runs)",
+    ],
+    prose: "\
+`run` is source-first with artifacts accepted uniformly. A built artifact \
+(recognized by its leading magic bytes) is used as-is; a <SOURCE.rs|DIR|Cargo.toml> \
+is built on the fly through the same pipeline as `build` and its product is run \
+(a one-line PATINA_BUILD_ON_RUN note reports the built artifact and its hash). A \
+`run` with a directory, a Cargo.toml, or no artifact and no --target stays the \
+Cargo package family (the same seed/record/param/budget machinery as `test`); \
+--target opts a source/package into build-then-run.\n\
+\n\
+`run <MODULE.wasm>` runs under WASI; `run <BINARY>` runs a shim-linked native \
+binary under a pre-run default-deny audit: every externally resolved symbol must \
+be interposed or known-safe, and any unsupported symbol on the \
+blocking/time/scheduling/effect surface hard-errors. --allow SYMBOL adds a \
+known-safe symbol; --allow-unsupported-symbols <all|name,...> downgrades matching \
+denials to a loud warning.\n\
+\n\
+`--harness` marks a patina-dst-harness (configure-then-run) binary: it defers \
+runtime installation so the harness installs and configures the context itself. \
+Supply it on both the record `run` and the `replay`. Reproduce a recorded run with \
+`cargo patina replay`.",
+    groups: &[
+        Group {
+            title: "Patina options (run/test)",
+            flags: &[
+                f(
+                    "--seed",
+                    None,
+                    Value::Required("U64"),
+                    "Deterministic root seed (default 0).",
+                    false,
+                ),
+                f(
+                    "--record",
+                    None,
+                    Value::Required("PATH"),
+                    "Record boundary operations and outcomes to PATH.",
+                    false,
+                ),
+                f(
+                    "--budget",
+                    None,
+                    Value::Required("STEPS"),
+                    "Maximum boundary operations before explicit failure (cargo family).",
+                    false,
+                ),
+                f(
+                    "--param",
+                    None,
+                    Value::Required("K=V"),
+                    "Typed-builder parameter exposed through Context (cargo family).",
+                    true,
+                ),
+            ],
+        },
+        Group {
+            title: "Source-first selection (building a source/package on the fly)",
+            flags: SOURCE_SELECT,
+        },
+        Group {
+            title: "Fault options (seed-driven, default off)",
+            flags: FAULT_FLAGS,
+        },
+        Group {
+            title: "Native run options (run <BINARY>)",
+            flags: &[
+                f(
+                    "--harness",
+                    None,
+                    Value::None,
+                    "Treat the binary as a patina-dst-harness (defers runtime init).",
+                    false,
+                ),
+                f(
+                    "--mount",
+                    None,
+                    Value::Required("HOST_DIR"),
+                    "Capture a host directory read-only into the guest filesystem at `/`.",
+                    false,
+                ),
+                f(
+                    "--net-latency-nanos",
+                    None,
+                    Value::Required("N"),
+                    "Base per-datagram delivery latency.",
+                    false,
+                ),
+                f(
+                    "--fingerprint",
+                    None,
+                    Value::Required("STR"),
+                    "Compatibility fingerprint label (default patina-native).",
+                    false,
+                ),
+                f(
+                    "--allow",
+                    None,
+                    Value::Required("SYMBOL"),
+                    "Add a known-safe symbol to the pre-run gate allow list.",
+                    true,
+                ),
+                f(
+                    "--allow-unsupported-symbols",
+                    None,
+                    Value::Required("all|name,..."),
+                    "Downgrade matching unsupported-symbol denials to a warning.",
+                    false,
+                ),
+            ],
+        },
+        Group {
+            title: "Native scheduling options (run <BINARY>)",
+            flags: NATIVE_SCHEDULE_FLAGS,
+        },
+        Group {
+            title: "Buggify options (run <MODULE.wasm> & run <BINARY>)",
+            flags: BUGGIFY_FLAGS,
+        },
+        Group {
+            title: "Liveness options (run <MODULE.wasm> & run <BINARY>)",
+            flags: LIVENESS_FLAGS_OPTIONAL,
+        },
+        Group {
+            title: "WASI run options (run <MODULE.wasm>)",
+            flags: WASI_HOST_FLAGS,
+        },
+    ],
+};
+
+const TEST: Verb = Verb {
+    name: "test",
+    summary: "Run a Cargo test binary under the deterministic runtime.",
+    synopsis: &[
+        "cargo patina test [--seed N | --record PATH] [FAULT OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]",
+    ],
+    prose: "\
+`test` is the Cargo package family: the seed/record machinery, seed-driven fault \
+knobs, and typed --param values, with every unrecognized option forwarded to \
+Cargo. Reproducing a recording is the `replay` verb's job, so `test` carries no \
+replay/branch/timeline flags. A --record run captures its seed and fault knobs \
+into the trace metadata so `replay` restores them.",
+    groups: &[
+        Group {
+            title: "Patina options (run/test)",
+            flags: &[
+                f(
+                    "--seed",
+                    None,
+                    Value::Required("U64"),
+                    "Deterministic root seed (default 0).",
+                    false,
+                ),
+                f(
+                    "--record",
+                    None,
+                    Value::Required("PATH"),
+                    "Record boundary operations and outcomes to PATH.",
+                    false,
+                ),
+                f(
+                    "--budget",
+                    None,
+                    Value::Required("STEPS"),
+                    "Maximum boundary operations before explicit failure.",
+                    false,
+                ),
+                f(
+                    "--param",
+                    None,
+                    Value::Required("K=V"),
+                    "Typed-builder parameter exposed through Context.",
+                    true,
+                ),
+            ],
+        },
+        Group {
+            title: "Fault options (seed-driven, default off)",
+            flags: FAULT_FLAGS,
+        },
+    ],
+};
+
+const BUILD: Verb = Verb {
+    name: "build",
+    summary: "Build the native linked-shim target (default) or a wasm32-wasip1 package.",
+    synopsis: &[
+        "cargo patina build <SOURCE.rs> --output <PATH> [--edition YEAR] [--release] [--yield-points] [-- RUSTC OPTIONS]",
+        "cargo patina build <DIR|Cargo.toml> [--output <PATH>] [--package NAME] [--bin NAME] [--release] [--yield-points]",
+        "cargo patina build <DIR|Cargo.toml> --target wasi [--output PATH] [--package NAME] [--bin NAME] [--release]",
+    ],
+    prose: "\
+`build` (default --target native) packages the native linked-shim target: it \
+builds the patina-dst-native-shim staticlib, compiles the embedded POSIX C layer, \
+injects cfg(patina)/cfg(dst), and links the shim below the user program. A `.rs` \
+path builds a single source directly; a directory or Cargo.toml drives the \
+package's own cargo build under Patina control. Select the member with --package \
+and the binary with --bin; --output copies the built binary out.\n\
+\n\
+`--yield-points` instruments the native guest with deterministic cooperative \
+preemption (a hook at every basic block routes into the scheduler), making \
+atomics-only race windows schedulable. It is native-only and rejected under \
+--target wasi (wasip1 has no threads to preempt). `build --target wasi` compiles a \
+Cargo package for wasm32-wasip1 and is package-only (a single .rs source is \
+native-only).",
+    groups: &[Group {
+        title: "Build options",
+        flags: &[
+            f(
+                "--output",
+                Some("-o"),
+                Value::Required("PATH"),
+                "Copy the built binary out to PATH (required for a single .rs source).",
+                false,
+            ),
+            f(
+                "--edition",
+                None,
+                Value::Required("YEAR"),
+                "Rust edition for a single-source build (default 2024).",
+                false,
+            ),
+            f(
+                "--release",
+                None,
+                Value::None,
+                "Build in release mode.",
+                false,
+            ),
+            f(
+                "--yield-points",
+                None,
+                Value::None,
+                "Instrument deterministic cooperative preemption (native only).",
+                false,
+            ),
+            f(
+                "--package",
+                Some("-p"),
+                Value::Required("NAME"),
+                "Select a workspace member.",
+                false,
+            ),
+            f(
+                "--bin",
+                None,
+                Value::Required("NAME"),
+                "Select the binary when the package defines more than one.",
+                false,
+            ),
+            TARGET_FLAG,
+        ],
+    }],
+};
+
+const AUDIT: Verb = Verb {
+    name: "audit",
+    summary: "Report the true post-interposition residual effect surface of a binary.",
+    synopsis: &[
+        "cargo patina audit <SOURCE.rs|DIR|Cargo.toml> [--package NAME] [--bin NAME] [--target native|wasi] [--allow SYMBOL]...   (builds shim-linked, then audits)",
+        "cargo patina audit <ARTIFACT> [--allow SYMBOL]... [--raw]   (a prebuilt binary; must be `cargo patina build`-linked unless --raw)",
+    ],
+    prose: "\
+`audit` is source-first: only a shim-linked binary shows the true \
+post-interposition residual, so auditing a source/package links the shim first and \
+the report is the handful of effect-surface symbols that genuinely escape. A stock \
+`cargo build` binary lists every libc call the shim would interpose as an \
+unsupported import — the opposite of the truth — so `audit <prebuilt>` fails closed \
+unless the binary was produced by `cargo patina build`. `--raw` overrides that gate \
+and runs the full audit anyway under a loud banner. A WASI module lists its imports \
+and takes no --allow (the allow list is native-only).",
+    groups: &[
+        Group {
+            title: "Audit options",
+            flags: &[
+                f(
+                    "--allow",
+                    None,
+                    Value::Required("SYMBOL"),
+                    "Treat SYMBOL as known-safe (native only).",
+                    true,
+                ),
+                f(
+                    "--raw",
+                    None,
+                    Value::None,
+                    "Audit a non-Patina-built binary anyway (import findings are pre-interposition).",
+                    false,
+                ),
+            ],
+        },
+        Group {
+            title: "Source-first selection",
+            flags: SOURCE_SELECT,
+        },
+    ],
+};
+
+const REPLAY: Verb = Verb {
+    name: "replay",
+    summary: "Reproduce a recorded run; routes by the same inference as `run`.",
+    synopsis: &[
+        "cargo patina replay <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> <TRACE> [--target native|wasi] [REPLAY OPTIONS]",
+    ],
+    prose: "\
+`replay <ARTIFACT|SOURCE|PKG> <TRACE>` is the sole replay entry point for all three \
+families: a wasm module replays under WASI, a native binary under the native \
+supervisor, and a directory/Cargo.toml (no --target) under the Cargo package \
+family. Each restores every recorded semantic input (seed, fault knobs, buggify, \
+and guest argv) from the trace — the trace is authoritative — so replay exposes no \
+semantic flags; any re-supplied value must match the recording or the replay is \
+refused.\n\
+\n\
+Only host/build inputs the trace cannot carry stay as flags. The Cargo and WASI \
+families carry the timeline/branch controls (--timeline, and --branch --from \
+--branch-seed --branch-id [--parent]); WASI re-takes its host environment \
+(--fuel/--env/--socket/--preopen and resource limits). Native traces are \
+single-timeline (native runs cannot branch), so native replay accepts only \
+--fingerprint, --mount, --harness, and the --allow/--allow-unsupported-symbols \
+audit surface.",
+    groups: &[
+        Group {
+            title: "Native replay options (host/build facts the trace cannot carry)",
+            flags: &[
+                f(
+                    "--fingerprint",
+                    None,
+                    Value::Required("STR"),
+                    "Compatibility fingerprint label (default patina-native).",
+                    false,
+                ),
+                f(
+                    "--mount",
+                    None,
+                    Value::Required("HOST_DIR"),
+                    "Re-supply the host corpus whose hash the fingerprint verifies.",
+                    false,
+                ),
+                f(
+                    "--harness",
+                    None,
+                    Value::None,
+                    "Replay a patina-dst-harness binary (defers runtime init).",
+                    false,
+                ),
+                f(
+                    "--allow",
+                    None,
+                    Value::Required("SYMBOL"),
+                    "Add a known-safe symbol to the pre-run gate allow list.",
+                    true,
+                ),
+                f(
+                    "--allow-unsupported-symbols",
+                    None,
+                    Value::Required("all|name,..."),
+                    "Downgrade matching unsupported-symbol denials to a warning.",
+                    false,
+                ),
+            ],
+        },
+        Group {
+            title: "Timeline/branch replay (Cargo package & WASI families)",
+            flags: REPLAY_TIMELINE_FLAGS,
+        },
+        Group {
+            title: "WASI host environment (re-supplied and fingerprint-checked)",
+            flags: WASI_HOST_FLAGS,
+        },
+        Group {
+            title: "Family selection",
+            flags: &[TARGET_FLAG],
+        },
+    ],
+};
+
+const EXPLORE: Verb = Verb {
+    name: "explore",
+    summary: "Sweep a seed range of `run`/`test`, reporting per-seed outcomes.",
+    synopsis: &[
+        "cargo patina explore run <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [--seeds N] [--start N] [RUN OPTIONS]",
+        "cargo patina explore test [--seeds N] [--start N] [PATINA/CARGO OPTIONS]",
+    ],
+    prose: "\
+`explore run`/`explore test` sweeps a contiguous seed range over one artifact or \
+Cargo target, running each seed as a child and reporting per-seed outcomes. The \
+wrapped command must be in a plain seeded mode — record/replay/branch pin a single \
+run and have nothing to sweep. Every option after the seed controls is the wrapped \
+`run`/`test` command's; run `cargo patina run --help` or `cargo patina test --help` \
+for those.",
+    groups: &[Group {
+        title: "Explore options",
+        flags: &[
+            f(
+                "--seeds",
+                None,
+                Value::Required("N"),
+                "Number of seeds to sweep (1..=1000000, default 100).",
+                false,
+            ),
+            f(
+                "--start",
+                None,
+                Value::Required("N"),
+                "First seed in the range (default: the wrapped command's seed).",
+                false,
+            ),
+        ],
+    }],
+};
+
+const CAMPAIGN: Verb = Verb {
+    name: "campaign",
+    summary: "Config-driven deterministic fault-and-schedule sweep over one artifact.",
+    synopsis: &[
+        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out DIR] [--spec FILE.json] [--seed-base N] [--buggify] [--swarm] [--pct] [--faults] [--liveness-watchdog N] [--converge-within N] [--report] [-- GUEST ARGS]",
+        "cargo patina campaign --selftest",
+    ],
+    prose: "\
+A campaign runs `--gens` independent child `cargo patina run` processes over one \
+artifact. Everything is a pure function of the generation number, so a re-run with \
+the same spec reproduces the same seeds, knobs, outcomes, and failure signatures. \
+Each generation is classified into one of seven outcome classes; novel failure \
+signatures are deduped and their traces saved with a reproduce command. A --spec \
+FILE.json supplies overrides and individual flags override the spec. Output is a \
+human summary or a patina.campaign/v1 JSON envelope. `--selftest` proves every \
+classifier class and the signature store.",
+    groups: &[Group {
+        title: "Campaign options",
+        flags: &[
+            f(
+                "--gens",
+                None,
+                Value::Required("N"),
+                "Number of generations (default 40).",
+                false,
+            ),
+            f(
+                "--out",
+                None,
+                Value::Required("DIR"),
+                "Output directory (default patina-campaign-out).",
+                false,
+            ),
+            f(
+                "--spec",
+                None,
+                Value::Required("FILE.json"),
+                "JSON spec of campaign overrides.",
+                false,
+            ),
+            f(
+                "--seed-base",
+                None,
+                Value::Required("N"),
+                "Base for the per-generation seed derivation (default 0).",
+                false,
+            ),
+            f(
+                "--timeout-secs",
+                None,
+                Value::Required("N"),
+                "Per-generation child timeout in seconds (default 60).",
+                false,
+            ),
+            f(
+                "--buggify",
+                None,
+                Value::None,
+                "Randomize cooperative-SUT (buggify) activation/fire per generation.",
+                false,
+            ),
+            f(
+                "--swarm",
+                None,
+                Value::None,
+                "Apply seed-derived swarm fault-class selection (native only).",
+                false,
+            ),
+            f(
+                "--pct",
+                None,
+                Value::None,
+                "Randomize a PCT bug depth per generation (native only).",
+                false,
+            ),
+            f(
+                "--faults",
+                None,
+                Value::None,
+                "Randomize fault knobs (net drop, sleep jitter) per generation.",
+                false,
+            ),
+            f(
+                "--report",
+                None,
+                Value::None,
+                "Also write a --report HTML for each failing generation.",
+                false,
+            ),
+            f(
+                "--liveness-watchdog",
+                None,
+                Value::Required("N"),
+                "Liveness-watchdog budget (virtual nanoseconds) applied every generation.",
+                false,
+            ),
+            f(
+                "--converge-within",
+                None,
+                Value::Required("N"),
+                "Heal-then-converge budget (virtual nanoseconds) applied every generation.",
+                false,
+            ),
+            f(
+                "--heal-after",
+                None,
+                Value::Required("N"),
+                "Explicit heal-then-converge arm-time override (virtual nanoseconds).",
+                false,
+            ),
+            f(
+                "--selftest",
+                None,
+                Value::None,
+                "Prove every classifier class and the signature store, then exit.",
+                false,
+            ),
+        ],
+    }],
+};
+
+const MINIMIZE: Verb = Verb {
+    name: "minimize",
+    summary: "Shrink a recorded trace, or shrink experiment inputs (--scenario).",
+    synopsis: &[
+        "cargo patina minimize <TRACE> --output <PATH> [--timeline ID] [--prune-branches] -- <ORACLE> [ARGS]...",
+        "cargo patina minimize --scenario --seed <U64> [--param K=V]... [--seed-budget N] -- <ORACLE> [ARGS]...",
+    ],
+    prose: "\
+`minimize <TRACE>` shrinks a recorded trace: an unbranched main timeline or a leaf \
+--timeline ID is delta-debugged directly, while a branched bundle is shrunk under a \
+branch-tree policy that never touches an inherited replay prefix. --prune-branches \
+also drops whole branch subtrees the failure does not need. The oracle runs once \
+per candidate with the candidate written to $PATINA_MINIMIZE_TRACE; a non-zero exit \
+means the failure is still present.\n\
+\n\
+`minimize --scenario` shrinks experiment inputs instead: it drops and shrinks \
+--param values and canonicalizes --seed toward zero, bounded by --seed-budget. Each \
+candidate re-runs the oracle as a fresh seeded child through the \
+PATINA_SEED/PATINA_PARAMS_JSON protocol.",
+    groups: &[
+        Group {
+            title: "Trace minimization",
+            flags: &[
+                f(
+                    "--output",
+                    None,
+                    Value::Required("PATH"),
+                    "Write the minimized trace to PATH (required).",
+                    false,
+                ),
+                f(
+                    "--timeline",
+                    None,
+                    Value::Required("ID"),
+                    "Minimize a specific leaf timeline.",
+                    false,
+                ),
+                f(
+                    "--prune-branches",
+                    None,
+                    Value::None,
+                    "Also drop whole branch subtrees the failure does not need.",
+                    false,
+                ),
+            ],
+        },
+        Group {
+            title: "Scenario minimization (--scenario)",
+            flags: &[
+                f(
+                    "--scenario",
+                    None,
+                    Value::None,
+                    "Shrink experiment inputs (seed/params) instead of a trace.",
+                    false,
+                ),
+                f(
+                    "--seed",
+                    None,
+                    Value::Required("U64"),
+                    "The failing seed to canonicalize toward zero (required).",
+                    false,
+                ),
+                f(
+                    "--seed-budget",
+                    None,
+                    Value::Required("N"),
+                    "Seed canonicalization budget (default 256).",
+                    false,
+                ),
+                f(
+                    "--param",
+                    None,
+                    Value::Required("K=V"),
+                    "A scenario parameter to drop/shrink.",
+                    true,
+                ),
+            ],
+        },
+    ],
+};
+
+/// Every verb, in overview order.
+pub const VERBS: &[&Verb] = &[
+    &RUN, &TEST, &BUILD, &AUDIT, &REPLAY, &EXPLORE, &CAMPAIGN, &MINIMIZE,
+];
+
+/// The `PATINA_*` environment protocol and honored tool variables.
+pub const ENVIRONMENT: &[EnvVar] = &[
+    EnvVar {
+        name: "PATINA_SEED",
+        scope: "user",
+        doc: "Deterministic root seed (mirrors --seed; a scenario-minimize oracle receives its candidate seed here).",
+    },
+    EnvVar {
+        name: "PATINA_PARAMS_JSON",
+        scope: "user",
+        doc: "Typed --param values as a JSON object (the scenario-minimize oracle protocol).",
+    },
+    EnvVar {
+        name: "PATINA_MINIMIZE_TRACE",
+        scope: "user",
+        doc: "Path to the candidate trace a trace-minimize oracle must judge; a non-zero exit means the failure is still present.",
+    },
+    EnvVar {
+        name: "PATINA_MODE",
+        scope: "protocol",
+        doc: "Run mode (seeded/record/replay/branch); set by the supervisor for the guest.",
+    },
+    EnvVar {
+        name: "PATINA_TRACE",
+        scope: "protocol",
+        doc: "On-disk trace path for record/replay.",
+    },
+    EnvVar {
+        name: "PATINA_TRACE_FD",
+        scope: "protocol",
+        doc: "Inherited already-open trace descriptor (native), so a fully interposed guest never recurses into the deterministic FS while finalizing its trace.",
+    },
+    EnvVar {
+        name: "PATINA_FS_IMAGE_FD",
+        scope: "protocol",
+        doc: "Inherited descriptor streaming the --mount host-directory image to the guest.",
+    },
+    EnvVar {
+        name: "PATINA_DEFER_INIT",
+        scope: "protocol",
+        doc: "Set by --harness: defer runtime installation so the harness owns configure-then-run.",
+    },
+    EnvVar {
+        name: "PATINA_STEP_BUDGET",
+        scope: "protocol",
+        doc: "Maximum boundary operations (mirrors --budget).",
+    },
+    EnvVar {
+        name: "PATINA_FINGERPRINT",
+        scope: "protocol",
+        doc: "Compatibility fingerprint checked on replay.",
+    },
+    EnvVar {
+        name: "PATINA_TIMELINE / PATINA_PARENT_TIMELINE / PATINA_BRANCH_FROM / PATINA_BRANCH_SEED / PATINA_BRANCH_ID",
+        scope: "protocol",
+        doc: "Timeline and branch-append controls (mirror the replay --timeline/--branch flags).",
+    },
+    EnvVar {
+        name: "PATINA_GUEST_ARGV",
+        scope: "protocol",
+        doc: "Recorded guest argv restored on replay.",
+    },
+    EnvVar {
+        name: "PATINA_FS_CRASH_AT / PATINA_FS_TORN_GRANULARITY",
+        scope: "protocol",
+        doc: "Filesystem crash fault knobs (mirror --fs-crash-at/--fs-torn-granularity).",
+    },
+    EnvVar {
+        name: "PATINA_SLEEP_JITTER_NANOS / PATINA_NET_JITTER_NANOS / PATINA_NET_DROP_PERMILLE / PATINA_NET_LATENCY_NANOS",
+        scope: "protocol",
+        doc: "Seed-driven timing/network fault knobs (mirror the --*-nanos/--net-* flags).",
+    },
+    EnvVar {
+        name: "PATINA_BUGGIFY / PATINA_BUGGIFY_ACTIVATION_PERMILLE / PATINA_BUGGIFY_CUTOFF_NANOS / PATINA_BUGGIFY_AFTER_SETUP",
+        scope: "protocol",
+        doc: "Cooperative-SUT (buggify) knobs (mirror the --buggify* flags).",
+    },
+    EnvVar {
+        name: "PATINA_SCHED_PCT / PATINA_SCHED_PCT_STEPS / PATINA_SCHED_STARVE / PATINA_SCHED_STARVE_MAX_LEN / PATINA_SCHED_STARVE_WINDOW",
+        scope: "protocol",
+        doc: "Native scheduling exploration knobs (mirror --sched-pct/--starve*). A wedged run is killed by the starvation stall backstop (exit 111).",
+    },
+    EnvVar {
+        name: "PATINA_SWARM",
+        scope: "protocol",
+        doc: "Seed-derived swarm fault-class selection (mirrors --swarm).",
+    },
+    EnvVar {
+        name: "PATINA_LIVENESS_WATCHDOG_NANOS / PATINA_CONVERGE_WITHIN_NANOS / PATINA_HEAL_AFTER_NANOS",
+        scope: "protocol",
+        doc: "Liveness watchdog / convergence budgets (mirror --liveness-watchdog/--converge-within/--heal-after).",
+    },
+    EnvVar {
+        name: "CARGO / RUSTC / CC",
+        scope: "tool",
+        doc: "Override the cargo, rustc, and C compiler binaries (default cargo/rustc/cc).",
+    },
+    EnvVar {
+        name: "RUSTFLAGS / CARGO_TARGET_DIR",
+        scope: "tool",
+        doc: "Honored as usual; Patina augments RUSTFLAGS via CARGO_ENCODED_RUSTFLAGS for package builds and respects CARGO_TARGET_DIR for staging.",
+    },
+];
+
+// ===========================================================================
+// Lookup
+// ===========================================================================
+
+/// The verb entry named `name`, if any.
+pub fn verb(name: &str) -> Option<&'static Verb> {
+    VERBS.iter().copied().find(|verb| verb.name == name)
+}
+
+/// The canonical `Topic` for a routed verb token. `explore run`/`explore test`
+/// all map to the `explore` overview; `test` has its own section.
+pub fn topic_for(verb_token: &str) -> Topic {
+    match verb_token {
+        name if verb(name).is_some() => Topic::Verb(verb(name).unwrap().name),
+        _ => Topic::Overview,
+    }
+}
+
+// ===========================================================================
+// Human rendering
+// ===========================================================================
+
+/// Column at which flag docs begin (a flag whose left column overruns it wraps
+/// its doc onto the next line).
+const DOC_COLUMN: usize = 34;
+/// Right margin for word-wrapped prose and docs.
+const WRAP_WIDTH: usize = 92;
+
+/// The rendered left column for a flag, e.g. `  -o, --output <PATH>`.
+fn flag_left(flag: &Flag) -> String {
+    let mut left = String::from("  ");
+    match flag.short {
+        Some(short) => left.push_str(&format!("{short}, {}", flag.name)),
+        None => left.push_str(&format!("    {}", flag.name)),
+    }
+    match flag.value {
+        Value::None => {}
+        Value::Required(p) => left.push_str(&format!(" <{p}>")),
+        Value::Optional(p) => left.push_str(&format!("[=<{p}>]")),
+    }
+    if flag.repeatable {
+        left.push_str("...");
+    }
+    left
+}
+
+/// Greedy word-wrap of `text` to at most `width` columns per line.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let candidate = if current.is_empty() {
+            word.to_string()
+        } else {
+            format!("{current} {word}")
+        };
+        if candidate.chars().count() > width && !current.is_empty() {
+            lines.push(current);
+            current = word.to_string();
+        } else {
+            current = candidate;
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+fn push_flag(out: &mut String, flag: &Flag) {
+    let left = flag_left(flag);
+    let doc_lines = wrap(flag.doc, WRAP_WIDTH.saturating_sub(DOC_COLUMN));
+    // The left column and the first doc line share a row unless the left column
+    // overruns the doc column, in which case the doc starts on the next line.
+    if left.chars().count() + 2 > DOC_COLUMN {
+        out.push_str(&left);
+        out.push('\n');
+        for line in &doc_lines {
+            out.push_str(&" ".repeat(DOC_COLUMN));
+            out.push_str(line);
+            out.push('\n');
+        }
+    } else {
+        out.push_str(&left);
+        out.push_str(&" ".repeat(DOC_COLUMN - left.chars().count()));
+        for (index, line) in doc_lines.iter().enumerate() {
+            if index > 0 {
+                out.push_str(&" ".repeat(DOC_COLUMN));
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        if doc_lines.is_empty() {
+            out.push('\n');
+        }
+    }
+}
+
+fn push_prose(out: &mut String, prose: &str) {
+    for paragraph in prose.split('\n') {
+        if paragraph.trim().is_empty() {
+            out.push('\n');
+            continue;
+        }
+        for line in wrap(paragraph, WRAP_WIDTH) {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+}
+
+fn push_output_and_env_footer(out: &mut String) {
+    out.push_str("\nOutput options (all verbs; stripped before routing, never reach the guest):\n");
+    for flag in GLOBAL_OUTPUT {
+        push_flag(out, flag);
+    }
+    out.push_str("\nRun `cargo patina --help` for the environment protocol and shared sections.\n");
+}
+
+/// Render the compact top-level overview.
+fn render_overview() -> String {
+    let mut out = String::new();
+    out.push_str("Patina deterministic Cargo runner\n\n");
+    out.push_str("Usage: cargo patina <VERB> [OPTIONS]\n\n");
+    out.push_str("Verbs (run `cargo patina <verb> --help` for details):\n");
+    let width = VERBS.iter().map(|v| v.name.len()).max().unwrap_or(0);
+    for verb in VERBS {
+        out.push_str(&format!(
+            "  {:<width$}  {}\n",
+            verb.name,
+            verb.summary,
+            width = width
+        ));
+    }
+    out.push('\n');
+    out.push_str("Global options:\n");
+    for flag in HELP_FLAGS {
+        push_flag(&mut out, flag);
+    }
+    for flag in GLOBAL_OUTPUT {
+        push_flag(&mut out, flag);
+    }
+
+    out.push_str("\nArtifact inference:\n");
+    push_prose(
+        &mut out,
+        "`run`, `audit`, and `replay` are source-first with artifacts accepted uniformly. A \
+built artifact is recognized by its leading magic bytes (\\0asm for a WASI module, Mach-O/ELF \
+for a native binary) and used as-is; a <SOURCE.rs|DIR|Cargo.toml> is built on the fly through \
+the same pipeline as `build` (honoring --target, default native). A directory, a Cargo.toml, \
+or no artifact with no --target stays the Cargo package family.",
+    );
+
+    out.push_str("\nENVIRONMENT:\n");
+    push_prose(
+        &mut out,
+        "User-facing knobs, the internal supervisor/oracle protocol vars (set for you; listed \
+for transparency), and honored tool vars. `--help --format json` emits the full registry.",
+    );
+    out.push('\n');
+    for env in ENVIRONMENT {
+        let tag = match env.scope {
+            "protocol" => " [internal protocol]",
+            "tool" => " [tool]",
+            _ => "",
+        };
+        out.push_str(&format!("  {}{}\n", env.name, tag));
+        for line in wrap(env.doc, WRAP_WIDTH - 6) {
+            out.push_str("      ");
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Render a single verb's focused section.
+fn render_verb(verb: &Verb) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "cargo patina {} — {}\n\n",
+        verb.name, verb.summary
+    ));
+    out.push_str("Usage:\n");
+    for line in verb.synopsis {
+        out.push_str("  ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push('\n');
+    for group in verb.groups {
+        out.push_str(group.title);
+        out.push_str(":\n");
+        for flag in group.flags {
+            push_flag(&mut out, flag);
+        }
+        out.push('\n');
+    }
+    push_prose(&mut out, verb.prose);
+    push_output_and_env_footer(&mut out);
+    out
+}
+
+/// Render the requested help topic as human text (exit 0).
+pub fn render(topic: Topic) -> String {
+    match topic {
+        Topic::Overview => render_overview(),
+        Topic::Verb(name) => match verb(name) {
+            Some(verb) => render_verb(verb),
+            None => render_overview(),
+        },
+    }
+}
+
+// ===========================================================================
+// Usage-error synopsis (message + synopsis lines + pointer)
+// ===========================================================================
+
+/// The synopsis block a usage error appends: the offending verb's synopsis
+/// lines plus a `--help` pointer, or the compact top-level list before a verb is
+/// resolved.
+pub fn usage_synopsis(current_verb: Option<&str>) -> String {
+    let mut out = String::new();
+    match current_verb.and_then(verb) {
+        Some(verb) => {
+            out.push_str("Usage:\n");
+            for line in verb.synopsis {
+                out.push_str("  ");
+                out.push_str(line);
+                out.push('\n');
+            }
+            out.push_str(&format!(
+                "\nrun `cargo patina {} --help` for details",
+                verb.name
+            ));
+        }
+        None => {
+            out.push_str("Usage: cargo patina <VERB> [OPTIONS]\n");
+            for verb in VERBS {
+                out.push_str("  ");
+                out.push_str(verb.synopsis[0]);
+                out.push('\n');
+            }
+            out.push_str("\nrun `cargo patina <verb> --help` for details");
+        }
+    }
+    out
+}
+
+// ===========================================================================
+// JSON rendering
+// ===========================================================================
+
+fn flag_json(flag: &Flag) -> serde_json::Value {
+    use serde_json::{Map, Value as J};
+    let mut m = Map::new();
+    m.insert("name".into(), J::from(flag.name));
+    m.insert("short".into(), flag.short.map_or(J::Null, J::from));
+    m.insert("value_kind".into(), J::from(flag.value.kind()));
+    m.insert(
+        "placeholder".into(),
+        flag.value.placeholder().map_or(J::Null, J::from),
+    );
+    m.insert("doc".into(), J::from(flag.doc));
+    m.insert("repeatable".into(), J::from(flag.repeatable));
+    J::Object(m)
+}
+
+/// Render the whole registry as pretty JSON (for `--help --format json`).
+pub fn render_json() -> String {
+    use serde_json::{Map, Value as J};
+    let mut verbs = Map::new();
+    for verb in VERBS {
+        let mut vm = Map::new();
+        vm.insert("summary".into(), J::from(verb.summary));
+        vm.insert("forms".into(), J::from(verb.synopsis.to_vec()));
+        let groups: Vec<J> = verb
+            .groups
+            .iter()
+            .map(|g| {
+                let mut gm = Map::new();
+                gm.insert("title".into(), J::from(g.title));
+                gm.insert(
+                    "flags".into(),
+                    J::Array(g.flags.iter().map(flag_json).collect()),
+                );
+                J::Object(gm)
+            })
+            .collect();
+        vm.insert("flag_groups".into(), J::Array(groups));
+        verbs.insert(verb.name.to_string(), J::Object(vm));
+    }
+
+    let mut global = Map::new();
+    global.insert("title".into(), J::from("Output options (all verbs)"));
+    global.insert(
+        "flags".into(),
+        J::Array(GLOBAL_OUTPUT.iter().map(flag_json).collect()),
+    );
+
+    let environment: Vec<J> = ENVIRONMENT
+        .iter()
+        .map(|e| {
+            let mut em = Map::new();
+            em.insert("name".into(), J::from(e.name));
+            em.insert("scope".into(), J::from(e.scope));
+            em.insert("doc".into(), J::from(e.doc));
+            J::Object(em)
+        })
+        .collect();
+
+    let mut root = Map::new();
+    root.insert("schema".into(), J::from("patina.help/v1"));
+    root.insert("verbs".into(), J::Object(verbs));
+    root.insert("global_flags".into(), J::Object(global));
+    root.insert("environment".into(), J::Array(environment));
+    serde_json::to_string_pretty(&J::Object(root)).unwrap_or_else(|_| "{}".into())
+}

@@ -7280,3 +7280,65 @@ fn harness_flag_rejected_for_wasi_target() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// The registry-driven help system: a per-verb `--help` prints that verb's
+// focused section and exits 0 (regression for the wall-dump / `--help`-consumed-
+// as-a-positional bug where `campaign --help` errored with "failed to read
+// artifact --help"), and `--help --format json` emits the machine-readable
+// registry covering every verb.
+#[test]
+fn per_verb_help_and_json_registry() {
+    let directory = tempdir().unwrap();
+
+    // `cargo patina campaign --help` exits 0 with the campaign synopsis + --gens.
+    let help = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        directory.path(),
+        &["campaign", "--help"],
+    );
+    assert!(
+        help.status.success(),
+        "campaign --help exited {}\nstderr:\n{}",
+        help.status,
+        String::from_utf8_lossy(&help.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&help.stdout);
+    assert!(
+        stdout.contains("cargo patina campaign"),
+        "campaign --help missing synopsis:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("--gens"),
+        "campaign --help missing --gens:\n{stdout}"
+    );
+    // The old bug's error string must be gone.
+    assert!(
+        !stdout.contains("failed to read artifact"),
+        "campaign --help still consumes --help as a positional"
+    );
+
+    // `cargo patina --help --format json` exits 0 and parses as JSON with all
+    // eight verbs.
+    let json = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        directory.path(),
+        &["--help", "--format", "json"],
+    );
+    assert!(
+        json.status.success(),
+        "--help --format json exited {}",
+        json.status
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&json.stdout).expect("--help --format json emits valid JSON");
+    let verbs = parsed["verbs"].as_object().expect("verbs object");
+    for verb in [
+        "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize",
+    ] {
+        assert!(
+            verbs.contains_key(verb),
+            "JSON help missing verb {verb}:\n{}",
+            String::from_utf8_lossy(&json.stdout)
+        );
+    }
+}
