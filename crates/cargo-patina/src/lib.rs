@@ -549,10 +549,12 @@ fn dispatch(arguments: Vec<OsString>) -> Result<i32, CliError> {
     match parse(arguments)? {
         ParseResult::Help(topic) => {
             // `--help --format json` (the output pre-pass already stripped and
-            // installed the format) emits the machine-readable registry; the
-            // human form prints the focused section. Both exit 0.
+            // installed the format) emits the machine-readable registry scoped to
+            // the same topic: the compact index for the overview, one verb's full
+            // detail for a verb. The human form prints the focused section. Both
+            // exit 0.
             if output::options().is_json() {
-                print!("{}", help::render_json());
+                print!("{}", help::render_json(topic));
             } else {
                 print!("{}", help::render(topic));
             }
@@ -8063,16 +8065,207 @@ mod tests {
         }
     }
 
+    /// Parse the index payload (`--help --format json`, overview topic).
+    fn index_json() -> serde_json::Value {
+        serde_json::from_str(&help::render_json(help::Topic::Overview))
+            .expect("index help JSON parses")
+    }
+
+    /// Parse a verb's scoped payload (`<verb> --help --format json`).
+    fn verb_json(name: &'static str) -> serde_json::Value {
+        serde_json::from_str(&help::render_json(help::Topic::Verb(name)))
+            .expect("verb help JSON parses")
+    }
+
     #[test]
-    fn json_help_lists_all_eight_verbs() {
-        let json: serde_json::Value =
-            serde_json::from_str(&help::render_json()).expect("help JSON parses");
-        assert_eq!(json["schema"], "patina.help/v1");
+    fn json_index_lists_every_verb_without_flag_groups() {
+        let json = index_json();
+        assert_eq!(json["schema"], help::HELP_SCHEMA);
+        // The env protocol and global flags live in the index.
+        assert!(json["environment"].is_array(), "index carries environment");
+        assert!(
+            json["global_flags"]["flags"].is_array(),
+            "index carries global flags"
+        );
+        // A machine-readable pointer to per-verb detail, with a substitutable
+        // {verb} template.
+        let template = json["verb_detail"]["command_template"]
+            .as_str()
+            .expect("verb_detail.command_template is a string");
+        assert!(
+            template.contains("{verb}") && template.contains("--format json"),
+            "command_template should be a substitutable per-verb command: {template}"
+        );
+        // Every registered verb appears with a summary + forms but NO flag_groups
+        // (the index is a directory, not a flag dump).
         let verbs = json["verbs"].as_object().expect("verbs object");
-        for verb in [
-            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize",
+        assert_eq!(
+            verbs.len(),
+            help::VERBS.len(),
+            "index verb count matches the registry"
+        );
+        for verb in help::VERBS {
+            let entry = &verbs[verb.name];
+            assert_eq!(
+                entry["summary"], verb.summary,
+                "index summary for {}",
+                verb.name
+            );
+            assert!(
+                entry["forms"].is_array(),
+                "index carries {} forms",
+                verb.name
+            );
+            assert!(
+                entry.get("flag_groups").is_none(),
+                "index must NOT carry flag_groups for {}",
+                verb.name
+            );
+        }
+    }
+
+    #[test]
+    fn json_verb_scope_carries_only_that_verbs_detail() {
+        // Class-shaped: walk the registry. Each verb's scoped payload names that
+        // verb, carries its own flag_groups and global flags, and leaks neither
+        // the environment block nor any other verb's entry.
+        for verb in help::VERBS {
+            let json = verb_json(verb.name);
+            assert_eq!(json["schema"], help::HELP_SCHEMA, "{} schema", verb.name);
+            assert_eq!(json["verb"]["name"], verb.name, "verb name");
+            assert_eq!(json["verb"]["summary"], verb.summary, "verb summary");
+            assert!(
+                json["verb"]["flag_groups"].is_array(),
+                "{} carries flag_groups",
+                verb.name
+            );
+            assert_eq!(
+                json["verb"]["flag_groups"].as_array().unwrap().len(),
+                verb.groups.len(),
+                "{} flag_groups count matches the registry",
+                verb.name
+            );
+            assert!(
+                json["global_flags"]["flags"].is_array(),
+                "{} carries global flags",
+                verb.name
+            );
+            // Scoping: no top-level `verbs` map and no environment block.
+            assert!(
+                json.get("verbs").is_none(),
+                "{} scoped payload must not carry the verbs index",
+                verb.name
+            );
+            assert!(
+                json.get("environment").is_none(),
+                "{} scoped payload must not carry the environment block",
+                verb.name
+            );
+            // The verb's own flags are present; a DIFFERENT verb's unique flag is
+            // not. `run`'s `--harness` is unique to run/replay, so it never appears
+            // in, say, `build`'s payload.
+            let names = flag_names(&json["verb"]["flag_groups"]);
+            if verb.name != "run" && verb.name != "replay" {
+                assert!(
+                    !names.contains("--harness"),
+                    "{}'s payload leaked run's unique --harness flag",
+                    verb.name
+                );
+            }
+        }
+        // Positive: run's payload does contain its unique flag.
+        let run = verb_json("run");
+        assert!(
+            flag_names(&run["verb"]["flag_groups"]).contains("--harness"),
+            "run's payload should contain its own --harness flag"
+        );
+    }
+
+    #[test]
+    fn json_flag_omits_default_valued_fields() {
+        // `--release` (build) is a valueless, non-repeatable switch with no short
+        // form: only name/value_kind/doc survive; the default-valued keys are gone.
+        let build = verb_json("build");
+        let release = find_flag(&build["verb"]["flag_groups"], "--release")
+            .expect("build registers --release");
+        assert_eq!(release["value_kind"], "none");
+        for absent in [
+            "short",
+            "placeholder",
+            "value_grammar",
+            "choices",
+            "repeatable",
         ] {
-            assert!(verbs.contains_key(verb), "JSON help missing verb {verb}");
+            assert!(
+                release.get(absent).is_none(),
+                "--release should omit default-valued `{absent}`, got {release}"
+            );
+        }
+        // `--output` (build) has a short form and a required value: those keys are
+        // present, but `repeatable` (false) is still omitted.
+        let output =
+            find_flag(&build["verb"]["flag_groups"], "--output").expect("build registers --output");
+        assert_eq!(output["short"], "-o");
+        assert_eq!(output["value_kind"], "required");
+        assert_eq!(output["placeholder"], "PATH");
+        assert!(
+            output.get("repeatable").is_none(),
+            "non-repeatable --output should omit `repeatable`"
+        );
+        // A repeatable flag emits `repeatable: true`; a `--param` is repeatable.
+        let run = verb_json("run");
+        let param =
+            find_flag(&run["verb"]["flag_groups"], "--param").expect("run registers --param");
+        assert_eq!(param["repeatable"], true);
+        // An enum-valued flag emits its choices; `--format` (global) is native|json.
+        let format = find_flag(&run["global_flags"], "--format").expect("global --format");
+        assert_eq!(format["value_grammar"], "enum");
+        assert!(
+            format["choices"].as_array().is_some(),
+            "an enum flag lists its choices"
+        );
+    }
+
+    /// The set of flag `name`s across an array of `{title, flags}` groups (or a
+    /// single such group object).
+    fn flag_names(groups_or_group: &serde_json::Value) -> BTreeSet<String> {
+        let mut names = BTreeSet::new();
+        collect_flags(groups_or_group, &mut |flag| {
+            if let Some(name) = flag["name"].as_str() {
+                names.insert(name.to_string());
+            }
+        });
+        names
+    }
+
+    /// The first flag object named `name` across an array of groups or a single
+    /// `{title, flags}` group.
+    fn find_flag(groups_or_group: &serde_json::Value, name: &str) -> Option<serde_json::Value> {
+        let mut found = None;
+        collect_flags(groups_or_group, &mut |flag| {
+            if found.is_none() && flag["name"].as_str() == Some(name) {
+                found = Some(flag.clone());
+            }
+        });
+        found
+    }
+
+    /// Invoke `visit` on every flag object inside an array of `{title, flags}`
+    /// groups or a single such group.
+    fn collect_flags(
+        groups_or_group: &serde_json::Value,
+        visit: &mut dyn FnMut(&serde_json::Value),
+    ) {
+        let groups: Vec<&serde_json::Value> = match groups_or_group {
+            serde_json::Value::Array(groups) => groups.iter().collect(),
+            single => vec![single],
+        };
+        for group in groups {
+            if let Some(flags) = group["flags"].as_array() {
+                for flag in flags {
+                    visit(flag);
+                }
+            }
         }
     }
 

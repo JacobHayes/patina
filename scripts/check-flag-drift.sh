@@ -4,8 +4,12 @@
 # One concept: no stale `--flag` spelling for a cargo-patina flag survives
 # anywhere in the repo's prose or its scripts. Every `--flag`-shaped token in the
 # gated docs and in every shell script is checked against the CLI's own
-# machine-readable help registry (`cargo patina --help --format json`, the single
-# source of truth generated from crates/cargo-patina/src/help.rs). A token that is
+# machine-readable help registry (generated from crates/cargo-patina/src/help.rs).
+# That registry is served with progressive disclosure (schema patina.help/v2):
+# `cargo patina --help --format json` is a compact INDEX (verbs as {summary,
+# forms}, no flag rows), and each `cargo patina <verb> --help --format json`
+# carries that verb's flag_groups. This gate reconstructs the full flag universe
+# by folding in every verb's payload (see section (a)). A token that is
 # neither a real CLI flag nor on the small, categorized allowlist of genuinely
 # non-patina flags is drift (a renamed/removed/never-existing patina flag) and
 # fails the gate loudly, naming every file:line that mentions it.
@@ -140,14 +144,43 @@ ALLOWED_FLAGS='
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 
-# (a) The CLI registry, from the local build.
-if ! registry=$(cargo run -q -p cargo-patina -- patina --help --format json 2>/dev/null); then
-  echo "check-flag-drift: FAILED to obtain the CLI help registry" >&2
+# (a) The CLI registry, from the local build. Progressive disclosure means no
+# single call lists every flag: the bare `--help` index carries only the shared
+# global flags, and each verb's own flags live behind `<verb> --help`. So fetch
+# the index, enumerate its verbs, and fold every verb's payload into one flag set.
+help_json() { cargo run -q -p cargo-patina -- patina "$@" --help --format json 2>/dev/null; }
+
+if ! index=$(help_json); then
+  echo "check-flag-drift: FAILED to obtain the CLI help index" >&2
   echo "  (cargo run -q -p cargo-patina -- patina --help --format json)" >&2
   exit 1
 fi
-printf '%s\n' "$registry" \
-  | grep -oE -e '"name":[[:space:]]*"--[A-Za-z0-9-]+"' \
+
+# Verb names are the keys of the index's `verbs` object — the only 4-space-indented
+# `"name": {` lines in the pretty JSON (global_flags/verb_detail children are
+# strings or arrays; environment elements are unkeyed objects). serde_json emits
+# sorted keys with a stable 2-space indent, so this is deterministic; if the shape
+# ever changes and this finds nothing, the gate fails closed here.
+verbs=$(printf '%s\n' "$index" | grep -oE '^    "[a-z_]+": \{$' \
+  | grep -oE '[a-z_]+' | LC_ALL=C sort -u)
+if [ -z "$verbs" ]; then
+  echo "check-flag-drift: could not enumerate verbs from the help index — shape changed?" >&2
+  exit 1
+fi
+
+# The index (for the global flags) plus every verb's payload (for its flag_groups;
+# each also repeats the global flags, which dedupe away).
+payloads="$tmpdir/payloads"
+printf '%s\n' "$index" >"$payloads"
+for verb in $verbs; do
+  if ! payload=$(help_json "$verb"); then
+    echo "check-flag-drift: FAILED to obtain help for verb '$verb'" >&2
+    exit 1
+  fi
+  printf '%s\n' "$payload" >>"$payloads"
+done
+
+grep -oE -e '"name":[[:space:]]*"--[A-Za-z0-9-]+"' "$payloads" \
   | grep -oE -e '\-\-[A-Za-z0-9-]+' | sort -u >"$tmpdir/registry"
 if ! [ -s "$tmpdir/registry" ]; then
   echo "check-flag-drift: registry JSON contained no flags — extraction broken?" >&2

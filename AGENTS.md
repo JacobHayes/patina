@@ -35,10 +35,16 @@ Never guess flag names — the CLI has gone through renames. The authoritative
 registry is generated from `crates/cargo-patina/src/help.rs`:
 
 ```sh
-cargo run -q -p cargo-patina -- patina --help                 # human
-cargo run -q -p cargo-patina -- patina --help --format json   # full machine-readable registry
-cargo run -q -p cargo-patina -- patina run --help             # per-verb help
+cargo run -q -p cargo-patina -- patina --help                    # human
+cargo run -q -p cargo-patina -- patina --help --format json      # machine-readable index (verbs + global flags + env)
+cargo run -q -p cargo-patina -- patina run --help                # per-verb human help
+cargo run -q -p cargo-patina -- patina run --help --format json  # per-verb machine-readable flag detail
 ```
+
+The JSON is progressive-disclosure (schema `patina.help/v2`): the bare `--help`
+index lists each verb's summary and forms but no flag rows; per-verb detail
+(flag_groups) comes from `cargo patina <verb> --help --format json`. Flag fields
+default-omit — an absent `short`/`value_grammar`/`repeatable` means none/false.
 
 Every verb also accepts `--format json`, emitting one `patina.result/v1`
 envelope on stdout — prefer it when parsing results programmatically.

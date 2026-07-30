@@ -128,11 +128,14 @@ they build through the same pipeline as `build` first.
 | `campaign` | Config-driven fault-and-schedule sweep with failure dedup. | `cargo patina campaign ./app --gens 200 --buggify --out-dir out/` |
 | `minimize` | Shrink a failing trace (or seed/params) against an oracle. | `cargo patina minimize bug.patina --output small.patina -- ./oracle` |
 
-Every verb has `--help`, and `--help --format json` emits the full CLI registry
-(verbs, flags, environment protocol) as machine-readable JSON — handy for
-scripts and AI agents. Every result is available as a single JSON envelope via
-`--format json`, and `--render out.html` writes a self-contained HTML timeline
-of any traced run.
+Every verb has `--help`, and `--help --format json` emits a machine-readable
+registry (schema `patina.help/v2`) with progressive disclosure: bare
+`cargo patina --help --format json` is a compact index (every verb's summary and
+usage forms, the global flags, and the environment protocol), while
+`cargo patina <verb> --help --format json` returns that one verb's full flag
+detail — handy for scripts and AI agents. Every result is available as a single
+JSON envelope via `--format json`, and `--render out.html` writes a
+self-contained HTML timeline of any traced run.
 
 ### Fault injection and schedule exploration
 

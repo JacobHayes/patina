@@ -7374,30 +7374,113 @@ fn per_verb_help_and_json_registry() {
         "campaign --help still consumes --help as a positional"
     );
 
-    // `cargo patina --help --format json` exits 0 and parses as JSON with all
-    // eight verbs.
-    let json = invoke_unchecked(
+    // `cargo patina --help --format json` exits 0 and parses as the compact INDEX:
+    // schema patina.help/v2, every verb as {summary, forms} but NO flag_groups,
+    // the global flags + environment protocol, and a per-verb command pointer.
+    let index_out = invoke_unchecked(
         env!("CARGO_BIN_EXE_cargo-patina"),
         directory.path(),
         &["--help", "--format", "json"],
     );
     assert!(
-        json.status.success(),
+        index_out.status.success(),
         "--help --format json exited {}",
-        json.status
+        index_out.status
     );
-    let parsed: serde_json::Value =
-        serde_json::from_slice(&json.stdout).expect("--help --format json emits valid JSON");
-    let verbs = parsed["verbs"].as_object().expect("verbs object");
+    let index: serde_json::Value =
+        serde_json::from_slice(&index_out.stdout).expect("--help --format json emits valid JSON");
+    assert_eq!(index["schema"], "patina.help/v2", "index schema tag");
+    assert!(
+        index["environment"].is_array(),
+        "index carries the environment protocol"
+    );
+    assert!(
+        index["verb_detail"]["command_template"]
+            .as_str()
+            .is_some_and(|t| t.contains("{verb}")),
+        "index carries a substitutable per-verb command template:\n{}",
+        String::from_utf8_lossy(&index_out.stdout)
+    );
+    let verbs = index["verbs"].as_object().expect("verbs object");
     for verb in [
         "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize",
     ] {
         assert!(
             verbs.contains_key(verb),
-            "JSON help missing verb {verb}:\n{}",
-            String::from_utf8_lossy(&json.stdout)
+            "JSON index missing verb {verb}:\n{}",
+            String::from_utf8_lossy(&index_out.stdout)
+        );
+        assert!(
+            verbs[verb].get("flag_groups").is_none(),
+            "index must not carry flag_groups for {verb}"
         );
     }
+
+    // `cargo patina run --help --format json` emits ONLY run's detail: run's own
+    // flags (its unique --harness) but NOT another verb's unique flag (campaign's
+    // --gens), and no environment block. Absent-field defaults hold: --release is
+    // native to build; run's repeatable --param carries `repeatable: true`.
+    let run_out = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        directory.path(),
+        &["run", "--help", "--format", "json"],
+    );
+    assert!(
+        run_out.status.success(),
+        "run --help --format json exited {}",
+        run_out.status
+    );
+    let run: serde_json::Value =
+        serde_json::from_slice(&run_out.stdout).expect("run --help --format json emits valid JSON");
+    assert_eq!(run["schema"], "patina.help/v2", "verb-scoped schema tag");
+    assert_eq!(run["verb"]["name"], "run", "scoped payload names its verb");
+    assert!(
+        run.get("verbs").is_none() && run.get("environment").is_none(),
+        "scoped payload carries neither the verbs index nor the environment block"
+    );
+    let run_flags = e2e_flag_names(&run["verb"]["flag_groups"]);
+    assert!(
+        run_flags.contains("--harness"),
+        "run's payload should carry its own --harness flag"
+    );
+    assert!(
+        !run_flags.contains("--gens"),
+        "run's payload leaked campaign's unique --gens flag"
+    );
+    let param = e2e_find_flag(&run["verb"]["flag_groups"], "--param").expect("run has --param");
+    assert_eq!(
+        param["repeatable"], true,
+        "a repeatable flag emits repeatable: true"
+    );
+    assert!(
+        param.get("short").is_none(),
+        "a short-less flag omits the `short` key entirely (absent means none)"
+    );
+}
+
+/// Every flag `name` across an array of `{title, flags}` groups.
+fn e2e_flag_names(flag_groups: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    for group in flag_groups.as_array().into_iter().flatten() {
+        for flag in group["flags"].as_array().into_iter().flatten() {
+            if let Some(name) = flag["name"].as_str() {
+                names.insert(name.to_string());
+            }
+        }
+    }
+    names
+}
+
+/// The first flag object named `name` across an array of `{title, flags}` groups.
+fn e2e_find_flag(flag_groups: &serde_json::Value, name: &str) -> Option<serde_json::Value> {
+    for group in flag_groups.as_array().into_iter().flatten() {
+        for flag in group["flags"].as_array().into_iter().flatten() {
+            if flag["name"].as_str() == Some(name) {
+                return Some(flag.clone());
+            }
+        }
+    }
+    None
 }
 
 // Phase 2: `--arg=--help` is the only way to deliver a literal `--help` to a WASI
