@@ -26,8 +26,8 @@ use patina_dst_runtime::{
 };
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
-    native_binary_has_sud_marker, native_binary_is_shim_linked, native_escape_is_sud_manageable,
-    shim_control_plane_symbols,
+    native_binary_has_sud_marker, native_binary_installs_custom_global_allocator,
+    native_binary_is_shim_linked, native_escape_is_sud_manageable, shim_control_plane_symbols,
 };
 use patina_dst_trace::TraceBundle;
 use patina_dst_wasi_host::{
@@ -1068,6 +1068,100 @@ fn wasi_package_spec(origin: PathBuf, manifest: PathBuf) -> BuildSpec {
     }
 }
 
+/// Extract source-first `--package NAME`/`-p NAME` and `--bin NAME` from the head
+/// of a `run`/`audit` flag list and return them with the remaining flags. When a
+/// `run`/`audit` argument is a directory/`Cargo.toml` built on the fly, these
+/// select the workspace member and binary exactly as the `build` verb does — the
+/// help advertises the form (`audit <Cargo.toml> --package X --bin Y`), so audit
+/// and run must honor it rather than reject it. Scanning stops at a `--`
+/// separator so a `--package` in the guest/rustc argument section is passed
+/// through untouched, and the flags are consumed here (not by the family parser),
+/// so a package build and a single-source/prebuilt input get a uniform, precise
+/// error via [`apply_package_selection`].
+struct SourceFirstSelection {
+    package: Option<String>,
+    bin: Option<String>,
+    /// The flags with `--package`/`--bin` removed, handed to the family parser.
+    rest: Vec<OsString>,
+}
+
+fn take_package_bin(flags: Vec<OsString>) -> Result<SourceFirstSelection, CliError> {
+    let mut package = None;
+    let mut bin = None;
+    let mut rest = Vec::with_capacity(flags.len());
+    let mut index = 0;
+    while index < flags.len() {
+        match flags[index].to_str() {
+            Some("--package") | Some("-p") => {
+                index += 1;
+                let value = utf8_argument(&flags, index, "--package")?;
+                set_once(&mut package, value.to_string(), "--package")?;
+            }
+            Some("--bin") => {
+                index += 1;
+                let value = utf8_argument(&flags, index, "--bin")?;
+                set_once(&mut bin, value.to_string(), "--bin")?;
+            }
+            Some("--") => {
+                rest.extend_from_slice(&flags[index..]);
+                break;
+            }
+            _ => rest.push(flags[index].clone()),
+        }
+        index += 1;
+    }
+    Ok(SourceFirstSelection { package, bin, rest })
+}
+
+/// Thread source-first `--package`/`--bin` selection into a build-on-the-fly
+/// artifact. Only a Cargo-package build honors them (a workspace member and its
+/// binary, exactly as the `build` verb selects them); a single `.rs` source or an
+/// already-built artifact has nothing to select, so a stray flag fails closed
+/// with a precise message rather than being silently ignored.
+fn apply_package_selection(
+    artifact: &mut ArtifactRef,
+    package: Option<String>,
+    bin: Option<String>,
+) -> Result<(), CliError> {
+    if package.is_none() && bin.is_none() {
+        return Ok(());
+    }
+    match artifact {
+        ArtifactRef::Build(spec) => match &mut spec.kind {
+            BuildSpecKind::Native(invocation) => match &mut invocation.target {
+                NativeBuildTarget::Package {
+                    package: pkg,
+                    bin: binary,
+                    ..
+                } => {
+                    if package.is_some() {
+                        *pkg = package;
+                    }
+                    if bin.is_some() {
+                        *binary = bin;
+                    }
+                    Ok(())
+                }
+                NativeBuildTarget::Source { .. } => Err(CliError::usage(
+                    "--package and --bin apply to a Cargo-package build, not a single source file",
+                )),
+            },
+            BuildSpecKind::Wasi(invocation) => {
+                if package.is_some() {
+                    invocation.package = package;
+                }
+                if bin.is_some() {
+                    invocation.bin = bin;
+                }
+                Ok(())
+            }
+        },
+        ArtifactRef::Prebuilt(_) => Err(CliError::usage(
+            "--package and --bin select a member to build; they do not apply to an already-built artifact",
+        )),
+    }
+}
+
 /// Resolve a run/audit/replay positional to an [`ArtifactRef`], honoring
 /// `--target` (default native) and building a source/package on the fly. When
 /// `cargo_family` is true (only `run`), a directory/`Cargo.toml` with no
@@ -1157,7 +1251,7 @@ fn parse_run(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
         return parse_cargo("run".to_string(), rest);
     };
     match resolve_positional(first, target.as_deref(), true)? {
-        Some((ArtifactFamily::Wasm, module)) => {
+        Some((ArtifactFamily::Wasm, mut module)) => {
             // `--harness` is native-only (usage mode 2 of the shim-backed harness).
             // Under WASI the supervisor owns run configuration, so reject the
             // combination loudly rather than silently ignore the flag.
@@ -1167,10 +1261,14 @@ fn parse_run(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
                      supervisor, not a patina-dst-harness binary",
                 ));
             }
-            parse_wasi_run_from(module, rest[1..].to_vec()).map(ParseResult::WasiRun)
+            let selection = take_package_bin(rest[1..].to_vec())?;
+            apply_package_selection(&mut module, selection.package, selection.bin)?;
+            parse_wasi_run_from(module, selection.rest).map(ParseResult::WasiRun)
         }
-        Some((ArtifactFamily::Native, binary)) => {
-            parse_native_run_from(binary, rest[1..].to_vec()).map(ParseResult::NativeRun)
+        Some((ArtifactFamily::Native, mut binary)) => {
+            let selection = take_package_bin(rest[1..].to_vec())?;
+            apply_package_selection(&mut binary, selection.package, selection.bin)?;
+            parse_native_run_from(binary, selection.rest).map(ParseResult::NativeRun)
         }
         // Cargo package family: forward the whole argument list (including the
         // positional dir/Cargo.toml, which Cargo interprets) to `parse_cargo`.
@@ -1187,14 +1285,20 @@ fn parse_audit(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     let Some(first) = rest.first() else {
         return Err(CliError::usage("audit requires an artifact or source path"));
     };
-    let (family, artifact) = resolve_positional(first, target.as_deref(), false)?
+    let (family, mut artifact) = resolve_positional(first, target.as_deref(), false)?
         .ok_or_else(|| {
             CliError::usage(format!(
                 "audit target {} is neither a WebAssembly module, a native binary, nor a source/package to build",
                 Path::new(first).display()
             ))
         })?;
-    let flags = rest[1..].to_vec();
+    // Source-first `--package`/`--bin` select the workspace member/binary to build
+    // before the audit — the help advertises the form, so it must not be rejected.
+    // Consumed here, uniformly for both families, so the family parser sees only
+    // its own flags.
+    let selection = take_package_bin(rest[1..].to_vec())?;
+    apply_package_selection(&mut artifact, selection.package, selection.bin)?;
+    let flags = selection.rest;
     match family {
         ArtifactFamily::Native => {
             parse_native_audit_from(artifact, flags).map(ParseResult::NativeAudit)
@@ -3833,9 +3937,30 @@ fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<i32, CliErr
              (`cargo patina audit ./Cargo.toml --bin <NAME>`) for the true residual."
         );
     }
+    // A shim-linked binary that installs a custom `#[global_allocator]` is refused
+    // by the pre-run gate (it deadlocks before `main`; see
+    // `CUSTOM_GLOBAL_ALLOCATOR_DIAGNOSTIC`). `audit` reports the surface `run`
+    // enforces, so it fails closed on the same class — never letting a binary that
+    // `run` would refuse look clean under `audit`. Skipped for a `--raw`
+    // non-shim-linked binary (raw is the explicit "show me everything" hatch).
+    if shim_linked
+        && native_binary_installs_custom_global_allocator(&bytes)
+            .map_err(|error| CliError(error.to_string()))?
+    {
+        return Err(CliError(format!(
+            "refusing to audit {}: {}",
+            resolved.path.display(),
+            CUSTOM_GLOBAL_ALLOCATOR_DIAGNOSTIC
+        )));
+    }
     // Shim-linked (or built on the fly, or --raw): render the real audit — for a
     // shim-linked artifact this is the true post-interposition residual, and it
     // fails closed on any genuine escape.
+    //
+    // The allow set is the shared `effective_native_allow` (shim control-plane +
+    // the operator's `--allow`), the SAME set the pre-run `run` gate audits
+    // against, so the static surface `audit` reports equals the surface `run`
+    // enforces — closing the reported `_dlsym` disparity.
     //
     // syscall-user-dispatch (SUD-DESIGN.md §7.1): a `direct-syscall` *instruction*
     // finding in a SUD-dispatch-capable binary is not a hard escape — at run time
@@ -3843,7 +3968,8 @@ fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<i32, CliErr
     // static (no live kernel probe), so it reports BOTH outcomes: runnable under
     // SUD, refused on kernels without it. Any OTHER denial (or the same finding
     // without the SUD marker) still fails closed.
-    let audit = match NativeAudit::audit(&bytes, &invocation.allow) {
+    let effective = effective_native_allow(&invocation.allow);
+    let audit = match NativeAudit::audit(&bytes, &effective) {
         Ok(audit) => audit,
         Err(TargetError::UnsupportedNativeImports(denied)) => {
             let sud_marker = native_binary_has_sud_marker(&bytes)
@@ -4824,6 +4950,35 @@ fn kernel_supports_sud() -> bool {
     false
 }
 
+/// The named diagnostic for a guest that installs a custom `#[global_allocator]`.
+/// Shared by the pre-run `run` gate and standalone `audit` so the two never
+/// disagree on the class. Phrased to follow a `{binary} ` prefix. The class name
+/// (`custom-global-allocator`) is embedded so sweeps can grep it.
+const CUSTOM_GLOBAL_ALLOCATOR_DIAGNOSTIC: &str = "installs a custom #[global_allocator] (custom-global-allocator): the deterministic runtime's \
+synchronization interposers allocate through the global allocator (the lock table registers each \
+lock lazily on first touch), so a custom allocator whose OWN lazy initialization takes an \
+interposed lock re-enters the half-initialized allocator while the shim holds its non-reentrant \
+runtime lock and DEADLOCKS before main — a silent pre-main hang. tikv-jemallocator hits this \
+exactly (malloc_init_hard -> os_unfair_lock -> shim interposer -> malloc -> malloc_init_hard). \
+Remove the #[global_allocator] and use the default (System) allocator. To run anyway (determinism \
+unqualified, and the guest may hang before main), pass --allow-unsupported-symbols all.";
+
+/// The effective symbol allow set the native gate audits against: the shim's own
+/// control-plane vehicle (auto-allowed on every `cargo patina build` binary —
+/// `dlsym` on both platforms) plus the operator's explicit `--allow` symbols.
+///
+/// Constructed in exactly ONE place and called by BOTH the standalone `audit`
+/// (`execute_native_audit`) and the pre-run `run` gate (`native_prerun_gate`), so
+/// the static surface `audit` reports and the static surface `run` enforces can
+/// never drift: a symbol one tolerates, the other tolerates too. This closes the
+/// reported disparity where `audit` reported `_dlsym (dynamic-loading)` as denied
+/// while `run` silently permitted it as the shim control-plane vehicle.
+fn effective_native_allow(user_allow: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut allow = shim_control_plane_symbols();
+    allow.extend(user_allow.iter().cloned());
+    allow
+}
+
 fn native_prerun_gate(
     binary: &Path,
     allow: &BTreeSet<String>,
@@ -4835,8 +4990,35 @@ fn native_prerun_gate(
             binary.display()
         ))
     })?;
-    let mut effective = shim_control_plane_symbols();
-    effective.extend(allow.iter().cloned());
+    // Refuse a custom `#[global_allocator]` up front (before the symbol audit and
+    // before the process is even spawned): the shim's synchronization interposers
+    // allocate through the global allocator, so a custom allocator whose lazy init
+    // takes an interposed lock deadlocks before `main` — a silent pre-main hang
+    // (tikv-jemallocator does exactly this). `--allow-unsupported-symbols all` is
+    // the blanket "run anyway, determinism unqualified" hatch; anything narrower
+    // keeps the refusal, so the gate stays default-deny for the class.
+    if native_binary_installs_custom_global_allocator(&bytes)
+        .map_err(|error| CliError(format!("refusing to run {}: {error}", binary.display())))?
+    {
+        if matches!(policy, UnsupportedPolicy::All) {
+            eprintln!(
+                "patina: WARNING: {} {}",
+                binary.display(),
+                CUSTOM_GLOBAL_ALLOCATOR_DIAGNOSTIC
+            );
+            eprintln!(
+                "patina: downgraded by --allow-unsupported-symbols all; this run's determinism is \
+NOT guaranteed and it may DEADLOCK before main if the allocator's init takes an interposed lock."
+            );
+        } else {
+            return Err(CliError(format!(
+                "refusing to run {}: {}",
+                binary.display(),
+                CUSTOM_GLOBAL_ALLOCATOR_DIAGNOSTIC
+            )));
+        }
+    }
+    let effective = effective_native_allow(allow);
     let denied = match NativeAudit::audit(&bytes, &effective) {
         Ok(_) => return Ok(Vec::new()),
         Err(TargetError::UnsupportedNativeImports(denied)) => denied,
@@ -4908,6 +5090,23 @@ kernel lacks syscall-user-dispatch (arm64 needs the generic-entry kernels; x86_6
 5.11), so they cannot be trapped here. Rebuild with `--cfg rustix_use_libc` (rustix's libc \
 backend emits interposable imports instead), or run on an x86_64 SUD kernel where the shim traps \
 them.",
+            );
+        }
+        if blocked
+            .iter()
+            .any(|escape| escape.category == "macos-framework")
+        {
+            // CoreFoundation/Security framework calls: name the determinism problem
+            // and the explicit allow path with its qualified-determinism caveat.
+            message.push_str(
+                "\nnote: the macos-framework symbol(s) above are macOS CoreFoundation/Security \
+framework calls that the deterministic runtime does not interpose. The Security-framework subset \
+(SecTrustSettingsCopy*, SecCertificateCopyData, ...) reads the host keychain and system trust \
+store — mutable host state that varies by machine and over time — so a run that reaches them is \
+NOT reproducible (this is the rustls-native-certs / native TLS trust-root surface). Avoid loading \
+native certificates under the deterministic runtime, or pass --allow-unsupported-symbols \
+<all|name,name,...> to run anyway with a warning; determinism is then only qualified — the trust \
+store the guest reads is whatever the host holds at run time.",
             );
         }
         return Err(CliError(message));
@@ -6699,6 +6898,59 @@ mod tests {
         assert_eq!(audit.binary, ArtifactRef::Prebuilt(PathBuf::from("probe")));
         assert!(audit.allow.contains("write"));
         assert!(audit.allow.contains("clock_gettime"));
+    }
+
+    #[test]
+    fn source_first_package_selection_threads_into_the_build_spec() {
+        // `--package`/`--bin` are extracted from the head (before any `--`) and the
+        // rest is passed through; a `--package` in the guest section is untouched.
+        let selection = take_package_bin(strings(&[
+            "--package",
+            "member",
+            "--seed",
+            "1",
+            "--bin",
+            "app",
+            "--",
+            "--package",
+            "guest",
+        ]))
+        .unwrap();
+        assert_eq!(selection.package.as_deref(), Some("member"));
+        assert_eq!(selection.bin.as_deref(), Some("app"));
+        assert_eq!(
+            selection.rest,
+            strings(&["--seed", "1", "--", "--package", "guest"])
+        );
+
+        // Applied to a native package build spec, they select the member/binary.
+        let mut artifact = ArtifactRef::Build(Box::new(native_package_spec(
+            PathBuf::from("ws"),
+            PathBuf::from("ws/Cargo.toml"),
+        )));
+        apply_package_selection(&mut artifact, Some("member".into()), Some("app".into())).unwrap();
+        match &artifact {
+            ArtifactRef::Build(spec) => match &spec.kind {
+                BuildSpecKind::Native(inv) => match &inv.target {
+                    NativeBuildTarget::Package { package, bin, .. } => {
+                        assert_eq!(package.as_deref(), Some("member"));
+                        assert_eq!(bin.as_deref(), Some("app"));
+                    }
+                    _ => panic!("expected a package target"),
+                },
+                _ => panic!("expected a native build"),
+            },
+            _ => panic!("expected a build spec"),
+        }
+
+        // A prebuilt artifact or a single `.rs` source has nothing to select, so a
+        // stray selection fails closed rather than being silently ignored; an empty
+        // selection is a no-op on any artifact.
+        let mut prebuilt = ArtifactRef::Prebuilt(PathBuf::from("bin"));
+        assert!(apply_package_selection(&mut prebuilt, Some("x".into()), None).is_err());
+        assert!(apply_package_selection(&mut prebuilt, None, None).is_ok());
+        let mut source = ArtifactRef::Build(Box::new(native_source_spec(PathBuf::from("main.rs"))));
+        assert!(apply_package_selection(&mut source, None, Some("x".into())).is_err());
     }
 
     #[test]

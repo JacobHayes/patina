@@ -203,6 +203,55 @@ pub fn native_binary_has_sud_marker(bytes: &[u8]) -> Result<bool, TargetError> {
     }))
 }
 
+/// Whether a shim-linked native binary installs a custom `#[global_allocator]`
+/// in place of the default (System) allocator.
+///
+/// Signature: every Rust binary defines the allocator-ABI entry `__rust_alloc`.
+/// With the DEFAULT allocator, rustc additionally emits the `__rdl_alloc` shim
+/// (mangled `___rustc::__rdl_alloc`) that `__rust_alloc` forwards to; installing a
+/// custom `#[global_allocator]` instead points `__rust_alloc` straight at the
+/// user allocator and OMITS `__rdl_alloc`. So a defined `__rust_alloc` with NO
+/// defined `__rdl_alloc` is the marker of a custom global allocator. Matched as a
+/// substring of the (v0-mangled) defined-symbol names so it is independent of the
+/// leading-underscore decoration and the exact mangling prefix.
+///
+/// This is load-bearing for the pre-run gate: the shim's synchronization
+/// interposers allocate through the global allocator (the lock table registers
+/// each lock lazily on first touch), so a custom allocator whose OWN lazy
+/// initialization takes an interposed lock re-enters the half-initialized
+/// allocator while the shim holds its non-reentrant runtime lock and DEADLOCKS
+/// before `main`. tikv-jemallocator hits this exactly: `malloc_init_hard` →
+/// `os_unfair_lock` → the shim's `os_unfair_lock` interposer → BTreeMap allocate →
+/// jemalloc `malloc` → `malloc_init_hard` (a self-deadlock, silent pre-main hang).
+/// The gate refuses the whole class up front rather than let that reach a sweep.
+///
+/// Fails closed on a parse error or unsupported format so a malformed/foreign
+/// input is never silently treated as the default allocator.
+pub fn native_binary_installs_custom_global_allocator(bytes: &[u8]) -> Result<bool, TargetError> {
+    let file = object::File::parse(bytes).map_err(TargetError::NativeParse)?;
+    NativeFormat::from_binary(file.format())?;
+    let mut defines_rust_alloc = false;
+    let mut defines_default_shim = false;
+    for symbol in file.symbols().chain(file.dynamic_symbols()) {
+        if !symbol.is_definition() {
+            continue;
+        }
+        let Ok(name) = symbol.name() else {
+            continue;
+        };
+        // `__rust_alloc` also matches `__rust_alloc_zeroed`/`__rust_alloc_error_handler`
+        // and `__rdl_alloc` also matches `__rdl_alloc_zeroed` — either member of a
+        // family is a sufficient presence signal.
+        if name.contains("__rust_alloc") {
+            defines_rust_alloc = true;
+        }
+        if name.contains("__rdl_alloc") {
+            defines_default_shim = true;
+        }
+    }
+    Ok(defines_rust_alloc && !defines_default_shim)
+}
+
 /// Whether a denied native escape is a `direct-syscall` finding that
 /// syscall-user-dispatch can trap and route — i.e. a raw inline `syscall`/`svc`
 /// *instruction* (`instruction@…`), as opposed to a `cpu-nondeterminism`
@@ -240,10 +289,15 @@ pub fn native_escape_is_sud_manageable(escape: &NativeEscape) -> bool {
 /// all leave the guest import table. Its residue is therefore the single `dlsym`
 /// resolution primitive, matching macOS.
 ///
-/// The pre-run gate in `native-run` bakes this set in (a guest importing
-/// anything else on the blocking/effect surface still fails closed), while
-/// standalone `native-audit` keeps requiring explicit `--allow` so its
-/// default-deny path stays provable.
+/// BOTH the pre-run gate in `native-run` AND standalone `audit` bake this set in
+/// through cargo-patina's single `effective_native_allow` constructor, so the
+/// surface `audit` reports is exactly the surface `run` enforces (a guest
+/// importing anything else on the blocking/effect surface still fails closed).
+/// Auditing the shim's own `dlsym` control-plane vehicle as "denied" while `run`
+/// silently permits it was a reported audit/run disparity; auditing against the
+/// same effective allow set removes it. Default-deny stays provable: this set is
+/// the fixed, near-empty `{dlsym}` control-plane residue, and every real escape
+/// symbol outside it is still denied by both paths.
 pub fn shim_control_plane_symbols() -> BTreeSet<String> {
     #[cfg(target_os = "macos")]
     const SYMBOLS: &[&str] = &[
@@ -1785,7 +1839,7 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
     // Direct kernel entry by name (the libc wrapper). Inlined syscall
     // *instructions* are caught separately by `scan_forbidden_instructions`.
     const SYSCALL: &[&str] = &["syscall", "__syscall", "syscall_chk"];
-    [
+    let classified = [
         (FILESYSTEM, "filesystem"),
         (NETWORK, "network"),
         (WAIT_MULTIPLEX, "wait-multiplex"),
@@ -1801,7 +1855,34 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         (SYSCALL, "direct-syscall"),
     ]
     .into_iter()
-    .find_map(|(symbols, category)| symbols.contains(&symbol).then_some(category))
+    .find_map(|(symbols, category)| symbols.contains(&symbol).then_some(category));
+    // (i) macOS system frameworks: CoreFoundation and Security. These are NOT
+    // interposed. The Security-framework subset (`SecTrustSettingsCopy*`,
+    // `SecCertificateCopyData`, `SecCopyErrorMessageString`) reads the host
+    // keychain / system trust store — mutable host state that varies by machine
+    // and over time — so a run that reaches it is not reproducible; the
+    // CoreFoundation helpers (`CFArray*`/`CFString*`/`CFData*`/`kCF*`) are the
+    // data-structure plumbing those calls require and travel with them.
+    // `rustls-native-certs`, `security-framework`, and any native TLS trust-root
+    // loader pull in this surface. A named class over the bare `unknown-import`
+    // it would otherwise fall to, so the gate can attach a determinism-specific
+    // refusal note. Matched by Apple's reserved framework prefixes as a REFINEMENT
+    // of the unknown fallback (a real classification above always wins), so it can
+    // never relax a decision — these symbols are denied either way.
+    classified.or_else(|| is_macos_framework_symbol(symbol).then_some("macos-framework"))
+}
+
+/// Whether a normalized import name is a macOS CoreFoundation (`CF`/`kCF`) or
+/// Security (`Sec`/`kSec`) framework symbol. These are Apple-reserved framework
+/// prefixes, so the match does not collide with Rust or libc names in practice,
+/// and it stays fail-closed regardless: such symbols are already denied as
+/// `unknown-import`, so classifying them only sharpens the label (and drives the
+/// gate's determinism-warning note), never relaxes the deny.
+fn is_macos_framework_symbol(symbol: &str) -> bool {
+    symbol.starts_with("CF")
+        || symbol.starts_with("kCF")
+        || symbol.starts_with("Sec")
+        || symbol.starts_with("kSec")
 }
 
 impl WasiAudit {
@@ -1953,6 +2034,29 @@ mod tests {
             Some("filesystem")
         );
         assert_eq!(native_escape_category("malloc"), None);
+        // macOS CoreFoundation / Security framework symbols (the rustls-native-certs
+        // surface) classify as `macos-framework` rather than a bare unknown import,
+        // so the gate can attach the host-trust-store determinism note.
+        for symbol in [
+            "_CFArrayCreate",
+            "_CFStringGetLength",
+            "_CFDataGetBytePtr",
+            "_kCFAllocatorDefault",
+            "_kCFTypeArrayCallBacks",
+            "_SecCertificateCopyData",
+            "_SecTrustSettingsCopyCertificates",
+        ] {
+            assert_eq!(
+                native_escape_category(normalize_native_symbol(symbol)),
+                Some("macos-framework"),
+                "{symbol} should classify as macos-framework"
+            );
+        }
+        // The prefix rule is a refinement of the unknown fallback only: a plain
+        // libc/Rust name near those prefixes stays unclassified (deny as
+        // unknown-import), and a real classification always wins.
+        assert_eq!(native_escape_category("close"), Some("filesystem"));
+        assert_eq!(native_escape_category("secure_getenv"), None);
         assert_eq!(
             aarch64_instruction_category(0xd400_0001),
             Some("direct-syscall")
@@ -1994,6 +2098,16 @@ mod tests {
         // A malformed binary must never be treated as SUD-capable: the marker
         // check is a downgrade precondition, so parse failure ⇒ error, not false.
         assert!(native_binary_has_sud_marker(b"not an object file").is_err());
+    }
+
+    #[test]
+    fn custom_global_allocator_detection_fails_closed_on_unparseable_input() {
+        // The custom-global-allocator gate refuses a class that DEADLOCKS pre-main,
+        // so an input it cannot parse must be an error (the caller refuses), never
+        // a silent `false` that would let a foreign/corrupt binary skip the check.
+        // (Positive/negative discrimination on real Mach-O/ELF binaries is covered
+        // end-to-end by cargo-patina's `native_run_and_audit_refuse_a_custom_global_allocator`.)
+        assert!(native_binary_installs_custom_global_allocator(b"not an object file").is_err());
     }
 
     #[test]

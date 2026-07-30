@@ -464,6 +464,322 @@ fn native_build_package_audits_records_and_fails_closed() {
     );
 }
 
+// Source-first `audit` and `run` honor `--package`/`--bin` against a WORKSPACE
+// manifest — the exact form the help advertises (`audit <Cargo.toml> --package X
+// --bin Y`) and the one the bug report showed rejected. A virtual workspace (no
+// root package) forces the selection: without `--package` the build cannot pick a
+// member. `audit` builds the selected member with the shim linked and audits the
+// true residual; `run` builds the same selection and executes it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn audit_and_run_select_workspace_member_with_package_and_bin() {
+    let directory = tempdir().unwrap();
+    let ws = directory.path().join("ws");
+    fs::create_dir_all(ws.join("crates/app/src")).unwrap();
+    fs::write(
+        ws.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/app\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    fs::write(
+        ws.join("crates/app/Cargo.toml"),
+        "[package]\nname = \"patina-ws-app\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[[bin]]\nname = \"patina-ws-app\"\npath = \"src/main.rs\"\n",
+    )
+    .unwrap();
+    fs::write(
+        ws.join("crates/app/src/main.rs"),
+        "fn main() { println!(\"WORKSPACE_MEMBER_OK\"); }\n",
+    )
+    .unwrap();
+    let manifest = ws.join("Cargo.toml");
+    let build_workspace = native_workspace();
+
+    // The bug's exact command: audit a workspace Cargo.toml with --package/--bin.
+    // Previously rejected ("unsupported option \"--package\" for `audit`"); now it
+    // builds the selected member's shim-linked binary and audits it (exit 0).
+    invoke_in(
+        build_workspace,
+        &[
+            "audit",
+            manifest.to_str().unwrap(),
+            "--package",
+            "patina-ws-app",
+            "--bin",
+            "patina-ws-app",
+        ],
+    );
+
+    // `run` honors the identical selection (source-first uniformity) and executes
+    // the chosen member. A bare `Cargo.toml` with no `--target` is the Cargo
+    // package family (where Cargo owns `--package`/`--bin`); `--target native` opts
+    // it into the native build-on-the-fly path this fix wires the selection into.
+    let ran = invoke_in(
+        build_workspace,
+        &[
+            "run",
+            manifest.to_str().unwrap(),
+            "--target",
+            "native",
+            "--package",
+            "patina-ws-app",
+            "--bin",
+            "patina-ws-app",
+            "--seed",
+            "1",
+        ],
+    );
+    assert!(
+        String::from_utf8_lossy(&ran.stdout).contains("WORKSPACE_MEMBER_OK"),
+        "missing member output:\n{}",
+        String::from_utf8_lossy(&ran.stdout)
+    );
+
+    // `--package`/`--bin` do not apply to an already-built artifact: fail closed
+    // with a precise message rather than silently ignoring the selection.
+    let prebuilt = ws.join("prebuilt-bin");
+    invoke_in(
+        build_workspace,
+        &[
+            "build",
+            manifest.to_str().unwrap(),
+            "--package",
+            "patina-ws-app",
+            "--output",
+            prebuilt.to_str().unwrap(),
+        ],
+    );
+    let rejected = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        build_workspace,
+        &["audit", prebuilt.to_str().unwrap(), "--package", "whatever"],
+    );
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("already-built artifact"),
+        "missing prebuilt-selection diagnostic:\n{}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+}
+
+// `audit` reports exactly the static surface `run` enforces. The shim's `dlsym`
+// control-plane vehicle — auto-allowed by the pre-run `run` gate — was reported by
+// standalone `audit` as `_dlsym (dynamic-loading)` denied, the reported
+// audit/run disparity. Both now audit against the shared effective-allow set, so a
+// plain guest that imports `dlsym` is accepted by BOTH with no `--allow`, and
+// `audit` no longer lists a dynamic-loading denial.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn audit_and_run_agree_on_the_shim_control_plane_symbol() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("parity.rs");
+    fs::write(&source, "fn main() { println!(\"PARITY_OK\"); }").unwrap();
+    let bin = directory.path().join("parity-bin");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    // audit with NO --allow now passes and reports no dynamic-loading (dlsym)
+    // denial — before the parity fix this failed closed on the control-plane
+    // vehicle that `run` silently permits.
+    let audited = invoke_in(workspace, &["audit", bin.to_str().unwrap()]);
+    let audit_out = String::from_utf8_lossy(&audited.stdout);
+    assert!(
+        !audit_out.contains("dynamic-loading"),
+        "audit still reports the shim control-plane dlsym as denied:\n{audit_out}"
+    );
+
+    // run with NO --allow succeeds: the same symbol `run` enforces is the same one
+    // `audit` accepted.
+    let ran = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    assert!(
+        String::from_utf8_lossy(&ran.stdout).contains("PARITY_OK"),
+        "run did not execute the guest:\n{}",
+        String::from_utf8_lossy(&ran.stdout)
+    );
+}
+
+// A custom `#[global_allocator]` deadlocks before `main` under the shim
+// (interposer-allocates-through-the-allocator reentrancy; tikv-jemallocator hits
+// it via `malloc_init_hard` -> `os_unfair_lock`). The gate detects the class
+// STATICALLY — a shim-linked binary that defines `__rust_alloc` but omits the
+// default-allocator `__rdl_alloc` shim — and refuses it BEFORE spawning, turning a
+// silent pre-main hang into a named `custom-global-allocator` diagnostic. `audit`
+// reports the same class (parity). The blanket `--allow-unsupported-symbols all`
+// hatch downgrades it to a warning and runs (this System-wrapping allocator does
+// not deadlock, proving the refusal is a policy gate, not a build failure).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_run_and_audit_refuse_a_custom_global_allocator() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("custom-alloc.rs");
+    fs::write(
+        &source,
+        r#"use std::alloc::{GlobalAlloc, Layout, System};
+struct Tracking;
+unsafe impl GlobalAlloc for Tracking {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 { unsafe { System.alloc(layout) } }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) { unsafe { System.dealloc(ptr, layout) } }
+}
+#[global_allocator]
+static GLOBAL: Tracking = Tracking;
+fn main() { let v: Vec<u8> = vec![1, 2, 3]; println!("CUSTOM_ALLOC_OK len={}", v.len()); }
+"#,
+    )
+    .unwrap();
+    let bin = directory.path().join("custom-alloc-bin");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    // Default gate: refused pre-spawn with the named class (no hang).
+    let refused = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["run", bin.to_str().unwrap(), "--seed", "1"],
+    );
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("custom-global-allocator"),
+        "missing custom-global-allocator diagnostic:\n{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    // A NARROW downgrade (a named symbol list) does NOT hatch the allocator class —
+    // exactly the bug-report scenario that used to hang.
+    let narrow = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--allow-unsupported-symbols",
+            "some_symbol",
+            "--seed",
+            "1",
+        ],
+    );
+    assert!(!narrow.status.success());
+    assert!(String::from_utf8_lossy(&narrow.stderr).contains("custom-global-allocator"));
+
+    // audit reports the same class (parity): a binary `run` would refuse must not
+    // look clean under `audit`.
+    let audited = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["audit", bin.to_str().unwrap()],
+    );
+    assert!(!audited.status.success());
+    assert!(String::from_utf8_lossy(&audited.stderr).contains("custom-global-allocator"));
+
+    // Blanket `--allow-unsupported-symbols all`: warns and runs (System wrapper
+    // does not deadlock).
+    let hatched = invoke_in(
+        workspace,
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--allow-unsupported-symbols",
+            "all",
+            "--seed",
+            "1",
+        ],
+    );
+    assert!(
+        String::from_utf8_lossy(&hatched.stdout).contains("CUSTOM_ALLOC_OK len=3"),
+        "hatched run did not execute:\n{}",
+        String::from_utf8_lossy(&hatched.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&hatched.stderr).contains("WARNING"),
+        "hatched run did not warn:\n{}",
+        String::from_utf8_lossy(&hatched.stderr)
+    );
+}
+
+// A guest importing a macOS Security-framework symbol (the rustls-native-certs
+// surface) is classified `macos-framework` and refused with a determinism note
+// that names the host-trust-store problem and the explicit allow path. `audit`
+// reports the same class. macOS-only: the Security framework and its symbols do
+// not exist on Linux (there the import is a bare unknown, still denied).
+#[cfg(target_os = "macos")]
+#[test]
+fn native_gate_classifies_and_refuses_a_security_framework_symbol() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("sec.rs");
+    fs::write(
+        &source,
+        r#"use std::ffi::c_void;
+#[link(name = "Security", kind = "framework")]
+unsafe extern "C" {
+    fn SecTrustSettingsCopyCertificates(domain: i32, out: *mut *const c_void) -> i32;
+}
+fn main() {
+    let mut out: *const c_void = std::ptr::null();
+    let status = unsafe { SecTrustSettingsCopyCertificates(0, &mut out) };
+    println!("SEC status={status}");
+}
+"#,
+    )
+    .unwrap();
+    let bin = directory.path().join("sec-bin");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    let refused = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["run", bin.to_str().unwrap(), "--seed", "1"],
+    );
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("macos-framework"),
+        "missing macos-framework class:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("keychain") || stderr.contains("trust store"),
+        "missing host-trust-store determinism note:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--allow-unsupported-symbols"),
+        "missing explicit allow path:\n{stderr}"
+    );
+
+    let audited = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["audit", bin.to_str().unwrap()],
+    );
+    assert!(!audited.status.success());
+    assert!(
+        String::from_utf8_lossy(&audited.stderr).contains("macos-framework"),
+        "audit did not report the macos-framework class:\n{}",
+        String::from_utf8_lossy(&audited.stderr)
+    );
+}
+
 // `run` and `audit` infer the target family from the artifact's leading magic
 // bytes, and a capability used on the wrong family is refused up front, naming
 // the flag and the target.

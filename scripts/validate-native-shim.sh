@@ -763,8 +763,18 @@ C
   fi
 fi
 
-if "$runner" audit "$tmp/std-probe" >/dev/null 2>"$tmp/audit-error"; then
-  echo 'validate-native-shim: audit unexpectedly allowed control-plane aliases without --allow' >&2
+# Audit/run parity (native audit/run blockers, issue 2a): standalone `audit` now
+# tolerates the shim's own control-plane vehicle (`dlsym`) exactly as the pre-run
+# `run` gate does — both build the effective allow set through the single
+# `effective_native_allow` constructor — so `audit` reports the surface `run`
+# enforces rather than flagging the control-plane `dlsym` that `run` silently
+# permits (the reported disparity). A shim-linked std probe therefore audits CLEAN
+# with NO `--allow`. Default-deny is unweakened: the only auto-tolerated symbol is
+# the fixed control-plane residue (`dlsym`), and every REAL escape symbol is still
+# denied — the non-shim escape/unknown-import probes below prove it.
+if ! "$runner" audit "$tmp/std-probe" >/dev/null 2>"$tmp/audit-error"; then
+  echo 'validate-native-shim: audit/run parity FAILED: a shim-linked std probe was refused by `audit` without --allow, but the pre-run `run` gate would run it — the control-plane dlsym must be tolerated identically by audit and run' >&2
+  cat "$tmp/audit-error" >&2
   exit 1
 fi
 "$cc" -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror "$tmp/escape_probe.c" -o "$tmp/escape-probe"
