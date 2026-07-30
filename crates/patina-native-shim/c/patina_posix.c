@@ -1634,6 +1634,11 @@ extern long patina_sud_dispatch(long nr, unsigned long a0, unsigned long a1,
 _Noreturn void patina_sud_report_fatal(const char *message);
 _Noreturn void patina_sud_report_fatal_addr(const char *message, long nr,
                                             uintptr_t addr);
+/* The arming flag is OWNED by the Rust lib (an exported AtomicU8 in a writable
+ * section); the C arming path stores into it so `sud_armed_metadata` can read it
+ * without the C→Rust link direction that left the lib's own test binary with an
+ * undefined symbol. C is only ever linked where the Rust lib is present. */
+extern unsigned char PATINA_SUD_ARMED;
 
 /* Lazily resolve the REAL glibc sigaction through the wrap alias, so the shim's
  * own SIGSYS-hardening `sigaction` strong def below can forward to it without
@@ -1921,11 +1926,6 @@ static void patina_sud_sigsys(int sig, siginfo_t *info, void *ucontext) {
  * thread at startup and on every managed thread from the Rust trampoline (the
  * config does not survive clone, so each thread arms once). A no-op when SUD was
  * not armed for this run (non-SUD kernel or standalone binary). */
-/* Whether SUD was armed for this run (managed run on a SUD-capable kernel).
- * Read by the Rust config path to record the `sud` trace-metadata field so a
- * cross-kernel replay is refused up front (SUD-DESIGN.md §7.3). */
-int patina_sud_is_armed(void) { return patina_sud_armed; }
-
 void patina_sud_arm_thread(void) {
     if (!patina_sud_armed) return;
     if (patina_host_prctl(PR_SET_SYSCALL_USER_DISPATCH, PR_SYS_DISPATCH_ON,
@@ -1991,6 +1991,9 @@ static void patina_sud_init(int argc, char **argv) {
     }
 
     patina_sud_armed = 1;
+    /* Publish the armed state to the Rust-owned flag (writable section) so the
+     * config path records the `sud` trace-metadata field. */
+    PATINA_SUD_ARMED = 1;
     patina_sud_arm_thread(); /* arm the main thread */
 }
 

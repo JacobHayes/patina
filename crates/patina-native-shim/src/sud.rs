@@ -2286,6 +2286,19 @@ fn sys_getpeername(fd: i64, addr: u64, len_ptr: u64) -> i64 {
     0
 }
 
+/// Whether `optval` points to a zero `struct timeval` (POSIX "no timeout"),
+/// mirroring the C `patina_zero_timeval`. A null/short buffer is not zero.
+fn timeval_is_zero(value: u64, len: u32) -> bool {
+    if value == 0 || (len as usize) < core::mem::size_of::<[i64; 2]>() {
+        return false;
+    }
+    // SAFETY: `value` points to a `struct timeval { tv_sec: i64, tv_usec: i64 }`.
+    unsafe {
+        let p = value as *const i64;
+        p.read() == 0 && p.add(1).read() == 0
+    }
+}
+
 fn sys_setsockopt(fd: i64, level: u64, optname: u64, value: u64, len: u32) -> i64 {
     if fd < PATINA_SOCKET_FD_BASE {
         return -ENOTSOCK;
@@ -2315,19 +2328,9 @@ fn sys_setsockopt(fd: i64, level: u64, optname: u64, value: u64, len: u32) -> i6
                     return ret_i32(unsafe { patina_net_set_read_timeout(fd as c_int, nanos) });
                 }
             }
-            SO_SNDTIMEO => {
-                // Only the no-op zero timeval is accepted (sends never block).
-                if value != 0 && (len as usize) >= 16 {
-                    // SAFETY: `value` points to a `struct timeval`.
-                    let (sec, usec) = unsafe {
-                        let p = value as *const i64;
-                        (p.read(), p.add(1).read())
-                    };
-                    if sec == 0 && usec == 0 {
-                        return 0;
-                    }
-                }
-            }
+            // Only the no-op zero timeval is accepted (sends never block); a
+            // non-zero send timeout falls through to ENOPROTOOPT below.
+            SO_SNDTIMEO if timeval_is_zero(value, len) => return 0,
             _ => {}
         }
     }

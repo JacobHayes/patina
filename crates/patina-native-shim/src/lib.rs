@@ -1197,17 +1197,24 @@ fn runtime_config_from_control_plane() -> Result<(RuntimeConfig, Option<i32>), R
     Ok((config, trace_fd))
 }
 
+/// The syscall-user-dispatch arming flag, OWNED by Rust and exported so the C
+/// arming path (`patina_sud_init`) writes it (`PATINA_SUD_ARMED = 1`) when it
+/// arms SUD. The dependency points C→Rust deliberately: C is only ever linked
+/// where this Rust lib is present, but the Rust lib's own test binary links NO C
+/// objects — so a Rust→C reference (the previous `patina_sud_is_armed()`) left
+/// the lib-test binary with an undefined symbol. As an `AtomicU8` it lives in a
+/// writable section (unlike a plain `static`, which C could not store into).
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+pub static PATINA_SUD_ARMED: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
 /// Whether SUD was armed for this run, shaped for [`RunMetadata::sud`]:
 /// `Some(true)` iff the C layer armed syscall-user-dispatch, else `None`
 /// (macOS, a non-SUD kernel, a standalone binary). Never records `Some(false)`,
 /// so old and non-SUD traces stay byte-identical.
 #[cfg(target_os = "linux")]
 fn sud_armed_metadata() -> Option<bool> {
-    unsafe extern "C" {
-        fn patina_sud_is_armed() -> c_int;
-    }
-    // SAFETY: a plain read of the C arming flag.
-    if unsafe { patina_sud_is_armed() } != 0 {
+    if PATINA_SUD_ARMED.load(core::sync::atomic::Ordering::Relaxed) != 0 {
         Some(true)
     } else {
         None
