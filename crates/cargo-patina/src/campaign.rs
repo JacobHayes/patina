@@ -189,22 +189,27 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
         });
     }
 
-    if arguments.is_empty() || arguments[0] == "--" {
+    // Options may lead the artifact (`campaign --gens 5 art.wasm`), so locate it
+    // registry-arity-aware rather than insisting it be the first token. A
+    // flag-looking token is never taken as the artifact: an unknown flag with a
+    // real artifact stranded behind it is a loud routing error, and an unknown
+    // flag with no artifact is the plain unsupported-option error (campaign has no
+    // Cargo package family to forward to).
+    let scan = crate::locate_positionals("campaign", &arguments, 1);
+    let Some(artifact) = scan.positionals.into_iter().next() else {
+        if let Some(stop) = scan.stop {
+            crate::reject_stranded_artifact("campaign", &arguments[stop..])?;
+            return Err(CliError::usage(format!(
+                "unsupported option {:?} for `campaign`; campaign requires an artifact path (a .wasm module or native binary), or --selftest",
+                arguments[stop].to_string_lossy()
+            )));
+        }
         return Err(CliError::usage(
             "campaign requires an artifact path (a .wasm module or native binary), or --selftest",
         ));
-    }
-    // The artifact always leads. A first token that looks like a flag is never an
-    // artifact path, so reject it loudly (fail-closed) rather than treating it as
-    // an artifact and failing later with a confusing "failed to read artifact".
-    if let Some(first) = arguments[0].to_str() {
-        if first.starts_with('-') {
-            return Err(CliError::usage(format!(
-                "unsupported option {first:?} for `campaign` (the artifact path must lead)"
-            )));
-        }
-    }
-    let artifact = PathBuf::from(arguments.remove(0));
+    };
+    let artifact = PathBuf::from(artifact);
+    let arguments = scan.rest;
     let mut spec = CampaignSpec::default();
     let mut out_dir: Option<PathBuf> = None;
 
@@ -1461,6 +1466,39 @@ mod tests {
         // usage error, not a later "failed to read artifact --nonsense".
         assert!(parse(args(&["--nonsense"])).is_err());
         assert!(parse(args(&["--gens", "3"])).is_err());
+    }
+
+    #[test]
+    fn campaign_locates_the_artifact_around_options() {
+        let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+        // Options may lead the artifact, in any form/order, matching the leading
+        // spelling exactly.
+        let base = parse(args(&["art.wasm", "--gens", "5", "--seed-start", "2"])).unwrap();
+        for spelling in [
+            &["--gens", "5", "--seed-start", "2", "art.wasm"][..],
+            &["--gens=5", "art.wasm", "--seed-start=2"][..],
+        ] {
+            let got = parse(args(spelling)).unwrap();
+            assert_eq!(got.artifact, base.artifact);
+            assert_eq!(got.spec, base.spec);
+            assert_eq!(got.out_dir, base.out_dir);
+        }
+        // A leading UNKNOWN flag with no artifact is the unsupported-option error
+        // naming the flag (campaign has no Cargo family to forward to).
+        let error = |values: &[&str]| match parse(args(values)) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("expected a usage error for {values:?}"),
+        };
+        assert!(error(&["--frob"]).contains("--frob"));
+        // A real compiled artifact stranded behind an unknown flag is a loud
+        // routing error naming both, never a confusing later "failed to read".
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("app.wasm");
+        std::fs::write(&module, b"\0asm\x01\0\0\0").unwrap();
+        let m = module.to_str().unwrap();
+        let message = error(&["--frob", m]);
+        assert!(message.contains("--frob"), "{message}");
+        assert!(message.contains(m), "{message}");
     }
 
     #[test]

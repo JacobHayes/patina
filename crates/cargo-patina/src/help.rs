@@ -1187,6 +1187,26 @@ pub fn verb(name: &str) -> Option<&'static Verb> {
     VERBS.iter().copied().find(|verb| verb.name == name)
 }
 
+/// The registered value-arity of a flag (matched by its long OR short name)
+/// under `verb`, consulting the verb's own flag groups plus the always-available
+/// global output and help flags. `None` means the flag is not registered for
+/// this verb — an unknown passthrough token. This is the SINGLE arity source the
+/// positional scanner in `lib.rs` consults so it never builds a second flag
+/// table; the same lookup surface (`groups` + `GLOBAL_OUTPUT` + `HELP_FLAGS`) is
+/// what `registry_covers_every_parsed_flag` asserts every parsed flag lives in,
+/// so a parsed-but-unregistered flag is caught there rather than silently read as
+/// an unknown-flag stop.
+pub fn flag_arity(verb_name: &str, name: &str) -> Option<Value> {
+    verb(verb_name)
+        .into_iter()
+        .flat_map(|verb| verb.groups.iter())
+        .flat_map(|group| group.flags.iter())
+        .chain(GLOBAL_OUTPUT.iter())
+        .chain(HELP_FLAGS.iter())
+        .find(|flag| flag.name == name || flag.short == Some(name))
+        .map(|flag| flag.value)
+}
+
 /// The canonical `Topic` for a routed verb token. `explore run`/`explore test`
 /// all map to the `explore` overview; `test` has its own section.
 pub fn topic_for(verb_token: &str) -> Topic {
@@ -1339,7 +1359,14 @@ built artifact is recognized by its leading magic bytes (\\0asm for a WASI modul
 for a native binary) and used as-is; a <SOURCE.rs|DIR|Cargo.toml> is built on the fly through \
 the same pipeline as `build` (honoring --target, default native). A directory, a Cargo.toml, \
 or no artifact with no --target stays the Cargo package family. A positional that names a file \
-path (.wasm/.rs/Cargo.toml, or with a separator) but does not exist is a hard error.",
+path (.wasm/.rs/Cargo.toml, or with a separator) but does not exist is a hard error.\n\
+\n\
+Options and the artifact may appear in any order, like `cargo build`/`cargo run` — \
+`run --seed 5 app.wasm` and `run app.wasm --seed 5` are identical. Only known options are \
+skipped when scanning for the artifact; an UNKNOWN option (a forwarded cargo flag) stops the \
+scan, since its value could otherwise be misread as the artifact. Past that stop an unknown \
+option is only forwarded silently in the Cargo package family — if a real artifact stands \
+behind it the routing is a hard error, never a surprising Cargo fallthrough.",
     );
 
     out.push_str("\nENVIRONMENT:\n");

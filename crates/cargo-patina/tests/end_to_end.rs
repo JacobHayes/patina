@@ -120,6 +120,63 @@ fn wasi_run_preopen_policy_controls_write_access() {
     assert_eq!(ro.status.code(), Some(69));
 }
 
+// Options and the artifact may appear in any order (the `cargo run` ergonomic):
+// a registered flag before the module runs identically to the module-leading
+// spelling; a real artifact stranded behind an UNKNOWN flag is a loud routing
+// error; and a nonexistent artifact reached after a registered flag fails closed.
+#[test]
+fn run_accepts_options_before_the_wasi_artifact() {
+    let directory = tempdir().unwrap();
+    let module = directory.path().join("noop.wasm");
+    fs::write(
+        &module,
+        wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#)
+            .unwrap(),
+    )
+    .unwrap();
+    let patina = env!("CARGO_BIN_EXE_cargo-patina");
+    let module = module.to_str().unwrap();
+
+    // Artifact leads.
+    let leading = invoke_unchecked(patina, directory.path(), &["run", module, "--seed", "7"]);
+    assert!(
+        leading.status.success(),
+        "module-leading run failed: {}",
+        String::from_utf8_lossy(&leading.stderr)
+    );
+    // A registered flag leads the artifact: identical success.
+    let flag_first = invoke_unchecked(patina, directory.path(), &["run", "--seed", "7", module]);
+    assert!(
+        flag_first.status.success(),
+        "flag-leading run failed: {}",
+        String::from_utf8_lossy(&flag_first.stderr)
+    );
+
+    // A real artifact stranded behind an unknown flag is a loud routing error
+    // naming the flag — never a silent Cargo fallthrough.
+    let stranded = invoke_unchecked(patina, directory.path(), &["run", "--frob", module]);
+    assert!(!stranded.status.success());
+    assert!(
+        String::from_utf8_lossy(&stranded.stderr).contains("--frob"),
+        "stranded-artifact error should name the unknown flag: {}",
+        String::from_utf8_lossy(&stranded.stderr)
+    );
+
+    // A path-like artifact that does not exist, reached after a registered flag,
+    // fails closed rather than falling through to a confusing `cargo run`.
+    let missing = invoke_unchecked(
+        patina,
+        directory.path(),
+        &["run", "--seed", "1", "does-not-exist.wasm"],
+    );
+    assert!(!missing.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no such file"),
+        "nonexistent artifact should fail closed: {}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+}
+
 // A WASI record→`replay` round-trip: the `replay` verb restores the recorded
 // guest argv (the `--arg` values) and fault configuration from the trace, so a
 // replay is flag-free and byte-identical. A re-supplied `--arg` must match the

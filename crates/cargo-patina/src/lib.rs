@@ -1145,6 +1145,189 @@ fn package_integrates_patina(manifest: Option<&Path>, cwd: Option<&Path>) -> boo
         })
 }
 
+/// The result of scanning a verb's leading region for its positional
+/// argument(s) with [`locate_positionals`].
+pub(crate) struct PositionalScan {
+    /// The located positionals, in encounter order (at most `wanted`).
+    pub(crate) positionals: Vec<OsString>,
+    /// Every other token, order preserved, with the located positionals removed —
+    /// handed to the family parser exactly as the whole tail was handed before.
+    pub(crate) rest: Vec<OsString>,
+    /// The index (into the scanned slice) of the first UNREGISTERED flag that
+    /// halted the scan before `wanted` positionals were found, or `None` when the
+    /// scan located everything or reached `--`/end seeing only registered flags.
+    pub(crate) stop: Option<usize>,
+}
+
+/// Locate up to `wanted` leading positional argument(s) for `verb`, consulting
+/// the registry ([`help::flag_arity`]) for flag arity so options may appear in
+/// any order around the positional — the `cargo build`/`cargo run` ergonomic.
+///
+/// The scan walks the pre-`--` region left-to-right: a flag REGISTERED for
+/// `verb` is skipped, and its value token too when the registry says the value
+/// is `Required` and no inline `=` is present; the first UNREGISTERED
+/// flag-looking token stops the scan conservatively — beyond it a token may be
+/// the value of an unknown passthrough flag (a forwarded cargo flag like
+/// `--manifest-path ./x/Cargo.toml`), and misreading a value as the artifact
+/// would corrupt routing. Non-flag tokens are the positionals, collected in
+/// order until `wanted` are found. The registry stays authoritative: arity comes
+/// only from it, never a second table.
+pub(crate) fn locate_positionals(
+    verb: &str,
+    arguments: &[OsString],
+    wanted: usize,
+) -> PositionalScan {
+    let mut positionals = Vec::new();
+    let mut taken = Vec::new();
+    let mut stop = None;
+    let mut index = 0;
+    while index < arguments.len() && positionals.len() < wanted {
+        let argument = &arguments[index];
+        if argument == "--" {
+            break;
+        }
+        if let Some(text) = argument.to_str() {
+            if text.starts_with('-') {
+                let opt = split_opt(text);
+                match help::flag_arity(verb, opt.name) {
+                    Some(help::Value::Required(_)) if opt.inline.is_none() => {
+                        // A registered value-taking flag consumes the next token.
+                        index += 2;
+                        continue;
+                    }
+                    Some(_) => {
+                        // A registered valueless/optional flag, or one with an
+                        // inline `=VALUE`: it consumes no separate token.
+                        index += 1;
+                        continue;
+                    }
+                    None => {
+                        // Unknown flag: stop conservatively.
+                        stop = Some(index);
+                        break;
+                    }
+                }
+            }
+        }
+        // A non-flag (or non-UTF-8) token is a positional.
+        positionals.push(argument.clone());
+        taken.push(index);
+        index += 1;
+    }
+    let rest = arguments
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !taken.contains(index))
+        .map(|(_, argument)| argument.clone())
+        .collect();
+    PositionalScan {
+        positionals,
+        rest,
+        stop,
+    }
+}
+
+/// Whether `raw` is an existing file whose magic bytes identify it as a compiled
+/// artifact (a `.wasm` module or a native binary). Such a file is NEVER the value
+/// of a cargo flag, so an unknown flag standing in front of it is a misuse, not a
+/// forwarded flag with a value.
+fn existing_compiled_artifact(raw: &OsStr) -> bool {
+    let path = Path::new(raw);
+    path.is_file() && matches!(artifact_family(path), Ok(Some(_)))
+}
+
+/// Whether `raw` names an existing artifact or source/package (a compiled
+/// binary, a `.rs` source, a `Cargo.toml`, or a directory) — anything the
+/// positional resolver would route to a real family.
+fn existing_artifact_or_source(raw: &OsStr) -> bool {
+    matches!(
+        classify_arg(raw),
+        Ok(ArgKind::Artifact(_) | ArgKind::SourceFile(_) | ArgKind::SourcePackage(_))
+    )
+}
+
+/// Whether `raw` is a path-like token (`.wasm`/`.rs`/`Cargo.toml`, or with a
+/// separator) that does not exist — the same shape [`classify_arg`] fails closed
+/// on. Behind an unknown flag it is a clearly-named artifact path the user
+/// misplaced, not a plausible bare cargo argument.
+fn stranded_path_like(raw: &OsStr) -> bool {
+    !Path::new(raw).exists()
+        && looks_like_path(raw)
+        && !raw.to_str().is_some_and(|text| text.starts_with('-'))
+}
+
+/// The loud routing error raised when a genuine artifact is stranded behind an
+/// unknown flag.
+fn stranded_artifact_error(verb: &str, unknown_flag: &OsStr, artifact: &OsStr) -> CliError {
+    CliError::usage(format!(
+        "unknown option {:?} ahead of artifact {:?}; options and the artifact may appear in any \
+order, but an unknown option is only forwarded in the Cargo package family — check the flag name \
+(run `cargo patina {verb} --help`)",
+        unknown_flag.to_string_lossy(),
+        artifact.to_string_lossy(),
+    ))
+}
+
+/// After [`locate_positionals`] halted on an unregistered flag without locating
+/// the artifact, decide the honest outcome — never a silent surprise. `tail`
+/// begins at that unknown flag. A genuine artifact/path stranded behind it is a
+/// loud routing error (an unknown option only ever forwards in the Cargo family,
+/// and every artifact family rejects an unknown flag anyway, so a real artifact
+/// after it can only be a misuse); otherwise `Ok(())` lets the caller forward the
+/// list to its no-artifact family. The token immediately after an unknown flag is
+/// that flag's presumed value (`--manifest-path ./x/Cargo.toml`) and is exempt
+/// UNLESS it is a compiled artifact, which is never a flag value.
+pub(crate) fn reject_stranded_artifact(verb: &str, tail: &[OsString]) -> Result<(), CliError> {
+    let unknown = tail.first().cloned().unwrap_or_default();
+    let mut index = 0;
+    let mut after_unknown_flag = false;
+    while index < tail.len() {
+        let argument = &tail[index];
+        if argument == "--" {
+            break;
+        }
+        if let Some(text) = argument.to_str() {
+            if text.starts_with('-') {
+                let opt = split_opt(text);
+                match help::flag_arity(verb, opt.name) {
+                    Some(help::Value::Required(_)) if opt.inline.is_none() => {
+                        index += 2;
+                        after_unknown_flag = false;
+                        continue;
+                    }
+                    Some(_) => {
+                        index += 1;
+                        after_unknown_flag = false;
+                        continue;
+                    }
+                    None => {
+                        after_unknown_flag = true;
+                        index += 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        if after_unknown_flag {
+            // The presumed value of the preceding unknown flag: exempt unless it
+            // is a compiled artifact (never a flag value).
+            if existing_compiled_artifact(argument) {
+                return Err(stranded_artifact_error(verb, &unknown, argument));
+            }
+            after_unknown_flag = false;
+            index += 1;
+            continue;
+        }
+        // A "free" token beyond any flag's value: an existing artifact/source or a
+        // path-like nonexistent token here is a misplaced artifact.
+        if existing_artifact_or_source(argument) || stranded_path_like(argument) {
+            return Err(stranded_artifact_error(verb, &unknown, argument));
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
 /// Route `run`: source-first with artifacts accepted uniformly. A built
 /// artifact runs as-is (family from magic); a `.rs`/dir/`Cargo.toml` with
 /// `--target` (or a lone `.rs`) builds on the fly then runs; a dir/`Cargo.toml`
@@ -1152,7 +1335,17 @@ fn package_integrates_patina(manifest: Option<&Path>, cwd: Option<&Path>) -> boo
 /// family — the same machinery as `test`.
 fn parse_run(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     let (target, rest) = extract_target(arguments)?;
-    let Some(first) = rest.first() else {
+    // Options may lead the artifact: locate it registry-arity-aware rather than
+    // insisting it be the first token.
+    let scan = locate_positionals("run", &rest, 1);
+    let Some(first) = scan.positionals.first().cloned() else {
+        // No artifact located. If the scan stopped at an unknown flag, refuse
+        // loudly when a real artifact is stranded behind it; otherwise the
+        // unknown flag is a genuine forwarded cargo flag (`run --manifest-path X`)
+        // and the whole list stays the Cargo package family.
+        if let Some(stop) = scan.stop {
+            reject_stranded_artifact("run", &rest[stop..])?;
+        }
         if target.is_some() {
             return Err(CliError::usage(
                 "--target requires a source or package to build; `run` with no artifact is the Cargo package family",
@@ -1168,29 +1361,29 @@ fn parse_run(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     // (and exactly like a prebuilt binary). Either way an existing directory
     // resolves as a source and is NEVER passed through as guest argv.
     if target.is_none() {
-        if let ArgKind::SourcePackage(manifest) = classify_arg(first)? {
+        if let ArgKind::SourcePackage(manifest) = classify_arg(&first)? {
             if package_integrates_patina(Some(&manifest), None) {
                 return parse_cargo("run".to_string(), rest);
             }
         }
     }
-    match resolve_positional(first, target.as_deref())? {
+    match resolve_positional(&first, target.as_deref())? {
         Some((ArtifactFamily::Wasm, mut module)) => {
             // `--harness` is native-only (usage mode 2 of the shim-backed harness).
             // Under WASI the supervisor owns run configuration, so reject the
             // combination loudly rather than silently ignore the flag.
-            if rest[1..].iter().any(|argument| argument == "--harness") {
+            if scan.rest.iter().any(|argument| argument == "--harness") {
                 return Err(CliError::usage(
                     "--harness is native-only; a WASI run configures the runtime through the \
                      supervisor, not a patina-dst-harness binary",
                 ));
             }
-            let selection = take_package_bin(rest[1..].to_vec())?;
+            let selection = take_package_bin(scan.rest)?;
             apply_package_selection(&mut module, selection.package, selection.bin)?;
             parse_wasi_run_from(module, selection.rest).map(ParseResult::WasiRun)
         }
         Some((ArtifactFamily::Native, mut binary)) => {
-            let selection = take_package_bin(rest[1..].to_vec())?;
+            let selection = take_package_bin(scan.rest)?;
             apply_package_selection(&mut binary, selection.package, selection.bin)?;
             parse_native_run_from(binary, selection.rest).map(ParseResult::NativeRun)
         }
@@ -1206,21 +1399,33 @@ fn parse_run(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
 /// `--target` builds native (audit has no Cargo package family).
 fn parse_audit(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     let (target, rest) = extract_target(arguments)?;
-    let Some(first) = rest.first() else {
+    // Options may lead the artifact.
+    let scan = locate_positionals("audit", &rest, 1);
+    let Some(first) = scan.positionals.first().cloned() else {
+        // `audit` has no Cargo package family, so a missing artifact is always an
+        // error — but name the offending unknown flag (and refuse loudly if a real
+        // artifact is stranded behind it) rather than a bare "requires an artifact".
+        if let Some(stop) = scan.stop {
+            reject_stranded_artifact("audit", &rest[stop..])?;
+            return Err(CliError::usage(format!(
+                "unsupported option {:?} for `audit`; audit requires an artifact or source path",
+                rest[stop].to_string_lossy()
+            )));
+        }
         return Err(CliError::usage("audit requires an artifact or source path"));
     };
-    let (family, mut artifact) = resolve_positional(first, target.as_deref())?
+    let (family, mut artifact) = resolve_positional(&first, target.as_deref())?
         .ok_or_else(|| {
             CliError::usage(format!(
                 "audit target {} is neither a WebAssembly module, a native binary, nor a source/package to build",
-                Path::new(first).display()
+                Path::new(&first).display()
             ))
         })?;
     // Source-first `--package`/`--bin` select the workspace member/binary to build
     // before the audit — the help advertises the form, so it must not be rejected.
     // Consumed here, uniformly for both families, so the family parser sees only
     // its own flags.
-    let selection = take_package_bin(rest[1..].to_vec())?;
+    let selection = take_package_bin(scan.rest)?;
     apply_package_selection(&mut artifact, selection.package, selection.bin)?;
     let flags = selection.rest;
     match family {
@@ -1260,19 +1465,11 @@ fn parse_build(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
 /// Parse `build --target wasi <DIR|Cargo.toml> [--package NAME] [--bin NAME]
 /// [--release] [--output PATH]`. WASI is package-only: a single `.rs` source is
 /// native-only, and `--yield-points` is meaningless without threads.
-fn parse_wasi_build(mut arguments: Vec<OsString>) -> Result<WasiBuildInvocation, CliError> {
-    if arguments.is_empty() {
-        return Err(CliError::usage(
-            "build --target wasi requires a Cargo package (a directory or Cargo.toml)",
-        ));
-    }
-    let package_path = PathBuf::from(arguments.remove(0));
-    if package_path.extension().and_then(OsStr::to_str) == Some("rs") {
-        return Err(CliError::usage(
-            "build --target wasi compiles a Cargo package; a single .rs source is native-only",
-        ));
-    }
-    let manifest = native_manifest_path(&package_path);
+fn parse_wasi_build(arguments: Vec<OsString>) -> Result<WasiBuildInvocation, CliError> {
+    // The package path may follow options; locate it registry-arity-aware.
+    let scan = locate_positionals("build", &arguments, 1);
+    let package_path = scan.positionals.into_iter().next().map(PathBuf::from);
+    let arguments = scan.rest;
     let mut package = None;
     let mut bin = None;
     let mut release = false;
@@ -1314,6 +1511,17 @@ fn parse_wasi_build(mut arguments: Vec<OsString>) -> Result<WasiBuildInvocation,
         }
         index += 1;
     }
+    // Require the package path after the flag scan so an unknown flag is named
+    // first (never taken as the path).
+    let package_path = package_path.ok_or_else(|| {
+        CliError::usage("build --target wasi requires a Cargo package (a directory or Cargo.toml)")
+    })?;
+    if package_path.extension().and_then(OsStr::to_str) == Some("rs") {
+        return Err(CliError::usage(
+            "build --target wasi compiles a Cargo package; a single .rs source is native-only",
+        ));
+    }
+    let manifest = native_manifest_path(&package_path);
     Ok(WasiBuildInvocation {
         manifest,
         package,
@@ -2081,12 +2289,14 @@ fn split_trailing_args(arguments: &mut Vec<OsString>) -> Vec<OsString> {
 
 fn parse_native_build(mut arguments: Vec<OsString>) -> Result<NativeBuildInvocation, CliError> {
     let rustc_args = split_trailing_args(&mut arguments);
-    if arguments.is_empty() {
-        return Err(CliError::usage(
-            "build requires a Rust source path or a Cargo package",
-        ));
-    }
-    let path = PathBuf::from(arguments.remove(0));
+    // The source/package path may follow options (`build --release ./pkg`), so
+    // locate it registry-arity-aware instead of forcing it to lead. A flag-looking
+    // token is never taken as the path — the remaining flags (including an unknown
+    // one, or a `--release=x` with a stray value) are validated below and produce
+    // a usage error naming the flag, not a bogus `--release=x/Cargo.toml`.
+    let scan = locate_positionals("build", &arguments, 1);
+    let path = scan.positionals.into_iter().next().map(PathBuf::from);
+    let arguments = scan.rest;
     let mut output = None;
     let mut edition = None;
     let mut release = false;
@@ -2133,6 +2343,12 @@ fn parse_native_build(mut arguments: Vec<OsString>) -> Result<NativeBuildInvocat
         }
         index += 1;
     }
+
+    // The path requirement is checked after the flag scan so an unknown flag or a
+    // `--release=x` stray value is named first (a usage error about the flag,
+    // never a bogus manifest path derived from a flag token).
+    let path = path
+        .ok_or_else(|| CliError::usage("build requires a Rust source path or a Cargo package"))?;
 
     if is_native_package_path(&path) {
         if let Some(rustc_arg) = rustc_args.first() {
@@ -2704,18 +2920,25 @@ fn parse_replay(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     // source/package built on the fly (honoring `--target`). A rebuilt binary is
     // judged against the trace by the fail-closed machinery (fingerprint +
     // operation-mismatch), so no special-casing.
-    let (target, mut rest) = extract_target(arguments)?;
-    if rest.is_empty() || rest[0] == "--" {
-        return Err(CliError::usage(
-            "replay requires an artifact/source/package path and a trace path",
-        ));
+    let (target, rest) = extract_target(arguments)?;
+    // The two positionals (artifact/source/package, then trace) may be interleaved
+    // with options in any order, e.g. `replay --fingerprint f art.wasm trace`.
+    // Their relative order is preserved: the first is the origin, the second the
+    // trace.
+    let scan = locate_positionals("replay", &rest, 2);
+    if scan.positionals.len() < 2 {
+        if let Some(stop) = scan.stop {
+            reject_stranded_artifact("replay", &rest[stop..])?;
+        }
+        return Err(CliError::usage(if scan.positionals.is_empty() {
+            "replay requires an artifact/source/package path and a trace path"
+        } else {
+            "replay requires a trace path"
+        }));
     }
-    let origin = rest.remove(0);
-    if rest.is_empty() || rest[0] == "--" {
-        return Err(CliError::usage("replay requires a trace path"));
-    }
-    let trace = PathBuf::from(rest.remove(0));
-    let flags = rest;
+    let origin = scan.positionals[0].clone();
+    let trace = PathBuf::from(&scan.positionals[1]);
+    let flags = scan.rest;
     // A package that integrates the Patina runtime replays through the cargo
     // family (the linked runtime restores seed/faults/timeline and honors
     // `--branch`/`--timeline`); a plain package rebuilds shim-linked and replays
@@ -2938,13 +3161,14 @@ fn parse_minimize(mut arguments: Vec<OsString>) -> Result<MinimizeInvocation, Cl
 }
 
 fn parse_minimize_trace(
-    mut arguments: Vec<OsString>,
+    arguments: Vec<OsString>,
     oracle: Vec<OsString>,
 ) -> Result<TraceMinimize, CliError> {
-    if arguments.is_empty() {
-        return Err(CliError::usage("minimize requires a trace path"));
-    }
-    let trace = PathBuf::from(arguments.remove(0));
+    // The trace path may follow options (`minimize --output out.patina trace`),
+    // so locate it registry-arity-aware rather than forcing it to lead.
+    let scan = locate_positionals("minimize", &arguments, 1);
+    let trace = scan.positionals.into_iter().next().map(PathBuf::from);
+    let arguments = scan.rest;
     let mut output = None;
     let mut timeline = None;
     let mut prune = false;
@@ -2981,6 +3205,7 @@ fn parse_minimize_trace(
             "--prune-branches operates on the whole branch forest and cannot be combined with --timeline",
         ));
     }
+    let trace = trace.ok_or_else(|| CliError::usage("minimize requires a trace path"))?;
     let output = output.ok_or_else(|| CliError::usage("minimize requires --output <PATH>"))?;
     Ok(TraceMinimize {
         trace,
@@ -8012,5 +8237,276 @@ mod tests {
             parse(strings(&["run", "mycrate", "--", "--version"])),
             Ok(ParseResult::Version)
         ));
+    }
+
+    // ---- Options may precede the artifact (cargo-run/cargo-build ergonomics) ----
+
+    /// A real WASI module on disk (recognized by its `\0asm` magic at routing).
+    fn wasm_fixture(dir: &tempfile::TempDir, name: &str) -> PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, b"\0asm\x01\0\0\0").unwrap();
+        path
+    }
+
+    /// A real native binary on disk (recognized by its ELF magic at routing).
+    fn native_fixture(dir: &tempfile::TempDir, name: &str) -> PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, [0x7f, b'E', b'L', b'F', 2, 1, 1, 0]).unwrap();
+        path
+    }
+
+    fn native_seed(mode: &NativeRunMode) -> Option<u64> {
+        match mode {
+            NativeRunMode::Seeded { seed } | NativeRunMode::Record { seed, .. } => Some(*seed),
+            NativeRunMode::Replay { .. } => None,
+        }
+    }
+
+    /// The message of a top-level `parse` that must fail (`ParseResult` is not
+    /// `Debug`, so `unwrap_err` cannot be used directly).
+    fn parse_error(values: &[&str]) -> String {
+        match parse(strings(values)) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("expected a usage error for {values:?}"),
+        }
+    }
+
+    #[test]
+    fn run_locates_a_wasi_artifact_around_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = wasm_fixture(&dir, "m.wasm");
+        let m = module.to_str().unwrap();
+        let wasi = |values: &[&str]| match parse(strings(values)).unwrap() {
+            ParseResult::WasiRun(inv) => inv,
+            _ => panic!("expected a WASI run"),
+        };
+        // Baseline: the artifact leads.
+        let base = wasi(&["run", m, "--seed", "5", "--fuel", "128"]);
+        // Every ordering with the same registered flags parses identically.
+        assert_eq!(base, wasi(&["run", "--seed", "5", "--fuel", "128", m])); // both after
+        assert_eq!(base, wasi(&["run", "--seed=5", "--fuel=128", m])); // equals form
+        assert_eq!(base, wasi(&["run", "--seed", "5", m, "--fuel", "128"])); // interleaved
+        // After a valueless registered switch the module + mode + fuel are unchanged
+        // (only the buggify field differs).
+        let switched = wasi(&[
+            "run",
+            "--buggify-after-setup",
+            "--fuel",
+            "128",
+            "--seed",
+            "5",
+            m,
+        ]);
+        assert_eq!(switched.module, base.module);
+        assert_eq!(switched.mode, base.mode);
+        assert_eq!(switched.fuel, base.fuel);
+    }
+
+    #[test]
+    fn run_locates_a_native_artifact_around_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = native_fixture(&dir, "app");
+        let b = binary.to_str().unwrap();
+        let native = |values: &[&str]| match parse(strings(values)).unwrap() {
+            ParseResult::NativeRun(inv) => inv,
+            _ => panic!("expected a native run"),
+        };
+        let base = native(&["run", b, "--seed", "5", "--fingerprint", "fp"]);
+        for spelling in [
+            &["run", "--seed", "5", "--fingerprint", "fp", b][..],
+            &["run", "--seed=5", "--fingerprint=fp", b][..],
+            &["run", "--fingerprint", "fp", b, "--seed", "5"][..],
+        ] {
+            let got = native(spelling);
+            assert_eq!(got.binary, base.binary);
+            assert_eq!(native_seed(&got.mode), native_seed(&base.mode));
+        }
+        // Interleaved artifact between semantic flags, record mode.
+        match native(&["run", "--seed", "5", b, "--record", "t.patina"]).mode {
+            NativeRunMode::Record { seed, path, .. } => {
+                assert_eq!(seed, 5);
+                assert_eq!(path, PathBuf::from("t.patina"));
+            }
+            _ => panic!("expected record mode"),
+        }
+    }
+
+    #[test]
+    fn audit_locates_a_native_artifact_around_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = native_fixture(&dir, "app");
+        let b = binary.to_str().unwrap();
+        let audit = |values: &[&str]| match parse(strings(values)).unwrap() {
+            ParseResult::NativeAudit(inv) => inv,
+            _ => panic!("expected a native audit"),
+        };
+        let base = audit(&["audit", b, "--allow", "foo"]);
+        for spelling in [
+            &["audit", "--allow", "foo", b][..], // `audit --allow foo ./bin`
+            &["audit", "--allow=foo", b][..],
+        ] {
+            let got = audit(spelling);
+            assert_eq!(got.binary, base.binary);
+            assert_eq!(got.allow, base.allow);
+            assert_eq!(got.raw, base.raw);
+        }
+    }
+
+    #[test]
+    fn replay_locates_two_positionals_around_options_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = native_fixture(&dir, "app");
+        let b = binary.to_str().unwrap();
+        // A flag leads the two positionals; their order (binary then trace) holds.
+        match parse(strings(&["replay", "--fingerprint", "f", b, "run.patina"])).unwrap() {
+            ParseResult::NativeRun(inv) => {
+                assert_eq!(inv.binary, ArtifactRef::Prebuilt(PathBuf::from(b)));
+                match inv.mode {
+                    NativeRunMode::Replay { path, fingerprint } => {
+                        assert_eq!(path, PathBuf::from("run.patina"));
+                        assert_eq!(fingerprint, "f");
+                    }
+                    _ => panic!("expected replay mode"),
+                }
+            }
+            _ => panic!("expected a native run from replay"),
+        }
+        // Interleaved keeps binary-then-trace order.
+        match parse(strings(&["replay", b, "--fingerprint", "f", "run.patina"])).unwrap() {
+            ParseResult::NativeRun(inv) => {
+                assert_eq!(inv.binary, ArtifactRef::Prebuilt(PathBuf::from(b)));
+                assert!(matches!(inv.mode, NativeRunMode::Replay { .. }));
+            }
+            _ => panic!("expected a native run"),
+        }
+    }
+
+    #[test]
+    fn conservative_stop_keeps_unknown_flag_runs_in_the_cargo_family() {
+        // `--bin` is registered (source-first selection), so its value `server` is
+        // skipped by the scan: no artifact, Cargo family.
+        assert!(matches!(
+            parse(strings(&["run", "--bin", "server"])).unwrap(),
+            ParseResult::Run(_)
+        ));
+        assert!(matches!(
+            parse(strings(&["run", "--seed", "5", "--bin", "server"])).unwrap(),
+            ParseResult::Run(_)
+        ));
+        // An UNKNOWN flag stops the scan; `thing.wasm` after it is path-like but does
+        // NOT exist, so it is presumed the unknown flag's value (never an artifact)
+        // and the run stays the Cargo family.
+        assert!(matches!(
+            parse(strings(&[
+                "run",
+                "--seed",
+                "5",
+                "--some-unknown",
+                "thing.wasm"
+            ]))
+            .unwrap(),
+            ParseResult::Run(_)
+        ));
+        // A forwarded cargo flag with a (nonexistent) manifest value, no artifact
+        // token present: the whole list forwards to Cargo.
+        assert!(matches!(
+            parse(strings(&["run", "--manifest-path", "./x/Cargo.toml"])).unwrap(),
+            ParseResult::Run(_)
+        ));
+        // `--release` is not a `run` flag; with no artifact it is a forwarded cargo
+        // flag (like `cargo run --release`), and the run stays the Cargo family.
+        match parse(strings(&["run", "--release", "--seed", "5"])).unwrap() {
+            ParseResult::Run(inv) => {
+                assert_eq!(inv.mode, Mode::Seeded { seed: 5 });
+                assert!(inv.cargo_args.iter().any(|a| a == "--release"));
+            }
+            _ => panic!("expected a Cargo-family run"),
+        }
+    }
+
+    #[test]
+    fn run_fails_closed_on_a_nonexistent_artifact_after_leading_options() {
+        // The motivating fix: `--seed 5` is registered and skipped, so the scan
+        // reaches `nonexistent.wasm` — a path-like token that does not exist — and
+        // fails closed rather than falling through to a confusing `cargo run`.
+        let err = parse_error(&["run", "--seed", "5", "nonexistent.wasm"]);
+        assert!(err.contains("no such file"), "{err}");
+    }
+
+    #[test]
+    fn run_rejects_a_real_artifact_stranded_behind_an_unknown_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = wasm_fixture(&dir, "app.wasm");
+        let m = module.to_str().unwrap();
+        // `--frob` is unknown and `app.wasm` is a real compiled artifact (never a
+        // flag value): a loud routing error naming both, never a silent Cargo
+        // fallthrough.
+        let message = parse_error(&["run", "--frob", m]);
+        assert!(message.contains("--frob"), "{message}");
+        assert!(message.contains(m), "{message}");
+    }
+
+    #[test]
+    fn artifact_scan_never_crosses_the_double_dash_separator() {
+        // Everything after `--` is the guest/cargo tail; an artifact-looking token
+        // there is never scanned as the artifact, so no fail-closed "no such file".
+        match parse(strings(&["run", "--seed", "5", "--", "nonexistent.wasm"])).unwrap() {
+            ParseResult::Run(inv) => {
+                assert_eq!(inv.cargo_args, strings(&["--", "nonexistent.wasm"]));
+            }
+            _ => panic!("expected a Cargo-family run"),
+        }
+    }
+
+    /// The message of a `build` parse that must fail (parse_build's `Ok` variant
+    /// is not `Debug`, so `unwrap_err` cannot be used directly).
+    fn build_error(values: &[&str]) -> String {
+        match parse_build(strings(values)) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("expected a build usage error for {values:?}"),
+        }
+    }
+
+    #[test]
+    fn build_locates_the_path_after_options_and_names_bad_flags() {
+        // `build --release <pkg>`: the path follows the flag, like `cargo build`.
+        match parse_build(strings(&["--release", "pkg"])).unwrap() {
+            ParseResult::NativeBuild(inv) => {
+                assert!(inv.release);
+                assert!(matches!(inv.target, NativeBuildTarget::Package { .. }));
+            }
+            _ => panic!("expected a native build"),
+        }
+        // A stray value on the valueless `--release` is a usage error naming the
+        // flag, never a bogus `--release=x/Cargo.toml` manifest path.
+        let err = build_error(&["--release=x"]);
+        assert!(err.contains("--release"), "{err}");
+        assert!(err.contains("takes no value"), "{err}");
+        // An unknown flag is a usage error naming it (not a manifest-path failure).
+        assert!(build_error(&["--nonsense"]).contains("--nonsense"));
+    }
+
+    #[test]
+    fn minimize_locates_the_trace_after_options() {
+        // `minimize --output out.patina trace.patina -- oracle`: the trace follows
+        // the option, like the other verbs (previously the option was mistaken for
+        // the trace path).
+        match parse(strings(&[
+            "minimize",
+            "--output",
+            "out.patina",
+            "trace.patina",
+            "--",
+            "oracle",
+        ]))
+        .unwrap()
+        {
+            ParseResult::Minimize(MinimizeInvocation::Trace(trace)) => {
+                assert_eq!(trace.trace, PathBuf::from("trace.patina"));
+                assert_eq!(trace.output, PathBuf::from("out.patina"));
+                assert_eq!(trace.oracle, strings(&["oracle"]));
+            }
+            _ => panic!("expected a trace minimization"),
+        }
     }
 }
