@@ -15,21 +15,44 @@ description = "Install root-workspace Rust toolchains and targets"
 run = '''
 set -euo pipefail
 rustup toolchain install stable --component rustfmt --component clippy --target wasm32-wasip1
+# x86_64 Linux std lets clippy check Linux-cfg code (the shim's SUD dispatcher)
+# from macOS; no cross C toolchain is needed because clippy never links.
+rustup target add x86_64-unknown-linux-gnu
 rustup toolchain install 1.86.0 --target wasm32-wasip1
 cc --version >/dev/null
 echo "Patina local toolchains are ready."
 '''
 
+# The full pre-landing checklist, laddered fast -> slow so the common failure
+# classes (formatting, lints — including Linux-cfg lints via cross-target
+# clippy) surface in seconds, not after the multi-minute suites. Each entry
+# must pass before the next runs, so the first failure ends the run.
 [tasks.check]
-description = "Run local root-workspace validation (no heavyweight testbeds)"
+description = "Full pre-landing validation, laddered fast -> slow (no heavyweight testbeds)"
 run = [
   "cargo fmt --all -- --check",
   "cargo clippy --workspace --all-targets --locked -- -D warnings",
-  "cargo test --workspace --locked",
+  "cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu -- -D warnings",
   "cargo doc --workspace --no-deps --locked",
+  "cargo test --workspace --locked",
   "cargo +1.86.0 test --workspace --locked",
   "scripts/validate-wasi.sh",
+  "scripts/smoke-cross-target.sh",
   "scripts/validate-native-shim.sh",
+]
+
+# Inner-loop tier: same gates as `check` minus the slowest suites — the two
+# end-to-end search/minimization tests and proptest generation (~80s of the
+# e2e wall clock), the MSRV re-run, and validate-native-shim. Not a landing
+# gate: run `mise run check` before landing.
+[tasks."check:fast"]
+description = "Fast iteration tier of `check`; not sufficient for landing"
+run = [
+  "cargo fmt --all -- --check",
+  "cargo clippy --workspace --all-targets --locked -- -D warnings",
+  "cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu -- -D warnings",
+  "cargo test --workspace --locked -- --skip native_two_axis_stateful_shrink_then_schedule_minimize --skip minimize_canonicalizes_a_recorded_schedule_via_replay_oracle --skip native_proptest_case_generation",
+  "scripts/validate-wasi.sh",
   "scripts/smoke-cross-target.sh",
 ]
 

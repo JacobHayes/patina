@@ -3,7 +3,9 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    # ci/** lets a pushed branch run the full matrix without opening a PR
+    # (used for iterating on Linux-only behavior from macOS).
+    branches: [main, "ci/**"]
   # Nightly heavy randomized campaign over the flagship workq testbed (see the
   # `nightly` job). Also manually triggerable. 07:17 UTC dodges top-of-hour cron
   # congestion on GitHub-hosted runners.
