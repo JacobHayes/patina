@@ -28,8 +28,13 @@
 //!     signature is flagged and its trace saved with a `cargo patina replay`/re-run
 //!     reproduce command.
 //!
-//! Output is a human summary or a `patina.campaign/v1` JSON envelope (the
-//! `patina.result/v1` envelope family extended for a campaign).
+//! Output is a summary-first human report or a `patina.campaign/v2` JSON envelope
+//! (the `patina.result/v1` envelope family extended for a campaign). Both are
+//! progressive-disclosure: the envelope carries class counts, deduped signatures,
+//! and per-run detail ONLY for novel/failing generations, with pointers to the
+//! full on-disk artifacts (the signature store, saved traces, reports); the human
+//! stream prints novel/failing generations plus a periodic progress heartbeat
+//! rather than one line per generation.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -41,8 +46,19 @@ use sha2::{Digest, Sha256};
 use crate::{CliError, reject_inline, required_value, set_once, split_opt};
 
 /// The stable schema identifier for the campaign JSON envelope, extending the
-/// `patina.result/v1` family.
-const CAMPAIGN_ENVELOPE_SCHEMA: &str = "patina.campaign/v1";
+/// `patina.result/v1` family. `v2` is summary-first: `notable_runs` carries only
+/// the novel/failing generations (v1's `runs` dumped every generation), and an
+/// `artifacts` object points at the full on-disk detail.
+const CAMPAIGN_ENVELOPE_SCHEMA: &str = "patina.campaign/v2";
+
+/// The default progress-heartbeat cadence: in human mode, print one
+/// `PATINA_CAMPAIGN_PROGRESS` line every this-many generations (on top of the
+/// always-printed novel/failing lines). 100 is a deliberate middle ground — at the
+/// default 40-generation campaign it yields a clean summary with no heartbeat
+/// noise, while a multi-thousand-generation sweep still gets a steady but sparse
+/// "still alive" pulse (~1% of the old per-generation line volume). `--progress-every 1`
+/// restores the full per-generation stream; `--progress-every 0` silences the heartbeat.
+const DEFAULT_PROGRESS_EVERY: u64 = 100;
 
 // ===========================================================================
 // Spec
@@ -160,6 +176,10 @@ pub struct CampaignInvocation {
     out_dir: PathBuf,
     spec: CampaignSpec,
     selftest: bool,
+    /// Human-mode progress-heartbeat cadence (generations per
+    /// `PATINA_CAMPAIGN_PROGRESS` line). Presentation only — it never affects the
+    /// deterministic sweep, so it lives here rather than on [`CampaignSpec`].
+    progress_every: u64,
 }
 
 // ===========================================================================
@@ -186,6 +206,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
             out_dir: PathBuf::new(),
             spec: CampaignSpec::default(),
             selftest: true,
+            progress_every: DEFAULT_PROGRESS_EVERY,
         });
     }
 
@@ -220,6 +241,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     let mut seed_start: Option<u64> = None;
     let mut timeout_secs: Option<u64> = None;
     let mut spec_path: Option<String> = None;
+    let mut progress_every: Option<u64> = None;
 
     let mut index = 0;
     while index < arguments.len() {
@@ -256,6 +278,13 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
                     required_value(opt, &arguments, &mut index)?,
                 )?;
                 set_once(&mut timeout_secs, value, "--timeout-secs")?;
+            }
+            "--progress-every" => {
+                let value = parse_u64_flag(
+                    "--progress-every",
+                    required_value(opt, &arguments, &mut index)?,
+                )?;
+                set_once(&mut progress_every, value, "--progress-every")?;
             }
             "--buggify" => {
                 reject_inline(opt)?;
@@ -322,6 +351,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
         out_dir,
         spec,
         selftest: false,
+        progress_every: progress_every.unwrap_or(DEFAULT_PROGRESS_EVERY),
     })
 }
 
@@ -649,6 +679,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
         artifact,
         out_dir,
         spec,
+        progress_every,
         ..
     } = invocation;
 
@@ -681,6 +712,17 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
     let mut class_counts: BTreeMap<&'static str, u64> = BTreeMap::new();
     let mut signatures: BTreeMap<String, SignatureRecord> = BTreeMap::new();
     let mut outcomes: Vec<GenerationOutcome> = Vec::new();
+
+    // Human-mode progress disclosure: at cadence 1 every generation prints its
+    // per-generation line (the full legacy stream, no separate heartbeat); at any
+    // higher cadence only novel/failing generations print a per-generation line,
+    // plus a periodic `PATINA_CAMPAIGN_PROGRESS` heartbeat answering "is it still
+    // running?". The wall-clock start is used only for the heartbeat's `elapsed_secs`
+    // — it never enters a deterministic (`PATINA_CAMPAIGN_GEN`) line.
+    let full_stream = progress_every == 1;
+    let start = std::time::Instant::now();
+    let mut failures_so_far: u64 = 0;
+    let mut novel_so_far: u64 = 0;
 
     for generation in 0..spec.generations {
         let hash = generation_hash(spec.seed_base, generation);
@@ -761,12 +803,36 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
         // output directory holds only real artifacts.
         let _ = std::fs::remove_file(&trace_path);
 
+        if novel {
+            novel_so_far += 1;
+        }
+        if class.is_failure() {
+            failures_so_far += 1;
+        }
         if !json_output {
-            let tag = if novel { " NOVEL" } else { "" };
-            println!(
-                "PATINA_CAMPAIGN_GEN generation={generation} seed={seed} class={}{tag}",
-                class.as_str()
-            );
+            // Always surface a novel or failing generation; surface an ordinary OK
+            // generation only in the full-stream mode. The line format is unchanged
+            // (and wall-clock-free) so replay/reproduce consumers and the
+            // determinism check stay stable.
+            if novel || class.is_failure() || full_stream {
+                let tag = if novel { " NOVEL" } else { "" };
+                println!(
+                    "PATINA_CAMPAIGN_GEN generation={generation} seed={seed} class={}{tag}",
+                    class.as_str()
+                );
+            }
+            // Heartbeat every `progress_every` generations (suppressed in the
+            // full-stream mode, where each generation already prints a line).
+            if !full_stream && progress_every > 0 && (generation + 1) % progress_every == 0 {
+                print_progress_heartbeat(
+                    generation + 1,
+                    spec.generations,
+                    start.elapsed().as_secs(),
+                    failures_so_far,
+                    novel_so_far,
+                    &class_counts,
+                );
+            }
         }
         outcomes.push(GenerationOutcome {
             generation,
@@ -788,7 +854,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
     let exit_code = if failures == 0 { 0 } else { 1 };
 
     if json_output {
-        emit_campaign_envelope(
+        let envelope = build_campaign_envelope(
             result,
             exit_code,
             &artifact_path,
@@ -797,8 +863,9 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
             &class_counts,
             &signatures,
             &outcomes,
-            &store_path,
+            &out_dir,
         );
+        println!("{envelope}");
     } else {
         print_campaign_summary(
             &class_counts,
@@ -1108,6 +1175,28 @@ fn write_signature_store(
         .map_err(|e| CliError(format!("failed to write signature store: {e}")))
 }
 
+/// Print one human-mode progress heartbeat: enough to answer "is it still running,
+/// and how is it going?" without the full per-generation stream. `elapsed_secs` is
+/// the only wall-clock-derived field and appears solely on this line (never on a
+/// deterministic `PATINA_CAMPAIGN_GEN` line).
+fn print_progress_heartbeat(
+    done: u64,
+    total: u64,
+    elapsed_secs: u64,
+    failures: u64,
+    novel: u64,
+    class_counts: &BTreeMap<&'static str, u64>,
+) {
+    let mut line = format!(
+        "PATINA_CAMPAIGN_PROGRESS generation={done}/{total} elapsed_secs={elapsed_secs} \
+         failures={failures} novel={novel}"
+    );
+    for (class, count) in class_counts {
+        line.push_str(&format!(" {class}={count}"));
+    }
+    println!("{line}");
+}
+
 fn print_campaign_summary(
     class_counts: &BTreeMap<&'static str, u64>,
     signatures: &BTreeMap<String, SignatureRecord>,
@@ -1144,8 +1233,16 @@ fn print_campaign_summary(
     );
 }
 
+/// Build the summary-first `patina.campaign/v2` JSON envelope. Progressive
+/// disclosure: the top level carries the class-count histogram and the deduped
+/// signatures; `runs` holds per-generation detail ONLY for novel and failing
+/// generations (the interesting minority — an OK generation adds no triage value
+/// and is fully accounted for by `classes`); and `artifacts` points at the full
+/// on-disk detail (the signature store, saved failing traces, optional reports) so
+/// nothing the v1 all-runs dump exposed becomes unreachable. Pure (returns the
+/// `Value`) so the shape is unit-testable without capturing stdout.
 #[allow(clippy::too_many_arguments)]
-fn emit_campaign_envelope(
+fn build_campaign_envelope(
     result: &str,
     exit_code: i32,
     artifact: &Path,
@@ -1154,8 +1251,8 @@ fn emit_campaign_envelope(
     class_counts: &BTreeMap<&'static str, u64>,
     signatures: &BTreeMap<String, SignatureRecord>,
     outcomes: &[GenerationOutcome],
-    store_path: &Path,
-) {
+    out_dir: &Path,
+) -> serde_json::Value {
     let classes: serde_json::Map<String, serde_json::Value> = class_counts
         .iter()
         .map(|(class, count)| ((*class).to_string(), serde_json::Value::from(*count)))
@@ -1164,8 +1261,11 @@ fn emit_campaign_envelope(
         .iter()
         .map(|(key, record)| record.to_json(key))
         .collect();
-    let generations_json: Vec<serde_json::Value> = outcomes
+    // Only novel or failing generations carry per-run detail; an ordinary OK
+    // generation is fully accounted for by the `classes` histogram.
+    let notable_runs: Vec<serde_json::Value> = outcomes
         .iter()
+        .filter(|o| o.novel || o.class.is_failure())
         .map(|o| {
             serde_json::json!({
                 "generation": o.generation,
@@ -1179,7 +1279,29 @@ fn emit_campaign_envelope(
         .collect();
     let failures = outcomes.iter().filter(|o| o.class.is_failure()).count();
     let novel = outcomes.iter().filter(|o| o.novel).count();
-    let envelope = serde_json::json!({
+    // Machine-readable pointers to the full on-disk detail. `failures` and
+    // `reports` are directories that exist only once a failing generation has
+    // populated them, so they are announced conditionally rather than promising a
+    // path that may not exist.
+    let mut artifacts = serde_json::Map::new();
+    artifacts.insert("out_dir".into(), out_dir.display().to_string().into());
+    artifacts.insert(
+        "signature_store".into(),
+        out_dir.join("signatures.json").display().to_string().into(),
+    );
+    if failures > 0 {
+        artifacts.insert(
+            "failures_dir".into(),
+            out_dir.join("failures").display().to_string().into(),
+        );
+    }
+    if spec.report && failures > 0 {
+        artifacts.insert(
+            "reports_dir".into(),
+            out_dir.join("reports").display().to_string().into(),
+        );
+    }
+    serde_json::json!({
         "schema": CAMPAIGN_ENVELOPE_SCHEMA,
         "verb": "campaign",
         "result": result,
@@ -1192,10 +1314,9 @@ fn emit_campaign_envelope(
         "novel_signatures": novel,
         "classes": classes,
         "signatures": signature_json,
-        "signature_store": store_path.display().to_string(),
-        "runs": generations_json,
-    });
-    println!("{envelope}");
+        "notable_runs": notable_runs,
+        "artifacts": artifacts,
+    })
 }
 
 // ===========================================================================
@@ -1540,6 +1661,139 @@ mod tests {
         let message = error(&["--frob", m]);
         assert!(message.contains("--frob"), "{message}");
         assert!(message.contains(m), "{message}");
+    }
+
+    #[test]
+    fn envelope_is_summary_first_with_artifact_pointers() {
+        // A campaign of four generations: two OK, one failing (non-novel repeat),
+        // one novel failing. The v2 envelope must expose the class histogram and
+        // deduped signatures, but per-run detail (`notable_runs`) ONLY for the
+        // novel/failing generations — the two OK generations are elided.
+        let mk = |generation: u64, class: CampaignClass, novel: bool| GenerationOutcome {
+            generation,
+            seed: generation,
+            class,
+            flags: Vec::new(),
+            novel,
+            signature_key: class.is_failure().then(|| "LIVENESS|shape|".to_string()),
+        };
+        let outcomes = vec![
+            mk(0, CampaignClass::Ok, false),
+            mk(1, CampaignClass::Liveness, true),
+            mk(2, CampaignClass::Ok, false),
+            mk(3, CampaignClass::Liveness, false),
+        ];
+        let mut class_counts: BTreeMap<&'static str, u64> = BTreeMap::new();
+        class_counts.insert("OK", 2);
+        class_counts.insert("LIVENESS", 2);
+        let signatures: BTreeMap<String, SignatureRecord> = BTreeMap::new();
+        let spec = CampaignSpec {
+            generations: 4,
+            ..CampaignSpec::default()
+        };
+        let envelope = build_campaign_envelope(
+            "failure",
+            1,
+            Path::new("guest"),
+            "native",
+            &spec,
+            &class_counts,
+            &signatures,
+            &outcomes,
+            Path::new("out"),
+        );
+
+        assert_eq!(envelope["schema"], CAMPAIGN_ENVELOPE_SCHEMA);
+        assert_eq!(envelope["schema"], "patina.campaign/v2");
+        assert_eq!(envelope["classes"]["OK"], 2);
+        assert_eq!(envelope["classes"]["LIVENESS"], 2);
+
+        // Only the two novel/failing generations appear in `notable_runs`; the OK
+        // generations are represented solely by the class histogram.
+        let notable = envelope["notable_runs"].as_array().unwrap();
+        assert_eq!(
+            notable.len(),
+            2,
+            "OK generations must be elided: {envelope:#}"
+        );
+        let gens: Vec<u64> = notable
+            .iter()
+            .map(|r| r["generation"].as_u64().unwrap())
+            .collect();
+        assert_eq!(gens, vec![1, 3]);
+        assert!(notable.iter().all(|r| r["class"] == "LIVENESS"));
+
+        // Machine-readable pointers keep the full on-disk detail reachable.
+        let artifacts = &envelope["artifacts"];
+        assert_eq!(artifacts["out_dir"], "out");
+        assert!(
+            artifacts["signature_store"]
+                .as_str()
+                .unwrap()
+                .ends_with("signatures.json")
+        );
+        assert!(
+            artifacts["failures_dir"]
+                .as_str()
+                .unwrap()
+                .ends_with("failures"),
+            "a failing campaign must point at its saved-trace dir: {envelope:#}"
+        );
+        // No `--report`, so no reports pointer is promised.
+        assert!(artifacts.get("reports_dir").is_none());
+    }
+
+    #[test]
+    fn envelope_clean_campaign_omits_failure_pointers() {
+        // A clean campaign advertises no failures dir (it is never created).
+        let outcomes = vec![GenerationOutcome {
+            generation: 0,
+            seed: 0,
+            class: CampaignClass::Ok,
+            flags: Vec::new(),
+            novel: false,
+            signature_key: None,
+        }];
+        let mut class_counts: BTreeMap<&'static str, u64> = BTreeMap::new();
+        class_counts.insert("OK", 1);
+        let envelope = build_campaign_envelope(
+            "ok",
+            0,
+            Path::new("guest"),
+            "native",
+            &CampaignSpec::default(),
+            &class_counts,
+            &BTreeMap::new(),
+            &outcomes,
+            Path::new("out"),
+        );
+        assert_eq!(envelope["failures"], 0);
+        assert!(envelope["notable_runs"].as_array().unwrap().is_empty());
+        assert!(envelope["artifacts"].get("failures_dir").is_none());
+    }
+
+    #[test]
+    fn progress_every_parses_and_defaults() {
+        let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+        // Default when unset.
+        let inv = parse(args(&["art"])).unwrap();
+        assert_eq!(inv.progress_every, DEFAULT_PROGRESS_EVERY);
+        // Both value forms parse; 0 and 1 are accepted (silent / full-stream).
+        assert_eq!(
+            parse(args(&["art", "--progress-every", "0"]))
+                .unwrap()
+                .progress_every,
+            0
+        );
+        assert_eq!(
+            parse(args(&["art", "--progress-every=1"]))
+                .unwrap()
+                .progress_every,
+            1
+        );
+        // Duplicate is rejected (set_once), non-integer is rejected.
+        assert!(parse(args(&["art", "--progress-every=1", "--progress-every=2"])).is_err());
+        assert!(parse(args(&["art", "--progress-every", "nope"])).is_err());
     }
 
     #[test]

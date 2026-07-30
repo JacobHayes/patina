@@ -2431,6 +2431,11 @@ fn campaign_catches_planted_liveness_bug_dedups_and_reproduces() {
             guest.to_str().unwrap().to_string(),
             "--gens".to_string(),
             "12".to_string(),
+            // Restore the full per-generation stream: this test asserts on the
+            // per-generation OK/LIVENESS lines and their determinism, which the
+            // summary-first default (novel/failing + periodic heartbeat) elides.
+            "--progress-every".to_string(),
+            "1".to_string(),
             "--buggify".to_string(),
             "--liveness-watchdog".to_string(),
             "600000000000".to_string(),

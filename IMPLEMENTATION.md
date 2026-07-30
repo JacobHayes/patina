@@ -478,8 +478,11 @@ surface (`cargo patina campaign`) generalizing the shell campaign machinery.
    re-run — a liveness/always abort writes no trace). A per-generation wall-clock
    `--timeout-secs` backstop kills a generation that hangs in a way the virtual-time
    watchdog cannot see (an uninterposed atomics-only busy loop), classifying it
-   INFRA so one hung generation cannot wedge the whole campaign. Output is a human
-   summary or a `patina.campaign/v1` JSON envelope (the `patina.result/v1` family
+   INFRA so one hung generation cannot wedge the whole campaign. Output is
+   summary-first: a human report (novel/failing generations plus a periodic
+   `--progress-every` heartbeat) or a `patina.campaign/v2` JSON envelope (class
+   counts, deduped signatures, per-run detail for novel/failing generations, and
+   pointers to the full on-disk artifacts — the `patina.result/v1` family
    extended). `--selftest` proves every class reachable and the signature
    dedup/novelty logic, mirroring the fuzz-sweep classifier selftest. The existing
    `fuzz-sweep.sh` and `buggify-campaign.sh` are untouched and remain the
