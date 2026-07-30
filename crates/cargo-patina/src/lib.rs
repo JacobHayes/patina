@@ -1453,12 +1453,9 @@ fn parse_audit(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
 /// the per-target parser unchanged, so each target keeps its exact flag set.
 fn parse_build(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     let (target, rest) = extract_target(arguments)?;
-    match target.as_deref().unwrap_or("native") {
-        "native" => parse_native_build(rest).map(ParseResult::NativeBuild),
-        "wasi" => parse_wasi_build(rest).map(ParseResult::WasiBuild),
-        other => Err(CliError::usage(format!(
-            "build --target must be native or wasi; got {other:?}"
-        ))),
+    match target_family(target.as_deref().unwrap_or("native"))? {
+        ArtifactFamily::Native => parse_native_build(rest).map(ParseResult::NativeBuild),
+        ArtifactFamily::Wasm => parse_wasi_build(rest).map(ParseResult::WasiBuild),
     }
 }
 
@@ -1922,10 +1919,18 @@ fn parse_wasi_run_from(
             // Optional-value cooperative-SUT/liveness switches: bare form or
             // `=VALUE`, never a following token.
             "--liveness-watchdog" => {
-                liveness.watchdog = Some(optional_u64_arg(opt, "--liveness-watchdog")?);
+                set_once(
+                    &mut liveness.watchdog,
+                    optional_u64_arg(opt, "--liveness-watchdog")?,
+                    "--liveness-watchdog",
+                )?;
             }
             "--converge-within" => {
-                liveness.converge = Some(optional_u64_arg(opt, "--converge-within")?);
+                set_once(
+                    &mut liveness.converge,
+                    optional_u64_arg(opt, "--converge-within")?,
+                    "--converge-within",
+                )?;
             }
             "--buggify" => {
                 let entry = buggify.get_or_insert_with(NativeBuggify::default);
@@ -1949,7 +1954,7 @@ fn parse_wasi_run_from(
             "--heal-after" => {
                 let value = required_value(opt, &arguments, &mut index)?;
                 parse_u64("--heal-after", value)?;
-                liveness.heal_after = Some(value.to_string());
+                set_once(&mut liveness.heal_after, value.to_string(), "--heal-after")?;
             }
             "--seed" => {
                 let value = required_value(opt, &arguments, &mut index)?;
@@ -2623,16 +2628,24 @@ fn parse_liveness_flag(
     match opt.name {
         // Optional-value: bare switch (runtime default) or `=VALUE`.
         "--liveness-watchdog" => {
-            liveness.watchdog = Some(optional_u64_arg(opt, "--liveness-watchdog")?);
+            set_once(
+                &mut liveness.watchdog,
+                optional_u64_arg(opt, "--liveness-watchdog")?,
+                "--liveness-watchdog",
+            )?;
         }
         "--converge-within" => {
-            liveness.converge = Some(optional_u64_arg(opt, "--converge-within")?);
+            set_once(
+                &mut liveness.converge,
+                optional_u64_arg(opt, "--converge-within")?,
+                "--converge-within",
+            )?;
         }
         // Required-value: `--heal-after VALUE` or `--heal-after=VALUE`.
         "--heal-after" => {
             let value = required_value(opt, arguments, index)?;
             parse_u64("--heal-after", value)?;
-            liveness.heal_after = Some(value.to_string());
+            set_once(&mut liveness.heal_after, value.to_string(), "--heal-after")?;
         }
         _ => return Ok(false),
     }
@@ -8156,25 +8169,52 @@ mod tests {
         .map(|_| ())
     }
 
-    /// Parse a single flag with `value` through the real family parser that owns
-    /// it under `verb`, threading any companion flag a dependency requires (e.g.
-    /// `--sched-pct-steps` needs `--sched-pct`). Returns `None` when no driver
-    /// covers the flag — the coverage gate that keeps this mirror honest as flags
-    /// are added. The inline `--flag=VALUE` form is used throughout: it is
-    /// accepted for both required- and optional-value flags, so one form drives
-    /// every kind.
-    fn drive_flag(verb: &str, flag: &str, value: &str) -> Option<Result<(), CliError>> {
-        let inline = format!("{flag}={value}");
-        let inline = inline.as_str();
+    /// The syntactic form a flag drive renders — the registry's arity decides
+    /// which forms must parse, so the generic tests exercise every form of every
+    /// flag rather than a hand-picked sample.
+    #[derive(Clone, Copy)]
+    enum FlagForm<'a> {
+        /// `--flag=VALUE` — valid for required- and optional-value flags alike.
+        Inline,
+        /// `--flag VALUE` — a required-value flag consumes the next token; an
+        /// optional-value flag must NOT (the sample lands as a stray positional).
+        Spaced,
+        /// `-x VALUE` — the registry short, space form.
+        Short(&'a str),
+        /// `--flag=A --flag=B` — rejected (`set_once`) unless registry-repeatable.
+        Repeated(&'a str),
+    }
+
+    /// Parse a single flag with `value`, rendered in `form`, through the real
+    /// family parser that owns it under `verb`, threading any companion flag a
+    /// dependency requires (e.g. `--sched-pct-steps` needs `--sched-pct`).
+    /// Returns `None` when no driver covers the flag — the coverage gate that
+    /// keeps this mirror honest as flags are added.
+    fn drive_flag(
+        verb: &str,
+        flag: &str,
+        value: &str,
+        form: FlagForm<'_>,
+    ) -> Option<Result<(), CliError>> {
+        let rendered: Vec<String> = match form {
+            FlagForm::Inline => vec![format!("{flag}={value}")],
+            FlagForm::Spaced => vec![flag.to_string(), value.to_string()],
+            FlagForm::Short(short) => vec![short.to_string(), value.to_string()],
+            FlagForm::Repeated(second) => {
+                vec![format!("{flag}={value}"), format!("{flag}={second}")]
+            }
+        };
+        let toks: Vec<&str> = rendered.iter().map(String::as_str).collect();
+        let toks = toks.as_slice();
         let outcome = match (verb, flag) {
             // run: route each flag to the family parser that owns it.
-            ("run", "--budget" | "--param") => drv_cargo("run", &[inline]),
+            ("run", "--budget" | "--param") => drv_cargo("run", toks),
             (
                 "run",
                 "--fuel" | "--arg" | "--env" | "--socket" | "--preopen" | "--max-memory-pages"
                 | "--max-descriptors" | "--max-preopens" | "--max-path-bytes" | "--max-io-bytes"
                 | "--max-iovecs",
-            ) => drv_wasi_run(&[inline]),
+            ) => drv_wasi_run(toks),
             (
                 "run",
                 "--seed"
@@ -8190,7 +8230,7 @@ mod tests {
                 | "--liveness-watchdog"
                 | "--converge-within"
                 | "--heal-after",
-            ) => drv_wasi_run(&[inline]),
+            ) => drv_wasi_run(toks),
             (
                 "run",
                 "--net-latency-nanos"
@@ -8200,109 +8240,145 @@ mod tests {
                 | "--allow-unsupported-symbols"
                 | "--sched-pct"
                 | "--starve",
-            ) => drv_native_run(&[inline]),
-            ("run", "--sched-pct-steps") => drv_native_run(&["--sched-pct=1", inline]),
-            ("run", "--starve-max-len" | "--starve-window") => {
-                drv_native_run(&["--starve=1", inline])
+            ) => drv_native_run(toks),
+            ("run", "--sched-pct-steps") => {
+                drv_native_run(&[&["--sched-pct=1"][..], toks].concat())
             }
-            ("run", "--package" | "--bin") => take_package_bin(strings(&[inline])).map(|_| ()),
-            ("run" | "audit" | "replay", "--target") => target_family(value).map(|_| ()),
+            ("run", "--starve-max-len" | "--starve-window") => {
+                drv_native_run(&[&["--starve=1"][..], toks].concat())
+            }
+            ("run", "--package" | "--bin") => take_package_bin(strings(toks)).map(|_| ()),
+            // `--target` is stripped by the shared selector pre-pass, then mapped
+            // by `target_family`; driving through both exercises every form.
+            ("run" | "audit" | "replay", "--target") => extract_target(strings(toks))
+                .and_then(|(target, _)| target_family(target.as_deref().unwrap_or("native")))
+                .map(|_| ()),
 
             // test: every flag is the Cargo package family's.
-            ("test", _) => drv_cargo("test", &[inline]),
+            ("test", _) => drv_cargo("test", toks),
 
             // build: the native/wasi build parsers; --target through parse_build.
-            ("build", "--output") => parse_native_build(strings(&["x.rs", inline])).map(|_| ()),
+            ("build", "--output") => {
+                parse_native_build(strings(&[&["x.rs"][..], toks].concat())).map(|_| ())
+            }
             ("build", "--edition") => {
-                parse_native_build(strings(&["x.rs", "--output=/tmp/o", inline])).map(|_| ())
+                parse_native_build(strings(&[&["x.rs", "--output=/tmp/o"][..], toks].concat()))
+                    .map(|_| ())
             }
             ("build", "--package" | "--bin") => {
-                parse_native_build(strings(&["sub/Cargo.toml", inline])).map(|_| ())
+                parse_native_build(strings(&[&["sub/Cargo.toml"][..], toks].concat())).map(|_| ())
             }
-            ("build", "--target") => parse_build(strings(&[inline, "sub/Cargo.toml"])).map(|_| ()),
+            ("build", "--target") => {
+                parse_build(strings(&[toks, &["sub/Cargo.toml"][..]].concat())).map(|_| ())
+            }
 
             // audit: --allow through the native audit parser.
-            ("audit", "--allow") => parse_native_audit(strings(&["bin", inline])).map(|_| ()),
-            ("audit", "--package" | "--bin") => take_package_bin(strings(&[inline])).map(|_| ()),
+            ("audit", "--allow") => {
+                parse_native_audit(strings(&[&["bin"][..], toks].concat())).map(|_| ())
+            }
+            ("audit", "--package" | "--bin") => take_package_bin(strings(toks)).map(|_| ()),
 
             // replay: native host facts, WASI host inputs, and the WASI-family
             // timeline/branch controls (branch flags need the full branch quorum).
             ("replay", "--fingerprint" | "--mount" | "--allow" | "--allow-unsupported-symbols") => {
-                drv_native_replay(&[inline])
+                drv_native_replay(toks)
             }
             (
                 "replay",
                 "--fuel" | "--arg" | "--env" | "--socket" | "--preopen" | "--max-memory-pages"
                 | "--max-descriptors" | "--max-preopens" | "--max-path-bytes" | "--max-io-bytes"
                 | "--max-iovecs" | "--timeline",
-            ) => drv_wasi_replay(&[inline]),
-            ("replay", "--from") => drv_wasi_replay(&[
-                "--branch",
-                "--branch-seed=1",
-                "--branch-id=b",
-                "--parent=main",
-                inline,
-            ]),
-            ("replay", "--branch-seed") => drv_wasi_replay(&[
-                "--branch",
-                "--from=0",
-                "--branch-id=b",
-                "--parent=main",
-                inline,
-            ]),
-            ("replay", "--branch-id") => drv_wasi_replay(&[
-                "--branch",
-                "--from=0",
-                "--branch-seed=1",
-                "--parent=main",
-                inline,
-            ]),
-            ("replay", "--parent") => drv_wasi_replay(&[
-                "--branch",
-                "--from=0",
-                "--branch-seed=1",
-                "--branch-id=b",
-                inline,
-            ]),
+            ) => drv_wasi_replay(toks),
+            ("replay", "--from") => drv_wasi_replay(
+                &[
+                    &[
+                        "--branch",
+                        "--branch-seed=1",
+                        "--branch-id=b",
+                        "--parent=main",
+                    ][..],
+                    toks,
+                ]
+                .concat(),
+            ),
+            ("replay", "--branch-seed") => drv_wasi_replay(
+                &[
+                    &["--branch", "--from=0", "--branch-id=b", "--parent=main"][..],
+                    toks,
+                ]
+                .concat(),
+            ),
+            ("replay", "--branch-id") => drv_wasi_replay(
+                &[
+                    &["--branch", "--from=0", "--branch-seed=1", "--parent=main"][..],
+                    toks,
+                ]
+                .concat(),
+            ),
+            ("replay", "--parent") => drv_wasi_replay(
+                &[
+                    &["--branch", "--from=0", "--branch-seed=1", "--branch-id=b"][..],
+                    toks,
+                ]
+                .concat(),
+            ),
 
             // explore: --seed-start pins --seeds 1 so a max-u64 start never
             // overflows the swept range.
-            ("explore", "--seeds") => parse_explore(strings(&[inline, "test"])).map(|_| ()),
+            ("explore", "--seeds") => {
+                parse_explore(strings(&[toks, &["test"][..]].concat())).map(|_| ())
+            }
             ("explore", "--seed-start") => {
-                parse_explore(strings(&["--seeds=1", inline, "test"])).map(|_| ())
+                parse_explore(strings(&[&["--seeds=1"][..], toks, &["test"][..]].concat()))
+                    .map(|_| ())
             }
 
             // campaign: --spec reads a JSON file at parse time, so it is driven
-            // against a real, minimal spec rather than a synthetic path sample.
+            // against a real, minimal spec rather than a synthetic path sample
+            // (re-rendered per form with the real path in the value slot).
             ("campaign", "--spec") => {
                 let dir = tempfile::tempdir().expect("tempdir");
                 let path = dir.path().join("spec.json");
                 std::fs::write(&path, b"{}").expect("write spec");
-                let arg = format!("--spec={}", path.display());
-                campaign::parse(strings(&["art.wasm", &arg])).map(|_| ())
+                let spec = path.display().to_string();
+                let rendered: Vec<String> = match form {
+                    FlagForm::Inline => vec![format!("--spec={spec}")],
+                    FlagForm::Spaced => vec!["--spec".to_string(), spec.clone()],
+                    FlagForm::Short(short) => vec![short.to_string(), spec.clone()],
+                    FlagForm::Repeated(_) => {
+                        vec![format!("--spec={spec}"), format!("--spec={spec}")]
+                    }
+                };
+                let rendered: Vec<&str> = rendered.iter().map(String::as_str).collect();
+                campaign::parse(strings(&[&["art.wasm"][..], &rendered].concat())).map(|_| ())
             }
-            ("campaign", _) => campaign::parse(strings(&["art.wasm", inline])).map(|_| ()),
+            ("campaign", _) => {
+                campaign::parse(strings(&[&["art.wasm"][..], toks].concat())).map(|_| ())
+            }
 
             // minimize: --output/--timeline are trace-mode; --seed/--seed-budget/
             // --param are scenario-mode (need --scenario and a --seed).
-            ("minimize", "--output") => {
-                parse_minimize(strings(&["t.patina", inline, "--", "oracle"])).map(|_| ())
-            }
-            ("minimize", "--timeline") => parse_minimize(strings(&[
-                "t.patina",
-                "--output=/tmp/o",
-                inline,
-                "--",
-                "oracle",
-            ]))
+            ("minimize", "--output") => parse_minimize(strings(
+                &[&["t.patina"][..], toks, &["--", "oracle"][..]].concat(),
+            ))
             .map(|_| ()),
-            ("minimize", "--seed") => {
-                parse_minimize(strings(&["--scenario", inline, "--", "oracle"])).map(|_| ())
-            }
-            ("minimize", "--seed-budget" | "--param") => {
-                parse_minimize(strings(&["--scenario", "--seed=0", inline, "--", "oracle"]))
-                    .map(|_| ())
-            }
+            ("minimize", "--timeline") => parse_minimize(strings(
+                &[
+                    &["t.patina", "--output=/tmp/o"][..],
+                    toks,
+                    &["--", "oracle"][..],
+                ]
+                .concat(),
+            ))
+            .map(|_| ()),
+            ("minimize", "--seed") => parse_minimize(strings(
+                &[&["--scenario"][..], toks, &["--", "oracle"][..]].concat(),
+            ))
+            .map(|_| ()),
+            ("minimize", "--seed-budget" | "--param") => parse_minimize(strings(
+                &[&["--scenario", "--seed=0"][..], toks, &["--", "oracle"][..]].concat(),
+            ))
+            .map(|_| ()),
 
             _ => return None,
         };
@@ -8320,16 +8396,25 @@ mod tests {
         // 0:N` vs `0..N` regression, for every flag at once.
 
         // Global output options are parsed once, before routing, by output::extract.
+        // Both value forms must work here too (the uniform-value-syntax rule).
         for flag in help::GLOBAL_OUTPUT {
             let Some(kind) = flag.value.grammar() else {
                 continue;
             };
             let (valid, invalid) = kind_samples(kind);
             for sample in valid {
-                let arg = format!("{}={sample}", flag.name);
-                output::extract(strings(&[&arg])).unwrap_or_else(|error| {
-                    panic!("global `{}` rejected valid {sample:?}: {error}", flag.name)
-                });
+                for args in [
+                    vec![format!("{}={sample}", flag.name)],
+                    vec![flag.name.to_string(), sample.to_string()],
+                ] {
+                    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                    output::extract(strings(&args)).unwrap_or_else(|error| {
+                        panic!(
+                            "global `{}` rejected valid {sample:?} as {args:?}: {error}",
+                            flag.name
+                        )
+                    });
+                }
             }
             for sample in invalid {
                 let arg = format!("{}={sample}", flag.name);
@@ -8341,7 +8426,11 @@ mod tests {
             }
         }
 
-        // Every per-verb flag, driven through its owning family parser.
+        // Every per-verb flag, driven through its owning family parser, in every
+        // registry-implied form: inline `=` always; the space form must parse for
+        // required-value flags and must NOT consume the token for optional-value
+        // flags (the sample lands as a stray positional and the parse fails); a
+        // declared short takes the space form.
         for verb in help::VERBS {
             let mut seen: BTreeSet<&str> = BTreeSet::new();
             for flag in verb.groups.iter().flat_map(|group| group.flags.iter()) {
@@ -8353,31 +8442,126 @@ mod tests {
                 }
                 let (valid, invalid) = kind_samples(kind);
                 for sample in &valid {
-                    let outcome = drive_flag(verb.name, flag.name, sample).unwrap_or_else(|| {
-                        panic!(
-                            "verb `{}` flag `{}` has no value-grammar driver; add one to \
-                             `drive_flag`",
-                            verb.name, flag.name
-                        )
-                    });
-                    outcome.unwrap_or_else(|error| {
+                    let drive = |form: FlagForm<'_>| {
+                        drive_flag(verb.name, flag.name, sample, form).unwrap_or_else(|| {
+                            panic!(
+                                "verb `{}` flag `{}` has no value-grammar driver; add one to \
+                                 `drive_flag`",
+                                verb.name, flag.name
+                            )
+                        })
+                    };
+                    drive(FlagForm::Inline).unwrap_or_else(|error| {
                         panic!(
                             "verb `{}` flag `{}` ({kind:?}) rejected VALID sample {sample:?}: \
                              {error}",
                             verb.name, flag.name
                         )
                     });
+                    match flag.value {
+                        help::Value::Required(..) => {
+                            drive(FlagForm::Spaced).unwrap_or_else(|error| {
+                                panic!(
+                                    "verb `{}` flag `{}` rejected the space form of valid \
+                                     {sample:?}: {error}",
+                                    verb.name, flag.name
+                                )
+                            });
+                            if let Some(short) = flag.short {
+                                drive(FlagForm::Short(short)).unwrap_or_else(|error| {
+                                    panic!(
+                                        "verb `{}` flag `{}` rejected short `{short}` with valid \
+                                         {sample:?}: {error}",
+                                        verb.name, flag.name
+                                    )
+                                });
+                            }
+                        }
+                        help::Value::Optional(..) => {
+                            assert!(
+                                drive(FlagForm::Spaced).is_err(),
+                                "verb `{}` optional-value flag `{}` CONSUMED the space-form \
+                                 token {sample:?} (optional values are `=`-only)",
+                                verb.name,
+                                flag.name
+                            );
+                        }
+                        help::Value::None => unreachable!("grammar() returned Some"),
+                    }
                 }
                 for sample in &invalid {
-                    let outcome = drive_flag(verb.name, flag.name, sample)
-                        .expect("driver present (proven by the valid loop above)");
-                    assert!(
-                        outcome.is_err(),
-                        "verb `{}` flag `{}` ({kind:?}) ACCEPTED invalid sample {sample:?}",
-                        verb.name,
-                        flag.name
-                    );
+                    for form in [FlagForm::Inline, FlagForm::Spaced] {
+                        // The space form only reaches the value validator on
+                        // required-value flags.
+                        if matches!(form, FlagForm::Spaced)
+                            && !matches!(flag.value, help::Value::Required(..))
+                        {
+                            continue;
+                        }
+                        let outcome = drive_flag(verb.name, flag.name, sample, form)
+                            .expect("driver present (proven by the valid loop above)");
+                        assert!(
+                            outcome.is_err(),
+                            "verb `{}` flag `{}` ({kind:?}) ACCEPTED invalid sample {sample:?}",
+                            verb.name,
+                            flag.name
+                        );
+                    }
                 }
+            }
+        }
+    }
+
+    /// The registry's `repeatable` field must match the parsers: a repeatable
+    /// value flag accepts two occurrences; a non-repeatable one rejects them
+    /// (`set_once`'s "provided more than once"). Scope is value-bearing flags —
+    /// a repeated bare switch is idempotent and harmless by construction.
+    #[test]
+    fn registry_repeatable_flags_match_the_parsers() {
+        for flag in help::GLOBAL_OUTPUT {
+            let Some(kind) = flag.value.grammar() else {
+                continue;
+            };
+            let (valid, _) = kind_samples(kind);
+            let first = valid[0];
+            let second = valid.get(1).copied().unwrap_or(first);
+            let args = [
+                format!("{}={first}", flag.name),
+                format!("{}={second}", flag.name),
+            ];
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            let outcome = output::extract(strings(&args)).map(|_| ());
+            assert_eq!(
+                outcome.is_ok(),
+                flag.repeatable,
+                "global `{}` repeat behavior does not match registry repeatable={}: {outcome:?}",
+                flag.name,
+                flag.repeatable
+            );
+        }
+        for verb in help::VERBS {
+            let mut seen: BTreeSet<&str> = BTreeSet::new();
+            for flag in verb.groups.iter().flat_map(|group| group.flags.iter()) {
+                let Some(kind) = flag.value.grammar() else {
+                    continue;
+                };
+                if !seen.insert(flag.name) {
+                    continue;
+                }
+                let (valid, _) = kind_samples(kind);
+                let first = valid[0];
+                let second = valid.get(1).copied().unwrap_or(first);
+                let outcome = drive_flag(verb.name, flag.name, first, FlagForm::Repeated(second))
+                    .expect("driver present (shared with the value-grammar test)");
+                assert_eq!(
+                    outcome.is_ok(),
+                    flag.repeatable,
+                    "verb `{}` flag `{}` repeat behavior does not match registry \
+                     repeatable={}: {outcome:?}",
+                    verb.name,
+                    flag.name,
+                    flag.repeatable
+                );
             }
         }
     }
@@ -8400,70 +8584,6 @@ mod tests {
     }
 
     #[test]
-    fn required_value_flags_accept_both_space_and_equals_forms() {
-        // Cargo family.
-        assert_eq!(
-            invocation(&["run", "--budget", "100"]).step_budget,
-            Some(100)
-        );
-        assert_eq!(invocation(&["run", "--budget=100"]).step_budget, Some(100));
-        // WASI family (previously `--fuel=100` was rejected).
-        assert_eq!(
-            parse_wasi_run(strings(&["m.wasm", "--fuel", "128"]))
-                .unwrap()
-                .fuel,
-            128
-        );
-        assert_eq!(
-            parse_wasi_run(strings(&["m.wasm", "--fuel=128"]))
-                .unwrap()
-                .fuel,
-            128
-        );
-        // Native family.
-        assert_eq!(
-            parse_native_run(strings(&["bin", "--net-latency-nanos", "50"]))
-                .unwrap()
-                .net_latency_nanos,
-            Some(50)
-        );
-        assert_eq!(
-            parse_native_run(strings(&["bin", "--net-latency-nanos=50"]))
-                .unwrap()
-                .net_latency_nanos,
-            Some(50)
-        );
-        // Build.
-        match parse_native_build(strings(&["x.rs", "--output", "o", "--edition=2021"]))
-            .unwrap()
-            .target
-        {
-            NativeBuildTarget::Source { edition, .. } => assert_eq!(edition, "2021"),
-            _ => panic!("expected a source build"),
-        }
-        // Minimize scenario (both `=` forms) and the new trace `-o` short.
-        match parse_minimize(strings(&[
-            "--scenario",
-            "--seed=4",
-            "--seed-budget=9",
-            "--",
-            "oracle",
-        ]))
-        .unwrap()
-        {
-            MinimizeInvocation::Scenario(scenario) => {
-                assert_eq!(scenario.seed, 4);
-                assert_eq!(scenario.seed_budget, 9);
-            }
-            _ => panic!("expected a scenario minimization"),
-        }
-        match parse_minimize(strings(&["t", "-o", "out", "--", "oracle"])).unwrap() {
-            MinimizeInvocation::Trace(trace) => assert_eq!(trace.output, PathBuf::from("out")),
-            _ => panic!("expected a trace minimization"),
-        }
-    }
-
-    #[test]
     fn inline_arg_passes_a_literal_help_token() {
         // `--arg=--help` delivers a literal `--help` to the WASI guest argv; the
         // inline form is the only way, since a bare `--help` before `--` is
@@ -8472,18 +8592,6 @@ mod tests {
         assert_eq!(
             inv.arguments,
             vec!["--help".to_string(), "tail".to_string()]
-        );
-    }
-
-    #[test]
-    fn optional_value_flags_reject_the_space_form_value() {
-        // `--buggify` is optional-value: `--buggify=250` sets the permille, a bare
-        // `--buggify` enables it, and a following `250` is NOT consumed as a value
-        // (it would be a positional/unknown, here a guest binary already given).
-        let inline = parse_native_run(strings(&["bin", "--buggify=250"])).unwrap();
-        assert_eq!(
-            inline.buggify.and_then(|b| b.fire_permille),
-            Some("250".to_string())
         );
     }
 

@@ -38,7 +38,7 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
-use crate::{CliError, reject_inline, required_value, split_opt};
+use crate::{CliError, reject_inline, required_value, set_once, split_opt};
 
 /// The stable schema identifier for the campaign JSON envelope, extending the
 /// `patina.result/v1` family.
@@ -212,6 +212,14 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     let arguments = scan.rest;
     let mut spec = CampaignSpec::default();
     let mut out_dir: Option<PathBuf> = None;
+    // Scalar overrides shadow the spec until the loop ends: duplicates are
+    // rejected via `set_once`, and a flag overrides `--spec` regardless of
+    // argument order (previously a flag preceding `--spec` was silently
+    // overwritten by the spec file).
+    let mut generations: Option<u64> = None;
+    let mut seed_start: Option<u64> = None;
+    let mut timeout_secs: Option<u64> = None;
+    let mut spec_path: Option<String> = None;
 
     let mut index = 0;
     while index < arguments.len() {
@@ -222,6 +230,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
         match opt.name {
             "--spec" => {
                 let path = required_value(opt, &arguments, &mut index)?.to_string();
+                set_once(&mut spec_path, path.clone(), "--spec")?;
                 let text = std::fs::read_to_string(&path)
                     .map_err(|e| CliError(format!("failed to read campaign spec {path}: {e}")))?;
                 let json: serde_json::Value = serde_json::from_str(&text)
@@ -229,21 +238,24 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
                 spec.apply_json(&json)?;
             }
             "--out-dir" => {
-                out_dir = Some(PathBuf::from(required_value(opt, &arguments, &mut index)?));
+                let path = PathBuf::from(required_value(opt, &arguments, &mut index)?);
+                set_once(&mut out_dir, path, "--out-dir")?;
             }
             "--gens" => {
-                spec.generations =
-                    parse_u64_flag("--gens", required_value(opt, &arguments, &mut index)?)?;
+                let value = parse_u64_flag("--gens", required_value(opt, &arguments, &mut index)?)?;
+                set_once(&mut generations, value, "--gens")?;
             }
             "--seed-start" => {
-                spec.seed_base =
+                let value =
                     parse_u64_flag("--seed-start", required_value(opt, &arguments, &mut index)?)?;
+                set_once(&mut seed_start, value, "--seed-start")?;
             }
             "--timeout-secs" => {
-                spec.timeout_secs = parse_u64_flag(
+                let value = parse_u64_flag(
                     "--timeout-secs",
                     required_value(opt, &arguments, &mut index)?,
                 )?;
+                set_once(&mut timeout_secs, value, "--timeout-secs")?;
             }
             "--buggify" => {
                 reject_inline(opt)?;
@@ -266,22 +278,23 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
                 spec.report = true;
             }
             "--liveness-watchdog" => {
-                spec.watchdog_nanos = Some(parse_u64_flag(
+                let value = parse_u64_flag(
                     "--liveness-watchdog",
                     required_value(opt, &arguments, &mut index)?,
-                )?);
+                )?;
+                set_once(&mut spec.watchdog_nanos, value, "--liveness-watchdog")?;
             }
             "--converge-within" => {
-                spec.converge_nanos = Some(parse_u64_flag(
+                let value = parse_u64_flag(
                     "--converge-within",
                     required_value(opt, &arguments, &mut index)?,
-                )?);
+                )?;
+                set_once(&mut spec.converge_nanos, value, "--converge-within")?;
             }
             "--heal-after" => {
-                spec.heal_after_nanos = Some(parse_u64_flag(
-                    "--heal-after",
-                    required_value(opt, &arguments, &mut index)?,
-                )?);
+                let value =
+                    parse_u64_flag("--heal-after", required_value(opt, &arguments, &mut index)?)?;
+                set_once(&mut spec.heal_after_nanos, value, "--heal-after")?;
             }
             other => {
                 return Err(CliError::usage(format!(
@@ -290,6 +303,15 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
             }
         }
         index += 1;
+    }
+    if let Some(generations) = generations {
+        spec.generations = generations;
+    }
+    if let Some(seed_start) = seed_start {
+        spec.seed_base = seed_start;
+    }
+    if let Some(timeout_secs) = timeout_secs {
+        spec.timeout_secs = timeout_secs;
     }
     if !guest_args.is_empty() {
         spec.guest_args = guest_args;

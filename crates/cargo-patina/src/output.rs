@@ -95,6 +95,7 @@ pub fn options() -> &'static OutputOptions {
 /// Mirrors [`crate::extract_target`] so these options can be parsed once,
 /// globally, without touching any per-verb flag loop.
 pub fn extract(arguments: Vec<OsString>) -> Result<(OutputOptions, Vec<OsString>), CliError> {
+    let mut format: Option<OutputFormat> = None;
     let mut options = OutputOptions::default();
     let mut rest: Vec<OsString> = Vec::new();
     let mut iterator = arguments.into_iter();
@@ -120,31 +121,37 @@ pub fn extract(arguments: Vec<OsString>) -> Result<(OutputOptions, Vec<OsString>
                     .next()
                     .and_then(|value| value.into_string().ok())
                     .ok_or_else(|| CliError::usage("--format requires a value (human or json)"))?;
-                options.format = parse_format(&value)?;
+                crate::set_once(&mut format, parse_format(&value)?, "--format")?;
             }
             Some(value) if value.starts_with("--format=") => {
-                options.format = parse_format(&value["--format=".len()..])?;
+                let parsed = parse_format(&value["--format=".len()..])?;
+                crate::set_once(&mut format, parsed, "--format")?;
             }
             Some("--render") => {
                 let value = iterator
                     .next()
                     .ok_or_else(|| CliError::usage("--render requires an output HTML path"))?;
-                options.render = Some(PathBuf::from(value));
+                crate::set_once(&mut options.render, PathBuf::from(value), "--render")?;
             }
             Some(value) if value.starts_with("--render=") => {
-                options.render = Some(PathBuf::from(&value["--render=".len()..]));
+                let path = PathBuf::from(&value["--render=".len()..]);
+                crate::set_once(&mut options.render, path, "--render")?;
             }
             Some("--report") => {
                 let value = iterator
                     .next()
                     .ok_or_else(|| CliError::usage("--report requires an output HTML path"))?;
-                options.report = Some(PathBuf::from(value));
+                crate::set_once(&mut options.report, PathBuf::from(value), "--report")?;
             }
             Some(value) if value.starts_with("--report=") => {
-                options.report = Some(PathBuf::from(&value["--report=".len()..]));
+                let path = PathBuf::from(&value["--report=".len()..]);
+                crate::set_once(&mut options.report, path, "--report")?;
             }
             _ => rest.push(argument),
         }
+    }
+    if let Some(format) = format {
+        options.format = format;
     }
     Ok((options, rest))
 }
