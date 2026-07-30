@@ -26,8 +26,8 @@ use patina_dst_runtime::{
 };
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
-    native_binary_has_sud_marker, native_binary_is_shim_linked, native_escape_is_sud_manageable,
-    shim_control_plane_symbols,
+    native_binary_has_sud_marker, native_binary_is_shim_linked, native_deny_trap_armed,
+    native_escape_is_sud_manageable, shim_control_plane_symbols,
 };
 use patina_dst_trace::TraceBundle;
 use patina_dst_wasi_host::{
@@ -4111,6 +4111,11 @@ trapped into the deterministic runtime via syscall-user-dispatch. Runnable on a 
             println!("{finding}");
         }
     }
+    // The audit above reports the import-table residual. Deny-trap-armed symbols
+    // are absent from it by construction (the shim strong-def drops them off the
+    // import table), so add the non-blocking "fails later" note naming any this
+    // binary references — visible up front rather than only when a call aborts.
+    emit_native_deny_trap_note(&bytes);
     Ok(0)
 }
 
@@ -5170,6 +5175,32 @@ fn effective_native_allow(user_allow: &BTreeSet<String>) -> BTreeSet<String> {
     allow
 }
 
+/// Emit the non-blocking "fails later" note for the deny-trap-armed symbols a
+/// shim-linked binary references. These symbols pass the import audit and the
+/// pre-run gate (the shim strong-def drops them off the import table), but a call
+/// aborts the run deterministically — a guarantee the import-table audit is blind
+/// to by construction. Surfacing it up front at `audit` and `run` makes the
+/// "fails later" contract visible before the guest is launched. Informational
+/// only: stderr, never touches the exit code, and stays off stdout so a `--format
+/// json` envelope is unaffected. A read/parse hiccup here must never fail the
+/// caller's real operation, so it is swallowed (the note is best-effort).
+fn emit_native_deny_trap_note(bytes: &[u8]) {
+    let armed = match native_deny_trap_armed(bytes) {
+        Ok(armed) if !armed.is_empty() => armed,
+        _ => return,
+    };
+    let list = armed
+        .iter()
+        .map(|trap| format!("{} ({})", trap.symbol, trap.class))
+        .collect::<Vec<_>>()
+        .join(", ");
+    eprintln!(
+        "note: {} linked symbol(s) are deny-trap armed under patina (a call aborts \
+deterministically): {list}",
+        armed.len()
+    );
+}
+
 /// Whether a *build* target has kernel syscall-user-dispatch, so a shim-linked
 /// guest's raw inline syscalls are trapped at runtime rather than needing the
 /// `--cfg rustix_use_libc` interposition workaround. x86_64 Linux has SUD since
@@ -5195,7 +5226,12 @@ fn native_prerun_gate(
     })?;
     let effective = effective_native_allow(allow);
     let denied = match NativeAudit::audit(&bytes, &effective) {
-        Ok(_) => return Ok(Vec::new()),
+        Ok(_) => {
+            // Clean import audit: the run proceeds. Surface the "fails later"
+            // deny-trap note once, up front, before the guest is launched.
+            emit_native_deny_trap_note(&bytes);
+            return Ok(Vec::new());
+        }
         Err(TargetError::UnsupportedNativeImports(denied)) => denied,
         // A binary we cannot even parse/format-check must never run.
         Err(other) => {
@@ -5325,6 +5361,9 @@ This run's determinism is NOT guaranteed and any \"deterministic\" claim on it i
         );
     }
 
+    // The run proceeds (clean, or with downgraded symbols). Surface the "fails
+    // later" deny-trap note once, up front, before the guest is launched.
+    emit_native_deny_trap_note(&bytes);
     Ok(downgraded)
 }
 

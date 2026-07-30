@@ -91,6 +91,18 @@ int32_t patina_errno(void);
 int32_t patina_entropy(void *destination, size_t length);
 int32_t patina_clock_now(uint32_t clock, uint64_t *nanos);
 int32_t patina_sleep_until(uint32_t clock, uint64_t deadline_nanos);
+/*
+ * Deterministic per-process CPU-time proxy in nanoseconds, for the resource
+ * accounting interposers (`getrusage`/`task_info`/Linux `sysinfo`). Reports the
+ * current virtual monotonic time UNRECORDED (like the kqueue reactor's deadline
+ * scans) — under the single-runnable-task world model the process's summed
+ * per-thread run-slices equal the monotonic delta, so elapsed virtual time is
+ * the deterministic CPU-time model. Always succeeds writing a value: 0 before a
+ * runtime is installed (allocator bootstrap / run outside the supervisor) so an
+ * accounting read never forces init or aborts. Pure function of simulation
+ * state: identical across same-seed runs, monotonic within a run.
+ */
+int32_t patina_cpu_time_nanos(uint64_t *nanos);
 int32_t patina_open(const char *path, uint32_t flags);
 intptr_t patina_read(int32_t fd, void *destination, size_t length);
 intptr_t patina_write(int32_t fd, const void *source, size_t length);

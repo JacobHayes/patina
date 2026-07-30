@@ -2080,6 +2080,47 @@ pub extern "C" fn patina_sleep_until(clock_id: u32, deadline_nanos: u64) -> c_in
     }
 }
 
+/// Deterministic per-process CPU-time proxy in nanoseconds, backing the libc
+/// resource-accounting interposers (`getrusage`/`task_info`/`sysinfo`).
+///
+/// The model is elapsed virtual monotonic time. Under the deterministic
+/// scheduler at most one task is runnable at a time and virtual time advances
+/// only through recorded `SleepUntil`/deadlock-rescue, so the sum of every
+/// thread's run-slices between two observations equals the monotonic delta — the
+/// monotonic clock IS the process's summed CPU time. It is read UNRECORDED (the
+/// same `monotonic_now_unrecorded` the kqueue reactor uses for deadline scans),
+/// so this read emits no trace op, takes no scheduling point, and leaves every
+/// existing fingerprint/replay stream byte-for-byte unchanged; the returned value
+/// is nonetheless a pure function of simulation state (the guest reaches this
+/// call at a deterministic virtual time on record and replay alike).
+///
+/// Always succeeds writing a value. Before the runtime is installed (a custom
+/// allocator's bootstrap timing, or a binary run outside the supervisor) it
+/// reports a deterministic 0 rather than auto-installing or aborting: a resource
+/// read must never be the thing that forces runtime init, mirroring
+/// [`patina_clock_now`]'s bootstrap leg.
+///
+/// # Safety
+/// `nanos` must be non-null and writable for one `u64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_cpu_time_nanos(nanos: *mut u64) -> c_int {
+    if nanos.is_null() {
+        return fail(EINVAL);
+    }
+    // Bootstrap window / no runtime installed: a deterministic zero (see
+    // `patina_clock_now`). Never routes through `ensure_runtime`, so an
+    // accounting probe cannot trip an auto-install or abort.
+    let value = if in_shim_bootstrap() {
+        0
+    } else {
+        with_context_raw(|context| context.monotonic_now_unrecorded()).unwrap_or(0)
+    };
+    // SAFETY: `nanos` was checked non-null and is writable per the C ABI.
+    unsafe { nanos.write(value) };
+    set_errno(0);
+    0
+}
+
 /// Open a path in the deterministic filesystem.
 ///
 /// # Safety

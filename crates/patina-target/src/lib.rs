@@ -1,6 +1,6 @@
 //! Target metadata and fail-closed import auditing.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use object::{Architecture, BinaryFormat, Object, ObjectSection, ObjectSymbol, SectionKind};
@@ -210,6 +210,148 @@ pub fn native_binary_has_sud_marker(bytes: &[u8]) -> Result<bool, TargetError> {
 /// refuses. This is the escape set the SUD audit downgrade applies to.
 pub fn native_escape_is_sud_manageable(escape: &NativeEscape) -> bool {
     escape.category == "direct-syscall" && escape.symbol.starts_with("instruction@")
+}
+
+/// A native symbol the shim strong-defines as a *deny-trap*: merely LINKING it is
+/// inert (the strong def binds the guest reference at link, so the symbol drops
+/// off the import table and both `audit` and the pre-run gate PASS), but the first
+/// CALL aborts the run deterministically with a diagnostic naming the symbol. This
+/// is the "fails later" surface — a determinism guarantee that is invisible to an
+/// import-table audit because the whole point of the deny-trap is to leave the
+/// import table clean. `(symbol, class)`, where `class` is the same escape
+/// category the pre-run gate prints for the equivalent un-interposed surface
+/// (`process`/`macos-framework`/`host-introspection`).
+pub type NativeDenyTrapSymbol = (&'static str, &'static str);
+
+/// The enumerated deny-trap-armed symbols the native shim (`c/patina_posix.c`)
+/// strong-defines: the process-spawn/identity family (`patina_process_trap`), the
+/// macOS CoreFoundation/Security framework helpers left unreachable by the honest
+/// empty-trust-store / UTC-timezone models (`PATINA_FRAMEWORK_TRAP`), and the
+/// IOKit registry walk left unreachable by `IOServiceMatching` returning NULL
+/// (`PATINA_INTROSPECTION_TRAP`).
+///
+/// This is the UNION across platforms. A given binary only *defines* the members
+/// its target actually compiles — the framework/introspection set is
+/// `__APPLE__`-only, `pidfd_*`/`waitid`/`posix_spawn_file_actions_addchdir*` are
+/// `__linux__`-only — so [`native_deny_trap_armed`] reports exactly the
+/// platform-correct subset by intersecting this union with the binary's real
+/// symbol table. The data-symbol bindings the shim also defines (`kCFAllocator*`,
+/// `mach_task_self_`, ...) are deliberately absent: reading a data symbol does not
+/// abort, so it is not deny-trap armed.
+///
+/// SINGLE SOURCE OF TRUTH: the `deny_trap_symbols_track_the_shim_c_source` test
+/// parses `patina_posix.c` and asserts this list equals exactly its trap-calling
+/// definitions, so when a trap is converted to a real model (or a new one is
+/// added) in the C, this list must move in lockstep or the test fails closed.
+const NATIVE_DENY_TRAP_SYMBOLS: &[NativeDenyTrapSymbol] = &[
+    // process (patina_process_trap): spawn/exec/wait/identity mutation.
+    ("chdir", "process"),
+    ("chroot", "process"),
+    ("execvp", "process"),
+    ("fork", "process"),
+    ("pidfd_getpid", "process"),
+    ("pidfd_spawnp", "process"),
+    ("posix_spawn_file_actions_addchdir", "process"),
+    ("posix_spawn_file_actions_addchdir_np", "process"),
+    ("posix_spawn_file_actions_adddup2", "process"),
+    ("posix_spawn_file_actions_destroy", "process"),
+    ("posix_spawn_file_actions_init", "process"),
+    ("posix_spawnattr_destroy", "process"),
+    ("posix_spawnattr_init", "process"),
+    ("posix_spawnattr_setflags", "process"),
+    ("posix_spawnattr_setpgroup", "process"),
+    ("posix_spawnattr_setsigdefault", "process"),
+    ("posix_spawnp", "process"),
+    ("setgid", "process"),
+    ("setgroups", "process"),
+    ("setpgid", "process"),
+    ("setsid", "process"),
+    ("setuid", "process"),
+    ("waitid", "process"),
+    ("waitpid", "process"),
+    // host-introspection (patina_native_trap explicit sites + PATINA_INTROSPECTION_TRAP):
+    // IOKit registry walk, unreachable while IOServiceMatching returns NULL.
+    ("IOIteratorNext", "host-introspection"),
+    ("IOObjectRelease", "host-introspection"),
+    ("IORegistryEntryCreateCFProperty", "host-introspection"),
+    ("IORegistryEntryGetName", "host-introspection"),
+    ("IOServiceGetMatchingServices", "host-introspection"),
+    // macos-framework (PATINA_FRAMEWORK_TRAP): CoreFoundation/Security helpers
+    // downstream of the honest empty-trust-store / UTC-timezone models.
+    ("CFArrayGetValueAtIndex", "macos-framework"),
+    ("CFDataGetBytePtr", "macos-framework"),
+    ("CFDataGetBytes", "macos-framework"),
+    ("CFDataGetLength", "macos-framework"),
+    ("CFDataGetTypeID", "macos-framework"),
+    ("CFDictionaryGetValueIfPresent", "macos-framework"),
+    ("CFEqual", "macos-framework"),
+    ("CFGetTypeID", "macos-framework"),
+    ("CFNumberGetValue", "macos-framework"),
+    ("CFRetain", "macos-framework"),
+    ("CFStringCreateWithBytesNoCopy", "macos-framework"),
+    ("CFStringCreateWithCStringNoCopy", "macos-framework"),
+    ("CFStringGetBytes", "macos-framework"),
+    ("CFStringGetLength", "macos-framework"),
+    ("SecCertificateCopyData", "macos-framework"),
+    ("SecCopyErrorMessageString", "macos-framework"),
+    ("SecTrustSettingsCopyTrustSettings", "macos-framework"),
+];
+
+/// The enumerated deny-trap-armed shim symbols (union across platforms). See
+/// [`NATIVE_DENY_TRAP_SYMBOLS`]. Query this to render the "fails later" note, or
+/// to test membership; use [`native_deny_trap_armed`] to scan an actual binary.
+pub fn native_deny_trap_symbols() -> &'static [NativeDenyTrapSymbol] {
+    NATIVE_DENY_TRAP_SYMBOLS
+}
+
+/// A deny-trap-armed symbol found DEFINED in a scanned native binary.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NativeDenyTrap {
+    pub symbol: String,
+    pub class: &'static str,
+}
+
+/// Scan a shim-linked native binary's DEFINED symbol table for deny-trap-armed
+/// shim symbols ([`native_deny_trap_symbols`]), returning the matches sorted by
+/// symbol.
+///
+/// Why *defined* symbols, and why this is precise rather than noise: the deny-trap
+/// strong def drops the symbol off the *import* table, so a defined match is the
+/// only post-link evidence the binary carries the armed surface at all. The naive
+/// worry is that every shim-linked binary defines the whole shim object and so
+/// would report identically — but the final link dead-strips an unreferenced trap:
+/// macOS `ld64` at atom granularity, and ELF `--gc-sections` (rustc's default)
+/// when the shim object is per-function-sectioned. So a trap symbol survives into
+/// the binary essentially iff the guest (transitively) references it, which is
+/// exactly the "this run can fail later HERE" set we want to surface. A binary
+/// whose target did not compile a given member simply never defines it, so the
+/// platform-correct subset falls out for free. Fails closed on a parse error or a
+/// non-native format (a foreign input is never reported as clean).
+pub fn native_deny_trap_armed(bytes: &[u8]) -> Result<Vec<NativeDenyTrap>, TargetError> {
+    let file = object::File::parse(bytes).map_err(TargetError::NativeParse)?;
+    // Only a native (Mach-O/ELF) binary carries these; refuse a foreign format so
+    // it is never silently treated as carrying no armed surface.
+    NativeFormat::from_binary(file.format())?;
+    let armed: BTreeMap<&'static str, &'static str> =
+        NATIVE_DENY_TRAP_SYMBOLS.iter().copied().collect();
+    let mut found: BTreeMap<&'static str, &'static str> = BTreeMap::new();
+    for symbol in file.symbols().chain(file.dynamic_symbols()) {
+        if !symbol.is_definition() {
+            continue;
+        }
+        let Ok(name) = symbol.name() else { continue };
+        let normalized = normalize_native_symbol(name);
+        if let Some((canonical, class)) = armed.get_key_value(normalized) {
+            found.insert(*canonical, *class);
+        }
+    }
+    Ok(found
+        .into_iter()
+        .map(|(symbol, class)| NativeDenyTrap {
+            symbol: symbol.to_owned(),
+            class,
+        })
+        .collect())
 }
 
 /// The shim's own host control-plane symbols the pre-run gate tolerates in a
@@ -3117,5 +3259,113 @@ mod tests {
         bytes.push(import.len() as u8);
         bytes.extend(import);
         bytes
+    }
+
+    /// Read the first double-quoted string literal at the start of `after` (which
+    /// must begin at the opening quote), returning `(contents, rest_after_quote)`.
+    /// `None` when `after` does not begin with a `"` (e.g. a `#name` macro
+    /// stringization), which is exactly how the parser skips the `patina_native_trap`
+    /// macro *definition* while catching its literal call sites.
+    fn read_quoted(after: &str) -> Option<(&str, &str)> {
+        let rest = after.strip_prefix('"')?;
+        let end = rest.find('"')?;
+        Some((&rest[..end], &rest[end + 1..]))
+    }
+
+    /// The single string-literal argument of the first `prefix("…")` call on
+    /// `line`, if any (`patina_process_trap("fork")` → `fork`).
+    fn one_literal_arg(line: &str, prefix: &str) -> Option<String> {
+        let idx = line.find(prefix)?;
+        let (arg, _) = read_quoted(&line[idx + prefix.len()..])?;
+        Some(arg.to_owned())
+    }
+
+    /// The `(class, symbol)` of the first `patina_native_trap("class", "symbol")`
+    /// call on `line`. Returns `None` when either argument is not a string literal,
+    /// which skips the macro definition `patina_native_trap("…", #name)`.
+    fn native_trap_args(line: &str) -> Option<(String, String)> {
+        let idx = line.find("patina_native_trap(")?;
+        let after = &line[idx + "patina_native_trap(".len()..];
+        let (class, rest) = read_quoted(after)?;
+        let rest = rest.trim_start().strip_prefix(',')?.trim_start();
+        let (symbol, _) = read_quoted(rest)?;
+        Some((class.to_owned(), symbol.to_owned()))
+    }
+
+    /// The identifier argument of a `MACRO(Ident)` invocation at the start of a
+    /// trimmed `line`, e.g. `PATINA_FRAMEWORK_TRAP(CFArrayCreate)` → `CFArrayCreate`.
+    fn macro_invocation_arg(line: &str, macro_name: &str) -> Option<String> {
+        let rest = line.strip_prefix(macro_name)?.strip_prefix('(')?;
+        let end = rest.find(')')?;
+        let ident = &rest[..end];
+        (!ident.is_empty() && ident.chars().all(|c| c.is_alphanumeric() || c == '_'))
+            .then(|| ident.to_owned())
+    }
+
+    /// Parse every deny-trap-calling definition out of the shim C source into a
+    /// `(symbol, class)` set: the two trap macros' invocations, the explicit
+    /// `patina_native_trap` sites, and the `patina_process_trap` sites. The macro
+    /// class is fixed by the macro (its body calls `patina_native_trap` with that
+    /// literal class), so it is attached here.
+    fn parse_c_deny_traps(source: &str) -> BTreeSet<(String, String)> {
+        let mut set = BTreeSet::new();
+        for raw in source.lines() {
+            let line = raw.trim_start();
+            // Skip preprocessor lines so the macro `#define`/`#undef` are ignored;
+            // real invocations sit at column 0 with no leading `#`.
+            if !line.starts_with('#') {
+                if let Some(symbol) = macro_invocation_arg(line, "PATINA_FRAMEWORK_TRAP") {
+                    set.insert((symbol, "macos-framework".to_owned()));
+                    continue;
+                }
+                if let Some(symbol) = macro_invocation_arg(line, "PATINA_INTROSPECTION_TRAP") {
+                    set.insert((symbol, "host-introspection".to_owned()));
+                    continue;
+                }
+            }
+            if let Some(symbol) = one_literal_arg(line, "patina_process_trap(") {
+                set.insert((symbol, "process".to_owned()));
+            }
+            if let Some((class, symbol)) = native_trap_args(line) {
+                set.insert((symbol, class));
+            }
+        }
+        set
+    }
+
+    // SINGLE SOURCE OF TRUTH guard: `NATIVE_DENY_TRAP_SYMBOLS` must equal exactly
+    // the set of trap-calling definitions in `c/patina_posix.c`. Reading the C via
+    // an include_str! keeps the guard hermetic without a dependency edge onto the
+    // shim crate. When a concurrent change converts a trap to a real model (the
+    // symbol's trap body is removed) or adds a new trap, this fails until the
+    // constant is updated in lockstep — so the "fails later" note can never quietly
+    // drift from what the shim actually arms.
+    #[test]
+    fn deny_trap_symbols_track_the_shim_c_source() {
+        const C_SOURCE: &str = include_str!("../../patina-native-shim/c/patina_posix.c");
+        let parsed = parse_c_deny_traps(C_SOURCE);
+        let declared: BTreeSet<(String, String)> = NATIVE_DENY_TRAP_SYMBOLS
+            .iter()
+            .map(|(symbol, class)| ((*symbol).to_owned(), (*class).to_owned()))
+            .collect();
+        let missing: Vec<_> = parsed.difference(&declared).collect();
+        let extra: Vec<_> = declared.difference(&parsed).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "NATIVE_DENY_TRAP_SYMBOLS drifted from c/patina_posix.c.\n  \
+             in the C but NOT in the constant (add them): {missing:?}\n  \
+             in the constant but NOT in the C (a trap became a real model? remove them): {extra:?}",
+        );
+    }
+
+    #[test]
+    fn deny_trap_armed_scan_fails_closed_on_a_foreign_input() {
+        // A non-native (here, wasm) blob must fail closed rather than report clean:
+        // either a native-format rejection or a parse rejection, never `Ok`.
+        let wasm = module_importing(WASI_PREVIEW1_MODULE, "random_get");
+        assert!(
+            native_deny_trap_armed(&wasm).is_err(),
+            "a foreign input must never be reported as carrying no armed surface"
+        );
     }
 }
