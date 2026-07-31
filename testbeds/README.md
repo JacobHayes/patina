@@ -17,9 +17,10 @@ build, so the guest still builds and runs as a plain program.
 
 `workq` is the flagship: `workq/run-patina.sh` runs its full self-checking
 battery (determinism, record/replay, net/fs faults, crash-recovery, buggify
-sweep) per push in CI, and `workq/fuzz-sweep.sh` is the home of the
-randomized-but-deterministic fault-combination campaign (including its
-schedule-fuzz tier) that runs nightly. `liveness-campaign` and `buggify-wasi`
+sweep) on every routine Linux CI run and the daily/manual macOS run.
+`workq/fuzz-sweep.sh` is the home of the randomized-but-deterministic
+fault-combination campaign (including its schedule-fuzz tier) that runs nightly
+on Linux. `liveness-campaign` and `buggify-wasi`
 are small fixtures. `buggify-campaign.sh` (this directory) is the shared
 campaign layer — `PATINA_SDK_REPORT` parsing, cross-generation coverage
 accumulation, the `ALWAYS_VIOLATION`/`SOMETIMES_UNMET` classes — sourced by the

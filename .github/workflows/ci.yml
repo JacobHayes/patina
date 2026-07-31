@@ -3,12 +3,13 @@ name: CI
 on:
   pull_request:
   push:
-    # ci/** lets a pushed branch run the full matrix without opening a PR
-    # (used for iterating on Linux-only behavior from macOS).
+    # ci/** lets a pushed branch run the routine Linux matrix without opening
+    # a PR (used for iterating on Linux-only behavior from macOS).
     branches: [main, "ci/**"]
-  # Nightly heavy randomized campaign over the flagship workq testbed (see the
-  # `nightly` job). Also manually triggerable. 07:17 UTC dodges top-of-hour cron
-  # congestion on GitHub-hosted runners.
+  # The heavy randomized workq campaign runs nightly on Linux, alongside one
+  # stable macOS clean-host safety-net run. Ordinary pushes rely on the
+  # developer's full local macOS landing gate and spend hosted-runner time on
+  # the Linux platforms unavailable locally.
   schedule:
     - cron: "17 7 * * *"
   workflow_dispatch:
@@ -19,6 +20,9 @@ concurrency:
 
 jobs:
   platform:
+    # Scheduled runs have dedicated jobs below. Pushes, pull requests, and
+    # manual dispatches cover both Linux architectures on stable + MSRV.
+    if: github.event_name != 'schedule'
     name: ${{ matrix.toolchain }} / ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -26,7 +30,7 @@ jobs:
         toolchain: [stable, msrv]
         # x86_64 and aarch64 Linux surface different platform gaps (libgcc
         # split-stack wrap symbols exist only on x86; the dev VM is aarch64).
-        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -96,22 +100,48 @@ jobs:
       - if: matrix.toolchain == 'stable'
         run: testbeds/pubsub/run-patina.sh
       # The ecosystem symbol-audit corpus: 20 per-crate MREs built + audited,
-      # each compared strictly (both directions) to a committed per-platform
-      # expectation file — the standing punchlist for the classification work.
-      # STABLE macOS + STABLE Linux x86_64 ONLY: msrv and the arm runners are
-      # skipped to bound cost (the audited symbol surface is toolchain-
-      # independent, and Linux arm shares the x86_64 expectation once recorded).
-      # crates.io network access on the runners is fine (the MREs are version-
-      # pinned by their committed Cargo.lock). Until the coordinator records
-      # expected/*.linux.txt on real Linux, run.sh self-SKIPs on Linux with a
-      # loud notice and exits 0, so this step never reddens CI pre-recording.
-      - if: matrix.toolchain == 'stable' && (runner.os == 'macOS' || matrix.runner == 'ubuntu-latest')
+      # each compared strictly (both directions) to a committed platform
+      # expectation file. Stable Linux x86_64 runs it here; the daily/manual
+      # macOS job below checks the independently recorded macOS surface.
+      - if: matrix.toolchain == 'stable' && matrix.runner == 'ubuntu-latest'
         run: testbeds/audit-corpus/run.sh
+
+  # Hosted macOS is a clean-environment safety net, not a duplicate of every
+  # locally validated push. Run the stable macOS gates daily and on explicit
+  # manual dispatch; MSRV remains covered on both Linux architectures.
+  macos:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '17 7 * * *'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            testbeds/workq
+            testbeds/pubsub
+      - run: cargo test --workspace --locked
+      - run: scripts/validate-wasi.sh
+      # macOS has no sound whole-run syscall tracing gate; the native script
+      # still exercises the static instruction scan, import audit, and runtime
+      # behavior. Linux's required strace detector runs in `platform` above.
+      - run: scripts/validate-native-shim.sh
+        env:
+          PATINA_REQUIRE_STRACE: "0"
+      - run: scripts/smoke-cross-target.sh
+      - run: testbeds/workq/run-patina.sh
+      - run: testbeds/pubsub/run-patina.sh
+      - run: testbeds/audit-corpus/run.sh
 
   # Advisory audit (RustSec). The root workspace lockfile is STRICT — any
   # advisory (including any protobuf appearance) fails the job. The testbeds are
   # separate workspaces with their own locks; every one is strict.
   audit:
+    # Lockfiles cannot change between pushes, so scheduled reruns add no signal.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -129,19 +159,15 @@ jobs:
             cargo audit --file "testbeds/$tb/Cargo.lock"
           done
 
-  # Heavy randomized campaign, beyond the per-push budget. The per-push jobs
-  # already run the flagship workq testbed's full self-checking battery
-  # (testbeds/workq/run-patina.sh); nightly adds breadth by sweeping 200
-  # randomized fault-combination generations over that same testbed — including
-  # its schedule-fuzz tier — which is far too long to run on every push. Runs
-  # nightly (cron) and on manual dispatch, on Linux and macOS.
+  # Heavy randomized campaign, beyond the per-push budget. The per-push Linux
+  # jobs already run the flagship workq testbed's full self-checking battery;
+  # nightly adds breadth by sweeping 200 randomized fault-combination
+  # generations, including the schedule-fuzz tier. The campaign runs on Linux,
+  # where it covers the same deterministic model without duplicating hosted
+  # macOS minutes; the daily macOS job runs the full deterministic gate suite.
   nightly:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.runner }}
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '17 7 * * *'
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
