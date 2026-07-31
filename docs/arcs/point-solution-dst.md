@@ -14,7 +14,7 @@ job). Three deliverables, one phase-2 boundary sketch:
 2. Tool-agnostic agent skills in `docs/skills/` (no `.claude/`-specific
    artifacts).
 3. Source-first polish for the `cargo patina run script.rs` tight loop.
-4. Phase 2, scheduled as this arc's Wave D: `patina-dst-harness` as an
+4. Boundary sketch only (deliberately unscheduled): `patina-dst-harness` as an
    embeddable fixture library. (Skills, item 2, run as a separate final pass
    after all arcs land — see Wave C.)
 
@@ -340,7 +340,7 @@ Findings and minimal fixes:
   cargo-script-style embedded manifest for now (new parse surface plus
   lockfile/determinism questions; revisit only on demonstrated demand).
 
-## 4. Phase 2 boundary sketch: harness fixtures (implemented as Wave D)
+## 4. Boundary sketch: harness fixtures (unscheduled — see staged plan)
 
 `patina-dst-harness` already supports deferred init (`--harness` →
 `PATINA_DEFER_INIT`, `lib.rs:5713`; USAGE-MODES mode 2): a binary configures
@@ -393,12 +393,11 @@ separate FINAL pass after all the other arcs have landed**, so the skills teach
 the finished surface (sites/coverage/trace verbs, fault knobs, --extend) rather
 than a snapshot that goes stale a week later.
 
-**Wave D — harness fixtures (phase 2, scheduled here — not a separate future
-arc).** Owned by this arc per user directive (2026-07-30: phase-2 items are
-tackled as part of their arcs, never parked for a later prompt). Implements the
-§4 boundary: in-code per-test config over the existing `--harness`/
-`PATINA_DEFER_INIT` path, no new runtime mode; designed in detail once wave B's
-macro is real and its config-vs-fingerprint questions are concrete.
+Harness fixtures (the §4 sketch) are deliberately NOT scheduled (user call,
+2026-07-31): likely possible over the existing `--harness`/`PATINA_DEFER_INIT`
+path, but it is the one item with no concrete consumer and real
+config-vs-fingerprint design risk — cut per no-cruft until a real need appears.
+The §4 boundary sketch stays as the record of how it would slot in.
 
 ## Open questions for review
 
