@@ -1,6 +1,6 @@
 # Unified Fault-Knob System — Design
 
-Status: proposal for review; no implementation before sign-off. All file:line references
+Status: design approved 2026-07-30; implementation not yet scheduled. All file:line references
 verified against the working tree (post-e135c94). Intended to land under `docs/` as an arc doc.
 
 ## 0. Verified current state (what this builds on, with the gaps found)

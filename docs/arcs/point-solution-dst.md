@@ -1,6 +1,6 @@
 # Arc: point-solution DST — deep exposure for a slice of a project
 
-Status: DESIGN — awaiting coordinator + user sign-off. No implementation before sign-off.
+Status: design approved 2026-07-30; implementation not yet scheduled.
 Lands as `docs/arcs/point-solution-dst.md`.
 
 Patina today is strongest as a whole-program instrument: build a binary, sweep
@@ -14,8 +14,9 @@ job). Three deliverables, one phase-2 boundary sketch:
 2. Tool-agnostic agent skills in `docs/skills/` (no `.claude/`-specific
    artifacts).
 3. Source-first polish for the `cargo patina run script.rs` tight loop.
-4. Phase 2 (sketch only): `patina-dst-harness` as an embeddable fixture
-   library.
+4. Phase 2, scheduled as this arc's Wave D: `patina-dst-harness` as an
+   embeddable fixture library. (Skills, item 2, run as a separate final pass
+   after all arcs land — see Wave C.)
 
 ## Decision summary
 
@@ -339,7 +340,7 @@ Findings and minimal fixes:
   cargo-script-style embedded manifest for now (new parse surface plus
   lockfile/determinism questions; revisit only on demonstrated demand).
 
-## 4. Phase 2 boundary sketch: harness fixtures (not planned here)
+## 4. Phase 2 boundary sketch: harness fixtures (implemented as Wave D)
 
 `patina-dst-harness` already supports deferred init (`--harness` →
 `PATINA_DEFER_INIT`, `lib.rs:5713`; USAGE-MODES mode 2): a binary configures
@@ -387,7 +388,17 @@ double-run identical; MSRV 1.86 build of the new crates; no new deps
 **Wave C — skills + links** (two skill docs, drift `DOCS` list, README/llms.txt
 links). Verify: `check-flag-drift.sh` (including its `--selftest`), every
 command in both skills executed once against the built CLI with output pasted
-into the battery log.
+into the battery log. **Sequencing (user, 2026-07-30): this wave runs as a
+separate FINAL pass after all the other arcs have landed**, so the skills teach
+the finished surface (sites/coverage/trace verbs, fault knobs, --extend) rather
+than a snapshot that goes stale a week later.
+
+**Wave D — harness fixtures (phase 2, scheduled here — not a separate future
+arc).** Owned by this arc per user directive (2026-07-30: phase-2 items are
+tackled as part of their arcs, never parked for a later prompt). Implements the
+§4 boundary: in-code per-test config over the existing `--harness`/
+`PATINA_DEFER_INIT` path, no new runtime mode; designed in detail once wave B's
+macro is real and its config-vs-fingerprint questions are concrete.
 
 ## Open questions for review
 

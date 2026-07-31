@@ -1,6 +1,6 @@
 # Campaign steering: resumable + extendable campaigns
 
-Status: decision-ready design, no implementation before sign-off. Lands as
+Status: design approved 2026-07-30; implementation not yet scheduled. Lands as
 `docs/arcs/campaign-steering.md`.
 
 ## 1. Problem and settled decision

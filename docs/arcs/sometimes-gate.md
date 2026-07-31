@@ -123,7 +123,7 @@ never activated across a sweep), but only oracle kinds participate in the gate. 
 is associative (counts add, `first_*` takes the min), which is exactly what the
 resumable-campaign arc needs: a resumed campaign loads `sites.json`, continues the
 fold, and rewrites it — no shape change required. Cross-reference:
-`docs/arcs/resumable-campaign.md` (in flight); its persistence section should list
+`docs/arcs/campaign-steering.md` (in flight); its persistence section should list
 `sites.json` alongside `signatures.json` as resume state.
 
 Persisted every campaign as `<out>/sites.json`, schema
@@ -339,11 +339,12 @@ runs suffice; the e2e fixtures are `wat`-built wasm modules (like `WASI_BUGGIFY_
 
 ## Cross-references
 
-* `docs/arcs/resumable-campaign.md` (in flight): `sites.json` is resume state; the
+* `docs/arcs/campaign-steering.md` (in flight): `sites.json` is resume state; the
   fold is associative by design; threshold waiver uses `generations_observed`.
-* Future arc (not this one): static site enumeration (link-time site table) — makes
-  never-reached `sometimes!`/`reachable!` sites visible as `registered_gens=0` unmet
-  entries; the gate formula and schema here absorb it unchanged.
+* Static site enumeration is scheduled as the invariant-visibility arc's Wave 5 (not a
+  someday-item): a link-time site table makes never-reached `sometimes!`/`reachable!`
+  sites visible as `registered_gens=0` unmet entries; the gate formula and schema here
+  absorb it unchanged.
 * Doctrine: vacuous-schedule diagnostic (same vacuity class, same fail-closed rationale);
   INTENTS principle 9 (`INTENTS.md:133`) for the summary-first shapes;
   detection-before-fixes for the RED-proven gate test and the loud malformed-row error.

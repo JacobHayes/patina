@@ -1,6 +1,6 @@
 # clap adoption + configuration story: evaluation and spike definition
 
-Status: evaluation (defines a future spike; no spike code exists yet).
+Status: approved 2026-07-30; spike awaits explicit user go, then the coordinator owns the adopt/reject call.
 Scope: the `cargo-patina` CLI only. Decision owner: user, after the spike defined in §7.
 
 This doc answers four questions about adopting clap for the cargo-patina CLI,
@@ -303,7 +303,12 @@ line-item.** Neither dominates.
 
 ## 7. The spike protocol
 
-Time-box: **2 working days**. Branch-only; no landing without the decision rule.
+Time-box: **~1 agent-hour** (user-calibrated 2026-07-30 — a subagent runs this in
+roughly an hour, not the human-scale "2 working days" originally written; keep it a
+small spike regardless). Throwaway workspace; no landing without the decision rule.
+The spike launches on the user's explicit go; after it reports, the coordinator owns
+the adopt/reject call against the §8 decision rule — including kicking off the full
+parser→clap port without further prompting if it clearly passes.
 
 **Port exactly two verbs, registry-driven builder API:**
 

@@ -336,6 +336,16 @@ runtime-touching waves and at the arc boundary.
 - **Wave 4 — `.patina/` config.** Groups/tags in rollups (both arcs), `[defaults.*]`,
   `.gitignore` generation, `--no-config`, gate 6. CLI-only → fast tier, then the **arc-boundary
   full battery**.
+- **Wave 5 — static site enumeration (phase 2, scheduled here — not a separate future
+  arc).** Owned by this arc per user directive (2026-07-30: phase-2 items are tackled as
+  part of their arcs, never parked for a later prompt). A link-time site table
+  (`inventory`/`linkme`-style registration in the SDK macros, surfaced by both embedders)
+  gives the campaign and the `sites` verb the FULL site universe up front, making
+  never-reached `sometimes!`/`reachable!` sites visible as `registered_gens=0` rows — which
+  is the moment the sometimes-gate arc's uniform gate starts biting on `reachable!` with
+  zero redesign (its schema and formula already absorb it). Runtime + SDK touching → full
+  battery + Linux gates; RED proof = a planted never-called `reachable!` visible in the
+  static table and failing the gate.
 
 Coverage-depth adopts the rollup module in its own arc once wave 1 lands.
 

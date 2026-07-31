@@ -1,6 +1,6 @@
 # Arc: trace inspection — `cargo patina trace {info,events,stats,diff}`
 
-Status: PROPOSED (decision-ready; no implementation before sign-off).
+Status: design approved 2026-07-30; implementation not yet scheduled.
 Scope settled by the user: all four surfaces (info, events, diff, stats); "not
 overengineered, but nicely inspectable — discovery/analysis via CLI + --help docs".
 

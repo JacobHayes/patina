@@ -1,13 +1,13 @@
 # Arc: coverage / depth measurement for runs and campaigns
 
-Status: DESIGN — decision-ready, no implementation before coordinator + user sign-off.
+Status: design approved 2026-07-30; implementation not yet scheduled.
 Lands as `docs/arcs/coverage-depth.md`.
 
 Cross-references:
 - **invariant-visibility arc** (`docs/arcs/invariant-visibility.md`): its crate → module →
   function hierarchy and `.patina/` tags/groups config are THE shared grouping mechanism.
   This arc designs ONE rollup module, used by both (§4).
-- **resumable-campaign arc** (`docs/arcs/resumable-campaign.md`): plateau detection and the
+- **resumable-campaign arc** (`docs/arcs/campaign-steering.md`): plateau detection and the
   persisted coverage state (§6, §8) are decision inputs for `campaign --extend`.
 
 User-settled decisions this design works within (not relitigated): reuse the existing
@@ -15,7 +15,8 @@ User-settled decisions this design works within (not relitigated): reuse the exi
 cumulative per-site hit counters; report percentages + locations, never bare counts;
 PC symbolization with hierarchical rollup; WASI depth = fuel + hostcall counts (honestly
 labeled depth, not coverage); campaign summary + `patina.campaign/v2` envelope + plateau
-in heartbeat; coverage-GUIDED scheduling is phase 2 — only its interface is designed here.
+in heartbeat; coverage-GUIDED scheduling is phase 2, scheduled as this arc's Wave E
+(interface fixed in §8; implementation owned by this arc, not a future prompt).
 
 ---
 
@@ -297,7 +298,7 @@ gains `covered_permille=… plateaued=…`. The v2 envelope gains additive `cove
 
 ---
 
-## 8. Phase-2 interface boundary (coverage-GUIDED scheduling — not designed here)
+## 8. Phase-2 interface boundary (coverage-GUIDED scheduling — implemented as Wave E)
 
 Phase 1 persists everything phase 2 needs and nothing more:
 
@@ -348,7 +349,17 @@ plumbing through `RunReport`, `PATINA_DEPTH_REPORT`, campaign depth accumulation
 `depth_plateau`.
 *Verify*: `mise run check`, both e2e runs, plus a WASI campaign smoke.
 
-Waves are separable and land independently; A must precede B/C; D is independent of B/C.
+**Wave E — coverage-GUIDED generation scheduling (phase 2, scheduled here — not a
+separate future arc).** Owned by this arc per user directive (2026-07-30: phase-2 items
+are tackled as part of their arcs, never parked for a later prompt). Builds strictly on
+the §8 interface: a campaign mode that biases knob/seed selection toward novelty using
+`new_edge_log` + `union.bits`, designed and RED-proven in its own right when waves A–C
+have real coverage data to steer on. Determinism constraint carried forward: guided
+selection must remain a pure function of (seed, persisted coverage state), so an
+extended guided campaign stays reproducible.
+
+Waves are separable and land independently; A must precede B/C; D is independent of B/C;
+E follows C.
 
 ---
 
