@@ -121,17 +121,17 @@ struct SiteTally {
 All kinds are tallied (same loop, lossless, useful for triage — e.g. a fault site that
 never activated across a sweep), but only oracle kinds participate in the gate. The fold
 is associative (counts add, `first_*` takes the min), which is exactly what the
-resumable-campaign arc needs: a resumed campaign loads `coverage.json`, continues the
+resumable-campaign arc needs: a resumed campaign loads `sites.json`, continues the
 fold, and rewrites it — no shape change required. Cross-reference:
 `docs/arcs/resumable-campaign.md` (in flight); its persistence section should list
-`coverage.json` alongside `signatures.json` as resume state.
+`sites.json` alongside `signatures.json` as resume state.
 
-Persisted every campaign as `<out>/coverage.json`, schema
-`patina.campaign.coverage/v1`, next to `signatures.json`:
+Persisted every campaign as `<out>/sites.json`, schema
+`patina.campaign.sites/v1`, next to `signatures.json`:
 
 ```json
 {
-  "schema": "patina.campaign.coverage/v1",
+  "schema": "patina.campaign.sites/v1",
   "generations_observed": 5000,
   "sites": [
     { "label": "redelivery-observed", "kind": "sometimes",
@@ -143,7 +143,7 @@ Persisted every campaign as `<out>/coverage.json`, schema
 ```
 
 The tally is a pure fold over per-generation reports, so the existing deterministic-re-run
-e2e extends to assert byte-identical `coverage.json` across identical sweeps.
+e2e extends to assert byte-identical `sites.json` across identical sweeps.
 
 ### 3. The gate
 
@@ -178,12 +178,12 @@ Human summary additions:
 -- coverage (sometimes!/reachable!) --
 oracle_sites=4 satisfied=3 unmet=1
   UNMET sometimes 'large-batch-seen' satisfied_gens=0/5000 registered_gens=4998 evals=981223
-coverage store: patina-campaign-out/coverage.json
+coverage store: patina-campaign-out/sites.json
 PATINA_CAMPAIGN_COVERAGE oracle_sites=4 satisfied=3 unmet=1 gate=fail
 ```
 
 (`gate=` is one of `pass | fail | waived | off`-less — there is no off; satisfied sites are
-one line of counts, per-site detail lives in `coverage.json`, unmet sites are always
+one line of counts, per-site detail lives in `sites.json`, unmet sites are always
 enumerated inline: the interesting minority, per progressive disclosure.)
 
 ### 4. Waiver flag
@@ -258,7 +258,7 @@ never satisfied).
 ### 7. Envelope: additive within v2
 
 Per the documented convention (bump only on a breaking change, `output.rs:21-24`), adding
-a `coverage` object and an `artifacts.coverage_store` pointer is additive — existing
+a `coverage` object and an `artifacts.sites_store` pointer is additive — existing
 consumers keyed on `classes`/`signatures`/`notable_runs`/`artifacts` are untouched — so the
 schema stays `patina.campaign/v2`. (The v1→v2 bump was a breaking reshape, `runs` →
 `notable_runs`; this is not that.)
@@ -275,11 +275,11 @@ schema stays `patina.campaign/v2`. (The v1→v2 bump was a breaking reshape, `ru
       "generations_observed": 5000, "evals": 981223, "waived": false }
   ]
 },
-"artifacts": { …, "coverage_store": "<out>/coverage.json" }
+"artifacts": { …, "sites_store": "<out>/sites.json" }
 ```
 
 Summary-first: counts + the unmet minority inline; the full per-site table (including the
-satisfied sites and non-oracle kinds) lives only in `coverage.json`, reachable via the
+satisfied sites and non-oracle kinds) lives only in `sites.json`, reachable via the
 pointer — lossless aggregation, firehose on disk.
 
 ## Edge cases (consolidated)
@@ -296,8 +296,8 @@ pointer — lossless aggregation, firehose on disk.
 | Malformed `site=` token (e.g. label with space/`|`) | Hard campaign error naming gen + token; runtime label-charset guard recommended as follow-up. |
 | Inherited `PATINA_SDK_REPORT=0` | Campaign pins `=1` on children (the one behavioral change outside parsing). |
 | wasi vs native artifact | Identical: both embedders drive the same `Context::finish` emitter to process stderr. |
-| Deterministic re-run | `coverage.json` byte-identical (pure fold; asserted by e2e). |
-| Resumed campaign (future arc) | Load `coverage.json`, continue the associative fold; threshold waiver compares observed gens. |
+| Deterministic re-run | `sites.json` byte-identical (pure fold; asserted by e2e). |
+| Resumed campaign (future arc) | Load `sites.json`, continue the associative fold; threshold waiver compares observed gens. |
 
 ## Staged plan
 
@@ -318,7 +318,7 @@ runs suffice; the e2e fixtures are `wat`-built wasm modules (like `WASI_BUGGIFY_
    RED-proven before the gate exists.
 2. **Row parser** (pure): `parse_sdk_report` + unit tests (round-trip against the emitter
    format, malformed-token loud error, absent-line ok, last-line-wins).
-3. **Tally + persistence + surfacing**: fold into `CoverageTally`, write `coverage.json`,
+3. **Tally + persistence + surfacing**: fold into `CoverageTally`, write `sites.json`,
    add the human coverage block + `PATINA_CAMPAIGN_COVERAGE` marker + envelope `coverage`
    section (envelope unit tests mirror `envelope_is_summary_first_with_artifact_pointers`:
    unmet-only inline, pointer present, schema still v2). Pin `PATINA_SDK_REPORT=1` on
@@ -332,14 +332,14 @@ runs suffice; the e2e fixtures are `wat`-built wasm modules (like `WASI_BUGGIFY_
    (liveness-campaign, workq sweeps) under the default gate and fix any testbed whose
    oracles legitimately can't be met at its sweep size (expected: none — their conditions
    are satisfied within a few generations — but the stage verifies rather than assumes).
-5. **Determinism + docs**: extend the deterministic-re-run e2e to compare `coverage.json`;
+5. **Determinism + docs**: extend the deterministic-re-run e2e to compare `sites.json`;
    update campaign help prose (gate semantics + reachability limitation), `IMPLEMENTATION.md`
    / `VALIDATION.md` per the usual landing checklist; `mise check` ladder with the two e2e
    runs in the battery log.
 
 ## Cross-references
 
-* `docs/arcs/resumable-campaign.md` (in flight): `coverage.json` is resume state; the
+* `docs/arcs/resumable-campaign.md` (in flight): `sites.json` is resume state; the
   fold is associative by design; threshold waiver uses `generations_observed`.
 * Future arc (not this one): static site enumeration (link-time site table) — makes
   never-reached `sometimes!`/`reachable!` sites visible as `registered_gens=0` unmet
@@ -356,5 +356,11 @@ runs suffice; the e2e fixtures are `wat`-built wasm modules (like `WASI_BUGGIFY_
    cases. If static site enumeration later widens the gate's scope, rename the flag to
    match reality then — renames are ordinary hard cuts with all callers migrated, not
    something to pre-hedge against.
-2. `coverage.json` includes non-oracle kinds from day one — same loop, lossless, aids
+2. `sites.json` includes non-oracle kinds from day one — same loop, lossless, aids
    fault-site triage.
+3. Store unification (coordinator, 2026-07-30): this doc's per-label aggregate store and
+   the invariant-visibility arc's exercised-sites store are the SAME data, so there is one
+   store — `<out>/sites.json`, schema `patina.campaign.sites/v1` (field superset of both) —
+   consumed by this gate, by `cargo patina sites --exercised`, and resumed by the
+   campaign-steering arc. The edge-coverage arc's separate `<out>/coverage/` directory now
+   collides with nothing.
