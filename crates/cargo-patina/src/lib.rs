@@ -4322,6 +4322,7 @@ scheduler-hook=patina_yield_point fingerprint-suffix={PATINA_YIELD_FINGERPRINT_S
                 .as_deref()
                 .expect("single-source native-build requires --output"),
             &edition,
+            invocation.release,
             &object,
             &staticlib,
             yield_object.as_deref(),
@@ -4544,10 +4545,12 @@ fn push_platform_link_args(mut configure: impl FnMut(&str)) {
 /// Compile a single Rust source, injecting cfg(patina)/cfg(dst) and linking the
 /// POSIX object and shim staticlib below it. Built native for the host, so the
 /// host OS selects the link recipe.
+#[allow(clippy::too_many_arguments)]
 fn build_native_source(
     source: &Path,
     output: &Path,
     edition: &str,
+    release: bool,
     object: &Path,
     staticlib: &Path,
     yield_object: Option<&Path>,
@@ -4579,6 +4582,24 @@ fn build_native_source(
     push_platform_link_args(|arg| {
         command.arg("-C").arg(arg);
     });
+    if release {
+        // Match cargo's `release` profile so a single-source guest behaves
+        // identically to a package guest under `--release`: optimize, and compile
+        // out `debug_assert!`/overflow checks (which turns those free failure
+        // oracles into no-ops — see the debug-vs-release note). These are stable
+        // `-C` codegen flags, so no nightly/`RUSTC_BOOTSTRAP`, and they compose
+        // with the sancov yield-point flags above. Emitted before `rustc_args` so
+        // an explicit trailing `-C opt-level=…` from the user still wins (rustc
+        // takes the last value for a repeated `-C` option).
+        command.args([
+            "-C",
+            "opt-level=3",
+            "-C",
+            "debug-assertions=off",
+            "-C",
+            "overflow-checks=off",
+        ]);
+    }
     command.arg(source).arg("-o").arg(output).args(rustc_args);
     let status = command
         .status()

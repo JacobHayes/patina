@@ -2104,6 +2104,69 @@ fn native_audit_and_run_emit_no_deny_trap_note_when_none_referenced() {
     );
 }
 
+// `run --release` must reprofile the GUEST for a single `.rs` source, not just the
+// shim staticlib: a `debug_assert!` is a live failure oracle under the default
+// (debug) build and compiled out under `--release`, exactly as it is for a package
+// guest. The debug leg here is also the pre-fix release behavior — before the
+// release profile was threaded into the single-source `rustc` invocation, a
+// `run --release <source.rs>` produced a byte-for-byte debug guest, so its assert
+// fired identically. That makes the release-clean assertion below non-vacuous: it
+// can only pass because the fix strips the assert.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_single_source_release_strips_debug_asserts() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("assert-guest.rs");
+    fs::write(
+        &source,
+        r#"fn main() {
+    debug_assert!(false, "SINGLE_SOURCE_DEBUG_ASSERT");
+    println!("SINGLE_SOURCE_RELEASE_CLEAN");
+}
+"#,
+    )
+    .unwrap();
+
+    // Default (debug) build-on-run: the debug_assert fires, aborting the guest.
+    let debug = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["run", source.to_str().unwrap(), "--seed", "0"],
+    );
+    assert!(
+        !debug.status.success(),
+        "default single-source run must fire the debug_assert:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&debug.stdout),
+        String::from_utf8_lossy(&debug.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&debug.stderr).contains("SINGLE_SOURCE_DEBUG_ASSERT"),
+        "the debug run must name the fired assert:\n{}",
+        String::from_utf8_lossy(&debug.stderr)
+    );
+
+    // `--release` build-on-run: the debug_assert is compiled out, so the guest
+    // reaches its clean exit — proof the guest itself (not only the shim) was built
+    // release.
+    let release = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["run", "--release", source.to_str().unwrap(), "--seed", "0"],
+    );
+    assert!(
+        release.status.success(),
+        "single-source run --release must compile out the debug_assert:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&release.stdout),
+        String::from_utf8_lossy(&release.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&release.stdout).contains("SINGLE_SOURCE_RELEASE_CLEAN"),
+        "the release guest must run to its clean exit:\n{}",
+        String::from_utf8_lossy(&release.stdout)
+    );
+}
+
 // Detection guard (RED-proven): no future link change (gc flags, sectioning,
 // visibility, staging) may silently drop a load-bearing interposer. On ELF the
 // printf family, the stdout/stderr sentinels, and the deterministic-IO interposers
