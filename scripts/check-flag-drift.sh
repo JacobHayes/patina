@@ -75,7 +75,7 @@ DOCS=(README.md TUTORIAL.md USAGE-MODES.md ARCHITECTURE.md IMPLEMENTATION.md
       crates/patina-target/ESCAPE-CLASSES.md
       testbeds/README.md testbeds/workq/README.md testbeds/pubsub/README.md
       testbeds/audit-corpus/README.md testbeds/rustix-default/README.md
-      testbeds/buggify-wasi/README.md)
+      testbeds/buggify-wasi/README.md testbeds/checkout-retry-idempotency/README.md)
 
 SCRIPTS=()
 while IFS= read -r f; do SCRIPTS+=("$f"); done < <(

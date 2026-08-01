@@ -20,7 +20,12 @@
 //!   explicit-context API. [`run`]/[`run_with`] build a [`Context`] and the code
 //!   performs effects *through it* — nothing is interposed, so plain
 //!   `std::fs`/`std::net` calls in the same program do **not** go through
-//!   Patina. Deterministic async ([`block_on`]/`spawn`, virtual-time
+//!   Patina. Ordinary code called from this mode must stay deterministic from
+//!   the simulator's inputs, or have its effects injected by the simulator; host
+//!   files, host sockets, host time/randomness, real-thread schedules, tokio
+//!   reactors, FFI, and syscalls are outside this explicit boundary. Use the
+//!   native shim/harness path for ordinary applications that perform those
+//!   effects directly. Deterministic async ([`block_on`]/`spawn`, virtual-time
 //!   sleep/timeout) layers over the same `Context` in `patina-dst-async`.
 //! - **Modes 1–2 (via `cargo patina`):** unmodified programs run under the
 //!   native shim or WASI host, which drive this same runtime below ordinary

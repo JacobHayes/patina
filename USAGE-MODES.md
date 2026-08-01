@@ -57,9 +57,21 @@ Simulator-shaped code that owns its world: `run`/`run_with` build a `Context`
 effects through it explicitly. Nothing is interposed — `std` calls made by the
 same program do not go through Patina — so this mode is for tests and
 simulators written against the runtime API, not for running unmodified
-programs. `patina-dst-async` layers the deterministic futures executor
-(`block_on`, `spawn`, virtual-time timers, TCP/UDP futures) over the same
-`Context`.
+programs. Ordinary code called from this mode may be tested as-is only while it
+stays deterministic from the simulator's inputs. If that code internally opens
+host sockets/files, reads host time or randomness, spawns real threads whose
+schedule matters, calls tokio's reactor, or reaches FFI/syscalls, those effects
+are outside the explicit `Context`; refactor them behind injected interfaces or
+use the shim/harness mode instead. `patina-dst-async` layers the deterministic
+futures executor (`block_on`, `spawn`, virtual-time timers, TCP/UDP futures)
+over the same `Context`.
+
+A user-facing example is `testbeds/checkout-retry-idempotency`: ordinary
+checkout ledger code is called from an explicit-context virtual client/service
+simulation. The virtual network latency and virtual client timeout force a
+retry, and the test asserts that the idempotency key prevents a duplicate
+charge. That is the intended shape for mode 3: model a small world around a
+component or protocol when the whole application is not the thing under test.
 
 ## Crate map
 

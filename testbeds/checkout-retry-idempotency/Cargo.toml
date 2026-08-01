@@ -1,0 +1,22 @@
+# Standalone package: its own empty [workspace] table keeps it OUT of the root
+# Patina workspace. This is an explicit-context simulator, so it depends on the
+# simulator crates directly instead of being built through the native shim.
+[workspace]
+
+[package]
+name = "checkout-retry-idempotency"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "checkout-retry-idempotency"
+path = "src/main.rs"
+
+[dependencies]
+patina-dst-async = { path = "../../crates/patina-async" }
+patina-dst-net-sim = { path = "../../crates/patina-net-sim" }
+patina-dst-runtime = { path = "../../crates/patina-runtime" }
+
+[profile.release]
+panic = "unwind"

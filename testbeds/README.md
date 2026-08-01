@@ -1,15 +1,18 @@
 # Testbeds
 
-Guests for exercising Patina end to end. Every harness binary is ordinary
+Guests for exercising Patina end to end. Most harness binaries are ordinary
 `std` Rust — no `cfg(patina)`, no runtime dependency — so the same source runs
 both natively and under Patina with identical arguments. Where a testbed uses
 the cooperative-SUT SDK (`patina-dst`), every macro is inert outside a Patina
-build, so the guest still builds and runs as a plain program.
+build, so the guest still builds and runs as a plain program. The
+`checkout-retry-idempotency` testbed is the explicit-context exception: it is a
+simulator that depends on the Patina runtime crates directly.
 
 | Testbed | Program under test | Shape | Patina phase exercised |
 |---|---|---|---|
 | [`workq/`](workq/) | itself — a single-process durable work queue (WAL segments + loopback UDP + worker/producer threads) | guest: server, workers, producers, and invariant checks in one process | WAL crash-recovery, SimNet drop/reorder/jitter, virtual-time visibility timeouts + retries, cooperative buggify faults, fail-closed recovery |
 | [`pubsub/`](pubsub/) | itself — a single-process tokio pub-sub broker (TcpListener fan-in over loopback TCP, credit-window backpressure, heartbeat timers) | guest: broker core actor, subscriber, and publisher tasks on one current-thread runtime, plus an exact-delivery audit | the deterministic readiness reactor (kqueue on macOS / epoll on Linux) under real tokio, virtual-time heartbeats + liveness timeouts, schedule-seed exploration, planted async bugs (lost wakeup, short-read framing, stale timeout) |
+| [`checkout-retry-idempotency/`](checkout-retry-idempotency/) | an ordinary checkout idempotency ledger called from a deterministic simulator | explicit-context virtual client/service actors over SimNet UDP; a virtual timeout forces one retry | component-level retry/idempotency testing: no host sockets or wall-clock sleeps, non-vacuous retry evidence, planted double-charge selftest |
 | [`audit-corpus/`](audit-corpus/) | twenty minimal reproducers, one per widely-used crate (rand, parking_lot, rayon, sysinfo, …) | strict-xfail gate: per-crate, per-platform pinned expectations of the residual unsupported imports | the symbol-classification / interposition surface: `cargo patina audit` over the real ecosystem, drift caught in both directions |
 | [`liveness-campaign/`](liveness-campaign/) | a small buggify-gated planted-bug fixture | guest: a deterministic bug the liveness/converge watchdog must catch | liveness/heal-then-converge oracles, buggify activation, `cargo patina campaign` classification + signature dedup |
 | [`buggify-wasi/`](buggify-wasi/) | a small `wasm32-wasip1` buggify fixture | guest: several buggify site kinds + a plantable `always!` violation | guest-side buggify lowering on WASI (`patina_sdk` imports), `PATINA_SDK_REPORT` parsing, record/replay determinism |
