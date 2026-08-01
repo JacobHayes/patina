@@ -16,12 +16,15 @@ anything; it tells you where truth lives and which gates must stay green.
 | [README.md](./README.md) | the user-facing summary; must stay honest about status |
 | [TUTORIAL.md](./TUTORIAL.md) | the command-by-command walkthrough (every command verified) |
 | `llms.txt` | compact machine-oriented CLI/SDK map |
+| [docs/agent-operations.md](./docs/agent-operations.md) | shared agent operating rules: verification, delegation, non-vacuity, cross-platform evidence |
 | [crates/patina-target/ESCAPE-CLASSES.md](./crates/patina-target/ESCAPE-CLASSES.md) | the guest-escape taxonomy behind the audit gate |
 | [testbeds/README.md](./testbeds/README.md) | the dogfooding guests and their conventions |
+| Nearest `AGENTS.md` files | focused guidance for high-risk subtrees such as the native shim and testbeds |
 
 **When changing intent, architecture, or user-visible behavior, update the
 relevant docs in the same change.** Doc drift is treated as a bug; part of it is
-mechanically gated (see below).
+mechanically gated (see below). If `AGENTS.local.md` exists, read it for local
+maintainer recipes; it is gitignored and is not project doctrine.
 
 ## The CLI: verbs, and where its truth lives
 
@@ -70,8 +73,8 @@ Without mise, run the `[tasks.check]` commands from `mise.toml` directly.
 Gates worth knowing individually:
 
 - `scripts/check-flag-drift.sh` — extracts every flag-shaped token from the gated
-  docs (the `DOCS` list in the script: README, TUTORIAL, USAGE-MODES,
-  ARCHITECTURE, IMPLEMENTATION, VALIDATION, INTENTS, AGENTS, `llms.txt`, and the
+  docs (the `DOCS` list in the script: the root docs, `llms.txt`,
+  `docs/agent-operations.md`, the native-shim/testbed `AGENTS.md` files, and the
   testbed READMEs) AND from every shell script (`scripts/*.sh`,
   `testbeds/**/*.sh`), and fails on any flag the CLI registry does not define
   (beyond a small allowlist of non-patina guest/tool/script flags). If you
@@ -99,6 +102,27 @@ Gates worth knowing individually:
 - **Determinism claims are verified, not asserted.** Byte-identical repeats,
   record→replay identity, and seed variation are the standard evidence shape;
   a check that cannot fail is treated as a bug (see the selftests above).
+
+## Agent operating habits
+
+- Ask structured questions during open design phases; keep summaries short and
+  put real decisions in explicit options.
+- Answer status questions from fresh evidence, not memory. Check logs, processes,
+  CI, output files, or the owning tool's status surface before saying what is
+  running or complete.
+- Measure rather than guess. Quote durations only when observed, and label
+  estimates as estimates.
+- Use read-only scouts to find the next likely rungs of a failure class while a
+  builder fixes the current one; batch the fixes instead of serializing through
+  one CI round per discovery.
+- Verify delegated work by reading the diff and checking its evidence. Builder
+  reports are useful leads, not acceptance.
+- Prefer isolated workspaces/checkouts for parallel work, and keep one writer
+  for any shared file set. Shared campaign outputs, generated binaries, and
+  build artifacts are single-writer while a run is live.
+- Convert historical incidents into detectors or guidance, not folklore. If a
+  lesson affects future work, document it in `docs/agent-operations.md` or the
+  relevant subtree `AGENTS.md`.
 
 ## Naming
 

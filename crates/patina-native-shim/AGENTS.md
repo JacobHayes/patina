@@ -1,0 +1,34 @@
+# Native shim agent guidance
+
+Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
+`crates/patina-target/ESCAPE-CLASSES.md` before changing this crate.
+
+## Doctrine
+
+- The shim's own host access must use private resolved aliases (`host_*` style),
+  not public interposable symbols. The guest and shim may use the same native
+  primitive only when the shim reaches the real host entry through the alias
+  table and guest calls still bind to the interposer.
+- A shared symbol allowance is not a fix. If a host effect escapes, first add or
+  harden detection so the class fails loudly, then model, interpose, or deny-trap
+  the specific surface.
+- Interposer semantics should match the public path they replace. Raw-syscall
+  dispatch, SUD handling, and C ABI entry points should route through the same
+  runtime behavior as the corresponding POSIX interposer whenever possible.
+- Bootstrap and reentrancy paths are load-bearing. Avoid allocations, locks, or
+  formatting in early-init/fatal paths unless the path is proven safe under the
+  custom allocator and host-collection rules.
+
+## Change checklist
+
+- Keep C and Rust ABI signatures in lockstep. Variadic libc functions must be
+  declared variadically on the host side; do not hand-declare a fixed argument
+  form for a variadic function.
+- After editing `c/patina_posix.c` or related embedded C sources, rebuild
+  `cargo-patina`; validating with a stale runner is an accidental false green.
+- Run targeted shim tests and `scripts/validate-native-shim.sh` for any native
+  interposition change. If the change can affect WASI or cross-target behavior,
+  also run `scripts/validate-wasi.sh` and `scripts/smoke-cross-target.sh`.
+- OS- or architecture-specific paths must be executed on that OS/arch before
+  being described as working; cross-clippy/cross-builds are useful, but not
+  execution evidence.
