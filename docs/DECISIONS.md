@@ -170,3 +170,48 @@ cluster so the fixes have citable symptom records.
   `SLATEDB-SANDBOX-NOTES.md` (bank fenced-close neutrality, recovery scenario
   stabilization) live in the sandbox SlateDB checkout, not this repo; nothing
   to land here beyond the patina-side fixes above.
+- **2026-08-06 (landing round) — clap port landed; verdict adopt.** The full
+  registry-driven port of all verbs landed with net −820 non-test lines, no
+  bridge, `default-features = false` (+3.4% binary), and clap pinned `~4.6`
+  for MSRV. The port surfaced four shipped parser bugs, each pinned
+  red-before/green-after; one user-visible rename fell out (`campaign
+  --report` → `--report-failures`, the old spelling having been unreachable
+  behind the global `--report OUT.html`). Wall-clock build-cost numbers in
+  the arc doc §9.2 are recorded as unreliable (contended machine) — do not
+  quote them as findings.
+- **2026-08-06 (landing round) — item 9 fix landed; swarm deselection is
+  coherent.** Fingerprints now reflect the per-generation effective class
+  set, metadata records requested vs effective (`swarm_deselected=1`
+  distinguishable from "never requested"), and `PATINA_SWARM_REPORT` covers
+  every class uniformly. Postmortem, including why the original reduction
+  misattributed the bug: `docs/bugs/swarm-buggify-fingerprint-coherence.md`.
+  Deliberate choice: deselected classes are derivable from the trace, not
+  stored (redundant state would be drift-prone and force a format bump).
+- **2026-08-06 (landing round) — dlsym returns a routing table, not NULL.**
+  For entropy (feedback #6), flat-NULL `__wrap_dlsym` was NOT fail-closed:
+  callers treat NULL as "kernel lacks this" and take a less-modeled fallback
+  (`/dev/random` open → ENOENT → poll → ENOSYS). `dlsym` now resolves
+  exactly the entropy symbols the shim already defines deterministically
+  (`getrandom`, `getentropy`) to internal-linkage implementations shared
+  with the interposers; membership is structural (only symbols the shim
+  models), so the table cannot widen guest reach. `getentropy` is included
+  despite no measured consumer because the closure rule is what keeps the
+  table auditable and omission is a silent demotion, not a refusal.
+  `/dev/random` stays unmodeled (both realistic openers are gated on
+  getrandom being unavailable, which it no longer is). The probe-compile
+  regression fix chose a local `extern` over `-D_DEFAULT_SOURCE` so the
+  shared probe flags don't change the visible glibc surface for other
+  probes.
+- **2026-08-06 (landing round) — cdylib fix landed as link-arg scoping;
+  `-fPIC` dropped; personality trigger unconfirmed.** Guest builds use
+  `cargo rustc` so shim objects/staticlib/`--wrap`/`-lc` reach only the
+  final-binary link; cfgs and sancov codegen stay whole-graph, and a weak
+  no-op sancov stub object keeps `--yield-points`-instrumented dependency
+  cdylibs linkable. `-fPIC` is dropped from the shim objects (only ever in
+  executable links; never prevented the class) and kept solely on the
+  whole-graph stub. Correction to the earlier entry: the `duplicate
+  rust_eh_personality` variant did NOT reproduce across four synthetic
+  fixture shapes — the crc-fast trigger remains unidentified and the fixture
+  asserts on shim-symbol leakage (which reproduces on both platforms); the
+  scoping fix removes the shim from that link regardless of trigger. The
+  real-tree crc-fast rebuild remains a re-verify-round obligation.

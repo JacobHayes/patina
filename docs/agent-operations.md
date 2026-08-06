@@ -88,6 +88,14 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   or deleting them mid-run can poison otherwise deterministic evidence.
 - Before updating canonical outputs or hashes, verify them from a clean build and
   on every platform the claim covers.
+- Concurrent builders on one machine share more than they think: session-shared
+  scratch directories are not per-agent (another agent can truncate your log),
+  and pattern kills like `pkill -f "mise run check"` match every workspace's
+  run, not just yours. Write battery logs to per-workspace paths and kill only
+  by the PID of processes you started.
+- Wall-clock timings taken while several batteries run concurrently are
+  contention-inflated. Label them as such; only quote uncontended runs as
+  representative durations.
 
 ## Cross-platform and campaign lessons
 
@@ -122,6 +130,14 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   interpose, or deny-trap the effect.
 - The `cargo-patina` binary embeds native C shim sources at build time. After
   changing the C layer, rebuild `cargo-patina` before trusting native validation.
+- Guest builds link the shim through injected link args, which cargo does not
+  treat as a fingerprint input: after a shim or runtime change, `cargo patina
+  build` can report "Finished" instantly and hand back a guest binary still
+  linked against the old shim. Deleting the guest's local `target/` does not
+  help when a global `build.build-dir` redirects the real build directory.
+  Until the staleness bug is fixed, force a relink (e.g. touch the guest's
+  sources) and confirm the fresh binary actually contains the change before
+  trusting "the fix didn't work" evidence.
 
 ## Local maintainer notes
 
