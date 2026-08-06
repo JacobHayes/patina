@@ -250,6 +250,14 @@ $ cargo patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina --fo
 - Add fault injection: `--fs-crash-at`, `--net-drop-permille`, `--net-jitter-nanos`,
   `--sleep-jitter-nanos`. They are seed-driven, default off, and recorded into the
   trace like buggify — so replay reproduces them flag-free.
+- Vary the *workload* across campaign generations from inside the guest: a
+  campaign varies patina-side seeds (scheduler, faults, buggify) per generation
+  but keeps guest argv fixed by design. A guest that wants a different logical
+  workload per generation should derive its workload parameters from the
+  deterministic entropy stream (seed an application RNG from bytes the runtime
+  provides — e.g. `rand` under native, `random_get` under WASI) instead of argv.
+  That way every generation is still reproducible from its patina seed alone,
+  and replay needs no extra flags.
 - Make atomics-only race windows schedulable: `cargo patina build --yield-points`.
 - Shrink a failing trace to its essence: `cargo patina minimize bug.patina
   --output small.patina -- ./oracle`.
