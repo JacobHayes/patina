@@ -53,12 +53,13 @@ An expectation file is one of:
   ```
 
 Human audit refusals are grouped by `provenance=...` so operators can see the
-object/archive member and crate that introduced each symbol. The corpus
-normalizer intentionally strips those grouping headers and records only the
-stable residual `symbol class` set. `# comments` and blank lines are allowed and
-ignored on read. On macOS the recorded symbol is the real libc name — the
-audit's one leading-underscore mangling (`_localtime_r`) is stripped during
-normalization; Linux ELF names are recorded verbatim.
+crate — and, where the binary format records it, the object/archive member —
+that introduced each symbol. The corpus normalizer intentionally strips those
+grouping headers and records only the stable residual `symbol class` set.
+`# comments` and blank lines are allowed and ignored on read. On macOS the
+recorded symbol is the real libc name — the audit's one leading-underscore
+mangling (`_localtime_r`) is stripped during normalization; Linux ELF names are
+recorded verbatim.
 
 ## The contract (STRICT, both directions)
 

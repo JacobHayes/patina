@@ -11,3 +11,9 @@ repository.workspace = true
 object.workspace = true
 rustc-demangle.workspace = true
 wasmparser.workspace = true
+
+# The ELF provenance tests synthesize the images they audit: what they pin is the
+# symbol-table *ordering* a linker produces, and a macOS host cannot link an ELF
+# to produce one. Writing is test-only; the shipped crate stays read-only.
+[dev-dependencies]
+object = { workspace = true, features = ["write"] }

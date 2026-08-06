@@ -5478,20 +5478,42 @@ fn native_audit_attributes_unsupported_imports_to_dependency_crates() {
     );
     assert!(!human.status.success());
     let stderr = String::from_utf8_lossy(&human.stderr);
-    for needle in [
+    let mut needles = vec![
         "unsupported native imports:",
         "provenance=crate=leaker_a",
         "provenance=crate=leaker_b",
-        "object=libleaker_a-",
-        "object=libleaker_b-",
         "killpg (process)",
         "shm_open (shared-memory-ipc)",
-    ] {
+    ];
+    // Object identity is what each format records, and the two formats record
+    // different amounts. Mach-O carries a per-address object/archive-member map,
+    // so the defining rlib member is named outright. A linked ELF only records
+    // object identity for an input file's *local* symbols — a crate's public
+    // function is global, so no object is recoverable for it, and the crate
+    // recovered from the symbol's own mangling plus the containing symbol is the
+    // whole honest answer.
+    if cfg!(target_os = "macos") {
+        needles.extend(["object=libleaker_a-", "object=libleaker_b-"]);
+    }
+    for needle in needles {
         assert!(
             stderr.contains(needle),
             "missing {needle:?} in provenance-grouped audit stderr:\n{stderr}"
         );
     }
+    for crate_name in ["leaker_a", "leaker_b"] {
+        assert!(
+            stderr
+                .lines()
+                .any(|line| line.contains("symbol=") && line.contains(crate_name)),
+            "no containing symbol names {crate_name} in audit stderr:\n{stderr}"
+        );
+    }
+    let junk = provenance_junk_lines(&stderr);
+    assert!(
+        junk.is_empty(),
+        "audit reported provenance that names nothing real: {junk:#?}\nfull stderr:\n{stderr}"
+    );
 
     let json = invoke_unchecked(
         env!("CARGO_BIN_EXE_cargo-patina"),
@@ -5512,6 +5534,60 @@ fn native_audit_attributes_unsupported_imports_to_dependency_crates() {
     assert_json_finding_has_crate(&value, "shm_open", "leaker_b");
 }
 
+/// Audit output lines whose `object=` names nothing real.
+///
+/// Attributing a site to an object it does not belong to is a wrong answer, not
+/// a missing feature, and the two Linux architectures produced different flavors
+/// of it from the same cause. Every ELF global symbol used to inherit whichever
+/// STT_FILE marker came last in the symbol table: on x86_64 that was a C
+/// translation unit, so Rust crates were reported as defined by `crtstuff.c`; on
+/// arm64 the marker's name was empty, so the finding rendered as a bare
+/// `object=` with nothing after it. Checking only the first shape would let the
+/// second through, so this covers both, plus the `unknown` sentinel leaking into
+/// human output instead of being omitted.
+fn provenance_junk_lines(stderr: &str) -> Vec<&str> {
+    stderr
+        .lines()
+        .filter(|line| {
+            let Some(rest) = line.split("object=").nth(1) else {
+                return false;
+            };
+            let object = rest.split_whitespace().next().unwrap_or_default();
+            rest.is_empty()
+                || rest.starts_with(char::is_whitespace)
+                || object.ends_with(".c")
+                || object == "unknown"
+        })
+        .collect()
+}
+
+// The junk detector has to fire on the real signatures, or the pin above is
+// decoration. These are verbatim lines from the pre-fix audit on each
+// architecture.
+#[test]
+fn provenance_junk_detector_fires_on_both_architectures_signatures() {
+    let x86_64 = "  provenance=crate=leaker_a object=crtstuff.c (1 finding)";
+    let arm64 = "  provenance=crate=leaker_a object= (1 finding)";
+    let sentinel = "  provenance=crate=leaker_a object=unknown (1 finding)";
+    for junk in [x86_64, arm64, sentinel] {
+        assert_eq!(
+            provenance_junk_lines(junk),
+            vec![junk],
+            "the junk detector missed a known signature"
+        );
+    }
+
+    let good = "unsupported native imports:\n  \
+        provenance=crate=leaker_a (1 finding)\n    \
+        killpg (process) [symbol=_RNvCslpz1a3WbgXx_8leaker_a4addr section=.text]\n  \
+        provenance=crate=foo object=libfoo-1234abcd.rlib(foo.o) (1 finding)";
+    assert!(
+        provenance_junk_lines(good).is_empty(),
+        "the junk detector must not fire on real attribution: {:#?}",
+        provenance_junk_lines(good)
+    );
+}
+
 fn assert_json_finding_has_crate(value: &serde_json::Value, symbol: &str, crate_name: &str) {
     let details = value["finding_details"]
         .as_array()
@@ -5525,16 +5601,30 @@ fn assert_json_finding_has_crate(value: &serde_json::Value, symbol: &str, crate_
                 .unwrap_or(false)
         })
         .unwrap_or_else(|| panic!("missing finding for {symbol} in {value:#}"));
+    let provenance = finding["provenance"]
+        .as_array()
+        .unwrap_or_else(|| panic!("missing provenance for {symbol}: {finding:#}"));
     assert!(
-        finding["provenance"]
-            .as_array()
-            .unwrap_or_else(|| panic!("missing provenance for {symbol}: {finding:#}"))
-            .iter()
-            .any(|origin| origin["crate"].as_str() == Some(crate_name)
+        provenance.iter().any(|origin| {
+            origin["crate"].as_str() == Some(crate_name)
+                && origin["containing_symbol"]
+                    .as_str()
+                    .map(|containing| containing.contains(crate_name))
+                    .unwrap_or(false)
+                // Mach-O names the defining rlib member; a linked ELF records no
+                // object for a global symbol, which reports as `unknown` rather
+                // than borrowing a neighbor's.
                 && origin["object"]
                     .as_str()
-                    .map(|object| object.starts_with(&format!("lib{crate_name}-")))
-                    .unwrap_or(false)),
+                    .map(|object| {
+                        if cfg!(target_os = "macos") {
+                            object.starts_with(&format!("lib{crate_name}-"))
+                        } else {
+                            object == "unknown" || object.starts_with(crate_name)
+                        }
+                    })
+                    .unwrap_or(false)
+        }),
         "finding for {symbol} lacks crate/object provenance {crate_name}: {finding:#}"
     );
 }

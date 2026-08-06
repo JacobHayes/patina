@@ -12,12 +12,30 @@ externally-resolved symbol the guest imports and refuse anything that is neither
 **known-safe** (an explicitly listed effect-free host-deferred symbol) nor
 caller-`--allow`ed. Anything else fails closed; known host-effect names are
 labeled with their escape *class* (below) for error quality. Diagnostics also
-group findings by recovered object/archive-member provenance (and crate when the
-linked image carries enough rlib/symbol context); `provenance=unknown` means the
-image no longer carries attributable context. This is a symbol-level gate by
+group findings by recovered provenance — the defining object, the crate, and the
+symbol containing the reference; `provenance=unknown` means the image carries no
+attributable context for that site. This is a symbol-level gate by
 design — it does **not** disassemble the binary for call-graph reachability — so
 raw inlined instructions and flag-dependent behavior are residuals covered (or
 honestly not covered) elsewhere; see "Residual gaps".
+
+How much provenance a finding can carry is a property of the binary format, and
+the two formats differ:
+
+- **Mach-O** keeps a per-address object map, so a finding names the defining
+  archive member outright: `crate=foo object=libfoo-<hash>.rlib(foo.o)`.
+- **ELF** records object identity only through STT_FILE markers, and a marker
+  covers the *local* symbols of one input object, ending at the first global
+  symbol. A crate's public function is global, so its defining object is
+  genuinely absent from the linked image; those findings report the crate
+  (recovered from the symbol's own mangling) and the containing symbol, with no
+  object.
+
+Provenance is never guessed to close that gap. Carrying an ELF file marker past
+its local run stamps every global symbol with whichever object happened to be
+last in the symbol table — the bug that had findings claiming a C translation
+unit as a Rust crate's defining object (`crate=leaker_a object=crtstuff.c`). An
+unrecoverable object is reported as unknown instead.
 
 The class lists live in `native_escape_category` (labeling) and the
 interposed/allowlisted sets in `native_allowlisted_import` /

@@ -110,10 +110,17 @@ pub struct WasiAudit {
     pub imports: Vec<WasmImport>,
 }
 
+/// The `object` value for a site whose defining object the linked image does not
+/// record. Mach-O keeps a per-address object/archive-member map, so this is rare
+/// there; ELF only records object identity for an input file's *local* symbols,
+/// so every global symbol legitimately lands here (see [`NativeProvenanceIndex`]).
+const UNKNOWN_OBJECT: &str = "unknown";
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NativeProvenance {
-    /// Compact object/archive-member label (`libfoo-<hash>.rlib(member.o)`), or
-    /// `unknown` when the linked image no longer carries enough information.
+    /// Compact object/archive-member label (`libfoo-<hash>.rlib(member.o)` on
+    /// Mach-O, the codegen-unit object name on ELF), or [`UNKNOWN_OBJECT`] when
+    /// the linked image no longer carries enough information.
     pub object: String,
     /// Rust crate name recovered from an rlib/member name or a Rust symbol.
     pub crate_name: Option<String>,
@@ -126,29 +133,35 @@ pub struct NativeProvenance {
 impl NativeProvenance {
     pub fn unknown() -> Self {
         Self {
-            object: "unknown".into(),
+            object: UNKNOWN_OBJECT.into(),
             crate_name: None,
             containing_symbol: None,
             section: None,
         }
     }
 
+    /// Whether this names nothing actionable: no object, no crate, no containing
+    /// symbol. The section is deliberately not part of the judgement — it is the
+    /// one field every site can fill in, so counting it as attribution turned
+    /// each unattributable reference into its own `provenance=unknown` group
+    /// instead of collapsing them into one.
     pub fn is_unknown(&self) -> bool {
-        self.object == "unknown"
+        self.object == UNKNOWN_OBJECT
             && self.crate_name.is_none()
             && self.containing_symbol.is_none()
-            && self.section.is_none()
     }
 
     pub fn label(&self) -> String {
-        if self.object == "unknown" && self.crate_name.is_none() {
-            return "provenance=unknown".into();
-        }
         let mut parts = Vec::new();
         if let Some(crate_name) = &self.crate_name {
             parts.push(format!("crate={crate_name}"));
         }
-        parts.push(format!("object={}", self.object));
+        if self.object != UNKNOWN_OBJECT {
+            parts.push(format!("object={}", self.object));
+        }
+        if parts.is_empty() {
+            return "provenance=unknown".into();
+        }
         format!("provenance={}", parts.join(" "))
     }
 
@@ -648,6 +661,14 @@ fn normalize_provenance(mut provenance: Vec<NativeProvenance>) -> Vec<NativeProv
     if provenance.is_empty() {
         return vec![NativeProvenance::unknown()];
     }
+    // Collapse every unattributable site to the one canonical `unknown`, so a
+    // set of them dedups to a single entry and is then dropped outright when any
+    // attributed site exists for the same symbol.
+    for entry in &mut provenance {
+        if entry.is_unknown() {
+            *entry = NativeProvenance::unknown();
+        }
+    }
     provenance.sort();
     provenance.dedup();
     if provenance.len() > 1 {
@@ -692,15 +713,34 @@ impl NativeProvenanceIndex {
             });
         }
 
-        // ELF (and stripped-down Mach-O fallback) commonly carries file symbols
-        // followed by local text/data symbols from that file. Keep that context
-        // as best-effort provenance; if the linked image lacks it, lookups below
-        // degrade to `provenance=unknown` rather than guessing.
+        // The generic symbol table: the only source of a containing symbol on
+        // ELF, and the fallback for a Mach-O image whose object map was stripped.
+        //
+        // ELF also carries STT_FILE markers naming each input object, but their
+        // reach is narrow and easy to overstate. A file symbol is itself local,
+        // and ELF requires every local symbol to precede the first global, so a
+        // marker only names the input object of the LOCAL symbols that follow it
+        // — the run ends at the first global, after which no marker applies to
+        // anything. Carrying the marker forward regardless attributed every
+        // global symbol in the image to whichever file symbol happened to come
+        // last (`crtstuff.c`, `ucmpti2.c`, ...), which is wrong for essentially
+        // every Rust symbol, and produced groups as self-contradictory as
+        // `crate=leaker_a object=crtstuff.c`. So the association stops at the
+        // local run; a global's object is genuinely not recorded in a linked ELF
+        // and degrades to `unknown`, with `crate=` still recovered from the
+        // symbol's own mangling.
         let mut current_file = None;
         for symbol in file.symbols() {
             if symbol.kind() == SymbolKind::File {
-                current_file = symbol.name().ok().map(str::to_owned);
+                current_file = symbol
+                    .name()
+                    .ok()
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned);
                 continue;
+            }
+            if !symbol.is_local() {
+                current_file = None;
             }
             if !symbol.is_definition() || symbol.address() == 0 {
                 continue;
@@ -779,27 +819,50 @@ fn address_in_entry(address: u64, entry: &AddressProvenance) -> bool {
     }
 }
 
+/// Which of two entries containing the same address describes it more precisely.
+/// The tightest container wins: a smaller sized symbol is nested inside a larger
+/// one, and a sized symbol beats a zero-size label (which matched only because it
+/// sits exactly on the address). Object provenance breaks ties between equally
+/// precise entries only — ranking it first let a bare label outrank the function
+/// that actually contains the site.
 fn entry_better(candidate: &AddressProvenance, current: &AddressProvenance) -> bool {
-    let candidate_has_object = candidate.object_path.is_some();
-    let current_has_object = current.object_path.is_some();
-    candidate_has_object && !current_has_object
-        || candidate_has_object == current_has_object
-            && candidate.size != 0
-            && (current.size == 0 || candidate.size < current.size)
+    match (candidate.size, current.size) {
+        (0, 0) => candidate.object_path.is_some() && current.object_path.is_none(),
+        (0, _) => false,
+        (_, 0) => true,
+        (candidate_size, current_size) if candidate_size != current_size => {
+            candidate_size < current_size
+        }
+        _ => candidate.object_path.is_some() && current.object_path.is_none(),
+    }
 }
 
 fn bytes_to_string(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// The compact label for a defining object, or [`UNKNOWN_OBJECT`] when the
+/// sources produce no name at all.
+///
+/// The empty case is a real one, not defensive padding: an ELF STT_FILE marker
+/// can carry an empty name, and a marker whose name is empty was rendered as a
+/// bare `object=` with nothing after it — an "attribution" naming nothing, which
+/// is the arm64 flavor of the same wrong answer x86_64 gave by borrowing a
+/// neighbor's marker. Nothing downstream should have to distinguish an empty
+/// object from an absent one, so an empty label never leaves this function.
 fn compact_object_label(path: &str, member: Option<&str>) -> String {
     let file = Path::new(path)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(path);
-    match member {
-        Some(member) => format!("{file}({member})"),
-        None => file.to_string(),
+    let label = match member {
+        Some(member) if !member.is_empty() => format!("{file}({member})"),
+        _ => file.to_string(),
+    };
+    if label.is_empty() {
+        UNKNOWN_OBJECT.to_string()
+    } else {
+        label
     }
 }
 
@@ -807,7 +870,28 @@ fn crate_name_from_object(path: &str, member: Option<&str>) -> Option<String> {
     let file = Path::new(path).file_name()?.to_str()?;
     crate_name_from_archive(file)
         .or_else(|| member.and_then(crate_name_from_object_member))
+        .or_else(|| crate_name_from_codegen_unit(file))
         .or_else(|| crate_name_from_source_path(path))
+}
+
+/// The crate behind an ELF STT_FILE marker. rustc names each codegen unit
+/// `<crate>.<hash>-cgu.<n>` (`std.1e3c4ec04c5261a9-cgu.0`), and that name is what
+/// the linker copies into the file symbol, so it is the ELF counterpart of a
+/// Mach-O archive member. Local-crate codegen units are named by hash alone and
+/// carry no crate, which this rejects rather than inventing one.
+fn crate_name_from_codegen_unit(file: &str) -> Option<String> {
+    let (crate_name, rest) = file.split_once('.')?;
+    let (hash, index) = rest.rsplit_once("-cgu.")?;
+    let valid = !crate_name.is_empty()
+        && crate_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && !crate_name.starts_with(|byte: char| byte.is_ascii_digit())
+        && !hash.is_empty()
+        && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && !index.is_empty()
+        && index.bytes().all(|byte| byte.is_ascii_digit());
+    valid.then(|| crate_name.to_owned())
 }
 
 fn crate_name_from_archive(file: &str) -> Option<String> {
@@ -853,13 +937,43 @@ fn crate_name_from_symbol(symbol: &str) -> Option<String> {
     let demangled = rustc_demangle::try_demangle(stripped)
         .or_else(|_| rustc_demangle::try_demangle(symbol))
         .ok()?;
-    let text = format!("{demangled:#}");
-    let first = text.split("::").next()?.trim();
-    if first.is_empty() || first.starts_with('<') || first.starts_with('{') {
-        None
-    } else {
-        Some(first.to_string())
+    crate_name_from_demangled_path(&format!("{demangled:#}"))
+}
+
+/// The defining crate at the head of a demangled Rust path. A free path starts
+/// with the crate outright (`std::io::copy`), but an inherent- or trait-impl
+/// method starts with the impl header instead
+/// (`<std::os::unix::process::Child as ChildExt>::kill_process_group`), and impl
+/// methods dominate a real binary's symbol table — refusing to look past the
+/// header left `crate=` unrecoverable for most of it. The leading type
+/// punctuation is peeled, then the head identifier is accepted only when a `::`
+/// follows it, so a generic parameter or primitive (`<T as ...>`, `<u32 as ...>`)
+/// is rejected instead of being reported as a crate.
+fn crate_name_from_demangled_path(path: &str) -> Option<String> {
+    let mut rest = path.trim_start();
+    loop {
+        let peeled = ['<', '&', '*', '(', '[']
+            .iter()
+            .find_map(|prefix| rest.strip_prefix(*prefix))
+            .or_else(|| {
+                ["mut ", "const ", "dyn ", "impl "]
+                    .iter()
+                    .find_map(|prefix| rest.strip_prefix(*prefix))
+            });
+        match peeled {
+            Some(peeled) => rest = peeled.trim_start(),
+            None => break,
+        }
     }
+
+    let end =
+        rest.find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))?;
+    let (name, tail) = rest.split_at(end);
+    if !tail.starts_with("::") || name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(name.to_owned())
 }
 
 fn collect_import_provenance(
@@ -930,22 +1044,25 @@ fn collect_elf_import_targets(file: &object::File<'_>, targets: &mut BTreeMap<u6
                 .map(|name| (symbol.index().0, name.to_owned()))
         })
         .collect::<BTreeMap<usize, String>>();
-    let mut jump_slots = Vec::new();
-    if let Some(relocations) = file.dynamic_relocations() {
-        let got_plt_ranges = file
-            .sections()
-            .filter_map(|section| {
-                let name = section.name().ok()?;
-                if name == ".got.plt" || name == ".got" {
-                    Some((
-                        section.address(),
-                        section.address().saturating_add(section.size()),
-                    ))
-                } else {
-                    None
-                }
+
+    // A dynamic relocation only names an import at the address it patches, and
+    // for a code reference that address is a GOT slot. Relocations landing
+    // elsewhere (`.data.rel.ro` function-pointer tables and the like) are data
+    // that happens to hold the address, not a call site, so treating them as
+    // reference targets attributed unrelated code to the symbol.
+    let got_ranges = file
+        .sections()
+        .filter_map(|section| {
+            matches!(section.name().ok()?, ".got" | ".got.plt" | ".plt.got").then(|| {
+                (
+                    section.address(),
+                    section.address().saturating_add(section.size()),
+                )
             })
-            .collect::<Vec<_>>();
+        })
+        .collect::<Vec<_>>();
+    let mut got_slots: BTreeMap<u64, String> = BTreeMap::new();
+    if let Some(relocations) = file.dynamic_relocations() {
         for (address, relocation) in relocations {
             let RelocationTarget::Symbol(index) = relocation.target() else {
                 continue;
@@ -953,42 +1070,104 @@ fn collect_elf_import_targets(file: &object::File<'_>, targets: &mut BTreeMap<u6
             let Some(symbol) = dyn_symbols.get(&index.0).cloned() else {
                 continue;
             };
-            targets.insert(address, symbol.clone());
-            if got_plt_ranges
+            if !got_ranges
                 .iter()
                 .any(|(start, end)| address >= *start && address < *end)
             {
-                jump_slots.push((address, symbol));
+                continue;
             }
+            got_slots.insert(address, symbol);
         }
     }
 
-    if jump_slots.is_empty() {
+    targets.extend(
+        got_slots
+            .iter()
+            .map(|(address, symbol)| (*address, symbol.clone())),
+    );
+    collect_elf_plt_targets(file, &got_slots, targets);
+}
+
+/// Map each PLT stub address to the import it forwards to, so a `call foo@plt`
+/// attributes to `foo`.
+///
+/// The stub is decoded, not counted: every entry indirects through its own GOT
+/// slot, and that slot's dynamic relocation already names the symbol. Deriving
+/// the mapping positionally instead — Nth stub gets the Nth jump slot — holds
+/// only if the relocation list and the stub table correspond one to one, and they
+/// routinely do not: `.got` GLOB_DAT entries for address-taken imports have no
+/// stub at all, and glibc's ifuncs add IRELATIVE relocations that carry no
+/// symbol. Each such entry shifts the rest of the table, so a single one
+/// misattributes every call after it to the wrong import.
+fn collect_elf_plt_targets(
+    file: &object::File<'_>,
+    got_slots: &BTreeMap<u64, String>,
+    targets: &mut BTreeMap<u64, String>,
+) {
+    // Both architectures use 16-byte stubs. The section's leading header entry
+    // (and the aarch64 header's second half) indirects through a reserved
+    // `.got.plt` word that carries no symbol relocation, so it finds no match and
+    // needs no special case.
+    const ENTRY_SIZE: usize = 16;
+    if got_slots.is_empty() {
         return;
     }
-    jump_slots.sort_by_key(|(address, _)| *address);
-
-    let (header_size, entry_size) = match file.architecture() {
-        Architecture::X86_64 => (16_u64, 16_u64),
-        Architecture::Aarch64 => (32_u64, 16_u64),
-        _ => return,
-    };
     for section in file.sections() {
         let Ok(name) = section.name() else {
             continue;
         };
-        if name != ".plt" && name != ".plt.sec" {
+        if !matches!(name, ".plt" | ".plt.sec" | ".plt.got" | ".iplt") {
             continue;
         }
-        let start = if name == ".plt" {
-            section.address().saturating_add(header_size)
-        } else {
-            section.address()
+        let Ok(data) = section.data() else {
+            continue;
         };
-        let entries = section.size() / entry_size;
-        for (index, (_, symbol)) in jump_slots.iter().take(entries as usize).enumerate() {
-            targets.insert(start + index as u64 * entry_size, symbol.clone());
+        for (index, entry) in data.chunks(ENTRY_SIZE).enumerate() {
+            let address = section.address() + (index * ENTRY_SIZE) as u64;
+            let Some(slot) = decode_plt_stub_slot(file.architecture(), entry, address) else {
+                continue;
+            };
+            let Some(symbol) = got_slots.get(&slot) else {
+                continue;
+            };
+            targets.insert(address, symbol.clone());
         }
+    }
+}
+
+/// The GOT slot a single PLT stub jumps through, or `None` when the entry is not
+/// a recognizable stub for this architecture.
+fn decode_plt_stub_slot(
+    architecture: Architecture,
+    entry: &[u8],
+    entry_address: u64,
+) -> Option<u64> {
+    match architecture {
+        // `jmp *disp32(%rip)`, at whatever offset the endbr64/bnd prefixes of the
+        // entry's flavor leave it.
+        Architecture::X86_64 => (0..entry.len().saturating_sub(5)).find_map(|offset| {
+            (entry[offset] == 0xff && entry[offset + 1] == 0x25).then(|| {
+                let displacement =
+                    i32::from_le_bytes(entry[offset + 2..offset + 6].try_into().expect("4 bytes"));
+                (entry_address + offset as u64 + 6).wrapping_add_signed(i64::from(displacement))
+            })
+        }),
+        // `adrp x16, <page>` followed by `ldr x17, [x16, #<offset>]`.
+        Architecture::Aarch64 => {
+            let instructions = entry
+                .chunks_exact(4)
+                .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("chunk has four bytes")))
+                .collect::<Vec<_>>();
+            instructions
+                .windows(2)
+                .enumerate()
+                .find_map(|(index, pair)| {
+                    let (register, page) =
+                        aarch64_adrp_target(pair[0], entry_address + (index * 4) as u64)?;
+                    aarch64_ldr_unsigned_target(pair[1], register, page)
+                })
+        }
+        _ => None,
     }
 }
 
@@ -1214,41 +1393,27 @@ fn scan_x86_64_import_xrefs(
     provenance: &NativeProvenanceIndex,
     origins: &mut BTreeMap<String, BTreeSet<NativeProvenance>>,
 ) {
-    for offset in 0..data.len() {
-        let pc = section_address + offset as u64;
-        if matches!(data[offset], 0xe8 | 0xe9) && offset + 5 <= data.len() {
-            let displacement = i32::from_le_bytes(data[offset + 1..offset + 5].try_into().unwrap());
-            let target = (pc + 5).wrapping_add_signed(i64::from(displacement));
+    let mut offset = 0usize;
+    while offset < data.len() {
+        // Undecodable bytes end the walk. That costs attribution for the rest of
+        // the section, never a refusal: the forbidden-instruction scan runs the
+        // same decoder over the same bytes and reports the undecodable site as a
+        // finding in its own right, so the audit still fails closed there.
+        let Some((len, reference)) = x86_scan::decode_reference(&data[offset..]) else {
+            break;
+        };
+        if let Some(displacement) = reference {
+            let target = (section_address + (offset + len) as u64)
+                .wrapping_add_signed(i64::from(displacement));
             if let Some(symbol) = targets.get(&target) {
-                insert_origin(origins, symbol, provenance.for_address(pc, section_name));
+                insert_origin(
+                    origins,
+                    symbol,
+                    provenance.for_address(section_address + offset as u64, section_name),
+                );
             }
         }
-        if data[offset] == 0xff && offset + 6 <= data.len() {
-            let modrm = data[offset + 1];
-            if matches!(modrm, 0x15 | 0x25) {
-                let displacement =
-                    i32::from_le_bytes(data[offset + 2..offset + 6].try_into().unwrap());
-                let target = (pc + 6).wrapping_add_signed(i64::from(displacement));
-                if let Some(symbol) = targets.get(&target) {
-                    insert_origin(origins, symbol, provenance.for_address(pc, section_name));
-                }
-            }
-        }
-        let mut op = offset;
-        if data[op] & 0xf0 == 0x40 {
-            op += 1;
-        }
-        if op + 6 <= data.len() && matches!(data[op], 0x8b | 0x8d) {
-            let modrm = data[op + 1];
-            if modrm & 0xc7 == 0x05 {
-                let displacement = i32::from_le_bytes(data[op + 2..op + 6].try_into().unwrap());
-                let next = section_address + op as u64 + 6;
-                let target = next.wrapping_add_signed(i64::from(displacement));
-                if let Some(symbol) = targets.get(&target) {
-                    insert_origin(origins, symbol, provenance.for_address(pc, section_name));
-                }
-            }
-        }
+        offset += len;
     }
 }
 
@@ -1491,6 +1656,61 @@ mod x86_scan {
                 }
             }
         }
+    }
+
+    /// Decode the instruction at `b[0]` into its length and, when it references a
+    /// fixed address, the displacement encoding that reference. Direct near
+    /// branches (`call`/`jmp rel32`) and RIP-relative memory operands share one
+    /// rule — the target is the address of the *next* instruction plus the
+    /// displacement — so both come back through the same value.
+    ///
+    /// References are only read at real instruction boundaries. Sliding the same
+    /// byte patterns over every offset in `.text` instead reads four displacement
+    /// bytes out of the middle of unrelated instructions, and any of those that
+    /// happens to land on a GOT slot attributes an import to a function that
+    /// never referenced it.
+    pub(super) fn decode_reference(b: &[u8]) -> Option<(usize, Option<i32>)> {
+        let len = match decode_one(b) {
+            Step::Insn { len, .. } if len > 0 => len,
+            _ => return None,
+        };
+        let insn = b.get(..len)?;
+
+        let mut p = 0usize;
+        while matches!(
+            insn.get(p).copied(),
+            Some(0x66 | 0x67 | 0xF0 | 0xF2 | 0xF3 | 0x2E | 0x36 | 0x3E | 0x26 | 0x64 | 0x65)
+        ) {
+            p += 1;
+        }
+        if matches!(insn.get(p).copied(), Some(0x40..=0x4F)) {
+            p += 1;
+        }
+
+        let displacement = |at: usize| -> Option<i32> {
+            insn.get(at..at + 4)
+                .map(|bytes| i32::from_le_bytes(bytes.try_into().expect("four bytes")))
+        };
+        // A ModRM of mod=00, rm=101 is the RIP-relative form, and rm=101 takes no
+        // SIB byte, so its disp32 follows the ModRM directly.
+        let rip_relative = |modrm: u8| modrm & 0xC7 == 0x05;
+        let reference = match insn.get(p).copied() {
+            Some(0xE8 | 0xE9) => displacement(p + 1),
+            // `call`/`jmp` through a RIP-relative slot: ModRM.reg 2 and 4.
+            Some(0xFF) => match insn.get(p + 1).copied() {
+                Some(modrm) if rip_relative(modrm) && matches!((modrm >> 3) & 7, 2 | 4) => {
+                    displacement(p + 2)
+                }
+                _ => None,
+            },
+            // `mov reg, [rip+disp]` / `lea reg, [rip+disp]`: the address-taken form.
+            Some(0x8B | 0x8D) => match insn.get(p + 1).copied() {
+                Some(modrm) if rip_relative(modrm) => displacement(p + 2),
+                _ => None,
+            },
+            _ => None,
+        };
+        Some((len, reference))
     }
 
     /// Decode the length of the single instruction at `b[0]`, and whether its
@@ -4250,6 +4470,410 @@ mod tests {
         assert!(
             native_deny_trap_armed(&wasm).is_err(),
             "a foreign input must never be reported as carrying no armed surface"
+        );
+    }
+
+    /// Build an ELF image whose symbol table has the shape a linker produces: a
+    /// run of local symbols, each introduced by the STT_FILE marker naming its
+    /// input object, and then the global symbols — which follow the whole local
+    /// run and therefore sit under no marker at all.
+    ///
+    /// `locals` is `(file, symbol, address, size)`; `globals` is
+    /// `(symbol, address, size)`.
+    fn elf_with_symbol_runs(
+        locals: &[(&str, &str, u64, u64)],
+        globals: &[(&str, u64, u64)],
+    ) -> Vec<u8> {
+        use object::write::{Object as WriteObject, Symbol as WriteSymbol, SymbolSection};
+        use object::{Endianness, SymbolFlags, SymbolScope};
+
+        let mut object =
+            WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+        let text = object.add_section(Vec::new(), b".text".to_vec(), SectionKind::Text);
+        object.append_section_data(text, &[0x90; 0x200], 16);
+
+        let mut current_file = None;
+        for (file, symbol, address, size) in locals {
+            if current_file != Some(*file) {
+                current_file = Some(*file);
+                object.add_symbol(WriteSymbol {
+                    name: file.as_bytes().to_vec(),
+                    value: 0,
+                    size: 0,
+                    kind: SymbolKind::File,
+                    scope: SymbolScope::Compilation,
+                    weak: false,
+                    section: SymbolSection::None,
+                    flags: SymbolFlags::None,
+                });
+            }
+            object.add_symbol(WriteSymbol {
+                name: symbol.as_bytes().to_vec(),
+                value: *address,
+                size: *size,
+                kind: SymbolKind::Text,
+                scope: SymbolScope::Compilation,
+                weak: false,
+                section: SymbolSection::Section(text),
+                flags: SymbolFlags::None,
+            });
+        }
+        for (symbol, address, size) in globals {
+            object.add_symbol(WriteSymbol {
+                name: symbol.as_bytes().to_vec(),
+                value: *address,
+                size: *size,
+                kind: SymbolKind::Text,
+                scope: SymbolScope::Linkage,
+                weak: false,
+                section: SymbolSection::Section(text),
+                flags: SymbolFlags::None,
+            });
+        }
+        object.write().expect("synthesized ELF is writable")
+    }
+
+    // The ELF root cause. A STT_FILE marker names the input object of the LOCAL
+    // symbols that follow it, and ELF puts every local before the first global,
+    // so no marker reaches a global symbol. Carrying the last one forward anyway
+    // stamped every global in the image with whichever object happened to be last
+    // in the local run — the `object=crtstuff.c` / `object=ucmpti2.c` findings, up
+    // to and including groups that contradicted themselves
+    // (`crate=leaker_a object=crtstuff.c`). Locals keep their real object;
+    // globals report no object rather than a borrowed one.
+    #[test]
+    fn elf_file_symbols_never_reach_past_their_own_local_run() {
+        let bytes = elf_with_symbol_runs(
+            &[
+                ("shim.c", "shim_helper", 0x10, 0x10),
+                ("ucmpti2.c", "builtin_helper", 0x30, 0x10),
+            ],
+            &[("_RNvCslpz1a3WbgXx_8leaker_a4addr", 0x80, 0x10)],
+        );
+        let file = object::File::parse(&*bytes).expect("synthesized ELF parses");
+        let index = NativeProvenanceIndex::new(&file);
+
+        let local = index.for_address(0x18, Some(".text"));
+        assert_eq!(local.object, "shim.c");
+        assert_eq!(local.containing_symbol.as_deref(), Some("shim_helper"));
+
+        let last_local = index.for_address(0x38, Some(".text"));
+        assert_eq!(last_local.object, "ucmpti2.c");
+
+        // The regression pin: this global follows `ucmpti2.c` in the table but
+        // belongs to neither file symbol.
+        let global = index.for_address(0x88, Some(".text"));
+        assert_eq!(
+            global.object, UNKNOWN_OBJECT,
+            "a global symbol must not inherit the last file symbol in the table"
+        );
+        assert_eq!(global.crate_name.as_deref(), Some("leaker_a"));
+        assert_eq!(
+            global.containing_symbol.as_deref(),
+            Some("_RNvCslpz1a3WbgXx_8leaker_a4addr")
+        );
+        assert_eq!(
+            global.label(),
+            "provenance=crate=leaker_a",
+            "an unrecorded object is omitted, never rendered as a borrowed one"
+        );
+    }
+
+    // Nested symbols: the tightest container names the site. This is the shape a
+    // linked ELF really produces — a global function laid out inside the span of
+    // a local region symbol, which is the one that carries an object — and
+    // ranking object provenance ahead of precision made the enclosing region win,
+    // naming a symbol that merely surrounds the site instead of the function
+    // holding it.
+    #[test]
+    fn elf_containing_symbol_is_the_tightest_enclosing_symbol() {
+        let bytes = elf_with_symbol_runs(
+            &[("shim.c", "outer_region", 0x10, 0x80)],
+            &[("_RNvCslpz1a3WbgXx_8leaker_a4addr", 0x40, 0x10)],
+        );
+        let file = object::File::parse(&*bytes).expect("synthesized ELF parses");
+        let index = NativeProvenanceIndex::new(&file);
+        assert_eq!(
+            index
+                .for_address(0x44, Some(".text"))
+                .containing_symbol
+                .as_deref(),
+            Some("_RNvCslpz1a3WbgXx_8leaker_a4addr")
+        );
+        assert_eq!(
+            index
+                .for_address(0x20, Some(".text"))
+                .containing_symbol
+                .as_deref(),
+            Some("outer_region")
+        );
+    }
+
+    // Each stub is mapped by the slot it jumps through, not by its position in
+    // the table. The two here jump through slots in the opposite order to their
+    // position, so a positional mapping and a decoded one cannot agree — which is
+    // the failure that had every `call foo@plt` site in a real binary attributed
+    // to an unrelated import, and imports reported as referenced from functions
+    // (`fputs`, `puts`) that never touched them.
+    #[test]
+    fn plt_entries_map_by_the_slot_they_jump_through_not_by_position() {
+        use object::write::{Object as WriteObject, StandardSegment};
+        use object::{Endianness, SectionKind};
+
+        // Entry 0 is a reserved header that is not a stub at all; entry 1 jumps
+        // through the higher slot and entry 2 through the lower one.
+        let mut plt = vec![0xcc; 16];
+        plt.extend_from_slice(&[0xff, 0x25]);
+        plt.extend_from_slice(&0x3ff2_i32.to_le_bytes());
+        plt.extend_from_slice(&[0xcc; 10]);
+        plt.extend_from_slice(&[0xff, 0x25]);
+        plt.extend_from_slice(&0x3fda_i32.to_le_bytes());
+        plt.extend_from_slice(&[0xcc; 10]);
+
+        let mut object =
+            WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+        let section = object.add_section(
+            object.segment_name(StandardSegment::Text).to_vec(),
+            b".plt".to_vec(),
+            SectionKind::Text,
+        );
+        object.append_section_data(section, &plt, 16);
+        let bytes = object.write().expect("synthesized ELF is writable");
+        let file = object::File::parse(&*bytes).expect("synthesized ELF parses");
+        let base = file
+            .sections()
+            .find(|section| section.name() == Ok(".plt"))
+            .expect("the .plt section survives the round trip")
+            .address();
+
+        let higher = base + 0x16 + 0x3ff2;
+        let lower = base + 0x26 + 0x3fda;
+        assert!(
+            higher > lower,
+            "the fixture only discriminates if slot order is the reverse of entry order"
+        );
+        let got_slots = BTreeMap::from([
+            (lower, "lower_slot".to_owned()),
+            (higher, "higher_slot".to_owned()),
+        ]);
+
+        let mut targets = BTreeMap::new();
+        collect_elf_plt_targets(&file, &got_slots, &mut targets);
+        assert_eq!(
+            targets,
+            BTreeMap::from([
+                (base + 0x10, "higher_slot".to_owned()),
+                (base + 0x20, "lower_slot".to_owned()),
+            ]),
+            "counting entries off against slot order would swap these two"
+        );
+    }
+
+    // PLT stubs are decoded through their own GOT slot rather than counted off
+    // positionally, so an entry that carries no symbol relocation (a reserved
+    // header word, an ifunc's IRELATIVE) cannot shift the rest of the table onto
+    // the wrong imports.
+    #[test]
+    fn plt_stubs_resolve_through_the_got_slot_they_jump_through() {
+        // `jmp *0x2fda(%rip)` at 0x1020: RIP after the 6-byte instruction is
+        // 0x1026, so the slot is 0x4000.
+        let mut lazy = vec![0xff, 0x25];
+        lazy.extend_from_slice(&0x2fda_i32.to_le_bytes());
+        assert_eq!(
+            decode_plt_stub_slot(Architecture::X86_64, &lazy, 0x1020),
+            Some(0x4000)
+        );
+
+        // A `.plt.sec` entry: `endbr64` then `bnd jmp *0x2fd1(%rip)`. The jump
+        // starts at offset 5, so RIP is 0x1020 + 5 + 6 = 0x102b.
+        let mut endbr = vec![0xf3, 0x0f, 0x1e, 0xfa, 0xf2, 0xff, 0x25];
+        endbr.extend_from_slice(&0x2fd5_i32.to_le_bytes());
+        assert_eq!(
+            decode_plt_stub_slot(Architecture::X86_64, &endbr, 0x1020),
+            Some(0x4000)
+        );
+
+        // aarch64: `adrp x16, 0x4000` then `ldr x17, [x16, #0x18]`.
+        let aarch64: Vec<u8> = [0xf000_0010_u32, 0xf940_0e11]
+            .iter()
+            .flat_map(|instruction| instruction.to_le_bytes())
+            .collect();
+        assert_eq!(
+            decode_plt_stub_slot(Architecture::Aarch64, &aarch64, 0x1000),
+            Some(0x4018)
+        );
+
+        // Padding is not a stub.
+        assert_eq!(
+            decode_plt_stub_slot(Architecture::X86_64, &[0xcc; 16], 0x1020),
+            None
+        );
+    }
+
+    // Import references are read at instruction boundaries, so displacement bytes
+    // sitting inside another instruction's operand are never mistaken for one.
+    // The planted `movabs` below carries the exact encoding of a RIP-relative
+    // load of `phantom_import` in its 8-byte immediate: a scan that matched the
+    // pattern at every byte offset reported that import as referenced from
+    // whatever function contained these bytes.
+    #[test]
+    fn import_xrefs_ignore_reference_bytes_embedded_in_an_operand() {
+        const SECTION: u64 = 0x1000;
+        let mut data = vec![0x48, 0xb8];
+        // imm64 = `mov rax, [rip+0xff8]` as data — resolving, if decoded at
+        // offset 2, to 0x1008 + 0xff8 = 0x2000.
+        data.extend_from_slice(&[0x8b, 0x05, 0xf8, 0x0f, 0x00, 0x00, 0x00, 0x00]);
+        // A genuine `mov rax, [rip+0x1fef]` at a real boundary (offset 0xa):
+        // 0x1011 + 0x1fef = 0x3000.
+        data.extend_from_slice(&[0x48, 0x8b, 0x05, 0xef, 0x1f, 0x00, 0x00]);
+
+        let targets = BTreeMap::from([
+            (0x2000_u64, "phantom_import".to_owned()),
+            (0x3000_u64, "real_import".to_owned()),
+        ]);
+        let file = elf_with_symbol_runs(&[("caller.c", "caller", SECTION, 0x40)], &[]);
+        let file = object::File::parse(&*file).expect("synthesized ELF parses");
+        let index = NativeProvenanceIndex::new(&file);
+
+        let mut origins = BTreeMap::new();
+        scan_x86_64_import_xrefs(
+            &data,
+            SECTION,
+            Some(".text"),
+            &targets,
+            &index,
+            &mut origins,
+        );
+        assert_eq!(
+            origins.keys().collect::<Vec<_>>(),
+            vec!["real_import"],
+            "only the reference at a real instruction boundary counts"
+        );
+    }
+
+    // Impl methods dominate a real symbol table, and their demangled form starts
+    // with the impl header rather than the crate. Reading only the first `::`
+    // segment left `crate=` empty for most of a binary — every `std` finding in
+    // the reproduction came through as `provenance=` with an object alone.
+    #[test]
+    fn crate_name_recovers_from_impl_method_and_generic_symbols() {
+        assert_eq!(
+            crate_name_from_symbol("_RNvCslpz1a3WbgXx_8leaker_a4addr").as_deref(),
+            Some("leaker_a")
+        );
+        assert_eq!(
+            crate_name_from_symbol(
+                "_RNvXs1_NtNtNtCs2AWtUsOyxgP_3std2os4unix7processNtNtBb_7process5ChildNtB5_8ChildExt18kill_process_group"
+            )
+            .as_deref(),
+            Some("std")
+        );
+
+        // Direct path cases, including the ones that must NOT yield a crate: a
+        // generic parameter and a primitive are not crates.
+        assert_eq!(
+            crate_name_from_demangled_path("std::io::Write::write_all").as_deref(),
+            Some("std")
+        );
+        assert_eq!(
+            crate_name_from_demangled_path("<alloc::vec::Vec<T> as core::ops::Drop>::drop")
+                .as_deref(),
+            Some("alloc")
+        );
+        assert_eq!(
+            crate_name_from_demangled_path("*const std::ffi::c_void::method").as_deref(),
+            Some("std")
+        );
+        assert_eq!(
+            crate_name_from_demangled_path("<T as core::fmt::Debug>::fmt"),
+            None
+        );
+        assert_eq!(
+            crate_name_from_demangled_path("<u32 as core::fmt::Display>::fmt"),
+            None
+        );
+        assert_eq!(crate_name_from_demangled_path("{{closure}}"), None);
+    }
+
+    // An object with no name is not attribution. An ELF file symbol may carry an
+    // empty name, and rendering that produced a bare `object=` with nothing after
+    // it — the arm64 flavor of the same wrong answer x86_64 gave by borrowing the
+    // last marker in the table. Both the marker and the label collapse to
+    // `unknown` instead.
+    #[test]
+    fn an_empty_object_name_is_reported_as_unknown_not_as_an_empty_label() {
+        assert_eq!(compact_object_label("", None), UNKNOWN_OBJECT);
+        assert_eq!(compact_object_label("", Some("")), UNKNOWN_OBJECT);
+        assert_eq!(compact_object_label("libfoo.rlib", Some("")), "libfoo.rlib");
+
+        let bytes = elf_with_symbol_runs(
+            &[("", "unnamed_file_local", 0x10, 0x10)],
+            &[("_RNvCslpz1a3WbgXx_8leaker_a4addr", 0x80, 0x10)],
+        );
+        let file = object::File::parse(&*bytes).expect("synthesized ELF parses");
+        let index = NativeProvenanceIndex::new(&file);
+        for address in [0x18, 0x88] {
+            let provenance = index.for_address(address, Some(".text"));
+            assert_eq!(
+                provenance.object, UNKNOWN_OBJECT,
+                "an empty file symbol names no object at {address:#x}"
+            );
+            assert!(
+                !provenance.label().contains("object="),
+                "an unnamed object must not be rendered at all: {}",
+                provenance.label()
+            );
+        }
+    }
+
+    // rustc names each codegen unit `<crate>.<hash>-cgu.<n>`, and that name is
+    // what the linker copies into the ELF file symbol — the readable half of
+    // ELF's object identity. Local-crate units are named by hash alone and must
+    // not be mined for a crate name.
+    #[test]
+    fn codegen_unit_names_yield_a_crate_only_when_they_carry_one() {
+        assert_eq!(
+            crate_name_from_codegen_unit("std.1e3c4ec04c5261a9-cgu.0").as_deref(),
+            Some("std")
+        );
+        assert_eq!(
+            crate_name_from_codegen_unit("compiler_builtins.fb155c23557db162-cgu.000").as_deref(),
+            Some("compiler_builtins")
+        );
+        assert_eq!(
+            crate_name_from_codegen_unit("9hzrs7df61h1scw4v1u1kzqy5"),
+            None
+        );
+        assert_eq!(crate_name_from_codegen_unit("crtstuff.c"), None);
+        assert_eq!(crate_name_from_codegen_unit("patina_posix.c"), None);
+    }
+
+    // A section name is the one field every site can fill in, so counting it as
+    // attribution kept each unattributable reference as its own
+    // `provenance=unknown` group instead of collapsing into one — and kept those
+    // groups alive alongside the real ones.
+    #[test]
+    fn section_only_provenance_collapses_and_yields_to_real_attribution() {
+        let site = |section: &str| NativeProvenance {
+            object: UNKNOWN_OBJECT.into(),
+            crate_name: None,
+            containing_symbol: None,
+            section: Some(section.into()),
+        };
+        assert_eq!(
+            normalize_provenance(vec![site(".text"), site(".data")]),
+            vec![NativeProvenance::unknown()]
+        );
+
+        let attributed = NativeProvenance {
+            object: "libfoo-1234abcd.rlib(foo.o)".into(),
+            crate_name: Some("foo".into()),
+            containing_symbol: Some("foo::bar".into()),
+            section: Some(".text".into()),
+        };
+        assert_eq!(
+            normalize_provenance(vec![site(".text"), attributed.clone()]),
+            vec![attributed]
         );
     }
 
