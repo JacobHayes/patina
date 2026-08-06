@@ -189,7 +189,31 @@ when the run fails*, leading with a failure summary:
 $ cargo patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina --report ./report.html
 ```
 
-## 8. Machine-readable output for agents
+## 8. Keep a point-solution guard under plain cargo test
+
+For a permanent per-PR guard, enable the `patina-dst` `macros` feature in
+`dev-dependencies` and annotate a zero-argument test:
+
+```rust
+#[patina_dst::test(seeds = 20, buggify)]
+fn ledger_stays_sorted_under_faults() {
+    // ordinary test code using the crate's helpers and dev-dependencies
+}
+```
+
+Plain `cargo test` finds `cargo-patina` through `PATINA_CLI` or `PATH`, rebuilds
+the same libtest target shim-linked, and runs only that test with one libtest
+thread. A failing seed panics with both repro commands:
+
+```text
+reproduce:
+  cargo patina test . --harness-target my_crate --exact ledger_stays_sorted_under_faults --seed 5
+  cargo patina replay target/patina/dst/.../guest target/patina/dst/.../seed-5.patina
+```
+
+If `cargo-patina` is not discoverable, the test fails loudly instead of skipping.
+
+## 9. Machine-readable output for agents
 
 Any verb accepts `--format json`, emitting one result envelope on stdout (schema
 `patina.result/v1`) with the guest output folded in, except `trace events`, which

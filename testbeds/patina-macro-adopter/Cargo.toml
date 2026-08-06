@@ -1,0 +1,16 @@
+# Standalone adopter crate: its own empty workspace keeps it outside the root
+# Patina workspace, so these tests exercise the published path-dependency shape
+# an ordinary crate uses.
+[workspace]
+
+[package]
+name = "patina-macro-adopter"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+patina-dst = { path = "../../crates/patina", features = ["macros"] }

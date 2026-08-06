@@ -13,8 +13,15 @@ repository.workspace = true
 # Outside a Patina build every macro compiles to a no-op or a plain fallback, so
 # a plain `cargo build` of an adopter stays lightweight and warning-free and
 # links no runtime. The explicit-context runtime surface lives in the separate
-# `patina-dst-runtime` crate; this crate carries no optional runtime deps.
+# `patina-dst-runtime` crate; this crate carries no runtime deps.
 default = []
+
+# Test-only point-solution DST attribute. Keep this feature default-off so
+# production builds of adopters do not compile the proc-macro crate.
+macros = ["dep:patina-dst-macros"]
+
+[dependencies]
+patina-dst-macros = { workspace = true, optional = true }
 
 # `cargo patina build` injects these cfgs workspace-wide; `patina_shim` is
 # additionally injected only by the native `build` paths (which link the shim), so

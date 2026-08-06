@@ -127,9 +127,17 @@ json` is a normal `patina.result/v1` envelope with a nested
 
 ## SDK macros (crate `patina-dst`, default features = dependency-light SDK)
 
-Instrument a system-under-test; every macro is a no-op under a plain
-`cargo build` (adopters pay nothing) and lowers to the runtime only under Patina.
+Instrument a system-under-test; every default-feature macro is a no-op under a
+plain `cargo build` (adopters pay nothing) and lowers to the runtime only under
+Patina. The default-off `macros` feature re-exports `#[patina_dst::test]` for
+dev-dependency use under plain `cargo test`.
 
+- `#[patina_dst::test]`: point-solution DST test. The plain test process finds
+  `cargo-patina` via absolute `PATINA_CLI` or `cargo-patina` on `PATH`, rebuilds
+  the same libtest target shim-linked, sweeps 20 seeds by default (or macro args
+  such as `seed = 7`, `seeds = 200`, `buggify`, `fs_crash_at = "write:3"`), and
+  panics with the failing seed plus `cargo patina test` / `cargo patina replay`
+  repro commands. Missing CLI discovery is a failure, never a skip.
 - `patina_dst::buggify!("label")` -> bool: fires on a rare, seed-deterministic path.
 - `patina_dst::buggify_with_prob!("label", 0.9)`, `patina_dst::buggify_delay!("label")`,
   `patina_dst::buggify_knob!("label", default, lo, hi)` -> value.

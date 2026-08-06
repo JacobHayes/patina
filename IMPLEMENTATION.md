@@ -310,6 +310,20 @@ Completed foundations (Milestone C — buggify on WASI):
     deterministic campaign (per-gen derived activation/fire, per-gen record→replay
     determinism check, fresh `out-wasi-buggify/` dir) reusing the campaign layer.
 
+Completed foundations (point-solution DST arc, Wave B):
+
+14. **`#[patina_dst::test]` under plain `cargo test`.** `patina-dst-macros`
+    (directory `crates/patina-macros`, no external deps) provides the hand-rolled
+    attribute, re-exported by `patina-dst` behind the default-off `macros`
+    feature. The wrapper runs the body directly only when `patina_dst::is_simulated()`
+    is true; otherwise it discovers `cargo-patina` through absolute `PATINA_CLI`
+    or `PATH` and delegates to native harness mode: `cargo patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test`.
+    Missing CLI discovery is a test
+    failure, never a skip. The adopter fixture `testbeds/patina-macro-adopter`
+    proves a passing sweep, a seeded failure panic carrying the seed plus
+    `cargo patina test`/`cargo patina replay` repro commands, a PATH-scrubbed
+    refusal, double-run identical failure blocks, and the no-new-deps cargo tree.
+
 ## Slice 7: exploration tier — Partial (wave 12)
 
 Directed exploration policies that steer *which* interleavings and fault

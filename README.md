@@ -138,6 +138,13 @@ The first failing seed is immediately re-run with `--record`; artifacts land und
 `target/patina/dst/...`, and the failure block includes both `cargo patina test`
 and `cargo patina replay` repro commands.
 
+For an adopter-shaped guardrail, enable `patina-dst`'s default-off `macros`
+feature in dev-dependencies and write `#[patina_dst::test]` on a zero-argument
+Rust test function. Plain `cargo test` then discovers `cargo-patina` through
+`PATINA_CLI` (absolute path) or `cargo-patina` on `PATH`, rebuilds the same
+libtest target shim-linked, and sweeps the test (20 seeds by default). Missing
+CLI discovery is a test failure, never a skip.
+
 Every verb has `--help`, and `--help --format json` emits a machine-readable
 registry (schema `patina.help/v2`) with progressive disclosure: bare
 `cargo patina --help --format json` is a compact index (every verb's summary and

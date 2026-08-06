@@ -75,7 +75,8 @@ DOCS=(README.md TUTORIAL.md USAGE-MODES.md ARCHITECTURE.md IMPLEMENTATION.md
       crates/patina-target/ESCAPE-CLASSES.md crates/patina-native-shim/AGENTS.md
       testbeds/AGENTS.md testbeds/README.md testbeds/workq/README.md testbeds/pubsub/README.md
       testbeds/audit-corpus/README.md testbeds/rustix-default/README.md
-      testbeds/buggify-wasi/README.md testbeds/checkout-retry-idempotency/README.md)
+      testbeds/buggify-wasi/README.md testbeds/checkout-retry-idempotency/README.md
+      testbeds/patina-macro-adopter/README.md)
 
 SCRIPTS=()
 while IFS= read -r f; do SCRIPTS+=("$f"); done < <(

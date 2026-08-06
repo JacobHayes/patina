@@ -10,6 +10,7 @@ members = [
     "crates/patina-fs-host",
     "crates/patina-fs-mem",
     "crates/patina-harness",
+    "crates/patina-macros",
     "crates/patina-minimize",
     "crates/patina-native-shim",
     "crates/patina-net-sim",
@@ -46,6 +47,7 @@ patina-dst-fs-crash = { path = "crates/patina-fs-crash", version = "0.1.0" }
 patina-dst-fs-host = { path = "crates/patina-fs-host", version = "0.1.0" }
 patina-dst-fs-mem = { path = "crates/patina-fs-mem", version = "0.1.0" }
 patina-dst-harness = { path = "crates/patina-harness", version = "0.1.0" }
+patina-dst-macros = { path = "crates/patina-macros", version = "0.1.0" }
 patina-dst-minimize = { path = "crates/patina-minimize", version = "0.1.0" }
 patina-dst-native-shim = { path = "crates/patina-native-shim", version = "0.1.0" }
 patina-dst-net-sim = { path = "crates/patina-net-sim", version = "0.1.0" }

@@ -1,0 +1,11 @@
+[package]
+name = "patina-dst-macros"
+description = "Attribute macros for Patina DST tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lib]
+proc-macro = true

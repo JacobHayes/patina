@@ -1,7 +1,8 @@
 # Arc: point-solution DST — deep exposure for a slice of a project
 
-Status: design approved 2026-07-30; implementation not yet scheduled.
-Lands as `docs/arcs/point-solution-dst.md`.
+Status: design approved 2026-07-30; Wave A (native libtest harness mode) and
+Wave B (`#[patina_dst::test]`) implemented; Wave C (skills) remains a separate
+final pass. Lands as `docs/arcs/point-solution-dst.md`.
 
 Patina today is strongest as a whole-program instrument: build a binary, sweep
 seeds, run campaigns overnight. This arc makes it a **point solution** — deep,

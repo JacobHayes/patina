@@ -18,9 +18,13 @@ Ordinary application code instrumented with the cooperative-SUT SDK:
 `buggify!`/`buggify_with_prob!`/`buggify_delay!`/`buggify_knob!` fault sites,
 `always!`/`sometimes!`/`reachable!` oracles, the `lifecycle` markers
 (`setup_complete()`, `event!`), and `patina_dst::rng()`/`is_simulated()`. The
-crate is dependency-free; every macro is a no-op or plain fallback outside a
-Patina build, so adopters ship it unconditionally with no `cfg(patina)` in
-their code. The runtime enters through `cargo patina build`/`run` (the shim),
+crate is dependency-free by default; every macro is a no-op or plain fallback
+outside a Patina build, so adopters ship it unconditionally with no `cfg(patina)`
+in their code. The default-off `macros` feature re-exports
+`#[patina_dst::test]` for dev-dependency use: plain `cargo test` discovers
+`cargo-patina` through `PATINA_CLI` or `PATH`, then rebuilds the same libtest
+target shim-linked and runs the annotated body under the native harness. The
+runtime otherwise enters through `cargo patina build`/`run` (the shim),
 `cargo patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test`
 (the source-first native libtest harness for one point-solution test), or
 `build --target wasi` (the `patina_sdk` host imports), or not at all.
@@ -91,7 +95,8 @@ Package names are `patina-dst-*`; the workspace directories drop the `-dst-`
 
 | Crate | Directory | Role |
 |---|---|---|
-| `patina-dst` | `crates/patina` | mode-1 SDK; dependency-free; used as `patina_dst::` |
+| `patina-dst` | `crates/patina` | mode-1 SDK; dependency-free by default; used as `patina_dst::` |
+| `patina-dst-macros` | `crates/patina-macros` | default-off `#[patina_dst::test]` proc macro; no external deps |
 | `patina-dst-harness` | `crates/patina-harness` | mode-2 configure-then-run harness (deps: `patina-dst-runtime`, `serde_json`) |
 | `patina-dst-runtime` | `crates/patina-runtime` | mode-3 explicit-context API; also the runtime every other mode drives |
 | `patina-dst-async` | `crates/patina-async` | explicit-boundary futures executor over mode 3 |
