@@ -8479,6 +8479,169 @@ fn assert_covmap_has_magic_and_report(path: &Path, output: &Output) {
     );
 }
 
+// A guest that produces every end-of-run diagnostic a single native run can:
+// concurrent workers (schedule report) and fault-eligible filesystem traffic
+// (fs-fault report), with the swarm/liveness/policy/SDK reports armed by flags.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const REPORT_KNOB_SOURCE: &str = r#"
+use std::fs;
+use std::sync::{Arc, Mutex};
+use std::thread;
+
+fn main() {
+    let counter = Arc::new(Mutex::new(0u64));
+    let mut handles = Vec::new();
+    for _ in 0..3 {
+        let counter = Arc::clone(&counter);
+        handles.push(thread::spawn(move || {
+            for _ in 0..20 {
+                *counter.lock().unwrap() += 1;
+            }
+        }));
+    }
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    for index in 0..8 {
+        let path = format!("/tmp/report-probe-{index}");
+        let _ = fs::write(&path, b"payload");
+        let _ = fs::read(&path);
+    }
+    println!("REPORT_KNOBS total={}", *counter.lock().unwrap());
+}
+"#;
+
+// Every end-of-run report knob must actually suppress its report on the NATIVE
+// family, and suppressing it must not change a single recorded byte.
+//
+// Native is the family where this cannot work by accident. The supervisor clears
+// the guest's environment, so a knob reaches the guest only if it is forwarded
+// explicitly; and the shim scrubs `environ` at startup, so by finalization the
+// interposed `getenv` returns NULL for everything and a late `std::env` read
+// cannot tell "suppressed" from "unset". Both halves were missing: only
+// `PATINA_COVERAGE_REPORT` was forwarded, and the runtime read the remaining
+// knobs from the process environment at `Context::finish` — so on this whole
+// family every documented suppressor was silently inert.
+//
+// The trace comparison is the other half of the contract: suppression is
+// presentation, never run semantics, so the recorded bytes — and with them the
+// fingerprint and everything replay reconciles — must be identical whether the
+// reports printed or not.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_report_knobs_suppress_every_report_without_touching_the_trace() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("reports.rs");
+    fs::write(&source, REPORT_KNOB_SOURCE).unwrap();
+
+    // Each knob with the line prefix it silences. `PATINA_SCHEDULE_POLICY_REPORT`
+    // gates a line named `PATINA_SCHEDULE_POLICY`, so knob and prefix are spelled
+    // out separately rather than derived from one another.
+    let armed: &[(&str, &str)] = &[
+        ("PATINA_SCHEDULE_REPORT", "PATINA_SCHEDULE_REPORT "),
+        ("PATINA_SWARM_REPORT", "PATINA_SWARM_REPORT "),
+        ("PATINA_LIVENESS_REPORT", "PATINA_LIVENESS_REPORT "),
+        ("PATINA_SDK_REPORT", "PATINA_SDK_REPORT "),
+        ("PATINA_FS_FAULT_REPORT", "PATINA_FS_FAULT_REPORT "),
+        ("PATINA_SCHEDULE_POLICY_REPORT", "PATINA_SCHEDULE_POLICY "),
+    ];
+    let loud_trace = directory.path().join("loud.patina");
+    let quiet_trace = directory.path().join("quiet.patina");
+    let run = |trace: &Path, envs: &[(&str, &str)]| {
+        let output = invoke_unchecked_clean_env(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &[
+                "run",
+                source.to_str().unwrap(),
+                "--seed",
+                "1",
+                "--record",
+                trace.to_str().unwrap(),
+                "--fs-error-permille",
+                "100",
+                "--swarm",
+                "--liveness-watchdog",
+                "--sched-pct",
+                "--buggify",
+            ],
+            envs,
+        );
+        assert!(
+            output.status.success(),
+            "native report-knob run failed with {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+
+    let loud = run(&loud_trace, &[]);
+    let loud_stderr = String::from_utf8_lossy(&loud.stderr).into_owned();
+    for (knob, prefix) in armed {
+        assert!(
+            loud_stderr.contains(prefix),
+            "{knob}'s report is missing from an unsuppressed run, so suppressing it \
+             would prove nothing; stderr:\n{loud_stderr}"
+        );
+    }
+
+    let silenced: Vec<(&str, &str)> = armed.iter().map(|(knob, _)| (*knob, "0")).collect();
+    let quiet = run(&quiet_trace, &silenced);
+    let quiet_stderr = String::from_utf8_lossy(&quiet.stderr).into_owned();
+    for (knob, prefix) in armed {
+        assert!(
+            !quiet_stderr.contains(prefix),
+            "{knob}=0 did not suppress its report on the native family; stderr:\n{quiet_stderr}"
+        );
+    }
+    // The guest's own line only: the surrounding `PATINA_BUILD_ON_RUN` line names
+    // a per-invocation temporary artifact path.
+    let guest_line = |output: &Output| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find(|line| line.starts_with("REPORT_KNOBS "))
+            .unwrap_or_else(|| panic!("guest produced no output line"))
+            .to_string()
+    };
+    assert_eq!(
+        guest_line(&loud),
+        guest_line(&quiet),
+        "report suppression must not change the guest's own output"
+    );
+    assert_eq!(
+        fs::read(&loud_trace).unwrap(),
+        fs::read(&quiet_trace).unwrap(),
+        "report suppression is presentation only: the recorded trace must be byte-identical"
+    );
+
+    // A replay reconciles against a recording made under different suppression
+    // settings and reproduces the same guest output — suppression reaches neither
+    // the fingerprint nor anything replay checks.
+    let replayed = invoke_unchecked_clean_env(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "replay",
+            source.to_str().unwrap(),
+            loud_trace.to_str().unwrap(),
+        ],
+        &silenced,
+    );
+    assert!(
+        replayed.status.success(),
+        "replay of a loud recording under suppressed reports must reconcile; stderr:\n{}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&replayed.stdout).contains("REPORT_KNOBS total=60"),
+        "replayed guest output changed under suppression:\n{}",
+        String::from_utf8_lossy(&replayed.stdout)
+    );
+}
+
 // A worker that uses `mpsc::recv_timeout` initializes a thread-local `Thread`
 // handle whose destructor runs at pthread exit. Under `--yield-points` that
 // destructor is instrumented std code monomorphized into the guest crate, so it
@@ -12943,6 +13106,38 @@ fn wasi_depth_is_byte_identical_across_repeats_and_replay_and_varies_by_seed() {
             .iter()
             .any(|marker| marker.as_str().unwrap().starts_with("PATINA_DEPTH_REPORT ")),
         "the depth marker must surface in the envelope's markers"
+    );
+}
+
+// The WASI family's own suppression leg. A WASI guest executes in the supervisor
+// process, so its knobs come from the supervisor's environment rather than a
+// forwarded child environment — a different path from native's, resolved through
+// the same table and parser. The depth line is the one report the supervisor
+// itself appends, so it is the one that would break if the unified resolution
+// stopped reaching this family.
+#[test]
+fn wasi_depth_report_is_suppressed_by_its_knob() {
+    let directory = tempdir().unwrap();
+    let module = directory.path().join("depth.wasm");
+    fs::write(&module, wat::parse_str(WASI_DEPTH_MODULE).unwrap()).unwrap();
+    let run = |envs: &[(&str, &str)]| {
+        let output = invoke_unchecked_clean_env(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            directory.path(),
+            &["run", module.to_str().unwrap(), "--seed", "5"],
+            envs,
+        );
+        assert!(output.status.success(), "WASI depth guest run failed");
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    assert!(
+        run(&[]).contains("PATINA_DEPTH_REPORT "),
+        "the depth line must be on by default, or suppressing it proves nothing"
+    );
+    let quiet = run(&[("PATINA_DEPTH_REPORT", "0")]);
+    assert!(
+        !quiet.contains("PATINA_DEPTH_REPORT "),
+        "PATINA_DEPTH_REPORT=0 did not suppress the WASI depth line; stderr:\n{quiet}"
     );
 }
 

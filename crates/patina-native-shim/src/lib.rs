@@ -1540,14 +1540,20 @@ fn control_coverage_fd() -> Result<Option<c_int>, RuntimeError> {
         .transpose()
 }
 
-fn coverage_report_suppressed() -> bool {
-    control_env(patina_dst_runtime::ENV_COVERAGE_REPORT).is_some_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "off" | "false" | "no"
-        )
-    })
+/// The run's end-of-run report-suppression preferences, parsed ONCE from the
+/// constructor's pre-scrub control-plane snapshot and cached.
+///
+/// Cached because both consumers need the same answer at different times: the
+/// runtime config takes it at install, and coverage finalization takes it at
+/// shutdown — after the context has left the slot, where a `std::env` read would
+/// route through the interposed `getenv` and come back empty. The control plane
+/// is the only view of the operator's environment that outlives the scrub, so it
+/// is the only one either consumer may use.
+fn control_reports() -> patina_dst_runtime::ReportConfig {
+    *REPORTS.get_or_init(|| patina_dst_runtime::ReportConfig::default().applied(control_env))
 }
+
+static REPORTS: OnceLock<patina_dst_runtime::ReportConfig> = OnceLock::new();
 
 fn prepare_coverage_output(
     requested: bool,
@@ -1587,7 +1593,7 @@ fn finalize_coverage() -> Result<(), String> {
     let Some(prepared) = prepare_coverage_output(requested, &guard_ranges, &pc_ranges)? else {
         return Ok(());
     };
-    if !coverage_report_suppressed() {
+    if control_reports().enabled(patina_dst_runtime::Report::Coverage) {
         capture_stderr_line(&format!(
             "PATINA_COVERAGE_REPORT edges_total={} edges_covered={} covered_permille={} hits_total={} hits_max={} saturated={}",
             prepared.summary.edges_total,
@@ -2274,6 +2280,11 @@ fn runtime_config_from_control_plane() -> Result<(RuntimeConfig, Option<i32>), R
     // Deterministic guest environment values travel the same control plane and
     // are recorded into trace metadata so replay restores them flag-free.
     config = config.apply_guest_env_env(control_env)?;
+    // End-of-run report suppression comes from the SAME pre-scrub snapshot, once,
+    // and is carried in the config: by finalization the context is out of the slot
+    // and the interposed `getenv` returns NULL for everything, so a knob read then
+    // would silently report "not set" and every suppression request would be inert.
+    config = config.with_reports(control_reports());
     // Record whether syscall-user-dispatch was armed for this run (the C layer's
     // arming state), so a cross-kernel replay is refused up front rather than
     // diverging mid-run (SUD-DESIGN.md §7.3). `None` on every non-SUD run.

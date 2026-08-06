@@ -1986,6 +1986,11 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         doc: "CLI default override for `.patina/config.toml` keys (for example PATINA_SEED, PATINA_GENERATIONS): explicit flags still win; campaign scrubs run-default env names from child runs.",
     },
     EnvVar {
+        name: "PATINA_SCHEDULE_REPORT / PATINA_SCHEDULE_POLICY_REPORT / PATINA_SWARM_REPORT / PATINA_LIVENESS_REPORT / PATINA_SDK_REPORT / PATINA_FS_FAULT_REPORT / PATINA_DNS_FAULT_REPORT / PATINA_NET_FAULT_REPORT / PATINA_COVERAGE_REPORT / PATINA_DEPTH_REPORT",
+        scope: "user",
+        doc: "End-of-run diagnostics, all on by default; a false-y value (0/off/false/no) silences one, on every family. Presentation only: suppressing a report changes no recorded byte, so a quiet run and a loud one replay against each other. A campaign pins them all on, since for a campaign they are classifier inputs rather than cosmetics.",
+    },
+    EnvVar {
         name: "PATINA_PARAMS_JSON",
         scope: "user",
         doc: "Typed --param values as a JSON object (the scenario-minimize oracle protocol).",
@@ -2011,9 +2016,9 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         doc: "Inherited already-open trace descriptor (native), so a fully interposed guest never recurses into the deterministic FS while finalizing its trace.",
     },
     EnvVar {
-        name: "PATINA_COVERAGE_FD / PATINA_COVERAGE_REPORT",
+        name: "PATINA_COVERAGE_FD",
         scope: "protocol",
-        doc: "Native coverage dump descriptor for --coverage-out, plus a false-y suppressor for the default-on PATINA_COVERAGE_REPORT line.",
+        doc: "Native coverage dump descriptor for --coverage-out.",
     },
     EnvVar {
         name: "PATINA_FS_IMAGE_FD",

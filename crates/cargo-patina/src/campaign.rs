@@ -2130,15 +2130,16 @@ fn run_generation(
             command.arg(arg);
         }
     }
-    // Keep the child's diagnostics deterministic and machine-parseable. Pin the
-    // SDK report on so a user's inherited PATINA_SDK_REPORT=0 cannot make the
-    // campaign coverage gate vacuously green, and the depth report on for the
-    // same reason: for a WASI campaign that line is the measurement channel, not
-    // a cosmetic diagnostic, so ambient suppression must not silence it.
+    // Keep the child's diagnostics deterministic and machine-parseable. For a
+    // campaign these lines are not cosmetic: they are the measurement channel and
+    // the only input the vacuity classifiers have, so an inherited
+    // `PATINA_*_REPORT=0` must never reach a generation and turn a blind run into
+    // a clean one. Pin every report on, from the same table the families forward,
+    // so a report added to the runtime is protected the day it exists.
     crate::config::scrub_child_config_env(&mut command, "run");
-    command.env("PATINA_LIVENESS_REPORT", "1");
-    command.env("PATINA_SDK_REPORT", "1");
-    command.env(patina_dst_runtime::ENV_DEPTH_REPORT, "1");
+    for report in patina_dst_runtime::Report::ALL {
+        command.env(report.env(), "1");
+    }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = command

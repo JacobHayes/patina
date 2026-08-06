@@ -299,6 +299,141 @@ pub const ENV_HEAL_AFTER: &str = "PATINA_HEAL_AFTER_NANOS";
 /// (`PATINA_LIVENESS_REPORT`) when set to a false-y value.
 pub const ENV_LIVENESS_REPORT: &str = "PATINA_LIVENESS_REPORT";
 
+/// One end-of-run diagnostic report, and the `PATINA_*` variable that silences
+/// it. Every report any layer emits — the runtime's own, the native shim's
+/// coverage line, the supervisor's WASI depth line — has a variant here, so the
+/// set of suppression knobs is enumerable rather than a per-emitter habit.
+///
+/// Suppression is presentation, never run semantics: no variant is a fingerprint
+/// input, none is recorded into a trace, and none participates in replay
+/// reconciliation. A replay with different suppression settings reconciles
+/// against the recording and produces the identical op stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Report {
+    /// `PATINA_SCHEDULE_REPORT` — per-task scheduling boundaries and vacuity.
+    Schedule,
+    /// `PATINA_SCHEDULE_POLICY_REPORT` — the realized PCT/starvation selection.
+    SchedulePolicy,
+    /// `PATINA_SWARM_REPORT` — the swarm fault-class draw.
+    Swarm,
+    /// `PATINA_LIVENESS_REPORT` — the liveness watchdog's armed/fired state.
+    Liveness,
+    /// `PATINA_SDK_REPORT` — cooperative-SUT site registration/activation/firing.
+    Sdk,
+    /// `PATINA_FS_FAULT_REPORT` — filesystem fault-injection accounting.
+    FsFault,
+    /// `PATINA_DNS_FAULT_REPORT` — DNS fault-injection accounting.
+    DnsFault,
+    /// `PATINA_NET_FAULT_REPORT` — network fault-injection accounting.
+    NetFault,
+    /// `PATINA_COVERAGE_REPORT` — native yield-point edge coverage, emitted by
+    /// the shim at its own finalization point rather than by [`Context::finish`].
+    Coverage,
+    /// `PATINA_DEPTH_REPORT` — WASI fuel/hostcall depth, emitted by the
+    /// supervisor because WASI guests execute in its process.
+    Depth,
+}
+
+impl Report {
+    /// Every report, in declaration order. Family plumbing (the native child's
+    /// environment, a campaign's pinned child diagnostics) iterates THIS, so a
+    /// report added here cannot be carried by one family and dropped by another.
+    pub const ALL: [Self; 10] = [
+        Self::Schedule,
+        Self::SchedulePolicy,
+        Self::Swarm,
+        Self::Liveness,
+        Self::Sdk,
+        Self::FsFault,
+        Self::DnsFault,
+        Self::NetFault,
+        Self::Coverage,
+        Self::Depth,
+    ];
+
+    /// The `PATINA_*` variable that suppresses this report.
+    #[must_use]
+    pub const fn env(self) -> &'static str {
+        match self {
+            Self::Schedule => ENV_SCHEDULE_REPORT,
+            Self::SchedulePolicy => ENV_SCHEDULE_POLICY_REPORT,
+            Self::Swarm => ENV_SWARM_REPORT,
+            Self::Liveness => ENV_LIVENESS_REPORT,
+            Self::Sdk => ENV_SDK_REPORT,
+            Self::FsFault => ENV_FS_FAULT_REPORT,
+            Self::DnsFault => ENV_DNS_FAULT_REPORT,
+            Self::NetFault => ENV_NET_FAULT_REPORT,
+            Self::Coverage => ENV_COVERAGE_REPORT,
+            Self::Depth => ENV_DEPTH_REPORT,
+        }
+    }
+}
+
+/// Which end-of-run diagnostic reports this run prints. Every report is on by
+/// default; a false-y value (`0`, `off`, `false`, `no`) for a [`Report`]'s
+/// variable turns that one off.
+///
+/// Resolved ONCE, at configuration time, from whatever control plane the family
+/// supplies — the native shim's pre-scrub environment snapshot, the process
+/// environment for the cargo family, the supervisor's environment for WASI.
+/// Nothing consults the process environment at finalization: on native the
+/// public `getenv` is interposed and the deterministic environment is long gone
+/// by then, so a late read returns NULL and every knob reads as absent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReportConfig {
+    enabled: [bool; Report::ALL.len()],
+}
+
+impl Default for ReportConfig {
+    fn default() -> Self {
+        Self {
+            enabled: [true; Report::ALL.len()],
+        }
+    }
+}
+
+impl ReportConfig {
+    /// Whether `report` prints.
+    #[must_use]
+    pub const fn enabled(&self, report: Report) -> bool {
+        self.enabled[report as usize]
+    }
+
+    /// Turn one report on or off explicitly (the harness overlay path).
+    pub const fn set(&mut self, report: Report, enabled: bool) {
+        self.enabled[report as usize] = enabled;
+    }
+
+    /// Resolve every report knob through one control-plane accessor. An absent
+    /// variable leaves the current setting; a false-y value suppresses; anything
+    /// else (including an empty value) enables, so a pinned `=1` re-enables a
+    /// report an ambient `=0` had suppressed.
+    #[must_use]
+    pub fn applied<F>(mut self, get: F) -> Self
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        for report in Report::ALL {
+            if let Some(value) = get(report.env()) {
+                self.set(report, !is_false_y(value.trim()));
+            }
+        }
+        self
+    }
+}
+
+/// The false-y spellings a default-ON knob accepts. Deliberately excludes the
+/// empty string: `PATINA_SDK_REPORT=` asks for the default, which is on. The
+/// default-OFF enable knobs ([`ENV_SWARM`], [`ENV_BUGGIFY_AFTER_SETUP`]) use the
+/// opposite convention — a bare, valueless variable means off — so they keep
+/// their own predicate rather than sharing this one.
+fn is_false_y(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "0" | "off" | "false" | "no"
+    )
+}
+
 // Return codes for the shim's `patina_harness_install` C ABI, shared by the
 // native shim (which returns them) and `patina-dst-harness` (which maps them to
 // its `HarnessError` variants). Distinct, stable sentinels so the harness can
@@ -653,6 +788,11 @@ pub struct RuntimeConfig {
     /// byte-for-byte unchanged; enabling it only ADDS a possible violation report
     /// and is deliberately NOT a fingerprint input (schedule-invariant).
     liveness: LivenessConfig,
+    /// Which end-of-run diagnostic reports print. Presentation only: resolved
+    /// once from the family's control plane, never fingerprinted, never recorded,
+    /// never reconciled — a replay may silence a report the recording printed and
+    /// still produce the identical op stream.
+    reports: ReportConfig,
     /// Whether syscall-user-dispatch was armed for this run (Linux/x86_64 managed
     /// run on a SUD kernel). Recorded into the trace's [`RunMetadata::sud`] so a
     /// cross-kernel replay is refused up front. `None` on every non-SUD run
@@ -677,6 +817,7 @@ impl RuntimeConfig {
             guest_env: BTreeMap::new(),
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
+            reports: ReportConfig::default(),
             sud: None,
         }
     }
@@ -696,6 +837,7 @@ impl RuntimeConfig {
             guest_env: BTreeMap::new(),
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
+            reports: ReportConfig::default(),
             sud: None,
         }
     }
@@ -720,6 +862,7 @@ impl RuntimeConfig {
             guest_env: BTreeMap::new(),
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
+            reports: ReportConfig::default(),
             sud: None,
         }
     }
@@ -745,6 +888,7 @@ impl RuntimeConfig {
             guest_env: BTreeMap::new(),
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
+            reports: ReportConfig::default(),
             sud: None,
         }
     }
@@ -771,6 +915,7 @@ impl RuntimeConfig {
             guest_env: BTreeMap::new(),
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
+            reports: ReportConfig::default(),
             sud: None,
         }
     }
@@ -803,6 +948,7 @@ impl RuntimeConfig {
             guest_env: BTreeMap::new(),
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
+            reports: ReportConfig::default(),
             sud: None,
         }
     }
@@ -1244,6 +1390,35 @@ impl RuntimeConfig {
         Ok(self)
     }
 
+    /// Install the end-of-run report-suppression preferences wholesale, for a
+    /// family that resolved them from its own control plane (the native shim
+    /// parses its pre-scrub environment snapshot once and shares the result with
+    /// its own coverage finalization).
+    #[must_use]
+    pub const fn with_reports(mut self, reports: ReportConfig) -> Self {
+        self.reports = reports;
+        self
+    }
+
+    /// Which end-of-run diagnostic reports this run prints.
+    #[must_use]
+    pub const fn reports(&self) -> ReportConfig {
+        self.reports
+    }
+
+    /// Apply the end-of-run report-suppression knobs from a control-plane
+    /// accessor, mirroring [`RuntimeConfig::apply_fault_env`]. Every [`Report`]'s
+    /// variable is resolved here, ONCE, because finalization has no usable view
+    /// of the process environment on the native path.
+    #[must_use]
+    pub fn apply_report_env<F>(mut self, get: F) -> Self
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        self.reports = self.reports.applied(get);
+        self
+    }
+
     /// Install the liveness-watchdog configuration.
     #[must_use]
     pub fn with_liveness(mut self, liveness: LivenessConfig) -> Self {
@@ -1408,6 +1583,10 @@ impl RuntimeConfig {
         let config = config.apply_liveness_env(|name| env::var(name).ok())?;
         let config = config.apply_guest_argv_env(|name| env::var(name).ok())?;
         let config = config.apply_guest_env_env(|name| env::var(name).ok())?;
+        // The report-suppression knobs are resolved HERE, with every other knob,
+        // and never again: finalization must not reach for the process
+        // environment (see `ReportConfig`).
+        let config = config.apply_report_env(|name| env::var(name).ok());
         Ok(config)
     }
 
@@ -1953,6 +2132,7 @@ impl RuntimeBuilder {
             buggify: Buggify::new(self.config.buggify, root_seed),
             liveness,
             swarm: swarm_record,
+            reports: self.config.reports,
         })
     }
 }
@@ -2993,6 +3173,9 @@ pub struct Context {
     /// than re-drawing one. Drives `PATINA_SWARM_REPORT` and the
     /// `swarm_deselected` field of `PATINA_SDK_REPORT`.
     swarm: Option<patina_dst_trace::SwarmConfigRecord>,
+    /// Which end-of-run diagnostic reports [`Context::finish`] prints, resolved
+    /// at configuration time. Presentation only — it reaches no recorded byte.
+    reports: ReportConfig,
 }
 
 impl Context {
@@ -4684,47 +4867,47 @@ impl Context {
     /// write the trace. Consumes the context; [`run`]/[`run_with`] call this
     /// automatically, on error paths too.
     pub fn finish(mut self) -> Result<(), RuntimeError> {
-        emit_schedule_report(&self.schedule.diagnostics());
+        emit_schedule_report(self.reports, &self.schedule.diagnostics());
         // Swarm selection diagnostic. Default-on for every masked run so which
         // classes this generation actually carried is never left to inference
         // from an absent knob effect.
         if let Some(swarm) = self.swarm.as_ref() {
-            emit_swarm_report(swarm);
+            emit_swarm_report(self.reports, swarm);
         }
         // Exploration-policy diagnostic (PCT / starvation). Populated from live
         // selection, so it reflects a record/seeded run; a replay reports the
         // inert default because recorded selections bypass the policy.
         if let Some(report) = self.scheduler.as_ref().and_then(|s| s.policy_report()) {
-            emit_schedule_policy_report(&report);
+            emit_schedule_policy_report(self.reports, &report);
         }
         // Filesystem fault-injection diagnostic. Default-on so a run configured
         // with fs fault knobs that never actually perturb eligible I/O is never a
         // false green.
         if let Some(report) = self.fs_fault_report() {
-            emit_fs_fault_report(&report);
+            emit_fs_fault_report(self.reports, &report);
         }
         // DNS fault-injection diagnostic, on the same default-on terms.
         if let Some(report) = self.dns_fault_report() {
-            emit_dns_fault_report(&report);
+            emit_dns_fault_report(self.reports, &report);
         }
         // Network fault-injection diagnostic. Default-on so a run configured with
         // net fault knobs that never actually perturbed any send (the knobs being
         // silently inert on the exercised code path) is never a false green.
         if let Some(report) = self.network.as_ref().and_then(|net| net.fault_report()) {
-            emit_net_fault_report(&report);
+            emit_net_fault_report(self.reports, &report);
         }
         // Liveness-watchdog diagnostic: prove the watchdog was actually armed and
         // ran to a clean finish (it did NOT fire — a fired watchdog aborts before
         // finish()). Default-on so "watchdog enabled, run OK" is never silently
         // vacuous; suppressed by a false-y PATINA_LIVENESS_REPORT.
         if self.liveness.active {
-            emit_liveness_report(&self.liveness);
+            emit_liveness_report(self.reports, &self.liveness);
         }
         // Cooperative-SUT diagnostic + metadata. Computed before the execution is
         // consumed so the record sink can fold in the run's realized active-site
         // set and knob picks.
         let buggify_diag = self.buggify_diagnostics();
-        emit_sdk_report(&buggify_diag);
+        emit_sdk_report(self.reports, &buggify_diag);
         let buggify_record = self.buggify.to_record();
         match self.execution {
             Execution::Seeded => Ok(()),
@@ -5748,14 +5931,9 @@ fn remove_fingerprint_component(fingerprint: &str, component: &str) -> String {
 /// shape as the fs/net inert-knob warnings: `--swarm` with nothing to select from
 /// explores exactly what a run without `--swarm` explores, so a clean result must
 /// not read as swarm coverage. Suppressed by a false-y [`ENV_SWARM_REPORT`].
-fn emit_swarm_report(record: &patina_dst_trace::SwarmConfigRecord) {
-    if let Ok(value) = env::var(ENV_SWARM_REPORT) {
-        if matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "off" | "false" | "no"
-        ) {
-            return;
-        }
+fn emit_swarm_report(reports: ReportConfig, record: &patina_dst_trace::SwarmConfigRecord) {
+    if !reports.enabled(Report::Swarm) {
+        return;
     }
     eprintln!("{}", swarm_report_line(record));
     if record.is_vacuous() {
@@ -5796,14 +5974,9 @@ buggify knobs the swarm should choose among, or drop --swarm.";
 /// watchdog was armed and did not fire (a fired watchdog aborts before finish), so
 /// "watchdog on, run OK" is demonstrably non-vacuous. Suppressed by a false-y
 /// `PATINA_LIVENESS_REPORT`.
-fn emit_liveness_report(watchdog: &LivenessWatchdog) {
-    if let Ok(value) = env::var(ENV_LIVENESS_REPORT) {
-        if matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "off" | "false" | "no"
-        ) {
-            return;
-        }
+fn emit_liveness_report(reports: ReportConfig, watchdog: &LivenessWatchdog) {
+    if !reports.enabled(Report::Liveness) {
+        return;
     }
     let mut line = format!(
         "PATINA_LIVENESS_REPORT armed={} fired={}",
@@ -5827,17 +6000,12 @@ fn emit_liveness_report(watchdog: &LivenessWatchdog) {
 /// The machine-readable `PATINA_SCHEDULE_REPORT` line lets a campaign tell a
 /// genuinely-explored "all clean" from a vacuous one; a loud warning fires when
 /// a spawned worker ran start-to-finish with zero scheduling boundaries.
-fn emit_schedule_report(diag: &ScheduleDiagnostics) {
+fn emit_schedule_report(reports: ReportConfig, diag: &ScheduleDiagnostics) {
     if !diag.had_concurrency() {
         return;
     }
-    if let Ok(value) = env::var(ENV_SCHEDULE_REPORT) {
-        if matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "off" | "false" | "no"
-        ) {
-            return;
-        }
+    if !reports.enabled(Report::Schedule) {
+        return;
     }
     let mut line = format!(
         "PATINA_SCHEDULE_REPORT tasks_spawned={} max_concurrent={} total_boundaries={} vacuous_threads={}",
@@ -5924,17 +6092,12 @@ fn reconcile_replay_dns(
 /// resolution happened at all — a workload that never looks up a defined name
 /// gave the knobs no opportunity, which is not the same as a knob being inert.
 /// Suppressed by a false-y [`ENV_DNS_FAULT_REPORT`].
-fn emit_dns_fault_report(report: &patina_dst_driver_api::DnsFaultReport) {
+fn emit_dns_fault_report(reports: ReportConfig, report: &patina_dst_driver_api::DnsFaultReport) {
     if report.resolutions == 0 {
         return;
     }
-    if let Ok(value) = env::var(ENV_DNS_FAULT_REPORT) {
-        if matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "off" | "false" | "no"
-        ) {
-            return;
-        }
+    if !reports.enabled(Report::DnsFault) {
+        return;
     }
     eprintln!(
         "PATINA_DNS_FAULT_REPORT resolutions={} fail_vacuity_diagnosable={} failures_injected={} \
@@ -6011,17 +6174,12 @@ fn latency_is_diagnosable(eligible_ops: u64, (min, max): (u64, u64)) -> bool {
 /// from an inert one, and a loud warning fires when a class that was expected to
 /// fire repeatedly (see `vacuity_is_diagnosable`) applied zero effects.
 /// Suppressed by a false-y [`ENV_FS_FAULT_REPORT`].
-fn emit_fs_fault_report(report: &patina_dst_driver_api::FsFaultReport) {
+fn emit_fs_fault_report(reports: ReportConfig, report: &patina_dst_driver_api::FsFaultReport) {
     if report.eligible_ops == 0 {
         return;
     }
-    if let Ok(value) = env::var(ENV_FS_FAULT_REPORT) {
-        if matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "off" | "false" | "no"
-        ) {
-            return;
-        }
+    if !reports.enabled(Report::FsFault) {
+        return;
     }
     eprintln!(
         "PATINA_FS_FAULT_REPORT eligible_ops={} error_vacuity_diagnosable={} errors_injected={} \
@@ -6056,17 +6214,12 @@ short-I/O knob applies nothing to a guest whose reads never fill their buffer.",
 /// effects landed — the silent-inertness class (historically: the SimNet TCP
 /// stream path ignoring the datagram-only fault knobs). Suppressed by a false-y
 /// [`ENV_NET_FAULT_REPORT`].
-fn emit_net_fault_report(report: &patina_dst_driver_api::NetFaultReport) {
+fn emit_net_fault_report(reports: ReportConfig, report: &patina_dst_driver_api::NetFaultReport) {
     if !report.could_apply {
         return;
     }
-    if let Ok(value) = env::var(ENV_NET_FAULT_REPORT) {
-        if matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "off" | "false" | "no"
-        ) {
-            return;
-        }
+    if !reports.enabled(Report::NetFault) {
+        return;
     }
     eprintln!(
         "PATINA_NET_FAULT_REPORT could_apply=1 send_ops={} faults_applied={} vacuous={}",
@@ -6091,17 +6244,15 @@ the faults were tested. Verify the fault knobs reach the send path the workload 
 /// `PATINA_SCHEDULE_REPORT`: a sweep parses it to annotate a found failure with a
 /// bug-depth estimate and to detect a vacuous starvation configuration. Suppressed
 /// by a false-y [`ENV_SCHEDULE_POLICY_REPORT`].
-fn emit_schedule_policy_report(report: &patina_dst_driver_api::SchedulePolicyReport) {
+fn emit_schedule_policy_report(
+    reports: ReportConfig,
+    report: &patina_dst_driver_api::SchedulePolicyReport,
+) {
     if !report.is_active() {
         return;
     }
-    if let Ok(value) = env::var(ENV_SCHEDULE_POLICY_REPORT) {
-        if matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "off" | "false" | "no"
-        ) {
-            return;
-        }
+    if !reports.enabled(Report::SchedulePolicy) {
+        return;
     }
     eprintln!(
         "PATINA_SCHEDULE_POLICY pct={} pct_depth={} pct_change_points={} pct_change_points_hit={} \
@@ -6134,17 +6285,12 @@ subset or the interval window.",
 /// declarations use `declared_site=<label>|<kind>|@<file:line>` and do not imply
 /// evaluation. Per-evaluated-site token is
 /// `site=<label>|<kind>|a<0|1>|e<evals>|f<fires>|r<0|1>|s<0|1>|v<0|1>|k<knob|->|@<file:line>`.
-fn emit_sdk_report(diag: &BuggifyDiagnostics) {
+fn emit_sdk_report(reports: ReportConfig, diag: &BuggifyDiagnostics) {
     if !diag.enabled && diag.sites_registered == 0 && diag.declared_sites.is_empty() {
         return;
     }
-    if let Ok(value) = env::var(ENV_SDK_REPORT) {
-        if matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "off" | "false" | "no"
-        ) {
-            return;
-        }
+    if !reports.enabled(Report::Sdk) {
+        return;
     }
     let mut line = format!(
         "PATINA_SDK_REPORT enabled={} swarm_deselected={} fire_permille={} activation_permille={} \
@@ -8852,6 +8998,35 @@ class=crash|0 class=buggify|0"
         replay.finish().unwrap();
     }
 
+    // Report suppression is presentation, not run semantics: two recordings of the
+    // same workload — one with every report on, one with every report off — must
+    // produce byte-identical traces. That property is what keeps the knobs out of
+    // the fingerprint and out of everything replay reconciles, so a quietly
+    // recorded trace still replays against a loud one and back.
+    #[test]
+    fn report_suppression_does_not_reach_a_recorded_byte() {
+        let directory = tempdir().unwrap();
+        let record = |name: &str, reports: ReportConfig| {
+            let trace = directory.path().join(name);
+            let config = RuntimeConfig::record(11, &trace, "reports-v1").with_reports(reports);
+            let mut context = Context::from_config(config).unwrap();
+            context.write_file("/data", b"payload").unwrap();
+            assert_eq!(context.read_file("/data").unwrap(), b"payload");
+            context.finish().unwrap();
+            fs::read(&trace).unwrap()
+        };
+
+        let mut silent = ReportConfig::default();
+        for report in Report::ALL {
+            silent.set(report, false);
+        }
+        assert_eq!(
+            record("loud.patina", ReportConfig::default()),
+            record("quiet.patina", silent),
+            "a suppression preference must not change a recorded byte"
+        );
+    }
+
     #[test]
     fn run_with_context_finalizes_recording_when_the_application_returns_an_error() {
         // The explicit-context `run` path always finalizes: a recorded run whose
@@ -8864,5 +9039,101 @@ class=crash|0 class=buggify|0"
         });
         assert!(matches!(result, Err(RuntimeError::Effect(_))));
         assert!(trace.is_file());
+    }
+}
+
+/// Source-level convention lints for the end-of-run report knobs.
+///
+/// The class these pin is "the runtime reads the process environment after the
+/// runtime is installed". On the native path that read is routed through the
+/// interposed `getenv`, which by finalization sees only the scrubbed
+/// deterministic environment with no context in the slot — so it returns NULL
+/// and every knob silently reads as absent. Every report knob is therefore
+/// resolved once, at configuration time, into [`ReportConfig`].
+#[cfg(test)]
+mod source_lints {
+    use super::{Report, ReportConfig};
+    use std::collections::BTreeSet;
+
+    /// The gate behind [`Report`]: a suppression variable declared in this file
+    /// but missing from the table would be documented, parsed by nothing, and
+    /// inert — the exact failure this whole mechanism exists to remove.
+    #[test]
+    fn report_table_covers_every_declared_suppression_variable() {
+        let source = include_str!("lib.rs");
+        let declared: BTreeSet<&str> = source
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim().strip_prefix("pub const ENV_")?;
+                let (name, value) = rest.split_once(": &str = ")?;
+                name.ends_with("_REPORT")
+                    .then(|| value.trim().trim_end_matches(';').trim_matches('"'))
+            })
+            .collect();
+        let table: BTreeSet<&str> = Report::ALL.iter().map(|report| report.env()).collect();
+        assert_eq!(
+            declared, table,
+            "every declared PATINA_*_REPORT variable needs a Report variant (and vice versa)"
+        );
+    }
+
+    /// No report knob may be read from the process environment. Assembled at
+    /// runtime so this test's own text cannot match itself.
+    #[test]
+    fn no_report_knob_is_read_from_the_process_environment() {
+        let source = include_str!("lib.rs");
+        // Whitespace-stripped so the lint survives any rustfmt line breaking.
+        let packed: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+        for needle in [
+            format!("env{}var(ENV_", "::"),
+            format!("env{}var_os(ENV_", "::"),
+        ] {
+            let mut cursor = 0;
+            while let Some(offset) = packed[cursor..].find(&needle) {
+                let start = cursor + offset + needle.len();
+                let end = start + packed[start..].find(')').expect("closing parenthesis");
+                assert!(
+                    !packed[start..end].ends_with("_REPORT"),
+                    "ENV_{} is read from the process environment; resolve it once into \
+                     ReportConfig at configuration time instead — a native finalization-time \
+                     read returns NULL and silently disables the knob",
+                    &packed[start..end],
+                );
+                cursor = end;
+            }
+        }
+    }
+
+    /// Absent knobs leave every report on; only the documented false-y spellings
+    /// suppress; an explicit truthy value re-enables what an ambient `0` had
+    /// suppressed (the pin a campaign puts on its children).
+    #[test]
+    fn report_config_parses_the_documented_spellings() {
+        // `ReportConfig` indexes by discriminant while `applied` iterates `ALL`,
+        // so a reordered or duplicated row would read one report's setting under
+        // another's name. Pin the two orders together.
+        for (index, report) in Report::ALL.iter().enumerate() {
+            assert_eq!(
+                *report as usize, index,
+                "Report::ALL must be in variant order"
+            );
+        }
+        assert!(ReportConfig::default().enabled(Report::Schedule));
+        for value in ["0", "off", "FALSE", " no "] {
+            let config = ReportConfig::default()
+                .applied(|name| (name == Report::Schedule.env()).then(|| value.to_string()));
+            assert!(!config.enabled(Report::Schedule), "{value:?} must suppress");
+            assert!(
+                config.enabled(Report::Swarm),
+                "{value:?} must not touch a sibling report"
+            );
+        }
+        for value in ["1", "", "yes", "on"] {
+            let config = ReportConfig::default()
+                .applied(|_| Some("0".to_string()))
+                .applied(|name| (name == Report::Sdk.env()).then(|| value.to_string()));
+            assert!(config.enabled(Report::Sdk), "{value:?} must re-enable");
+            assert!(!config.enabled(Report::Swarm));
+        }
     }
 }

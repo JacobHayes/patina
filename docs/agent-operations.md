@@ -150,6 +150,17 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
 - The host-alias doctrine is structural: shim internals reach real host
   primitives through private resolved aliases, never by calling public symbols
   that guest code can import.
+- Under a shim the runtime's own `std::env` reads route through the *interposed*
+  `getenv`, so once the environment is scrubbed every late lookup returns "not
+  set" — indistinguishable from a default, and therefore silent. Resolve each
+  knob once, at configuration time, from the family's control plane; a
+  configuration value consulted at finalization is a bug even when the code
+  reads correctly. Enforce it cheaply with a source lint that fails on the
+  forbidden read shape, paired with a table gate so a newly declared variable
+  cannot skip the mechanism. Found when eight documented report suppressors
+  turned out to be inert across the whole native family — half from this, half
+  from the supervisor forwarding only one of them into the cleared child
+  environment.
 - Default-deny audit/run parity is load-bearing. Do not fix a missed native
   effect by adding an allowance; add or harden the detector and then model,
   interpose, or deny-trap the effect.

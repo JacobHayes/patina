@@ -29,14 +29,13 @@ use patina_dst_minimize::{
 use patina_dst_runtime::{
     Context, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION,
     ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN, ENV_COVERAGE_FD,
-    ENV_COVERAGE_REPORT, ENV_DEFER_INIT, ENV_DEPTH_REPORT, ENV_DNS_ENTRIES, ENV_DNS_FAIL_PERMILLE,
-    ENV_DNS_LATENCY, ENV_FINGERPRINT, ENV_FS_CRASH_AT, ENV_FS_ERROR_PERMILLE, ENV_FS_IMAGE_FD,
-    ENV_FS_LATENCY, ENV_FS_SHORT_PERMILLE, ENV_FS_TORN_GRANULARITY, ENV_GUEST_ARGV, ENV_GUEST_ENV,
-    ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG, ENV_MODE, ENV_NET_DROP_PERMILLE, ENV_NET_JITTER,
-    ENV_NET_LATENCY, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS,
-    ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED,
-    ENV_SLEEP_JITTER, ENV_STEP_BUDGET, ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD,
-    RuntimeConfig,
+    ENV_DEFER_INIT, ENV_DNS_ENTRIES, ENV_DNS_FAIL_PERMILLE, ENV_DNS_LATENCY, ENV_FINGERPRINT,
+    ENV_FS_CRASH_AT, ENV_FS_ERROR_PERMILLE, ENV_FS_IMAGE_FD, ENV_FS_LATENCY, ENV_FS_SHORT_PERMILLE,
+    ENV_FS_TORN_GRANULARITY, ENV_GUEST_ARGV, ENV_GUEST_ENV, ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG,
+    ENV_MODE, ENV_NET_DROP_PERMILLE, ENV_NET_JITTER, ENV_NET_LATENCY, ENV_PARAMS_JSON,
+    ENV_PARENT_TIMELINE, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS, ENV_SCHED_STARVE,
+    ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED, ENV_SLEEP_JITTER, ENV_STEP_BUDGET,
+    ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, RuntimeConfig,
 };
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
@@ -2899,6 +2898,12 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
     if matches!(invocation.mode, Mode::Record { .. }) {
         config = config.with_guest_argv(Some(invocation.arguments.clone()));
     }
+    // A WASI guest runs in THIS process, so the report knobs come straight from
+    // the supervisor's environment — but through the same table and parser the
+    // native and cargo families use, and resolved once for both the runtime's own
+    // reports and the depth line this function appends below.
+    let reports = patina_dst_runtime::ReportConfig::default().applied(|name| env::var(name).ok());
+    config = config.with_reports(reports);
     let context = Context::from_config(config).map_err(|error| CliError(error.to_string()))?;
     let host = configured_wasi_host(&invocation, &resolved.display, context)?;
     let mut execution = execute_preview1_with_fuel(&bytes, host, invocation.fuel)
@@ -2909,7 +2914,7 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
     // output all read the same line. Appending happens after the guest and its
     // trace are finalized, so no recorded byte or fingerprint is affected.
     let depth = wasi_depth_report(&execution);
-    if !depth_report_suppressed() {
+    if reports.enabled(patina_dst_runtime::Report::Depth) {
         execution
             .stderr
             .extend_from_slice(depth.marker_line().as_bytes());
@@ -2955,17 +2960,6 @@ fn wasi_depth_report(execution: &patina_dst_wasi_host::WasiExecution) -> output:
             .map(|(name, count)| ((*name).to_string(), *count))
             .collect(),
     }
-}
-
-/// Whether the operator silenced the default-on depth diagnostic, using the same
-/// false-y spellings the native shim accepts for `PATINA_COVERAGE_REPORT`.
-fn depth_report_suppressed() -> bool {
-    env::var(ENV_DEPTH_REPORT).is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "off" | "false" | "no"
-        )
-    })
 }
 
 /// The trace path a replay/branch mode reads its recorded guest argv from, or
@@ -6398,8 +6392,16 @@ liveness-safe."
     if let Some(file) = &coverage_file {
         command.env(ENV_COVERAGE_FD, file.as_raw_fd().to_string());
     }
-    if let Some(value) = env::var_os(ENV_COVERAGE_REPORT) {
-        command.env(ENV_COVERAGE_REPORT, value);
+    // The guest's environment is cleared above, so every end-of-run report knob
+    // the operator set has to be forwarded explicitly or it never reaches the
+    // guest at all. Driven by `Report::ALL` rather than a hand-kept list, so a
+    // report added to the runtime is silenceable on native the day it exists —
+    // only `PATINA_COVERAGE_REPORT` used to be carried, which is why every other
+    // knob read as inert on this family.
+    for report in patina_dst_runtime::Report::ALL {
+        if let Some(value) = env::var_os(report.env()) {
+            command.env(report.env(), value);
+        }
     }
     if !invocation.environment.is_empty() {
         let encoded = serde_json::to_string(&invocation.environment).map_err(|error| {
@@ -9832,6 +9834,27 @@ mod tests {
                     spec.family
                 );
             }
+        }
+    }
+
+    #[test]
+    fn every_report_knob_is_documented_in_the_environment_registry() {
+        // Same drift gate as the fault knobs, for the report suppressors: the
+        // registry is what `--help` and the JSON index publish, so a report the
+        // runtime can silence but the registry never names is a working knob
+        // nobody can discover — and an undocumented knob is the first step back
+        // toward one family carrying it and the rest dropping it.
+        let documented: String = help::ENVIRONMENT
+            .iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>()
+            .join(" ");
+        for report in patina_dst_runtime::Report::ALL {
+            assert!(
+                documented.contains(report.env()),
+                "{} has no row in the help environment registry",
+                report.env()
+            );
         }
     }
 
