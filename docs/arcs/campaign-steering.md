@@ -47,7 +47,7 @@ head.
   loader** — `SignatureRecord` has `to_json` only (`:642-661`).
 - **Out-dir contents.** `traces/` (per-generation scratch, deleted after each
   generation, `:804`), `failures/generation-<N>.patina` (valid failing traces,
-  `:1112-1124`), `reports/generation-<N>.html` (with `--report`), and
+  `:1112-1124`), `reports/generation-<N>.html` (with `--report-failures`), and
   `signatures.json`. Nothing else.
 - **Artifact identity.** `run_campaign` resolves the artifact and reads its
   bytes for family sniffing (`artifact_family`, `:1150-1158`) but records no
@@ -88,7 +88,7 @@ cargo patina campaign --resume  [--out-dir DIR]      # finish an interrupted cam
 - **The spec comes FROM the out-dir. Re-supplied knobs are rejected loudly.**
   Supplying an artifact positional, `--gens`, `--seed-start`, `--spec`,
   `--buggify`, `--swarm`, `--sched-pct`, `--faults`, `--liveness-watchdog`,
-  `--converge-within`, `--heal-after`, `--report`, or a `-- GUEST_ARGS` tail
+  `--converge-within`, `--heal-after`, `--report-failures`, or a `-- GUEST_ARGS` tail
   alongside `--extend`/`--resume` is a usage error naming the flag and the
   doctrine ("the out-dir's recorded spec is authoritative; start a new out-dir
   to change the spec"). This mirrors replay's trace-authoritative model

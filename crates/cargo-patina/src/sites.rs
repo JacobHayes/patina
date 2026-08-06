@@ -121,96 +121,32 @@ impl SitesOptions {
 /// [--all] [--exercised FILE] [--kind KIND]
 /// [--runtime driven|observed|invisible] [--no-cache] [--selftest]`.
 pub(crate) fn parse(arguments: Vec<OsString>) -> Result<SitesInvocation, CliError> {
-    let mut options = SitesOptions::default();
-    let mut selftest = false;
-    let mut index = 0;
-    while index < arguments.len() {
-        let argument = &arguments[index];
-        if argument == "--" {
-            return Err(CliError::usage(
-                "sites takes no guest arguments or `--` separator",
-            ));
-        }
-        let Some(text) = argument.to_str() else {
-            return Err(CliError::usage("sites options must be valid UTF-8"));
-        };
-        if !text.starts_with('-') {
-            return Err(CliError::usage(format!(
-                "sites takes no positional arguments; unexpected {}",
-                Path::new(text).display()
-            )));
-        }
-        let opt = crate::split_opt(text);
-        match opt.name {
-            "--crate" => {
-                let value = crate::required_value(opt, &arguments, &mut index)?.to_string();
-                crate::set_once(&mut options.crate_filter, value, "--crate")?;
-            }
-            "--module" => {
-                let value = crate::required_value(opt, &arguments, &mut index)?.to_string();
-                crate::set_once(&mut options.module_filter, value, "--module")?;
-            }
-            "--group" => {
-                let value = crate::required_value(opt, &arguments, &mut index)?.to_string();
-                crate::set_once(&mut options.group_filter, value, "--group")?;
-            }
-            "--site" => {
-                let value = crate::required_value(opt, &arguments, &mut index)?.to_string();
-                crate::set_once(&mut options.site_filter, value, "--site")?;
-            }
-            "--exercised" => {
-                let value = crate::required_os_value(opt, &arguments, &mut index)?;
-                crate::set_once(&mut options.exercised, PathBuf::from(value), "--exercised")?;
-            }
-            "--kind" => {
-                let value = crate::required_value(opt, &arguments, &mut index)?;
-                if !KIND_ORDER.contains(&value) {
-                    return Err(CliError::usage(format!(
-                        "--kind must be one of {}; got {value:?}",
-                        KIND_ORDER.join("|")
-                    )));
-                }
-                crate::set_once(&mut options.kind_filter, value.to_string(), "--kind")?;
-            }
-            "--runtime" => {
-                let value = crate::required_value(opt, &arguments, &mut index)?;
-                if !RUNTIME_ORDER.contains(&value) {
-                    return Err(CliError::usage(format!(
-                        "--runtime must be driven, observed, or invisible; got {value:?}"
-                    )));
-                }
-                crate::set_once(&mut options.runtime_filter, value.to_string(), "--runtime")?;
-            }
-            "--all" => {
-                crate::reject_inline(opt)?;
-                options.all = true;
-            }
-            "--no-cache" => {
-                crate::reject_inline(opt)?;
-                options.no_cache = true;
-            }
-            "--selftest" => {
-                crate::reject_inline(opt)?;
-                selftest = true;
-            }
-            other => {
-                return Err(CliError::usage(format!(
-                    "unsupported option {other:?} for `sites`"
-                )));
-            }
-        }
-        index += 1;
+    if arguments.iter().any(|argument| argument == "--") {
+        return Err(CliError::usage(
+            "sites takes no guest arguments or `--` separator",
+        ));
     }
-    if selftest {
-        if options != SitesOptions::default() {
-            return Err(CliError::usage(
-                "sites --selftest does not accept report filters",
-            ));
-        }
-        Ok(SitesInvocation::Selftest)
-    } else {
-        Ok(SitesInvocation::Scan(options))
+    let args = crate::cli::parse("sites", crate::help::Family::Sole, arguments)?;
+    let options = SitesOptions {
+        crate_filter: args.string("--crate"),
+        module_filter: args.string("--module"),
+        group_filter: args.string("--group"),
+        site_filter: args.string("--site"),
+        all: args.flag("--all"),
+        exercised: args.path("--exercised"),
+        kind_filter: args.string("--kind"),
+        runtime_filter: args.string("--runtime"),
+        no_cache: args.flag("--no-cache"),
+    };
+    if !args.flag("--selftest") {
+        return Ok(SitesInvocation::Scan(options));
     }
+    if options != SitesOptions::default() {
+        return Err(CliError::usage(
+            "sites --selftest does not accept report filters",
+        ));
+    }
+    Ok(SitesInvocation::Selftest)
 }
 
 impl PartialEq for SitesOptions {

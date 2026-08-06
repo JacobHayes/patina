@@ -47,10 +47,12 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
+use crate::CliError;
 use crate::aux_store::{AuxFoldDecision, fold_decision, validate_resume_watermark};
+use crate::cli;
 use crate::coverage::{CampaignCoverageStore, CoverageArtifact, FoldOutcome, top_uncovered_crates};
+use crate::help;
 use crate::sdk_report::{CoverageTally, ExercisedSite};
-use crate::{CliError, reject_inline, required_value, set_once, split_opt};
 
 #[cfg(unix)]
 const SIGKILL: i32 = 9;
@@ -262,7 +264,7 @@ pub struct CampaignInvocation {
 /// Parse `campaign [--selftest] | campaign <ARTIFACT> [flags] [-- GUEST_ARGS…] |
 /// campaign --extend N [--out-dir DIR] | campaign --resume [--out-dir DIR]`.
 pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliError> {
-    let cli = campaign_cli(&arguments);
+    let cli_line = campaign_cli(&arguments);
 
     // Split a trailing `-- GUEST_ARGS…` section (the guest argument vector).
     let mut guest_args: Vec<String> = Vec::new();
@@ -285,7 +287,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
             selftest: true,
             timeout_secs_override: None,
             progress_every: DEFAULT_PROGRESS_EVERY,
-            cli,
+            cli: cli_line,
         });
     }
 
@@ -300,199 +302,70 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     if artifact.is_none() && !continuation_requested {
         if let Some(stop) = scan.stop {
             crate::reject_stranded_artifact("campaign", &arguments[stop..])?;
-            return Err(CliError::usage(format!(
-                "unsupported option {:?} for `campaign`; campaign requires an artifact path (a .wasm module or native binary), or --selftest",
-                arguments[stop].to_string_lossy()
-            )));
         }
-        return Err(CliError::usage(
-            "campaign requires an artifact path (a .wasm module or native binary), or --selftest",
-        ));
     }
-    let arguments = scan.rest;
-    let mut spec = CampaignSpec::default();
-    let mut out_dir: Option<PathBuf> = None;
-    // Scalar overrides shadow the spec until the loop ends: duplicates are
-    // rejected via `set_once`, and a flag overrides `--spec` regardless of
-    // argument order (previously a flag preceding `--spec` was silently
-    // overwritten by the spec file).
-    let mut generations: Option<u64> = None;
-    let mut seed_start: Option<u64> = None;
-    let mut timeout_secs: Option<u64> = None;
-    let mut spec_path: Option<String> = None;
-    let mut progress_every: Option<u64> = None;
-    let mut plateau_after: Option<u64> = None;
-    let mut allow_unmet_sometimes: Option<AllowUnmetSometimes> = None;
-    let mut extend: Option<u64> = None;
-    let mut resume: Option<()> = None;
+    let args = cli::parse("campaign", help::Family::Sole, scan.rest)?;
 
-    let mut index = 0;
-    while index < arguments.len() {
-        let text = arguments[index]
-            .to_str()
-            .ok_or_else(|| CliError::usage("campaign options must be valid UTF-8"))?;
-        let opt = split_opt(text);
-        match opt.name {
-            "--extend" => {
-                let value =
-                    parse_u64_flag("--extend", required_value(opt, &arguments, &mut index)?)?;
-                set_once(&mut extend, value, "--extend")?;
-            }
-            "--resume" => {
-                reject_inline(opt)?;
-                set_once(&mut resume, (), "--resume")?;
-            }
-            "--spec" => {
-                if continuation_requested {
-                    return Err(reject_continuation_override("--spec"));
-                }
-                let path = required_value(opt, &arguments, &mut index)?.to_string();
-                set_once(&mut spec_path, path.clone(), "--spec")?;
-                let text = fs::read_to_string(&path)
-                    .map_err(|e| CliError(format!("failed to read campaign spec {path}: {e}")))?;
-                let json: serde_json::Value = serde_json::from_str(&text)
-                    .map_err(|e| CliError(format!("campaign spec {path} is invalid JSON: {e}")))?;
-                spec.apply_json(&json)?;
-            }
-            "--out-dir" => {
-                let path = PathBuf::from(required_value(opt, &arguments, &mut index)?);
-                set_once(&mut out_dir, path, "--out-dir")?;
-            }
-            "--gens" => {
-                if continuation_requested {
-                    return Err(reject_continuation_override("--gens"));
-                }
-                let value = parse_u64_flag("--gens", required_value(opt, &arguments, &mut index)?)?;
-                set_once(&mut generations, value, "--gens")?;
-            }
-            "--seed-start" => {
-                if continuation_requested {
-                    return Err(reject_continuation_override("--seed-start"));
-                }
-                let value =
-                    parse_u64_flag("--seed-start", required_value(opt, &arguments, &mut index)?)?;
-                set_once(&mut seed_start, value, "--seed-start")?;
-            }
-            "--timeout-secs" => {
-                let value = parse_u64_flag(
-                    "--timeout-secs",
-                    required_value(opt, &arguments, &mut index)?,
-                )?;
-                set_once(&mut timeout_secs, value, "--timeout-secs")?;
-            }
-            "--progress-every" => {
-                let value = parse_u64_flag(
-                    "--progress-every",
-                    required_value(opt, &arguments, &mut index)?,
-                )?;
-                set_once(&mut progress_every, value, "--progress-every")?;
-            }
-            "--plateau-after" => {
-                if continuation_requested {
-                    return Err(reject_continuation_override("--plateau-after"));
-                }
-                let value = parse_u64_flag(
-                    "--plateau-after",
-                    required_value(opt, &arguments, &mut index)?,
-                )?;
-                set_once(&mut plateau_after, value, "--plateau-after")?;
-            }
-            "--allow-unmet-sometimes" => {
-                if continuation_requested {
-                    return Err(reject_continuation_override("--allow-unmet-sometimes"));
-                }
-                let value = parse_allow_unmet_sometimes_flag(opt)?;
-                set_once(&mut allow_unmet_sometimes, value, "--allow-unmet-sometimes")?;
-            }
-            "--buggify" => {
-                if continuation_requested {
-                    return Err(reject_continuation_override("--buggify"));
-                }
-                reject_inline(opt)?;
-                spec.buggify = true;
-            }
-            "--swarm" => {
-                if continuation_requested {
-                    return Err(reject_continuation_override("--swarm"));
-                }
-                reject_inline(opt)?;
-                spec.swarm = true;
-            }
-            "--sched-pct" => {
-                if continuation_requested {
-                    return Err(reject_continuation_override("--sched-pct"));
-                }
-                reject_inline(opt)?;
-                spec.pct = true;
-            }
-            "--faults" => {
-                if continuation_requested {
-                    return Err(reject_continuation_override("--faults"));
-                }
-                reject_inline(opt)?;
-                spec.faults = true;
-            }
-            "--report" => {
-                if continuation_requested {
-                    return Err(reject_continuation_override("--report"));
-                }
-                reject_inline(opt)?;
-                spec.report = true;
-            }
-            "--liveness-watchdog" => {
-                if continuation_requested {
-                    return Err(reject_continuation_override("--liveness-watchdog"));
-                }
-                let value = parse_u64_flag(
-                    "--liveness-watchdog",
-                    required_value(opt, &arguments, &mut index)?,
-                )?;
-                set_once(&mut spec.watchdog_nanos, value, "--liveness-watchdog")?;
-            }
-            "--converge-within" => {
-                if continuation_requested {
-                    return Err(reject_continuation_override("--converge-within"));
-                }
-                let value = parse_u64_flag(
-                    "--converge-within",
-                    required_value(opt, &arguments, &mut index)?,
-                )?;
-                set_once(&mut spec.converge_nanos, value, "--converge-within")?;
-            }
-            "--heal-after" => {
-                if continuation_requested {
-                    return Err(reject_continuation_override("--heal-after"));
-                }
-                let value =
-                    parse_u64_flag("--heal-after", required_value(opt, &arguments, &mut index)?)?;
-                set_once(&mut spec.heal_after_nanos, value, "--heal-after")?;
-            }
-            other => {
-                return Err(CliError::usage(format!(
-                    "unsupported option {other:?} for `campaign`"
-                )));
-            }
-        }
-        index += 1;
-    }
-
-    let mode = match (extend, resume.is_some()) {
+    // In continuation mode the out-dir's recorded spec is authoritative, so any
+    // flag that would change it is refused. The permitted set is the handful of
+    // knobs that describe THIS invocation rather than the campaign's shape.
+    let mode = match (args.u64("--extend"), args.flag("--resume")) {
         (Some(_), true) => {
             return Err(CliError::usage(
                 "--extend and --resume are redundant; choose exactly one continuation mode",
-            ));
-        }
-        (Some(0), false) => {
-            return Err(CliError::usage(
-                "--extend 0 is redundant; use --resume to finish an interrupted campaign or --extend N with N > 0",
             ));
         }
         (Some(additional), false) => CampaignMode::Extend { additional },
         (None, true) => CampaignMode::Resume,
         (None, false) => CampaignMode::Fresh,
     };
+    if !matches!(mode, CampaignMode::Fresh) {
+        for flag in help::verb("campaign")
+            .expect("`campaign` is registered")
+            .family_flags(help::Family::Sole)
+        {
+            if !CONTINUATION_FLAGS.contains(&flag.name) && args.supplied(flag.name) {
+                return Err(reject_continuation_override(flag.name));
+            }
+        }
+    }
 
-    let out_dir = out_dir.unwrap_or_else(|| PathBuf::from("patina-campaign-out"));
+    let mut spec = CampaignSpec::default();
+    if let Some(path) = args.path("--spec") {
+        let shown = path.display();
+        let text = fs::read_to_string(&path)
+            .map_err(|e| CliError(format!("failed to read campaign spec {shown}: {e}")))?;
+        let json: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| CliError(format!("campaign spec {shown} is invalid JSON: {e}")))?;
+        spec.apply_json(&json)?;
+    }
+    // A flag overrides the spec regardless of argument order — the same
+    // precedence the config layer uses (flag > env > config > default). An
+    // ABSENT flag overrides nothing: the switches only ever turn a knob on, so a
+    // spec that enables buggify is not silently undone by omitting --buggify.
+    spec.buggify |= args.flag("--buggify");
+    spec.swarm |= args.flag("--swarm");
+    spec.pct |= args.flag("--sched-pct");
+    spec.faults |= args.flag("--faults");
+    spec.report |= args.flag("--report-failures");
+    if let Some(value) = args.u64("--liveness-watchdog") {
+        spec.watchdog_nanos = Some(value);
+    }
+    if let Some(value) = args.u64("--converge-within") {
+        spec.converge_nanos = Some(value);
+    }
+    if let Some(value) = args.u64("--heal-after") {
+        spec.heal_after_nanos = Some(value);
+    }
+
+    let out_dir = args
+        .path("--out-dir")
+        .unwrap_or_else(|| PathBuf::from("patina-campaign-out"));
+    let progress_every = args
+        .u64("--progress-every")
+        .unwrap_or(DEFAULT_PROGRESS_EVERY);
+    let timeout_secs = args.u64("--timeout-secs");
+
     if !matches!(mode, CampaignMode::Fresh) {
         if artifact.is_some() {
             return Err(reject_continuation_override("artifact positional"));
@@ -507,51 +380,68 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
             mode,
             selftest: false,
             timeout_secs_override: timeout_secs,
-            progress_every: progress_every.unwrap_or(DEFAULT_PROGRESS_EVERY),
-            cli,
+            progress_every,
+            cli: cli_line,
         });
     }
 
-    if let Some(generations) = generations {
+    if let Some(generations) = args.u64("--gens") {
         spec.generations = generations;
     }
-    if let Some(seed_start) = seed_start {
+    if let Some(seed_start) = args.u64("--seed-start") {
         spec.seed_base = seed_start;
     }
     if let Some(timeout_secs) = timeout_secs {
         spec.timeout_secs = timeout_secs;
     }
-    if let Some(value) = plateau_after {
+    if let Some(value) = args.u64("--plateau-after") {
         spec.plateau_after = value;
     }
-    if let Some(value) = allow_unmet_sometimes {
-        spec.allow_unmet_sometimes = Some(value);
+    if let Some(value) = args.text("--allow-unmet-sometimes") {
+        spec.allow_unmet_sometimes = Some(match value {
+            "" => AllowUnmetSometimes::Always,
+            generations => AllowUnmetSometimes::BelowGenerations(
+                generations
+                    .parse()
+                    .expect("validated by the registry grammar"),
+            ),
+        });
     }
     if !guest_args.is_empty() {
         spec.guest_args = guest_args;
     }
-    let artifact = artifact.ok_or_else(|| {
-        CliError::usage(
-            "campaign requires an artifact path (a .wasm module or native binary), or --selftest",
-        )
-    })?;
     Ok(CampaignInvocation {
-        artifact: Some(artifact),
+        artifact: Some(artifact.ok_or_else(|| {
+            CliError::usage(
+                "campaign requires an artifact path (a .wasm module or native binary), or --selftest",
+            )
+        })?),
         out_dir,
         spec,
         mode,
         selftest: false,
         timeout_secs_override: None,
-        progress_every: progress_every.unwrap_or(DEFAULT_PROGRESS_EVERY),
-        cli,
+        progress_every,
+        cli: cli_line,
     })
 }
+
+/// The flags a continuation (`--extend`/`--resume`) still accepts: they describe
+/// this invocation, not the campaign's shape, which the recorded spec owns.
+const CONTINUATION_FLAGS: &[&str] = &[
+    "--extend",
+    "--resume",
+    "--out-dir",
+    "--timeout-secs",
+    "--progress-every",
+    "--selftest",
+];
 
 fn has_continuation_flag(arguments: &[OsString]) -> bool {
     arguments.iter().any(|argument| {
         argument
             .to_str()
-            .is_some_and(|text| matches!(split_opt(text).name, "--extend" | "--resume"))
+            .is_some_and(|text| matches!(cli::split_name(text), "--extend" | "--resume"))
     })
 }
 
@@ -574,31 +464,6 @@ fn reject_continuation_override(name: &str) -> CliError {
     CliError::usage(format!(
         "{name} cannot be used with --extend/--resume; the out-dir's recorded spec is authoritative; start a new out-dir to change the spec"
     ))
-}
-
-fn parse_u64_flag(name: &str, value: &str) -> Result<u64, CliError> {
-    value
-        .parse()
-        .map_err(|_| CliError::usage(format!("{name} must be an unsigned integer; got {value:?}")))
-}
-
-fn parse_positive_u64_flag(name: &str, value: &str) -> Result<u64, CliError> {
-    let value = parse_u64_flag(name, value)?;
-    if value == 0 {
-        return Err(CliError::usage(format!(
-            "{name} must be a positive unsigned integer; got 0"
-        )));
-    }
-    Ok(value)
-}
-
-fn parse_allow_unmet_sometimes_flag(opt: crate::Opt<'_>) -> Result<AllowUnmetSometimes, CliError> {
-    match opt.inline {
-        Some(value) => Ok(AllowUnmetSometimes::BelowGenerations(
-            parse_positive_u64_flag("--allow-unmet-sometimes", value)?,
-        )),
-        None => Ok(AllowUnmetSometimes::Always),
-    }
 }
 
 /// Route the `campaign` verb.
@@ -3351,6 +3216,61 @@ fn declared_reachable_fixture() -> Result<CoverageTally, String> {
 mod tests {
     use super::*;
 
+    /// A `--spec` file and individual flags layer with the flag on top, in
+    /// EITHER argument order, and an absent switch never undoes the spec.
+    #[test]
+    fn flags_override_the_spec_in_either_order_and_absence_overrides_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("spec.json");
+        fs::write(
+            &path,
+            br#"{"generations": 7, "buggify": true, "watchdog_nanos": 11}"#,
+        )
+        .expect("write spec");
+        let spec = path.display().to_string();
+        let argv = |args: &[&str]| args.iter().map(OsString::from).collect::<Vec<_>>();
+
+        // Spec alone.
+        let only_spec = parse(argv(&["art.wasm", "--spec", &spec])).unwrap().spec;
+        assert_eq!(only_spec.generations, 7);
+        assert!(
+            only_spec.buggify,
+            "an absent --buggify must not undo the spec"
+        );
+        assert_eq!(only_spec.watchdog_nanos, Some(11));
+
+        // A flag wins over the spec whether it precedes or follows `--spec`.
+        for args in [
+            vec![
+                "art.wasm",
+                "--spec",
+                &spec,
+                "--gens",
+                "3",
+                "--liveness-watchdog",
+                "22",
+            ],
+            vec![
+                "art.wasm",
+                "--gens",
+                "3",
+                "--liveness-watchdog",
+                "22",
+                "--spec",
+                &spec,
+            ],
+        ] {
+            let spec = parse(argv(&args)).unwrap().spec;
+            assert_eq!(spec.generations, 3, "flag beats spec for {args:?}");
+            assert_eq!(
+                spec.watchdog_nanos,
+                Some(22),
+                "flag beats spec for {args:?}"
+            );
+            assert!(spec.buggify, "the spec's own knobs survive for {args:?}");
+        }
+    }
+
     #[test]
     fn every_class_is_reachable() {
         assert_eq!(classify(0, "", ""), CampaignClass::Ok);
@@ -3828,7 +3748,7 @@ mod tests {
             "--liveness-watchdog",
             "--converge-within",
             "--heal-after",
-            "--report",
+            "--report-failures",
             "--allow-unmet-sometimes",
         ] {
             let values: Vec<&str> = match flag {
@@ -3836,7 +3756,7 @@ mod tests {
                 | "--swarm"
                 | "--sched-pct"
                 | "--faults"
-                | "--report"
+                | "--report-failures"
                 | "--allow-unmet-sometimes" => vec!["--extend", "1", flag],
                 _ => vec!["--extend", "1", flag, "1"],
             };

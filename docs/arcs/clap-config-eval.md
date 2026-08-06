@@ -1,16 +1,14 @@
-# clap adoption + configuration story: evaluation and spike definition
+# clap adoption + configuration story: evaluation, spike, and full port
 
-Status: spike run 2026-08-06; verdict **REJECT** by the mechanical rule. All
-functional gates passed (registry walks unmodified; `run`/`campaign` help JSON
-and human help byte-identical; drift gate; run e2e 26/26 and campaign e2e 7/7;
-non-UTF8 passthrough preserved; MSRV 1.86 clean; `cargo tree -i clap` shows a
-single dependent), but the LOC criteria failed: net parser+bridge delta was
-+117 LOC (baseline 804 → spike 921) with a 116-LOC clap↔passthrough/family
-bridge, plus +3.30s cold build and +2.33 MB (+6.4%) binary. Measured on an
-Apple M4 / rustc 1.97.1 with isolated build dirs. The spike diff was dropped
-per the no-middle-state rule; the config layering design below proceeded on the
-bespoke parsers and landed in invariant-visibility Wave 4.
-Scope: the `cargo-patina` CLI only. Decision owner: user, after the spike defined in §7.
+Status: **ADOPTED and landed 2026-08-06** as a full port of every verb. The
+earlier two-verb spike was rejected on its mechanical LOC rule (+117 LOC,
+dominated by a 116-line clap-to-passthrough bridge); the user overturned that
+verdict on the grounds that the bridge is exactly what a whole-CLI port
+deletes, and that byte-identical help output was never a requirement. §9 records
+the measured outcome of the full port; §§1-8 are the pre-port analysis, kept as
+written so its predictions can be checked against §9.
+
+Scope: the `cargo-patina` CLI only.
 
 This doc answers four questions about adopting clap for the cargo-patina CLI,
 coupled with the env-var + config-file configuration story:
@@ -405,3 +403,180 @@ battery already exists — which is precisely the situation the walks were built
 for: they make a parser-engine swap *testable* rather than a leap of faith. If
 `run` fits clap without weakening a single gate, adopt; the first gate weakened,
 reject without relitigating.
+
+## 9. The full port: what was built and what it measured
+
+The port keeps the architecture §2 predicted — **registry-driven clap** — and
+carries it further than the spike could: the registry now declares not just each
+flag but each verb's *families* (the disjoint flag sets a verb chooses between at
+routing time), so one declaration generates the help, the JSON payload, the
+parser, the refusal wording, and the test routing.
+
+### 9.1 What the registry gained
+
+| Addition | Replaces | Why it matters |
+|---|---|---|
+| `Family` + `Group.families` + `only(flag, …)` | the `(verb, flag) → family parser` knowledge spread across routing code and the test driver table | a family's flag set is declared once; a flag cannot be accepted by a family its help omits |
+| `FamilySpec { label, because }` | hand-written "unsupported option X for `run` of a native binary" arms in every parser | the same wording for every family, derived |
+| `Refusal { families, flags, names, message }` | literal flag lists inside `parse_native_replay` / `parse_wasi_replay` | a knob added to `FAULT_FLAGS` is refused by replay the day it is added — see 9.4 |
+| `Flag.requires` | `if schedule.pct.is_none() && schedule.pct_steps.is_some()` checks, repeated per family | one generic check, and the grammar walk knows to arm the parent |
+
+### 9.2 Measured (Apple M4, rustc 1.97.1, isolated build dirs and workspace paths)
+
+**Read the wall-clock rows as unreliable.** Every build and battery timing below
+was taken with several agents running batteries on the same machine (load average
+33-47 throughout), and the baseline and ported measurements were taken at
+different times under different, unrecorded contention. The build-cost delta is
+therefore an order-of-magnitude sanity check, not a number to defend; the
+warm-rebuild result (the ported crate rebuilding FASTER) is plausible on
+mechanism but wants a re-measure on a quiet machine before it is quoted. The LOC,
+binary-size, MSRV, and dependency-graph rows are contention-independent.
+
+A measurement trap worth recording: this machine's `~/.cargo/config.toml` sets
+`build.build-dir` to a workspace-path-hashed shared directory, so `CARGO_TARGET_DIR`
+alone does NOT produce a cold build — only a fresh workspace PATH does. The first
+"baseline" reading taken here was wrong for exactly that reason.
+
+| Metric | Baseline | Ported | Delta |
+|---|---|---|---|
+| Non-test source (`crates/cargo-patina/src`) | 23,051 | 22,231 | **−820 (−3.6%)** |
+| … bespoke parsing/tokenizing deleted | — | — | −1,945 |
+| … registry declaration added (`help.rs`) | — | — | +412 |
+| … clap layer added (`cli.rs` 509 + `values.rs` 204) | — | — | +713 |
+| Test source | 5,256 | 5,126 | −130 |
+| Total | 28,307 | 27,357 | **−950 (−3.4%)** |
+| Cold `cargo build -p cargo-patina --release` (contended) | 37.36 s | 45.90 s | +8.54 s (unreliable) |
+| Warm rebuild of `cargo-patina` alone (contended) | 11.40 / 11.59 s | 10.71 / 8.55 s | faster (unreliable) |
+| Release binary | 10,076,640 B | 10,417,264 B | +340,624 B (+3.4%) |
+| MSRV `cargo +1.86.0 check` | clean | clean | — |
+| `cargo tree -i clap` | — | `clap → cargo-patina` only | single dependent |
+
+There is no bridge. The 116-line spike bridge existed to reconcile two parsing
+idioms; with every verb on clap there is one idiom, and the passthrough split
+([`cli::partition`]) is 40 lines driven by the registry rather than by a second
+arity table.
+
+The binary cost is a quarter of the spike's (+340 KB vs +2.33 MB) because the
+dependency carries `default-features = false`: the CLI renders its own help and
+usage from the registry, so clap's `help`, `usage`, and `color` features are all
+dead weight — and `color` would have made error output terminal-dependent, which
+a machine-parsed CLI must not be. clap is pinned `~4.6` rather than `^4.6`
+because clap raises its MSRV in minor releases (4.6 needs 1.85 against our 1.86);
+bumping the minor is a deliberate step that re-runs `mise run msrv`.
+
+The warm-rebuild result was the surprise: the crate appears to compile *faster*
+with clap linked, which is mechanically plausible because ~1,900 lines of
+monomorphized hand-written parsing disappeared. Under the contention above it is
+a hypothesis, not a finding.
+
+### 9.3 Bug classes: eliminated vs merely moved
+
+**Structurally eliminated** (unrepresentable, not tested away):
+
+* *Parser accepts a flag the help omits, or omits one it advertises.* The parser
+  is BUILT from the help rows. `registry_covers_every_parsed_flag` and its
+  140-line hand-maintained `accepted_flags` mirror are deleted, not ported.
+* *Arity / `=`-only divergence.* `Value::Optional` maps to
+  `require_equals(true).num_args(0..=1)`; there is no per-family code that could
+  disagree.
+* *Missed duplicate rejection.* One generic check over `repeatable` replaced
+  ~60 `set_once` call sites.
+* *Wrong grammar for a value.* `Kind` selects the validator, once. This class had
+  a live instance: `config.rs` carried a SECOND, independently written
+  implementation of every grammar for config/env defaults, and the two disagreed
+  (different socket rules, different messages). Both now call `values::validate`.
+* *A family accepting a sibling family's flag.* The family declaration is what
+  builds the `Command`.
+
+The test delta is net of ~340 deleted lines of mirror (`accepted_flags`, the
+per-flag `drive_flag` routing) against ~210 added: a family-keyed driver table
+and five new pins — the two registry invariants below, the first test the CLI has
+ever had for non-UTF-8 Cargo passthrough (an arc-stated constraint that until now
+rested only on a comment), a pin that a Cargo-family replay refuses semantic
+knobs rather than forwarding them, and a pin that `--spec` and flags layer with
+the flag on top in either argument order. Each was verified red-before/
+green-after.
+
+**Reduced but still ours**: the grammars themselves (still hand-written, now in
+one place); routing and magic-byte family inference; the Cargo passthrough;
+cross-flag domain rules that are not simple dependencies.
+
+**New**: dependency stewardship. clap's error wording is now user-visible text we
+do not own, so a minor bump can change it; the pin plus the e2e assertions make
+that a loud, contained change rather than a silent one.
+
+### 9.4 Two live bugs the port surfaced
+
+1. **`campaign --report` was documented and unreachable.** The global
+   `--report OUT.html` pre-pass ran before verb routing and consumed both the
+   flag and the token after it, so `campaign … --report --gens 2` reported
+   `unsupported option "2"`. Two flags shared a name with different arities and
+   nothing noticed, because the pre-pass and the verb parser were separate token
+   loops. Fixed by renaming the campaign flag to `--report-failures`, and pinned
+   as a class by `no_verb_redeclares_a_global_flag` (verified red-before/
+   green-after). Under clap a single `Command` would panic at build time on the
+   duplicate; the pre-pass is the one place that stays outside clap, so the
+   invariant is asserted instead.
+2. **Native replay's refusal list was drifting.** `parse_native_replay` spelled
+   out all seven fault knobs literally, so a knob added to `FAULT_FLAGS` would
+   have silently degraded from "the trace is authoritative" to "unsupported
+   replay option". The registry `Refusal` now references the shared slice.
+
+A third, from writing the passthrough split down: the Cargo-family `replay`
+refused only the seven fault knobs by name and forwarded `--seed`/`--buggify`/
+`--sched-pct` to Cargo, where they surfaced as a cargo argument error rather
+than "the trace is authoritative". The registry `Refusal` now covers the Cargo
+family too, and `partition` keeps declared refusals rather than forwarding them.
+(Sibling-family flags are still forwarded — `--bin` and `--release` are exactly
+the names a legitimate Cargo argument shares, and forwarding them is what the
+passthrough is for. That asymmetry is deliberate and commented at
+`cli::partition`.)
+
+A fourth, smaller: WASI `run` accepted `--heal-after` without `--converge-within`
+(the native families rejected it), so the knob was silently inert — an "inert
+knobs are bugs" violation. `Flag.requires` makes the rule uniform.
+
+### 9.5 Intentional output changes
+
+Every one was reviewed; none loses information.
+
+| Case | Before | After |
+|---|---|---|
+| Unknown flag | `unsupported option "--seeed" for \`run\` of a WASI module` | `unexpected argument '--seeed' found; tip: a similar argument exists: '--seed'` |
+| Missing value | `--seed requires a UTF-8 value` | `a value is required for '--seed <U64>' but none was supplied` |
+| Bad value | `--seed must be an unsigned 64-bit integer` | `invalid value 'abc' for '--seed <U64>': --seed must be an unsigned 64-bit integer` |
+| Value on a switch | `--release takes no value` | `unexpected value 'x' for '--release' found; no more were expected` |
+| Sibling-family flag | per-parser prose, e.g. `trace info reads metadata only and does not accept --kind` | `trace info does not accept --kind (trace info reads metadata only)` |
+| `--harness` on a WASI run | `--harness is native-only; …` | `` `run` of a WASI module does not accept --harness `` |
+| `--extend 0` | `--extend 0 is redundant; use --resume …` | `--extend must be >= 1` (the guidance moved into the flag's help text) |
+| `--kind`/`--runtime` enums | `--kind must be one of a\|b; got "x"` | unchanged wording, now generated from `Kind::Enum` |
+
+Unchanged: exit codes (2 for every usage error, 0 for `--help`/`--version`), the
+registry-rendered usage synopsis appended to every error, human `--help` layout,
+`--format json` result envelopes, and unknown-verb / unknown-subcommand errors
+(those are routing, not flag parsing).
+
+Help JSON stayed schema-compatible: the only structural change is an **additive**
+`families` array on groups and on narrowed flags, plus `requires` on dependent
+flags — new machine-readable facts (an agent can now see that `--fuel` is
+WASI-only) that `patina.help/v2` consumers ignore. `scripts/check-flag-drift.sh`
+passes unmodified.
+
+### 9.6 Verdict
+
+**Adopt — the full port is a clear improvement, and the spike's rejection was an
+artifact of measuring a half-migration.** The win is not the line count (−3.6% of
+non-test source is real but modest); it is that the CLI now has *one* description
+of itself. Three hand-maintained mirrors are gone (`accepted_flags`, the
+`drive_flag` per-flag routing table, `config.rs`'s duplicate grammars), two
+shipped bugs fell out of writing the declaration down, and the marginal cost of a
+new flag dropped from "registry row + parser arm + driver route + mirror line" to
+"registry row + extraction line".
+
+The honest costs: a dependency whose error wording is user-visible and whose MSRV
+policy is not ours (mitigated by the `~4.6` pin), a cold-build cost measured at
++8.5 s but under heavy contention (§9.2 — read it as single-digit seconds, not as
+a figure), +340 KB of binary, and a `Family` concept a reader must learn before
+the registry makes sense. Against a CLI with eleven verbs and twenty-two families whose defining
+difficulty was keeping parser, help, and docs in agreement, that trade is worth
+making.

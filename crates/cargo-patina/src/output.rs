@@ -16,6 +16,7 @@ use std::sync::OnceLock;
 
 use sha2::{Digest, Sha256};
 
+use crate::help::{self, Flag};
 use crate::render::{self, FailureSummary};
 use crate::{CliError, config, exit_code};
 
@@ -89,82 +90,24 @@ pub fn options() -> &'static OutputOptions {
     OPTIONS.get_or_init(OutputOptions::default)
 }
 
-/// Strip `--format <fmt>`, `--render <path>`, `--report <path>`, and
-/// `--no-config` from the leading (pre-`--`) region of an argument list,
-/// returning the parsed options and the arguments with those flags removed.
+/// Strip the global output/config flags from the leading (pre-`--`) region of
+/// an argument list, returning the parsed options and the remaining arguments.
 /// Flags after a `--` separator are left in place — there they belong to the
 /// guest program, not Patina.
 ///
-/// Mirrors [`crate::extract_target`] so these options can be parsed once,
-/// globally, without touching any per-verb flag loop.
+/// These are parsed once, globally, before any per-verb routing, because they
+/// decide how the CLI reports whatever the verb goes on to do. Arity comes from
+/// the same registry rows that document them (`help::GLOBAL_OUTPUT`).
 pub fn extract(arguments: Vec<OsString>) -> Result<(OutputOptions, Vec<OsString>), CliError> {
-    let mut format: Option<OutputFormat> = None;
+    let flags: Vec<&'static Flag> = help::GLOBAL_OUTPUT.iter().collect();
+    let (found, rest) = crate::cli::strip(&flags, arguments)?;
     let mut options = OutputOptions::default();
-    let mut rest: Vec<OsString> = Vec::new();
-    let mut iterator = arguments.into_iter();
-    let mut after_separator = false;
-    while let Some(argument) = iterator.next() {
-        if after_separator {
-            rest.push(argument);
-            continue;
-        }
-        if argument == "--" {
-            after_separator = true;
-            rest.push(argument);
-            continue;
-        }
-        match argument.to_str() {
-            // `--format`, not `--output`: `--output <PATH>` is already the
-            // artifact-path flag for `build` and `minimize`, so the machine-
-            // readable envelope selector uses the distinct, collision-free
-            // `--format <human|json>` (conventional, like cargo's
-            // `--message-format`).
-            Some("--format") => {
-                let value = iterator
-                    .next()
-                    .and_then(|value| value.into_string().ok())
-                    .ok_or_else(|| CliError::usage("--format requires a value (human or json)"))?;
-                crate::set_once(&mut format, parse_format(&value)?, "--format")?;
-            }
-            Some(value) if value.starts_with("--format=") => {
-                let parsed = parse_format(&value["--format=".len()..])?;
-                crate::set_once(&mut format, parsed, "--format")?;
-            }
-            Some("--render") => {
-                let value = iterator
-                    .next()
-                    .ok_or_else(|| CliError::usage("--render requires an output HTML path"))?;
-                crate::set_once(&mut options.render, PathBuf::from(value), "--render")?;
-            }
-            Some(value) if value.starts_with("--render=") => {
-                let path = PathBuf::from(&value["--render=".len()..]);
-                crate::set_once(&mut options.render, path, "--render")?;
-            }
-            Some("--report") => {
-                let value = iterator
-                    .next()
-                    .ok_or_else(|| CliError::usage("--report requires an output HTML path"))?;
-                crate::set_once(&mut options.report, PathBuf::from(value), "--report")?;
-            }
-            Some(value) if value.starts_with("--report=") => {
-                let path = PathBuf::from(&value["--report=".len()..]);
-                crate::set_once(&mut options.report, path, "--report")?;
-            }
-            Some("--no-config") => {
-                options.no_config = true;
-            }
-            Some(value) if value.starts_with("--no-config=") => {
-                return Err(CliError::usage(format!(
-                    "--no-config takes no value; got {:?}",
-                    &value["--no-config=".len()..]
-                )));
-            }
-            _ => rest.push(argument),
-        }
+    if let Some(value) = crate::cli::single(&found, "--format")? {
+        options.format = parse_format(&value.to_string_lossy())?;
     }
-    if let Some(format) = format {
-        options.format = format;
-    }
+    options.render = crate::cli::single(&found, "--render")?.map(PathBuf::from);
+    options.report = crate::cli::single(&found, "--report")?.map(PathBuf::from);
+    options.no_config = found.contains_key("--no-config");
     Ok((options, rest))
 }
 

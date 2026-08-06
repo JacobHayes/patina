@@ -16,6 +16,7 @@ patina-dst-runtime.workspace = true
 patina-dst-target.workspace = true
 patina-dst-trace.workspace = true
 patina-dst-wasi-host.workspace = true
+clap.workspace = true
 object.workspace = true
 proc-macro2.workspace = true
 rustc-demangle.workspace = true

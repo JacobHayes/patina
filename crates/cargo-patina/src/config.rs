@@ -15,8 +15,9 @@ use serde_json::{Value as JsonValue, json};
 
 type TomlValue = toml::Value;
 
+use crate::CliError;
+use crate::cli;
 use crate::help::{self, Flag, Kind, Value};
-use crate::{CliError, split_opt};
 
 #[derive(Clone, Debug)]
 pub(crate) struct RepoConfig {
@@ -544,10 +545,10 @@ fn explicit_flags(verb: &str, arguments: &[OsString]) -> BTreeSet<&'static str> 
             index += 1;
             continue;
         };
-        let opt = split_opt(text);
-        if let Some(flag) = help::configurable_flag_by_cli_name(verb, opt.name) {
+        let name = cli::split_name(text);
+        if let Some(flag) = help::configurable_flag_by_cli_name(verb, name) {
             explicit.insert(flag.name);
-            if opt.inline.is_none() && matches!(flag.value, Value::Required(..)) {
+            if name == text && matches!(flag.value, Value::Required(..)) {
                 index += 1;
             }
         }
@@ -752,97 +753,11 @@ fn render_toml_scalar(
     ))
 }
 
+/// Validate a config/env-supplied value against the flag's declared grammar.
+/// This is the SAME check the flag parser runs — a project default and a typed
+/// flag cannot disagree about what a value means.
 fn validate_kind(name: &str, kind: Kind, value: &str) -> Result<(), CliError> {
-    match kind {
-        Kind::U64 => crate::parse_u64(name, value).map(|_| ()),
-        Kind::U32 => crate::parse_u32(name, value).map(|_| ()),
-        Kind::Usize => crate::parse_usize(name, value).map(|_| ()),
-        Kind::PositiveU64 => crate::parse_positive_u64(name, value).map(|_| ()),
-        Kind::Permille => {
-            let parsed = crate::parse_u64(name, value)?;
-            if parsed > 1000 {
-                Err(CliError::usage(format!("{name} must be within [0, 1000]")))
-            } else {
-                Ok(())
-            }
-        }
-        Kind::NanosRange => crate::validate_nanos_range(name, value),
-        Kind::U64Range => crate::parse_u64_range(name, value).map(|_| ()),
-        Kind::OpKindList => crate::parse_trace_kind_list(value).map(|_| ()),
-        Kind::TaskSelector => crate::parse_task_selector(value).map(|_| ()),
-        Kind::CrashSpec => crate::validate_crash_at(value),
-        Kind::KeyValue => {
-            let (key, _) = value
-                .split_once('=')
-                .ok_or_else(|| CliError::usage(format!("{name} requires KEY=VALUE")))?;
-            if key.is_empty() {
-                Err(CliError::usage(format!("{name} keys must be non-empty")))
-            } else {
-                Ok(())
-            }
-        }
-        Kind::Socket => validate_socket(name, value),
-        Kind::Preopen => crate::parse_wasi_preopen(value).map(|_| ()),
-        Kind::UnsupportedSymbols => validate_unsupported_symbols(name, value),
-        Kind::Enum(choices) => {
-            if choices.contains(&value) {
-                Ok(())
-            } else {
-                Err(CliError::usage(format!(
-                    "{name} must be one of {}; got {value:?}",
-                    choices.join("|")
-                )))
-            }
-        }
-        Kind::Symbol => {
-            if value.is_empty() {
-                Err(CliError::usage(format!("{name} must not be empty")))
-            } else {
-                Ok(())
-            }
-        }
-        Kind::Path | Kind::Str => Ok(()),
-    }
-}
-
-fn validate_socket(name: &str, value: &str) -> Result<(), CliError> {
-    let (fd, route) = value
-        .split_once('=')
-        .ok_or_else(|| CliError::usage(format!("{name} requires FD=BIND->PEER")))?;
-    let fd = fd
-        .parse::<u32>()
-        .map_err(|_| CliError::usage(format!("{name} FD must be an unsigned 32-bit integer")))?;
-    let (bind, peer) = route
-        .split_once("->")
-        .ok_or_else(|| CliError::usage(format!("{name} requires FD=BIND->PEER")))?;
-    if fd <= 3 || bind.is_empty() || peer.is_empty() {
-        return Err(CliError::usage(format!(
-            "{name} requires an FD above 3 and non-empty addresses"
-        )));
-    }
-    Ok(())
-}
-
-fn validate_unsupported_symbols(name: &str, value: &str) -> Result<(), CliError> {
-    if value == "all" {
-        return Ok(());
-    }
-    let mut any = false;
-    for symbol in value.split(',') {
-        if symbol.trim().is_empty() {
-            return Err(CliError::usage(format!(
-                "{name} requires `all` or a comma-separated symbol list"
-            )));
-        }
-        any = true;
-    }
-    if any {
-        Ok(())
-    } else {
-        Err(CliError::usage(format!(
-            "{name} requires `all` or a comma-separated symbol list"
-        )))
-    }
+    crate::values::validate(kind, name, value).map_err(CliError::usage)
 }
 
 fn parse_env_bool(value: &str) -> Option<bool> {

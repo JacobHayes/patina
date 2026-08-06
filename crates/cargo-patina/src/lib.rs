@@ -54,6 +54,7 @@ use sha2::{Digest, Sha256};
 // emitting an envelope cannot perturb replay hashes.
 mod aux_store;
 mod campaign;
+mod cli;
 mod config;
 mod coverage;
 mod help;
@@ -64,6 +65,7 @@ mod sdk_report;
 mod sites;
 mod trace_cmd;
 mod trace_view;
+mod values;
 
 const PATINA_CFG_FLAGS: &str = "--cfg patina --cfg dst";
 
@@ -842,38 +844,8 @@ fn artifact_family(path: &Path) -> Result<Option<ArtifactFamily>, CliError> {
 /// removed. A `--target` after a `--` separator is left in place — there it is a
 /// rustc/cargo flag, not Patina's family selector.
 fn extract_target(arguments: Vec<OsString>) -> Result<(Option<String>, Vec<OsString>), CliError> {
-    let mut target: Option<String> = None;
-    let mut rest: Vec<OsString> = Vec::new();
-    let mut iterator = arguments.into_iter();
-    let mut after_separator = false;
-    while let Some(argument) = iterator.next() {
-        if after_separator {
-            rest.push(argument);
-            continue;
-        }
-        if argument == "--" {
-            after_separator = true;
-            rest.push(argument);
-            continue;
-        }
-        match argument.to_str() {
-            Some("--target") => {
-                let value = iterator
-                    .next()
-                    .and_then(|value| value.into_string().ok())
-                    .ok_or_else(|| CliError::usage("--target requires native or wasi"))?;
-                set_once(&mut target, value, "--target")?;
-            }
-            Some(value) if value.starts_with("--target=") => {
-                set_once(
-                    &mut target,
-                    value["--target=".len()..].to_string(),
-                    "--target",
-                )?;
-            }
-            _ => rest.push(argument),
-        }
-    }
+    let (found, rest) = cli::strip(&[cli::flag("run", "--target")], arguments)?;
+    let target = cli::single(&found, "--target")?.map(|value| value.to_string_lossy().into_owned());
     Ok((target, rest))
 }
 
@@ -1021,30 +993,16 @@ struct SourceFirstSelection {
 }
 
 fn take_package_bin(flags: Vec<OsString>) -> Result<SourceFirstSelection, CliError> {
-    let mut package = None;
-    let mut bin = None;
-    let mut rest = Vec::with_capacity(flags.len());
-    let mut index = 0;
-    while index < flags.len() {
-        let opt = flags[index].to_str().map(split_opt);
-        match opt.map(|opt| opt.name) {
-            Some("--package") | Some("-p") => {
-                let value = required_value(opt.expect("matched name"), &flags, &mut index)?;
-                set_once(&mut package, value.to_string(), "--package")?;
-            }
-            Some("--bin") => {
-                let value = required_value(opt.expect("matched name"), &flags, &mut index)?;
-                set_once(&mut bin, value.to_string(), "--bin")?;
-            }
-            Some("--") if flags[index] == "--" => {
-                rest.extend_from_slice(&flags[index..]);
-                break;
-            }
-            _ => rest.push(flags[index].clone()),
-        }
-        index += 1;
-    }
-    Ok(SourceFirstSelection { package, bin, rest })
+    let (found, rest) = cli::strip(
+        &[cli::flag("run", "--package"), cli::flag("run", "--bin")],
+        flags,
+    )?;
+    Ok(SourceFirstSelection {
+        package: cli::single(&found, "--package")?
+            .map(|value| value.to_string_lossy().into_owned()),
+        bin: cli::single(&found, "--bin")?.map(|value| value.to_string_lossy().into_owned()),
+        rest,
+    })
 }
 
 /// Thread source-first `--package`/`--bin` selection into a build-on-the-fly
@@ -1103,25 +1061,8 @@ fn apply_package_selection(
 /// idempotent, matching the `build` parser; an inline `--release=VALUE` is
 /// rejected because the switch takes no value.
 fn take_release(flags: Vec<OsString>) -> Result<(bool, Vec<OsString>), CliError> {
-    let mut release = false;
-    let mut rest = Vec::with_capacity(flags.len());
-    let mut index = 0;
-    while index < flags.len() {
-        let opt = flags[index].to_str().map(split_opt);
-        match opt.map(|opt| opt.name) {
-            Some("--release") => {
-                reject_inline(opt.expect("matched name"))?;
-                release = true;
-            }
-            Some("--") if flags[index] == "--" => {
-                rest.extend_from_slice(&flags[index..]);
-                break;
-            }
-            _ => rest.push(flags[index].clone()),
-        }
-        index += 1;
-    }
-    Ok((release, rest))
+    let (found, rest) = cli::strip(&[cli::flag("run", "--release")], flags)?;
+    Ok((found.contains_key("--release"), rest))
 }
 
 /// Apply a source-first `--release` to a build-on-the-fly artifact: it selects the
@@ -1321,9 +1262,9 @@ pub(crate) fn locate_positionals(
         }
         if let Some(text) = argument.to_str() {
             if text.starts_with('-') {
-                let opt = split_opt(text);
-                match help::flag_arity(verb, opt.name) {
-                    Some(help::Value::Required(..)) if opt.inline.is_none() => {
+                let name = cli::split_name(text);
+                match help::flag_arity(verb, name) {
+                    Some(help::Value::Required(..)) if name == text => {
                         // A registered value-taking flag consumes the next token.
                         index += 2;
                         continue;
@@ -1421,9 +1362,9 @@ pub(crate) fn reject_stranded_artifact(verb: &str, tail: &[OsString]) -> Result<
         }
         if let Some(text) = argument.to_str() {
             if text.starts_with('-') {
-                let opt = split_opt(text);
-                match help::flag_arity(verb, opt.name) {
-                    Some(help::Value::Required(..)) if opt.inline.is_none() => {
+                let name = cli::split_name(text);
+                match help::flag_arity(verb, name) {
+                    Some(help::Value::Required(..)) if name == text => {
                         index += 2;
                         after_unknown_flag = false;
                         continue;
@@ -1502,15 +1443,6 @@ fn parse_run(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     }
     match resolve_positional(&first, target.as_deref())? {
         Some((ArtifactFamily::Wasm, mut module)) => {
-            // `--harness` is native-only (usage mode 2 of the shim-backed harness).
-            // Under WASI the supervisor owns run configuration, so reject the
-            // combination loudly rather than silently ignore the flag.
-            if scan.rest.iter().any(|argument| argument == "--harness") {
-                return Err(CliError::usage(
-                    "--harness is native-only; a WASI run configures the runtime through the \
-                     supervisor, not a patina-dst-harness binary",
-                ));
-            }
             let selection = take_package_bin(scan.rest)?;
             apply_package_selection(&mut module, selection.package, selection.bin)?;
             let (release, rest) = take_release(selection.rest)?;
@@ -1561,192 +1493,20 @@ fn parse_native_harness_from(
     manifest: PathBuf,
     arguments: Vec<OsString>,
 ) -> Result<NativeHarnessInvocation, CliError> {
+    if arguments.iter().any(|argument| argument == "--") {
+        return Err(CliError::usage(
+            "test native harness mode does not accept a `--` tail; it supplies the libtest --exact filter itself",
+        ));
+    }
     let selection = take_package_bin(arguments)?;
     if selection.bin.is_some() {
         return Err(CliError::usage(
             "--bin does not select a libtest harness; use --harness-target with the Cargo test target name",
         ));
     }
-    let mut harness_target = None;
-    let mut exact = None;
-    let mut seed = None;
-    let mut seeds = None;
-    let mut release = false;
-    let mut yield_points = false;
-    let mut faults = NativeFaults::default();
-    let mut buggify: Option<NativeBuggify> = None;
-    let mut schedule = NativeSchedule::default();
-    let mut liveness = NativeLiveness::default();
-    let mut index = 0;
-    let arguments = selection.rest;
-    while index < arguments.len() {
-        if arguments[index] == "--" {
-            return Err(CliError::usage(
-                "test native harness mode does not accept a `--` tail; it supplies the libtest --exact filter itself",
-            ));
-        }
-        let Some(text) = arguments[index].to_str() else {
-            return Err(CliError::usage(
-                "test native harness options must be valid UTF-8",
-            ));
-        };
-        let opt = split_opt(text);
-        match opt.name {
-            "--harness-target" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                if value.is_empty() {
-                    return Err(CliError::usage("--harness-target must not be empty"));
-                }
-                set_once(&mut harness_target, value.to_string(), "--harness-target")?;
-            }
-            "--exact" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                if value.is_empty() {
-                    return Err(CliError::usage("--exact must not be empty"));
-                }
-                set_once(&mut exact, value.to_string(), "--exact")?;
-            }
-            "--seed" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(&mut seed, parse_u64("--seed", value)?, "--seed")?;
-            }
-            "--seeds" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(&mut seeds, parse_u64("--seeds", value)?, "--seeds")?;
-            }
-            "--release" => {
-                reject_inline(opt)?;
-                release = true;
-            }
-            "--yield-points" => {
-                reject_inline(opt)?;
-                yield_points = true;
-            }
-            name if FAULT_FLAGS.contains(&name) => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                apply_fault_flag(&mut faults, name, value)?;
-            }
-            "--buggify" => {
-                let entry = buggify.get_or_insert_with(NativeBuggify::default);
-                if let Some(value) = opt.inline {
-                    let permille = parse_u64("--buggify", value)?;
-                    if permille > 1000 {
-                        return Err(CliError::usage(
-                            "--buggify permille must be within [0, 1000]",
-                        ));
-                    }
-                    set_once(&mut entry.fire_permille, permille.to_string(), "--buggify")?;
-                }
-            }
-            "--buggify-activation-permille" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                let permille = parse_u64("--buggify-activation-permille", value)?;
-                if permille > 1000 {
-                    return Err(CliError::usage(
-                        "--buggify-activation-permille must be within [0, 1000]",
-                    ));
-                }
-                let entry = buggify.get_or_insert_with(NativeBuggify::default);
-                set_once(
-                    &mut entry.activation_permille,
-                    permille.to_string(),
-                    "--buggify-activation-permille",
-                )?;
-            }
-            "--buggify-cutoff-nanos" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                let nanos = parse_u64("--buggify-cutoff-nanos", value)?;
-                let entry = buggify.get_or_insert_with(NativeBuggify::default);
-                set_once(
-                    &mut entry.cutoff_nanos,
-                    nanos.to_string(),
-                    "--buggify-cutoff-nanos",
-                )?;
-            }
-            "--buggify-after-setup" => {
-                reject_inline(opt)?;
-                buggify
-                    .get_or_insert_with(NativeBuggify::default)
-                    .after_setup = true;
-            }
-            "--sched-pct" => {
-                let value = match opt.inline {
-                    Some(value) => {
-                        let parsed = parse_u64("--sched-pct", value)?;
-                        if parsed < 1 {
-                            return Err(CliError::usage("--sched-pct bug depth must be >= 1"));
-                        }
-                        parsed.to_string()
-                    }
-                    None => String::new(),
-                };
-                set_once(&mut schedule.pct, value, "--sched-pct")?;
-            }
-            "--sched-pct-steps" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                let steps = parse_u64("--sched-pct-steps", value)?;
-                if steps < 1 {
-                    return Err(CliError::usage("--sched-pct-steps must be >= 1"));
-                }
-                set_once(
-                    &mut schedule.pct_steps,
-                    steps.to_string(),
-                    "--sched-pct-steps",
-                )?;
-            }
-            "--starve" => {
-                let value = match opt.inline {
-                    Some(value) => {
-                        let parsed = parse_u64("--starve", value)?;
-                        if parsed < 1 {
-                            return Err(CliError::usage("--starve interval count must be >= 1"));
-                        }
-                        parsed.to_string()
-                    }
-                    None => String::new(),
-                };
-                set_once(&mut schedule.starve, value, "--starve")?;
-            }
-            "--starve-max-len" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                let len = parse_u64("--starve-max-len", value)?;
-                if len < 1 {
-                    return Err(CliError::usage("--starve-max-len must be >= 1"));
-                }
-                set_once(
-                    &mut schedule.starve_max_len,
-                    len.to_string(),
-                    "--starve-max-len",
-                )?;
-            }
-            "--starve-window" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                let window = parse_u64("--starve-window", value)?;
-                if window < 1 {
-                    return Err(CliError::usage("--starve-window must be >= 1"));
-                }
-                set_once(
-                    &mut schedule.starve_window,
-                    window.to_string(),
-                    "--starve-window",
-                )?;
-            }
-            "--swarm" => {
-                reject_inline(opt)?;
-                schedule.swarm = true;
-            }
-            _ => {
-                if !parse_liveness_flag(opt, &arguments, &mut index, &mut liveness)? {
-                    return Err(CliError::usage(format!(
-                        "unsupported option {:?} for `test` native harness mode",
-                        opt.name
-                    )));
-                }
-            }
-        }
-        index += 1;
-    }
-
+    let args = cli::parse("test", help::Family::Harness, selection.rest)?;
+    let seed = args.u64("--seed");
+    let seeds = args.u64("--seeds");
     if seed.is_some() && seeds.is_some() {
         return Err(CliError::usage("--seed and --seeds are mutually exclusive"));
     }
@@ -1755,38 +1515,25 @@ fn parse_native_harness_from(
             return Err(CliError::usage("--seeds must be between 1 and 1000000"));
         }
     }
-    if schedule.pct.is_none() && schedule.pct_steps.is_some() {
-        return Err(CliError::usage("--sched-pct-steps requires --sched-pct"));
-    }
-    if schedule.starve.is_none()
-        && (schedule.starve_max_len.is_some() || schedule.starve_window.is_some())
-    {
-        return Err(CliError::usage(
-            "--starve-max-len and --starve-window require --starve",
-        ));
-    }
-    if liveness.converge.is_none() && liveness.heal_after.is_some() {
-        return Err(CliError::usage("--heal-after requires --converge-within"));
-    }
-
     Ok(NativeHarnessInvocation {
         origin,
         manifest,
         package: selection.package,
-        harness_target: harness_target.ok_or_else(|| {
+        harness_target: args.string("--harness-target").ok_or_else(|| {
             CliError::usage("test native harness mode requires --harness-target <NAME>")
         })?,
-        exact: exact
+        exact: args
+            .string("--exact")
             .ok_or_else(|| CliError::usage("test native harness mode requires --exact <PATH>"))?,
         seeds: seed
             .map(HarnessSeeds::One)
             .unwrap_or_else(|| HarnessSeeds::Range(seeds.unwrap_or(20))),
-        release,
-        yield_points,
-        faults,
-        buggify,
-        schedule,
-        liveness,
+        release: args.flag("--release"),
+        yield_points: args.flag("--yield-points"),
+        faults: faults_of(&args),
+        buggify: buggify_of(&args),
+        schedule: schedule_of(&args),
+        liveness: liveness_of(&args),
     })
 }
 
@@ -1830,16 +1577,7 @@ fn parse_audit(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
             parse_native_audit_from(artifact, flags).map(ParseResult::NativeAudit)
         }
         ArtifactFamily::Wasm => {
-            if flags.iter().any(|argument| argument == "--allow") {
-                return Err(CliError::usage(
-                    "audit of a WASI module takes no --allow (the allow list is native-only)",
-                ));
-            }
-            if !flags.is_empty() {
-                return Err(CliError::usage(
-                    "audit of a WASI module takes only the module path",
-                ));
-            }
+            cli::parse("audit", help::Family::Wasi, flags)?;
             Ok(ParseResult::WasiAudit(artifact))
         }
     }
@@ -1863,48 +1601,7 @@ fn parse_wasi_build(arguments: Vec<OsString>) -> Result<WasiBuildInvocation, Cli
     // The package path may follow options; locate it registry-arity-aware.
     let scan = locate_positionals("build", &arguments, 1);
     let package_path = scan.positionals.into_iter().next().map(PathBuf::from);
-    let arguments = scan.rest;
-    let mut package = None;
-    let mut bin = None;
-    let mut release = false;
-    let mut output = None;
-    let mut index = 0;
-    while index < arguments.len() {
-        let text = arguments[index]
-            .to_str()
-            .ok_or_else(|| CliError::usage("build --target wasi options must be valid UTF-8"))?;
-        let opt = split_opt(text);
-        match opt.name {
-            "--package" | "-p" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(&mut package, value.to_string(), "--package")?;
-            }
-            "--bin" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(&mut bin, value.to_string(), "--bin")?;
-            }
-            "--release" => {
-                reject_inline(opt)?;
-                release = true;
-            }
-            "--output" | "-o" => {
-                let value = required_os_value(opt, &arguments, &mut index)?;
-                set_once(&mut output, PathBuf::from(value), "--output")?;
-            }
-            "--yield-points" => {
-                return Err(CliError::usage(
-                    "--yield-points has no effect with --target wasi: wasip1 has no threads to preempt",
-                ));
-            }
-            _ => {
-                return Err(CliError::usage(format!(
-                    "unsupported build --target wasi option {:?}",
-                    opt.name
-                )));
-            }
-        }
-        index += 1;
-    }
+    let args = cli::parse("build", help::Family::Wasi, scan.rest)?;
     // Require the package path after the flag scan so an unknown flag is named
     // first (never taken as the path).
     let package_path = package_path.ok_or_else(|| {
@@ -1915,13 +1612,12 @@ fn parse_wasi_build(arguments: Vec<OsString>) -> Result<WasiBuildInvocation, Cli
             "build --target wasi compiles a Cargo package; a single .rs source is native-only",
         ));
     }
-    let manifest = native_manifest_path(&package_path);
     Ok(WasiBuildInvocation {
-        manifest,
-        package,
-        bin,
-        release,
-        output,
+        manifest: native_manifest_path(&package_path),
+        package: args.string("--package"),
+        bin: args.string("--bin"),
+        release: args.flag("--release"),
+        output: args.path("--output"),
     })
 }
 
@@ -1931,89 +1627,20 @@ fn parse_wasi_build(arguments: Vec<OsString>) -> Result<WasiBuildInvocation, Cli
 /// or branch-append — is the `replay` verb's job (see [`parse_cargo_replay`]), so
 /// `run`/`test` carry no replay/branch/timeline flags.
 fn parse_cargo(command: String, arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
-    let mut seed = None;
-    let mut record = None;
-    let mut step_budget = None;
-    let mut params = BTreeMap::new();
-    let mut faults = NativeFaults::default();
-    let mut cargo_args = Vec::new();
-    let mut index = 0;
-    let mut passthrough = false;
-    while index < arguments.len() {
-        let argument = &arguments[index];
-        if passthrough {
-            cargo_args.push(argument.clone());
-            index += 1;
-            continue;
-        }
-        if argument == "--" {
-            passthrough = true;
-            cargo_args.push(argument.clone());
-            index += 1;
-            continue;
-        }
-
-        let Some(text) = argument.to_str() else {
-            // A non-UTF-8 argument is never a Patina flag; forward it to Cargo.
-            cargo_args.push(argument.clone());
-            index += 1;
-            continue;
-        };
-        let opt = split_opt(text);
-        match opt.name {
-            "-h" | "--help" => {
-                // The top-level pre-scan intercepts `--help` before routing here,
-                // so this is a belt-and-suspenders path (e.g. a direct
-                // `parse_cargo` caller); surface the current verb's section.
-                return Ok(ParseResult::Help(help::topic_for(
-                    current_verb().unwrap_or("run"),
-                )));
-            }
-            "-V" | "--version" => return Ok(ParseResult::Version),
-            "--seed" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(&mut seed, parse_u64("--seed", value)?, "--seed")?;
-            }
-            "--record" => {
-                let value = required_os_value(opt, &arguments, &mut index)?;
-                set_once(&mut record, PathBuf::from(value), "--record")?;
-            }
-            "--budget" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(&mut step_budget, parse_u64("--budget", value)?, "--budget")?;
-            }
-            "--param" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                let (key, value) = value
-                    .split_once('=')
-                    .ok_or_else(|| CliError::usage("--param requires KEY=VALUE"))?;
-                if key.is_empty() || params.insert(key.into(), value.into()).is_some() {
-                    return Err(CliError::usage("--param keys must be non-empty and unique"));
-                }
-            }
-            name if FAULT_FLAGS.contains(&name) => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                apply_fault_flag(&mut faults, name, value)?;
-            }
-            // Any unrecognized option is forwarded to Cargo verbatim.
-            _ => cargo_args.push(argument.clone()),
-        }
-        index += 1;
-    }
-
-    let seed = seed.unwrap_or(0);
-    let mode = match record {
-        Some(path) => Mode::Record { seed, path },
-        None => Mode::Seeded { seed },
-    };
-
+    let verb = help::verb(&command).expect("the Cargo family routes only `run` and `test`");
+    let (owned, cargo_args) = cli::partition(verb, help::Family::Cargo, arguments);
+    let args = cli::parse(&command, help::Family::Cargo, owned)?;
+    let seed = args.u64("--seed").unwrap_or(0);
     Ok(ParseResult::Run(Invocation {
         cargo_command: command,
         cargo_args,
-        mode,
-        step_budget,
-        params,
-        faults,
+        mode: match args.path("--record") {
+            Some(path) => Mode::Record { seed, path },
+            None => Mode::Seeded { seed },
+        },
+        step_budget: args.u64("--budget"),
+        params: key_values(&args, "--param")?,
+        faults: faults_of(&args),
         working_dir: None,
     }))
 }
@@ -2026,7 +1653,7 @@ fn parse_cargo(command: String, arguments: Vec<OsString>) -> Result<ParseResult,
 ///   recorded timeline (default `main`);
 /// * branch-append — `replay <pkg> <trace> --branch --from N --branch-seed S
 ///   --branch-id ID [--parent ID]` — replays the parent prefix then records a new
-///   branch timeline (today's `--branch` semantics).
+///   branch timeline.
 ///
 /// Cargo selectors (`-p NAME`, `--example NAME`, a `-- ARGS` tail, ...) that are
 /// not replay controls are forwarded to Cargo verbatim and folded into the
@@ -2039,106 +1666,15 @@ fn parse_cargo_replay(
     trace: PathBuf,
     arguments: Vec<OsString>,
 ) -> Result<ParseResult, CliError> {
-    let mut branch = false;
-    let mut timeline = None;
-    let mut branch_from = None;
-    let mut branch_seed = None;
-    let mut branch_id = None;
-    let mut parent = None;
-    let mut cargo_args = Vec::new();
-    let mut index = 0;
-    let mut passthrough = false;
-    while index < arguments.len() {
-        let argument = &arguments[index];
-        if passthrough {
-            cargo_args.push(argument.clone());
-            index += 1;
-            continue;
-        }
-        if argument == "--" {
-            passthrough = true;
-            cargo_args.push(argument.clone());
-            index += 1;
-            continue;
-        }
-        let opt = argument.to_str().map(split_opt);
-        match opt.map(|opt| opt.name) {
-            Some("--branch") => {
-                reject_inline(opt.expect("matched name"))?;
-                branch = true;
-            }
-            Some("--timeline") => {
-                let value = required_value(opt.expect("matched name"), &arguments, &mut index)?;
-                set_once(&mut timeline, value.to_string(), "--timeline")?;
-            }
-            Some("--from") => {
-                let value = required_value(opt.expect("matched name"), &arguments, &mut index)?;
-                set_once(&mut branch_from, parse_u64("--from", value)?, "--from")?;
-            }
-            Some("--branch-seed") => {
-                let value = required_value(opt.expect("matched name"), &arguments, &mut index)?;
-                set_once(
-                    &mut branch_seed,
-                    parse_u64("--branch-seed", value)?,
-                    "--branch-seed",
-                )?;
-            }
-            Some("--branch-id") => {
-                let value = required_value(opt.expect("matched name"), &arguments, &mut index)?;
-                set_once(&mut branch_id, value.to_string(), "--branch-id")?;
-            }
-            Some("--parent") => {
-                let value = required_value(opt.expect("matched name"), &arguments, &mut index)?;
-                set_once(&mut parent, value.to_string(), "--parent")?;
-            }
-            Some(flag) if FAULT_FLAGS.contains(&flag) => {
-                return Err(CliError::usage(format!(
-                    "replay restores run semantics from the trace and does not accept {flag}; \
-                     the trace is authoritative"
-                )));
-            }
-            // Any other flag or value is a Cargo selector, forwarded verbatim so
-            // it hashes into the fingerprint exactly as it did on the recording.
-            _ => cargo_args.push(argument.clone()),
-        }
-        index += 1;
-    }
-
-    let mode = if branch {
-        if timeline.is_some() {
-            return Err(CliError::usage(
-                "--timeline selects a timeline to replay and is not valid with --branch",
-            ));
-        }
-        Mode::Branch {
-            path: trace,
-            parent: parent.unwrap_or_else(|| "main".into()),
-            from_sequence: branch_from
-                .ok_or_else(|| CliError::usage("replay --branch requires --from"))?,
-            branch_seed: branch_seed
-                .ok_or_else(|| CliError::usage("replay --branch requires --branch-seed"))?,
-            branch_id: branch_id
-                .ok_or_else(|| CliError::usage("replay --branch requires --branch-id"))?,
-        }
-    } else {
-        if branch_from.is_some() || branch_seed.is_some() || branch_id.is_some() || parent.is_some()
-        {
-            return Err(CliError::usage(
-                "--from/--branch-seed/--branch-id/--parent require --branch",
-            ));
-        }
-        Mode::Replay {
-            path: trace,
-            timeline: timeline.unwrap_or_else(|| "main".into()),
-        }
-    };
-
+    let verb = help::verb("replay").expect("`replay` is registered");
+    let (owned, cargo_args) = cli::partition(verb, help::Family::Cargo, arguments);
+    let args = cli::parse("replay", help::Family::Cargo, owned)?;
     Ok(ParseResult::Run(Invocation {
         // A recording is produced by `run`; its fingerprint hashes the cargo
         // subcommand, so replaying reproduces the `run` program under the runtime.
         cargo_command: "run".to_string(),
         cargo_args,
-        mode,
+        mode: replay_mode(&args, trace)?,
         step_budget: None,
         params: BTreeMap::new(),
         faults: NativeFaults::default(),
@@ -2173,91 +1709,6 @@ struct WasiHostInputs {
     sockets: Vec<WasiSocketConfig>,
     preopens: Vec<WasiPreopenConfig>,
     resource_limits: WasiResourceLimitOverrides,
-    socket_fds: BTreeSet<u32>,
-}
-
-/// Apply one WASI host-input flag to `inputs`, returning `true` when `opt` is a
-/// host-input flag (having fetched its required value inline-or-next) and `false`
-/// otherwise (consuming nothing). Shared by [`parse_wasi_run_from`] and
-/// [`parse_wasi_replay`] so the two verbs parse the guest environment
-/// identically, both forms (`--flag VALUE` and `--flag=VALUE`).
-fn apply_wasi_host_input(
-    inputs: &mut WasiHostInputs,
-    opt: Opt<'_>,
-    arguments: &[OsString],
-    index: &mut usize,
-) -> Result<bool, CliError> {
-    match opt.name {
-        "--fuel" => {
-            let parsed = parse_u64("--fuel", required_value(opt, arguments, index)?)?;
-            set_once(&mut inputs.fuel, parsed, "--fuel")?;
-            set_once(&mut inputs.resource_limits.fuel, parsed, "--fuel")?;
-        }
-        "--arg" => inputs
-            .arguments
-            .push(required_value(opt, arguments, index)?.into()),
-        "--socket" => {
-            let value = required_value(opt, arguments, index)?;
-            let (fd, route) = value
-                .split_once('=')
-                .ok_or_else(|| CliError::usage("--socket requires FD=BIND->PEER"))?;
-            let fd = fd
-                .parse::<u32>()
-                .map_err(|_| CliError::usage("--socket FD must be an unsigned 32-bit integer"))?;
-            let (bind, peer) = route
-                .split_once("->")
-                .ok_or_else(|| CliError::usage("--socket requires FD=BIND->PEER"))?;
-            if fd <= 3 || bind.is_empty() || peer.is_empty() || !inputs.socket_fds.insert(fd) {
-                return Err(CliError::usage(
-                    "--socket requires a unique FD above 3 and non-empty addresses",
-                ));
-            }
-            inputs.sockets.push(WasiSocketConfig {
-                fd,
-                bind: bind.into(),
-                peer: peer.into(),
-            });
-        }
-        "--env" => {
-            let value = required_value(opt, arguments, index)?;
-            insert_guest_env(&mut inputs.environment, "--env", value)?;
-        }
-        "--preopen" => inputs
-            .preopens
-            .push(parse_wasi_preopen(required_value(opt, arguments, index)?)?),
-        "--max-memory-pages" => set_once(
-            &mut inputs.resource_limits.max_memory_pages,
-            parse_u32("--max-memory-pages", required_value(opt, arguments, index)?)?,
-            "--max-memory-pages",
-        )?,
-        "--max-descriptors" => set_once(
-            &mut inputs.resource_limits.max_descriptors,
-            parse_usize("--max-descriptors", required_value(opt, arguments, index)?)?,
-            "--max-descriptors",
-        )?,
-        "--max-preopens" => set_once(
-            &mut inputs.resource_limits.max_preopens,
-            parse_usize("--max-preopens", required_value(opt, arguments, index)?)?,
-            "--max-preopens",
-        )?,
-        "--max-path-bytes" => set_once(
-            &mut inputs.resource_limits.max_path_bytes,
-            parse_usize("--max-path-bytes", required_value(opt, arguments, index)?)?,
-            "--max-path-bytes",
-        )?,
-        "--max-io-bytes" => set_once(
-            &mut inputs.resource_limits.max_io_bytes,
-            parse_usize("--max-io-bytes", required_value(opt, arguments, index)?)?,
-            "--max-io-bytes",
-        )?,
-        "--max-iovecs" => set_once(
-            &mut inputs.resource_limits.max_iovecs,
-            parse_usize("--max-iovecs", required_value(opt, arguments, index)?)?,
-            "--max-iovecs",
-        )?,
-        _ => return Ok(false),
-    }
-    Ok(true)
 }
 
 /// Assemble a [`WasiInvocation`] from a parsed mode, the shared host inputs, and
@@ -2286,130 +1737,30 @@ fn wasi_invocation_from(
     }
 }
 
+/// Parse the flags of a WASI `run` given an already-resolved module reference
 /// (an existing `.wasm` or a build-on-the-fly spec). `run` produces a seeded or
 /// `--record` run: replaying a recording is the `replay` verb's job, so the
 /// replay/branch/timeline flags live there, not here. The seed-driven fault knobs
-/// (including `--sleep-jitter-nanos`, now honored at the wasip1 host's sleep
-/// entry) and the cooperative-SUT (buggify) knobs are accepted and recorded
-/// exactly as on the native family.
+/// (including `--sleep-jitter-nanos`, honored at the wasip1 host's sleep entry)
+/// and the cooperative-SUT (buggify) knobs are accepted and recorded exactly as
+/// on the native family.
 fn parse_wasi_run_from(
     module: ArtifactRef,
     arguments: Vec<OsString>,
 ) -> Result<WasiInvocation, CliError> {
-    let mut seed = None;
-    let mut record = None;
-    let mut faults = NativeFaults::default();
-    let mut buggify: Option<NativeBuggify> = None;
-    let mut liveness = NativeLiveness::default();
-    let mut inputs = WasiHostInputs::default();
-    let mut index = 0;
-    while index < arguments.len() {
-        let Some(text) = arguments[index].to_str() else {
-            return Err(CliError::usage("run options must be valid UTF-8"));
-        };
-        let opt = split_opt(text);
-        match opt.name {
-            // Optional-value cooperative-SUT/liveness switches: bare form or
-            // `=VALUE`, never a following token.
-            "--liveness-watchdog" => {
-                set_once(
-                    &mut liveness.watchdog,
-                    optional_u64_arg(opt, "--liveness-watchdog")?,
-                    "--liveness-watchdog",
-                )?;
-            }
-            "--converge-within" => {
-                set_once(
-                    &mut liveness.converge,
-                    optional_u64_arg(opt, "--converge-within")?,
-                    "--converge-within",
-                )?;
-            }
-            "--buggify" => {
-                let entry = buggify.get_or_insert_with(NativeBuggify::default);
-                if let Some(value) = opt.inline {
-                    let permille = parse_u64("--buggify", value)?;
-                    if permille > 1000 {
-                        return Err(CliError::usage(
-                            "--buggify permille must be within [0, 1000]",
-                        ));
-                    }
-                    set_once(&mut entry.fire_permille, permille.to_string(), "--buggify")?;
-                }
-            }
-            "--buggify-after-setup" => {
-                reject_inline(opt)?;
-                buggify
-                    .get_or_insert_with(NativeBuggify::default)
-                    .after_setup = true;
-            }
-            // Required-value flags: `--flag VALUE` or `--flag=VALUE`.
-            "--heal-after" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                parse_u64("--heal-after", value)?;
-                set_once(&mut liveness.heal_after, value.to_string(), "--heal-after")?;
-            }
-            "--seed" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(&mut seed, parse_u64("--seed", value)?, "--seed")?;
-            }
-            "--record" => {
-                let value = required_os_value(opt, &arguments, &mut index)?;
-                set_once(&mut record, PathBuf::from(value), "--record")?;
-            }
-            "--buggify-activation-permille" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                let permille = parse_u64("--buggify-activation-permille", value)?;
-                if permille > 1000 {
-                    return Err(CliError::usage(
-                        "--buggify-activation-permille must be within [0, 1000]",
-                    ));
-                }
-                set_once(
-                    &mut buggify
-                        .get_or_insert_with(NativeBuggify::default)
-                        .activation_permille,
-                    permille.to_string(),
-                    "--buggify-activation-permille",
-                )?;
-            }
-            "--buggify-cutoff-nanos" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                let nanos = parse_u64("--buggify-cutoff-nanos", value)?;
-                set_once(
-                    &mut buggify
-                        .get_or_insert_with(NativeBuggify::default)
-                        .cutoff_nanos,
-                    nanos.to_string(),
-                    "--buggify-cutoff-nanos",
-                )?;
-            }
-            name if FAULT_FLAGS.contains(&name) => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                apply_fault_flag(&mut faults, name, value)?;
-            }
-            _ => {
-                if !apply_wasi_host_input(&mut inputs, opt, &arguments, &mut index)? {
-                    return Err(CliError::usage(format!(
-                        "unsupported option {:?} for `run` of a WASI module",
-                        opt.name
-                    )));
-                }
-            }
-        }
-        index += 1;
-    }
-    let mode = match record {
-        Some(path) => Mode::Record {
-            seed: seed.unwrap_or(0),
-            path,
-        },
-        None => Mode::Seeded {
-            seed: seed.unwrap_or(0),
-        },
+    let args = cli::parse("run", help::Family::Wasi, arguments)?;
+    let seed = args.u64("--seed").unwrap_or(0);
+    let mode = match args.path("--record") {
+        Some(path) => Mode::Record { seed, path },
+        None => Mode::Seeded { seed },
     };
     Ok(wasi_invocation_from(
-        module, mode, inputs, faults, buggify, liveness,
+        module,
+        mode,
+        wasi_host_inputs_of(&args)?,
+        faults_of(&args),
+        buggify_of(&args),
+        liveness_of(&args),
     ))
 }
 
@@ -2418,119 +1769,17 @@ fn parse_wasi_run_from(
 /// knobs are restored from the trace, and `--arg` values (the recorded guest
 /// argv) are restored and conflict-checked at execution. Only genuine host inputs
 /// stay as flags (`--fuel`/`--env`/`--socket`/`--preopen`/resource limits), plus
-/// the timeline selector and branch controls that the WASI runtime supports:
-///
-/// * strict replay — `replay <mod.wasm> <trace> [--timeline ID]`;
-/// * branch-append — `replay <mod.wasm> <trace> --branch --from N --branch-seed S
-///   --branch-id ID [--parent ID]`.
+/// the timeline selector and branch controls the WASI runtime supports.
 fn parse_wasi_replay(
     module: ArtifactRef,
     trace: PathBuf,
     arguments: Vec<OsString>,
 ) -> Result<WasiInvocation, CliError> {
-    let mut inputs = WasiHostInputs::default();
-    let mut branch = false;
-    let mut timeline = None;
-    let mut branch_from = None;
-    let mut branch_seed = None;
-    let mut branch_id = None;
-    let mut parent = None;
-    let mut index = 0;
-    while index < arguments.len() {
-        let Some(text) = arguments[index].to_str() else {
-            return Err(CliError::usage("replay options must be valid UTF-8"));
-        };
-        let opt = split_opt(text);
-        match opt.name {
-            "--branch" => {
-                reject_inline(opt)?;
-                branch = true;
-            }
-            "--timeline" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(&mut timeline, value.to_string(), "--timeline")?;
-            }
-            "--from" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(&mut branch_from, parse_u64("--from", value)?, "--from")?;
-            }
-            "--branch-seed" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(
-                    &mut branch_seed,
-                    parse_u64("--branch-seed", value)?,
-                    "--branch-seed",
-                )?;
-            }
-            "--branch-id" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(&mut branch_id, value.to_string(), "--branch-id")?;
-            }
-            "--parent" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(&mut parent, value.to_string(), "--parent")?;
-            }
-            // Semantic inputs are restored from the trace, never re-supplied. The
-            // cooperative-SUT (buggify) configuration is likewise authoritative in
-            // the trace metadata and reconciled by `Context::from_config`, so its
-            // knobs are rejected here exactly as on the native replay path.
-            other
-                if other == "--seed"
-                    || other == "--record"
-                    || FAULT_FLAGS.contains(&other)
-                    || other == "--buggify"
-                    || other == "--buggify-after-setup"
-                    || other == "--buggify-activation-permille"
-                    || other == "--buggify-cutoff-nanos" =>
-            {
-                return Err(CliError::usage(format!(
-                    "replay restores run semantics from the trace and does not accept {other}; \
-the trace is authoritative"
-                )));
-            }
-            _ => {
-                if !apply_wasi_host_input(&mut inputs, opt, &arguments, &mut index)? {
-                    return Err(CliError::usage(format!(
-                        "unsupported option {:?} for `replay` of a WASI module",
-                        opt.name
-                    )));
-                }
-            }
-        }
-        index += 1;
-    }
-    let mode = if branch {
-        if timeline.is_some() {
-            return Err(CliError::usage(
-                "--timeline selects a timeline to replay and is not valid with --branch",
-            ));
-        }
-        Mode::Branch {
-            path: trace,
-            parent: parent.unwrap_or_else(|| "main".into()),
-            from_sequence: branch_from
-                .ok_or_else(|| CliError::usage("replay --branch requires --from"))?,
-            branch_seed: branch_seed
-                .ok_or_else(|| CliError::usage("replay --branch requires --branch-seed"))?,
-            branch_id: branch_id
-                .ok_or_else(|| CliError::usage("replay --branch requires --branch-id"))?,
-        }
-    } else {
-        if branch_from.is_some() || branch_seed.is_some() || branch_id.is_some() || parent.is_some()
-        {
-            return Err(CliError::usage(
-                "--from/--branch-seed/--branch-id/--parent require --branch",
-            ));
-        }
-        Mode::Replay {
-            path: trace,
-            timeline: timeline.unwrap_or_else(|| "main".into()),
-        }
-    };
+    let args = cli::parse("replay", help::Family::Wasi, arguments)?;
     Ok(wasi_invocation_from(
         module,
-        mode,
-        inputs,
+        replay_mode(&args, trace)?,
+        wasi_host_inputs_of(&args)?,
         NativeFaults::default(),
         None,
         NativeLiveness::default(),
@@ -2538,31 +1787,11 @@ the trace is authoritative"
 }
 
 fn parse_explore(arguments: Vec<OsString>) -> Result<ExploreInvocation, CliError> {
-    let mut forwarded = Vec::new();
-    let mut seeds = None;
-    let mut start = None;
-    let mut index = 0;
-    while index < arguments.len() {
-        if arguments[index] == "--" {
-            forwarded.extend(arguments[index..].iter().cloned());
-            break;
-        }
-        let opt = arguments[index].to_str().map(split_opt);
-        match opt.map(|opt| opt.name) {
-            Some(name @ ("--seeds" | "--seed-start")) => {
-                let opt = opt.expect("matched name");
-                let value = parse_u64(name, required_value(opt, &arguments, &mut index)?)?;
-                if name == "--seeds" {
-                    set_once(&mut seeds, value, name)?;
-                } else {
-                    set_once(&mut start, value, name)?;
-                }
-            }
-            // Everything else is the wrapped `run`/`test` command's; forward it.
-            _ => forwarded.push(arguments[index].clone()),
-        }
-        index += 1;
-    }
+    let verb = help::verb("explore").expect("`explore` is registered");
+    // Everything that is not an explore knob belongs to the wrapped `run`/`test`
+    // command, including the verb token itself and anything past `--`.
+    let (owned, forwarded) = cli::partition(verb, help::Family::Sole, arguments);
+    let args = cli::parse("explore", help::Family::Sole, owned)?;
     // `explore run <artifact|src>` sweeps the native or WASI families; `explore
     // run`/`test` with no diverting artifact stays the Cargo package family. Every
     // family must be in a plain seeded mode — record/replay/branch pin a single
@@ -2591,11 +1820,11 @@ fn parse_explore(arguments: Vec<OsString>) -> Result<ExploreInvocation, CliError
             ));
         }
     };
-    let seed_count = seeds.unwrap_or(100);
+    let seed_count = args.u64("--seeds").unwrap_or(100);
     if seed_count == 0 || seed_count > 1_000_000 {
         return Err(CliError::usage("--seeds must be between 1 and 1000000"));
     }
-    let start_seed = start.unwrap_or(mode_seed);
+    let start_seed = args.u64("--seed-start").unwrap_or(mode_seed);
     start_seed
         .checked_add(seed_count - 1)
         .ok_or_else(|| CliError::usage("exploration seed range overflows u64"))?;
@@ -2641,39 +1870,18 @@ fn parse_native_audit(mut arguments: Vec<OsString>) -> Result<NativeAuditInvocat
     parse_native_audit_from(binary, arguments)
 }
 
-/// Parse the `--allow` flags of a native `audit` given an already-resolved
-/// binary reference (an existing binary or a build-on-the-fly spec).
+/// Parse the flags of a native `audit` given an already-resolved binary
+/// reference (an existing binary or a build-on-the-fly spec).
 fn parse_native_audit_from(
     binary: ArtifactRef,
     arguments: Vec<OsString>,
 ) -> Result<NativeAuditInvocation, CliError> {
-    let mut allow = BTreeSet::new();
-    let mut raw = false;
-    let mut index = 0;
-    while index < arguments.len() {
-        let opt = arguments[index].to_str().map(split_opt);
-        match opt.map(|opt| opt.name) {
-            Some("--raw") => {
-                reject_inline(opt.expect("matched name"))?;
-                raw = true;
-            }
-            Some("--allow") => {
-                let symbol = required_value(opt.expect("matched name"), &arguments, &mut index)?;
-                if symbol.is_empty() {
-                    return Err(CliError::usage("--allow symbol must not be empty"));
-                }
-                allow.insert(symbol.to_string());
-            }
-            _ => {
-                return Err(CliError::usage(format!(
-                    "unsupported option {:?} for `audit` of a native binary",
-                    arguments[index]
-                )));
-            }
-        }
-        index += 1;
-    }
-    Ok(NativeAuditInvocation { binary, allow, raw })
+    let args = cli::parse("audit", help::Family::Native, arguments)?;
+    Ok(NativeAuditInvocation {
+        binary,
+        allow: allow_of(&args),
+        raw: args.flag("--raw"),
+    })
 }
 
 fn split_trailing_args(arguments: &mut Vec<OsString>) -> Vec<OsString> {
@@ -2696,59 +1904,15 @@ fn parse_native_build(mut arguments: Vec<OsString>) -> Result<NativeBuildInvocat
     // a usage error naming the flag, not a bogus `--release=x/Cargo.toml`.
     let scan = locate_positionals("build", &arguments, 1);
     let path = scan.positionals.into_iter().next().map(PathBuf::from);
-    let arguments = scan.rest;
-    let mut output = None;
-    let mut edition = None;
-    let mut release = false;
-    let mut package = None;
-    let mut bin = None;
-    let mut yield_points = false;
-    let mut index = 0;
-    while index < arguments.len() {
-        let text = arguments[index]
-            .to_str()
-            .ok_or_else(|| CliError::usage("build options must be valid UTF-8"))?;
-        let opt = split_opt(text);
-        match opt.name {
-            "--output" | "-o" => {
-                let value = required_os_value(opt, &arguments, &mut index)?;
-                set_once(&mut output, PathBuf::from(value), "--output")?;
-            }
-            "--edition" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(&mut edition, value.to_string(), "--edition")?;
-            }
-            "--release" => {
-                reject_inline(opt)?;
-                release = true;
-            }
-            "--yield-points" => {
-                reject_inline(opt)?;
-                yield_points = true;
-            }
-            "--package" | "-p" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(&mut package, value.to_string(), "--package")?;
-            }
-            "--bin" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(&mut bin, value.to_string(), "--bin")?;
-            }
-            _ => {
-                return Err(CliError::usage(format!(
-                    "unsupported build option {:?}",
-                    opt.name
-                )));
-            }
-        }
-        index += 1;
-    }
-
+    let args = cli::parse("build", help::Family::Native, scan.rest)?;
     // The path requirement is checked after the flag scan so an unknown flag or a
     // `--release=x` stray value is named first (a usage error about the flag,
     // never a bogus manifest path derived from a flag token).
     let path = path
         .ok_or_else(|| CliError::usage("build requires a Rust source path or a Cargo package"))?;
+    let output = args.path("--output");
+    let release = args.flag("--release");
+    let yield_points = args.flag("--yield-points");
 
     if is_native_package_path(&path) {
         if let Some(rustc_arg) = rustc_args.first() {
@@ -2756,7 +1920,7 @@ fn parse_native_build(mut arguments: Vec<OsString>) -> Result<NativeBuildInvocat
                 "trailing rustc options ({rustc_arg:?}) apply to a single-source build, not package builds"
             )));
         }
-        if edition.is_some() {
+        if args.string("--edition").is_some() {
             return Err(CliError::usage(
                 "--edition applies to a single-source build; a package's edition comes from its Cargo.toml",
             ));
@@ -2764,15 +1928,15 @@ fn parse_native_build(mut arguments: Vec<OsString>) -> Result<NativeBuildInvocat
         Ok(NativeBuildInvocation {
             target: NativeBuildTarget::Package {
                 manifest: native_manifest_path(&path),
-                package,
-                bin,
+                package: args.string("--package"),
+                bin: args.string("--bin"),
             },
             output,
             release,
             yield_points,
         })
     } else {
-        if package.is_some() || bin.is_some() {
+        if args.string("--package").is_some() || args.string("--bin").is_some() {
             return Err(CliError::usage(
                 "--package and --bin apply to a Cargo-package build, not a single source file",
             ));
@@ -2781,7 +1945,9 @@ fn parse_native_build(mut arguments: Vec<OsString>) -> Result<NativeBuildInvocat
         Ok(NativeBuildInvocation {
             target: NativeBuildTarget::Source {
                 source: path,
-                edition: edition.unwrap_or_else(|| DEFAULT_NATIVE_EDITION.to_string()),
+                edition: args
+                    .string("--edition")
+                    .unwrap_or_else(|| DEFAULT_NATIVE_EDITION.to_string()),
                 rustc_args,
             },
             output: Some(output),
@@ -2812,138 +1978,205 @@ fn native_manifest_path(path: &Path) -> PathBuf {
     }
 }
 
-/// Validate a `--fs-crash-at` value (`close`, `close:1`, `write:3`, ...) so a
-/// malformed knob is rejected before the guest is built and spawned. The runtime
-/// re-parses the same grammar; this keeps the failure early and legible.
-fn validate_crash_at(value: &str) -> Result<(), CliError> {
-    let (op, ordinal) = value.split_once(':').unwrap_or((value, "1"));
-    if !matches!(op, "open" | "write" | "sync" | "close") {
-        return Err(CliError::usage(format!(
-            "--fs-crash-at op must be open, write, sync, or close; got {op:?}"
-        )));
-    }
-    match ordinal.parse::<u64>() {
-        Ok(0) | Err(_) => Err(CliError::usage(format!(
-            "--fs-crash-at ordinal must be a positive integer; got {value:?}"
-        ))),
-        Ok(_) => Ok(()),
+/// The seed-driven fault knobs of any family that offers them. Stored as the
+/// exact text the operator typed so the runtime re-parses the same protocol
+/// string on record and on replay.
+fn faults_of(args: &cli::Args) -> NativeFaults {
+    NativeFaults {
+        fs_crash_at: args.string("--fs-crash-at"),
+        fs_torn_granularity: args.string("--fs-torn-granularity"),
+        fs_error_permille: args.string("--fs-error-permille"),
+        fs_short_permille: args.string("--fs-short-permille"),
+        sleep_jitter_nanos: args.string("--sleep-jitter-nanos"),
+        net_jitter_nanos: args.string("--net-jitter-nanos"),
+        net_drop_permille: args.string("--net-drop-permille"),
     }
 }
 
-/// Validate an inclusive `MIN..MAX` nanosecond range flag.
-fn validate_nanos_range(name: &str, value: &str) -> Result<(), CliError> {
-    let (min, max) = value.split_once("..").ok_or_else(|| {
-        CliError::usage(format!("{name} must be a MIN..MAX range; got {value:?}"))
-    })?;
-    let min = parse_u64(name, min)?;
-    let max = parse_u64(name, max)?;
-    if min > max {
-        return Err(CliError::usage(format!(
-            "{name} requires MIN <= MAX; got {value:?}"
-        )));
+/// The cooperative-SUT (buggify) knobs, or `None` when buggify was not enabled.
+/// Any of the four flags enables it — the three detail knobs each imply
+/// `--buggify`, as their help says.
+fn buggify_of(args: &cli::Args) -> Option<NativeBuggify> {
+    let fire = args.text("--buggify");
+    let activation = args.string("--buggify-activation-permille");
+    let cutoff = args.string("--buggify-cutoff-nanos");
+    let after_setup = args.flag("--buggify-after-setup");
+    if fire.is_none() && activation.is_none() && cutoff.is_none() && !after_setup {
+        return None;
     }
-    Ok(())
+    Some(NativeBuggify {
+        // A bare `--buggify` supplies no per-mille; the runtime default applies.
+        fire_permille: fire.filter(|value| !value.is_empty()).map(str::to_string),
+        activation_permille: activation,
+        cutoff_nanos: cutoff,
+        after_setup,
+    })
 }
 
-/// The seed-driven fault-injection flags shared by every run family. Kept as a
-/// single list so `run`/`test`/`replay` routing can detect a fault knob without
-/// re-listing the names, and so a knob added here is offered everywhere at once.
-const FAULT_FLAGS: &[&str] = &[
-    "--fs-crash-at",
-    "--fs-torn-granularity",
-    "--fs-error-permille",
-    "--fs-short-permille",
-    "--sleep-jitter-nanos",
-    "--net-jitter-nanos",
-    "--net-drop-permille",
-];
-
-/// Validate and store a single fault-injection knob into `faults`. Returns `true`
-/// when `option` is one of the [`FAULT_FLAGS`] (having consumed `value`), `false`
-/// when it is not a fault flag at all. Shared by the WASI and cargo-family run
-/// parsers so every family validates the fault protocol identically; the value is
-/// stored verbatim so the runtime re-parses the exact same text on record and
-/// replay.
-fn apply_fault_flag(
-    faults: &mut NativeFaults,
-    option: &str,
-    value: &str,
-) -> Result<bool, CliError> {
-    match option {
-        "--fs-crash-at" => {
-            validate_crash_at(value)?;
-            set_once(&mut faults.fs_crash_at, value.to_string(), "--fs-crash-at")?;
-        }
-        "--fs-torn-granularity" => {
-            if value != "block" && value != "byte" {
-                return Err(CliError::usage(format!(
-                    "--fs-torn-granularity must be block or byte; got {value:?}"
-                )));
-            }
-            set_once(
-                &mut faults.fs_torn_granularity,
-                value.to_string(),
-                "--fs-torn-granularity",
-            )?;
-        }
-        "--fs-error-permille" => {
-            let permille = parse_u64("--fs-error-permille", value)?;
-            if permille > 1000 {
-                return Err(CliError::usage(
-                    "--fs-error-permille must be within [0, 1000]",
-                ));
-            }
-            set_once(
-                &mut faults.fs_error_permille,
-                permille.to_string(),
-                "--fs-error-permille",
-            )?;
-        }
-        "--fs-short-permille" => {
-            let permille = parse_u64("--fs-short-permille", value)?;
-            if permille > 1000 {
-                return Err(CliError::usage(
-                    "--fs-short-permille must be within [0, 1000]",
-                ));
-            }
-            set_once(
-                &mut faults.fs_short_permille,
-                permille.to_string(),
-                "--fs-short-permille",
-            )?;
-        }
-        "--sleep-jitter-nanos" => {
-            validate_nanos_range("--sleep-jitter-nanos", value)?;
-            set_once(
-                &mut faults.sleep_jitter_nanos,
-                value.to_string(),
-                "--sleep-jitter-nanos",
-            )?;
-        }
-        "--net-jitter-nanos" => {
-            validate_nanos_range("--net-jitter-nanos", value)?;
-            set_once(
-                &mut faults.net_jitter_nanos,
-                value.to_string(),
-                "--net-jitter-nanos",
-            )?;
-        }
-        "--net-drop-permille" => {
-            let permille = parse_u64("--net-drop-permille", value)?;
-            if permille > 1000 {
-                return Err(CliError::usage(
-                    "--net-drop-permille must be within [0, 1000]",
-                ));
-            }
-            set_once(
-                &mut faults.net_drop_permille,
-                permille.to_string(),
-                "--net-drop-permille",
-            )?;
-        }
-        _ => return Ok(false),
+/// The exploration scheduling knobs. The inert-knob rule (`--sched-pct-steps`
+/// without `--sched-pct`, and so on) is declared in the registry and enforced
+/// generically by the parser, so it is not repeated here.
+fn schedule_of(args: &cli::Args) -> NativeSchedule {
+    NativeSchedule {
+        pct: args.string("--sched-pct"),
+        pct_steps: args.string("--sched-pct-steps"),
+        starve: args.string("--starve"),
+        starve_max_len: args.string("--starve-max-len"),
+        starve_window: args.string("--starve-window"),
+        swarm: args.flag("--swarm"),
     }
-    Ok(true)
+}
+
+/// The liveness-watchdog knobs.
+fn liveness_of(args: &cli::Args) -> NativeLiveness {
+    NativeLiveness {
+        watchdog: args.string("--liveness-watchdog"),
+        converge: args.string("--converge-within"),
+        heal_after: args.string("--heal-after"),
+    }
+}
+
+/// The pre-run gate's allow list.
+fn allow_of(args: &cli::Args) -> BTreeSet<String> {
+    args.texts("--allow")
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+/// The unsupported-symbol escape hatch, default-deny.
+fn unsupported_policy_of(args: &cli::Args) -> UnsupportedPolicy {
+    match args.text("--allow-unsupported-symbols") {
+        None => UnsupportedPolicy::Deny,
+        Some(value) => {
+            match values::unsupported_symbols("--allow-unsupported-symbols", value)
+                .expect("validated by the registry grammar")
+            {
+                None => UnsupportedPolicy::All,
+                Some(symbols) => {
+                    UnsupportedPolicy::Only(symbols.into_iter().map(str::to_string).collect())
+                }
+            }
+        }
+    }
+}
+
+/// A repeatable `KEY=VALUE` flag as a map. The grammar already guaranteed a
+/// non-empty key; uniqueness is the cross-value rule that remains.
+fn key_values(args: &cli::Args, flag: &str) -> Result<BTreeMap<String, String>, CliError> {
+    let mut map = BTreeMap::new();
+    for entry in args.texts(flag) {
+        let (key, value) = entry.split_once('=').expect("KEY=VALUE grammar");
+        if map.insert(key.to_string(), value.to_string()).is_some() {
+            return Err(CliError::usage(format!(
+                "{flag} keys must be non-empty and unique"
+            )));
+        }
+    }
+    Ok(map)
+}
+
+/// The host-supplied inputs a WASI run/replay shares.
+fn wasi_host_inputs_of(args: &cli::Args) -> Result<WasiHostInputs, CliError> {
+    let fuel = args.u64("--fuel");
+    let mut sockets = Vec::new();
+    let mut socket_fds = BTreeSet::new();
+    for entry in args.texts("--socket") {
+        let (fd, bind, peer) =
+            values::socket("--socket", entry).expect("validated by the registry grammar");
+        if !socket_fds.insert(fd) {
+            return Err(CliError::usage(
+                "--socket requires a unique FD above 3 and non-empty addresses",
+            ));
+        }
+        sockets.push(WasiSocketConfig {
+            fd,
+            bind: bind.to_string(),
+            peer: peer.to_string(),
+        });
+    }
+    let preopens = args
+        .texts("--preopen")
+        .into_iter()
+        .map(|entry| {
+            let (guest_path, read_only) =
+                values::preopen("--preopen", entry).expect("validated by the registry grammar");
+            WasiPreopenConfig {
+                guest_path: normalize_cli_preopen_path(guest_path),
+                policy: if read_only {
+                    MountPolicy::ReadOnly
+                } else {
+                    MountPolicy::ReadWrite
+                },
+            }
+        })
+        .collect();
+    Ok(WasiHostInputs {
+        fuel,
+        arguments: args
+            .texts("--arg")
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        environment: key_values(args, "--env")?,
+        sockets,
+        preopens,
+        resource_limits: WasiResourceLimitOverrides {
+            fuel,
+            max_memory_pages: args.u32("--max-memory-pages"),
+            max_iovecs: args.usize("--max-iovecs"),
+            max_io_bytes: args.usize("--max-io-bytes"),
+            max_descriptors: args.usize("--max-descriptors"),
+            max_preopens: args.usize("--max-preopens"),
+            max_path_bytes: args.usize("--max-path-bytes"),
+        },
+    })
+}
+
+/// The timeline/branch selection shared by the Cargo package and WASI replay
+/// families, which are the two that support branch-append.
+fn replay_mode(args: &cli::Args, path: PathBuf) -> Result<Mode, CliError> {
+    let timeline = args.string("--timeline");
+    let from_sequence = args.u64("--from");
+    let branch_seed = args.u64("--branch-seed");
+    let branch_id = args.string("--branch-id");
+    let parent = args.string("--parent");
+    if !args.flag("--branch") {
+        if from_sequence.is_some()
+            || branch_seed.is_some()
+            || branch_id.is_some()
+            || parent.is_some()
+        {
+            return Err(CliError::usage(
+                "--from/--branch-seed/--branch-id/--parent require --branch",
+            ));
+        }
+        return Ok(Mode::Replay {
+            path,
+            timeline: timeline.unwrap_or_else(|| "main".into()),
+        });
+    }
+    if timeline.is_some() {
+        return Err(CliError::usage(
+            "--timeline selects a timeline to replay and is not valid with --branch",
+        ));
+    }
+    Ok(Mode::Branch {
+        path,
+        parent: parent.unwrap_or_else(|| "main".into()),
+        from_sequence: from_sequence
+            .ok_or_else(|| CliError::usage("replay --branch requires --from"))?,
+        branch_seed: branch_seed
+            .ok_or_else(|| CliError::usage("replay --branch requires --branch-seed"))?,
+        branch_id: branch_id
+            .ok_or_else(|| CliError::usage("replay --branch requires --branch-id"))?,
+    })
+}
+
+/// The `--timeline` selector, defaulting to `main`.
+fn timeline_or_main(args: &cli::Args) -> String {
+    args.string("--timeline")
+        .unwrap_or_else(|| "main".to_string())
 }
 
 /// The `PATINA_*` control-plane variables carrying a [`NativeFaults`] to the
@@ -3044,43 +2277,6 @@ fn liveness_env_pairs(liveness: &NativeLiveness) -> Vec<(&'static str, String)> 
     pairs
 }
 
-/// Parse a single liveness-watchdog flag into `liveness`, returning `true` when
-/// `option` was one (advancing `index` past any separate value). Shared by every
-/// `run` family so `--liveness-watchdog`, `--converge-within`, and `--heal-after`
-/// parse identically. A supplied budget is validated as an unsigned integer.
-fn parse_liveness_flag(
-    opt: Opt<'_>,
-    arguments: &[OsString],
-    index: &mut usize,
-    liveness: &mut NativeLiveness,
-) -> Result<bool, CliError> {
-    match opt.name {
-        // Optional-value: bare switch (runtime default) or `=VALUE`.
-        "--liveness-watchdog" => {
-            set_once(
-                &mut liveness.watchdog,
-                optional_u64_arg(opt, "--liveness-watchdog")?,
-                "--liveness-watchdog",
-            )?;
-        }
-        "--converge-within" => {
-            set_once(
-                &mut liveness.converge,
-                optional_u64_arg(opt, "--converge-within")?,
-                "--converge-within",
-            )?;
-        }
-        // Required-value: `--heal-after VALUE` or `--heal-after=VALUE`.
-        "--heal-after" => {
-            let value = required_value(opt, arguments, index)?;
-            parse_u64("--heal-after", value)?;
-            set_once(&mut liveness.heal_after, value.to_string(), "--heal-after")?;
-        }
-        _ => return Ok(false),
-    }
-    Ok(true)
-}
-
 /// Thin wrapper: treat the leading argument as an already-built binary. Used by
 /// unit tests; `run` routing calls [`parse_native_run_from`] with a resolved ref.
 #[cfg(test)]
@@ -3103,262 +2299,33 @@ fn parse_native_run_from(
     mut arguments: Vec<OsString>,
 ) -> Result<NativeRunInvocation, CliError> {
     let program_args = split_trailing_args(&mut arguments);
-    let mut seed = None;
-    let mut record = None;
-    let mut fingerprint = None;
-    let mut net_latency_nanos = None;
-    let mut faults = NativeFaults::default();
-    let mut buggify: Option<NativeBuggify> = None;
-    let mut schedule = NativeSchedule::default();
-    let mut liveness = NativeLiveness::default();
-    let mut environment = BTreeMap::new();
-    let mut allow = BTreeSet::new();
-    let mut allow_unsupported: Option<UnsupportedPolicy> = None;
-    let mut coverage_out = None;
-    let mut mount = None;
-    let mut harness = false;
-    let mut index = 0;
-    while index < arguments.len() {
-        let Some(text) = arguments[index].to_str() else {
-            return Err(CliError::usage("run options must be valid UTF-8"));
-        };
-        let opt = split_opt(text);
-        match opt.name {
-            "--harness" => {
-                reject_inline(opt)?;
-                harness = true;
-            }
-            "--allow" => {
-                let symbol = required_value(opt, &arguments, &mut index)?;
-                if symbol.is_empty() {
-                    return Err(CliError::usage("--allow symbol must not be empty"));
-                }
-                allow.insert(symbol.to_string());
-            }
-            "--allow-unsupported-symbols" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                let policy = if value == "all" {
-                    UnsupportedPolicy::All
-                } else {
-                    let symbols: BTreeSet<String> = value
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|part| !part.is_empty())
-                        .map(str::to_owned)
-                        .collect();
-                    if symbols.is_empty() {
-                        return Err(CliError::usage(
-                            "--allow-unsupported-symbols requires `all` or a comma-separated symbol list",
-                        ));
-                    }
-                    UnsupportedPolicy::Only(symbols)
-                };
-                set_once(
-                    &mut allow_unsupported,
-                    policy,
-                    "--allow-unsupported-symbols",
-                )?;
-            }
-            "--seed" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(&mut seed, parse_u64("--seed", value)?, "--seed")?;
-            }
-            "--net-latency-nanos" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(
-                    &mut net_latency_nanos,
-                    parse_u64("--net-latency-nanos", value)?,
-                    "--net-latency-nanos",
-                )?;
-            }
-            "--env" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                insert_guest_env(&mut environment, "--env", value)?;
-            }
-            "--mount" => {
-                let value = required_os_value(opt, &arguments, &mut index)?;
-                set_once(&mut mount, PathBuf::from(value), "--mount")?;
-            }
-            "--coverage-out" => {
-                let value = required_os_value(opt, &arguments, &mut index)?;
-                set_once(&mut coverage_out, PathBuf::from(value), "--coverage-out")?;
-            }
-            // The seed-driven fault knobs, validated by the shared
-            // `apply_fault_flag` exactly as on the cargo and WASI families.
-            name if FAULT_FLAGS.contains(&name) => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                apply_fault_flag(&mut faults, name, value)?;
-            }
-            "--buggify" => {
-                let entry = buggify.get_or_insert_with(NativeBuggify::default);
-                if let Some(value) = opt.inline {
-                    let permille = parse_u64("--buggify", value)?;
-                    if permille > 1000 {
-                        return Err(CliError::usage(
-                            "--buggify permille must be within [0, 1000]",
-                        ));
-                    }
-                    set_once(&mut entry.fire_permille, permille.to_string(), "--buggify")?;
-                }
-            }
-            "--buggify-activation-permille" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                let permille = parse_u64("--buggify-activation-permille", value)?;
-                if permille > 1000 {
-                    return Err(CliError::usage(
-                        "--buggify-activation-permille must be within [0, 1000]",
-                    ));
-                }
-                let entry = buggify.get_or_insert_with(NativeBuggify::default);
-                set_once(
-                    &mut entry.activation_permille,
-                    permille.to_string(),
-                    "--buggify-activation-permille",
-                )?;
-            }
-            "--buggify-cutoff-nanos" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                let nanos = parse_u64("--buggify-cutoff-nanos", value)?;
-                let entry = buggify.get_or_insert_with(NativeBuggify::default);
-                set_once(
-                    &mut entry.cutoff_nanos,
-                    nanos.to_string(),
-                    "--buggify-cutoff-nanos",
-                )?;
-            }
-            "--buggify-after-setup" => {
-                reject_inline(opt)?;
-                buggify
-                    .get_or_insert_with(NativeBuggify::default)
-                    .after_setup = true;
-            }
-            "--sched-pct" => {
-                let value = match opt.inline {
-                    Some(value) => {
-                        let parsed = parse_u64("--sched-pct", value)?;
-                        if parsed < 1 {
-                            return Err(CliError::usage("--sched-pct bug depth must be >= 1"));
-                        }
-                        parsed.to_string()
-                    }
-                    None => String::new(),
-                };
-                set_once(&mut schedule.pct, value, "--sched-pct")?;
-            }
-            "--sched-pct-steps" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                let steps = parse_u64("--sched-pct-steps", value)?;
-                if steps < 1 {
-                    return Err(CliError::usage("--sched-pct-steps must be >= 1"));
-                }
-                set_once(
-                    &mut schedule.pct_steps,
-                    steps.to_string(),
-                    "--sched-pct-steps",
-                )?;
-            }
-            "--starve" => {
-                let value = match opt.inline {
-                    Some(value) => {
-                        let parsed = parse_u64("--starve", value)?;
-                        if parsed < 1 {
-                            return Err(CliError::usage("--starve interval count must be >= 1"));
-                        }
-                        parsed.to_string()
-                    }
-                    None => String::new(),
-                };
-                set_once(&mut schedule.starve, value, "--starve")?;
-            }
-            "--starve-max-len" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                let len = parse_u64("--starve-max-len", value)?;
-                if len < 1 {
-                    return Err(CliError::usage("--starve-max-len must be >= 1"));
-                }
-                set_once(
-                    &mut schedule.starve_max_len,
-                    len.to_string(),
-                    "--starve-max-len",
-                )?;
-            }
-            "--starve-window" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                let window = parse_u64("--starve-window", value)?;
-                if window < 1 {
-                    return Err(CliError::usage("--starve-window must be >= 1"));
-                }
-                set_once(
-                    &mut schedule.starve_window,
-                    window.to_string(),
-                    "--starve-window",
-                )?;
-            }
-            "--swarm" => {
-                reject_inline(opt)?;
-                schedule.swarm = true;
-            }
-            "--record" => {
-                let value = required_os_value(opt, &arguments, &mut index)?;
-                set_once(&mut record, PathBuf::from(value), "--record")?;
-            }
-            "--fingerprint" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(&mut fingerprint, value.to_string(), "--fingerprint")?;
-            }
-            _ => {
-                if !parse_liveness_flag(opt, &arguments, &mut index, &mut liveness)? {
-                    return Err(CliError::usage(format!(
-                        "unsupported option {:?} for `run` of a native binary",
-                        opt.name
-                    )));
-                }
-            }
-        }
-        index += 1;
-    }
-    // Dependent knobs are inert without their parent policy; reject rather than
-    // silently ignore, so a mistyped sweep flag fails loudly.
-    if schedule.pct.is_none() && (schedule.pct_steps.is_some()) {
-        return Err(CliError::usage("--sched-pct-steps requires --sched-pct"));
-    }
-    if schedule.starve.is_none()
-        && (schedule.starve_max_len.is_some() || schedule.starve_window.is_some())
-    {
-        return Err(CliError::usage(
-            "--starve-max-len and --starve-window require --starve",
-        ));
-    }
-    if liveness.converge.is_none() && liveness.heal_after.is_some() {
-        return Err(CliError::usage("--heal-after requires --converge-within"));
-    }
-    let fingerprint = fingerprint.unwrap_or_else(|| DEFAULT_NATIVE_FINGERPRINT.to_string());
-    let mode = if let Some(path) = record {
-        NativeRunMode::Record {
-            seed: seed.unwrap_or(0),
-            path,
-            fingerprint,
-        }
-    } else {
-        NativeRunMode::Seeded {
-            seed: seed.unwrap_or(0),
-        }
-    };
+    let args = cli::parse("run", help::Family::Native, arguments)?;
+    let seed = args.u64("--seed").unwrap_or(0);
+    let fingerprint = args
+        .string("--fingerprint")
+        .unwrap_or_else(|| DEFAULT_NATIVE_FINGERPRINT.to_string());
     Ok(NativeRunInvocation {
         binary,
-        mode,
+        mode: match args.path("--record") {
+            Some(path) => NativeRunMode::Record {
+                seed,
+                path,
+                fingerprint,
+            },
+            None => NativeRunMode::Seeded { seed },
+        },
         program_args,
-        environment,
-        net_latency_nanos,
-        faults,
-        buggify,
-        schedule,
-        liveness,
-        allow,
-        allow_unsupported: allow_unsupported.unwrap_or(UnsupportedPolicy::Deny),
-        coverage_out,
-        mount,
-        harness,
+        environment: key_values(&args, "--env")?,
+        net_latency_nanos: args.u64("--net-latency-nanos"),
+        faults: faults_of(&args),
+        buggify: buggify_of(&args),
+        schedule: schedule_of(&args),
+        liveness: liveness_of(&args),
+        allow: allow_of(&args),
+        allow_unsupported: unsupported_policy_of(&args),
+        coverage_out: args.path("--coverage-out"),
+        mount: args.path("--mount"),
+        harness: args.flag("--harness"),
     })
 }
 
@@ -3446,145 +2413,29 @@ fn cargo_package_dir(origin: &OsStr) -> Result<PathBuf, CliError> {
 ///
 /// Native replay restores every semantic input from the trace itself — seed,
 /// fault knobs, buggify, guest arguments, and injected guest environment — so it
-/// exposes NO semantic flags (not `--seed`, not `--env`, not `--fs-*`, not
-/// `--buggify*`). The only flags are
-/// host/build facts the trace cannot carry: `--fingerprint` (the compatibility
-/// fingerprint), `--mount` (re-supply the host corpus whose hash the fingerprint
-/// verifies), and `--allow`/`--allow-unsupported-symbols` (the machine-local
-/// pre-run audit surface). An optional trailing `--` section is accepted only for
-/// script compatibility and must match the recorded arguments byte-for-byte
-/// (enforced downstream by `reconcile_replay_argv`); for a trace recorded before
-/// argv capture the `--` section is used as-is. Native traces are single-timeline
-/// and native runs cannot branch, so `--timeline`/`--branch` are not accepted.
+/// exposes NO semantic flags. The registry declares those refusals (see
+/// `REPLAY`'s `refusals`), so each is answered by name rather than as an unknown
+/// option, and a knob added to a shared slice is refused the day it is added.
+/// The only flags are host/build facts the trace cannot carry: `--fingerprint`,
+/// `--mount` (re-supply the host corpus whose hash the fingerprint verifies),
+/// `--harness`, and the machine-local pre-run audit surface. An optional trailing
+/// `--` section is accepted only for script compatibility and must match the
+/// recorded arguments byte-for-byte (enforced downstream by
+/// `reconcile_replay_argv`).
 fn parse_native_replay(
     binary: ArtifactRef,
     trace: PathBuf,
     mut arguments: Vec<OsString>,
 ) -> Result<NativeRunInvocation, CliError> {
     let program_args = split_trailing_args(&mut arguments);
-    let mut fingerprint = None;
-    let mut allow = BTreeSet::new();
-    let mut allow_unsupported: Option<UnsupportedPolicy> = None;
-    let mut coverage_out = None;
-    let mut mount = None;
-    let mut harness = false;
-    let mut index = 0;
-    while index < arguments.len() {
-        let Some(text) = arguments[index].to_str() else {
-            return Err(CliError::usage("replay options must be valid UTF-8"));
-        };
-        let opt = split_opt(text);
-        let option = opt.name;
-        match opt.name {
-            // Replaying a harness binary needs the same deferred init as its
-            // record run: without it the constructor would install a context the
-            // harness cannot own, so `run_with` would fail closed on a boundary or
-            // already-installed runtime. `--harness` is a host/build fact (not a
-            // recorded semantic), so it is supplied at replay just like
-            // `--fingerprint`/`--mount`.
-            "--harness" => {
-                reject_inline(opt)?;
-                harness = true;
-            }
-            "--fingerprint" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(&mut fingerprint, value.to_string(), "--fingerprint")?;
-            }
-            // `--mount` re-supplies the host corpus, a host input the trace cannot
-            // carry: only its hash is recorded (folded into the fingerprint, which
-            // still rejects a wrong corpus). So, like `--fingerprint`, it is a
-            // host/build input rather than a semantic knob restored from metadata.
-            "--mount" => {
-                let value = required_os_value(opt, &arguments, &mut index)?;
-                set_once(&mut mount, PathBuf::from(value), "--mount")?;
-            }
-            "--coverage-out" => {
-                let value = required_os_value(opt, &arguments, &mut index)?;
-                set_once(&mut coverage_out, PathBuf::from(value), "--coverage-out")?;
-            }
-            "--allow" => {
-                let symbol = required_value(opt, &arguments, &mut index)?;
-                if symbol.is_empty() {
-                    return Err(CliError::usage("--allow symbol must not be empty"));
-                }
-                allow.insert(symbol.to_string());
-            }
-            "--allow-unsupported-symbols" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                let policy = if value == "all" {
-                    UnsupportedPolicy::All
-                } else {
-                    let symbols: BTreeSet<String> = value
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|part| !part.is_empty())
-                        .map(str::to_owned)
-                        .collect();
-                    if symbols.is_empty() {
-                        return Err(CliError::usage(
-                            "--allow-unsupported-symbols requires `all` or a comma-separated symbol list",
-                        ));
-                    }
-                    UnsupportedPolicy::Only(symbols)
-                };
-                set_once(
-                    &mut allow_unsupported,
-                    policy,
-                    "--allow-unsupported-symbols",
-                )?;
-            }
-            // Branch and timeline replay are the explicit-API (Cargo) and WASI
-            // families' capability; native traces are single-timeline and a
-            // native run cannot branch, so name the family that can.
-            "--branch" | "--timeline" | "--from" | "--branch-seed" | "--branch-id" | "--parent" => {
-                return Err(CliError::usage(format!(
-                    "{option} is not supported for native replay: native traces are single-timeline \
-and native runs cannot branch; branch/timeline replay is the Cargo package and WASI families"
-                )));
-            }
-            // Semantic inputs are restored from the trace, never re-supplied.
-            // Name the offending flag so the operator is not left guessing why a
-            // knob was rejected; the trace is authoritative for all of these.
-            "--seed"
-            | "--record"
-            | "--env"
-            | "--net-latency-nanos"
-            | "--fs-crash-at"
-            | "--fs-torn-granularity"
-            | "--fs-error-permille"
-            | "--fs-short-permille"
-            | "--sleep-jitter-nanos"
-            | "--net-jitter-nanos"
-            | "--net-drop-permille"
-            | "--buggify"
-            | "--buggify-activation-permille"
-            | "--buggify-cutoff-nanos"
-            | "--buggify-after-setup"
-            | "--sched-pct"
-            | "--sched-pct-steps"
-            | "--starve"
-            | "--starve-max-len"
-            | "--starve-window"
-            | "--swarm" => {
-                return Err(CliError::usage(format!(
-                    "replay restores run semantics from the trace and does not accept {option}; \
-the trace is authoritative"
-                )));
-            }
-            _ => {
-                return Err(CliError::usage(format!(
-                    "unsupported replay option {option:?}"
-                )));
-            }
-        }
-        index += 1;
-    }
-    let fingerprint = fingerprint.unwrap_or_else(|| DEFAULT_NATIVE_FINGERPRINT.to_string());
+    let args = cli::parse("replay", help::Family::Native, arguments)?;
     Ok(NativeRunInvocation {
         binary,
         mode: NativeRunMode::Replay {
             path: trace,
-            fingerprint,
+            fingerprint: args
+                .string("--fingerprint")
+                .unwrap_or_else(|| DEFAULT_NATIVE_FINGERPRINT.to_string()),
         },
         program_args,
         environment: BTreeMap::new(),
@@ -3598,11 +2449,11 @@ the trace is authoritative"
         // Liveness is schedule-invariant and informational-only in the trace, so a
         // replay does not re-supply or reconcile it.
         liveness: NativeLiveness::default(),
-        allow,
-        allow_unsupported: allow_unsupported.unwrap_or(UnsupportedPolicy::Deny),
-        coverage_out,
-        mount,
-        harness,
+        allow: allow_of(&args),
+        allow_unsupported: unsupported_policy_of(&args),
+        coverage_out: args.path("--coverage-out"),
+        mount: args.path("--mount"),
+        harness: args.flag("--harness"),
     })
 }
 
@@ -3629,217 +2480,75 @@ fn parse_trace(mut arguments: Vec<OsString>) -> Result<trace_cmd::TraceInvocatio
 
 fn parse_trace_info(arguments: Vec<OsString>) -> Result<trace_cmd::TraceInfo, CliError> {
     let scan = locate_positionals("trace", &arguments, 1);
-    let trace = scan.positionals.first().cloned().map(PathBuf::from);
-    let mut timeline = None;
-    let mut index = 0;
-    while index < scan.rest.len() {
-        let text = scan.rest[index]
-            .to_str()
-            .ok_or_else(|| CliError::usage("trace info options must be valid UTF-8"))?;
-        let opt = split_opt(text);
-        match opt.name {
-            "--timeline" => {
-                let value = required_value(opt, &scan.rest, &mut index)?;
-                set_once(&mut timeline, value.to_string(), "--timeline")?;
-            }
-            "--kind" | "--task" | "--seq" | "--first" | "--last" | "--notable" | "--context" => {
-                return Err(CliError::usage(format!(
-                    "trace info reads metadata only and does not accept {}",
-                    opt.name
-                )));
-            }
-            flag if flag.starts_with('-') => {
-                return Err(CliError::usage(format!(
-                    "unsupported trace info option {flag:?}"
-                )));
-            }
-            _ => {
-                return Err(CliError::usage(format!(
-                    "unexpected trace info positional {:?}",
-                    scan.rest[index].to_string_lossy()
-                )));
-            }
-        }
-        index += 1;
-    }
-    let path = trace.ok_or_else(|| CliError::usage("trace info requires a trace path"))?;
+    let args = cli::parse("trace", help::Family::Info, scan.rest)?;
     Ok(trace_cmd::TraceInfo {
-        path,
-        timeline: timeline.unwrap_or_else(|| "main".to_string()),
+        path: scan
+            .positionals
+            .into_iter()
+            .next()
+            .map(PathBuf::from)
+            .ok_or_else(|| CliError::usage("trace info requires a trace path"))?,
+        timeline: timeline_or_main(&args),
     })
 }
 
 fn parse_trace_events(arguments: Vec<OsString>) -> Result<trace_cmd::TraceEvents, CliError> {
     let scan = locate_positionals("trace", &arguments, 1);
-    let trace = scan.positionals.first().cloned().map(PathBuf::from);
-    let mut timeline = None;
-    let mut kind_filter: Option<(BTreeSet<String>, BTreeSet<trace_view::Category>)> = None;
-    let mut filters = trace_cmd::EventFilters::default();
-    let mut index = 0;
-    while index < scan.rest.len() {
-        let text = scan.rest[index]
-            .to_str()
-            .ok_or_else(|| CliError::usage("trace events options must be valid UTF-8"))?;
-        let opt = split_opt(text);
-        match opt.name {
-            "--timeline" => {
-                let value = required_value(opt, &scan.rest, &mut index)?;
-                set_once(&mut timeline, value.to_string(), "--timeline")?;
-            }
-            "--kind" => {
-                let value = required_value(opt, &scan.rest, &mut index)?;
-                set_once(&mut kind_filter, parse_trace_kind_list(value)?, "--kind")?;
-            }
-            "--task" => {
-                let value = required_value(opt, &scan.rest, &mut index)?;
-                filters.tasks.insert(parse_task_selector(value)?);
-            }
-            "--seq" => {
-                let value = required_value(opt, &scan.rest, &mut index)?;
-                set_once(&mut filters.seq, parse_u64_range("--seq", value)?, "--seq")?;
-            }
-            "--first" => {
-                let value = required_value(opt, &scan.rest, &mut index)?;
-                set_once(
-                    &mut filters.first,
-                    parse_positive_u64("--first", value)?,
-                    "--first",
-                )?;
-            }
-            "--last" => {
-                let value = required_value(opt, &scan.rest, &mut index)?;
-                set_once(
-                    &mut filters.last,
-                    parse_positive_u64("--last", value)?,
-                    "--last",
-                )?;
-            }
-            "--notable" => {
-                reject_inline(opt)?;
-                filters.notable = true;
-            }
-            "--context" => {
-                return Err(CliError::usage(
-                    "--context is only supported for trace diff",
-                ));
-            }
-            flag if flag.starts_with('-') => {
-                return Err(CliError::usage(format!(
-                    "unsupported trace events option {flag:?}"
-                )));
-            }
-            _ => {
-                return Err(CliError::usage(format!(
-                    "unexpected trace events positional {:?}",
-                    scan.rest[index].to_string_lossy()
-                )));
-            }
-        }
-        index += 1;
+    let args = cli::parse("trace", help::Family::Events, scan.rest)?;
+    let mut filters = trace_cmd::EventFilters {
+        first: args.u64("--first"),
+        last: args.u64("--last"),
+        notable: args.flag("--notable"),
+        seq: args
+            .text("--seq")
+            .map(|value| values::range_of("--seq", value, "..").expect("validated by the grammar")),
+        ..trace_cmd::EventFilters::default()
+    };
+    for value in args.texts("--task") {
+        filters.tasks.insert(match value {
+            "main" => trace_view::LaneKey::Main,
+            id => trace_view::LaneKey::Task(id.parse().expect("validated by the grammar")),
+        });
     }
-    if let Some((op_kinds, categories)) = kind_filter {
-        filters.op_kinds = op_kinds;
-        filters.categories = categories;
+    if let Some(value) = args.text("--kind") {
+        let (kinds, categories) = values::kind_list(value).expect("validated by the grammar");
+        filters.op_kinds = kinds.into_iter().map(str::to_string).collect();
+        filters.categories = categories.into_iter().collect();
     }
     if filters.first.is_some() && filters.last.is_some() {
         return Err(CliError::usage(
             "--first and --last are mutually exclusive for trace events",
         ));
     }
-    let path = trace.ok_or_else(|| CliError::usage("trace events requires a trace path"))?;
     Ok(trace_cmd::TraceEvents {
-        path,
-        timeline: timeline.unwrap_or_else(|| "main".to_string()),
+        path: scan
+            .positionals
+            .into_iter()
+            .next()
+            .map(PathBuf::from)
+            .ok_or_else(|| CliError::usage("trace events requires a trace path"))?,
+        timeline: timeline_or_main(&args),
         filters,
     })
 }
 
 fn parse_trace_stats(arguments: Vec<OsString>) -> Result<trace_cmd::TraceStats, CliError> {
     let scan = locate_positionals("trace", &arguments, 1);
-    let trace = scan.positionals.first().cloned().map(PathBuf::from);
-    let mut timeline = None;
-    let mut index = 0;
-    while index < scan.rest.len() {
-        let text = scan.rest[index]
-            .to_str()
-            .ok_or_else(|| CliError::usage("trace stats options must be valid UTF-8"))?;
-        let opt = split_opt(text);
-        match opt.name {
-            "--timeline" => {
-                let value = required_value(opt, &scan.rest, &mut index)?;
-                set_once(&mut timeline, value.to_string(), "--timeline")?;
-            }
-            "--kind" | "--task" | "--seq" | "--first" | "--last" | "--notable" => {
-                return Err(CliError::usage(format!(
-                    "trace stats aggregates the whole resolved timeline and does not accept {}",
-                    opt.name
-                )));
-            }
-            "--context" => {
-                return Err(CliError::usage(
-                    "--context is only supported for trace diff",
-                ));
-            }
-            flag if flag.starts_with('-') => {
-                return Err(CliError::usage(format!(
-                    "unsupported trace stats option {flag:?}"
-                )));
-            }
-            _ => {
-                return Err(CliError::usage(format!(
-                    "unexpected trace stats positional {:?}",
-                    scan.rest[index].to_string_lossy()
-                )));
-            }
-        }
-        index += 1;
-    }
-    let path = trace.ok_or_else(|| CliError::usage("trace stats requires a trace path"))?;
+    let args = cli::parse("trace", help::Family::Stats, scan.rest)?;
     Ok(trace_cmd::TraceStats {
-        path,
-        timeline: timeline.unwrap_or_else(|| "main".to_string()),
+        path: scan
+            .positionals
+            .into_iter()
+            .next()
+            .map(PathBuf::from)
+            .ok_or_else(|| CliError::usage("trace stats requires a trace path"))?,
+        timeline: timeline_or_main(&args),
     })
 }
 
 fn parse_trace_diff(arguments: Vec<OsString>) -> Result<trace_cmd::TraceDiff, CliError> {
     let scan = locate_positionals("trace", &arguments, 2);
-    let mut timeline = None;
-    let mut context = None;
-    let mut index = 0;
-    while index < scan.rest.len() {
-        let text = scan.rest[index]
-            .to_str()
-            .ok_or_else(|| CliError::usage("trace diff options must be valid UTF-8"))?;
-        let opt = split_opt(text);
-        match opt.name {
-            "--timeline" => {
-                let value = required_value(opt, &scan.rest, &mut index)?;
-                set_once(&mut timeline, value.to_string(), "--timeline")?;
-            }
-            "--context" => {
-                let value = required_value(opt, &scan.rest, &mut index)?;
-                set_once(&mut context, parse_usize("--context", value)?, "--context")?;
-            }
-            "--kind" | "--task" | "--seq" | "--first" | "--last" | "--notable" => {
-                return Err(CliError::usage(format!(
-                    "trace diff compares full resolved timelines and does not accept {}",
-                    opt.name
-                )));
-            }
-            flag if flag.starts_with('-') => {
-                return Err(CliError::usage(format!(
-                    "unsupported trace diff option {flag:?}"
-                )));
-            }
-            _ => {
-                return Err(CliError::usage(format!(
-                    "unexpected trace diff positional {:?}",
-                    scan.rest[index].to_string_lossy()
-                )));
-            }
-        }
-        index += 1;
-    }
+    let args = cli::parse("trace", help::Family::Diff, scan.rest)?;
     if scan.positionals.len() < 2 {
         return Err(CliError::usage(if scan.positionals.is_empty() {
             "trace diff requires two trace paths"
@@ -3850,72 +2559,9 @@ fn parse_trace_diff(arguments: Vec<OsString>) -> Result<trace_cmd::TraceDiff, Cl
     Ok(trace_cmd::TraceDiff {
         a: PathBuf::from(&scan.positionals[0]),
         b: PathBuf::from(&scan.positionals[1]),
-        timeline: timeline.unwrap_or_else(|| "main".to_string()),
-        context: context.unwrap_or(3),
+        timeline: timeline_or_main(&args),
+        context: args.usize("--context").unwrap_or(3),
     })
-}
-
-fn parse_trace_kind_list(
-    value: &str,
-) -> Result<(BTreeSet<String>, BTreeSet<trace_view::Category>), CliError> {
-    let valid_kinds = trace_view::valid_op_kinds();
-    let valid_categories = trace_view::valid_category_labels();
-    let mut kinds = BTreeSet::new();
-    let mut categories = BTreeSet::new();
-    for token in value.split(',') {
-        let token = token.trim();
-        if token.is_empty() {
-            return Err(CliError::usage("--kind entries must be non-empty"));
-        }
-        if valid_kinds.contains(token) {
-            kinds.insert(token.to_string());
-        } else if let Some(category) = trace_view::Category::parse_label(token) {
-            categories.insert(category);
-        } else {
-            let kind_list = valid_kinds.iter().copied().collect::<Vec<_>>().join(",");
-            let category_list = valid_categories
-                .iter()
-                .copied()
-                .collect::<Vec<_>>()
-                .join(",");
-            return Err(CliError::usage(format!(
-                "unknown --kind token {token:?}; valid operation tags: {kind_list}; valid categories: {category_list}"
-            )));
-        }
-    }
-    if kinds.is_empty() && categories.is_empty() {
-        return Err(CliError::usage("--kind requires at least one entry"));
-    }
-    Ok((kinds, categories))
-}
-
-fn parse_task_selector(value: &str) -> Result<trace_view::LaneKey, CliError> {
-    if value == "main" {
-        return Ok(trace_view::LaneKey::Main);
-    }
-    parse_u64("--task", value).map(trace_view::LaneKey::Task)
-}
-
-fn parse_u64_range(name: &str, value: &str) -> Result<(u64, u64), CliError> {
-    let (start, end) = value
-        .split_once("..")
-        .ok_or_else(|| CliError::usage(format!("{name} must be an inclusive A..B range")))?;
-    let start = parse_u64(name, start)?;
-    let end = parse_u64(name, end)?;
-    if start > end {
-        return Err(CliError::usage(format!(
-            "{name} range start must be <= end; got {value:?}"
-        )));
-    }
-    Ok((start, end))
-}
-
-fn parse_positive_u64(name: &str, value: &str) -> Result<u64, CliError> {
-    let parsed = parse_u64(name, value)?;
-    if parsed == 0 {
-        return Err(CliError::usage(format!("{name} must be >= 1")));
-    }
-    Ok(parsed)
 }
 
 fn parse_minimize(mut arguments: Vec<OsString>) -> Result<MinimizeInvocation, CliError> {
@@ -3944,49 +2590,24 @@ fn parse_minimize_trace(
     // The trace path may follow options (`minimize --output out.patina trace`),
     // so locate it registry-arity-aware rather than forcing it to lead.
     let scan = locate_positionals("minimize", &arguments, 1);
-    let trace = scan.positionals.into_iter().next().map(PathBuf::from);
-    let arguments = scan.rest;
-    let mut output = None;
-    let mut timeline = None;
-    let mut prune = false;
-    let mut index = 0;
-    while index < arguments.len() {
-        let text = arguments[index]
-            .to_str()
-            .ok_or_else(|| CliError::usage("minimize options must be valid UTF-8"))?;
-        let opt = split_opt(text);
-        match opt.name {
-            "--output" | "-o" => {
-                let value = required_os_value(opt, &arguments, &mut index)?;
-                set_once(&mut output, PathBuf::from(value), "--output")?;
-            }
-            "--timeline" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(&mut timeline, value.into(), "--timeline")?;
-            }
-            "--prune-branches" => {
-                reject_inline(opt)?;
-                prune = true;
-            }
-            _ => {
-                return Err(CliError::usage(format!(
-                    "unsupported minimize option {:?}",
-                    opt.name
-                )));
-            }
-        }
-        index += 1;
-    }
+    let args = cli::parse("minimize", help::Family::Sole, scan.rest)?;
+    let timeline = args.string("--timeline");
+    let prune = args.flag("--prune-branches");
     if prune && timeline.is_some() {
         return Err(CliError::usage(
             "--prune-branches operates on the whole branch forest and cannot be combined with --timeline",
         ));
     }
-    let trace = trace.ok_or_else(|| CliError::usage("minimize requires a trace path"))?;
-    let output = output.ok_or_else(|| CliError::usage("minimize requires --output <PATH>"))?;
     Ok(TraceMinimize {
-        trace,
-        output,
+        trace: scan
+            .positionals
+            .into_iter()
+            .next()
+            .map(PathBuf::from)
+            .ok_or_else(|| CliError::usage("minimize requires a trace path"))?,
+        output: args
+            .path("--output")
+            .ok_or_else(|| CliError::usage("minimize requires --output <PATH>"))?,
         timeline,
         prune,
         oracle,
@@ -3997,216 +2618,14 @@ fn parse_minimize_scenario(
     arguments: Vec<OsString>,
     oracle: Vec<OsString>,
 ) -> Result<ScenarioMinimize, CliError> {
-    let mut seed = None;
-    let mut seed_budget = None;
-    let mut params = BTreeMap::new();
-    let mut index = 0;
-    while index < arguments.len() {
-        let text = arguments[index]
-            .to_str()
-            .ok_or_else(|| CliError::usage("minimize options must be valid UTF-8"))?;
-        let opt = split_opt(text);
-        match opt.name {
-            "--scenario" => reject_inline(opt)?,
-            "--seed" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(&mut seed, parse_u64("--seed", value)?, "--seed")?;
-            }
-            "--seed-budget" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                set_once(
-                    &mut seed_budget,
-                    parse_u64("--seed-budget", value)?,
-                    "--seed-budget",
-                )?;
-            }
-            "--param" => {
-                let value = required_value(opt, &arguments, &mut index)?;
-                let (key, param_value) = value
-                    .split_once('=')
-                    .ok_or_else(|| CliError::usage("--param requires KEY=VALUE"))?;
-                if key.is_empty() || params.insert(key.into(), param_value.into()).is_some() {
-                    return Err(CliError::usage("--param keys must be non-empty and unique"));
-                }
-            }
-            "--output" | "-o" | "--timeline" | "--prune-branches" => {
-                return Err(CliError::usage(format!(
-                    "minimize --scenario reduces experiment inputs and does not accept {}",
-                    opt.name
-                )));
-            }
-            _ => {
-                return Err(CliError::usage(format!(
-                    "unsupported minimize option {:?}",
-                    opt.name
-                )));
-            }
-        }
-        index += 1;
-    }
-    let seed = seed.ok_or_else(|| CliError::usage("minimize --scenario requires --seed <U64>"))?;
+    let args = cli::parse("minimize", help::Family::Scenario, arguments)?;
     Ok(ScenarioMinimize {
-        seed,
-        params,
-        seed_budget: seed_budget.unwrap_or(DEFAULT_SEED_BUDGET),
+        seed: args
+            .u64("--seed")
+            .ok_or_else(|| CliError::usage("minimize --scenario requires --seed <U64>"))?,
+        params: key_values(&args, "--param")?,
+        seed_budget: args.u64("--seed-budget").unwrap_or(DEFAULT_SEED_BUDGET),
         oracle,
-    })
-}
-
-fn utf8_argument<'a>(
-    arguments: &'a [OsString],
-    index: usize,
-    name: &str,
-) -> Result<&'a str, CliError> {
-    arguments
-        .get(index)
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| CliError::usage(format!("{name} requires a UTF-8 value")))
-}
-
-/// A tokenized CLI option: its flag name and any inline `=VALUE`. Splitting on
-/// the first `=` is what lets every family accept both `--flag VALUE` and
-/// `--flag=VALUE` for a required value (and `--flag=VALUE` for an optional one)
-/// through one code path instead of scattered `starts_with` surgery. An
-/// unrecognized flag is forwarded by cloning its original `OsString`, so this
-/// carries only the split-off name and value.
-#[derive(Clone, Copy)]
-struct Opt<'a> {
-    name: &'a str,
-    inline: Option<&'a str>,
-}
-
-/// Split a UTF-8 option token into `(name, inline)`. Only a leading-dash token is
-/// treated as a flag with an inline value; a positional like `zone=a` is returned
-/// whole so it is never mistaken for a flag.
-fn split_opt(token: &str) -> Opt<'_> {
-    match token.split_once('=') {
-        Some((name, value)) if name.starts_with('-') => Opt {
-            name,
-            inline: Some(value),
-        },
-        _ => Opt {
-            name: token,
-            inline: None,
-        },
-    }
-}
-
-/// The value for a required-value flag: the inline `=VALUE` if present, else the
-/// next token (advancing `index`). Both forms, one path.
-fn required_value<'a>(
-    opt: Opt<'a>,
-    arguments: &'a [OsString],
-    index: &mut usize,
-) -> Result<&'a str, CliError> {
-    if let Some(value) = opt.inline {
-        return Ok(value);
-    }
-    *index += 1;
-    utf8_argument(arguments, *index, opt.name)
-}
-
-/// Like [`required_value`] but yields an owned [`OsString`], so a space-form path
-/// value may be non-UTF-8. An inline `=VALUE` is necessarily UTF-8 (the token was
-/// split as a string).
-fn required_os_value(
-    opt: Opt<'_>,
-    arguments: &[OsString],
-    index: &mut usize,
-) -> Result<OsString, CliError> {
-    if let Some(value) = opt.inline {
-        return Ok(OsString::from(value));
-    }
-    *index += 1;
-    arguments
-        .get(*index)
-        .cloned()
-        .ok_or_else(|| CliError::usage(format!("{} requires a value", opt.name)))
-}
-
-/// Reject an inline `=VALUE` on a valueless switch, so `--release=x` fails loudly
-/// rather than silently ignoring the value.
-fn reject_inline(opt: Opt<'_>) -> Result<(), CliError> {
-    if opt.inline.is_some() {
-        return Err(CliError::usage(format!("{} takes no value", opt.name)));
-    }
-    Ok(())
-}
-
-/// The stored representation of an optional-value nanos flag: the validated
-/// inline `=VALUE`, or the empty string for the bare switch (runtime default).
-/// The space form is intentionally unsupported for optional-value flags — it
-/// would be ambiguous with a following positional.
-fn optional_u64_arg(opt: Opt<'_>, name: &str) -> Result<String, CliError> {
-    match opt.inline {
-        Some(value) => {
-            parse_u64(name, value)?;
-            Ok(value.to_string())
-        }
-        None => Ok(String::new()),
-    }
-}
-
-fn set_once<T>(slot: &mut Option<T>, value: T, name: &str) -> Result<(), CliError> {
-    if slot.replace(value).is_some() {
-        return Err(CliError::usage(format!(
-            "{name} was provided more than once"
-        )));
-    }
-    Ok(())
-}
-
-fn parse_u64(name: &str, value: &str) -> Result<u64, CliError> {
-    value
-        .parse()
-        .map_err(|_| CliError::usage(format!("{name} must be an unsigned 64-bit integer")))
-}
-
-fn parse_u32(name: &str, value: &str) -> Result<u32, CliError> {
-    value
-        .parse()
-        .map_err(|_| CliError::usage(format!("{name} must be an unsigned 32-bit integer")))
-}
-
-fn parse_usize(name: &str, value: &str) -> Result<usize, CliError> {
-    value
-        .parse()
-        .map_err(|_| CliError::usage(format!("{name} must be a non-negative integer")))
-}
-
-fn insert_guest_env(
-    environment: &mut BTreeMap<String, String>,
-    flag: &str,
-    value: &str,
-) -> Result<(), CliError> {
-    let (key, value) = value
-        .split_once('=')
-        .ok_or_else(|| CliError::usage(format!("{flag} requires KEY=VALUE")))?;
-    if key.is_empty() || environment.insert(key.into(), value.into()).is_some() {
-        return Err(CliError::usage(format!(
-            "{flag} keys must be non-empty and unique"
-        )));
-    }
-    Ok(())
-}
-
-fn parse_wasi_preopen(value: &str) -> Result<WasiPreopenConfig, CliError> {
-    let (guest_path, policy) = match value.rsplit_once(':') {
-        Some((guest_path, "ro")) => (guest_path, MountPolicy::ReadOnly),
-        Some((guest_path, "rw")) => (guest_path, MountPolicy::ReadWrite),
-        Some(_) => {
-            return Err(CliError::usage(
-                "--preopen requires GUEST, GUEST:ro, or GUEST:rw",
-            ));
-        }
-        None => (value, MountPolicy::ReadWrite),
-    };
-    if guest_path.is_empty() {
-        return Err(CliError::usage("--preopen guest path must not be empty"));
-    }
-    Ok(WasiPreopenConfig {
-        guest_path: normalize_cli_preopen_path(guest_path),
-        policy,
     })
 }
 
@@ -9794,203 +8213,6 @@ mod tests {
         assert!(!is_help(&["test", "--", "--help"]));
     }
 
-    /// Every flag literal a verb's parsers accept, mirroring the parser match
-    /// arms. This is the drift gate feeding `registry_covers_every_parsed_flag`:
-    /// a flag added to a parser must be listed here (co-located discipline) and
-    /// then registered in `help.rs`, or the coverage test fails. Rejection-only
-    /// arms (e.g. native `replay` naming a semantic flag it refuses) are NOT
-    /// accepted flags and are intentionally omitted.
-    fn accepted_flags(verb: &str) -> &'static [&'static str] {
-        match verb {
-            "run" => &[
-                // cargo family
-                "--seed",
-                "--record",
-                "--budget",
-                "--param",
-                "--fs-crash-at",
-                "--fs-torn-granularity",
-                "--fs-error-permille",
-                "--fs-short-permille",
-                "--sleep-jitter-nanos",
-                "--net-jitter-nanos",
-                "--net-drop-permille",
-                // WASI family
-                "--liveness-watchdog",
-                "--converge-within",
-                "--heal-after",
-                "--buggify",
-                "--buggify-after-setup",
-                "--buggify-activation-permille",
-                "--buggify-cutoff-nanos",
-                "--fuel",
-                "--arg",
-                "--socket",
-                "--env",
-                "--preopen",
-                "--max-memory-pages",
-                "--max-descriptors",
-                "--max-preopens",
-                "--max-path-bytes",
-                "--max-io-bytes",
-                "--max-iovecs",
-                // native family
-                "--harness",
-                "--allow",
-                "--allow-unsupported-symbols",
-                "--net-latency-nanos",
-                "--mount",
-                "--coverage-out",
-                "--sched-pct",
-                "--sched-pct-steps",
-                "--starve",
-                "--starve-max-len",
-                "--starve-window",
-                "--swarm",
-                "--fingerprint",
-                // source-first selection + target
-                "--package",
-                "-p",
-                "--bin",
-                "--target",
-                // source-first build profile
-                "--release",
-            ],
-            "test" => &[
-                // cargo family
-                "--seed",
-                "--record",
-                "--budget",
-                "--param",
-                "--fs-crash-at",
-                "--fs-torn-granularity",
-                "--fs-error-permille",
-                "--fs-short-permille",
-                "--sleep-jitter-nanos",
-                "--net-jitter-nanos",
-                "--net-drop-permille",
-                // native harness mode
-                "--harness-target",
-                "--exact",
-                "--seeds",
-                "--package",
-                "-p",
-                "--release",
-                "--yield-points",
-                "--buggify",
-                "--buggify-after-setup",
-                "--buggify-activation-permille",
-                "--buggify-cutoff-nanos",
-                "--sched-pct",
-                "--sched-pct-steps",
-                "--starve",
-                "--starve-max-len",
-                "--starve-window",
-                "--swarm",
-                "--liveness-watchdog",
-                "--converge-within",
-                "--heal-after",
-            ],
-            "build" => &[
-                "--output",
-                "-o",
-                "--edition",
-                "--release",
-                "--yield-points",
-                "--package",
-                "-p",
-                "--bin",
-                "--target",
-            ],
-            "audit" => &["--raw", "--allow", "--package", "-p", "--bin", "--target"],
-            "replay" => &[
-                // cargo + WASI timeline/branch
-                "--branch",
-                "--timeline",
-                "--from",
-                "--branch-seed",
-                "--branch-id",
-                "--parent",
-                // WASI host inputs
-                "--fuel",
-                "--arg",
-                "--socket",
-                "--env",
-                "--preopen",
-                "--max-memory-pages",
-                "--max-descriptors",
-                "--max-preopens",
-                "--max-path-bytes",
-                "--max-io-bytes",
-                "--max-iovecs",
-                // native host/build facts
-                "--harness",
-                "--fingerprint",
-                "--mount",
-                "--coverage-out",
-                "--allow",
-                "--allow-unsupported-symbols",
-                "--target",
-            ],
-            "explore" => &["--seeds", "--seed-start"],
-            "campaign" => &[
-                "--spec",
-                "--out-dir",
-                "--extend",
-                "--resume",
-                "--gens",
-                "--seed-start",
-                "--timeout-secs",
-                "--progress-every",
-                "--plateau-after",
-                "--allow-unmet-sometimes",
-                "--buggify",
-                "--swarm",
-                "--sched-pct",
-                "--faults",
-                "--report",
-                "--liveness-watchdog",
-                "--converge-within",
-                "--heal-after",
-                "--selftest",
-            ],
-            "coverage" => &["--focus", "--top"],
-            "minimize" => &[
-                "--output",
-                "-o",
-                "--timeline",
-                "--prune-branches",
-                "--scenario",
-                "--seed",
-                "--seed-budget",
-                "--param",
-            ],
-            "sites" => &[
-                "--crate",
-                "--module",
-                "--group",
-                "--site",
-                "--all",
-                "--exercised",
-                "--kind",
-                "--runtime",
-                "--no-cache",
-                "--selftest",
-            ],
-            "trace" => &[
-                "--timeline",
-                "--kind",
-                "--task",
-                "--seq",
-                "--first",
-                "--last",
-                "--notable",
-                "--context",
-            ],
-            other => panic!("unknown verb {other}"),
-        }
-    }
-
     #[test]
     fn parses_trace_subcommands_and_events_filters() {
         match parse(strings(&[
@@ -10097,37 +8319,6 @@ mod tests {
                 .contains("does not accept --first")
         );
         assert!(parse_error(&["trace", "diff", "a.patina"]).contains("second trace"));
-    }
-
-    #[test]
-    fn registry_covers_every_parsed_flag() {
-        // The whole flag universe a verb may present: its registered groups plus
-        // the always-available global help/output flags.
-        for verb_name in [
-            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize",
-            "coverage", "sites", "trace",
-        ] {
-            let verb = help::verb(verb_name).expect("verb registered");
-            let mut registered: BTreeSet<&str> = BTreeSet::new();
-            let all_groups = verb
-                .groups
-                .iter()
-                .flat_map(|group| group.flags.iter())
-                .chain(help::GLOBAL_OUTPUT.iter())
-                .chain(help::HELP_FLAGS.iter());
-            for flag in all_groups {
-                registered.insert(flag.name);
-                if let Some(short) = flag.short {
-                    registered.insert(short);
-                }
-            }
-            for flag in accepted_flags(verb_name) {
-                assert!(
-                    registered.contains(flag),
-                    "verb `{verb_name}`: parser accepts `{flag}` but it is not in the help registry"
-                );
-            }
-        }
     }
 
     /// Parse the index payload (`--help --format json`, overview topic).
@@ -10398,7 +8589,7 @@ mod tests {
             ),
             Kind::Enum(choices) => (choices.to_vec(), vec!["bogus", ""]),
             Kind::Symbol => (vec!["memcpy", "foo_bar", "x"], vec![""]),
-            Kind::Path => (vec!["/tmp/x", "out.html", "x", ""], vec![]),
+            Kind::Path => (vec!["/tmp/x", "out.html", "x"], vec![""]),
             Kind::Str => (vec!["x", "hello", ""], vec![]),
         }
     }
@@ -10406,56 +8597,6 @@ mod tests {
     // Family-parser drivers. Each feeds an argument list to the real per-family
     // parser exactly as routing would, with a leading binary/module label where
     // the parser strips one, so a sample exercises the true value validation.
-    fn drv_wasi_run(args: &[&str]) -> Result<(), CliError> {
-        let mut argv = vec![OsString::from("m.wasm")];
-        argv.extend(args.iter().map(OsString::from));
-        parse_wasi_run(argv).map(|_| ())
-    }
-    fn drv_native_run(args: &[&str]) -> Result<(), CliError> {
-        let mut argv = vec![OsString::from("bin")];
-        argv.extend(args.iter().map(OsString::from));
-        parse_native_run(argv).map(|_| ())
-    }
-    fn drv_native_harness(args: &[&str]) -> Result<(), CliError> {
-        let has_harness_target = args
-            .iter()
-            .any(|arg| *arg == "--harness-target" || arg.starts_with("--harness-target="));
-        let has_exact = args
-            .iter()
-            .any(|arg| *arg == "--exact" || arg.starts_with("--exact="));
-        let mut argv = Vec::new();
-        if !has_harness_target {
-            argv.extend(
-                ["--harness-target", "harness"]
-                    .into_iter()
-                    .map(OsString::from),
-            );
-        }
-        if !has_exact {
-            argv.extend(["--exact", "module::test"].into_iter().map(OsString::from));
-        }
-        argv.extend(args.iter().map(OsString::from));
-        parse_native_harness_from(PathBuf::from("."), PathBuf::from("Cargo.toml"), argv).map(|_| ())
-    }
-    fn drv_cargo(command: &str, args: &[&str]) -> Result<(), CliError> {
-        parse_cargo(command.to_string(), strings(args)).map(|_| ())
-    }
-    fn drv_wasi_replay(args: &[&str]) -> Result<(), CliError> {
-        parse_wasi_replay(
-            ArtifactRef::Prebuilt(PathBuf::from("m.wasm")),
-            PathBuf::from("t.patina"),
-            strings(args),
-        )
-        .map(|_| ())
-    }
-    fn drv_native_replay(args: &[&str]) -> Result<(), CliError> {
-        parse_native_replay(
-            ArtifactRef::Prebuilt(PathBuf::from("bin")),
-            PathBuf::from("t.patina"),
-            strings(args),
-        )
-        .map(|_| ())
-    }
 
     /// The syntactic form a flag drive renders — the registry's arity decides
     /// which forms must parse, so the generic tests exercise every form of every
@@ -10473,265 +8614,353 @@ mod tests {
         Repeated(&'a str),
     }
 
-    /// Parse a single flag with `value`, rendered in `form`, through the real
-    /// family parser that owns it under `verb`, threading any companion flag a
-    /// dependency requires (e.g. `--sched-pct-steps` needs `--sched-pct`).
-    /// Returns `None` when no driver covers the flag — the coverage gate that
-    /// keeps this mirror honest as flags are added.
+    /// Drive `args` through the real parser of `verb`'s `family`, supplying the
+    /// context that family's routing would already have consumed: the
+    /// positionals it takes, and the companion flags a successful parse needs
+    /// (a native harness needs a target and a test filter; a branch replay needs
+    /// its whole quorum).
+    ///
+    /// This is the ONLY hand-written table left in the walk, and it is keyed by
+    /// family rather than by flag — twenty entries that change when a family
+    /// is added, not sixty that change when a flag is. Which flags to drive
+    /// comes from the registry ([`help::Verb::family_flags`]), so a new flag is
+    /// exercised in every family that accepts it without touching this file.
+    fn drive_family(
+        verb: &str,
+        family: help::Family,
+        flag: &str,
+        args: &[&str],
+    ) -> Result<(), CliError> {
+        // A companion the parse needs but the flag under test does not supply.
+        let unless = |name: &'static str, tokens: &[&'static str]| -> Vec<String> {
+            if flag == name {
+                Vec::new()
+            } else {
+                tokens.iter().map(|t| t.to_string()).collect()
+            }
+        };
+        // The branch quorum is all-or-nothing and conflicts with `--timeline`, so
+        // it is supplied only when the flag under test is part of it.
+        let quorum = |names: &[&'static str]| -> Vec<String> {
+            if !names.contains(&flag) && flag != "--parent" {
+                return Vec::new();
+            }
+            names
+                .iter()
+                .filter(|name| **name != flag)
+                .map(|name| match *name {
+                    "--branch" => "--branch".to_string(),
+                    "--from" => "--from=0".to_string(),
+                    "--branch-seed" => "--branch-seed=1".to_string(),
+                    other => format!("{other}=b"),
+                })
+                .collect()
+        };
+        let with = |prefix: Vec<String>, suffix: &[&str]| -> Vec<OsString> {
+            prefix
+                .iter()
+                .map(String::as_str)
+                .chain(args.iter().copied())
+                .chain(suffix.iter().copied())
+                .map(OsString::from)
+                .collect()
+        };
+        let none: Vec<String> = Vec::new();
+        let prebuilt = |name: &str| ArtifactRef::Prebuilt(PathBuf::from(name));
+        let trace = || PathBuf::from("t.patina");
+        match (verb, family) {
+            ("run" | "test", help::Family::Cargo) => {
+                parse_cargo(verb.to_string(), with(none, &[])).map(|_| ())
+            }
+            ("run", help::Family::Wasi) => {
+                parse_wasi_run_from(prebuilt("m.wasm"), with(none, &[])).map(|_| ())
+            }
+            ("run", help::Family::Native) => {
+                parse_native_run_from(prebuilt("bin"), with(none, &[])).map(|_| ())
+            }
+            ("test", help::Family::Harness) => {
+                let mut prefix = unless("--harness-target", &["--harness-target=harness"]);
+                prefix.extend(unless("--exact", &["--exact=module::test"]));
+                parse_native_harness_from(
+                    PathBuf::from("."),
+                    PathBuf::from("Cargo.toml"),
+                    with(prefix, &[]),
+                )
+                .map(|_| ())
+            }
+            ("build", help::Family::Native) => {
+                // A single-source build needs an output; a package build is what
+                // `--package`/`--bin` select.
+                let prefix = if matches!(flag, "--package" | "--bin") {
+                    vec!["sub/Cargo.toml".to_string()]
+                } else {
+                    let mut prefix = vec!["x.rs".to_string()];
+                    prefix.extend(unless("--output", &["--output=/tmp/o"]));
+                    prefix
+                };
+                parse_native_build(with(prefix, &[])).map(|_| ())
+            }
+            ("build", help::Family::Wasi) => {
+                parse_wasi_build(with(vec!["sub/Cargo.toml".to_string()], &[])).map(|_| ())
+            }
+            ("audit", help::Family::Native) => {
+                parse_native_audit_from(prebuilt("bin"), with(none, &[])).map(|_| ())
+            }
+            ("audit", help::Family::Wasi) => {
+                cli::parse("audit", family, with(none, &[])).map(|_| ())
+            }
+            ("replay", help::Family::Cargo) => parse_cargo_replay(
+                PathBuf::from("."),
+                trace(),
+                with(
+                    quorum(&["--branch", "--from", "--branch-seed", "--branch-id"]),
+                    &[],
+                ),
+            )
+            .map(|_| ()),
+            ("replay", help::Family::Wasi) => parse_wasi_replay(
+                prebuilt("m.wasm"),
+                trace(),
+                with(
+                    quorum(&["--branch", "--from", "--branch-seed", "--branch-id"]),
+                    &[],
+                ),
+            )
+            .map(|_| ()),
+            ("replay", help::Family::Native) => {
+                parse_native_replay(prebuilt("bin"), trace(), with(none, &[])).map(|_| ())
+            }
+            // `--seed-start` pins `--seeds 1` so a max-u64 start never overflows
+            // the swept range.
+            ("explore", _) => {
+                parse_explore(with(unless("--seeds", &["--seeds=1"]), &["test"])).map(|_| ())
+            }
+            // A continuation takes no artifact; every other campaign flag needs
+            // one. `--spec` reads its file while parsing, so the driver makes
+            // whatever path the sample names a readable empty spec — otherwise
+            // the drive would fail for a reason that is not the grammar's.
+            ("campaign", _) => {
+                let prefix = if matches!(flag, "--extend" | "--resume") {
+                    none
+                } else {
+                    vec!["art.wasm".to_string()]
+                };
+                let mut argv = with(prefix, &[]);
+                if flag == "--spec" {
+                    // `--spec` reads its file while parsing, so a non-empty
+                    // sampled path is redirected to a real empty spec in a temp
+                    // dir. What is under test is the grammar, not the
+                    // filesystem — and nothing is written into the source tree.
+                    // An EMPTY value is left alone: it is the invalid sample and
+                    // must still be rejected.
+                    let dir = tempfile::tempdir().expect("tempdir");
+                    let real = dir.path().join("spec.json");
+                    std::fs::write(&real, b"{}").expect("write spec");
+                    let real = real.display().to_string();
+                    let mut after_spec = false;
+                    for token in &mut argv {
+                        let text = token.to_string_lossy().into_owned();
+                        match text.strip_prefix("--spec=") {
+                            Some(value) if !value.is_empty() => {
+                                *token = OsString::from(format!("--spec={real}"));
+                            }
+                            _ if after_spec && !text.is_empty() => {
+                                *token = OsString::from(&real);
+                            }
+                            _ => {}
+                        }
+                        after_spec = text == "--spec";
+                    }
+                    return campaign::parse(argv).map(|_| ());
+                }
+                campaign::parse(argv).map(|_| ())
+            }
+            ("coverage", _) => coverage::parse(with(
+                vec!["guest".to_string(), "run.covmap".to_string()],
+                &[],
+            ))
+            .map(|_| ()),
+            ("sites", _) => sites::parse(with(none, &[])).map(|_| ()),
+            ("minimize", help::Family::Sole) => {
+                let mut prefix = vec!["t.patina".to_string()];
+                prefix.extend(unless("--output", &["--output=/tmp/o"]));
+                parse_minimize(with(prefix, &["--", "oracle"])).map(|_| ())
+            }
+            ("minimize", help::Family::Scenario) => {
+                let mut prefix = vec!["--scenario".to_string()];
+                prefix.extend(unless("--seed", &["--seed=0"]));
+                parse_minimize(with(prefix, &["--", "oracle"])).map(|_| ())
+            }
+            ("trace", help::Family::Diff) => parse_trace(with(
+                vec![
+                    "diff".to_string(),
+                    "a.patina".to_string(),
+                    "b.patina".to_string(),
+                ],
+                &[],
+            ))
+            .map(|_| ()),
+            ("trace", subcommand) => parse_trace(with(
+                vec![subcommand.tag().to_string(), "t.patina".to_string()],
+                &[],
+            ))
+            .map(|_| ()),
+            (verb, family) => panic!("no driver for `{verb}` family {family:?}"),
+        }
+    }
+
+    /// Parse a single flag with `value`, rendered in `form`, through the family
+    /// parser under test, prefixing whatever the registry says the flag is inert
+    /// without.
     fn drive_flag(
         verb: &str,
-        flag: &str,
+        family: help::Family,
+        flag: &'static help::Flag,
         value: &str,
         form: FlagForm<'_>,
-    ) -> Option<Result<(), CliError>> {
+    ) -> Result<(), CliError> {
         let rendered: Vec<String> = match form {
-            FlagForm::Inline => vec![format!("{flag}={value}")],
-            FlagForm::Spaced => vec![flag.to_string(), value.to_string()],
+            FlagForm::Inline => vec![format!("{}={value}", flag.name)],
+            FlagForm::Spaced => vec![flag.name.to_string(), value.to_string()],
             FlagForm::Short(short) => vec![short.to_string(), value.to_string()],
-            FlagForm::Repeated(second) => {
-                vec![format!("{flag}={value}"), format!("{flag}={second}")]
-            }
+            FlagForm::Repeated(second) => vec![
+                format!("{}={value}", flag.name),
+                format!("{}={second}", flag.name),
+            ],
         };
-        let toks: Vec<&str> = rendered.iter().map(String::as_str).collect();
-        let toks = toks.as_slice();
-        let outcome = match (verb, flag) {
-            // run: route each flag to the family parser that owns it.
-            ("run", "--budget" | "--param") => drv_cargo("run", toks),
-            (
-                "run",
-                "--fuel" | "--arg" | "--socket" | "--preopen" | "--max-memory-pages"
-                | "--max-descriptors" | "--max-preopens" | "--max-path-bytes" | "--max-io-bytes"
-                | "--max-iovecs",
-            ) => drv_wasi_run(toks),
-            (
-                "run",
-                "--seed"
-                | "--record"
-                | "--fs-crash-at"
-                | "--fs-torn-granularity"
-                | "--fs-error-permille"
-                | "--fs-short-permille"
-                | "--sleep-jitter-nanos"
-                | "--net-jitter-nanos"
-                | "--net-drop-permille"
-                | "--buggify"
-                | "--buggify-activation-permille"
-                | "--buggify-cutoff-nanos"
-                | "--liveness-watchdog"
-                | "--converge-within"
-                | "--heal-after",
-            ) => drv_wasi_run(toks),
-            (
-                "run",
-                "--env"
-                | "--net-latency-nanos"
-                | "--coverage-out"
-                | "--mount"
-                | "--fingerprint"
-                | "--allow"
-                | "--allow-unsupported-symbols"
-                | "--sched-pct"
-                | "--starve",
-            ) => drv_native_run(toks),
-            ("run", "--sched-pct-steps") => {
-                drv_native_run(&[&["--sched-pct=1"][..], toks].concat())
-            }
-            ("run", "--starve-max-len" | "--starve-window") => {
-                drv_native_run(&[&["--starve=1"][..], toks].concat())
-            }
-            ("run", "--package" | "--bin") => take_package_bin(strings(toks)).map(|_| ()),
-            // `--target` is stripped by the shared selector pre-pass, then mapped
-            // by `target_family`; driving through both exercises every form.
-            ("run" | "audit" | "replay", "--target") => extract_target(strings(toks))
-                .and_then(|(target, _)| target_family(target.as_deref().unwrap_or("native")))
-                .map(|_| ()),
+        // A dependent knob is refused without its parent, and every parent in the
+        // registry is an optional-value switch, so the bare form arms it.
+        let mut tokens: Vec<&str> = flag.requires.into_iter().collect();
+        tokens.extend(rendered.iter().map(String::as_str));
+        drive_family(verb, family, flag.name, &tokens)
+    }
 
-            // test: Cargo-family flags stay on the Cargo parser; native harness
-            // mode owns harness selection plus the reused native knobs.
-            ("test", "--record" | "--budget" | "--param") => drv_cargo("test", toks),
-            (
-                "test",
-                "--seed"
-                | "--fs-crash-at"
-                | "--fs-torn-granularity"
-                | "--fs-error-permille"
-                | "--fs-short-permille"
-                | "--sleep-jitter-nanos"
-                | "--net-jitter-nanos"
-                | "--net-drop-permille"
-                | "--harness-target"
-                | "--exact"
-                | "--seeds"
-                | "--package"
-                | "--buggify"
-                | "--buggify-activation-permille"
-                | "--buggify-cutoff-nanos"
-                | "--liveness-watchdog"
-                | "--converge-within"
-                | "--sched-pct"
-                | "--starve",
-            ) => drv_native_harness(toks),
-            ("test", "--sched-pct-steps") => {
-                drv_native_harness(&[&["--sched-pct=1"][..], toks].concat())
-            }
-            ("test", "--starve-max-len" | "--starve-window") => {
-                drv_native_harness(&[&["--starve=1"][..], toks].concat())
-            }
-            ("test", "--heal-after") => {
-                drv_native_harness(&[&["--converge-within"][..], toks].concat())
-            }
+    /// A verb may not redeclare a global flag. The global output/config switches
+    /// are stripped by a pre-pass BEFORE any verb routing, so a verb that
+    /// registers the same name can never be reached — and if the two declare
+    /// different arities, the pre-pass also eats the following token.
+    ///
+    /// This is a shipped bug pinned as a class: `campaign --report` was
+    /// documented and unreachable, because the global `--report OUT.html`
+    /// consumed both it and whatever came next.
+    /// A Cargo-family replay refuses a semantic knob by name instead of handing
+    /// it to Cargo: the trace is authoritative, and silently forwarding
+    /// `--fs-crash-at` would surface as a confusing cargo error rather than the
+    /// reason the knob is not accepted.
+    #[test]
+    fn cargo_replay_refuses_semantic_knobs_rather_than_forwarding_them() {
+        for flag in ["--fs-crash-at", "--seed", "--buggify", "--sched-pct"] {
+            let argv = vec![
+                OsString::from(flag),
+                OsString::from("close"),
+                OsString::from("--example"),
+                OsString::from("demo"),
+            ];
+            let Err(error) =
+                parse_cargo_replay(PathBuf::from("."), PathBuf::from("t.patina"), argv)
+            else {
+                panic!("{flag} should be refused, not forwarded to Cargo");
+            };
+            let message = error.to_string();
+            assert!(
+                message.contains(flag) && message.contains("trace is authoritative"),
+                "{flag}: {message}"
+            );
+        }
+    }
 
-            // build: the native/wasi build parsers; --target through parse_build.
-            ("build", "--output") => {
-                parse_native_build(strings(&[&["x.rs"][..], toks].concat())).map(|_| ())
-            }
-            ("build", "--edition") => {
-                parse_native_build(strings(&[&["x.rs", "--output=/tmp/o"][..], toks].concat()))
-                    .map(|_| ())
-            }
-            ("build", "--package" | "--bin") => {
-                parse_native_build(strings(&[&["sub/Cargo.toml"][..], toks].concat())).map(|_| ())
-            }
-            ("build", "--target") => {
-                parse_build(strings(&[toks, &["sub/Cargo.toml"][..]].concat())).map(|_| ())
-            }
+    /// The Cargo family forwards every unrecognized token verbatim, in place,
+    /// including one that is not valid UTF-8 — such a token can never be a
+    /// Patina flag, and dropping or re-encoding it would corrupt a legitimate
+    /// cargo argument (a path under a non-UTF-8 locale). The `--` section is
+    /// the guest's and is passed through whole, so a `--seed` after it stays a
+    /// guest argument.
+    #[cfg(unix)]
+    #[test]
+    fn cargo_passthrough_preserves_order_and_non_utf8_tokens() {
+        use std::os::unix::ffi::OsStringExt;
+        let raw = OsString::from_vec(vec![b'-', b'-', b'p', b'=', 0xff, 0xfe]);
+        let forwarded = [
+            OsString::from("--manifest-path"),
+            OsString::from("./x/Cargo.toml"),
+            raw.clone(),
+            OsString::from("--example"),
+            OsString::from("demo"),
+            OsString::from("--"),
+            OsString::from("--seed=99"),
+        ];
+        let mut argv = vec![
+            OsString::from("--manifest-path"),
+            OsString::from("./x/Cargo.toml"),
+        ];
+        argv.push(OsString::from("--seed=7"));
+        argv.extend(forwarded[2..].iter().cloned());
 
-            // audit: --allow through the native audit parser.
-            ("audit", "--allow") => {
-                parse_native_audit(strings(&[&["bin"][..], toks].concat())).map(|_| ())
-            }
-            ("audit", "--package" | "--bin") => take_package_bin(strings(toks)).map(|_| ()),
-
-            // replay: native host facts, WASI host inputs, and the WASI-family
-            // timeline/branch controls (branch flags need the full branch quorum).
-            (
-                "replay",
-                "--coverage-out"
-                | "--fingerprint"
-                | "--mount"
-                | "--allow"
-                | "--allow-unsupported-symbols",
-            ) => drv_native_replay(toks),
-            (
-                "replay",
-                "--fuel" | "--arg" | "--env" | "--socket" | "--preopen" | "--max-memory-pages"
-                | "--max-descriptors" | "--max-preopens" | "--max-path-bytes" | "--max-io-bytes"
-                | "--max-iovecs" | "--timeline",
-            ) => drv_wasi_replay(toks),
-            ("replay", "--from") => drv_wasi_replay(
-                &[
-                    &[
-                        "--branch",
-                        "--branch-seed=1",
-                        "--branch-id=b",
-                        "--parent=main",
-                    ][..],
-                    toks,
-                ]
-                .concat(),
-            ),
-            ("replay", "--branch-seed") => drv_wasi_replay(
-                &[
-                    &["--branch", "--from=0", "--branch-id=b", "--parent=main"][..],
-                    toks,
-                ]
-                .concat(),
-            ),
-            ("replay", "--branch-id") => drv_wasi_replay(
-                &[
-                    &["--branch", "--from=0", "--branch-seed=1", "--parent=main"][..],
-                    toks,
-                ]
-                .concat(),
-            ),
-            ("replay", "--parent") => drv_wasi_replay(
-                &[
-                    &["--branch", "--from=0", "--branch-seed=1", "--branch-id=b"][..],
-                    toks,
-                ]
-                .concat(),
-            ),
-
-            // explore: --seed-start pins --seeds 1 so a max-u64 start never
-            // overflows the swept range.
-            ("explore", "--seeds") => {
-                parse_explore(strings(&[toks, &["test"][..]].concat())).map(|_| ())
-            }
-            ("explore", "--seed-start") => {
-                parse_explore(strings(&[&["--seeds=1"][..], toks, &["test"][..]].concat()))
-                    .map(|_| ())
-            }
-
-            // campaign: --spec reads a JSON file at parse time, so it is driven
-            // against a real, minimal spec rather than a synthetic path sample
-            // (re-rendered per form with the real path in the value slot).
-            ("campaign", "--spec") => {
-                let dir = tempfile::tempdir().expect("tempdir");
-                let path = dir.path().join("spec.json");
-                std::fs::write(&path, b"{}").expect("write spec");
-                let spec = path.display().to_string();
-                let rendered: Vec<String> = match form {
-                    FlagForm::Inline => vec![format!("--spec={spec}")],
-                    FlagForm::Spaced => vec!["--spec".to_string(), spec.clone()],
-                    FlagForm::Short(short) => vec![short.to_string(), spec.clone()],
-                    FlagForm::Repeated(_) => {
-                        vec![format!("--spec={spec}"), format!("--spec={spec}")]
-                    }
-                };
-                let rendered: Vec<&str> = rendered.iter().map(String::as_str).collect();
-                campaign::parse(strings(&[&["art.wasm"][..], &rendered].concat())).map(|_| ())
-            }
-            ("campaign", "--extend") => campaign::parse(strings(toks)).map(|_| ()),
-            ("campaign", _) => {
-                campaign::parse(strings(&[&["art.wasm"][..], toks].concat())).map(|_| ())
-            }
-
-            // coverage: both positionals are required; the files are not opened at parse time.
-            ("coverage", _) => {
-                coverage::parse(strings(&[&["guest", "run.covmap"][..], toks].concat())).map(|_| ())
-            }
-
-            // sites: every value-bearing flag is static-report filtering.
-            ("sites", _) => sites::parse(strings(toks)).map(|_| ()),
-
-            // minimize: --output/--timeline are trace-mode; --seed/--seed-budget/
-            // --param are scenario-mode (need --scenario and a --seed).
-            ("minimize", "--output") => parse_minimize(strings(
-                &[&["t.patina"][..], toks, &["--", "oracle"][..]].concat(),
-            ))
-            .map(|_| ()),
-            ("minimize", "--timeline") => parse_minimize(strings(
-                &[
-                    &["t.patina", "--output=/tmp/o"][..],
-                    toks,
-                    &["--", "oracle"][..],
-                ]
-                .concat(),
-            ))
-            .map(|_| ()),
-            ("minimize", "--seed") => parse_minimize(strings(
-                &[&["--scenario"][..], toks, &["--", "oracle"][..]].concat(),
-            ))
-            .map(|_| ()),
-            ("minimize", "--seed-budget" | "--param") => parse_minimize(strings(
-                &[&["--scenario", "--seed=0"][..], toks, &["--", "oracle"][..]].concat(),
-            ))
-            .map(|_| ()),
-
-            ("trace", "--timeline") => {
-                parse_trace(strings(&[&["info", "t.patina"][..], toks].concat())).map(|_| ())
-            }
-            ("trace", "--kind" | "--task" | "--seq" | "--first" | "--last") => {
-                parse_trace(strings(&[&["events", "t.patina"][..], toks].concat())).map(|_| ())
-            }
-            ("trace", "--context") => parse_trace(strings(
-                &[&["diff", "a.patina", "b.patina"][..], toks].concat(),
-            ))
-            .map(|_| ()),
-
-            _ => return None,
+        let ParseResult::Run(invocation) = parse_cargo("run".to_string(), argv).unwrap() else {
+            panic!("expected a Cargo-family run");
         };
-        Some(outcome)
+        assert_eq!(invocation.mode, Mode::Seeded { seed: 7 });
+        assert_eq!(
+            invocation.cargo_args,
+            forwarded.to_vec(),
+            "forwarded tokens keep their order and bytes; only the Patina flag is taken"
+        );
+    }
+
+    #[test]
+    fn no_verb_redeclares_a_global_flag() {
+        let globals: BTreeSet<&str> = help::GLOBAL_OUTPUT
+            .iter()
+            .chain(help::HELP_FLAGS.iter())
+            .flat_map(|flag| [Some(flag.name), flag.short])
+            .flatten()
+            .collect();
+        for verb in help::VERBS {
+            for flag in verb.groups.iter().flat_map(|group| group.flags.iter()) {
+                for name in [Some(flag.name), flag.short].into_iter().flatten() {
+                    assert!(
+                        !globals.contains(name),
+                        "verb `{}` registers `{name}`, which the global pre-pass strips before \
+                         routing — the verb's flag is unreachable",
+                        verb.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every family a group claims is one the verb declares, and every family a
+    /// verb declares owns at least one flag. Without this a typo in a group's
+    /// `families` would silently drop flags from a parser (they would simply
+    /// stop being accepted) rather than failing loudly.
+    #[test]
+    fn registry_families_are_declared_and_populated() {
+        for verb in help::VERBS {
+            let declared: BTreeSet<help::Family> =
+                verb.families.iter().map(|spec| spec.family).collect();
+            for group in verb.groups {
+                for family in group
+                    .families
+                    .iter()
+                    .chain(group.flags.iter().filter_map(|f| f.families).flatten())
+                {
+                    assert!(
+                        declared.contains(family),
+                        "verb `{}` group {:?} claims undeclared family {family:?}",
+                        verb.name,
+                        group.title
+                    );
+                }
+            }
+            for spec in verb.families {
+                assert!(
+                    verb.family_flags(spec.family).next().is_some(),
+                    "verb `{}` declares family {:?} but no flag reaches it",
+                    verb.name,
+                    spec.family
+                );
+            }
+        }
     }
 
     #[test]
@@ -10781,80 +9010,77 @@ mod tests {
         // flags (the sample lands as a stray positional and the parse fails); a
         // declared short takes the space form.
         for verb in help::VERBS {
-            let mut seen: BTreeSet<&str> = BTreeSet::new();
-            for flag in verb.groups.iter().flat_map(|group| group.flags.iter()) {
-                let Some(kind) = flag.value.grammar() else {
-                    continue;
-                };
-                if !seen.insert(flag.name) {
-                    continue;
-                }
-                let (valid, invalid) = kind_samples(kind);
-                for sample in &valid {
-                    let drive = |form: FlagForm<'_>| {
-                        drive_flag(verb.name, flag.name, sample, form).unwrap_or_else(|| {
+            for spec in verb.families {
+                let mut seen: BTreeSet<&str> = BTreeSet::new();
+                for flag in verb.family_flags(spec.family) {
+                    let Some(kind) = flag.value.grammar() else {
+                        continue;
+                    };
+                    if !seen.insert(flag.name) {
+                        continue;
+                    }
+                    let (valid, invalid) = kind_samples(kind);
+                    for sample in &valid {
+                        let drive = |form: FlagForm<'_>| {
+                            drive_flag(verb.name, spec.family, flag, sample, form)
+                        };
+                        drive(FlagForm::Inline).unwrap_or_else(|error| {
                             panic!(
-                                "verb `{}` flag `{}` has no value-grammar driver; add one to \
-                                 `drive_flag`",
+                                "verb `{}` flag `{}` ({kind:?}) rejected VALID sample {sample:?}: \
+                             {error}",
                                 verb.name, flag.name
                             )
-                        })
-                    };
-                    drive(FlagForm::Inline).unwrap_or_else(|error| {
-                        panic!(
-                            "verb `{}` flag `{}` ({kind:?}) rejected VALID sample {sample:?}: \
-                             {error}",
-                            verb.name, flag.name
-                        )
-                    });
-                    match flag.value {
-                        help::Value::Required(..) => {
-                            drive(FlagForm::Spaced).unwrap_or_else(|error| {
-                                panic!(
-                                    "verb `{}` flag `{}` rejected the space form of valid \
+                        });
+                        match flag.value {
+                            help::Value::Required(..) => {
+                                drive(FlagForm::Spaced).unwrap_or_else(|error| {
+                                    panic!(
+                                        "verb `{}` flag `{}` rejected the space form of valid \
                                      {sample:?}: {error}",
-                                    verb.name, flag.name
-                                )
-                            });
-                            if let Some(short) = flag.short {
-                                drive(FlagForm::Short(short)).unwrap_or_else(|error| {
+                                        verb.name, flag.name
+                                    )
+                                });
+                                if let Some(short) = flag.short {
+                                    drive(FlagForm::Short(short)).unwrap_or_else(|error| {
                                     panic!(
                                         "verb `{}` flag `{}` rejected short `{short}` with valid \
                                          {sample:?}: {error}",
                                         verb.name, flag.name
                                     )
                                 });
+                                }
                             }
-                        }
-                        help::Value::Optional(..) => {
-                            assert!(
-                                drive(FlagForm::Spaced).is_err(),
-                                "verb `{}` optional-value flag `{}` CONSUMED the space-form \
+                            help::Value::Optional(..) => {
+                                assert!(
+                                    drive(FlagForm::Spaced).is_err(),
+                                    "verb `{}` optional-value flag `{}` CONSUMED the space-form \
                                  token {sample:?} (optional values are `=`-only)",
+                                    verb.name,
+                                    flag.name
+                                );
+                            }
+                            help::Value::None => unreachable!("grammar() returned Some"),
+                        }
+                    }
+                    for sample in &invalid {
+                        for form in [FlagForm::Inline, FlagForm::Spaced] {
+                            // The space form only reaches the value validator on
+                            // required-value flags.
+                            if matches!(form, FlagForm::Spaced)
+                                && !matches!(flag.value, help::Value::Required(..))
+                            {
+                                continue;
+                            }
+                            let outcome = drive_flag(verb.name, spec.family, flag, sample, form);
+                            assert!(
+                                outcome.is_err(),
+                                "verb `{}` family {:?} flag `{}` ({kind:?}) ACCEPTED invalid \
+                             sample {sample:?}",
                                 verb.name,
+                                spec.family,
                                 flag.name
                             );
                         }
-                        help::Value::None => unreachable!("grammar() returned Some"),
-                    }
-                }
-                for sample in &invalid {
-                    for form in [FlagForm::Inline, FlagForm::Spaced] {
-                        // The space form only reaches the value validator on
-                        // required-value flags.
-                        if matches!(form, FlagForm::Spaced)
-                            && !matches!(flag.value, help::Value::Required(..))
-                        {
-                            continue;
-                        }
-                        let outcome = drive_flag(verb.name, flag.name, sample, form)
-                            .expect("driver present (proven by the valid loop above)");
-                        assert!(
-                            outcome.is_err(),
-                            "verb `{}` flag `{}` ({kind:?}) ACCEPTED invalid sample {sample:?}",
-                            verb.name,
-                            flag.name
-                        );
                     }
                 }
             }
@@ -10889,28 +9115,36 @@ mod tests {
             );
         }
         for verb in help::VERBS {
-            let mut seen: BTreeSet<&str> = BTreeSet::new();
-            for flag in verb.groups.iter().flat_map(|group| group.flags.iter()) {
-                let Some(kind) = flag.value.grammar() else {
-                    continue;
-                };
-                if !seen.insert(flag.name) {
-                    continue;
+            for spec in verb.families {
+                let mut seen: BTreeSet<&str> = BTreeSet::new();
+                for flag in verb.family_flags(spec.family) {
+                    let Some(kind) = flag.value.grammar() else {
+                        continue;
+                    };
+                    if !seen.insert(flag.name) {
+                        continue;
+                    }
+                    let (valid, _) = kind_samples(kind);
+                    let first = valid[0];
+                    let second = valid.get(1).copied().unwrap_or(first);
+                    let outcome = drive_flag(
+                        verb.name,
+                        spec.family,
+                        flag,
+                        first,
+                        FlagForm::Repeated(second),
+                    );
+                    assert_eq!(
+                        outcome.is_ok(),
+                        flag.repeatable,
+                        "verb `{}` family {:?} flag `{}` repeat behavior does not match \
+                         registry repeatable={}: {outcome:?}",
+                        verb.name,
+                        spec.family,
+                        flag.name,
+                        flag.repeatable
+                    );
                 }
-                let (valid, _) = kind_samples(kind);
-                let first = valid[0];
-                let second = valid.get(1).copied().unwrap_or(first);
-                let outcome = drive_flag(verb.name, flag.name, first, FlagForm::Repeated(second))
-                    .expect("driver present (shared with the value-grammar test)");
-                assert_eq!(
-                    outcome.is_ok(),
-                    flag.repeatable,
-                    "verb `{}` flag `{}` repeat behavior does not match registry \
-                     repeatable={}: {outcome:?}",
-                    verb.name,
-                    flag.name,
-                    flag.repeatable
-                );
             }
         }
     }
@@ -11234,7 +9468,7 @@ mod tests {
         // flag, never a bogus `--release=x/Cargo.toml` manifest path.
         let err = build_error(&["--release=x"]);
         assert!(err.contains("--release"), "{err}");
-        assert!(err.contains("takes no value"), "{err}");
+        assert!(err.contains("'x'"), "{err}");
         // An unknown flag is a usage error naming it (not a manifest-path failure).
         assert!(build_error(&["--nonsense"]).contains("--nonsense"));
     }

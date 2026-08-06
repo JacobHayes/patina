@@ -3612,7 +3612,7 @@ fn campaign_continuation_refusals_are_loud() {
             "--out-dir",
             out.to_str().unwrap(),
         ]),
-        "--extend 0 is redundant",
+        "--extend must be >= 1",
     );
 
     let heartbeat_out = cwd.join("heartbeat-camp");
@@ -10483,7 +10483,8 @@ fn harness_flag_rejected_for_wasi_target() {
         "--harness on a WASI run succeeded"
     );
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("--harness is native-only"),
+        String::from_utf8_lossy(&output.stderr)
+            .contains("`run` of a WASI module does not accept --harness"),
         "missing native-only rejection:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );

@@ -2,18 +2,22 @@
 //!
 //! Every flag the CLI parsers accept is described once here — canonical name,
 //! optional short form, value kind, placeholder, one-line doc, repeatability —
-//! grouped per verb (and per family within a verb, where the accepted flags
-//! differ). This registry is the SINGLE SOURCE that generates all help text:
-//! the compact top-level overview, each verb's focused `--help` section, the
-//! machine-readable `--help --format json` payload, and the synopsis lines a
-//! usage error prints. It also documents the `PATINA_*` environment protocol and
-//! the honored tool variables.
+//! grouped per verb and per FAMILY within a verb (the disjoint flag sets a verb
+//! chooses between at routing time). This registry is the SINGLE SOURCE for both
+//! halves of the CLI:
 //!
-//! The parsers stay hand-rolled `match` loops (no clap, no added deps); the
-//! registry does not drive parsing. A test-only enumeration of each parser's
-//! accepted flags (see `tests::registry_covers_every_parsed_flag` in `lib.rs`)
-//! asserts every parsed flag is registered, so adding a parsed flag without
-//! registering it fails a test — the structural drift gate.
+//! * the help — the compact top-level overview, each verb's focused `--help`
+//!   section, the machine-readable `--help --format json` payload, and the
+//!   synopsis lines a usage error prints; and
+//! * the PARSING — `cli::command` builds each family's `clap::Command` from
+//!   these same rows, so arity, the `=`-only optional form, repeatability, the
+//!   typed value grammar, and cross-flag dependencies are declared once and
+//!   enforced by construction.
+//!
+//! Because one declaration produces both, a parser cannot accept a flag the
+//! help omits or reject one it advertises: those drift classes are
+//! unrepresentable rather than merely tested. It also documents the `PATINA_*`
+//! environment protocol and the honored tool variables.
 
 /// The value grammar a flag's argument must satisfy — the typed shape the
 /// parsers accept, declared once here so a value-syntax mismatch between what a
@@ -111,7 +115,7 @@ impl Value {
         }
     }
 
-    fn placeholder(self) -> Option<&'static str> {
+    pub fn placeholder(self) -> Option<&'static str> {
         match self {
             Value::None => None,
             Value::Required(p, _) | Value::Optional(p, _) => Some(p),
@@ -136,6 +140,17 @@ pub struct Flag {
     pub value: Value,
     pub doc: &'static str,
     pub repeatable: bool,
+    /// The flag this one is inert without. A dependent knob supplied alone is
+    /// refused rather than silently ignored, so a mistyped sweep flag fails
+    /// loudly — and the generic grammar walk knows to supply the parent when it
+    /// exercises the child.
+    pub requires: Option<&'static str>,
+    /// The families that accept this flag, when they are narrower than its
+    /// [`Group`]'s. `None` — the common case — means "exactly the group's".
+    /// [`only`] sets it for the few flags that share a group with flags of wider
+    /// reach: `--budget`/`--param` are Cargo-family knobs sitting beside
+    /// `--seed`/`--record`, which every family of `run` accepts.
+    pub families: Option<&'static [Family]>,
 }
 
 /// Terse constructor so the registry tables stay one-flag-per-line.
@@ -152,13 +167,133 @@ const fn f(
         value,
         doc,
         repeatable,
+        requires: None,
+        families: None,
     }
+}
+
+/// Declare that a flag is inert without `parent`.
+const fn needs(flag: Flag, parent: &'static str) -> Flag {
+    Flag {
+        requires: Some(parent),
+        ..flag
+    }
+}
+
+/// Narrow one flag to a subset of its group's families.
+const fn only(flag: Flag, families: &'static [Family]) -> Flag {
+    Flag {
+        families: Some(families),
+        ..flag
+    }
+}
+
+/// A parsing family within a verb: one verb and one positional shape, but
+/// several disjoint flag sets, chosen at routing time from an artifact's magic
+/// bytes, a subcommand token, or a mode switch. Families are why `--fuel` is
+/// valid on `run <MODULE.wasm>` and invalid on `run <BINARY>`.
+///
+/// The registry is the single declaration of that mapping. It builds each
+/// family's parser, decides which flags a family refuses and in what words, and
+/// routes the generic grammar walks — so a family cannot accept a flag the help
+/// does not advertise for it, and cannot advertise one it does not accept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Family {
+    /// A verb with one form: `campaign`, `coverage`, `sites`, `explore`, and
+    /// `minimize`'s default trace-reduction mode.
+    Sole,
+    /// The Cargo package family: an in-process `cargo run`/`cargo test` that
+    /// forwards every unrecognized option to Cargo verbatim.
+    Cargo,
+    /// A `wasm32-wasip1` module under the WASI host.
+    Wasi,
+    /// A shim-linked native binary under the native supervisor.
+    Native,
+    /// `test <DIR|Cargo.toml>`: native libtest harness mode.
+    Harness,
+    /// `minimize --scenario`: seed/parameter rather than trace reduction.
+    Scenario,
+    /// `trace info`.
+    Info,
+    /// `trace events`.
+    Events,
+    /// `trace stats`.
+    Stats,
+    /// `trace diff`.
+    Diff,
+}
+
+impl Family {
+    /// The stable tag exposed in the JSON payload.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Family::Sole => "sole",
+            Family::Cargo => "cargo",
+            Family::Wasi => "wasi",
+            Family::Native => "native",
+            Family::Harness => "harness",
+            Family::Scenario => "scenario",
+            Family::Info => "info",
+            Family::Events => "events",
+            Family::Stats => "stats",
+            Family::Diff => "diff",
+        }
+    }
+}
+
+/// The family list of a verb with exactly one form.
+const SOLE: &[Family] = &[Family::Sole];
+
+/// One family of a verb, with the wording its errors use.
+#[derive(Clone, Copy, Debug)]
+pub struct FamilySpec {
+    pub family: Family,
+    /// How an unknown-option error names this family: "`run` of a native
+    /// binary", "trace events".
+    pub label: &'static str,
+    /// Why this family refuses a flag a SIBLING family of the same verb accepts
+    /// — "trace info reads metadata only". Rendered as
+    /// "<because> and does not accept <flag>"; `None` falls back to
+    /// "<label> does not accept <flag>".
+    pub because: Option<&'static str>,
+}
+
+const fn fam(family: Family, label: &'static str, because: Option<&'static str>) -> FamilySpec {
+    FamilySpec {
+        family,
+        label,
+        because,
+    }
+}
+
+/// A family's refusal of a flag it does not register: a flag that is real
+/// elsewhere in the CLI but meaningless here, answered with an explanation
+/// rather than the generic unknown-option error.
+///
+/// `replay` is the motivating case. It restores every semantic input from the
+/// trace, so `--seed`/`--fs-*`/`--buggify*` are not replay flags at all — but
+/// "unknown option" would leave the operator guessing why a knob vanished. The
+/// refused set is declared here by REFERENCE to the shared flag slices, so a
+/// knob added to [`FAULT_FLAGS`] is refused by every family that refuses faults
+/// with no second list to remember.
+#[derive(Clone, Copy, Debug)]
+pub struct Refusal {
+    pub families: &'static [Family],
+    /// Shared registry slices whose every flag is refused.
+    pub flags: &'static [&'static [Flag]],
+    /// Individually named refusals that are not a whole slice.
+    pub names: &'static [&'static str],
+    /// The explanation; `{flag}` is replaced with the offending flag.
+    pub message: &'static str,
 }
 
 /// A titled group of flags within a verb's help section.
 #[derive(Clone, Copy, Debug)]
 pub struct Group {
     pub title: &'static str,
+    /// The families whose parsers accept this group's flags. Individual flags
+    /// may narrow it with [`only`].
+    pub families: &'static [Family],
     pub flags: &'static [Flag],
 }
 
@@ -169,8 +304,14 @@ pub struct Verb {
     pub summary: &'static str,
     pub synopsis: &'static [&'static str],
     pub prose: &'static str,
+    /// The verb's families, in routing order.
+    pub families: &'static [FamilySpec],
     pub groups: &'static [Group],
+    pub refusals: &'static [Refusal],
 }
+
+/// No declared refusals: every flag this verb rejects is simply unknown to it.
+const NO_REFUSALS: &[Refusal] = &[];
 
 /// A `PATINA_*` environment variable's documentation.
 #[derive(Clone, Copy, Debug)]
@@ -449,12 +590,15 @@ const LIVENESS_FLAGS_OPTIONAL: &[Flag] = &[
         "Require convergence within NANOS of the last injected fault (bare = default).",
         false,
     ),
-    f(
-        "--heal-after",
-        None,
-        Value::Required("NANOS", Kind::U64),
-        "Fault-free convergence arm-time override; requires --converge-within.",
-        false,
+    needs(
+        f(
+            "--heal-after",
+            None,
+            Value::Required("NANOS", Kind::U64),
+            "Fault-free convergence arm-time override; requires --converge-within.",
+            false,
+        ),
+        "--converge-within",
     ),
 ];
 
@@ -466,12 +610,15 @@ const NATIVE_SCHEDULE_FLAGS: &[Flag] = &[
         "PCT priority-scheduling exploration; N is the bug depth (>= 1).",
         false,
     ),
-    f(
-        "--sched-pct-steps",
-        None,
-        Value::Required("N", Kind::PositiveU64),
-        "Number of PCT priority-change points (>= 1). Requires --sched-pct.",
-        false,
+    needs(
+        f(
+            "--sched-pct-steps",
+            None,
+            Value::Required("N", Kind::PositiveU64),
+            "Number of PCT priority-change points (>= 1). Requires --sched-pct.",
+            false,
+        ),
+        "--sched-pct",
     ),
     f(
         "--starve",
@@ -480,19 +627,25 @@ const NATIVE_SCHEDULE_FLAGS: &[Flag] = &[
         "Starvation exploration; N is the interval count (>= 1).",
         false,
     ),
-    f(
-        "--starve-max-len",
-        None,
-        Value::Required("N", Kind::PositiveU64),
-        "Maximum starvation run length (>= 1). Requires --starve.",
-        false,
+    needs(
+        f(
+            "--starve-max-len",
+            None,
+            Value::Required("N", Kind::PositiveU64),
+            "Maximum starvation run length (>= 1). Requires --starve.",
+            false,
+        ),
+        "--starve",
     ),
-    f(
-        "--starve-window",
-        None,
-        Value::Required("N", Kind::PositiveU64),
-        "Starvation window (>= 1). Requires --starve.",
-        false,
+    needs(
+        f(
+            "--starve-window",
+            None,
+            Value::Required("N", Kind::PositiveU64),
+            "Starvation window (>= 1). Requires --starve.",
+            false,
+        ),
+        "--starve",
     ),
     f(
         "--swarm",
@@ -581,9 +734,15 @@ denials to a loud warning.\n\
 runtime installation so the harness installs and configures the context itself. \
 Supply it on both the record `run` and the `replay`. Reproduce a recorded run with \
 `cargo patina replay`.",
+    families: &[
+        fam(Family::Cargo, "`run`", None),
+        fam(Family::Wasi, "`run` of a WASI module", None),
+        fam(Family::Native, "`run` of a native binary", None),
+    ],
     groups: &[
         Group {
             title: "Patina options (run/test)",
+            families: &[Family::Cargo, Family::Wasi, Family::Native],
             flags: &[
                 f(
                     "--seed",
@@ -599,28 +758,36 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
                     "Record boundary operations and outcomes to PATH.",
                     false,
                 ),
-                f(
-                    "--budget",
-                    None,
-                    Value::Required("STEPS", Kind::U64),
-                    "Maximum boundary operations before explicit failure (cargo family).",
-                    false,
+                only(
+                    f(
+                        "--budget",
+                        None,
+                        Value::Required("STEPS", Kind::U64),
+                        "Maximum boundary operations before explicit failure (cargo family).",
+                        false,
+                    ),
+                    &[Family::Cargo],
                 ),
-                f(
-                    "--param",
-                    None,
-                    Value::Required("K=V", Kind::KeyValue),
-                    "Typed-builder parameter exposed through Context (cargo family).",
-                    true,
+                only(
+                    f(
+                        "--param",
+                        None,
+                        Value::Required("K=V", Kind::KeyValue),
+                        "Typed-builder parameter exposed through Context (cargo family).",
+                        true,
+                    ),
+                    &[Family::Cargo],
                 ),
             ],
         },
         Group {
             title: "Source-first selection (building a source/package on the fly)",
+            families: &[Family::Wasi, Family::Native],
             flags: SOURCE_SELECT,
         },
         Group {
             title: "Build profile (source-first)",
+            families: &[Family::Wasi, Family::Native],
             flags: &[f(
                 "--release",
                 None,
@@ -631,10 +798,12 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
         },
         Group {
             title: "Fault options (seed-driven, default off)",
+            families: &[Family::Cargo, Family::Wasi, Family::Native],
             flags: FAULT_FLAGS,
         },
         Group {
             title: "Native run options (run <BINARY>)",
+            families: &[Family::Native],
             flags: &[
                 f(
                     "--harness",
@@ -696,21 +865,26 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
         },
         Group {
             title: "Native scheduling options (run <BINARY>)",
+            families: &[Family::Native],
             flags: NATIVE_SCHEDULE_FLAGS,
         },
         Group {
             title: "Buggify options (run <MODULE.wasm> & run <BINARY>)",
+            families: &[Family::Wasi, Family::Native],
             flags: BUGGIFY_FLAGS,
         },
         Group {
             title: "Liveness options (run <MODULE.wasm> & run <BINARY>)",
+            families: &[Family::Wasi, Family::Native],
             flags: LIVENESS_FLAGS_OPTIONAL,
         },
         Group {
             title: "WASI run options (run <MODULE.wasm>)",
+            families: &[Family::Wasi],
             flags: WASI_HOST_FLAGS,
         },
     ],
+    refusals: NO_REFUSALS,
 };
 
 const TEST: Verb = Verb {
@@ -734,9 +908,14 @@ the harness under target/patina/dst, and runs only the `--exact` test with \
 `--test-threads=1`. `--seeds N` sweeps 0..N (default 20); `--seed N` runs one \
 seed. On the first failure Patina re-runs that seed with --record and prints \
 copy-paste `test` and `replay` repro commands.",
+    families: &[
+        fam(Family::Cargo, "`test`", None),
+        fam(Family::Harness, "`test` native harness mode", None),
+    ],
     groups: &[
         Group {
             title: "Patina options (Cargo-family run/test)",
+            families: &[Family::Cargo, Family::Harness],
             flags: &[
                 f(
                     "--seed",
@@ -745,31 +924,41 @@ copy-paste `test` and `replay` repro commands.",
                     "Deterministic root seed (default 0). In native harness mode, run exactly this seed instead of a sweep.",
                     false,
                 ),
-                f(
-                    "--record",
-                    None,
-                    Value::Required("PATH", Kind::Path),
-                    "Record boundary operations and outcomes to PATH (Cargo-family form; native harness mode records failures automatically).",
-                    false,
+                only(
+                    f(
+                        "--record",
+                        None,
+                        Value::Required("PATH", Kind::Path),
+                        "Record boundary operations and outcomes to PATH (Cargo-family form; native harness mode records failures automatically).",
+                        false,
+                    ),
+                    &[Family::Cargo],
                 ),
-                f(
-                    "--budget",
-                    None,
-                    Value::Required("STEPS", Kind::U64),
-                    "Maximum boundary operations before explicit failure (Cargo-family form).",
-                    false,
+                only(
+                    f(
+                        "--budget",
+                        None,
+                        Value::Required("STEPS", Kind::U64),
+                        "Maximum boundary operations before explicit failure (Cargo-family form).",
+                        false,
+                    ),
+                    &[Family::Cargo],
                 ),
-                f(
-                    "--param",
-                    None,
-                    Value::Required("K=V", Kind::KeyValue),
-                    "Typed-builder parameter exposed through Context (Cargo-family form).",
-                    true,
+                only(
+                    f(
+                        "--param",
+                        None,
+                        Value::Required("K=V", Kind::KeyValue),
+                        "Typed-builder parameter exposed through Context (Cargo-family form).",
+                        true,
+                    ),
+                    &[Family::Cargo],
                 ),
             ],
         },
         Group {
             title: "Native libtest harness selection (test <DIR|Cargo.toml>)",
+            families: &[Family::Harness],
             flags: &[
                 f(
                     "--harness-target",
@@ -817,21 +1006,26 @@ copy-paste `test` and `replay` repro commands.",
         },
         Group {
             title: "Fault options (seed-driven, default off)",
+            families: &[Family::Cargo, Family::Harness],
             flags: FAULT_FLAGS,
         },
         Group {
             title: "Buggify options (native harness mode)",
+            families: &[Family::Harness],
             flags: BUGGIFY_FLAGS,
         },
         Group {
             title: "Native scheduling options (native harness mode)",
+            families: &[Family::Harness],
             flags: NATIVE_SCHEDULE_FLAGS,
         },
         Group {
             title: "Liveness options (native harness mode)",
+            families: &[Family::Harness],
             flags: LIVENESS_FLAGS_OPTIONAL,
         },
     ],
+    refusals: NO_REFUSALS,
 };
 
 const BUILD: Verb = Verb {
@@ -856,8 +1050,19 @@ atomics-only race windows schedulable. It is native-only and rejected under \
 --target wasi (wasip1 has no threads to preempt). `build --target wasi` compiles a \
 Cargo package for wasm32-wasip1 and is package-only (a single .rs source is \
 native-only).",
+    families: &[
+        fam(Family::Native, "`build`", None),
+        fam(
+            Family::Wasi,
+            "`build --target wasi`",
+            Some(
+                "wasip1 has no threads to preempt and takes its edition from the package's Cargo.toml",
+            ),
+        ),
+    ],
     groups: &[Group {
         title: "Build options",
+        families: &[Family::Native, Family::Wasi],
         flags: &[
             f(
                 "--output",
@@ -866,12 +1071,15 @@ native-only).",
                 "Copy the built binary out to PATH (required for a single .rs source).",
                 false,
             ),
-            f(
-                "--edition",
-                None,
-                Value::Required("YEAR", Kind::Str),
-                "Rust edition for a single-source build (default 2024).",
-                false,
+            only(
+                f(
+                    "--edition",
+                    None,
+                    Value::Required("YEAR", Kind::Str),
+                    "Rust edition for a single-source build (default 2024).",
+                    false,
+                ),
+                &[Family::Native],
             ),
             f(
                 "--release",
@@ -880,12 +1088,15 @@ native-only).",
                 "Build in release mode.",
                 false,
             ),
-            f(
-                "--yield-points",
-                None,
-                Value::None,
-                "Instrument deterministic cooperative preemption (native only).",
-                false,
+            only(
+                f(
+                    "--yield-points",
+                    None,
+                    Value::None,
+                    "Instrument deterministic cooperative preemption (native only).",
+                    false,
+                ),
+                &[Family::Native],
             ),
             f(
                 "--package",
@@ -904,6 +1115,7 @@ native-only).",
             TARGET_FLAG,
         ],
     }],
+    refusals: NO_REFUSALS,
 };
 
 const AUDIT: Verb = Verb {
@@ -922,9 +1134,20 @@ unsupported import — the opposite of the truth — so `audit <prebuilt>` fails
 unless the binary was produced by `cargo patina build`. `--raw` overrides that gate \
 and runs the full audit anyway under a loud banner. A WASI module lists its imports \
 and takes no --allow (the allow list is native-only).",
+    families: &[
+        fam(Family::Native, "`audit` of a native binary", None),
+        fam(
+            Family::Wasi,
+            "`audit` of a WASI module",
+            Some(
+                "a module's imports are read from the module itself; the allow list is native-only",
+            ),
+        ),
+    ],
     groups: &[
         Group {
             title: "Audit options",
+            families: &[Family::Native],
             flags: &[
                 f(
                     "--allow",
@@ -944,9 +1167,11 @@ and takes no --allow (the allow list is native-only).",
         },
         Group {
             title: "Source-first selection",
+            families: &[Family::Native, Family::Wasi],
             flags: SOURCE_SELECT,
         },
     ],
+    refusals: NO_REFUSALS,
 };
 
 const REPLAY: Verb = Verb {
@@ -972,9 +1197,15 @@ families carry the timeline/branch controls (--timeline, and --branch --from \
 traces are single-timeline (native runs cannot branch), so native replay accepts \
 only --fingerprint, --mount, --coverage-out, --harness, and the \
 --allow/--allow-unsupported-symbols audit surface.",
+    families: &[
+        fam(Family::Cargo, "`replay` of a Cargo package", None),
+        fam(Family::Wasi, "`replay` of a WASI module", None),
+        fam(Family::Native, "`replay` of a native binary", None),
+    ],
     groups: &[
         Group {
             title: "Native replay options (host/build facts the trace cannot carry)",
+            families: &[Family::Native],
             flags: &[
                 f(
                     "--fingerprint",
@@ -1022,15 +1253,37 @@ only --fingerprint, --mount, --coverage-out, --harness, and the \
         },
         Group {
             title: "Timeline/branch replay (Cargo package & WASI families)",
+            families: &[Family::Cargo, Family::Wasi],
             flags: REPLAY_TIMELINE_FLAGS,
         },
         Group {
             title: "WASI host environment (re-supplied and fingerprint-checked)",
+            families: &[Family::Wasi],
             flags: WASI_HOST_FLAGS,
         },
         Group {
             title: "Family selection",
+            families: &[Family::Wasi, Family::Native],
             flags: &[TARGET_FLAG],
+        },
+    ],
+    refusals: &[
+        // Every semantic input is recorded in the trace and restored from it, so
+        // re-supplying one could only diverge the replay. Declared by reference
+        // to the shared slices: a knob added to FAULT_FLAGS or BUGGIFY_FLAGS is
+        // refused here the day it is added, with no second list to remember.
+        Refusal {
+            families: &[Family::Cargo, Family::Wasi, Family::Native],
+            flags: &[FAULT_FLAGS, BUGGIFY_FLAGS, NATIVE_SCHEDULE_FLAGS],
+            names: &["--seed", "--record", "--env", "--net-latency-nanos"],
+            message: "replay restores run semantics from the trace and does not accept {flag}; the trace is authoritative",
+        },
+        // Native traces are single-timeline and a native run cannot branch.
+        Refusal {
+            families: &[Family::Native],
+            flags: &[REPLAY_TIMELINE_FLAGS],
+            names: &[],
+            message: "{flag} is not supported for native replay: native traces are single-timeline and native runs cannot branch; branch/timeline replay is the Cargo package and WASI families",
         },
     ],
 };
@@ -1049,8 +1302,10 @@ wrapped command must be in a plain seeded mode — record/replay/branch pin a si
 run and have nothing to sweep. Every option after the seed controls is the wrapped \
 `run`/`test` command's; run `cargo patina run --help` or `cargo patina test --help` \
 for those.",
+    families: &[fam(Family::Sole, "`explore`", None)],
     groups: &[Group {
         title: "Explore options",
+        families: SOLE,
         flags: &[
             f(
                 "--seeds",
@@ -1068,13 +1323,14 @@ for those.",
             ),
         ],
     }],
+    refusals: NO_REFUSALS,
 };
 
 const CAMPAIGN: Verb = Verb {
     name: "campaign",
     summary: "Config-driven deterministic fault-and-schedule sweep over one artifact.",
     synopsis: &[
-        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults] [--liveness-watchdog N] [--converge-within N] [--report] [-- GUEST ARGS]",
+        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults] [--liveness-watchdog N] [--converge-within N] [--report-failures] [-- GUEST ARGS]",
         "cargo patina campaign --extend N [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --resume [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --selftest",
@@ -1100,8 +1356,10 @@ appear with registered_gens=0; --allow-unmet-sometimes[=MIN_GENS] reports but \
 waives that gate (unconditionally or only below the observed generation \
 threshold). `--selftest` proves every classifier class and the coverage gate \
 classes.",
+    families: &[fam(Family::Sole, "`campaign`", None)],
     groups: &[Group {
         title: "Campaign options",
+        families: SOLE,
         flags: &[
             f(
                 "--gens",
@@ -1121,7 +1379,7 @@ classes.",
                 "--extend",
                 None,
                 Value::Required("N", Kind::PositiveU64),
-                "Continue the recorded out-dir with N additional generations; the out-dir's spec is authoritative.",
+                "Continue the recorded out-dir with N additional generations (N >= 1; use --resume to finish an interrupted campaign without adding any); the out-dir's spec is authoritative.",
                 false,
             ),
             f(
@@ -1203,7 +1461,7 @@ classes.",
                 false,
             ),
             f(
-                "--report",
+                "--report-failures",
                 None,
                 Value::None,
                 "Also write a --report HTML for each failing generation.",
@@ -1239,6 +1497,7 @@ classes.",
             ),
         ],
     }],
+    refusals: NO_REFUSALS,
 };
 
 const COVERAGE: Verb = Verb {
@@ -1255,8 +1514,10 @@ uses the map's anchor-relative PCs, resolves them against the binary's \
 `patina_yield_point` symbol, demangles Rust symbols, buckets edges into the \
 shared crate/module rollup, and reports covered percentages plus hit \
 concentration. The JSON form emits schema patina.coverage/v1.",
+    families: &[fam(Family::Sole, "`coverage`", None)],
     groups: &[Group {
         title: "Coverage options",
+        families: SOLE,
         flags: &[
             f(
                 "--focus",
@@ -1274,6 +1535,7 @@ concentration. The JSON form emits schema patina.coverage/v1.",
             ),
         ],
     }],
+    refusals: NO_REFUSALS,
 };
 
 const TRACE: Verb = Verb {
@@ -1309,9 +1571,28 @@ aligned prefix, first divergence, context, and tails rather than trying to \n\
 re-align different executions. Buggify per-evaluation firings are not recorded \n\
 in traces; `info` reports the recorded config, active sites, and knobs from \n\
 metadata.",
+    families: &[
+        fam(
+            Family::Info,
+            "trace info",
+            Some("trace info reads metadata only"),
+        ),
+        fam(Family::Events, "trace events", None),
+        fam(
+            Family::Stats,
+            "trace stats",
+            Some("trace stats aggregates the whole resolved timeline"),
+        ),
+        fam(
+            Family::Diff,
+            "trace diff",
+            Some("trace diff compares full resolved timelines"),
+        ),
+    ],
     groups: &[
         Group {
             title: "Trace options (trace info/events/stats/diff)",
+            families: &[Family::Info, Family::Events, Family::Stats, Family::Diff],
             flags: &[f(
                 "--timeline",
                 None,
@@ -1322,6 +1603,7 @@ metadata.",
         },
         Group {
             title: "Events options (trace events)",
+            families: &[Family::Events],
             flags: &[
                 f(
                     "--kind",
@@ -1369,6 +1651,7 @@ metadata.",
         },
         Group {
             title: "Diff options (trace diff)",
+            families: &[Family::Diff],
             flags: &[f(
                 "--context",
                 None,
@@ -1378,6 +1661,7 @@ metadata.",
             )],
         },
     ],
+    refusals: NO_REFUSALS,
 };
 
 const SITES: Verb = Verb {
@@ -1399,8 +1683,10 @@ crate/module index; scoped flags \
 or --all opt into per-site drill-down rows. Results are cached per file under \
 .patina/out/sites-cache.json unless --no-cache is set. `--selftest` scans a \
 planted fixture and proves every recognizer class fires.",
+    families: &[fam(Family::Sole, "`sites`", None)],
     groups: &[Group {
         title: "Sites options",
+        families: SOLE,
         flags: &[
             f(
                 "--crate",
@@ -1497,6 +1783,7 @@ planted fixture and proves every recognizer class fires.",
             ),
         ],
     }],
+    refusals: NO_REFUSALS,
 };
 
 const MINIMIZE: Verb = Verb {
@@ -1518,9 +1805,18 @@ means the failure is still present.\n\
 --param values and canonicalizes --seed toward zero, bounded by --seed-budget. Each \
 candidate re-runs the oracle as a fresh seeded child through the \
 PATINA_SEED/PATINA_PARAMS_JSON protocol.",
+    families: &[
+        fam(Family::Sole, "`minimize`", None),
+        fam(
+            Family::Scenario,
+            "minimize --scenario",
+            Some("minimize --scenario reduces experiment inputs rather than a recorded trace"),
+        ),
+    ],
     groups: &[
         Group {
             title: "Trace minimization",
+            families: SOLE,
             flags: &[
                 f(
                     "--output",
@@ -1547,6 +1843,7 @@ PATINA_SEED/PATINA_PARAMS_JSON protocol.",
         },
         Group {
             title: "Scenario minimization (--scenario)",
+            families: &[Family::Scenario],
             flags: &[
                 f(
                     "--scenario",
@@ -1579,6 +1876,7 @@ PATINA_SEED/PATINA_PARAMS_JSON protocol.",
             ],
         },
     ],
+    refusals: NO_REFUSALS,
 };
 
 /// Every verb, in overview order.
@@ -1739,6 +2037,80 @@ pub fn flag_by_cli_name(verb_name: &str, name: &str) -> Option<&'static Flag> {
         .chain(GLOBAL_OUTPUT.iter())
         .chain(HELP_FLAGS.iter())
         .find(|flag| flag.name == name || flag.short == Some(name))
+}
+
+impl Group {
+    /// The families that accept `flag` within this group — the flag's own
+    /// narrowing if it has one, else the group's.
+    fn families_of(&self, flag: &Flag) -> &'static [Family] {
+        flag.families.unwrap_or(self.families)
+    }
+}
+
+impl Verb {
+    /// The spec of one of this verb's families.
+    pub fn family(&self, family: Family) -> &'static FamilySpec {
+        self.families
+            .iter()
+            .find(|spec| spec.family == family)
+            .unwrap_or_else(|| panic!("verb `{}` has no family {family:?}", self.name))
+    }
+
+    /// Every flag `family`'s parser accepts. Parser and help are built from this
+    /// one call, so a family cannot accept a flag its help omits, nor advertise
+    /// one it rejects.
+    pub fn family_flags(&self, family: Family) -> impl Iterator<Item = &'static Flag> + use<'_> {
+        self.groups.iter().flat_map(move |group| {
+            group
+                .flags
+                .iter()
+                .filter(move |flag| group.families_of(flag).contains(&family))
+        })
+    }
+
+    /// Flags registered for this verb but NOT accepted by `family` — a sibling
+    /// family's flags, answered in this family's own words rather than with a
+    /// bare unknown-option error. Yields `(flag, message)`.
+    pub fn cross_family_refusals(
+        &self,
+        family: Family,
+    ) -> impl Iterator<Item = (&'static Flag, String)> + use<'_> {
+        let spec = self.family(family);
+        self.groups
+            .iter()
+            .flat_map(move |group| {
+                group
+                    .flags
+                    .iter()
+                    .filter(move |flag| !group.families_of(flag).contains(&family))
+            })
+            .map(move |flag| (flag, refusal_message(spec, flag.name)))
+    }
+
+    /// The verb's DECLARED refusals for `family`: flags that are real elsewhere
+    /// in the CLI but meaningless here. Yields `(flag name, message)`.
+    pub fn declared_refusals(&self, family: Family) -> Vec<(&'static str, String)> {
+        self.refusals
+            .iter()
+            .filter(|refusal| refusal.families.contains(&family))
+            .flat_map(|refusal| {
+                refusal
+                    .flags
+                    .iter()
+                    .flat_map(|slice| slice.iter().map(|flag| flag.name))
+                    .chain(refusal.names.iter().copied())
+                    .map(|name| (name, refusal.message.replace("{flag}", name)))
+            })
+            .collect()
+    }
+}
+
+/// The wording a family uses to refuse a sibling family's flag.
+fn refusal_message(spec: &FamilySpec, flag: &str) -> String {
+    match spec.because {
+        Some(because) => format!("{} does not accept {flag} ({because})", spec.label),
+        None => format!("{} does not accept {flag}", spec.label),
+    }
 }
 
 /// Verb-local flags that may be supplied by `.patina/config.toml` defaults or
@@ -2068,7 +2440,7 @@ pub fn usage_synopsis(current_verb: Option<&str>) -> String {
 /// (split index vs per-verb payloads; default-valued flag fields omitted).
 pub const HELP_SCHEMA: &str = "patina.help/v2";
 
-fn flag_json(flag: &Flag) -> serde_json::Value {
+fn flag_json(flag: &Flag, group: &Group) -> serde_json::Value {
     use serde_json::{Map, Value as J};
     let mut m = Map::new();
     m.insert("name".into(), J::from(flag.name));
@@ -2093,20 +2465,55 @@ fn flag_json(flag: &Flag) -> serde_json::Value {
     if flag.repeatable {
         m.insert("repeatable".into(), J::from(true));
     }
+    // Present only when this flag reaches fewer families than its group, which
+    // is how an agent learns that `--budget` is Cargo-family-only while the
+    // `--seed` beside it is universal.
+    if let Some(parent) = flag.requires {
+        m.insert("requires".into(), J::from(parent));
+    }
+    if let Some(families) = flag.families {
+        m.insert(
+            "families".into(),
+            J::from(families.iter().map(|f| f.tag()).collect::<Vec<_>>()),
+        );
+    }
+    let _ = group;
     J::Object(m)
 }
 
-/// One titled flag group as `{title, flags}`.
+/// One titled flag group as `{title, families, flags}`. `families` names the
+/// verb forms whose parser accepts the group — the same declaration that builds
+/// those parsers, so an agent reading this payload learns exactly which flags a
+/// given form will take.
 fn group_json(group: &Group) -> serde_json::Value {
     use serde_json::{Map, Value as J};
     let mut gm = Map::new();
     gm.insert("title".into(), J::from(group.title));
+    if group.families != SOLE {
+        gm.insert(
+            "families".into(),
+            J::from(group.families.iter().map(|f| f.tag()).collect::<Vec<_>>()),
+        );
+    }
     gm.insert(
         "flags".into(),
-        J::Array(group.flags.iter().map(flag_json).collect()),
+        J::Array(
+            group
+                .flags
+                .iter()
+                .map(|flag| flag_json(flag, group))
+                .collect(),
+        ),
     );
     J::Object(gm)
 }
+
+/// The stand-in group for the always-available flags, which belong to no verb.
+const GLOBAL_GROUP: Group = Group {
+    title: "",
+    families: SOLE,
+    flags: &[],
+};
 
 /// The always-available output flags as `{title, flags}` (present in both the
 /// index and every per-verb payload).
@@ -2116,7 +2523,12 @@ fn global_flags_json() -> serde_json::Value {
     global.insert("title".into(), J::from("Output options (all verbs)"));
     global.insert(
         "flags".into(),
-        J::Array(GLOBAL_OUTPUT.iter().map(flag_json).collect()),
+        J::Array(
+            GLOBAL_OUTPUT
+                .iter()
+                .map(|flag| flag_json(flag, &GLOBAL_GROUP))
+                .collect(),
+        ),
     );
     J::Object(global)
 }

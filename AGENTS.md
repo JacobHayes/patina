@@ -35,7 +35,10 @@ package / native binary / WASI module) from the argument; `run`, `audit`, and
 the fly).
 
 Never guess flag names — the CLI has gone through renames. The authoritative
-registry is generated from `crates/cargo-patina/src/help.rs`:
+registry is `crates/cargo-patina/src/help.rs`, and it is the single source for
+both halves of the CLI: the help/JSON/usage text AND the parsers themselves
+(`cli.rs` builds each verb+family's `clap::Command` from the same rows). A flag
+the help omits cannot be parsed, and one it advertises cannot be rejected.
 
 ```sh
 cargo run -q -p cargo-patina -- patina --help                    # human
@@ -48,6 +51,15 @@ The JSON is progressive-disclosure (schema `patina.help/v2`): the bare `--help`
 index lists each verb's summary and forms but no flag rows; per-verb detail
 (flag_groups) comes from `cargo patina <verb> --help --format json`. Flag fields
 default-omit — an absent `short`/`value_grammar`/`repeatable` means none/false.
+
+A verb's forms are its **families** (`cargo`/`wasi`/`native`, the `trace`
+subcommands, …), chosen at routing time from the artifact's magic bytes or a
+subcommand token. Each group carries a `families` array naming the forms that
+accept it, and a flag narrower than its group repeats the array — so
+`run --help --format json` says outright that `--fuel` is WASI-only and
+`--budget` is Cargo-family-only. A dependent flag carries `requires` (e.g.
+`--sched-pct-steps` requires `--sched-pct`). A flag supplied to the wrong family
+is refused by name, not as an unknown option.
 
 Every execution verb also accepts `--format json`, usually emitting one
 `patina.result/v1` envelope on stdout; verb-specific report verbs may emit their

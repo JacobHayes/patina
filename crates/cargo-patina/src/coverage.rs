@@ -15,10 +15,12 @@ use object::{Object, ObjectSymbol, SymbolKind};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::CliError;
 use crate::aux_store::{AuxFoldDecision, fold_decision, validate_resume_watermark};
+use crate::cli;
+use crate::help;
 use crate::output;
 use crate::rollup::{Rollup, RollupLeaf, build_rollup};
-use crate::{CliError, required_value, set_once, split_opt};
 
 const COVERAGE_MAP_MAGIC: &[u8; 16] = b"patina.covmap/v1";
 const COVERAGE_MAP_VERSION: u32 = 1;
@@ -989,39 +991,14 @@ pub(crate) fn parse(arguments: Vec<OsString>) -> Result<CoverageInvocation, CliE
             "coverage requires a binary path and a coverage map or campaign out-dir",
         ));
     }
-    let mut options = CoverageOptions::default();
-    let mut index = 0;
-    while index < scan.rest.len() {
-        let text = scan.rest[index]
-            .to_str()
-            .ok_or_else(|| CliError::usage("coverage options must be valid UTF-8"))?;
-        let opt = split_opt(text);
-        match opt.name {
-            "--focus" => {
-                let value = required_value(opt, &scan.rest, &mut index)?.to_string();
-                set_once(&mut options.focus, value, "--focus")?;
-            }
-            "--top" => {
-                let value = required_value(opt, &scan.rest, &mut index)?;
-                let parsed = value.parse::<usize>().map_err(|_| {
-                    CliError::usage(format!(
-                        "--top must be a non-negative integer; got {value:?}"
-                    ))
-                })?;
-                set_once(&mut options.top, parsed, "--top")?;
-            }
-            other => {
-                return Err(CliError::usage(format!(
-                    "unsupported option {other:?} for `coverage`"
-                )));
-            }
-        }
-        index += 1;
-    }
+    let args = cli::parse("coverage", help::Family::Sole, scan.rest)?;
     Ok(CoverageInvocation {
         binary: PathBuf::from(&scan.positionals[0]),
         input: PathBuf::from(&scan.positionals[1]),
-        options,
+        options: CoverageOptions {
+            focus: args.string("--focus"),
+            top: args.usize("--top"),
+        },
     })
 }
 

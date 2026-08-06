@@ -22,6 +22,12 @@ with no `--target` -> the Cargo package family (in-process boundary API), except
 `test <DIR|Cargo.toml>` which selects native libtest harness mode. A
 `.rs`/dir/`Cargo.toml` source argument is built on the fly, then run.
 
+A verb's families are also machine-readable: `cargo patina <verb> --help --format
+json` tags every flag group with the families that accept it (and narrows an
+individual flag where it differs), plus `requires` for a flag that is inert
+without another. A flag given to the wrong family is refused by name, not as an
+unknown option.
+
 ## CLI verbs
 
 - `cargo patina build <SOURCE.rs|DIR|Cargo.toml> [--output PATH] [--target native|wasi] [--release] [--yield-points]`

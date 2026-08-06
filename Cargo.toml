@@ -61,6 +61,13 @@ patina-dst-trace = { path = "crates/patina-trace", version = "0.1.0" }
 patina-dst-wasi-host = { path = "crates/patina-wasi-host", version = "0.1.0" }
 patina-dst-wrapper-fault = { path = "crates/patina-wrapper-fault", version = "0.1.0" }
 patina-dst-wrapper-latency = { path = "crates/patina-wrapper-latency", version = "0.1.0" }
+# The CLI's token engine. Pinned to a minor (`~4.6`) rather than `^4.6` because
+# clap raises its own MSRV in minor releases: 4.6 requires Rust 1.85, which fits
+# the workspace's 1.86, but 4.7 need not. Bumping the minor is a deliberate step
+# that re-runs `mise run msrv`. Default features are off: the CLI renders its own
+# help and usage from the flag registry, and `color` would make error output
+# terminal-dependent, which a machine-parsed CLI must not be.
+clap = { version = "~4.6", default-features = false, features = ["std", "error-context", "suggestions"] }
 object = { version = "0.39.1", default-features = false, features = ["read", "std"] }
 proptest = { version = "1.11.0", default-features = false, features = ["std", "bit-set"] }
 proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
