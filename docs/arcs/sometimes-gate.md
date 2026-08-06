@@ -1,18 +1,18 @@
 # Arc: campaign-level `sometimes!` coverage aggregation + gate
 
-Status: implemented in `cargo patina campaign` (2026-08 wave): per-generation SDK report fold, shared `sites.json` store, default unmet-`sometimes!` gate, waiver flag, selftest classes, and deterministic `sites.json` e2e coverage.
+Status: implemented in `cargo patina campaign` (2026-08 wave) and widened by invariant-visibility Wave 5: per-generation SDK report fold, shared `sites.json` store, default unmet SDK-oracle gate (`sometimes!` and `reachable!`), waiver flag, selftest classes, deterministic `sites.json` e2e coverage, and link-time declared zero-registered rows.
 
 ## Summary
 
 `cargo patina campaign` parses the per-run `PATINA_SDK_REPORT` rows it already
 captures, unions coverage-oracle sites across generations, reports satisfied-in-N-generations
-per site, and **fails the campaign by default when any `sometimes!` site was registered but
-never satisfied across the whole sweep** — the campaign-level twin of the vacuous-schedule
-diagnostic: a `sometimes!` that never came true is a vacuous oracle, and a green campaign
-built on vacuous oracles is a false green. A single waiver flag,
+per site, and **fails the campaign by default when any `sometimes!`/`reachable!` SDK oracle
+is never satisfied across the whole sweep** — the campaign-level twin of the vacuous-schedule
+diagnostic: an oracle that never came true is a false green. A single waiver flag,
 `--allow-unmet-sometimes[=MIN_GENS]`, waives the gate either unconditionally or only for
-campaigns smaller than a user-chosen generation floor. The work is entirely campaign-side
-(`crates/cargo-patina`): the runtime plumbing is complete and needs no changes.
+campaigns smaller than a user-chosen generation floor. The initial gate was campaign-side;
+invariant-visibility Wave 5 added the runtime/SDK/embedding declarations that make
+never-reached literal-label sites visible.
 
 ## Settled decisions (inputs to this design)
 
@@ -41,16 +41,17 @@ campaigns smaller than a user-chosen generation floor. The work is entirely camp
   permille, swarm selection, or the damage-control cutoff. Only fault/delay/knob firing is
   activation-gated. This settles the swarm-denominator question (below): swarm can never
   mask an oracle directly, only shape which code paths execute.
-* Registration is **lazy**: a site exists only once its macro executes. A `sometimes!` (or
-  `reachable!`) whose enclosing code path never runs in a generation emits no row for that
-  generation — and if it runs in no generation, it is invisible to the campaign entirely.
-  This is the load-bearing limitation of the whole design; see "reachable! decision".
+* Runtime evaluation remains **lazy**, but literal-label SDK macro sites are also declared
+  through invariant-visibility Wave 5's link-time table. A `sometimes!`/`reachable!` whose
+  enclosing code path never runs now emits a `declared_site=` row and persists in the campaign
+  store with `registered_gens=0`; dynamic labels and hand-written `patina_sdk` imports still
+  require runtime evaluation to appear.
 * `emit_sdk_report` (`lib.rs:4963-5015`), called from `Context::finish` (`lib.rs:4003`),
   writes **one line to the real process stderr**, on the native shim and the wasip1 host
   alike (the wasi host drives the same `Context`; `crates/patina-wasi-host/src/lib.rs:2567-2583`).
-  It is **default-on**, emitted whenever buggify is enabled *or* any site registered
-  (`lib.rs:4969`), and suppressed only by a false-y `PATINA_SDK_REPORT` env
-  (`lib.rs:185`, `4972-4978`). Row format (`lib.rs:4967`):
+  It is **default-on**, emitted whenever buggify is enabled, any site registered, or the
+  link-time table declared a site, and suppressed only by a false-y `PATINA_SDK_REPORT` env.
+  Declaration row format: `declared_site=<label>|<kind>|@<file:line>`. Evaluated row format:
   `site=<label>|<kind>|a<0|1>|e<evals>|f<fires>|r<0|1>|s<0|1>|v<0|1>|k<knob|->|@<file:line>`.
 * `run`/`run_with` call `finish()` on error paths too (`lib.rs:3974-3977`), so failing
   generations still carry a report — except aborts that never reach `finish` (an `always!`
@@ -60,7 +61,7 @@ campaigns smaller than a user-chosen generation floor. The work is entirely camp
 
 * `run_generation` pipes the child's stdout and stderr into strings the driver already holds;
   the campaign now parses the last `PATINA_SDK_REPORT` line from every generation and folds all
-  `site=` rows into `CoverageTally`. **No new capture channel was needed**.
+  `declared_site=` and `site=` rows into `CoverageTally`. **No new capture channel was needed**.
 * Campaign pins `.env("PATINA_SDK_REPORT", "1")` on the child, exactly as it pins
   `PATINA_LIVENESS_REPORT=1`, so a user's exported `PATINA_SDK_REPORT=0` cannot make the
   gate vacuously green.
@@ -216,23 +217,17 @@ the waiver that was applied, so a waived-vacuous campaign is auditable after the
 ### 5. `reachable!` — gated uniformly, honest about when it can bite
 
 Decision: `reachable!` sites enter the same tally and the same unmet formula
-(`satisfied_gens == 0`), with "satisfied" = the row existed (reached). But because
-registration is lazy, **a `reachable!` that is never reached in any generation never emits
-a row anywhere and is invisible to the campaign** — and any `reachable!` row that does
-appear is satisfied by construction. So under today's plumbing the unified gate is
-trivially green for `reachable!`; only `sometimes!` (reached-but-never-true) can actually
-trip it. The same blind spot applies to a `sometimes!` whose code path never executes.
+(`satisfied_gens == 0`). An evaluated `reachable!` row is satisfied by construction;
+a link-time `declared_site=` row that never gains a runtime `site=` row remains
+unsatisfied with `registered_gens=0`. Therefore the unified gate now bites for
+never-reached literal-label `reachable!` and `sometimes!` SDK macro sites without a schema
+change. Dynamic labels and hand-written `patina_sdk` imports are the honest residual: they
+have no literal link-time label and must execute before the campaign can know them.
 
-Why gate uniformly anyway rather than exclude the kind: the tally, the unmet formula, the
-waiver, the envelope shape, and the tests are all kind-agnostic; when a static site
-enumeration lands (a link-time site table — e.g. `inventory`/`linkme`-style registration —
-letting the campaign know the full site universe up front), never-reached `reachable!` and
-never-reached `sometimes!` sites become visible unmet entries with `registered_gens=0` and
-the gate bites with **zero redesign**. That static-enumeration work is a separate follow-up
-arc (it touches the SDK macros and both embedders — squarely runtime-side); this doc's
-scope note plus the `registered_gens` field are the prepared seam. The limitation is
-stated in the campaign help prose so nobody mistakes today's gate for full reachability
-coverage.
+Why gate uniformly rather than exclude the kind: the tally, the unmet formula, the waiver,
+the envelope shape, and the tests are all kind-agnostic; invariant-visibility Wave 5 filled
+the prepared `registered_gens=0` seam, so `reachable!` coverage is no longer a vacuous
+column for literal-label SDK sites.
 
 ### 6. Swarm / knob-subset generations and the denominator
 
@@ -286,7 +281,8 @@ pointer — lossless aggregation, firehose on disk.
 | No `PATINA_SDK_REPORT` line in a generation | Normal; contributes nothing to tallies. |
 | Zero oracle sites campaign-wide | Trivially green; informational line; no warning. |
 | Site registers in only some generations (lazy paths) | Union; `registered_gens` reports the spread. |
-| Site never reached in ANY generation | Invisible (documented limitation; static-enumeration follow-up arc). |
+| Literal-label SDK site never reached in ANY generation | Visible from `declared_site=`, with `registered_gens=0`; unmet oracles fail the gate. |
+| Dynamic-label or hand-written SDK import never reached | Invisible until runtime evaluation (documented residual). |
 | Timed-out / aborted generation | No row; counts only toward `generations_observed`. |
 | Failing generation that reached `finish` | Row parsed normally (finish runs on error paths). |
 | Guest prints a lookalike report line | Last-matching-line rule makes it inert. |
@@ -298,14 +294,9 @@ pointer — lossless aggregation, firehose on disk.
 
 ## Staged plan
 
-Verification tier: **CLI-only** (cargo-patina unit tests + e2e), justified: no
-runtime/shim/wasi-host code changes, no interposition surface touched, no trace-format or
-schedule-semantics change — the entire diff is `campaign.rs` + `help.rs` + tests, and the
-report format being parsed is already pinned by existing runtime e2e
-(`end_to_end.rs:2661`, `3057`, `5579`). Per the tiered-verification policy that reserves
-the full battery / Linux gates for runtime-touching changes, `mise check` + the two e2e
-runs suffice; the e2e fixtures are `wat`-built wasm modules (like `WASI_BUGGIFY_MODULE`,
-`end_to_end.rs:2620-2644`), so they run on every platform without a native toolchain.
+Initial sometimes-gate landing was CLI-only. Invariant-visibility Wave 5 later touched the
+SDK, runtime, native shim, and WASI host to add the link-time table, so that wave uses the
+runtime-touching full battery and Linux/WASI/native validation scripts.
 
 1. **RED first (detection-before-fixes).** Write the e2e before any implementation: a
    planted wat guest whose `$sometimes` import is called with `i32.const 0`
@@ -330,18 +321,16 @@ runs suffice; the e2e fixtures are `wat`-built wasm modules (like `WASI_BUGGIFY_
    oracles legitimately can't be met at its sweep size (expected: none — their conditions
    are satisfied within a few generations — but the stage verifies rather than assumes).
 5. **Determinism + docs**: extend the deterministic-re-run e2e to compare `sites.json`;
-   update campaign help prose (gate semantics + reachability limitation), `IMPLEMENTATION.md`
-   / `VALIDATION.md` per the usual landing checklist; `mise check` ladder with the two e2e
-   runs in the battery log.
+   update campaign help prose, `IMPLEMENTATION.md` / `VALIDATION.md` per the usual landing
+   checklist; `mise check` ladder with the two e2e runs in the battery log.
 
 ## Cross-references
 
 * `docs/arcs/campaign-steering.md` (in flight): `sites.json` is resume state; the
   fold is associative by design; threshold waiver uses `generations_observed`.
-* Static site enumeration is scheduled as the invariant-visibility arc's Wave 5 (not a
-  someday-item): a link-time site table makes never-reached `sometimes!`/`reachable!`
-  sites visible as `registered_gens=0` unmet entries; the gate formula and schema here
-  absorb it unchanged.
+* Static site enumeration landed as invariant-visibility Wave 5: a link-time site table makes
+  never-reached literal-label `sometimes!`/`reachable!` sites visible as `registered_gens=0`
+  unmet entries; the gate formula and schema here absorbed it unchanged.
 * Doctrine: vacuous-schedule diagnostic (same vacuity class, same fail-closed rationale);
   INTENTS principle 9 (`INTENTS.md:133`) for the summary-first shapes;
   detection-before-fixes for the RED-proven gate test and the loud malformed-row error.
@@ -351,9 +340,9 @@ runs suffice; the e2e fixtures are `wat`-built wasm modules (like `WASI_BUGGIFY_
 1. Flag name: `--allow-unmet-sometimes` (user-confirmed 2026-07-30). It precisely names
    what the gate can bite today; the `=MIN_GENS` form delivers the desired
    warn-below-threshold / error-at-or-above behavior, with unmet sites reported in all
-   cases. If static site enumeration later widens the gate's scope, rename the flag to
-   match reality then — renames are ordinary hard cuts with all callers migrated, not
-   something to pre-hedge against.
+   cases. Static site enumeration later widened the gate's scope to literal-label
+   `reachable!` sites; the flag name remains accepted because the waiver still names the
+   user intent (allow unmet SDK oracle coverage) and renaming it is a separate product cut.
 2. `sites.json` includes non-oracle kinds from day one — same loop, lossless, aids
    fault-site triage.
 3. Store unification (coordinator, 2026-07-30): this doc's per-label aggregate store and

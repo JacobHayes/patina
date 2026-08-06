@@ -50,8 +50,12 @@
 //!   same libtest harness shim-linked and sweeps the annotated test under plain
 //!   `cargo test`.
 //!
-//! Site labels are explicit strings and must be unique across the program;
-//! a label reused at a different call site is a fatal error at first evaluation.
+//! Site labels are explicit strings and must be unique across the program; a
+//! label reused at a different call site is fatal. For literal labels the
+//! link-time site table (below) catches the reuse before the guest runs, even
+//! when neither site is ever evaluated; a computed label is caught at its first
+//! evaluation. Either way the embedder emits `PATINA_BUGGIFY_DUPLICATE_LABEL`
+//! and aborts.
 //!
 //! # No vacuous "all clean"
 //!
@@ -62,15 +66,16 @@
 //! can join runtime counters back to the static inventory. A green run with
 //! inert instrumentation is visible instead of silently reassuring.
 //!
-//! ## Determinism and the never-reached-site blind spot
+//! ## Determinism and never-reached sites
 //!
-//! Sites register lazily, at first evaluation. A compile-time site inventory
-//! (`ctor`/`linkme`-style) was considered and rejected: it would add a
-//! dependency to the dependency-light default and constructor run-order is not a
-//! determinism guarantee across platforms. The consequence is that a site the
-//! run never reaches is invisible to the `PATINA_SDK_REPORT` — the campaign layer
-//! closes this by accumulating coverage across many generations rather than
-//! within one run.
+//! Literal-label SDK macro calls also emit a dependency-free link-time site
+//! table under `cfg(patina)`. The native shim and WASI host enumerate that table
+//! before the guest runs and surface `declared_site=` rows in `PATINA_SDK_REPORT`,
+//! so a `sometimes!` or `reachable!` site that no generation ever reaches still
+//! appears in campaign `sites.json` with `registered_gens=0`. The table uses no
+//! constructors and does not compute activation or firing decisions, so replay
+//! fingerprints and buggify decisions remain driven only by the runtime config,
+//! seed, and actually evaluated sites.
 //!
 //! ## Lifecycle gating (honest limitation)
 //!
@@ -208,6 +213,94 @@ pub mod lifecycle {
 /// call the macros, not these functions.
 #[doc(hidden)]
 pub mod __rt {
+    /// Link-time SDK site descriptor emitted by literal-label SDK macro calls in
+    /// native Patina builds. Embedders enumerate the `patina_sites` linker
+    /// section before the guest runs, so never-reached sites can still appear in
+    /// runtime-joined reports without constructors or external dependencies.
+    #[repr(C)]
+    pub struct StaticSiteDescriptor {
+        pub label_ptr: *const u8,
+        pub label_len: usize,
+        pub site_ptr: *const u8,
+        pub site_len: usize,
+        pub kind: u8,
+        pub _reserved: [u8; 7],
+    }
+
+    // SAFETY: descriptors point at immutable string literals and are never
+    // mutated; sharing them between threads is safe.
+    unsafe impl Sync for StaticSiteDescriptor {}
+
+    impl StaticSiteDescriptor {
+        pub const fn new(label: &'static str, site: &'static str, kind: u8) -> Self {
+            Self {
+                label_ptr: label.as_ptr(),
+                label_len: label.len(),
+                site_ptr: site.as_ptr(),
+                site_len: site.len(),
+                kind,
+                _reserved: [0; 7],
+            }
+        }
+    }
+
+    pub const STATIC_SITE_KIND_FAULT: u8 = 1;
+    pub const STATIC_SITE_KIND_DELAY: u8 = 2;
+    pub const STATIC_SITE_KIND_KNOB: u8 = 3;
+    pub const STATIC_SITE_KIND_ALWAYS: u8 = 4;
+    pub const STATIC_SITE_KIND_SOMETIMES: u8 = 5;
+    pub const STATIC_SITE_KIND_REACHABLE: u8 = 6;
+
+    pub const WASM_STATIC_SITE_RECORD_HEADER_LEN: usize = 14;
+
+    pub const fn wasm_static_site_len(label: &str, site: &str) -> usize {
+        WASM_STATIC_SITE_RECORD_HEADER_LEN + label.len() + site.len()
+    }
+
+    /// Encode one WASM `patina_sites` custom-section record. The wasm target
+    /// rejects custom-section statics with relocations, so wasm descriptors are
+    /// self-contained bytes rather than native pointer records.
+    pub const fn encode_wasm_static_site<const N: usize>(
+        kind: u8,
+        label: &str,
+        site: &str,
+    ) -> [u8; N] {
+        let label_bytes = label.as_bytes();
+        let site_bytes = site.as_bytes();
+        let label_len = label_bytes.len() as u32;
+        let site_len = site_bytes.len() as u32;
+        let mut out = [0_u8; N];
+        out[0] = b'P';
+        out[1] = b'T';
+        out[2] = b'S';
+        out[3] = b'1';
+        out[4] = kind;
+        out[5] = 0;
+        out[6] = (label_len & 0xff) as u8;
+        out[7] = ((label_len >> 8) & 0xff) as u8;
+        out[8] = ((label_len >> 16) & 0xff) as u8;
+        out[9] = ((label_len >> 24) & 0xff) as u8;
+        out[10] = (site_len & 0xff) as u8;
+        out[11] = ((site_len >> 8) & 0xff) as u8;
+        out[12] = ((site_len >> 16) & 0xff) as u8;
+        out[13] = ((site_len >> 24) & 0xff) as u8;
+
+        let mut cursor = WASM_STATIC_SITE_RECORD_HEADER_LEN;
+        let mut i = 0;
+        while i < label_bytes.len() {
+            out[cursor] = label_bytes[i];
+            cursor += 1;
+            i += 1;
+        }
+        i = 0;
+        while i < site_bytes.len() {
+            out[cursor] = site_bytes[i];
+            cursor += 1;
+            i += 1;
+        }
+        out
+    }
+
     /// Runtime data emitted by `#[patina_dst::test]`.
     #[cfg(feature = "macros")]
     #[doc(hidden)]
@@ -877,6 +970,30 @@ mod fallback {
     }
 }
 
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __patina_static_site {
+    ($label:literal, $site:expr, $kind:expr) => {
+        #[allow(unexpected_cfgs)]
+        const _: () = {
+            #[cfg(all(patina, target_arch = "wasm32"))]
+            #[used]
+            #[unsafe(link_section = "patina_sites")]
+            static __PATINA_SITE: [u8; { $crate::__rt::wasm_static_site_len($label, $site) }] =
+                $crate::__rt::encode_wasm_static_site::<
+                    { $crate::__rt::wasm_static_site_len($label, $site) },
+                >($kind, $label, $site);
+
+            #[cfg(all(patina, not(target_arch = "wasm32")))]
+            #[used]
+            #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__patina_sites"))]
+            #[cfg_attr(not(target_os = "macos"), unsafe(link_section = "patina_sites"))]
+            static __PATINA_SITE: $crate::__rt::StaticSiteDescriptor =
+                $crate::__rt::StaticSiteDescriptor::new($label, $site, $kind);
+        };
+    };
+}
+
 /// Trigger a probabilistic fault at a labeled site. Under Patina an activated
 /// site fires deterministically from the run seed; outside Patina always `false`.
 ///
@@ -899,6 +1016,18 @@ mod fallback {
 /// ```
 #[macro_export]
 macro_rules! buggify {
+    ($label:literal) => {{
+        $crate::__patina_static_site!(
+            $label,
+            ::core::concat!(::core::file!(), ":", ::core::line!()),
+            $crate::__rt::STATIC_SITE_KIND_FAULT
+        );
+        $crate::__rt::buggify(
+            $label,
+            ::core::concat!(::core::file!(), ":", ::core::line!()),
+            -1,
+        )
+    }};
     ($label:expr) => {
         $crate::__rt::buggify(
             $label,
@@ -917,6 +1046,18 @@ macro_rules! buggify {
 /// ```
 #[macro_export]
 macro_rules! buggify_with_prob {
+    ($label:literal, $probability:expr) => {{
+        $crate::__patina_static_site!(
+            $label,
+            ::core::concat!(::core::file!(), ":", ::core::line!()),
+            $crate::__rt::STATIC_SITE_KIND_FAULT
+        );
+        $crate::__rt::buggify(
+            $label,
+            ::core::concat!(::core::file!(), ":", ::core::line!()),
+            $crate::__rt::prob_to_permille($probability),
+        )
+    }};
     ($label:expr, $probability:expr) => {
         $crate::__rt::buggify(
             $label,
@@ -939,6 +1080,17 @@ macro_rules! buggify_with_prob {
 /// ```
 #[macro_export]
 macro_rules! buggify_delay {
+    ($label:literal) => {{
+        $crate::__patina_static_site!(
+            $label,
+            ::core::concat!(::core::file!(), ":", ::core::line!()),
+            $crate::__rt::STATIC_SITE_KIND_DELAY
+        );
+        $crate::__rt::buggify_delay(
+            $label,
+            ::core::concat!(::core::file!(), ":", ::core::line!()),
+        )
+    }};
     ($label:expr) => {
         $crate::__rt::buggify_delay(
             $label,
@@ -960,6 +1112,20 @@ macro_rules! buggify_delay {
 /// ```
 #[macro_export]
 macro_rules! buggify_knob {
+    ($label:literal, $default:expr, $lo:expr, $hi:expr) => {{
+        $crate::__patina_static_site!(
+            $label,
+            ::core::concat!(::core::file!(), ":", ::core::line!()),
+            $crate::__rt::STATIC_SITE_KIND_KNOB
+        );
+        $crate::__rt::buggify_knob(
+            $label,
+            ::core::concat!(::core::file!(), ":", ::core::line!()),
+            $default,
+            $lo,
+            $hi,
+        )
+    }};
     ($label:expr, $default:expr, $lo:expr, $hi:expr) => {
         $crate::__rt::buggify_knob(
             $label,
@@ -983,6 +1149,18 @@ macro_rules! buggify_knob {
 /// ```
 #[macro_export]
 macro_rules! always {
+    ($condition:expr, $label:literal) => {{
+        $crate::__patina_static_site!(
+            $label,
+            ::core::concat!(::core::file!(), ":", ::core::line!()),
+            $crate::__rt::STATIC_SITE_KIND_ALWAYS
+        );
+        $crate::__rt::always(
+            $condition,
+            $label,
+            ::core::concat!(::core::file!(), ":", ::core::line!()),
+        )
+    }};
     ($condition:expr, $label:expr) => {
         $crate::__rt::always(
             $condition,
@@ -1010,6 +1188,18 @@ macro_rules! always {
 /// ```
 #[macro_export]
 macro_rules! sometimes {
+    ($condition:expr, $label:literal) => {{
+        $crate::__patina_static_site!(
+            $label,
+            ::core::concat!(::core::file!(), ":", ::core::line!()),
+            $crate::__rt::STATIC_SITE_KIND_SOMETIMES
+        );
+        $crate::__rt::sometimes(
+            $condition,
+            $label,
+            ::core::concat!(::core::file!(), ":", ::core::line!()),
+        )
+    }};
     ($condition:expr, $label:expr) => {
         $crate::__rt::sometimes(
             $condition,
@@ -1029,6 +1219,17 @@ macro_rules! sometimes {
 /// ```
 #[macro_export]
 macro_rules! reachable {
+    ($label:literal) => {{
+        $crate::__patina_static_site!(
+            $label,
+            ::core::concat!(::core::file!(), ":", ::core::line!()),
+            $crate::__rt::STATIC_SITE_KIND_REACHABLE
+        );
+        $crate::__rt::reachable(
+            $label,
+            ::core::concat!(::core::file!(), ":", ::core::line!()),
+        )
+    }};
     ($label:expr) => {
         $crate::__rt::reachable(
             $label,

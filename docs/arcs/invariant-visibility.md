@@ -1,6 +1,6 @@
 # Arc: Invariant visibility
 
-**Status:** Waves 1-4 implemented (static `cargo patina sites` inventory, runtime report join, campaign `<out>/sites.json` feed, `.patina/config.toml` groups/defaults); Wave 5 remains design.
+**Status:** Waves 1-5 implemented (static `cargo patina sites` inventory, runtime report join, campaign `<out>/sites.json` feed, `.patina/config.toml` groups/defaults, SDK link-time site table).
 **Depends on:** nothing (wave 1 is standalone). **Feeds:** the coverage-depth arc (shared rollup),
 the sometimes-gate arc (runtime exercised data).
 
@@ -346,16 +346,15 @@ runtime-touching waves and at the arc boundary.
 - **Wave 4 — `.patina/` config. Implemented.** Groups/tags in rollups, `[defaults.*]`,
   `.gitignore` generation, `--no-config`, env/config precedence, replay exclusion, campaign child
   config/env scrubbing, gate 6. CLI-only → fast tier, then the **arc-boundary full battery**.
-- **Wave 5 — static site enumeration (phase 2, scheduled here — not a separate future
-  arc).** Owned by this arc per user directive (2026-07-30: phase-2 items are tackled as
-  part of their arcs, never parked for a later prompt). A link-time site table
-  (`inventory`/`linkme`-style registration in the SDK macros, surfaced by both embedders)
-  gives the campaign and the `sites` verb the FULL site universe up front, making
-  never-reached `sometimes!`/`reachable!` sites visible as `registered_gens=0` rows — which
-  is the moment the sometimes-gate arc's uniform gate starts biting on `reachable!` with
-  zero redesign (its schema and formula already absorb it). Runtime + SDK touching → full
-  battery + Linux gates; RED proof = a planted never-called `reachable!` visible in the
-  static table and failing the gate.
+- **Wave 5 — static site enumeration (phase 2, implemented).** Owned by this arc per user
+  directive (2026-07-30: phase-2 items are tackled as part of their arcs, never parked for a
+  later prompt). A dependency-free link-time site table in the SDK macros (native linker
+  section plus WASM custom-section bytes, surfaced by both embedders) gives the campaign and
+  the `sites` verb the literal-label SDK site universe up front. Never-reached
+  `sometimes!`/`reachable!` sites now appear as `registered_gens=0` rows, so the
+  sometimes-gate arc's uniform gate bites on `reachable!` with zero schema redesign.
+  Runtime + SDK touching → full battery + Linux gates; RED proof = a planted never-called
+  `reachable!` visible in the static table and failing the gate.
 
 Coverage-depth adopts the rollup module in its own arc once wave 1 lands.
 

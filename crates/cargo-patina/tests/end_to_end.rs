@@ -4199,6 +4199,9 @@ fn create_wasi_buggify_package(path: &Path) {
     let violate = std::env::args().nth(1).as_deref() == Some("violate");
     patina_dst::reachable!("guest-startup");
     patina_dst::lifecycle::setup_complete();
+    if std::env::args().any(|arg| arg == "never") {
+        patina_dst::reachable!("never-wasi-branch");
+    }
     let iterations = patina_dst::buggify_knob!("iters", 6, 4, 12);
     let mut digest: u64 = 0;
     for _ in 0..iterations {
@@ -4309,6 +4312,7 @@ wasm32-wasip1 target not installed"
         &String::from_utf8_lossy(&ran.stderr),
         &[
             "guest-startup",
+            "never-wasi-branch",
             "iters",
             "inject",
             "even-draw",
@@ -8076,8 +8080,113 @@ fn assert_sites_join_for_sdk_report(package: &Path, stderr: &str, expected_label
     }
 }
 
+// A guest whose `reachable!` site is behind an argv branch the campaign never
+// takes: invisible to lazy registration, visible through the link-time table.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const BUGGIFY_NEVER_REACHABLE_MAIN: &str = r#"
+fn main() {
+    patina_dst::lifecycle::setup_complete();
+    if std::env::args().any(|arg| arg == "--take-never-branch") {
+        patina_dst::reachable!("never-called-reachable");
+    }
+    println!("guest-finished");
+}
+"#;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_static_site_table_surfaces_never_called_reachable_in_campaign() {
+    let directory = tempdir().unwrap();
+    let pkg = directory.path().join("never");
+    write_sdk_fixture(&pkg, BUGGIFY_NEVER_REACHABLE_MAIN);
+    let workspace = native_workspace();
+    let bin = directory.path().join("buggify-never-reachable");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            pkg.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    let out_dir = directory.path().join("campaign");
+    let campaign = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "campaign",
+            bin.to_str().unwrap(),
+            "--gens",
+            "1",
+            "--out-dir",
+            out_dir.to_str().unwrap(),
+        ],
+    );
+    let campaign_stdout = String::from_utf8_lossy(&campaign.stdout);
+    assert_eq!(
+        campaign.status.code(),
+        Some(1),
+        "never-called reachable! must fail the campaign coverage gate\nstdout:\n{campaign_stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&campaign.stderr)
+    );
+    assert!(
+        campaign_stdout.contains("UNMET reachable 'never-called-reachable'")
+            && campaign_stdout.contains("registered_gens=0"),
+        "campaign did not surface the never-called reachable site:\n{campaign_stdout}"
+    );
+    let sites_path = out_dir.join("sites.json");
+    let sites_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sites_path).unwrap()).unwrap();
+    let row = sites_json["sites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|site| site["label"].as_str() == Some("never-called-reachable"))
+        .unwrap_or_else(|| panic!("missing never-called reachable in sites.json: {sites_json:#}"));
+    assert_eq!(row["kind"], "reachable");
+    assert_eq!(row["registered_gens"], 0);
+    assert_eq!(row["first_registered_gen"], serde_json::Value::Null);
+
+    let joined = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        &pkg,
+        &[
+            "sites",
+            "--no-cache",
+            "--exercised",
+            out_dir.to_str().unwrap(),
+            "--site",
+            "never-called-reachable",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(
+        joined.status.success(),
+        "sites --exercised campaign out-dir failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&joined.stdout),
+        String::from_utf8_lossy(&joined.stderr)
+    );
+    let joined_json: serde_json::Value = serde_json::from_slice(&joined.stdout).unwrap();
+    assert_eq!(
+        joined_json["unmatched_runtime_labels"], 0,
+        "{joined_json:#}"
+    );
+    assert_eq!(
+        joined_json["totals"]["exercised"]["never_exercised"], 1,
+        "{joined_json:#}"
+    );
+    assert_eq!(
+        joined_json["sites"][0]["exercised"]["registered_gens"], 0,
+        "{joined_json:#}"
+    );
+}
+
 // A guest that reuses the same label at two different call sites: a fatal
-// duplicate, aborting with the marker.
+// duplicate, aborting with the marker. With literal labels the link-time site
+// table catches it at install, before the first evaluation.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const BUGGIFY_DUP_MAIN: &str = r#"
 fn main() {

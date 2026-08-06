@@ -66,10 +66,11 @@ cluster so the fixes have citable symptom records.
   (`patina.campaign.sites/v1`): top-level `schema` / `generations_observed`
   (the resume watermark campaign-steering Stage 3 consumes) / sorted `sites`;
   per-site label, kind, `@file:line` site, registered/satisfied generation
-  tallies, evals/fires, first-satisfaction seed. `reachable!` participates in
-  tallies but never-reached sites stay invisible until invariant Wave 5's
-  static enumeration (lazy registration). Campaign resume at a nonzero cursor
-  refuses a missing/mismatched store rather than silently dropping coverage.
+  tallies, evals/fires, first-satisfaction seed. Literal-label SDK macro sites
+  also enter through invariant Wave 5's link-time table; never-reached
+  `sometimes!`/`reachable!` rows remain in this schema with `registered_gens=0`.
+  Campaign resume at a nonzero cursor refuses a missing/mismatched store rather
+  than silently dropping coverage.
 - **2026-08-06 — trace `events` JSONL exception.** Every verb's `--format
   json` emits one patina.result/v1 envelope except `trace events`, which
   streams patina.trace.events/v1 JSON Lines (a 1M-event envelope would be

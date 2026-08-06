@@ -4,9 +4,11 @@
 //! by `patina-dst-runtime::emit_sdk_report`. The format is intentionally strict:
 //! Wave 2 adds a required trailing `|@<file:line>` site identity to every
 //! `site=` token, and old rows without it are malformed rather than accepted as
-//! a compatibility alias. Campaigns fold the same rows into `<out>/sites.json`
-//! (`patina.campaign.sites/v1`), which `cargo patina sites --exercised` also
-//! consumes.
+//! a compatibility alias. Wave 5 adds `declared_site=<label>|<kind>|@<file:line>`
+//! rows from the SDK link-time table; these fold into `<out>/sites.json` with
+//! `registered_gens=0` until a runtime `site=` row evaluates them. Campaigns fold
+//! the same rows into `<out>/sites.json` (`patina.campaign.sites/v1`), which
+//! `cargo patina sites --exercised` also consumes.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -23,7 +25,15 @@ const PREFIX: &str = "PATINA_SDK_REPORT ";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SdkReport {
     pub(crate) enabled: Option<bool>,
+    pub(crate) declared_sites: Vec<SdkDeclaredSiteReport>,
     pub(crate) sites: Vec<SdkSiteReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SdkDeclaredSiteReport {
+    pub(crate) label: String,
+    pub(crate) kind: String,
+    pub(crate) site: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +94,43 @@ impl ExercisedSite {
             site: site.site.clone(),
             ..Self::default()
         }
+    }
+
+    fn declared(site: &SdkDeclaredSiteReport) -> Self {
+        Self {
+            label: site.label.clone(),
+            kind: site.kind.clone(),
+            site: site.site.clone(),
+            ..Self::default()
+        }
+    }
+
+    fn reconcile_declaration(&mut self, site: &SdkDeclaredSiteReport) -> Result<(), String> {
+        if self.label.is_empty() {
+            self.label = site.label.clone();
+        } else if self.label != site.label {
+            return Err(format!(
+                "SDK report declaration label mismatch in aggregate: have {:?}, got {:?}",
+                self.label, site.label
+            ));
+        }
+        if self.kind.is_empty() {
+            self.kind = site.kind.clone();
+        } else if self.kind != site.kind {
+            return Err(format!(
+                "SDK report label {:?} declaration changed kind from {:?} to {:?}",
+                site.label, self.kind, site.kind
+            ));
+        }
+        if self.site.is_empty() {
+            self.site = site.site.clone();
+        } else if self.site != site.site {
+            return Err(format!(
+                "SDK report label {:?} declaration changed site identity from {:?} to {:?}",
+                site.label, self.site, site.site
+            ));
+        }
+        Ok(())
     }
 
     fn add(
@@ -192,6 +239,12 @@ impl CoverageTally {
 
     fn add_report(&mut self, generation: u64, seed: Option<u64>, line: &str) -> Result<(), String> {
         let report = parse_report_line(line)?;
+        for site in report.declared_sites {
+            self.sites
+                .entry(site.label.clone())
+                .or_insert_with(|| ExercisedSite::declared(&site))
+                .reconcile_declaration(&site)?;
+        }
         for site in report.sites {
             self.sites
                 .entry(site.label.clone())
@@ -247,10 +300,31 @@ fn validate_site_record(site: &ExercisedSite) -> Result<(), String> {
     parse_kind(&site.kind)?;
     required_text("site identity", &site.site)?;
     if site.registered_gens == 0 {
-        return Err(format!(
-            "campaign sites label {:?} has registered_gens=0; absent sites must be omitted until static enumeration lands",
-            site.label
-        ));
+        if site.first_registered_gen.is_some() || site.last_registered_gen.is_some() {
+            return Err(format!(
+                "campaign sites label {:?} has registered_gens=0 but non-null registration bounds",
+                site.label
+            ));
+        }
+        if site.satisfied_gens != 0
+            || site.runs_active != 0
+            || site.evals != 0
+            || site.fires != 0
+            || site.runs_fired != 0
+            || site.sometimes_satisfied_runs != 0
+            || site.reachable_runs != 0
+            || site.always_violated_runs != 0
+            || site.first_satisfied_gen.is_some()
+            || site.first_satisfied_seed.is_some()
+            || site.knob_min.is_some()
+            || site.knob_max.is_some()
+        {
+            return Err(format!(
+                "campaign sites label {:?} has registered_gens=0 but nonzero exercised counters",
+                site.label
+            ));
+        }
+        return Ok(());
     }
     let first = site.first_registered_gen.ok_or_else(|| {
         format!(
@@ -393,15 +467,42 @@ pub(crate) fn parse_report_line(line: &str) -> Result<SdkReport, String> {
         .strip_prefix(PREFIX)
         .ok_or_else(|| "SDK report line must start with PATINA_SDK_REPORT".to_string())?;
     let mut enabled = None;
+    let mut declared_sites = Vec::new();
     let mut sites = Vec::new();
     for token in rest.split_whitespace() {
-        if let Some(body) = token.strip_prefix("site=") {
+        if let Some(body) = token.strip_prefix("declared_site=") {
+            declared_sites.push(parse_declared_site_token(body)?);
+        } else if let Some(body) = token.strip_prefix("site=") {
             sites.push(parse_site_token(body)?);
         } else if let Some(value) = token.strip_prefix("enabled=") {
             enabled = Some(parse_header_bool("enabled", value)?);
         }
     }
-    Ok(SdkReport { enabled, sites })
+    Ok(SdkReport {
+        enabled,
+        declared_sites,
+        sites,
+    })
+}
+
+fn parse_declared_site_token(body: &str) -> Result<SdkDeclaredSiteReport, String> {
+    let parts = body.split('|').collect::<Vec<_>>();
+    if parts.len() != 3 {
+        return Err(format!(
+            "malformed SDK declared-site token {body:?}: expected <label>|<kind>|@<file:line>"
+        ));
+    }
+    let label = required_text("declared label", parts[0])?;
+    let kind = parse_kind(parts[1])?.to_string();
+    let site = parts[2]
+        .strip_prefix('@')
+        .ok_or_else(|| format!("declared site identity field must start with @ in {body:?}"))?;
+    let site = required_text("declared site identity", site)?;
+    Ok(SdkDeclaredSiteReport {
+        label: label.to_string(),
+        kind,
+        site: site.to_string(),
+    })
 }
 
 fn parse_site_token(body: &str) -> Result<SdkSiteReport, String> {
@@ -507,6 +608,33 @@ mod tests {
         assert_eq!(parsed.sites[0].site, "src/main.rs:9");
         assert_eq!(parsed.sites[0].fires, 2);
         assert_eq!(parsed.sites[1].knob, Some(42));
+    }
+
+    #[test]
+    fn declared_sites_round_trip_as_zero_registered_rows() {
+        let line = "PATINA_SDK_REPORT enabled=1 sites_declared=2 \
+             declared_site=never|reachable|@src/main.rs:9 \
+             declared_site=maybe|sometimes|@src/main.rs:10 \
+             site=maybe|sometimes|a0|e1|f0|r1|s0|v0|k-|@src/main.rs:10";
+        let parsed = parse_report_line(line).unwrap();
+        assert_eq!(parsed.declared_sites.len(), 2);
+        assert_eq!(parsed.declared_sites[0].label, "never");
+        assert_eq!(parsed.sites.len(), 1);
+
+        let mut tally = CoverageTally::default();
+        tally.observe_generation(0, 7, line).unwrap();
+        let never = &tally.sites["never"];
+        assert_eq!(never.kind, "reachable");
+        assert_eq!(never.registered_gens, 0);
+        assert_eq!(never.reachable_runs, 0);
+        assert_eq!(never.first_registered_gen, None);
+        let maybe = &tally.sites["maybe"];
+        assert_eq!(maybe.registered_gens, 1);
+        assert_eq!(maybe.evals, 1);
+
+        let json = tally.to_json();
+        let loaded = CoverageTally::from_json(&json).unwrap();
+        assert_eq!(loaded, tally);
     }
 
     #[test]

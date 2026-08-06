@@ -3271,6 +3271,15 @@ fn selftest() -> Result<i32, CliError> {
         CoverageGate::Fail,
         1,
     );
+    let declared_reachable =
+        declared_reachable_fixture().expect("declared reachable fixture parses");
+    coverage_check(
+        "declared-reachable-unreached-fails",
+        &declared_reachable,
+        None,
+        CoverageGate::Fail,
+        1,
+    );
     let mut malformed = CoverageTally::default();
     match malformed.observe_generation(
         0,
@@ -3324,6 +3333,16 @@ fn coverage_fixture(satisfied: bool) -> Result<CoverageTally, String> {
         1,
         101,
         "PATINA_SDK_REPORT enabled=1 site=faulty|fault|a1|e1|f1|r1|s0|v0|k-|@src/main.rs:11",
+    )?;
+    Ok(tally)
+}
+
+fn declared_reachable_fixture() -> Result<CoverageTally, String> {
+    let mut tally = CoverageTally::default();
+    tally.observe_generation(
+        0,
+        200,
+        "PATINA_SDK_REPORT enabled=1 sites_declared=1 declared_site=never|reachable|@src/main.rs:12",
     )?;
     Ok(tally)
 }

@@ -202,11 +202,13 @@ The `patina-dst` crate is dependency-light and every macro is a no-op outside a
 Patina build — adopters ship it unconditionally, with no `cfg(patina)` in their
 code. Enable at run time with `cargo patina run --buggify`; decisions are pure
 functions of the seed, and a `PATINA_SDK_REPORT` line proves sites actually
-fired (no vacuous "all clean"). Each row carries `@file:line`, so
-`cargo patina sites --exercised <stderr-file>` can join a run back to the static
-inventory. `cargo patina campaign` also folds every generation into
-`<out-dir>/sites.json` (`patina.campaign.sites/v1`) and fails by default when a
-registered `sometimes!` oracle is never satisfied; use
+fired (no vacuous "all clean"). Literal-label SDK macro calls also declare a
+link-time site table under Patina, so never-reached `sometimes!`/`reachable!`
+oracles appear in reports with `registered_gens=0`. Each row carries
+`@file:line`, so `cargo patina sites --exercised <stderr-file>` can join a run
+back to the static inventory. `cargo patina campaign` also folds every generation
+into `<out-dir>/sites.json` (`patina.campaign.sites/v1`) and fails by default
+when a `sometimes!`/`reachable!` oracle is never satisfied; use
 `--allow-unmet-sometimes[=MIN_GENS]` only as an explicit waiver. The same store
 loads through `cargo patina sites --exercised <out-dir>`.
 

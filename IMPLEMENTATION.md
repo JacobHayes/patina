@@ -205,11 +205,12 @@ Completed foundations (Milestone A):
    per run, both configurable.
 2. **Site identity and uniqueness.** Labels are explicit strings; a label reused
    at a different call site (`file:line`) is a fatal duplicate that emits a
-   `PATINA_BUGGIFY_DUPLICATE_LABEL` marker and aborts. Registration is lazy at
-   first evaluation — a compile-time inventory (`ctor`/`linkme`) was rejected (it
-   adds a dependency to the dependency-light default and constructor order is not
-   a determinism guarantee), so a never-reached site is invisible within one run;
-   the campaign layer closes this across generations.
+   `PATINA_BUGGIFY_DUPLICATE_LABEL` marker and aborts. Runtime counters still
+   register lazily at first evaluation, but literal-label SDK macro calls also
+   emit a dependency-free link-time table under `cfg(patina)`: native uses a
+   linker section, WASI uses custom-section bytes, and both embedders declare the
+   sites before execution. Declarations do not compute activation or enter trace
+   metadata, but they make never-reached sites visible to reports.
 3. **Damage-control cutoff.** A virtual-time cutoff (default 300 virtual seconds,
    configurable) after which firing stops, checked against the unrecorded
    monotonic clock read.
@@ -235,10 +236,12 @@ Completed foundations (Milestone A):
    import table grows *no* `patina_sdk` reference (proven by wasm inspection in a
    test), so adopters pay nothing.
 6. **`PATINA_SDK_REPORT`** — one machine-parseable stderr line per run:
-   registered/activated/fired counts, cutoff state, and per-site
-   `sometimes`/`reachable` coverage, knob values, and `@file:line` site
-   identities, in the spirit of `PATINA_SCHEDULE_REPORT`. `cargo patina sites
-   --exercised <stderr-file>` joins those rows to the static inventory.
+   declared-site count, registered/activated/fired counts, cutoff state,
+   `declared_site=<label>|<kind>|@<file:line>` rows from the link-time table, and
+   per-evaluated-site `sometimes`/`reachable` coverage, knob values, and
+   `@file:line` identities, in the spirit of `PATINA_SCHEDULE_REPORT`. `cargo
+   patina sites --exercised <stderr-file>` joins those rows to the static
+   inventory.
 7. **`patina_dst::rng()`** bridged to the root seed under Patina (a plainly-seeded
    fallback outside), as the hook for the property-based-testing wave.
 
@@ -505,10 +508,11 @@ surface (`cargo patina campaign`) generalizing the shell campaign machinery.
    artifacts — the `patina.result/v1` family extended). Every generation's
    `PATINA_SDK_REPORT` is folded into `<out-dir>/sites.json` (schema
    `patina.campaign.sites/v1`, with `generations_observed` for continuation
-   watermarks); registered `sometimes!` sites that are never satisfied fail the
-   campaign by default unless `--allow-unmet-sometimes[=MIN_GENS]` explicitly
-   waives the gate. `--selftest` proves every class reachable, the coverage gate
-   classes, malformed-row rejection, and the signature dedup/novelty logic,
+   watermarks); `sometimes!`/`reachable!` oracles that are never satisfied —
+   including link-time-declared rows with `registered_gens=0` — fail the campaign
+   by default unless `--allow-unmet-sometimes[=MIN_GENS]` explicitly waives the
+   gate. `--selftest` proves every class reachable, the coverage gate classes,
+   malformed-row rejection, and the signature dedup/novelty logic,
    mirroring the fuzz-sweep classifier selftest. The existing
    `fuzz-sweep.sh` and `buggify-campaign.sh` are untouched and remain the
    battle-tested reference.

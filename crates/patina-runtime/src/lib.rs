@@ -2386,7 +2386,7 @@ pub enum BuggifyKind {
 }
 
 impl BuggifyKind {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             BuggifyKind::Fault => "fault",
             BuggifyKind::Delay => "delay",
@@ -2394,6 +2394,18 @@ impl BuggifyKind {
             BuggifyKind::Always => "always",
             BuggifyKind::Sometimes => "sometimes",
             BuggifyKind::Reachable => "reachable",
+        }
+    }
+
+    pub const fn from_static_site_kind(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(BuggifyKind::Fault),
+            2 => Some(BuggifyKind::Delay),
+            3 => Some(BuggifyKind::Knob),
+            4 => Some(BuggifyKind::Always),
+            5 => Some(BuggifyKind::Sometimes),
+            6 => Some(BuggifyKind::Reachable),
+            _ => None,
         }
     }
 }
@@ -2413,6 +2425,15 @@ pub enum SiteOutcome {
     /// The label is reused at a different call site: a fatal duplicate. The
     /// embedder emits the `PATINA_BUGGIFY_DUPLICATE_LABEL` marker and aborts.
     DuplicateLabel,
+}
+
+/// One link-time declared cooperative-SUT site, keyed by its unique explicit
+/// label. Declarations come from SDK macro linker sections and do not imply that
+/// the site was evaluated in this run.
+#[derive(Clone, Debug)]
+struct BuggifyDeclaredSite {
+    site: String,
+    kind: BuggifyKind,
 }
 
 /// One registered cooperative-SUT site, keyed by its unique explicit label.
@@ -2450,9 +2471,20 @@ pub struct BuggifyDiagnostics {
     pub cutoff_suppressed: u64,
     pub after_setup: bool,
     pub setup_complete: bool,
+    /// Link-time declared SDK sites in label order. These rows describe the full
+    /// literal-label site universe and do not imply per-run evaluation.
+    pub declared_sites: Vec<BuggifyDeclaredSiteReport>,
     /// Per-site rows in label order: (label, site, kind, active, evals, fires,
     /// reachable, sometimes_satisfied, always_violated, knob).
     pub sites: Vec<BuggifySiteReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuggifyDeclaredSiteReport {
+    pub label: String,
+    /// The `file:line` identity captured by the SDK macro.
+    pub site: String,
+    pub kind: BuggifyKind,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2481,6 +2513,7 @@ struct Buggify {
     /// docs on the causal limitation); it is reported and, for a guest that
     /// places its workload sites after the call, marks the setup boundary.
     setup_complete: bool,
+    declared_sites: BTreeMap<String, BuggifyDeclaredSite>,
     sites: BTreeMap<String, BuggifySite>,
     rng: SplitMix64,
     cutoff_suppressed: u64,
@@ -2494,6 +2527,7 @@ impl Buggify {
             config,
             seed,
             setup_complete: false,
+            declared_sites: BTreeMap::new(),
             sites: BTreeMap::new(),
             rng: SplitMix64::new(buggify_prf(&[seed, buggify_domain::RNG])),
             cutoff_suppressed: 0,
@@ -2508,14 +2542,67 @@ impl Buggify {
             < u64::from(self.config.activation_permille)
     }
 
+    /// Declare a literal-label site discovered from the SDK's link-time table.
+    /// This makes a site visible to reports before it is ever evaluated. It does
+    /// not compute activation or firing decisions, so unchanged guests keep the
+    /// same replay/fingerprint behavior.
+    ///
+    /// A label declared at two different call sites (or for two different kinds)
+    /// is the same fatal duplicate the evaluation path rejects, returned as
+    /// [`SiteOutcome::DuplicateLabel`] so the embedder emits the one named
+    /// `PATINA_BUGGIFY_DUPLICATE_LABEL` marker. `Err` is reserved for a malformed
+    /// declaration (empty label or missing `file:line`).
+    fn declare(
+        &mut self,
+        label: &str,
+        site: &str,
+        kind: BuggifyKind,
+    ) -> Result<SiteOutcome, String> {
+        if label.is_empty() {
+            return Err("static SDK site label must not be empty".to_string());
+        }
+        if site.is_empty() {
+            return Err(format!(
+                "static SDK site {label:?} must carry a file:line identity"
+            ));
+        }
+        match self.declared_sites.get(label) {
+            Some(existing) if existing.site != site || existing.kind != kind => {
+                return Ok(SiteOutcome::DuplicateLabel);
+            }
+            Some(_) => return Ok(SiteOutcome::Ok),
+            None => {}
+        }
+        if let Some(existing) = self.sites.get(label) {
+            if existing.site != site || existing.kind != kind {
+                return Ok(SiteOutcome::DuplicateLabel);
+            }
+        }
+        self.declared_sites.insert(
+            label.to_string(),
+            BuggifyDeclaredSite {
+                site: site.to_string(),
+                kind,
+            },
+        );
+        Ok(SiteOutcome::Ok)
+    }
+
     /// Register (or revisit) a site under `label`, returning its stable label
-    /// hash. A label reused at a different call `site` is a fatal duplicate
-    /// (returned as `Err(existing_site)`). On first registration the activation
-    /// decision is computed once and frozen.
+    /// hash. A label reused at a different call `site` (or for a different SDK
+    /// kind) is a fatal duplicate (returned as `Err(existing_site)`). On first
+    /// registration the activation decision is computed once and frozen.
     fn register(&mut self, label: &str, site: &str, kind: BuggifyKind) -> Result<u64, String> {
         let hash = label_hash(label);
+        if let Some(declared) = self.declared_sites.get(label) {
+            if declared.site != site || declared.kind != kind {
+                return Err(declared.site.clone());
+            }
+        }
         match self.sites.get(label) {
-            Some(existing) if existing.site != site => return Err(existing.site.clone()),
+            Some(existing) if existing.site != site || existing.kind != kind => {
+                return Err(existing.site.clone());
+            }
             Some(_) => {}
             None => {
                 let active = self.label_is_active(hash);
@@ -2547,6 +2634,14 @@ impl Buggify {
     }
 
     fn diagnostics(&self, cutoff_reached_now: bool) -> BuggifyDiagnostics {
+        let mut declared_sites = Vec::with_capacity(self.declared_sites.len());
+        for (label, site) in &self.declared_sites {
+            declared_sites.push(BuggifyDeclaredSiteReport {
+                label: label.clone(),
+                site: site.site.clone(),
+                kind: site.kind,
+            });
+        }
         let mut sites = Vec::with_capacity(self.sites.len());
         let mut activated = 0_u64;
         let mut firings = 0_u64;
@@ -2580,6 +2675,7 @@ impl Buggify {
             cutoff_suppressed: self.cutoff_suppressed,
             after_setup: self.config.after_setup,
             setup_complete: self.setup_complete,
+            declared_sites,
             sites,
         }
     }
@@ -2757,6 +2853,25 @@ impl Context {
     /// Whether cooperative-SUT fault injection is enabled this run.
     pub const fn buggify_enabled(&self) -> bool {
         self.buggify.config.enabled
+    }
+
+    /// Declare one SDK site discovered from a link-time site table. Declarations
+    /// make never-reached sites visible in diagnostics but do not evaluate the
+    /// site, compute activation, advance counters, or enter the trace.
+    ///
+    /// Returns [`SiteOutcome::DuplicateLabel`] when the label is already bound to
+    /// a different call site or kind — the embedder emits the same
+    /// `PATINA_BUGGIFY_DUPLICATE_LABEL` marker the evaluation path uses. `Err`
+    /// means the declaration itself is malformed.
+    pub fn declare_static_site(
+        &mut self,
+        label: &str,
+        site: &str,
+        kind: BuggifyKind,
+    ) -> Result<SiteOutcome, RuntimeError> {
+        self.buggify.declare(label, site, kind).map_err(|error| {
+            RuntimeError::Config(format!("invalid static SDK site declaration: {error}"))
+        })
     }
 
     /// Evaluate a `buggify!` / `buggify_with_prob!` site. `prob_permille`
@@ -5242,10 +5357,12 @@ subset or the interval window.",
 /// Emit the machine-readable `PATINA_SDK_REPORT` line for a run that registered
 /// any cooperative-SUT sites (or enabled buggify). One line, same spirit as
 /// `PATINA_SCHEDULE_REPORT`: a campaign parses it to accumulate per-site coverage
-/// across generations. Suppressed by a false-y [`ENV_SDK_REPORT`]. Per-site token
-/// is `site=<label>|<kind>|a<0|1>|e<evals>|f<fires>|r<0|1>|s<0|1>|v<0|1>|k<knob|->|@<file:line>`.
+/// across generations. Suppressed by a false-y [`ENV_SDK_REPORT`]. Link-time
+/// declarations use `declared_site=<label>|<kind>|@<file:line>` and do not imply
+/// evaluation. Per-evaluated-site token is
+/// `site=<label>|<kind>|a<0|1>|e<evals>|f<fires>|r<0|1>|s<0|1>|v<0|1>|k<knob|->|@<file:line>`.
 fn emit_sdk_report(diag: &BuggifyDiagnostics) {
-    if !diag.enabled && diag.sites_registered == 0 {
+    if !diag.enabled && diag.sites_registered == 0 && diag.declared_sites.is_empty() {
         return;
     }
     if let Ok(value) = env::var(ENV_SDK_REPORT) {
@@ -5258,13 +5375,14 @@ fn emit_sdk_report(diag: &BuggifyDiagnostics) {
     }
     let mut line = format!(
         "PATINA_SDK_REPORT enabled={} fire_permille={} activation_permille={} cutoff_nanos={} \
-cutoff_reached={} sites_registered={} sites_activated={} total_firings={} cutoff_suppressed={} \
-after_setup={} setup_complete={}",
+cutoff_reached={} sites_declared={} sites_registered={} sites_activated={} total_firings={} \
+cutoff_suppressed={} after_setup={} setup_complete={}",
         u8::from(diag.enabled),
         diag.fire_permille,
         diag.activation_permille,
         diag.cutoff_nanos,
         u8::from(diag.cutoff_reached),
+        diag.declared_sites.len(),
         diag.sites_registered,
         diag.sites_activated,
         diag.total_firings,
@@ -5272,6 +5390,14 @@ after_setup={} setup_complete={}",
         u8::from(diag.after_setup),
         u8::from(diag.setup_complete),
     );
+    for site in &diag.declared_sites {
+        line.push_str(&format!(
+            " declared_site={}|{}|@{}",
+            site.label,
+            site.kind.as_str(),
+            site.site,
+        ));
+    }
     for site in &diag.sites {
         let knob = site
             .knob
@@ -5647,6 +5773,59 @@ mod tests {
             context.always_check("dup", "c.rs:3", true).unwrap(),
             SiteOutcome::DuplicateLabel
         );
+    }
+
+    #[test]
+    fn static_site_declarations_do_not_register_or_record_decisions() {
+        let mut context = buggify_context(3, BuggifyConfig::default());
+        context
+            .declare_static_site("never", "src/main.rs:9", BuggifyKind::Reachable)
+            .unwrap();
+        let diag = context.buggify_diagnostics();
+        assert!(!diag.enabled);
+        assert_eq!(diag.sites_registered, 0);
+        assert_eq!(diag.declared_sites.len(), 1);
+        assert_eq!(diag.declared_sites[0].label, "never");
+        assert_eq!(diag.declared_sites[0].kind, BuggifyKind::Reachable);
+        assert_eq!(context.buggify.to_record(), None);
+    }
+
+    #[test]
+    fn static_site_declaration_conflict_is_a_duplicate_label_not_a_config_error() {
+        let mut context = buggify_context(3, BuggifyConfig::default());
+        assert_eq!(
+            context
+                .declare_static_site("dup", "src/main.rs:3", BuggifyKind::Fault)
+                .unwrap(),
+            SiteOutcome::Ok
+        );
+        // Re-declaring the identical site (a second link unit, same literal) is
+        // idempotent, not a duplicate.
+        assert_eq!(
+            context
+                .declare_static_site("dup", "src/main.rs:3", BuggifyKind::Fault)
+                .unwrap(),
+            SiteOutcome::Ok
+        );
+        assert_eq!(
+            context
+                .declare_static_site("dup", "src/main.rs:4", BuggifyKind::Fault)
+                .unwrap(),
+            SiteOutcome::DuplicateLabel
+        );
+        assert_eq!(
+            context
+                .declare_static_site("dup", "src/main.rs:3", BuggifyKind::Sometimes)
+                .unwrap(),
+            SiteOutcome::DuplicateLabel
+        );
+        // Malformed declarations stay hard errors, distinct from a duplicate.
+        assert!(
+            context
+                .declare_static_site("empty-site", "", BuggifyKind::Reachable)
+                .is_err()
+        );
+        assert_eq!(context.buggify_diagnostics().declared_sites.len(), 1);
     }
 
     #[test]

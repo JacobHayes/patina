@@ -126,8 +126,9 @@ PY
 
 # Print the labels of `sometimes` sites that were reached during the campaign but
 # never satisfied — the SOMETIMES_UNMET set. Empty output means every reached
-# sometimes-site was satisfied at least once. A `reachable` site that was never
-# reached is the documented never-reached blind spot, NOT reported here.
+# sometimes-site was satisfied at least once. This legacy shell helper tracks the
+# SOMETIMES_UNMET class only; first-class `cargo patina campaign` consumes
+# `declared_site=` rows and gates never-reached `reachable!` sites too.
 campaign_sometimes_unmet() {
   # args: state_file
   [[ -f "$1" ]] || return 0

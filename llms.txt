@@ -71,8 +71,9 @@ with no `--target` -> the Cargo package family (in-process boundary API), except
   traces, SDK site coverage is folded into `<out-dir>/sites.json` (schema
   `patina.campaign.sites/v1`), and native yield-point edge coverage is folded
   into `<out-dir>/coverage/` (schema `patina.coverage.campaign/v1`) with a
-  plateau report controlled by `--plateau-after`. Registered `sometimes!` sites
-  that are never satisfied fail the campaign by default unless explicitly waived.
+  plateau report controlled by `--plateau-after`. Unsatisfied `sometimes!`/
+  `reachable!` oracle sites, including link-time-declared rows with
+  `registered_gens=0`, fail the campaign by default unless explicitly waived.
 - `cargo patina coverage <BINARY> <MAP|CAMPAIGN-OUT-DIR> [--focus CRATE::module] [--top N]`
   Read-only offline symbolization for native yield-point coverage. Resolves
   covmap PCs from the `patina_yield_point` anchor, demangles symbols, rolls edges
@@ -85,8 +86,8 @@ with no `--target` -> the Cargo package family (in-process boundary API), except
   JSON output is schema `patina.sites/v1`; per-file cache is
   `.patina/out/sites-cache.json` unless `--no-cache` is set. `--exercised FILE`
   reads raw `PATINA_SDK_REPORT` line(s); `--exercised OUTDIR` reads a campaign's
-  `OUTDIR/sites.json`. Both join runtime counters by label or dynamic-label
-  file:line.
+  `OUTDIR/sites.json`. Both join runtime counters and link-time declared SDK rows
+  by label or dynamic-label file:line.
 - `cargo patina minimize <TRACE> --output PATH -- <ORACLE>` / `minimize --scenario --seed N -- <ORACLE>`
   Delta-debug a failing trace, or shrink the seed/params that trigger a failure.
 

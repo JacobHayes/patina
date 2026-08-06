@@ -48,8 +48,8 @@ use patina_dst_driver_api::canonicalize_path;
 use patina_dst_fs_crash::CrashFs;
 use patina_dst_fs_mem::{FsImage, MemFs};
 use patina_dst_runtime::{
-    Context, MAX_TRACE_BYTES, RuntimeBuilder, RuntimeConfig, RuntimeError, SiteOutcome,
-    TraceTransport,
+    BuggifyKind, Context, MAX_TRACE_BYTES, RuntimeBuilder, RuntimeConfig, RuntimeError,
+    SiteOutcome, TraceTransport,
 };
 pub use thread::{
     patina_cond_broadcast, patina_cond_destroy, patina_cond_init, patina_cond_signal,
@@ -289,6 +289,119 @@ fn urandom_close(raw_fd: c_int) -> Result<(), c_int> {
 /// cleared exactly once, before `main`; a single-threaded guest's later, legitimate
 /// deterministic calls (e.g. `readlink` in `main`) are therefore unaffected.
 static SHIM_BOOTSTRAP: AtomicBool = AtomicBool::new(true);
+
+#[repr(C)]
+struct StaticSiteDescriptor {
+    label_ptr: *const u8,
+    label_len: usize,
+    site_ptr: *const u8,
+    site_len: usize,
+    kind: u8,
+    _reserved: [u8; 7],
+}
+
+// SAFETY: descriptors point at immutable linker-section data and are never
+// mutated by the shim.
+unsafe impl Sync for StaticSiteDescriptor {}
+
+impl StaticSiteDescriptor {
+    const fn sentinel() -> Self {
+        Self {
+            label_ptr: core::ptr::null(),
+            label_len: 0,
+            site_ptr: core::ptr::null(),
+            site_len: 0,
+            kind: 0,
+            _reserved: [0; 7],
+        }
+    }
+
+    fn is_sentinel(&self) -> bool {
+        self.kind == 0 && self.label_len == 0 && self.site_len == 0
+    }
+}
+
+#[used]
+#[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__patina_sites"))]
+#[cfg_attr(not(target_os = "macos"), unsafe(link_section = "patina_sites"))]
+static PATINA_STATIC_SITE_SENTINEL: StaticSiteDescriptor = StaticSiteDescriptor::sentinel();
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    #[link_name = "\u{1}section$start$__DATA$__patina_sites"]
+    static PATINA_STATIC_SITES_START: StaticSiteDescriptor;
+    #[link_name = "\u{1}section$end$__DATA$__patina_sites"]
+    static PATINA_STATIC_SITES_END: StaticSiteDescriptor;
+}
+
+#[cfg(not(target_os = "macos"))]
+unsafe extern "C" {
+    #[link_name = "__start_patina_sites"]
+    static PATINA_STATIC_SITES_START: StaticSiteDescriptor;
+    #[link_name = "__stop_patina_sites"]
+    static PATINA_STATIC_SITES_END: StaticSiteDescriptor;
+}
+
+fn declare_link_time_sites(context: &mut Context) -> Result<(), RuntimeError> {
+    let start = core::ptr::addr_of!(PATINA_STATIC_SITES_START).cast::<StaticSiteDescriptor>();
+    let end = core::ptr::addr_of!(PATINA_STATIC_SITES_END).cast::<StaticSiteDescriptor>();
+    let start_addr = start as usize;
+    let end_addr = end as usize;
+    let byte_len = end_addr.checked_sub(start_addr).ok_or_else(|| {
+        RuntimeError::Config("Patina static site linker section has invalid bounds".to_string())
+    })?;
+    let record_size = core::mem::size_of::<StaticSiteDescriptor>();
+    if record_size == 0 || byte_len % record_size != 0 {
+        return Err(RuntimeError::Config(format!(
+            "Patina static site linker section size {byte_len} is not a multiple of {record_size}"
+        )));
+    }
+    // SAFETY: the start/end symbols delimit the linker section populated with
+    // `StaticSiteDescriptor` records by the SDK macros plus the sentinel above.
+    let descriptors = unsafe { slice::from_raw_parts(start, byte_len / record_size) };
+    for descriptor in descriptors {
+        if descriptor.is_sentinel() {
+            continue;
+        }
+        let kind = BuggifyKind::from_static_site_kind(descriptor.kind).ok_or_else(|| {
+            RuntimeError::Config(format!(
+                "Patina static site declaration has unknown kind {}",
+                descriptor.kind
+            ))
+        })?;
+        let label = descriptor_text("label", descriptor.label_ptr, descriptor.label_len)?;
+        let site = descriptor_text("site", descriptor.site_ptr, descriptor.site_len)?;
+        if context.declare_static_site(label, site, kind)? == SiteOutcome::DuplicateLabel {
+            abort_with_buggify_marker("PATINA_BUGGIFY_DUPLICATE_LABEL", label);
+        }
+    }
+    Ok(())
+}
+
+fn descriptor_text(
+    field: &str,
+    pointer: *const u8,
+    length: usize,
+) -> Result<&'static str, RuntimeError> {
+    if length == 0 {
+        return Err(RuntimeError::Config(format!(
+            "Patina static site {field} must not be empty"
+        )));
+    }
+    if pointer.is_null() {
+        return Err(RuntimeError::Config(format!(
+            "Patina static site {field} pointer is null"
+        )));
+    }
+    // SAFETY: descriptor pointers come from SDK string literals retained in the
+    // same linked image as the descriptor and therefore live for the process.
+    let bytes = unsafe { slice::from_raw_parts(pointer, length) };
+    std::str::from_utf8(bytes).map_err(|error| {
+        RuntimeError::Config(format!(
+            "Patina static site {field} is not valid UTF-8: {error}"
+        ))
+    })
+}
 
 /// Whether the process is still in the shim-bootstrap window (see
 /// [`SHIM_BOOTSTRAP`]). Read lock-free so the interposers can branch on it on
@@ -2150,10 +2263,14 @@ fn fingerprint_declares_component(fingerprint: &str, component: &str) -> bool {
 }
 
 fn install(context: Result<Context, RuntimeError>) -> c_int {
-    let context = match context {
+    let mut context = match context {
         Ok(context) => context,
         Err(error) => return fail(runtime_errno(&error)),
     };
+    if let Err(error) = declare_link_time_sites(&mut context) {
+        *init_error().lock() = Some(error.to_string());
+        return fail(runtime_errno(&error));
+    }
     let mut guard = slot().lock();
     if guard.is_some() {
         return fail(EALREADY);

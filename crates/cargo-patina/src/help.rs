@@ -1094,11 +1094,12 @@ report (novel/failing generations plus a periodic progress heartbeat, tuned by \
 signatures, per-run detail for novel/failing generations, and pointers to the full \
 on-disk artifacts). Campaigns also write <out-dir>/sites.json (schema \
 patina.campaign.sites/v1), summarize SDK site coverage, and fail by default \
-when a registered `sometimes!` site is never satisfied; \
---allow-unmet-sometimes[=MIN_GENS] reports but waives that gate (unconditionally \
-or only below the observed generation threshold). Lazy registration means a \
-never-reached `reachable!` is invisible until static site enumeration lands. \
-`--selftest` proves every classifier class and the coverage gate classes.",
+when a `sometimes!`/`reachable!` oracle is never satisfied. Literal-label SDK \
+macro sites are declared through the link-time table, so never-reached oracles \
+appear with registered_gens=0; --allow-unmet-sometimes[=MIN_GENS] reports but \
+waives that gate (unconditionally or only below the observed generation \
+threshold). `--selftest` proves every classifier class and the coverage gate \
+classes.",
     groups: &[Group {
         title: "Campaign options",
         flags: &[
@@ -1170,7 +1171,7 @@ never-reached `reachable!` is invisible until static site enumeration lands. \
                 "--allow-unmet-sometimes",
                 None,
                 Value::Optional("MIN_GENS", Kind::PositiveU64),
-                "Waive the default unmet sometimes! coverage gate; with =MIN_GENS, waive only while observed generations are below MIN_GENS.",
+                "Waive the default unmet SDK oracle coverage gate; with =MIN_GENS, waive only while observed generations are below MIN_GENS.",
                 false,
             ),
             f(
@@ -1391,8 +1392,9 @@ const SITES: Verb = Verb {
 where Patina SDK sites, Rust assertions, proptest/quickcheck checks, and \
 antithesis-sdk assertions live. With --exercised FILE, it parses runtime PATINA_SDK_REPORT line(s); \
 with --exercised OUTDIR, it reads OUTDIR/sites.json from a campaign. Both forms join \
-runtime counters to the static SDK rows by label or dynamic-label file:line. Invisible sites \
-remain inventory rows rather than coverage claims. The default output is a \
+runtime counters and link-time declared SDK rows to the static SDK rows by label or \
+dynamic-label file:line; declared-but-never-evaluated rows carry registered_gens=0. \
+Invisible sites remain inventory rows rather than coverage claims. The default output is a \
 crate/module index; scoped flags \
 or --all opt into per-site drill-down rows. Results are cached per file under \
 .patina/out/sites-cache.json unless --no-cache is set. `--selftest` scans a \
