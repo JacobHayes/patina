@@ -52,6 +52,7 @@ use sha2::{Digest, Sha256};
 // semantics — they never record, replay, or mutate a trace — so rendering or
 // emitting an envelope cannot perturb replay hashes.
 mod campaign;
+mod coverage;
 mod help;
 mod output;
 mod render;
@@ -626,6 +627,7 @@ fn dispatch(arguments: Vec<OsString>) -> Result<i32, CliError> {
         }
         ParseResult::Run(invocation) => execute(invocation),
         ParseResult::Campaign(invocation) => campaign::execute(invocation),
+        ParseResult::Coverage(invocation) => coverage::execute(invocation),
         ParseResult::Sites(invocation) => sites::execute(invocation),
         ParseResult::Explore(invocation) => execute_explore(invocation),
         ParseResult::WasiBuild(invocation) => execute_wasi_build(invocation),
@@ -645,6 +647,7 @@ enum ParseResult {
     Version,
     Run(Invocation),
     Campaign(campaign::CampaignInvocation),
+    Coverage(coverage::CoverageInvocation),
     Sites(sites::SitesInvocation),
     Explore(ExploreInvocation),
     WasiBuild(WasiBuildInvocation),
@@ -708,7 +711,7 @@ fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     }
     if arguments.is_empty() {
         return Err(CliError::usage(
-            "missing command (expected run, test, campaign, explore, build, audit, replay, minimize, sites, or trace)",
+            "missing command (expected run, test, campaign, explore, build, audit, replay, minimize, coverage, sites, or trace)",
         ));
     }
     // The routed verb (if any). Every known verb records itself so a usage error
@@ -739,6 +742,7 @@ fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
             }
             return match name {
                 "campaign" => campaign::parse(arguments).map(ParseResult::Campaign),
+                "coverage" => coverage::parse(arguments).map(ParseResult::Coverage),
                 "sites" => sites::parse(arguments).map(ParseResult::Sites),
                 "explore" => parse_explore(arguments).map(ParseResult::Explore),
                 "build" => parse_build(arguments),
@@ -760,7 +764,7 @@ fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
         Some("-h" | "--help") => Ok(ParseResult::Help(help::Topic::Overview)),
         Some("-V" | "--version") => Ok(ParseResult::Version),
         _ => Err(CliError::usage(format!(
-            "unsupported command {:?}; expected run, test, campaign, explore, build, audit, replay, minimize, sites, or trace",
+            "unsupported command {:?}; expected run, test, campaign, explore, build, audit, replay, minimize, coverage, sites, or trace",
             arguments[0].to_string_lossy()
         ))),
     }
@@ -6291,154 +6295,6 @@ fn binary_has_yield_points(binary: &Path) -> Result<bool, CliError> {
     }
 }
 
-const COVERAGE_MAP_MAGIC: &[u8; 16] = b"patina.covmap/v1";
-const COVERAGE_MAP_VERSION: u32 = 1;
-
-fn read_le_u32(bytes: &[u8], offset: &mut usize) -> Result<u32, CliError> {
-    let end = offset.saturating_add(4);
-    let chunk = bytes
-        .get(*offset..end)
-        .ok_or_else(|| CliError("truncated patina.covmap/v1 u32 field".into()))?;
-    *offset = end;
-    Ok(u32::from_le_bytes(chunk.try_into().unwrap()))
-}
-
-fn read_le_u64(bytes: &[u8], offset: &mut usize) -> Result<u64, CliError> {
-    let end = offset.saturating_add(8);
-    let chunk = bytes
-        .get(*offset..end)
-        .ok_or_else(|| CliError("truncated patina.covmap/v1 u64 field".into()))?;
-    *offset = end;
-    Ok(u64::from_le_bytes(chunk.try_into().unwrap()))
-}
-
-fn checked_covmap_len(guard_count: usize, range_count: usize) -> Result<usize, CliError> {
-    let header = COVERAGE_MAP_MAGIC.len() + 4 + 8 + 8;
-    let ranges = range_count
-        .checked_mul(32)
-        .ok_or_else(|| CliError("patina.covmap/v1 range table is too large".into()))?;
-    let counters = guard_count
-        .checked_mul(4)
-        .ok_or_else(|| CliError("patina.covmap/v1 counter array is too large".into()))?;
-    let deltas = guard_count
-        .checked_mul(8)
-        .ok_or_else(|| CliError("patina.covmap/v1 pc-delta array is too large".into()))?;
-    header
-        .checked_add(ranges)
-        .and_then(|len| len.checked_add(counters))
-        .and_then(|len| len.checked_add(deltas))
-        .ok_or_else(|| CliError("patina.covmap/v1 is too large".into()))
-}
-
-fn coverage_summary_from_map(path: &Path) -> Result<output::CoverageReport, CliError> {
-    let bytes = fs::read(path).map_err(|error| {
-        CliError(format!(
-            "failed to read coverage map {}: {error}",
-            path.display()
-        ))
-    })?;
-    let magic_end = COVERAGE_MAP_MAGIC.len();
-    if bytes.get(..magic_end) != Some(COVERAGE_MAP_MAGIC.as_slice()) {
-        return Err(CliError(format!(
-            "coverage map {} is not patina.covmap/v1 (bad magic)",
-            path.display()
-        )));
-    }
-    let mut offset = magic_end;
-    let version = read_le_u32(&bytes, &mut offset)?;
-    if version != COVERAGE_MAP_VERSION {
-        return Err(CliError(format!(
-            "coverage map {} has unsupported version {version}",
-            path.display()
-        )));
-    }
-    let guard_count_u64 = read_le_u64(&bytes, &mut offset)?;
-    let range_count_u64 = read_le_u64(&bytes, &mut offset)?;
-    let guard_count = usize::try_from(guard_count_u64).map_err(|_| {
-        CliError(format!(
-            "coverage map {} guard count {guard_count_u64} does not fit this host",
-            path.display()
-        ))
-    })?;
-    let range_count = usize::try_from(range_count_u64).map_err(|_| {
-        CliError(format!(
-            "coverage map {} range count {range_count_u64} does not fit this host",
-            path.display()
-        ))
-    })?;
-    let expected_len = checked_covmap_len(guard_count, range_count)?;
-    if bytes.len() != expected_len {
-        return Err(CliError(format!(
-            "coverage map {} has {} bytes; expected {expected_len} for {guard_count} guards and {range_count} ranges",
-            path.display(),
-            bytes.len(),
-        )));
-    }
-    let mut guard_offset = 0u64;
-    let mut pc_offset = 0u64;
-    for index in 0..range_count {
-        let range_guard_offset = read_le_u64(&bytes, &mut offset)?;
-        let range_guard_count = read_le_u64(&bytes, &mut offset)?;
-        let range_pc_offset = read_le_u64(&bytes, &mut offset)?;
-        let range_pc_count = read_le_u64(&bytes, &mut offset)?;
-        if range_guard_offset != guard_offset
-            || range_pc_offset != pc_offset
-            || range_guard_count != range_pc_count
-        {
-            return Err(CliError(format!(
-                "coverage map {} range {index} is inconsistent: guard_offset={range_guard_offset} guard_count={range_guard_count} pc_offset={range_pc_offset} pc_count={range_pc_count}",
-                path.display(),
-            )));
-        }
-        guard_offset = guard_offset.saturating_add(range_guard_count);
-        pc_offset = pc_offset.saturating_add(range_pc_count);
-    }
-    if guard_offset != guard_count_u64 || pc_offset != guard_count_u64 {
-        return Err(CliError(format!(
-            "coverage map {} range table covers guards={guard_offset} pcs={pc_offset}, expected {guard_count_u64}",
-            path.display(),
-        )));
-    }
-    let mut edges_covered = 0u64;
-    let mut hits_total = 0u64;
-    let mut hits_max = 0u32;
-    let mut saturated = 0u64;
-    for _ in 0..guard_count {
-        let hits = read_le_u32(&bytes, &mut offset)?;
-        if hits != 0 {
-            edges_covered += 1;
-        }
-        hits_total = hits_total.saturating_add(hits as u64);
-        hits_max = hits_max.max(hits);
-        if hits == u32::MAX {
-            saturated += 1;
-        }
-    }
-    // Skip the anchor-delta array. Its byte length was already validated above;
-    // Wave B will consume it for offline symbolization.
-    offset = offset.saturating_add(guard_count.saturating_mul(8));
-    if offset != bytes.len() {
-        return Err(CliError(format!(
-            "coverage map {} has trailing bytes after pc-delta array",
-            path.display()
-        )));
-    }
-    let covered_permille = if guard_count == 0 {
-        0
-    } else {
-        ((edges_covered as u128 * 1000) / guard_count as u128) as u64
-    };
-    Ok(output::CoverageReport {
-        edges_total: guard_count_u64,
-        edges_covered,
-        covered_permille,
-        hits_total,
-        hits_max,
-        saturated,
-        map_path: Some(path.to_path_buf()),
-    })
-}
-
 /// Append the yield-point policy suffix to a base fingerprint when the binary is
 /// yield-instrumented, leaving a plain binary's fingerprint untouched.
 fn yield_point_fingerprint(base: &str, yield_points: bool) -> String {
@@ -7661,7 +7517,7 @@ IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
             .map(|metadata| metadata.len())
             .unwrap_or(0);
         if captured.exit_code == 0 || len > 0 {
-            Some(coverage_summary_from_map(path)?)
+            Some(coverage::coverage_summary_from_map(path)?)
         } else {
             None
         }
@@ -9768,8 +9624,8 @@ mod tests {
         // `-h`/`--help` in the first flag position of every verb and subcommand
         // routes to Help — never consumed as a positional, never an error.
         for verb in [
-            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize", "sites",
-            "trace",
+            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize",
+            "coverage", "sites", "trace",
         ] {
             assert!(is_help(&[verb, "--help"]), "{verb} --help");
             assert!(is_help(&[verb, "-h"]), "{verb} -h");
@@ -9948,6 +9804,7 @@ mod tests {
                 "--seed-start",
                 "--timeout-secs",
                 "--progress-every",
+                "--plateau-after",
                 "--allow-unmet-sometimes",
                 "--buggify",
                 "--swarm",
@@ -9959,6 +9816,7 @@ mod tests {
                 "--heal-after",
                 "--selftest",
             ],
+            "coverage" => &["--focus", "--top"],
             "minimize" => &[
                 "--output",
                 "-o",
@@ -10108,8 +9966,8 @@ mod tests {
         // The whole flag universe a verb may present: its registered groups plus
         // the always-available global help/output flags.
         for verb_name in [
-            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize", "sites",
-            "trace",
+            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize",
+            "coverage", "sites", "trace",
         ] {
             let verb = help::verb(verb_name).expect("verb registered");
             let mut registered: BTreeSet<&str> = BTreeSet::new();
@@ -10686,6 +10544,11 @@ mod tests {
                 campaign::parse(strings(&[&["art.wasm"][..], toks].concat())).map(|_| ())
             }
 
+            // coverage: both positionals are required; the files are not opened at parse time.
+            ("coverage", _) => {
+                coverage::parse(strings(&[&["guest", "run.covmap"][..], toks].concat())).map(|_| ())
+            }
+
             // sites: every value-bearing flag is static-report filtering.
             ("sites", _) => sites::parse(strings(toks)).map(|_| ()),
 
@@ -10961,8 +10824,8 @@ mod tests {
     #[test]
     fn version_intercepted_across_verbs_before_separator() {
         for verb in [
-            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize", "sites",
-            "trace",
+            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize",
+            "coverage", "sites", "trace",
         ] {
             assert!(
                 matches!(

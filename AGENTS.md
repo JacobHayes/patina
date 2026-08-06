@@ -29,7 +29,7 @@ maintainer recipes; it is gitignored and is not project doctrine.
 ## The CLI: verbs, and where its truth lives
 
 `cargo patina` is verb-first: `build`, `run`, `test`, `audit`, `replay`,
-`explore`, `campaign`, `sites`, `trace`, `minimize`. Verbs infer the artifact family (Cargo
+`explore`, `campaign`, `coverage`, `sites`, `trace`, `minimize`. Verbs infer the artifact family (Cargo
 package / native binary / WASI module) from the argument; `run`, `audit`, and
 `replay` are source-first (a `.rs` file, directory, or `Cargo.toml` builds on
 the fly).
@@ -49,8 +49,10 @@ index lists each verb's summary and forms but no flag rows; per-verb detail
 (flag_groups) comes from `cargo patina <verb> --help --format json`. Flag fields
 default-omit — an absent `short`/`value_grammar`/`repeatable` means none/false.
 
-Every verb also accepts `--format json`, emitting one `patina.result/v1`
-envelope on stdout — prefer it when parsing results programmatically.
+Every execution verb also accepts `--format json`, usually emitting one
+`patina.result/v1` envelope on stdout; verb-specific report verbs may emit their
+own schemas (for example `coverage --format json` emits `patina.coverage/v1`).
+Prefer JSON when parsing results programmatically.
 
 ## Check ladder (run before claiming done)
 

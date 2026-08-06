@@ -1,7 +1,8 @@
 # Arc: coverage / depth measurement for runs and campaigns
 
-Status: Wave A implemented 2026-08-06 (native yield-point counters, reports,
-`run`/`replay --coverage-out` covmaps, and fail-closed detectors); Waves B-E remain planned.
+Status: Waves A-C implemented 2026-08-06 (native yield-point counters, reports,
+`run`/`replay --coverage-out` covmaps, fail-closed detectors, offline `coverage`
+symbolization/rollup, and campaign coverage accumulation/plateau); Waves D-E remain planned.
 Lands as `docs/arcs/coverage-depth.md`.
 
 Cross-references:
@@ -173,6 +174,10 @@ than dumping rollups inline into `run` output. Progressive disclosure:
 - `--format json` emits a `patina.coverage/v1` envelope with the full tree — same content,
   machine medium (project principle: every surface consumable by humans AND agents).
 
+For campaign stores, the verb validates the supplied binary against the artifact hash recorded
+in `meta.json` before symbolization; a mismatched binary fails closed instead of producing a
+plausible rollup over the wrong symbol table.
+
 `run`/`replay --coverage-out` prints exactly one pointer line
 (`PATINA_COVERAGE map=PATH edges=19204/48211 covered_permille=398`) and defers drill-down
 to the verb — run output stays lean.
@@ -268,12 +273,13 @@ acting on it (auto-stop, `--extend` guidance) is the resumable-campaign arc's de
 PATINA_CAMPAIGN_PROGRESS generation=800/2500 elapsed_secs=412 failures=3 novel=2 OK=771 ... coverage=19204/48211 covered_permille=398 last_new_edge_gen=641 plateau=0
 ```
 
-Final summary adds a coverage block (covered %, `last_new_edge_gen`, plateaued yes/no, top
+Final summary adds a native-edge coverage block (covered %, `last_new_edge_gen`, plateaued yes/no, top
 uncovered crates by edge share — locations, not bare counts); `PATINA_CAMPAIGN_COMPLETE`
-gains `covered_permille=… plateaued=…`. The v2 envelope gains additive `coverage` (native)
-/ `depth` (WASI) objects plus `artifacts.coverage_dir` — additive, schema stays
-`patina.campaign/v2` (absent-field discipline is already the envelope's convention,
-`campaign.rs:1284-1303`).
+gains `covered_permille=… plateaued=…` when edge coverage is available. The v2 envelope
+preserves the existing SDK-site `coverage` object and adds native edge coverage under
+`coverage.edge`, plus `artifacts.coverage_dir`; WASI depth later adds a separate `depth`
+object. This is additive, so the schema stays `patina.campaign/v2` (absent-field discipline
+is already the envelope's convention, `campaign.rs:1284-1303`).
 
 ---
 
@@ -332,14 +338,13 @@ summary, requested-but-empty and count-mismatch refusals.
 yp-fixture record/replay + same-seed map byte-identity at ≥ 2 seeds, MEASURED
 before/after overhead on a threaded testbed, Linux gate battery (runtime-touching).
 
-**Wave B — offline symbolization + rollup + `coverage` verb (CLI-only).** nm-anchor
-resolution, symbol bucketing + demangle, shared rollup module (coordinate with
-invariant-visibility on the `.patina/` config shape), verb + `--format json` envelope,
+**Wave B — offline symbolization + rollup + `coverage` verb (CLI-only) — implemented 2026-08-06.** nm-anchor
+resolution, symbol bucketing + demangle, shared rollup module, verb + `--format json` envelope,
 and llms.txt/TUTORIAL rows for the symbolized coverage workflow.
 *Verify*: `mise run check` (drift gate `scripts/check-flag-drift.sh` covers the registry);
 no shim battery beyond the ladder — runtime untouched.
 
-**Wave C — campaign accumulation + plateau.** Fold/union/persist, plateau rule, heartbeat +
+**Wave C — campaign accumulation + plateau — implemented 2026-08-06.** Fold/union/persist, plateau rule, heartbeat +
 summary + envelope fields, `campaign --plateau-after`, selftest classes (§10 D3-D5),
 deterministic re-run test extended to cover coverage state byte-identity.
 *Verify*: `mise run check` + campaign `--selftest` + a real ≥ 50-gen yp campaign smoke

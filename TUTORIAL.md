@@ -113,6 +113,21 @@ $ cargo patina sites --no-cache --site batch-commit --exercised ./sdk.stderr
 src/main.rs:9 fault driven id=batch-commit label=batch-commit ... exercised(reg=1 evals=8 fires=2 ...)
 ```
 
+For native edge coverage, build with yield points, write a covmap, then use the
+read-only coverage report to symbolize and roll it up by crate/module/function:
+
+```
+$ cargo patina build ./ledger --yield-points --output ./ledger/ledger-yp
+$ cargo patina run ./ledger/ledger-yp --seed 5 --buggify --coverage-out ./ledger/run.covmap
+$ cargo patina coverage ./ledger/ledger-yp ./ledger/run.covmap --focus ledger --top 10
+```
+
+A longer `campaign` over a yield-point binary automatically accumulates the union
+under `<out-dir>/coverage/`; inspect it with
+`cargo patina coverage ./ledger/ledger-yp <out-dir>`. The campaign report is tied
+to the recorded artifact hash, so passing a different binary fails closed instead
+of producing a mismatched symbol rollup.
+
 Catching seeds are build-specific (the instrumentation shapes the decision
 space), so sweep for one rather than hardcoding it.
 
@@ -215,9 +230,9 @@ If `cargo-patina` is not discoverable, the test fails loudly instead of skipping
 
 ## 9. Machine-readable output for agents
 
-Any verb accepts `--format json`, emitting one result envelope on stdout (schema
-`patina.result/v1`) with the guest output folded in, except `trace events`, which
-uses streaming JSON Lines:
+Any verb accepts `--format json`. Most emit one result envelope on stdout (schema
+`patina.result/v1`) with the guest output folded in; `coverage` emits
+`patina.coverage/v1`, and `trace events` uses streaming JSON Lines:
 
 ```
 $ cargo patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina --format json

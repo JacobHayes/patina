@@ -47,6 +47,7 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
+use crate::coverage::{CampaignCoverageStore, CoverageArtifact, FoldOutcome, top_uncovered_crates};
 use crate::sdk_report::{CoverageTally, ExercisedSite};
 use crate::{CliError, reject_inline, required_value, set_once, split_opt};
 
@@ -65,6 +66,7 @@ unsafe extern "C" {
 const CAMPAIGN_ENVELOPE_SCHEMA: &str = "patina.campaign/v2";
 const CAMPAIGN_STATE_SCHEMA: &str = "patina.campaign.state/v1";
 const CAMPAIGN_SIGNATURES_SCHEMA: &str = "patina.campaign.signatures/v1";
+const DEFAULT_PLATEAU_AFTER: u64 = 200;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AllowUnmetSometimes {
@@ -112,6 +114,9 @@ pub struct CampaignSpec {
     pub heal_after_nanos: Option<u64>,
     /// Also write a wave-14 `--report` HTML for each failing generation.
     pub report: bool,
+    /// Report native edge-coverage plateau after this many generations without a
+    /// new edge; 0 disables the plateau flag.
+    pub plateau_after: u64,
     /// Waive the default campaign-level gate for `sometimes!` sites that were
     /// registered but never satisfied.
     pub allow_unmet_sometimes: Option<AllowUnmetSometimes>,
@@ -132,6 +137,7 @@ impl Default for CampaignSpec {
             converge_nanos: None,
             heal_after_nanos: None,
             report: false,
+            plateau_after: DEFAULT_PLATEAU_AFTER,
             allow_unmet_sometimes: None,
         }
     }
@@ -170,6 +176,7 @@ impl CampaignSpec {
                 "converge_nanos" => self.converge_nanos = Some(json_u64(key, val)?),
                 "heal_after_nanos" => self.heal_after_nanos = Some(json_u64(key, val)?),
                 "report" => self.report = json_bool(key, val)?,
+                "plateau_after" => self.plateau_after = json_u64(key, val)?,
                 "allow_unmet_sometimes" => {
                     self.allow_unmet_sometimes = Some(json_allow_unmet_sometimes(key, val)?)
                 }
@@ -177,7 +184,8 @@ impl CampaignSpec {
                     return Err(CliError(format!(
                         "unknown campaign spec key {other:?}; expected generations, seed_base, \
                          timeout_secs, guest_args, buggify, swarm, pct, faults, watchdog_nanos, \
-                         converge_nanos, heal_after_nanos, report, or allow_unmet_sometimes"
+                         converge_nanos, heal_after_nanos, report, plateau_after, or \
+                         allow_unmet_sometimes"
                     )));
                 }
             }
@@ -312,6 +320,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     let mut timeout_secs: Option<u64> = None;
     let mut spec_path: Option<String> = None;
     let mut progress_every: Option<u64> = None;
+    let mut plateau_after: Option<u64> = None;
     let mut allow_unmet_sometimes: Option<AllowUnmetSometimes> = None;
     let mut extend: Option<u64> = None;
     let mut resume: Option<()> = None;
@@ -376,6 +385,16 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
                     required_value(opt, &arguments, &mut index)?,
                 )?;
                 set_once(&mut progress_every, value, "--progress-every")?;
+            }
+            "--plateau-after" => {
+                if continuation_requested {
+                    return Err(reject_continuation_override("--plateau-after"));
+                }
+                let value = parse_u64_flag(
+                    "--plateau-after",
+                    required_value(opt, &arguments, &mut index)?,
+                )?;
+                set_once(&mut plateau_after, value, "--plateau-after")?;
             }
             "--allow-unmet-sometimes" => {
                 if continuation_requested {
@@ -500,6 +519,9 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     }
     if let Some(timeout_secs) = timeout_secs {
         spec.timeout_secs = timeout_secs;
+    }
+    if let Some(value) = plateau_after {
+        spec.plateau_after = value;
     }
     if let Some(value) = allow_unmet_sometimes {
         spec.allow_unmet_sometimes = Some(value);
@@ -1272,6 +1294,7 @@ fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
         map.insert("heal_after_nanos".into(), value.into());
     }
     map.insert("report".into(), spec.report.into());
+    map.insert("plateau_after".into(), spec.plateau_after.into());
     if let Some(value) = spec.allow_unmet_sometimes {
         map.insert("allow_unmet_sometimes".into(), allow_unmet_to_json(value));
     }
@@ -1299,6 +1322,7 @@ fn spec_from_state_json(value: &serde_json::Value) -> Result<CampaignSpec, Strin
         "pct",
         "faults",
         "report",
+        "plateau_after",
     ] {
         if !object.contains_key(key) {
             return Err(format!("spec missing required key {key:?}"));
@@ -1379,6 +1403,90 @@ fn class_counts_failures(class_counts: &BTreeMap<String, u64>) -> u64 {
         .sum()
 }
 
+#[derive(Debug)]
+enum EdgeCoverageState {
+    Active(Box<CampaignCoverageStore>),
+    Unavailable {
+        reason: &'static str,
+        hint: Option<&'static str>,
+    },
+}
+
+impl EdgeCoverageState {
+    fn active_mut(&mut self) -> Option<&mut CampaignCoverageStore> {
+        match self {
+            Self::Active(store) => Some(store.as_mut()),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
+    fn active(&self) -> Option<&CampaignCoverageStore> {
+        match self {
+            Self::Active(store) => Some(store.as_ref()),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
+    fn unavailable(reason: &'static str, hint: Option<&'static str>) -> Self {
+        Self::Unavailable { reason, hint }
+    }
+}
+
+fn initialize_edge_coverage(
+    out_dir: &Path,
+    state: &CampaignState,
+    campaign_generations_done: u64,
+) -> Result<EdgeCoverageState, CliError> {
+    if state.artifact.family != "native" {
+        return Ok(EdgeCoverageState::unavailable(
+            "not-native",
+            Some("WASI depth arrives in coverage-depth Wave D"),
+        ));
+    }
+    let artifact_path = PathBuf::from(&state.artifact.path);
+    if !crate::binary_has_yield_points(&artifact_path)? {
+        return Ok(EdgeCoverageState::unavailable(
+            "not-instrumented",
+            Some("rebuild with cargo patina build --yield-points"),
+        ));
+    }
+    let coverage_dir = out_dir.join("coverage");
+    fs::create_dir_all(&coverage_dir).map_err(|error| {
+        CliError(format!(
+            "failed to create campaign coverage dir {}: {error}",
+            coverage_dir.display()
+        ))
+    })?;
+    let artifact = CoverageArtifact {
+        path: state.artifact.path.clone(),
+        sha256: state.artifact.sha256.clone(),
+        family: state.artifact.family.to_string(),
+    };
+    let fingerprint = campaign_coverage_fingerprint(&state.spec);
+    let store = CampaignCoverageStore::load(
+        coverage_dir,
+        artifact,
+        fingerprint,
+        state.spec.plateau_after,
+        campaign_generations_done,
+    )?;
+    Ok(EdgeCoverageState::Active(Box::new(store)))
+}
+
+fn campaign_coverage_fingerprint(spec: &CampaignSpec) -> String {
+    let mut fingerprint = crate::yield_point_fingerprint(crate::DEFAULT_NATIVE_FINGERPRINT, true);
+    if spec.buggify {
+        fingerprint.push_str("+buggify");
+    }
+    if spec.pct {
+        fingerprint.push_str("+pct");
+    }
+    if spec.swarm {
+        fingerprint.push_str("+swarm");
+    }
+    fingerprint
+}
+
 fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
     let CampaignInvocation {
         artifact,
@@ -1452,6 +1560,8 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
             .ok_or_else(|| CliError::usage("--extend would overflow the generation target"))?;
     }
 
+    let mut edge_coverage = initialize_edge_coverage(&out_dir, &state, state.generations_done)?;
+
     let traces_dir = out_dir.join("traces");
     fs::create_dir_all(&traces_dir)
         .map_err(|e| CliError(format!("failed to create traces dir: {e}")))?;
@@ -1473,7 +1583,14 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
     });
     let invocation_index = state.invocations.len() - 1;
 
-    write_campaign_checkpoint(&state_path, &store_path, &sites_path, &state, &coverage)?;
+    write_campaign_checkpoint(
+        &state_path,
+        &store_path,
+        &sites_path,
+        &state,
+        &coverage,
+        &edge_coverage,
+    )?;
 
     if !json_output {
         match mode {
@@ -1513,13 +1630,19 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
         let trace_path = traces_dir.join(format!("generation-{generation}.patina"));
         let _ = fs::remove_file(&trace_path);
         crate::remove_native_trace_scratch(&trace_path);
+        let coverage_map_path = edge_coverage
+            .active()
+            .map(|store| store.generation_covmap_path(generation));
 
         let (exit, stdout, stderr, timed_out) = run_generation(
             &self_exe,
             &artifact_path,
             seed,
             &flags,
-            &trace_path,
+            GenerationFiles {
+                trace_path: &trace_path,
+                coverage_out: coverage_map_path.as_deref(),
+            },
             &state.spec.guest_args,
             effective_timeout_secs,
         )?;
@@ -1530,6 +1653,11 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
                     "generation {generation} has malformed PATINA_SDK_REPORT: {error}"
                 ))
             })?;
+        let _edge_fold = fold_edge_coverage_generation(
+            &mut edge_coverage,
+            generation,
+            coverage_map_path.as_deref(),
+        )?;
         // A generation that blew the wall-clock budget was killed: it hung in a way
         // neither the virtual-time watchdog nor the child's own budgets caught
         // (e.g. an uninterposed atomics-only busy loop). Classify it INFRA
@@ -1632,19 +1760,27 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
             // Heartbeat every `progress_every` generations (suppressed in the
             // full-stream mode, where each generation already prints a line).
             if !full_stream && progress_every > 0 && (generation + 1) % progress_every == 0 {
-                print_progress_heartbeat(
-                    generation + 1,
-                    state.spec.generations,
-                    start.elapsed().as_secs(),
-                    failures_so_far,
-                    novel_so_far,
-                    &state.classes,
-                    &coverage,
-                );
+                print_progress_heartbeat(ProgressHeartbeatInput {
+                    done: generation + 1,
+                    total: state.spec.generations,
+                    elapsed_secs: start.elapsed().as_secs(),
+                    failures: failures_so_far,
+                    novel: novel_so_far,
+                    class_counts: &state.classes,
+                    coverage: &coverage,
+                    edge_coverage: &edge_coverage,
+                });
             }
             flush_stdout();
         }
-        write_campaign_checkpoint(&state_path, &store_path, &sites_path, &state, &coverage)?;
+        write_campaign_checkpoint(
+            &state_path,
+            &store_path,
+            &sites_path,
+            &state,
+            &coverage,
+            &edge_coverage,
+        )?;
     }
 
     let failures = class_counts_failures(&state.classes);
@@ -1669,6 +1805,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
             state: &state,
             coverage: &coverage,
             coverage_verdict: &coverage_verdict,
+            edge_coverage: &edge_coverage,
             out_dir: &out_dir,
             state_path: &state_path,
             sites_path: &sites_path,
@@ -1680,6 +1817,8 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
             signatures: &state.signatures,
             coverage: &coverage,
             coverage_verdict: &coverage_verdict,
+            edge_coverage: &edge_coverage,
+            artifact_path: &artifact_path,
             failures,
             novel: novel_count,
             generations: state.spec.generations,
@@ -1691,6 +1830,46 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
     Ok(exit_code)
 }
 
+fn fold_edge_coverage_generation(
+    edge_coverage: &mut EdgeCoverageState,
+    generation: u64,
+    coverage_map_path: Option<&Path>,
+) -> Result<Option<FoldOutcome>, CliError> {
+    let Some(store) = edge_coverage.active_mut() else {
+        return Ok(None);
+    };
+    let path = coverage_map_path.expect("active coverage has a generation path");
+    let skip_by_watermark = store
+        .meta()
+        .is_some_and(|meta| generation < meta.generations_applied);
+    if skip_by_watermark {
+        let _ = fs::remove_file(path);
+        return Ok(Some(FoldOutcome {
+            generation,
+            new_edges: 0,
+            skipped_by_watermark: true,
+        }));
+    }
+    let len = fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    if len == 0 {
+        return Err(CliError(format!(
+            "generation {generation} requested native coverage but did not produce a covmap at {}; refusing a partial coverage campaign",
+            path.display()
+        )));
+    }
+    let covmap = crate::coverage::read_covmap(path).map_err(|error| {
+        CliError(format!(
+            "generation {generation} produced malformed native coverage map {}: {error}",
+            path.display()
+        ))
+    })?;
+    let outcome = store.fold_covmap(generation, &covmap)?;
+    let _ = fs::remove_file(path);
+    Ok(Some(outcome))
+}
+
 /// Run one generation as a child `cargo patina run --record` process, capturing
 /// its streams. The virtual-time watchdog and the child's own step/fuel budgets
 /// bound the *deterministic* run, but a guest can still wedge in a way none of
@@ -1700,12 +1879,17 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
 ///
 /// Returns `(exit_code, stdout, stderr, timed_out)`. A signal death (including the
 /// timeout kill) has no exit code and surfaces as `-1`.
+struct GenerationFiles<'a> {
+    trace_path: &'a Path,
+    coverage_out: Option<&'a Path>,
+}
+
 fn run_generation(
     self_exe: &Path,
     artifact: &Path,
     seed: u64,
     flags: &[String],
-    trace_path: &Path,
+    files: GenerationFiles<'_>,
     guest_args: &[String],
     timeout_secs: u64,
 ) -> Result<(i32, String, String, bool), CliError> {
@@ -1724,9 +1908,12 @@ fn run_generation(
         .arg("--seed")
         .arg(seed.to_string())
         .arg("--record")
-        .arg(trace_path);
+        .arg(files.trace_path);
     for flag in flags {
         command.arg(flag);
+    }
+    if let Some(path) = files.coverage_out {
+        command.arg("--coverage-out").arg(path);
     }
     if !guest_args.is_empty() {
         command.arg("--");
@@ -2042,10 +2229,16 @@ fn write_campaign_checkpoint(
     sites_path: &Path,
     state: &CampaignState,
     coverage: &CoverageTally,
+    edge_coverage: &EdgeCoverageState,
 ) -> Result<(), CliError> {
     // The state cursor is the checkpoint readers poll. Write the derived stores
     // first, then the state file, so an observed advanced cursor has matching
-    // signatures/sites artifacts.
+    // signatures/sites/native-coverage artifacts. Native coverage writes before
+    // the cursor on purpose: if a crash tears here, generations_applied may be
+    // one ahead and resume will re-run then watermark-skip that generation.
+    if let Some(store) = edge_coverage.active() {
+        store.write_checkpoint()?;
+    }
     write_sites_store(sites_path, coverage)?;
     write_signature_store(store_path, &state.signatures)?;
     write_campaign_state(state_path, state)
@@ -2352,30 +2545,58 @@ fn waiver_json(waiver: Option<AllowUnmetSometimes>) -> serde_json::Value {
 /// and how is it going?" without the full per-generation stream. `elapsed_secs` is
 /// the only wall-clock-derived field and appears solely on this line (never on a
 /// deterministic `PATINA_CAMPAIGN_GEN` line).
-fn print_progress_heartbeat(
+struct ProgressHeartbeatInput<'a> {
     done: u64,
     total: u64,
     elapsed_secs: u64,
     failures: u64,
     novel: u64,
-    class_counts: &BTreeMap<String, u64>,
-    coverage: &CoverageTally,
-) {
+    class_counts: &'a BTreeMap<String, u64>,
+    coverage: &'a CoverageTally,
+    edge_coverage: &'a EdgeCoverageState,
+}
+
+fn print_progress_heartbeat(input: ProgressHeartbeatInput<'_>) {
     let mut line = format!(
-        "PATINA_CAMPAIGN_PROGRESS generation={done}/{total} elapsed_secs={elapsed_secs} \
-         failures={failures} novel={novel}"
+        "PATINA_CAMPAIGN_PROGRESS generation={}/{} elapsed_secs={} failures={} novel={}",
+        input.done, input.total, input.elapsed_secs, input.failures, input.novel
     );
-    for (class, count) in class_counts {
+    for (class, count) in input.class_counts {
         line.push_str(&format!(" {class}={count}"));
     }
-    let coverage_summary = coverage_summary(coverage);
+    let coverage_summary = coverage_summary(input.coverage);
     line.push_str(&format!(
         " sdk_labels={} oracle_sites={} oracle_unmet={}",
         coverage_summary.labels_seen,
         coverage_summary.oracle_sites,
         coverage_summary.unmet.len()
     ));
+    append_edge_coverage_progress(&mut line, input.edge_coverage);
     println!("{line}");
+}
+
+fn append_edge_coverage_progress(line: &mut String, edge_coverage: &EdgeCoverageState) {
+    match edge_coverage {
+        EdgeCoverageState::Active(store) => {
+            if let Some(meta) = store.meta() {
+                line.push_str(&format!(
+                    " coverage={}/{} covered_permille={} last_new_edge_gen={} plateau={}",
+                    meta.edges_covered,
+                    meta.edges_total,
+                    meta.covered_permille(),
+                    meta.last_new_edge_gen
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    meta.plateaued as u8,
+                ));
+            } else {
+                line.push_str(" coverage=pending");
+            }
+        }
+        EdgeCoverageState::Unavailable { reason, .. } => {
+            line.push_str(&format!(" coverage=unavailable reason={reason}"));
+        }
+    }
 }
 
 struct CampaignSummaryInput<'a> {
@@ -2383,6 +2604,8 @@ struct CampaignSummaryInput<'a> {
     signatures: &'a BTreeMap<String, SignatureRecord>,
     coverage: &'a CoverageTally,
     coverage_verdict: &'a CoverageVerdict<'a>,
+    edge_coverage: &'a EdgeCoverageState,
+    artifact_path: &'a Path,
     failures: u64,
     novel: u64,
     generations: u64,
@@ -2417,11 +2640,68 @@ fn print_campaign_summary(input: CampaignSummaryInput<'_>) {
         }
     }
     print_coverage_summary(input.coverage, input.coverage_verdict, input.sites_path);
+    print_edge_coverage_summary(input.edge_coverage, input.artifact_path);
     println!("signature store: {}", input.store_path.display());
-    println!(
+    let mut complete = format!(
         "PATINA_CAMPAIGN_COMPLETE generations={} failures={} novel={}",
         input.generations, input.failures, input.novel
     );
+    append_edge_coverage_complete(&mut complete, input.edge_coverage);
+    println!("{complete}");
+}
+
+fn print_edge_coverage_summary(edge_coverage: &EdgeCoverageState, artifact_path: &Path) {
+    println!("-- coverage (native edges) --");
+    match edge_coverage {
+        EdgeCoverageState::Unavailable { reason, hint } => {
+            println!("coverage=unavailable reason={reason}");
+            if let Some(hint) = hint {
+                println!("hint: {hint}");
+            }
+        }
+        EdgeCoverageState::Active(store) => {
+            if let Some(meta) = store.meta() {
+                println!(
+                    "edges={}/{} covered_permille={} last_new_edge_gen={} plateau_after={} plateaued={} generations_applied={}",
+                    meta.edges_covered,
+                    meta.edges_total,
+                    meta.covered_permille(),
+                    meta.last_new_edge_gen
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    meta.plateau_window,
+                    meta.plateaued as u8,
+                    meta.generations_applied,
+                );
+                println!("coverage store: {}", store.dir().display());
+                match top_uncovered_crates(artifact_path, store, 5) {
+                    Ok(rows) if rows.is_empty() => println!("top_uncovered_crates: none"),
+                    Ok(rows) => {
+                        println!("top_uncovered_crates:");
+                        for (krate, uncovered, total) in rows {
+                            println!("  {krate} uncovered={uncovered}/{total}");
+                        }
+                    }
+                    Err(error) => println!("top_uncovered_crates: unavailable ({error})"),
+                }
+            } else {
+                println!("coverage=pending no finalized generation has produced a covmap yet");
+                println!("coverage store: {}", store.dir().display());
+            }
+        }
+    }
+}
+
+fn append_edge_coverage_complete(line: &mut String, edge_coverage: &EdgeCoverageState) {
+    if let EdgeCoverageState::Active(store) = edge_coverage {
+        if let Some(meta) = store.meta() {
+            line.push_str(&format!(
+                " covered_permille={} plateaued={}",
+                meta.covered_permille(),
+                meta.plateaued as u8,
+            ));
+        }
+    }
 }
 
 fn print_coverage_summary(
@@ -2482,6 +2762,7 @@ struct CampaignEnvelopeInput<'a> {
     state: &'a CampaignState,
     coverage: &'a CoverageTally,
     coverage_verdict: &'a CoverageVerdict<'a>,
+    edge_coverage: &'a EdgeCoverageState,
     out_dir: &'a Path,
     state_path: &'a Path,
     sites_path: &'a Path,
@@ -2525,6 +2806,12 @@ fn build_campaign_envelope(input: CampaignEnvelopeInput<'_>) -> serde_json::Valu
         "site_coverage".into(),
         input.sites_path.display().to_string().into(),
     );
+    if let Some(store) = input.edge_coverage.active() {
+        artifacts.insert(
+            "coverage_dir".into(),
+            store.dir().display().to_string().into(),
+        );
+    }
     if failures > 0 {
         artifacts.insert(
             "failures_dir".into(),
@@ -2537,7 +2824,12 @@ fn build_campaign_envelope(input: CampaignEnvelopeInput<'_>) -> serde_json::Valu
             input.out_dir.join("reports").display().to_string().into(),
         );
     }
-    let coverage_json = coverage_envelope_json(input.coverage, input.coverage_verdict);
+    let coverage_json = coverage_envelope_json(
+        input.coverage,
+        input.coverage_verdict,
+        input.edge_coverage,
+        Path::new(&state.artifact.path),
+    );
     let sdk_sites_json = sdk_sites_summary_json(input.coverage, input.coverage_verdict);
     serde_json::json!({
         "schema": CAMPAIGN_ENVELOPE_SCHEMA,
@@ -2563,6 +2855,8 @@ fn build_campaign_envelope(input: CampaignEnvelopeInput<'_>) -> serde_json::Valu
 fn coverage_envelope_json(
     coverage: &CoverageTally,
     verdict: &CoverageVerdict<'_>,
+    edge_coverage: &EdgeCoverageState,
+    artifact_path: &Path,
 ) -> serde_json::Value {
     let unmet = verdict
         .summary
@@ -2580,13 +2874,67 @@ fn coverage_envelope_json(
             })
         })
         .collect::<Vec<_>>();
+    let edge = edge_coverage_json(edge_coverage, artifact_path);
     serde_json::json!({
         "oracle_sites": verdict.summary.oracle_sites,
         "satisfied": verdict.summary.satisfied,
         "gate": verdict.gate.as_str(),
         "waiver": waiver_json(verdict.waiver),
         "unmet": unmet,
+        "edge": edge,
     })
+}
+
+fn edge_coverage_json(
+    edge_coverage: &EdgeCoverageState,
+    artifact_path: &Path,
+) -> serde_json::Value {
+    match edge_coverage {
+        EdgeCoverageState::Unavailable { reason, hint } => serde_json::json!({
+            "state": "unavailable",
+            "reason": reason,
+            "hint": hint,
+        }),
+        EdgeCoverageState::Active(store) => {
+            let Some(meta) = store.meta() else {
+                return serde_json::json!({
+                    "state": "pending",
+                    "coverage_dir": store.dir().display().to_string(),
+                });
+            };
+            let (top_uncovered, top_uncovered_error) =
+                match top_uncovered_crates(artifact_path, store, 5) {
+                    Ok(rows) => (
+                        rows.into_iter()
+                            .map(|(krate, uncovered, total)| {
+                                serde_json::json!({
+                                    "crate": krate,
+                                    "uncovered_edges": uncovered,
+                                    "edges_total": total,
+                                })
+                            })
+                            .collect::<Vec<_>>(),
+                        serde_json::Value::Null,
+                    ),
+                    Err(error) => (Vec::new(), serde_json::json!(error.to_string())),
+                };
+            serde_json::json!({
+                "state": "available",
+                "schema": crate::coverage::CAMPAIGN_COVERAGE_SCHEMA,
+                "coverage_dir": store.dir().display().to_string(),
+                "edges_total": meta.edges_total,
+                "edges_covered": meta.edges_covered,
+                "covered_permille": meta.covered_permille(),
+                "generations_applied": meta.generations_applied,
+                "last_new_edge_gen": meta.last_new_edge_gen,
+                "plateau_after": meta.plateau_window,
+                "plateaued": meta.plateaued,
+                "new_edge_log": meta.new_edge_log.iter().map(|(generation, new_edges)| serde_json::json!([generation, new_edges])).collect::<Vec<_>>(),
+                "top_uncovered_crates": top_uncovered,
+                "top_uncovered_crates_error": top_uncovered_error,
+            })
+        }
+    }
 }
 
 fn sdk_sites_summary_json(
@@ -2860,6 +3208,16 @@ fn selftest() -> Result<i32, CliError> {
         }
     }
 
+    println!("-- native edge coverage store --");
+    for (name, ok, detail) in crate::coverage::campaign_detector_selftest() {
+        if ok {
+            println!("  ok   {name:<40} -> {detail}");
+        } else {
+            println!("  FAIL {name:<40} -> {detail}");
+            failures += 1;
+        }
+    }
+
     println!();
     if failures == 0 {
         println!("CAMPAIGN SELFTEST PASSED");
@@ -3075,12 +3433,14 @@ mod tests {
             ..CoverageTally::default()
         };
         let coverage_verdict = coverage_verdict(&coverage, None);
+        let edge_coverage = EdgeCoverageState::unavailable("not-instrumented", None);
         let envelope = build_campaign_envelope(CampaignEnvelopeInput {
             result: "failure",
             exit_code: 1,
             state: &state,
             coverage: &coverage,
             coverage_verdict: &coverage_verdict,
+            edge_coverage: &edge_coverage,
             out_dir: Path::new("out"),
             state_path: Path::new("out/campaign-state.json"),
             sites_path: Path::new("out/sites.json"),
@@ -3158,12 +3518,14 @@ mod tests {
             ..CoverageTally::default()
         };
         let coverage_verdict = coverage_verdict(&coverage, None);
+        let edge_coverage = EdgeCoverageState::unavailable("not-instrumented", None);
         let envelope = build_campaign_envelope(CampaignEnvelopeInput {
             result: "ok",
             exit_code: 0,
             state: &state,
             coverage: &coverage,
             coverage_verdict: &coverage_verdict,
+            edge_coverage: &edge_coverage,
             out_dir: Path::new("out"),
             state_path: Path::new("out/campaign-state.json"),
             sites_path: Path::new("out/sites.json"),
@@ -3174,11 +3536,12 @@ mod tests {
     }
 
     #[test]
-    fn progress_every_parses_and_defaults() {
+    fn progress_every_and_plateau_parse_and_default() {
         let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
         // Default when unset.
         let inv = parse(args(&["art"])).unwrap();
         assert_eq!(inv.progress_every, DEFAULT_PROGRESS_EVERY);
+        assert_eq!(inv.spec.plateau_after, DEFAULT_PLATEAU_AFTER);
         // Both value forms parse; 0 and 1 are accepted (silent / full-stream).
         assert_eq!(
             parse(args(&["art", "--progress-every", "0"]))
@@ -3192,9 +3555,25 @@ mod tests {
                 .progress_every,
             1
         );
+        assert_eq!(
+            parse(args(&["art", "--plateau-after", "0"]))
+                .unwrap()
+                .spec
+                .plateau_after,
+            0
+        );
+        assert_eq!(
+            parse(args(&["art", "--plateau-after=17"]))
+                .unwrap()
+                .spec
+                .plateau_after,
+            17
+        );
         // Duplicate is rejected (set_once), non-integer is rejected.
         assert!(parse(args(&["art", "--progress-every=1", "--progress-every=2"])).is_err());
         assert!(parse(args(&["art", "--progress-every", "nope"])).is_err());
+        assert!(parse(args(&["art", "--plateau-after=1", "--plateau-after=2"])).is_err());
+        assert!(parse(args(&["art", "--plateau-after", "nope"])).is_err());
     }
 
     #[test]

@@ -127,7 +127,8 @@ source-first native libtest harness mode for one exact test target.
 | `replay` | Reproduce a recorded trace; seed/faults/argv restored from it. | `cargo patina replay ./app run.patina` |
 | `trace` | Inspect an existing trace's metadata, events, stats, or diff. | `cargo patina trace info run.patina` |
 | `explore` | Sweep a seed range, reporting per-seed outcomes. | `cargo patina explore run ./app --seeds 500` |
-| `campaign` | Config-driven fault-and-schedule sweep with failure dedup and SDK oracle coverage gate. | `cargo patina campaign ./app --gens 200 --buggify --out-dir out/` |
+| `campaign` | Config-driven fault-and-schedule sweep with failure dedup, SDK oracle coverage gate, and native edge-coverage accumulation for yield-point binaries. | `cargo patina campaign ./app --gens 200 --buggify --out-dir out/` |
+| `coverage` | Symbolize and roll up a `patina.covmap/v1` map or campaign coverage store. | `cargo patina coverage ./app out/` |
 | `sites` | Inventory assertion/oracle instrumentation; optionally join a run or campaign SDK report. | `cargo patina sites --exercised out/` |
 | `minimize` | Shrink a failing trace (or seed/params) against an oracle. | `cargo patina minimize bug.patina --output small.patina -- ./oracle` |
 
@@ -150,11 +151,11 @@ registry (schema `patina.help/v2`) with progressive disclosure: bare
 `cargo patina --help --format json` is a compact index (every verb's summary and
 usage forms, the global flags, and the environment protocol), while
 `cargo patina <verb> --help --format json` returns that one verb's full flag
-detail — handy for scripts and AI agents. Every result is available as a single
-JSON envelope via `--format json` (except `trace events --format json`, which
-streams `patina.trace.events/v1` JSON Lines; `trace info|stats|diff` nest their
-trace payloads in the normal result envelope), and `--render out.html` writes a
-self-contained HTML timeline of any traced run.
+detail — handy for scripts and AI agents. Results are available as JSON via
+`--format json` (usually a single `patina.result/v1` envelope; `coverage` emits
+`patina.coverage/v1`; `trace events` streams `patina.trace.events/v1` JSON Lines;
+`trace info|stats|diff` nest their trace payloads in the normal result envelope),
+and `--render out.html` writes a self-contained HTML timeline of any traced run.
 
 ### Fault injection and schedule exploration
 
@@ -232,7 +233,11 @@ Why debug finds more bugs:
   basic blocks, so a release guest hands the seeded scheduler *fewer* windows to
   preempt an atomics-only race. Yield-point binaries also emit
   `PATINA_COVERAGE_REPORT`; use `run`/`replay --coverage-out PATH` to save a
-  `patina.covmap/v1` edge-counter map.
+  `patina.covmap/v1` edge-counter map, then inspect it with
+  `cargo patina coverage <binary> <map>`. Campaigns over yield-point native
+  binaries persist the union under `<out-dir>/coverage/`, and the offline
+  coverage report refuses a campaign store if `<binary>` does not hash to the
+  recorded campaign artifact. Campaigns report plateau with `--plateau-after`.
 - **Faster inner loop.** Debug compiles quicker, which dominates when you rebuild
   between every edit.
 

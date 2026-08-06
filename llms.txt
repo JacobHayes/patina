@@ -64,13 +64,21 @@ with no `--target` -> the Cargo package family (in-process boundary API), except
   first failing seed with `PATINA_EXPLORE_FAILURE seed=S exit=E repro="cargo patina run ... --seed S"`;
   the JSON envelope's `message` carries the same repro. Otherwise
   `PATINA_EXPLORE_COMPLETE start=... seeds=...`.
-- `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults]`
+- `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults]`
   Config-driven deterministic fault-and-schedule sweep: every generation's seed
   and knobs are a pure function of the generation number, outcomes are
   classified into seven classes, novel failure signatures are deduped with saved
-  traces, and SDK site coverage is folded into `<out-dir>/sites.json` (schema
-  `patina.campaign.sites/v1`). Registered `sometimes!` sites that are never
-  satisfied fail the campaign by default unless explicitly waived.
+  traces, SDK site coverage is folded into `<out-dir>/sites.json` (schema
+  `patina.campaign.sites/v1`), and native yield-point edge coverage is folded
+  into `<out-dir>/coverage/` (schema `patina.coverage.campaign/v1`) with a
+  plateau report controlled by `--plateau-after`. Registered `sometimes!` sites
+  that are never satisfied fail the campaign by default unless explicitly waived.
+- `cargo patina coverage <BINARY> <MAP|CAMPAIGN-OUT-DIR> [--focus CRATE::module] [--top N]`
+  Read-only offline symbolization for native yield-point coverage. Resolves
+  covmap PCs from the `patina_yield_point` anchor, demangles symbols, rolls edges
+  up by crate/module/function, refuses campaign stores whose recorded artifact
+  hash does not match `<BINARY>`, and emits human tables or a
+  `patina.coverage/v1` JSON envelope.
 - `cargo patina sites [--crate NAME] [--module PATH] [--group NAME] [--site LABEL] [--all] [--exercised FILE|OUTDIR] [--kind KIND] [--runtime driven|observed|invisible] [--no-cache]` / `sites --selftest`
   Static inventory of Patina SDK assertion/oracle sites, Rust assert/debug_assert,
   proptest/quickcheck, and antithesis-sdk assertions in the current workspace.
@@ -90,9 +98,10 @@ with no `--target` -> the Cargo package family (in-process boundary API), except
 
 ## Output options (all verbs; stripped before routing, never reach the guest)
 
-- `--format human|json` (default human). `json` prints ONE result envelope on
-  stdout (schema `patina.result/v1`) and folds captured guest output into it;
-  `trace events --format json` is the streaming exception and emits
+- `--format human|json` (default human). `json` usually prints ONE result
+  envelope on stdout (schema `patina.result/v1`) and folds captured guest output
+  into it; `coverage --format json` emits `patina.coverage/v1`, and `trace
+  events --format json` is the streaming exception and emits
   `patina.trace.events/v1` JSON Lines. Human output is unchanged by default.
   NOTE: the selector is `--format`, not
   `--output`, because `--output PATH` is already the build/minimize artifact path.

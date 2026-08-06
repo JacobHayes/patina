@@ -202,7 +202,7 @@ pub const GLOBAL_OUTPUT: &[Flag] = &[
         "--format",
         None,
         Value::Required("human|json", Kind::Enum(&["human", "json"])),
-        "Result format (default human). `json` prints one machine-readable result envelope (schema patina.result/v1) on stdout; `trace events --format json` is the streaming exception and prints patina.trace.events/v1 JSON Lines. `--help --format json` prints this registry as JSON.",
+        "Result format (default human). `json` prints one machine-readable result envelope (schema patina.result/v1) on stdout; `coverage --format json` prints patina.coverage/v1, and `trace events --format json` is the streaming exception and prints patina.trace.events/v1 JSON Lines. `--help --format json` prints this registry as JSON.",
         false,
     ),
     f(
@@ -1139,6 +1139,13 @@ never-reached `reachable!` is invisible until static site enumeration lands. \
                 false,
             ),
             f(
+                "--plateau-after",
+                None,
+                Value::Required("N", Kind::U64),
+                "Report native edge-coverage plateau after N generations without new edges (default 200; 0 disables).",
+                false,
+            ),
+            f(
                 "--allow-unmet-sometimes",
                 None,
                 Value::Optional("MIN_GENS", Kind::PositiveU64),
@@ -1206,6 +1213,41 @@ never-reached `reachable!` is invisible until static site enumeration lands. \
                 None,
                 Value::None,
                 "Prove every classifier class and the signature store, then exit.",
+                false,
+            ),
+        ],
+    }],
+};
+
+const COVERAGE: Verb = Verb {
+    name: "coverage",
+    summary: "Symbolize and roll up native yield-point coverage maps or campaign stores.",
+    synopsis: &[
+        "cargo patina coverage <BINARY> <MAP|CAMPAIGN-OUT-DIR> [--focus CRATE::module] [--top N]",
+    ],
+    prose: "\
+`coverage` is a read-only offline report over native `--yield-points` coverage. \
+Pass the same binary that produced a `patina.covmap/v1` map (from run/replay \
+--coverage-out) or a campaign out-dir with `<out-dir>/coverage/`. The report \
+uses the map's anchor-relative PCs, resolves them against the binary's \
+`patina_yield_point` symbol, demangles Rust symbols, buckets edges into the \
+shared crate/module rollup, and reports covered percentages plus hit \
+concentration. The JSON form emits schema patina.coverage/v1.",
+    groups: &[Group {
+        title: "Coverage options",
+        flags: &[
+            f(
+                "--focus",
+                None,
+                Value::Required("CRATE::module", Kind::Str),
+                "Drill down to one crate/module/function prefix.",
+                false,
+            ),
+            f(
+                "--top",
+                None,
+                Value::Required("N", Kind::Usize),
+                "List the N hottest and N coldest functions after the crate index.",
                 false,
             ),
         ],
@@ -1518,7 +1560,7 @@ PATINA_SEED/PATINA_PARAMS_JSON protocol.",
 
 /// Every verb, in overview order.
 pub const VERBS: &[&Verb] = &[
-    &RUN, &TEST, &BUILD, &AUDIT, &REPLAY, &EXPLORE, &CAMPAIGN, &SITES, &TRACE, &MINIMIZE,
+    &RUN, &TEST, &BUILD, &AUDIT, &REPLAY, &EXPLORE, &CAMPAIGN, &COVERAGE, &SITES, &TRACE, &MINIMIZE,
 ];
 
 /// The `PATINA_*` environment protocol and honored tool variables.
