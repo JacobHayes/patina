@@ -3,11 +3,12 @@
 Status: design approved 2026-07-30; Wave A (`domain_seed`/`fault_domain` registry, nested
 `FaultConfig`, FaultNet permille migration, swarm coverage gate), Wave B (`FaultFs` errors +
 short I/O), Wave C (fs latency, `--net-latency-nanos` in the shared fault group, TCP base
-latency, `--budget`/`test`-buggify parity, the crash-placement campaign band) and the core of
-Wave D (SimNet + shim wildcard-bind routing, `Operation::DnsResolve` + `Context::dns_resolve`,
+latency, `--budget`/`test`-buggify parity, the crash-placement campaign band) and and Wave D
+(SimNet + shim wildcard-bind routing, `Operation::DnsResolve` + `Context::dns_resolve`,
 the `getaddrinfo`/`freeaddrinfo` interposer, `--dns-entry`/`Kind::DnsEntry` + both fault knobs +
-`DnsConfigRecord` + reconcile, the WASI family exception) implemented 2026-08-06; Waves E-F
-remain planned. Wave D's remaining items are listed in §10. The §0 file:line references are as verified at design
+`DnsConfigRecord` + reconcile, the WASI family exception, the harness `dns_entry`/`dns_service`
+builders, and the campaign DNS band + `VACUOUS_DNS_FAULT` class) implemented 2026-08-06; Waves E-F
+remain planned. The §0 file:line references are as verified at design
 time (post-e135c94) and have since moved.
 
 ## 0. Verified current state (what this builds on, with the gaps found)
@@ -387,7 +388,7 @@ fault be replayed flag-free, and is there standalone point injection?*
 | net delivery (drop/jitter/latency) | finder: ✓ · repro: replay ✓ | same | finder: ✓ full · repro: ✓ | Latency CLI family gap fixed in Wave C (`--net-latency-nanos` moved into the shared `FAULT_FLAGS`); TCP base latency (defect 2) applies on the stream path. No point injection ("drop packet N") — replay suffices. |
 | net partition | finder: ✗ · repro: ✗ | ✗ | ✗ | **Code-only** (`SimNet::partition`, §7). Fix: `--net-partition A,B` (static) + seeded timed partitions with heal windows tied to the liveness converge arm (§8 #1). |
 | TCP connect/reset | ✗ | ✗ | ✗ | §8 #1. |
-| DNS | finder/repro: ✗ → §3 | N/A (no wasip1 surface) | ✗ → §3 | Family exception documented. |
+| DNS | finder: ✓ · repro: replay ✓ | N/A (no wasip1 surface) | finder: ✓ · repro: ✓ | Closed in Wave D. The finder is `--dns-fail-permille`/`--dns-latency-nanos` over a `--dns-entry` host table, banded per generation by `campaign --faults` (which takes `--dns-entry` as campaign shape). Family exception documented. |
 | clock (sleep jitter) | finder: ✓ · repro: replay ✓ | ✓ · ✓ | ✓ · ✓ | Skew/jumps: §8 #2. |
 | schedule (PCT/starve/yield-points) | finder: ✗ (env-only, no CLI) · repro: replay ✓ | N/A (single-threaded) | finder: ✓ · repro: replay + minimize ✓ | Cargo-family CLI gap noted in §7. |
 | entropy | finder: ✗ · repro: replay ✓ (stream recorded) | same | same | Fault knob: §8 #3. |
@@ -498,7 +499,7 @@ check ladder; Linux 8-gate at wave boundaries.
   "buggify at the default rate, and 500 is a test filter"). Both are now structurally prevented:
   every family's fault plumbing enumerates ONE knob table gated against the flag registry, and a
   plain token after a bare optional-value flag is a loud parse error.
-- **Wave D — DNS (runtime-touching, full battery). CORE DONE; three items remain.**
+- **Wave D — DNS (runtime-touching, full battery). DONE.**
   Delivered: the wildcard-bind routing rule — shared by SimNet AND the native shim, because each
   resolves addresses independently and a rule in only one of them delivers traffic that nothing
   wakes for (red-proven in both directions); `Operation::DnsResolve` + `Context::dns_resolve`
@@ -507,9 +508,20 @@ check ladder; Linux 8-gate at wave boundaries.
   `--dns-fail-permille`, `--dns-latency-nanos`, `DnsConfigRecord` + reconcile, swarm rows, and
   the WASI family exception (declared by the owning group, so the refusal is registry-driven);
   `PATINA_DNS_FAULT_REPORT` with per-class vacuity; runtime and native end-to-end efficacy legs.
-  REMAINING: (1) `HarnessBuilder::dns_entry`/`dns_service` (§3.4 part 2); (2) the campaign
-  `--faults` DNS band plus a `VACUOUS_DNS_FAULT` outcome class and its selftest fixture — the
-  runtime already emits the vacuity verdict the classifier would read; (3) TUTORIAL prose.
+  Then completed: `HarnessBuilder::dns_entry`/`dns_service` (§3.4 part 2, allocating `10.0.0.N`
+  in registration order and skipping addresses an explicit entry claims); the campaign `--faults`
+  DNS band plus the `VACUOUS_DNS_FAULT` outcome class (RED-proven: four selftest fixtures failing
+  before the classify rule, including per-plane attribution so a vacuous DNS run is not filed
+  under the fs class); and TUTORIAL §9, every command executed.
+
+  One addition beyond the original wave list, made because the band would otherwise have been
+  inert by construction: `campaign --dns-entry NAME=ADDR`. A campaign had no way to define a host
+  table — a generation with no defined names resolves everything to NXDOMAIN by SEMANTICS, so a
+  banded `--dns-fail-permille` could never fire and the fault report would stay silent. The flag
+  is campaign SHAPE (recorded in the out-dir spec, refused on `--extend`/`--resume` like every
+  other spec flag, refused outright for a WASI artifact), and the band is emitted only when the
+  table is non-empty. This is the arc's own acceptance criterion — "a campaign … shows fs/dns-fault
+  generations firing" — made reachable rather than a new axis.
 
   One design note against §3.4: the accepted socket's local address stays the LISTENER's
   (`0.0.0.0:PORT`) rather than the address the client dialed, so `getsockname` on an accepted

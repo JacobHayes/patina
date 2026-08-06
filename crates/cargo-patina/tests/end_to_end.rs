@@ -12175,6 +12175,105 @@ fn harness_effect_before_install_fails_closed() {
     );
 }
 
+// A harness that names its own services. `dns_service` allocates the virtual
+// address and inserts the host-table entry; `dns_entry` pins one explicitly. The
+// unregistered name must stay NXDOMAIN, so an over-broad table cannot make this
+// pass. Single-threaded on purpose: the wildcard-bind producer path needs a
+// listener thread, and harness mode currently aborts at shutdown when the guest
+// spawns one, so that leg is covered by the CLI `--dns-entry` gate instead.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const HARNESS_DNS_SRC: &str = r#"
+use std::net::ToSocketAddrs;
+
+fn resolve(name: &str) -> String {
+    match (name, 9500).to_socket_addrs() {
+        Ok(mut addrs) => match addrs.next() {
+            Some(addr) => addr.ip().to_string(),
+            None => "empty".to_string(),
+        },
+        Err(_) => "NXDOMAIN".to_string(),
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    patina_dst_harness::run_with(
+        |harness| {
+            Ok(harness
+                .dns_entry("pinned.internal", "10.9.9.9")
+                .dns_service("db.internal"))
+        },
+        || {
+            println!(
+                "HARNESS_OUT service={} pinned={} absent={}",
+                resolve("db.internal"),
+                resolve("pinned.internal"),
+                resolve("absent.internal"),
+            );
+            Ok::<(), std::io::Error>(())
+        },
+    )?;
+    Ok(())
+}
+"#;
+
+// Gate: the harness DNS builders are the code-side twin of `--dns-entry`. They
+// must reach the SAME `RuntimeConfig` host table (so the names resolve, the
+// allocation is the documented one, and undefined names stay NXDOMAIN) and be
+// recorded into the trace so replay is flag-free — the harness closure re-applies
+// the overlay on replay, so this also proves the overlay and the authoritative
+// trace reconcile rather than conflict.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn harness_dns_service_and_entry_reach_the_host_table_and_replay_flag_free() {
+    let directory = tempdir().unwrap();
+    let fixture = directory.path().join("dns");
+    write_harness_fixture(&fixture, "harness-dns", HARNESS_DNS_SRC);
+    let bin = directory.path().join("harness-dns-bin");
+    build_harness_bin(&fixture, &bin);
+
+    let trace = directory.path().join("harness-dns.patina");
+    let recorded = invoke_in(
+        native_workspace(),
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--harness",
+            "--seed",
+            "1",
+            "--record",
+            trace.to_str().unwrap(),
+        ],
+    );
+    let line = harness_out_line(&recorded);
+    assert!(
+        line.contains("service=10.0.0.1"),
+        "dns_service did not allocate the documented address: {line}"
+    );
+    assert!(
+        line.contains("pinned=10.9.9.9"),
+        "dns_entry did not reach the host table: {line}"
+    );
+    assert!(
+        line.contains("absent=NXDOMAIN"),
+        "an unregistered name must stay NXDOMAIN: {line}"
+    );
+
+    let replayed = invoke_in(
+        native_workspace(),
+        &[
+            "replay",
+            bin.to_str().unwrap(),
+            trace.to_str().unwrap(),
+            "--harness",
+        ],
+    );
+    assert_eq!(
+        harness_out_line(&replayed),
+        line,
+        "flag-free replay of a harness-configured DNS table diverged"
+    );
+}
+
 // `--harness` is native-only: on a WASI run it is rejected up front (the WASI
 // supervisor owns run configuration), never silently ignored.
 #[cfg(any(target_os = "linux", target_os = "macos"))]

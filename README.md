@@ -183,7 +183,10 @@ reproduces them flag-free:
   inject seeded resolution failures and delays against the defined names. A
   server that binds `0.0.0.0:PORT` is reachable at any address on that port, so
   ordinary `INADDR_ANY` server code is reached by a resolved name with no
-  service-side registration.
+  service-side registration — and a harness can name its own services with
+  `HarnessBuilder::dns_service`, which allocates the virtual address for you.
+  `campaign --dns-entry` hands the table to a sweep, which then bands both knobs
+  per generation and classifies an inert one as `VACUOUS_DNS_FAULT`.
 - **Timing**: `--sleep-jitter-nanos MIN..MAX` on every guest sleep.
 - **Schedule exploration** (native): `--sched-pct` (PCT priority scheduling),
   `--starve` (bounded starvation intervals), `--swarm` (seed-derived fault-class

@@ -228,7 +228,102 @@ reproduce:
 
 If `cargo-patina` is not discoverable, the test fails loudly instead of skipping.
 
-## 9. Machine-readable output for agents
+## 9. Name resolution as a fault domain
+
+Buggify needs you to mark the site. Environment faults do not — they perturb the
+boundary your program already crosses. DNS is one, and it catches a bug class
+that never shows up in a unit test: a service that resolves its dependency once
+at startup and gives up if that lookup fails.
+
+`resolver.rs` (a standalone source; `build` takes a single `.rs` file directly):
+
+```rust
+// A service startup path that looks up its dependency exactly ONCE -- no retry.
+// Realistic, and exactly the shape a transient resolver failure breaks.
+use std::net::ToSocketAddrs;
+
+fn main() {
+    let resolved = ("db.internal", 9000)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.next());
+    match resolved {
+        Some(addr) => println!("PATINA_RESULT ok=1 db.internal={}", addr.ip()),
+        None => {
+            // The campaign's harness-agnostic violation contract.
+            println!("PATINA_VIOLATION dns-startup detail=gave-up-after-one-lookup");
+            std::process::exit(1);
+        }
+    }
+}
+```
+
+There is no host resolver behind this. The run's host table is exactly what you
+declare with `--dns-entry NAME=ADDR` (repeatable); every other name is NXDOMAIN,
+deterministically:
+
+```
+$ cargo patina build ./resolver.rs --output ./resolver
+PATINA_NATIVE_BUILD output=./resolver
+
+$ cargo patina run ./resolver --seed 1 --dns-entry db.internal=10.0.0.5
+PATINA_RESULT ok=1 db.internal=10.0.0.5
+
+$ cargo patina run ./resolver --seed 1
+PATINA_VIOLATION dns-startup detail=gave-up-after-one-lookup      # exit 1
+```
+
+That second failure is *semantics*, not a fault: an undefined name always fails.
+The two fault knobs act on names the table **does** define —
+`--dns-fail-permille` (a seeded split of NXDOMAIN and resolver timeout) and
+`--dns-latency-nanos MIN..MAX` (seeded resolution delay on the virtual clock).
+Both report on stderr whether they actually did anything, so a clean run cannot
+quietly mean "the knob never fired":
+
+```
+$ cargo patina run ./resolver --seed 1 --dns-entry db.internal=10.0.0.5 --dns-fail-permille 1000
+PATINA_VIOLATION dns-startup detail=gave-up-after-one-lookup      # exit 1
+PATINA_DNS_FAULT_REPORT resolutions=1 ... failures_injected=1 ... vacuous=0
+
+$ cargo patina run ./resolver --seed 1 --dns-entry db.internal=10.0.0.5 \
+    --dns-latency-nanos 2000000..2000000
+PATINA_RESULT ok=1 db.internal=10.0.0.5
+PATINA_DNS_FAULT_REPORT resolutions=1 ... latency_applied=1 vacuous=0
+```
+
+At rate 1000 the bug is trivially reproducible; the interesting question is
+whether a *realistic* failure rate finds it. Hand the table to a campaign and it
+draws the DNS knobs per generation alongside the fs and network ones:
+
+```
+$ cargo patina campaign ./resolver --gens 20 --faults --dns-entry db.internal=10.0.0.5 \
+    --out-dir ./dns-out
+PATINA_CAMPAIGN_GEN generation=7 seed=10045940371587287147 class=VIOLATION NOVEL
+  class OK                 19
+  class VIOLATION          1
+      reproduce: cargo patina replay ./resolver ./dns-out/failures/generation-7.patina
+PATINA_CAMPAIGN_COMPLETE generations=20 failures=1 novel=1
+```
+
+One generation in twenty caught it, and the reproducer needs no knob flags at
+all — the trace carries the host table and both knob settings:
+
+```
+$ cargo patina replay ./resolver ./dns-out/failures/generation-7.patina
+PATINA_VIOLATION dns-startup detail=gave-up-after-one-lookup      # exit 1
+PATINA_DNS_FAULT_REPORT resolutions=1 ... failures_injected=1 latency_applied=1 vacuous=0
+```
+
+Two things worth knowing beyond this example. On the producer side, a server that
+binds `0.0.0.0:PORT` receives traffic addressed to any address on that port, so
+ordinary `INADDR_ANY` server code is reachable by a resolved name with no
+service-side registration — and a harness can name its own services with
+`HarnessBuilder::dns_service`, which allocates the virtual address for you. And
+the `--dns-*` flags are a documented family exception: wasip1 has no
+name-resolution surface at all, so `--target wasi` refuses them rather than
+accepting a knob that could never fire.
+
+## 10. Machine-readable output for agents
 
 Any verb accepts `--format json`. Most emit one result envelope on stdout (schema
 `patina.result/v1`) with the guest output folded in; `coverage` emits
@@ -247,11 +342,11 @@ $ cargo patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina --fo
 
 ## Where to go next
 
-- Add fault injection: `--fs-crash-at`, `--fs-error-permille`,
+- Add the other fault domains: `--fs-crash-at`, `--fs-error-permille`,
   `--fs-short-permille`, `--fs-latency-nanos`, `--net-drop-permille`,
-  `--net-jitter-nanos`, `--net-latency-nanos`, `--sleep-jitter-nanos`. They are
-  seed-driven, default off, and recorded into the trace like buggify — so replay
-  reproduces them flag-free.
+  `--net-jitter-nanos`, `--net-latency-nanos`, `--sleep-jitter-nanos` — the same
+  shape as the DNS knobs in section 9. They are seed-driven, default off, and
+  recorded into the trace like buggify, so replay reproduces them flag-free.
 - Vary the *workload* across campaign generations from inside the guest: a
   campaign varies patina-side seeds (scheduler, faults, buggify) per generation
   but keeps guest argv fixed by design. A guest that wants a different logical

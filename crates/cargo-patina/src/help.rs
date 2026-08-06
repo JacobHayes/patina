@@ -492,14 +492,22 @@ const FAULT_FLAGS: &[Flag] = &[
 /// never fire. That family exception is declared once, by the owning GROUP in
 /// each verb, which is also the only place that can name families the verb
 /// actually has.
+/// The host table itself, split out because `campaign` takes it WITHOUT the fault
+/// knobs: a campaign draws `--dns-fail-permille`/`--dns-latency-nanos` per
+/// generation from the generation hash, so accepting them from the operator too
+/// would be two authorities over one knob.
+const DNS_ENTRY_FLAG: Flag = f(
+    "--dns-entry",
+    None,
+    Value::Required("NAME=ADDR", Kind::DnsEntry),
+    "Define NAME to resolve to IPv4 ADDR (repeatable). Undefined names are NXDOMAIN.",
+    true,
+);
+
+const DNS_ENTRY_FLAGS: &[Flag] = &[DNS_ENTRY_FLAG];
+
 const DNS_FLAGS: &[Flag] = &[
-    f(
-        "--dns-entry",
-        None,
-        Value::Required("NAME=ADDR", Kind::DnsEntry),
-        "Define NAME to resolve to IPv4 ADDR (repeatable). Undefined names are NXDOMAIN.",
-        true,
-    ),
+    DNS_ENTRY_FLAG,
     f(
         "--dns-fail-permille",
         None,
@@ -1381,7 +1389,7 @@ const CAMPAIGN: Verb = Verb {
     name: "campaign",
     summary: "Config-driven deterministic fault-and-schedule sweep over one artifact.",
     synopsis: &[
-        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults] [--liveness-watchdog N] [--converge-within N] [--report-failures] [-- GUEST ARGS]",
+        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [-- GUEST ARGS]",
         "cargo patina campaign --extend N [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --resume [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --selftest",
@@ -1390,7 +1398,7 @@ const CAMPAIGN: Verb = Verb {
 A campaign runs `--gens` independent child `cargo patina run` processes over one \
 artifact. Everything is a pure function of the generation number, so a re-run with \
 the same spec reproduces the same seeds, knobs, outcomes, and failure signatures. \
-Each generation is classified into one of eight outcome classes; novel failure \
+Each generation is classified into one of nine outcome classes; novel failure \
 signatures are deduped and their traces saved with a reproduce command. A --spec \
 FILE.json supplies overrides and individual flags override the spec. Campaigns \
 checkpoint their state in --out-dir; `--extend N` adds N generations to the recorded \
@@ -1408,155 +1416,165 @@ waives that gate (unconditionally or only below the observed generation \
 threshold). `--selftest` proves every classifier class and the coverage gate \
 classes.",
     families: &[fam(Family::Sole, "`campaign`", None)],
-    groups: &[Group {
-        title: "Campaign options",
-        families: SOLE,
-        flags: &[
-            f(
-                "--gens",
-                None,
-                Value::Required("N", Kind::U64),
-                "Number of generations (default 40).",
-                false,
-            ),
-            f(
-                "--out-dir",
-                None,
-                Value::Required("DIR", Kind::Path),
-                "Output directory (default patina-campaign-out).",
-                false,
-            ),
-            f(
-                "--extend",
-                None,
-                Value::Required("N", Kind::PositiveU64),
-                "Continue the recorded out-dir with N additional generations (N >= 1; use --resume to finish an interrupted campaign without adding any); the out-dir's spec is authoritative.",
-                false,
-            ),
-            f(
-                "--resume",
-                None,
-                Value::None,
-                "Finish an interrupted recorded out-dir without adding generations.",
-                false,
-            ),
-            f(
-                "--spec",
-                None,
-                Value::Required("FILE.json", Kind::Path),
-                "JSON spec of campaign overrides.",
-                false,
-            ),
-            f(
-                "--seed-start",
-                None,
-                Value::Required("N", Kind::U64),
-                "Base for the per-generation seed derivation (default 0).",
-                false,
-            ),
-            f(
-                "--timeout-secs",
-                None,
-                Value::Required("N", Kind::U64),
-                "Per-generation child timeout in seconds (default 60).",
-                false,
-            ),
-            f(
-                "--progress-every",
-                None,
-                Value::Required("N", Kind::U64),
-                "Human-mode progress heartbeat every N generations (default 100; 1 = \
+    groups: &[
+        Group {
+            title: "Campaign options",
+            families: SOLE,
+            flags: &[
+                f(
+                    "--gens",
+                    None,
+                    Value::Required("N", Kind::U64),
+                    "Number of generations (default 40).",
+                    false,
+                ),
+                f(
+                    "--out-dir",
+                    None,
+                    Value::Required("DIR", Kind::Path),
+                    "Output directory (default patina-campaign-out).",
+                    false,
+                ),
+                f(
+                    "--extend",
+                    None,
+                    Value::Required("N", Kind::PositiveU64),
+                    "Continue the recorded out-dir with N additional generations (N >= 1; use --resume to finish an interrupted campaign without adding any); the out-dir's spec is authoritative.",
+                    false,
+                ),
+                f(
+                    "--resume",
+                    None,
+                    Value::None,
+                    "Finish an interrupted recorded out-dir without adding generations.",
+                    false,
+                ),
+                f(
+                    "--spec",
+                    None,
+                    Value::Required("FILE.json", Kind::Path),
+                    "JSON spec of campaign overrides.",
+                    false,
+                ),
+                f(
+                    "--seed-start",
+                    None,
+                    Value::Required("N", Kind::U64),
+                    "Base for the per-generation seed derivation (default 0).",
+                    false,
+                ),
+                f(
+                    "--timeout-secs",
+                    None,
+                    Value::Required("N", Kind::U64),
+                    "Per-generation child timeout in seconds (default 60).",
+                    false,
+                ),
+                f(
+                    "--progress-every",
+                    None,
+                    Value::Required("N", Kind::U64),
+                    "Human-mode progress heartbeat every N generations (default 100; 1 = \
                  full per-generation stream; 0 = silent).",
-                false,
-            ),
-            f(
-                "--plateau-after",
-                None,
-                Value::Required("N", Kind::U64),
-                "Report native edge-coverage plateau after N generations without new edges (default 200; 0 disables).",
-                false,
-            ),
-            f(
-                "--guided",
-                None,
-                Value::None,
-                "Bias each generation's seed and knobs toward configurations that previously \
+                    false,
+                ),
+                f(
+                    "--plateau-after",
+                    None,
+                    Value::Required("N", Kind::U64),
+                    "Report native edge-coverage plateau after N generations without new edges (default 200; 0 disables).",
+                    false,
+                ),
+                f(
+                    "--guided",
+                    None,
+                    Value::None,
+                    "Bias each generation's seed and knobs toward configurations that previously \
                  found new coverage (native --yield-points) or depth (WASI); refused when \
                  neither is available.",
-                false,
-            ),
-            f(
-                "--allow-unmet-sometimes",
-                None,
-                Value::Optional("MIN_GENS", Kind::PositiveU64),
-                "Waive the default unmet SDK oracle coverage gate; with =MIN_GENS, waive only while observed generations are below MIN_GENS.",
-                false,
-            ),
-            f(
-                "--buggify",
-                None,
-                Value::None,
-                "Randomize cooperative-SUT (buggify) activation/fire per generation.",
-                false,
-            ),
-            f(
-                "--swarm",
-                None,
-                Value::None,
-                "Apply seed-derived swarm fault-class selection (native only).",
-                false,
-            ),
-            f(
-                "--sched-pct",
-                None,
-                Value::None,
-                "Randomize a PCT bug depth per generation (native only).",
-                false,
-            ),
-            f(
-                "--faults",
-                None,
-                Value::None,
-                "Randomize fault knobs (fs error/short I/O, net drop, sleep jitter) per generation.",
-                false,
-            ),
-            f(
-                "--report-failures",
-                None,
-                Value::None,
-                "Also write a --report HTML for each failing generation.",
-                false,
-            ),
-            f(
-                "--liveness-watchdog",
-                None,
-                Value::Required("N", Kind::U64),
-                "Liveness-watchdog budget (virtual nanoseconds) applied every generation.",
-                false,
-            ),
-            f(
-                "--converge-within",
-                None,
-                Value::Required("N", Kind::U64),
-                "Heal-then-converge budget (virtual nanoseconds) applied every generation.",
-                false,
-            ),
-            f(
-                "--heal-after",
-                None,
-                Value::Required("N", Kind::U64),
-                "Explicit heal-then-converge arm-time override (virtual nanoseconds).",
-                false,
-            ),
-            f(
-                "--selftest",
-                None,
-                Value::None,
-                "Prove every classifier class and the signature store, then exit.",
-                false,
-            ),
-        ],
-    }],
+                    false,
+                ),
+                f(
+                    "--allow-unmet-sometimes",
+                    None,
+                    Value::Optional("MIN_GENS", Kind::PositiveU64),
+                    "Waive the default unmet SDK oracle coverage gate; with =MIN_GENS, waive only while observed generations are below MIN_GENS.",
+                    false,
+                ),
+                f(
+                    "--buggify",
+                    None,
+                    Value::None,
+                    "Randomize cooperative-SUT (buggify) activation/fire per generation.",
+                    false,
+                ),
+                f(
+                    "--swarm",
+                    None,
+                    Value::None,
+                    "Apply seed-derived swarm fault-class selection (native only).",
+                    false,
+                ),
+                f(
+                    "--sched-pct",
+                    None,
+                    Value::None,
+                    "Randomize a PCT bug depth per generation (native only).",
+                    false,
+                ),
+                f(
+                    "--faults",
+                    None,
+                    Value::None,
+                    "Randomize fault knobs (fs error/short I/O/crash placement, net drop/latency, sleep jitter, and — with --dns-entry — DNS failure/latency) per generation.",
+                    false,
+                ),
+                f(
+                    "--report-failures",
+                    None,
+                    Value::None,
+                    "Also write a --report HTML for each failing generation.",
+                    false,
+                ),
+                f(
+                    "--liveness-watchdog",
+                    None,
+                    Value::Required("N", Kind::U64),
+                    "Liveness-watchdog budget (virtual nanoseconds) applied every generation.",
+                    false,
+                ),
+                f(
+                    "--converge-within",
+                    None,
+                    Value::Required("N", Kind::U64),
+                    "Heal-then-converge budget (virtual nanoseconds) applied every generation.",
+                    false,
+                ),
+                f(
+                    "--heal-after",
+                    None,
+                    Value::Required("N", Kind::U64),
+                    "Explicit heal-then-converge arm-time override (virtual nanoseconds).",
+                    false,
+                ),
+                f(
+                    "--selftest",
+                    None,
+                    Value::None,
+                    "Prove every classifier class and the signature store, then exit.",
+                    false,
+                ),
+            ],
+        },
+        Group {
+            // Part of the campaign's shape, so it is recorded in the out-dir spec and
+            // refused on `--extend`/`--resume` like every other spec flag. A WASI
+            // artifact is refused outright — wasip1 has no resolution surface.
+            title: "DNS host table (forwarded to every generation; native artifacts only)",
+            families: SOLE,
+            flags: DNS_ENTRY_FLAGS,
+        },
+    ],
     refusals: NO_REFUSALS,
 };
 

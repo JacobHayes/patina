@@ -67,6 +67,16 @@ binary outside `cargo patina run` are each distinct loud errors.
 Fingerprinted knobs (buggify, schedule exploration, fault families) work from
 the harness for seeded runs but need the matching CLI flag on record/replay.
 
+The harness can also name services: `dns_service(name)` allocates a virtual
+address and inserts the DNS host-table entry, while `dns_entry(name, addr)` pins
+a name explicitly. Application code then resolves the name through plain `std`,
+and a server binding `0.0.0.0:PORT` receives traffic addressed to any address on
+that port, so the service body stays ordinary `INADDR_ANY` code. That is one
+host-table entry per name, not a topology model — network topology stays out of
+scope for v1. Known limitation: a harness whose application code spawns a thread
+aborts at shutdown, so run an in-process listener through `cargo patina run
+<binary> --dns-entry …` rather than through a harness until that is fixed.
+
 ## 3. Explicit-context simulator code — `patina-dst-runtime`
 
 Simulator-shaped code that owns its world: `run`/`run_with` build a `Context`

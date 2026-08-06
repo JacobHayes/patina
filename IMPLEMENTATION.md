@@ -83,7 +83,13 @@ Acceptance level: V2.
   run's `--dns-entry` host table as a recorded boundary operation, and
   `--dns-fail-permille` / `--dns-latency-nanos` act only on the names that table
   DEFINES (an undefined name is NXDOMAIN by semantics, so it is never a fault
-  opportunity). Per-class vacuity is reported through `PATINA_DNS_FAULT_REPORT`.
+  opportunity). Per-class vacuity is reported through `PATINA_DNS_FAULT_REPORT`,
+  which the campaign classifier reads as `VACUOUS_DNS_FAULT`. The table has three
+  entry points onto one `RuntimeConfig` field: the CLI `--dns-entry`, the harness
+  builders (`dns_entry` pins a name, `dns_service` allocates `10.0.0.N` in
+  registration order and skips addresses an explicit entry claims), and
+  `campaign --dns-entry`, which records the table in the out-dir spec, forwards it
+  to every generation, and is what makes the `--faults` DNS band non-inert.
   wasip1 has no resolution surface, so the WASI family refuses the `--dns-*`
   flags — a declared family exception, not an omission.
 - Runtime traces cross scheduler, network, clock, filesystem, and entropy effects.
@@ -499,9 +505,9 @@ surface (`cargo patina campaign`) generalizing the shell campaign machinery.
    `SHA-256("patina-campaign-<seed_base>-<gen>")` — no wall clock, no `$RANDOM`,
    exactly the fuzz-sweep scheme — so a re-run reproduces identical outcomes and
    signatures. The spec is a JSON file (`--spec`, `deny`-unknown-keys) and/or flags.
-   A pure classifier assigns one of eight outcome classes — `OK` / `VIOLATION` /
-   `LIVENESS` / `VACUOUS_FS_FAULT` / `FAIL_CLOSED_ABORT` / `STARVATION_STALL` /
-   `INFRA` / `UNCLASSIFIED` — with fuzz-sweep's strictness: an explicit finding is never
+   A pure classifier assigns one of nine outcome classes — `OK` / `VIOLATION` /
+   `LIVENESS` / `VACUOUS_FS_FAULT` / `VACUOUS_DNS_FAULT` / `FAIL_CLOSED_ABORT` /
+   `STARVATION_STALL` / `INFRA` / `UNCLASSIFIED` — with fuzz-sweep's strictness: an explicit finding is never
    downgraded, exit 111 is `STARVATION_STALL`, a Patina fail-closed refusal (a
    shim fatal stderr line or a bare SIGABRT carrying no SUT finding) is its own
    class distinct from a generic failure, and any nonzero exit matching no class

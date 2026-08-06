@@ -65,12 +65,44 @@
 //! pass the matching CLI flag too (e.g. `--buggify`) so the recorded and replayed
 //! fingerprints agree.
 //!
+//! # Named services
+//!
+//! [`HarnessBuilder::dns_service`] names a service and allocates it a virtual
+//! address; [`HarnessBuilder::dns_entry`] pins a name to an address you choose.
+//! Either way the application code stays ordinary production code — it resolves
+//! the name through plain `std`, and a server binding `0.0.0.0:PORT` receives
+//! whatever address the client dialed on that port, so nothing service-side has
+//! to know the name exists:
+//!
+//! ```no_run
+//! use std::net::ToSocketAddrs;
+//!
+//! patina_dst_harness::run_with(
+//!     |harness| Ok(harness.dns_service("db.internal").dns_entry("cache", "10.9.9.9")),
+//!     || {
+//!         let addr = ("db.internal", 9000).to_socket_addrs()?.next();
+//!         println!("db.internal -> {addr:?}"); // 10.0.0.1:9000
+//!         Ok::<(), std::io::Error>(())
+//!     },
+//! )?;
+//! # Ok::<(), patina_dst_harness::HarnessError>(())
+//! ```
+//!
+//! **Current limitation**: a harness whose application code spawns a thread
+//! aborts at shutdown (an interposed effect reaches the boundary after the
+//! harness finalizes). Until that is fixed, run the in-process listener half of a
+//! client/server scenario through `cargo patina run <binary> --dns-entry …`
+//! rather than through a harness.
+//!
 //! # v1 scope
 //!
-//! Network topology and building an initial virtual filesystem image from code are
-//! out of scope for v1: the CLI `--mount` owns the filesystem image. WASI is
+//! Building an initial virtual filesystem image from code is out of scope for v1:
+//! the CLI `--mount` owns the filesystem image. Network *topology* is likewise out
+//! of scope — the DNS builders above are one host-table entry per name, not a
+//! topology model, and multi-process topologies remain future work. WASI is
 //! unsupported — the WASI supervisor owns run configuration there, so this crate's
-//! ABI targets the native shim only.
+//! ABI targets the native shim only, which is also why the DNS builders have no
+//! WASI counterpart (wasip1 has no name-resolution surface at all).
 //!
 //! [Patina]: https://github.com/JacobHayes/patina
 //! [USAGE-MODES.md]: https://github.com/JacobHayes/patina/blob/main/USAGE-MODES.md
@@ -167,6 +199,10 @@ impl Error for HarnessError {
 pub struct HarnessBuilder {
     overlay: BTreeMap<String, String>,
     params: BTreeMap<String, String>,
+    dns_entries: BTreeMap<String, String>,
+    /// Names registered through [`HarnessBuilder::dns_service`], in registration
+    /// order — the order their virtual addresses are allocated from.
+    dns_services: Vec<String>,
 }
 
 impl HarnessBuilder {
@@ -323,13 +359,88 @@ impl HarnessBuilder {
         self.set(rt::ENV_SWARM, "1")
     }
 
-    /// Finalize the overlay into a flat `PATINA_*` map (params folded to JSON).
+    /// Define `name` in the run's DNS host table, resolving to the IPv4 literal
+    /// `address` — the code-side twin of `--dns-entry NAME=ADDR`.
+    ///
+    /// Names the table does not define are NXDOMAIN, and the `--dns-*` fault
+    /// knobs act only on defined names. A malformed name or address is rejected
+    /// when the runtime installs, as [`HarnessError::Config`], the same as any
+    /// other malformed knob value.
+    #[must_use]
+    pub fn dns_entry(mut self, name: impl Into<String>, address: impl Into<String>) -> Self {
+        self.dns_entries.insert(name.into(), address.into());
+        self
+    }
+
+    /// Define `name` as a service running inside this harness, resolving it to a
+    /// virtual address the builder allocates.
+    ///
+    /// The service body needs no registration of its own: it binds
+    /// `0.0.0.0:PORT` the way production server code does, and a client that
+    /// resolves `name` and dials the resulting address reaches it, because a
+    /// wildcard bind receives traffic addressed to any address on its port.
+    ///
+    /// Addresses are allocated `10.0.0.1`, `10.0.0.2`, … in registration order,
+    /// skipping any address an explicit [`HarnessBuilder::dns_entry`] already
+    /// claims, so every name in the table resolves somewhere distinct. The
+    /// allocation is a pure function of the registered names, so it is identical
+    /// on record and replay.
+    #[must_use]
+    pub fn dns_service(mut self, name: impl Into<String>) -> Self {
+        let name = name.into();
+        if !self.dns_services.contains(&name) {
+            self.dns_services.push(name);
+        }
+        self
+    }
+
+    /// Resolve the registered services into host-table entries, allocating each
+    /// an address no explicit entry claims.
+    fn allocate_dns_services(&mut self) -> Result<(), HarnessError> {
+        if self.dns_services.is_empty() {
+            return Ok(());
+        }
+        // Seeded with the explicitly pinned addresses and grown as services are
+        // allocated, so the result depends only on the registration ORDER and the
+        // pinned set — never on the host table's map iteration order.
+        let mut claimed: Vec<String> = self.dns_entries.values().cloned().collect();
+        for name in std::mem::take(&mut self.dns_services) {
+            if self.dns_entries.contains_key(&name) {
+                return Err(HarnessError::Config(format!(
+                    "DNS service {name:?} is also defined by dns_entry; a name resolves to one \
+                     address, so register it as a service OR pin it explicitly, not both"
+                )));
+            }
+            let address = (1..=254u8)
+                .map(|host| format!("10.0.0.{host}"))
+                .find(|candidate| !claimed.contains(candidate))
+                .ok_or_else(|| {
+                    HarnessError::Config(
+                        "the harness DNS service address pool (10.0.0.1-10.0.0.254) is exhausted"
+                            .into(),
+                    )
+                })?;
+            claimed.push(address.clone());
+            self.dns_entries.insert(name, address);
+        }
+        Ok(())
+    }
+
+    /// Finalize the overlay into a flat `PATINA_*` map (params and the DNS host
+    /// table folded to JSON).
     fn into_overlay(mut self) -> Result<BTreeMap<String, String>, HarnessError> {
         if !self.params.is_empty() {
             let json = serde_json::to_string(&self.params).map_err(|error| {
                 HarnessError::Config(format!("failed to encode harness params: {error}"))
             })?;
             self.overlay.insert(rt::ENV_PARAMS_JSON.to_string(), json);
+        }
+        self.allocate_dns_services()?;
+        if !self.dns_entries.is_empty() {
+            let json = serde_json::to_string(&self.dns_entries).map_err(|error| {
+                HarnessError::Config(format!("failed to encode the harness DNS table: {error}"))
+            })?;
+            self.overlay.insert(rt::ENV_DNS_ENTRIES.to_string(), json);
         }
         Ok(self.overlay)
     }
@@ -529,6 +640,43 @@ mod tests {
             "activation knob must enable buggify"
         );
         assert_eq!(overlay[rt::ENV_BUGGIFY_ACTIVATION], "500");
+    }
+
+    #[test]
+    fn dns_entries_and_services_fold_into_one_host_table() {
+        // Services allocate in registration order and SKIP an address an explicit
+        // entry already claims: two names resolving to one address would make a
+        // multi-service test pass for the wrong reason.
+        let overlay = HarnessBuilder::new()
+            .dns_entry("pinned.internal", "10.0.0.2")
+            .dns_service("db.internal")
+            .dns_service("cache.internal")
+            .dns_service("db.internal") // repeat: same allocation, not a second one
+            .into_overlay()
+            .unwrap();
+        assert_eq!(
+            overlay[rt::ENV_DNS_ENTRIES],
+            r#"{"cache.internal":"10.0.0.3","db.internal":"10.0.0.1","pinned.internal":"10.0.0.2"}"#
+        );
+    }
+
+    #[test]
+    fn a_run_without_dns_names_carries_no_dns_control_plane_entry() {
+        let overlay = HarnessBuilder::new().step_budget(1).into_overlay().unwrap();
+        assert!(!overlay.contains_key(rt::ENV_DNS_ENTRIES));
+    }
+
+    #[test]
+    fn a_name_that_is_both_a_service_and_a_pinned_entry_is_refused() {
+        let error = HarnessBuilder::new()
+            .dns_entry("db.internal", "10.9.9.9")
+            .dns_service("db.internal")
+            .into_overlay()
+            .unwrap_err();
+        assert!(
+            matches!(&error, HarnessError::Config(message) if message.contains("db.internal")),
+            "expected a loud conflict, got {error:?}"
+        );
     }
 
     #[test]

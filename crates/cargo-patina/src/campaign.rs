@@ -109,6 +109,14 @@ pub struct CampaignSpec {
     pub pct: bool,
     /// Randomize fault knobs (net drop, sleep jitter) per generation.
     pub faults: bool,
+    /// The DNS host table (`NAME=ADDR` entries) every generation runs with.
+    ///
+    /// Part of the campaign's shape rather than a per-generation draw: the names
+    /// a guest resolves are its workload, not a fault. It is what makes the
+    /// `--faults` DNS band non-inert — with no defined name, a guest's lookups
+    /// are all NXDOMAIN by semantics and no DNS fault is ever eligible — so the
+    /// band is only emitted when this is non-empty.
+    pub dns_entries: Vec<String>,
     /// Generic liveness-watchdog budget (virtual nanoseconds), applied every
     /// generation when set.
     pub watchdog_nanos: Option<u64>,
@@ -142,6 +150,7 @@ impl Default for CampaignSpec {
             swarm: false,
             pct: false,
             faults: false,
+            dns_entries: Vec::new(),
             watchdog_nanos: None,
             converge_nanos: None,
             heal_after_nanos: None,
@@ -182,6 +191,26 @@ impl CampaignSpec {
                 "swarm" => self.swarm = json_bool(key, val)?,
                 "pct" => self.pct = json_bool(key, val)?,
                 "faults" => self.faults = json_bool(key, val)?,
+                "dns_entries" => {
+                    let array = val
+                        .as_array()
+                        .ok_or_else(|| CliError("dns_entries must be a JSON array".into()))?;
+                    self.dns_entries = array
+                        .iter()
+                        .map(|v| {
+                            let entry = v.as_str().ok_or_else(|| {
+                                CliError("dns_entries entries must be strings".into())
+                            })?;
+                            // A spec file bypasses the CLI value grammar, so run
+                            // the same validator here: a malformed table must fail
+                            // at parse time, not as an opaque child-run refusal in
+                            // every generation.
+                            crate::values::dns_entry("dns_entries", entry)
+                                .map_err(|error| CliError(format!("campaign spec {error}")))?;
+                            Ok(entry.to_string())
+                        })
+                        .collect::<Result<_, CliError>>()?;
+                }
                 "watchdog_nanos" => self.watchdog_nanos = Some(json_u64(key, val)?),
                 "converge_nanos" => self.converge_nanos = Some(json_u64(key, val)?),
                 "heal_after_nanos" => self.heal_after_nanos = Some(json_u64(key, val)?),
@@ -194,9 +223,9 @@ impl CampaignSpec {
                 other => {
                     return Err(CliError(format!(
                         "unknown campaign spec key {other:?}; expected generations, seed_base, \
-                         timeout_secs, guest_args, buggify, swarm, pct, faults, watchdog_nanos, \
-                         converge_nanos, heal_after_nanos, report, plateau_after, guided, or \
-                         allow_unmet_sometimes"
+                         timeout_secs, guest_args, buggify, swarm, pct, faults, dns_entries, \
+                         watchdog_nanos, converge_nanos, heal_after_nanos, report, \
+                         plateau_after, guided, or allow_unmet_sometimes"
                     )));
                 }
             }
@@ -356,6 +385,10 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     spec.pct |= args.flag("--sched-pct");
     spec.faults |= args.flag("--faults");
     spec.report |= args.flag("--report-failures");
+    let dns_entries = args.texts("--dns-entry");
+    if !dns_entries.is_empty() {
+        spec.dns_entries = dns_entries.into_iter().map(str::to_string).collect();
+    }
     if let Some(value) = args.u64("--liveness-watchdog") {
         spec.watchdog_nanos = Some(value);
     }
@@ -504,6 +537,12 @@ pub enum CampaignClass {
     /// occurred, but an enabled fs error/short-I/O fault class applied zero
     /// effects. This is a coverage failure, not a SUT finding.
     VacuousFsFault,
+    /// A configured DNS fault class was vacuous: the guest resolved defined names
+    /// often enough for an enabled failure/latency class to have fired several
+    /// times over, yet it applied zero effects. A coverage failure, not a SUT
+    /// finding — and its own class rather than a shared "vacuous fault" bucket so
+    /// a campaign report says which fault plane went inert.
+    VacuousDnsFault,
     /// Patina fail-closed refusal: a fingerprint/trace mismatch, a duplicate
     /// buggify label, a declared-but-never-called setup gate, a runtime that
     /// refused to initialize, or a bare shim SIGABRT.
@@ -526,6 +565,7 @@ impl CampaignClass {
             CampaignClass::Violation => "VIOLATION",
             CampaignClass::Liveness => "LIVENESS",
             CampaignClass::VacuousFsFault => "VACUOUS_FS_FAULT",
+            CampaignClass::VacuousDnsFault => "VACUOUS_DNS_FAULT",
             CampaignClass::FailClosedAbort => "FAIL_CLOSED_ABORT",
             CampaignClass::StarvationStall => "STARVATION_STALL",
             CampaignClass::Infra => "INFRA",
@@ -539,6 +579,7 @@ impl CampaignClass {
             "VIOLATION" => Some(CampaignClass::Violation),
             "LIVENESS" => Some(CampaignClass::Liveness),
             "VACUOUS_FS_FAULT" => Some(CampaignClass::VacuousFsFault),
+            "VACUOUS_DNS_FAULT" => Some(CampaignClass::VacuousDnsFault),
             "FAIL_CLOSED_ABORT" => Some(CampaignClass::FailClosedAbort),
             "STARVATION_STALL" => Some(CampaignClass::StarvationStall),
             "INFRA" => Some(CampaignClass::Infra),
@@ -632,6 +673,18 @@ pub fn classify(exit_code: i32, stdout: &str, stderr: &str) -> CampaignClass {
     {
         return CampaignClass::VacuousFsFault;
     }
+    // 3b. The same coverage failure on the DNS plane, kept a separate class so the
+    //    campaign report names WHICH fault plane went inert. Read off the DNS
+    //    report line for the same reason the fs verdict is: each plane carries its
+    //    own `vacuous=` field, and a whole-output substring search would file one
+    //    plane's vacuity under another's class.
+    if combined.contains("DNS fault knobs inert")
+        || combined
+            .lines()
+            .any(|line| line.contains("PATINA_DNS_FAULT_REPORT") && line.contains("vacuous=1"))
+    {
+        return CampaignClass::VacuousDnsFault;
+    }
     // 4. Patina fail-closed refusal: a shim fatal-abort refusal line, or a raw
     //    SIGABRT carrying no SUT finding (checked after the SUT-violation markers,
     //    so an `always!` abort stays a VIOLATION). Its own class, never a generic
@@ -703,6 +756,10 @@ fn primary_finding_line(class: CampaignClass, stdout: &str, stderr: &str) -> Str
         CampaignClass::VacuousFsFault => &[
             "PATINA_FS_FAULT_REPORT",
             "PATINA WARNING: filesystem fault knobs inert",
+        ],
+        CampaignClass::VacuousDnsFault => &[
+            "PATINA_DNS_FAULT_REPORT",
+            "PATINA WARNING: DNS fault knobs inert",
         ],
         CampaignClass::FailClosedAbort => &[
             "PATINA_BUGGIFY_DUPLICATE_LABEL",
@@ -1181,6 +1238,12 @@ fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     map.insert("swarm".into(), spec.swarm.into());
     map.insert("pct".into(), spec.pct.into());
     map.insert("faults".into(), spec.faults.into());
+    // Emitted only when the campaign HAS a host table, so a DNS-free spec's
+    // recorded JSON is byte-identical to what it was before the key existed and
+    // an out-dir written by an earlier build still round-trips on `--resume`.
+    if !spec.dns_entries.is_empty() {
+        map.insert("dns_entries".into(), spec.dns_entries.clone().into());
+    }
     if let Some(value) = spec.watchdog_nanos {
         map.insert("watchdog_nanos".into(), value.into());
     }
@@ -1584,6 +1647,17 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
 
     let artifact_path = PathBuf::from(&state.artifact.path);
     verify_artifact_identity(&state.artifact)?;
+
+    // The DNS family exception, enforced where the artifact family is finally
+    // known: wasip1 has no name-resolution surface, so a WASI campaign carrying a
+    // host table is refused rather than silently sweeping without it.
+    if state.artifact.family == "wasi" && !state.spec.dns_entries.is_empty() {
+        return Err(CliError::usage(
+            "--dns-entry is not supported for a WASI campaign: wasip1 has no name-resolution \
+             surface (no getaddrinfo, no sock_addr_resolve), so the host table could never be \
+             consulted; sweep a native artifact for DNS faults",
+        ));
+    }
 
     if let CampaignMode::Resume = mode {
         if state.generations_done == state.spec.generations {
@@ -2234,6 +2308,32 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
                 hi: jitter_hi,
             },
         );
+        // The DNS band rides on the host table, which is spec config rather than a
+        // per-generation draw: with no defined name every lookup is NXDOMAIN by
+        // SEMANTICS and no DNS fault is ever eligible, so banding the knobs there
+        // would ship a knob that provably cannot fire. WASI never gets them —
+        // wasip1 has no resolution surface (the artifact is refused outright
+        // upstream of this, so this is belt and braces).
+        if !spec.dns_entries.is_empty() && family != "wasi" {
+            for entry in &spec.dns_entries {
+                push_run_flag(&mut flags, "--dns-entry", RunValue::Text(entry.clone()));
+            }
+            let dns_fail = u32::from(hash[21]) * 100 / 255; // [0, 100] permille
+            push_run_flag(
+                &mut flags,
+                "--dns-fail-permille",
+                RunValue::Int(u64::from(dns_fail)),
+            );
+            let dns_latency_hi = u64::from(hash[22]) * 10_000; // up to 2.55 ms
+            push_run_flag(
+                &mut flags,
+                "--dns-latency-nanos",
+                RunValue::NanosRange {
+                    lo: 0,
+                    hi: dns_latency_hi,
+                },
+            );
+        }
     }
     if spec.swarm && native {
         push_run_flag(&mut flags, "--swarm", RunValue::Switch);
@@ -3416,6 +3516,77 @@ fn selftest() -> Result<i32, CliError> {
             "PATINA WARNING: filesystem fault knobs inert — 4 fault-eligible filesystem op(s) occurred",
         ),
     );
+    // The DNS fault plane, same per-class shape: a run that resolved defined
+    // names often enough for an enabled knob to fire, that applied nothing.
+    check(
+        "vacuous-dns-fail-report",
+        CampaignClass::VacuousDnsFault,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA_DNS_FAULT_REPORT resolutions=40 fail_vacuity_diagnosable=1 failures_injected=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1",
+        ),
+    );
+    check(
+        "vacuous-dns-latency-report",
+        CampaignClass::VacuousDnsFault,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA_DNS_FAULT_REPORT resolutions=40 fail_vacuity_diagnosable=0 failures_injected=0 latency_vacuity_diagnosable=1 latency_applied=0 vacuous=1",
+        ),
+    );
+    check(
+        "vacuous-dns-warning",
+        CampaignClass::VacuousDnsFault,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA WARNING: DNS fault knobs inert — 40 fault-eligible name resolution(s) occurred",
+        ),
+    );
+    check(
+        "dns-knobs-that-fired-are-not-vacuous",
+        CampaignClass::Ok,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA_DNS_FAULT_REPORT resolutions=40 fail_vacuity_diagnosable=1 failures_injected=4 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=0",
+        ),
+    );
+    // Per-plane attribution: a vacuous DNS run alongside a healthy fs report must
+    // NOT be filed under the fs class, and vice versa. Both verdicts are read off
+    // their own report LINE, never a substring search over the whole output.
+    check(
+        "dns-vacuity-is-not-filed-under-the-fs-class",
+        CampaignClass::VacuousDnsFault,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=1 errors_injected=4 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=0\nPATINA_DNS_FAULT_REPORT resolutions=40 fail_vacuity_diagnosable=1 failures_injected=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1",
+        ),
+    );
+    check(
+        "fs-vacuity-wins-over-a-healthy-dns-report",
+        CampaignClass::VacuousFsFault,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=1 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_DNS_FAULT_REPORT resolutions=40 fail_vacuity_diagnosable=1 failures_injected=4 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=0",
+        ),
+    );
+    // Both planes vacuous: one generation gets ONE class, and which one is pinned
+    // rather than left to whichever check happens to run first, so the same output
+    // always dedups to the same signature.
+    check(
+        "both-planes-vacuous-reports-the-fs-class",
+        CampaignClass::VacuousFsFault,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=1 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_DNS_FAULT_REPORT resolutions=40 fail_vacuity_diagnosable=1 failures_injected=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1",
+        ),
+    );
     check(
         "net-vacuity-is-not-filed-under-the-fs-class",
         CampaignClass::Ok,
@@ -4388,6 +4559,98 @@ mod tests {
             error.contains("another campaign is writing this out-dir")
                 || error.contains("failed to lock campaign out-dir"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn the_dns_band_rides_on_the_host_table_and_never_reaches_wasi() {
+        let bare = CampaignSpec {
+            faults: true,
+            ..CampaignSpec::default()
+        };
+        let hash = generation_hash(0, 3);
+        // No host table: no DNS flags at all. Every name a guest looks up is
+        // NXDOMAIN by semantics, so a banded knob could not fire — and an inert
+        // knob is worse than an absent one, because the report reads clean.
+        let without = derive_flags(&bare, &hash, "native");
+        assert!(
+            !without.iter().any(|f| f.starts_with("--dns-")),
+            "a table-free campaign must not band DNS knobs: {without:?}"
+        );
+
+        let spec = CampaignSpec {
+            dns_entries: vec!["db.internal=10.0.0.5".into()],
+            ..bare
+        };
+        let native = derive_flags(&spec, &hash, "native");
+        for banded in ["--dns-entry", "--dns-fail-permille", "--dns-latency-nanos"] {
+            assert!(native.iter().any(|f| f == banded), "native lacks {banded}");
+        }
+        let index = native
+            .iter()
+            .position(|f| f == "--dns-entry")
+            .expect("host table");
+        assert_eq!(native[index + 1], "db.internal=10.0.0.5");
+        // wasip1 has no resolution surface: the WASI `run` parser refuses these
+        // flags, so banding them would turn every generation into a refusal.
+        let wasi = derive_flags(&spec, &hash, "wasi");
+        assert!(
+            !wasi.iter().any(|f| f.starts_with("--dns-")),
+            "the WASI family must never receive DNS flags: {wasi:?}"
+        );
+    }
+
+    #[test]
+    fn the_dns_band_varies_the_failure_rate_and_latency_across_generations() {
+        let spec = CampaignSpec {
+            faults: true,
+            dns_entries: vec!["db.internal=10.0.0.5".into()],
+            ..CampaignSpec::default()
+        };
+        let mut rates = BTreeSet::new();
+        let mut latencies = BTreeSet::new();
+        for generation in 0..64 {
+            let flags = derive_flags(&spec, &generation_hash(0, generation), "native");
+            let value = |name: &str| {
+                let index = flags.iter().position(|f| f == name).expect("banded knob");
+                flags[index + 1].clone()
+            };
+            let rate: u64 = value("--dns-fail-permille").parse().expect("permille");
+            assert!(rate <= 100, "failure rate {rate} outside the [0, 100] band");
+            rates.insert(rate);
+            latencies.insert(value("--dns-latency-nanos"));
+        }
+        assert!(rates.len() > 8, "DNS failure rate barely varied: {rates:?}");
+        assert!(
+            latencies.len() > 8,
+            "DNS latency barely varied: {latencies:?}"
+        );
+    }
+
+    #[test]
+    fn a_dns_host_table_round_trips_through_the_recorded_spec() {
+        let spec = CampaignSpec {
+            faults: true,
+            dns_entries: vec!["db.internal=10.0.0.5".into(), "cache=10.0.0.6".into()],
+            ..CampaignSpec::default()
+        };
+        let json = spec_to_json(&spec);
+        assert_eq!(spec_from_state_json(&json).unwrap(), spec);
+        // A DNS-free spec records no key at all, so an out-dir written before the
+        // key existed still resumes.
+        let bare = CampaignSpec::default();
+        assert!(
+            spec_to_json(&bare).get("dns_entries").is_none(),
+            "a table-free spec must not record the key"
+        );
+        // A spec file bypasses the CLI value grammar, so it is validated here.
+        let mut malformed = CampaignSpec::default();
+        let json: serde_json::Value =
+            serde_json::from_str(r#"{"dns_entries": ["db.internal=nope"]}"#).unwrap();
+        let error = malformed.apply_json(&json).unwrap_err();
+        assert!(
+            error.to_string().contains("dotted-quad"),
+            "expected a loud grammar error, got {error}"
         );
     }
 

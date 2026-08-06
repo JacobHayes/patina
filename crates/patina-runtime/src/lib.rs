@@ -3519,7 +3519,7 @@ impl Context {
         report.latency_applied = self.fs_latency_applied;
         report.latency_vacuity_diagnosable = self
             .fs_latency_nanos
-            .is_some_and(|range| fs_latency_is_diagnosable(report.eligible_ops, range));
+            .is_some_and(|range| latency_is_diagnosable(report.eligible_ops, range));
         Some(report)
     }
 
@@ -4055,7 +4055,7 @@ impl Context {
         );
         report.latency_vacuity_diagnosable = self
             .dns_latency_nanos
-            .is_some_and(|range| fs_latency_is_diagnosable(report.resolutions, range));
+            .is_some_and(|range| latency_is_diagnosable(report.resolutions, range));
         Some(report)
     }
 
@@ -5960,15 +5960,19 @@ fn nxdomain(name: &str) -> EffectError {
     )
 }
 
-/// Whether a zero-application verdict on the fs-latency knob is anomalous rather
-/// than ordinary, judged the same rate-aware way as the wrapper's error/short
-/// classes: the knob's chance of drawing a NON-ZERO delay, over the eligible
-/// operations it actually saw, must have expected at least
+/// Whether a zero-application verdict on a `MIN..MAX` latency knob is anomalous
+/// rather than ordinary, judged the same rate-aware way as the wrapper's
+/// error/short classes: the knob's chance of drawing a NON-ZERO delay, over the
+/// eligible operations it actually saw, must have expected at least
 /// `VACUITY_MIN_EXPECTED_FIRES` delays. A `0..0` range (and any range whose
 /// draws are all zero) is inert by construction, not vacuous, so it never
 /// diagnoses; a `MIN..MAX` with `MIN >= 1` delays every eligible op and reaches
 /// the threshold as soon as there are five of them.
-fn fs_latency_is_diagnosable(eligible_ops: u64, (min, max): (u64, u64)) -> bool {
+///
+/// Domain-neutral on purpose: every latency knob shares this rule, so filesystem
+/// operations and DNS resolutions are judged here rather than each domain
+/// growing its own copy of the arithmetic.
+fn latency_is_diagnosable(eligible_ops: u64, (min, max): (u64, u64)) -> bool {
     if max == 0 {
         return false;
     }
@@ -7195,7 +7199,7 @@ mod tests {
         // that applied ZERO delays. That is the shape a filesystem path
         // bypassing the Context latency choke point produces — the class this
         // detector exists for — and it must be reported as vacuous.
-        assert!(fs_latency_is_diagnosable(20, (1_000, 1_000)));
+        assert!(latency_is_diagnosable(20, (1_000, 1_000)));
         let bypassed = FsFaultReport {
             eligible_ops: 20,
             latency_vacuity_diagnosable: true,
@@ -7206,16 +7210,16 @@ mod tests {
 
         // DOES NOT FIRE below the expected-firings floor: four eligible ops are
         // too few to call zero delays anomalous.
-        assert!(!fs_latency_is_diagnosable(4, (1_000, 1_000)));
+        assert!(!latency_is_diagnosable(4, (1_000, 1_000)));
 
         // DOES NOT FIRE for a range whose every draw is zero: that knob is inert
         // by construction, not inert on the code path.
-        assert!(!fs_latency_is_diagnosable(1_000_000, (0, 0)));
+        assert!(!latency_is_diagnosable(1_000_000, (0, 0)));
 
         // Rate-aware in between: `0..9` delays nine draws in ten, so it takes six
         // eligible ops to expect five delays.
-        assert!(!fs_latency_is_diagnosable(5, (0, 9)));
-        assert!(fs_latency_is_diagnosable(6, (0, 9)));
+        assert!(!latency_is_diagnosable(5, (0, 9)));
+        assert!(latency_is_diagnosable(6, (0, 9)));
     }
 
     #[test]
