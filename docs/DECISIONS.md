@@ -79,6 +79,14 @@ cluster so the fixes have citable symptom records.
   stacks (CLI, campaign/sites, runtime/shim) integrated twice: ten
   verb-table conflicts at point one, doc-only conflicts plus two one-line
   merges at point two; full battery green at the integrated tip (5m52s).
+- **2026-08-06 — clap adoption REJECTED by the spike's mechanical rule.**
+  The throwaway clap port of `run`+`campaign` passed every functional gate
+  (byte-identical help JSON/human help, e2e green, MSRV, single dependent)
+  but cost +117 net parser LOC (804→921) with a 116-LOC bridge, +3.3s cold
+  build, +2.33 MB binary. The decision rule required ≤0 net LOC, so the
+  spike was deleted (no middle state) and the flag > env > `.patina/` >
+  default config layer proceeds on the bespoke parsers in invariant Wave 4.
+  Full criterion table in docs/arcs/clap-config-eval.md.
 - **2026-08-06 — SlateDB-side harness findings are out of scope.** Items in
   `SLATEDB-SANDBOX-NOTES.md` (bank fenced-close neutrality, recovery scenario
   stabilization) live in the sandbox SlateDB checkout, not this repo; nothing

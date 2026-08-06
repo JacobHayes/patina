@@ -1,6 +1,15 @@
 # clap adoption + configuration story: evaluation and spike definition
 
-Status: approved 2026-07-30; spike awaits explicit user go, then the coordinator owns the adopt/reject call.
+Status: spike run 2026-08-06; verdict **REJECT** by the mechanical rule. All
+functional gates passed (registry walks unmodified; `run`/`campaign` help JSON
+and human help byte-identical; drift gate; run e2e 26/26 and campaign e2e 7/7;
+non-UTF8 passthrough preserved; MSRV 1.86 clean; `cargo tree -i clap` shows a
+single dependent), but the LOC criteria failed: net parser+bridge delta was
++117 LOC (baseline 804 → spike 921) with a 116-LOC clap↔passthrough/family
+bridge, plus +3.30s cold build and +2.33 MB (+6.4%) binary. Measured on an
+Apple M4 / rustc 1.97.1 with isolated build dirs. The spike diff was dropped
+per the no-middle-state rule; the config layering design below proceeds on the
+bespoke parsers (owned by invariant-visibility Wave 4).
 Scope: the `cargo-patina` CLI only. Decision owner: user, after the spike defined in §7.
 
 This doc answers four questions about adopting clap for the cargo-patina CLI,
