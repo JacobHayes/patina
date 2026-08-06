@@ -1,8 +1,7 @@
 //! `cargo patina sites` — static inventory of assertion/oracle sites.
 //!
-//! Wave 1 is intentionally static-only: it inventories Rust source sites with a
-//! syn pass, caches per-file recognizer results, and renders a summary-first
-//! `patina.sites/v1` report. Runtime joins, campaign feeds, `.patina/config.toml`
+//! Wave 2 joins a syn static inventory with runtime `PATINA_SDK_REPORT` rows
+//! supplied through `--exercised FILE`. Campaign aggregation, `.patina/config.toml`
 //! groups, and link-time static site enumeration are later waves.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,6 +18,7 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
 use crate::rollup::{RollupLeaf, build_rollup};
+use crate::sdk_report::{ExercisedSite, ExercisedSource, parse_exercised_file};
 use crate::{CliError, output};
 
 pub(crate) const SITES_SCHEMA: &str = "patina.sites/v1";
@@ -97,6 +97,7 @@ pub(crate) struct SitesOptions {
     group_filter: Option<String>,
     site_filter: Option<String>,
     all: bool,
+    exercised: Option<PathBuf>,
     kind_filter: Option<String>,
     runtime_filter: Option<String>,
     no_cache: bool,
@@ -115,8 +116,8 @@ impl SitesOptions {
 }
 
 /// Parse `sites [--crate NAME] [--module PATH] [--group NAME] [--site LABEL]
-/// [--all] [--kind KIND] [--runtime driven|observed|invisible] [--no-cache]
-/// [--selftest]`.
+/// [--all] [--exercised FILE] [--kind KIND]
+/// [--runtime driven|observed|invisible] [--no-cache] [--selftest]`.
 pub(crate) fn parse(arguments: Vec<OsString>) -> Result<SitesInvocation, CliError> {
     let mut options = SitesOptions::default();
     let mut selftest = false;
@@ -154,6 +155,10 @@ pub(crate) fn parse(arguments: Vec<OsString>) -> Result<SitesInvocation, CliErro
             "--site" => {
                 let value = crate::required_value(opt, &arguments, &mut index)?.to_string();
                 crate::set_once(&mut options.site_filter, value, "--site")?;
+            }
+            "--exercised" => {
+                let value = crate::required_os_value(opt, &arguments, &mut index)?;
+                crate::set_once(&mut options.exercised, PathBuf::from(value), "--exercised")?;
             }
             "--kind" => {
                 let value = crate::required_value(opt, &arguments, &mut index)?;
@@ -213,6 +218,7 @@ impl PartialEq for SitesOptions {
             && self.group_filter == other.group_filter
             && self.site_filter == other.site_filter
             && self.all == other.all
+            && self.exercised == other.exercised
             && self.kind_filter == other.kind_filter
             && self.runtime_filter == other.runtime_filter
             && self.no_cache == other.no_cache
@@ -230,7 +236,12 @@ pub(crate) fn execute(invocation: SitesInvocation) -> Result<i32, CliError> {
 
 fn run_scan(options: SitesOptions) -> Result<i32, CliError> {
     let scan = scan_current_workspace(!options.no_cache)?;
-    let report = build_report(&scan, &options);
+    let exercised = options
+        .exercised
+        .as_deref()
+        .map(parse_exercised_file)
+        .transpose()?;
+    let report = build_report(&scan, &options, exercised.as_ref());
     if output::options().is_json() {
         println!(
             "{}",
@@ -1181,15 +1192,84 @@ fn path_to_string(path: &syn::Path) -> String {
         .join("::")
 }
 
-fn build_report(scan: &StaticScan, options: &SitesOptions) -> Value {
+#[derive(Clone, Debug)]
+struct JoinedSite<'a> {
+    site: &'a SiteRecord,
+    exercised: Option<&'a ExercisedSite>,
+    never_exercised: bool,
+}
+
+impl RollupLeaf for JoinedSite<'_> {
+    fn crate_name(&self) -> &str {
+        &self.site.crate_name
+    }
+
+    fn module(&self) -> &str {
+        &self.site.module
+    }
+
+    fn groups(&self) -> &[String] {
+        &self.site.groups
+    }
+
+    fn bucket(&self) -> &str {
+        &self.site.runtime
+    }
+
+    fn is_gap(&self) -> bool {
+        self.never_exercised
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct JoinResult<'a> {
+    by_site_id: BTreeMap<String, &'a ExercisedSite>,
+    unmatched: Vec<UnmatchedRuntimeSite>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct UnmatchedRuntimeSite {
+    label: String,
+    kind: String,
+    site: String,
+    origin: &'static str,
+}
+
+fn build_report(
+    scan: &StaticScan,
+    options: &SitesOptions,
+    exercised: Option<&ExercisedSource>,
+) -> Value {
+    let join = exercised
+        .map(|source| join_exercised(scan, source))
+        .unwrap_or_default();
     let filtered = scan
         .sites
         .iter()
         .filter(|site| site_matches(site, options))
-        .cloned()
+        .map(|site| JoinedSite {
+            site,
+            exercised: join.by_site_id.get(&site.id).copied(),
+            never_exercised: exercised.is_some()
+                && site.runtime != "invisible"
+                && !join.by_site_id.contains_key(&site.id),
+        })
         .collect::<Vec<_>>();
     let rollup = build_rollup(&filtered, RUNTIME_ORDER);
-    let by_kind = count_by_kind(&filtered);
+    let static_sites = filtered
+        .iter()
+        .map(|joined| joined.site.clone())
+        .collect::<Vec<_>>();
+    let by_kind = count_by_kind(&static_sites);
+
+    let mut totals = json!({
+        "sites": filtered.len(),
+        "by_runtime": rollup.by_bucket,
+        "by_kind": by_kind,
+    });
+    if exercised.is_some() {
+        totals["exercised"] = exercised_totals(&filtered, &join);
+    }
 
     let mut root = Map::new();
     root.insert("schema".to_string(), json!(SITES_SCHEMA));
@@ -1206,24 +1286,43 @@ fn build_report(scan: &StaticScan, options: &SitesOptions) -> Value {
             "unparsed": scan.unparsed,
         }),
     );
+    if let Some(source) = exercised {
+        root.insert(
+            "exercised_source".to_string(),
+            json!({
+                "kind": "sdk_report",
+                "path": source.path,
+                "reports": source.reports,
+            }),
+        );
+    }
+    root.insert("totals".to_string(), totals);
     root.insert(
-        "totals".to_string(),
-        json!({
-            "sites": filtered.len(),
-            "by_runtime": rollup.by_bucket,
-            "by_kind": by_kind,
-        }),
+        "crates".to_string(),
+        crate_rollups_json(&rollup.crates, exercised.is_some()),
     );
-    root.insert("crates".to_string(), crate_rollups_json(&rollup.crates));
-    root.insert("groups".to_string(), group_rollups_json(&rollup.groups));
-    root.insert("unmatched_runtime_labels".to_string(), json!(0));
+    root.insert(
+        "groups".to_string(),
+        group_rollups_json(&rollup.groups, exercised.is_some()),
+    );
+    root.insert(
+        "unmatched_runtime_labels".to_string(),
+        json!(join.unmatched.len()),
+    );
+    if !join.unmatched.is_empty() {
+        root.insert("unmatched".to_string(), json!(join.unmatched));
+    }
     if options.scoped() {
-        root.insert("sites".to_string(), json!(filtered));
+        root.insert("sites".to_string(), site_rows_json(&filtered));
         root.insert(
             "detail".to_string(),
             json!({
-                "mode": "static",
-                "honesty": "Static-only Wave 1 has no exercised source; invisible sites are inventoried but Patina cannot observe their execution.",
+                "mode": if exercised.is_some() { "static+exercised" } else { "static" },
+                "honesty": if exercised.is_some() {
+                    "Runtime rows are joined to static SDK labels or dynamic-label file:line sites; invisible sites remain inventory-only and carry no exercised object."
+                } else {
+                    "Static-only report has no exercised source; invisible sites are inventoried but Patina cannot observe their execution."
+                },
             }),
         );
     } else {
@@ -1236,6 +1335,106 @@ fn build_report(scan: &StaticScan, options: &SitesOptions) -> Value {
         );
     }
     Value::Object(root)
+}
+
+fn join_exercised<'a>(scan: &StaticScan, source: &'a ExercisedSource) -> JoinResult<'a> {
+    let mut by_label: BTreeMap<&str, &SiteRecord> = BTreeMap::new();
+    let mut dynamic_by_location: BTreeMap<String, &SiteRecord> = BTreeMap::new();
+    for site in &scan.sites {
+        if matches!(site.runtime.as_str(), "driven" | "observed") {
+            if let Some(label) = &site.label {
+                by_label.insert(label, site);
+            } else if site.label_dynamic {
+                dynamic_by_location.insert(format!("{}:{}", site.file, site.line), site);
+            }
+        }
+    }
+
+    let mut joined = JoinResult::default();
+    for exercised in source.sites.values() {
+        if let Some(site) = by_label.get(exercised.label.as_str()) {
+            joined.by_site_id.insert(site.id.clone(), exercised);
+            continue;
+        }
+        if let Some(location) = normalize_runtime_site(&scan.workspace_root, &exercised.site) {
+            if let Some(site) = dynamic_by_location.get(&location) {
+                joined.by_site_id.insert(site.id.clone(), exercised);
+                continue;
+            }
+        }
+        joined.unmatched.push(UnmatchedRuntimeSite {
+            label: exercised.label.clone(),
+            kind: exercised.kind.clone(),
+            site: exercised.site.clone(),
+            origin: "expanded",
+        });
+    }
+    joined
+}
+
+fn normalize_runtime_site(workspace_root: &Path, site: &str) -> Option<String> {
+    let (file, line) = site.rsplit_once(':')?;
+    if line.parse::<usize>().is_err() {
+        return None;
+    }
+    let mut file = file.replace('\\', "/");
+    let root = workspace_root.to_string_lossy().replace('\\', "/");
+    if let Some(stripped) = file.strip_prefix(root.trim_end_matches('/')) {
+        file = stripped.trim_start_matches('/').to_string();
+    }
+    Some(format!("{file}:{line}"))
+}
+
+fn exercised_totals(filtered: &[JoinedSite<'_>], join: &JoinResult<'_>) -> Value {
+    let mut joined_runtime_labels = 0_u64;
+    let mut driven_fired = 0_u64;
+    let mut observed_satisfied = 0_u64;
+    let mut never_exercised = 0_u64;
+    for joined in filtered {
+        if joined.never_exercised {
+            never_exercised += 1;
+        }
+        let Some(exercised) = joined.exercised else {
+            continue;
+        };
+        joined_runtime_labels += 1;
+        match joined.site.kind.as_str() {
+            "fault" | "delay" if exercised.fires > 0 => driven_fired += 1,
+            "knob" if exercised.knob_min.is_some() => driven_fired += 1,
+            "always" if exercised.evals > 0 && exercised.always_violated_runs == 0 => {
+                observed_satisfied += 1;
+            }
+            "sometimes" if exercised.sometimes_satisfied_runs > 0 => observed_satisfied += 1,
+            "reachable" if exercised.reachable_runs > 0 => observed_satisfied += 1,
+            _ => {}
+        }
+    }
+    json!({
+        "runtime_labels": joined_runtime_labels + join.unmatched.len() as u64,
+        "joined_runtime_labels": joined_runtime_labels,
+        "unmatched_runtime_labels": join.unmatched.len(),
+        "driven_fired": driven_fired,
+        "observed_satisfied": observed_satisfied,
+        "never_exercised": never_exercised,
+    })
+}
+
+fn site_rows_json(sites: &[JoinedSite<'_>]) -> Value {
+    Value::Array(
+        sites
+            .iter()
+            .map(|joined| {
+                let mut value = serde_json::to_value(joined.site)
+                    .expect("site records are JSON-serializable objects");
+                if let (Some(object), Some(exercised)) = (value.as_object_mut(), joined.exercised) {
+                    if joined.site.runtime != "invisible" {
+                        object.insert("exercised".to_string(), json!(exercised));
+                    }
+                }
+                value
+            })
+            .collect(),
+    )
 }
 
 fn site_matches(site: &SiteRecord, options: &SitesOptions) -> bool {
@@ -1283,36 +1482,50 @@ fn count_by_kind(sites: &[SiteRecord]) -> BTreeMap<String, usize> {
     counts
 }
 
-fn crate_rollups_json(crates: &[crate::rollup::CrateRollup]) -> Value {
+fn crate_rollups_json(crates: &[crate::rollup::CrateRollup], include_gaps: bool) -> Value {
     Value::Array(
         crates
             .iter()
             .map(|krate| {
-                json!({
+                let mut value = json!({
                     "name": krate.name,
                     "sites": krate.total,
                     "by_runtime": krate.by_bucket,
-                    "modules": krate.modules.iter().map(|module| json!({
-                        "module": module.module,
-                        "sites": module.total,
-                        "by_runtime": module.by_bucket,
-                    })).collect::<Vec<_>>(),
-                })
+                    "modules": krate.modules.iter().map(|module| {
+                        let mut module_value = json!({
+                            "module": module.module,
+                            "sites": module.total,
+                            "by_runtime": module.by_bucket,
+                        });
+                        if include_gaps {
+                            module_value["never_exercised"] = json!(module.gaps);
+                        }
+                        module_value
+                    }).collect::<Vec<_>>(),
+                });
+                if include_gaps {
+                    value["never_exercised"] = json!(krate.gaps);
+                }
+                value
             })
             .collect(),
     )
 }
 
-fn group_rollups_json(groups: &[crate::rollup::GroupRollup]) -> Value {
+fn group_rollups_json(groups: &[crate::rollup::GroupRollup], include_gaps: bool) -> Value {
     Value::Array(
         groups
             .iter()
             .map(|group| {
-                json!({
+                let mut value = json!({
                     "name": group.name,
                     "sites": group.total,
                     "by_runtime": group.by_bucket,
-                })
+                });
+                if include_gaps {
+                    value["never_exercised"] = json!(group.gaps);
+                }
+                value
             })
             .collect(),
     )
@@ -1337,6 +1550,20 @@ fn print_human(report: &Value) {
         totals["by_runtime"]["observed"].as_u64().unwrap_or(0),
         totals["by_runtime"]["invisible"].as_u64().unwrap_or(0),
     );
+    if let Some(source) = report.get("exercised_source") {
+        println!(
+            "exercised_source={} reports={} joined={} unmatched={} never_exercised={}",
+            source["path"].as_str().unwrap_or("?"),
+            source["reports"].as_u64().unwrap_or(0),
+            totals["exercised"]["joined_runtime_labels"]
+                .as_u64()
+                .unwrap_or(0),
+            totals["exercised"]["unmatched_runtime_labels"]
+                .as_u64()
+                .unwrap_or(0),
+            totals["exercised"]["never_exercised"].as_u64().unwrap_or(0),
+        );
+    }
     if scan["files_unparsed"].as_u64().unwrap_or(0) > 0 {
         println!("WARNING: unparsed Rust files were counted and omitted from site totals:");
         if let Some(unparsed) = scan["unparsed"].as_array() {
@@ -1362,8 +1589,18 @@ fn print_human(report: &Value) {
             } else {
                 ""
             };
+            let exercised = site.get("exercised").map_or_else(String::new, |row| {
+                format!(
+                    " exercised(reg={} evals={} fires={} satisfied={} reached={})",
+                    row["runs_registered"].as_u64().unwrap_or(0),
+                    row["evals"].as_u64().unwrap_or(0),
+                    row["fires"].as_u64().unwrap_or(0),
+                    row["sometimes_satisfied_runs"].as_u64().unwrap_or(0),
+                    row["reachable_runs"].as_u64().unwrap_or(0),
+                )
+            });
             println!(
-                "{}:{} {} {} id={} label={} module={} context={} macro={}{}",
+                "{}:{} {} {} id={} label={} module={} context={} macro={}{}{}",
                 site["file"].as_str().unwrap_or("?"),
                 site["line"].as_u64().unwrap_or(0),
                 site["kind"].as_str().unwrap_or("?"),
@@ -1374,15 +1611,22 @@ fn print_human(report: &Value) {
                 site["context"].as_str().unwrap_or("?"),
                 site["macro_path"].as_str().unwrap_or("?"),
                 dynamic,
+                exercised,
             );
         }
-        println!(
-            "\nStatic-only Wave 1: exercised data is absent; invisible sites render as inventory only."
-        );
+        if report.get("exercised_source").is_some() {
+            println!(
+                "\nRuntime rows are joined by label (or dynamic-label file:line); invisible sites remain inventory-only."
+            );
+        } else {
+            println!(
+                "\nStatic-only report: exercised data is absent; invisible sites render as inventory only."
+            );
+        }
     } else {
         println!(
-            "\n{:<32} {:>6} {:>7} {:>8} {:>9}",
-            "crate/module", "sites", "driven", "observed", "invisible"
+            "\n{:<32} {:>6} {:>7} {:>8} {:>9} {:>7}",
+            "crate/module", "sites", "driven", "observed", "invisible", "never"
         );
         if let Some(crates) = report["crates"].as_array() {
             for krate in crates {
@@ -1406,13 +1650,15 @@ fn print_rollup_row(prefix: &str, row: &Value, name_key: &str) {
     let driven = row["by_runtime"]["driven"].as_u64().unwrap_or(0);
     let observed = row["by_runtime"]["observed"].as_u64().unwrap_or(0);
     let invisible = row["by_runtime"]["invisible"].as_u64().unwrap_or(0);
+    let never = row["never_exercised"].as_u64().unwrap_or(0);
     println!(
-        "{:<32} {:>6} {:>7} {:>8} {:>9}",
+        "{:<32} {:>6} {:>7} {:>8} {:>9} {:>7}",
         format!("{prefix}{name}"),
         sites,
         pct(driven, sites),
         pct(observed, sites),
         pct(invisible, sites),
+        never,
     );
 }
 
@@ -1714,10 +1960,128 @@ mod tests {
                 module_filter: Some("pkg".to_string()),
                 ..SitesOptions::default()
             },
+            None,
         );
         assert_eq!(report["schema"], SITES_SCHEMA);
         assert_eq!(report["sites"].as_array().unwrap().len(), 1);
         assert_eq!(report["unmatched_runtime_labels"], 0);
+    }
+
+    #[test]
+    fn exercised_source_joins_labels_and_dynamic_file_line_sites() {
+        let scan = StaticScan {
+            workspace_root: PathBuf::from("/workspace"),
+            sites: vec![
+                SiteRecord {
+                    id: "static-label".to_string(),
+                    kind: "fault".to_string(),
+                    runtime: "driven".to_string(),
+                    label: Some("static-label".to_string()),
+                    label_dynamic: false,
+                    file: "src/main.rs".to_string(),
+                    line: 10,
+                    crate_name: "pkg".to_string(),
+                    module: "pkg".to_string(),
+                    context: "src".to_string(),
+                    groups: Vec::new(),
+                    macro_path: "buggify".to_string(),
+                },
+                SiteRecord {
+                    id: "src/main.rs:12:5#fault".to_string(),
+                    kind: "fault".to_string(),
+                    runtime: "driven".to_string(),
+                    label: None,
+                    label_dynamic: true,
+                    file: "src/main.rs".to_string(),
+                    line: 12,
+                    crate_name: "pkg".to_string(),
+                    module: "pkg".to_string(),
+                    context: "src".to_string(),
+                    groups: Vec::new(),
+                    macro_path: "buggify".to_string(),
+                },
+            ],
+            files_scanned: 1,
+            files_unparsed: 0,
+            unparsed: Vec::new(),
+            cache_state: CacheState::Cold,
+        };
+        let mut exercised_sites = BTreeMap::new();
+        exercised_sites.insert(
+            "static-label".to_string(),
+            ExercisedSite {
+                label: "static-label".to_string(),
+                kind: "fault".to_string(),
+                site: "src/main.rs:10".to_string(),
+                runs_registered: 1,
+                runs_active: 1,
+                evals: 2,
+                fires: 1,
+                runs_fired: 1,
+                ..ExercisedSite::default()
+            },
+        );
+        exercised_sites.insert(
+            "dynamic-at-runtime".to_string(),
+            ExercisedSite {
+                label: "dynamic-at-runtime".to_string(),
+                kind: "fault".to_string(),
+                site: "/workspace/src/main.rs:12".to_string(),
+                runs_registered: 1,
+                evals: 1,
+                ..ExercisedSite::default()
+            },
+        );
+        let source = ExercisedSource {
+            path: "stderr.log".to_string(),
+            reports: 1,
+            sites: exercised_sites,
+        };
+        let report = build_report(
+            &scan,
+            &SitesOptions {
+                all: true,
+                ..SitesOptions::default()
+            },
+            Some(&source),
+        );
+        assert_eq!(report["unmatched_runtime_labels"], 0);
+        assert_eq!(report["totals"]["exercised"]["joined_runtime_labels"], 2);
+        let rows = report["sites"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["exercised"]["fires"], 1);
+        assert_eq!(rows[1]["exercised"]["label"], "dynamic-at-runtime");
+    }
+
+    #[test]
+    fn unmatched_runtime_labels_are_visible_not_dropped() {
+        let scan = StaticScan {
+            workspace_root: PathBuf::from("/workspace"),
+            sites: Vec::new(),
+            files_scanned: 0,
+            files_unparsed: 0,
+            unparsed: Vec::new(),
+            cache_state: CacheState::Cold,
+        };
+        let mut exercised_sites = BTreeMap::new();
+        exercised_sites.insert(
+            "wrapped".to_string(),
+            ExercisedSite {
+                label: "wrapped".to_string(),
+                kind: "fault".to_string(),
+                site: "src/lib.rs:1".to_string(),
+                runs_registered: 1,
+                ..ExercisedSite::default()
+            },
+        );
+        let source = ExercisedSource {
+            path: "stderr.log".to_string(),
+            reports: 1,
+            sites: exercised_sites,
+        };
+        let report = build_report(&scan, &SitesOptions::default(), Some(&source));
+        assert_eq!(report["unmatched_runtime_labels"], 1);
+        assert_eq!(report["unmatched"][0]["origin"], "expanded");
     }
 
     #[test]

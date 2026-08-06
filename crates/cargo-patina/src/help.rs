@@ -1218,15 +1218,16 @@ const SITES: Verb = Verb {
     name: "sites",
     summary: "Inventory static assertion/oracle sites in the current workspace.",
     synopsis: &[
-        "cargo patina sites [--crate NAME] [--module PATH] [--group NAME] [--site LABEL] [--all] [--kind KIND] [--runtime driven|observed|invisible] [--no-cache]",
+        "cargo patina sites [--crate NAME] [--module PATH] [--group NAME] [--site LABEL] [--all] [--exercised FILE] [--kind KIND] [--runtime driven|observed|invisible] [--no-cache]",
         "cargo patina sites --selftest",
     ],
     prose: "\
 `sites` scans the current Cargo workspace with a syn-based static analyzer and reports \
 where Patina SDK sites, Rust assertions, proptest/quickcheck checks, and \
-antithesis-sdk assertions live. Wave 1 is static-only: no runtime/campaign \
-exercised source is joined yet, and invisible sites are inventory rows rather \
-than coverage claims. The default output is a crate/module index; scoped flags \
+antithesis-sdk assertions live. With --exercised FILE, it parses runtime PATINA_SDK_REPORT line(s) and joins \
+them to the static SDK rows by label or dynamic-label file:line. Invisible sites \
+remain inventory rows rather than coverage claims. The default output is a \
+crate/module index; scoped flags \
 or --all opt into per-site drill-down rows. Results are cached per file under \
 .patina/out/sites-cache.json unless --no-cache is set. `--selftest` scans a \
 planted fixture and proves every recognizer class fires.",
@@ -1266,6 +1267,13 @@ planted fixture and proves every recognizer class fires.",
                 None,
                 Value::None,
                 "Emit every static site record instead of the summary index.",
+                false,
+            ),
+            f(
+                "--exercised",
+                None,
+                Value::Required("FILE", Kind::Path),
+                "Read raw PATINA_SDK_REPORT line(s) from FILE and join runtime counters into the static inventory.",
                 false,
             ),
             f(

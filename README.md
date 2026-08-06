@@ -127,7 +127,7 @@ they build through the same pipeline as `build` first.
 | `trace` | Inspect an existing trace's metadata, events, stats, or diff. | `cargo patina trace info run.patina` |
 | `explore` | Sweep a seed range, reporting per-seed outcomes. | `cargo patina explore run ./app --seeds 500` |
 | `campaign` | Config-driven fault-and-schedule sweep with failure dedup. | `cargo patina campaign ./app --gens 200 --buggify --out-dir out/` |
-| `sites` | Inventory static assertion/oracle instrumentation in the current workspace. | `cargo patina sites --no-cache` |
+| `sites` | Inventory assertion/oracle instrumentation; optionally join a run's SDK report. | `cargo patina sites --exercised sdk.stderr` |
 | `minimize` | Shrink a failing trace (or seed/params) against an oracle. | `cargo patina minimize bug.patina --output small.patina -- ./oracle` |
 
 Every verb has `--help`, and `--help --format json` emits a machine-readable
@@ -177,7 +177,9 @@ The `patina-dst` crate is dependency-light and every macro is a no-op outside a
 Patina build — adopters ship it unconditionally, with no `cfg(patina)` in their
 code. Enable at run time with `cargo patina run --buggify`; decisions are pure
 functions of the seed, and a `PATINA_SDK_REPORT` line proves sites actually
-fired (no vacuous "all clean").
+fired (no vacuous "all clean"). Each row carries `@file:line`, so
+`cargo patina sites --exercised <stderr-file>` can join a run back to the static
+inventory.
 
 ### Record, replay, branch
 

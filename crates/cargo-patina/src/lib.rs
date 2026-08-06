@@ -55,6 +55,7 @@ mod help;
 mod output;
 mod render;
 mod rollup;
+mod sdk_report;
 mod sites;
 mod trace_cmd;
 mod trace_view;
@@ -8521,6 +8522,7 @@ mod tests {
                 "--group",
                 "--site",
                 "--all",
+                "--exercised",
                 "--kind",
                 "--runtime",
                 "--no-cache",

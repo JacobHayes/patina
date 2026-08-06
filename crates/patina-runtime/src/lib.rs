@@ -2326,7 +2326,7 @@ pub struct BuggifyDiagnostics {
     pub cutoff_suppressed: u64,
     pub after_setup: bool,
     pub setup_complete: bool,
-    /// Per-site rows in label order: (label, kind, active, evals, fires,
+    /// Per-site rows in label order: (label, site, kind, active, evals, fires,
     /// reachable, sometimes_satisfied, always_violated, knob).
     pub sites: Vec<BuggifySiteReport>,
 }
@@ -2334,6 +2334,8 @@ pub struct BuggifyDiagnostics {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuggifySiteReport {
     pub label: String,
+    /// The `file:line` identity captured by the SDK macro / WASI import.
+    pub site: String,
     pub kind: BuggifyKind,
     pub active: bool,
     pub evals: u64,
@@ -2431,6 +2433,7 @@ impl Buggify {
             firings += site.fire_count;
             sites.push(BuggifySiteReport {
                 label: label.clone(),
+                site: site.site.clone(),
                 kind: site.kind,
                 active: site.active,
                 evals: site.eval_count,
@@ -4990,7 +4993,7 @@ subset or the interval window.",
 /// any cooperative-SUT sites (or enabled buggify). One line, same spirit as
 /// `PATINA_SCHEDULE_REPORT`: a campaign parses it to accumulate per-site coverage
 /// across generations. Suppressed by a false-y [`ENV_SDK_REPORT`]. Per-site token
-/// is `site=<label>|<kind>|a<0|1>|e<evals>|f<fires>|r<0|1>|s<0|1>|v<0|1>|k<knob|->`.
+/// is `site=<label>|<kind>|a<0|1>|e<evals>|f<fires>|r<0|1>|s<0|1>|v<0|1>|k<knob|->|@<file:line>`.
 fn emit_sdk_report(diag: &BuggifyDiagnostics) {
     if !diag.enabled && diag.sites_registered == 0 {
         return;
@@ -5025,7 +5028,7 @@ after_setup={} setup_complete={}",
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".to_string());
         line.push_str(&format!(
-            " site={}|{}|a{}|e{}|f{}|r{}|s{}|v{}|k{}",
+            " site={}|{}|a{}|e{}|f{}|r{}|s{}|v{}|k{}|@{}",
             site.label,
             site.kind.as_str(),
             u8::from(site.active),
@@ -5035,6 +5038,7 @@ after_setup={} setup_complete={}",
             u8::from(site.sometimes_satisfied),
             u8::from(site.always_violated),
             knob,
+            site.site,
         ));
     }
     eprintln!("{line}");
@@ -5484,7 +5488,7 @@ mod tests {
                 .buggify_diagnostics()
                 .sites
                 .iter()
-                .any(|s| s.reachable)
+                .any(|s| s.reachable && s.site == "g.rs:1")
         );
         // A run that never reaches setup_complete is a declared-but-never-called
         // violation.

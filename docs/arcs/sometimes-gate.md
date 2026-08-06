@@ -51,7 +51,7 @@ campaigns smaller than a user-chosen generation floor. The work is entirely camp
   It is **default-on**, emitted whenever buggify is enabled *or* any site registered
   (`lib.rs:4969`), and suppressed only by a false-y `PATINA_SDK_REPORT` env
   (`lib.rs:185`, `4972-4978`). Row format (`lib.rs:4967`):
-  `site=<label>|<kind>|a<0|1>|e<evals>|f<fires>|r<0|1>|s<0|1>|v<0|1>|k<knob|->`.
+  `site=<label>|<kind>|a<0|1>|e<evals>|f<fires>|r<0|1>|s<0|1>|v<0|1>|k<knob|->|@<file:line>`.
 * `run`/`run_with` call `finish()` on error paths too (`lib.rs:3974-3977`), so failing
   generations still carry a report — except aborts that never reach `finish` (an `always!`
   trap, a fired watchdog, a timeout kill).
@@ -90,9 +90,10 @@ posture — guest spoofing is already outside the threat model). Absence of the 
 normal (guest registered no sites and buggify off, or the child died before `finish`) and
 contributes nothing to any site's tally.
 
-Parse the line into header `k=v` tokens plus `site=` rows. **A malformed row is a hard
-campaign error** (`CliError` naming the generation and the offending token), not a skip:
-an unparseable row means the report contract drifted, and detection-before-fixes demands
+Parse the line into header `k=v` tokens plus Wave 2 `site=` rows, including the required
+trailing `|@<file:line>` site identity. **A malformed row is a hard campaign error**
+(`CliError` naming the generation and the offending token), not a skip: an unparseable row means
+the report contract drifted, and detection-before-fixes demands
 that drift class fail loudly at the choke point rather than silently under-counting
 coverage. (Known hazard: labels containing a space or `|` would shear the token stream.
 Nothing validates label charsets today; the loud parse error is the campaign-side

@@ -16,8 +16,10 @@ What it proves:
   host import module (a plain `cargo build --target wasm32-wasip1` leaves the
   macros no-ops and the import table free of `patina_sdk` — the no-leakage
   contract, stated in `Cargo.toml`);
-- the `PATINA_SDK_REPORT` line parses into the same shared campaign classifier
-  (`../buggify-campaign.sh`) the native sweeps use;
+- the Wave 2 `PATINA_SDK_REPORT` rows parse into the same shared campaign
+  classifier (`../buggify-campaign.sh`) the native sweeps use, and the sweep
+  proves one run joins through `cargo patina sites --exercised` with zero
+  unmatched runtime labels;
 - per-generation record→replay byte-identity with buggify active.
 
 The fixture carries **no planted defect**: a clean campaign is all-OK. The

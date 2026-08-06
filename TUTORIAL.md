@@ -98,18 +98,19 @@ On stderr you also get the SDK report — proof the site was actually exercised
 
 ```
 PATINA_SDK_REPORT enabled=1 fire_permille=250 activation_permille=250 ... \
-  sites_registered=1 sites_activated=1 total_firings=2 ... site=batch-commit|fault|...
+  sites_registered=1 sites_activated=1 total_firings=2 ... site=batch-commit|fault|...|@src/main.rs:9
 ```
 
-Before sweeping, you can inventory the static instrumentation from the `ledger/`
-workspace. Wave 1 of `sites` is static-only: it tells you the site exists and how
-Patina relates to it, not whether this run exercised it.
+You can inventory the static instrumentation from the `ledger/` workspace, and
+join a run's SDK report back to that inventory. Capture stderr from any run and
+feed it to `sites --exercised`:
 
 ```
-$ cargo patina sites --no-cache --site batch-commit
+$ cargo patina run ./ledger/ledger --seed 5 --buggify 2> ./sdk.stderr
+$ cargo patina sites --no-cache --site batch-commit --exercised ./sdk.stderr
 == sites static inventory ==
 ...
-src/main.rs:9 fault driven id=batch-commit label=batch-commit ...
+src/main.rs:9 fault driven id=batch-commit label=batch-commit ... exercised(reg=1 evals=8 fires=2 ...)
 ```
 
 Catching seeds are build-specific (the instrumentation shapes the decision

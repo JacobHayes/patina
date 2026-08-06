@@ -232,8 +232,9 @@ Completed foundations (Milestone A):
    test), so adopters pay nothing.
 6. **`PATINA_SDK_REPORT`** — one machine-parseable stderr line per run:
    registered/activated/fired counts, cutoff state, and per-site
-   `sometimes`/`reachable` coverage and knob values, in the spirit of
-   `PATINA_SCHEDULE_REPORT`.
+   `sometimes`/`reachable` coverage, knob values, and `@file:line` site
+   identities, in the spirit of `PATINA_SCHEDULE_REPORT`. `cargo patina sites
+   --exercised <stderr-file>` joins those rows to the static inventory.
 7. **`patina_dst::rng()`** bridged to the root seed under Patina (a plainly-seeded
    fallback outside), as the hook for the property-based-testing wave.
 

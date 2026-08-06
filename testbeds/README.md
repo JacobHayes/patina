@@ -25,7 +25,8 @@ sweep) on every routine Linux CI run and the daily/manual macOS run.
 fault-combination campaign (including its schedule-fuzz tier) that runs nightly
 on Linux. `liveness-campaign` and `buggify-wasi`
 are small fixtures. `buggify-campaign.sh` (this directory) is the shared
-campaign layer — `PATINA_SDK_REPORT` parsing, cross-generation coverage
+campaign layer — Wave 2 `PATINA_SDK_REPORT` parsing, one-run
+`cargo patina sites --exercised` join checks, cross-generation coverage
 accumulation, the `ALWAYS_VIOLATION`/`SOMETIMES_UNMET` classes — sourced by the
 workq, pubsub, and buggify-wasi sweeps.
 

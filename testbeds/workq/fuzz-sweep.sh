@@ -67,8 +67,9 @@ set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
 # Shared cooperative-SUT (buggify) campaign layer: the ALWAYS_VIOLATION /
-# SOMETIMES_UNMET classes, the PATINA_SDK_REPORT parser, and the campaign-state
-# accumulator, proven by buggify_campaign_selftest. Additive only.
+# SOMETIMES_UNMET classes, the Wave 2 PATINA_SDK_REPORT parser, the one-run
+# sites --exercised join check, and the campaign-state accumulator, proven by
+# buggify_campaign_selftest. Additive only.
 # shellcheck source=../buggify-campaign.sh
 source "$here/../buggify-campaign.sh"
 
@@ -87,6 +88,7 @@ PATINA="$repo_root/target/release/cargo-patina"
 OUTDIR="${PATINA_FUZZ_OUT:-$here/out-fuzz}"
 SWEEP_LOG="$OUTDIR/sweep.log"
 CAMPAIGN_STATE="$OUTDIR/campaign-state.json"
+SITES_JOIN_CHECKED=0
 # GLOBAL so the EXIT trap (fires after sweep() returns) still sees it under set -u.
 FUZZ_LOCK="$here/target/patina/.fuzz-sweep.lock"
 
@@ -764,8 +766,14 @@ run_gen() {
   fi
 
   bump "$class"
-  # Accumulate this gen's cooperative-SUT coverage (inert when no PATINA_SDK_REPORT).
-  campaign_accumulate "$CAMPAIGN_STATE" "$(sdk_report_line "$err")"
+  # Accumulate this gen's cooperative-SUT coverage and, once per sweep, prove the
+  # runtime rows join the testbed's static sites inventory.
+  local sdk_line; sdk_line="$(sdk_report_line "$err")"
+  campaign_accumulate "$CAMPAIGN_STATE" "$sdk_line"
+  if (( SITES_JOIN_CHECKED == 0 )) && [[ -n "$sdk_line" ]]; then
+    buggify_sites_join_assert "$PATINA" "$here" "$err" || exit 3
+    SITES_JOIN_CHECKED=1
+  fi
   local logline="gen=$G tier=$TIER class=$class exit=$code enqueued=${enq:-?}/${jobs:-?} completed=${comp:-?} failed=${failed:-?} config='$CFG_SUMMARY'$live_note$det_note$sched_note$policy_note"
   echo "$logline" >> "$SWEEP_LOG"; echo "$logline"
 

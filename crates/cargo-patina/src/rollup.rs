@@ -14,7 +14,7 @@ pub(crate) trait RollupLeaf {
     fn crate_name(&self) -> &str;
     /// Rust module path used for drill-down (`crate::module::path`).
     fn module(&self) -> &str;
-    /// Custom groups attached by the caller. Empty in Wave 1 sites.
+    /// Custom groups attached by the caller (empty until the config wave lands).
     fn groups(&self) -> &[String];
     /// Bucket name counted in every summary (for sites this is runtime class).
     fn bucket(&self) -> &str;

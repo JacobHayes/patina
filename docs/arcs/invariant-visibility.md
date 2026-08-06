@@ -1,6 +1,6 @@
 # Arc: Invariant visibility
 
-**Status:** Wave 1 implemented (static `cargo patina sites` inventory); Waves 2-5 remain design.
+**Status:** Waves 1-2 implemented (static `cargo patina sites` inventory + runtime report join); Waves 3-5 remain design.
 **Depends on:** nothing (wave 1 is standalone). **Feeds:** the coverage-depth arc (shared rollup),
 the sometimes-gate arc (runtime exercised data).
 
@@ -9,10 +9,10 @@ the sometimes-gate arc (runtime exercised data).
 Patina can *drive* cooperative-SUT sites and *observe* oracles, but nobody — human or agent — can
 answer, without grepping: where does this codebase have invariant/property instrumentation? Which
 crates have none? Which `sometimes!` claims has no campaign ever satisfied? Which assertions exist
-that Patina cannot see at all? Today the only artifacts are the per-run `PATINA_SDK_REPORT` stderr
+that Patina cannot see at all? Before this arc, the only artifacts were the per-run `PATINA_SDK_REPORT` stderr
 line (`crates/patina-runtime/src/lib.rs:4968`) and verbatim marker capture on failing campaign
-generations (`crates/cargo-patina/src/output.rs:364`). There is no static inventory, no aggregation
-across a campaign, and no join between "what exists" and "what was exercised".
+generations (`crates/cargo-patina/src/output.rs:364`). Waves 1-2 add the static inventory and
+single-run join; campaign aggregation remains a later wave.
 
 This arc makes instrumentation *visible*: a static inventory of every assertion/property site, a
 runtime/campaign exercised view, and a merged report — hierarchical, progressively disclosed
@@ -51,14 +51,15 @@ runtime/campaign exercised view, and a merged report — hierarchical, progressi
   identity). Per-site counters: evals, fires, reachable, sometimes_satisfied, always_violated, knob.
 - **Per-run emission** — `emit_sdk_report`, `crates/patina-runtime/src/lib.rs:4968-5015`: one
   `PATINA_SDK_REPORT` stderr line, per-site token
-  `site=<label>|<kind>|a<0|1>|e<evals>|f<fires>|r<0|1>|s<0|1>|v<0|1>|k<knob|->`. **The file:line is
-  not in the report row** — `BuggifySiteReport` (`:2323-2333`) has no `site` field. Trace metadata
-  records only config + active labels (`BuggifyConfigRecord`, `crates/patina-trace/src/lib.rs:121`).
+  `site=<label>|<kind>|a<0|1>|e<evals>|f<fires>|r<0|1>|s<0|1>|v<0|1>|k<knob|->|@<file:line>`.
+  `BuggifySiteReport` carries the macro/import `site` field, so `cargo patina sites --exercised`
+  can join a run's labels back to static SDK rows. Trace metadata still records only config +
+  active labels (`BuggifyConfigRecord`, `crates/patina-trace/src/lib.rs:121`).
 - **Campaign** — `patina.campaign/v2` envelope (`crates/cargo-patina/src/campaign.rs:52`,
   `:1236-1320`): class histogram, deduped signatures, notable runs, artifact pointers. SDK reports
   are captured only as verbatim marker lines on notable runs; **no per-site aggregation exists**.
-- **CLI** — verbs run/test/build/audit/replay/explore/campaign/minimize
-  (`crates/cargo-patina/src/help.rs:1168-1170`); global `--format human|json`
+- **CLI** — verbs run/test/build/audit/replay/explore/campaign/sites/minimize
+  (`crates/cargo-patina/src/help.rs`); global `--format human|json`
   (`help.rs:191-213`, result envelope `patina.result/v1`, `output.rs:24`); help is
   progressive-disclosure `patina.help/v2` with index vs per-verb payloads (`help.rs:1667-1717`);
   registry drift gates already exist (`lib.rs:8146` parser↔registry, `:8689` value grammars,
@@ -327,9 +328,9 @@ runtime-touching waves and at the arc boundary.
 - **Wave 1 — SCA + `sites` verb, static only.** `rollup` module, syn scanner + recognizer table +
   cache, `sites` index/drill-down (human + `patina.sites/v1` JSON), registry entry, gates 1-2.
   No runtime/shim edits → fast tier. Docs: AGENTS.md verb list, llms.txt, TUTORIAL entry.
-- **Wave 2 — runtime join.** `BuggifySiteReport` + SDK report row gain `@<file:line>`; all in-repo
-  consumers migrated in-change; `sites --exercised FILE`; gates 3-4. Runtime-touching → **full
-  battery** (incl. the three validation scripts) + Linux gates.
+- **Wave 2 — runtime join.** Implemented: `BuggifySiteReport` + SDK report row gained
+  `@<file:line>`; in-repo consumers migrated; `sites --exercised FILE` joins raw run stderr; gates
+  3-4 cover zero-unmatched e2e joins and strict parser drift.
 - **Wave 3 — campaign feed.** Per-generation SDK parsing → `<out_dir>/sites.json`; envelope
   `sdk_sites` + `artifacts.site_coverage`; `sites --exercised OUTDIR`; gates 5, 7. CLI-only → fast
   tier; hand the artifact contract to the sometimes-gate arc at this boundary.

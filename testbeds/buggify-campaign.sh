@@ -86,11 +86,11 @@ if line.startswith("PATINA_SDK_REPORT"):
     for token in line.split():
         if not token.startswith("site="):
             continue
-        # site=<label>|<kind>|a<0|1>|e<n>|f<n>|r<0|1>|s<0|1>|v<0|1>|k<v|->
+        # site=<label>|<kind>|a<0|1>|e<n>|f<n>|r<0|1>|s<0|1>|v<0|1>|k<v|->|@<file:line>
         body = token[len("site="):]
         parts = body.split("|")
-        if len(parts) < 9:
-            continue
+        if len(parts) != 10 or not parts[9].startswith("@") or len(parts[9]) == 1:
+            raise SystemExit(f"malformed PATINA_SDK_REPORT site token (expected Wave 2 @file:line): {token}")
         label, kind = parts[0], parts[1]
         active = parts[2] == "a1"
         evals = int(parts[3][1:]) if parts[3][1:].isdigit() else 0
@@ -98,12 +98,14 @@ if line.startswith("PATINA_SDK_REPORT"):
         reached = parts[5] == "r1"
         satisfied = parts[6] == "s1"
         violated = parts[7] == "v1"
+        site = parts[9][1:]
         rec = sites.setdefault(label, {
-            "kind": kind, "reached": False, "activated_gens": 0,
+            "kind": kind, "site": site, "reached": False, "activated_gens": 0,
             "fired_gens": 0, "total_fires": 0, "sometimes_satisfied": False,
             "always_violated": False,
         })
         rec["kind"] = kind
+        rec["site"] = site
         rec["reached"] = rec["reached"] or reached
         if active:
             rec["activated_gens"] += 1
@@ -137,6 +139,36 @@ for label, rec in sorted(state.get("sites", {}).items()):
     if rec.get("kind") == "sometimes" and rec.get("reached") and not rec.get("sometimes_satisfied"):
         print(label)
 PY
+}
+
+# Assert that a raw run stderr joins cleanly against the testbed's static sites.
+# This is the Wave 2 invariant-visibility gate for direct-macro testbeds:
+# every runtime label in the SDK report must match a static row (or the scan/parser
+# drifted). Prints one concise evidence line on success.
+buggify_sites_join_assert() {
+  # args: cargo_patina_exe package_dir stderr_file
+  local patina="$1" package_dir="$2" stderr_file="$3" out err unmatched
+  out="$(mktemp)"; err="$(mktemp)"
+  if ! (cd "$package_dir" && "$patina" sites --no-cache --exercised "$stderr_file" --format json >"$out" 2>"$err"); then
+    echo "FATAL: cargo patina sites --exercised failed for $stderr_file" >&2
+    cat "$out" >&2; cat "$err" >&2
+    rm -f "$out" "$err"
+    return 1
+  fi
+  if ! unmatched="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['unmatched_runtime_labels'])" "$out")"; then
+    echo "FATAL: could not read unmatched_runtime_labels from sites --exercised output" >&2
+    cat "$out" >&2; cat "$err" >&2
+    rm -f "$out" "$err"
+    return 1
+  fi
+  if [[ "$unmatched" != 0 ]]; then
+    echo "FATAL: sites --exercised found unmatched runtime labels ($unmatched) for $stderr_file" >&2
+    cat "$out" >&2
+    rm -f "$out" "$err"
+    return 1
+  fi
+  echo "PATINA_SITES_JOIN unmatched_runtime_labels=0 report=$stderr_file"
+  rm -f "$out" "$err"
 }
 
 ###############################################################################
@@ -178,16 +210,16 @@ PATINA_SDK_REPORT enabled=1 sites_registered=3' 'PATINA_ALWAYS_VIOLATION label=x
   # Gen 1: the "torn-page" sometimes site is reached (r1) but unsatisfied (s0);
   # the "recovery" sometimes site is satisfied (s1).
   campaign_accumulate "$tmp" \
-    'PATINA_SDK_REPORT enabled=1 fire_permille=250 activation_permille=250 cutoff_nanos=0 cutoff_reached=0 sites_registered=3 sites_activated=1 total_firings=2 cutoff_suppressed=0 after_setup=0 setup_complete=1 site=torn-page-rejected|sometimes|a0|e5|f0|r1|s0|v0|k- site=recovery-exercised|sometimes|a0|e3|f0|r1|s1|v0|k- site=commit-early|fault|a1|e5|f2|r1|s0|v0|k-'
+    'PATINA_SDK_REPORT enabled=1 fire_permille=250 activation_permille=250 cutoff_nanos=0 cutoff_reached=0 sites_registered=3 sites_activated=1 total_firings=2 cutoff_suppressed=0 after_setup=0 setup_complete=1 site=torn-page-rejected|sometimes|a0|e5|f0|r1|s0|v0|k-|@src/main.rs:10 site=recovery-exercised|sometimes|a0|e3|f0|r1|s1|v0|k-|@src/main.rs:11 site=commit-early|fault|a1|e5|f2|r1|s0|v0|k-|@src/main.rs:12'
   # Gen 2: torn-page reached again, still unsatisfied.
   campaign_accumulate "$tmp" \
-    'PATINA_SDK_REPORT enabled=1 sites_registered=3 site=torn-page-rejected|sometimes|a0|e4|f0|r1|s0|v0|k-'
+    'PATINA_SDK_REPORT enabled=1 sites_registered=3 site=torn-page-rejected|sometimes|a0|e4|f0|r1|s0|v0|k-|@src/main.rs:10'
   local unmet; unmet="$(campaign_sometimes_unmet "$tmp")"
   _bc_expect "torn-page-rejected" "$unmet" "sometimes-unmet-fires"
 
   # Once the site is satisfied in a later gen, it drops out of the unmet set.
   campaign_accumulate "$tmp" \
-    'PATINA_SDK_REPORT enabled=1 sites_registered=3 site=torn-page-rejected|sometimes|a0|e4|f1|r1|s1|v0|k-'
+    'PATINA_SDK_REPORT enabled=1 sites_registered=3 site=torn-page-rejected|sometimes|a0|e4|f1|r1|s1|v0|k-|@src/main.rs:10'
   _bc_expect "" "$(campaign_sometimes_unmet "$tmp")" "sometimes-unmet-clears-when-satisfied"
 
   # The accumulator counts generations and fault fires correctly.

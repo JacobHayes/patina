@@ -6,8 +6,9 @@
 # `cargo patina build --target wasi` (which routes the SDK macros through the
 # `patina_sdk` host import module) and runs a deterministic campaign with buggify
 # ENABLED, proving the WASI path has full parity with the native family:
-#   - sites register + fire under --buggify on wasip1 (PATINA_SDK_REPORT emitted
-#     and parseable by the SHARED ../buggify-campaign.sh classifier/accumulator),
+#   - sites register + fire under --buggify on wasip1 (Wave 2 PATINA_SDK_REPORT
+#     emitted, parseable by the SHARED ../buggify-campaign.sh classifier/
+#     accumulator, and joined once through cargo patina sites --exercised),
 #   - record/replay is byte-identical with buggify active (a per-gen double run),
 #   - distinct seeds vary the firing profile (campaign coverage accumulation).
 #
@@ -34,6 +35,7 @@ WASM="$here/target/wasm32-wasip1/debug/buggify-wasi-fixture.wasm"
 OUTDIR="${WASI_BUGGIFY_OUT:-$here/out-wasi-buggify}"
 CAMPAIGN_STATE="$OUTDIR/campaign-state.json"
 SWEEP_LOG="$OUTDIR/sweep.log"
+SITES_JOIN_CHECKED=0
 LOCK="$here/target/.wasi-buggify-sweep.lock"
 
 # Fill BYTE[0..31] from SHA-256("wasi-buggify-$G").
@@ -132,7 +134,12 @@ run_gen() {
   fi
 
   bump "$class"
-  campaign_accumulate "$CAMPAIGN_STATE" "$(sdk_report_line "$err")"
+  local sdk_line; sdk_line="$(sdk_report_line "$err")"
+  campaign_accumulate "$CAMPAIGN_STATE" "$sdk_line"
+  if (( SITES_JOIN_CHECKED == 0 )) && [[ -n "$sdk_line" ]]; then
+    buggify_sites_join_assert "$PATINA" "$here" "$err" || exit 3
+    SITES_JOIN_CHECKED=1
+  fi
 
   local digest; digest="$(/usr/bin/grep -m1 '^WASI_BUGGIFY_DIGEST ' "$out" 2>/dev/null || true)"
   local logline="gen=$G class=$class exit=$code $GEN_SUMMARY :: ${digest:-<no digest>}"
@@ -194,8 +201,9 @@ wasi-buggify-sweep — WASI cooperative-SUT (buggify) campaign, the dogfood prov
 the wasm32-wasip1 path has full parity with the native buggify family. Compiles
 the buggify-instrumented fixture (src/main.rs) via `cargo patina build --target
 wasi` and runs a deterministic campaign with buggify ENABLED: sites register +
-fire under --buggify on wasip1 (PATINA_SDK_REPORT parsed by the SHARED
-../buggify-campaign.sh classifier), record/replay is byte-identical per gen, and
+fire under --buggify on wasip1 (Wave 2 PATINA_SDK_REPORT parsed by the SHARED
+../buggify-campaign.sh classifier and joined once through cargo patina sites
+--exercised), record/replay is byte-identical per gen, and
 distinct seeds vary the firing profile. Every knob for generation G is a pure
 function of SHA-256("wasi-buggify-G"), so the campaign reproduces from the range
 alone. The fixture carries no planted defect: a clean campaign is all-OK.
@@ -240,6 +248,7 @@ main() {
   if (( end < start )); then echo "wasi-buggify-sweep.sh: END ($end) must be >= START ($start)" >&2; usage; exit 2; fi
   if (( derive_only == 1 )); then dry_run "$start" "$end"; exit 0; fi
 
+  mkdir -p "$(dirname "$LOCK")"
   if ! mkdir "$LOCK" 2>/dev/null; then
     echo "REFUSING TO RUN: another wasi-buggify-sweep holds $LOCK" >&2; exit 4
   fi

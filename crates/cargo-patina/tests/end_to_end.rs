@@ -3413,7 +3413,8 @@ fn wasi_buggify_fires_and_reports_on_wasip1() {
     assert!(
         report.contains("enabled=1")
             && report.contains("sites_registered=3")
-            && report.contains("total_firings=1"),
+            && report.contains("total_firings=1")
+            && report.contains("|@wat:site-a"),
         "unexpected PATINA_SDK_REPORT on wasip1:\n{report}"
     );
 }
@@ -3779,10 +3780,22 @@ wasm32-wasip1 target not installed"
         String::from_utf8_lossy(&ran.stdout),
         String::from_utf8_lossy(&ran.stderr)
     );
+    let sdk_report = sdk_report_line(&ran);
     assert!(
-        sdk_report_line(&ran).contains("enabled=1"),
-        "missing PATINA_SDK_REPORT from wasi guest:\nstderr:\n{}",
+        sdk_report.contains("enabled=1") && sdk_report.contains("|@src/main.rs:"),
+        "missing Wave 2 PATINA_SDK_REPORT from wasi guest:\nstderr:\n{}",
         String::from_utf8_lossy(&ran.stderr)
+    );
+    assert_sites_join_for_sdk_report(
+        &package,
+        &String::from_utf8_lossy(&ran.stderr),
+        &[
+            "guest-startup",
+            "iters",
+            "inject",
+            "even-draw",
+            "guest-invariant",
+        ],
     );
 
     // Flag-free replay reproduces the guest's digest byte-for-byte.
@@ -6310,6 +6323,21 @@ fn native_buggify_sdk_reports_records_and_replays() {
         stderr.contains("total_firings=") && !stderr.contains("total_firings=0"),
         "expected nonzero firings: {stderr}"
     );
+    assert!(
+        sdk_report_line(&seeded).contains("|@src/main.rs:"),
+        "SDK report rows must carry Wave 2 file:line identities: {stderr}"
+    );
+    assert_sites_join_for_sdk_report(
+        &pkg,
+        &stderr,
+        &[
+            "batch",
+            "loop-body",
+            "early-return",
+            "index-is-three",
+            "fired-in-bounds",
+        ],
+    );
 
     // Record, then replay WITHOUT re-supplying --buggify: byte-identical stdout.
     let trace = directory.path().join("buggify.patina");
@@ -6341,6 +6369,55 @@ fn native_buggify_sdk_reports_records_and_replays() {
         .expect("value-form --buggify must record an armed SDK config");
     assert_eq!(buggify.fire_permille, 1000);
     assert_eq!(buggify.activation_permille, 1000);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn assert_sites_join_for_sdk_report(package: &Path, stderr: &str, expected_labels: &[&str]) {
+    let report_path = package.join("sdk-report.stderr");
+    fs::write(&report_path, stderr).unwrap();
+    let joined = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        package,
+        &[
+            "sites",
+            "--no-cache",
+            "--exercised",
+            report_path.to_str().unwrap(),
+            "--all",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(
+        joined.status.success(),
+        "sites --exercised failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&joined.stdout),
+        String::from_utf8_lossy(&joined.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&joined.stdout).unwrap_or_else(|error| {
+        panic!(
+            "sites --exercised did not emit JSON: {error}\nstdout:\n{}",
+            String::from_utf8_lossy(&joined.stdout)
+        )
+    });
+    assert_eq!(json["schema"], "patina.sites/v1");
+    assert_eq!(json["unmatched_runtime_labels"], 0, "{json:#}");
+    assert_eq!(
+        json["totals"]["exercised"]["unmatched_runtime_labels"], 0,
+        "{json:#}"
+    );
+    for label in expected_labels {
+        let row = json["sites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|site| site["label"].as_str() == Some(label))
+            .unwrap_or_else(|| panic!("missing static site for label {label}: {json:#}"));
+        assert!(
+            row.get("exercised").is_some(),
+            "label {label} did not join an exercised row: {json:#}"
+        );
+    }
 }
 
 // A guest that reuses the same label at two different call sites: a fatal
