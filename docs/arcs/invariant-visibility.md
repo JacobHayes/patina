@@ -1,6 +1,6 @@
 # Arc: Invariant visibility
 
-**Status:** Waves 1-2 implemented (static `cargo patina sites` inventory + runtime report join); Waves 3-5 remain design.
+**Status:** Waves 1-3 implemented (static `cargo patina sites` inventory, runtime report join, campaign `<out>/sites.json` feed); Waves 4-5 remain design.
 **Depends on:** nothing (wave 1 is standalone). **Feeds:** the coverage-depth arc (shared rollup),
 the sometimes-gate arc (runtime exercised data).
 
@@ -12,7 +12,7 @@ crates have none? Which `sometimes!` claims has no campaign ever satisfied? Whic
 that Patina cannot see at all? Before this arc, the only artifacts were the per-run `PATINA_SDK_REPORT` stderr
 line (`crates/patina-runtime/src/lib.rs:4968`) and verbatim marker capture on failing campaign
 generations (`crates/cargo-patina/src/output.rs:364`). Waves 1-2 add the static inventory and
-single-run join; campaign aggregation remains a later wave.
+single-run join; Wave 3 adds campaign aggregation into the shared exercised-site store.
 
 This arc makes instrumentation *visible*: a static inventory of every assertion/property site, a
 runtime/campaign exercised view, and a merged report — hierarchical, progressively disclosed
@@ -55,9 +55,11 @@ runtime/campaign exercised view, and a merged report — hierarchical, progressi
   `BuggifySiteReport` carries the macro/import `site` field, so `cargo patina sites --exercised`
   can join a run's labels back to static SDK rows. Trace metadata still records only config +
   active labels (`BuggifyConfigRecord`, `crates/patina-trace/src/lib.rs:121`).
-- **Campaign** — `patina.campaign/v2` envelope (`crates/cargo-patina/src/campaign.rs:52`,
-  `:1236-1320`): class histogram, deduped signatures, notable runs, artifact pointers. SDK reports
-  are captured only as verbatim marker lines on notable runs; **no per-site aggregation exists**.
+- **Campaign** — `patina.campaign/v2` envelope (`crates/cargo-patina/src/campaign.rs`): class
+  histogram, deduped signatures, notable runs, artifact pointers, `sdk_sites` coverage summary,
+  and `artifacts.site_coverage`. Wave 3 parses every generation's SDK report into
+  `<out>/sites.json` (`patina.campaign.sites/v1`) for `sites --exercised OUTDIR` and the
+  sometimes-gate.
 - **CLI** — verbs run/test/build/audit/replay/explore/campaign/sites/minimize
   (`crates/cargo-patina/src/help.rs`); global `--format human|json`
   (`help.rs:191-213`, result envelope `patina.result/v1`, `output.rs:24`); help is
@@ -331,9 +333,9 @@ runtime-touching waves and at the arc boundary.
 - **Wave 2 — runtime join.** Implemented: `BuggifySiteReport` + SDK report row gained
   `@<file:line>`; in-repo consumers migrated; `sites --exercised FILE` joins raw run stderr; gates
   3-4 cover zero-unmatched e2e joins and strict parser drift.
-- **Wave 3 — campaign feed.** Per-generation SDK parsing → `<out_dir>/sites.json`; envelope
-  `sdk_sites` + `artifacts.site_coverage`; `sites --exercised OUTDIR`; gates 5, 7. CLI-only → fast
-  tier; hand the artifact contract to the sometimes-gate arc at this boundary.
+- **Wave 3 — campaign feed. Implemented.** Per-generation SDK parsing → `<out_dir>/sites.json`;
+  envelope `sdk_sites` + `artifacts.site_coverage`; `sites --exercised OUTDIR`; gates 5, 7.
+  CLI-only → fast tier; hand the artifact contract to the sometimes-gate arc at this boundary.
 - **Wave 4 — `.patina/` config.** Groups/tags in rollups (both arcs), `[defaults.*]`,
   `.gitignore` generation, `--no-config`, gate 6. CLI-only → fast tier, then the **arc-boundary
   full battery**.

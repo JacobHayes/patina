@@ -64,18 +64,21 @@ with no `--target` -> the Cargo package family (in-process boundary API), except
   first failing seed with `PATINA_EXPLORE_FAILURE seed=S exit=E repro="cargo patina run ... --seed S"`;
   the JSON envelope's `message` carries the same repro. Otherwise
   `PATINA_EXPLORE_COMPLETE start=... seeds=...`.
-- `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--buggify] [--swarm] [--sched-pct] [--faults]`
+- `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults]`
   Config-driven deterministic fault-and-schedule sweep: every generation's seed
   and knobs are a pure function of the generation number, outcomes are
-  classified into seven classes, and novel failure signatures are deduped with
-  saved traces and a reproduce command.
-- `cargo patina sites [--crate NAME] [--module PATH] [--group NAME] [--site LABEL] [--all] [--exercised FILE] [--kind KIND] [--runtime driven|observed|invisible] [--no-cache]` / `sites --selftest`
+  classified into seven classes, novel failure signatures are deduped with saved
+  traces, and SDK site coverage is folded into `<out-dir>/sites.json` (schema
+  `patina.campaign.sites/v1`). Registered `sometimes!` sites that are never
+  satisfied fail the campaign by default unless explicitly waived.
+- `cargo patina sites [--crate NAME] [--module PATH] [--group NAME] [--site LABEL] [--all] [--exercised FILE|OUTDIR] [--kind KIND] [--runtime driven|observed|invisible] [--no-cache]` / `sites --selftest`
   Static inventory of Patina SDK assertion/oracle sites, Rust assert/debug_assert,
   proptest/quickcheck, and antithesis-sdk assertions in the current workspace.
   JSON output is schema `patina.sites/v1`; per-file cache is
   `.patina/out/sites-cache.json` unless `--no-cache` is set. `--exercised FILE`
-  reads raw `PATINA_SDK_REPORT` line(s) and joins runtime counters by label or
-  dynamic-label file:line.
+  reads raw `PATINA_SDK_REPORT` line(s); `--exercised OUTDIR` reads a campaign's
+  `OUTDIR/sites.json`. Both join runtime counters by label or dynamic-label
+  file:line.
 - `cargo patina minimize <TRACE> --output PATH -- <ORACLE>` / `minimize --scenario --seed N -- <ORACLE>`
   Delta-debug a failing trace, or shrink the seed/params that trigger a failure.
 

@@ -127,8 +127,8 @@ source-first native libtest harness mode for one exact test target.
 | `replay` | Reproduce a recorded trace; seed/faults/argv restored from it. | `cargo patina replay ./app run.patina` |
 | `trace` | Inspect an existing trace's metadata, events, stats, or diff. | `cargo patina trace info run.patina` |
 | `explore` | Sweep a seed range, reporting per-seed outcomes. | `cargo patina explore run ./app --seeds 500` |
-| `campaign` | Config-driven fault-and-schedule sweep with failure dedup. | `cargo patina campaign ./app --gens 200 --buggify --out-dir out/` |
-| `sites` | Inventory assertion/oracle instrumentation; optionally join a run's SDK report. | `cargo patina sites --exercised sdk.stderr` |
+| `campaign` | Config-driven fault-and-schedule sweep with failure dedup and SDK oracle coverage gate. | `cargo patina campaign ./app --gens 200 --buggify --out-dir out/` |
+| `sites` | Inventory assertion/oracle instrumentation; optionally join a run or campaign SDK report. | `cargo patina sites --exercised out/` |
 | `minimize` | Shrink a failing trace (or seed/params) against an oracle. | `cargo patina minimize bug.patina --output small.patina -- ./oracle` |
 
 Native harness mode is the tight point-solution loop: `cargo patina test
@@ -187,7 +187,11 @@ code. Enable at run time with `cargo patina run --buggify`; decisions are pure
 functions of the seed, and a `PATINA_SDK_REPORT` line proves sites actually
 fired (no vacuous "all clean"). Each row carries `@file:line`, so
 `cargo patina sites --exercised <stderr-file>` can join a run back to the static
-inventory.
+inventory. `cargo patina campaign` also folds every generation into
+`<out-dir>/sites.json` (`patina.campaign.sites/v1`) and fails by default when a
+registered `sometimes!` oracle is never satisfied; use
+`--allow-unmet-sometimes[=MIN_GENS]` only as an explicit waiver. The same store
+loads through `cargo patina sites --exercised <out-dir>`.
 
 ### Record, replay, branch
 

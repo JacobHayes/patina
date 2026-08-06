@@ -2485,6 +2485,112 @@ fn campaign_json_stdout(output: &Output) -> serde_json::Value {
     })
 }
 
+fn sometimes_gate_wat(label: &str, satisfied: bool) -> Vec<u8> {
+    let bit = if satisfied { 1 } else { 0 };
+    let wat = format!(
+        r#"(module
+    (import "patina_sdk" "sometimes"
+        (func $sometimes (param i32 i32 i32 i32 i32) (result i32)))
+    (import "patina_sdk" "lifecycle_setup_complete" (func $setup (result i32)))
+    (memory (export "memory") 1)
+    (data (i32.const 0) "{label}")
+    (data (i32.const 32) "wat:sometimes")
+    (func (export "_start")
+        (drop (call $setup))
+        (drop (call $sometimes (i32.const {bit})
+            (i32.const 0) (i32.const {label_len}) (i32.const 32) (i32.const 13)))))"#,
+        label_len = label.len()
+    );
+    wat::parse_str(&wat).unwrap()
+}
+
+#[test]
+fn campaign_sometimes_gate_fails_unmet_accepts_met_and_waives_threshold() {
+    let directory = tempdir().unwrap();
+    let unmet = directory.path().join("never-green.wasm");
+    let met = directory.path().join("met.wasm");
+    fs::write(&unmet, sometimes_gate_wat("never-green", false)).unwrap();
+    fs::write(&met, sometimes_gate_wat("met-green", true)).unwrap();
+
+    let run = |module: &Path, out: &Path, extra: &[&str], inherited_report: Option<&str>| {
+        let mut args = vec![
+            "campaign".to_string(),
+            module.to_str().unwrap().to_string(),
+            "--gens".to_string(),
+            "5".to_string(),
+            "--progress-every".to_string(),
+            "1".to_string(),
+            "--out-dir".to_string(),
+            out.to_str().unwrap().to_string(),
+        ];
+        args.extend(extra.iter().map(|arg| arg.to_string()));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-patina"));
+        command.current_dir(native_workspace()).args(&args);
+        if let Some(value) = inherited_report {
+            command.env("PATINA_SDK_REPORT", value);
+        }
+        command.output().unwrap()
+    };
+
+    let unmet_out = directory.path().join("unmet");
+    let unmet_run = run(&unmet, &unmet_out, &[], Some("0"));
+    let unmet_stdout = String::from_utf8_lossy(&unmet_run.stdout);
+    assert_eq!(
+        unmet_run.status.code(),
+        Some(1),
+        "never-satisfied sometimes! must fail the campaign even when PATINA_SDK_REPORT=0 is inherited\nstdout:\n{unmet_stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&unmet_run.stderr)
+    );
+    assert!(
+        unmet_stdout.contains("UNMET sometimes 'never-green'")
+            && unmet_stdout
+                .contains("PATINA_CAMPAIGN_COVERAGE oracle_sites=1 satisfied=0 unmet=1 gate=fail"),
+        "unmet campaign did not surface the coverage gate:\n{unmet_stdout}"
+    );
+    let unmet_sites: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(unmet_out.join("sites.json")).unwrap()).unwrap();
+    assert_eq!(unmet_sites["schema"], "patina.campaign.sites/v1");
+    assert_eq!(unmet_sites["generations_observed"], 5);
+    assert_eq!(unmet_sites["sites"][0]["label"], "never-green");
+    assert_eq!(unmet_sites["sites"][0]["registered_gens"], 5);
+    assert_eq!(unmet_sites["sites"][0]["satisfied_gens"], 0);
+
+    let met_out = directory.path().join("met");
+    let met_run = run(&met, &met_out, &[], None);
+    let met_stdout = String::from_utf8_lossy(&met_run.stdout);
+    assert!(
+        met_run.status.success(),
+        "satisfied sometimes! campaign should stay green\nstdout:\n{met_stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&met_run.stderr)
+    );
+    assert!(
+        met_stdout
+            .contains("PATINA_CAMPAIGN_COVERAGE oracle_sites=1 satisfied=1 unmet=0 gate=pass"),
+        "met campaign did not report a passing coverage gate:\n{met_stdout}"
+    );
+
+    let waived_out = directory.path().join("waived");
+    let waived_run = run(&unmet, &waived_out, &["--allow-unmet-sometimes=10"], None);
+    let waived_stdout = String::from_utf8_lossy(&waived_run.stdout);
+    assert!(
+        waived_run.status.success()
+            && waived_stdout.contains("gate=waived")
+            && waived_stdout.contains("UNMET sometimes 'never-green'"),
+        "threshold waiver below MIN_GENS should report but not fail:\nstdout:\n{waived_stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&waived_run.stderr)
+    );
+
+    let enforced_out = directory.path().join("enforced");
+    let enforced_run = run(&unmet, &enforced_out, &["--allow-unmet-sometimes=5"], None);
+    assert_eq!(
+        enforced_run.status.code(),
+        Some(1),
+        "threshold waiver must enforce at observed generations >= MIN_GENS\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&enforced_run.stdout),
+        String::from_utf8_lossy(&enforced_run.stderr)
+    );
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 // End-to-end coverage for `cargo patina campaign` + the liveness watchdog: build
 // the buggify-driven planted-bug guest (`testbeds/liveness-campaign`), sweep it,
@@ -2627,6 +2733,11 @@ fn campaign_catches_planted_liveness_bug_dedups_and_reproduces() {
         "a deterministic re-run must produce an identical signature store"
     );
     assert_eq!(
+        fs::read_to_string(out.join("sites.json")).unwrap(),
+        fs::read_to_string(out2.join("sites.json")).unwrap(),
+        "a deterministic re-run must produce an identical sites.json store"
+    );
+    assert_eq!(
         campaign_state_without_invocations(&out.join("campaign-state.json")),
         campaign_state_without_invocations(&out2.join("campaign-state.json")),
         "a deterministic re-run must produce identical persisted state except audit invocations"
@@ -2701,6 +2812,7 @@ fn campaign_extend_equals_fresh_campaign() {
     );
     let fresh_stdout = String::from_utf8_lossy(&fresh.stdout).into_owned();
     let fresh_signatures = fs::read_to_string(out.join("signatures.json")).unwrap();
+    let fresh_sites = fs::read_to_string(out.join("sites.json")).unwrap();
     let fresh_state = campaign_state_without_invocations(&out.join("campaign-state.json"));
 
     fs::remove_dir_all(&out).unwrap();
@@ -2755,6 +2867,11 @@ fn campaign_extend_equals_fresh_campaign() {
         fresh_signatures,
         fs::read_to_string(out.join("signatures.json")).unwrap(),
         "k-then-extend must reproduce the fresh signature store"
+    );
+    assert_eq!(
+        fresh_sites,
+        fs::read_to_string(out.join("sites.json")).unwrap(),
+        "k-then-extend must reproduce the fresh sites.json store"
     );
     assert_eq!(
         fresh_state,

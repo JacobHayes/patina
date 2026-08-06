@@ -9755,6 +9755,7 @@ mod tests {
                 "--seed-start",
                 "--timeout-secs",
                 "--progress-every",
+                "--allow-unmet-sometimes",
                 "--buggify",
                 "--swarm",
                 "--sched-pct",

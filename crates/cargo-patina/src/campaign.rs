@@ -47,6 +47,7 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
+use crate::sdk_report::{CoverageTally, ExercisedSite};
 use crate::{CliError, reject_inline, required_value, set_once, split_opt};
 
 /// The stable schema identifier for the campaign JSON envelope, extending the
@@ -56,6 +57,12 @@ use crate::{CliError, reject_inline, required_value, set_once, split_opt};
 const CAMPAIGN_ENVELOPE_SCHEMA: &str = "patina.campaign/v2";
 const CAMPAIGN_STATE_SCHEMA: &str = "patina.campaign.state/v1";
 const CAMPAIGN_SIGNATURES_SCHEMA: &str = "patina.campaign.signatures/v1";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AllowUnmetSometimes {
+    Always,
+    BelowGenerations(u64),
+}
 
 /// The default progress-heartbeat cadence: in human mode, print one
 /// `PATINA_CAMPAIGN_PROGRESS` line every this-many generations (on top of the
@@ -97,6 +104,9 @@ pub struct CampaignSpec {
     pub heal_after_nanos: Option<u64>,
     /// Also write a wave-14 `--report` HTML for each failing generation.
     pub report: bool,
+    /// Waive the default campaign-level gate for `sometimes!` sites that were
+    /// registered but never satisfied.
+    pub allow_unmet_sometimes: Option<AllowUnmetSometimes>,
 }
 
 impl Default for CampaignSpec {
@@ -114,6 +124,7 @@ impl Default for CampaignSpec {
             converge_nanos: None,
             heal_after_nanos: None,
             report: false,
+            allow_unmet_sometimes: None,
         }
     }
 }
@@ -151,11 +162,14 @@ impl CampaignSpec {
                 "converge_nanos" => self.converge_nanos = Some(json_u64(key, val)?),
                 "heal_after_nanos" => self.heal_after_nanos = Some(json_u64(key, val)?),
                 "report" => self.report = json_bool(key, val)?,
+                "allow_unmet_sometimes" => {
+                    self.allow_unmet_sometimes = Some(json_allow_unmet_sometimes(key, val)?)
+                }
                 other => {
                     return Err(CliError(format!(
                         "unknown campaign spec key {other:?}; expected generations, seed_base, \
                          timeout_secs, guest_args, buggify, swarm, pct, faults, watchdog_nanos, \
-                         converge_nanos, heal_after_nanos, or report"
+                         converge_nanos, heal_after_nanos, report, or allow_unmet_sometimes"
                     )));
                 }
             }
@@ -174,6 +188,26 @@ fn json_bool(key: &str, value: &serde_json::Value) -> Result<bool, CliError> {
     value
         .as_bool()
         .ok_or_else(|| CliError(format!("campaign spec {key:?} must be a boolean")))
+}
+
+fn json_allow_unmet_sometimes(
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<AllowUnmetSometimes, CliError> {
+    if value.as_bool() == Some(true) {
+        return Ok(AllowUnmetSometimes::Always);
+    }
+    if let Some(value) = value.as_u64() {
+        if value == 0 {
+            return Err(CliError(format!(
+                "campaign spec {key:?} must be true or a positive unsigned integer"
+            )));
+        }
+        return Ok(AllowUnmetSometimes::BelowGenerations(value));
+    }
+    Err(CliError(format!(
+        "campaign spec {key:?} must be true or a positive unsigned integer"
+    )))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,6 +304,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     let mut timeout_secs: Option<u64> = None;
     let mut spec_path: Option<String> = None;
     let mut progress_every: Option<u64> = None;
+    let mut allow_unmet_sometimes: Option<AllowUnmetSometimes> = None;
     let mut extend: Option<u64> = None;
     let mut resume: Option<()> = None;
 
@@ -333,6 +368,13 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
                     required_value(opt, &arguments, &mut index)?,
                 )?;
                 set_once(&mut progress_every, value, "--progress-every")?;
+            }
+            "--allow-unmet-sometimes" => {
+                if continuation_requested {
+                    return Err(reject_continuation_override("--allow-unmet-sometimes"));
+                }
+                let value = parse_allow_unmet_sometimes_flag(opt)?;
+                set_once(&mut allow_unmet_sometimes, value, "--allow-unmet-sometimes")?;
             }
             "--buggify" => {
                 if continuation_requested {
@@ -451,6 +493,9 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     if let Some(timeout_secs) = timeout_secs {
         spec.timeout_secs = timeout_secs;
     }
+    if let Some(value) = allow_unmet_sometimes {
+        spec.allow_unmet_sometimes = Some(value);
+    }
     if !guest_args.is_empty() {
         spec.guest_args = guest_args;
     }
@@ -504,6 +549,25 @@ fn parse_u64_flag(name: &str, value: &str) -> Result<u64, CliError> {
     value
         .parse()
         .map_err(|_| CliError::usage(format!("{name} must be an unsigned integer; got {value:?}")))
+}
+
+fn parse_positive_u64_flag(name: &str, value: &str) -> Result<u64, CliError> {
+    let value = parse_u64_flag(name, value)?;
+    if value == 0 {
+        return Err(CliError::usage(format!(
+            "{name} must be a positive unsigned integer; got 0"
+        )));
+    }
+    Ok(value)
+}
+
+fn parse_allow_unmet_sometimes_flag(opt: crate::Opt<'_>) -> Result<AllowUnmetSometimes, CliError> {
+    match opt.inline {
+        Some(value) => Ok(AllowUnmetSometimes::BelowGenerations(
+            parse_positive_u64_flag("--allow-unmet-sometimes", value)?,
+        )),
+        None => Ok(AllowUnmetSometimes::Always),
+    }
 }
 
 /// Route the `campaign` verb.
@@ -1198,7 +1262,17 @@ fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
         map.insert("heal_after_nanos".into(), value.into());
     }
     map.insert("report".into(), spec.report.into());
+    if let Some(value) = spec.allow_unmet_sometimes {
+        map.insert("allow_unmet_sometimes".into(), allow_unmet_to_json(value));
+    }
     serde_json::Value::Object(map)
+}
+
+fn allow_unmet_to_json(value: AllowUnmetSometimes) -> serde_json::Value {
+    match value {
+        AllowUnmetSometimes::Always => serde_json::Value::Bool(true),
+        AllowUnmetSometimes::BelowGenerations(min) => serde_json::Value::from(min),
+    }
 }
 
 fn spec_from_state_json(value: &serde_json::Value) -> Result<CampaignSpec, String> {
@@ -1309,6 +1383,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
 
     let state_path = out_dir.join("campaign-state.json");
     let store_path = out_dir.join("signatures.json");
+    let sites_path = out_dir.join("sites.json");
 
     if !matches!(mode, CampaignMode::Fresh) && !state_path.is_file() {
         return Err(CliError(format!(
@@ -1339,6 +1414,13 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
             CampaignState::fresh(identity, spec)
         }
         CampaignMode::Resume | CampaignMode::Extend { .. } => load_campaign_state(&state_path)?,
+    };
+
+    let mut coverage = match mode {
+        CampaignMode::Fresh => CoverageTally::default(),
+        CampaignMode::Resume | CampaignMode::Extend { .. } => {
+            load_coverage_tally(&sites_path, state.generations_done)?
+        }
     };
 
     let artifact_path = PathBuf::from(&state.artifact.path);
@@ -1381,7 +1463,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
     });
     let invocation_index = state.invocations.len() - 1;
 
-    write_campaign_checkpoint(&state_path, &store_path, &state)?;
+    write_campaign_checkpoint(&state_path, &store_path, &sites_path, &state, &coverage)?;
 
     if !json_output {
         match mode {
@@ -1429,6 +1511,13 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
             &state.spec.guest_args,
             effective_timeout_secs,
         )?;
+        coverage
+            .observe_generation(generation, seed, &stderr)
+            .map_err(|error| {
+                CliError(format!(
+                    "generation {generation} has malformed PATINA_SDK_REPORT: {error}"
+                ))
+            })?;
         // A generation that blew the wall-clock budget was killed: it hung in a way
         // neither the virtual-time watchdog nor the child's own budgets caught
         // (e.g. an uninterposed atomics-only busy loop). Classify it INFRA
@@ -1537,30 +1626,53 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
                     failures_so_far,
                     novel_so_far,
                     &state.classes,
+                    &coverage,
                 );
             }
             flush_stdout();
         }
-        write_campaign_checkpoint(&state_path, &store_path, &state)?;
+        write_campaign_checkpoint(&state_path, &store_path, &sites_path, &state, &coverage)?;
     }
 
     let failures = class_counts_failures(&state.classes);
     let novel_count = state.signatures.len() as u64;
-    let result = if failures == 0 { "ok" } else { "failure" };
-    let exit_code = if failures == 0 { 0 } else { 1 };
+    let coverage_verdict = coverage_verdict(&coverage, state.spec.allow_unmet_sometimes);
+    let coverage_failure = coverage_verdict.gate == CoverageGate::Fail;
+    let result = if failures == 0 && !coverage_failure {
+        "ok"
+    } else {
+        "failure"
+    };
+    let exit_code = if failures == 0 && !coverage_failure {
+        0
+    } else {
+        1
+    };
 
     if json_output {
-        let envelope = build_campaign_envelope(result, exit_code, &state, &out_dir, &state_path);
+        let envelope = build_campaign_envelope(CampaignEnvelopeInput {
+            result,
+            exit_code,
+            state: &state,
+            coverage: &coverage,
+            coverage_verdict: &coverage_verdict,
+            out_dir: &out_dir,
+            state_path: &state_path,
+            sites_path: &sites_path,
+        });
         println!("{envelope}");
     } else {
-        print_campaign_summary(
-            &state.classes,
-            &state.signatures,
+        print_campaign_summary(CampaignSummaryInput {
+            class_counts: &state.classes,
+            signatures: &state.signatures,
+            coverage: &coverage,
+            coverage_verdict: &coverage_verdict,
             failures,
-            novel_count,
-            state.spec.generations,
-            &store_path,
-        );
+            novel: novel_count,
+            generations: state.spec.generations,
+            store_path: &store_path,
+            sites_path: &sites_path,
+        });
         flush_stdout();
     }
     Ok(exit_code)
@@ -1604,8 +1716,11 @@ fn run_generation(
             command.arg(arg);
         }
     }
-    // Keep the child's diagnostics deterministic and machine-parseable.
+    // Keep the child's diagnostics deterministic and machine-parseable. Pin the
+    // SDK report on so a user's inherited PATINA_SDK_REPORT=0 cannot make the
+    // campaign coverage gate vacuously green.
     command.env("PATINA_LIVENESS_REPORT", "1");
+    command.env("PATINA_SDK_REPORT", "1");
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = command
@@ -1896,10 +2011,16 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn write_campaign_checkpoint(
     state_path: &Path,
     store_path: &Path,
+    sites_path: &Path,
     state: &CampaignState,
+    coverage: &CoverageTally,
 ) -> Result<(), CliError> {
-    write_campaign_state(state_path, state)?;
-    write_signature_store(store_path, &state.signatures)
+    // The state cursor is the checkpoint readers poll. Write the derived stores
+    // first, then the state file, so an observed advanced cursor has matching
+    // signatures/sites artifacts.
+    write_sites_store(sites_path, coverage)?;
+    write_signature_store(store_path, &state.signatures)?;
+    write_campaign_state(state_path, state)
 }
 
 fn write_campaign_state(path: &Path, state: &CampaignState) -> Result<(), CliError> {
@@ -1935,6 +2056,46 @@ fn load_campaign_state(path: &Path) -> Result<CampaignState, CliError> {
     }
 }
 
+fn load_coverage_tally(path: &Path, generations_done: u64) -> Result<CoverageTally, CliError> {
+    if !path.exists() {
+        if generations_done == 0 {
+            return Ok(CoverageTally::default());
+        }
+        return Err(CliError(format!(
+            "campaign out-dir is missing sites store {} for {} already-recorded generations; refusing to resume partially",
+            path.display(),
+            generations_done
+        )));
+    }
+    let text = fs::read_to_string(path).map_err(|error| {
+        CliError(format!(
+            "failed to read campaign sites store {}: {error}",
+            path.display()
+        ))
+    })?;
+    let json: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
+        CliError(format!(
+            "campaign sites store {} is invalid JSON: {error}",
+            path.display()
+        ))
+    })?;
+    let tally = CoverageTally::from_json(&json).map_err(|error| {
+        CliError(format!(
+            "campaign sites store {} is corrupt: {error}; refusing to resume partially",
+            path.display()
+        ))
+    })?;
+    if tally.generations_observed != generations_done {
+        return Err(CliError(format!(
+            "campaign sites store {} observed {} generations but campaign-state cursor is {}; refusing to resume partially",
+            path.display(),
+            tally.generations_observed,
+            generations_done
+        )));
+    }
+    Ok(tally)
+}
+
 fn write_signature_store(
     path: &Path,
     signatures: &BTreeMap<String, SignatureRecord>,
@@ -1944,6 +2105,10 @@ fn write_signature_store(
         "signatures": signatures_to_json(signatures),
     });
     atomic_write_json(path, &store, "signature store")
+}
+
+fn write_sites_store(path: &Path, coverage: &CoverageTally) -> Result<(), CliError> {
+    atomic_write_json(path, &coverage.to_json(), "campaign sites store")
 }
 
 fn atomic_write_json(path: &Path, value: &serde_json::Value, label: &str) -> Result<(), CliError> {
@@ -2057,6 +2222,104 @@ fn acquire_flock(_file: &File, out_dir: &Path) -> Result<(), CliError> {
     )))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CoverageGate {
+    Pass,
+    Fail,
+    Waived,
+}
+
+impl CoverageGate {
+    const fn as_str(self) -> &'static str {
+        match self {
+            CoverageGate::Pass => "pass",
+            CoverageGate::Fail => "fail",
+            CoverageGate::Waived => "waived",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CoverageSummary<'a> {
+    labels_seen: u64,
+    oracle_sites: u64,
+    satisfied: u64,
+    sometimes_unsatisfied: u64,
+    reachable_unreached: u64,
+    always_violated: u64,
+    unmet: Vec<&'a ExercisedSite>,
+}
+
+#[derive(Clone, Debug)]
+struct CoverageVerdict<'a> {
+    summary: CoverageSummary<'a>,
+    gate: CoverageGate,
+    waiver: Option<AllowUnmetSometimes>,
+}
+
+fn coverage_summary(coverage: &CoverageTally) -> CoverageSummary<'_> {
+    let mut summary = CoverageSummary {
+        labels_seen: coverage.sites.len() as u64,
+        oracle_sites: 0,
+        satisfied: 0,
+        sometimes_unsatisfied: 0,
+        reachable_unreached: 0,
+        always_violated: 0,
+        unmet: Vec::new(),
+    };
+    for site in coverage.sites.values() {
+        if site.kind == "always" && site.always_violated_runs > 0 {
+            summary.always_violated += 1;
+        }
+        if !site.is_oracle() {
+            continue;
+        }
+        summary.oracle_sites += 1;
+        if site.satisfied_gens > 0 {
+            summary.satisfied += 1;
+        } else {
+            if site.kind == "sometimes" {
+                summary.sometimes_unsatisfied += 1;
+            } else if site.kind == "reachable" {
+                summary.reachable_unreached += 1;
+            }
+            summary.unmet.push(site);
+        }
+    }
+    summary
+}
+
+fn coverage_verdict(
+    coverage: &CoverageTally,
+    waiver: Option<AllowUnmetSometimes>,
+) -> CoverageVerdict<'_> {
+    let summary = coverage_summary(coverage);
+    let gate = if summary.unmet.is_empty() {
+        CoverageGate::Pass
+    } else if waiver_applies(waiver, coverage.generations_observed) {
+        CoverageGate::Waived
+    } else {
+        CoverageGate::Fail
+    };
+    CoverageVerdict {
+        summary,
+        gate,
+        waiver,
+    }
+}
+
+fn waiver_applies(waiver: Option<AllowUnmetSometimes>, generations_observed: u64) -> bool {
+    match waiver {
+        Some(AllowUnmetSometimes::Always) => true,
+        Some(AllowUnmetSometimes::BelowGenerations(min)) => generations_observed < min,
+        None => false,
+    }
+}
+
+fn waiver_json(waiver: Option<AllowUnmetSometimes>) -> serde_json::Value {
+    waiver.map_or(serde_json::Value::Null, allow_unmet_to_json)
+}
+
 /// Print one human-mode progress heartbeat: enough to answer "is it still running,
 /// and how is it going?" without the full per-generation stream. `elapsed_secs` is
 /// the only wall-clock-derived field and appears solely on this line (never on a
@@ -2068,6 +2331,7 @@ fn print_progress_heartbeat(
     failures: u64,
     novel: u64,
     class_counts: &BTreeMap<String, u64>,
+    coverage: &CoverageTally,
 ) {
     let mut line = format!(
         "PATINA_CAMPAIGN_PROGRESS generation={done}/{total} elapsed_secs={elapsed_secs} \
@@ -2076,25 +2340,40 @@ fn print_progress_heartbeat(
     for (class, count) in class_counts {
         line.push_str(&format!(" {class}={count}"));
     }
+    let coverage_summary = coverage_summary(coverage);
+    line.push_str(&format!(
+        " sdk_labels={} oracle_sites={} oracle_unmet={}",
+        coverage_summary.labels_seen,
+        coverage_summary.oracle_sites,
+        coverage_summary.unmet.len()
+    ));
     println!("{line}");
 }
 
-fn print_campaign_summary(
-    class_counts: &BTreeMap<String, u64>,
-    signatures: &BTreeMap<String, SignatureRecord>,
+struct CampaignSummaryInput<'a> {
+    class_counts: &'a BTreeMap<String, u64>,
+    signatures: &'a BTreeMap<String, SignatureRecord>,
+    coverage: &'a CoverageTally,
+    coverage_verdict: &'a CoverageVerdict<'a>,
     failures: u64,
     novel: u64,
     generations: u64,
-    store_path: &Path,
-) {
+    store_path: &'a Path,
+    sites_path: &'a Path,
+}
+
+fn print_campaign_summary(input: CampaignSummaryInput<'_>) {
     println!("== campaign summary ==");
-    println!("generations={generations} failures={failures} novel_signatures={novel}");
-    for (class, count) in class_counts {
+    println!(
+        "generations={} failures={} novel_signatures={}",
+        input.generations, input.failures, input.novel
+    );
+    for (class, count) in input.class_counts {
         println!("  class {class:<18} {count}");
     }
-    if !signatures.is_empty() {
+    if !input.signatures.is_empty() {
         println!("-- failure signatures --");
-        for (key, record) in signatures {
+        for (key, record) in input.signatures {
             println!(
                 "  [{}] count={} first_gen={} seed={}",
                 record.class.as_str(),
@@ -2109,9 +2388,54 @@ fn print_campaign_summary(
             }
         }
     }
-    println!("signature store: {}", store_path.display());
+    print_coverage_summary(input.coverage, input.coverage_verdict, input.sites_path);
+    println!("signature store: {}", input.store_path.display());
     println!(
-        "PATINA_CAMPAIGN_COMPLETE generations={generations} failures={failures} novel={novel}"
+        "PATINA_CAMPAIGN_COMPLETE generations={} failures={} novel={}",
+        input.generations, input.failures, input.novel
+    );
+}
+
+fn print_coverage_summary(
+    coverage: &CoverageTally,
+    coverage_verdict: &CoverageVerdict<'_>,
+    sites_path: &Path,
+) {
+    let summary = &coverage_verdict.summary;
+    println!("-- coverage (sometimes!/reachable!) --");
+    if summary.oracle_sites == 0 {
+        println!("coverage: no sometimes!/reachable! sites registered");
+    } else {
+        println!(
+            "oracle_sites={} satisfied={} unmet={}",
+            summary.oracle_sites,
+            summary.satisfied,
+            summary.unmet.len()
+        );
+        for site in &summary.unmet {
+            let waived = if coverage_verdict.gate == CoverageGate::Waived {
+                " (waived)"
+            } else {
+                ""
+            };
+            println!(
+                "  UNMET {} '{}' satisfied_gens=0/{} registered_gens={} evals={}{}",
+                site.kind,
+                site.label,
+                coverage.generations_observed,
+                site.registered_gens,
+                site.evals,
+                waived
+            );
+        }
+    }
+    println!("coverage store: {}", sites_path.display());
+    println!(
+        "PATINA_CAMPAIGN_COVERAGE oracle_sites={} satisfied={} unmet={} gate={}",
+        summary.oracle_sites,
+        summary.satisfied,
+        summary.unmet.len(),
+        coverage_verdict.gate.as_str()
     );
 }
 
@@ -2124,13 +2448,19 @@ fn print_campaign_summary(
 /// traces, optional reports) so nothing the v1 all-runs dump exposed becomes
 /// unreachable. Pure (returns the `Value`) so the shape is unit-testable without
 /// capturing stdout.
-fn build_campaign_envelope(
-    result: &str,
+struct CampaignEnvelopeInput<'a> {
+    result: &'a str,
     exit_code: i32,
-    state: &CampaignState,
-    out_dir: &Path,
-    state_path: &Path,
-) -> serde_json::Value {
+    state: &'a CampaignState,
+    coverage: &'a CoverageTally,
+    coverage_verdict: &'a CoverageVerdict<'a>,
+    out_dir: &'a Path,
+    state_path: &'a Path,
+    sites_path: &'a Path,
+}
+
+fn build_campaign_envelope(input: CampaignEnvelopeInput<'_>) -> serde_json::Value {
+    let state = input.state;
     let classes: serde_json::Map<String, serde_json::Value> = state
         .classes
         .iter()
@@ -2149,32 +2479,43 @@ fn build_campaign_envelope(
     // populated them, so they are announced conditionally rather than promising a
     // path that may not exist.
     let mut artifacts = serde_json::Map::new();
-    artifacts.insert("out_dir".into(), out_dir.display().to_string().into());
+    artifacts.insert("out_dir".into(), input.out_dir.display().to_string().into());
     artifacts.insert(
         "campaign_state".into(),
-        state_path.display().to_string().into(),
+        input.state_path.display().to_string().into(),
     );
     artifacts.insert(
         "signature_store".into(),
-        out_dir.join("signatures.json").display().to_string().into(),
+        input
+            .out_dir
+            .join("signatures.json")
+            .display()
+            .to_string()
+            .into(),
+    );
+    artifacts.insert(
+        "site_coverage".into(),
+        input.sites_path.display().to_string().into(),
     );
     if failures > 0 {
         artifacts.insert(
             "failures_dir".into(),
-            out_dir.join("failures").display().to_string().into(),
+            input.out_dir.join("failures").display().to_string().into(),
         );
     }
     if state.spec.report && failures > 0 {
         artifacts.insert(
             "reports_dir".into(),
-            out_dir.join("reports").display().to_string().into(),
+            input.out_dir.join("reports").display().to_string().into(),
         );
     }
+    let coverage_json = coverage_envelope_json(input.coverage, input.coverage_verdict);
+    let sdk_sites_json = sdk_sites_summary_json(input.coverage, input.coverage_verdict);
     serde_json::json!({
         "schema": CAMPAIGN_ENVELOPE_SCHEMA,
         "verb": "campaign",
-        "result": result,
-        "exit_code": exit_code,
+        "result": input.result,
+        "exit_code": input.exit_code,
         "artifact": state.artifact.path.clone(),
         "family": state.artifact.family,
         "generations": state.spec.generations,
@@ -2185,7 +2526,51 @@ fn build_campaign_envelope(
         "signatures": signature_json,
         "notable_runs": notable_runs,
         "invocations": state.invocations.iter().map(InvocationRecord::to_json).collect::<Vec<_>>(),
+        "sdk_sites": sdk_sites_json,
+        "coverage": coverage_json,
         "artifacts": artifacts,
+    })
+}
+
+fn coverage_envelope_json(
+    coverage: &CoverageTally,
+    verdict: &CoverageVerdict<'_>,
+) -> serde_json::Value {
+    let unmet = verdict
+        .summary
+        .unmet
+        .iter()
+        .map(|site| {
+            serde_json::json!({
+                "label": &site.label,
+                "kind": &site.kind,
+                "satisfied_gens": site.satisfied_gens,
+                "registered_gens": site.registered_gens,
+                "generations_observed": coverage.generations_observed,
+                "evals": site.evals,
+                "waived": verdict.gate == CoverageGate::Waived,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "oracle_sites": verdict.summary.oracle_sites,
+        "satisfied": verdict.summary.satisfied,
+        "gate": verdict.gate.as_str(),
+        "waiver": waiver_json(verdict.waiver),
+        "unmet": unmet,
+    })
+}
+
+fn sdk_sites_summary_json(
+    coverage: &CoverageTally,
+    verdict: &CoverageVerdict<'_>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "labels_seen": verdict.summary.labels_seen,
+        "generations_observed": coverage.generations_observed,
+        "sometimes_unsatisfied": verdict.summary.sometimes_unsatisfied,
+        "reachable_unreached": verdict.summary.reachable_unreached,
+        "always_violated": verdict.summary.always_violated,
     })
 }
 
@@ -2379,6 +2764,74 @@ fn selftest() -> Result<i32, CliError> {
         failures += 1;
     }
 
+    println!("-- coverage gate --");
+    let mut coverage_check = |name: &str,
+                              tally: &CoverageTally,
+                              waiver: Option<AllowUnmetSometimes>,
+                              want_gate: CoverageGate,
+                              want_unmet: usize| {
+        let verdict = coverage_verdict(tally, waiver);
+        if verdict.gate == want_gate && verdict.summary.unmet.len() == want_unmet {
+            println!(
+                "  ok   {name:<40} -> gate={} unmet={}",
+                verdict.gate.as_str(),
+                verdict.summary.unmet.len()
+            );
+        } else {
+            println!(
+                "  FAIL {name:<40} -> gate={} unmet={} (want gate={} unmet={})",
+                verdict.gate.as_str(),
+                verdict.summary.unmet.len(),
+                want_gate.as_str(),
+                want_unmet
+            );
+            failures += 1;
+        }
+    };
+    let unmet = coverage_fixture(false).expect("unmet coverage fixture parses");
+    let met = coverage_fixture(true).expect("met coverage fixture parses");
+    coverage_check("sometimes-met-passes", &met, None, CoverageGate::Pass, 0);
+    coverage_check("sometimes-unmet-fails", &unmet, None, CoverageGate::Fail, 1);
+    coverage_check(
+        "sometimes-unmet-waived-bare",
+        &unmet,
+        Some(AllowUnmetSometimes::Always),
+        CoverageGate::Waived,
+        1,
+    );
+    coverage_check(
+        "sometimes-unmet-waived-under-threshold",
+        &unmet,
+        Some(AllowUnmetSometimes::BelowGenerations(3)),
+        CoverageGate::Waived,
+        1,
+    );
+    coverage_check(
+        "sometimes-unmet-enforced-at-threshold",
+        &unmet,
+        Some(AllowUnmetSometimes::BelowGenerations(2)),
+        CoverageGate::Fail,
+        1,
+    );
+    let mut malformed = CoverageTally::default();
+    match malformed.observe_generation(
+        0,
+        1,
+        "PATINA_SDK_REPORT enabled=1 site=x|sometimes|a0|e1|f0|r1|s0|v0|k-",
+    ) {
+        Ok(()) => {
+            println!("  FAIL malformed-coverage-row-rejected       -> parsed");
+            failures += 1;
+        }
+        Err(error) if error.contains("expected 10 pipe-separated fields") => {
+            println!("  ok   malformed-coverage-row-rejected       -> loud error");
+        }
+        Err(error) => {
+            println!("  FAIL malformed-coverage-row-rejected       -> {error}");
+            failures += 1;
+        }
+    }
+
     println!();
     if failures == 0 {
         println!("CAMPAIGN SELFTEST PASSED");
@@ -2387,6 +2840,24 @@ fn selftest() -> Result<i32, CliError> {
         println!("CAMPAIGN SELFTEST FAILED ({failures} checks)");
         Ok(1)
     }
+}
+
+fn coverage_fixture(satisfied: bool) -> Result<CoverageTally, String> {
+    let mut tally = CoverageTally::default();
+    let bit = if satisfied { 1 } else { 0 };
+    tally.observe_generation(
+        0,
+        100,
+        &format!(
+            "PATINA_SDK_REPORT enabled=1 site=oracle|sometimes|a0|e4|f0|r1|s{bit}|v0|k-|@src/main.rs:10"
+        ),
+    )?;
+    tally.observe_generation(
+        1,
+        101,
+        "PATINA_SDK_REPORT enabled=1 site=faulty|fault|a1|e1|f1|r1|s0|v0|k-|@src/main.rs:11",
+    )?;
+    Ok(tally)
 }
 
 #[cfg(test)]
@@ -2571,13 +3042,21 @@ mod tests {
             .into_iter()
             .filter(GenerationOutcome::is_notable)
             .collect();
-        let envelope = build_campaign_envelope(
-            "failure",
-            1,
-            &state,
-            Path::new("out"),
-            Path::new("out/campaign-state.json"),
-        );
+        let coverage = CoverageTally {
+            generations_observed: 4,
+            ..CoverageTally::default()
+        };
+        let coverage_verdict = coverage_verdict(&coverage, None);
+        let envelope = build_campaign_envelope(CampaignEnvelopeInput {
+            result: "failure",
+            exit_code: 1,
+            state: &state,
+            coverage: &coverage,
+            coverage_verdict: &coverage_verdict,
+            out_dir: Path::new("out"),
+            state_path: Path::new("out/campaign-state.json"),
+            sites_path: Path::new("out/sites.json"),
+        });
 
         assert_eq!(envelope["schema"], CAMPAIGN_ENVELOPE_SCHEMA);
         assert_eq!(envelope["schema"], "patina.campaign/v2");
@@ -2621,6 +3100,14 @@ mod tests {
                 .ends_with("failures"),
             "a failing campaign must point at its saved-trace dir: {envelope:#}"
         );
+        assert!(
+            artifacts["site_coverage"]
+                .as_str()
+                .unwrap()
+                .ends_with("sites.json")
+        );
+        assert_eq!(envelope["sdk_sites"]["labels_seen"], 0);
+        assert_eq!(envelope["coverage"]["gate"], "pass");
         // No `--report`, so no reports pointer is promised.
         assert!(artifacts.get("reports_dir").is_none());
     }
@@ -2638,13 +3125,21 @@ mod tests {
         );
         state.classes.insert("OK".to_string(), 1);
         state.generations_done = 1;
-        let envelope = build_campaign_envelope(
-            "ok",
-            0,
-            &state,
-            Path::new("out"),
-            Path::new("out/campaign-state.json"),
-        );
+        let coverage = CoverageTally {
+            generations_observed: 1,
+            ..CoverageTally::default()
+        };
+        let coverage_verdict = coverage_verdict(&coverage, None);
+        let envelope = build_campaign_envelope(CampaignEnvelopeInput {
+            result: "ok",
+            exit_code: 0,
+            state: &state,
+            coverage: &coverage,
+            coverage_verdict: &coverage_verdict,
+            out_dir: Path::new("out"),
+            state_path: Path::new("out/campaign-state.json"),
+            sites_path: Path::new("out/sites.json"),
+        });
         assert_eq!(envelope["failures"], 0);
         assert!(envelope["notable_runs"].as_array().unwrap().is_empty());
         assert!(envelope["artifacts"].get("failures_dir").is_none());
@@ -2672,6 +3167,51 @@ mod tests {
         // Duplicate is rejected (set_once), non-integer is rejected.
         assert!(parse(args(&["art", "--progress-every=1", "--progress-every=2"])).is_err());
         assert!(parse(args(&["art", "--progress-every", "nope"])).is_err());
+    }
+
+    #[test]
+    fn allow_unmet_sometimes_parses_flag_and_spec_shapes() {
+        let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+        let bare = parse(args(&["art", "--allow-unmet-sometimes"])).unwrap();
+        assert_eq!(
+            bare.spec.allow_unmet_sometimes,
+            Some(AllowUnmetSometimes::Always)
+        );
+        let threshold = parse(args(&["art", "--allow-unmet-sometimes=10"])).unwrap();
+        assert_eq!(
+            threshold.spec.allow_unmet_sometimes,
+            Some(AllowUnmetSometimes::BelowGenerations(10))
+        );
+        assert!(parse(args(&["art", "--allow-unmet-sometimes=0"])).is_err());
+        assert!(
+            parse(args(&[
+                "art",
+                "--allow-unmet-sometimes=1",
+                "--allow-unmet-sometimes=2",
+            ]))
+            .is_err()
+        );
+
+        let mut spec = CampaignSpec::default();
+        spec.apply_json(&serde_json::json!({"allow_unmet_sometimes": true}))
+            .unwrap();
+        assert_eq!(
+            spec.allow_unmet_sometimes,
+            Some(AllowUnmetSometimes::Always)
+        );
+        spec.apply_json(&serde_json::json!({"allow_unmet_sometimes": 7}))
+            .unwrap();
+        assert_eq!(
+            spec.allow_unmet_sometimes,
+            Some(AllowUnmetSometimes::BelowGenerations(7))
+        );
+        for bad in [
+            serde_json::json!({"allow_unmet_sometimes": false}),
+            serde_json::json!({"allow_unmet_sometimes": 0}),
+            serde_json::json!({"allow_unmet_sometimes": "yes"}),
+        ] {
+            assert!(CampaignSpec::default().apply_json(&bad).is_err());
+        }
     }
 
     #[test]
@@ -2709,11 +3249,15 @@ mod tests {
             "--converge-within",
             "--heal-after",
             "--report",
+            "--allow-unmet-sometimes",
         ] {
             let values: Vec<&str> = match flag {
-                "--buggify" | "--swarm" | "--sched-pct" | "--faults" | "--report" => {
-                    vec!["--extend", "1", flag]
-                }
+                "--buggify"
+                | "--swarm"
+                | "--sched-pct"
+                | "--faults"
+                | "--report"
+                | "--allow-unmet-sometimes" => vec!["--extend", "1", flag],
                 _ => vec!["--extend", "1", flag, "1"],
             };
             let message = parse(args(&values)).unwrap_err().to_string();

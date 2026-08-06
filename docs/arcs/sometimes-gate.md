@@ -1,10 +1,10 @@
 # Arc: campaign-level `sometimes!` coverage aggregation + gate
 
-Status: design approved 2026-07-30; implementation not yet scheduled.
+Status: implemented in `cargo patina campaign` (2026-08 wave): per-generation SDK report fold, shared `sites.json` store, default unmet-`sometimes!` gate, waiver flag, selftest classes, and deterministic `sites.json` e2e coverage.
 
 ## Summary
 
-`cargo patina campaign` starts parsing the per-run `PATINA_SDK_REPORT` rows it already
+`cargo patina campaign` parses the per-run `PATINA_SDK_REPORT` rows it already
 captures, unions coverage-oracle sites across generations, reports satisfied-in-N-generations
 per site, and **fails the campaign by default when any `sometimes!` site was registered but
 never satisfied across the whole sweep** — the campaign-level twin of the vacuous-schedule
@@ -56,21 +56,17 @@ campaigns smaller than a user-chosen generation floor. The work is entirely camp
   generations still carry a report — except aborts that never reach `finish` (an `always!`
   trap, a fired watchdog, a timeout kill).
 
-**Campaign side — capture exists, rows ignored.**
+**Campaign side — implemented in cargo-patina.**
 
-* `run_generation` (`crates/cargo-patina/src/campaign.rs:891-970`) pipes the child's stdout
-  and stderr into strings the driver already holds; `classify` (`campaign.rs:471`) greps
-  those strings for markers but nothing reads the `site=` rows. **No new capture channel is
-  needed** — the report line is already sitting in the captured stderr of every generation.
-* One gap: the child inherits the parent environment, so a user's exported
-  `PATINA_SDK_REPORT=0` would silently suppress every row and render the gate vacuously
-  green. Campaign must pin `.env("PATINA_SDK_REPORT", "1")` on the child, exactly as it
-  already pins `PATINA_LIVENESS_REPORT=1` (`campaign.rs:921`).
-* Envelope: `patina.campaign/v2` (`campaign.rs:52`), built by `build_campaign_envelope`
-  (`campaign.rs:1245`). The documented versioning convention is "bump the version suffix
-  only on a breaking change to the documented shape"
-  (`crates/cargo-patina/src/output.rs:21-24`). The signature store persists as
-  `<out>/signatures.json`, schema `patina.campaign.signatures/v1` (`campaign.rs:1160-1176`).
+* `run_generation` pipes the child's stdout and stderr into strings the driver already holds;
+  the campaign now parses the last `PATINA_SDK_REPORT` line from every generation and folds all
+  `site=` rows into `CoverageTally`. **No new capture channel was needed**.
+* Campaign pins `.env("PATINA_SDK_REPORT", "1")` on the child, exactly as it pins
+  `PATINA_LIVENESS_REPORT=1`, so a user's exported `PATINA_SDK_REPORT=0` cannot make the
+  gate vacuously green.
+* Envelope: `patina.campaign/v2` stays additive and now carries `coverage`, `sdk_sites`, and
+  `artifacts.site_coverage`. The signature store remains `<out>/signatures.json`; the shared
+  exercised-site store is `<out>/sites.json`, schema `patina.campaign.sites/v1`.
 * Flags live in the typed registry with a structural drift gate
   (`crates/cargo-patina/src/help.rs:954-1080`, gate per `help.rs:16`); `Value::Optional`
   with a typed `Kind` is established precedent (`--buggify[=<PERMILLE>]`).

@@ -1053,7 +1053,7 @@ const CAMPAIGN: Verb = Verb {
     name: "campaign",
     summary: "Config-driven deterministic fault-and-schedule sweep over one artifact.",
     synopsis: &[
-        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--buggify] [--swarm] [--sched-pct] [--faults] [--liveness-watchdog N] [--converge-within N] [--report] [-- GUEST ARGS]",
+        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults] [--liveness-watchdog N] [--converge-within N] [--report] [-- GUEST ARGS]",
         "cargo patina campaign --extend N [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --resume [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --selftest",
@@ -1071,8 +1071,13 @@ without re-supplying the artifact or spec flags. Output is summary-first: a huma
 report (novel/failing generations plus a periodic progress heartbeat, tuned by \
 --progress-every) or a patina.campaign/v2 JSON envelope (class counts, deduped \
 signatures, per-run detail for novel/failing generations, and pointers to the full \
-on-disk artifacts). `--selftest` proves every classifier class and the signature \
-store.",
+on-disk artifacts). Campaigns also write <out-dir>/sites.json (schema \
+patina.campaign.sites/v1), summarize SDK site coverage, and fail by default \
+when a registered `sometimes!` site is never satisfied; \
+--allow-unmet-sometimes[=MIN_GENS] reports but waives that gate (unconditionally \
+or only below the observed generation threshold). Lazy registration means a \
+never-reached `reachable!` is invisible until static site enumeration lands. \
+`--selftest` proves every classifier class and the coverage gate classes.",
     groups: &[Group {
         title: "Campaign options",
         flags: &[
@@ -1131,6 +1136,13 @@ store.",
                 Value::Required("N", Kind::U64),
                 "Human-mode progress heartbeat every N generations (default 100; 1 = \
                  full per-generation stream; 0 = silent).",
+                false,
+            ),
+            f(
+                "--allow-unmet-sometimes",
+                None,
+                Value::Optional("MIN_GENS", Kind::PositiveU64),
+                "Waive the default unmet sometimes! coverage gate; with =MIN_GENS, waive only while observed generations are below MIN_GENS.",
                 false,
             ),
             f(
@@ -1308,14 +1320,15 @@ const SITES: Verb = Verb {
     name: "sites",
     summary: "Inventory static assertion/oracle sites in the current workspace.",
     synopsis: &[
-        "cargo patina sites [--crate NAME] [--module PATH] [--group NAME] [--site LABEL] [--all] [--exercised FILE] [--kind KIND] [--runtime driven|observed|invisible] [--no-cache]",
+        "cargo patina sites [--crate NAME] [--module PATH] [--group NAME] [--site LABEL] [--all] [--exercised FILE|OUTDIR] [--kind KIND] [--runtime driven|observed|invisible] [--no-cache]",
         "cargo patina sites --selftest",
     ],
     prose: "\
 `sites` scans the current Cargo workspace with a syn-based static analyzer and reports \
 where Patina SDK sites, Rust assertions, proptest/quickcheck checks, and \
-antithesis-sdk assertions live. With --exercised FILE, it parses runtime PATINA_SDK_REPORT line(s) and joins \
-them to the static SDK rows by label or dynamic-label file:line. Invisible sites \
+antithesis-sdk assertions live. With --exercised FILE, it parses runtime PATINA_SDK_REPORT line(s); \
+with --exercised OUTDIR, it reads OUTDIR/sites.json from a campaign. Both forms join \
+runtime counters to the static SDK rows by label or dynamic-label file:line. Invisible sites \
 remain inventory rows rather than coverage claims. The default output is a \
 crate/module index; scoped flags \
 or --all opt into per-site drill-down rows. Results are cached per file under \
@@ -1362,8 +1375,8 @@ planted fixture and proves every recognizer class fires.",
             f(
                 "--exercised",
                 None,
-                Value::Required("FILE", Kind::Path),
-                "Read raw PATINA_SDK_REPORT line(s) from FILE and join runtime counters into the static inventory.",
+                Value::Required("FILE|OUTDIR", Kind::Path),
+                "Read raw PATINA_SDK_REPORT line(s) from FILE, or OUTDIR/sites.json from a campaign, and join runtime counters into the static inventory.",
                 false,
             ),
             f(

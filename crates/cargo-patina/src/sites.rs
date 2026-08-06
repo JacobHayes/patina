@@ -1,8 +1,9 @@
 //! `cargo patina sites` — static inventory of assertion/oracle sites.
 //!
-//! Wave 2 joins a syn static inventory with runtime `PATINA_SDK_REPORT` rows
-//! supplied through `--exercised FILE`. Campaign aggregation, `.patina/config.toml`
-//! groups, and link-time static site enumeration are later waves.
+//! Wave 3 joins a syn static inventory with runtime `PATINA_SDK_REPORT` rows
+//! supplied through `--exercised FILE`, or with a campaign `<out>/sites.json`
+//! store supplied through `--exercised OUTDIR`. `.patina/config.toml` groups and
+//! link-time static site enumeration are later waves.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -1255,6 +1256,19 @@ fn build_report(
                 && !join.by_site_id.contains_key(&site.id),
         })
         .collect::<Vec<_>>();
+    let warnings = exercised
+        .filter(|source| source.sites.is_empty())
+        .and_then(|_| {
+            filtered
+                .iter()
+                .any(|joined| joined.site.runtime == "driven")
+                .then(|| {
+                    "WARNING: exercised source contained zero SDK site rows while the static inventory has driven sites; coverage may be vacuous"
+                        .to_string()
+                })
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
     let rollup = build_rollup(&filtered, RUNTIME_ORDER);
     let static_sites = filtered
         .iter()
@@ -1290,11 +1304,15 @@ fn build_report(
         root.insert(
             "exercised_source".to_string(),
             json!({
-                "kind": "sdk_report",
+                "kind": source.kind,
                 "path": source.path,
                 "reports": source.reports,
+                "generations_observed": source.generations_observed,
             }),
         );
+    }
+    if !warnings.is_empty() {
+        root.insert("warnings".to_string(), json!(warnings));
     }
     root.insert("totals".to_string(), totals);
     root.insert(
@@ -1552,9 +1570,11 @@ fn print_human(report: &Value) {
     );
     if let Some(source) = report.get("exercised_source") {
         println!(
-            "exercised_source={} reports={} joined={} unmatched={} never_exercised={}",
+            "exercised_source={} kind={} reports={} generations_observed={} joined={} unmatched={} never_exercised={}",
             source["path"].as_str().unwrap_or("?"),
+            source["kind"].as_str().unwrap_or("?"),
             source["reports"].as_u64().unwrap_or(0),
+            source["generations_observed"].as_u64().unwrap_or(0),
             totals["exercised"]["joined_runtime_labels"]
                 .as_u64()
                 .unwrap_or(0),
@@ -1563,6 +1583,14 @@ fn print_human(report: &Value) {
                 .unwrap_or(0),
             totals["exercised"]["never_exercised"].as_u64().unwrap_or(0),
         );
+    }
+    if let Some(warnings) = report.get("warnings").and_then(Value::as_array) {
+        for warning in warnings {
+            println!(
+                "{}",
+                warning.as_str().unwrap_or("WARNING: unknown sites warning")
+            );
+        }
     }
     if scan["files_unparsed"].as_u64().unwrap_or(0) > 0 {
         println!("WARNING: unparsed Rust files were counted and omitted from site totals:");
@@ -1592,10 +1620,10 @@ fn print_human(report: &Value) {
             let exercised = site.get("exercised").map_or_else(String::new, |row| {
                 format!(
                     " exercised(reg={} evals={} fires={} satisfied={} reached={})",
-                    row["runs_registered"].as_u64().unwrap_or(0),
+                    row["registered_gens"].as_u64().unwrap_or(0),
                     row["evals"].as_u64().unwrap_or(0),
                     row["fires"].as_u64().unwrap_or(0),
-                    row["sometimes_satisfied_runs"].as_u64().unwrap_or(0),
+                    row["satisfied_gens"].as_u64().unwrap_or(0),
                     row["reachable_runs"].as_u64().unwrap_or(0),
                 )
             });
@@ -2013,7 +2041,9 @@ mod tests {
                 label: "static-label".to_string(),
                 kind: "fault".to_string(),
                 site: "src/main.rs:10".to_string(),
-                runs_registered: 1,
+                first_registered_gen: Some(0),
+                last_registered_gen: Some(0),
+                registered_gens: 1,
                 runs_active: 1,
                 evals: 2,
                 fires: 1,
@@ -2027,14 +2057,18 @@ mod tests {
                 label: "dynamic-at-runtime".to_string(),
                 kind: "fault".to_string(),
                 site: "/workspace/src/main.rs:12".to_string(),
-                runs_registered: 1,
+                first_registered_gen: Some(0),
+                last_registered_gen: Some(0),
+                registered_gens: 1,
                 evals: 1,
                 ..ExercisedSite::default()
             },
         );
         let source = ExercisedSource {
+            kind: "sdk_report".to_string(),
             path: "stderr.log".to_string(),
             reports: 1,
+            generations_observed: 1,
             sites: exercised_sites,
         };
         let report = build_report(
@@ -2070,18 +2104,62 @@ mod tests {
                 label: "wrapped".to_string(),
                 kind: "fault".to_string(),
                 site: "src/lib.rs:1".to_string(),
-                runs_registered: 1,
+                first_registered_gen: Some(0),
+                last_registered_gen: Some(0),
+                registered_gens: 1,
                 ..ExercisedSite::default()
             },
         );
         let source = ExercisedSource {
+            kind: "sdk_report".to_string(),
             path: "stderr.log".to_string(),
             reports: 1,
+            generations_observed: 1,
             sites: exercised_sites,
         };
         let report = build_report(&scan, &SitesOptions::default(), Some(&source));
         assert_eq!(report["unmatched_runtime_labels"], 1);
         assert_eq!(report["unmatched"][0]["origin"], "expanded");
+    }
+
+    #[test]
+    fn empty_exercised_source_warns_when_static_driven_sites_exist() {
+        let scan = StaticScan {
+            workspace_root: PathBuf::from("/workspace"),
+            sites: vec![SiteRecord {
+                id: "static-label".to_string(),
+                kind: "fault".to_string(),
+                runtime: "driven".to_string(),
+                label: Some("static-label".to_string()),
+                label_dynamic: false,
+                file: "src/main.rs".to_string(),
+                line: 10,
+                crate_name: "pkg".to_string(),
+                module: "pkg".to_string(),
+                context: "src".to_string(),
+                groups: Vec::new(),
+                macro_path: "buggify".to_string(),
+            }],
+            files_scanned: 1,
+            files_unparsed: 0,
+            unparsed: Vec::new(),
+            cache_state: CacheState::Cold,
+        };
+        let source = ExercisedSource {
+            kind: "campaign".to_string(),
+            path: "out".to_string(),
+            reports: 3,
+            generations_observed: 3,
+            sites: BTreeMap::new(),
+        };
+        let report = build_report(&scan, &SitesOptions::default(), Some(&source));
+        assert!(
+            report["warnings"][0]
+                .as_str()
+                .unwrap()
+                .contains("zero SDK site rows"),
+            "expected vacuity warning: {report:#}"
+        );
     }
 
     #[test]

@@ -482,10 +482,16 @@ surface (`cargo patina campaign`) generalizing the shell campaign machinery.
    INFRA so one hung generation cannot wedge the whole campaign. Output is
    summary-first: a human report (novel/failing generations plus a periodic
    `--progress-every` heartbeat) or a `patina.campaign/v2` JSON envelope (class
-   counts, deduped signatures, per-run detail for novel/failing generations, and
-   pointers to the full on-disk artifacts — the `patina.result/v1` family
-   extended). `--selftest` proves every class reachable and the signature
-   dedup/novelty logic, mirroring the fuzz-sweep classifier selftest. The existing
+   counts, deduped signatures, per-run detail for novel/failing generations, a
+   `sdk_sites` summary, coverage gate details, and pointers to the full on-disk
+   artifacts — the `patina.result/v1` family extended). Every generation's
+   `PATINA_SDK_REPORT` is folded into `<out-dir>/sites.json` (schema
+   `patina.campaign.sites/v1`, with `generations_observed` for continuation
+   watermarks); registered `sometimes!` sites that are never satisfied fail the
+   campaign by default unless `--allow-unmet-sometimes[=MIN_GENS]` explicitly
+   waives the gate. `--selftest` proves every class reachable, the coverage gate
+   classes, malformed-row rejection, and the signature dedup/novelty logic,
+   mirroring the fuzz-sweep classifier selftest. The existing
    `fuzz-sweep.sh` and `buggify-campaign.sh` are untouched and remain the
    battle-tested reference.
 
@@ -494,8 +500,8 @@ surface (`cargo patina campaign`) generalizing the shell campaign machinery.
    virtual-time retry churn), else it completes. An end-to-end test builds it and
    sweeps it: the campaign catches the planted `LIVENESS` bug on the generations
    that fire it, deduplicates the one signature across them, records a working
-   reproduce command, and produces byte-identical outcomes/signatures on a
-   deterministic re-run.
+   reproduce command, and produces byte-identical outcomes, signatures, and
+   `sites.json` coverage stores on a deterministic re-run.
 
 ## Dependency order
 
