@@ -537,7 +537,7 @@ const RUN: Verb = Verb {
     synopsis: &[
         "cargo patina run [--seed N | --record PATH] [FAULT OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]",
         "cargo patina run <MODULE.wasm> [--seed N | --record PATH] [--fuel N] [--arg VALUE]... [--env K=V]... [--preopen GUEST[:ro|:rw]]... [FAULT OPTIONS] [BUGGIFY/LIVENESS OPTIONS]",
-        "cargo patina run <BINARY> [--seed N | --record PATH] [--coverage-out PATH] [--fingerprint STR] [--mount HOST_DIR] [--harness] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL]... [-- PROGRAM ARGS]",
+        "cargo patina run <BINARY> [--seed N | --record PATH] [--env K=V]... [--coverage-out PATH] [--fingerprint STR] [--mount HOST_DIR] [--harness] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL]... [-- PROGRAM ARGS]",
         "cargo patina run <SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [--release] [RUN OPTIONS]   (builds on the fly, then runs)",
     ],
     prose: "\
@@ -642,6 +642,13 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
                     Value::Required("N", Kind::U64),
                     "Base per-datagram delivery latency.",
                     false,
+                ),
+                f(
+                    "--env",
+                    None,
+                    Value::Required("K=V", Kind::KeyValue),
+                    "Set a deterministic native guest environment variable (recorded and restored on replay).",
+                    true,
                 ),
                 f(
                     "--fingerprint",
@@ -864,16 +871,17 @@ const REPLAY: Verb = Verb {
 families: a wasm module replays under WASI, a native binary under the native \
 supervisor, and a directory/Cargo.toml (no --target) under the Cargo package \
 family. Each restores every recorded semantic input (seed, fault knobs, buggify, \
-and guest argv) from the trace — the trace is authoritative — so replay exposes no \
-semantic flags; any re-supplied value must match the recording or the replay is \
-refused.\n\
+guest argv, and native `--env` values) from the trace — the trace is authoritative \
+— so replay exposes no semantic flags; any re-supplied value must match the \
+recording or the replay is refused.\n\
 \n\
 Only host/build inputs the trace cannot carry stay as flags. The Cargo and WASI \
 families carry the timeline/branch controls (--timeline, and --branch --from \
 --branch-seed --branch-id [--parent]); WASI re-takes its host environment \
-(--fuel/--env/--socket/--preopen and resource limits). Native traces are \
-single-timeline (native runs cannot branch), so native replay accepts only \
---fingerprint, --mount, --coverage-out, --harness, and the \
+(--fuel/--env/--socket/--preopen and resource limits). Native traces restore \
+`run --env` values from metadata and reject re-supplied native `--env`; native \
+traces are single-timeline (native runs cannot branch), so native replay accepts \
+only --fingerprint, --mount, --coverage-out, --harness, and the \
 --allow/--allow-unsupported-symbols audit surface.",
     groups: &[
         Group {
@@ -1498,6 +1506,11 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         name: "PATINA_GUEST_ARGV",
         scope: "protocol",
         doc: "Recorded guest argv restored on replay.",
+    },
+    EnvVar {
+        name: "PATINA_GUEST_ENV_JSON",
+        scope: "protocol",
+        doc: "Recorded native guest environment map from run --env, restored on replay.",
     },
     EnvVar {
         name: "PATINA_FS_CRASH_AT / PATINA_FS_TORN_GRANULARITY",

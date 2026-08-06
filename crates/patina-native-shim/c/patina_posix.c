@@ -221,6 +221,7 @@ static int patina_posix_deny(const char *message) {
 }
 
 int clock_gettime(clockid_t clock_id, struct timespec *time) {
+    patina_note_boundary_symbol("clock_gettime");
     uint32_t patina_clock;
     if (clock_id == CLOCK_REALTIME) patina_clock = PATINA_CLOCK_REALTIME;
     else if (clock_id == CLOCK_MONOTONIC
@@ -243,6 +244,7 @@ int clock_gettime(clockid_t clock_id, struct timespec *time) {
 }
 
 int gettimeofday(struct timeval *restrict time, void *restrict zone) {
+    patina_note_boundary_symbol("gettimeofday");
     (void)zone;
     uint64_t nanos = 0;
     if (patina_clock_now(PATINA_CLOCK_REALTIME, &nanos) != 0) {
@@ -257,9 +259,9 @@ int gettimeofday(struct timeval *restrict time, void *restrict zone) {
 extern char **environ;
 
 /* Snapshot of the PATINA_* control plane, captured before the ambient host
- * environment is scrubbed. The public interposed getenv always returns NULL;
- * shim-internal startup reads use patina_control_getenv so guest-visible
- * environment reads are completely empty and deterministic after init. */
+ * environment is scrubbed. Public getenv/secure_getenv read only Patina's
+ * deterministic guest map after startup (NULL before startup and when unset);
+ * shim-internal startup reads use patina_control_getenv. */
 static char **patina_control_plane = NULL;
 
 static char **patina_environ_base(void) {
@@ -296,9 +298,10 @@ static void patina_capture_control_plane(void) {
     patina_control_plane = snapshot;
 }
 
-/* Empty the live environ array in place. Every reader — the Linux `environ`
- * global, Darwin `_NSGetEnviron`, std::env::vars — then sees the deterministic
- * (empty) environment. The entry strings stay alive; the snapshot borrows them. */
+/* Empty the live environ array in place. Direct environ readers — the Linux
+ * `environ` global, Darwin `_NSGetEnviron`, std::env::vars — then see an empty
+ * environment; key lookups go through the deterministic getenv interposer. The
+ * entry strings stay alive; the snapshot borrows them. */
 static void patina_scrub_environ(void) {
     char **base = patina_environ_base();
     if (base == NULL) return;
@@ -318,8 +321,8 @@ const char *patina_control_getenv(const char *name) {
 }
 
 char *getenv(const char *name) {
-    (void)name;
-    return NULL;
+    patina_note_boundary_symbol("getenv");
+    return patina_getenv(name);
 }
 
 /* The deterministic environment is immutable: mutation through the host libc
@@ -877,6 +880,7 @@ ssize_t readlink(const char *restrict path, char *restrict destination, size_t l
 }
 
 static int patina_posix_open(const char *path, int flags) {
+    patina_note_boundary_symbol("open");
     int supported = O_ACCMODE | O_CREAT | O_TRUNC | O_APPEND | O_EXCL;
 #ifdef O_CLOEXEC
     supported |= O_CLOEXEC;
@@ -2342,11 +2346,11 @@ int sched_setaffinity(pid_t pid, size_t cpusetsize, const cpu_set_t *mask) {
     return 0;
 }
 
-/* `secure_getenv`, like the interposed `getenv`, reads the deterministic (empty,
- * startup-scrubbed) guest environment, so it always returns NULL. */
+/* `secure_getenv`, like the interposed `getenv`, reads only the deterministic
+ * guest environment map. */
 char *secure_getenv(const char *name) {
-    (void)name;
-    return NULL;
+    patina_note_boundary_symbol("secure_getenv");
+    return patina_getenv(name);
 }
 
 /* A thread's name is host/kernel state (`/proc/self/task/<tid>/comm`); return a
@@ -4757,9 +4761,10 @@ unsigned long vm_page_size = 4096;
  * mode is finalized on any normal exit path (main return or exit()) without an
  * explicit patina_shutdown. A standalone run (no PATINA_MODE) is left
  * uninstalled; the first effect boundary then fails closed with a clear message
- * (see ensure_runtime in the Rust layer). The public interposed getenv returns
- * NULL for every name; startup reads the PATINA_* control plane through the
- * private snapshot accessor before scrubbing environ for guest code.
+ * (see ensure_runtime in the Rust layer). The public interposed getenv reads only
+ * the deterministic guest map after startup (NULL before startup and when unset);
+ * startup reads the PATINA_* control plane through the private snapshot accessor
+ * before scrubbing environ for guest code.
  */
 static void patina_finalize_atexit(void) {
 #ifdef __linux__
@@ -4783,7 +4788,11 @@ static void patina_finalize_atexit(void) {
     }
 }
 
-__attribute__((constructor)) static void patina_native_start(void) {
+/* Priority 101 runs before default-priority constructors on toolchains that
+ * honor constructor priorities, minimizing false early-init failures while still
+ * letting deliberately earlier constructors (the e2e uses .init_array.00099 on
+ * ELF) prove the fail-closed path. */
+__attribute__((constructor(101))) static void patina_native_start(void) {
     atexit(patina_finalize_atexit);
     patina_capture_control_plane();
     /* Deferred harness init (PATINA_DEFER_INIT=1, set by `cargo patina run
@@ -4798,4 +4807,5 @@ __attribute__((constructor)) static void patina_native_start(void) {
         patina_init_from_env();
     }
     patina_scrub_environ();
+    patina_note_startup_constructor_finished();
 }

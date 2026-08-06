@@ -30,14 +30,14 @@ pub const NATIVE_HEADER: &str = include_str!("../include/patina_native.h");
 #[cfg(target_os = "linux")]
 mod sud;
 
-use std::cell::{Cell, UnsafeCell};
+use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::BTreeMap;
-use std::ffi::{CStr, c_char, c_int, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::io;
 use std::ops::{Deref, DerefMut};
 use std::slice;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use patina_dst_abi::{
     ClockKind, EffectError, ErrorCode, Fd, FsDirectoryEntry, FsEntryKind, OpenFlags, SeekWhence,
@@ -1493,6 +1493,7 @@ fn finalize_coverage() -> Result<(), String> {
 
 thread_local! {
     static LAST_ERRNO: Cell<c_int> = const { Cell::new(0) };
+    static GUEST_ENV_CSTRING: RefCell<Option<CString>> = const { RefCell::new(None) };
 }
 
 fn slot() -> &'static SpinMutex<Option<Context>> {
@@ -1684,6 +1685,18 @@ static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 /// `install` does not route through those functions, so it never self-trips this.
 static BOUNDARY_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Set by the packaged C startup constructor after it has captured the control
+/// plane, optionally installed the runtime, and scrubbed the live environment.
+/// If an interposed boundary arrives before this flag, a guest/static constructor
+/// beat Patina's constructor in the loader order and the runtime cannot be
+/// installed soundly from the still-unsnapshotted control plane.
+static STARTUP_CONSTRUCTOR_FINISHED: AtomicBool = AtomicBool::new(false);
+
+/// Best-effort name of the public interposed symbol currently entering the Rust
+/// boundary. C interposers store string-literal pointers here before calling the
+/// prefixed `patina_*` ABI; early-init diagnostics read it without allocation.
+static LAST_BOUNDARY_SYMBOL: AtomicPtr<c_char> = AtomicPtr::new(std::ptr::null_mut());
+
 /// Guarantee a deterministic runtime is installed before a boundary call, or
 /// fail closed. Ordinary programs built with `cargo patina native-build` do not
 /// call `patina_init_from_env` themselves: the packaged startup path installs
@@ -1707,6 +1720,9 @@ fn ensure_runtime() -> Result<(), c_int> {
     if let Some(message) = init_error().lock().clone() {
         abort_with_init_error(&message);
     }
+    if !STARTUP_CONSTRUCTOR_FINISHED.load(Ordering::Acquire) {
+        abort_preinit_interposed_call();
+    }
     // Deferred harness init (PATINA_DEFER_INIT=1, `cargo patina run --harness`):
     // the harness owns installation. Reaching here with no context installed means
     // an interposed effect ran BEFORE `patina_harness_install`. Do NOT auto-init
@@ -1714,12 +1730,7 @@ fn ensure_runtime() -> Result<(), c_int> {
     // against a config the harness never got to apply. Fail closed, loudly and
     // named, so the boundary is attributed to the missing harness install.
     if control_env(patina_dst_runtime::ENV_DEFER_INIT).is_some() {
-        let _ = flush_captured_stdio();
-        let message: &[u8] = b"patina: harness has not installed the runtime yet; an interposed \
-effect reached the deterministic boundary before patina_dst_harness::run/run_with installed the \
-runtime. Do all configuration and application effects inside the harness closure.\n";
-        let _ = host_write_all(2, message);
-        std::process::abort();
+        abort_harness_before_install();
     }
     if control_env(patina_dst_runtime::ENV_MODE).is_some() {
         let _ = init_from_env();
@@ -1752,6 +1763,42 @@ fn abort_with_init_error(message: &str) -> ! {
     let _ = flush_captured_stdio();
     let line = format!("patina: the deterministic runtime failed to initialize: {message}\n");
     let _ = host_write_all(2, line.as_bytes());
+    std::process::abort();
+}
+
+fn last_boundary_symbol_bytes() -> Option<&'static [u8]> {
+    let pointer = LAST_BOUNDARY_SYMBOL.load(Ordering::Relaxed);
+    if pointer.is_null() {
+        return None;
+    }
+    // SAFETY: C only stores string-literal pointers for diagnostics. This is a
+    // best-effort field and is never trusted for control flow.
+    let bytes = unsafe { CStr::from_ptr(pointer) }.to_bytes();
+    if bytes.is_empty() { None } else { Some(bytes) }
+}
+
+fn abort_harness_before_install() -> ! {
+    let _ = flush_captured_stdio();
+    let message: &[u8] = b"patina: harness has not installed the runtime yet; an interposed \
+effect reached the deterministic boundary before patina_dst_harness::run/run_with installed the \
+runtime. Do all configuration and application effects inside the harness closure.\n";
+    let _ = host_write_all(2, message);
+    std::process::abort();
+}
+
+fn abort_preinit_interposed_call() -> ! {
+    let _ = host_write_all(
+        2,
+        b"patina: interposed call before deterministic runtime initialization",
+    );
+    if let Some(symbol) = last_boundary_symbol_bytes() {
+        let _ = host_write_all(2, b"; calling symbol: ");
+        let _ = host_write_all(2, symbol);
+    }
+    let _ = host_write_all(
+        2,
+        b". This most likely came from a static constructor/ctor that ran before Patina's startup constructor. Patina fails closed here because the control plane is not installed yet; cfg-gate that constructor out of DST builds (for example with `#[cfg(not(patina))]` / `#[cfg(not(dst))]`) and move any setup that reads environment, files, clocks, threads, or other interposed APIs into `main` or the Patina harness closure.\n",
+    );
     std::process::abort();
 }
 
@@ -1825,11 +1872,15 @@ fn control_env(name: &str) -> Option<String> {
     if let Some(value) = control_plane().lock().get(name).cloned() {
         return Some(value);
     }
+    if STARTUP_CONSTRUCTOR_FINISHED.load(Ordering::Acquire) {
+        return None;
+    }
     // Direct C-ABI users that link only the Rust static library have no POSIX
     // constructor to snapshot/scrub environ, so patina_init_from_env keeps the
     // documented PATINA_* protocol working by reading the host environment here.
-    // Shim-linked POSIX binaries populate CONTROL_PLANE before init and public
-    // getenv returns NULL, so guest-visible environment reads stay empty.
+    // Once the packaged POSIX constructor has finished, the live environment is
+    // scrubbed and public getenv routes through patina_getenv; do not recurse
+    // through std::env in that post-startup path.
     std::env::var(name).ok()
 }
 
@@ -2050,6 +2101,9 @@ fn runtime_config_from_control_plane() -> Result<(RuntimeConfig, Option<i32>), R
     // Guest argv (recorded into the trace metadata) travels the same control
     // plane, so record mode captures the arguments the supervisor forwarded.
     config = config.apply_guest_argv_env(control_env)?;
+    // Deterministic guest environment values travel the same control plane and
+    // are recorded into trace metadata so replay restores them flag-free.
+    config = config.apply_guest_env_env(control_env)?;
     // Record whether syscall-user-dispatch was armed for this run (the C layer's
     // arming state), so a cross-kernel replay is refused up front rather than
     // diverging mid-run (SUD-DESIGN.md §7.3). `None` on every non-SUD run.
@@ -2137,6 +2191,19 @@ fn clock(value: u32) -> Result<ClockKind, c_int> {
         1 => Ok(ClockKind::Monotonic),
         _ => Err(EINVAL),
     }
+}
+
+/// Remember the public interposed symbol entering the Rust boundary so an
+/// early-init abort can name the API that a constructor reached.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_note_boundary_symbol(symbol: *const c_char) {
+    LAST_BOUNDARY_SYMBOL.store(symbol.cast_mut(), Ordering::Relaxed);
+}
+
+/// Mark that the packaged C startup constructor finished capture/init/scrub.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_note_startup_constructor_finished() {
+    STARTUP_CONSTRUCTOR_FINISHED.store(true, Ordering::Release);
 }
 
 /// Capture one `PATINA_NAME=value` constructor-time control-plane entry for
@@ -2418,6 +2485,68 @@ pub unsafe extern "C" fn patina_stdio_write(
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_errno() -> c_int {
     LAST_ERRNO.with(Cell::get)
+}
+
+/// Look up one deterministic guest environment value for the POSIX `getenv`
+/// interposer. Before the startup constructor finishes, return NULL rather than
+/// reading the host environment: Rust/libc startup code can probe environment
+/// variables before Patina's constructor runs, and hiding those probes preserves
+/// the historical empty ambient environment without breaking ordinary guests.
+/// After startup, a standalone (non-Patina) run with no runtime keeps the same
+/// empty deterministic environment and returns NULL.
+///
+/// # Safety
+/// `name` must be a valid NUL-terminated C string when non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_getenv(name: *const c_char) -> *mut c_char {
+    if name.is_null() {
+        return std::ptr::null_mut();
+    }
+    let name = match unsafe { CStr::from_ptr(name) }.to_str() {
+        Ok(name) => name,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    if let Some(message) = init_error().lock().clone() {
+        abort_with_init_error(&message);
+    }
+    if !STARTUP_CONSTRUCTOR_FINISHED.load(Ordering::Acquire) {
+        return std::ptr::null_mut();
+    }
+    let value = {
+        let guard = slot().lock();
+        let missing_context = guard.is_none();
+        let value = guard
+            .as_ref()
+            .and_then(|context| context.guest_env_var(name).map(str::to_owned));
+        drop(guard);
+        if missing_context
+            && control_plane()
+                .lock()
+                .contains_key(patina_dst_runtime::ENV_DEFER_INIT)
+        {
+            abort_harness_before_install();
+        }
+        value
+    };
+    let Some(value) = value else {
+        return std::ptr::null_mut();
+    };
+    let Ok(value) = CString::new(value) else {
+        // RuntimeConfig validation rejects NUL bytes before build; keep this path
+        // fail-closed if an embedder bypasses that invariant.
+        let _ = host_write_all(
+            2,
+            b"patina: deterministic guest environment contained a NUL byte; failing closed\n",
+        );
+        std::process::abort();
+    };
+    GUEST_ENV_CSTRING.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        *slot = Some(value);
+        slot.as_ref()
+            .map(|value| value.as_ptr().cast_mut())
+            .unwrap_or(std::ptr::null_mut())
+    })
 }
 
 /// Fill caller-owned memory with deterministic bytes.

@@ -69,6 +69,8 @@ impl MemFs {
         };
         let root = filesystem.allocate_entry_metadata();
         filesystem.directories.insert("/".into(), root);
+        let tmp = filesystem.allocate_entry_metadata();
+        filesystem.directories.insert("/tmp".into(), tmp);
         filesystem
     }
 
@@ -960,6 +962,13 @@ fn not_found(path: &str) -> EffectError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_seeds_root_and_tmp_directories() {
+        let mut fs = MemFs::new();
+        assert_eq!(fs.metadata("/").unwrap().kind, FsEntryKind::Directory);
+        assert_eq!(fs.metadata("/tmp").unwrap().kind, FsEntryKind::Directory);
+    }
 
     #[test]
     fn writes_reads_and_truncates_files() {

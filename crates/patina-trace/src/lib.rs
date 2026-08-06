@@ -307,6 +307,13 @@ pub struct RunMetadata {
     /// nothing run-specific to reproduce.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_argv: Option<Vec<String>>,
+    /// Deterministic guest environment values supplied by the supervisor (native
+    /// `run --env KEY=VALUE`). Additive exactly like [`guest_argv`](RunMetadata::guest_argv):
+    /// absent (`None`) in traces recorded before env capture or when no values
+    /// were supplied; present values are authoritative on replay so a flag-free
+    /// replay reproduces environment-dependent guest behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_env: Option<BTreeMap<String, String>>,
     /// The run's exploration scheduling policy (PCT / starvation), authoritative
     /// on replay. Additive exactly like [`faults`](RunMetadata::faults): absent
     /// (`None`) in traces recorded under the default uniform policy, which the
@@ -346,6 +353,7 @@ impl RunMetadata {
             faults: None,
             buggify: None,
             guest_argv: None,
+            guest_env: None,
             schedule_policy: None,
             swarm: None,
             watchdog: None,
@@ -375,6 +383,14 @@ impl RunMetadata {
     #[must_use]
     pub fn with_guest_argv(mut self, guest_argv: Option<Vec<String>>) -> Self {
         self.guest_argv = guest_argv;
+        self
+    }
+
+    /// Attach deterministic guest environment values recorded into the trace.
+    /// `None` records nothing; `Some(map)` records exactly the supplied values.
+    #[must_use]
+    pub fn with_guest_env(mut self, guest_env: Option<BTreeMap<String, String>>) -> Self {
+        self.guest_env = guest_env;
         self
     }
 
@@ -838,6 +854,12 @@ impl Replayer {
         self.metadata.guest_argv.as_deref()
     }
 
+    /// Deterministic guest environment values recorded into the trace.
+    /// `None` for a trace recorded before env capture or with no supplied values.
+    pub fn guest_env(&self) -> Option<&BTreeMap<String, String>> {
+        self.metadata.guest_env.as_ref()
+    }
+
     /// Whether the trace was recorded under syscall-user-dispatch. `Some(true)`
     /// when it was; `None` otherwise (see [`RunMetadata::sud`]).
     pub const fn sud(&self) -> Option<bool> {
@@ -995,6 +1017,12 @@ impl BranchSession {
     /// parent was recorded without swarm.
     pub const fn swarm_config(&self) -> Option<&SwarmConfigRecord> {
         self.bundle.metadata.swarm.as_ref()
+    }
+
+    /// Deterministic guest environment values inherited from the parent trace.
+    /// `None` for a trace recorded before env capture or with no supplied values.
+    pub fn guest_env(&self) -> Option<&BTreeMap<String, String>> {
+        self.bundle.metadata.guest_env.as_ref()
     }
 
     pub fn expect_prefix(
@@ -1652,6 +1680,24 @@ mod tests {
         assert!(!text.contains("guest_argv"), "{text}");
         let reloaded_plain = TraceBundle::from_slice(plain.to_bytes().unwrap().as_slice()).unwrap();
         assert_eq!(reloaded_plain.metadata.guest_argv, None);
+    }
+
+    #[test]
+    fn guest_env_metadata_round_trips_and_is_additive() {
+        let env = BTreeMap::from([("RUST_LOG".to_string(), "debug".to_string())]);
+        let metadata = RunMetadata::new(7, "fingerprint").with_guest_env(Some(env.clone()));
+        let bundle = TraceBundle::new(metadata, Vec::new());
+        let text = String::from_utf8(bundle.to_bytes().unwrap()).unwrap();
+        assert!(text.contains("\"guest_env\":{"), "{text}");
+        assert!(text.contains("\"RUST_LOG\":\"debug\""), "{text}");
+        let reloaded = TraceBundle::from_slice(bundle.to_bytes().unwrap().as_slice()).unwrap();
+        assert_eq!(reloaded.metadata.guest_env, Some(env));
+
+        let plain = TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new());
+        let text = String::from_utf8(plain.to_bytes().unwrap()).unwrap();
+        assert!(!text.contains("guest_env"), "{text}");
+        let reloaded_plain = TraceBundle::from_slice(plain.to_bytes().unwrap().as_slice()).unwrap();
+        assert_eq!(reloaded_plain.metadata.guest_env, None);
     }
 
     #[test]

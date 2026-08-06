@@ -4735,6 +4735,195 @@ fn main() {
 }
 "#;
 
+// A guest/static constructor can run before Patina's startup constructor. If it
+// reaches an effectful interposed API, fail closed with the ctor-specific
+// diagnostic rather than the misleading not-launched/runtime-missing path.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_ctor_preinit_open_reports_static_constructor_diagnostic() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("ctor_open.rs");
+    fs::write(
+        &source,
+        r#"extern "C" fn patina_ctor() {
+    let _ = std::fs::File::open("/tmp/patina-ctor-trigger");
+}
+
+#[used]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".init_array.00099"))]
+#[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__mod_init_func"))]
+static PATINA_CTOR: extern "C" fn() = patina_ctor;
+
+fn main() {
+    println!("main should not run");
+}
+"#,
+    )
+    .unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("ctor-open");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    let output = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["run", bin.to_str().unwrap(), "--seed", "1"],
+    );
+    assert!(
+        !output.status.success(),
+        "ctor pre-init open unexpectedly succeeded:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("interposed call before deterministic runtime initialization"),
+        "missing pre-init condition:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("static constructor/ctor"),
+        "missing ctor attribution:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("calling symbol: open"),
+        "missing calling symbol:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("#[cfg(not(patina))]") && stderr.contains("#[cfg(not(dst))]"),
+        "missing cfg-gate workaround:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("must run under `cargo patina run`"),
+        "ctor diagnostic must be distinct from not-launched message:\n{stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("main should not run"),
+        "ctor failure should happen before main"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_env_injection_records_replays_and_tempdir_is_seed_stable() {
+    let directory = tempdir().unwrap();
+    let package = directory.path().join("env_tmp_guest");
+    fs::create_dir_all(package.join("src")).unwrap();
+    fs::write(
+        package.join("Cargo.toml"),
+        r#"[package]
+name = "env-tmp-guest"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tempfile = "3"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        package.join("src/main.rs"),
+        r#"fn main() {
+    let value = std::env::var("PATINA_TEST_ENV").unwrap_or_else(|_| "<missing>".to_string());
+    let dir = tempfile::Builder::new()
+        .prefix("patina-env-")
+        .tempdir()
+        .expect("tempdir under deterministic /tmp");
+    let file = dir.path().join("value.txt");
+    std::fs::write(&file, value.as_bytes()).unwrap();
+    let read_back = std::fs::read_to_string(&file).unwrap();
+    println!(
+        "NATIVE_ENV_TMP value={} path={} read={}",
+        value,
+        dir.path().display(),
+        read_back
+    );
+}
+"#,
+    )
+    .unwrap();
+
+    let workspace = native_workspace();
+    let bin = directory.path().join("env-tmp-bin");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            package.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let bin = bin.to_str().unwrap();
+
+    let empty_a = invoke_in(workspace, &["run", bin, "--seed", "7"]);
+    let empty_b = invoke_in(workspace, &["run", bin, "--seed", "7"]);
+    assert_eq!(
+        empty_a.stdout, empty_b.stdout,
+        "tempfile path must be same-seed deterministic with an empty guest env"
+    );
+    let empty_stdout = String::from_utf8_lossy(&empty_a.stdout);
+    assert!(empty_stdout.contains("value=<missing>"), "{empty_stdout}");
+    assert!(empty_stdout.contains("path=/tmp/"), "{empty_stdout}");
+
+    let trace = directory.path().join("env-tmp.patina");
+    let recorded = invoke_in(
+        workspace,
+        &[
+            "run",
+            bin,
+            "--seed",
+            "7",
+            "--env",
+            "PATINA_TEST_ENV=alpha",
+            "--record",
+            trace.to_str().unwrap(),
+        ],
+    );
+    let replayed = invoke_in(workspace, &["replay", bin, trace.to_str().unwrap()]);
+    assert_eq!(
+        recorded.stdout, replayed.stdout,
+        "native replay must restore --env and tempfile effects flag-free"
+    );
+    let recorded_stdout = String::from_utf8_lossy(&recorded.stdout);
+    assert!(recorded_stdout.contains("value=alpha"), "{recorded_stdout}");
+    assert!(recorded_stdout.contains("read=alpha"), "{recorded_stdout}");
+    assert!(recorded_stdout.contains("path=/tmp/"), "{recorded_stdout}");
+
+    let trace_text = fs::read_to_string(&trace).unwrap();
+    assert!(trace_text.contains("\"guest_env\":{"), "{trace_text}");
+    assert!(
+        trace_text.contains("\"PATINA_TEST_ENV\":\"alpha\""),
+        "{trace_text}"
+    );
+
+    let conflict = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "replay",
+            bin,
+            trace.to_str().unwrap(),
+            "--env",
+            "PATINA_TEST_ENV=beta",
+        ],
+    );
+    assert!(!conflict.status.success());
+    let conflict_stderr = String::from_utf8_lossy(&conflict.stderr);
+    assert!(
+        conflict_stderr.contains("does not accept --env")
+            && conflict_stderr.contains("trace is authoritative"),
+        "native replay conflict should refuse re-supplied --env:\n{conflict_stderr}"
+    );
+}
+
 // The trace is authoritative for the fault configuration, so `replay` exposes no
 // fault knobs at all: a flag-free `replay` reproduces the recorded fault run, and
 // supplying a fault knob is refused UP FRONT (a CLI usage error naming the flag),

@@ -38,7 +38,10 @@ int32_t patina_init_crash(uint64_t seed);
  * processes never recurse into the deterministic filesystem.
  */
 int32_t patina_init_from_env(void);
+void patina_note_boundary_symbol(const char *symbol);
+void patina_note_startup_constructor_finished(void);
 void patina_control_set_entry(const char *entry);
+char *patina_getenv(const char *name);
 int32_t patina_shutdown(void);
 /*
  * The runtime side of the packaged `exit` interposer. Marks the process as

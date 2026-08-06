@@ -141,6 +141,11 @@ pub const ENV_PARAMS_JSON: &str = "PATINA_PARAMS_JSON";
 /// a later `replay` restores them without re-passing the `--` section. Absent
 /// leaves the recorded argv unset. Malformed JSON is rejected fail-closed.
 pub const ENV_GUEST_ARGV: &str = "PATINA_GUEST_ARGV";
+/// Deterministic guest environment values as a JSON object (`KEY` -> `VALUE`).
+/// Set by native `run --env KEY=VALUE`; recorded into trace metadata and restored
+/// on replay so environment-dependent native guests reproduce without re-supplying
+/// flags. Malformed JSON, empty keys, keys containing `=`, or NUL bytes fail closed.
+pub const ENV_GUEST_ENV: &str = "PATINA_GUEST_ENV_JSON";
 /// Base link latency in nanoseconds applied to the default `SimNet` network
 /// (datagrams and TCP segments). Blocking receives under a non-zero value park
 /// on the virtual-clock timer queue until delivery. Invalid values are rejected fail-closed.
@@ -560,6 +565,10 @@ pub struct RuntimeConfig {
     /// `replay` restores them flag-free. `None` records nothing (unset); `Some`
     /// (possibly empty) records the exact list. Not a fingerprint input.
     guest_argv: Option<Vec<String>>,
+    /// Deterministic guest environment values supplied at run startup. Empty by
+    /// default; recorded into trace metadata when non-empty and restored on
+    /// replay. Not a fingerprint input.
+    guest_env: BTreeMap<String, String>,
     /// The liveness-watchdog configuration. Default (disabled) leaves a run
     /// byte-for-byte unchanged; enabling it only ADDS a possible violation report
     /// and is deliberately NOT a fingerprint input (schedule-invariant).
@@ -585,6 +594,7 @@ impl RuntimeConfig {
             schedule_policy: SchedulePolicy::default(),
             swarm: false,
             guest_argv: None,
+            guest_env: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             sud: None,
         }
@@ -602,6 +612,7 @@ impl RuntimeConfig {
             schedule_policy: SchedulePolicy::default(),
             swarm: false,
             guest_argv: None,
+            guest_env: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             sud: None,
         }
@@ -624,6 +635,7 @@ impl RuntimeConfig {
             schedule_policy: SchedulePolicy::default(),
             swarm: false,
             guest_argv: None,
+            guest_env: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             sud: None,
         }
@@ -647,6 +659,7 @@ impl RuntimeConfig {
             schedule_policy: SchedulePolicy::default(),
             swarm: false,
             guest_argv: None,
+            guest_env: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             sud: None,
         }
@@ -671,6 +684,7 @@ impl RuntimeConfig {
             schedule_policy: SchedulePolicy::default(),
             swarm: false,
             guest_argv: None,
+            guest_env: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             sud: None,
         }
@@ -701,6 +715,7 @@ impl RuntimeConfig {
             schedule_policy: SchedulePolicy::default(),
             swarm: false,
             guest_argv: None,
+            guest_env: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             sud: None,
         }
@@ -865,6 +880,18 @@ impl RuntimeConfig {
         self
     }
 
+    /// Deterministic guest environment values supplied at startup.
+    pub fn guest_env(&self) -> &BTreeMap<String, String> {
+        &self.guest_env
+    }
+
+    /// Set deterministic guest environment values directly (tests and embedders).
+    #[must_use]
+    pub fn with_guest_env(mut self, guest_env: BTreeMap<String, String>) -> Self {
+        self.guest_env = guest_env;
+        self
+    }
+
     /// Whether syscall-user-dispatch was armed for this run, or `None` when SUD
     /// is not applicable.
     pub const fn sud(&self) -> Option<bool> {
@@ -895,6 +922,25 @@ impl RuntimeConfig {
                 RuntimeError::Config(format!("{ENV_GUEST_ARGV} is invalid: {error}"))
             })?;
             self.guest_argv = Some(argv);
+        }
+        Ok(self)
+    }
+
+    /// Apply deterministic guest environment values from a control-plane
+    /// accessor. Presence of [`ENV_GUEST_ENV`] sets the environment from its JSON
+    /// object value; absence leaves it empty. Malformed JSON or invalid keys/values
+    /// fail closed. Shared by [`RuntimeConfig::from_env`] and the native shim.
+    pub fn apply_guest_env_env<F>(mut self, get: F) -> Result<Self, RuntimeError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        if let Some(value) = get(ENV_GUEST_ENV) {
+            let guest_env: BTreeMap<String, String> =
+                serde_json::from_str(&value).map_err(|error| {
+                    RuntimeError::Config(format!("{ENV_GUEST_ENV} is invalid: {error}"))
+                })?;
+            validate_guest_env(&guest_env)?;
+            self.guest_env = guest_env;
         }
         Ok(self)
     }
@@ -1203,6 +1249,7 @@ impl RuntimeConfig {
         let config = config.apply_swarm_env(|name| env::var(name).ok())?;
         let config = config.apply_liveness_env(|name| env::var(name).ok())?;
         let config = config.apply_guest_argv_env(|name| env::var(name).ok())?;
+        let config = config.apply_guest_env_env(|name| env::var(name).ok())?;
         Ok(config)
     }
 
@@ -1376,6 +1423,7 @@ impl RuntimeBuilder {
                 "runtime compatibility fingerprint must not be empty".into(),
             ));
         }
+        validate_guest_env(&self.config.guest_env)?;
 
         match self.config.mode {
             ExecutionMode::RecordTransport | ExecutionMode::ReplayTransport { .. } => {
@@ -1426,6 +1474,8 @@ impl RuntimeBuilder {
         // Same contract for the cooperative-SUT (buggify) configuration: a
         // replayed/branched trace's recorded config is authoritative.
         let mut replay_buggify_override: Option<BuggifyConfig> = None;
+        // Same contract for deterministic guest environment values.
+        let mut replay_guest_env_override: Option<BTreeMap<String, String>> = None;
         // Same contract for the exploration scheduling policy.
         let mut replay_schedule_override: Option<SchedulePolicy> = None;
         let (execution, root_seed) = match &self.config.mode {
@@ -1440,6 +1490,7 @@ impl RuntimeBuilder {
                             .with_swarm(swarm_record.clone())
                             .with_watchdog(watchdog_record(&self.config))
                             .with_guest_argv(self.config.guest_argv.clone())
+                            .with_guest_env(guest_env_record(&self.config))
                             .with_sud(self.config.sud),
                     ),
                     sink: RecordSink::Path {
@@ -1459,6 +1510,7 @@ impl RuntimeBuilder {
                             .with_swarm(swarm_record.clone())
                             .with_watchdog(watchdog_record(&self.config))
                             .with_guest_argv(self.config.guest_argv.clone())
+                            .with_guest_env(guest_env_record(&self.config))
                             .with_sud(self.config.sud),
                     ),
                     sink: RecordSink::Transport(
@@ -1475,6 +1527,8 @@ impl RuntimeBuilder {
                     reconcile_replay_faults(&self.config, replayer.fault_config())?;
                 replay_buggify_override =
                     reconcile_replay_buggify(&self.config, replayer.buggify_config())?;
+                replay_guest_env_override =
+                    reconcile_replay_guest_env(&self.config, replayer.guest_env())?;
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
                 reconcile_replay_sud(&self.config, replayer.sud())?;
@@ -1493,6 +1547,8 @@ impl RuntimeBuilder {
                     reconcile_replay_faults(&self.config, replayer.fault_config())?;
                 replay_buggify_override =
                     reconcile_replay_buggify(&self.config, replayer.buggify_config())?;
+                replay_guest_env_override =
+                    reconcile_replay_guest_env(&self.config, replayer.guest_env())?;
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
                 reconcile_replay_sud(&self.config, replayer.sud())?;
@@ -1520,6 +1576,8 @@ impl RuntimeBuilder {
                     reconcile_replay_faults(&self.config, session.fault_config())?;
                 replay_buggify_override =
                     reconcile_replay_buggify(&self.config, session.buggify_config())?;
+                replay_guest_env_override =
+                    reconcile_replay_guest_env(&self.config, session.guest_env())?;
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, session.schedule_policy())?;
                 (
@@ -1542,6 +1600,11 @@ impl RuntimeBuilder {
         // replay re-derives the same activation and firing decisions.
         if let Some(buggify) = replay_buggify_override {
             self.config.buggify = buggify;
+        }
+        // Adopt the trace's authoritative guest environment values so a flag-free
+        // replay reproduces environment-dependent guest behavior.
+        if let Some(guest_env) = replay_guest_env_override {
+            self.config.guest_env = guest_env;
         }
         // Adopt the trace's authoritative exploration scheduling policy. Replay
         // consumes recorded task selections directly (through `select`), so the
@@ -1670,6 +1733,7 @@ impl RuntimeBuilder {
             step_budget: self.config.step_budget,
             steps: 0,
             params: self.config.params,
+            guest_env: self.config.guest_env,
             execution,
             filesystem: self.filesystem,
             filesystem_is_capture: self.filesystem_is_capture,
@@ -2552,6 +2616,7 @@ pub struct Context {
     step_budget: Option<u64>,
     steps: u64,
     params: BTreeMap<String, String>,
+    guest_env: BTreeMap<String, String>,
     execution: Execution,
     filesystem: Option<Box<dyn FsDriver>>,
     filesystem_is_capture: bool,
@@ -2633,6 +2698,11 @@ impl Context {
 
     pub fn param(&self, key: &str) -> Option<&str> {
         self.params.get(key).map(String::as_str)
+    }
+
+    /// Return one deterministic guest environment value, if supplied at startup.
+    pub fn guest_env_var(&self, key: &str) -> Option<&str> {
+        self.guest_env.get(key).map(String::as_str)
     }
 
     // ---- Cooperative-SUT (buggify) surface -----------------------------------
@@ -4663,6 +4733,38 @@ fn reconcile_replay_buggify(
     Ok(Some(stored))
 }
 
+/// The deterministic guest environment recorded into a trace. `None` when no
+/// values were supplied, so env-free runs keep compact old-shape metadata.
+fn guest_env_record(config: &RuntimeConfig) -> Option<BTreeMap<String, String>> {
+    if config.guest_env.is_empty() {
+        None
+    } else {
+        Some(config.guest_env.clone())
+    }
+}
+
+/// Reconcile a recorded trace's authoritative guest environment with any values
+/// supplied to the replaying process. The trace is authoritative: with no values
+/// supplied the stored map is adopted verbatim; if values are supplied they must
+/// match exactly or replay fails closed. A pre-env trace (`None`) keeps the
+/// historical re-supply behavior for embedders.
+fn reconcile_replay_guest_env(
+    config: &RuntimeConfig,
+    recorded: Option<&BTreeMap<String, String>>,
+) -> Result<Option<BTreeMap<String, String>>, RuntimeError> {
+    let Some(stored) = recorded else {
+        return Ok(None);
+    };
+    if !config.guest_env.is_empty() && &config.guest_env != stored {
+        return Err(RuntimeError::Config(
+            "replay --env values conflict with the trace's recorded guest environment; \
+             the trace is authoritative, so omit the flags (or supply matching values)"
+                .into(),
+        ));
+    }
+    Ok(Some(stored.clone()))
+}
+
 /// The exploration scheduling policy recorded into a trace at build time. `None`
 /// under the default uniform policy, so a default run records no policy metadata
 /// at all and is indistinguishable from an old trace.
@@ -5115,6 +5217,27 @@ fn parse_nanos_range(name: &str, value: &str) -> Result<(u64, u64), RuntimeError
         )));
     }
     Ok((min, max))
+}
+
+fn validate_guest_env(env: &BTreeMap<String, String>) -> Result<(), RuntimeError> {
+    for (key, value) in env {
+        if key.is_empty() {
+            return Err(RuntimeError::Config(
+                "guest environment keys must not be empty".into(),
+            ));
+        }
+        if key.contains('=') {
+            return Err(RuntimeError::Config(format!(
+                "guest environment key {key:?} must not contain '='"
+            )));
+        }
+        if key.contains('\0') || value.contains('\0') {
+            return Err(RuntimeError::Config(format!(
+                "guest environment entry {key:?} must not contain NUL bytes"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn parse_seed(value: Option<String>) -> Result<u64, RuntimeError> {
@@ -6534,6 +6657,45 @@ mod tests {
             .apply_guest_argv_env(map("not json"))
             .unwrap_err();
         assert!(matches!(error, RuntimeError::Config(_)), "{error:?}");
+    }
+
+    #[test]
+    fn guest_env_env_parses_validates_and_reconciles_trace_metadata() {
+        fn map(value: &'static str) -> impl Fn(&str) -> Option<String> {
+            move |name: &str| (name == ENV_GUEST_ENV).then(|| value.to_string())
+        }
+
+        let config = RuntimeConfig::record(0, "/trace", "fp")
+            .apply_guest_env_env(map(r#"{"RUST_LOG":"debug","MODE":"test"}"#))
+            .unwrap();
+        assert_eq!(config.guest_env()["RUST_LOG"], "debug");
+        assert_eq!(config.guest_env()["MODE"], "test");
+
+        let empty = RuntimeConfig::record(0, "/trace", "fp")
+            .apply_guest_env_env(map("{}"))
+            .unwrap();
+        assert!(empty.guest_env().is_empty());
+
+        let invalid = RuntimeConfig::record(0, "/trace", "fp")
+            .apply_guest_env_env(map(r#"{"":"value"}"#))
+            .unwrap_err();
+        assert!(matches!(invalid, RuntimeError::Config(_)), "{invalid:?}");
+
+        let stored = BTreeMap::from([("RUST_LOG".to_string(), "debug".to_string())]);
+        let adopted = reconcile_replay_guest_env(&RuntimeConfig::seeded(0), Some(&stored))
+            .unwrap()
+            .unwrap();
+        assert_eq!(adopted, stored);
+        reconcile_replay_guest_env(
+            &RuntimeConfig::seeded(0).with_guest_env(stored.clone()),
+            Some(&stored),
+        )
+        .unwrap();
+        let conflict = RuntimeConfig::seeded(0).with_guest_env(BTreeMap::from([(
+            "RUST_LOG".to_string(),
+            "trace".to_string(),
+        )]));
+        assert!(reconcile_replay_guest_env(&conflict, Some(&stored)).is_err());
     }
 
     #[test]

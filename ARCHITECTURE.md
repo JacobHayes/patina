@@ -410,7 +410,8 @@ Three control-plane concerns are deliberately separated from the interposed data
 
 - **Trace channel.** When ordinary file symbols are interposed, the runtime must not open trace files through them: record finalization would recurse into the deterministic filesystem. A supervisor instead passes an inherited host descriptor through `PATINA_TRACE_FD`; the shim reads replay bundles from it and writes record bundles to it using the real, non-interposed host `read`/`write`. On macOS these are reached through the host-alias table below (resolving `read$NOCANCEL`/`write$NOCANCEL`); on glibc they still bind the distinct `__read`/`__write` aliases.
 - **Captured stdio.** Writes to file descriptors 1 and 2 are captured deterministically in the shim, mirroring the WASI host, and flushed to the real host descriptors at shutdown.
-- **Environment policy.** The ambient environment is a nondeterminism source, so interposed `getenv` returns no value, except for the supervisor-provided `PATINA_*` experiment protocol, which passes through.
+- **Environment policy.** The ambient environment is a nondeterminism source, so the live host environment is scrubbed. Native `run --env KEY=VALUE` supplies an explicit deterministic guest environment map; record mode stores it in trace metadata and replay restores it without re-supplying flags. Guest mutation (`setenv`/`putenv`/`unsetenv`) stays fail-closed.
+- **Startup order.** The packaged constructor installs the runtime before ordinary guest code. If a guest/static constructor reaches an effectful interposed API first, Patina fails closed with a distinct ctor diagnostic; pre-startup `getenv` is the narrow exception and returns NULL so Rust/libc startup probes cannot leak host environment. Cfg-gate such constructors out of DST builds and move setup into `main` or the harness closure.
 
 ### Host-alias doctrine
 

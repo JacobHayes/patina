@@ -29,11 +29,11 @@ use patina_dst_runtime::{
     Context, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION,
     ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN, ENV_COVERAGE_FD,
     ENV_COVERAGE_REPORT, ENV_DEFER_INIT, ENV_FINGERPRINT, ENV_FS_CRASH_AT, ENV_FS_IMAGE_FD,
-    ENV_FS_TORN_GRANULARITY, ENV_GUEST_ARGV, ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG, ENV_MODE,
-    ENV_NET_DROP_PERMILLE, ENV_NET_JITTER, ENV_NET_LATENCY, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE,
-    ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS, ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN,
-    ENV_SCHED_STARVE_WINDOW, ENV_SEED, ENV_SLEEP_JITTER, ENV_STEP_BUDGET, ENV_SWARM, ENV_TIMELINE,
-    ENV_TRACE, ENV_TRACE_FD, RuntimeConfig,
+    ENV_FS_TORN_GRANULARITY, ENV_GUEST_ARGV, ENV_GUEST_ENV, ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG,
+    ENV_MODE, ENV_NET_DROP_PERMILLE, ENV_NET_JITTER, ENV_NET_LATENCY, ENV_PARAMS_JSON,
+    ENV_PARENT_TIMELINE, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS, ENV_SCHED_STARVE,
+    ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED, ENV_SLEEP_JITTER, ENV_STEP_BUDGET,
+    ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, RuntimeConfig,
 };
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
@@ -389,6 +389,9 @@ struct NativeRunInvocation {
     binary: ArtifactRef,
     mode: NativeRunMode,
     program_args: Vec<OsString>,
+    /// Deterministic guest environment values injected by native `run --env`.
+    /// Recorded into trace metadata on `--record` and restored by replay.
+    environment: BTreeMap<String, String>,
     net_latency_nanos: Option<u64>,
     /// Fault-injection knobs forwarded to the guest through the `PATINA_*`
     /// control plane. Each is a validated raw value stored verbatim; the runtime
@@ -1890,17 +1893,7 @@ fn apply_wasi_host_input(
         }
         "--env" => {
             let value = required_value(opt, arguments, index)?;
-            let (key, value) = value
-                .split_once('=')
-                .ok_or_else(|| CliError::usage("--env requires KEY=VALUE"))?;
-            if key.is_empty()
-                || inputs
-                    .environment
-                    .insert(key.into(), value.into())
-                    .is_some()
-            {
-                return Err(CliError::usage("--env keys must be non-empty and unique"));
-            }
+            insert_guest_env(&mut inputs.environment, "--env", value)?;
         }
         "--preopen" => inputs
             .preopens
@@ -2755,6 +2748,7 @@ fn parse_native_run_from(
     let mut buggify: Option<NativeBuggify> = None;
     let mut schedule = NativeSchedule::default();
     let mut liveness = NativeLiveness::default();
+    let mut environment = BTreeMap::new();
     let mut allow = BTreeSet::new();
     let mut allow_unsupported: Option<UnsupportedPolicy> = None;
     let mut coverage_out = None;
@@ -2813,6 +2807,10 @@ fn parse_native_run_from(
                     parse_u64("--net-latency-nanos", value)?,
                     "--net-latency-nanos",
                 )?;
+            }
+            "--env" => {
+                let value = required_value(opt, &arguments, &mut index)?;
+                insert_guest_env(&mut environment, "--env", value)?;
             }
             "--mount" => {
                 let value = required_os_value(opt, &arguments, &mut index)?;
@@ -2987,6 +2985,7 @@ fn parse_native_run_from(
         binary,
         mode,
         program_args,
+        environment,
         net_latency_nanos,
         faults,
         buggify,
@@ -3083,8 +3082,9 @@ fn cargo_package_dir(origin: &OsStr) -> Result<PathBuf, CliError> {
 /// [-- GUEST ARGS]` given an already-resolved binary reference and trace path.
 ///
 /// Native replay restores every semantic input from the trace itself — seed,
-/// fault knobs, buggify, and the guest arguments — so it exposes NO semantic
-/// flags (not `--seed`, not `--fs-*`, not `--buggify*`). The only flags are
+/// fault knobs, buggify, guest arguments, and injected guest environment — so it
+/// exposes NO semantic flags (not `--seed`, not `--env`, not `--fs-*`, not
+/// `--buggify*`). The only flags are
 /// host/build facts the trace cannot carry: `--fingerprint` (the compatibility
 /// fingerprint), `--mount` (re-supply the host corpus whose hash the fingerprint
 /// verifies), and `--allow`/`--allow-unsupported-symbols` (the machine-local
@@ -3184,6 +3184,7 @@ and native runs cannot branch; branch/timeline replay is the Cargo package and W
             // knob was rejected; the trace is authoritative for all of these.
             "--seed"
             | "--record"
+            | "--env"
             | "--net-latency-nanos"
             | "--fs-crash-at"
             | "--fs-torn-granularity"
@@ -3221,6 +3222,7 @@ the trace is authoritative"
             fingerprint,
         },
         program_args,
+        environment: BTreeMap::new(),
         net_latency_nanos: None,
         faults: NativeFaults::default(),
         buggify: None,
@@ -3805,6 +3807,22 @@ fn parse_usize(name: &str, value: &str) -> Result<usize, CliError> {
     value
         .parse()
         .map_err(|_| CliError::usage(format!("{name} must be a non-negative integer")))
+}
+
+fn insert_guest_env(
+    environment: &mut BTreeMap<String, String>,
+    flag: &str,
+    value: &str,
+) -> Result<(), CliError> {
+    let (key, value) = value
+        .split_once('=')
+        .ok_or_else(|| CliError::usage(format!("{flag} requires KEY=VALUE")))?;
+    if key.is_empty() || environment.insert(key.into(), value.into()).is_some() {
+        return Err(CliError::usage(format!(
+            "{flag} keys must be non-empty and unique"
+        )));
+    }
+    Ok(())
 }
 
 fn parse_wasi_preopen(value: &str) -> Result<WasiPreopenConfig, CliError> {
@@ -6251,11 +6269,18 @@ liveness-safe."
     if let Some(latency) = invocation.net_latency_nanos {
         command.env(ENV_NET_LATENCY, latency.to_string());
     }
+    if !invocation.environment.is_empty() {
+        let encoded = serde_json::to_string(&invocation.environment).map_err(|error| {
+            CliError(format!(
+                "failed to encode native guest environment: {error}"
+            ))
+        })?;
+        command.env(ENV_GUEST_ENV, encoded);
+    }
     // Forward whatever fault knobs the operator supplied to the guest. On record
     // and seeded runs these configure the faults and are recorded into the trace
-    // metadata. On replay they are OPTIONAL: the trace's recorded configuration
-    // is authoritative, so an operator who supplies none replays the faults from
-    // the trace alone, while conflicting knobs fail closed in the runtime.
+    // metadata. Native replay does not accept semantic re-supply; the trace's
+    // recorded configuration is authoritative and restored by the runtime.
     if let Some(value) = &invocation.faults.fs_crash_at {
         command.env(ENV_FS_CRASH_AT, value);
     }
@@ -6273,8 +6298,8 @@ liveness-safe."
     }
     // Forward the cooperative-SUT (buggify) knobs. Presence of `PATINA_BUGGIFY`
     // enables buggify; its value (if any) is the firing per-mille. Like the fault
-    // knobs, these are recorded into the trace metadata and are OPTIONAL on
-    // replay (the trace is authoritative; a conflicting knob fails closed).
+    // knobs, these are recorded into trace metadata and restored from the trace on
+    // native replay, rather than re-supplied as semantic flags.
     if let Some(buggify) = &invocation.buggify {
         command.env(ENV_BUGGIFY, buggify.fire_permille.as_deref().unwrap_or(""));
         if let Some(value) = &buggify.activation_permille {
@@ -6289,8 +6314,8 @@ liveness-safe."
     }
     // Forward the exploration scheduling-policy (PCT / starvation) and swarm
     // knobs through the same control plane. Recorded into the trace metadata and
-    // OPTIONAL on replay (the trace is authoritative; the fingerprint suffix
-    // rejects a cross-policy replay).
+    // restored from the trace on native replay; the fingerprint suffix rejects a
+    // cross-policy replay.
     for (name, value) in schedule_env_pairs(&invocation.schedule) {
         command.env(name, value);
     }
@@ -8450,10 +8475,21 @@ mod tests {
 
     #[test]
     fn parses_native_run_modes_and_rejects_conflicts() {
-        let seeded = native_run(&["native-run", "probe", "--seed", "9", "--", "one"]);
+        let seeded = native_run(&[
+            "native-run",
+            "probe",
+            "--seed",
+            "9",
+            "--env",
+            "RUST_LOG=debug",
+            "--",
+            "one",
+        ]);
         assert_eq!(seeded.binary, ArtifactRef::Prebuilt(PathBuf::from("probe")));
         assert!(matches!(seeded.mode, NativeRunMode::Seeded { seed: 9 }));
         assert_eq!(seeded.program_args, strings(&["one"]));
+        assert_eq!(seeded.environment["RUST_LOG"], "debug");
+        assert!(parse_native_run(strings(&["probe", "--env", ""])).is_err());
 
         let covered = native_run(&[
             "native-run",
@@ -8567,6 +8603,16 @@ mod tests {
             .is_err()
         );
         assert!(parse(strings(&["replay", probe, "run.patina", "--seed", "1"])).is_err());
+        assert!(
+            parse(strings(&[
+                "replay",
+                probe,
+                "run.patina",
+                "--env",
+                "RUST_LOG=trace"
+            ]))
+            .is_err()
+        );
         assert!(parse(strings(&["replay", probe])).is_err());
     }
 
@@ -9280,7 +9326,7 @@ mod tests {
             ("run", "--budget" | "--param") => drv_cargo("run", toks),
             (
                 "run",
-                "--fuel" | "--arg" | "--env" | "--socket" | "--preopen" | "--max-memory-pages"
+                "--fuel" | "--arg" | "--socket" | "--preopen" | "--max-memory-pages"
                 | "--max-descriptors" | "--max-preopens" | "--max-path-bytes" | "--max-io-bytes"
                 | "--max-iovecs",
             ) => drv_wasi_run(toks),
@@ -9302,7 +9348,8 @@ mod tests {
             ) => drv_wasi_run(toks),
             (
                 "run",
-                "--net-latency-nanos"
+                "--env"
+                | "--net-latency-nanos"
                 | "--coverage-out"
                 | "--mount"
                 | "--fingerprint"

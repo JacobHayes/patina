@@ -185,8 +185,8 @@ inventory.
 
 `--record` captures every boundary decision into a compact JSON `.patina` trace
 (inspect with `jq` or `cargo patina trace info|events`). Replay is strict: the
-trace carries the seed, fault knobs, buggify config, and guest argv, and any
-mismatch — changed binary, changed
+trace carries the seed, fault knobs, buggify config, guest argv, and native
+`--env` values, and any mismatch — changed binary, changed
 config, diverging operation — fails closed rather than lying. Cargo and WASI
 traces also support *branch timelines*: replay a recorded prefix, then explore a
 different seeded suffix from that moment

@@ -23,6 +23,15 @@ Patina build, so adopters ship it unconditionally with no `cfg(patina)` in
 their code. The runtime enters through `cargo patina build`/`run` (the shim) or
 `build --target wasi` (the `patina_sdk` host imports), or not at all.
 
+Native startup has one important adopter rule: static constructors (`#[ctor]`,
+link-section constructors, C++ global constructors) must not perform interposed
+Patina effects. They can run before the shim's own startup constructor has
+installed the deterministic runtime, so effectful APIs fail closed with a
+ctor-specific diagnostic (pre-startup `getenv` is hidden and returns NULL rather
+than reading host state). Gate such constructors out of DST builds (for example
+`#[cfg(not(patina))]` / `#[cfg(not(dst))]`) and move environment/logging/filesystem
+setup into `main` or the harness closure.
+
 ## 2. Shim-backed harness for normal application code — `patina-dst-harness`
 
 A harness binary configures the run in code, then executes ordinary application
