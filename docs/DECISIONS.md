@@ -95,6 +95,38 @@ cluster so the fixes have citable symptom records.
   tool (same briefs, same workspaces, same verification bars) until the limit
   resets; pi is re-probed at natural checkpoints and preferred again once
   available.
+- **2026-08-06 (user review round) — builder fallback is Opus, not Sonnet.**
+  User direction upon return: when pi/GPT-5.5 is limited, implementation
+  builders fall back to Claude Opus via the Agent tool. Supersedes the Sonnet
+  fallback entry above (the three Sonnet builders were stopped by the user for
+  this reason; their workspace diffs were preserved and re-verified by Opus
+  builders).
+- **2026-08-06 (user review round) — Linux verification channel is Tensorlake.**
+  User direction: use Tensorlake x86_64 sandboxes (CLAUDE.local.md recipe)
+  instead of GitHub throwaway-CI rounds for Linux legs. All SlateDB-derived
+  fixes get Linux validation there, not just macOS batteries: a verify agent is
+  running the buggify item-9 repro (RED hunt at the pre-fix base snapshot
+  commit, guard behavior at tip), the cdylib PIC RED→GREEN, and the
+  native-shim/WASI/e2e batteries in a fresh sandbox from
+  `qipgdlzrg0eylt8ewn8w7`.
+- **2026-08-06 (user review round) — setenv decision revised: support it.**
+  User overruled the "stays fail-closed" half of item 4: host env still never
+  leaks in, but guest-side `setenv`/`unsetenv` (with `getenv`/`environ`
+  coherence) are legitimate deterministic operations on the guest env map and
+  are being implemented (no per-mutation trace records needed — mutations are
+  guest-driven and deterministic; only the initial `--env` set stays in
+  metadata). `putenv` is the builder's call: clean aliasing semantics or loud
+  fail-closed naming setenv as the path.
+- **2026-08-06 (user review round) — clap rejection overturned; full port
+  approved.** The user rejected the mechanical "≤0 net LOC" criterion: the
+  arc's actual goal is maintenance/quality, the +117 LOC was dominated by a
+  116-LOC bridge that only existed because 2 of 10 verbs were ported, and
+  byte-identical help JSON was never a requirement (schema-compatible is
+  enough). Decision: one-change full port of all verbs + the help registry to
+  clap, bespoke parsers and bridge deleted (no dual paths), verdict judged on
+  maintainability/bug-class elimination/drift-gate fit with LOC reported but
+  not decisive. Sequenced after fault-knobs Wave B and invariant Wave 5 land,
+  because those diffs touch the same parser layer.
 - **2026-08-06 — SlateDB-side harness findings are out of scope.** Items in
   `SLATEDB-SANDBOX-NOTES.md` (bank fenced-close neutrality, recovery scenario
   stabilization) live in the sandbox SlateDB checkout, not this repo; nothing
