@@ -386,6 +386,21 @@ pub(crate) fn partition(
                     index += 1;
                 }
             }
+            Some(Value::Optional(..)) if !is_inline(argument) => {
+                owned.push(argument.clone());
+                // An optional-value flag takes its value ONLY inline, so a plain
+                // token after the bare form is not its value. Keep that token on
+                // the owned side rather than forwarding it to Cargo: the family
+                // parser then rejects it as a stray positional, instead of the
+                // operator's `--buggify 500` silently meaning "buggify at the
+                // default rate, and 500 is a Cargo test filter".
+                if let Some(next) = arguments.get(index + 1) {
+                    if next != "--" && !next.to_string_lossy().starts_with('-') {
+                        owned.push(next.clone());
+                        index += 1;
+                    }
+                }
+            }
             Some(_) => owned.push(argument.clone()),
             None => forwarded.push(argument.clone()),
         }

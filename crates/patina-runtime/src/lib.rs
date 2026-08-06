@@ -185,6 +185,11 @@ pub const ENV_FS_ERROR_PERMILLE: &str = "PATINA_FS_ERROR_PERMILLE";
 /// to read/write operations by the default `FaultFs` wrapper. Off (zero) when
 /// unset.
 pub const ENV_FS_SHORT_PERMILLE: &str = "PATINA_FS_SHORT_PERMILLE";
+/// Seeded extra latency `MIN..MAX` in nanoseconds added to every fault-eligible
+/// filesystem operation before it executes, applied by the `Context` (the only
+/// site that owns the clock). Slow I/O reorders against timers and peers. Off
+/// when unset.
+pub const ENV_FS_LATENCY: &str = "PATINA_FS_LATENCY_NANOS";
 /// Suppress the default-on end-of-run schedule diagnostic when set to a false-y
 /// value (`0`, `off`, `false`, `no`). The diagnostic is on by default.
 pub const ENV_SCHEDULE_REPORT: &str = "PATINA_SCHEDULE_REPORT";
@@ -495,6 +500,9 @@ pub struct FsFaultConfig {
     pub error_permille: u16,
     /// Seeded short-read/short-write probability in per-mille (0..=1000).
     pub short_permille: u16,
+    /// Inclusive `[min, max]` nanoseconds of seeded extra latency applied to
+    /// every fault-eligible filesystem operation before it executes.
+    pub latency_nanos: Option<(u64, u64)>,
 }
 
 /// Network fault knobs.
@@ -801,6 +809,13 @@ impl RuntimeConfig {
         self
     }
 
+    /// Add seeded extra latency to every fault-eligible filesystem operation,
+    /// drawn from `[min, max]` and applied before the operation executes.
+    pub fn with_fs_latency_nanos(mut self, min: u64, max: u64) -> Self {
+        self.faults.fs.latency_nanos = Some((min, max));
+        self
+    }
+
     /// Add seeded extra latency to every guest sleep, drawn from `[min, max]`.
     pub fn with_sleep_jitter_nanos(mut self, min: u64, max: u64) -> Self {
         self.faults.clock.sleep_jitter_nanos = Some((min, max));
@@ -851,6 +866,9 @@ impl RuntimeConfig {
         if let Some(value) = get(ENV_FS_SHORT_PERMILLE) {
             self.faults.fs.short_permille = parse_permille(ENV_FS_SHORT_PERMILLE, &value)?;
         }
+        if let Some(value) = get(ENV_FS_LATENCY) {
+            self.faults.fs.latency_nanos = Some(parse_nanos_range(ENV_FS_LATENCY, &value)?);
+        }
         if let Some(value) = get(ENV_SLEEP_JITTER) {
             self.faults.clock.sleep_jitter_nanos =
                 Some(parse_nanos_range(ENV_SLEEP_JITTER, &value)?);
@@ -860,6 +878,13 @@ impl RuntimeConfig {
         }
         if let Some(value) = get(ENV_NET_DROP_PERMILLE) {
             self.faults.net.drop_permille = parse_permille(ENV_NET_DROP_PERMILLE, &value)?;
+        }
+        if let Some(value) = get(ENV_NET_LATENCY) {
+            self.faults.net.latency_nanos = value.trim().parse().map_err(|_| {
+                RuntimeError::Config(format!(
+                    "{ENV_NET_LATENCY} must be an unsigned 64-bit integer"
+                ))
+            })?;
         }
         Ok(self)
     }
@@ -1278,19 +1303,6 @@ impl RuntimeConfig {
             }
             config.params = params;
         }
-        config.faults.net.latency_nanos = match env::var(ENV_NET_LATENCY) {
-            Ok(value) => value.parse().map_err(|_| {
-                RuntimeError::Config(format!(
-                    "{ENV_NET_LATENCY} must be an unsigned 64-bit integer"
-                ))
-            })?,
-            Err(env::VarError::NotPresent) => 0,
-            Err(env::VarError::NotUnicode(_)) => {
-                return Err(RuntimeError::Config(format!(
-                    "{ENV_NET_LATENCY} must be valid UTF-8"
-                )));
-            }
-        };
         let config = config.apply_fault_env(|name| env::var(name).ok())?;
         let config = config.apply_buggify_env(|name| env::var(name).ok())?;
         let config = config.apply_schedule_env(|name| env::var(name).ok())?;
@@ -1735,7 +1747,8 @@ impl RuntimeBuilder {
                 self.filesystem = Some(Box::new(
                     FaultFs::new(crash_fs, root_seed)
                         .error_permille(self.config.faults.fs.error_permille)
-                        .short_permille(self.config.faults.fs.short_permille),
+                        .short_permille(self.config.faults.fs.short_permille)
+                        .latency_live(self.config.faults.fs.latency_nanos.is_some()),
                 ));
             }
             self.clock
@@ -1817,6 +1830,10 @@ impl RuntimeBuilder {
             // Domain-separated seed so sleep-jitter draws do not correlate with
             // the entropy or network-fault streams that also derive from root_seed.
             sleep_jitter_rng: SplitMix64::new(domain_seed(root_seed, fault_domain::SLEEP_JITTER)),
+            fs_latency_nanos: self.config.faults.fs.latency_nanos,
+            fs_latency_rng: SplitMix64::new(domain_seed(root_seed, fault_domain::FS_LATENCY)),
+            fs_latency_eligible_ops: 0,
+            fs_latency_applied: 0,
             schedule: ScheduleTracker::default(),
             buggify: Buggify::new(self.config.buggify, root_seed),
             liveness,
@@ -2821,6 +2838,19 @@ pub struct Context {
     /// sleep, or `None` when latency injection is off.
     sleep_jitter_nanos: Option<(u64, u64)>,
     sleep_jitter_rng: SplitMix64,
+    /// Inclusive `[min, max]` nanoseconds of seeded latency added to each
+    /// fault-eligible filesystem operation, or `None` when fs latency is off.
+    /// Latency needs the clock, so the Context is the ONE site that applies it —
+    /// no embedder may add a second (see the family-parity rules).
+    fs_latency_nanos: Option<(u64, u64)>,
+    fs_latency_rng: SplitMix64,
+    /// Fault-eligible filesystem operations this Context routed, and how many of
+    /// them an fs-latency draw actually delayed. Folded into the driver's
+    /// [`patina_dst_driver_api::FsFaultReport`] at finalization: the driver and
+    /// the Context are independent observers of the same op stream, so eligible
+    /// traffic the Context never delayed is exactly the inert-knob signal.
+    fs_latency_eligible_ops: u64,
+    fs_latency_applied: u64,
     /// Per-task scheduling-boundary accounting for the vacuous-schedule
     /// diagnostic emitted at [`Context::finish`].
     schedule: ScheduleTracker,
@@ -3304,6 +3334,69 @@ impl Context {
         deadline_nanos.saturating_add(jitter)
     }
 
+    /// Delay one fault-eligible filesystem operation by a seeded draw from the
+    /// configured `[min, max]` range, before the operation executes. Latency is
+    /// the one fs fault that needs the clock, so it lives here rather than in the
+    /// `FaultFs` wrapper — and here ONLY: no embedder adds a second site, or the
+    /// same guest operation would be delayed twice in one family and once in the
+    /// other.
+    ///
+    /// The decision-point law: a draw is consumed if and only if the knob is live
+    /// and the range is not a single decision-free value, so a run without the
+    /// knob is byte-identical and a fixed `N..N` latency perturbs no stream.
+    /// Applying it before the operation means the op is slow and THEN fails when
+    /// error injection also fires, and virtual time has already advanced when the
+    /// I/O result lands — which is what reorders fs completions against timers.
+    fn apply_fs_latency(&mut self) -> Result<(), RuntimeError> {
+        let Some((min, max)) = self.fs_latency_nanos else {
+            return Ok(());
+        };
+        self.fs_latency_eligible_ops += 1;
+        let latency = if min == max {
+            min
+        } else {
+            min + (self.fs_latency_rng.next_u64() % (max - min + 1))
+        };
+        if latency == 0 {
+            return Ok(());
+        }
+        // Read the clock UNRECORDED (as the timer rescue does): the recorded
+        // effect is the sleep itself, so an fs op under this knob costs one extra
+        // trace op rather than two, and the driver's monotonic value is
+        // maintained identically on record and replay by that same sleep.
+        let now = self.current_monotonic()?;
+        let deadline = now.saturating_add(latency);
+        self.sleep_until(ClockKind::Monotonic, deadline)?;
+        self.fs_latency_applied += 1;
+        Ok(())
+    }
+
+    /// The end-of-run filesystem fault summary: the driver's own per-class
+    /// counters merged with the Context's fs-latency counters. `None` when no
+    /// filesystem fault class was live at all. This is what
+    /// `PATINA_FS_FAULT_REPORT` prints at finalization; embedders and tests read
+    /// it directly to assert a knob was non-vacuous.
+    ///
+    /// Eligible-op count prefers the driver's, because the driver and the Context
+    /// observe the same operation stream independently: eligible traffic the
+    /// driver saw that the Context never delayed is a filesystem path that
+    /// bypassed the latency choke point, and the latency verdict is judged
+    /// against that larger count precisely so the bypass shows up as vacuity
+    /// rather than as silence.
+    pub fn fs_fault_report(&self) -> Option<patina_dst_driver_api::FsFaultReport> {
+        let driver = self.filesystem.as_ref().and_then(|fs| fs.fault_report());
+        if driver.is_none() && self.fs_latency_nanos.is_none() {
+            return None;
+        }
+        let mut report = driver.unwrap_or_default();
+        report.eligible_ops = report.eligible_ops.max(self.fs_latency_eligible_ops);
+        report.latency_applied = self.fs_latency_applied;
+        report.latency_vacuity_diagnosable = self
+            .fs_latency_nanos
+            .is_some_and(|range| fs_latency_is_diagnosable(report.eligible_ops, range));
+        Some(report)
+    }
+
     pub fn sleep_for(&mut self, duration_nanos: u64) -> Result<(), RuntimeError> {
         let now = self.now(ClockKind::Monotonic)?;
         let deadline = now.checked_add(duration_nanos).ok_or_else(|| {
@@ -3319,6 +3412,7 @@ impl Context {
         if self.filesystem.is_none() {
             return Err(EffectError::missing_driver("filesystem").into());
         }
+        self.apply_fs_latency()?;
         let operation = Operation::FsOpen {
             path: path.into(),
             flags,
@@ -3346,6 +3440,7 @@ impl Context {
         if self.filesystem.is_none() {
             return Err(EffectError::missing_driver("filesystem").into());
         }
+        self.apply_fs_latency()?;
         let operation = Operation::FsRead { fd, max_len };
         let expected = match self.filesystem_expected(&operation)? {
             FilesystemExpected::Execute(expected) => expected,
@@ -3368,6 +3463,7 @@ impl Context {
         if self.filesystem.is_none() {
             return Err(EffectError::missing_driver("filesystem").into());
         }
+        self.apply_fs_latency()?;
         let operation = Operation::FsWrite {
             fd,
             bytes: bytes.to_vec(),
@@ -3403,6 +3499,7 @@ impl Context {
         if self.filesystem.is_none() {
             return Err(EffectError::missing_driver("filesystem").into());
         }
+        self.apply_fs_latency()?;
         let operation = Operation::FsReadAt {
             fd,
             offset,
@@ -3438,6 +3535,7 @@ impl Context {
         if self.filesystem.is_none() {
             return Err(EffectError::missing_driver("filesystem").into());
         }
+        self.apply_fs_latency()?;
         let operation = Operation::FsWriteAt {
             fd,
             offset,
@@ -3539,6 +3637,7 @@ impl Context {
         if self.filesystem.is_none() {
             return Err(EffectError::missing_driver("filesystem").into());
         }
+        self.apply_fs_latency()?;
         let operation = Operation::FsMetadata { path: path.into() };
         let expected = match self.filesystem_expected(&operation)? {
             FilesystemExpected::Execute(expected) => expected,
@@ -3561,6 +3660,7 @@ impl Context {
         if self.filesystem.is_none() {
             return Err(EffectError::missing_driver("filesystem").into());
         }
+        self.apply_fs_latency()?;
         let operation = Operation::FsFdMetadata { fd };
         let expected = match self.filesystem_expected(&operation)? {
             FilesystemExpected::Execute(expected) => expected,
@@ -3642,6 +3742,7 @@ impl Context {
         if self.filesystem.is_none() {
             return Err(EffectError::missing_driver("filesystem").into());
         }
+        self.apply_fs_latency()?;
         let operation = Operation::FsReadDirectory { path: path.into() };
         let expected = match self.filesystem_expected(&operation)? {
             FilesystemExpected::Execute(expected) => expected,
@@ -3703,6 +3804,7 @@ impl Context {
         if self.filesystem.is_none() {
             return Err(EffectError::missing_driver("filesystem").into());
         }
+        self.apply_fs_latency()?;
         let operation = Operation::FsReadLink { path: path.into() };
         let expected = match self.filesystem_expected(&operation)? {
             FilesystemExpected::Execute(expected) => expected,
@@ -3722,7 +3824,7 @@ impl Context {
     }
 
     pub fn fs_crash(&mut self) -> Result<(), RuntimeError> {
-        self.filesystem_unit(Operation::FsCrash, |filesystem| filesystem.crash())
+        self.filesystem_unit_undelayed(Operation::FsCrash, |filesystem| filesystem.crash())
     }
 
     /// Fire the configured filesystem crash if the just-completed boundary
@@ -4362,7 +4464,7 @@ impl Context {
         // Filesystem fault-injection diagnostic. Default-on so a run configured
         // with fs fault knobs that never actually perturb eligible I/O is never a
         // false green.
-        if let Some(report) = self.filesystem.as_ref().and_then(|fs| fs.fault_report()) {
+        if let Some(report) = self.fs_fault_report() {
             emit_fs_fault_report(&report);
         }
         // Network fault-injection diagnostic. Default-on so a run configured with
@@ -4433,7 +4535,23 @@ impl Context {
         Ok(FilesystemExpected::Execute(None))
     }
 
+    /// The unit-outcome filesystem choke point for FAULT-ELIGIBLE operations:
+    /// seeded fs latency applies here, once, before the operation executes.
     fn filesystem_unit(
+        &mut self,
+        operation: Operation,
+        invoke: impl FnOnce(&mut dyn FsDriver) -> Result<(), EffectError>,
+    ) -> Result<(), RuntimeError> {
+        if self.filesystem.is_none() {
+            return Err(EffectError::missing_driver("filesystem").into());
+        }
+        self.apply_fs_latency()?;
+        self.filesystem_unit_undelayed(operation, invoke)
+    }
+
+    /// The same choke point without fault latency, for the administrative
+    /// operations outside the eligible set (`crash`).
+    fn filesystem_unit_undelayed(
         &mut self,
         operation: Operation,
         invoke: impl FnOnce(&mut dyn FsDriver) -> Result<(), EffectError>,
@@ -4880,6 +4998,7 @@ fn fault_record(config: &RuntimeConfig) -> patina_dst_trace::FaultConfigRecord {
         torn_granularity: torn_granularity_to_record(config.faults.fs.torn_granularity),
         fs_error_permille: config.faults.fs.error_permille,
         fs_short_permille: config.faults.fs.short_permille,
+        fs_latency_nanos: config.faults.fs.latency_nanos,
         sleep_jitter_nanos: config.faults.clock.sleep_jitter_nanos,
         net_jitter_nanos: config.faults.net.jitter_nanos,
         net_drop_permille: config.faults.net.drop_permille,
@@ -4899,6 +5018,7 @@ fn fault_config_from_record(record: &patina_dst_trace::FaultConfigRecord) -> Fau
             torn_granularity: torn_granularity_from_record(record.torn_granularity),
             error_permille: record.fs_error_permille,
             short_permille: record.fs_short_permille,
+            latency_nanos: record.fs_latency_nanos,
         },
         net: NetFaultConfig {
             latency_nanos: record.net_latency_nanos,
@@ -5208,6 +5328,16 @@ fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_dst_trace::SwarmConfig
             || config.faults.fs.short_permille = 0,
         );
     }
+    if config.faults.fs.latency_nanos.is_some() {
+        apply_swarm_class(
+            seed,
+            "fs_latency",
+            fault_domain::SWARM_FS_LATENCY,
+            None,
+            &mut draw,
+            || config.faults.fs.latency_nanos = None,
+        );
+    }
     if config.faults.clock.sleep_jitter_nanos.is_some() {
         apply_swarm_class(
             seed,
@@ -5447,6 +5577,24 @@ schedulable.",
             diag.vacuous.len(),
         );
     }
+}
+
+/// Whether a zero-application verdict on the fs-latency knob is anomalous rather
+/// than ordinary, judged the same rate-aware way as the wrapper's error/short
+/// classes: the knob's chance of drawing a NON-ZERO delay, over the eligible
+/// operations it actually saw, must have expected at least
+/// `VACUITY_MIN_EXPECTED_FIRES` delays. A `0..0` range (and any range whose
+/// draws are all zero) is inert by construction, not vacuous, so it never
+/// diagnoses; a `MIN..MAX` with `MIN >= 1` delays every eligible op and reaches
+/// the threshold as soon as there are five of them.
+fn fs_latency_is_diagnosable(eligible_ops: u64, (min, max): (u64, u64)) -> bool {
+    if max == 0 {
+        return false;
+    }
+    let span = max - min + 1;
+    let nonzero = max - min.max(1) + 1;
+    let permille = u16::try_from(nonzero.saturating_mul(1000) / span).unwrap_or(1000);
+    patina_dst_driver_api::vacuity_is_diagnosable(eligible_ops, permille)
 }
 
 /// Emit the default-on filesystem fault-injection diagnostic to stderr. A driver
@@ -6444,6 +6592,7 @@ mod tests {
             .with_fs_torn_granularity(TornGranularity::Byte)
             .with_fs_error_permille(1)
             .with_fs_short_permille(1)
+            .with_fs_latency_nanos(1, 2)
             .with_sleep_jitter_nanos(1, 2)
             .with_net_jitter_nanos(1, 2)
             .with_net_drop_permille(1)
@@ -6471,6 +6620,7 @@ mod tests {
                 "crash",
                 "fs_error",
                 "fs_short",
+                "fs_latency",
                 "sleep_jitter",
                 "net_jitter",
                 "net_drop",
@@ -6653,12 +6803,44 @@ mod tests {
     }
 
     #[test]
+    fn fs_latency_vacuity_is_rate_aware_and_bites_on_an_inert_knob() {
+        use patina_dst_driver_api::FsFaultReport;
+
+        // FIRES: a knob that delays every eligible op, over twenty of them,
+        // that applied ZERO delays. That is the shape a filesystem path
+        // bypassing the Context latency choke point produces — the class this
+        // detector exists for — and it must be reported as vacuous.
+        assert!(fs_latency_is_diagnosable(20, (1_000, 1_000)));
+        let bypassed = FsFaultReport {
+            eligible_ops: 20,
+            latency_vacuity_diagnosable: true,
+            latency_applied: 0,
+            ..FsFaultReport::default()
+        };
+        assert!(bypassed.is_vacuous());
+
+        // DOES NOT FIRE below the expected-firings floor: four eligible ops are
+        // too few to call zero delays anomalous.
+        assert!(!fs_latency_is_diagnosable(4, (1_000, 1_000)));
+
+        // DOES NOT FIRE for a range whose every draw is zero: that knob is inert
+        // by construction, not inert on the code path.
+        assert!(!fs_latency_is_diagnosable(1_000_000, (0, 0)));
+
+        // Rate-aware in between: `0..9` delays nine draws in ten, so it takes six
+        // eligible ops to expect five delays.
+        assert!(!fs_latency_is_diagnosable(5, (0, 9)));
+        assert!(fs_latency_is_diagnosable(6, (0, 9)));
+    }
+
+    #[test]
     fn swarm_class_coins_use_the_domain_seed_registry() {
         let seed = 42;
         let expected = [
             ("crash", fault_domain::SWARM_CRASH),
             ("fs_error", fault_domain::SWARM_FS_ERROR),
             ("fs_short", fault_domain::SWARM_FS_SHORT),
+            ("fs_latency", fault_domain::SWARM_FS_LATENCY),
             ("sleep_jitter", fault_domain::SWARM_SLEEP_JITTER),
             ("net_jitter", fault_domain::SWARM_NET_JITTER),
             ("net_drop", fault_domain::SWARM_NET_DROP),
@@ -6676,6 +6858,7 @@ mod tests {
             .with_crash_at(CrashOp::Close, 1)
             .with_fs_error_permille(1)
             .with_fs_short_permille(1)
+            .with_fs_latency_nanos(1, 2)
             .with_sleep_jitter_nanos(1, 2)
             .with_net_jitter_nanos(1, 2)
             .with_net_drop_permille(1)

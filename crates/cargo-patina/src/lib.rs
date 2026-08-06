@@ -30,12 +30,12 @@ use patina_dst_runtime::{
     Context, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION,
     ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN, ENV_COVERAGE_FD,
     ENV_COVERAGE_REPORT, ENV_DEFER_INIT, ENV_DEPTH_REPORT, ENV_FINGERPRINT, ENV_FS_CRASH_AT,
-    ENV_FS_ERROR_PERMILLE, ENV_FS_IMAGE_FD, ENV_FS_SHORT_PERMILLE, ENV_FS_TORN_GRANULARITY,
-    ENV_GUEST_ARGV, ENV_GUEST_ENV, ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG, ENV_MODE,
-    ENV_NET_DROP_PERMILLE, ENV_NET_JITTER, ENV_NET_LATENCY, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE,
-    ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS, ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN,
-    ENV_SCHED_STARVE_WINDOW, ENV_SEED, ENV_SLEEP_JITTER, ENV_STEP_BUDGET, ENV_SWARM, ENV_TIMELINE,
-    ENV_TRACE, ENV_TRACE_FD, RuntimeConfig,
+    ENV_FS_ERROR_PERMILLE, ENV_FS_IMAGE_FD, ENV_FS_LATENCY, ENV_FS_SHORT_PERMILLE,
+    ENV_FS_TORN_GRANULARITY, ENV_GUEST_ARGV, ENV_GUEST_ENV, ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG,
+    ENV_MODE, ENV_NET_DROP_PERMILLE, ENV_NET_JITTER, ENV_NET_LATENCY, ENV_PARAMS_JSON,
+    ENV_PARENT_TIMELINE, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS, ENV_SCHED_STARVE,
+    ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED, ENV_SLEEP_JITTER, ENV_STEP_BUDGET,
+    ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, RuntimeConfig,
 };
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
@@ -170,6 +170,11 @@ struct WasiInvocation {
     sockets: Vec<WasiSocketConfig>,
     preopens: Vec<WasiPreopenConfig>,
     resource_limits: WasiResourceLimitOverrides,
+    /// Maximum boundary operations before the run fails explicitly (`--budget`).
+    /// Family-neutral: the same `RuntimeConfig::step_budget` the Cargo family
+    /// sets, and distinct from `--fuel`, which bounds wasm execution rather than
+    /// recorded boundary operations.
+    step_budget: Option<u64>,
     /// Seed-driven fault-injection knobs applied to the in-process runtime before
     /// `Context::from_config`, so a WASI guest's filesystem and datagram sockets
     /// see the same seeded crash/jitter/drop drivers the native family does.
@@ -291,6 +296,11 @@ struct Invocation {
     /// trace on the `replay` verb, so a cargo-family replay is flag-free. Default
     /// (all `None`) leaves faults off.
     faults: NativeFaults,
+    /// Cooperative-SUT (buggify) knobs, or `None` when `--buggify` was not
+    /// passed. Forwarded over the same `PATINA_BUGGIFY*` control plane the other
+    /// families use; the guest's `apply_buggify_env` is family-neutral, so only
+    /// the parser ever omitted them.
+    buggify: Option<NativeBuggify>,
     /// Working directory the cargo subprocess runs in, or `None` to inherit the
     /// caller's. Set by the cargo-family `replay` verb from its `<pkg>` positional
     /// so a replay can run from anywhere while its fingerprint (which walks the
@@ -325,6 +335,8 @@ struct NativeHarnessInvocation {
     seeds: HarnessSeeds,
     release: bool,
     yield_points: bool,
+    /// Boundary-operation budget forwarded to each seed's child `run`.
+    step_budget: Option<u64>,
     faults: NativeFaults,
     buggify: Option<NativeBuggify>,
     schedule: NativeSchedule,
@@ -451,7 +463,10 @@ struct NativeRunInvocation {
     /// Deterministic guest environment values injected by native `run --env`.
     /// Recorded into trace metadata on `--record` and restored by replay.
     environment: BTreeMap<String, String>,
-    net_latency_nanos: Option<u64>,
+    /// Maximum boundary operations before the run fails explicitly (`--budget`),
+    /// forwarded over the control plane. Family-neutral: the same
+    /// `RuntimeConfig::step_budget` the Cargo and WASI families set.
+    step_budget: Option<u64>,
     /// Fault-injection knobs forwarded to the guest through the `PATINA_*`
     /// control plane. Each is a validated raw value stored verbatim; the runtime
     /// re-parses it identically on record and replay, so a mismatched flag on
@@ -510,13 +525,62 @@ struct NativeFaults {
     fs_error_permille: Option<String>,
     /// Seeded short-read/short-write probability in per-mille (0..=1000).
     fs_short_permille: Option<String>,
+    /// Seeded per-operation filesystem latency range `MIN..MAX` nanoseconds.
+    fs_latency_nanos: Option<String>,
     /// Seeded sleep-latency range `MIN..MAX` nanoseconds.
     sleep_jitter_nanos: Option<String>,
     /// Seeded per-datagram delivery-jitter range `MIN..MAX` nanoseconds.
     net_jitter_nanos: Option<String>,
     /// Seeded datagram drop probability in per-mille (0..=1000).
     net_drop_permille: Option<String>,
+    /// Base per-datagram/segment delivery latency in nanoseconds.
+    net_latency_nanos: Option<String>,
 }
+
+/// One fault knob's three spellings: the CLI flag it is parsed from, the
+/// `PATINA_*` control-plane variable that carries it to a guest, and the
+/// accessor for its stored value. See [`FAULT_KNOBS`].
+type FaultKnob = (
+    &'static str,
+    &'static str,
+    fn(&NativeFaults) -> Option<&String>,
+);
+
+/// Every fault knob's three spellings in one table: the CLI flag it is parsed
+/// from, the `PATINA_*` control-plane variable that carries it to a guest, and
+/// the accessor for its stored value. Every family's plumbing — the WASI
+/// in-process overlay, the native subprocess environment, the cargo subprocess
+/// environment and its scrub list, and the native harness's re-emitted `run`
+/// command line — iterates THIS table, so a knob added to the registry cannot be
+/// forwarded by one family and silently dropped by another. `knob_table_covers_
+/// every_registry_fault_flag` gates the table against the registry.
+const FAULT_KNOBS: &[FaultKnob] = &[
+    ("--fs-crash-at", ENV_FS_CRASH_AT, |f| f.fs_crash_at.as_ref()),
+    ("--fs-torn-granularity", ENV_FS_TORN_GRANULARITY, |f| {
+        f.fs_torn_granularity.as_ref()
+    }),
+    ("--fs-error-permille", ENV_FS_ERROR_PERMILLE, |f| {
+        f.fs_error_permille.as_ref()
+    }),
+    ("--fs-short-permille", ENV_FS_SHORT_PERMILLE, |f| {
+        f.fs_short_permille.as_ref()
+    }),
+    ("--fs-latency-nanos", ENV_FS_LATENCY, |f| {
+        f.fs_latency_nanos.as_ref()
+    }),
+    ("--sleep-jitter-nanos", ENV_SLEEP_JITTER, |f| {
+        f.sleep_jitter_nanos.as_ref()
+    }),
+    ("--net-jitter-nanos", ENV_NET_JITTER, |f| {
+        f.net_jitter_nanos.as_ref()
+    }),
+    ("--net-drop-permille", ENV_NET_DROP_PERMILLE, |f| {
+        f.net_drop_permille.as_ref()
+    }),
+    ("--net-latency-nanos", ENV_NET_LATENCY, |f| {
+        f.net_latency_nanos.as_ref()
+    }),
+];
 
 /// Cooperative-SUT (buggify) knobs for `native-run`, forwarded to the guest as
 /// validated raw strings through the `PATINA_BUGGIFY*` control plane. Presence
@@ -1536,6 +1600,7 @@ fn parse_native_harness_from(
             .unwrap_or_else(|| HarnessSeeds::Range(seeds.unwrap_or(20))),
         release: args.flag("--release"),
         yield_points: args.flag("--yield-points"),
+        step_budget: args.u64("--budget"),
         faults: faults_of(&args),
         buggify: buggify_of(&args),
         schedule: schedule_of(&args),
@@ -1647,6 +1712,7 @@ fn parse_cargo(command: String, arguments: Vec<OsString>) -> Result<ParseResult,
         step_budget: args.u64("--budget"),
         params: key_values(&args, "--param")?,
         faults: faults_of(&args),
+        buggify: buggify_of(&args),
         working_dir: None,
     }))
 }
@@ -1684,6 +1750,7 @@ fn parse_cargo_replay(
         step_budget: None,
         params: BTreeMap::new(),
         faults: NativeFaults::default(),
+        buggify: None,
         working_dir: Some(package_dir),
     }))
 }
@@ -1724,6 +1791,7 @@ fn wasi_invocation_from(
     module: ArtifactRef,
     mode: Mode,
     inputs: WasiHostInputs,
+    step_budget: Option<u64>,
     faults: NativeFaults,
     buggify: Option<NativeBuggify>,
     liveness: NativeLiveness,
@@ -1737,6 +1805,7 @@ fn wasi_invocation_from(
         sockets: inputs.sockets,
         preopens: inputs.preopens,
         resource_limits: inputs.resource_limits,
+        step_budget,
         faults,
         buggify,
         liveness,
@@ -1764,6 +1833,7 @@ fn parse_wasi_run_from(
         module,
         mode,
         wasi_host_inputs_of(&args)?,
+        args.u64("--budget"),
         faults_of(&args),
         buggify_of(&args),
         liveness_of(&args),
@@ -1786,6 +1856,9 @@ fn parse_wasi_replay(
         module,
         replay_mode(&args, trace)?,
         wasi_host_inputs_of(&args)?,
+        // `replay` registers no --budget: it re-executes a recorded operation
+        // stream whose length is already fixed by the trace.
+        None,
         NativeFaults::default(),
         None,
         NativeLiveness::default(),
@@ -1993,10 +2066,20 @@ fn faults_of(args: &cli::Args) -> NativeFaults {
         fs_torn_granularity: args.string("--fs-torn-granularity"),
         fs_error_permille: args.string("--fs-error-permille"),
         fs_short_permille: args.string("--fs-short-permille"),
+        fs_latency_nanos: args.string("--fs-latency-nanos"),
         sleep_jitter_nanos: args.string("--sleep-jitter-nanos"),
         net_jitter_nanos: args.string("--net-jitter-nanos"),
         net_drop_permille: args.string("--net-drop-permille"),
+        net_latency_nanos: args.string("--net-latency-nanos"),
     }
+}
+
+/// Every knob this invocation set, as `(flag, value)` in registry order.
+fn fault_flag_pairs(faults: &NativeFaults) -> Vec<(&'static str, &String)> {
+    FAULT_KNOBS
+        .iter()
+        .filter_map(|(flag, _, get)| get(faults).map(|value| (*flag, value)))
+        .collect()
 }
 
 /// The cooperative-SUT (buggify) knobs, or `None` when buggify was not enabled.
@@ -2191,30 +2274,20 @@ fn timeline_or_main(args: &cli::Args) -> String {
 /// subprocess (as real environment variables), so both apply the identical
 /// protocol the native shim reads.
 fn fault_env_pairs(faults: &NativeFaults) -> Vec<(&'static str, String)> {
-    let mut pairs = Vec::new();
-    if let Some(value) = &faults.fs_crash_at {
-        pairs.push((ENV_FS_CRASH_AT, value.clone()));
-    }
-    if let Some(value) = &faults.fs_torn_granularity {
-        pairs.push((ENV_FS_TORN_GRANULARITY, value.clone()));
-    }
-    if let Some(value) = &faults.fs_error_permille {
-        pairs.push((ENV_FS_ERROR_PERMILLE, value.clone()));
-    }
-    if let Some(value) = &faults.fs_short_permille {
-        pairs.push((ENV_FS_SHORT_PERMILLE, value.clone()));
-    }
-    if let Some(value) = &faults.sleep_jitter_nanos {
-        pairs.push((ENV_SLEEP_JITTER, value.clone()));
-    }
-    if let Some(value) = &faults.net_jitter_nanos {
-        pairs.push((ENV_NET_JITTER, value.clone()));
-    }
-    if let Some(value) = &faults.net_drop_permille {
-        pairs.push((ENV_NET_DROP_PERMILLE, value.clone()));
-    }
-    pairs
+    FAULT_KNOBS
+        .iter()
+        .filter_map(|(_, variable, get)| get(faults).map(|value| (*variable, value.clone())))
+        .collect()
 }
+
+/// Every `PATINA_BUGGIFY*` control-plane variable, for the scrub that keeps an
+/// ambient environment from enabling buggify in a run that did not ask for it.
+const BUGGIFY_ENV_VARS: &[&str] = &[
+    ENV_BUGGIFY,
+    ENV_BUGGIFY_ACTIVATION,
+    ENV_BUGGIFY_CUTOFF,
+    ENV_BUGGIFY_AFTER_SETUP,
+];
 
 /// The cooperative-SUT (buggify) control-plane pairs for the in-process WASI
 /// runtime, mirroring the env vars the native family forwards to its subprocess.
@@ -2322,7 +2395,7 @@ fn parse_native_run_from(
         },
         program_args,
         environment: key_values(&args, "--env")?,
-        net_latency_nanos: args.u64("--net-latency-nanos"),
+        step_budget: args.u64("--budget"),
         faults: faults_of(&args),
         buggify: buggify_of(&args),
         schedule: schedule_of(&args),
@@ -2445,7 +2518,9 @@ fn parse_native_replay(
         },
         program_args,
         environment: BTreeMap::new(),
-        net_latency_nanos: None,
+        // `replay` registers no --budget: it re-executes a recorded operation
+        // stream whose length is already fixed by the trace.
+        step_budget: None,
         faults: NativeFaults::default(),
         buggify: None,
         // Replay restores the scheduling policy and swarm selection from the
@@ -2708,6 +2783,9 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
     // faults: the runtime restores the trace's authoritative fault configuration
     // during `Context::from_config`, so a flag-free replay rebuilds the same
     // CrashFs/SimNet the recording used.
+    if let Some(budget) = invocation.step_budget {
+        config = config.with_step_budget(budget);
+    }
     if matches!(invocation.mode, Mode::Seeded { .. } | Mode::Record { .. }) {
         let pairs = fault_env_pairs(&invocation.faults);
         config = config
@@ -3734,31 +3812,16 @@ fn run_native_harness_seed(
 }
 
 fn append_native_harness_run_flags(args: &mut Vec<OsString>, invocation: &NativeHarnessInvocation) {
-    push_optional_arg(
-        args,
-        "--fs-crash-at",
-        invocation.faults.fs_crash_at.as_deref(),
-    );
-    push_optional_arg(
-        args,
-        "--fs-torn-granularity",
-        invocation.faults.fs_torn_granularity.as_deref(),
-    );
-    push_optional_arg(
-        args,
-        "--sleep-jitter-nanos",
-        invocation.faults.sleep_jitter_nanos.as_deref(),
-    );
-    push_optional_arg(
-        args,
-        "--net-jitter-nanos",
-        invocation.faults.net_jitter_nanos.as_deref(),
-    );
-    push_optional_arg(
-        args,
-        "--net-drop-permille",
-        invocation.faults.net_drop_permille.as_deref(),
-    );
+    if let Some(budget) = invocation.step_budget {
+        args.push(OsString::from("--budget"));
+        args.push(OsString::from(budget.to_string()));
+    }
+    // Every knob the registry defines, from the shared table: a fault flag the
+    // harness parsed but did not re-emit would be silently inert here.
+    for (flag, value) in fault_flag_pairs(&invocation.faults) {
+        args.push(OsString::from(flag));
+        args.push(OsString::from(value));
+    }
     if let Some(buggify) = &invocation.buggify {
         match &buggify.fire_permille {
             Some(value) => args.push(OsString::from(format!("--buggify={value}"))),
@@ -6023,9 +6086,6 @@ liveness-safe."
     if let Some(value) = env::var_os(ENV_COVERAGE_REPORT) {
         command.env(ENV_COVERAGE_REPORT, value);
     }
-    if let Some(latency) = invocation.net_latency_nanos {
-        command.env(ENV_NET_LATENCY, latency.to_string());
-    }
     if !invocation.environment.is_empty() {
         let encoded = serde_json::to_string(&invocation.environment).map_err(|error| {
             CliError(format!(
@@ -6034,30 +6094,17 @@ liveness-safe."
         })?;
         command.env(ENV_GUEST_ENV, encoded);
     }
+    // The boundary-operation budget is a supervisor-side bound, not recorded run
+    // semantics, so it is supplied per invocation on every family alike.
+    if let Some(budget) = invocation.step_budget {
+        command.env(ENV_STEP_BUDGET, budget.to_string());
+    }
     // Forward whatever fault knobs the operator supplied to the guest. On record
     // and seeded runs these configure the faults and are recorded into the trace
     // metadata. Native replay does not accept semantic re-supply; the trace's
     // recorded configuration is authoritative and restored by the runtime.
-    if let Some(value) = &invocation.faults.fs_crash_at {
-        command.env(ENV_FS_CRASH_AT, value);
-    }
-    if let Some(value) = &invocation.faults.fs_torn_granularity {
-        command.env(ENV_FS_TORN_GRANULARITY, value);
-    }
-    if let Some(value) = &invocation.faults.fs_error_permille {
-        command.env(ENV_FS_ERROR_PERMILLE, value);
-    }
-    if let Some(value) = &invocation.faults.fs_short_permille {
-        command.env(ENV_FS_SHORT_PERMILLE, value);
-    }
-    if let Some(value) = &invocation.faults.sleep_jitter_nanos {
-        command.env(ENV_SLEEP_JITTER, value);
-    }
-    if let Some(value) = &invocation.faults.net_jitter_nanos {
-        command.env(ENV_NET_JITTER, value);
-    }
-    if let Some(value) = &invocation.faults.net_drop_permille {
-        command.env(ENV_NET_DROP_PERMILLE, value);
+    for (name, value) in fault_env_pairs(&invocation.faults) {
+        command.env(name, value);
     }
     // Forward the cooperative-SUT (buggify) knobs. Presence of `PATINA_BUGGIFY`
     // enables buggify; its value (if any) is the firing per-mille. Like the fault
@@ -6629,24 +6676,32 @@ and run/audit the artifact (cargo patina build <DIR|Cargo.toml> --output <PATH>)
         .env_remove(ENV_BRANCH_ID)
         .env_remove(ENV_PARENT_TIMELINE)
         .env_remove(ENV_STEP_BUDGET)
-        .env_remove(ENV_PARAMS_JSON)
-        // Scrub the fault-injection control plane so only the flags this
-        // invocation parsed reach the child; an ambient `PATINA_FS_CRASH_AT` (or
-        // any sibling) in the caller's environment must never silently perturb a
-        // run that requested no faults.
-        .env_remove(ENV_FS_CRASH_AT)
-        .env_remove(ENV_FS_TORN_GRANULARITY)
-        .env_remove(ENV_FS_ERROR_PERMILLE)
-        .env_remove(ENV_FS_SHORT_PERMILLE)
-        .env_remove(ENV_SLEEP_JITTER)
-        .env_remove(ENV_NET_JITTER)
-        .env_remove(ENV_NET_DROP_PERMILLE);
+        .env_remove(ENV_PARAMS_JSON);
+    // Scrub the fault-injection control plane so only the flags this invocation
+    // parsed reach the child; an ambient `PATINA_FS_CRASH_AT` (or any sibling) in
+    // the caller's environment must never silently perturb a run that requested
+    // no faults. Driven by the shared knob table, so a new knob is scrubbed the
+    // day it is registered.
+    for (_, variable, _) in FAULT_KNOBS {
+        command.env_remove(variable);
+    }
     // Forward this run's fault knobs. On a `--record` run the child's runtime
     // captures them into the trace metadata; on the `replay` verb none are set
     // (the trace is authoritative and the runtime restores them), so replay is
     // flag-free.
     for (name, value) in fault_env_pairs(&invocation.faults) {
         command.env(name, value);
+    }
+    // Cooperative-SUT (buggify) knobs ride the same control plane. Scrubbed
+    // first, for the same reason the fault knobs are: an ambient PATINA_BUGGIFY
+    // must never enable buggify in a run that did not ask for it.
+    for variable in BUGGIFY_ENV_VARS {
+        command.env_remove(variable);
+    }
+    if let Some(buggify) = &invocation.buggify {
+        for (name, value) in buggify_env_pairs(buggify) {
+            command.env(name, value);
+        }
     }
     if let Some(budget) = invocation.step_budget {
         command.env(ENV_STEP_BUDGET, budget.to_string());
@@ -9287,6 +9342,135 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn knob_table_covers_every_registry_fault_flag() {
+        // The drift gate behind FAULT_KNOBS: every knob the registry declares has
+        // a row, so every family's plumbing carries it. Without this, a knob can
+        // be parsed by one family and silently dropped on the way to the guest —
+        // the silent-inertness class, which looks exactly like a clean run.
+        let table: BTreeSet<&str> = FAULT_KNOBS.iter().map(|(flag, _, _)| *flag).collect();
+        let registry: BTreeSet<&str> = help::fault_flag_names().collect();
+        assert_eq!(
+            registry, table,
+            "every registry fault flag needs a FAULT_KNOBS row (and vice versa)"
+        );
+    }
+
+    #[test]
+    fn every_fault_knob_reaches_every_family_and_is_refused_by_replay() {
+        // Each knob, set to a valid value, must survive parsing into the same
+        // control-plane variable for the Cargo, WASI and native families, and must
+        // be REFUSED by `replay` — which derives its refusal list from the same
+        // registry slice, so a new knob is refused the day it is registered.
+        let samples: Vec<(&str, &str)> = vec![
+            ("--fs-crash-at", "write:2"),
+            ("--fs-torn-granularity", "byte"),
+            ("--fs-error-permille", "100"),
+            ("--fs-short-permille", "200"),
+            ("--fs-latency-nanos", "10..20"),
+            ("--sleep-jitter-nanos", "10..20"),
+            ("--net-jitter-nanos", "10..20"),
+            ("--net-drop-permille", "50"),
+            ("--net-latency-nanos", "500"),
+        ];
+        assert_eq!(
+            samples
+                .iter()
+                .map(|(flag, _)| *flag)
+                .collect::<BTreeSet<_>>(),
+            help::fault_flag_names().collect::<BTreeSet<_>>(),
+            "give every registered fault knob a sample here"
+        );
+
+        for (flag, value) in samples {
+            let variable = FAULT_KNOBS
+                .iter()
+                .find(|(name, _, _)| *name == flag)
+                .map(|(_, variable, _)| *variable)
+                .expect("knob table row");
+            for (verb, family) in [
+                ("run", help::Family::Cargo),
+                ("run", help::Family::Wasi),
+                ("run", help::Family::Native),
+                ("test", help::Family::Cargo),
+                ("test", help::Family::Harness),
+            ] {
+                let args = cli::parse(verb, family, strings(&[flag, value]))
+                    .unwrap_or_else(|error| panic!("{verb} {family:?} rejected {flag}: {error}"));
+                let pairs = fault_env_pairs(&faults_of(&args));
+                assert!(
+                    pairs.contains(&(variable, value.to_string())),
+                    "{verb} {family:?} did not carry {flag} to {variable}: {pairs:?}"
+                );
+            }
+            for family in [
+                help::Family::Cargo,
+                help::Family::Wasi,
+                help::Family::Native,
+            ] {
+                let message = match cli::parse("replay", family, strings(&[flag, value])) {
+                    Err(error) => error.to_string(),
+                    Ok(_) => panic!("replay accepted a re-supplied {flag}"),
+                };
+                assert!(
+                    message.contains(flag) && message.contains("the trace is authoritative"),
+                    "replay refusal for {flag} should explain itself: {message}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_native_harness_re_emits_every_fault_knob_it_parsed() {
+        // Native harness mode runs each seed as a child `run`, so a knob it
+        // parsed but did not re-emit is silently inert — the shape the
+        // hand-maintained forwarding list had for the Wave B fs knobs. Every
+        // registered knob must survive the round trip.
+        let flags: Vec<&str> = help::fault_flag_names().collect();
+        let mut tokens: Vec<OsString> = Vec::new();
+        for flag in &flags {
+            tokens.push(OsString::from(*flag));
+            tokens.push(OsString::from(match *flag {
+                "--fs-crash-at" => "write:2",
+                "--fs-torn-granularity" => "byte",
+                _ if flag.ends_with("-nanos") => "10..20",
+                _ => "100",
+            }));
+        }
+        // `--net-latency-nanos` is a scalar, not a range.
+        let scalar = tokens
+            .iter()
+            .position(|t| t == "--net-latency-nanos")
+            .expect("net latency knob");
+        tokens[scalar + 1] = OsString::from("500");
+
+        let args = cli::parse("test", help::Family::Harness, tokens).expect("harness parse");
+        let invocation = NativeHarnessInvocation {
+            origin: PathBuf::new(),
+            manifest: PathBuf::new(),
+            package: None,
+            harness_target: "t".into(),
+            exact: "m::t".into(),
+            seeds: HarnessSeeds::One(0),
+            release: false,
+            yield_points: false,
+            step_budget: Some(9),
+            faults: faults_of(&args),
+            buggify: None,
+            schedule: NativeSchedule::default(),
+            liveness: NativeLiveness::default(),
+        };
+        let mut emitted: Vec<OsString> = Vec::new();
+        append_native_harness_run_flags(&mut emitted, &invocation);
+        for flag in &flags {
+            assert!(
+                emitted.iter().any(|token| token == flag),
+                "native harness dropped {flag} on the way to its child run"
+            );
+        }
+        assert!(emitted.iter().any(|token| token == "--budget"));
     }
 
     #[test]

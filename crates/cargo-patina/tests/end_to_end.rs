@@ -358,6 +358,210 @@ const WASI_FS_SHORT_WRITE: &str = r#"(module
     (if (i32.ge_u (local.get $n) (i32.const 6)) (then (call $proc_exit (i32.const 71))))
     (call $print)))"#;
 
+// The guest reads the monotonic clock either side of ONE eligible filesystem
+// operation and exits 70 unless virtual time advanced by at least the configured
+// latency. This is the observation `--fs-latency-nanos` exists to produce, seen
+// from inside the guest rather than from a host-side report.
+const WASI_FS_LATENCY: &str = r#"(module
+  (import "wasi_snapshot_preview1" "clock_time_get"
+    (func $clock_time_get (param i32 i64 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "path_filestat_get"
+    (func $path_filestat_get (param i32 i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_write"
+    (func $fd_write (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "file")
+  (data (i32.const 128) "WASI_FS_FAULT_RESULT latency\n")
+  (func $print
+    (i32.store (i32.const 64) (i32.const 128))
+    (i32.store (i32.const 68) (i32.const 29))
+    (drop (call $fd_write (i32.const 1) (i32.const 64) (i32.const 1) (i32.const 80))))
+  (func (export "_start")
+    (local $before i64) (local $after i64)
+    (drop (call $clock_time_get (i32.const 1) (i64.const 0) (i32.const 200)))
+    (local.set $before (i64.load (i32.const 200)))
+    (drop (call $path_filestat_get
+      (i32.const 3) (i32.const 0) (i32.const 0) (i32.const 4) (i32.const 100)))
+    (drop (call $clock_time_get (i32.const 1) (i64.const 0) (i32.const 208)))
+    (local.set $after (i64.load (i32.const 208)))
+    (if (i64.lt_u (i64.sub (local.get $after) (local.get $before)) (i64.const 1000000))
+      (then (call $proc_exit (i32.const 70))))
+    (call $print)))"#;
+
+#[test]
+fn wasi_fs_latency_is_observable_in_the_guest_and_reported_non_vacuous() {
+    let directory = tempdir().unwrap();
+    let module = directory.path().join("latency.wasm");
+    fs::write(&module, wat::parse_str(WASI_FS_LATENCY).unwrap()).unwrap();
+    let patina = env!("CARGO_BIN_EXE_cargo-patina");
+
+    // Control: without the knob the two clock reads bracket no delay at all, so
+    // the guest takes its explicit failure exit. A knob-free run is unperturbed.
+    let clean = invoke_unchecked(
+        patina,
+        directory.path(),
+        &["run", module.to_str().unwrap(), "--seed", "3"],
+    );
+    assert_eq!(
+        clean.status.code(),
+        Some(70),
+        "a knob-free run must not delay fs ops:\n{}",
+        String::from_utf8_lossy(&clean.stderr)
+    );
+
+    // MUST delay: a fixed 1ms latency shows up as virtual elapsed time inside the
+    // guest, across the WASI family, from a flag in the shared fault group.
+    let output = invoke_unchecked(
+        patina,
+        directory.path(),
+        &[
+            "run",
+            module.to_str().unwrap(),
+            "--seed",
+            "3",
+            "--fs-latency-nanos",
+            "1000000..1000000",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "guest did not observe the injected fs latency:\n{stderr}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("WASI_FS_FAULT_RESULT latency"),
+        "missing guest latency marker"
+    );
+    assert!(
+        stderr.contains("PATINA_FS_FAULT_REPORT") && stderr.contains("vacuous=0"),
+        "fs fault report must prove the latency knob was non-vacuous:\n{stderr}"
+    );
+}
+
+#[test]
+fn the_cargo_family_accepts_buggify_flags_and_scrubs_an_ambient_control_plane() {
+    // Buggify was reachable from the Cargo family only through PATINA_BUGGIFY* in
+    // the caller's environment: the runtime path was always family-neutral, but
+    // the parser omitted the flags. Now `run`/`test` carry them like every other
+    // family — and, like the fault knobs, scrub the ambient control plane so a
+    // stale variable cannot enable buggify in a run that did not ask for it.
+    let directory = tempdir().unwrap();
+    let fixture = directory.path().join("fixture");
+    create_fixture(&fixture);
+    let patina = env!("CARGO_BIN_EXE_cargo-patina");
+
+    let enabled = invoke_unchecked_clean_env(
+        patina,
+        &fixture,
+        &[
+            "run",
+            "--seed",
+            "7",
+            "--buggify=400",
+            "--buggify-cutoff-nanos",
+            "5000",
+        ],
+        &[],
+    );
+    let stderr = String::from_utf8_lossy(&enabled.stderr);
+    assert!(
+        stderr.contains("PATINA_SDK_REPORT enabled=1") && stderr.contains("fire_permille=400"),
+        "cargo-family --buggify did not reach the guest runtime:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("cutoff_nanos=5000"),
+        "cargo-family buggify detail knobs did not reach the guest:\n{stderr}"
+    );
+
+    // `replay` registers no buggify flag — the trace is authoritative — so an
+    // ambient PATINA_BUGGIFY has no CLI meaning there. Before the scrub it would
+    // still have reached the guest's own control-plane read and buggified a
+    // replay of a buggify-free recording, which is a corrupted reproduction.
+    let trace = directory.path().join("clean.patina");
+    let recorded = invoke_unchecked_clean_env(
+        patina,
+        &fixture,
+        &["run", "--seed", "7", "--record", trace.to_str().unwrap()],
+        &[],
+    );
+    assert!(recorded.status.success());
+    let replayed = invoke_unchecked_clean_env(
+        patina,
+        &fixture,
+        &["replay", ".", trace.to_str().unwrap()],
+        &[("PATINA_BUGGIFY", "900")],
+    );
+    let stderr = String::from_utf8_lossy(&replayed.stderr);
+    assert!(
+        replayed.status.success(),
+        "replay under an ambient PATINA_BUGGIFY failed:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("PATINA_SDK_REPORT enabled=1"),
+        "an ambient PATINA_BUGGIFY buggified a replay of a buggify-free trace:\n{stderr}"
+    );
+}
+
+#[test]
+fn the_boundary_operation_budget_reaches_the_wasi_and_native_families() {
+    // `--budget` bounds recorded boundary operations, which every family
+    // performs; it was registered for the Cargo family alone, so a WASI or native
+    // guest could not be bounded at all (wasip1's `--fuel` bounds wasm execution,
+    // a different thing). One operation is below any real guest's needs, so an
+    // honored budget shows up as the explicit StepBudgetExceeded failure.
+    let directory = tempdir().unwrap();
+    let module = directory.path().join("latency.wasm");
+    fs::write(&module, wat::parse_str(WASI_FS_LATENCY).unwrap()).unwrap();
+    let patina = env!("CARGO_BIN_EXE_cargo-patina");
+    let budgeted = invoke_unchecked(
+        patina,
+        directory.path(),
+        &["run", module.to_str().unwrap(), "--budget", "1"],
+    );
+    assert!(!budgeted.status.success());
+    assert!(
+        String::from_utf8_lossy(&budgeted.stderr).contains("step budget of 1"),
+        "WASI run ignored --budget:\n{}",
+        String::from_utf8_lossy(&budgeted.stderr)
+    );
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let source = directory.path().join("fs_fault.rs");
+        fs::write(&source, FS_FAULT_SOURCE).unwrap();
+        let workspace = native_workspace();
+        let bin = directory.path().join("budgeted");
+        invoke_in(
+            workspace,
+            &[
+                "build",
+                source.to_str().unwrap(),
+                "--output",
+                bin.to_str().unwrap(),
+            ],
+        );
+        let budgeted = invoke_unchecked(
+            patina,
+            workspace,
+            &[
+                "run",
+                bin.to_str().unwrap(),
+                "--budget",
+                "1",
+                "--",
+                "latency",
+            ],
+        );
+        assert!(!budgeted.status.success());
+        assert!(
+            String::from_utf8_lossy(&budgeted.stderr).contains("step budget of 1"),
+            "native run ignored --budget:\n{}",
+            String::from_utf8_lossy(&budgeted.stderr)
+        );
+    }
+}
+
 #[test]
 fn wasi_fs_fault_errors_and_short_io_are_observable() {
     let directory = tempdir().unwrap();
@@ -6510,6 +6714,16 @@ fn main() {
             assert!((1..6).contains(&written), "written={written}");
             println!("NATIVE_FS_FAULT_RESULT mode=short_write written={written}");
         }
+        "latency" => {
+            // Virtual time observed from inside the guest, either side of one
+            // eligible filesystem operation.
+            std::fs::write("/fault-latency", b"abc").expect("setup write");
+            let before = std::time::Instant::now();
+            let meta = std::fs::metadata("/fault-latency").expect("metadata");
+            let elapsed = before.elapsed().as_nanos();
+            assert_eq!(meta.len(), 3);
+            println!("NATIVE_FS_FAULT_RESULT mode=latency elapsed_nanos={elapsed}");
+        }
         "short_read" => {
             std::fs::write("/fault-short-read", b"abcdef").expect("setup write_all");
             let mut file = OpenOptions::new()
@@ -6638,6 +6852,90 @@ fn native_fs_fault_errors_and_shorts_are_deterministic_replayable_and_reported()
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_fs_latency_is_observable_in_the_guest_and_replays_flag_free() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("fs_fault.rs");
+    fs::write(&source, FS_FAULT_SOURCE).unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("fs-latency");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let bin = bin.to_str().unwrap().to_owned();
+    let elapsed_of = |output: &std::process::Output| -> u128 {
+        stdout_line_with(output, "NATIVE_FS_FAULT_RESULT")
+            .rsplit_once('=')
+            .expect("elapsed_nanos=N")
+            .1
+            .parse()
+            .expect("elapsed nanos")
+    };
+
+    // Control: a knob-free run advances no virtual time across the operation.
+    let clean = invoke_in(workspace, &["run", &bin, "--seed", "4", "--", "latency"]);
+    assert_eq!(
+        elapsed_of(&clean),
+        0,
+        "a knob-free run must not delay fs ops"
+    );
+
+    // MUST delay: the same fixed 1ms latency the WASI leg asserts, seen by the
+    // native guest as virtual elapsed time — the two families share the ONE
+    // Context-side application site, so neither doubles it nor misses it.
+    let trace = directory.path().join("fs-latency.patina");
+    let args = vec![
+        "run".to_string(),
+        bin.clone(),
+        "--seed".to_string(),
+        "4".to_string(),
+        "--record".to_string(),
+        trace.to_str().unwrap().to_string(),
+        "--fs-latency-nanos".to_string(),
+        "1000000..1000000".to_string(),
+        "--".to_string(),
+        "latency".to_string(),
+    ];
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let delayed = invoke_in(workspace, &refs);
+    let elapsed = elapsed_of(&delayed);
+    assert!(
+        elapsed >= 1_000_000 && elapsed % 1_000_000 == 0,
+        "native guest saw {elapsed}ns across the fs op, not whole 1ms latencies"
+    );
+    let stderr = String::from_utf8_lossy(&delayed.stderr);
+    assert!(
+        stderr.contains("PATINA_FS_FAULT_REPORT") && stderr.contains("vacuous=0"),
+        "fs fault report must prove the latency knob was non-vacuous:\n{stderr}"
+    );
+
+    // Flag-free replay restores the latency from the trace and reproduces it.
+    let replayed = invoke_in(workspace, &["replay", &bin, trace.to_str().unwrap()]);
+    assert_eq!(elapsed_of(&replayed), elapsed);
+
+    // Re-supplying the knob on replay is refused: the trace is authoritative.
+    let rejected = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "replay",
+            &bin,
+            trace.to_str().unwrap(),
+            "--fs-latency-nanos",
+            "1..2",
+        ],
+    );
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("--fs-latency-nanos"));
+}
+
 // TCP *stream* path — the surface the `--net-jitter-nanos`/`--net-drop-permille`
 // knobs historically ignored.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -6666,6 +6964,82 @@ fn main() {
     println!("TCP_ECHO_RESULT sum={} reply={}", sum, u32::from_le_bytes(reply));
 }
 "#;
+
+// The TCP round trip, timed on the virtual clock. `--net-latency-nanos` was a
+// datagram-only knob in practice: SimNet configured a base latency but skipped it
+// on the stream path, so a managed TCP guest saw zero link delay however the
+// operator set it. This guest reports the virtual time an echo round trip takes,
+// which is the operator-visible consequence.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const TCP_LATENCY_SOURCE: &str = r#"
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::thread;
+use std::time::Instant;
+
+fn main() {
+    let listener = TcpListener::bind("127.0.0.1:6124").expect("bind");
+    let server = thread::spawn(move || {
+        let (mut sock, _) = listener.accept().expect("accept");
+        let mut got = [0u8; 4];
+        sock.read_exact(&mut got).expect("read_exact");
+        sock.write_all(&got).expect("reply");
+    });
+    let mut client = TcpStream::connect("127.0.0.1:6124").expect("connect");
+    let started = Instant::now();
+    client.write_all(b"ping").expect("write");
+    let mut reply = [0u8; 4];
+    client.read_exact(&mut reply).expect("read reply");
+    let elapsed = started.elapsed().as_nanos();
+    server.join().unwrap();
+    assert_eq!(&reply, b"ping");
+    println!("TCP_LATENCY_RESULT elapsed_nanos={elapsed}");
+}
+"#;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_tcp_base_latency_delays_the_stream_round_trip() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("tcp_latency.rs");
+    fs::write(&source, TCP_LATENCY_SOURCE).unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("tcp-latency");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let bin = bin.to_str().unwrap().to_owned();
+    let elapsed_of = |output: &std::process::Output| -> u128 {
+        stdout_line_with(output, "TCP_LATENCY_RESULT")
+            .rsplit_once('=')
+            .expect("elapsed_nanos=N")
+            .1
+            .parse()
+            .expect("elapsed nanos")
+    };
+
+    // Control: a zero-latency link completes the round trip in no virtual time.
+    let clean = invoke_in(workspace, &["run", &bin, "--seed", "5"]);
+    assert_eq!(elapsed_of(&clean), 0);
+
+    // MUST delay: each of the two segments (request and reply) carries the base
+    // latency, so the round trip costs at least twice it.
+    let delayed = invoke_in(
+        workspace,
+        &["run", &bin, "--seed", "5", "--net-latency-nanos", "1000000"],
+    );
+    let elapsed = elapsed_of(&delayed);
+    assert!(
+        elapsed >= 2_000_000,
+        "TCP base latency is inert on the stream path: round trip took {elapsed}ns"
+    );
+}
 
 // TCP-stream fault injection end to end. The datagram-only reputation of the net
 // fault knobs was a real bug (they were inert on the stream path); this locks in

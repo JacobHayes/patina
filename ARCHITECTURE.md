@@ -230,7 +230,7 @@ External controls include:
 - run budget (`--budget`);
 - trace path (`--record`, the `replay` verb);
 - explicit host-capture allowlists (`--mount`);
-- fault knobs (`--fs-crash-at`, `--fs-error-permille`, `--fs-short-permille`, `--net-drop-permille`, …) and buggify knobs;
+- fault knobs (`--fs-crash-at`, `--fs-error-permille`, `--fs-short-permille`, `--fs-latency-nanos`, `--net-drop-permille`, `--net-latency-nanos`, …) and buggify knobs, accepted uniformly by every family;
 - exploration-policy selection (`--sched-pct`, `--starve`, `--swarm`);
 - liveness oracles (`--liveness-watchdog`, `--converge-within`);
 - simple key/value parameters (`--param`, exposed through `Context::param`).

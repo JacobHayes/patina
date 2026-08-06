@@ -109,6 +109,12 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
 - Inert knobs are bugs. Fault, schedule, coverage, and buggify controls need
   reports that show whether they affected the run; vacuous clean passes should be
   warnings or classified failures when the tier depends on them.
+- A knob that several execution families each plumb through their own
+  hand-maintained list will eventually be carried by some families and dropped by
+  the rest, and a dropped knob looks exactly like a clean run. Derive every
+  family's plumbing from ONE table keyed to the flag registry, and gate that
+  table against the registry with a test. Two silent-inertness bugs of this shape
+  were found and structurally removed while unifying the fault knobs.
 - Failure classifiers must be deterministic and self-tested. A new class should
   have a fixture that fires it, and a clean run should not hide unclassified or
   infrastructure failures.

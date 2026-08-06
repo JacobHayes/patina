@@ -20,6 +20,12 @@ pub struct FaultFs<D> {
     short_rng: SplitMix64,
     error_permille: u16,
     short_permille: u16,
+    /// Whether the run's Context-side fs-latency knob is live. The wrapper
+    /// injects no latency itself — latency needs the clock, which only the
+    /// Context owns — but it is the independent observer of the eligible-op
+    /// count that the latency vacuity verdict is judged against, so a
+    /// latency-only run must still produce a report.
+    latency_live: bool,
     /// Read/write operations long enough for a truncation to bind, i.e. the
     /// firing opportunities the short-I/O rate actually saw.
     short_opportunities: u64,
@@ -34,6 +40,7 @@ impl<D> FaultFs<D> {
             short_rng: SplitMix64::new(domain_seed(seed, fault_domain::FAULT_FS_SHORT)),
             error_permille: 0,
             short_permille: 0,
+            latency_live: false,
             short_opportunities: 0,
             report: FsFaultReport::default(),
         }
@@ -59,6 +66,14 @@ impl<D> FaultFs<D> {
             "FaultFs::short_permille must be within [0, 1000]"
         );
         self.short_permille = permille;
+        self
+    }
+
+    /// Declare that the run's Context-side fs-latency knob is live, so the
+    /// wrapper reports its eligible-op count even when no wrapper-owned knob is
+    /// set. See [`FaultFs::latency_live`]'s field documentation.
+    pub fn latency_live(mut self, live: bool) -> Self {
+        self.latency_live = live;
         self
     }
 
@@ -334,7 +349,7 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
     /// the fault plane did. Deciding whether the numbers are worth printing —
     /// and whether they are vacuous — belongs to the consumer.
     fn fault_report(&self) -> Option<FsFaultReport> {
-        let modeled = self.error_permille != 0 || self.short_permille != 0;
+        let modeled = self.error_permille != 0 || self.short_permille != 0 || self.latency_live;
         (modeled || self.inner.fault_report().is_some()).then(|| self.merged_report())
     }
 }

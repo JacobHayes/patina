@@ -171,10 +171,12 @@ reproduces them flag-free:
 
 - **Filesystem faults**: `--fs-crash-at open|write|sync|close[:N]` with
   block- or byte-granularity torn writes (`--fs-torn-granularity`), plus
-  rate-based `--fs-error-permille` (seeded EIO/ENOSPC/EINTR) and
-  `--fs-short-permille` (short reads/writes).
+  rate-based `--fs-error-permille` (seeded EIO/ENOSPC/EINTR),
+  `--fs-short-permille` (short reads/writes), and `--fs-latency-nanos MIN..MAX`
+  (seeded delay before every eligible fs op, so slow I/O reorders against timers
+  and peers).
 - **Network faults**: `--net-drop-permille`, `--net-jitter-nanos MIN..MAX`,
-  `--net-latency-nanos`.
+  `--net-latency-nanos` (base delivery latency, on datagrams and TCP alike).
 - **Timing**: `--sleep-jitter-nanos MIN..MAX` on every guest sleep.
 - **Schedule exploration** (native): `--sched-pct` (PCT priority scheduling),
   `--starve` (bounded starvation intervals), `--swarm` (seed-derived fault-class
@@ -279,7 +281,8 @@ then `run` the resulting artifact.
 
 - **Seeded determinism** for ordinary `std`: filesystem (including directories
   and symlinks), virtual clocks (`SystemTime`/`Instant`/sleeps), entropy,
-  UDP datagrams and zero-latency TCP over a simulated network, threads with
+  UDP datagrams and TCP over a simulated network (both honor the configured
+  base link latency), threads with
   mutex/condvar/parking gated one-at-a-time through a deterministic scheduler,
   and deterministic process-state constants.
 - **Stock tokio** on macOS and Linux: kqueue/epoll readiness reactors are
@@ -326,8 +329,8 @@ silently:
   `patina_dst::` in code.
 - **No process spawning**: `fork`/`posix_spawn` and friends are denied
   (a guest that reaches them aborts deterministically). One process per run.
-- **IPv6 and DNS fail closed**; TCP over the simulated network is
-  zero-latency only (non-zero TCP latency is unfinished; UDP latency works).
+- **IPv6 and DNS fail closed**. TCP and UDP over the simulated network both
+  honor `--net-latency-nanos` and the seeded jitter/drop knobs.
 - **Not a hypervisor**: unsupported FFI, dynamic loading, inline assembly
   reading clocks/entropy, and direct host APIs are refused, not virtualized.
   Patina makes *mostly-Rust* programs deterministic; it does not promise to run

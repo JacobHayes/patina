@@ -28,6 +28,10 @@ pub mod fault_domain {
 
     /// CrashFs torn-write/crash-model stream.
     pub const FS_CRASH: &str = "patina.fs.crash";
+    /// Context-side per-operation filesystem latency stream. Latency needs the
+    /// clock, so unlike the error/short streams it is drawn by the Context rather
+    /// than by a wrapper driver.
+    pub const FS_LATENCY: &str = "patina.fs.latency";
 
     /// Swarm per-class coin for crash/torn-write knobs.
     pub const SWARM_CRASH: &str = "patina.swarm.crash";
@@ -39,6 +43,8 @@ pub mod fault_domain {
     pub const SWARM_FS_ERROR: &str = "patina.swarm.fs_error";
     /// Swarm per-class coin for filesystem short-I/O injection.
     pub const SWARM_FS_SHORT: &str = "patina.swarm.fs_short";
+    /// Swarm per-class coin for filesystem operation latency.
+    pub const SWARM_FS_LATENCY: &str = "patina.swarm.fs_latency";
     /// Swarm per-class coin for network drop.
     pub const SWARM_NET_DROP: &str = "patina.swarm.net_drop";
     /// Swarm per-class coin for network base latency.

@@ -442,6 +442,13 @@ const FAULT_FLAGS: &[Flag] = &[
         false,
     ),
     f(
+        "--fs-latency-nanos",
+        None,
+        Value::Required("MIN..MAX", Kind::NanosRange),
+        "Add seeded latency drawn from [MIN, MAX] to every fault-eligible fs op, before it runs.",
+        false,
+    ),
+    f(
         "--sleep-jitter-nanos",
         None,
         Value::Required("MIN..MAX", Kind::NanosRange),
@@ -460,6 +467,13 @@ const FAULT_FLAGS: &[Flag] = &[
         None,
         Value::Required("N", Kind::Permille),
         "Drop datagrams at N per-mille (0..=1000).",
+        false,
+    ),
+    f(
+        "--net-latency-nanos",
+        None,
+        Value::Required("N", Kind::U64),
+        "Base per-datagram/segment delivery latency in nanoseconds.",
         false,
     ),
 ];
@@ -709,9 +723,9 @@ const RUN: Verb = Verb {
     name: "run",
     summary: "Build (on the fly) and/or run an artifact under the deterministic runtime.",
     synopsis: &[
-        "cargo patina run [--seed N | --record PATH] [FAULT OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]",
-        "cargo patina run <MODULE.wasm> [--seed N | --record PATH] [--fuel N] [--arg VALUE]... [--env K=V]... [--preopen GUEST[:ro|:rw]]... [FAULT OPTIONS] [BUGGIFY/LIVENESS OPTIONS]",
-        "cargo patina run <BINARY> [--seed N | --record PATH] [--env K=V]... [--coverage-out PATH] [--fingerprint STR] [--mount HOST_DIR] [--harness] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL]... [-- PROGRAM ARGS]",
+        "cargo patina run [--seed N | --record PATH] [FAULT/BUGGIFY OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]",
+        "cargo patina run <MODULE.wasm> [--seed N | --record PATH] [--fuel N] [--budget N] [--arg VALUE]... [--env K=V]... [--preopen GUEST[:ro|:rw]]... [FAULT OPTIONS] [BUGGIFY/LIVENESS OPTIONS]",
+        "cargo patina run <BINARY> [--seed N | --record PATH] [--env K=V]... [--budget N] [--coverage-out PATH] [--fingerprint STR] [--mount HOST_DIR] [--harness] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL]... [-- PROGRAM ARGS]",
         "cargo patina run <SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [--release] [RUN OPTIONS]   (builds on the fly, then runs)",
     ],
     prose: "\
@@ -758,15 +772,12 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
                     "Record boundary operations and outcomes to PATH.",
                     false,
                 ),
-                only(
-                    f(
-                        "--budget",
-                        None,
-                        Value::Required("STEPS", Kind::U64),
-                        "Maximum boundary operations before explicit failure (cargo family).",
-                        false,
-                    ),
-                    &[Family::Cargo],
+                f(
+                    "--budget",
+                    None,
+                    Value::Required("STEPS", Kind::U64),
+                    "Maximum boundary operations before explicit failure.",
+                    false,
                 ),
                 only(
                     f(
@@ -827,13 +838,6 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
                     false,
                 ),
                 f(
-                    "--net-latency-nanos",
-                    None,
-                    Value::Required("N", Kind::U64),
-                    "Base per-datagram delivery latency.",
-                    false,
-                ),
-                f(
                     "--env",
                     None,
                     Value::Required("K=V", Kind::KeyValue),
@@ -869,8 +873,8 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
             flags: NATIVE_SCHEDULE_FLAGS,
         },
         Group {
-            title: "Buggify options (run <MODULE.wasm> & run <BINARY>)",
-            families: &[Family::Wasi, Family::Native],
+            title: "Buggify options",
+            families: &[Family::Cargo, Family::Wasi, Family::Native],
             flags: BUGGIFY_FLAGS,
         },
         Group {
@@ -891,8 +895,8 @@ const TEST: Verb = Verb {
     name: "test",
     summary: "Run tests under Patina: Cargo-family by default, or a shim-linked native libtest harness for a source package.",
     synopsis: &[
-        "cargo patina test [--seed N | --record PATH] [FAULT OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]",
-        "cargo patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test [--seed N | --seeds N] [--release] [--yield-points] [FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]",
+        "cargo patina test [--seed N | --record PATH] [FAULT/BUGGIFY OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]",
+        "cargo patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test [--seed N | --seeds N] [--release] [--budget N] [--yield-points] [FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]",
     ],
     prose: "\
 With no source positional, `test` is the Cargo package family: the seed/record \
@@ -934,15 +938,12 @@ copy-paste `test` and `replay` repro commands.",
                     ),
                     &[Family::Cargo],
                 ),
-                only(
-                    f(
-                        "--budget",
-                        None,
-                        Value::Required("STEPS", Kind::U64),
-                        "Maximum boundary operations before explicit failure (Cargo-family form).",
-                        false,
-                    ),
-                    &[Family::Cargo],
+                f(
+                    "--budget",
+                    None,
+                    Value::Required("STEPS", Kind::U64),
+                    "Maximum boundary operations before explicit failure.",
+                    false,
                 ),
                 only(
                     f(
@@ -1010,8 +1011,8 @@ copy-paste `test` and `replay` repro commands.",
             flags: FAULT_FLAGS,
         },
         Group {
-            title: "Buggify options (native harness mode)",
-            families: &[Family::Harness],
+            title: "Buggify options",
+            families: &[Family::Cargo, Family::Harness],
             flags: BUGGIFY_FLAGS,
         },
         Group {
@@ -1275,7 +1276,7 @@ only --fingerprint, --mount, --coverage-out, --harness, and the \
         Refusal {
             families: &[Family::Cargo, Family::Wasi, Family::Native],
             flags: &[FAULT_FLAGS, BUGGIFY_FLAGS, NATIVE_SCHEDULE_FLAGS],
-            names: &["--seed", "--record", "--env", "--net-latency-nanos"],
+            names: &["--seed", "--record", "--env"],
             message: "replay restores run semantics from the trace and does not accept {flag}; the trace is authoritative",
         },
         // Native traces are single-timeline and a native run cannot branch.
@@ -2019,6 +2020,14 @@ pub const ENVIRONMENT: &[EnvVar] = &[
 /// The verb entry named `name`, if any.
 pub fn verb(name: &str) -> Option<&'static Verb> {
     VERBS.iter().copied().find(|verb| verb.name == name)
+}
+
+/// Every seed-driven fault knob's flag name, in registry order. The gate surface
+/// for the CLI's shared knob table, so a knob added to [`FAULT_FLAGS`] cannot be
+/// forwarded by one family and silently dropped by another.
+#[cfg(test)]
+pub fn fault_flag_names() -> impl Iterator<Item = &'static str> {
+    FAULT_FLAGS.iter().map(|flag| flag.name)
 }
 
 /// The registered value-arity of a flag (matched by its long OR short name)

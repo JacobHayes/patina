@@ -1745,13 +1745,24 @@ pub(crate) unsafe fn sud_host_syscall(
 fn runtime_errno(error: &RuntimeError) -> c_int {
     match error {
         RuntimeError::Effect(error) => effect_errno(error),
-        RuntimeError::StepBudgetExceeded { .. } => EOVERFLOW,
+        // An exhausted step budget is a supervisor-imposed stop, not a
+        // recoverable I/O error: handing the guest an errno lets it swallow the
+        // bound and keep going (every subsequent boundary op failing the same
+        // way), so the budget would not actually bound anything. Name it and
+        // abort, the way a liveness violation does.
+        RuntimeError::StepBudgetExceeded { budget } => {
+            eprintln!(
+                "patina: step budget of {budget} boundary operations was exhausted; \
+                 the run is stopped"
+            );
+            abort_after_flushing_output()
+        }
         // A liveness-watchdog violation is fatal and fail-closed: the run has
         // wedged into a virtual-time no-progress churn. Returning an errno the
         // guest could ignore would let it keep spinning, so abort loudly instead —
         // the runtime has already emitted the classifiable PATINA_LIVENESS marker
         // to the captured stderr.
-        RuntimeError::Liveness { .. } => abort_with_liveness(),
+        RuntimeError::Liveness { .. } => abort_after_flushing_output(),
         RuntimeError::Config(_)
         | RuntimeError::Io { .. }
         | RuntimeError::Trace(_)
@@ -1761,11 +1772,12 @@ fn runtime_errno(error: &RuntimeError) -> c_int {
     }
 }
 
-/// Flush the captured guest output (which already contains the runtime's
-/// `PATINA_LIVENESS` marker) and abort the wedged run. `abort()` skips the
-/// atexit-driven shutdown flush, so the explicit flush here is what preserves the
-/// marker — mirroring [`abort_with_init_error`] / [`abort_with_buggify_marker`].
-fn abort_with_liveness() -> ! {
+/// Flush the captured guest output — which already carries the marker line
+/// explaining why (`PATINA_LIVENESS`, an exhausted step budget) — and abort the
+/// run. `abort()` skips the atexit-driven shutdown flush, so the explicit flush
+/// here is what preserves that marker; mirrors [`abort_with_init_error`] /
+/// [`abort_with_buggify_marker`].
+fn abort_after_flushing_output() -> ! {
     let _ = flush_captured_stdio();
     std::process::abort();
 }

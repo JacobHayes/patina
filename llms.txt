@@ -73,7 +73,10 @@ unknown option.
   `PATINA_EXPLORE_COMPLETE start=... seeds=...`.
 - `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults]`
   Config-driven deterministic fault-and-schedule sweep: every generation's seed
-  and knobs are a pure function of the generation number, outcomes are
+  and knobs are a pure function of the generation number. `--faults` bands the
+  fs error/short/latency rates, the crash PLACEMENT (op class + ordinal, plus
+  byte-granularity tearing half the time), the net drop/latency, and the sleep
+  jitter, so successive generations explore different fault shapes. Outcomes are
   classified into eight classes, novel failure signatures are deduped with saved
   traces, SDK site coverage is folded into `<out-dir>/sites.json` (schema
   `patina.campaign.sites/v1`), and native yield-point edge coverage is folded
@@ -111,8 +114,9 @@ unknown option.
 
 ## Fault + buggify knobs (seed-driven, default off; recorded into the trace)
 
-- `--fs-crash-at open|write|sync|close[:N]`, `--fs-torn-granularity block|byte`, `--fs-error-permille N`, `--fs-short-permille N`
+- `--fs-crash-at open|write|sync|close[:N]`, `--fs-torn-granularity block|byte`, `--fs-error-permille N`, `--fs-short-permille N`, `--fs-latency-nanos MIN..MAX`
 - `--sleep-jitter-nanos MIN..MAX`, `--net-jitter-nanos MIN..MAX`, `--net-drop-permille N`, `--net-latency-nanos N`
+- Every knob above is accepted by `run` and `test` in ALL families (Cargo package, WASI, native) and refused by `replay`, which restores them from the trace.
 - `--buggify[=PERMILLE]`, `--buggify-activation-permille N`, `--buggify-cutoff-nanos N`, `--buggify-after-setup`
 
 ## Output options (all verbs; stripped before routing, never reach the guest)

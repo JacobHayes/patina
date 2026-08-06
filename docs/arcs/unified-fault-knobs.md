@@ -1,9 +1,11 @@
 # Unified Fault-Knob System — Design
 
 Status: design approved 2026-07-30; Wave A (`domain_seed`/`fault_domain` registry, nested
-`FaultConfig`, FaultNet permille migration, swarm coverage gate) and Wave B (`FaultFs` errors +
-short I/O) implemented 2026-08-06; Waves C-F remain planned. The §0 file:line references are as
-verified at design time (post-e135c94) and have since moved.
+`FaultConfig`, FaultNet permille migration, swarm coverage gate), Wave B (`FaultFs` errors +
+short I/O) and Wave C (fs latency, `--net-latency-nanos` in the shared fault group, TCP base
+latency, `--budget`/`test`-buggify parity, the crash-placement campaign band) implemented
+2026-08-06; Waves D-F remain planned. The §0 file:line references are as verified at design
+time (post-e135c94) and have since moved.
 
 ## 0. Verified current state (what this builds on, with the gaps found)
 
@@ -44,7 +46,9 @@ Defects found while verifying, which the unified design fixes rather than paperi
 2. **TCP base latency is not applied.** `SimNet::tcp_send` explicitly skips `base_latency_nanos`
    ("deferred to wrapper-level", net-sim:556), and the wrapper that would add it (`LatencyNet`)
    is never installed by `with_default_drivers`. In managed runs `--net-latency-nanos` affects
-   UDP only. This is the user-reported "non-zero TCP latency" gap.
+   UDP only. This is the user-reported "non-zero TCP latency" gap. FIXED in Wave A (the segment
+   path adds the base latency); Wave C closed the loop end to end from the CLI and corrected the
+   "zero-latency TCP" claim in README/VALIDATION/IMPLEMENTATION.
 3. **No I/O-fault errnos exist.** `ErrorCode` (patina-abi:262) has no EIO/ENOSPC/EINTR
    equivalents, so fs error injection needs new ABI vocabulary, not just a wrapper.
 4. **Code-only fault surface.** `SimNet::partition()` (net-sim:69) — a first-class DST fault —
@@ -375,9 +379,9 @@ fault be replayed flag-free, and is there standalone point injection?*
 
 | Domain | Cargo (explicit/test) | WASI | Native | Notes / gaps |
 |---|---|---|---|---|
-| fs durability (crash, torn writes) | finder: ✗ · repro: ✓ `--fs-crash-at` + replay | same | same | **Gap: no rate-based crash finder** — crash_at is point-only; campaign `--faults` never varies it. Fix: seed-drawn crash placement (an `fs_crash` campaign band drawing op-class+ordinal from the generation hash) — cheap, no new runtime knob needed. |
+| fs durability (crash, torn writes) | finder: ✓ (Wave C) · repro: ✓ `--fs-crash-at` + replay | same | same | Closed in Wave C by seed-drawn crash placement: `campaign --faults` draws the op class and a low ordinal from the generation hash (and tears at byte granularity half the time), so successive generations crash at different points in the guest's I/O sequence. No new runtime knob was needed. |
 | fs I/O errors / short I/O / latency | finder: ✗ → §2 · repro: replay after §2 | same | same | Point injection (`--fs-error-at op:N`) deliberately deferred; seed+replay covers reproduction. |
-| net delivery (drop/jitter/latency) | finder: ✓ (latency: no CLI) · repro: replay ✓ | same | finder: ✓ full · repro: ✓ | Latency CLI family gap fixed in Wave C; TCP base latency is defect 2. No point injection ("drop packet N") — replay suffices. |
+| net delivery (drop/jitter/latency) | finder: ✓ · repro: replay ✓ | same | finder: ✓ full · repro: ✓ | Latency CLI family gap fixed in Wave C (`--net-latency-nanos` moved into the shared `FAULT_FLAGS`); TCP base latency (defect 2) applies on the stream path. No point injection ("drop packet N") — replay suffices. |
 | net partition | finder: ✗ · repro: ✗ | ✗ | ✗ | **Code-only** (`SimNet::partition`, §7). Fix: `--net-partition A,B` (static) + seeded timed partitions with heal windows tied to the liveness converge arm (§8 #1). |
 | TCP connect/reset | ✗ | ✗ | ✗ | §8 #1. |
 | DNS | finder/repro: ✗ → §3 | N/A (no wasip1 surface) | ✗ → §3 | Family exception documented. |
@@ -407,8 +411,8 @@ vs the help.rs registry. Findings, with dispositions:
 | `CrashFsBuilder::torn_write_granularity(bytes)` (fs-crash:203) | only `block\|byte` enum | **Delete the arbitrary-bytes code path** unless a use appears — no-cruft says don't carry a hidden third mode the CLI can't spell. |
 | `CrashFsBuilder::model_rename_atomicity` / `model_directory_durability` / `directory_loss_probability` (fs-crash:222-234) | none | **Flag them** in a later fs-durability wave (`--fs-rename-atomic`, `--fs-dir-loss-permille`); until then defaults-only — acceptable since nothing in-tree varies them, but tracked here so the gap is explicit. |
 | `FaultNet::drop_one_in/duplicate_one_in`, `LatencyNet` knobs | none (explicit-API wrappers) | FaultNet migrates to permille (Wave A). Duplication becomes a managed knob (`--net-duplicate-permille`, Wave E). LatencyNet stays an explicit-API composition tool, exempt: it duplicates managed knobs rather than adding new ones. |
-| `RuntimeConfig::step_budget` | `--budget` cargo family only | **Extend `--budget` to wasi/native run** — a boundary-op budget is family-neutral (wasi's `--fuel` bounds wasm execution, a different budget; both legitimate). |
-| Buggify knobs on cargo `test` | env-only (`PATINA_BUGGIFY*`) | **Add `BUGGIFY_FLAGS` to `test`** — the runtime path (`apply_buggify_env`) is already family-neutral; only the parser omits them. |
+| `RuntimeConfig::step_budget` | `--budget` on every family (Wave C) | DONE: `--budget` is registered for the Cargo, WASI, native and native-harness families; wasi's `--fuel` remains the separate wasm-execution budget. |
+| Buggify knobs on cargo `test` | `BUGGIFY_FLAGS` on `run`/`test` (Wave C) | DONE: the Cargo family parses the buggify flags and forwards them over the same `PATINA_BUGGIFY*` control plane it forwards fault knobs on, scrubbing the ambient environment first. |
 | Schedule policy on cargo family | env-only (`PATINA_SCHED_*`) | Defer with a decision note: the explicit-API family owns its scheduler in code; revisit when a cargo-family exploration campaign exists. |
 | `HarnessBuilder` overlay (harness crate) | by design | Exempt: the code-side twin of the CLI control plane — flows through the same `RuntimeConfig` and reconciles identically. Documented, not a violation. |
 
@@ -479,11 +483,18 @@ check ladder; Linux 8-gate at wave boundaries.
   errno maps; `FaultFs<D>` wrapper + install as `FaultFs<CrashFs>`; `FsFaultReport` + trait
   method + finalization emission; `FaultConfigRecord` fields; CLI flags + replay reject-list +
   campaign bands + registry rows.
-- **Wave C — latency unification + parity fixes (runtime-touching, full battery).** Context fs
-  latency (`--fs-latency-nanos`) with its efficacy/vacuity legs; move `--net-latency-nanos` to
-  `FAULT_FLAGS` (all families); SimNet TCP base-latency application (defect 2); the §7
+- **Wave C — latency unification + parity fixes (runtime-touching, full battery). DONE.**
+  Context fs latency (`--fs-latency-nanos`) with its efficacy/vacuity legs; `--net-latency-nanos`
+  moved into `FAULT_FLAGS` (all families); SimNet TCP base latency verified end to end from the
+  CLI (defect 2, fixed in Wave A) and the stale "zero-latency TCP" docs corrected; the §7
   `--budget` and `test`-buggify family-parity fixes; the seed-drawn crash-placement campaign
-  band (§6 fs-durability finder gap).
+  band (§6 fs-durability finder gap). Two parity bugs found while unifying the plumbing and
+  fixed in the same change: the native libtest harness parsed `--fs-error-permille`/
+  `--fs-short-permille` but never re-emitted them to its child `run` (silently inert), and the
+  Cargo family forwarded a bare optional-value flag's value to Cargo (so `--buggify 500` meant
+  "buggify at the default rate, and 500 is a test filter"). Both are now structurally prevented:
+  every family's fault plumbing enumerates ONE knob table gated against the flag registry, and a
+  plain token after a bare optional-value flag is a loud parse error.
 - **Wave D — DNS (runtime-touching, full battery).** SimNet wildcard-bind routing rule;
   `Operation::DnsResolve` + `Context::dns_resolve`; getaddrinfo interposer + real
   `freeaddrinfo`; `--dns-entry`/`Kind::DnsEntry` + fault knobs + `DnsConfigRecord` +

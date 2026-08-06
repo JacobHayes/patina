@@ -5,6 +5,7 @@
 use std::collections::BTreeSet;
 
 use patina_dst_abi::{ClockKind, OpenFlags, SendDisposition};
+use patina_dst_driver_api::FsFaultReport;
 use patina_dst_runtime::{Context, CrashOp, RuntimeConfig, TornGranularity};
 use tempfile::tempdir;
 
@@ -403,4 +404,100 @@ fn net_faults_delay_the_tcp_stream_without_losing_data() {
         "a dropped TCP segment is retransmitted (delayed)"
     );
     assert_eq!(drop_bytes, b"hello", "TCP drop must never lose data");
+}
+
+/// Open a file, write, sync and read it back — five fault-eligible filesystem
+/// operations plus one ineligible close — reporting the virtual monotonic time
+/// afterwards and the run's filesystem fault report.
+fn fs_ops_elapsed_and_report(config: RuntimeConfig) -> (u64, Option<FsFaultReport>) {
+    let mut context = Context::from_config(config).unwrap();
+    let fd = context
+        .fs_open("/latency.log", OpenFlags::create_truncate_write())
+        .unwrap();
+    context.fs_write(fd, b"record").unwrap();
+    context.fs_sync(fd).unwrap();
+    context.fs_set_len(fd, 6).unwrap();
+    context.fs_metadata("/latency.log").unwrap();
+    context.fs_close(fd).unwrap();
+    let elapsed = context.now(ClockKind::Monotonic).unwrap();
+    let report = context.fs_fault_report();
+    context.finish().unwrap();
+    (elapsed, report)
+}
+
+/// Five eligible operations: open, write, sync, set_len, metadata. `close` is
+/// outside the eligible set, so it is deliberately not counted.
+const ELIGIBLE_FS_OPS: u64 = 5;
+
+#[test]
+fn fs_latency_delays_every_eligible_operation_and_never_the_ineligible_ones() {
+    // Control: with no fs fault knob the clock never moves and no report exists
+    // at all, so a knob-free run is unchanged.
+    let (clean_elapsed, clean_report) = fs_ops_elapsed_and_report(RuntimeConfig::seeded(1));
+    assert_eq!(clean_elapsed, 0);
+    assert!(clean_report.is_none());
+
+    // MUST delay: a fixed 1_000ns latency delays each of the five eligible ops
+    // and nothing else, so elapsed is exactly five microseconds' worth. An
+    // eligible-op miscount or a delayed `close` both show up here.
+    let (elapsed, report) =
+        fs_ops_elapsed_and_report(RuntimeConfig::seeded(1).with_fs_latency_nanos(1_000, 1_000));
+    assert_eq!(elapsed, ELIGIBLE_FS_OPS * 1_000);
+    let report = report.expect("a live fs latency knob must report");
+    assert_eq!(report.latency_applied, ELIGIBLE_FS_OPS);
+    assert_eq!(report.eligible_ops, ELIGIBLE_FS_OPS);
+    assert!(report.latency_vacuity_diagnosable);
+    assert!(
+        !report.is_vacuous(),
+        "a latency knob that delayed every eligible op is not vacuous: {report:?}"
+    );
+}
+
+#[test]
+fn fs_latency_is_seed_deterministic_and_seed_varying() {
+    let elapsed_for = |seed: u64| {
+        fs_ops_elapsed_and_report(RuntimeConfig::seeded(seed).with_fs_latency_nanos(500, 1_500)).0
+    };
+    // Deterministic per seed, and every draw lands inside the configured range.
+    let first = elapsed_for(7);
+    assert_eq!(first, elapsed_for(7));
+    assert!((ELIGIBLE_FS_OPS * 500..=ELIGIBLE_FS_OPS * 1_500).contains(&first));
+
+    // Genuinely seed-driven rather than a fixed offset.
+    let distinct: BTreeSet<u64> = (0..16).map(elapsed_for).collect();
+    assert!(distinct.len() > 1, "fs latency never varied across seeds");
+}
+
+#[test]
+fn a_decision_free_fs_latency_range_perturbs_nothing_and_is_not_diagnosed_vacuous() {
+    // A `0..0` range applies no delay by construction. That is an inert knob,
+    // not an inert code path, so the vacuity diagnostic must stay silent —
+    // otherwise the warning fires on healthy runs and stops meaning anything.
+    let (elapsed, report) =
+        fs_ops_elapsed_and_report(RuntimeConfig::seeded(1).with_fs_latency_nanos(0, 0));
+    assert_eq!(elapsed, 0);
+    let report = report.expect("a live knob still reports");
+    assert_eq!(report.latency_applied, 0);
+    assert!(!report.latency_vacuity_diagnosable);
+    assert!(!report.is_vacuous());
+}
+
+#[test]
+fn fs_latency_replays_self_contained_without_re_supplying_flags() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("fs-latency.patina");
+    let (recorded_elapsed, recorded_report) = fs_ops_elapsed_and_report(
+        RuntimeConfig::record(11, &path, "patina-test").with_fs_latency_nanos(400, 900),
+    );
+    assert!(recorded_elapsed >= ELIGIBLE_FS_OPS * 400);
+    assert_eq!(
+        recorded_report.expect("report").latency_applied,
+        ELIGIBLE_FS_OPS
+    );
+
+    // A flag-free replay restores the latency configuration from the trace and
+    // reproduces the identical virtual-time profile.
+    let (replayed_elapsed, _) =
+        fs_ops_elapsed_and_report(RuntimeConfig::replay(&path, "patina-test"));
+    assert_eq!(recorded_elapsed, replayed_elapsed);
 }

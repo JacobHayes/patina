@@ -2113,6 +2113,8 @@ enum RunValue {
     NanosRange { lo: u64, hi: u64 },
     /// A valueless switch (`help::Kind`-less, `Value::None`).
     Switch,
+    /// A value with its own grammar (a crash spec, an enum member).
+    Text(String),
 }
 
 impl RunValue {
@@ -2121,6 +2123,7 @@ impl RunValue {
             RunValue::Int(value) => value.to_string(),
             RunValue::NanosRange { lo, hi } => format!("{lo}..{hi}"),
             RunValue::Switch => String::new(),
+            RunValue::Text(value) => value.clone(),
         }
     }
 }
@@ -2179,11 +2182,48 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
             "--fs-short-permille",
             RunValue::Int(u64::from(fs_short)),
         );
+        let fs_latency_hi = u64::from(hash[16]) * 10_000; // up to 2.55 ms
+        push_run_flag(
+            &mut flags,
+            "--fs-latency-nanos",
+            RunValue::NanosRange {
+                lo: 0,
+                hi: fs_latency_hi,
+            },
+        );
+        // Seed-drawn crash PLACEMENT, the rate-based finder the point-only
+        // `--fs-crash-at` never gave durability testing: the generation hash picks
+        // the op class and a low ordinal, so successive generations tear the
+        // filesystem at different points in the guest's I/O sequence. Ordinals stay
+        // in [1, 8] because a crash that never fires (an ordinal past the guest's
+        // op count) explores nothing.
+        let crash_op = ["open", "write", "sync", "close"][usize::from(hash[17] % 4)];
+        let crash_ordinal = 1 + u64::from(hash[18] % 8);
+        push_run_flag(
+            &mut flags,
+            "--fs-crash-at",
+            RunValue::Text(format!("{crash_op}:{crash_ordinal}")),
+        );
+        // Half the generations tear at sub-block byte granularity, the harder
+        // durability model to survive.
+        if hash[19] % 2 == 0 {
+            push_run_flag(
+                &mut flags,
+                "--fs-torn-granularity",
+                RunValue::Text("byte".to_string()),
+            );
+        }
         let drop = u32::from(hash[12]) * 200 / 255; // [0, 200] permille
         push_run_flag(
             &mut flags,
             "--net-drop-permille",
             RunValue::Int(u64::from(drop)),
+        );
+        let net_latency = u64::from(hash[20]) * 10_000; // up to 2.55 ms
+        push_run_flag(
+            &mut flags,
+            "--net-latency-nanos",
+            RunValue::Int(net_latency),
         );
         let jitter_hi = u64::from(hash[13]) * 10_000; // up to 2.55 ms
         push_run_flag(
@@ -3350,6 +3390,24 @@ fn selftest() -> Result<i32, CliError> {
         ),
     );
     check(
+        "vacuous-fs-latency-report",
+        CampaignClass::VacuousFsFault,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=0 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=1 latency_applied=0 vacuous=1",
+        ),
+    );
+    check(
+        "fs-latency-that-fired-is-not-vacuous",
+        CampaignClass::Ok,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=0 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=1 latency_applied=40 vacuous=0",
+        ),
+    );
+    check(
         "vacuous-fs-warning",
         CampaignClass::VacuousFsFault,
         classify(
@@ -3635,6 +3693,8 @@ fn declared_reachable_fixture() -> Result<CoverageTally, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     /// A `--spec` file and individual flags layer with the flag on top, in
@@ -3764,13 +3824,64 @@ mod tests {
         assert!(!wasi.iter().any(|f| f == "--swarm"));
         assert!(!wasi.iter().any(|f| f.starts_with("--sched-pct")));
         assert!(wasi.iter().any(|f| f.starts_with("--buggify=")));
-        assert!(wasi.iter().any(|f| f == "--fs-error-permille"));
-        assert!(wasi.iter().any(|f| f == "--fs-short-permille"));
         let native = derive_flags(&spec, &hash, "native");
         assert!(native.iter().any(|f| f == "--swarm"));
-        assert!(native.iter().any(|f| f == "--fs-error-permille"));
-        assert!(native.iter().any(|f| f == "--fs-short-permille"));
         assert!(native.iter().any(|f| f.starts_with("--sched-pct")));
+        // Every knob `--faults` bands must reach BOTH families: a band that
+        // exists only on one family halves the exploration silently.
+        for banded in [
+            "--fs-error-permille",
+            "--fs-short-permille",
+            "--fs-latency-nanos",
+            "--fs-crash-at",
+            "--net-drop-permille",
+            "--net-latency-nanos",
+            "--sleep-jitter-nanos",
+        ] {
+            assert!(wasi.iter().any(|f| f == banded), "wasi lacks {banded}");
+            assert!(native.iter().any(|f| f == banded), "native lacks {banded}");
+        }
+    }
+
+    #[test]
+    fn the_crash_placement_band_varies_the_op_class_and_ordinal_across_generations() {
+        // The fs-durability FINDER: `--fs-crash-at` is point-only, so without a
+        // seed-drawn placement band a campaign tears the filesystem at the same
+        // spot every generation (or, before this band, never). Successive
+        // generations must reach several op classes and several ordinals.
+        let spec = CampaignSpec {
+            faults: true,
+            ..CampaignSpec::default()
+        };
+        let mut placements = BTreeSet::new();
+        let mut ops = BTreeSet::new();
+        for generation in 0..64 {
+            let flags = derive_flags(&spec, &generation_hash(0, generation), "native");
+            let index = flags
+                .iter()
+                .position(|f| f == "--fs-crash-at")
+                .expect("crash placement band");
+            let spec_text = flags[index + 1].clone();
+            let (op, ordinal) = spec_text.split_once(':').expect("op:ordinal");
+            assert!(
+                (1..=8).contains(&ordinal.parse::<u64>().expect("ordinal")),
+                "ordinal {ordinal} outside the firing band"
+            );
+            ops.insert(op.to_string());
+            placements.insert(spec_text);
+        }
+        assert_eq!(
+            ops,
+            ["close", "open", "sync", "write"]
+                .into_iter()
+                .map(String::from)
+                .collect::<BTreeSet<_>>(),
+            "the band must reach every crash op class"
+        );
+        assert!(
+            placements.len() > 8,
+            "crash placement barely varied: {placements:?}"
+        );
     }
 
     #[test]

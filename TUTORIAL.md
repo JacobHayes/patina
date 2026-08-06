@@ -248,9 +248,10 @@ $ cargo patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina --fo
 ## Where to go next
 
 - Add fault injection: `--fs-crash-at`, `--fs-error-permille`,
-  `--fs-short-permille`, `--net-drop-permille`, `--net-jitter-nanos`,
-  `--sleep-jitter-nanos`. They are seed-driven, default off, and recorded into
-  the trace like buggify — so replay reproduces them flag-free.
+  `--fs-short-permille`, `--fs-latency-nanos`, `--net-drop-permille`,
+  `--net-jitter-nanos`, `--net-latency-nanos`, `--sleep-jitter-nanos`. They are
+  seed-driven, default off, and recorded into the trace like buggify — so replay
+  reproduces them flag-free.
 - Vary the *workload* across campaign generations from inside the guest: a
   campaign varies patina-side seeds (scheduler, faults, buggify) per generation
   but keeps guest argv fixed by design. A guest that wants a different logical

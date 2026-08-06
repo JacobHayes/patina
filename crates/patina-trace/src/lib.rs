@@ -100,6 +100,8 @@ pub struct FaultConfigRecord {
     #[serde(default, skip_serializing_if = "is_zero_u16")]
     pub fs_short_permille: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs_latency_nanos: Option<(u64, u64)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sleep_jitter_nanos: Option<(u64, u64)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub net_jitter_nanos: Option<(u64, u64)>,
