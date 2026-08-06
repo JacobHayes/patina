@@ -47,6 +47,12 @@ pub struct Preview1Host {
     explicit_preopens: bool,
     /// Linear-memory limiter installed on the Wasmi store at execution time.
     store_limits: StoreLimits,
+    /// Per-import call counts, keyed by the imported function name. Written by
+    /// every `define_preview1`/`define_patina_sdk` wrapper and never read by any
+    /// host function, so counting cannot perturb the guest: the map is a pure
+    /// observation of the same deterministic instruction stream that produces
+    /// `WasiExecution::fuel_consumed`.
+    hostcalls: BTreeMap<&'static str, u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -127,7 +133,15 @@ impl Preview1Host {
             mounts,
             explicit_preopens: false,
             store_limits: StoreLimits::default(),
+            hostcalls: BTreeMap::new(),
         }
+    }
+
+    /// Record one call to the imported function `name`. The saturating add keeps
+    /// a pathological guest from wrapping the counter around to a smaller depth.
+    fn count_hostcall(&mut self, name: &'static str) {
+        let entry = self.hostcalls.entry(name).or_insert(0);
+        *entry = entry.saturating_add(1);
     }
 
     /// Replace the default resource ceilings.
@@ -1333,6 +1347,21 @@ pub struct WasiExecution {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub fuel_consumed: u64,
+    /// Per-import call counts keyed by imported function name — the hostcall half
+    /// of the WASI depth proxy (see `docs/arcs/coverage-depth.md` §5). Like
+    /// `fuel_consumed` this is a deterministic function of the executed
+    /// instruction stream and is report-only: it never enters the trace, a
+    /// fingerprint, or any canonical hash.
+    pub hostcalls: BTreeMap<&'static str, u64>,
+}
+
+impl WasiExecution {
+    /// Total hostcalls across every imported function.
+    pub fn hostcalls_total(&self) -> u64 {
+        self.hostcalls
+            .values()
+            .fold(0u64, |total, count| total.saturating_add(*count))
+    }
 }
 
 /// Execute an audited WASI Preview 1 core module through deterministic host
@@ -1549,6 +1578,24 @@ fn parse_wasm_static_site_payload(
     Ok(())
 }
 
+/// Fail closed on missing depth data. Fuel metering is pinned on for every run
+/// and the engine charges the executed instruction stream including the `_start`
+/// call, so a guest that ran to completion consumed fuel. Zero means the
+/// accounting stopped working — and a zero-valued depth report is
+/// indistinguishable from a genuine "did nothing" run, exactly the silent-empty
+/// report the coverage/depth arc refuses (`docs/arcs/coverage-depth.md` §10 D1).
+fn check_depth_available(fuel_consumed: u64) -> Result<(), WasiRunError> {
+    if fuel_consumed == 0 {
+        return Err(WasiRunError::Depth(
+            "WASI run completed but reported fuel_consumed=0; depth accounting is not recording \
+the executed instruction stream (refusing an empty depth report that cannot be told apart from \
+zero depth)"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn execute_preview1_with_fuel(
     module_bytes: &[u8],
     mut host: Preview1Host,
@@ -1589,17 +1636,22 @@ pub fn execute_preview1_with_fuel(
             .get_fuel()
             .expect("fuel metering was enabled on the Wasmi engine"),
     );
+    let hostcalls = store.data().hostcalls.clone();
     let output_result = store
         .into_data()
         .finish_with_output()
         .map_err(WasiRunError::Host);
     match (run_result, output_result) {
-        (Ok(exit_code), Ok((stdout, stderr))) => Ok(WasiExecution {
-            exit_code,
-            stdout,
-            stderr,
-            fuel_consumed,
-        }),
+        (Ok(exit_code), Ok((stdout, stderr))) => {
+            check_depth_available(fuel_consumed)?;
+            Ok(WasiExecution {
+                exit_code,
+                stdout,
+                stderr,
+                fuel_consumed,
+                hostcalls,
+            })
+        }
         (Err(run), Ok((stdout, stderr))) if stdout.is_empty() && stderr.is_empty() => Err(run),
         (Err(run), Ok((stdout, stderr))) => Err(WasiRunError::RunWithOutput {
             run: Box::new(run),
@@ -1620,6 +1672,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
         MODULE,
         "args_sizes_get",
         |mut caller: Caller<'_, Preview1Host>, count: i32, size: i32| -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("args_sizes_get");
             let values = caller.data().arguments.clone();
             write_u32(&mut caller, count, values.len() as u32)?;
             write_u32(&mut caller, size, string_buffer_size(&values)?)?;
@@ -1633,6 +1686,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          pointers: i32,
          buffer: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("args_get");
             let values = caller.data().arguments.clone();
             write_string_vector(&mut caller, pointers, buffer, &values)?;
             Ok(0)
@@ -1642,6 +1696,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
         MODULE,
         "environ_sizes_get",
         |mut caller: Caller<'_, Preview1Host>, count: i32, size: i32| -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("environ_sizes_get");
             let values = environment_strings(caller.data());
             write_u32(&mut caller, count, values.len() as u32)?;
             write_u32(&mut caller, size, string_buffer_size(&values)?)?;
@@ -1655,6 +1710,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          pointers: i32,
          buffer: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("environ_get");
             let values = environment_strings(caller.data());
             write_string_vector(&mut caller, pointers, buffer, &values)?;
             Ok(0)
@@ -1667,6 +1723,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          pointer: i32,
          length: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("random_get");
             let length = offset(length)?;
             let mut bytes = vec![0; length];
             caller
@@ -1684,6 +1741,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          clock: i32,
          result: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("clock_res_get");
             let Some(clock) = wasi_clock(clock) else {
                 return Ok(28);
             };
@@ -1700,6 +1758,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          _precision: i64,
          result: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("clock_time_get");
             let Some(clock) = wasi_clock(clock) else {
                 return Ok(28);
             };
@@ -1714,12 +1773,13 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
     linker.func_wrap(
         MODULE,
         "fd_advise",
-        |caller: Caller<'_, Preview1Host>,
+        |mut caller: Caller<'_, Preview1Host>,
          fd: i32,
          offset: i64,
          len: i64,
          advice: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("fd_advise");
             if !(0..=5).contains(&advice) {
                 return Ok(WASI_ERRNO_INVAL);
             }
@@ -1740,6 +1800,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          offset: i64,
          len: i64|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("fd_allocate");
             match wasi_call(
                 caller
                     .data_mut()
@@ -1754,6 +1815,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
         MODULE,
         "fd_close",
         |mut caller: Caller<'_, Preview1Host>, fd: i32| -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("fd_close");
             match wasi_call(caller.data_mut().fd_close(fd as u32))? {
                 Ok(()) => Ok(WASI_ERRNO_SUCCESS),
                 Err(errno) => Ok(errno),
@@ -1764,6 +1826,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
         MODULE,
         "fd_fdstat_get",
         |mut caller: Caller<'_, Preview1Host>, fd: i32, result: i32| -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("fd_fdstat_get");
             let fd = fd as u32;
             let (filetype, flags, rights, inheriting) = match fd {
                 0 => (WASI_FILETYPE_CHARACTER_DEVICE, 0, WASI_RIGHT_FD_READ, 0),
@@ -1797,6 +1860,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
         MODULE,
         "fd_fdstat_set_flags",
         |mut caller: Caller<'_, Preview1Host>, fd: i32, fdflags: i32| -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("fd_fdstat_set_flags");
             let Ok(fdflags) = u16::try_from(fdflags) else {
                 return Ok(WASI_ERRNO_INVAL);
             };
@@ -1814,6 +1878,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          rights: i64,
          inheriting: i64|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("fd_fdstat_set_rights");
             match wasi_call(caller.data_mut().fd_fdstat_set_rights(
                 fd as u32,
                 rights as u64,
@@ -1828,6 +1893,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
         MODULE,
         "fd_filestat_set_size",
         |mut caller: Caller<'_, Preview1Host>, fd: i32, len: i64| -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("fd_filestat_set_size");
             match wasi_call(
                 caller
                     .data_mut()
@@ -1847,6 +1913,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          mtime_nanos: i64,
          fst_flags: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("fd_filestat_set_times");
             let Ok(fst_flags) = u16::try_from(fst_flags) else {
                 return Ok(WASI_ERRNO_INVAL);
             };
@@ -1873,6 +1940,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
         MODULE,
         "fd_filestat_get",
         |mut caller: Caller<'_, Preview1Host>, fd: i32, result: i32| -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("fd_filestat_get");
             let fd = fd as u32;
             let (metadata, filetype) = match fd {
                 0..=2 => (
@@ -1919,6 +1987,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
         MODULE,
         "fd_prestat_get",
         |mut caller: Caller<'_, Preview1Host>, fd: i32, result: i32| -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("fd_prestat_get");
             match caller.data().descriptors.get(&(fd as u32)) {
                 Some(WasiDescriptor::Directory {
                     path,
@@ -1942,6 +2011,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          result: i32,
          length: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("fd_prestat_dir_name");
             let name = match caller.data().descriptors.get(&(fd as u32)) {
                 Some(WasiDescriptor::Directory {
                     path,
@@ -1966,6 +2036,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          count: i32,
          read: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("fd_read");
             let vectors = read_iovecs(&caller, iovecs, count)?;
             let max_len = vectors.iter().try_fold(0usize, |total, (_, length)| {
                 total
@@ -2000,6 +2071,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          file_offset: i64,
          read: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("fd_pread");
             let vectors = read_iovecs(&caller, iovecs, count)?;
             let max_len = vectors.iter().try_fold(0usize, |total, (_, length)| {
                 total
@@ -2038,6 +2110,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          cookie: i64,
          result: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("fd_readdir");
             let path = match caller.data().descriptors.get(&(fd as u32)) {
                 Some(WasiDescriptor::Directory { path, .. }) => path.clone(),
                 _ => return Ok(WASI_ERRNO_BADF),
@@ -2089,6 +2162,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
         MODULE,
         "fd_renumber",
         |mut caller: Caller<'_, Preview1Host>, from: i32, to: i32| -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("fd_renumber");
             match wasi_call(caller.data_mut().fd_renumber(from as u32, to as u32))? {
                 Ok(()) => Ok(WASI_ERRNO_SUCCESS),
                 Err(errno) => Ok(errno),
@@ -2099,6 +2173,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
         MODULE,
         "fd_datasync",
         |mut caller: Caller<'_, Preview1Host>, fd: i32| -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("fd_datasync");
             match wasi_call(caller.data_mut().fd_sync(fd as u32))? {
                 Ok(()) => Ok(WASI_ERRNO_SUCCESS),
                 Err(errno) => Ok(errno),
@@ -2109,6 +2184,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
         MODULE,
         "fd_sync",
         |mut caller: Caller<'_, Preview1Host>, fd: i32| -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("fd_sync");
             match wasi_call(caller.data_mut().fd_sync(fd as u32))? {
                 Ok(()) => Ok(WASI_ERRNO_SUCCESS),
                 Err(errno) => Ok(errno),
@@ -2124,6 +2200,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          whence: i32,
          result: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("fd_seek");
             let whence = match whence {
                 0 => SeekWhence::Start,
                 1 => SeekWhence::Current,
@@ -2143,6 +2220,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
         MODULE,
         "fd_tell",
         |mut caller: Caller<'_, Preview1Host>, fd: i32, result: i32| -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("fd_tell");
             match wasi_call(caller.data_mut().fd_seek(fd as u32, 0, SeekWhence::Current))? {
                 Ok(position) => {
                     write_u64(&mut caller, result, position)?;
@@ -2160,6 +2238,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          path: i32,
          path_len: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("path_create_directory");
             let bytes = read_guest_bytes(&caller, path, path_len)?;
             let path = match wasi_call(caller.data().resolve_path(fd as u32, &bytes))? {
                 Ok(path) => path,
@@ -2190,6 +2269,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          path_len: i32,
          result: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("path_filestat_get");
             let Ok(flags) = u32::try_from(flags) else {
                 return Ok(WASI_ERRNO_INVAL);
             };
@@ -2232,6 +2312,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          mtime_nanos: i64,
          fst_flags: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("path_filestat_set_times");
             let (Ok(flags), Ok(fst_flags)) = (u32::try_from(flags), u16::try_from(fst_flags))
             else {
                 return Ok(WASI_ERRNO_INVAL);
@@ -2275,6 +2356,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          fdflags: i32,
          result: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("path_open");
             let (Ok(directory_flags), Ok(oflags), Ok(fdflags)) = (
                 u32::try_from(directory_flags),
                 u16::try_from(oflags),
@@ -2321,6 +2403,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          path: i32,
          path_len: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("path_remove_directory");
             let bytes = read_guest_bytes(&caller, path, path_len)?;
             let path = match wasi_call(caller.data().resolve_path(fd as u32, &bytes))? {
                 Ok(path) => path,
@@ -2352,6 +2435,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          to: i32,
          to_len: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("path_rename");
             let from_bytes = read_guest_bytes(&caller, from, from_len)?;
             let to_bytes = read_guest_bytes(&caller, to, to_len)?;
             let from = match wasi_call(caller.data().resolve_path(from_fd as u32, &from_bytes))? {
@@ -2392,6 +2476,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          new_path: i32,
          new_path_len: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("path_link");
             let Ok(old_flags) = u32::try_from(old_flags) else {
                 return Ok(WASI_ERRNO_INVAL);
             };
@@ -2421,6 +2506,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          link_path: i32,
          link_path_len: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("path_symlink");
             let target = read_guest_bytes(&caller, target, target_len)?;
             let link_path = read_guest_bytes(&caller, link_path, link_path_len)?;
             match wasi_call(
@@ -2444,6 +2530,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          buffer_len: i32,
          result: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("path_readlink");
             let path = read_guest_bytes(&caller, path, path_len)?;
             let target = match wasi_call(caller.data_mut().path_readlink(fd as u32, &path))? {
                 Ok(target) => target,
@@ -2463,6 +2550,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          path: i32,
          path_len: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("path_unlink_file");
             let bytes = read_guest_bytes(&caller, path, path_len)?;
             let path = match wasi_call(caller.data().resolve_path(fd as u32, &bytes))? {
                 Ok(path) => path,
@@ -2492,6 +2580,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          count: i32,
          written: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("fd_write");
             let vectors = read_iovecs(&caller, iovecs, count)?;
             let memory = memory(&caller)?;
             let mut buffers = Vec::with_capacity(vectors.len());
@@ -2519,6 +2608,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          file_offset: i64,
          written: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("fd_pwrite");
             let vectors = read_iovecs(&caller, iovecs, count)?;
             let memory = memory(&caller)?;
             let mut buffers = Vec::with_capacity(vectors.len());
@@ -2543,11 +2633,14 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
     linker.func_wrap(
         MODULE,
         "sock_accept",
-        |caller: Caller<'_, Preview1Host>,
+        |mut caller: Caller<'_, Preview1Host>,
          fd: i32,
          _flags: i32,
          _result: i32|
-         -> Result<i32, WasmiError> { Ok(caller.data().sock_accept(fd as u32, 0)) },
+         -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("sock_accept");
+            Ok(caller.data().sock_accept(fd as u32, 0))
+        },
     )?;
     linker.func_wrap(
         MODULE,
@@ -2560,6 +2653,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          read: i32,
          result_flags: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("sock_recv");
             if flags & !0x3 != 0 {
                 return Ok(WASI_ERRNO_INVAL);
             }
@@ -2596,6 +2690,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          flags: i32,
          written: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("sock_send");
             if flags != 0 {
                 return Ok(WASI_ERRNO_INVAL);
             }
@@ -2621,6 +2716,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
         MODULE,
         "sock_shutdown",
         |mut caller: Caller<'_, Preview1Host>, fd: i32, flags: i32| -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("sock_shutdown");
             if flags == 0 || flags & !0x3 != 0 {
                 return Ok(WASI_ERRNO_INVAL);
             }
@@ -2639,6 +2735,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
          count: i32,
          result: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("poll_oneoff");
             let count = offset(count)?;
             if count == 0 {
                 return Ok(WASI_ERRNO_INVAL);
@@ -2704,21 +2801,24 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
     linker.func_wrap(
         MODULE,
         "sched_yield",
-        |caller: Caller<'_, Preview1Host>| -> Result<i32, WasmiError> {
+        |mut caller: Caller<'_, Preview1Host>| -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("sched_yield");
             Ok(caller.data().sched_yield())
         },
     )?;
     linker.func_wrap(
         MODULE,
         "proc_raise",
-        |caller: Caller<'_, Preview1Host>, signal: i32| -> Result<i32, WasmiError> {
+        |mut caller: Caller<'_, Preview1Host>, signal: i32| -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("proc_raise");
             Ok(caller.data().proc_raise(signal as u32))
         },
     )?;
     linker.func_wrap(
         MODULE,
         "proc_exit",
-        |_caller: Caller<'_, Preview1Host>, code: i32| -> Result<(), WasmiError> {
+        |mut caller: Caller<'_, Preview1Host>, code: i32| -> Result<(), WasmiError> {
+            caller.data_mut().count_hostcall("proc_exit");
             Err(WasmiError::i32_exit(code))
         },
     )?;
@@ -2794,18 +2894,22 @@ fn define_patina_sdk(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError
         "is_simulated",
         // The deterministic context is always installed for a WASI run, so this is
         // authoritative `true`; a foreign runtime never resolves the import.
-        |_caller: Caller<'_, Preview1Host>| -> i32 { 1 },
+        |mut caller: Caller<'_, Preview1Host>| -> i32 {
+            caller.data_mut().count_hostcall("is_simulated");
+            1
+        },
     )?;
     linker.func_wrap(
         MODULE,
         "buggify",
-        |caller: Caller<'_, Preview1Host>,
+        |mut caller: Caller<'_, Preview1Host>,
          label: i32,
          label_len: i32,
          site: i32,
          site_len: i32,
          prob_permille: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("buggify");
             patina_sdk_site(
                 caller,
                 label,
@@ -2822,12 +2926,13 @@ fn define_patina_sdk(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError
     linker.func_wrap(
         MODULE,
         "buggify_delay",
-        |caller: Caller<'_, Preview1Host>,
+        |mut caller: Caller<'_, Preview1Host>,
          label: i32,
          label_len: i32,
          site: i32,
          site_len: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("buggify_delay");
             patina_sdk_site(caller, label, label_len, site, site_len, |ctx, l, s| {
                 ctx.buggify_delay(l, s)
             })
@@ -2845,6 +2950,7 @@ fn define_patina_sdk(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError
          lo: i64,
          hi: i64|
          -> Result<i64, WasmiError> {
+            caller.data_mut().count_hostcall("buggify_knob");
             let label = read_patina_label(&caller, label, label_len)?;
             let site = read_patina_label(&caller, site, site_len)?;
             match caller
@@ -2864,13 +2970,14 @@ fn define_patina_sdk(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError
     linker.func_wrap(
         MODULE,
         "always",
-        |caller: Caller<'_, Preview1Host>,
+        |mut caller: Caller<'_, Preview1Host>,
          condition: i32,
          label: i32,
          label_len: i32,
          site: i32,
          site_len: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("always");
             patina_sdk_site(
                 caller,
                 label,
@@ -2884,13 +2991,14 @@ fn define_patina_sdk(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError
     linker.func_wrap(
         MODULE,
         "sometimes",
-        |caller: Caller<'_, Preview1Host>,
+        |mut caller: Caller<'_, Preview1Host>,
          condition: i32,
          label: i32,
          label_len: i32,
          site: i32,
          site_len: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("sometimes");
             patina_sdk_site(
                 caller,
                 label,
@@ -2904,12 +3012,13 @@ fn define_patina_sdk(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError
     linker.func_wrap(
         MODULE,
         "reachable",
-        |caller: Caller<'_, Preview1Host>,
+        |mut caller: Caller<'_, Preview1Host>,
          label: i32,
          label_len: i32,
          site: i32,
          site_len: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("reachable");
             patina_sdk_site(caller, label, label_len, site, site_len, |ctx, l, s| {
                 ctx.reachable_mark(l, s)
             })
@@ -2918,12 +3027,16 @@ fn define_patina_sdk(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError
     linker.func_wrap(
         MODULE,
         "rng",
-        |mut caller: Caller<'_, Preview1Host>| -> u64 { caller.data_mut().context.buggify_rng() },
+        |mut caller: Caller<'_, Preview1Host>| -> u64 {
+            caller.data_mut().count_hostcall("rng");
+            caller.data_mut().context.buggify_rng()
+        },
     )?;
     linker.func_wrap(
         MODULE,
         "lifecycle_setup_complete",
         |mut caller: Caller<'_, Preview1Host>| -> i32 {
+            caller.data_mut().count_hostcall("lifecycle_setup_complete");
             let host = caller.data_mut();
             host.context.lifecycle_setup_complete();
             // Mirror the native shim: the lifecycle marker rides the captured guest
@@ -2940,6 +3053,7 @@ fn define_patina_sdk(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError
          label: i32,
          label_len: i32|
          -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("lifecycle_event");
             let label = read_patina_label(&caller, label, label_len)?;
             let line = format!("PATINA_LIFECYCLE_EVENT label={label}\n");
             caller.data_mut().stderr.extend_from_slice(line.as_bytes());
@@ -3207,6 +3321,10 @@ pub enum WasiRunError {
     Target(TargetError),
     Engine(WasmiError),
     Host(WasiHostError),
+    /// Depth accounting (fuel / hostcall counters) did not produce data for a
+    /// run that executed. Reported rather than papered over so "no depth data"
+    /// can never be read as "zero depth".
+    Depth(String),
     RunWithOutput {
         run: Box<WasiRunError>,
         stdout: Vec<u8>,
@@ -3224,6 +3342,7 @@ impl fmt::Display for WasiRunError {
             Self::Target(error) => error.fmt(f),
             Self::Engine(error) => error.fmt(f),
             Self::Host(error) => error.fmt(f),
+            Self::Depth(message) => f.write_str(message),
             Self::RunWithOutput {
                 run,
                 stdout,
@@ -3254,6 +3373,7 @@ impl std::error::Error for WasiRunError {
             Self::Target(error) => Some(error),
             Self::Engine(error) => Some(error),
             Self::Host(error) => Some(error),
+            Self::Depth(_) => None,
             Self::RunWithOutput { run, .. } => Some(run),
             Self::RunAndFinalize { run, .. } => Some(run),
         }
@@ -4710,5 +4830,140 @@ mod tests {
         let mut replay = host_for(replay_context);
         assert_eq!(exercise(&mut replay).unwrap(), expected);
         replay.finish().unwrap();
+    }
+
+    /// A guest whose hostcall mix is fixed by the module text, so the counters
+    /// can be asserted exactly rather than "greater than zero". Mutating any
+    /// wrapper's counting line drives its row to absent and fails this test.
+    fn depth_probe_module() -> Vec<u8> {
+        wat::parse_str(
+            r#"(module
+                (import "wasi_snapshot_preview1" "clock_time_get"
+                    (func $clock (param i32 i64 i32) (result i32)))
+                (import "wasi_snapshot_preview1" "fd_write"
+                    (func $write (param i32 i32 i32 i32) (result i32)))
+                (import "wasi_snapshot_preview1" "random_get"
+                    (func $random (param i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 64) "depth\n")
+                (func (export "_start")
+                    (drop (call $clock (i32.const 0) (i64.const 0) (i32.const 8)))
+                    (drop (call $clock (i32.const 1) (i64.const 0) (i32.const 8)))
+                    (drop (call $clock (i32.const 1) (i64.const 0) (i32.const 8)))
+                    (drop (call $random (i32.const 96) (i32.const 8)))
+                    (i32.store (i32.const 0) (i32.const 64))
+                    (i32.store (i32.const 4) (i32.const 6))
+                    (drop (call $write (i32.const 1) (i32.const 0) (i32.const 1)
+                        (i32.const 16)))))"#,
+        )
+        .unwrap()
+    }
+
+    fn run_depth_probe(seed: u64) -> WasiExecution {
+        let context = Context::from_config(RuntimeConfig::seeded(seed)).unwrap();
+        execute_preview1(&depth_probe_module(), Preview1Host::new(context)).unwrap()
+    }
+
+    #[test]
+    fn hostcall_counters_record_every_import_call_exactly() {
+        let execution = run_depth_probe(7);
+        assert_eq!(execution.hostcalls.get("clock_time_get"), Some(&3));
+        assert_eq!(execution.hostcalls.get("random_get"), Some(&1));
+        assert_eq!(execution.hostcalls.get("fd_write"), Some(&1));
+        assert_eq!(execution.hostcalls_total(), 5);
+        // An import the module never calls must be absent, not zero-valued: the
+        // map reports what ran, so "no rows" and "zero depth" stay distinct.
+        assert!(!execution.hostcalls.contains_key("fd_read"));
+        assert!(
+            execution.fuel_consumed > 0,
+            "fuel accounting reported nothing for a guest that executed"
+        );
+    }
+
+    #[test]
+    fn depth_is_byte_identical_across_repeat_runs_of_one_seed() {
+        let first = run_depth_probe(11);
+        let second = run_depth_probe(11);
+        assert_eq!(first.fuel_consumed, second.fuel_consumed);
+        assert_eq!(first.hostcalls, second.hostcalls);
+        // The counters must not perturb the run either: the guest-observable
+        // outputs stay identical alongside them.
+        assert_eq!(first.stdout, second.stdout);
+        assert_eq!(first.exit_code, second.exit_code);
+    }
+
+    #[test]
+    fn zero_fuel_depth_is_refused_rather_than_reported_as_zero() {
+        let error = check_depth_available(0).unwrap_err();
+        assert!(matches!(error, WasiRunError::Depth(_)), "got {error:?}");
+        assert!(
+            error.to_string().contains("fuel_consumed=0"),
+            "refusal must name the missing measurement, got: {error}"
+        );
+        check_depth_available(1).expect("a run that consumed fuel has depth data");
+    }
+}
+
+/// Source-level convention lint for the depth counters: every imported function
+/// defined in `define_preview1`/`define_patina_sdk` must bump the hostcall
+/// counter under its OWN name, as the first statement of its wrapper. The
+/// counters are per-wrapper by design (there is no interception point in
+/// `Linker::func_wrap`), so this lint is what keeps a newly added import from
+/// silently dropping out of the depth report.
+#[cfg(test)]
+mod depth_source_lints {
+    #[test]
+    fn every_wasi_import_wrapper_counts_its_own_hostcall() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .split_once("fn define_preview1(")
+            .expect("definition function")
+            .1
+            .split_once("\nfn read_guest_bytes(")
+            .expect("end of the import definitions")
+            .0;
+        // Assembled at runtime so this lint's own text cannot satisfy itself.
+        let counter = format!("count_{}(\"", "hostcall");
+        let mut names: Vec<String> = Vec::new();
+        let mut counted: Vec<String> = Vec::new();
+        let mut previous = "";
+        for line in body.lines() {
+            if previous.trim() == "MODULE," {
+                if let Some(name) = line
+                    .trim()
+                    .strip_prefix('"')
+                    .and_then(|r| r.split_once('"'))
+                {
+                    names.push(name.0.to_string());
+                }
+            }
+            if let Some(rest) = line.split_once(&counter) {
+                counted.push(
+                    rest.1
+                        .split_once('"')
+                        .expect("counted name is quoted")
+                        .0
+                        .to_string(),
+                );
+            }
+            previous = line;
+        }
+        assert!(
+            names.len() > 40,
+            "the lint failed to find the import table; it found {} names",
+            names.len()
+        );
+        assert_eq!(
+            names, counted,
+            "every import wrapper must count its own name, in definition order"
+        );
+        let mut unique = names.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            names.len(),
+            "import names must be unique so depth rows cannot silently merge"
+        );
     }
 }

@@ -40,6 +40,7 @@ unknown option.
   `--record PATH` writes a trace. Native yield-point binaries emit
   `PATINA_COVERAGE_REPORT`; `--coverage-out PATH` writes a `patina.covmap/v1`
   edge-counter map and refuses plain native binaries with a `build --yield-points` hint.
+  WASI runs emit `PATINA_DEPTH_REPORT` (fuel + per-import hostcall counts).
 - `cargo patina test [--seed N | --record PATH] [FAULT OPTIONS] [CARGO OPTIONS]`
   The Cargo package family under Patina.
 - `cargo patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test [--seed N | --seeds N] [--release] [--yield-points] [FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]`
@@ -77,7 +78,10 @@ unknown option.
   traces, SDK site coverage is folded into `<out-dir>/sites.json` (schema
   `patina.campaign.sites/v1`), and native yield-point edge coverage is folded
   into `<out-dir>/coverage/` (schema `patina.coverage.campaign/v1`) with a
-  plateau report controlled by `--plateau-after`. Unsatisfied `sometimes!`/
+  plateau report controlled by `--plateau-after`. A WASI campaign accumulates
+  depth instead of edges into `<out-dir>/depth/meta.json` (schema
+  `patina.depth.campaign/v1`): fuel high-water mark, per-import hostcall sums, and
+  a `depth_plateaued` flag from the same `--plateau-after` window. Unsatisfied `sometimes!`/
   `reachable!` oracle sites, including link-time-declared rows with
   `registered_gens=0`, fail the campaign by default unless explicitly waived.
 - `cargo patina coverage <BINARY> <MAP|CAMPAIGN-OUT-DIR> [--focus CRATE::module] [--top N]`
@@ -149,7 +153,8 @@ category, provenance), `output_path` + `content_hash` (build), `markers` (extrac
 `PATINA_*`/`*_VIOLATION`/`BUG_CAUGHT` lines), `result_line`, `stdout`, `stderr`,
 `message`, optional `config` provenance, optional native `coverage` =
 `{edges_total, edges_covered, covered_permille, hits_total, hits_max, saturated,
-map_path?}`, and `trace` =
+map_path?}`, optional WASI `depth` =
+`{family, fuel_consumed, hostcalls_total, hostcalls{name: count}}`, and `trace` =
 `{path, format_version, timelines[], event_count, metadata}` where `metadata` is
 the raw trace metadata (seed, faults, buggify, guest_argv, and any future fields,
 rendered generically). `trace info --format
@@ -197,6 +202,12 @@ dev-dependency use under plain `cargo test`.
 - `PATINA_COVERAGE_REPORT` (stderr) reports native yield-point edge coverage
   (`edges_covered/edges_total`, hit totals/max, saturation); suppress with
   `PATINA_COVERAGE_REPORT=0`.
+- `PATINA_DEPTH_REPORT` (stderr) reports WASI depth — `fuel_consumed`,
+  `hostcalls_total`, and one `name=count` row per imported function actually
+  called. Depth is not coverage: it measures how far a guest ran and which host
+  surface it touched. Deterministic per seed; suppress with
+  `PATINA_DEPTH_REPORT=0` (a campaign pins it on, since it is that campaign's
+  measurement channel).
 - `PATINA_SDK_REPORT` (stderr) reports buggify site registration/activation/firing; each `site=` row ends with `|@<file:line>`. `enabled=0 swarm_deselected=1` means buggify WAS requested and this generation's `--swarm` draw dropped it; `enabled=0 swarm_deselected=0` means it was never requested.
 - `PATINA_SWARM_REPORT` (stderr) reports the `--swarm` decision for every fault class: `candidates=N selected=M deselected=K` then one `class=<token>|<0|1>` row per candidate. A class that was never enabled appears in no row. Suppress with `PATINA_SWARM_REPORT=0`.
 - A trace is compact JSON: inspect it with `jq . run.patina`.

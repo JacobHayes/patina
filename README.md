@@ -249,6 +249,10 @@ Why debug finds more bugs:
   binaries persist the union under `<out-dir>/coverage/`, and the offline
   coverage report refuses a campaign store if `<binary>` does not hash to the
   recorded campaign artifact. Campaigns report plateau with `--plateau-after`.
+  WASI has no sancov, so that family reports *depth* instead of coverage: every
+  run emits `PATINA_DEPTH_REPORT` (fuel plus per-import hostcall counts) and a
+  campaign accumulates it under `<out-dir>/depth/`, plateauing on the same
+  `--plateau-after` window.
 - **Faster inner loop.** Debug compiles quicker, which dominates when you rebuild
   between every edit.
 

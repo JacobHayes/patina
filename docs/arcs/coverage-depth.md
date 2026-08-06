@@ -1,8 +1,10 @@
 # Arc: coverage / depth measurement for runs and campaigns
 
-Status: Waves A-C implemented 2026-08-06 (native yield-point counters, reports,
+Status: Waves A-D implemented 2026-08-06 (native yield-point counters, reports,
 `run`/`replay --coverage-out` covmaps, fail-closed detectors, offline `coverage`
-symbolization/rollup, and campaign coverage accumulation/plateau); Waves D-E remain planned.
+symbolization/rollup, campaign coverage accumulation/plateau, and WASI depth —
+hostcall counters, `PATINA_DEPTH_REPORT`, campaign depth accumulation and
+`depth_plateau`); Wave E remains planned.
 Lands as `docs/arcs/coverage-depth.md`.
 
 Cross-references:
@@ -351,10 +353,44 @@ deterministic re-run test extended to cover coverage state byte-identity.
 asserting monotone union growth and a correct plateau line.
 
 **Wave D — WASI depth (wasi-host touching → full battery with `validate-wasi.sh`
-emphasized).** Hostcall counters in `Preview1Host`, `WasiExecution.hostcalls`, fuel/depth
-plumbing through `RunReport`, `PATINA_DEPTH_REPORT`, campaign depth accumulation +
-`depth_plateau`.
+emphasized) — implemented 2026-08-06.** Hostcall counters in `Preview1Host`,
+`WasiExecution.hostcalls`, fuel/depth plumbing through `RunReport`,
+`PATINA_DEPTH_REPORT`, campaign depth accumulation + `depth_plateau`.
 *Verify*: `mise run check`, both e2e runs, plus a WASI campaign smoke.
+
+Wave-D implementation notes (where the design was silent, the nearest wave A-C
+precedent was followed):
+
+- **Counters are per-wrapper, and a source lint keeps them complete.** `wasmi`'s
+  `Linker::func_wrap` offers no interception point, so each of the 56 imported
+  functions bumps `Preview1Host::count_hostcall("<its own name>")` as its first
+  statement. `depth_source_lints::every_wasi_import_wrapper_counts_its_own_hostcall`
+  pairs every `func_wrap` name with a counting call of the SAME name in definition
+  order and rejects duplicate names, so a newly added import cannot silently drop
+  out of the depth report or merge into another row.
+- **No new flags.** Depth plateau reuses `--plateau-after`, so the CLI registry and
+  the flag-drift gate are untouched.
+- **D1's WASI analogue.** Fuel metering is pinned on, so a completed run with
+  `fuel_consumed == 0` means the accounting stopped working; it is refused
+  (`WasiRunError::Depth`) rather than reported as a zero-valued depth. An import
+  the guest never called has no row at all, so "no data" and "zero" stay distinct
+  at every level of the surface.
+- **The campaign's missing-report rule.** A generation that exited cleanly must
+  carry a `PATINA_DEPTH_REPORT` line; missing it is a loud refusal naming the
+  generation. A generation killed by the wall-clock backstop or lost inside the
+  engine may carry none, contributing no measurement while still advancing the
+  watermark — counted in `generations_with_depth`, whose zero value (with
+  generations applied) prints `PATINA_CAMPAIGN_DEPTH_VACUOUS`. Campaign children
+  get `PATINA_DEPTH_REPORT=1` pinned on, exactly like `PATINA_SDK_REPORT`, so an
+  operator's ambient suppression cannot silence the measurement channel.
+- **Novelty for the plateau rule** is "a previously unseen hostcall kind OR a new
+  fuel high-water mark", per §5-§6; the first generation is trivially novel because
+  it establishes the high-water mark, mirroring the edge rule's first generation.
+- **Persistence** is one `<out>/depth/meta.json` (schema
+  `patina.depth.campaign/v1`) — depth has no per-site arrays, so the coverage
+  store's side files have no analogue. `fuel_max` folds idempotently but the
+  hostcall sums are saturating adds, so the `generations_applied` watermark skip is
+  load-bearing and RED-proven at both the store and campaign levels.
 
 **Wave E — coverage-GUIDED generation scheduling (phase 2, scheduled here — not a
 separate future arc).** Owned by this arc per user directive (2026-07-30: phase-2 items

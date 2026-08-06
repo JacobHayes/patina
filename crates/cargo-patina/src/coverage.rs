@@ -309,7 +309,7 @@ impl CoverageArtifact {
         })
     }
 
-    fn from_json(value: &Value) -> Result<Self, String> {
+    pub(crate) fn from_json(value: &Value) -> Result<Self, String> {
         let object = value
             .as_object()
             .ok_or_else(|| "coverage artifact must be an object".to_string())?;
@@ -920,13 +920,13 @@ fn encode_i64_vec(values: &[i64]) -> Vec<u8> {
     bytes
 }
 
-fn atomic_write_json(path: &Path, value: &Value, label: &str) -> Result<(), CliError> {
+pub(crate) fn atomic_write_json(path: &Path, value: &Value, label: &str) -> Result<(), CliError> {
     let text = serde_json::to_string_pretty(value)
         .map_err(|error| CliError(format!("failed to serialize {label}: {error}")))?;
     atomic_write(path, text.as_bytes(), label)
 }
 
-fn atomic_write(path: &Path, bytes: &[u8], label: &str) -> Result<(), CliError> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8], label: &str) -> Result<(), CliError> {
     let parent = path
         .parent()
         .ok_or_else(|| CliError(format!("{label} path {} has no parent", path.display())))?;
@@ -1788,21 +1788,27 @@ pub(crate) fn top_uncovered_crates(
     Ok(rows)
 }
 
-fn json_required_str<'a>(object: &'a Map<String, Value>, key: &str) -> Result<&'a str, String> {
+pub(crate) fn json_required_str<'a>(
+    object: &'a Map<String, Value>,
+    key: &str,
+) -> Result<&'a str, String> {
     object
         .get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| format!("{key} must be a string"))
 }
 
-fn json_required_u64(object: &Map<String, Value>, key: &str) -> Result<u64, String> {
+pub(crate) fn json_required_u64(object: &Map<String, Value>, key: &str) -> Result<u64, String> {
     object
         .get(key)
         .and_then(Value::as_u64)
         .ok_or_else(|| format!("{key} must be an unsigned integer"))
 }
 
-fn json_optional_u64(object: &Map<String, Value>, key: &str) -> Result<Option<u64>, String> {
+pub(crate) fn json_optional_u64(
+    object: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<u64>, String> {
     match object.get(key) {
         Some(Value::Null) | None => Ok(None),
         Some(value) => value
@@ -1812,7 +1818,7 @@ fn json_optional_u64(object: &Map<String, Value>, key: &str) -> Result<Option<u6
     }
 }
 
-fn json_required_bool(object: &Map<String, Value>, key: &str) -> Result<bool, String> {
+pub(crate) fn json_required_bool(object: &Map<String, Value>, key: &str) -> Result<bool, String> {
     object
         .get(key)
         .and_then(Value::as_bool)

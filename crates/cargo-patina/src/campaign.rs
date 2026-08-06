@@ -51,6 +51,7 @@ use crate::CliError;
 use crate::aux_store::{AuxFoldDecision, fold_decision, validate_resume_watermark};
 use crate::cli;
 use crate::coverage::{CampaignCoverageStore, CoverageArtifact, FoldOutcome, top_uncovered_crates};
+use crate::depth::{CampaignDepthStore, DepthFoldOutcome};
 use crate::help;
 use crate::sdk_report::{CoverageTally, ExercisedSite};
 
@@ -1328,7 +1329,9 @@ fn initialize_edge_coverage(
     if state.artifact.family != "native" {
         return Ok(EdgeCoverageState::unavailable(
             "not-native",
-            Some("WASI depth arrives in coverage-depth Wave D"),
+            Some(
+                "only yield-point native binaries carry edge coverage; a WASI module accumulates depth instead",
+            ),
         ));
     }
     let artifact_path = PathBuf::from(&state.artifact.path);
@@ -1373,6 +1376,110 @@ fn campaign_coverage_fingerprint(spec: &CampaignSpec) -> String {
         fingerprint.push_str("+swarm");
     }
     fingerprint
+}
+
+/// The depth store's compatibility fingerprint. It binds accumulated depth to the
+/// exploration policy that produced it, exactly as the coverage fingerprint does:
+/// re-running a WASI campaign under different knobs explores a different space, so
+/// its fuel high-water marks and hostcall sums must not be unioned with the old
+/// ones. Module identity itself rides the artifact hash, not this string.
+fn campaign_depth_fingerprint(spec: &CampaignSpec) -> String {
+    let mut fingerprint = "patina-wasi".to_string();
+    if spec.buggify {
+        fingerprint.push_str("+buggify");
+    }
+    if spec.faults {
+        fingerprint.push_str("+faults");
+    }
+    fingerprint
+}
+
+/// WASI depth accumulation state, mirroring [`EdgeCoverageState`]. A native
+/// campaign reports `unavailable` here and edge coverage there, so exactly one of
+/// the two blocks carries data and neither is silently absent.
+#[derive(Debug)]
+enum DepthState {
+    Active(Box<CampaignDepthStore>),
+    Unavailable {
+        reason: &'static str,
+        hint: Option<&'static str>,
+    },
+}
+
+impl DepthState {
+    fn active_mut(&mut self) -> Option<&mut CampaignDepthStore> {
+        match self {
+            Self::Active(store) => Some(store.as_mut()),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
+    fn active(&self) -> Option<&CampaignDepthStore> {
+        match self {
+            Self::Active(store) => Some(store.as_ref()),
+            Self::Unavailable { .. } => None,
+        }
+    }
+}
+
+fn initialize_depth(
+    out_dir: &Path,
+    state: &CampaignState,
+    campaign_generations_done: u64,
+) -> Result<DepthState, CliError> {
+    if state.artifact.family != "wasi" {
+        return Ok(DepthState::Unavailable {
+            reason: "not-wasi",
+            hint: Some(
+                "depth (fuel + hostcalls) is the WASI family's measure; native binaries accumulate edge coverage instead",
+            ),
+        });
+    }
+    let depth_dir = out_dir.join("depth");
+    fs::create_dir_all(&depth_dir).map_err(|error| {
+        CliError(format!(
+            "failed to create campaign depth dir {}: {error}",
+            depth_dir.display()
+        ))
+    })?;
+    let artifact = CoverageArtifact {
+        path: state.artifact.path.clone(),
+        sha256: state.artifact.sha256.clone(),
+        family: state.artifact.family.to_string(),
+    };
+    let store = CampaignDepthStore::load(
+        depth_dir,
+        artifact,
+        campaign_depth_fingerprint(&state.spec),
+        state.spec.plateau_after,
+        campaign_generations_done,
+    )?;
+    Ok(DepthState::Active(Box::new(store)))
+}
+
+/// Fold one generation's `PATINA_DEPTH_REPORT` (parsed out of the child's already
+/// captured stderr — no descriptor plumbing needed) into the depth store.
+///
+/// A generation that exited cleanly must carry a depth line; one that was killed
+/// by the wall-clock backstop or died inside the engine may not, and contributes
+/// no measurement while still advancing the watermark.
+fn fold_depth_generation(
+    depth: &mut DepthState,
+    generation: u64,
+    exit: i32,
+    timed_out: bool,
+    stderr: &str,
+) -> Result<Option<DepthFoldOutcome>, CliError> {
+    let Some(store) = depth.active_mut() else {
+        return Ok(None);
+    };
+    let report = stderr
+        .lines()
+        .find_map(crate::output::parse_depth_report_line);
+    let requires_report = exit == 0 && !timed_out;
+    store
+        .fold_generation(generation, report.as_ref(), requires_report)
+        .map(Some)
 }
 
 fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
@@ -1449,6 +1556,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
     }
 
     let mut edge_coverage = initialize_edge_coverage(&out_dir, &state, state.generations_done)?;
+    let mut depth = initialize_depth(&out_dir, &state, state.generations_done)?;
 
     let traces_dir = out_dir.join("traces");
     fs::create_dir_all(&traces_dir)
@@ -1478,6 +1586,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
         &state,
         &coverage,
         &edge_coverage,
+        &depth,
     )?;
 
     if !json_output {
@@ -1550,6 +1659,10 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
             classify(exit, &stdout, &stderr)
         };
         *state.classes.entry(class.as_str().to_string()).or_insert(0) += 1;
+        // Depth folds AFTER classification: whether a missing depth line is a
+        // tolerable "the guest never finished" or a loud plumbing failure depends
+        // on how the generation ended.
+        let _depth_fold = fold_depth_generation(&mut depth, generation, exit, timed_out, &stderr)?;
 
         let mut novel = false;
         let mut signature_key = None;
@@ -1651,6 +1764,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
                     class_counts: &state.classes,
                     coverage: &coverage,
                     edge_coverage: &edge_coverage,
+                    depth: &depth,
                 });
             }
             flush_stdout();
@@ -1662,6 +1776,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
             &state,
             &coverage,
             &edge_coverage,
+            &depth,
         )?;
     }
 
@@ -1688,6 +1803,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
             coverage: &coverage,
             coverage_verdict: &coverage_verdict,
             edge_coverage: &edge_coverage,
+            depth: &depth,
             out_dir: &out_dir,
             state_path: &state_path,
             sites_path: &sites_path,
@@ -1700,6 +1816,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
             coverage: &coverage,
             coverage_verdict: &coverage_verdict,
             edge_coverage: &edge_coverage,
+            depth: &depth,
             artifact_path: &artifact_path,
             failures,
             novel: novel_count,
@@ -1827,10 +1944,13 @@ fn run_generation(
     }
     // Keep the child's diagnostics deterministic and machine-parseable. Pin the
     // SDK report on so a user's inherited PATINA_SDK_REPORT=0 cannot make the
-    // campaign coverage gate vacuously green.
+    // campaign coverage gate vacuously green, and the depth report on for the
+    // same reason: for a WASI campaign that line is the measurement channel, not
+    // a cosmetic diagnostic, so ambient suppression must not silence it.
     crate::config::scrub_child_config_env(&mut command, "run");
     command.env("PATINA_LIVENESS_REPORT", "1");
     command.env("PATINA_SDK_REPORT", "1");
+    command.env(patina_dst_runtime::ENV_DEPTH_REPORT, "1");
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = command
@@ -2147,6 +2267,7 @@ fn write_campaign_checkpoint(
     state: &CampaignState,
     coverage: &CoverageTally,
     edge_coverage: &EdgeCoverageState,
+    depth: &DepthState,
 ) -> Result<(), CliError> {
     // The state cursor is the checkpoint readers poll. Write the derived stores
     // first, then the state file, so an observed advanced cursor has matching
@@ -2154,6 +2275,9 @@ fn write_campaign_checkpoint(
     // the cursor on purpose: if a crash tears here, generations_applied may be
     // one ahead and resume will re-run then watermark-skip that generation.
     if let Some(store) = edge_coverage.active() {
+        store.write_checkpoint()?;
+    }
+    if let Some(store) = depth.active() {
         store.write_checkpoint()?;
     }
     write_sites_store(sites_path, coverage)?;
@@ -2468,6 +2592,7 @@ struct ProgressHeartbeatInput<'a> {
     class_counts: &'a BTreeMap<String, u64>,
     coverage: &'a CoverageTally,
     edge_coverage: &'a EdgeCoverageState,
+    depth: &'a DepthState,
 }
 
 fn print_progress_heartbeat(input: ProgressHeartbeatInput<'_>) {
@@ -2486,6 +2611,7 @@ fn print_progress_heartbeat(input: ProgressHeartbeatInput<'_>) {
         coverage_summary.unmet.len()
     ));
     append_edge_coverage_progress(&mut line, input.edge_coverage);
+    append_depth_progress(&mut line, input.depth);
     println!("{line}");
 }
 
@@ -2513,12 +2639,143 @@ fn append_edge_coverage_progress(line: &mut String, edge_coverage: &EdgeCoverage
     }
 }
 
+fn append_depth_progress(line: &mut String, depth: &DepthState) {
+    match depth {
+        DepthState::Active(store) => {
+            let meta = store.meta();
+            line.push_str(&format!(
+                " depth_gens={}/{} fuel_max={} hostcall_kinds={} last_new_depth_gen={} depth_plateau={}",
+                meta.generations_with_depth,
+                meta.generations_applied,
+                meta.fuel_max,
+                meta.hostcall_kinds(),
+                meta.last_new_depth_gen
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                meta.depth_plateaued as u8,
+            ));
+        }
+        DepthState::Unavailable { reason, .. } => {
+            line.push_str(&format!(" depth=unavailable reason={reason}"));
+        }
+    }
+}
+
+/// The final depth block. Depth is labeled as a proxy everywhere: it says how far
+/// the guests ran and which host surface they touched, never which code they
+/// covered (`docs/arcs/coverage-depth.md` §5, §11).
+fn print_depth_summary(depth: &DepthState) {
+    println!("-- depth (wasi fuel/hostcalls) --");
+    match depth {
+        DepthState::Unavailable { reason, hint } => {
+            println!("depth=unavailable reason={reason}");
+            if let Some(hint) = hint {
+                println!("hint: {hint}");
+            }
+        }
+        DepthState::Active(store) if store.meta().generations_applied == 0 => {
+            println!("depth=pending no generation has folded a depth report yet");
+            println!("depth store: {}", store.dir().display());
+        }
+        DepthState::Active(store) => {
+            let meta = store.meta();
+            println!(
+                "generations_with_depth={}/{} fuel_max={} fuel_total={} hostcall_kinds={} hostcalls_total={}",
+                meta.generations_with_depth,
+                meta.generations_applied,
+                meta.fuel_max,
+                meta.fuel_total,
+                meta.hostcall_kinds(),
+                meta.hostcalls_total(),
+            );
+            println!(
+                "last_new_depth_gen={} plateau_after={} depth_plateaued={}",
+                meta.last_new_depth_gen
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                meta.plateau_window,
+                meta.depth_plateaued as u8,
+            );
+            if meta.is_vacuous() {
+                // Non-vacuity is a gate, not a nicety: an accumulation with no
+                // measurement at all must announce itself rather than read as a
+                // clean "zero depth" result.
+                println!(
+                    "PATINA_CAMPAIGN_DEPTH_VACUOUS generations={} reason=no-generation-reported-depth",
+                    meta.generations_applied
+                );
+            } else {
+                let mut hottest: Vec<(&String, &u64)> = meta.hostcalls.iter().collect();
+                hottest.sort_by(|left, right| right.1.cmp(left.1).then(left.0.cmp(right.0)));
+                println!("top_hostcalls:");
+                for (name, count) in hottest.iter().take(5) {
+                    println!("  {name} calls={count}");
+                }
+            }
+            println!("depth store: {}", store.dir().display());
+        }
+    }
+}
+
+fn append_depth_complete(line: &mut String, depth: &DepthState) {
+    if let DepthState::Active(store) = depth {
+        let meta = store.meta();
+        line.push_str(&format!(
+            " fuel_max={} hostcall_kinds={} depth_plateaued={}",
+            meta.fuel_max,
+            meta.hostcall_kinds(),
+            meta.depth_plateaued as u8,
+        ));
+    }
+}
+
+fn depth_json(depth: &DepthState) -> serde_json::Value {
+    match depth {
+        DepthState::Unavailable { reason, hint } => serde_json::json!({
+            "state": "unavailable",
+            "reason": reason,
+            "hint": hint,
+        }),
+        DepthState::Active(store) => {
+            let meta = store.meta();
+            // Three distinguishable states, mirroring the edge-coverage object:
+            // nothing folded yet, folded but no generation carried a measurement,
+            // and real data. Collapsing the first two into "available" would print
+            // all-zero depth for a store that never measured anything.
+            let state = if meta.generations_applied == 0 {
+                "pending"
+            } else if meta.is_vacuous() {
+                "vacuous"
+            } else {
+                "available"
+            };
+            serde_json::json!({
+                "state": state,
+                "schema": crate::depth::CAMPAIGN_DEPTH_SCHEMA,
+                "depth_dir": store.dir().display().to_string(),
+                "generations_applied": meta.generations_applied,
+                "generations_with_depth": meta.generations_with_depth,
+                "fuel_max": meta.fuel_max,
+                "fuel_total": meta.fuel_total,
+                "hostcall_kinds": meta.hostcall_kinds(),
+                "hostcalls_total": meta.hostcalls_total(),
+                "hostcalls": meta.hostcalls.iter().map(|(name, count)| (name.clone(), serde_json::Value::from(*count))).collect::<serde_json::Map<_, _>>(),
+                "last_new_depth_gen": meta.last_new_depth_gen,
+                "plateau_after": meta.plateau_window,
+                "depth_plateaued": meta.depth_plateaued,
+                "new_depth_log": meta.new_depth_log.iter().map(|(generation, new_kinds, fuel_max)| serde_json::json!([generation, new_kinds, fuel_max])).collect::<Vec<_>>(),
+            })
+        }
+    }
+}
+
 struct CampaignSummaryInput<'a> {
     class_counts: &'a BTreeMap<String, u64>,
     signatures: &'a BTreeMap<String, SignatureRecord>,
     coverage: &'a CoverageTally,
     coverage_verdict: &'a CoverageVerdict<'a>,
     edge_coverage: &'a EdgeCoverageState,
+    depth: &'a DepthState,
     artifact_path: &'a Path,
     failures: u64,
     novel: u64,
@@ -2555,12 +2812,14 @@ fn print_campaign_summary(input: CampaignSummaryInput<'_>) {
     }
     print_coverage_summary(input.coverage, input.coverage_verdict, input.sites_path);
     print_edge_coverage_summary(input.edge_coverage, input.artifact_path);
+    print_depth_summary(input.depth);
     println!("signature store: {}", input.store_path.display());
     let mut complete = format!(
         "PATINA_CAMPAIGN_COMPLETE generations={} failures={} novel={}",
         input.generations, input.failures, input.novel
     );
     append_edge_coverage_complete(&mut complete, input.edge_coverage);
+    append_depth_complete(&mut complete, input.depth);
     println!("{complete}");
 }
 
@@ -2677,6 +2936,7 @@ struct CampaignEnvelopeInput<'a> {
     coverage: &'a CoverageTally,
     coverage_verdict: &'a CoverageVerdict<'a>,
     edge_coverage: &'a EdgeCoverageState,
+    depth: &'a DepthState,
     out_dir: &'a Path,
     state_path: &'a Path,
     sites_path: &'a Path,
@@ -2726,6 +2986,9 @@ fn build_campaign_envelope(input: CampaignEnvelopeInput<'_>) -> serde_json::Valu
             store.dir().display().to_string().into(),
         );
     }
+    if let Some(store) = input.depth.active() {
+        artifacts.insert("depth_dir".into(), store.dir().display().to_string().into());
+    }
     if failures > 0 {
         artifacts.insert(
             "failures_dir".into(),
@@ -2762,6 +3025,7 @@ fn build_campaign_envelope(input: CampaignEnvelopeInput<'_>) -> serde_json::Valu
         "invocations": state.invocations.iter().map(InvocationRecord::to_json).collect::<Vec<_>>(),
         "sdk_sites": sdk_sites_json,
         "coverage": coverage_json,
+        "depth": depth_json(input.depth),
         "artifacts": artifacts,
     });
     if let (Some(object), Some(config)) =
@@ -3174,6 +3438,16 @@ fn selftest() -> Result<i32, CliError> {
         }
     }
 
+    println!("-- wasi depth store --");
+    for (name, ok, detail) in crate::depth::campaign_detector_selftest() {
+        if ok {
+            println!("  ok   {name:<40} -> {detail}");
+        } else {
+            println!("  FAIL {name:<40} -> {detail}");
+            failures += 1;
+        }
+    }
+
     println!();
     if failures == 0 {
         println!("CAMPAIGN SELFTEST PASSED");
@@ -3527,6 +3801,10 @@ mod tests {
         };
         let coverage_verdict = coverage_verdict(&coverage, None);
         let edge_coverage = EdgeCoverageState::unavailable("not-instrumented", None);
+        let depth = DepthState::Unavailable {
+            reason: "not-wasi",
+            hint: None,
+        };
         let envelope = build_campaign_envelope(CampaignEnvelopeInput {
             result: "failure",
             exit_code: 1,
@@ -3534,6 +3812,7 @@ mod tests {
             coverage: &coverage,
             coverage_verdict: &coverage_verdict,
             edge_coverage: &edge_coverage,
+            depth: &depth,
             out_dir: Path::new("out"),
             state_path: Path::new("out/campaign-state.json"),
             sites_path: Path::new("out/sites.json"),
@@ -3612,6 +3891,10 @@ mod tests {
         };
         let coverage_verdict = coverage_verdict(&coverage, None);
         let edge_coverage = EdgeCoverageState::unavailable("not-instrumented", None);
+        let depth = DepthState::Unavailable {
+            reason: "not-wasi",
+            hint: None,
+        };
         let envelope = build_campaign_envelope(CampaignEnvelopeInput {
             result: "ok",
             exit_code: 0,
@@ -3619,6 +3902,7 @@ mod tests {
             coverage: &coverage,
             coverage_verdict: &coverage_verdict,
             edge_coverage: &edge_coverage,
+            depth: &depth,
             out_dir: Path::new("out"),
             state_path: Path::new("out/campaign-state.json"),
             sites_path: Path::new("out/sites.json"),

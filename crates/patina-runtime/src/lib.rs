@@ -111,6 +111,11 @@ pub const ENV_COVERAGE_FD: &str = "PATINA_COVERAGE_FD";
 /// false-y value (`0`, `off`, `false`, `no`). The diagnostic is emitted by the
 /// native shim at the same finalization point as the runtime reports.
 pub const ENV_COVERAGE_REPORT: &str = "PATINA_COVERAGE_REPORT";
+/// Suppress the default-on WASI depth diagnostic when set to a false-y value
+/// (`0`, `off`, `false`, `no`). WASI guests execute in-process, so the line is
+/// emitted by `cargo-patina` rather than by a shim, but the gate spelling matches
+/// [`ENV_COVERAGE_REPORT`] so both diagnostics are silenced the same way.
+pub const ENV_DEPTH_REPORT: &str = "PATINA_DEPTH_REPORT";
 /// Inherited host descriptor carrying an encoded `patina_dst_fs_mem::FsImage`. When
 /// set, `native-run` streams a read-only host directory tree into the guest and
 /// the shim rebuilds it as the deterministic filesystem instead of an empty one,

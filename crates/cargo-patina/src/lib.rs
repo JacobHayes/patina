@@ -29,13 +29,13 @@ use patina_dst_minimize::{
 use patina_dst_runtime::{
     Context, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION,
     ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN, ENV_COVERAGE_FD,
-    ENV_COVERAGE_REPORT, ENV_DEFER_INIT, ENV_FINGERPRINT, ENV_FS_CRASH_AT, ENV_FS_ERROR_PERMILLE,
-    ENV_FS_IMAGE_FD, ENV_FS_SHORT_PERMILLE, ENV_FS_TORN_GRANULARITY, ENV_GUEST_ARGV, ENV_GUEST_ENV,
-    ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG, ENV_MODE, ENV_NET_DROP_PERMILLE, ENV_NET_JITTER,
-    ENV_NET_LATENCY, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS,
-    ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED,
-    ENV_SLEEP_JITTER, ENV_STEP_BUDGET, ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD,
-    RuntimeConfig,
+    ENV_COVERAGE_REPORT, ENV_DEFER_INIT, ENV_DEPTH_REPORT, ENV_FINGERPRINT, ENV_FS_CRASH_AT,
+    ENV_FS_ERROR_PERMILLE, ENV_FS_IMAGE_FD, ENV_FS_SHORT_PERMILLE, ENV_FS_TORN_GRANULARITY,
+    ENV_GUEST_ARGV, ENV_GUEST_ENV, ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG, ENV_MODE,
+    ENV_NET_DROP_PERMILLE, ENV_NET_JITTER, ENV_NET_LATENCY, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE,
+    ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS, ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN,
+    ENV_SCHED_STARVE_WINDOW, ENV_SEED, ENV_SLEEP_JITTER, ENV_STEP_BUDGET, ENV_SWARM, ENV_TIMELINE,
+    ENV_TRACE, ENV_TRACE_FD, RuntimeConfig,
 };
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
@@ -57,6 +57,7 @@ mod campaign;
 mod cli;
 mod config;
 mod coverage;
+mod depth;
 mod help;
 mod output;
 mod render;
@@ -2754,8 +2755,20 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
     }
     let context = Context::from_config(config).map_err(|error| CliError(error.to_string()))?;
     let host = configured_wasi_host(&invocation, &resolved.display, context)?;
-    let execution = execute_preview1_with_fuel(&bytes, host, invocation.fuel)
+    let mut execution = execute_preview1_with_fuel(&bytes, host, invocation.fuel)
         .map_err(|error| CliError(error.to_string()))?;
+    // WASI depth (fuel + hostcall counts) rides the run's own stderr, exactly as
+    // the native family's `PATINA_COVERAGE_REPORT` rides the child's — so the
+    // human stream, the envelope's `markers`, and a campaign's captured child
+    // output all read the same line. Appending happens after the guest and its
+    // trace are finalized, so no recorded byte or fingerprint is affected.
+    let depth = wasi_depth_report(&execution);
+    if !depth_report_suppressed() {
+        execution
+            .stderr
+            .extend_from_slice(depth.marker_line().as_bytes());
+        execution.stderr.push(b'\n');
+    }
     let (trace_path, seed, timeline) = match &invocation.mode {
         Mode::Seeded { seed } => (None, Some(*seed), "main".to_string()),
         Mode::Record { seed, path } => (Some(path.clone()), Some(*seed), "main".to_string()),
@@ -2775,11 +2788,38 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
             fingerprint: Some(fingerprint),
             seed,
             coverage: None,
+            depth: Some(depth),
         },
         execution.exit_code,
         execution.stdout,
         execution.stderr,
     )
+}
+
+/// Build the run envelope's `depth` object from a finished WASI execution. The
+/// values come straight from the engine's fuel meter and the host's per-import
+/// counters, both deterministic functions of the executed instruction stream.
+fn wasi_depth_report(execution: &patina_dst_wasi_host::WasiExecution) -> output::DepthReport {
+    output::DepthReport {
+        family: "wasi".to_string(),
+        fuel_consumed: execution.fuel_consumed,
+        hostcalls: execution
+            .hostcalls
+            .iter()
+            .map(|(name, count)| ((*name).to_string(), *count))
+            .collect(),
+    }
+}
+
+/// Whether the operator silenced the default-on depth diagnostic, using the same
+/// false-y spellings the native shim accepts for `PATINA_COVERAGE_REPORT`.
+fn depth_report_suppressed() -> bool {
+    env::var(ENV_DEPTH_REPORT).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "false" | "no"
+        )
+    })
 }
 
 /// The trace path a replay/branch mode reads its recorded guest argv from, or
@@ -6105,6 +6145,7 @@ IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
             fingerprint,
             seed,
             coverage: coverage.clone(),
+            depth: None,
         },
         captured,
     )?;
@@ -6478,6 +6519,7 @@ integrates the Patina runtime, or record under the native runtime: cargo patina 
             fingerprint: Some(fingerprint),
             seed,
             coverage: None,
+            depth: None,
         },
         captured,
     )

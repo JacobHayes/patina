@@ -180,6 +180,41 @@ pub struct CoverageReport {
     pub map_path: Option<PathBuf>,
 }
 
+/// The WASI family's depth proxy: fuel plus per-import hostcall counts. Depth is
+/// deliberately NOT called coverage — it measures how far a guest ran, not which
+/// edges it reached (`docs/arcs/coverage-depth.md` §5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DepthReport {
+    pub family: String,
+    pub fuel_consumed: u64,
+    /// Per-import call counts in import-name order. An import the guest never
+    /// called has no row at all, so "no depth data" can never be read as "zero".
+    pub hostcalls: Vec<(String, u64)>,
+}
+
+impl DepthReport {
+    pub fn hostcalls_total(&self) -> u64 {
+        self.hostcalls
+            .iter()
+            .fold(0u64, |total, (_, count)| total.saturating_add(*count))
+    }
+
+    /// The stderr marker line. Every value is an integer and the row order is the
+    /// map's, so the line is a deterministic function of the run.
+    pub fn marker_line(&self) -> String {
+        let mut line = format!(
+            "PATINA_DEPTH_REPORT family={} fuel_consumed={} hostcalls_total={}",
+            self.family,
+            self.fuel_consumed,
+            self.hostcalls_total()
+        );
+        for (name, count) in &self.hostcalls {
+            line.push_str(&format!(" {name}={count}"));
+        }
+        line
+    }
+}
+
 pub struct RunReport<'a> {
     pub verb: &'a str,
     pub family: &'a str,
@@ -191,6 +226,7 @@ pub struct RunReport<'a> {
     pub fingerprint: Option<String>,
     pub seed: Option<u64>,
     pub coverage: Option<CoverageReport>,
+    pub depth: Option<DepthReport>,
 }
 
 /// Finalize a run/replay after the guest returns: echo captured output for the
@@ -271,6 +307,10 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
             .coverage
             .clone()
             .or_else(|| coverage_report_line(&stdout_text, &stderr_text));
+        env.depth = report
+            .depth
+            .clone()
+            .or_else(|| depth_report_line(&stdout_text, &stderr_text));
         env.markers = extract_markers(&stdout_text, &stderr_text);
         env.result_line = result_line(&stdout_text, &stderr_text);
         env.stdout = Some(stdout_text);
@@ -337,6 +377,7 @@ const MARKER_PREFIXES: &[&str] = &[
     "PATINA_SCHEDULE_REPORT",
     "PATINA_COVERAGE_REPORT",
     "PATINA_COVERAGE",
+    "PATINA_DEPTH_REPORT",
     "PATINA_SDK_REPORT",
     "PATINA_SWARM_REPORT",
     "PATINA_LIVENESS_REPORT",
@@ -402,6 +443,47 @@ fn parse_coverage_report_line(line: &str) -> Option<CoverageReport> {
         saturated: saturated?,
         map_path: None,
     })
+}
+
+fn depth_report_line(stdout: &str, stderr: &str) -> Option<DepthReport> {
+    stdout
+        .lines()
+        .chain(stderr.lines())
+        .find_map(parse_depth_report_line)
+}
+
+/// Parse a `PATINA_DEPTH_REPORT` marker back into its structured form. The three
+/// fixed keys are reserved; every other `name=count` token is a hostcall row, so
+/// a newly counted import needs no parser change. A line whose declared
+/// `hostcalls_total` disagrees with its rows is rejected rather than silently
+/// re-derived — a truncated depth line must not read as a smaller-but-valid one.
+pub(crate) fn parse_depth_report_line(line: &str) -> Option<DepthReport> {
+    let mut parts = line.split_whitespace();
+    if parts.next()? != "PATINA_DEPTH_REPORT" {
+        return None;
+    }
+    let mut family: Option<String> = None;
+    let mut fuel_consumed: Option<u64> = None;
+    let mut declared_total: Option<u64> = None;
+    let mut hostcalls: Vec<(String, u64)> = Vec::new();
+    for part in parts {
+        let (key, value) = part.split_once('=')?;
+        match key {
+            "family" => family = Some(value.to_string()),
+            "fuel_consumed" => fuel_consumed = Some(value.parse().ok()?),
+            "hostcalls_total" => declared_total = Some(value.parse().ok()?),
+            name => hostcalls.push((name.to_string(), value.parse().ok()?)),
+        }
+    }
+    let report = DepthReport {
+        family: family?,
+        fuel_consumed: fuel_consumed?,
+        hostcalls,
+    };
+    if report.hostcalls_total() != declared_total? {
+        return None;
+    }
+    Some(report)
 }
 
 /// The single most representative result line for the failure summary: a
@@ -506,6 +588,7 @@ pub struct Envelope {
     seed: Option<u64>,
     trace: Option<TraceFacts>,
     coverage: Option<CoverageReport>,
+    depth: Option<DepthReport>,
     render: Option<String>,
     /// audit findings / build outputs / mismatch detail — a list of strings.
     findings: Vec<String>,
@@ -533,6 +616,7 @@ impl Envelope {
             seed: None,
             trace: None,
             coverage: None,
+            depth: None,
             render: None,
             findings: Vec::new(),
             finding_details: Vec::new(),
@@ -590,6 +674,18 @@ impl Envelope {
                 );
             }
             m.insert("coverage".into(), Value::Object(cm));
+        }
+        if let Some(d) = &self.depth {
+            let mut dm = Map::new();
+            dm.insert("family".into(), Value::from(d.family.clone()));
+            dm.insert("fuel_consumed".into(), Value::from(d.fuel_consumed));
+            dm.insert("hostcalls_total".into(), Value::from(d.hostcalls_total()));
+            let mut hm = Map::new();
+            for (name, count) in &d.hostcalls {
+                hm.insert(name.clone(), Value::from(*count));
+            }
+            dm.insert("hostcalls".into(), Value::Object(hm));
+            m.insert("depth".into(), Value::Object(dm));
         }
         if let Some(v) = &self.render {
             m.insert("render".into(), Value::from(v.clone()));

@@ -515,11 +515,31 @@ surface (`cargo patina campaign`) generalizing the shell campaign machinery.
    artifacts — the `patina.result/v1` family extended). Every generation's
    `PATINA_SDK_REPORT` is folded into `<out-dir>/sites.json` (schema
    `patina.campaign.sites/v1`, with `generations_observed` for continuation
-   watermarks); `sometimes!`/`reachable!` oracles that are never satisfied —
+   watermarks). A WASI campaign additionally accumulates **depth** — the family's
+   honest stand-in for edge coverage, since `wasm32-wasip1` has no sancov: every
+   run emits `PATINA_DEPTH_REPORT family=wasi fuel_consumed=... hostcalls_total=...`
+   plus one `name=count` row per imported function actually called (counted in
+   `Preview1Host`, surfaced through `WasiExecution::hostcalls` and the run
+   envelope's `depth` object; suppress with `PATINA_DEPTH_REPORT=0`, which a
+   campaign overrides for its own children). The campaign folds those lines into
+   `<out-dir>/depth/meta.json` (schema `patina.depth.campaign/v1`): fuel high-water
+   mark, cumulative hostcall sums, and a `depth_plateaued` flag from the same
+   `--plateau-after` window over the weaker novelty signal "a new hostcall kind or
+   a new fuel high-water mark". Depth is report-only — never part of a trace,
+   fingerprint, or canonical hash — and never conflated with coverage in output.
+   Both aux stores share the `generations_applied` watermark contract, so a resume
+   that re-runs an interrupted generation contributes nothing rather than
+   double-counting the non-idempotent sums. Missing depth is refused, not folded as
+   zero: a cleanly finished generation without a depth line aborts the campaign
+   naming the generation, a run whose fuel accounting reports 0 is refused
+   outright, and a campaign where no generation reported depth prints
+   `PATINA_CAMPAIGN_DEPTH_VACUOUS`. `sometimes!`/`reachable!` oracles that are never satisfied —
    including link-time-declared rows with `registered_gens=0` — fail the campaign
    by default unless `--allow-unmet-sometimes[=MIN_GENS]` explicitly waives the
    gate. `--selftest` proves every class reachable, the coverage gate classes,
-   malformed-row rejection, and the signature dedup/novelty logic,
+   malformed-row rejection, the signature dedup/novelty logic, and the native
+   coverage / WASI depth store detectors (fingerprint mismatch, plateau exactness,
+   watermark idempotency, missing-depth refusal),
    mirroring the fuzz-sweep classifier selftest. The existing
    `fuzz-sweep.sh` and `buggify-campaign.sh` are untouched and remain the
    battle-tested reference.
