@@ -15,10 +15,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use patina_dst_fs_mem::{FsImage, FsImageEntry};
 use patina_dst_minimize::{
@@ -96,6 +97,7 @@ const NATIVE_SHIM_STATICLIB: &str = "libpatina_dst_native_shim.a";
 const NATIVE_SHIM_OBJECTS_DIR: &str = "patina-shim-objects";
 const DEFAULT_NATIVE_EDITION: &str = "2024";
 const DEFAULT_NATIVE_FINGERPRINT: &str = "patina-native";
+static NATIVE_TRACE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// The fixed, machine-independent `argv[0]` every native guest sees. `native-run`
 /// resolves the guest binary to an absolute host path (tempdir-specific,
 /// machine-specific) to exec it, so passing that path through as `argv[0]` would
@@ -6910,6 +6912,116 @@ This run's determinism is NOT guaranteed and any \"deterministic\" claim on it i
     Ok(downgraded)
 }
 
+struct NativeTraceSink {
+    final_path: PathBuf,
+    temp_path: PathBuf,
+    file: Option<fs::File>,
+}
+
+impl NativeTraceSink {
+    fn create(final_path: &Path) -> Result<Self, CliError> {
+        if final_path.exists() && TraceBundle::load(final_path).is_err() {
+            fs::remove_file(final_path).map_err(|error| {
+                CliError(format!(
+                    "failed to remove incomplete existing trace {} before recording: {error}",
+                    final_path.display()
+                ))
+            })?;
+        }
+        if let Some(parent) = final_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent).map_err(|error| {
+                CliError(format!(
+                    "failed to create trace directory {}: {error}",
+                    parent.display()
+                ))
+            })?;
+        }
+        let temp_path = native_trace_temp_path(final_path);
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .map_err(|error| {
+                CliError(format!(
+                    "failed to create temporary trace {}: {error}",
+                    temp_path.display()
+                ))
+            })?;
+        Ok(Self {
+            final_path: final_path.to_path_buf(),
+            temp_path,
+            file: Some(file),
+        })
+    }
+
+    #[cfg(unix)]
+    fn raw_fd(&self) -> std::os::unix::io::RawFd {
+        use std::os::unix::io::AsRawFd;
+
+        self.file
+            .as_ref()
+            .expect("trace sink is live until commit")
+            .as_raw_fd()
+    }
+
+    fn commit(mut self) -> Result<PathBuf, String> {
+        drop(self.file.take());
+        if let Err(error) = TraceBundle::load(&self.temp_path) {
+            let _ = fs::remove_file(&self.temp_path);
+            return Err(error.to_string());
+        }
+        fs::rename(&self.temp_path, &self.final_path).map_err(|error| {
+            let _ = fs::remove_file(&self.temp_path);
+            format!(
+                "failed to atomically rename temporary trace {} to {}: {error}",
+                self.temp_path.display(),
+                self.final_path.display()
+            )
+        })?;
+        Ok(self.final_path.clone())
+    }
+}
+
+impl Drop for NativeTraceSink {
+    fn drop(&mut self) {
+        if self.file.is_some() {
+            let _ = fs::remove_file(&self.temp_path);
+        }
+    }
+}
+
+fn native_trace_temp_path(path: &Path) -> PathBuf {
+    let counter = NATIVE_TRACE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut name = OsString::from(".");
+    name.push(path.file_name().unwrap_or_else(|| OsStr::new("trace")));
+    name.push(format!(".tmp.{}.{}", std::process::id(), counter));
+    path.with_file_name(name)
+}
+
+fn remove_native_trace_scratch(trace_path: &Path) {
+    let Some(parent) = trace_path.parent() else {
+        return;
+    };
+    let Some(file_name) = trace_path.file_name() else {
+        return;
+    };
+    let mut prefix = OsString::from(".");
+    prefix.push(file_name);
+    prefix.push(".tmp.");
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    let prefix = prefix.to_string_lossy().into_owned();
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Record the downgraded-symbol caveat next to a recorded trace so a later
 /// reader of the artifact sees that the run was not an unconditional
 /// determinism claim.
@@ -7079,6 +7191,47 @@ fn spawn_native_child(
         ))
     })?;
     Ok((child, guard))
+}
+
+#[cfg(unix)]
+fn native_child_status(status: ExitStatus) -> (i32, Option<i32>) {
+    use std::os::unix::process::ExitStatusExt;
+
+    if let Some(code) = status.code() {
+        (code, None)
+    } else if let Some(signal) = status.signal() {
+        (128 + signal, Some(signal))
+    } else {
+        (2, None)
+    }
+}
+
+#[cfg(unix)]
+fn append_native_infra_marker(
+    captured: &mut output::Captured,
+    signal: Option<i32>,
+    trace_error: Option<(&Path, &str)>,
+) {
+    if signal.is_none() && trace_error.is_none() {
+        return;
+    }
+    let mut line = String::from("PATINA_INFRA native_run");
+    if let Some(signal) = signal {
+        line.push_str(&format!(" signal={signal}"));
+    }
+    if let Some((path, reason)) = trace_error {
+        line.push_str(&format!(
+            " trace=incomplete trace_path={:?} reason={:?}",
+            path.display().to_string(),
+            reason
+        ));
+    }
+    line.push('\n');
+    if captured.captured {
+        captured.stderr.extend_from_slice(line.as_bytes());
+    } else {
+        eprint!("{line}");
+    }
 }
 
 #[cfg(unix)]
@@ -7266,9 +7419,12 @@ liveness-safe."
         command.env(name, value);
     }
 
-    // Hold the trace file open until the child has been spawned so the inherited
-    // descriptor named by `PATINA_TRACE_FD` remains valid.
-    let trace_file = match &invocation.mode {
+    // Hold the trace transport file open until the child exits so the inherited
+    // descriptor named by `PATINA_TRACE_FD` remains valid. Record mode writes to
+    // a sibling temporary file first; the supervisor validates and renames it to
+    // the requested path only after the guest reaches trace finalization.
+    let mut replay_trace_file: Option<fs::File> = None;
+    let trace_sink = match &invocation.mode {
         NativeRunMode::Seeded { seed } => {
             command
                 .env(ENV_MODE, "seeded")
@@ -7280,12 +7436,7 @@ liveness-safe."
             path,
             fingerprint,
         } => {
-            let file = fs::File::create(path).map_err(|error| {
-                CliError(format!(
-                    "failed to create trace {}: {error}",
-                    path.display()
-                ))
-            })?;
+            let sink = NativeTraceSink::create(path)?;
             command
                 .env(ENV_MODE, "record")
                 .env(ENV_SEED, seed.to_string())
@@ -7299,7 +7450,7 @@ liveness-safe."
                         &SchedulePolicyFingerprint::from_schedule(&invocation.schedule),
                     ),
                 )
-                .env(ENV_TRACE_FD, file.as_raw_fd().to_string())
+                .env(ENV_TRACE_FD, sink.raw_fd().to_string())
                 // Record the guest arguments into the trace metadata so a later
                 // `replay` restores them without the `--` section being
                 // re-passed. Always forwarded (even when empty) so a
@@ -7307,12 +7458,7 @@ liveness-safe."
                 // absent field, so replaying it reproduces zero arguments rather
                 // than inheriting whatever the command line supplies.
                 .env(ENV_GUEST_ARGV, encode_guest_argv(&program_args)?);
-            // Qualify the recorded artifact: a run that downgraded unsupported
-            // symbols is not an unconditional determinism claim. Record the
-            // downgraded surface in a sidecar next to the trace so the caveat
-            // travels with it.
-            write_unsupported_sidecar(path, &downgraded)?;
-            Some(file)
+            Some(sink)
         }
         NativeRunMode::Replay { path, fingerprint } => {
             let file = fs::File::open(path).map_err(|error| {
@@ -7337,7 +7483,8 @@ liveness-safe."
                     ),
                 )
                 .env(ENV_TRACE_FD, file.as_raw_fd().to_string());
-            Some(file)
+            replay_trace_file = Some(file);
+            None
         }
     };
 
@@ -7346,7 +7493,10 @@ liveness-safe."
     // for the child, then restore the supervisor's close-on-exec state after the
     // child exits.
     let mut inherited_fds: Vec<std::os::unix::io::RawFd> = Vec::new();
-    if let Some(file) = &trace_file {
+    if let Some(sink) = &trace_sink {
+        inherited_fds.push(sink.raw_fd());
+    }
+    if let Some(file) = &replay_trace_file {
         inherited_fds.push(file.as_raw_fd());
     }
     if let Some(image) = &image_file {
@@ -7371,7 +7521,7 @@ liveness-safe."
     // The kill-able wait loop mirrors `output::execute_command`'s capture
     // semantics (piped when the JSON envelope / render wants guest output,
     // inherited otherwise) so `--starve` composes with `--format json`.
-    let captured = if invocation.schedule.starve.is_some() {
+    let (mut captured, native_signal) = if invocation.schedule.starve.is_some() {
         let stall_secs: u64 = std::env::var("PATINA_STARVATION_STALL_SECS")
             .ok()
             .and_then(|value| value.trim().parse().ok())
@@ -7399,7 +7549,8 @@ is starved). This is the documented starvation limitation, not a liveness guaran
 IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
                         );
                         inherited_guard.restore()?;
-                        drop(trace_file);
+                        drop(trace_sink);
+                        drop(replay_trace_file);
                         drop(image_file);
                         drop(coverage_file);
                         return Ok(STARVATION_STALL_EXIT);
@@ -7421,12 +7572,16 @@ IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
             ))
         })?;
         inherited_guard.restore()?;
-        output::Captured {
-            exit_code: exit_code(output.status)?,
-            stdout: output.stdout,
-            stderr: output.stderr,
-            captured: capture,
-        }
+        let (exit_code, signal) = native_child_status(output.status);
+        (
+            output::Captured {
+                exit_code,
+                stdout: output.stdout,
+                stderr: output.stderr,
+                captured: capture,
+            },
+            signal,
+        )
     } else if output::capture_active() {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let (child, inherited_guard) = spawn_native_child(&mut command, &binary, &inherited_fds)?;
@@ -7437,12 +7592,16 @@ IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
             ))
         })?;
         inherited_guard.restore()?;
-        output::Captured {
-            exit_code: exit_code(output.status)?,
-            stdout: output.stdout,
-            stderr: output.stderr,
-            captured: true,
-        }
+        let (exit_code, signal) = native_child_status(output.status);
+        (
+            output::Captured {
+                exit_code,
+                stdout: output.stdout,
+                stderr: output.stderr,
+                captured: true,
+            },
+            signal,
+        )
     } else {
         let (mut child, inherited_guard) =
             spawn_native_child(&mut command, &binary, &inherited_fds)?;
@@ -7453,14 +7612,48 @@ IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
             ))
         })?;
         inherited_guard.restore()?;
-        output::Captured {
-            exit_code: exit_code(status)?,
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-            captured: false,
-        }
+        let (exit_code, signal) = native_child_status(status);
+        (
+            output::Captured {
+                exit_code,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                captured: false,
+            },
+            signal,
+        )
     };
-    drop(trace_file);
+    drop(replay_trace_file);
+    let mut committed_record_trace = None;
+    let mut trace_finalization_error: Option<(PathBuf, String)> = None;
+    if let Some(sink) = trace_sink {
+        match sink.commit() {
+            Ok(path) => {
+                if let Err(error) = write_unsupported_sidecar(&path, &downgraded) {
+                    let _ = fs::remove_file(&path);
+                    return Err(error);
+                }
+                committed_record_trace = Some(path);
+            }
+            Err(reason) => {
+                let path = match &invocation.mode {
+                    NativeRunMode::Record { path, .. } => path.clone(),
+                    NativeRunMode::Seeded { .. } | NativeRunMode::Replay { .. } => PathBuf::new(),
+                };
+                if captured.exit_code == 0 {
+                    captured.exit_code = 2;
+                }
+                trace_finalization_error = Some((path, reason));
+            }
+        }
+    }
+    append_native_infra_marker(
+        &mut captured,
+        native_signal,
+        trace_finalization_error
+            .as_ref()
+            .map(|(path, reason)| (path.as_path(), reason.as_str())),
+    );
     drop(image_file);
     drop(coverage_file);
     let coverage = if let Some(path) = &invocation.coverage_out {
@@ -7477,7 +7670,7 @@ IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
     };
     let (trace_path, seed) = match &invocation.mode {
         NativeRunMode::Seeded { seed } => (None, Some(*seed)),
-        NativeRunMode::Record { seed, path, .. } => (Some(path.clone()), Some(*seed)),
+        NativeRunMode::Record { seed, .. } => (committed_record_trace.clone(), Some(*seed)),
         NativeRunMode::Replay { path, .. } => (Some(path.clone()), None),
     };
     let fingerprint = match &invocation.mode {

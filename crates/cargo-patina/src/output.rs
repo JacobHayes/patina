@@ -368,6 +368,9 @@ fn classify(exit_code: i32, stdout: &str, stderr: &str) -> String {
     {
         return "violation".to_string();
     }
+    if combined.contains("PATINA_INFRA") || combined.contains("incomplete trace") {
+        return "infra".to_string();
+    }
     "failure".to_string()
 }
 
@@ -381,6 +384,7 @@ const MARKER_PREFIXES: &[&str] = &[
     "PATINA_COVERAGE",
     "PATINA_SDK_REPORT",
     "PATINA_LIVENESS_REPORT",
+    "PATINA_INFRA",
     "PATINA_ALWAYS_VIOLATION",
     "PATINA_BUGGIFY_DUPLICATE_LABEL",
     "PATINA_BUGGIFY_SETUP_NEVER_CALLED",
@@ -819,6 +823,22 @@ mod tests {
             "violation"
         );
         assert_eq!(classify(1, "panic somewhere", ""), "failure");
+    }
+
+    #[test]
+    fn classify_detects_infra_markers() {
+        assert_eq!(
+            classify(
+                134,
+                "",
+                "PATINA_INFRA native_run signal=6 trace=incomplete reason=empty"
+            ),
+            "infra"
+        );
+        assert_eq!(
+            classify(2, "", "incomplete trace run.patina: empty trace file"),
+            "infra"
+        );
     }
 
     #[test]

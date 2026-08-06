@@ -50,6 +50,14 @@ use sha2::{Digest, Sha256};
 use crate::sdk_report::{CoverageTally, ExercisedSite};
 use crate::{CliError, reject_inline, required_value, set_once, split_opt};
 
+#[cfg(unix)]
+const SIGKILL: i32 = 9;
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
 /// The stable schema identifier for the campaign JSON envelope, extending the
 /// `patina.result/v1` family. `v2` is summary-first: `notable_runs` carries only
 /// the novel/failing generations (v1's `runs` dumped every generation), and an
@@ -644,6 +652,8 @@ impl CampaignClass {
 }
 
 const INFRA_MARKERS: &[&str] = &[
+    "PATINA_INFRA",
+    "incomplete trace",
     "cargo-patina:",
     "Cargo process terminated",
     "terminated by a signal",
@@ -1501,6 +1511,8 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
         let seed = u64::from_le_bytes(hash[0..8].try_into().expect("32-byte hash"));
         let flags = derive_flags(&state.spec, &hash, state.artifact.family);
         let trace_path = traces_dir.join(format!("generation-{generation}.patina"));
+        let _ = fs::remove_file(&trace_path);
+        crate::remove_native_trace_scratch(&trace_path);
 
         let (exit, stdout, stderr, timed_out) = run_generation(
             &self_exe,
@@ -1582,6 +1594,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
         // Remove the scratch file (including an empty abort-reservation file) so the
         // output directory holds only real artifacts.
         let _ = fs::remove_file(&trace_path);
+        crate::remove_native_trace_scratch(&trace_path);
 
         if novel {
             novel_so_far += 1;
@@ -1700,6 +1713,11 @@ fn run_generation(
     use std::time::{Duration, Instant};
 
     let mut command = Command::new(self_exe);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     command
         .arg("run")
         .arg(artifact)
@@ -1742,7 +1760,7 @@ fn run_generation(
                 Some(_) => break,
                 None => {
                     if Instant::now() >= deadline {
-                        let _ = child.kill();
+                        kill_generation_process_tree(&mut child);
                         timed_out = true;
                         break;
                     }
@@ -1769,6 +1787,21 @@ fn run_generation(
         stderr,
         timed_out,
     ))
+}
+
+fn kill_generation_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let pgid = -(child.id() as i32);
+        // SAFETY: `kill` is called with a process-group id created for this
+        // generation's child `cargo patina run`, so the supervisor and its guest
+        // are killed together on timeout rather than orphaning a spinning guest.
+        let rc = unsafe { kill(pgid, SIGKILL) };
+        if rc == 0 {
+            return;
+        }
+    }
+    let _ = child.kill();
 }
 
 /// A typed value for a child `run` flag, rendered to the exact canonical syntax
@@ -1908,20 +1941,15 @@ fn reproduce_command(
 }
 
 /// Save a failing generation's trace into `<out>/failures/`, but ONLY when the
-/// child wrote a valid (non-empty) bundle. A mid-run abort — a liveness violation
-/// or an always-violation trap — never reaches `Context::finish`, so it leaves
-/// only an empty reservation file; that is not a replayable trace and is skipped.
+/// child wrote a complete, validated bundle. A mid-run abort or timeout never
+/// reaches `Context::finish`; an empty/truncated scratch trace is skipped rather
+/// than copied forward as a future replay surprise.
 fn save_failure_trace(out_dir: &Path, trace_path: &Path, generation: u64) -> Option<String> {
-    let is_valid = std::fs::metadata(trace_path)
-        .map(|m| m.len() > 0)
-        .unwrap_or(false);
-    if !is_valid {
-        return None;
-    }
+    let bundle = patina_dst_trace::TraceBundle::load(trace_path).ok()?;
     let failures_dir = out_dir.join("failures");
     std::fs::create_dir_all(&failures_dir).ok()?;
     let dest = failures_dir.join(format!("generation-{generation}.patina"));
-    std::fs::copy(trace_path, &dest).ok()?;
+    bundle.write_atomic(&dest).ok()?;
     Some(dest.display().to_string())
 }
 

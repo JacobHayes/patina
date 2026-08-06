@@ -480,10 +480,25 @@ impl TraceBundle {
             })?
             .len();
         enforce_trace_byte_limit(size, MAX_TRACE_BYTES, "trace file")?;
-        let value: serde_json::Value =
-            serde_json::from_reader(BufReader::new(file)).map_err(|source| TraceError::Parse {
+        if size == 0 {
+            return Err(TraceError::Incomplete {
                 path: path.to_path_buf(),
-                source,
+                reason: "empty trace file; record finalization did not complete".into(),
+            });
+        }
+        let value: serde_json::Value =
+            serde_json::from_reader(BufReader::new(file)).map_err(|source| {
+                if source.is_eof() {
+                    TraceError::Incomplete {
+                        path: path.to_path_buf(),
+                        reason: format!("truncated JSON trace: {source}"),
+                    }
+                } else {
+                    TraceError::Parse {
+                        path: path.to_path_buf(),
+                        source,
+                    }
+                }
             })?;
         Self::decode(value, path.to_path_buf())
     }
@@ -496,12 +511,28 @@ impl TraceBundle {
             MAX_TRACE_BYTES,
             "trace transport payload",
         )?;
-        let value: serde_json::Value =
-            serde_json::from_slice(bytes).map_err(|source| TraceError::Parse {
-                path: PathBuf::from("<trace-transport>"),
-                source,
-            })?;
-        Self::decode(value, PathBuf::from("<trace-transport>"))
+        let path = PathBuf::from("<trace-transport>");
+        if bytes.is_empty() {
+            return Err(TraceError::Incomplete {
+                path,
+                reason: "empty trace transport payload; record finalization did not complete"
+                    .into(),
+            });
+        }
+        let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|source| {
+            if source.is_eof() {
+                TraceError::Incomplete {
+                    path: path.clone(),
+                    reason: format!("truncated JSON trace: {source}"),
+                }
+            } else {
+                TraceError::Parse {
+                    path: path.clone(),
+                    source,
+                }
+            }
+        })?;
+        Self::decode(value, path)
     }
 
     /// Upgrade a decoded bundle to the current format, then deserialize and
@@ -515,6 +546,7 @@ impl TraceBundle {
     /// [`migrate_to_current`] before any structural interpretation.
     fn decode(value: serde_json::Value, path: PathBuf) -> Result<Self, TraceError> {
         let value = migrate_to_current(value)?;
+        require_complete_current_bundle(&value, &path)?;
         let bundle: Self =
             serde_json::from_value(value).map_err(|source| TraceError::Parse { path, source })?;
         bundle.validate()?;
@@ -1081,6 +1113,14 @@ pub enum TraceError {
         path: PathBuf,
         source: serde_json::Error,
     },
+    /// A trace stopped before a complete bundle was written: empty/truncated JSON
+    /// or missing top-level/core metadata fields. This is a distinct refusal so
+    /// replay reports "the record never finalized" rather than a generic JSON
+    /// parse error at first use.
+    Incomplete {
+        path: PathBuf,
+        reason: String,
+    },
     Serialize(serde_json::Error),
     UnsupportedVersion {
         found: u32,
@@ -1120,6 +1160,9 @@ impl fmt::Display for TraceError {
             Self::Io { action, source } => write!(f, "failed to {action}: {source}"),
             Self::Parse { path, source } => {
                 write!(f, "failed to parse trace {}: {source}", path.display())
+            }
+            Self::Incomplete { path, reason } => {
+                write!(f, "incomplete trace {}: {reason}", path.display())
             }
             Self::Serialize(source) => write!(f, "failed to serialize trace: {source}"),
             Self::UnsupportedVersion { found, supported } => write!(
@@ -1291,6 +1334,38 @@ fn migrate_v3_to_v4(mut value: serde_json::Value) -> Result<serde_json::Value, T
         .ok_or_else(|| TraceError::Invalid("format 3 trace is not a JSON object".into()))?;
     object.insert("format_version".into(), serde_json::Value::from(4u32));
     Ok(value)
+}
+
+fn require_complete_current_bundle(
+    value: &serde_json::Value,
+    path: &Path,
+) -> Result<(), TraceError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| TraceError::Invalid("trace bundle must be a JSON object".into()))?;
+    for field in ["format_version", "metadata", "timelines"] {
+        if !object.contains_key(field) {
+            return Err(TraceError::Incomplete {
+                path: path.to_path_buf(),
+                reason: format!("trace bundle is missing required field `{field}`"),
+            });
+        }
+    }
+    let metadata = object["metadata"]
+        .as_object()
+        .ok_or_else(|| TraceError::Incomplete {
+            path: path.to_path_buf(),
+            reason: "trace metadata is missing or not an object".into(),
+        })?;
+    for field in ["root_seed", "decision_policy", "fingerprint"] {
+        if !metadata.contains_key(field) {
+            return Err(TraceError::Incomplete {
+                path: path.to_path_buf(),
+                reason: format!("trace metadata is missing required field `{field}`"),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn enforce_trace_byte_limit(
@@ -1731,13 +1806,46 @@ mod tests {
     }
 
     #[test]
-    fn rejects_malformed_and_unsupported_trace_files() {
+    fn rejects_malformed_incomplete_and_unsupported_trace_files() {
         let directory = tempdir().unwrap();
         let malformed = directory.path().join("malformed.patina");
         fs::write(&malformed, b"not json").unwrap();
         assert!(matches!(
             TraceBundle::load(&malformed),
             Err(TraceError::Parse { .. })
+        ));
+
+        let empty = directory.path().join("empty.patina");
+        fs::write(&empty, b"").unwrap();
+        let error = TraceBundle::load(&empty).unwrap_err();
+        assert!(
+            matches!(&error, TraceError::Incomplete { reason, .. } if reason.contains("empty trace")),
+            "unexpected error: {error}"
+        );
+
+        let truncated = directory.path().join("truncated.patina");
+        fs::write(&truncated, b"{\"format_version\":4,").unwrap();
+        let error = TraceBundle::load(&truncated).unwrap_err();
+        assert!(
+            matches!(&error, TraceError::Incomplete { reason, .. } if reason.contains("truncated JSON")),
+            "unexpected error: {error}"
+        );
+
+        let incomplete_metadata = directory.path().join("incomplete-metadata.patina");
+        fs::write(
+            &incomplete_metadata,
+            br#"{"format_version":4,"metadata":{"root_seed":1,"decision_policy":"splitmix64-v1"},"timelines":[]}"#,
+        )
+        .unwrap();
+        let error = TraceBundle::load(&incomplete_metadata).unwrap_err();
+        assert!(
+            matches!(&error, TraceError::Incomplete { reason, .. } if reason.contains("trace metadata") && reason.contains("fingerprint")),
+            "unexpected error: {error}"
+        );
+
+        assert!(matches!(
+            TraceBundle::from_slice(b""),
+            Err(TraceError::Incomplete { .. })
         ));
 
         let unsupported = directory.path().join("unsupported.patina");

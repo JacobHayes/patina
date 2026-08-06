@@ -2746,6 +2746,95 @@ fn campaign_catches_planted_liveness_bug_dedups_and_reproduces() {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
+fn campaign_timeout_does_not_save_incomplete_trace() {
+    let workspace = native_workspace();
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("spin_forever.rs");
+    fs::write(
+        &source,
+        r#"fn main() {
+    loop {
+        std::hint::spin_loop();
+    }
+}
+"#,
+    )
+    .unwrap();
+    let guest = directory.path().join("spin-forever");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            guest.to_str().unwrap(),
+        ],
+    );
+
+    let out = directory.path().join("timeout-campaign");
+    let ran = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "campaign",
+            guest.to_str().unwrap(),
+            "--gens",
+            "1",
+            "--timeout-secs",
+            "1",
+            "--progress-every",
+            "1",
+            "--out-dir",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        ran.status.code(),
+        Some(1),
+        "timeout campaign should report the INFRA failure\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        stdout.contains("class=INFRA"),
+        "timeout was not classified as INFRA:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("PATINA_CAMPAIGN_GEN generation=0"),
+        "missing per-generation timeout line:\n{stdout}"
+    );
+
+    let scratch = out.join("traces/generation-0.patina");
+    assert!(
+        !scratch.exists(),
+        "timed-out generation must not leave a zero-byte scratch trace"
+    );
+    let traces_dir = out.join("traces");
+    let leftovers = fs::read_dir(&traces_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        leftovers.is_empty(),
+        "timed-out generation left trace scratch files: {leftovers:?}"
+    );
+    assert!(
+        !out.join("failures/generation-0.patina").exists(),
+        "campaign must not save an incomplete failure trace"
+    );
+    let store: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(out.join("signatures.json")).unwrap()).unwrap();
+    let signature = &store["signatures"].as_array().unwrap()[0];
+    assert_eq!(signature["class"], "INFRA");
+    assert!(
+        signature.get("trace").is_none(),
+        "timeout signature should fall back to a rerun command, not an unreplayable trace: {signature:#}"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
 fn campaign_extend_equals_fresh_campaign() {
     let workspace = native_workspace();
     let fixture = workspace.join("testbeds/liveness-campaign");
@@ -4464,6 +4553,164 @@ fn main() {
 // are byte-identical, and a recorded run replays byte-identically. Before this
 // wave the audit refused the binary outright ("unsupported native imports:
 // _fdopendir _linkat"), which is the RED evidence this test's fix clears.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_record_abort_leaves_trace_absent_and_infra_classified() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("abort_record.rs");
+    fs::write(
+        &source,
+        r#"fn main() {
+    eprintln!("guest-about-to-abort");
+    std::process::abort();
+}
+"#,
+    )
+    .unwrap();
+    let bin = directory.path().join("abort-record");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    let trace = directory.path().join("abort.patina");
+    let ran = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--record",
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "abort-record",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(
+        ran.status.code(),
+        Some(134),
+        "abort should be surfaced as 128+SIGABRT with a named infra marker\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(
+        !trace.exists(),
+        "record abort must leave the requested trace path absent, not zero-byte"
+    );
+    assert!(
+        fs::read_dir(directory.path()).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("abort.patina.tmp")),
+        "record abort must clean up its temporary trace"
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&ran.stdout).unwrap_or_else(|error| {
+        panic!(
+            "native run did not emit a JSON envelope: {error}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&ran.stdout),
+            String::from_utf8_lossy(&ran.stderr)
+        )
+    });
+    assert_eq!(envelope["result"], "infra");
+    assert!(
+        envelope.get("trace").is_none(),
+        "no absent trace fact should be advertised: {envelope:#}"
+    );
+    let stderr = envelope["stderr"].as_str().unwrap();
+    assert!(
+        stderr.contains("PATINA_INFRA native_run"),
+        "missing infra marker: {stderr}"
+    );
+    assert!(
+        stderr.contains("signal=6"),
+        "missing signal detail: {stderr}"
+    );
+    assert!(
+        stderr.contains("trace=incomplete"),
+        "missing trace detail: {stderr}"
+    );
+    assert!(
+        stderr.contains("empty trace"),
+        "missing empty-trace refusal: {stderr}"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_replay_refuses_incomplete_traces_before_guest_exec() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("noop_replay.rs");
+    fs::write(&source, "fn main() { println!(\"SHOULD_NOT_RUN\"); }\n").unwrap();
+    let bin = directory.path().join("noop-replay");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    let cases: [(&str, &[u8], &str); 3] = [
+        ("empty", b"", "empty trace"),
+        ("truncated", b"{\"format_version\":4,", "truncated JSON"),
+        (
+            "incomplete-metadata",
+            br#"{"format_version":4,"metadata":{"root_seed":1,"decision_policy":"splitmix64-v1"},"timelines":[]}"#,
+            "trace metadata is missing required field `fingerprint`",
+        ),
+    ];
+    for (name, bytes, needle) in cases {
+        let trace = directory.path().join(format!("{name}.patina"));
+        fs::write(&trace, bytes).unwrap();
+        let replayed = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &[
+                "replay",
+                bin.to_str().unwrap(),
+                trace.to_str().unwrap(),
+                "--fingerprint",
+                "noop-replay",
+            ],
+        );
+        assert_eq!(
+            replayed.status.code(),
+            Some(2),
+            "{name} trace should refuse with the CLI error exit\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&replayed.stdout),
+            String::from_utf8_lossy(&replayed.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&replayed.stderr);
+        assert!(
+            stderr.contains("incomplete trace"),
+            "{name} stderr:\n{stderr}"
+        );
+        assert!(stderr.contains(needle), "{name} stderr:\n{stderr}");
+        assert!(
+            !stderr.contains("terminated by a signal"),
+            "{name} replay must refuse before guest exec, not die by signal:\n{stderr}"
+        );
+        assert!(
+            !String::from_utf8_lossy(&replayed.stdout).contains("SHOULD_NOT_RUN"),
+            "{name} replay executed the guest before refusing"
+        );
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn native_hard_link_and_remove_dir_all_are_supported_and_deterministic() {
