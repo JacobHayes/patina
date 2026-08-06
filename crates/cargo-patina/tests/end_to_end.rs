@@ -5244,6 +5244,148 @@ fn native_yield_points_trace_fails_closed_against_plain_binary() {
     );
 }
 
+// Wave-A coverage detector/determinism gate. `--coverage-out` is legal only on
+// the yield-point build (D1 plain-binary refusal); a yield-point run writes the
+// `patina.covmap/v1` artifact, emits the numeric report, and the full map is
+// byte-identical for same-seed repeats and record→replay at two seeds.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_coverage_out_writes_covmap_and_is_byte_identical() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("yp_cov.rs");
+    fs::write(&source, YIELD_POINTS_SOURCE).unwrap();
+    let workspace = native_workspace();
+    let plain = directory.path().join("plain-cov");
+    let instrumented = directory.path().join("instrumented-cov");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            plain.to_str().unwrap(),
+        ],
+    );
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            instrumented.to_str().unwrap(),
+            "--yield-points",
+        ],
+    );
+
+    let refused_map = directory.path().join("plain.covmap");
+    let refused = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "run",
+            plain.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--coverage-out",
+            refused_map.to_str().unwrap(),
+        ],
+    );
+    let refused_stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success()
+            && refused_stderr.contains("--coverage-out requires")
+            && refused_stderr.contains("cargo patina build --yield-points"),
+        "D1 plain-binary coverage request should fail closed with the yield-points hint:\n{refused_stderr}"
+    );
+
+    for seed in [3u64, 7] {
+        let seed = seed.to_string();
+        let first_map = directory.path().join(format!("seed-{seed}-a.covmap"));
+        let first = invoke_in(
+            workspace,
+            &[
+                "run",
+                instrumented.to_str().unwrap(),
+                "--seed",
+                &seed,
+                "--coverage-out",
+                first_map.to_str().unwrap(),
+            ],
+        );
+        assert_covmap_has_magic_and_report(&first_map, &first);
+
+        let second_map = directory.path().join(format!("seed-{seed}-b.covmap"));
+        let second = invoke_in(
+            workspace,
+            &[
+                "run",
+                instrumented.to_str().unwrap(),
+                "--seed",
+                &seed,
+                "--coverage-out",
+                second_map.to_str().unwrap(),
+            ],
+        );
+        assert_covmap_has_magic_and_report(&second_map, &second);
+        assert_eq!(
+            fs::read(&first_map).unwrap(),
+            fs::read(&second_map).unwrap(),
+            "same-seed coverage maps must be byte-identical for seed {seed}"
+        );
+
+        let trace = directory.path().join(format!("seed-{seed}.patina"));
+        let record_map = directory.path().join(format!("seed-{seed}-record.covmap"));
+        let recorded = invoke_in(
+            workspace,
+            &[
+                "run",
+                instrumented.to_str().unwrap(),
+                "--seed",
+                &seed,
+                "--record",
+                trace.to_str().unwrap(),
+                "--coverage-out",
+                record_map.to_str().unwrap(),
+            ],
+        );
+        assert_covmap_has_magic_and_report(&record_map, &recorded);
+
+        let replay_map = directory.path().join(format!("seed-{seed}-replay.covmap"));
+        let replayed = invoke_in(
+            workspace,
+            &[
+                "replay",
+                instrumented.to_str().unwrap(),
+                trace.to_str().unwrap(),
+                "--coverage-out",
+                replay_map.to_str().unwrap(),
+            ],
+        );
+        assert_covmap_has_magic_and_report(&replay_map, &replayed);
+        assert_eq!(
+            fs::read(&record_map).unwrap(),
+            fs::read(&replay_map).unwrap(),
+            "record→replay coverage maps must be byte-identical for seed {seed}"
+        );
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn assert_covmap_has_magic_and_report(path: &Path, output: &Output) {
+    let bytes = fs::read(path).unwrap_or_else(|error| panic!("missing covmap {path:?}: {error}"));
+    assert!(
+        bytes.starts_with(b"patina.covmap/v1"),
+        "coverage map {path:?} missing magic"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("PATINA_COVERAGE_REPORT edges_total=")
+            && stderr.contains("PATINA_COVERAGE map=")
+            && stderr.contains("covered_permille="),
+        "coverage run should emit report + pointer lines; stderr:\n{stderr}"
+    );
+}
+
 // A worker that uses `mpsc::recv_timeout` initializes a thread-local `Thread`
 // handle whose destructor runs at pthread exit. Under `--yield-points` that
 // destructor is instrumented std code monomorphized into the guest crate, so it

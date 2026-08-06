@@ -1,6 +1,7 @@
 # Arc: coverage / depth measurement for runs and campaigns
 
-Status: design approved 2026-07-30; implementation not yet scheduled.
+Status: Wave A implemented 2026-08-06 (native yield-point counters, reports,
+`run`/`replay --coverage-out` covmaps, and fail-closed detectors); Waves B-E remain planned.
 Lands as `docs/arcs/coverage-depth.md`.
 
 Cross-references:
@@ -22,14 +23,13 @@ in heartbeat; coverage-GUIDED scheduling is phase 2, scheduled as this arc's Wav
 
 ## 1. Native mechanism: counter mechanics in `patina_yield.c`
 
-**Today.** `crates/cargo-patina/c/patina_yield.c` receives the full guard range in
-`__sanitizer_cov_trace_pc_guard_init(start, stop)` and deliberately ignores it
-(`patina_yield.c:35-41` — "The guards are unused"); every guard hit calls
-`patina_yield_point(__builtin_return_address(0))` unconditionally (`patina_yield.c:45-48`).
-The instrumentation flags are stable `-C` codegen flags
-(`sancov_rustc_flags`, `cargo-patina/src/lib.rs:4503-4512`: `passes=sancov-module`,
-`-sanitizer-coverage-level=3`, `-sanitizer-coverage-trace-pc-guard`), and the hook object
-itself is compiled WITHOUT sancov so it can never recurse (`lib.rs:4384-4400`).
+**Pre-Wave-A baseline.** `crates/cargo-patina/c/patina_yield.c` received the full
+guard range in `__sanitizer_cov_trace_pc_guard_init(start, stop)` and deliberately ignored
+it; every guard hit called `patina_yield_point(__builtin_return_address(0))`
+unconditionally. Wave A keeps that unconditional scheduling call and uses the same stable
+`-C` codegen flag family (`passes=sancov-module`, `-sanitizer-coverage-level=3`,
+`-sanitizer-coverage-trace-pc-guard`), adding only the parallel pc-table flag described
+below. The hook object itself is still compiled WITHOUT sancov so it can never recurse.
 
 **Decision C1 — counters live in the guard words themselves; the hook does one saturating
 increment per hit.** The compiler already allocates one `uint32_t` per instrumented edge
@@ -108,8 +108,9 @@ run that requested coverage → loud error, never a silent empty report (§10, D
    ```
 
 2. **Full counter map to a supervisor-owned descriptor**, only when requested:
-   `run --coverage-out PATH` makes the supervisor create the file and pass it as an
-   inherited descriptor via `PATINA_COVERAGE_FD` — the exact `PATINA_TRACE_FD` pattern
+   `run --coverage-out PATH` / `replay --coverage-out PATH` makes the supervisor create
+   the file and pass it as an inherited descriptor via `PATINA_COVERAGE_FD` — the exact
+   `PATINA_TRACE_FD` pattern
    (`cargo-patina/src/lib.rs:5805`, `patina-runtime/src/lib.rs:98`), written at finalize
    through host-alias writes (shim host-alias doctrine holds; no interposable symbol is
    called). Map format `patina.covmap/v1`: header (magic, version, guard count, range
@@ -172,7 +173,7 @@ than dumping rollups inline into `run` output. Progressive disclosure:
 - `--format json` emits a `patina.coverage/v1` envelope with the full tree — same content,
   machine medium (project principle: every surface consumable by humans AND agents).
 
-`run --coverage-out` prints exactly one pointer line
+`run`/`replay --coverage-out` prints exactly one pointer line
 (`PATINA_COVERAGE map=PATH edges=19204/48211 covered_permille=398`) and defers drill-down
 to the verb — run output stays lean.
 
@@ -320,10 +321,11 @@ formats.
 ## 9. Staged implementation plan
 
 **Wave A — native counters + dump + report (runtime/shim/build-recipe touching → FULL
-battery).** Hook increment + range registration (`patina_yield.c`), pc-table flag,
-`patina_coverage_register` + finalize-time report/dump in shim+runtime,
-`PATINA_COVERAGE_FD` supervisor plumbing, `run --coverage-out` (registry row),
-requested-but-empty and count-mismatch refusals.
+battery) — implemented 2026-08-06.** Hook increment + range registration
+(`patina_yield.c`), pc-table flag, `patina_coverage_register` + finalize-time
+report/dump in shim+runtime, `PATINA_COVERAGE_FD` supervisor plumbing,
+`run`/`replay --coverage-out` (registry rows), additive run-envelope coverage
+summary, requested-but-empty and count-mismatch refusals.
 *Verify*: `mise run check` (the ladder INCLUDES the three validation scripts —
 `scripts/validate-wasi.sh`, `scripts/smoke-cross-target.sh`,
 `scripts/validate-native-shim.sh`; `mise.toml:30-43`), TWO e2e runs in the battery log,
@@ -333,7 +335,7 @@ before/after overhead on a threaded testbed, Linux gate battery (runtime-touchin
 **Wave B — offline symbolization + rollup + `coverage` verb (CLI-only).** nm-anchor
 resolution, symbol bucketing + demangle, shared rollup module (coordinate with
 invariant-visibility on the `.patina/` config shape), verb + `--format json` envelope,
-run-envelope `coverage` object, `MARKER_PREFIXES` additions, llms.txt/TUTORIAL rows.
+and llms.txt/TUTORIAL rows for the symbolized coverage workflow.
 *Verify*: `mise run check` (drift gate `scripts/check-flag-drift.sh` covers the registry);
 no shim battery beyond the ladder — runtime untouched.
 

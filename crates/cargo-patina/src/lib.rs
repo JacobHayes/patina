@@ -27,13 +27,13 @@ use patina_dst_minimize::{
 };
 use patina_dst_runtime::{
     Context, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION,
-    ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN, ENV_DEFER_INIT,
-    ENV_FINGERPRINT, ENV_FS_CRASH_AT, ENV_FS_IMAGE_FD, ENV_FS_TORN_GRANULARITY, ENV_GUEST_ARGV,
-    ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG, ENV_MODE, ENV_NET_DROP_PERMILLE, ENV_NET_JITTER,
-    ENV_NET_LATENCY, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS,
-    ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED,
-    ENV_SLEEP_JITTER, ENV_STEP_BUDGET, ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD,
-    RuntimeConfig,
+    ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN, ENV_COVERAGE_FD,
+    ENV_COVERAGE_REPORT, ENV_DEFER_INIT, ENV_FINGERPRINT, ENV_FS_CRASH_AT, ENV_FS_IMAGE_FD,
+    ENV_FS_TORN_GRANULARITY, ENV_GUEST_ARGV, ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG, ENV_MODE,
+    ENV_NET_DROP_PERMILLE, ENV_NET_JITTER, ENV_NET_LATENCY, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE,
+    ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS, ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN,
+    ENV_SCHED_STARVE_WINDOW, ENV_SEED, ENV_SLEEP_JITTER, ENV_STEP_BUDGET, ENV_SWARM, ENV_TIMELINE,
+    ENV_TRACE, ENV_TRACE_FD, RuntimeConfig,
 };
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
@@ -412,6 +412,11 @@ struct NativeRunInvocation {
     /// How the pre-run gate treats symbols that are neither interposed nor
     /// known-safe.
     allow_unsupported: UnsupportedPolicy,
+    /// Host path where `run --coverage-out` writes the native yield-point edge
+    /// counter map. The supervisor creates the file and passes its descriptor via
+    /// `PATINA_COVERAGE_FD`, so the shim never opens it through the deterministic
+    /// filesystem. Native yield-point binaries only.
+    coverage_out: Option<PathBuf>,
     /// Host directory to capture read-only into the guest filesystem, mounted at
     /// the guest root `/`. When set, the supervisor (which is not interposed)
     /// walks the tree into a deterministic `FsImage`, streams it to the guest
@@ -2752,6 +2757,7 @@ fn parse_native_run_from(
     let mut liveness = NativeLiveness::default();
     let mut allow = BTreeSet::new();
     let mut allow_unsupported: Option<UnsupportedPolicy> = None;
+    let mut coverage_out = None;
     let mut mount = None;
     let mut harness = false;
     let mut index = 0;
@@ -2811,6 +2817,10 @@ fn parse_native_run_from(
             "--mount" => {
                 let value = required_os_value(opt, &arguments, &mut index)?;
                 set_once(&mut mount, PathBuf::from(value), "--mount")?;
+            }
+            "--coverage-out" => {
+                let value = required_os_value(opt, &arguments, &mut index)?;
+                set_once(&mut coverage_out, PathBuf::from(value), "--coverage-out")?;
             }
             // The five seed-driven fault knobs, validated by the shared
             // `apply_fault_flag` exactly as on the cargo and WASI families.
@@ -2984,6 +2994,7 @@ fn parse_native_run_from(
         liveness,
         allow,
         allow_unsupported: allow_unsupported.unwrap_or(UnsupportedPolicy::Deny),
+        coverage_out,
         mount,
         harness,
     })
@@ -3091,6 +3102,7 @@ fn parse_native_replay(
     let mut fingerprint = None;
     let mut allow = BTreeSet::new();
     let mut allow_unsupported: Option<UnsupportedPolicy> = None;
+    let mut coverage_out = None;
     let mut mount = None;
     let mut harness = false;
     let mut index = 0;
@@ -3122,6 +3134,10 @@ fn parse_native_replay(
             "--mount" => {
                 let value = required_os_value(opt, &arguments, &mut index)?;
                 set_once(&mut mount, PathBuf::from(value), "--mount")?;
+            }
+            "--coverage-out" => {
+                let value = required_os_value(opt, &arguments, &mut index)?;
+                set_once(&mut coverage_out, PathBuf::from(value), "--coverage-out")?;
             }
             "--allow" => {
                 let symbol = required_value(opt, &arguments, &mut index)?;
@@ -3217,6 +3233,7 @@ the trace is authoritative"
         liveness: NativeLiveness::default(),
         allow,
         allow_unsupported: allow_unsupported.unwrap_or(UnsupportedPolicy::Deny),
+        coverage_out,
         mount,
         harness,
     })
@@ -3955,6 +3972,7 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
             timeline: &timeline,
             fingerprint: Some(fingerprint),
             seed,
+            coverage: None,
         },
         execution.exit_code,
         execution.stdout,
@@ -4824,7 +4842,7 @@ fn stage_shim_object(base: &Path, object: &ShimObject, target: &str) -> Result<P
 /// toolchain and no `RUSTC_BOOTSTRAP`. The only version coupling is to LLVM's
 /// internal pass name (`sancov-module`) and coverage cl::opts, which are stable
 /// across the LLVM releases rustc ships but are not a rustc stability guarantee.
-fn sancov_rustc_flags() -> [&'static str; 6] {
+fn sancov_rustc_flags() -> [&'static str; 8] {
     [
         "-C",
         "passes=sancov-module",
@@ -4832,6 +4850,8 @@ fn sancov_rustc_flags() -> [&'static str; 6] {
         "llvm-args=-sanitizer-coverage-level=3",
         "-C",
         "llvm-args=-sanitizer-coverage-trace-pc-guard",
+        "-C",
+        "llvm-args=-sanitizer-coverage-pc-table",
     ]
 }
 
@@ -5309,6 +5329,154 @@ fn binary_has_yield_points(binary: &Path) -> Result<bool, CliError> {
             window.drain(..window.len() - overlap);
         }
     }
+}
+
+const COVERAGE_MAP_MAGIC: &[u8; 16] = b"patina.covmap/v1";
+const COVERAGE_MAP_VERSION: u32 = 1;
+
+fn read_le_u32(bytes: &[u8], offset: &mut usize) -> Result<u32, CliError> {
+    let end = offset.saturating_add(4);
+    let chunk = bytes
+        .get(*offset..end)
+        .ok_or_else(|| CliError("truncated patina.covmap/v1 u32 field".into()))?;
+    *offset = end;
+    Ok(u32::from_le_bytes(chunk.try_into().unwrap()))
+}
+
+fn read_le_u64(bytes: &[u8], offset: &mut usize) -> Result<u64, CliError> {
+    let end = offset.saturating_add(8);
+    let chunk = bytes
+        .get(*offset..end)
+        .ok_or_else(|| CliError("truncated patina.covmap/v1 u64 field".into()))?;
+    *offset = end;
+    Ok(u64::from_le_bytes(chunk.try_into().unwrap()))
+}
+
+fn checked_covmap_len(guard_count: usize, range_count: usize) -> Result<usize, CliError> {
+    let header = COVERAGE_MAP_MAGIC.len() + 4 + 8 + 8;
+    let ranges = range_count
+        .checked_mul(32)
+        .ok_or_else(|| CliError("patina.covmap/v1 range table is too large".into()))?;
+    let counters = guard_count
+        .checked_mul(4)
+        .ok_or_else(|| CliError("patina.covmap/v1 counter array is too large".into()))?;
+    let deltas = guard_count
+        .checked_mul(8)
+        .ok_or_else(|| CliError("patina.covmap/v1 pc-delta array is too large".into()))?;
+    header
+        .checked_add(ranges)
+        .and_then(|len| len.checked_add(counters))
+        .and_then(|len| len.checked_add(deltas))
+        .ok_or_else(|| CliError("patina.covmap/v1 is too large".into()))
+}
+
+fn coverage_summary_from_map(path: &Path) -> Result<output::CoverageReport, CliError> {
+    let bytes = fs::read(path).map_err(|error| {
+        CliError(format!(
+            "failed to read coverage map {}: {error}",
+            path.display()
+        ))
+    })?;
+    let magic_end = COVERAGE_MAP_MAGIC.len();
+    if bytes.get(..magic_end) != Some(COVERAGE_MAP_MAGIC.as_slice()) {
+        return Err(CliError(format!(
+            "coverage map {} is not patina.covmap/v1 (bad magic)",
+            path.display()
+        )));
+    }
+    let mut offset = magic_end;
+    let version = read_le_u32(&bytes, &mut offset)?;
+    if version != COVERAGE_MAP_VERSION {
+        return Err(CliError(format!(
+            "coverage map {} has unsupported version {version}",
+            path.display()
+        )));
+    }
+    let guard_count_u64 = read_le_u64(&bytes, &mut offset)?;
+    let range_count_u64 = read_le_u64(&bytes, &mut offset)?;
+    let guard_count = usize::try_from(guard_count_u64).map_err(|_| {
+        CliError(format!(
+            "coverage map {} guard count {guard_count_u64} does not fit this host",
+            path.display()
+        ))
+    })?;
+    let range_count = usize::try_from(range_count_u64).map_err(|_| {
+        CliError(format!(
+            "coverage map {} range count {range_count_u64} does not fit this host",
+            path.display()
+        ))
+    })?;
+    let expected_len = checked_covmap_len(guard_count, range_count)?;
+    if bytes.len() != expected_len {
+        return Err(CliError(format!(
+            "coverage map {} has {} bytes; expected {expected_len} for {guard_count} guards and {range_count} ranges",
+            path.display(),
+            bytes.len(),
+        )));
+    }
+    let mut guard_offset = 0u64;
+    let mut pc_offset = 0u64;
+    for index in 0..range_count {
+        let range_guard_offset = read_le_u64(&bytes, &mut offset)?;
+        let range_guard_count = read_le_u64(&bytes, &mut offset)?;
+        let range_pc_offset = read_le_u64(&bytes, &mut offset)?;
+        let range_pc_count = read_le_u64(&bytes, &mut offset)?;
+        if range_guard_offset != guard_offset
+            || range_pc_offset != pc_offset
+            || range_guard_count != range_pc_count
+        {
+            return Err(CliError(format!(
+                "coverage map {} range {index} is inconsistent: guard_offset={range_guard_offset} guard_count={range_guard_count} pc_offset={range_pc_offset} pc_count={range_pc_count}",
+                path.display(),
+            )));
+        }
+        guard_offset = guard_offset.saturating_add(range_guard_count);
+        pc_offset = pc_offset.saturating_add(range_pc_count);
+    }
+    if guard_offset != guard_count_u64 || pc_offset != guard_count_u64 {
+        return Err(CliError(format!(
+            "coverage map {} range table covers guards={guard_offset} pcs={pc_offset}, expected {guard_count_u64}",
+            path.display(),
+        )));
+    }
+    let mut edges_covered = 0u64;
+    let mut hits_total = 0u64;
+    let mut hits_max = 0u32;
+    let mut saturated = 0u64;
+    for _ in 0..guard_count {
+        let hits = read_le_u32(&bytes, &mut offset)?;
+        if hits != 0 {
+            edges_covered += 1;
+        }
+        hits_total = hits_total.saturating_add(hits as u64);
+        hits_max = hits_max.max(hits);
+        if hits == u32::MAX {
+            saturated += 1;
+        }
+    }
+    // Skip the anchor-delta array. Its byte length was already validated above;
+    // Wave B will consume it for offline symbolization.
+    offset = offset.saturating_add(guard_count.saturating_mul(8));
+    if offset != bytes.len() {
+        return Err(CliError(format!(
+            "coverage map {} has trailing bytes after pc-delta array",
+            path.display()
+        )));
+    }
+    let covered_permille = if guard_count == 0 {
+        0
+    } else {
+        ((edges_covered as u128 * 1000) / guard_count as u128) as u64
+    };
+    Ok(output::CoverageReport {
+        edges_total: guard_count_u64,
+        edges_covered,
+        covered_permille,
+        hits_total,
+        hits_max,
+        saturated,
+        map_path: Some(path.to_path_buf()),
+    })
 }
 
 /// Append the yield-point policy suffix to a base fingerprint when the binary is
@@ -5990,6 +6158,11 @@ fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> 
     // fingerprint; the same binary is inspected on record and replay, so the
     // suffix is applied consistently and a policy mismatch is rejected.
     let yield_points = binary_has_yield_points(&binary)?;
+    if invocation.coverage_out.is_some() && !yield_points {
+        return Err(CliError::usage(
+            "--coverage-out requires a native binary built with `cargo patina build --yield-points`; coverage rides the yield-point SanitizerCoverage hook",
+        ));
+    }
 
     // Starvation intervals reorder real thread execution adversarially. A guest
     // whose synchronization is INTERPOSED (mutex/condvar/futex) is always safe —
@@ -6025,6 +6198,15 @@ liveness-safe."
         None => None,
     };
     let image_hash = image_file.as_ref().map(|image| image.hash.clone());
+    let coverage_file = match &invocation.coverage_out {
+        Some(path) => Some(fs::File::create(path).map_err(|error| {
+            CliError(format!(
+                "failed to create coverage map {}: {error}",
+                path.display()
+            ))
+        })?),
+        None => None,
+    };
 
     // Restore the guest arguments for a replay from the trace's recorded argv, so
     // a bare replay reproduces them without the `--` section being re-passed; a
@@ -6059,6 +6241,12 @@ liveness-safe."
     }
     if let Some(image) = &image_file {
         command.env(ENV_FS_IMAGE_FD, image.file.as_raw_fd().to_string());
+    }
+    if let Some(file) = &coverage_file {
+        command.env(ENV_COVERAGE_FD, file.as_raw_fd().to_string());
+    }
+    if let Some(value) = env::var_os(ENV_COVERAGE_REPORT) {
+        command.env(ENV_COVERAGE_REPORT, value);
     }
     if let Some(latency) = invocation.net_latency_nanos {
         command.env(ENV_NET_LATENCY, latency.to_string());
@@ -6199,6 +6387,9 @@ liveness-safe."
     if let Some(image) = &image_file {
         inherited_fds.push(image.file.as_raw_fd());
     }
+    if let Some(file) = &coverage_file {
+        inherited_fds.push(file.as_raw_fd());
+    }
 
     // Starvation stall backstop (diagnostic, NOT a liveness guarantee; armed only
     // when starvation is enabled, so it has zero effect on any other mode). The
@@ -6245,6 +6436,7 @@ IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
                         inherited_guard.restore()?;
                         drop(trace_file);
                         drop(image_file);
+                        drop(coverage_file);
                         return Ok(STARVATION_STALL_EXIT);
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -6305,6 +6497,19 @@ IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
     };
     drop(trace_file);
     drop(image_file);
+    drop(coverage_file);
+    let coverage = if let Some(path) = &invocation.coverage_out {
+        let len = fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if captured.exit_code == 0 || len > 0 {
+            Some(coverage_summary_from_map(path)?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let (trace_path, seed) = match &invocation.mode {
         NativeRunMode::Seeded { seed } => (None, Some(*seed)),
         NativeRunMode::Record { seed, path, .. } => (Some(path.clone()), Some(*seed)),
@@ -6317,7 +6522,7 @@ IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
         }
     };
     let artifact = binary.display().to_string();
-    output::finalize_run(
+    let exit = output::finalize_run(
         output::RunReport {
             verb: "run",
             family: "native",
@@ -6326,9 +6531,24 @@ IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
             timeline: "main",
             fingerprint,
             seed,
+            coverage: coverage.clone(),
         },
         captured,
-    )
+    )?;
+    if let Some(coverage) = coverage {
+        if !output::options().is_json() {
+            if let Some(path) = coverage.map_path {
+                eprintln!(
+                    "PATINA_COVERAGE map={} edges={}/{} covered_permille={}",
+                    path.display(),
+                    coverage.edges_covered,
+                    coverage.edges_total,
+                    coverage.covered_permille,
+                );
+            }
+        }
+    }
+    Ok(exit)
 }
 
 /// Distinct exit code the supervisor returns when the starvation stall backstop
@@ -6682,6 +6902,7 @@ integrates the Patina runtime, or record under the native runtime: cargo patina 
             timeline: &timeline,
             fingerprint: Some(fingerprint),
             seed,
+            coverage: None,
         },
         captured,
     )
@@ -8234,6 +8455,16 @@ mod tests {
         assert!(matches!(seeded.mode, NativeRunMode::Seeded { seed: 9 }));
         assert_eq!(seeded.program_args, strings(&["one"]));
 
+        let covered = native_run(&[
+            "native-run",
+            "probe",
+            "--seed",
+            "9",
+            "--coverage-out",
+            "run.covmap",
+        ]);
+        assert_eq!(covered.coverage_out, Some(PathBuf::from("run.covmap")));
+
         let recorded = native_run(&[
             "native-run",
             "probe",
@@ -8306,6 +8537,23 @@ mod tests {
             ]))
             .is_ok()
         );
+        match parse(strings(&[
+            "replay",
+            probe,
+            "run.patina",
+            "--coverage-out",
+            "replay.covmap",
+        ]))
+        .unwrap()
+        {
+            ParseResult::NativeRun(invocation) => {
+                assert_eq!(
+                    invocation.coverage_out,
+                    Some(PathBuf::from("replay.covmap"))
+                );
+            }
+            _ => panic!("expected native replay invocation"),
+        }
         // ... but rejects semantic knobs (the trace is authoritative) and a
         // missing trace path.
         assert!(
@@ -8421,6 +8669,7 @@ mod tests {
                 "--allow-unsupported-symbols",
                 "--net-latency-nanos",
                 "--mount",
+                "--coverage-out",
                 "--sched-pct",
                 "--sched-pct-steps",
                 "--starve",
@@ -8483,6 +8732,7 @@ mod tests {
                 "--harness",
                 "--fingerprint",
                 "--mount",
+                "--coverage-out",
                 "--allow",
                 "--allow-unsupported-symbols",
                 "--target",
@@ -9053,6 +9303,7 @@ mod tests {
             (
                 "run",
                 "--net-latency-nanos"
+                | "--coverage-out"
                 | "--mount"
                 | "--fingerprint"
                 | "--allow"
@@ -9099,9 +9350,14 @@ mod tests {
 
             // replay: native host facts, WASI host inputs, and the WASI-family
             // timeline/branch controls (branch flags need the full branch quorum).
-            ("replay", "--fingerprint" | "--mount" | "--allow" | "--allow-unsupported-symbols") => {
-                drv_native_replay(toks)
-            }
+            (
+                "replay",
+                "--coverage-out"
+                | "--fingerprint"
+                | "--mount"
+                | "--allow"
+                | "--allow-unsupported-symbols",
+            ) => drv_native_replay(toks),
             (
                 "replay",
                 "--fuel" | "--arg" | "--env" | "--socket" | "--preopen" | "--max-memory-pages"

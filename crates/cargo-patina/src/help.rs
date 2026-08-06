@@ -537,7 +537,7 @@ const RUN: Verb = Verb {
     synopsis: &[
         "cargo patina run [--seed N | --record PATH] [FAULT OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]",
         "cargo patina run <MODULE.wasm> [--seed N | --record PATH] [--fuel N] [--arg VALUE]... [--env K=V]... [--preopen GUEST[:ro|:rw]]... [FAULT OPTIONS] [BUGGIFY/LIVENESS OPTIONS]",
-        "cargo patina run <BINARY> [--seed N | --record PATH] [--fingerprint STR] [--mount HOST_DIR] [--harness] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL]... [-- PROGRAM ARGS]",
+        "cargo patina run <BINARY> [--seed N | --record PATH] [--coverage-out PATH] [--fingerprint STR] [--mount HOST_DIR] [--harness] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL]... [-- PROGRAM ARGS]",
         "cargo patina run <SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [--release] [RUN OPTIONS]   (builds on the fly, then runs)",
     ],
     prose: "\
@@ -627,6 +627,13 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
                     None,
                     Value::Required("HOST_DIR", Kind::Path),
                     "Capture a host directory read-only into the guest filesystem at `/`.",
+                    false,
+                ),
+                f(
+                    "--coverage-out",
+                    None,
+                    Value::Required("PATH", Kind::Path),
+                    "Write a patina.covmap/v1 edge-counter map (requires --yield-points build).",
                     false,
                 ),
                 f(
@@ -866,8 +873,8 @@ families carry the timeline/branch controls (--timeline, and --branch --from \
 --branch-seed --branch-id [--parent]); WASI re-takes its host environment \
 (--fuel/--env/--socket/--preopen and resource limits). Native traces are \
 single-timeline (native runs cannot branch), so native replay accepts only \
---fingerprint, --mount, --harness, and the --allow/--allow-unsupported-symbols \
-audit surface.",
+--fingerprint, --mount, --coverage-out, --harness, and the \
+--allow/--allow-unsupported-symbols audit surface.",
     groups: &[
         Group {
             title: "Native replay options (host/build facts the trace cannot carry)",
@@ -884,6 +891,13 @@ audit surface.",
                     None,
                     Value::Required("HOST_DIR", Kind::Path),
                     "Re-supply the host corpus whose hash the fingerprint verifies.",
+                    false,
+                ),
+                f(
+                    "--coverage-out",
+                    None,
+                    Value::Required("PATH", Kind::Path),
+                    "Write a patina.covmap/v1 edge-counter map for the replayed native run.",
                     false,
                 ),
                 f(
@@ -1449,6 +1463,11 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         name: "PATINA_TRACE_FD",
         scope: "protocol",
         doc: "Inherited already-open trace descriptor (native), so a fully interposed guest never recurses into the deterministic FS while finalizing its trace.",
+    },
+    EnvVar {
+        name: "PATINA_COVERAGE_FD / PATINA_COVERAGE_REPORT",
+        scope: "protocol",
+        doc: "Native coverage dump descriptor for --coverage-out, plus a false-y suppressor for the default-on PATINA_COVERAGE_REPORT line.",
     },
     EnvVar {
         name: "PATINA_FS_IMAGE_FD",

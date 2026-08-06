@@ -1151,6 +1151,346 @@ impl TraceTransport for FdTraceTransport {
     }
 }
 
+const COVERAGE_MAGIC: &[u8; 16] = b"patina.covmap/v1";
+const COVERAGE_VERSION: u32 = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CoverageRange {
+    start: usize,
+    len: usize,
+}
+
+#[derive(Default)]
+struct CoverageState {
+    guard_ranges: Vec<CoverageRange>,
+    pc_ranges: Vec<CoverageRange>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CoverageSummary {
+    edges_total: u64,
+    edges_covered: u64,
+    covered_permille: u64,
+    hits_total: u64,
+    hits_max: u32,
+    saturated: u64,
+}
+
+#[derive(Debug)]
+struct PreparedCoverage {
+    summary: CoverageSummary,
+    map: Option<Vec<u8>>,
+}
+
+static COVERAGE_STATE: OnceLock<SpinMutex<CoverageState>> = OnceLock::new();
+
+fn coverage_state() -> &'static SpinMutex<CoverageState> {
+    COVERAGE_STATE.get_or_init(|| SpinMutex::new(CoverageState::default()))
+}
+
+fn coverage_len<T>(start: *const T, stop: *const T) -> usize {
+    if start.is_null() || stop.is_null() {
+        return 0;
+    }
+    let start = start as usize;
+    let stop = stop as usize;
+    if stop <= start {
+        return 0;
+    }
+    (stop - start) / std::mem::size_of::<T>()
+}
+
+fn register_coverage_range(ranges: &mut Vec<CoverageRange>, start: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+    if ranges
+        .iter()
+        .any(|range| range.start == start && range.len == len)
+    {
+        return;
+    }
+    ranges.push(CoverageRange { start, len });
+}
+
+/// Register one SanitizerCoverage guard-counter range. Called by the C hook's
+/// `__sanitizer_cov_trace_pc_guard_init` once per codegen unit. The guard words
+/// are the counters themselves, so registration records only the live range.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_coverage_register(start: *mut u32, stop: *mut u32) {
+    let len = coverage_len(start.cast_const(), stop.cast_const());
+    let mut state = coverage_state().lock();
+    register_coverage_range(&mut state.guard_ranges, start as usize, len);
+}
+
+/// Register one SanitizerCoverage pc-table range. LLVM gives a flat uintptr_t
+/// array of `(pc, flags)` pairs; the coverage map persists one anchor-relative
+/// pc delta per guard. The flags are intentionally not serialized in wave A's
+/// `patina.covmap/v1` format (12 bytes per edge: u32 count + i64 delta).
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_coverage_register_pcs(start: *const usize, stop: *const usize) {
+    let words = coverage_len(start, stop);
+    let entries = words / 2;
+    let mut state = coverage_state().lock();
+    register_coverage_range(&mut state.pc_ranges, start as usize, entries);
+}
+
+fn coverage_snapshot() -> (Vec<CoverageRange>, Vec<CoverageRange>) {
+    let state = coverage_state().lock();
+    (state.guard_ranges.clone(), state.pc_ranges.clone())
+}
+
+fn coverage_count(ranges: &[CoverageRange]) -> Result<usize, String> {
+    ranges.iter().try_fold(0usize, |total, range| {
+        total.checked_add(range.len).ok_or_else(|| {
+            "registered coverage ranges exceed this platform's addressable size".to_string()
+        })
+    })
+}
+
+fn validate_coverage_ranges(
+    guard_ranges: &[CoverageRange],
+    pc_ranges: &[CoverageRange],
+) -> Result<usize, String> {
+    let guard_count = coverage_count(guard_ranges)?;
+    let pc_count = coverage_count(pc_ranges)?;
+    if guard_count != pc_count {
+        return Err(format!(
+            "guard/pc-table count mismatch: guards={guard_count} pcs={pc_count}"
+        ));
+    }
+    if guard_ranges.len() != pc_ranges.len() {
+        return Err(format!(
+            "guard/pc-table range count mismatch: guard_ranges={} pc_ranges={} guards={} pcs={}",
+            guard_ranges.len(),
+            pc_ranges.len(),
+            guard_count,
+            pc_count,
+        ));
+    }
+    for (index, (guards, pcs)) in guard_ranges.iter().zip(pc_ranges).enumerate() {
+        if guards.len != pcs.len {
+            return Err(format!(
+                "guard/pc-table range {index} count mismatch: guards={} pcs={} total_guards={} total_pcs={}",
+                guards.len, pcs.len, guard_count, pc_count,
+            ));
+        }
+    }
+    Ok(guard_count)
+}
+
+fn coverage_summary(guard_ranges: &[CoverageRange]) -> CoverageSummary {
+    let mut edges_total = 0u64;
+    let mut edges_covered = 0u64;
+    let mut hits_total = 0u64;
+    let mut hits_max = 0u32;
+    let mut saturated = 0u64;
+    for range in guard_ranges {
+        // SAFETY: SanitizerCoverage guard arrays are process-lifetime static
+        // storage. Registration only records the compiler-provided `[start, stop)`
+        // subranges, and finalization runs after managed execution is stopped.
+        let counters = unsafe { slice::from_raw_parts(range.start as *const u32, range.len) };
+        edges_total += counters.len() as u64;
+        for &hits in counters {
+            if hits != 0 {
+                edges_covered += 1;
+            }
+            hits_total = hits_total.saturating_add(hits as u64);
+            hits_max = hits_max.max(hits);
+            if hits == u32::MAX {
+                saturated += 1;
+            }
+        }
+    }
+    let covered_permille = if edges_total == 0 {
+        0
+    } else {
+        ((edges_covered as u128 * 1000) / edges_total as u128) as u64
+    };
+    CoverageSummary {
+        edges_total,
+        edges_covered,
+        covered_permille,
+        hits_total,
+        hits_max,
+        saturated,
+    }
+}
+
+fn push_u32_le(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u64_le(out: &mut Vec<u8>, value: u64) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_i64_le(out: &mut Vec<u8>, value: i64) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn build_coverage_map(
+    guard_ranges: &[CoverageRange],
+    pc_ranges: &[CoverageRange],
+) -> Result<Vec<u8>, String> {
+    let guard_count = validate_coverage_ranges(guard_ranges, pc_ranges)?;
+    let range_count = guard_ranges.len();
+    let mut bytes = Vec::with_capacity(
+        COVERAGE_MAGIC.len()
+            + 4
+            + 8
+            + 8
+            + range_count.saturating_mul(32)
+            + guard_count.saturating_mul(12),
+    );
+    bytes.extend_from_slice(COVERAGE_MAGIC);
+    push_u32_le(&mut bytes, COVERAGE_VERSION);
+    push_u64_le(&mut bytes, guard_count as u64);
+    push_u64_le(&mut bytes, range_count as u64);
+
+    let mut guard_offset = 0u64;
+    let mut pc_offset = 0u64;
+    for (guards, pcs) in guard_ranges.iter().zip(pc_ranges) {
+        push_u64_le(&mut bytes, guard_offset);
+        push_u64_le(&mut bytes, guards.len as u64);
+        push_u64_le(&mut bytes, pc_offset);
+        push_u64_le(&mut bytes, pcs.len as u64);
+        guard_offset += guards.len as u64;
+        pc_offset += pcs.len as u64;
+    }
+
+    let mut counters_flat = Vec::with_capacity(guard_count);
+    for range in guard_ranges {
+        // SAFETY: see `coverage_summary`.
+        let counters = unsafe { slice::from_raw_parts(range.start as *const u32, range.len) };
+        for &counter in counters {
+            counters_flat.push(counter);
+            push_u32_le(&mut bytes, counter);
+        }
+    }
+
+    let anchor = patina_yield_point as *const () as i128;
+    let mut guard_index = 0usize;
+    for range in pc_ranges {
+        // SAFETY: pc-table arrays are process-lifetime static storage. `len` is
+        // the number of `(pc, flags)` pairs, so the raw word slice is `len * 2`.
+        let words = unsafe { slice::from_raw_parts(range.start as *const usize, range.len * 2) };
+        for pair in words.chunks_exact(2) {
+            let raw_pc = pair[0];
+            let delta = if raw_pc <= 1 {
+                // On current Darwin/LLVM builds a handful of unexecuted guard
+                // slots can carry a null/function-entry sentinel (`0`/`1`) in
+                // the pc-table rather than a load-addressed code pointer. The
+                // literal sentinel is already stable; subtracting the ASLR-slid
+                // anchor would manufacture nondeterministic bytes. Keep unhit
+                // sentinels as the stable zero delta, but fail closed if such a
+                // guard ever reports coverage — a covered edge without a real PC
+                // cannot be symbolized honestly.
+                if counters_flat[guard_index] != 0 {
+                    return Err(format!(
+                        "coverage pc-table entry {guard_index} has sentinel pc={raw_pc} for a covered guard"
+                    ));
+                }
+                0
+            } else {
+                let pc = raw_pc as i128;
+                let delta = pc - anchor;
+                i64::try_from(delta).map_err(|_| {
+                    format!(
+                        "coverage pc delta {delta} does not fit in patina.covmap/v1 i64 encoding"
+                    )
+                })?
+            };
+            push_i64_le(&mut bytes, delta);
+            guard_index += 1;
+        }
+    }
+    Ok(bytes)
+}
+
+fn control_coverage_fd() -> Result<Option<c_int>, RuntimeError> {
+    control_env(patina_dst_runtime::ENV_COVERAGE_FD)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value.parse().map_err(|_| {
+                RuntimeError::Config(format!(
+                    "{} must be a non-negative descriptor number",
+                    patina_dst_runtime::ENV_COVERAGE_FD
+                ))
+            })
+        })
+        .transpose()
+}
+
+fn coverage_report_suppressed() -> bool {
+    control_env(patina_dst_runtime::ENV_COVERAGE_REPORT).is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "false" | "no"
+        )
+    })
+}
+
+fn prepare_coverage_output(
+    requested: bool,
+    guard_ranges: &[CoverageRange],
+    pc_ranges: &[CoverageRange],
+) -> Result<Option<PreparedCoverage>, String> {
+    let guard_count = coverage_count(guard_ranges)?;
+    if requested && guard_count == 0 {
+        return Err(
+            "requested coverage is unavailable: the binary registered zero SanitizerCoverage guard ranges; rebuild with `cargo patina build --yield-points`"
+                .to_string(),
+        );
+    }
+    if guard_count == 0 {
+        return Ok(None);
+    }
+    // Validate before reading counters or emitting a report so the fail-closed
+    // guard/pc-table invariant always wins over any derived observation.
+    validate_coverage_ranges(guard_ranges, pc_ranges)?;
+    let summary = coverage_summary(guard_ranges);
+    if requested && summary.edges_covered == 0 {
+        return Err(format!(
+            "requested coverage is empty: edges_total={} edges_covered=0; the yield-point hook did not count any executed guard",
+            summary.edges_total,
+        ));
+    }
+    let map = requested
+        .then(|| build_coverage_map(guard_ranges, pc_ranges))
+        .transpose()?;
+    Ok(Some(PreparedCoverage { summary, map }))
+}
+
+fn finalize_coverage() -> Result<(), String> {
+    let coverage_fd = control_coverage_fd().map_err(|error| error.to_string())?;
+    let requested = coverage_fd.is_some();
+    let (guard_ranges, pc_ranges) = coverage_snapshot();
+    let Some(prepared) = prepare_coverage_output(requested, &guard_ranges, &pc_ranges)? else {
+        return Ok(());
+    };
+    if !coverage_report_suppressed() {
+        capture_stderr_line(&format!(
+            "PATINA_COVERAGE_REPORT edges_total={} edges_covered={} covered_permille={} hits_total={} hits_max={} saturated={}",
+            prepared.summary.edges_total,
+            prepared.summary.edges_covered,
+            prepared.summary.covered_permille,
+            prepared.summary.hits_total,
+            prepared.summary.hits_max,
+            prepared.summary.saturated,
+        ));
+    }
+    if let (Some(fd), Some(map)) = (coverage_fd, prepared.map) {
+        host_write_all(fd, &map).map_err(|error| {
+            format!(
+                "failed to write {} coverage map to descriptor {fd}: {error}",
+                patina_dst_runtime::ENV_COVERAGE_FD,
+            )
+        })?;
+    }
+    Ok(())
+}
+
 thread_local! {
     static LAST_ERRNO: Cell<c_int> = const { Cell::new(0) };
 }
@@ -1973,6 +2313,7 @@ pub extern "C" fn patina_shutdown() -> c_int {
     // called `setup_complete()` is a harness bug, not a silent no-fault run.
     let setup_violation = context.buggify_setup_violation();
     let finished = context.finish();
+    let coverage = finalize_coverage();
     let flushed = flush_captured_stdio();
     if setup_violation {
         let _ = host_write_all(
@@ -1980,6 +2321,11 @@ pub extern "C" fn patina_shutdown() -> c_int {
             b"PATINA_BUGGIFY_SETUP_NEVER_CALLED --buggify-after-setup was declared but the guest \
 never called patina_dst::lifecycle::setup_complete()\n",
         );
+        std::process::abort();
+    }
+    if let Err(error) = coverage {
+        let line = format!("patina: coverage finalization refused: {error}\n");
+        let _ = host_write_all(2, line.as_bytes());
         std::process::abort();
     }
     match (finished, flushed) {
@@ -9314,6 +9660,147 @@ mod thread {
             scheduler.park(b, "wait-a").unwrap();
             assert!(scheduler.next().is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn coverage_summary_counts_hits_and_saturation() {
+        let counters = [0u32, 2, u32::MAX];
+        let ranges = [CoverageRange {
+            start: counters.as_ptr() as usize,
+            len: counters.len(),
+        }];
+        let summary = coverage_summary(&ranges);
+        assert_eq!(summary.edges_total, 3);
+        assert_eq!(summary.edges_covered, 2);
+        assert_eq!(summary.covered_permille, 666);
+        assert_eq!(summary.hits_total, u64::from(2u32) + u64::from(u32::MAX));
+        assert_eq!(summary.hits_max, u32::MAX);
+        assert_eq!(summary.saturated, 1);
+    }
+
+    #[test]
+    fn requested_coverage_with_zero_ranges_refuses() {
+        let error = prepare_coverage_output(true, &[], &[]).unwrap_err();
+        eprintln!("D1_RED {error}");
+        assert!(
+            error.contains("requested coverage is unavailable")
+                && error.contains("zero SanitizerCoverage guard ranges")
+                && error.contains("cargo patina build --yield-points"),
+            "D1 refusal should name the missing instrumentation; got {error}"
+        );
+    }
+
+    #[test]
+    fn requested_coverage_with_zero_hits_refuses() {
+        let counters = [0u32, 0];
+        let pcs = [
+            patina_yield_point as *const () as usize,
+            0usize,
+            patina_yield_point as *const () as usize,
+            0usize,
+        ];
+        let guards = [CoverageRange {
+            start: counters.as_ptr() as usize,
+            len: counters.len(),
+        }];
+        let pc_ranges = [CoverageRange {
+            start: pcs.as_ptr() as usize,
+            len: counters.len(),
+        }];
+        let error = prepare_coverage_output(true, &guards, &pc_ranges).unwrap_err();
+        eprintln!("D1_EMPTY_RED {error}");
+        assert!(
+            error.contains("requested coverage is empty")
+                && error.contains("edges_total=2")
+                && error.contains("edges_covered=0"),
+            "empty-coverage refusal should name the zero covered count; got {error}"
+        );
+    }
+
+    #[test]
+    fn coverage_count_mismatch_refuses_naming_both_counts() {
+        let guards = [CoverageRange {
+            start: 0x1000,
+            len: 3,
+        }];
+        let pcs = [CoverageRange {
+            start: 0x2000,
+            len: 2,
+        }];
+        let error = prepare_coverage_output(true, &guards, &pcs).unwrap_err();
+        eprintln!("D2_RED {error}");
+        assert!(
+            error.contains("guard/pc-table count mismatch")
+                && error.contains("guards=3")
+                && error.contains("pcs=2"),
+            "D2 refusal should name both counts; got {error}"
+        );
+    }
+
+    #[test]
+    fn coverage_map_serializes_counters_and_anchor_deltas() {
+        let counters = [1u32, 0, 7];
+        let anchor = patina_yield_point as *const () as usize;
+        let pcs = [
+            anchor.wrapping_add(4),
+            0usize,
+            anchor.wrapping_sub(8),
+            0usize,
+            anchor,
+            1usize,
+        ];
+        let guards = [CoverageRange {
+            start: counters.as_ptr() as usize,
+            len: counters.len(),
+        }];
+        let pc_ranges = [CoverageRange {
+            start: pcs.as_ptr() as usize,
+            len: counters.len(),
+        }];
+        let map = build_coverage_map(&guards, &pc_ranges).unwrap();
+        assert!(map.starts_with(COVERAGE_MAGIC));
+        let header_len = COVERAGE_MAGIC.len() + 4 + 8 + 8 + 32;
+        assert_eq!(
+            &map[header_len..header_len + 12],
+            &[1, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0]
+        );
+        let deltas = &map[header_len + 12..];
+        assert_eq!(&deltas[0..8], &4i64.to_le_bytes());
+        assert_eq!(&deltas[8..16], &(-8i64).to_le_bytes());
+        assert_eq!(&deltas[16..24], &0i64.to_le_bytes());
+    }
+
+    #[test]
+    fn coverage_map_normalizes_unhit_pc_sentinel_and_refuses_hit_sentinel() {
+        let counters = [0u32];
+        let pcs = [1usize, 0usize];
+        let guards = [CoverageRange {
+            start: counters.as_ptr() as usize,
+            len: counters.len(),
+        }];
+        let pc_ranges = [CoverageRange {
+            start: pcs.as_ptr() as usize,
+            len: counters.len(),
+        }];
+        let map = build_coverage_map(&guards, &pc_ranges).unwrap();
+        let delta_start = COVERAGE_MAGIC.len() + 4 + 8 + 8 + 32 + 4;
+        assert_eq!(&map[delta_start..delta_start + 8], &0i64.to_le_bytes());
+
+        let hit = [1u32];
+        let guards = [CoverageRange {
+            start: hit.as_ptr() as usize,
+            len: hit.len(),
+        }];
+        let error = build_coverage_map(&guards, &pc_ranges).unwrap_err();
+        assert!(
+            error.contains("sentinel pc=1") && error.contains("covered guard"),
+            "covered sentinel pc should fail loudly; got {error}"
+        );
     }
 }
 

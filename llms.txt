@@ -28,12 +28,14 @@ with no `--target` -> the Cargo package family (in-process boundary API). A
   instruments basic blocks (LLVM SanitizerCoverage) so atomics-only race windows
   become schedulable; native-only. Prints `PATINA_NATIVE_BUILD output=...` /
   `PATINA_WASI_BUILD output=...`.
-- `cargo patina run <ARTIFACT|SOURCE> [--seed N | --record PATH] [FAULT OPTIONS] [--buggify[=PERMILLE]] [-- ARGS]`
+- `cargo patina run <ARTIFACT|SOURCE> [--seed N | --record PATH] [--coverage-out PATH] [FAULT OPTIONS] [--buggify[=PERMILLE]] [-- ARGS]`
   Run under the deterministic runtime. `--seed` (default 0) drives everything.
-  `--record PATH` writes a trace.
+  `--record PATH` writes a trace. Native yield-point binaries emit
+  `PATINA_COVERAGE_REPORT`; `--coverage-out PATH` writes a `patina.covmap/v1`
+  edge-counter map and refuses plain native binaries with a `build --yield-points` hint.
 - `cargo patina test [--seed N | --record PATH] [FAULT OPTIONS] [CARGO OPTIONS]`
   The Cargo package family under Patina.
-- `cargo patina replay <ARTIFACT|SOURCE> <TRACE> [host inputs]`
+- `cargo patina replay <ARTIFACT|SOURCE> <TRACE> [--coverage-out PATH] [host inputs]`
   Reproduce a recording. Flag-free: seed, fault knobs, buggify, and guest argv
   are restored from the trace (the trace is authoritative; a re-supplied semantic
   flag that conflicts is refused). A fingerprint or operation mismatch fails
@@ -102,9 +104,11 @@ One line of JSON on stdout. Always: `schema`, `verb`, `result`
 (`native|wasi|cargo`), `artifact`, `fingerprint`, `seed`, `render`, `findings`
 (audit imports), `output_path` + `content_hash` (build), `markers` (extracted
 `PATINA_*`/`*_VIOLATION`/`BUG_CAUGHT` lines), `result_line`, `stdout`, `stderr`,
-`message`, and `trace` = `{path, format_version, timelines[], event_count,
-metadata}` where `metadata` is the raw trace metadata (seed, faults, buggify,
-guest_argv, and any future fields, rendered generically). `trace info --format
+`message`, optional native `coverage` = `{edges_total, edges_covered,
+covered_permille, hits_total, hits_max, saturated, map_path?}`, and `trace` =
+`{path, format_version, timelines[], event_count, metadata}` where `metadata` is
+the raw trace metadata (seed, faults, buggify, guest_argv, and any future fields,
+rendered generically). `trace info --format
 json` is a normal `patina.result/v1` envelope with a nested
 `patina.trace.info/v1` `trace_info` payload; `trace stats --format json` and
 `trace diff --format json` likewise nest `patina.trace.stats/v1` and
@@ -138,6 +142,9 @@ Instrument a system-under-test; every macro is a no-op under a plain
 - `PATINA_SCHEDULE_REPORT` (stderr) reports per-task scheduling boundaries and
   warns (`vacuous_threads>0`) when a spawned thread ran zero interposed ops — i.e.
   its interleavings were not actually explored (use `build --yield-points`).
+- `PATINA_COVERAGE_REPORT` (stderr) reports native yield-point edge coverage
+  (`edges_covered/edges_total`, hit totals/max, saturation); suppress with
+  `PATINA_COVERAGE_REPORT=0`.
 - `PATINA_SDK_REPORT` (stderr) reports buggify site registration/activation/firing; each `site=` row ends with `|@<file:line>`.
 - A trace is compact JSON: inspect it with `jq . run.patina`.
 

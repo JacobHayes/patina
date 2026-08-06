@@ -101,6 +101,15 @@ pub const ENV_MODE: &str = "PATINA_MODE";
 pub const ENV_SEED: &str = "PATINA_SEED";
 pub const ENV_TRACE: &str = "PATINA_TRACE";
 pub const ENV_TRACE_FD: &str = "PATINA_TRACE_FD";
+/// Inherited host descriptor receiving a `patina.covmap/v1` native edge-coverage
+/// counter map. Set only by `run --coverage-out PATH` for yield-point-instrumented
+/// native binaries, so the fully interposed guest writes coverage through the
+/// supervisor-owned host descriptor rather than through the deterministic FS.
+pub const ENV_COVERAGE_FD: &str = "PATINA_COVERAGE_FD";
+/// Suppress the default-on native yield-point coverage diagnostic when set to a
+/// false-y value (`0`, `off`, `false`, `no`). The diagnostic is emitted by the
+/// native shim at the same finalization point as the runtime reports.
+pub const ENV_COVERAGE_REPORT: &str = "PATINA_COVERAGE_REPORT";
 /// Inherited host descriptor carrying an encoded `patina_dst_fs_mem::FsImage`. When
 /// set, `native-run` streams a read-only host directory tree into the guest and
 /// the shim rebuilds it as the deterministic filesystem instead of an empty one,

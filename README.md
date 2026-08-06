@@ -211,7 +211,9 @@ Why debug finds more bugs:
 - **Denser schedule exploration.** `cargo patina build --yield-points` plants a
   scheduling point at each basic-block coverage guard; optimization collapses
   basic blocks, so a release guest hands the seeded scheduler *fewer* windows to
-  preempt an atomics-only race.
+  preempt an atomics-only race. Yield-point binaries also emit
+  `PATINA_COVERAGE_REPORT`; use `run`/`replay --coverage-out PATH` to save a
+  `patina.covmap/v1` edge-counter map.
 - **Faster inner loop.** Debug compiles quicker, which dominates when you rebuild
   between every edit.
 

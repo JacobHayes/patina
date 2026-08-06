@@ -214,6 +214,17 @@ pub fn execute_command(command: &mut Command) -> Result<Captured, CliError> {
 
 /// Everything needed to finalize a run/replay: emit any envelope, render any
 /// timeline/report, and echo captured guest output back for the human format.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoverageReport {
+    pub edges_total: u64,
+    pub edges_covered: u64,
+    pub covered_permille: u64,
+    pub hits_total: u64,
+    pub hits_max: u32,
+    pub saturated: u64,
+    pub map_path: Option<PathBuf>,
+}
+
 pub struct RunReport<'a> {
     pub verb: &'a str,
     pub family: &'a str,
@@ -224,6 +235,7 @@ pub struct RunReport<'a> {
     pub timeline: &'a str,
     pub fingerprint: Option<String>,
     pub seed: Option<u64>,
+    pub coverage: Option<CoverageReport>,
 }
 
 /// Finalize a run/replay after the guest returns: echo captured output for the
@@ -300,6 +312,10 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
         if let Some(trace) = &report.trace_path {
             env.trace = trace_facts(trace, report.timeline);
         }
+        env.coverage = report
+            .coverage
+            .clone()
+            .or_else(|| coverage_report_line(&stdout_text, &stderr_text));
         env.markers = extract_markers(&stdout_text, &stderr_text);
         env.result_line = result_line(&stdout_text, &stderr_text);
         env.stdout = Some(stdout_text);
@@ -361,6 +377,8 @@ const MARKER_PREFIXES: &[&str] = &[
     "PATINA_RESULT",
     "PATINA_VIOLATION",
     "PATINA_SCHEDULE_REPORT",
+    "PATINA_COVERAGE_REPORT",
+    "PATINA_COVERAGE",
     "PATINA_SDK_REPORT",
     "PATINA_LIVENESS_REPORT",
     "PATINA_ALWAYS_VIOLATION",
@@ -383,6 +401,47 @@ fn extract_markers(stdout: &str, stderr: &str) -> Vec<String> {
         }
     }
     markers
+}
+
+fn coverage_report_line(stdout: &str, stderr: &str) -> Option<CoverageReport> {
+    stdout
+        .lines()
+        .chain(stderr.lines())
+        .find_map(parse_coverage_report_line)
+}
+
+fn parse_coverage_report_line(line: &str) -> Option<CoverageReport> {
+    let mut parts = line.split_whitespace();
+    if parts.next()? != "PATINA_COVERAGE_REPORT" {
+        return None;
+    }
+    let mut edges_total = None;
+    let mut edges_covered = None;
+    let mut covered_permille = None;
+    let mut hits_total = None;
+    let mut hits_max = None;
+    let mut saturated = None;
+    for part in parts {
+        let (key, value) = part.split_once('=')?;
+        match key {
+            "edges_total" => edges_total = value.parse().ok(),
+            "edges_covered" => edges_covered = value.parse().ok(),
+            "covered_permille" => covered_permille = value.parse().ok(),
+            "hits_total" => hits_total = value.parse().ok(),
+            "hits_max" => hits_max = value.parse().ok(),
+            "saturated" => saturated = value.parse().ok(),
+            _ => {}
+        }
+    }
+    Some(CoverageReport {
+        edges_total: edges_total?,
+        edges_covered: edges_covered?,
+        covered_permille: covered_permille?,
+        hits_total: hits_total?,
+        hits_max: hits_max?,
+        saturated: saturated?,
+        map_path: None,
+    })
 }
 
 /// The single most representative result line for the failure summary: a
@@ -486,6 +545,7 @@ pub struct Envelope {
     fingerprint: Option<String>,
     seed: Option<u64>,
     trace: Option<TraceFacts>,
+    coverage: Option<CoverageReport>,
     render: Option<String>,
     /// audit findings / build outputs / mismatch detail — a list of strings.
     findings: Vec<String>,
@@ -509,6 +569,7 @@ impl Envelope {
             fingerprint: None,
             seed: None,
             trace: None,
+            coverage: None,
             render: None,
             findings: Vec::new(),
             output_path: None,
@@ -548,6 +609,22 @@ impl Envelope {
             tm.insert("event_count".into(), Value::from(t.event_count));
             tm.insert("metadata".into(), t.metadata.clone());
             m.insert("trace".into(), Value::Object(tm));
+        }
+        if let Some(c) = &self.coverage {
+            let mut cm = Map::new();
+            cm.insert("edges_total".into(), Value::from(c.edges_total));
+            cm.insert("edges_covered".into(), Value::from(c.edges_covered));
+            cm.insert("covered_permille".into(), Value::from(c.covered_permille));
+            cm.insert("hits_total".into(), Value::from(c.hits_total));
+            cm.insert("hits_max".into(), Value::from(c.hits_max));
+            cm.insert("saturated".into(), Value::from(c.saturated));
+            if let Some(path) = &c.map_path {
+                cm.insert(
+                    "map_path".into(),
+                    Value::from(path.to_string_lossy().into_owned()),
+                );
+            }
+            m.insert("coverage".into(), Value::Object(cm));
         }
         if let Some(v) = &self.render {
             m.insert("render".into(), Value::from(v.clone()));
@@ -692,6 +769,21 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert_eq!(rest, vec!["build", "demo.rs", "--output", "demo"]);
+    }
+
+    #[test]
+    fn parses_coverage_report_marker_for_json_envelope() {
+        let coverage = parse_coverage_report_line(
+            "PATINA_COVERAGE_REPORT edges_total=10 edges_covered=4 covered_permille=400 hits_total=99 hits_max=12 saturated=1",
+        )
+        .unwrap();
+        assert_eq!(coverage.edges_total, 10);
+        assert_eq!(coverage.edges_covered, 4);
+        assert_eq!(coverage.covered_permille, 400);
+        assert_eq!(coverage.hits_total, 99);
+        assert_eq!(coverage.hits_max, 12);
+        assert_eq!(coverage.saturated, 1);
+        assert!(coverage.map_path.is_none());
     }
 
     #[test]

@@ -18,9 +18,13 @@
 
 #include <stdint.h>
 
-/* Provided by the patina-dst-native-shim staticlib; offers the deterministic
- * scheduler a chance to switch tasks. The instrumented call site rides along so
- * a record/replay yield divergence can name the exact guest location. */
+/* Provided by the patina-dst-native-shim staticlib. The coverage registration
+ * calls hand the shim the guard-counter ranges and parallel SanitizerCoverage
+ * pc-table ranges; patina_yield_point offers the deterministic scheduler a
+ * chance to switch tasks. The instrumented call site rides along so a
+ * record/replay yield divergence can name the exact guest location. */
+extern void patina_coverage_register(uint32_t *start, uint32_t *stop);
+extern void patina_coverage_register_pcs(const uintptr_t *start, const uintptr_t *stop);
 extern void patina_yield_point(const void *site);
 
 /* A distinctive marker so `cargo patina run` can detect a yield-point
@@ -32,17 +36,26 @@ __attribute__((used, retain))
 static const char PATINA_YIELD_POINTS_MARKER[] = "PATINA_YIELD_POINTS_V1";
 const char *volatile patina_yield_points_anchor;
 
-/* SanitizerCoverage guard-array initializer. The guards are unused (every point
- * yields unconditionally), so this only anchors the marker symbol. */
+/* SanitizerCoverage guard-array initializer. The guard words themselves are the
+ * per-edge hit counters (zero means unseen), so init only registers the range
+ * and anchors the marker symbol. */
 void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
-    (void)start;
-    (void)stop;
+    patina_coverage_register(start, stop);
     patina_yield_points_anchor = PATINA_YIELD_POINTS_MARKER;
+}
+
+/* SanitizerCoverage pc-table initializer. LLVM emits one (pc, flags) pair per
+ * guard, and calls this from the same module constructor as guard init. */
+void __sanitizer_cov_pcs_init(const uintptr_t *start, const uintptr_t *stop) {
+    patina_coverage_register_pcs(start, stop);
 }
 
 /* Fired at every instrumented basic block in the guest. The return address is
  * the instrumented site itself. */
 void __sanitizer_cov_trace_pc_guard(uint32_t *guard) {
-    (void)guard;
+    uint32_t hits = *guard;
+    if (hits != UINT32_MAX) {
+        *guard = hits + 1;
+    }
     patina_yield_point(__builtin_return_address(0));
 }
