@@ -1080,13 +1080,25 @@ impl TraceTransport for FdTraceTransport {
             if bytes.len() as u64 > MAX_TRACE_BYTES {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("trace descriptor exceeds {MAX_TRACE_BYTES} byte limit"),
+                    format!(
+                        "trace descriptor read is {} bytes; limit is {MAX_TRACE_BYTES}; reduce recorded event count or payload volume, or split the run",
+                        bytes.len()
+                    ),
                 ));
             }
         }
     }
 
     fn write_bundle(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if bytes.len() as u64 > MAX_TRACE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "trace descriptor write is {} bytes; limit is {MAX_TRACE_BYTES}; reduce recorded event count or payload volume, or split the run",
+                    bytes.len()
+                ),
+            ));
+        }
         host_write_all(self.fd, bytes)
     }
 }
@@ -1911,9 +1923,20 @@ never called patina_dst::lifecycle::setup_complete()\n",
             set_errno(0);
             0
         }
-        (Err(error), _) => fail(runtime_errno(&error)),
-        (Ok(()), Err(_)) => fail(EIO),
+        (Err(error), _) => {
+            report_shutdown_error(&error.to_string());
+            fail(runtime_errno(&error))
+        }
+        (Ok(()), Err(error)) => {
+            report_shutdown_error(&format!("flush captured stdio: {error}"));
+            fail(EIO)
+        }
     }
+}
+
+fn report_shutdown_error(message: &str) {
+    let line = format!("patina: runtime shutdown failed: {message}\n");
+    let _ = host_write_all(2, line.as_bytes());
 }
 
 /// Flush captured stdout/stderr to the real host descriptors WITHOUT finalizing

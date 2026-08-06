@@ -4776,7 +4776,11 @@ static void patina_finalize_atexit(void) {
      */
     patina_assert_teardown_engaged();
 #endif
-    patina_shutdown();
+    if (patina_shutdown() != 0) {
+        /* patina_shutdown already emitted the runtime error; atexit return values
+         * are ignored, so abort to make record/replay finalization failures loud. */
+        abort();
+    }
 }
 
 __attribute__((constructor)) static void patina_native_start(void) {

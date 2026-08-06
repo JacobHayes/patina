@@ -48,7 +48,7 @@ pub const TRACE_FORMAT_VERSION: u32 = 4;
 /// [`TRACE_FORMAT_VERSION`], are rejected with
 /// [`TraceError::UnsupportedVersion`].
 pub const MIN_SUPPORTED_FORMAT_VERSION: u32 = 1;
-pub const MAX_TRACE_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
 const MAIN_TIMELINE: &str = "main";
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -460,11 +460,7 @@ impl TraceBundle {
                 source,
             })?
             .len();
-        if size > MAX_TRACE_BYTES {
-            return Err(TraceError::ResourceLimit(format!(
-                "trace is {size} bytes; limit is {MAX_TRACE_BYTES}"
-            )));
-        }
+        enforce_trace_byte_limit(size, MAX_TRACE_BYTES, "trace file")?;
         let value: serde_json::Value =
             serde_json::from_reader(BufReader::new(file)).map_err(|source| TraceError::Parse {
                 path: path.to_path_buf(),
@@ -476,12 +472,11 @@ impl TraceBundle {
     /// Parse and validate a bundle from in-memory bytes, enforcing the same
     /// size limit as file loading.
     pub fn from_slice(bytes: &[u8]) -> Result<Self, TraceError> {
-        if bytes.len() as u64 > MAX_TRACE_BYTES {
-            return Err(TraceError::ResourceLimit(format!(
-                "trace is {} bytes; limit is {MAX_TRACE_BYTES}",
-                bytes.len()
-            )));
-        }
+        enforce_trace_byte_limit(
+            bytes.len() as u64,
+            MAX_TRACE_BYTES,
+            "trace transport payload",
+        )?;
         let value: serde_json::Value =
             serde_json::from_slice(bytes).map_err(|source| TraceError::Parse {
                 path: PathBuf::from("<trace-transport>"),
@@ -516,14 +511,27 @@ impl TraceBundle {
     /// nothing here is a bespoke binary framing that would need a dedicated
     /// dump command.
     pub fn to_bytes(&self) -> Result<Vec<u8>, TraceError> {
+        self.to_bytes_with_limit(MAX_TRACE_BYTES)
+    }
+
+    fn to_bytes_with_limit(&self, max_bytes: u64) -> Result<Vec<u8>, TraceError> {
         self.validate()?;
         let mut bytes = serde_json::to_vec(self).map_err(TraceError::Serialize)?;
         bytes.push(b'\n');
+        enforce_trace_byte_limit(bytes.len() as u64, max_bytes, "serialized trace")?;
         Ok(bytes)
     }
 
     pub fn write_atomic(&self, path: impl AsRef<Path>) -> Result<(), TraceError> {
-        let bytes = self.to_bytes()?;
+        self.write_atomic_with_limit(path, MAX_TRACE_BYTES)
+    }
+
+    fn write_atomic_with_limit(
+        &self,
+        path: impl AsRef<Path>,
+        max_bytes: u64,
+    ) -> Result<(), TraceError> {
+        let bytes = self.to_bytes_with_limit(max_bytes)?;
         let path = path.as_ref();
         let parent = path.parent().filter(|value| !value.as_os_str().is_empty());
         if let Some(parent) = parent {
@@ -727,7 +735,11 @@ impl Recorder {
     }
 
     pub fn finish(self, path: impl AsRef<Path>) -> Result<(), TraceError> {
-        self.into_bundle().write_atomic(path)
+        self.finish_with_limit(path, MAX_TRACE_BYTES)
+    }
+
+    fn finish_with_limit(self, path: impl AsRef<Path>, max_bytes: u64) -> Result<(), TraceError> {
+        self.into_bundle().write_atomic_with_limit(path, max_bytes)
     }
 
     /// Convert the recorded decisions into a bundle without touching storage.
@@ -1239,6 +1251,19 @@ fn migrate_v3_to_v4(mut value: serde_json::Value) -> Result<serde_json::Value, T
     Ok(value)
 }
 
+fn enforce_trace_byte_limit(
+    size: u64,
+    max_bytes: u64,
+    description: &'static str,
+) -> Result<(), TraceError> {
+    if size <= max_bytes {
+        return Ok(());
+    }
+    Err(TraceError::ResourceLimit(format!(
+        "{description} is {size} bytes; limit is {max_bytes}; reduce recorded event count or payload volume, or split the run"
+    )))
+}
+
 fn temporary_path(path: &Path) -> PathBuf {
     let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let name = path
@@ -1310,6 +1335,54 @@ mod tests {
             1,
             "atomic write must not leave a temporary file"
         );
+    }
+
+    #[test]
+    fn save_paths_reject_serialized_trace_that_exceeds_byte_limit() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("oversized.patina");
+        let event = TraceEvent {
+            sequence: 0,
+            operation: operation(),
+            outcome: Outcome::U64(10),
+        };
+        let bundle = TraceBundle::new(RunMetadata::new(7, "fingerprint"), vec![event]);
+        let serialized_len = {
+            let mut bytes = serde_json::to_vec(&bundle).unwrap();
+            bytes.push(b'\n');
+            bytes.len() as u64
+        };
+        let limit = serialized_len - 1;
+
+        let error = bundle.to_bytes_with_limit(limit).unwrap_err();
+        assert!(
+            matches!(&error, TraceError::ResourceLimit(message) if message.contains("serialized trace")),
+            "unexpected error: {error}"
+        );
+
+        let error = bundle.write_atomic_with_limit(&path, limit).unwrap_err();
+        assert!(
+            matches!(&error, TraceError::ResourceLimit(message) if message.contains("serialized trace")),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !path.exists(),
+            "save-time refusal must not leave a trace file"
+        );
+        assert_eq!(
+            fs::read_dir(directory.path()).unwrap().count(),
+            0,
+            "save-time refusal must not leave a temporary file"
+        );
+
+        let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint"));
+        recorder.observe(operation(), Outcome::U64(10));
+        let error = recorder.finish_with_limit(&path, limit).unwrap_err();
+        assert!(
+            matches!(&error, TraceError::ResourceLimit(message) if message.contains("serialized trace")),
+            "unexpected error: {error}"
+        );
+        assert!(!path.exists(), "Recorder::finish must fail before writing");
     }
 
     #[test]

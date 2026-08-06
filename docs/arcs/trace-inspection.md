@@ -6,7 +6,7 @@ overengineered, but nicely inspectable — discovery/analysis via CLI + --help d
 
 ## 1. Problem
 
-A `.patina` trace (up to 64 MB / 1,000,000 events per timeline —
+A `.patina` trace (up to 256 MiB / 1,000,000 events per timeline —
 `crates/patina-trace/src/lib.rs:51-52`) currently has exactly two consumers:
 
 1. **Full HTML render** — `render_trace_file`
@@ -44,7 +44,7 @@ comparator.
   starvation), `swarm`, `watchdog` (informational-only), `sud`. All additive,
   all readable without touching the event stream. Note the brief's list plus
   two the brief omitted: `decision_policy` and `sud`.
-- **Loading is strict and fail-closed**: `TraceBundle::load` enforces the 64 MB
+- **Loading is strict and fail-closed**: `TraceBundle::load` enforces the 256 MiB
   cap, migrates v1..v3 → v4 in memory, then *typed*-deserializes and runs the
   structural `validate()` oracle (contiguous sequences, main-timeline shape,
   1M-event cap). `RunMetadata` is `deny_unknown_fields`; `Operation`/`Outcome`
@@ -340,7 +340,7 @@ selection is deferred until a real need appears.
 
 - **`info` must not decode the event stream — and here is what that honestly
   means for a single-document JSON format.** The file *parse* is unavoidable
-  (`serde_json` over ≤64 MB — bounded by construction). What `info` skips is
+  (`serde_json` over ≤256 MiB — bounded by construction). What `info` skips is
   everything after: it reads the raw `serde_json::Value` only — metadata
   object verbatim, per-timeline `decisions` array *lengths*, and a shallow
   field scan for the vtime span (`clock_now` u64 outcomes + `now_nanos`
