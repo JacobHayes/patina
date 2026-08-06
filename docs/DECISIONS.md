@@ -87,6 +87,14 @@ cluster so the fixes have citable symptom records.
   spike was deleted (no middle state) and the flag > env > `.patina/` >
   default config layer proceeds on the bespoke parsers in invariant Wave 4.
   Full criterion table in docs/arcs/clap-config-eval.md.
+- **2026-08-06 — builder model fallback.** The GPT-5.5/Codex usage limit was
+  exhausted mid-run (it was also the cause of the repeated "external kills" of
+  pi builders throughout the session). Per the standing preference GPT-5.5 is
+  the implementer tier, but with the user afk and the limit blocking all
+  progress, implementation builders fall back to Claude Sonnet via the Agent
+  tool (same briefs, same workspaces, same verification bars) until the limit
+  resets; pi is re-probed at natural checkpoints and preferred again once
+  available.
 - **2026-08-06 — SlateDB-side harness findings are out of scope.** Items in
   `SLATEDB-SANDBOX-NOTES.md` (bank fenced-close neutrality, recovery scenario
   stabilization) live in the sandbox SlateDB checkout, not this repo; nothing
