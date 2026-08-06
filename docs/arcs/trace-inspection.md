@@ -213,7 +213,7 @@ virtual time: 0 ns .. 4.20 s (span 4.20 s)
 faults: net_drop_permille=300 sleep_jitter_nanos=0..1000000
 buggify: fire=250 permille, activation=250 permille, cutoff=300 s, 3 active sites
 schedule_policy: pct depth=3 steps=10000
-swarm: candidates=crash,net_drop selected=net_drop
+swarm: candidates=crash,net_drop selected=net_drop deselected=crash
 watchdog: no_progress=600 s
 sud: armed
 next: `cargo patina trace events|stats <TRACE>` for the event stream

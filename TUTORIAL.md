@@ -97,7 +97,7 @@ On stderr you also get the SDK report — proof the site was actually exercised
 (not a vacuous "all clean"):
 
 ```
-PATINA_SDK_REPORT enabled=1 fire_permille=250 activation_permille=250 ... \
+PATINA_SDK_REPORT enabled=1 swarm_deselected=0 fire_permille=250 activation_permille=250 ... \
   sites_registered=1 sites_activated=1 total_firings=2 ... site=batch-commit|fault|...|@src/main.rs:9
 ```
 

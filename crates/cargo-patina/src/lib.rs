@@ -4852,6 +4852,13 @@ fn yield_point_fingerprint(base: &str, yield_points: bool) -> String {
 /// different one, exactly like a schedule-policy mismatch. The `+buggify`
 /// suffix means a buggify trace never cross-replays with a non-buggify build,
 /// even though the per-site knobs live in (reconciled) metadata.
+///
+/// `+buggify` is a *request* here; it is the one component the guest may retract.
+/// A `--swarm` generation whose seed deselects the buggify class strips it again
+/// inside the runtime, so the fingerprint recorded into the trace describes the
+/// run that happened. A flag-free replay of such a trace reconstructs the
+/// component set from the metadata ([`trace_has_buggify`],
+/// [`native_policy_from_trace`]) and therefore recomputes the same string.
 fn native_run_fingerprint(
     base: &str,
     yield_points: bool,
@@ -4865,7 +4872,8 @@ fn native_run_fingerprint(
         fingerprint.push_str(hash);
     }
     if buggify {
-        fingerprint.push_str("+buggify");
+        fingerprint.push('+');
+        fingerprint.push_str(patina_dst_runtime::FINGERPRINT_BUGGIFY);
     }
     // Exploration-policy suffixes, in a fixed order so the fingerprint is stable.
     // Each folds only when active, so a plain run fingerprints exactly as before

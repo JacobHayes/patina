@@ -471,7 +471,7 @@ fn print_info_human(facts: &Value) {
         );
     }
     print_optional_metadata(metadata, "schedule_policy", "schedule_policy");
-    print_optional_metadata(metadata, "swarm", "swarm");
+    print_swarm_metadata(metadata);
     print_optional_metadata(metadata, "watchdog", "watchdog");
     if metadata.get("sud").and_then(Value::as_bool) == Some(true) {
         println!("sud: armed");
@@ -479,6 +479,45 @@ fn print_info_human(facts: &Value) {
     println!(
         "next: `cargo patina trace events {}` for the event stream",
         facts["path"].as_str().unwrap_or("<TRACE>")
+    );
+}
+
+/// Render the swarm record with its selection spelled out rather than as raw
+/// JSON the reader has to diff by eye. The deselected list is the whole point of
+/// the record: a class named there was requested and dropped by this generation's
+/// seed, which is why the trace carries no `buggify`/fault config for it and why
+/// its fingerprint component is absent. A class the operator never enabled is in
+/// neither list.
+fn print_swarm_metadata(metadata: &Value) {
+    let Some(swarm) = metadata.get("swarm").filter(|value| !value.is_null()) else {
+        return;
+    };
+    let classes = |key: &str| -> Vec<&str> {
+        swarm
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|values| values.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default()
+    };
+    let candidates = classes("candidate_classes");
+    let selected = classes("selected_classes");
+    let deselected: Vec<&str> = candidates
+        .iter()
+        .copied()
+        .filter(|class| !selected.contains(class))
+        .collect();
+    let list = |values: &[&str]| -> String {
+        if values.is_empty() {
+            "(none)".to_string()
+        } else {
+            values.join(",")
+        }
+    };
+    println!(
+        "swarm: candidates={} selected={} deselected={}",
+        list(&candidates),
+        list(&selected),
+        list(&deselected)
     );
 }
 

@@ -369,7 +369,14 @@ original modulo draw verbatim.
    and the recorded `FaultConfigRecord` consume, so replay reproduces the subset
    verbatim, and a `SwarmConfigRecord` documents the candidate set and the
    selection so the trace is self-describing. Subsets vary across seeds; the
-   always-all default (no `--swarm`) is unchanged.
+   always-all default (no `--swarm`) is unchanged. Dropping a class retracts
+   everything that class declared — its configuration resets, and its
+   compatibility-fingerprint component (`+buggify`, the only one today) is
+   stripped — so a masked generation's fingerprint and metadata describe the run
+   that happened. `PATINA_SWARM_REPORT` and `PATINA_SDK_REPORT`'s
+   `swarm_deselected` field keep "swarm dropped it" distinguishable from "never
+   requested"; see
+   [docs/bugs/swarm-buggify-fingerprint-coherence.md](./docs/bugs/swarm-buggify-fingerprint-coherence.md).
 
 3. **Starvation intervals** (`patina-dst-sched-det`): `cargo patina run --starve[=N]`
    (`PATINA_SCHED_STARVE`, default 3 intervals) with `--starve-max-len M`

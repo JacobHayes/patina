@@ -248,6 +248,25 @@ sequence and every fault/buggify hash preserved).
   sets round-trip, the applied config matches the selection, and subsets vary
   across seeds. `patina-dst-trace` covers the additive `swarm` and `schedule_policy`
   metadata round-trips and their absence from a plain trace.
+
+  Masking is coherent end to end: a dropped class is retracted from everything
+  that declared it, including the compatibility fingerprint (`+buggify` is the
+  only fingerprint-folding swarm class today) and the class's own configuration,
+  which resets entirely so a masked run leaves no residue. A dropped class stays
+  distinguishable from one that was never requested — it appears in
+  `candidate_classes` but not `selected_classes`, `PATINA_SDK_REPORT` carries
+  `swarm_deselected=1`, and the default-on `PATINA_SWARM_REPORT` line names every
+  candidate with its per-class decision. `TraceBundle::validate` enforces that the
+  selection is a duplicate-free subset of the candidates, so the derived
+  "deselected" complement is always meaningful. Replay and branch adopt the
+  recording's swarm record, so a replayed generation reports the same decision.
+  End-to-end tests
+  (`swarm_deselection_stays_coherent_with_fingerprint_and_metadata`,
+  `campaign_with_swarm_and_buggify_has_no_coherence_aborts`) prove a masked
+  generation runs and is distinguishable, an unmasked one keeps `+buggify`, a
+  `--buggify --swarm` campaign has no coherence aborts while exercising both
+  outcomes, and genuine incoherence still refuses. See
+  [docs/bugs/swarm-buggify-fingerprint-coherence.md](./docs/bugs/swarm-buggify-fingerprint-coherence.md).
 - **Starvation intervals** (`--starve[=N]` / `--starve-max-len M` /
   `--starve-window W`): bounded seed-chosen intervals not scheduling a residue
   subset. Liveness is guaranteed at the scheduler level by *aging* — a per-task
@@ -344,6 +363,7 @@ unit suite — it is in the handful of **structurally unpaired classes** below
 | Shim host-alias object scan | `cargo-patina` `tests/shim_host_alias.rs` (`shim_objects_name_no_undeclared_host_escape` + `planted_leak_is_caught`) | Dispatch-semaphore Parker sharing the baton's `--allow` | **Class** | Scans shim's own objects for undeclared host escapes; planted leak keeps it honest. |
 | Fingerprint fail-closed (`+yieldpoints`/`+buggify`/`+pct`/`+starve`/`+swarm`, reconstructed from trace) | `patina-runtime`, `patina-trace`; `native_yield_points_trace_fails_closed_against_plain_binary`, `reconcile_replay_*_enforces_the_authoritative_trace_contract` | Cross-replay of incompatible build/policy | **Class** | Any capability mismatch fails closed; `deny_unknown_fields` rejects unknown policy in older runtime. |
 | Fingerprint/buggify metadata coherence (`+buggify` requires armed config) | `patina-trace` `buggify_fingerprint_requires_buggify_metadata`; `patina-runtime` `buggify_fingerprint_requires_enabled_config`; e2e `native_buggify_sdk_reports_records_and_replays` | Campaign value-form buggify vacuity: fingerprint claimed SDK buggify while trace metadata was absent | **Class** | Any parser/env-plumbing variant that stamps `+buggify` without arming the SDK fails before recording/replay can certify coverage. Limit: WASI fingerprints fold buggify into a hash rather than a textual suffix, so the invariant is one-way (`+buggify` ⇒ metadata). |
+| Swarm deselection coherence (a dropped class retracts its fingerprint component) | `patina-runtime` `swarm_deselecting_buggify_retracts_the_fingerprint_component`, `swarm_class_table_declares_every_fingerprint_component`; `patina-trace` `swarm_record_partitions_candidates_into_selected_and_deselected`; e2e `swarm_deselection_stays_coherent_with_fingerprint_and_metadata`, `campaign_with_swarm_and_buggify_has_no_coherence_aborts` | SlateDB item 9: a `--swarm` generation that dropped buggify kept declaring `+buggify`, first as silent phantom coverage and then (post-guard) as an abort of a legitimate run | **Class** | The class table pins which swarm classes fold a fingerprint component, so adding one without registering its retraction fails the test rather than resurrecting the incoherence. |
 | Vacuous-schedule diagnostic (`PATINA_SCHEDULE_REPORT` + `PATINA WARNING`) | `patina-runtime/src/lib.rs` (`SCAFFOLDING_YIELD_FLOOR`); `vacuous_worker_that_never_yields_is_flagged` | "N seeds clean" hiding zero exploration (atomics-only window) | **Class (calibration-coupled)** | Mechanism is structural, but the floor is a tuned constant (macOS 4 / Linux 0). A std-scaffolding cost change could mis-calibrate it silently. |
 | Net-fault vacuity diagnostic (`PATINA_NET_FAULT_REPORT` + `PATINA WARNING: net fault knobs inert`) | `patina-runtime/src/lib.rs` (`emit_net_fault_report`); `patina-dst-driver-api` `NetFaultReport::is_vacuous`; `patina-net-sim` `fault_report_is_vacuous_exactly_on_the_silent_inertness_signature`; e2e `native_tcp_stream_faults_are_deterministic_replayable_and_non_vacuous`; `testbeds/pubsub/fuzz-sweep.sh` `VACUOUS_NET_FAULT` selftest | `--net-jitter-nanos`/`--net-drop-permille` silently inert on the SimNet TCP stream path (a datagram-only implementation) — "clean under faults" hiding zero perturbation (task #37) | **Class** | Fires when the knobs could perturb (nonzero drop or jitter ceiling) and fault-eligible traffic occurred yet ZERO fault effects landed. RED-proven: with the TCP fault application disabled, the runtime `faults.rs` TCP test fails AND the warning fires (`vacuous=1`). The `pubsub` gate's fault leg additionally proves non-vacuity by trace-diff (fault vs no-fault at the same seed). |
 | Liveness watchdog (`PATINA_VIOLATION liveness`/`converge`; virtual-time only) | `patina-runtime` (`LIVENESS_MIN_STALL_OPS=4`, 600s budget); `liveness_watchdog_is_schedule_invariant_when_no_violation_fires` | Wedged run silently advancing vtime to budget | **Class** | Schedule-invariant (proven byte-identical op stream); non-vacuity via default-on `PATINA_LIVENESS_REPORT`. Limit: real-I/O-but-no-goal needs an app oracle. |

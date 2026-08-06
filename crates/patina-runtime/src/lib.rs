@@ -240,10 +240,26 @@ pub const ENV_SCHED_STARVE_WINDOW: &str = "PATINA_SCHED_STARVE_WINDOW";
 /// (or absence) keeps the existing always-all behavior. Folds a `+swarm`
 /// fingerprint component.
 pub const ENV_SWARM: &str = "PATINA_SWARM";
+/// Suppress the default-on end-of-run swarm-selection diagnostic
+/// (`PATINA_SWARM_REPORT`) when set to a false-y value. On by default for every
+/// run that applied swarm selection.
+pub const ENV_SWARM_REPORT: &str = "PATINA_SWARM_REPORT";
 /// Suppress the default-on end-of-run exploration-policy diagnostic
 /// (`PATINA_SCHEDULE_POLICY`) when set to a false-y value. On by default when a
 /// policy is active.
 pub const ENV_SCHEDULE_POLICY_REPORT: &str = "PATINA_SCHEDULE_POLICY_REPORT";
+
+/// The compatibility-fingerprint component a supervisor folds (as `+buggify`)
+/// when a run arms cooperative-SUT injection, and the component swarm strips
+/// again when a generation deselects the `buggify` class.
+///
+/// Both sides read this one constant so the declaration and the retraction can
+/// never disagree: `cargo patina`'s fingerprint composer appends it, and
+/// [`RuntimeConfig`]'s swarm mask removes it. A fingerprint component that is
+/// also a swarm-maskable class MUST live here and be registered in the swarm
+/// class table (see the `swarm_class_table_declares_every_fingerprint_component`
+/// test), or a masked run would keep declaring coverage it no longer has.
+pub const FINGERPRINT_BUGGIFY: &str = "buggify";
 
 /// Enable the generic liveness watchdog with a virtual-time no-progress budget in
 /// nanoseconds (armed from run start). A bare/empty value uses
@@ -1482,7 +1498,7 @@ impl RuntimeBuilder {
         // replay/branch, where the trace's recorded (already-masked) fault config
         // is authoritative and re-masking would double-select. The record is
         // attached to the recorder metadata below.
-        let swarm_record = if self.config.swarm
+        let mut swarm_record = if self.config.swarm
             && matches!(
                 self.config.mode,
                 ExecutionMode::Seeded
@@ -1559,6 +1575,11 @@ impl RuntimeBuilder {
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
                 reconcile_replay_sud(&self.config, replayer.sud())?;
+                // The recording's swarm decision is authoritative and purely
+                // descriptive on replay (the trace's already-masked fault/buggify
+                // records drive the drivers). Adopting it makes a replay emit the
+                // same PATINA_SWARM_REPORT and swarm_deselected the recording did.
+                swarm_record = replayer.swarm_config().cloned();
                 (Execution::Replay(replayer), root_seed)
             }
             ExecutionMode::ReplayTransport { timeline } => {
@@ -1579,6 +1600,7 @@ impl RuntimeBuilder {
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
                 reconcile_replay_sud(&self.config, replayer.sud())?;
+                swarm_record = replayer.swarm_config().cloned();
                 (Execution::Replay(replayer), root_seed)
             }
             ExecutionMode::Branch {
@@ -1607,6 +1629,9 @@ impl RuntimeBuilder {
                     reconcile_replay_guest_env(&self.config, session.guest_env())?;
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, session.schedule_policy())?;
+                // A branch inherits the parent's swarm decision along with its
+                // fault configuration; it does not re-draw the mask.
+                swarm_record = session.swarm_config().cloned();
                 (
                     Execution::Branch {
                         session: Box::new(session),
@@ -1790,6 +1815,7 @@ impl RuntimeBuilder {
             schedule: ScheduleTracker::default(),
             buggify: Buggify::new(self.config.buggify, root_seed),
             liveness,
+            swarm: swarm_record,
         })
     }
 }
@@ -2471,6 +2497,12 @@ pub struct BuggifyDiagnostics {
     pub cutoff_suppressed: u64,
     pub after_setup: bool,
     pub setup_complete: bool,
+    /// Whether swarm selection deselected the `buggify` class this generation.
+    /// True only when the run asked for buggify AND the seed's swarm draw dropped
+    /// it, so `enabled == false && swarm_deselected == true` reads "requested,
+    /// masked out this generation" while `enabled == false && swarm_deselected ==
+    /// false` reads "never requested".
+    pub swarm_deselected: bool,
     /// Link-time declared SDK sites in label order. These rows describe the full
     /// literal-label site universe and do not imply per-run evaluation.
     pub declared_sites: Vec<BuggifyDeclaredSiteReport>,
@@ -2675,6 +2707,9 @@ impl Buggify {
             cutoff_suppressed: self.cutoff_suppressed,
             after_setup: self.config.after_setup,
             setup_complete: self.setup_complete,
+            // The engine has no view of the swarm draw; `Context::buggify_diagnostics`
+            // fills this in from the run's swarm record.
+            swarm_deselected: false,
             declared_sites,
             sites,
         }
@@ -2791,6 +2826,12 @@ pub struct Context {
     /// configured on a record/seeded run, so a run that does not opt in — and every
     /// replay — is byte-for-byte unchanged.
     liveness: LivenessWatchdog,
+    /// The swarm fault-class selection this run carried, or `None` when swarm was
+    /// not enabled. A record/seeded run draws it; a replay or branch adopts the
+    /// recording's, so a replayed generation reports the same decision rather
+    /// than re-drawing one. Drives `PATINA_SWARM_REPORT` and the
+    /// `swarm_deselected` field of `PATINA_SDK_REPORT`.
+    swarm: Option<patina_dst_trace::SwarmConfigRecord>,
 }
 
 impl Context {
@@ -3155,7 +3196,17 @@ impl Context {
             && self
                 .current_monotonic()
                 .is_ok_and(|now| now >= self.buggify.config.cutoff_nanos);
-        self.buggify.diagnostics(cutoff_reached_now)
+        // Whether buggify is off because THIS generation's swarm draw dropped it,
+        // as opposed to never having been requested. Both report `enabled=0`, and
+        // conflating them is what turned a working `--buggify=N` into a phantom
+        // bug report; the flag makes the two states distinguishable in one line.
+        let swarm_deselected = self
+            .swarm
+            .as_ref()
+            .is_some_and(|swarm| swarm.deselected(FINGERPRINT_BUGGIFY));
+        let mut diagnostics = self.buggify.diagnostics(cutoff_reached_now);
+        diagnostics.swarm_deselected = swarm_deselected;
+        diagnostics
     }
 
     pub fn entropy_bytes(&mut self, len: usize) -> Result<Vec<u8>, RuntimeError> {
@@ -4291,6 +4342,12 @@ impl Context {
     /// automatically, on error paths too.
     pub fn finish(mut self) -> Result<(), RuntimeError> {
         emit_schedule_report(&self.schedule.diagnostics());
+        // Swarm selection diagnostic. Default-on for every masked run so which
+        // classes this generation actually carried is never left to inference
+        // from an absent knob effect.
+        if let Some(swarm) = self.swarm.as_ref() {
+            emit_swarm_report(swarm);
+        }
         // Exploration-policy diagnostic (PCT / starvation). Populated from live
         // selection, so it reflects a record/seeded run; a replay reports the
         // inert default because recorded selections bypass the policy.
@@ -4893,8 +4950,15 @@ fn buggify_record(config: &RuntimeConfig) -> Option<patina_dst_trace::BuggifyCon
     })
 }
 
+/// Refuse a run whose fingerprint claims cooperative-SUT coverage the config
+/// cannot deliver. This stays exactly as strict as it was for genuine
+/// incoherence; a swarm-masked generation passes because [`apply_swarm_mask`] has
+/// already retracted [`FINGERPRINT_BUGGIFY`] from the fingerprint, so the run's
+/// declared state is truthful rather than merely tolerated.
 fn validate_buggify_fingerprint_contract(config: &RuntimeConfig) -> Result<(), RuntimeError> {
-    if fingerprint_declares_component(&config.fingerprint, "buggify") && !config.buggify.enabled {
+    if fingerprint_declares_component(&config.fingerprint, FINGERPRINT_BUGGIFY)
+        && !config.buggify.enabled
+    {
         return Err(RuntimeError::Config(
             "fingerprint declares +buggify but buggify is not enabled; refusing vacuous SDK buggify coverage"
                 .into(),
@@ -5085,11 +5149,23 @@ fn reconcile_replay_sud(
 /// selected subset verbatim; the returned `SwarmConfigRecord` documents the
 /// candidate set and the seed's selection so the trace is self-describing. Each
 /// class draws independently, so subsets vary across generations (seeds).
+///
+/// **Deselection is retracted from the fingerprint too.** A class whose
+/// capability the supervisor declared as a compatibility-fingerprint component
+/// (today only [`FINGERPRINT_BUGGIFY`]) has that component stripped from
+/// `config.fingerprint` when the seed deselects it, because the fingerprint
+/// describes the run that actually happened, not the run that was requested.
+/// Without this the run would declare `+buggify` while carrying a disarmed
+/// buggify config — exactly the incoherence
+/// [`validate_buggify_fingerprint_contract`] refuses — so a legitimate
+/// swarm-masked generation aborted. The trace metadata stays coherent by the same
+/// rule: the recorded fault/buggify records are derived from the masked config,
+/// and the swarm record names the class as a candidate that was not selected.
 fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_dst_trace::SwarmConfigRecord {
-    // Stable class tokens paired with a live predicate, a domain label, and a
-    // dropper. A class is a candidate only when currently enabled (non-default).
-    let mut candidates: Vec<&'static str> = Vec::new();
-    let mut selected: Vec<String> = Vec::new();
+    // Stable class tokens paired with a live predicate, a domain label, the
+    // fingerprint component the class declares (if any), and a dropper. A class
+    // is a candidate only when currently enabled (non-default).
+    let mut draw = SwarmDraw::default();
     let seed = config.seed;
 
     if config.faults.fs.crash_at.is_some()
@@ -5099,8 +5175,8 @@ fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_dst_trace::SwarmConfig
             seed,
             "crash",
             fault_domain::SWARM_CRASH,
-            &mut candidates,
-            &mut selected,
+            None,
+            &mut draw,
             || {
                 config.faults.fs.crash_at = None;
                 config.faults.fs.torn_granularity = TornGranularity::default();
@@ -5112,8 +5188,8 @@ fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_dst_trace::SwarmConfig
             seed,
             "fs_error",
             fault_domain::SWARM_FS_ERROR,
-            &mut candidates,
-            &mut selected,
+            None,
+            &mut draw,
             || config.faults.fs.error_permille = 0,
         );
     }
@@ -5122,8 +5198,8 @@ fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_dst_trace::SwarmConfig
             seed,
             "fs_short",
             fault_domain::SWARM_FS_SHORT,
-            &mut candidates,
-            &mut selected,
+            None,
+            &mut draw,
             || config.faults.fs.short_permille = 0,
         );
     }
@@ -5132,8 +5208,8 @@ fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_dst_trace::SwarmConfig
             seed,
             "sleep_jitter",
             fault_domain::SWARM_SLEEP_JITTER,
-            &mut candidates,
-            &mut selected,
+            None,
+            &mut draw,
             || config.faults.clock.sleep_jitter_nanos = None,
         );
     }
@@ -5142,8 +5218,8 @@ fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_dst_trace::SwarmConfig
             seed,
             "net_jitter",
             fault_domain::SWARM_NET_JITTER,
-            &mut candidates,
-            &mut selected,
+            None,
+            &mut draw,
             || config.faults.net.jitter_nanos = None,
         );
     }
@@ -5152,8 +5228,8 @@ fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_dst_trace::SwarmConfig
             seed,
             "net_drop",
             fault_domain::SWARM_NET_DROP,
-            &mut candidates,
-            &mut selected,
+            None,
+            &mut draw,
             || config.faults.net.drop_permille = 0,
         );
     }
@@ -5162,8 +5238,8 @@ fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_dst_trace::SwarmConfig
             seed,
             "net_latency",
             fault_domain::SWARM_NET_LATENCY,
-            &mut candidates,
-            &mut selected,
+            None,
+            &mut draw,
             || config.faults.net.latency_nanos = 0,
         );
     }
@@ -5172,33 +5248,116 @@ fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_dst_trace::SwarmConfig
             seed,
             "buggify",
             fault_domain::SWARM_BUGGIFY,
-            &mut candidates,
-            &mut selected,
-            || config.buggify.enabled = false,
+            Some(FINGERPRINT_BUGGIFY),
+            &mut draw,
+            // The WHOLE buggify config is reset, not just `enabled`. Clearing only
+            // the flag left the requested permilles behind, so the run reported
+            // `enabled=0 fire_permille=372` — a half-masked state that reads like
+            // "buggify was asked for and silently ignored". That line is what the
+            // original investigation drew its (wrong) conclusion from. A dropped
+            // class now leaves no residue at all; the fact that it was requested
+            // and dropped is carried explicitly by the swarm record, the
+            // `PATINA_SWARM_REPORT` line, and `swarm_deselected=1`. Resetting also
+            // makes record and replay agree: the trace records no buggify config
+            // for a dropped class, so a replay that rebuilt one from residue could
+            // not reproduce the recording's diagnostics.
+            || config.buggify = BuggifyConfig::default(),
         );
     }
 
-    patina_dst_trace::SwarmConfigRecord {
-        candidate_classes: candidates.into_iter().map(String::from).collect(),
-        selected_classes: selected,
+    for component in draw.retract {
+        config.fingerprint = remove_fingerprint_component(&config.fingerprint, component);
     }
+
+    patina_dst_trace::SwarmConfigRecord {
+        candidate_classes: draw.candidates.into_iter().map(String::from).collect(),
+        selected_classes: draw.selected,
+    }
+}
+
+/// What one run's swarm draw accumulated: the classes it considered, the ones it
+/// kept, and the fingerprint components of the ones it dropped. Collected in a
+/// struct rather than three out-parameters so the per-class droppers — which each
+/// borrow the config mutably — stay independent of the accumulation.
+#[derive(Default)]
+struct SwarmDraw {
+    candidates: Vec<&'static str>,
+    selected: Vec<String>,
+    /// Retracted from the fingerprint only after every dropper has run, so the
+    /// config borrow the droppers hold is released first.
+    retract: Vec<&'static str>,
 }
 
 fn apply_swarm_class(
     seed: u64,
     token: &'static str,
     domain: &'static str,
-    candidates: &mut Vec<&'static str>,
-    selected: &mut Vec<String>,
+    fingerprint_component: Option<&'static str>,
+    draw: &mut SwarmDraw,
     drop: impl FnOnce(),
 ) {
-    candidates.push(token);
+    draw.candidates.push(token);
     let mut rng = SplitMix64::new(domain_seed(seed, domain));
     if rng.next_u64() & 1 == 1 {
-        selected.push(token.into());
+        draw.selected.push(token.into());
     } else {
         drop();
+        if let Some(component) = fingerprint_component {
+            draw.retract.push(component);
+        }
     }
+}
+
+/// Remove every `+component` occurrence from a compatibility fingerprint,
+/// preserving the base label and the order of the remaining components. The
+/// result is exactly the string a supervisor composes for a run that never
+/// declared the component, so a flag-free replay — which reconstructs the
+/// component set from the trace metadata — recomputes an identical fingerprint.
+fn remove_fingerprint_component(fingerprint: &str, component: &str) -> String {
+    let mut parts = fingerprint.split('+');
+    let mut out = String::from(parts.next().unwrap_or_default());
+    for part in parts {
+        if part == component {
+            continue;
+        }
+        out.push('+');
+        out.push_str(part);
+    }
+    out
+}
+
+/// Emit the default-on swarm-selection diagnostic for a run that applied swarm
+/// fault-class masking. One machine-readable line, in the same shape as
+/// `PATINA_SDK_REPORT`: the candidate/selected/deselected counts followed by one
+/// `class=<token>|<0|1>` row per candidate in table order.
+///
+/// This is the uniform surface for every swarm-maskable class, so a consumer can
+/// tell "this generation ran without fs error injection because swarm dropped it"
+/// from "fs error injection was never requested" without re-deriving the mask.
+/// Suppressed by a false-y [`ENV_SWARM_REPORT`].
+fn emit_swarm_report(record: &patina_dst_trace::SwarmConfigRecord) {
+    if let Ok(value) = env::var(ENV_SWARM_REPORT) {
+        if matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "false" | "no"
+        ) {
+            return;
+        }
+    }
+    let selected = record.selected_classes.len();
+    let mut line = format!(
+        "PATINA_SWARM_REPORT candidates={} selected={} deselected={}",
+        record.candidate_classes.len(),
+        selected,
+        record.candidate_classes.len() - selected,
+    );
+    for class in &record.candidate_classes {
+        line.push_str(&format!(
+            " class={class}|{}",
+            u8::from(!record.deselected(class)),
+        ));
+    }
+    eprintln!("{line}");
 }
 
 /// Emit the default-on liveness-watchdog diagnostic at a clean finish. Proves the
@@ -5428,10 +5587,11 @@ fn emit_sdk_report(diag: &BuggifyDiagnostics) {
         }
     }
     let mut line = format!(
-        "PATINA_SDK_REPORT enabled={} fire_permille={} activation_permille={} cutoff_nanos={} \
-cutoff_reached={} sites_declared={} sites_registered={} sites_activated={} total_firings={} \
-cutoff_suppressed={} after_setup={} setup_complete={}",
+        "PATINA_SDK_REPORT enabled={} swarm_deselected={} fire_permille={} activation_permille={} \
+cutoff_nanos={} cutoff_reached={} sites_declared={} sites_registered={} sites_activated={} \
+total_firings={} cutoff_suppressed={} after_setup={} setup_complete={}",
         u8::from(diag.enabled),
+        u8::from(diag.swarm_deselected),
         diag.fire_permille,
         diag.activation_permille,
         diag.cutoff_nanos,
@@ -6312,6 +6472,178 @@ mod tests {
                 "net_latency",
                 "buggify",
             ]
+        );
+    }
+
+    /// The lowest seed for which swarm's `buggify` coin comes up the given way,
+    /// so the coherence tests below name a real deselecting/selecting generation
+    /// instead of hard-coding a seed that a coin change would silently invert.
+    fn seed_where_buggify_is(selected: bool) -> u64 {
+        (0..1024)
+            .find(|seed| {
+                let mut rng = SplitMix64::new(domain_seed(*seed, fault_domain::SWARM_BUGGIFY));
+                (rng.next_u64() & 1 == 1) == selected
+            })
+            .expect("some seed in 0..1024 draws each way")
+    }
+
+    /// The bug behind SlateDB feedback item 9. A `--swarm` generation whose seed
+    /// deselects `buggify` used to keep `+buggify` in its fingerprint while
+    /// disarming the buggify config, which the coherence guard then (correctly)
+    /// refused — so a legitimate masked generation aborted. Masking now retracts
+    /// the component, and the whole declared state stays truthful.
+    #[test]
+    fn swarm_deselecting_buggify_retracts_the_fingerprint_component() {
+        let directory = tempdir().unwrap();
+        let record = |seed: u64| {
+            let trace = directory.path().join(format!("swarm-fp-{seed}.patina"));
+            let config = RuntimeConfig::record(seed, &trace, "fp+buggify+swarm")
+                .with_buggify(BuggifyConfig {
+                    enabled: true,
+                    fire_permille: 372,
+                    ..BuggifyConfig::default()
+                })
+                .with_swarm(true);
+            // RED before the fix: this `build` returned the "+buggify but buggify
+            // is not enabled" refusal on a deselecting seed.
+            let context = Context::from_config(config).expect("masked run must build");
+            context.finish().unwrap();
+            patina_dst_trace::TraceBundle::load(&trace).unwrap()
+        };
+
+        // Deselected: the component is gone, no buggify config is recorded, and
+        // the swarm record still names buggify as a candidate — so the trace says
+        // "asked for, dropped here", not "never asked for".
+        let dropped = record(seed_where_buggify_is(false));
+        assert_eq!(dropped.metadata.fingerprint, "fp+swarm");
+        assert_eq!(dropped.metadata.buggify, None);
+        let swarm = dropped.metadata.swarm.as_ref().expect("swarm recorded");
+        assert!(swarm.was_candidate(FINGERPRINT_BUGGIFY));
+        assert!(swarm.deselected(FINGERPRINT_BUGGIFY));
+        assert_eq!(swarm.deselected_classes(), vec![FINGERPRINT_BUGGIFY]);
+        // The trace's own coherence check agrees (it is what rejects a fingerprint
+        // that declares +buggify with no buggify config).
+        dropped.validate().expect("masked trace must validate");
+
+        // Selected: nothing changes — the component and the config both stand.
+        let kept = record(seed_where_buggify_is(true));
+        assert_eq!(kept.metadata.fingerprint, "fp+buggify+swarm");
+        assert_eq!(
+            kept.metadata
+                .buggify
+                .as_ref()
+                .expect("buggify recorded")
+                .fire_permille,
+            372
+        );
+        let swarm = kept.metadata.swarm.as_ref().expect("swarm recorded");
+        assert!(!swarm.deselected(FINGERPRINT_BUGGIFY));
+        kept.validate().expect("selected trace must validate");
+    }
+
+    /// A dropped class leaves NO residue in the configuration: the whole buggify
+    /// config resets, so a masked run reports the same numbers a run that never
+    /// asked for buggify reports. The requested-but-dropped fact is carried by
+    /// `swarm_deselected`, not by leftover permilles — which is what made the
+    /// original `enabled=0 fire_permille=372` line read like a broken flag.
+    #[test]
+    fn swarm_deselection_clears_the_class_config_and_is_reported_distinctly() {
+        let requested = || {
+            RuntimeConfig::seeded(seed_where_buggify_is(false))
+                .with_buggify(BuggifyConfig {
+                    enabled: true,
+                    fire_permille: 372,
+                    activation_permille: 900,
+                    ..BuggifyConfig::default()
+                })
+                .with_swarm(true)
+        };
+        let mut masked = requested();
+        let record = apply_swarm_mask(&mut masked);
+        assert!(record.deselected(FINGERPRINT_BUGGIFY));
+        assert_eq!(masked.buggify, BuggifyConfig::default());
+
+        // `swarm_deselected` is what separates the two `enabled=0` states.
+        let mut context = Context::from_config(requested()).unwrap();
+        let diagnostics = context.buggify_diagnostics();
+        assert!(!diagnostics.enabled);
+        assert!(diagnostics.swarm_deselected);
+
+        let mut never_asked = Context::from_config(RuntimeConfig::seeded(0)).unwrap();
+        let diagnostics = never_asked.buggify_diagnostics();
+        assert!(!diagnostics.enabled);
+        assert!(!diagnostics.swarm_deselected);
+    }
+
+    /// `buggify` is the ONLY swarm class whose capability is declared as a
+    /// fingerprint component today. Adding another one without registering it in
+    /// the swarm class table would resurrect the item-9 incoherence for that
+    /// class, so pin the mapping: with every class enabled and every class token
+    /// present as a fingerprint component, masking must retract `buggify` (when
+    /// dropped) and nothing else, whatever the seed decided.
+    #[test]
+    fn swarm_class_table_declares_every_fingerprint_component() {
+        let classes = [
+            "crash",
+            "fs_error",
+            "fs_short",
+            "sleep_jitter",
+            "net_jitter",
+            "net_drop",
+            "net_latency",
+            "buggify",
+        ];
+        for seed in 0..8u64 {
+            let mut config = RuntimeConfig::seeded(seed)
+                .with_crash_at(CrashOp::Close, 1)
+                .with_fs_error_permille(1)
+                .with_fs_short_permille(1)
+                .with_sleep_jitter_nanos(1, 2)
+                .with_net_jitter_nanos(1, 2)
+                .with_net_drop_permille(1)
+                .with_net_latency_nanos(1)
+                .with_buggify(BuggifyConfig {
+                    enabled: true,
+                    ..BuggifyConfig::default()
+                })
+                .with_swarm(true);
+            config.fingerprint = format!("fp+{}", classes.join("+"));
+            let record = apply_swarm_mask(&mut config);
+            let expected: Vec<&str> = classes
+                .iter()
+                .copied()
+                .filter(|class| {
+                    *class != FINGERPRINT_BUGGIFY || !record.deselected(FINGERPRINT_BUGGIFY)
+                })
+                .collect();
+            assert_eq!(
+                config.fingerprint,
+                format!("fp+{}", expected.join("+")),
+                "seed {seed} retracted the wrong component set"
+            );
+        }
+    }
+
+    #[test]
+    fn remove_fingerprint_component_drops_only_whole_components() {
+        assert_eq!(
+            remove_fingerprint_component("patina-native+buggify+swarm", "buggify"),
+            "patina-native+swarm"
+        );
+        // The base label and every other component keep their order.
+        assert_eq!(
+            remove_fingerprint_component("base+fsimg:abc+buggify+pct+swarm", "buggify"),
+            "base+fsimg:abc+pct+swarm"
+        );
+        // A component is matched whole, never as a substring of another.
+        assert_eq!(
+            remove_fingerprint_component("base+buggifyx+swarm", "buggify"),
+            "base+buggifyx+swarm"
+        );
+        // Absent component: unchanged.
+        assert_eq!(
+            remove_fingerprint_component("base+swarm", "buggify"),
+            "base+swarm"
         );
     }
 

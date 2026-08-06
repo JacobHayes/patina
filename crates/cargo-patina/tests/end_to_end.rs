@@ -2927,6 +2927,310 @@ fn campaign_catches_planted_liveness_bug_dedups_and_reproduces() {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+// Swarm fault-class deselection stays coherent end to end (SlateDB feedback item
+// 9). `--swarm` applies a seed-derived subset of the enabled classes, so some
+// generations run WITHOUT buggify even though the operator asked for it. That
+// masked state used to keep `+buggify` in the run fingerprint while disarming
+// buggify, which the coherence guard then refused — a legitimate generation died
+// with "fingerprint declares +buggify but buggify is not enabled".
+//
+// This proves the three things the fix owes:
+//   1. a masked generation RUNS, and its trace declares the effective state
+//      (no `+buggify`, no buggify config, swarm names it a dropped candidate);
+//   2. a masked generation is DISTINGUISHABLE from "buggify was never requested"
+//      — the ambiguity that sent the original bug report after the wrong cause;
+//   3. an unmasked swarm generation still carries `+buggify`, and genuine
+//      incoherence (declaring `+buggify` with no buggify at all) still refuses.
+#[test]
+fn swarm_deselection_stays_coherent_with_fingerprint_and_metadata() {
+    let workspace = native_workspace();
+    let fixture = workspace.join("testbeds/liveness-campaign");
+    let directory = tempdir().unwrap();
+    let guest = directory.path().join("swarm-guest");
+    let built = invoke_in(
+        workspace,
+        &[
+            "build",
+            fixture.to_str().unwrap(),
+            "--output",
+            guest.to_str().unwrap(),
+            "--release",
+        ],
+    );
+    assert!(
+        built.status.success(),
+        "building the swarm guest failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&built.stdout),
+        String::from_utf8_lossy(&built.stderr)
+    );
+
+    // Find one generation that drops buggify and one that keeps it by reading
+    // each run's own PATINA_SWARM_REPORT rather than re-deriving the mask here. A
+    // wedged generation (the fixture's planted liveness bug) is skipped: this
+    // test is about configuration coherence, not the planted bug.
+    let mut dropped: Option<(u64, std::path::PathBuf, String)> = None;
+    let mut kept: Option<(u64, std::path::PathBuf, String)> = None;
+    for seed in 0..24u64 {
+        if dropped.is_some() && kept.is_some() {
+            break;
+        }
+        let trace = directory.path().join(format!("swarm-{seed}.patina"));
+        let ran = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &[
+                "run",
+                guest.to_str().unwrap(),
+                "--seed",
+                &seed.to_string(),
+                "--swarm",
+                "--buggify=372",
+                "--record",
+                trace.to_str().unwrap(),
+            ],
+        );
+        let stderr = String::from_utf8_lossy(&ran.stderr).to_string();
+        if !ran.status.success() {
+            assert!(
+                !stderr.contains("fingerprint declares +buggify"),
+                "seed {seed}: a swarm-masked generation must not abort on the \
+                 buggify coherence guard\nstderr:\n{stderr}"
+            );
+            continue;
+        }
+        let swarm_line = stderr
+            .lines()
+            .find(|line| line.starts_with("PATINA_SWARM_REPORT "))
+            .unwrap_or_else(|| panic!("seed {seed}: no swarm report\nstderr:\n{stderr}"))
+            .to_string();
+        if swarm_line.contains("class=buggify|0") {
+            dropped.get_or_insert((seed, trace, stderr));
+        } else if swarm_line.contains("class=buggify|1") {
+            kept.get_or_insert((seed, trace, stderr));
+        }
+    }
+    let (dropped_seed, dropped_trace, dropped_stderr) =
+        dropped.expect("no seed in 0..24 deselected buggify");
+    let (_kept_seed, kept_trace, kept_stderr) = kept.expect("no seed in 0..24 selected buggify");
+
+    // (1) The masked run's trace declares the effective configuration.
+    let info = invoke_in(
+        workspace,
+        &["trace", "info", dropped_trace.to_str().unwrap()],
+    );
+    let info = String::from_utf8_lossy(&info.stdout).to_string();
+    assert!(
+        info.contains("fingerprint: patina-native+swarm"),
+        "a masked run must not declare +buggify:\n{info}"
+    );
+    assert!(
+        !info.contains("\nbuggify:"),
+        "a masked run must record no buggify config:\n{info}"
+    );
+    assert!(
+        info.contains("swarm: candidates=buggify selected=(none) deselected=buggify"),
+        "the trace must name buggify as a dropped candidate:\n{info}"
+    );
+
+    // (2) Distinguishable from "never requested". Both report `enabled=0`; only
+    // the masked one reports `swarm_deselected=1`.
+    assert!(
+        dropped_stderr.contains("PATINA_SDK_REPORT enabled=0 swarm_deselected=1"),
+        "a masked run must report swarm_deselected=1\nstderr:\n{dropped_stderr}"
+    );
+    let never_asked = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "run",
+            guest.to_str().unwrap(),
+            "--seed",
+            &dropped_seed.to_string(),
+        ],
+    );
+    let never_asked = String::from_utf8_lossy(&never_asked.stderr).to_string();
+    assert!(
+        never_asked.contains("PATINA_SDK_REPORT enabled=0 swarm_deselected=0"),
+        "a run that never asked for buggify must report swarm_deselected=0\nstderr:\n{never_asked}"
+    );
+
+    // Replay of the masked trace reproduces the run: the fingerprint check holds
+    // in both directions (the replay recomputes `+swarm` without `+buggify` from
+    // the metadata), and the diagnostics are identical to the recording's.
+    let replayed = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "replay",
+            guest.to_str().unwrap(),
+            dropped_trace.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        replayed.status.success(),
+        "replaying a swarm-masked trace failed:\nstderr:\n{}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+    let replayed = String::from_utf8_lossy(&replayed.stderr).to_string();
+    let reports = |stderr: &str| -> Vec<String> {
+        stderr
+            .lines()
+            .filter(|line| {
+                line.starts_with("PATINA_SWARM_REPORT ") || line.starts_with("PATINA_SDK_REPORT ")
+            })
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(
+        reports(&dropped_stderr),
+        reports(&replayed),
+        "record and replay of a masked run must report the same swarm/SDK state"
+    );
+
+    // (3) An unmasked swarm generation is untouched: `+buggify` and the buggify
+    // config both stand.
+    assert!(
+        kept_stderr.contains("PATINA_SDK_REPORT enabled=1 swarm_deselected=0"),
+        "an unmasked swarm run must keep buggify armed\nstderr:\n{kept_stderr}"
+    );
+    let info = invoke_in(workspace, &["trace", "info", kept_trace.to_str().unwrap()]);
+    let info = String::from_utf8_lossy(&info.stdout).to_string();
+    assert!(
+        info.contains("fingerprint: patina-native+buggify+swarm"),
+        "an unmasked swarm run must keep +buggify:\n{info}"
+    );
+    assert!(
+        info.contains("swarm: candidates=buggify selected=buggify deselected=(none)"),
+        "the trace must name buggify as selected:\n{info}"
+    );
+
+    // Genuine incoherence — a fingerprint declaring `+buggify` on a run that
+    // never armed buggify — still fails closed, exactly as before.
+    let incoherent = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "run",
+            guest.to_str().unwrap(),
+            "--seed",
+            "0",
+            "--fingerprint",
+            "patina-native+buggify",
+            "--record",
+            directory.path().join("incoherent.patina").to_str().unwrap(),
+        ],
+    );
+    assert!(!incoherent.status.success());
+    assert!(
+        String::from_utf8_lossy(&incoherent.stderr)
+            .contains("fingerprint declares +buggify but buggify is not enabled"),
+        "the coherence guard must still refuse genuine incoherence:\nstderr:\n{}",
+        String::from_utf8_lossy(&incoherent.stderr)
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+// A `--buggify --swarm` campaign is the shape that made item 9 look like a broken
+// flag: the campaign emits both flags on every generation, so each generation
+// whose seed dropped buggify aborted on the coherence guard. Before the fix an
+// eight generation sweep of the planted-bug fixture reported FAIL_CLOSED_ABORT on
+// six of them; it must now report only the planted liveness bug.
+#[test]
+fn campaign_with_swarm_and_buggify_has_no_coherence_aborts() {
+    let workspace = native_workspace();
+    let fixture = workspace.join("testbeds/liveness-campaign");
+    let directory = tempdir().unwrap();
+    let guest = directory.path().join("swarm-campaign-guest");
+    let built = invoke_in(
+        workspace,
+        &[
+            "build",
+            fixture.to_str().unwrap(),
+            "--output",
+            guest.to_str().unwrap(),
+            "--release",
+        ],
+    );
+    assert!(built.status.success());
+
+    let out = directory.path().join("camp");
+    let ran = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "campaign",
+            guest.to_str().unwrap(),
+            "--gens",
+            "12",
+            "--buggify",
+            "--swarm",
+            "--liveness-watchdog",
+            "600000000000",
+            "--progress-every",
+            "1",
+            "--out-dir",
+            out.to_str().unwrap(),
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&ran.stdout).to_string();
+    assert!(
+        !stdout.contains("FAIL_CLOSED_ABORT"),
+        "a swarm+buggify campaign must not abort on configuration incoherence\n{stdout}"
+    );
+    // The sweep still does its job: it finds the planted liveness bug and has
+    // clean generations too, so "no aborts" is not "nothing ran".
+    assert!(
+        stdout.contains("class=LIVENESS") && stdout.contains("class=OK"),
+        "the sweep must still find the planted bug and have clean generations\n{stdout}"
+    );
+
+    // Non-vacuous: the sweep really did drop buggify on some of its generations
+    // and keep it on others, so the coherence path was exercised both ways. The
+    // swarm draw is a function of the run seed alone, so replaying the campaign's
+    // own generation seeds reports the same decision each generation made.
+    let mut dropped = 0usize;
+    let mut kept = 0usize;
+    for line in stdout.lines() {
+        let Some(seed) = line.strip_prefix("PATINA_CAMPAIGN_GEN ").and_then(|rest| {
+            rest.split_whitespace()
+                .find_map(|f| f.strip_prefix("seed="))
+        }) else {
+            continue;
+        };
+        let ran = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &[
+                "run",
+                guest.to_str().unwrap(),
+                "--seed",
+                seed,
+                "--swarm",
+                "--buggify=372",
+                // `run` takes the optional-value form with `=`; the space form is
+                // a usage error, which would silently make this check vacuous.
+                "--liveness-watchdog=600000000000",
+            ],
+        );
+        assert!(
+            ran.status.code() != Some(2),
+            "seed {seed}: usage error re-running a campaign generation:\n{}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&ran.stderr);
+        if stderr.contains("class=buggify|0") {
+            dropped += 1;
+        } else if stderr.contains("class=buggify|1") {
+            kept += 1;
+        }
+    }
+    assert!(
+        dropped > 0 && kept > 0,
+        "the sweep must exercise both swarm outcomes, got dropped={dropped} kept={kept}"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn campaign_timeout_does_not_save_incomplete_trace() {
     let workspace = native_workspace();

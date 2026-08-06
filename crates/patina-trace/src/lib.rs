@@ -206,15 +206,59 @@ impl SchedulePolicyRecord {
 /// replay. Class names are stable snake_case tokens (`crash`, `fs_error`,
 /// `fs_short`, `sleep_jitter`, `net_jitter`, `net_drop`, `net_latency`,
 /// `buggify`). Absent (`None`) when swarm was not enabled.
+///
+/// The two lists partition the run's swarm decision: `selected_classes` is a
+/// subset of `candidate_classes` (enforced by [`TraceBundle::validate`]), so the
+/// complement — the classes this generation dropped — is exactly
+/// [`SwarmConfigRecord::deselected_classes`]. A class the operator never enabled
+/// appears in NEITHER list, which is what makes "swarm dropped it here"
+/// distinguishable from "it was never asked for": the first names the class as a
+/// candidate, the second does not mention it at all.
+///
+/// A dropped class is also retracted from the run's compatibility fingerprint
+/// (see `patina_dst_runtime::FINGERPRINT_BUGGIFY`), so a masked run's fingerprint
+/// and its `buggify`/`faults` records agree — the trace never declares coverage
+/// this generation did not carry.
+///
+/// Both lists are in the runtime's stable class-table order, not alphabetical
+/// order; that order is a property of the table, so it is stable across runs and
+/// safe to compare byte-for-byte.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SwarmConfigRecord {
     /// Fault classes that were candidates for this run (the operator-enabled
-    /// set), in stable sorted order.
+    /// set), in stable class-table order.
     pub candidate_classes: Vec<String>,
     /// Fault classes the run seed selected to keep active this generation, in
-    /// stable sorted order — a subset of `candidate_classes`.
+    /// stable class-table order — a subset of `candidate_classes`.
     pub selected_classes: Vec<String>,
+}
+
+impl SwarmConfigRecord {
+    /// Whether `class` was a candidate this run that the seed's swarm draw
+    /// dropped. False both for a selected class and for a class that was never a
+    /// candidate; callers needing to tell those apart also consult
+    /// [`SwarmConfigRecord::was_candidate`].
+    pub fn deselected(&self, class: &str) -> bool {
+        self.was_candidate(class) && !self.selected_classes.iter().any(|name| name == class)
+    }
+
+    /// Whether `class` was enabled by the operator and therefore subject to this
+    /// run's swarm draw.
+    pub fn was_candidate(&self, class: &str) -> bool {
+        self.candidate_classes.iter().any(|name| name == class)
+    }
+
+    /// The candidate classes this generation dropped, in candidate order. Derived
+    /// from the two stored lists rather than stored alongside them, so the
+    /// partition cannot drift out of agreement with itself.
+    pub fn deselected_classes(&self) -> Vec<&str> {
+        self.candidate_classes
+            .iter()
+            .filter(|class| !self.selected_classes.iter().any(|name| name == *class))
+            .map(String::as_str)
+            .collect()
+    }
 }
 
 /// The liveness-watchdog configuration of a recorded run. The watchdog is a
@@ -666,6 +710,34 @@ impl TraceBundle {
             return Err(TraceError::Invalid(
                 "fingerprint declares +buggify but trace metadata has no buggify config".into(),
             ));
+        }
+        // The swarm record must partition cleanly: every selected class was a
+        // candidate, and no class is listed twice. Consumers derive "swarm
+        // dropped this class" as the complement of the two lists, so a record
+        // that is not a clean partition would make that derivation lie.
+        if let Some(swarm) = &self.metadata.swarm {
+            let mut candidates = BTreeSet::new();
+            for class in &swarm.candidate_classes {
+                if !candidates.insert(class.as_str()) {
+                    return Err(TraceError::Invalid(format!(
+                        "swarm candidate class {class:?} is listed more than once"
+                    )));
+                }
+            }
+            let mut selected = BTreeSet::new();
+            for class in &swarm.selected_classes {
+                if !selected.insert(class.as_str()) {
+                    return Err(TraceError::Invalid(format!(
+                        "swarm selected class {class:?} is listed more than once"
+                    )));
+                }
+                if !candidates.contains(class.as_str()) {
+                    return Err(TraceError::Invalid(format!(
+                        "swarm selected class {class:?} was not a candidate; \
+                         the selection must be a subset of the candidates"
+                    )));
+                }
+            }
         }
         let Some(main) = self.timelines.first() else {
             return Err(TraceError::Invalid("trace has no main timeline".into()));
@@ -1709,6 +1781,65 @@ mod tests {
         let plain = TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new());
         let text = String::from_utf8(plain.to_bytes().unwrap()).unwrap();
         assert!(!text.contains("swarm"), "{text}");
+    }
+
+    /// The candidate/selected lists are the machine-readable record of what swarm
+    /// dropped, so consumers derive deselection as their complement. Prove the
+    /// derivation and the validation that keeps it meaningful.
+    #[test]
+    fn swarm_record_partitions_candidates_into_selected_and_deselected() {
+        let swarm = SwarmConfigRecord {
+            candidate_classes: vec![
+                "crash".to_string(),
+                "net_drop".to_string(),
+                "buggify".to_string(),
+            ],
+            selected_classes: vec!["crash".to_string()],
+        };
+        assert_eq!(swarm.deselected_classes(), vec!["net_drop", "buggify"]);
+        assert!(swarm.deselected("buggify"));
+        assert!(!swarm.deselected("crash"));
+        // A class the operator never enabled is in neither list: it was not a
+        // candidate, so it was not "deselected" either. That distinction is the
+        // whole point — it separates "swarm dropped it" from "never requested".
+        assert!(!swarm.was_candidate("fs_error"));
+        assert!(!swarm.deselected("fs_error"));
+        TraceBundle::new(
+            RunMetadata::new(7, "fingerprint+swarm").with_swarm(Some(swarm)),
+            Vec::new(),
+        )
+        .validate()
+        .expect("a clean partition validates");
+
+        // RED: a selection that is not a subset of the candidates would make the
+        // complement nonsense, so the trace is refused.
+        let broken = SwarmConfigRecord {
+            candidate_classes: vec!["crash".to_string()],
+            selected_classes: vec!["buggify".to_string()],
+        };
+        let error = TraceBundle::new(
+            RunMetadata::new(7, "fingerprint+swarm").with_swarm(Some(broken)),
+            Vec::new(),
+        )
+        .validate()
+        .expect_err("a selection outside the candidates must be refused");
+        assert!(
+            format!("{error}").contains("was not a candidate"),
+            "{error}"
+        );
+
+        // RED: a duplicated class would double-count in any accumulation.
+        let duplicated = SwarmConfigRecord {
+            candidate_classes: vec!["crash".to_string(), "crash".to_string()],
+            selected_classes: Vec::new(),
+        };
+        let error = TraceBundle::new(
+            RunMetadata::new(7, "fingerprint+swarm").with_swarm(Some(duplicated)),
+            Vec::new(),
+        )
+        .validate()
+        .expect_err("a duplicated candidate must be refused");
+        assert!(format!("{error}").contains("more than once"), "{error}");
     }
 
     #[test]
