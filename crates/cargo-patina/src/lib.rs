@@ -3219,7 +3219,7 @@ the trace is authoritative"
 fn parse_trace(mut arguments: Vec<OsString>) -> Result<trace_cmd::TraceInvocation, CliError> {
     if arguments.is_empty() {
         return Err(CliError::usage(
-            "trace requires a subcommand: info or events",
+            "trace requires a subcommand: info, events, stats, or diff",
         ));
     }
     let subcommand = arguments
@@ -3229,11 +3229,10 @@ fn parse_trace(mut arguments: Vec<OsString>) -> Result<trace_cmd::TraceInvocatio
     match subcommand.as_str() {
         "info" => parse_trace_info(arguments).map(trace_cmd::TraceInvocation::Info),
         "events" => parse_trace_events(arguments).map(trace_cmd::TraceInvocation::Events),
-        "stats" | "diff" => Err(CliError::usage(format!(
-            "trace {subcommand} is planned for a later stage; this build supports trace info and trace events"
-        ))),
+        "stats" => parse_trace_stats(arguments).map(trace_cmd::TraceInvocation::Stats),
+        "diff" => parse_trace_diff(arguments).map(trace_cmd::TraceInvocation::Diff),
         other => Err(CliError::usage(format!(
-            "unsupported trace subcommand {other:?}; expected info or events"
+            "unsupported trace subcommand {other:?}; expected info, events, stats, or diff"
         ))),
     }
 }
@@ -3253,7 +3252,7 @@ fn parse_trace_info(arguments: Vec<OsString>) -> Result<trace_cmd::TraceInfo, Cl
                 let value = required_value(opt, &scan.rest, &mut index)?;
                 set_once(&mut timeline, value.to_string(), "--timeline")?;
             }
-            "--kind" | "--task" | "--seq" | "--first" | "--last" | "--notable" => {
+            "--kind" | "--task" | "--seq" | "--first" | "--last" | "--notable" | "--context" => {
                 return Err(CliError::usage(format!(
                     "trace info reads metadata only and does not accept {}",
                     opt.name
@@ -3329,6 +3328,11 @@ fn parse_trace_events(arguments: Vec<OsString>) -> Result<trace_cmd::TraceEvents
                 reject_inline(opt)?;
                 filters.notable = true;
             }
+            "--context" => {
+                return Err(CliError::usage(
+                    "--context is only supported for trace diff",
+                ));
+            }
             flag if flag.starts_with('-') => {
                 return Err(CliError::usage(format!(
                     "unsupported trace events option {flag:?}"
@@ -3357,6 +3361,107 @@ fn parse_trace_events(arguments: Vec<OsString>) -> Result<trace_cmd::TraceEvents
         path,
         timeline: timeline.unwrap_or_else(|| "main".to_string()),
         filters,
+    })
+}
+
+fn parse_trace_stats(arguments: Vec<OsString>) -> Result<trace_cmd::TraceStats, CliError> {
+    let scan = locate_positionals("trace", &arguments, 1);
+    let trace = scan.positionals.first().cloned().map(PathBuf::from);
+    let mut timeline = None;
+    let mut index = 0;
+    while index < scan.rest.len() {
+        let text = scan.rest[index]
+            .to_str()
+            .ok_or_else(|| CliError::usage("trace stats options must be valid UTF-8"))?;
+        let opt = split_opt(text);
+        match opt.name {
+            "--timeline" => {
+                let value = required_value(opt, &scan.rest, &mut index)?;
+                set_once(&mut timeline, value.to_string(), "--timeline")?;
+            }
+            "--kind" | "--task" | "--seq" | "--first" | "--last" | "--notable" => {
+                return Err(CliError::usage(format!(
+                    "trace stats aggregates the whole resolved timeline and does not accept {}",
+                    opt.name
+                )));
+            }
+            "--context" => {
+                return Err(CliError::usage(
+                    "--context is only supported for trace diff",
+                ));
+            }
+            flag if flag.starts_with('-') => {
+                return Err(CliError::usage(format!(
+                    "unsupported trace stats option {flag:?}"
+                )));
+            }
+            _ => {
+                return Err(CliError::usage(format!(
+                    "unexpected trace stats positional {:?}",
+                    scan.rest[index].to_string_lossy()
+                )));
+            }
+        }
+        index += 1;
+    }
+    let path = trace.ok_or_else(|| CliError::usage("trace stats requires a trace path"))?;
+    Ok(trace_cmd::TraceStats {
+        path,
+        timeline: timeline.unwrap_or_else(|| "main".to_string()),
+    })
+}
+
+fn parse_trace_diff(arguments: Vec<OsString>) -> Result<trace_cmd::TraceDiff, CliError> {
+    let scan = locate_positionals("trace", &arguments, 2);
+    let mut timeline = None;
+    let mut context = None;
+    let mut index = 0;
+    while index < scan.rest.len() {
+        let text = scan.rest[index]
+            .to_str()
+            .ok_or_else(|| CliError::usage("trace diff options must be valid UTF-8"))?;
+        let opt = split_opt(text);
+        match opt.name {
+            "--timeline" => {
+                let value = required_value(opt, &scan.rest, &mut index)?;
+                set_once(&mut timeline, value.to_string(), "--timeline")?;
+            }
+            "--context" => {
+                let value = required_value(opt, &scan.rest, &mut index)?;
+                set_once(&mut context, parse_usize("--context", value)?, "--context")?;
+            }
+            "--kind" | "--task" | "--seq" | "--first" | "--last" | "--notable" => {
+                return Err(CliError::usage(format!(
+                    "trace diff compares full resolved timelines and does not accept {}",
+                    opt.name
+                )));
+            }
+            flag if flag.starts_with('-') => {
+                return Err(CliError::usage(format!(
+                    "unsupported trace diff option {flag:?}"
+                )));
+            }
+            _ => {
+                return Err(CliError::usage(format!(
+                    "unexpected trace diff positional {:?}",
+                    scan.rest[index].to_string_lossy()
+                )));
+            }
+        }
+        index += 1;
+    }
+    if scan.positionals.len() < 2 {
+        return Err(CliError::usage(if scan.positionals.is_empty() {
+            "trace diff requires two trace paths"
+        } else {
+            "trace diff requires a second trace path"
+        }));
+    }
+    Ok(trace_cmd::TraceDiff {
+        a: PathBuf::from(&scan.positionals[0]),
+        b: PathBuf::from(&scan.positionals[1]),
+        timeline: timeline.unwrap_or_else(|| "main".to_string()),
+        context: context.unwrap_or(3),
     })
 }
 
@@ -8382,13 +8487,14 @@ mod tests {
                 "--first",
                 "--last",
                 "--notable",
+                "--context",
             ],
             other => panic!("unknown verb {other}"),
         }
     }
 
     #[test]
-    fn parses_trace_info_and_events_filters() {
+    fn parses_trace_subcommands_and_events_filters() {
         match parse(strings(&[
             "trace",
             "info",
@@ -8455,10 +8561,44 @@ mod tests {
             ])
             .contains("mutually exclusive")
         );
+        match parse(strings(&["trace", "stats", "run.patina", "--timeline=b2"])).unwrap() {
+            ParseResult::Trace(trace_cmd::TraceInvocation::Stats(stats)) => {
+                assert_eq!(stats.path, PathBuf::from("run.patina"));
+                assert_eq!(stats.timeline, "b2");
+            }
+            _ => panic!("expected trace stats"),
+        }
+
+        match parse(strings(&[
+            "trace",
+            "diff",
+            "a.patina",
+            "--context",
+            "0",
+            "b.patina",
+            "--timeline",
+            "main",
+        ]))
+        .unwrap()
+        {
+            ParseResult::Trace(trace_cmd::TraceInvocation::Diff(diff)) => {
+                assert_eq!(diff.a, PathBuf::from("a.patina"));
+                assert_eq!(diff.b, PathBuf::from("b.patina"));
+                assert_eq!(diff.context, 0);
+                assert_eq!(diff.timeline, "main");
+            }
+            _ => panic!("expected trace diff"),
+        }
+
         assert!(
             parse_error(&["trace", "info", "--kind", "fs_write", "run.patina"])
                 .contains("does not accept --kind")
         );
+        assert!(
+            parse_error(&["trace", "stats", "--first", "1", "run.patina"])
+                .contains("does not accept --first")
+        );
+        assert!(parse_error(&["trace", "diff", "a.patina"]).contains("second trace"));
     }
 
     #[test]
@@ -9014,6 +9154,10 @@ mod tests {
             ("trace", "--kind" | "--task" | "--seq" | "--first" | "--last") => {
                 parse_trace(strings(&[&["events", "t.patina"][..], toks].concat())).map(|_| ())
             }
+            ("trace", "--context") => parse_trace(strings(
+                &[&["diff", "a.patina", "b.patina"][..], toks].concat(),
+            ))
+            .map(|_| ()),
 
             _ => return None,
         };

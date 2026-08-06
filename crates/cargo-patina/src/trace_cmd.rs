@@ -8,15 +8,19 @@ use serde_json::{Map, Value};
 
 use crate::CliError;
 use crate::output::{self, OutputFormat};
-use crate::trace_view::{self, Category, FlatEvent, FlatTrace, LaneKey};
+use crate::trace_view::{self, Category, FlatEvent, FlatTrace, LaneKey, Notable};
 
 pub(crate) const INFO_SCHEMA: &str = "patina.trace.info/v1";
 pub(crate) const EVENTS_SCHEMA: &str = "patina.trace.events/v1";
+pub(crate) const STATS_SCHEMA: &str = "patina.trace.stats/v1";
+pub(crate) const DIFF_SCHEMA: &str = "patina.trace.diff/v1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TraceInvocation {
     Info(TraceInfo),
     Events(TraceEvents),
+    Stats(TraceStats),
+    Diff(TraceDiff),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +34,20 @@ pub(crate) struct TraceEvents {
     pub(crate) path: PathBuf,
     pub(crate) timeline: String,
     pub(crate) filters: EventFilters,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TraceStats {
+    pub(crate) path: PathBuf,
+    pub(crate) timeline: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TraceDiff {
+    pub(crate) a: PathBuf,
+    pub(crate) b: PathBuf,
+    pub(crate) timeline: String,
+    pub(crate) context: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -106,6 +124,8 @@ pub(crate) fn execute(invocation: TraceInvocation) -> Result<i32, CliError> {
     match invocation {
         TraceInvocation::Info(info) => execute_info(&info),
         TraceInvocation::Events(events) => execute_events(&events),
+        TraceInvocation::Stats(stats) => execute_stats(&stats),
+        TraceInvocation::Diff(diff) => execute_diff(&diff),
     }
 }
 
@@ -127,6 +147,48 @@ fn execute_info(info: &TraceInfo) -> Result<i32, CliError> {
         OutputFormat::Json => println!("{}", compact_json(&info_envelope(facts))?),
     }
     Ok(0)
+}
+
+fn execute_stats(stats: &TraceStats) -> Result<i32, CliError> {
+    let (bundle, raw) = load_trace(&stats.path)?;
+    let flat = trace_view::flatten(&bundle, &raw, &stats.timeline)
+        .map_err(|error| trace_error(&stats.path, error))?;
+    let payload = stats_value(&stats.path, &stats.timeline, &flat);
+    match output::options().format {
+        OutputFormat::Human => print_stats_human(&payload),
+        OutputFormat::Json => println!("{}", compact_json(&stats_envelope(payload))?),
+    }
+    Ok(0)
+}
+
+fn execute_diff(diff: &TraceDiff) -> Result<i32, CliError> {
+    let (a_bundle, a_raw) = load_trace(&diff.a)?;
+    let (b_bundle, b_raw) = load_trace(&diff.b)?;
+    let a_flat = trace_view::flatten(&a_bundle, &a_raw, &diff.timeline)
+        .map_err(|error| trace_error(&diff.a, error))?;
+    let b_flat = trace_view::flatten(&b_bundle, &b_raw, &diff.timeline)
+        .map_err(|error| trace_error(&diff.b, error))?;
+    let report = diff_report(
+        &diff.a,
+        &diff.b,
+        &diff.timeline,
+        &a_bundle,
+        &b_bundle,
+        &a_raw,
+        &b_raw,
+        &a_flat,
+        &b_flat,
+        diff.context,
+    );
+    let exit_code = if report.identical { 0 } else { 1 };
+    match output::options().format {
+        OutputFormat::Human => print_diff_human(&report),
+        OutputFormat::Json => println!(
+            "{}",
+            compact_json(&diff_envelope(report.to_json(), exit_code))?
+        ),
+    }
+    Ok(exit_code)
 }
 
 fn execute_events(events: &TraceEvents) -> Result<i32, CliError> {
@@ -182,14 +244,37 @@ fn trace_error(path: &Path, error: TraceError) -> CliError {
 }
 
 fn info_envelope(facts: Value) -> Value {
-    serde_json::json!({
-        "schema": output::ENVELOPE_SCHEMA,
-        "verb": "trace",
-        "subcommand": "info",
-        "result": "ok",
-        "exit_code": 0,
-        "trace_info": facts,
-    })
+    trace_envelope("info", "ok", 0, "trace_info", facts)
+}
+
+fn stats_envelope(stats: Value) -> Value {
+    trace_envelope("stats", "ok", 0, "trace_stats", stats)
+}
+
+fn diff_envelope(diff: Value, exit_code: i32) -> Value {
+    let result = diff
+        .get("result")
+        .and_then(Value::as_str)
+        .unwrap_or("diverged")
+        .to_string();
+    trace_envelope("diff", &result, exit_code, "trace_diff", diff)
+}
+
+fn trace_envelope(
+    subcommand: &str,
+    result: &str,
+    exit_code: i32,
+    payload_key: &str,
+    payload: Value,
+) -> Value {
+    let mut map = Map::new();
+    map.insert("schema".into(), Value::from(output::ENVELOPE_SCHEMA));
+    map.insert("verb".into(), Value::from("trace"));
+    map.insert("subcommand".into(), Value::from(subcommand));
+    map.insert("result".into(), Value::from(result));
+    map.insert("exit_code".into(), Value::from(exit_code));
+    map.insert(payload_key.into(), payload);
+    Value::Object(map)
 }
 
 fn compact_json(value: &Value) -> Result<String, CliError> {
@@ -470,6 +555,11 @@ pub(crate) fn write_events_human<W: std::io::Write>(
 }
 
 fn write_human_event<W: std::io::Write>(out: &mut W, event: &FlatEvent) -> Result<(), CliError> {
+    writeln!(out, "{}", human_event_line(event))
+        .map_err(|error| CliError(format!("failed to write trace events: {error}")))
+}
+
+fn human_event_line(event: &FlatEvent) -> String {
     let vtime = event
         .vtime
         .map(|n| format!(" @ {}", trace_view::human_nanos(n)))
@@ -479,8 +569,7 @@ fn write_human_event<W: std::io::Write>(out: &mut W, event: &FlatEvent) -> Resul
         .as_ref()
         .map(|note| format!("  [notable: {}]", note.kind()))
         .unwrap_or_default();
-    writeln!(
-        out,
+    format!(
         "#{:06}  {:<8} {:<18} {}{}{}",
         event.seq,
         event.lane.label(),
@@ -489,7 +578,6 @@ fn write_human_event<W: std::io::Write>(out: &mut W, event: &FlatEvent) -> Resul
         vtime,
         notable
     )
-    .map_err(|error| CliError(format!("failed to write trace events: {error}")))
 }
 
 pub(crate) fn write_events_jsonl<W: std::io::Write>(
@@ -570,6 +658,10 @@ pub(crate) fn write_events_jsonl<W: std::io::Write>(
 }
 
 fn write_json_event<W: std::io::Write>(out: &mut W, event: &FlatEvent) -> Result<(), CliError> {
+    write_json_line(out, &event_value(event))
+}
+
+fn event_value(event: &FlatEvent) -> Value {
     let mut map = Map::new();
     map.insert("seq".into(), Value::from(event.seq));
     map.insert("task".into(), event.lane.json_value());
@@ -584,13 +676,590 @@ fn write_json_event<W: std::io::Write>(out: &mut W, event: &FlatEvent) -> Result
     }
     map.insert("operation".into(), event.operation.clone());
     map.insert("outcome".into(), event.outcome.clone());
-    write_json_line(out, &Value::Object(map))
+    Value::Object(map)
 }
 
 fn write_json_line<W: std::io::Write>(out: &mut W, value: &Value) -> Result<(), CliError> {
     serde_json::to_writer(&mut *out, value)
         .map_err(|error| CliError(format!("failed to encode trace events JSON: {error}")))?;
     writeln!(out).map_err(|error| CliError(format!("failed to write trace events: {error}")))
+}
+
+const HISTOGRAM_BUCKETS: usize = 20;
+
+fn stats_value(path: &Path, timeline: &str, flat: &FlatTrace) -> Value {
+    let notable = notable_counts(flat);
+    let vtime = histogram_value(flat);
+    let mut kinds = Map::new();
+    for (kind, stat) in &flat.kind_counts {
+        kinds.insert(
+            kind.clone(),
+            serde_json::json!({
+                "count": stat.count,
+                "errors": stat.errors,
+                "bytes_in": stat.bytes_in,
+                "bytes_out": stat.bytes_out,
+            }),
+        );
+    }
+    let mut categories = Map::new();
+    for category in Category::ALL {
+        categories.insert(
+            category.label().to_string(),
+            Value::from(flat.category_counts.get(&category).copied().unwrap_or(0)),
+        );
+    }
+    let tasks: Vec<Value> = flat
+        .lanes
+        .iter()
+        .map(|(lane, stat)| task_stat_value(*lane, stat))
+        .collect();
+    serde_json::json!({
+        "schema": STATS_SCHEMA,
+        "path": path.to_string_lossy(),
+        "timeline": timeline,
+        "totals": {
+            "events": flat.events.len(),
+            "lanes": flat.lanes.len(),
+            "virtual_time_span_nanos": flat.vt_min.zip(flat.vt_max).map(|(min, max)| max.saturating_sub(min)),
+            "notable": flat.notable.len(),
+        },
+        "kinds": Value::Object(kinds),
+        "categories": Value::Object(categories),
+        "tasks": tasks,
+        "vtime": vtime,
+        "notable": {
+            "crashes": notable.crashes,
+            "errors": notable.errors,
+            "drops": notable.drops,
+        },
+    })
+}
+
+fn task_stat_value(lane: LaneKey, stat: &trace_view::TaskStat) -> Value {
+    serde_json::json!({
+        "lane": lane.json_value(),
+        "label": stat.label.clone(),
+        "ops": stat.ops,
+        "yields": stat.yields,
+        "parks": stat.parks,
+        "first_seq": stat.first_seq,
+        "last_seq": stat.first_seq.map(|_| stat.last_seq),
+        "completed": stat.completed,
+        "completion": if stat.completed { "completed" } else { "live-at-exit" },
+    })
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct NotableCounts {
+    crashes: u64,
+    errors: u64,
+    drops: u64,
+}
+
+fn notable_counts(flat: &FlatTrace) -> NotableCounts {
+    let mut counts = NotableCounts::default();
+    for event in &flat.notable {
+        match event.notable.as_ref() {
+            Some(Notable::Crash) => counts.crashes += 1,
+            Some(Notable::Error { .. }) => counts.errors += 1,
+            Some(Notable::Drop { .. }) => counts.drops += 1,
+            None => {}
+        }
+    }
+    counts
+}
+
+fn histogram_value(flat: &FlatTrace) -> Value {
+    let Some(buckets) = histogram_buckets(flat) else {
+        return Value::Null;
+    };
+    serde_json::json!({
+        "min_nanos": flat.vt_min,
+        "max_nanos": flat.vt_max,
+        "buckets": buckets.into_iter().map(|bucket| serde_json::json!({
+            "start_nanos": bucket.start,
+            "end_nanos": bucket.end,
+            "events": bucket.events,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HistogramBucket {
+    start: u64,
+    end: u64,
+    events: u64,
+}
+
+fn histogram_buckets(flat: &FlatTrace) -> Option<Vec<HistogramBucket>> {
+    let (min, max) = flat.vt_min.zip(flat.vt_max)?;
+    let range = u128::from(max) - u128::from(min) + 1;
+    let mut buckets = Vec::with_capacity(HISTOGRAM_BUCKETS);
+    for index in 0..HISTOGRAM_BUCKETS {
+        let start_offset = range * index as u128 / HISTOGRAM_BUCKETS as u128;
+        let end_exclusive_offset = range * (index as u128 + 1) / HISTOGRAM_BUCKETS as u128;
+        let start = u64::try_from(u128::from(min) + start_offset).unwrap_or(max);
+        let end = if end_exclusive_offset == 0 {
+            start
+        } else {
+            u64::try_from(u128::from(min) + end_exclusive_offset - 1).unwrap_or(max)
+        };
+        buckets.push(HistogramBucket {
+            start: start.min(max),
+            end: end.min(max),
+            events: 0,
+        });
+    }
+    for event in &flat.events {
+        let Some(vtime) = event.vtime else {
+            continue;
+        };
+        let offset = u128::from(vtime.saturating_sub(min));
+        let bucket = ((offset * HISTOGRAM_BUCKETS as u128) / range)
+            .min(HISTOGRAM_BUCKETS as u128 - 1) as usize;
+        buckets[bucket].events += 1;
+    }
+    Some(buckets)
+}
+
+fn print_stats_human(stats: &Value) {
+    println!("trace stats: {}", stats["path"].as_str().unwrap_or("?"));
+    println!("timeline: {}", stats["timeline"].as_str().unwrap_or("main"));
+    println!("\nTotals");
+    println!("events: {}", stats["totals"]["events"]);
+    println!("lanes: {}", stats["totals"]["lanes"]);
+    if stats["totals"]["virtual_time_span_nanos"].is_null() {
+        println!("virtual time: no samples");
+    } else {
+        let span = stats["totals"]["virtual_time_span_nanos"]
+            .as_u64()
+            .unwrap_or(0);
+        println!("virtual time span: {}", trace_view::human_nanos(span));
+    }
+    println!(
+        "notable: crashes={} errors={} drops={}",
+        stats["notable"]["crashes"], stats["notable"]["errors"], stats["notable"]["drops"]
+    );
+
+    let total = stats["totals"]["events"].as_u64().unwrap_or(0).max(1);
+    println!("\nPer-kind");
+    println!(
+        "{:<22} {:>8} {:>8} {:>8} {:>10} {:>10}",
+        "kind", "count", "share", "errors", "bytes_in", "bytes_out"
+    );
+    if let Some(kinds) = stats["kinds"].as_object() {
+        for (kind, stat) in kinds {
+            let count = stat["count"].as_u64().unwrap_or(0);
+            let share = count as f64 * 100.0 / total as f64;
+            println!(
+                "{:<22} {:>8} {:>7.2}% {:>8} {:>10} {:>10}",
+                kind,
+                count,
+                share,
+                stat["errors"].as_u64().unwrap_or(0),
+                stat["bytes_in"].as_u64().unwrap_or(0),
+                stat["bytes_out"].as_u64().unwrap_or(0)
+            );
+        }
+    }
+
+    println!("\nPer-category");
+    println!("{:<12} {:>8}", "category", "count");
+    if let Some(categories) = stats["categories"].as_object() {
+        for category in Category::ALL {
+            let label = category.label();
+            println!(
+                "{:<12} {:>8}",
+                label,
+                categories.get(label).and_then(Value::as_u64).unwrap_or(0)
+            );
+        }
+    }
+
+    println!("\nPer-task");
+    println!(
+        "{:<10} {:<18} {:>8} {:>8} {:>8} {:<17} completion",
+        "lane", "label", "ops", "yields", "parks", "seq span"
+    );
+    if let Some(tasks) = stats["tasks"].as_array() {
+        for task in tasks {
+            let lane = task["lane"]
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| task["lane"].as_u64().map(|id| format!("task {id}")))
+                .unwrap_or_else(|| "?".into());
+            let span = match (task["first_seq"].as_u64(), task["last_seq"].as_u64()) {
+                (Some(first), Some(last)) => format!("{first}..{last}"),
+                _ => "—".to_string(),
+            };
+            println!(
+                "{:<10} {:<18} {:>8} {:>8} {:>8} {:<17} {}",
+                lane,
+                task["label"].as_str().unwrap_or("—"),
+                task["ops"].as_u64().unwrap_or(0),
+                task["yields"].as_u64().unwrap_or(0),
+                task["parks"].as_u64().unwrap_or(0),
+                span,
+                task["completion"].as_str().unwrap_or("?")
+            );
+        }
+    }
+
+    println!("\nVirtual-time histogram");
+    if let Some(vtime) = stats["vtime"].as_object() {
+        let buckets = vtime["buckets"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let max_events = buckets
+            .iter()
+            .filter_map(|bucket| bucket["events"].as_u64())
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        for bucket in buckets {
+            let events = bucket["events"].as_u64().unwrap_or(0);
+            let bar_len = ((events * 40) / max_events) as usize;
+            println!(
+                "{:>12} .. {:<12} {:>8} {}",
+                trace_view::human_nanos(bucket["start_nanos"].as_u64().unwrap_or(0)),
+                trace_view::human_nanos(bucket["end_nanos"].as_u64().unwrap_or(0)),
+                events,
+                "#".repeat(bar_len)
+            );
+        }
+    } else {
+        println!("no virtual-time samples");
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MetadataDiff {
+    field: String,
+    a: Value,
+    b: Value,
+}
+
+#[derive(Clone, Debug)]
+struct Divergence {
+    seq: u64,
+    class: &'static str,
+    a_event: Option<FlatEvent>,
+    b_event: Option<FlatEvent>,
+    a_context: Vec<FlatEvent>,
+    b_context: Vec<FlatEvent>,
+}
+
+#[derive(Clone, Debug)]
+struct DiffReport {
+    a_path: String,
+    b_path: String,
+    timeline: String,
+    a_events: usize,
+    b_events: usize,
+    a_final_vtime: Option<u64>,
+    b_final_vtime: Option<u64>,
+    metadata_diff: Vec<MetadataDiff>,
+    aligned_prefix: usize,
+    divergence: Option<Divergence>,
+    identical: bool,
+}
+
+impl DiffReport {
+    fn to_json(&self) -> Value {
+        serde_json::json!({
+            "schema": DIFF_SCHEMA,
+            "a": {
+                "path": self.a_path,
+                "timeline": self.timeline,
+                "events": self.a_events,
+                "final_vtime_nanos": self.a_final_vtime,
+            },
+            "b": {
+                "path": self.b_path,
+                "timeline": self.timeline,
+                "events": self.b_events,
+                "final_vtime_nanos": self.b_final_vtime,
+            },
+            "result": if self.identical { "identical" } else { "diverged" },
+            "metadata_diff": self.metadata_diff.iter().map(|diff| serde_json::json!({
+                "field": diff.field,
+                "a": diff.a,
+                "b": diff.b,
+            })).collect::<Vec<_>>(),
+            "aligned_prefix": self.aligned_prefix,
+            "divergence": self.divergence.as_ref().map(divergence_value),
+            "tails": {
+                "a": {
+                    "events": self.a_events.saturating_sub(self.aligned_prefix),
+                    "final_vtime_nanos": self.a_final_vtime,
+                },
+                "b": {
+                    "events": self.b_events.saturating_sub(self.aligned_prefix),
+                    "final_vtime_nanos": self.b_final_vtime,
+                },
+            },
+        })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn diff_report(
+    a_path: &Path,
+    b_path: &Path,
+    timeline: &str,
+    a_bundle: &TraceBundle,
+    b_bundle: &TraceBundle,
+    a_raw: &Value,
+    b_raw: &Value,
+    a_flat: &FlatTrace,
+    b_flat: &FlatTrace,
+    context: usize,
+) -> DiffReport {
+    let metadata_diff = metadata_diff(a_bundle, b_bundle, a_raw, b_raw);
+    let (aligned_prefix, divergence) = event_divergence(a_flat, b_flat, context);
+    let identical = metadata_diff.is_empty() && divergence.is_none();
+    DiffReport {
+        a_path: a_path.to_string_lossy().into_owned(),
+        b_path: b_path.to_string_lossy().into_owned(),
+        timeline: timeline.to_string(),
+        a_events: a_flat.events.len(),
+        b_events: b_flat.events.len(),
+        a_final_vtime: final_vtime(a_flat),
+        b_final_vtime: final_vtime(b_flat),
+        metadata_diff,
+        aligned_prefix,
+        divergence,
+        identical,
+    }
+}
+
+fn metadata_diff(
+    a_bundle: &TraceBundle,
+    b_bundle: &TraceBundle,
+    a_raw: &Value,
+    b_raw: &Value,
+) -> Vec<MetadataDiff> {
+    let mut diffs = Vec::new();
+    if a_bundle.format_version != b_bundle.format_version {
+        diffs.push(MetadataDiff {
+            field: "format_version".into(),
+            a: Value::from(a_bundle.format_version),
+            b: Value::from(b_bundle.format_version),
+        });
+    }
+    let a_meta = a_raw
+        .get("metadata")
+        .cloned()
+        .unwrap_or_else(|| serde_json::to_value(&a_bundle.metadata).unwrap_or(Value::Null));
+    let b_meta = b_raw
+        .get("metadata")
+        .cloned()
+        .unwrap_or_else(|| serde_json::to_value(&b_bundle.metadata).unwrap_or(Value::Null));
+    match (a_meta.as_object(), b_meta.as_object()) {
+        (Some(a), Some(b)) => {
+            let keys: BTreeSet<String> = a.keys().chain(b.keys()).cloned().collect();
+            for key in keys {
+                let av = a.get(&key).cloned().unwrap_or(Value::Null);
+                let bv = b.get(&key).cloned().unwrap_or(Value::Null);
+                if av != bv {
+                    diffs.push(MetadataDiff {
+                        field: key,
+                        a: av,
+                        b: bv,
+                    });
+                }
+            }
+        }
+        _ if a_meta != b_meta => diffs.push(MetadataDiff {
+            field: "metadata".into(),
+            a: a_meta,
+            b: b_meta,
+        }),
+        _ => {}
+    }
+    diffs
+}
+
+fn event_divergence(
+    a_flat: &FlatTrace,
+    b_flat: &FlatTrace,
+    context: usize,
+) -> (usize, Option<Divergence>) {
+    let min_len = a_flat.events.len().min(b_flat.events.len());
+    let mut aligned = 0usize;
+    for index in 0..min_len {
+        let a = &a_flat.events[index];
+        let b = &b_flat.events[index];
+        if a.operation != b.operation {
+            return (
+                aligned,
+                Some(make_divergence(
+                    "operation-mismatch",
+                    index,
+                    Some(a),
+                    Some(b),
+                    &a_flat.events,
+                    &b_flat.events,
+                    context,
+                )),
+            );
+        }
+        if a.outcome != b.outcome {
+            return (
+                aligned,
+                Some(make_divergence(
+                    "outcome-mismatch",
+                    index,
+                    Some(a),
+                    Some(b),
+                    &a_flat.events,
+                    &b_flat.events,
+                    context,
+                )),
+            );
+        }
+        aligned += 1;
+    }
+    if a_flat.events.len() != b_flat.events.len() {
+        return (
+            aligned,
+            Some(make_divergence(
+                "length",
+                min_len,
+                a_flat.events.get(min_len),
+                b_flat.events.get(min_len),
+                &a_flat.events,
+                &b_flat.events,
+                context,
+            )),
+        );
+    }
+    (aligned, None)
+}
+
+fn make_divergence(
+    class: &'static str,
+    index: usize,
+    a_event: Option<&FlatEvent>,
+    b_event: Option<&FlatEvent>,
+    a_events: &[FlatEvent],
+    b_events: &[FlatEvent],
+    context: usize,
+) -> Divergence {
+    let seq = a_event
+        .or(b_event)
+        .map(|event| event.seq)
+        .unwrap_or(index as u64);
+    Divergence {
+        seq,
+        class,
+        a_event: a_event.cloned(),
+        b_event: b_event.cloned(),
+        a_context: context_events(a_events, index, context),
+        b_context: context_events(b_events, index, context),
+    }
+}
+
+fn context_events(events: &[FlatEvent], index: usize, context: usize) -> Vec<FlatEvent> {
+    if events.is_empty() {
+        return Vec::new();
+    }
+    if index >= events.len() {
+        let start = events.len().saturating_sub(context);
+        return events[start..].to_vec();
+    }
+    let start = index.saturating_sub(context);
+    let end = (index + context + 1).min(events.len());
+    events[start..end].to_vec()
+}
+
+fn divergence_value(divergence: &Divergence) -> Value {
+    serde_json::json!({
+        "seq": divergence.seq,
+        "class": divergence.class,
+        "a_event": divergence.a_event.as_ref().map(event_value),
+        "b_event": divergence.b_event.as_ref().map(event_value),
+        "a_context": divergence.a_context.iter().map(event_value).collect::<Vec<_>>(),
+        "b_context": divergence.b_context.iter().map(event_value).collect::<Vec<_>>(),
+    })
+}
+
+fn final_vtime(flat: &FlatTrace) -> Option<u64> {
+    flat.events.iter().rev().find_map(|event| event.vtime)
+}
+
+fn print_diff_human(report: &DiffReport) {
+    println!("trace diff:");
+    println!("a: {}", report.a_path);
+    println!("b: {}", report.b_path);
+    println!("timeline: {}", report.timeline);
+    println!("\nMetadata diff");
+    if report.metadata_diff.is_empty() {
+        println!("metadata: identical");
+    } else {
+        for diff in &report.metadata_diff {
+            println!(
+                "{}: {} -> {}",
+                diff.field,
+                compact_json_lossy(&diff.a),
+                compact_json_lossy(&diff.b)
+            );
+        }
+    }
+    println!("\nAligned prefix: {} events", report.aligned_prefix);
+    match &report.divergence {
+        None if report.identical => println!("Result: identical"),
+        None => println!("Result: metadata-only divergence; event streams are identical"),
+        Some(divergence) => {
+            println!(
+                "First divergence: {} at sequence {}",
+                divergence.class, divergence.seq
+            );
+            println!(
+                "a: {}",
+                divergence
+                    .a_event
+                    .as_ref()
+                    .map(human_event_line)
+                    .unwrap_or_else(|| "<missing>".to_string())
+            );
+            println!(
+                "b: {}",
+                divergence
+                    .b_event
+                    .as_ref()
+                    .map(human_event_line)
+                    .unwrap_or_else(|| "<missing>".to_string())
+            );
+            println!("\nContext a:");
+            for event in &divergence.a_context {
+                println!("{}", human_event_line(event));
+            }
+            println!("Context b:");
+            for event in &divergence.b_context {
+                println!("{}", human_event_line(event));
+            }
+        }
+    }
+    println!("\nTail summary");
+    println!(
+        "a: remaining_events={} final_vtime={}",
+        report.a_events.saturating_sub(report.aligned_prefix),
+        report
+            .a_final_vtime
+            .map(trace_view::human_nanos)
+            .unwrap_or_else(|| "none".into())
+    );
+    println!(
+        "b: remaining_events={} final_vtime={}",
+        report.b_events.saturating_sub(report.aligned_prefix),
+        report
+            .b_final_vtime
+            .map(trace_view::human_nanos)
+            .unwrap_or_else(|| "none".into())
+    );
 }
 
 #[cfg(test)]
@@ -708,6 +1377,122 @@ mod tests {
         assert_eq!(lines.last().unwrap()["emitted"], 2);
         assert_eq!(lines[1]["seq"], 3);
         assert_eq!(lines[2]["seq"], 4);
+    }
+
+    #[test]
+    fn stats_counts_sum_to_totals_and_histogram_counts_vtime_events() {
+        let flat = sample_flat();
+        let stats = stats_value(Path::new("run.patina"), "main", &flat);
+        assert_eq!(stats["schema"], STATS_SCHEMA);
+        assert_eq!(stats["totals"]["events"], flat.events.len() as u64);
+        let kind_sum: u64 = stats["kinds"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|stat| stat["count"].as_u64().unwrap())
+            .sum();
+        assert_eq!(kind_sum, flat.events.len() as u64);
+        let category_sum: u64 = stats["categories"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|count| count.as_u64().unwrap())
+            .sum();
+        assert_eq!(category_sum, flat.events.len() as u64);
+        let buckets = stats["vtime"]["buckets"].as_array().unwrap();
+        assert_eq!(buckets.len(), HISTOGRAM_BUCKETS);
+        let bucket_sum: u64 = buckets
+            .iter()
+            .map(|bucket| bucket["events"].as_u64().unwrap())
+            .sum();
+        assert_eq!(
+            bucket_sum,
+            flat.events
+                .iter()
+                .filter(|event| event.vtime.is_some())
+                .count() as u64
+        );
+    }
+
+    fn flat_for(bundle: &TraceBundle) -> (serde_json::Value, FlatTrace) {
+        let raw = serde_json::to_value(bundle).unwrap();
+        let flat = trace_view::flatten(bundle, &raw, "main").unwrap();
+        (raw, flat)
+    }
+
+    fn diff_for(a: &TraceBundle, b: &TraceBundle, context: usize) -> DiffReport {
+        let (a_raw, a_flat) = flat_for(a);
+        let (b_raw, b_flat) = flat_for(b);
+        diff_report(
+            Path::new("a.patina"),
+            Path::new("b.patina"),
+            "main",
+            a,
+            b,
+            &a_raw,
+            &b_raw,
+            &a_flat,
+            &b_flat,
+            context,
+        )
+    }
+
+    #[test]
+    fn diff_reports_identical_metadata_operation_outcome_and_length_classes() {
+        let one = bundle_with(vec![(
+            Operation::ClockNow {
+                clock: ClockKind::Monotonic,
+            },
+            Outcome::U64(1),
+        )]);
+        let identical = diff_for(&one, &one, 1);
+        assert!(identical.identical);
+        assert_eq!(identical.aligned_prefix, 1);
+        assert!(identical.divergence.is_none());
+        assert_eq!(identical.to_json()["result"], "identical");
+
+        let mut metadata_only = one.clone();
+        metadata_only.metadata.root_seed = 99;
+        let metadata = diff_for(&one, &metadata_only, 1);
+        assert!(!metadata.identical);
+        assert!(metadata.divergence.is_none());
+        assert_eq!(metadata.metadata_diff[0].field, "root_seed");
+
+        let op_changed = bundle_with(vec![(Operation::FsSync { fd: Fd(3) }, Outcome::Unit)]);
+        let operation = diff_for(&one, &op_changed, 1);
+        assert_eq!(
+            operation.divergence.as_ref().unwrap().class,
+            "operation-mismatch"
+        );
+        assert_eq!(operation.aligned_prefix, 0);
+
+        let outcome_changed = bundle_with(vec![(
+            Operation::ClockNow {
+                clock: ClockKind::Monotonic,
+            },
+            Outcome::U64(2),
+        )]);
+        let outcome = diff_for(&one, &outcome_changed, 1);
+        assert_eq!(
+            outcome.divergence.as_ref().unwrap().class,
+            "outcome-mismatch"
+        );
+        assert_eq!(outcome.aligned_prefix, 0);
+
+        let longer = bundle_with(vec![
+            (
+                Operation::ClockNow {
+                    clock: ClockKind::Monotonic,
+                },
+                Outcome::U64(1),
+            ),
+            (Operation::FsSync { fd: Fd(3) }, Outcome::Unit),
+        ]);
+        let length = diff_for(&one, &longer, 1);
+        assert_eq!(length.divergence.as_ref().unwrap().class, "length");
+        assert_eq!(length.aligned_prefix, 1);
+        assert!(length.divergence.as_ref().unwrap().a_event.is_none());
+        assert!(length.divergence.as_ref().unwrap().b_event.is_some());
     }
 
     #[test]

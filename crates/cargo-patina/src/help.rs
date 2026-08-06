@@ -1093,10 +1093,12 @@ and the signature store.",
 
 const TRACE: Verb = Verb {
     name: "trace",
-    summary: "Inspect a recorded trace: metadata or filtered events, without executing a guest.",
+    summary: "Inspect a recorded trace: metadata, filtered events, aggregates, or a two-trace diff.",
     synopsis: &[
         "cargo patina trace info <TRACE> [--timeline ID]",
         "cargo patina trace events <TRACE> [--timeline ID] [--kind LIST] [--task SEL]... [--seq A..B] [--first N | --last N] [--notable]",
+        "cargo patina trace stats <TRACE> [--timeline ID]",
+        "cargo patina trace diff <A.patina> <B.patina> [--timeline ID] [--context N]",
     ],
     prose: "\
 `trace` strictly loads and validates an existing .patina trace, then inspects it \n\
@@ -1104,23 +1106,32 @@ without executing a guest. `trace info` is the cheap index: metadata, timelines,
 resolved event count, and the virtual-time span. `trace events` runs the shared \n\
 semantic walk used by the HTML renderer, so task attribution, operation \n\
 categories, virtual time, summaries, and notable-event detection match the \n\
-rendered timeline.\n\
+rendered timeline. `trace stats` aggregates that same walk by kind, category, \n\
+task, notable class, and virtual time. `trace diff` compares two resolved \n\
+timelines operation-first, then outcome, mirroring replay mismatch semantics and \n\
+reporting the first divergence without attempting LCS/re-sync alignment.\n\
 \n\
 `trace info --format json` follows the normal result-envelope contract: one \n\
 patina.result/v1 object carrying a nested patina.trace.info/v1 `trace_info` \n\
-payload. `trace events --format json` intentionally streams JSON Lines instead \n\
-of one large envelope: a patina.trace.events/v1 header, one object per emitted \n\
-event (with raw operation/outcome JSON intact), then a matched/emitted summary. \n\
-Buggify per-evaluation firings are not recorded in traces; `info` reports the \n\
-recorded config, active sites, and knobs from metadata.",
+payload. `trace stats --format json` and `trace diff --format json` likewise \n\
+return one patina.result/v1 envelope carrying nested patina.trace.stats/v1 or \n\
+patina.trace.diff/v1 payloads. `trace events --format json` intentionally \n\
+streams JSON Lines instead of one large envelope: a patina.trace.events/v1 \n\
+header, one object per emitted event (with raw operation/outcome JSON intact), \n\
+then a matched/emitted summary. Different-seed diffs commonly diverge near the \n\
+first entropy/clock/schedule decision; `trace diff` reports the metadata delta, \n\
+aligned prefix, first divergence, context, and tails rather than trying to \n\
+re-align different executions. Buggify per-evaluation firings are not recorded \n\
+in traces; `info` reports the recorded config, active sites, and knobs from \n\
+metadata.",
     groups: &[
         Group {
-            title: "Trace options (trace info/events)",
+            title: "Trace options (trace info/events/stats/diff)",
             flags: &[f(
                 "--timeline",
                 None,
                 Value::Required("ID", Kind::Str),
-                "Resolved timeline to inspect (default main).",
+                "Resolved timeline to inspect (default main). For diff, applies to both traces.",
                 false,
             )],
         },
@@ -1170,6 +1181,16 @@ recorded config, active sites, and knobs from metadata.",
                     false,
                 ),
             ],
+        },
+        Group {
+            title: "Diff options (trace diff)",
+            flags: &[f(
+                "--context",
+                None,
+                Value::Required("N", Kind::Usize),
+                "Number of surrounding events to show per side around the first divergence (default 3).",
+                false,
+            )],
         },
     ],
 };

@@ -158,9 +158,12 @@ For CLI-only inspection of an existing trace, use `trace info` and a filtered
 ```
 $ cargo patina trace info ./bug.patina
 $ cargo patina trace events ./bug.patina --notable
+$ cargo patina trace stats ./bug.patina
+$ cargo patina trace diff ./bug.patina ./bug.patina
 $ cargo patina trace events ./bug.patina --kind filesystem --first 20 --format json
 ```
 
+`trace diff` exits 0 for identical traces and 1 when metadata or events diverge.
 The last command emits `patina.trace.events/v1` JSON Lines: a header, one object
 per emitted event (raw `operation`/`outcome` intact), and a matched/emitted
 summary.

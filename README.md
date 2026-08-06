@@ -124,7 +124,7 @@ they build through the same pipeline as `build` first.
 | `build` | Build the shim-linked native binary (default) or a wasip1 package. | `cargo patina build ./pkg --output app` |
 | `audit` | Report the true residual effect surface of a binary; default-deny. | `cargo patina audit app.rs` |
 | `replay` | Reproduce a recorded trace; seed/faults/argv restored from it. | `cargo patina replay ./app run.patina` |
-| `trace` | Inspect an existing trace's metadata or filtered event stream. | `cargo patina trace info run.patina` |
+| `trace` | Inspect an existing trace's metadata, events, stats, or diff. | `cargo patina trace info run.patina` |
 | `explore` | Sweep a seed range, reporting per-seed outcomes. | `cargo patina explore run ./app --seeds 500` |
 | `campaign` | Config-driven fault-and-schedule sweep with failure dedup. | `cargo patina campaign ./app --gens 200 --buggify --out-dir out/` |
 | `minimize` | Shrink a failing trace (or seed/params) against an oracle. | `cargo patina minimize bug.patina --output small.patina -- ./oracle` |
@@ -136,7 +136,8 @@ usage forms, the global flags, and the environment protocol), while
 `cargo patina <verb> --help --format json` returns that one verb's full flag
 detail — handy for scripts and AI agents. Every result is available as a single
 JSON envelope via `--format json` (except `trace events --format json`, which
-streams `patina.trace.events/v1` JSON Lines), and `--render out.html` writes a
+streams `patina.trace.events/v1` JSON Lines; `trace info|stats|diff` nest their
+trace payloads in the normal result envelope), and `--render out.html` writes a
 self-contained HTML timeline of any traced run.
 
 ### Fault injection and schedule exploration

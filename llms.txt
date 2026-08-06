@@ -38,12 +38,15 @@ with no `--target` -> the Cargo package family (in-process boundary API). A
   are restored from the trace (the trace is authoritative; a re-supplied semantic
   flag that conflicts is refused). A fingerprint or operation mismatch fails
   closed with a nonzero exit.
-- `cargo patina trace info <TRACE> [--timeline ID]` / `trace events <TRACE> [--kind LIST] [--task SEL]... [--seq A..B] [--first N|--last N] [--notable]`
+- `cargo patina trace info <TRACE> [--timeline ID]` / `trace events <TRACE> [--kind LIST] [--task SEL]... [--seq A..B] [--first N|--last N] [--notable]` / `trace stats <TRACE>` / `trace diff <A> <B> [--context N]`
   Inspect an existing trace without executing a guest. `info` prints metadata,
   timelines, resolved event count, and virtual-time span. `events` prints the
   shared decoded event view; `--kind` accepts operation tags or categories
   (`filesystem`, `network`, `scheduling`, `sleep`, `clock`, `entropy`, `crash`,
-  `other`), and `--task` accepts a task id or `main`.
+  `other`), and `--task` accepts a task id or `main`. `stats` aggregates totals,
+  per-kind/category/task counts, notable events, and a virtual-time histogram.
+  `diff` compares two traces, exits 0 when identical and 1 when metadata/events
+  diverge, and reports the first operation/outcome/length divergence.
 - `cargo patina audit <ARTIFACT|SOURCE> [--allow SYMBOL]...`
   Strict fail-closed import allowlist. Any un-interposed effect symbol is a
   finding. Audit source-first (or a `cargo patina build` artifact): only a
@@ -96,7 +99,9 @@ One line of JSON on stdout. Always: `schema`, `verb`, `result`
 metadata}` where `metadata` is the raw trace metadata (seed, faults, buggify,
 guest_argv, and any future fields, rendered generically). `trace info --format
 json` is a normal `patina.result/v1` envelope with a nested
-`patina.trace.info/v1` `trace_info` payload; `trace events --format json` emits
+`patina.trace.info/v1` `trace_info` payload; `trace stats --format json` and
+`trace diff --format json` likewise nest `patina.trace.stats/v1` and
+`patina.trace.diff/v1` payloads. `trace events --format json` emits
 `patina.trace.events/v1` JSONL (header/events/summary; event lines carry raw
 `operation`/`outcome`).
 
