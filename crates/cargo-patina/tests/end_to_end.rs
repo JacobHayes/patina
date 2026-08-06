@@ -12285,9 +12285,8 @@ fn harness_effect_before_install_fails_closed() {
 // A harness that names its own services. `dns_service` allocates the virtual
 // address and inserts the host-table entry; `dns_entry` pins one explicitly. The
 // unregistered name must stay NXDOMAIN, so an over-broad table cannot make this
-// pass. Single-threaded on purpose: the wildcard-bind producer path needs a
-// listener thread, and harness mode currently aborts at shutdown when the guest
-// spawns one, so that leg is covered by the CLI `--dns-entry` gate instead.
+// pass. The threaded wildcard-bind producer half has its own gate below
+// (`harness_dns_service_reaches_a_listener_thread_and_replays_flag_free`).
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const HARNESS_DNS_SRC: &str = r#"
 use std::net::ToSocketAddrs;
@@ -12378,6 +12377,218 @@ fn harness_dns_service_and_entry_reach_the_host_table_and_replay_flag_free() {
         harness_out_line(&replayed),
         line,
         "flag-free replay of a harness-configured DNS table diverged"
+    );
+}
+
+// A harness whose application code spawns worker threads that do interposed work
+// and are joined inside the closure — the ordinary multi-threaded shape. Each
+// worker sleeps (an interposed clock effect) so it is a real managed task with
+// scheduling boundaries, not a scheduler-invisible one.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const HARNESS_THREAD_SRC: &str = r#"
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    patina_dst_harness::run(|| {
+        let counter = Arc::new(AtomicU64::new(0));
+        let mut workers = Vec::new();
+        for step in 1..=3u64 {
+            let counter = Arc::clone(&counter);
+            workers.push(std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_nanos(step));
+                counter.fetch_add(step, Ordering::SeqCst);
+                step * 2
+            }));
+        }
+        let mut doubled = 0u64;
+        for worker in workers {
+            doubled += worker.join().unwrap();
+        }
+        println!(
+            "HARNESS_OUT total={} doubled={}",
+            counter.load(Ordering::SeqCst),
+            doubled
+        );
+        Ok::<(), std::io::Error>(())
+    })?;
+    Ok(())
+}
+"#;
+
+// Gate: a harness guest that spawns threads runs to a clean exit, its recorded
+// trace finalizes, and a flag-free replay is byte-identical.
+//
+// Regression pin for the harness thread-spawn abort: the runtime's end-of-run
+// multithreaded schedule diagnostic is emitted from `Context::finish()`, which
+// `patina_shutdown` reaches AFTER taking the context out of the slot. Its
+// suppression lookup went out through the interposed `getenv`, and under
+// deferred init (`--harness`) an absent context was classified as
+// "the harness has not installed the runtime yet" — so every harness guest that
+// spawned a thread aborted at shutdown (exit 134) with a never-finalized trace.
+// Single-threaded harness guests never reached it because the diagnostic is only
+// emitted for a run that had concurrency.
+//
+// Class-level pairing: the pre-install question now has one choke-point,
+// `missing_context_is_pre_harness_install` in the native shim, which every
+// interposer that can meet an absent context consults, and which keys on whether
+// the harness installed rather than on whether a context is currently present. A
+// new interposer misclassifying teardown as pre-install would have to bypass that
+// choke-point. `harness_effect_before_install_fails_closed` is its non-vacuity
+// partner: it proves the pre-install abort still fires, so this gate cannot be
+// satisfied by weakening the detector into silence.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn harness_guest_that_spawns_threads_finalizes_and_replays_flag_free() {
+    let directory = tempdir().unwrap();
+    let fixture = directory.path().join("threads");
+    write_harness_fixture(&fixture, "harness-threads", HARNESS_THREAD_SRC);
+    let bin = directory.path().join("harness-threads-bin");
+    build_harness_bin(&fixture, &bin);
+
+    let trace = directory.path().join("harness-threads.patina");
+    let recorded = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        native_workspace(),
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--harness",
+            "--seed",
+            "1",
+            "--record",
+            trace.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        recorded.status.success(),
+        "a harness guest that spawns threads did not exit cleanly:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&recorded.stdout),
+        String::from_utf8_lossy(&recorded.stderr),
+    );
+    let line = harness_out_line(&recorded);
+    assert!(
+        line.contains("total=6") && line.contains("doubled=12"),
+        "the worker threads did not all run: {line}"
+    );
+    assert!(
+        fs::metadata(&trace).is_ok_and(|meta| meta.len() > 0),
+        "the recorded trace was never finalized"
+    );
+
+    let replayed = invoke_in(
+        native_workspace(),
+        &[
+            "replay",
+            bin.to_str().unwrap(),
+            trace.to_str().unwrap(),
+            "--harness",
+        ],
+    );
+    assert_eq!(
+        harness_out_line(&replayed),
+        line,
+        "flag-free replay of a multi-threaded harness run diverged"
+    );
+}
+
+// The headline threaded harness shape: a named service whose listener runs on
+// its own thread. The server is ordinary production code — it binds `0.0.0.0` and
+// never learns the name exists — and the client reaches it purely by resolving
+// the `dns_service` name the harness registered.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const HARNESS_DNS_SERVICE_THREAD_SRC: &str = r#"
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    patina_dst_harness::run_with(
+        |harness| Ok(harness.dns_service("db.internal")),
+        || {
+            let listener = TcpListener::bind("0.0.0.0:9600")?;
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().expect("accept");
+                let mut request = [0u8; 4];
+                socket.read_exact(&mut request).expect("read request");
+                socket.write_all(b"pong").expect("write reply");
+                String::from_utf8_lossy(&request).into_owned()
+            });
+            let mut client = TcpStream::connect("db.internal:9600")?;
+            let served = client.peer_addr()?.ip().to_string();
+            client.write_all(b"ping")?;
+            let mut reply = [0u8; 4];
+            client.read_exact(&mut reply)?;
+            let request = server.join().expect("listener thread");
+            println!(
+                "HARNESS_OUT dialed={served} served_request={request} reply={}",
+                String::from_utf8_lossy(&reply)
+            );
+            Ok::<(), std::io::Error>(())
+        },
+    )?;
+    Ok(())
+}
+"#;
+
+// Gate: the `dns_service` producer pattern works end to end from a harness — a
+// listener thread inside the closure receives traffic the client addressed to the
+// service's allocated virtual IP, and the whole run replays flag-free.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn harness_dns_service_reaches_a_listener_thread_and_replays_flag_free() {
+    let directory = tempdir().unwrap();
+    let fixture = directory.path().join("dns-thread");
+    write_harness_fixture(
+        &fixture,
+        "harness-dns-thread",
+        HARNESS_DNS_SERVICE_THREAD_SRC,
+    );
+    let bin = directory.path().join("harness-dns-thread-bin");
+    build_harness_bin(&fixture, &bin);
+
+    let trace = directory.path().join("harness-dns-thread.patina");
+    let recorded = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        native_workspace(),
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--harness",
+            "--seed",
+            "1",
+            "--record",
+            trace.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        recorded.status.success(),
+        "the harness listener-thread service run did not exit cleanly:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&recorded.stdout),
+        String::from_utf8_lossy(&recorded.stderr),
+    );
+    let line = harness_out_line(&recorded);
+    assert!(
+        line.contains("dialed=10.0.0.1"),
+        "the client did not dial the dns_service's allocated address: {line}"
+    );
+    assert!(
+        line.contains("served_request=ping") && line.contains("reply=pong"),
+        "the wildcard-bound listener thread did not serve the named request: {line}"
+    );
+
+    let replayed = invoke_in(
+        native_workspace(),
+        &[
+            "replay",
+            bin.to_str().unwrap(),
+            trace.to_str().unwrap(),
+            "--harness",
+        ],
+    );
+    assert_eq!(
+        harness_out_line(&replayed),
+        line,
+        "flag-free replay of the harness listener-thread service run diverged"
     );
 }
 

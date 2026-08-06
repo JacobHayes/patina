@@ -1818,6 +1818,19 @@ static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 /// `install` does not route through those functions, so it never self-trips this.
 static BOUNDARY_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Set once [`patina_harness_install`] has installed the runtime. Monotonic: it
+/// stays set for the rest of the process, including the teardown window after
+/// `patina_shutdown` has taken the context back out of the slot.
+///
+/// Under deferred init the shim answers an absent context by aborting with the
+/// "harness has not installed the runtime yet" diagnostic. That is only the right
+/// answer *before* the install — after it, an absent context means the run was
+/// already finalized, which is an ordinary teardown state the non-deferred path
+/// handles by returning nothing. Keying the diagnostic on the install itself
+/// rather than on the context's presence keeps the two apart with no window
+/// between `patina_shutdown` taking the context and marking the run shut down.
+static HARNESS_INSTALLED: AtomicBool = AtomicBool::new(false);
+
 /// Set by the packaged C startup constructor after it has captured the control
 /// plane, optionally installed the runtime, and scrubbed the live environment.
 /// If an interposed boundary arrives before this flag, a guest/static constructor
@@ -1857,12 +1870,12 @@ fn ensure_runtime() -> Result<(), c_int> {
         abort_preinit_interposed_call();
     }
     // Deferred harness init (PATINA_DEFER_INIT=1, `cargo patina run --harness`):
-    // the harness owns installation. Reaching here with no context installed means
-    // an interposed effect ran BEFORE `patina_harness_install`. Do NOT auto-init
-    // from the env — that would race the harness's overlay and silently run
-    // against a config the harness never got to apply. Fail closed, loudly and
-    // named, so the boundary is attributed to the missing harness install.
-    if control_env(patina_dst_runtime::ENV_DEFER_INIT).is_some() {
+    // the harness owns installation, so an effect that arrives with no context
+    // installed and no install yet performed ran BEFORE `patina_harness_install`.
+    // Do NOT auto-init from the env — that would race the harness's overlay and
+    // silently run against a config the harness never got to apply. Fail closed,
+    // loudly and named, so the boundary is attributed to the missing install.
+    if missing_context_is_pre_harness_install() {
         abort_harness_before_install();
     }
     if control_env(patina_dst_runtime::ENV_MODE).is_some() {
@@ -1908,6 +1921,27 @@ fn last_boundary_symbol_bytes() -> Option<&'static [u8]> {
     // best-effort field and is never trusted for control flow.
     let bytes = unsafe { CStr::from_ptr(pointer) }.to_bytes();
     if bytes.is_empty() { None } else { Some(bytes) }
+}
+
+/// Whether an absent deterministic context means the harness has not installed
+/// the runtime *yet* — the fail-closed pre-install case — as opposed to the run
+/// having already been installed and finalized.
+///
+/// `patina_shutdown` takes the context out of the slot before `Context::finish`
+/// emits the end-of-run diagnostics, and the multithreaded schedule report reads
+/// its own suppression knob through `std::env`, which links to the interposed
+/// `getenv` inside a shim-linked guest. So every harness run whose guest spawned
+/// a thread reached the interposers with no context installed, during teardown of
+/// a runtime the harness had plainly installed. Without this discriminator that
+/// landed on the pre-install abort and killed the process before the trace was
+/// written.
+fn missing_context_is_pre_harness_install() -> bool {
+    if HARNESS_INSTALLED.load(Ordering::Acquire) {
+        return false;
+    }
+    control_plane()
+        .lock()
+        .contains_key(patina_dst_runtime::ENV_DEFER_INIT)
 }
 
 fn abort_harness_before_install() -> ! {
@@ -2484,6 +2518,10 @@ run through Patina, e.g. `cargo patina run <manifest> --target native --harness`
     }
     let _ = init_from_env();
     if slot().lock().is_some() {
+        // Ordered against the interposers' `missing_context_is_pre_harness_install`
+        // load: once this is visible, an absent context is teardown, not a
+        // pre-install boundary.
+        HARNESS_INSTALLED.store(true, Ordering::Release);
         set_errno(0);
         return patina_dst_runtime::HARNESS_OK;
     }
@@ -2664,11 +2702,7 @@ pub unsafe extern "C" fn patina_getenv(name: *const c_char) -> *mut c_char {
             .as_ref()
             .and_then(|context| context.guest_env_var(name).map(str::to_owned));
         drop(guard);
-        if missing_context
-            && control_plane()
-                .lock()
-                .contains_key(patina_dst_runtime::ENV_DEFER_INIT)
-        {
+        if missing_context && missing_context_is_pre_harness_install() {
             abort_harness_before_install();
         }
         value
@@ -2820,10 +2854,7 @@ fn with_guest_env(apply: impl FnOnce(&mut Context) -> Result<(), RuntimeError>) 
     let mut guard = slot().lock();
     let Some(context) = guard.as_mut() else {
         drop(guard);
-        if control_plane()
-            .lock()
-            .contains_key(patina_dst_runtime::ENV_DEFER_INIT)
-        {
+        if missing_context_is_pre_harness_install() {
             abort_harness_before_install();
         }
         // A standalone run (or one past `patina_shutdown`) has no deterministic

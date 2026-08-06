@@ -88,11 +88,14 @@
 //! # Ok::<(), patina_dst_harness::HarnessError>(())
 //! ```
 //!
-//! **Current limitation**: a harness whose application code spawns a thread
-//! aborts at shutdown (an interposed effect reaches the boundary after the
-//! harness finalizes). Until that is fixed, run the in-process listener half of a
-//! client/server scenario through `cargo patina run <binary> --dns-entry …`
-//! rather than through a harness.
+//! # Threads
+//!
+//! Application code may spawn threads. They become managed tasks on the same
+//! deterministic scheduler a transparent run uses, so the listener half of a
+//! client/server scenario can run on its own thread inside the closure. The run's
+//! deterministic body ends when the closure returns — exactly as it ends when
+//! `main` returns under the supervisor — so a worker still running at that point
+//! is cut off there; join anything whose completion the run depends on.
 //!
 //! # v1 scope
 //!

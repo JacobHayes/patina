@@ -73,9 +73,13 @@ a name explicitly. Application code then resolves the name through plain `std`,
 and a server binding `0.0.0.0:PORT` receives traffic addressed to any address on
 that port, so the service body stays ordinary `INADDR_ANY` code. That is one
 host-table entry per name, not a topology model — network topology stays out of
-scope for v1. Known limitation: a harness whose application code spawns a thread
-aborts at shutdown, so run an in-process listener through `cargo patina run
-<binary> --dns-entry …` rather than through a harness until that is fixed.
+scope for v1.
+
+Application code may spawn threads: they become managed tasks on the same
+deterministic scheduler as under a transparent run, so a service's listener can
+run on its own thread inside the closure. The deterministic body ends when the
+closure returns, exactly as it ends when `main` returns under the supervisor —
+a worker still running at that point is cut off there.
 
 ## 3. Explicit-context simulator code — `patina-dst-runtime`
 
