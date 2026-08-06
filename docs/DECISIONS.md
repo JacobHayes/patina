@@ -49,6 +49,18 @@ cluster so the fixes have citable symptom records.
 - **2026-08-06 — clap-config-eval go.** The /goal directive to "implement the
   open planned arcs" is read as the explicit go the arc docs were waiting on,
   including the clap spike (its doc says "launches on explicit go").
+- **2026-08-06 — feedback #9 did not reproduce on macOS at trunk.** The
+  `--buggify=N` value form armed the SDK correctly in local repro. Shipped the
+  structural fix anyway: fail-closed fingerprint/metadata coherence guards at
+  shim, runtime, and trace levels — if the SlateDB condition recurs (it was
+  observed on Linux x86_64), it is now a loud refusal naming the vacuity
+  instead of silent scheduler-only coverage. Follow-up task tracks a Linux
+  repro attempt.
+- **2026-08-06 — fault-knobs Wave A trace shape.** Runtime `FaultConfig` is
+  nested (fs/net/clock) but the trace `FaultConfigRecord` stays flat to avoid
+  trace-format churn; the cross-target canonical entropy hash was updated
+  intentionally because domain-separated seeding changes deterministic entropy
+  output (expected, one-time).
 - **2026-08-06 — SlateDB-side harness findings are out of scope.** Items in
   `SLATEDB-SANDBOX-NOTES.md` (bank fenced-close neutrality, recovery scenario
   stabilization) live in the sandbox SlateDB checkout, not this repo; nothing
