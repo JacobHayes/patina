@@ -20,6 +20,7 @@ struct Description {
     cursor: usize,
     readable: bool,
     writable: bool,
+    kind: FsEntryKind,
     /// Number of fds referencing this open-file description.
     fds: u32,
 }
@@ -144,6 +145,40 @@ impl MemFs {
             .expect("handle references a description"))
     }
 
+    fn allocate_handle(
+        &mut self,
+        path: String,
+        cursor: usize,
+        readable: bool,
+        writable: bool,
+        kind: FsEntryKind,
+    ) -> DriverResult<Fd> {
+        let fd = Fd(self.next_fd);
+        self.next_fd = self.next_fd.checked_add(1).ok_or_else(|| {
+            EffectError::new(ErrorCode::InvalidHandle, "virtual file handles exhausted")
+        })?;
+        let description = self.next_description;
+        self.next_description = self.next_description.checked_add(1).ok_or_else(|| {
+            EffectError::new(
+                ErrorCode::InvalidHandle,
+                "virtual file descriptions exhausted",
+            )
+        })?;
+        self.descriptions.insert(
+            description,
+            Description {
+                path,
+                cursor,
+                readable,
+                writable,
+                kind,
+                fds: 1,
+            },
+        );
+        self.handles.insert(fd, description);
+        Ok(fd)
+    }
+
     fn file_inode(&self, path: &str) -> DriverResult<InodeId> {
         self.files.get(path).copied().ok_or_else(|| not_found(path))
     }
@@ -224,7 +259,7 @@ impl MemFs {
 
 impl FsDriver for MemFs {
     fn open(&mut self, path: &str, flags: OpenFlags) -> DriverResult<Fd> {
-        let path = normalize_path(path)?;
+        let path = normalize_entry_path(path)?;
         self.ensure_no_intermediate_symlink(&path)?;
         if !flags.read && !flags.write {
             return Err(EffectError::new(
@@ -245,10 +280,13 @@ impl FsDriver for MemFs {
             ));
         }
         if self.directories.contains_key(&path) {
-            return Err(EffectError::new(
-                ErrorCode::IsDirectory,
-                format!("virtual filesystem path is a directory: {path}"),
-            ));
+            if flags.write || flags.create || flags.truncate || flags.append || flags.exclusive {
+                return Err(EffectError::new(
+                    ErrorCode::IsDirectory,
+                    format!("virtual filesystem path is a directory: {path}"),
+                ));
+            }
+            return self.allocate_handle(path, 0, true, false, FsEntryKind::Directory);
         }
         if self.symlinks.contains_key(&path) {
             return Err(EffectError::new(
@@ -279,10 +317,6 @@ impl FsDriver for MemFs {
                 .clear();
         }
 
-        let fd = Fd(self.next_fd);
-        self.next_fd = self.next_fd.checked_add(1).ok_or_else(|| {
-            EffectError::new(ErrorCode::InvalidHandle, "virtual file handles exhausted")
-        })?;
         let cursor = if flags.append {
             let inode = self.file_inode(&path)?;
             self.inodes
@@ -293,25 +327,7 @@ impl FsDriver for MemFs {
         } else {
             0
         };
-        let description = self.next_description;
-        self.next_description = self.next_description.checked_add(1).ok_or_else(|| {
-            EffectError::new(
-                ErrorCode::InvalidHandle,
-                "virtual file descriptions exhausted",
-            )
-        })?;
-        self.descriptions.insert(
-            description,
-            Description {
-                path,
-                cursor,
-                readable: flags.read,
-                writable: flags.write,
-                fds: 1,
-            },
-        );
-        self.handles.insert(fd, description);
-        Ok(fd)
+        self.allocate_handle(path, cursor, flags.read, flags.write, FsEntryKind::File)
     }
 
     fn read(&mut self, fd: Fd, max_len: usize) -> DriverResult<Vec<u8>> {
@@ -320,6 +336,12 @@ impl FsDriver for MemFs {
             return Err(EffectError::new(
                 ErrorCode::NotReadable,
                 format!("virtual file handle {} is not readable", fd.0),
+            ));
+        }
+        if description.kind == FsEntryKind::Directory {
+            return Err(EffectError::new(
+                ErrorCode::IsDirectory,
+                format!("virtual file handle {} references a directory", fd.0),
             ));
         }
         let path = description.path.clone();
@@ -342,6 +364,12 @@ impl FsDriver for MemFs {
             return Err(EffectError::new(
                 ErrorCode::NotWritable,
                 format!("virtual file handle {} is not writable", fd.0),
+            ));
+        }
+        if description.kind == FsEntryKind::Directory {
+            return Err(EffectError::new(
+                ErrorCode::IsDirectory,
+                format!("virtual file handle {} references a directory", fd.0),
             ));
         }
         let path = description.path.clone();
@@ -394,6 +422,12 @@ impl FsDriver for MemFs {
 
     fn seek(&mut self, fd: Fd, offset: i64, whence: SeekWhence) -> DriverResult<u64> {
         let description = self.description(fd)?;
+        if description.kind == FsEntryKind::Directory {
+            return Err(EffectError::new(
+                ErrorCode::InvalidInput,
+                format!("virtual directory handle {} cannot be seeked", fd.0),
+            ));
+        }
         let path = description.path.clone();
         let cursor = description.cursor;
         let inode = self.file_inode(&path)?;
@@ -776,9 +810,13 @@ impl FsDriver for MemFs {
         for description in self
             .descriptions
             .values_mut()
-            .filter(|description| description.path.starts_with(&prefix))
+            .filter(|description| description.path == from || description.path.starts_with(&prefix))
         {
-            description.path = format!("{to}{}", &description.path[from.len()..]);
+            description.path = if description.path == from {
+                to.clone()
+            } else {
+                format!("{to}{}", &description.path[from.len()..])
+            };
         }
         Ok(())
     }
@@ -968,6 +1006,35 @@ mod tests {
         let mut fs = MemFs::new();
         assert_eq!(fs.metadata("/").unwrap().kind, FsEntryKind::Directory);
         assert_eq!(fs.metadata("/tmp").unwrap().kind, FsEntryKind::Directory);
+    }
+
+    #[test]
+    fn read_only_directory_open_supports_fstat_fsync_and_close_only() {
+        let mut fs = MemFs::new();
+        fs.create_directory("/state").unwrap();
+        let fd = fs.open("/state", OpenFlags::read_only()).unwrap();
+        assert_eq!(fs.fd_metadata(fd).unwrap().kind, FsEntryKind::Directory);
+        fs.sync(fd).unwrap();
+        assert_eq!(fs.read(fd, 1).unwrap_err().code, ErrorCode::IsDirectory);
+        assert_eq!(fs.write(fd, b"x").unwrap_err().code, ErrorCode::NotWritable);
+        assert_eq!(
+            fs.seek(fd, 0, SeekWhence::Start).unwrap_err().code,
+            ErrorCode::InvalidInput
+        );
+        fs.close(fd).unwrap();
+
+        let write_dir = OpenFlags {
+            read: true,
+            write: true,
+            create: false,
+            truncate: false,
+            append: false,
+            exclusive: false,
+        };
+        assert_eq!(
+            fs.open("/state", write_dir).unwrap_err().code,
+            ErrorCode::IsDirectory
+        );
     }
 
     #[test]

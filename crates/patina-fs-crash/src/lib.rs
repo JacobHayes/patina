@@ -2,8 +2,8 @@
 //!
 //! `CrashFs` keeps a live working image and a durable baseline. Ordinary
 //! effects mutate the live image. Durability is reached incrementally: a file
-//! `sync` stages that file's fsynced content, `sync_directory` commits the
-//! namespace operations of one directory, and `checkpoint` makes the entire
+//! `sync` stages that file's fsynced content, syncing a directory fd commits the
+//! namespace operations of that directory, and `checkpoint` makes the entire
 //! live image durable. `crash` recomputes the post-crash image from the
 //! durable baseline plus seeded torn-write and lost-entry decisions, then
 //! invalidates every open handle so a modeled process restart begins from a
@@ -97,8 +97,8 @@ impl Default for CrashPolicy {
             torn_write_probability: 1.0,
             torn_granularity: TornGranularity::Block,
             model_rename_atomicity: true,
-            model_directory_durability: false,
-            directory_loss_probability: 0.0,
+            model_directory_durability: true,
+            directory_loss_probability: 1.0,
         }
     }
 }
@@ -149,8 +149,9 @@ struct Baseline {
 ///
 /// Construct one with [`CrashFs::builder`] to select the torn-write,
 /// rename-atomicity, and directory-durability models, or use
-/// [`CrashFs::default`] for the conservative whole-file model where fsynced
-/// data survives, namespace changes are durable, and unsynced data is lost.
+/// [`CrashFs::default`] for the conservative crash model where fsynced file
+/// data survives, fsynced parent directories make namespace changes durable,
+/// and unsynced data or namespace changes are lost.
 pub struct CrashFs {
     live: MemFs,
     /// The durable baseline: entries, contents, symlink targets, and times.
@@ -640,7 +641,7 @@ impl FsDriver for CrashFs {
             .map(|metadata| matches!(metadata.kind, FsEntryKind::File))
             .unwrap_or(false);
         let fd = self.live.open(path, flags)?;
-        let normalized = normalize_path(path).expect("open normalized the path already");
+        let normalized = normalize_entry_path(path).expect("open normalized the path already");
         if flags.create && !existed {
             self.journal(PendingKind::Create {
                 path: normalized.clone(),
@@ -724,8 +725,14 @@ impl FsDriver for CrashFs {
     fn sync(&mut self, fd: Fd) -> DriverResult<()> {
         self.live.sync(fd)?;
         if let Some(path) = self.open_paths.get(&fd).cloned() {
-            if let Ok(bytes) = self.live.contents(&path) {
-                self.staged_content.insert(path, bytes.to_vec());
+            match self.live.metadata(&path)?.kind {
+                FsEntryKind::File => {
+                    if let Ok(bytes) = self.live.contents(&path) {
+                        self.staged_content.insert(path, bytes.to_vec());
+                    }
+                }
+                FsEntryKind::Directory => self.sync_directory(&path)?,
+                FsEntryKind::Symlink => {}
             }
         }
         Ok(())
@@ -1058,6 +1065,7 @@ mod tests {
         let fd = fs.open("/db", OpenFlags::create_truncate_write()).unwrap();
         fs.set_len(fd, 4096).unwrap();
         fs.sync(fd).unwrap(); // durable baseline: 4096 zero bytes
+        fs.sync_directory("/").unwrap(); // durable namespace entry
         fs.write_at(fd, OFFSET, b"positional").unwrap();
         fs.crash().unwrap();
         let after = fs.contents("/db").unwrap();
@@ -1074,6 +1082,7 @@ mod tests {
         fs.set_len(fd, 4096).unwrap();
         fs.write_at(fd, OFFSET, b"positional").unwrap();
         fs.sync(fd).unwrap();
+        fs.sync_directory("/").unwrap();
         fs.crash().unwrap();
         let after = fs.contents("/db").unwrap();
         let start = OFFSET as usize;
@@ -1109,10 +1118,11 @@ mod tests {
     fn crash_discards_unsynchronized_data_and_open_handles() {
         let mut fs = CrashFs::default();
         let fd = write(&mut fs, "/volatile", b"lost");
+        // Fsync the parent directory to make only the namespace entry durable;
+        // the unsynced bytes are still discarded, leaving an empty file.
+        fs.sync_directory("/").unwrap();
         fs.crash().unwrap();
         assert_eq!(fs.crash_count(), 1);
-        // The entry is durable metadata by default, but its unsynced bytes are
-        // discarded, leaving an empty file.
         assert!(fs.contents("/volatile").unwrap().is_empty());
         assert_eq!(
             fs.write(fd, b"stale").unwrap_err().code,
@@ -1125,6 +1135,7 @@ mod tests {
         let mut fs = CrashFs::default();
         let fd = write(&mut fs, "/state", b"stable");
         fs.sync(fd).unwrap();
+        fs.sync_directory("/").unwrap();
         fs.write(fd, b"-volatile").unwrap();
         fs.crash().unwrap();
         assert_eq!(fs.contents("/state").unwrap(), b"stable");
@@ -1154,8 +1165,11 @@ mod tests {
             fs.contents("/corpus/data.txt").unwrap(),
             b"mounted-and-durable"
         );
-        // The unsynced guest write is dropped, just as against an empty FS.
-        assert!(fs.contents("/scratch/out.txt").unwrap().is_empty());
+        // The unsynced guest write's namespace entry was never made durable.
+        assert_eq!(
+            fs.metadata("/scratch/out.txt").unwrap_err().code,
+            ErrorCode::NotFound
+        );
     }
 
     #[test]
@@ -1163,7 +1177,9 @@ mod tests {
         let mut fs = CrashFs::default();
         let durable = write(&mut fs, "/keep", b"durable");
         fs.sync(durable).unwrap();
+        fs.sync_directory("/").unwrap();
         let volatile = write(&mut fs, "/lose", b"volatile");
+        fs.sync_directory("/").unwrap();
         fs.crash().unwrap();
 
         // Handles from before the crash are stale after restart.
@@ -1346,6 +1362,7 @@ mod tests {
         let fd = fs.open("/db", OpenFlags::create_truncate_write()).unwrap();
         fs.set_len(fd, 8).unwrap();
         fs.sync(fd).unwrap();
+        fs.sync_directory("/").unwrap();
         // First (earlier) write to page 0, then the final write to page 1.
         fs.write_at(fd, 0, b"XXXX").unwrap();
         fs.write_at(fd, 4, b"YYYY").unwrap();
@@ -1409,6 +1426,27 @@ mod tests {
             observed_non_atomic,
             "non-atomic rename never exposed a torn intermediate state"
         );
+    }
+
+    #[test]
+    fn directory_fd_sync_commits_namespace_operations() {
+        let mut base = MemFs::new();
+        base.create_directory("/d").unwrap();
+        let mut fs = CrashFs::builder()
+            .filesystem(base)
+            .model_directory_durability(true)
+            .directory_loss_probability(1.0)
+            .build()
+            .unwrap();
+        let fd = write(&mut fs, "/d/f", b"x");
+        fs.sync(fd).unwrap();
+        fs.close(fd).unwrap();
+        let dir = fs.open("/d", OpenFlags::read_only()).unwrap();
+        assert_eq!(fs.fd_metadata(dir).unwrap().kind, FsEntryKind::Directory);
+        fs.sync(dir).unwrap();
+        fs.close(dir).unwrap();
+        fs.crash().unwrap();
+        assert_eq!(fs.contents("/d/f").unwrap(), b"x");
     }
 
     #[test]
@@ -1523,8 +1561,9 @@ mod tests {
         assert_eq!(fs.read_link("/d/link").unwrap(), "/target");
         assert_eq!(fs.metadata("/d/link").unwrap().kind, FsEntryKind::Symlink);
 
-        // Default model keeps namespace entries durable, so the symlink and its
-        // verbatim target survive the crash rather than being silently dropped.
+        // Fsyncing the parent directory makes the symlink and its verbatim target
+        // survive the crash rather than being silently dropped.
+        fs.sync_directory("/d").unwrap();
         fs.crash().unwrap();
         assert_eq!(fs.read_link("/d/link").unwrap(), "/target");
         assert_eq!(fs.metadata("/d/link").unwrap().kind, FsEntryKind::Symlink);

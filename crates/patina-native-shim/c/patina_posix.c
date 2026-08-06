@@ -879,6 +879,8 @@ ssize_t readlink(const char *restrict path, char *restrict destination, size_t l
     return fail_size(patina_read_link(path, destination, length));
 }
 
+static int patina_open_directory(const char *path, int flags);
+
 static int patina_posix_open(const char *path, int flags) {
     patina_note_boundary_symbol("open");
     int supported = O_ACCMODE | O_CREAT | O_TRUNC | O_APPEND | O_EXCL;
@@ -891,10 +893,16 @@ static int patina_posix_open(const char *path, int flags) {
 #ifdef O_NOFOLLOW
     supported |= O_NOFOLLOW;
 #endif
+#ifdef O_DIRECTORY
+    supported |= O_DIRECTORY;
+#endif
     if ((flags & ~supported) != 0) {
         errno = ENOSYS;
         return -1;
     }
+#ifdef O_DIRECTORY
+    if (flags & O_DIRECTORY) return patina_open_directory(path, flags);
+#endif
     uint32_t patina_flags = 0;
     switch (flags & O_ACCMODE) {
         case O_RDONLY: patina_flags |= PATINA_O_READ; break;
@@ -961,13 +969,15 @@ static int patina_resolve_at(int dirfd, const char *path, char *out, size_t out_
 }
 
 /*
- * openat(..., O_DIRECTORY): validate that `path` names a directory and hand back
- * a virtual directory descriptor. patina_metadata reports the entry's own kind
- * (no trailing-symlink follow, like lstat), so O_NOFOLLOW on a symlink fails with
- * ELOOP -- exactly what std's remove_dir_all treats as "not a directory, unlink
- * it". Without O_NOFOLLOW a trailing symlink is resolved through realpath and
- * re-checked, so a symlink-to-directory opens honestly. A non-directory is
- * ENOTDIR.
+ * open/openat(..., O_DIRECTORY): validate that `path` names a directory, open a
+ * read-only deterministic filesystem descriptor for it, and register the fd as a
+ * directory handle for fdopendir/openat/unlinkat resolution. patina_metadata
+ * reports the entry's own kind (no trailing-symlink follow, like lstat), so
+ * O_NOFOLLOW on a symlink fails with ELOOP -- exactly what std's remove_dir_all
+ * treats as "not a directory, unlink it". Without O_NOFOLLOW a trailing symlink
+ * is resolved through realpath and re-checked, so a symlink-to-directory opens
+ * honestly. A non-directory is ENOTDIR. The fd is a real deterministic-FS fd, so
+ * fstat reports a directory and fsync is the parent-directory durability barrier.
  */
 static int patina_open_directory(const char *path, int flags) {
     (void)flags;
@@ -1002,10 +1012,20 @@ static int patina_open_directory(const char *path, int flags) {
             errno = ENOTDIR;
             return -1;
         }
+        if ((flags & O_ACCMODE) != O_RDONLY ||
+            (flags & (O_CREAT | O_TRUNC | O_APPEND | O_EXCL)) != 0) {
+            errno = EISDIR;
+            return -1;
+        }
         return fail_int(patina_diropen(resolved));
     }
     if (kind != PATINA_ENTRY_DIRECTORY) {
         errno = ENOTDIR;
+        return -1;
+    }
+    if ((flags & O_ACCMODE) != O_RDONLY ||
+        (flags & (O_CREAT | O_TRUNC | O_APPEND | O_EXCL)) != 0) {
+        errno = EISDIR;
         return -1;
     }
     return fail_int(patina_diropen(path));
@@ -1278,11 +1298,12 @@ int flock(int fd, int operation) {
 }
 
 int close(int fd) {
+    /* A virtual directory descriptor is released here as well as by closedir, so
+     * a guest that close()s the raw fd (rather than the DIR) still frees it.
+     * Directory fds are ordinary deterministic-FS fds now (small numbers), so
+     * check the directory table before the socket-space dispatch. */
+    if (patina_dir_is_dirfd(fd)) return fail_int(patina_dirclose(fd));
     if (fd >= PATINA_SOCKET_FD_BASE) {
-        /* A virtual directory descriptor is released here as well as by closedir,
-         * so a guest that close()s the raw fd (rather than the DIR) still frees
-         * it. Checked first: dir fds share the virtual-fd space with sockets. */
-        if (patina_dir_is_dirfd(fd)) return fail_int(patina_dirclose(fd));
 #ifdef __APPLE__
         if (patina_kqueue_is_kq(fd)) return fail_int(patina_kqueue_close(fd));
 #endif

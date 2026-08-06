@@ -99,12 +99,22 @@ int main(int argc, char **argv) {
         !check(patina_clock_now(PATINA_CLOCK_MONOTONIC, &after) == 0, "clock after") ||
         !check(patina_mkdir("/state") == 0, "mkdir")) return 1;
 
+    int root = patina_open("/", PATINA_O_READ);
+    if (!check(root >= 0, "open root") ||
+        !check(patina_fsync(root) == 0, "fsync root") ||
+        !check(patina_close(root) == 0, "close root")) return 1;
+
     int fd = patina_open("/state/value", PATINA_O_READ | PATINA_O_WRITE |
         PATINA_O_CREATE | PATINA_O_TRUNCATE);
     if (!check(fd >= 0, "open") ||
         !check(patina_write(fd, "stable", 6) == 6, "stable write") ||
         !check(patina_fsync(fd) == 0, "fsync") ||
-        !check(patina_write(fd, "-volatile", 9) == 9, "volatile write") ||
+        !check(patina_write(fd, "-volatile", 9) == 9, "volatile write")) return 1;
+
+    int dir = patina_open("/state", PATINA_O_READ);
+    if (!check(dir >= 0, "open dir") ||
+        !check(patina_fsync(dir) == 0, "fsync dir") ||
+        !check(patina_close(dir) == 0, "close dir") ||
         !check(patina_crash() == 0, "crash") ||
         !check(patina_close(fd) == -1, "stale descriptor rejection")) return 1;
 

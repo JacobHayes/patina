@@ -6855,6 +6855,9 @@ mod tests {
             let fd = context.fs_open("/state", OpenFlags::create_truncate_write())?;
             context.fs_write(fd, b"stable")?;
             context.fs_sync(fd)?;
+            let dir = context.fs_open("/", OpenFlags::read_only())?;
+            context.fs_sync(dir)?;
+            context.fs_close(dir)?;
             context.fs_write(fd, b"-volatile")?;
             context.fs_crash()?;
             assert!(matches!(
@@ -6903,6 +6906,9 @@ mod tests {
             let fd = context.fs_open("/log", OpenFlags::create_truncate_write())?;
             context.fs_write(fd, b"AAAAAAAA")?;
             context.fs_sync(fd)?;
+            let dir = context.fs_open("/", OpenFlags::read_only())?;
+            context.fs_sync(dir)?;
+            context.fs_close(dir)?;
             context.fs_seek(fd, 0, SeekWhence::Start)?;
             context.fs_write(fd, b"BBBBBBBB")?;
             context.fs_crash()?;
@@ -7016,6 +7022,9 @@ mod tests {
                 .unwrap();
             context.fs_write_at(fd, 0, &[b'A'; 16]).unwrap(); // write 1
             context.fs_sync(fd).unwrap();
+            let dir = context.fs_open("/", OpenFlags::read_only()).unwrap();
+            context.fs_sync(dir).unwrap();
+            context.fs_close(dir).unwrap();
             let _ = context.fs_write_at(fd, 0, &[b'B'; 16]); // write 2 -> crash
             context.read_file("/f").unwrap_or_default()
         }
@@ -7053,11 +7062,17 @@ mod tests {
         let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
         // (a) Rooted: create a directory and a file under `/`, write, sync.
         context.fs_create_directory("/state").unwrap();
+        let root = context.fs_open("/", OpenFlags::read_only()).unwrap();
+        context.fs_sync(root).unwrap();
+        context.fs_close(root).unwrap();
         let fd = context
             .fs_open("/state/value", OpenFlags::create_truncate_write())
             .unwrap();
         context.fs_write_at(fd, 0, b"durable").unwrap();
         context.fs_sync(fd).unwrap();
+        let state = context.fs_open("/state", OpenFlags::read_only()).unwrap();
+        context.fs_sync(state).unwrap();
+        context.fs_close(state).unwrap();
         context.fs_write_at(fd, 0, b"volatile").unwrap(); // unsynced overwrite
         // (b) Crashable: an imperative crash with NO crash_at must succeed and
         // drop the unsynced overwrite back to the durable bytes.

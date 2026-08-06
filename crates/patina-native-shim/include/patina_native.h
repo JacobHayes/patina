@@ -155,14 +155,15 @@ int32_t patina_symlink(const char *target, const char *link_path);
  */
 int32_t patina_link(const char *from, const char *to);
 /*
- * Virtual directory descriptors backing the openat/fdopendir/unlinkat family.
- * patina_diropen records an fd->path handle (the caller validates that `path`
- * names a directory and resolves any trailing symlink first) drawn from the
- * shared virtual-fd space; patina_dirpath recovers the bound path (buf gets a
- * NUL-terminated copy when it fits; returns the length, or -1/EBADF for an
- * unknown fd); patina_dir_is_dirfd tells a dir fd apart from other virtual fds;
- * patina_dirclose releases it (closedir/close). fdopendir transfers fd ownership
- * into the DIR, so closedir is what calls patina_dirclose.
+ * Directory descriptors backing the openat/fdopendir/unlinkat family.
+ * patina_diropen opens a read-only deterministic filesystem fd, records its
+ * fd->path handle (the caller validates that `path` names a directory and
+ * resolves any trailing symlink first), and returns that fd; patina_dirpath
+ * recovers the bound path (buf gets a NUL-terminated copy when it fits; returns
+ * the length, or -1/EBADF for an unknown fd); patina_dir_is_dirfd tells a dir fd
+ * apart from other virtual fds; patina_dirclose releases the mapping and closes
+ * the filesystem fd (closedir/close). fdopendir transfers fd ownership into the
+ * DIR, so closedir is what calls patina_dirclose.
  */
 int32_t patina_diropen(const char *path);
 intptr_t patina_dirpath(int32_t fd, char *buf, size_t len);

@@ -205,6 +205,7 @@ const O_CREAT: u64 = 0o100;
 const O_EXCL: u64 = 0o200;
 const O_TRUNC: u64 = 0o1000;
 const O_APPEND: u64 = 0o2000;
+const O_DIRECTORY: u64 = 0o200000;
 
 const AT_FDCWD: i64 = -100;
 
@@ -354,15 +355,14 @@ fn with_dispatch_guard<F: FnOnce() -> i64>(nr: i64, body: F) -> i64 {
 // ===========================================================================
 // SUD directory-fd model (getdents64).
 //
-// The deterministic filesystem refuses to hand out a descriptor for a directory
-// (`fs_open` returns EISDIR): the interposed path models directory iteration
-// through the *path-based* `opendir`/`readdir` strong defs, which call
-// `patina_read_dir`. A raw caller (rustix's `Dir`, hand-rolled getdents) instead
-// does `openat(dir, O_DIRECTORY) → getdents64(fd)` — it needs a real directory
-// fd. So the SUD layer models one: when a read-only `openat` lands on a
-// directory (EISDIR), it snapshots the directory through the SAME
-// `patina_read_dir` entry the interposed `opendir` uses and hands back a
-// SUD-private descriptor; `getdents64` then walks that snapshot into
+// The deterministic filesystem now hands out read-only directory descriptors so
+// `fstat` and `fsync` on ordinary directory opens route through the same runtime
+// fd as files. Raw callers that ask for `openat(..., O_DIRECTORY) →
+// getdents64(fd)` additionally need a Linux directory-iteration fd. The SUD
+// layer models that iteration-only surface with a private snapshot descriptor:
+// the open path validates the directory through the runtime, snapshots it
+// through the SAME `patina_read_dir` entry the interposed `opendir` uses, and
+// hands back a SUD-private descriptor. `getdents64` walks that snapshot into
 // `linux_dirent64` records, `lseek(…,0,SEEK_SET)` rewinds it (re-snapshot), and
 // `close`/`fstat` recognize it. Entries come from the one runtime entry — this
 // is a second *caller*, never a second directory model.
@@ -1282,7 +1282,23 @@ fn sys_openat(dirfd: i64, path: u64, flags: u64) -> i64 {
         return -EINVAL;
     }
     let patina_flags = openat_patina_flags(flags);
-    let read_only = patina_flags & (PATINA_O_WRITE | PATINA_O_CREATE | PATINA_O_TRUNCATE) == 0;
+    let read_only = patina_flags
+        & (PATINA_O_WRITE
+            | PATINA_O_CREATE
+            | PATINA_O_TRUNCATE
+            | PATINA_O_APPEND
+            | PATINA_O_EXCLUSIVE)
+        == 0;
+    // A raw O_DIRECTORY open wants a getdents64-capable SUD directory fd, not the
+    // ordinary deterministic-FS directory fd used by fsync-only callers. Validate
+    // and snapshot it through the same `patina_read_dir` path as `opendir`.
+    if flags & O_DIRECTORY != 0 {
+        return if read_only {
+            open_dir_fd(path as *const c_char)
+        } else {
+            -EISDIR
+        };
+    }
     // SAFETY: `path` is a guest NUL-terminated string pointer.
     let fd = unsafe { patina_open(path as *const c_char, patina_flags) };
     if fd >= 0 {
@@ -1290,14 +1306,6 @@ fn sys_openat(dirfd: i64, path: u64, flags: u64) -> i64 {
     }
     // SAFETY: plain thread-local read.
     let errno = unsafe { patina_errno() } as i64;
-    // A read-only open of a directory: the deterministic FS refuses to open a
-    // directory as an ordinary fd (EISDIR), but a raw caller (rustix `Dir`)
-    // legitimately wants a directory fd to `getdents64`. Model it in the SUD
-    // layer, snapshotting through the same `patina_read_dir` the interposed
-    // `opendir` uses.
-    if errno == EISDIR && read_only {
-        return open_dir_fd(path as *const c_char);
-    }
     -errno
 }
 
@@ -1361,6 +1369,38 @@ fn reopen_sud_dir(dir_fd: i64) -> i64 {
         }
     };
     open_dir_fd(stored.as_ptr())
+}
+
+/// Fsync a SUD-private directory descriptor by transiently opening the same path
+/// as an ordinary deterministic-FS directory fd, syncing it, and closing it. The
+/// SUD fd itself is a getdents64 snapshot, not a runtime filesystem handle.
+fn sync_sud_dir_fd(fd: c_int) -> i64 {
+    let stored = {
+        let map = DIR_FDS.lock().unwrap();
+        match map.get(&fd) {
+            Some(dir) => dir.path.clone(),
+            None => return -EBADF,
+        }
+    };
+    // SAFETY: `stored` is an owned, NUL-terminated C string.
+    let opened = unsafe { patina_open(stored.as_ptr(), PATINA_O_READ) };
+    if opened < 0 {
+        // SAFETY: plain thread-local read.
+        return -(unsafe { patina_errno() } as i64);
+    }
+    // SAFETY: no pointers.
+    let sync = unsafe { patina_fsync(opened) };
+    let sync_errno = if sync < 0 {
+        // SAFETY: plain thread-local read.
+        (unsafe { patina_errno() }) as i64
+    } else {
+        0
+    };
+    // If the fsync injected a crash, all ordinary filesystem fds were invalidated;
+    // the close may then fail with EBADF. The fsync result remains authoritative.
+    // SAFETY: no pointers.
+    let _ = unsafe { patina_close(opened) };
+    if sync < 0 { -sync_errno } else { 0 }
 }
 
 /// Copy a guest NUL-terminated C string into an owned [`CString`], or `None` on
@@ -1532,6 +1572,9 @@ fn sys_writev(fd: i64, iov: u64, count: i64) -> i64 {
 fn sys_fsync(fd: i64) -> i64 {
     if let Some(err) = fd_out_of_range(fd) {
         return err;
+    }
+    if is_sud_dir_fd(fd) {
+        return sync_sud_dir_fd(fd as c_int);
     }
     // SAFETY: no pointers.
     ret_i32(unsafe { patina_fsync(fd as c_int) })
@@ -2178,8 +2221,9 @@ fn dt_for_kind(kind: u32) -> u8 {
 /// number of bytes written (0 at end-of-directory) or `-errno`.
 fn sys_getdents64(fd: i64, dirp: u64, count: u64) -> i64 {
     if !is_sud_dir_fd(fd) {
-        // A getdents64 on anything but a SUD directory fd: the deterministic FS
-        // hands out no other directory descriptors.
+        // A getdents64 on anything but a SUD snapshot directory fd is not
+        // supported; ordinary deterministic-FS directory fds are for fstat/fsync,
+        // not Linux directory iteration.
         return -ENOTDIR;
     }
     if dirp == 0 {
@@ -3243,7 +3287,8 @@ mod tests {
             openat_patina_flags(0x8241),
             PATINA_O_WRITE | PATINA_O_CREATE | PATINA_O_TRUNCATE
         );
-        // A directory open decodes read-only (→ EISDIR → SUD dir-fd fallback).
+        // A directory open decodes read-only; the O_DIRECTORY bit is handled by
+        // the caller that creates a SUD getdents-capable directory snapshot.
         assert_eq!(
             openat_patina_flags(O_DIRECTORY | O_LARGEFILE),
             PATINA_O_READ

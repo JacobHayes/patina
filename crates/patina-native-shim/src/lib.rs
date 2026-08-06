@@ -6022,14 +6022,14 @@ mod thread {
         // vehicle, the EVFILT_USER analogue), sharing the virtual-fd space.
         #[cfg(target_os = "linux")]
         eventfds: BTreeMap<c_int, EventFd>,
-        // Virtual directory descriptors for the openat/fdopendir/unlinkat family
+        // Directory descriptors for the openat/fdopendir/unlinkat family
         // (std's `remove_dir_all` opens each directory with `openat(...,
         // O_DIRECTORY)`, hands the fd to `fdopendir`, and removes children with
-        // `unlinkat(dirfd, name, ...)`). A dir fd is a pure fd->path handle: it
-        // carries no I/O, so it needs no readiness state, only the canonical
-        // directory path the *at interposers join child names against. Drawn from
-        // the shared `next_fd` space so a virtual fd is a socket XOR pipe XOR
-        // kqueue/epoll/eventfd XOR dir fd, never two at once.
+        // `unlinkat(dirfd, name, ...)`). A dir fd is an ordinary deterministic-FS
+        // descriptor plus a path handle: fstat/fsync/close route through the FS,
+        // while the *at interposers consult the canonical path to join child names.
+        // FS fds live below the virtual socket/pipe/reactor range, so table
+        // membership keeps the classes distinct.
         dir_fds: BTreeMap<c_int, String>,
         next_fd: c_int,
         next_ephemeral: u16,
@@ -7135,13 +7135,13 @@ mod thread {
             .unwrap_or_default()
     }
 
-    /// Open a virtual directory descriptor bound to `path`, drawn from the shared
-    /// virtual-fd space. The caller (the C `openat(..., O_DIRECTORY)` interposer)
+    /// Open a deterministic read-only directory fd bound to `path`, and register
+    /// that fd as a directory handle for the `fdopendir`/`unlinkat`/`openat`
+    /// interposers. The caller (the C `open/openat(..., O_DIRECTORY)` interposer)
     /// has already validated that `path` names a directory and resolved any
-    /// trailing symlink, so this only records the fd->path mapping the
-    /// `fdopendir`/`unlinkat`/`openat` interposers consult. Does NOT activate the
-    /// thread subsystem: a directory handle carries no scheduling, so a
-    /// single-threaded `remove_dir_all` stays single-threaded.
+    /// trailing symlink. Because the returned fd is also a real filesystem fd,
+    /// `fstat` reports a directory and `fsync` routes to the crash model's
+    /// namespace-durability barrier.
     ///
     /// # Safety
     /// `path` must point to a valid NUL-terminated UTF-8 string.
@@ -7151,10 +7151,17 @@ mod thread {
             Ok(path) => path,
             Err(errno) => return super::fail(errno),
         };
-        let mut state = lock_state();
-        let fd = state.net.next_fd;
-        state.net.next_fd = state.net.next_fd.wrapping_add(1);
-        state.net.dir_fds.insert(fd, path);
+        let fd = match super::with_context(|context| {
+            context.fs_open(&path, super::OpenFlags::read_only())
+        }) {
+            Ok(fd) => fd,
+            Err(errno) => return super::fail(errno),
+        };
+        let fd = match c_int::try_from(fd.0) {
+            Ok(fd) => fd,
+            Err(_) => return super::fail(super::EOVERFLOW),
+        };
+        lock_state().net.dir_fds.insert(fd, path);
         super::set_errno(0);
         fd
     }
@@ -7198,15 +7205,14 @@ mod thread {
         isize::try_from(needed).unwrap_or_else(|_| super::fail(super::EOVERFLOW) as isize)
     }
 
-    /// Release a virtual directory descriptor (the `closedir`/`close` owner). Its
-    /// fd number is not recycled -- the shared counter only advances -- so a
-    /// stale reference fails closed rather than aliasing a later fd. Returns
-    /// `EBADF` for an unknown fd.
+    /// Release a virtual directory descriptor (the `closedir`/`close` owner).
+    /// The fd is also an open deterministic filesystem descriptor, so closing the
+    /// directory handle closes the underlying filesystem handle as POSIX
+    /// `closedir` requires. Returns `EBADF` for an unknown fd.
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_dirclose(fd: c_int) -> c_int {
         if lock_state().net.dir_fds.remove(&fd).is_some() {
-            super::set_errno(0);
-            0
+            super::patina_close(fd)
         } else {
             super::fail(super::EBADF)
         }

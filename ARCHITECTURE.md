@@ -279,7 +279,7 @@ flowchart LR
 Concrete drivers implement capabilities:
 
 - `MemFs`: deterministic in-memory filesystem.
-- `CrashFs`: filesystem model with crash-consistency behavior (checkpoints, seeded torn writes, rename atomicity, directory durability).
+- `CrashFs`: filesystem model with crash-consistency behavior (checkpoints, seeded torn writes, rename atomicity, and directory-fd `fsync` as the namespace-durability barrier).
 - `SimNet`: deterministic virtual network (datagrams and TCP streams, partitions, seeded stream faults).
 - `VirtualClock`: controlled time source and timer queue.
 - `SeededEntropy`: deterministic entropy source.
@@ -395,7 +395,7 @@ Escape hatches are explicit:
 The native ABI shim provides compatibility symbols such as:
 
 ```text
-open, read, write, close, fsync
+open (including read-only directories), read, write, close, fsync
 socket, bind, connect, send, recv
 clock_gettime, gettimeofday, nanosleep
 getrandom, /dev/urandom reads

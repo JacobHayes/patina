@@ -60,6 +60,7 @@ enum WasiDescriptor {
     },
     Directory {
         path: String,
+        handle: Option<Fd>,
         preopen: bool,
         rights: u64,
         inheriting: u64,
@@ -106,6 +107,7 @@ impl Preview1Host {
             3,
             WasiDescriptor::Directory {
                 path: "/".into(),
+                handle: None,
                 preopen: true,
                 rights: WASI_DIRECTORY_RIGHTS,
                 inheriting: WASI_DIRECTORY_RIGHTS | WASI_RIGHT_FD_READ | WASI_RIGHT_FD_WRITE,
@@ -184,6 +186,7 @@ impl Preview1Host {
             fd,
             WasiDescriptor::Directory {
                 path: guest.clone(),
+                handle: None,
                 preopen: true,
                 rights,
                 inheriting,
@@ -637,8 +640,10 @@ impl Preview1Host {
                         .into(),
                 ));
             }
+            let handle = self.context.fs_open(&path, OpenFlags::read_only())?;
             return self.allocate_descriptor(WasiDescriptor::Directory {
                 path,
+                handle: Some(handle),
                 preopen: false,
                 rights: options.rights,
                 inheriting: options.inheriting,
@@ -669,7 +674,14 @@ impl Preview1Host {
                 self.descriptors.remove(&fd);
                 Ok(())
             }
-            Some(WasiDescriptor::Directory { preopen: false, .. }) => {
+            Some(WasiDescriptor::Directory {
+                handle,
+                preopen: false,
+                ..
+            }) => {
+                if let Some(handle) = *handle {
+                    self.context.fs_close(handle)?;
+                }
                 self.descriptors.remove(&fd);
                 Ok(())
             }
@@ -684,6 +696,39 @@ impl Preview1Host {
             }
             _ => Err(WasiHostError::DeniedFd(fd)),
         }
+    }
+
+    fn fd_sync(&mut self, fd: u32) -> Result<(), WasiHostError> {
+        let (handle, close_after) = match self.descriptors.get(&fd) {
+            Some(WasiDescriptor::File { handle, .. }) => (*handle, false),
+            Some(WasiDescriptor::Directory {
+                handle: Some(handle),
+                ..
+            }) => (*handle, false),
+            Some(WasiDescriptor::Directory {
+                path, handle: None, ..
+            }) => {
+                let path = path.clone();
+                (self.context.fs_open(&path, OpenFlags::read_only())?, true)
+            }
+            _ => return Err(WasiHostError::DeniedFd(fd)),
+        };
+        let synced = self.context.fs_sync(handle);
+        if close_after {
+            match self.context.fs_close(handle) {
+                Err(error)
+                    if !matches!(
+                        error,
+                        RuntimeError::Effect(ref effect)
+                            if effect.code == ErrorCode::InvalidHandle
+                    ) =>
+                {
+                    return Err(error.into());
+                }
+                _ => {}
+            }
+        }
+        synced.map_err(Into::into)
     }
 
     fn fd_read(&mut self, fd: u32, max_len: usize) -> Result<Vec<u8>, WasiHostError> {
@@ -889,21 +934,25 @@ impl Preview1Host {
                 let metadata = self.context.fs_fd_metadata(*handle)?;
                 Ok((metadata, path.clone()))
             }
-            Some(WasiDescriptor::Directory { path, .. }) => {
+            Some(WasiDescriptor::Directory { path, handle, .. }) => {
                 let path = path.clone();
-                let metadata = match self.context.fs_metadata(&path) {
-                    Ok(metadata) => metadata,
-                    Err(RuntimeError::Effect(error)) if error.code == ErrorCode::NotFound => {
-                        FsMetadata {
-                            kind: FsEntryKind::Directory,
-                            len: 0,
-                            ino: 0,
-                            nlink: 1,
-                            atime_nanos: 0,
-                            mtime_nanos: 0,
+                let metadata = if let Some(handle) = handle {
+                    self.context.fs_fd_metadata(*handle)?
+                } else {
+                    match self.context.fs_metadata(&path) {
+                        Ok(metadata) => metadata,
+                        Err(RuntimeError::Effect(error)) if error.code == ErrorCode::NotFound => {
+                            FsMetadata {
+                                kind: FsEntryKind::Directory,
+                                len: 0,
+                                ino: 0,
+                                nlink: 1,
+                                atime_nanos: 0,
+                                mtime_nanos: 0,
+                            }
                         }
+                        Err(error) => return Err(error.into()),
                     }
-                    Err(error) => return Err(error.into()),
                 };
                 Ok((metadata, path))
             }
@@ -1905,17 +1954,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
         MODULE,
         "fd_datasync",
         |mut caller: Caller<'_, Preview1Host>, fd: i32| -> Result<i32, WasmiError> {
-            let handle = match caller.data().descriptors.get(&(fd as u32)) {
-                Some(WasiDescriptor::File { handle, .. }) => *handle,
-                _ => return Ok(WASI_ERRNO_BADF),
-            };
-            match wasi_call(
-                caller
-                    .data_mut()
-                    .context
-                    .fs_sync(handle)
-                    .map_err(Into::into),
-            )? {
+            match wasi_call(caller.data_mut().fd_sync(fd as u32))? {
                 Ok(()) => Ok(WASI_ERRNO_SUCCESS),
                 Err(errno) => Ok(errno),
             }
@@ -1925,17 +1964,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
         MODULE,
         "fd_sync",
         |mut caller: Caller<'_, Preview1Host>, fd: i32| -> Result<i32, WasmiError> {
-            let handle = match caller.data().descriptors.get(&(fd as u32)) {
-                Some(WasiDescriptor::File { handle, .. }) => *handle,
-                _ => return Ok(WASI_ERRNO_BADF),
-            };
-            match wasi_call(
-                caller
-                    .data_mut()
-                    .context
-                    .fs_sync(handle)
-                    .map_err(Into::into),
-            )? {
+            match wasi_call(caller.data_mut().fd_sync(fd as u32))? {
                 Ok(()) => Ok(WASI_ERRNO_SUCCESS),
                 Err(errno) => Ok(errno),
             }
@@ -4092,6 +4121,35 @@ mod tests {
             fdflags: 0,
             follow_symlink: true,
         }
+    }
+
+    fn directory_open() -> WasiPathOpen {
+        WasiPathOpen {
+            oflags: WASI_OFLAG_DIRECTORY,
+            rights: 0,
+            inheriting: 0,
+            fdflags: 0,
+            follow_symlink: true,
+        }
+    }
+
+    #[test]
+    fn directory_fd_sync_commits_namespace_durability() {
+        let context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+        let mut host = Preview1Host::new(context);
+        let tmp = host.path_open(3, b"ns.tmp", create_write_open()).unwrap();
+        host.fd_write(tmp, &[b"stable"]).unwrap();
+        host.fd_sync(tmp).unwrap();
+        host.fd_close(tmp).unwrap();
+        host.context.fs_rename("/ns.tmp", "/final").unwrap();
+
+        let root = host.path_open(3, b".", directory_open()).unwrap();
+        host.fd_sync(root).unwrap();
+        host.fd_close(root).unwrap();
+        host.context.fs_crash().unwrap();
+
+        let final_fd = host.path_open(3, b"final", read_open()).unwrap();
+        assert_eq!(host.fd_read(final_fd, 16).unwrap(), b"stable");
     }
 
     #[test]

@@ -7943,6 +7943,7 @@ fn main() {
         let f = OpenOptions::new().create(true).write(true).open(path).unwrap();
         f.write_all_at(&[b'A'; 16], 0).unwrap();
         f.sync_all().unwrap();
+        File::open("/").unwrap().sync_all().unwrap();
     }
     {
         let f = OpenOptions::new().write(true).open(path).unwrap();
@@ -8069,6 +8070,143 @@ fn native_fs_crash_image_is_seed_live_and_deterministic() {
             "crash image is not deterministic for seed {seed}"
         );
     }
+}
+
+// A native guest that follows the parent-directory fsync pattern for namespace
+// durability: write tmp, fsync file, rename, open parent directory read-only,
+// fstat it, fsync it, then recover. Without the parent fsync, a crash after the
+// rename can lose the destination; with the parent fsync, a crash after the dir
+// fsync preserves it. This is the SlateDB local-object-store pattern that used
+// to be impossible because File::open(parent_dir) returned EISDIR under Patina.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const NAMESPACE_DURABILITY_SOURCE: &str = r#"
+use std::env;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+
+fn main() {
+    let with_dir_fsync = env::args().any(|arg| arg == "--dir-fsync");
+    let tmp = "/tmp/patina-ns.tmp";
+    let final_path = "/tmp/patina-ns.final";
+    let _ = fs::remove_file(tmp);
+    let _ = fs::remove_file(final_path);
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(tmp)
+        .unwrap();
+    file.write_all(b"stable").unwrap();
+    file.sync_all().unwrap();
+    fs::rename(tmp, final_path).unwrap();
+
+    if with_dir_fsync {
+        let dir = File::open("/tmp").unwrap();
+        println!("dir_is_dir={}", dir.metadata().unwrap().is_dir());
+        dir.sync_all().unwrap();
+    }
+    drop(file);
+
+    let mut contents = String::new();
+    match File::open(final_path) {
+        Ok(mut file) => {
+            file.read_to_string(&mut contents).unwrap();
+            println!("NS_RESULT present {contents}");
+        }
+        Err(error) => println!("NS_RESULT missing {:?}", error.kind()),
+    }
+}
+"#;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_directory_fsync_guards_namespace_durability_and_replays() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("namespace.rs");
+    fs::write(&source, NAMESPACE_DURABILITY_SOURCE).unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("namespace");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    let run_stdout = |args: &[&str]| -> String {
+        String::from_utf8_lossy(&invoke_in(workspace, args).stdout).into_owned()
+    };
+    let bin_str = bin.to_str().unwrap();
+
+    // RED detector: without the parent-directory fsync, a crash after the rename
+    // (the file close immediately after rename) loses the destination. Same seed
+    // repeats byte-identically.
+    let lost_args = ["run", bin_str, "--seed", "5", "--fs-crash-at", "close:1"];
+    let lost_a = run_stdout(&lost_args);
+    let lost_b = run_stdout(&lost_args);
+    assert_eq!(lost_a, lost_b, "same-seed namespace crash outcome changed");
+    assert!(
+        lost_a.contains("NS_RESULT missing"),
+        "missing parent fsync should be able to lose the rename:\n{lost_a}"
+    );
+
+    // Guarded green: the same workload with parent-dir fsync survives a crash
+    // immediately after the directory fsync.
+    let guarded = run_stdout(&[
+        "run",
+        bin_str,
+        "--seed",
+        "5",
+        "--fs-crash-at",
+        "sync:2",
+        "--",
+        "--dir-fsync",
+    ]);
+    assert!(
+        guarded.contains("dir_is_dir=true"),
+        "fstat did not report a directory:\n{guarded}"
+    );
+    assert!(
+        guarded.contains("NS_RESULT present stable"),
+        "parent dir fsync should preserve the rename:\n{guarded}"
+    );
+
+    // A dir-fsync-bearing trace records and replays byte-identically.
+    let trace = directory.path().join("namespace.patina");
+    let recorded = invoke_in(
+        workspace,
+        &[
+            "run",
+            bin_str,
+            "--seed",
+            "5",
+            "--record",
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "namespace-dir-fsync",
+            "--",
+            "--dir-fsync",
+        ],
+    );
+    let replayed = invoke_in(
+        workspace,
+        &[
+            "replay",
+            bin_str,
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "namespace-dir-fsync",
+        ],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&recorded.stdout),
+        String::from_utf8_lossy(&replayed.stdout),
+        "directory-fsync trace replay diverged"
+    );
 }
 
 // ---------------------------------------------------------------------------

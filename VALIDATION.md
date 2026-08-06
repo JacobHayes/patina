@@ -195,7 +195,7 @@ Required before claiming broad libc/POSIX compatibility or stable traces:
 
 - broader libc network/process symbol *coverage* (modeling more behavior): the remaining items are either a documented non-goal (process/spawn symbols, which the audit rejects) or tracked in Slice 4 (non-zero TCP latency; the async readiness reactors are delivered). Unsupported-symbol *diagnostics* are complete — the strict audit default-denies any unmodeled import as `unknown-import`, interposed-but-unsupported operations fail closed at runtime through `patina_posix_deny` (ENOSYS plus a loud `patina: … failing closed` line), and the `unknown_import_probe` gate proves the rejection fires.
 
-`CrashFs` modeling simplifications stated honestly: directory renames are always atomic (no subtree tearing); directory-durability loss covers explicitly created entries, not implicitly created parents; defaults preserve the prior conservative behavior (4096-byte granularity, torn probability 1.0, atomic renames, directory durability off).
+`CrashFs` modeling simplifications stated honestly: directory renames are always atomic (no subtree tearing); directory-durability loss covers explicitly created entries, not implicitly created parents; defaults are conservative (4096-byte granularity, torn probability 1.0, atomic renames, and namespace changes lost unless the governing directory is fsynced).
 
 ### V6: cooperative-SUT SDK
 

@@ -8,6 +8,14 @@ use patina_dst_abi::{ClockKind, OpenFlags, SendDisposition};
 use patina_dst_runtime::{Context, CrashOp, RuntimeConfig, TornGranularity};
 use tempfile::tempdir;
 
+fn sync_directory(context: &mut Context, path: &str) {
+    // Do not close the directory fd here: several tests pin `--fs-crash-at
+    // close:1` to the subsequent file close, so adding an earlier close would
+    // move the planted crash point away from the data-durability assertion.
+    let dir = context.fs_open(path, OpenFlags::read_only()).unwrap();
+    context.fs_sync(dir).unwrap();
+}
+
 /// Append `records` framed with a trailing marker to a write-ahead log without
 /// syncing, mirroring a missing-fsync commit protocol, then return how many
 /// bytes survive a reopen. The write handle is closed before the reopen so a
@@ -22,7 +30,9 @@ fn write_wal_and_reopen(seed: u64, crash: Option<CrashOp>) -> usize {
         .fs_open("/commit.log", OpenFlags::create_truncate_write())
         .unwrap();
     context.fs_write(fd, b"durable-record-0001").unwrap();
-    // No fs_sync: the record is announced durable but never flushed.
+    // Make the namespace entry durable but do NOT fsync the file data: the
+    // record is announced durable but never flushed.
+    sync_directory(&mut context, "/");
     context.fs_close(fd).unwrap();
 
     let fd = context
@@ -57,6 +67,7 @@ fn crash_injection_replays_self_contained_without_re_supplying_flags() {
             .fs_open("/commit.log", OpenFlags::create_truncate_write())
             .unwrap();
         context.fs_write(fd, b"durable-record-0001").unwrap();
+        sync_directory(&mut context, "/");
         context.fs_close(fd).unwrap();
         let fd = context
             .fs_open("/commit.log", OpenFlags::read_only())
@@ -79,6 +90,7 @@ fn crash_injection_replays_self_contained_without_re_supplying_flags() {
         .fs_open("/commit.log", OpenFlags::create_truncate_write())
         .unwrap();
     replay.fs_write(fd, b"durable-record-0001").unwrap();
+    sync_directory(&mut replay, "/");
     replay.fs_close(fd).unwrap();
     let fd = replay
         .fs_open("/commit.log", OpenFlags::read_only())
@@ -103,6 +115,7 @@ fn replay_with_matching_flags_is_still_accepted() {
             .fs_open("/commit.log", OpenFlags::create_truncate_write())
             .unwrap();
         context.fs_write(fd, b"durable-record-0001").unwrap();
+        sync_directory(&mut context, "/");
         context.fs_close(fd).unwrap();
         let fd = context
             .fs_open("/commit.log", OpenFlags::read_only())
@@ -119,6 +132,7 @@ fn replay_with_matching_flags_is_still_accepted() {
         .fs_open("/commit.log", OpenFlags::create_truncate_write())
         .unwrap();
     replay.fs_write(fd, b"durable-record-0001").unwrap();
+    sync_directory(&mut replay, "/");
     replay.fs_close(fd).unwrap();
     let fd = replay
         .fs_open("/commit.log", OpenFlags::read_only())
@@ -143,6 +157,7 @@ fn replay_with_a_different_crash_point_fails_closed() {
             .fs_open("/commit.log", OpenFlags::create_truncate_write())
             .unwrap();
         context.fs_write(fd, b"durable-record-0001").unwrap();
+        sync_directory(&mut context, "/");
         context.fs_close(fd).unwrap();
         let fd = context
             .fs_open("/commit.log", OpenFlags::read_only())
@@ -182,6 +197,7 @@ fn byte_granularity_crash_records_a_torn_image_and_replays_self_contained() {
             .unwrap();
         context.fs_write(fd, &[b'A'; 4096]).unwrap();
         context.fs_sync(fd).unwrap();
+        sync_directory(context, "/");
         // The final unsynced write; the injected crash fires immediately after.
         context.fs_write(fd, &[b'B'; 4096]).unwrap();
         let fd = context.fs_open("/db", OpenFlags::read_only()).unwrap();
