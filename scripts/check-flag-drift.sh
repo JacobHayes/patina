@@ -119,6 +119,10 @@ ALLOWED_FLAGS='
 --update
 --dry-run
 --gen
+--block
+--max
+--seeds
+--patina
 '
 # -- cargo / rustc / rustup / linker tool flags --
 # --all/--all-targets/--check/--no-deps/--workspace/--locked: cargo fmt/clippy/
@@ -140,6 +144,8 @@ ALLOWED_FLAGS='
 # --update: audit-corpus run.sh's re-record mode.
 # --dry-run: the fuzz-sweep/wasi-buggify-sweep scripts' no-run mode.
 # --gen: fuzz-sweep.sh's single-generation selector.
+# --block/--max/--seeds/--patina: guided-efficacy run.sh's own probe options
+#   (generation step, per-seed budget, seed-base count, binary override).
 # (--selftest and --seed are REAL registry flags — not allowlisted here.)
 
 tmpdir=$(mktemp -d)
