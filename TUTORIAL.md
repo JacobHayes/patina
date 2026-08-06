@@ -71,7 +71,7 @@ the program behaves normally and ships with the instrumentation inert.
 
 ```
 $ cargo patina build ./ledger --output ./ledger/ledger
-PATINA_NATIVE_BUILD output=/.../ledger/ledger
+PATINA_NATIVE_BUILD output=./ledger/ledger
 ```
 
 `build` links the deterministic shim below your program and injects the cfgs that

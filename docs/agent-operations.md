@@ -96,6 +96,12 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
 - Wall-clock timings taken while several batteries run concurrently are
   contention-inflated. Label them as such; only quote uncontended runs as
   representative durations.
+- Any harness or testbed that takes a binary path (a `--patina PATH`-style
+  option) can silently measure a STALE binary after a source change and
+  reproduce the pre-change numbers exactly. Rebuild before measuring, and
+  prefer a cheap behavioral discriminator that would differ across the change
+  (for the guided scheduler, the exploit-ancestor distribution) over trusting
+  that the rebuild happened.
 
 ## Cross-platform and campaign lessons
 

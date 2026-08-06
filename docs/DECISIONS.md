@@ -202,6 +202,41 @@ cluster so the fixes have citable symptom records.
   regression fix chose a local `extern` over `-D_DEFAULT_SOURCE` so the
   shared probe flags don't change the visible glibc surface for other
   probes.
+- **2026-08-06 (arc-completion round) — `--guided` ships with a measured
+  no-advantage verdict.** The mandated efficacy demonstration (a purpose-built
+  staircase fixture, `testbeds/guided-efficacy/`) found the initial ancestor
+  weighting actively harmful (bootstrap-generation dominance, ~81% of the
+  exploitation budget on one configuration); after the bootstrap-exclusion
+  fix, the re-measured verdict is NO CONSISTENT ADVANTAGE (native: slower 2 /
+  tied 4; WASI: slower 2 / tied 3 / faster 1 — including one seed the default
+  sweep never solved). `--guided` stays landed, documented neutrally with an
+  explicit caveat in llms.txt and the arc doc; the testbed gate exits 1 so no
+  efficacy claim can land without earning it. Recency weighting was tried and
+  removed (changed zero seed bases); rarity weighting was rejected because it
+  requires cumulative state that cannot be rewound to a generation boundary
+  without breaking guided-resume determinism.
+- **2026-08-06 (arc-completion round) — split shim/guest toolchains refuse
+  with NO escape hatch.** Unlike the audit `--allow-unsupported-symbols`
+  hatch, a guest carrying two libstds is never a valid build (on macOS the
+  link even SUCCEEDS silently), so the refusal is unconditional. Known
+  fail-open residual, accepted: a per-directory `.cargo/config.toml`
+  `build.rustc` split is not probed — only `RUSTC` and rustup's ambient
+  per-directory resolution are.
+- **2026-08-06 (arc-completion round) — the buggify-fingerprint coherence
+  guard stays scoped to record/replay; `--fingerprint` on a seeded native run
+  is refused, not ignored.** A seeded run sets no `PATINA_FINGERPRINT`, reads
+  none, and produces no coverage-claiming artifact; every campaign generation
+  records, so the coverage-claiming path is already guarded. Rather than
+  leave the flag silently inert there (inert knobs are bugs), it now requires
+  `--record` via the registry's `needs` mechanism, advertised in the JSON
+  help.
+- **2026-08-06 (arc-completion round) — campaign gains `--dns-entry` beyond
+  the Wave D brief.** Without a host table, every campaign generation
+  resolves NXDOMAIN by semantics, no DNS fault is ever eligible, and
+  `VACUOUS_DNS_FAULT` could never fire — the band was inert by construction.
+  One registry definition shared with `run`; recorded in the out-dir spec
+  (key omitted when empty so existing out-dirs resume byte-identically);
+  refused on continuations and for WASI artifacts.
 - **2026-08-06 (landing round) — cdylib fix landed as link-arg scoping;
   `-fPIC` dropped; personality trigger unconfirmed.** Guest builds use
   `cargo rustc` so shim objects/staticlib/`--wrap`/`-lc` reach only the
