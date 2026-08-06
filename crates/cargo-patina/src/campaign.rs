@@ -47,6 +47,7 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
+use crate::aux_store::{AuxFoldDecision, fold_decision, validate_resume_watermark};
 use crate::coverage::{CampaignCoverageStore, CoverageArtifact, FoldOutcome, top_uncovered_crates};
 use crate::sdk_report::{CoverageTally, ExercisedSite};
 use crate::{CliError, reject_inline, required_value, set_once, split_opt};
@@ -1646,13 +1647,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
             &state.spec.guest_args,
             effective_timeout_secs,
         )?;
-        coverage
-            .observe_generation(generation, seed, &stderr)
-            .map_err(|error| {
-                CliError(format!(
-                    "generation {generation} has malformed PATINA_SDK_REPORT: {error}"
-                ))
-            })?;
+        let _sites_fold = fold_sites_generation(&mut coverage, generation, seed, &stderr)?;
         let _edge_fold = fold_edge_coverage_generation(
             &mut edge_coverage,
             generation,
@@ -1830,6 +1825,30 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
     Ok(exit_code)
 }
 
+fn fold_sites_generation(
+    coverage: &mut CoverageTally,
+    generation: u64,
+    seed: u64,
+    stderr: &str,
+) -> Result<AuxFoldDecision, CliError> {
+    let decision = fold_decision(
+        "campaign sites store",
+        "generations_observed",
+        coverage.generations_observed,
+        generation,
+    )?;
+    if decision == AuxFoldDecision::Apply {
+        coverage
+            .observe_generation(generation, seed, stderr)
+            .map_err(|error| {
+                CliError(format!(
+                    "generation {generation} has malformed PATINA_SDK_REPORT: {error}"
+                ))
+            })?;
+    }
+    Ok(decision)
+}
+
 fn fold_edge_coverage_generation(
     edge_coverage: &mut EdgeCoverageState,
     generation: u64,
@@ -1839,10 +1858,7 @@ fn fold_edge_coverage_generation(
         return Ok(None);
     };
     let path = coverage_map_path.expect("active coverage has a generation path");
-    let skip_by_watermark = store
-        .meta()
-        .is_some_and(|meta| generation < meta.generations_applied);
-    if skip_by_watermark {
+    if store.fold_decision(generation)? == AuxFoldDecision::SkipAlreadyApplied {
         let _ = fs::remove_file(path);
         return Ok(Some(FoldOutcome {
             generation,
@@ -2279,9 +2295,6 @@ fn load_campaign_state(path: &Path) -> Result<CampaignState, CliError> {
 
 fn load_coverage_tally(path: &Path, generations_done: u64) -> Result<CoverageTally, CliError> {
     if !path.exists() {
-        if generations_done == 0 {
-            return Ok(CoverageTally::default());
-        }
         return Err(CliError(format!(
             "campaign out-dir is missing sites store {} for {} already-recorded generations; refusing to resume partially",
             path.display(),
@@ -2306,14 +2319,14 @@ fn load_coverage_tally(path: &Path, generations_done: u64) -> Result<CoverageTal
             path.display()
         ))
     })?;
-    if tally.generations_observed != generations_done {
-        return Err(CliError(format!(
-            "campaign sites store {} observed {} generations but campaign-state cursor is {}; refusing to resume partially",
-            path.display(),
-            tally.generations_observed,
-            generations_done
-        )));
-    }
+    let label = format!("campaign sites store {}", path.display());
+    validate_resume_watermark(
+        &label,
+        "generations_observed",
+        tally.generations_observed,
+        generations_done,
+        "per-generation SDK reports are transient, so refusing to resume with missing sites folds",
+    )?;
     Ok(tally)
 }
 
@@ -3388,6 +3401,70 @@ mod tests {
         let message = error(&["--frob", m]);
         assert!(message.contains("--frob"), "{message}");
         assert!(message.contains(m), "{message}");
+    }
+
+    #[test]
+    fn sites_fold_is_watermark_idempotent() {
+        let stderr = "PATINA_SDK_REPORT enabled=1 \
+             site=oracle|sometimes|a1|e3|f2|r1|s1|v0|k-|@src/main.rs:9";
+        let mut coverage = CoverageTally::default();
+        let first = fold_sites_generation(&mut coverage, 0, 99, stderr).expect("first fold");
+        assert_eq!(first, AuxFoldDecision::Apply);
+        let after_first = coverage.clone();
+        let second = fold_sites_generation(&mut coverage, 0, 99, stderr).expect("watermark skip");
+        assert_eq!(second, AuxFoldDecision::SkipAlreadyApplied);
+        assert_eq!(
+            coverage, after_first,
+            "duplicate sites fold must not double-count evals/fires/generation tallies"
+        );
+        let site = coverage.sites.get("oracle").unwrap();
+        assert_eq!(site.evals, 3);
+        assert_eq!(site.fires, 2);
+        assert_eq!(site.registered_gens, 1);
+        assert_eq!(coverage.generations_observed, 1);
+    }
+
+    #[test]
+    fn sites_load_validates_resume_watermark() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sites.json");
+        let coverage = CoverageTally {
+            generations_observed: 2,
+            ..CoverageTally::default()
+        };
+        write_sites_store(&path, &coverage).unwrap();
+
+        load_coverage_tally(&path, 1).expect("one-generation tear ahead is resumable");
+        load_coverage_tally(&path, 2).expect("aligned cursor is resumable");
+
+        let behind = load_coverage_tally(&path, 3).unwrap_err();
+        assert!(
+            behind.0.contains("missing sites folds"),
+            "unexpected error: {behind}"
+        );
+        let ahead = load_coverage_tally(&path, 0).unwrap_err();
+        assert!(
+            ahead
+                .0
+                .contains("at most one checkpoint-tear generation ahead"),
+            "unexpected error: {ahead}"
+        );
+
+        let mut bad_schema = coverage.to_json();
+        bad_schema["schema"] = "patina.campaign.sites/v999".into();
+        fs::write(&path, serde_json::to_string_pretty(&bad_schema).unwrap()).unwrap();
+        let schema = load_coverage_tally(&path, 2).unwrap_err();
+        assert!(
+            schema.0.contains("unsupported schema"),
+            "unexpected error: {schema}"
+        );
+
+        fs::remove_file(&path).unwrap();
+        let missing = load_coverage_tally(&path, 0).unwrap_err();
+        assert!(
+            missing.0.contains("missing sites store"),
+            "unexpected error: {missing}"
+        );
     }
 
     #[test]

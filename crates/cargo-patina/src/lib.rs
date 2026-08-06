@@ -51,6 +51,7 @@ use sha2::{Digest, Sha256};
 // `--output json` envelope. Both are read-only consumers of trace/runtime
 // semantics — they never record, replay, or mutate a trace — so rendering or
 // emitting an envelope cannot perturb replay hashes.
+mod aux_store;
 mod campaign;
 mod coverage;
 mod help;

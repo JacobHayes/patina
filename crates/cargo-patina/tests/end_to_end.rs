@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -5,6 +6,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 
 /// Serializes cargo-patina invocations that compile through cargo/rustc. Under
@@ -2485,6 +2487,47 @@ fn campaign_json_stdout(output: &Output) -> serde_json::Value {
     })
 }
 
+fn campaign_coverage_file_hashes(out_dir: &Path) -> BTreeMap<String, String> {
+    let coverage_dir = out_dir.join("coverage");
+    assert!(
+        coverage_dir.is_dir(),
+        "campaign coverage store is missing at {}",
+        coverage_dir.display()
+    );
+    let mut hashes = BTreeMap::new();
+    collect_file_hashes(&coverage_dir, &coverage_dir, &mut hashes);
+    assert!(
+        hashes.contains_key("meta.json")
+            && hashes.contains_key("union.bits")
+            && hashes.contains_key("hits.u64le")
+            && hashes.contains_key("sites.i64le"),
+        "coverage store did not contain every checkpoint file: {hashes:?}"
+    );
+    hashes
+}
+
+fn collect_file_hashes(root: &Path, dir: &Path, hashes: &mut BTreeMap<String, String>) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            collect_file_hashes(root, &path, hashes);
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let bytes = fs::read(&path).unwrap();
+        let digest = Sha256::digest(&bytes);
+        let hex = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        hashes.insert(rel, hex);
+    }
+}
+
 fn sometimes_gate_wat(label: &str, satisfied: bool) -> Vec<u8> {
     let bit = if satisfied { 1 } else { 0 };
     let wat = format!(
@@ -2997,6 +3040,136 @@ fn campaign_extend_equals_fresh_campaign() {
             .as_str()
             .unwrap()
             .ends_with("campaign-state.json")
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn campaign_extend_reproduces_aux_store_bytes_for_sites_and_coverage() {
+    let workspace = native_workspace();
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("aux_guest.rs");
+    let guest = directory.path().join("aux-guest");
+    fs::write(
+        &source,
+        r#"fn main() {
+    eprintln!("PATINA_SDK_REPORT enabled=1 site=aux|sometimes|a1|e3|f1|r1|s1|v0|k-|@src/main.rs:1");
+    let mut sum = 0u64;
+    for i in 0..128u64 {
+        sum = sum.wrapping_add(i.rotate_left((i % 17) as u32));
+        std::hint::black_box(sum);
+    }
+    println!("AUX_DONE {sum}");
+}
+"#,
+    )
+    .unwrap();
+    let built = invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            guest.to_str().unwrap(),
+            "--yield-points",
+        ],
+    );
+    assert!(
+        built.status.success(),
+        "building aux coverage guest failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&built.stdout),
+        String::from_utf8_lossy(&built.stderr)
+    );
+
+    let campaign_args = |out: &Path, gens: u64| {
+        vec![
+            "campaign".to_string(),
+            guest.to_str().unwrap().to_string(),
+            "--gens".to_string(),
+            gens.to_string(),
+            "--progress-every".to_string(),
+            "1".to_string(),
+            "--out-dir".to_string(),
+            out.to_str().unwrap().to_string(),
+        ]
+    };
+    let run = |owned: Vec<String>| {
+        let refs = owned.iter().map(String::as_str).collect::<Vec<_>>();
+        invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, &refs)
+    };
+    let concat_gen_lines = |outputs: &[&str]| {
+        outputs
+            .iter()
+            .map(|text| campaign_gen_lines(text))
+            .filter(|lines| !lines.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let fresh_out = directory.path().join("fresh");
+    let fresh = run(campaign_args(&fresh_out, 6));
+    assert!(
+        fresh.status.success(),
+        "fresh aux campaign failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&fresh.stdout),
+        String::from_utf8_lossy(&fresh.stderr)
+    );
+    let fresh_stdout = String::from_utf8_lossy(&fresh.stdout).into_owned();
+    let fresh_sites = fs::read_to_string(fresh_out.join("sites.json")).unwrap();
+    let fresh_site_json: serde_json::Value = serde_json::from_str(&fresh_sites).unwrap();
+    assert_eq!(fresh_site_json["generations_observed"], 6);
+    assert_eq!(fresh_site_json["sites"][0]["registered_gens"], 6);
+    let fresh_coverage_hashes = campaign_coverage_file_hashes(&fresh_out);
+    let fresh_state = campaign_state_without_invocations(&fresh_out.join("campaign-state.json"));
+
+    let split_out = directory.path().join("split");
+    let split1 = run(campaign_args(&split_out, 2));
+    assert!(
+        split1.status.success(),
+        "first split aux segment failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&split1.stdout),
+        String::from_utf8_lossy(&split1.stderr)
+    );
+    let split2 = run(vec![
+        "campaign".to_string(),
+        "--extend".to_string(),
+        "4".to_string(),
+        "--out-dir".to_string(),
+        split_out.to_str().unwrap().to_string(),
+        "--progress-every".to_string(),
+        "1".to_string(),
+    ]);
+    assert!(
+        split2.status.success(),
+        "extended aux campaign failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&split2.stdout),
+        String::from_utf8_lossy(&split2.stderr)
+    );
+    let split1_stdout = String::from_utf8_lossy(&split1.stdout);
+    let split2_stdout = String::from_utf8_lossy(&split2.stdout);
+    assert_eq!(
+        campaign_gen_lines(&fresh_stdout),
+        concat_gen_lines(&[&split1_stdout, &split2_stdout]),
+        "aux k-then-extend must reproduce the fresh per-generation stream"
+    );
+    assert_eq!(
+        fresh_sites,
+        fs::read_to_string(split_out.join("sites.json")).unwrap(),
+        "aux k-then-extend must reproduce sites.json bytes"
+    );
+    assert_eq!(
+        fresh_coverage_hashes,
+        campaign_coverage_file_hashes(&split_out),
+        "aux k-then-extend must reproduce coverage store file hashes"
+    );
+    println!(
+        "AUX_STORE_BYTE_EQUALITY sites.json_bytes={} coverage_hashes={fresh_coverage_hashes:?}",
+        fresh_sites.len()
+    );
+    assert_eq!(
+        fresh_state,
+        campaign_state_without_invocations(&split_out.join("campaign-state.json")),
+        "aux k-then-extend must reproduce persisted state except audit invocations"
     );
 }
 

@@ -1,7 +1,8 @@
 # Campaign steering: resumable + extendable campaigns
 
-Status: design approved 2026-07-30; Stages 1+2 implemented in the current
-campaign-steering arc; Stage 3 remains a later wave. Lands as
+Status: design approved 2026-07-30; Stages 1+2 implemented the core
+campaign-state and continuation surface; Stage 3 implemented the shared
+aux-store watermark contract for `sites.json` and `coverage/`. Lands as
 `docs/arcs/campaign-steering.md`.
 
 ## 1. Problem and settled decision
@@ -456,10 +457,10 @@ summary/heartbeat/envelope (+`invocations`, `campaign_state` pointer),
 **RED-proved via both planted breaks, then green** — plus the
 interruption-resume leg and the negative-path battery.
 
-**Stage 3 — aux-state contract.** The watermark/skip resume rule as a small
-shared helper, consumed by the coverage-depth and sometimes-gate arcs when
-they land their files; the equality test grows their byte-equality
-assertions then.
+**Stage 3 — aux-state contract.** Implemented: the watermark/skip resume rule
+is a small shared helper consumed by both auxiliary stores (`sites.json` and
+`coverage/`), and the equality test asserts byte-identical `sites.json` plus
+matching coverage-store file hashes.
 
 **Verification tier: CLI-only** — `cargo test -p cargo-patina` (unit + the
 campaign e2e battery) plus `cargo patina campaign --selftest`. Justification

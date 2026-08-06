@@ -15,6 +15,7 @@ use object::{Object, ObjectSymbol, SymbolKind};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::aux_store::{AuxFoldDecision, fold_decision, validate_resume_watermark};
 use crate::output;
 use crate::rollup::{Rollup, RollupLeaf, build_rollup};
 use crate::{CliError, required_value, set_once, split_opt};
@@ -452,6 +453,34 @@ impl CampaignCoverageMeta {
                 self.edges_covered, self.edges_total
             ));
         }
+        let mut guard_offset = 0u64;
+        let mut pc_offset = 0u64;
+        for range in &self.ranges {
+            if range.guard_offset != guard_offset || range.pc_offset != pc_offset {
+                return Err(format!(
+                    "coverage range table is not contiguous at guard_offset={} pc_offset={}; expected guards={} pcs={}",
+                    range.guard_offset, range.pc_offset, guard_offset, pc_offset
+                ));
+            }
+            if range.guard_count != range.pc_count {
+                return Err(format!(
+                    "coverage range table has guard_count={} but pc_count={}",
+                    range.guard_count, range.pc_count
+                ));
+            }
+            guard_offset = guard_offset
+                .checked_add(range.guard_count)
+                .ok_or_else(|| "coverage range guard count overflows u64".to_string())?;
+            pc_offset = pc_offset
+                .checked_add(range.pc_count)
+                .ok_or_else(|| "coverage range pc count overflows u64".to_string())?;
+        }
+        if guard_offset != self.edges_total || pc_offset != self.edges_total {
+            return Err(format!(
+                "coverage range table covers guards={guard_offset} pcs={pc_offset}, expected edges_total={}",
+                self.edges_total
+            ));
+        }
         if let Some(last) = self.last_new_edge_gen {
             if last >= self.generations_applied {
                 return Err(format!(
@@ -587,18 +616,13 @@ impl CampaignCoverageStore {
                 meta.plateau_window, plateau_window
             )));
         }
-        if meta.generations_applied < campaign_generations_done {
-            return Err(CliError(format!(
-                "coverage state applied {} generations but campaign-state cursor is {}; per-generation covmaps are transient, so refusing to resume with missing coverage folds",
-                meta.generations_applied, campaign_generations_done
-            )));
-        }
-        if meta.generations_applied > campaign_generations_done.saturating_add(1) {
-            return Err(CliError(format!(
-                "coverage state applied {} generations but campaign-state cursor is {}; expected at most one checkpoint tear, refusing corrupt out-dir",
-                meta.generations_applied, campaign_generations_done
-            )));
-        }
+        validate_resume_watermark(
+            "coverage state",
+            "generations_applied",
+            meta.generations_applied,
+            campaign_generations_done,
+            "per-generation covmaps are transient, so refusing to resume with missing coverage folds",
+        )?;
         let edge_count = usize::try_from(meta.edges_total).map_err(|_| {
             CliError(format!(
                 "coverage state edge count {} does not fit this host",
@@ -657,6 +681,17 @@ impl CampaignCoverageStore {
         self.dir.join(format!("gen-{generation}.covmap"))
     }
 
+    pub(crate) fn fold_decision(&self, generation: u64) -> Result<AuxFoldDecision, CliError> {
+        fold_decision(
+            "coverage state",
+            "generations_applied",
+            self.meta
+                .as_ref()
+                .map_or(0, |meta| meta.generations_applied),
+            generation,
+        )
+    }
+
     pub(crate) fn fold_covmap(
         &mut self,
         generation: u64,
@@ -665,20 +700,14 @@ impl CampaignCoverageStore {
         if self.meta.is_none() {
             self.initialize(covmap)?;
         }
-        let meta = self.meta.as_mut().expect("initialized above");
-        if generation < meta.generations_applied {
+        if self.fold_decision(generation)? == AuxFoldDecision::SkipAlreadyApplied {
             return Ok(FoldOutcome {
                 generation,
                 new_edges: 0,
                 skipped_by_watermark: true,
             });
         }
-        if generation > meta.generations_applied {
-            return Err(CliError(format!(
-                "coverage fold gap: generation {generation} is beyond generations_applied {}; refusing non-sequential accumulation",
-                meta.generations_applied
-            )));
-        }
+        let meta = self.meta.as_mut().expect("initialized above");
         validate_covmap_compatible(meta, &self.sites, covmap)?;
         let mut new_edges = 0u64;
         for (index, &counter) in covmap.counters.iter().enumerate() {
@@ -2039,6 +2068,94 @@ mod tests {
         assert_eq!(
             store.hits, hits_after_first,
             "duplicate fold must not double-count hits"
+        );
+    }
+
+    #[test]
+    fn campaign_load_validates_resume_watermark() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("coverage");
+        let artifact = CoverageArtifact {
+            path: "guest".into(),
+            sha256: "abc".into(),
+            family: "native".into(),
+        };
+        let covmap = parse_covmap_bytes(&covmap_bytes(&[1], &[10]), Path::new("a")).unwrap();
+        let mut store = CampaignCoverageStore::fresh(
+            dir.clone(),
+            artifact.clone(),
+            "patina-native+yieldpoints".into(),
+            200,
+        );
+        store.fold_covmap(0, &covmap).unwrap();
+        store.write_checkpoint().unwrap();
+
+        CampaignCoverageStore::load(
+            dir.clone(),
+            artifact.clone(),
+            "patina-native+yieldpoints".into(),
+            200,
+            0,
+        )
+        .expect("one-generation tear ahead is resumable");
+        let behind = CampaignCoverageStore::load(
+            dir.clone(),
+            artifact.clone(),
+            "patina-native+yieldpoints".into(),
+            200,
+            2,
+        )
+        .unwrap_err();
+        assert!(
+            behind.0.contains("missing coverage folds"),
+            "unexpected error: {behind}"
+        );
+
+        let meta_path = dir.join("meta.json");
+        let mut meta: Value =
+            serde_json::from_str(&fs::read_to_string(&meta_path).unwrap()).unwrap();
+        meta["generations_applied"] = 3.into();
+        fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
+        let ahead =
+            CampaignCoverageStore::load(dir, artifact, "patina-native+yieldpoints".into(), 200, 1)
+                .unwrap_err();
+        assert!(
+            ahead
+                .0
+                .contains("at most one checkpoint-tear generation ahead"),
+            "unexpected error: {ahead}"
+        );
+    }
+
+    #[test]
+    fn campaign_meta_rejects_schema_and_edges_total_mismatch() {
+        let covmap = parse_covmap_bytes(&covmap_bytes(&[1], &[10]), Path::new("a")).unwrap();
+        let meta = CampaignCoverageMeta::new(
+            CoverageArtifact {
+                path: "guest".into(),
+                sha256: "abc".into(),
+                family: "native".into(),
+            },
+            "patina-native+yieldpoints".into(),
+            &covmap,
+            200,
+        )
+        .to_json();
+
+        let mut bad_schema = meta.clone();
+        bad_schema["schema"] = "patina.coverage.campaign/v999".into();
+        assert!(
+            CampaignCoverageMeta::from_json(&bad_schema)
+                .unwrap_err()
+                .contains("unsupported schema")
+        );
+
+        let mut bad_edges = meta;
+        bad_edges["edges_total"] = 2.into();
+        let error = CampaignCoverageMeta::from_json(&bad_edges).unwrap_err();
+        assert!(
+            error.contains("expected edges_total=2"),
+            "unexpected error: {error}"
         );
     }
 
