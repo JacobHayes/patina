@@ -8,6 +8,7 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+patina-dst-abi.workspace = true
 patina-dst-fs-mem.workspace = true
 patina-dst-minimize.workspace = true
 patina-dst-native-shim.workspace = true
@@ -21,7 +22,6 @@ tempfile.workspace = true
 
 [dev-dependencies]
 object.workspace = true
-patina-dst-abi.workspace = true
 serde_json.workspace = true
 wat.workspace = true
 

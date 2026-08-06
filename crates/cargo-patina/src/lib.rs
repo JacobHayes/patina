@@ -1,7 +1,7 @@
 //! Process-level implementation behind the `cargo-patina` binary.
 //!
 //! Internal crate: the `cargo patina` CLI — verb parsing (`build`, `run`,
-//! `test`, `audit`, `replay`, `explore`, `campaign`, `minimize`), artifact
+//! `test`, `audit`, `replay`, `explore`, `campaign`, `minimize`, `trace`), artifact
 //! family inference (Cargo package / shim-linked native binary / WASI module),
 //! build orchestration, the supervisor protocol that hands the `PATINA_*`
 //! control plane to a guest, and result rendering (`--format json`,
@@ -54,6 +54,8 @@ mod campaign;
 mod help;
 mod output;
 mod render;
+mod trace_cmd;
+mod trace_view;
 
 const PATINA_CFG_FLAGS: &str = "--cfg patina --cfg dst";
 
@@ -574,6 +576,7 @@ fn dispatch(arguments: Vec<OsString>) -> Result<i32, CliError> {
         ParseResult::NativeBuild(invocation) => execute_native_build(invocation),
         ParseResult::NativeRun(invocation) => execute_native_run(invocation),
         ParseResult::Minimize(invocation) => execute_minimize(invocation),
+        ParseResult::Trace(invocation) => trace_cmd::execute(invocation),
     }
 }
 
@@ -590,6 +593,7 @@ enum ParseResult {
     NativeBuild(NativeBuildInvocation),
     NativeRun(NativeRunInvocation),
     Minimize(MinimizeInvocation),
+    Trace(trace_cmd::TraceInvocation),
 }
 
 thread_local! {
@@ -642,7 +646,7 @@ fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     }
     if arguments.is_empty() {
         return Err(CliError::usage(
-            "missing command (expected run, test, campaign, explore, build, audit, replay, or minimize)",
+            "missing command (expected run, test, campaign, explore, build, audit, replay, minimize, or trace)",
         ));
     }
     // The routed verb (if any). Every known verb records itself so a usage error
@@ -684,6 +688,7 @@ fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
                 // from the trace and exposes no semantic flags.
                 "replay" => parse_replay(arguments),
                 "minimize" => parse_minimize(arguments).map(ParseResult::Minimize),
+                "trace" => parse_trace(arguments).map(ParseResult::Trace),
                 _ => unreachable!("verb() gated the known-verb set"),
             };
         }
@@ -692,7 +697,7 @@ fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
         Some("-h" | "--help") => Ok(ParseResult::Help(help::Topic::Overview)),
         Some("-V" | "--version") => Ok(ParseResult::Version),
         _ => Err(CliError::usage(format!(
-            "unsupported command {:?}; expected run, test, campaign, explore, build, audit, replay, or minimize",
+            "unsupported command {:?}; expected run, test, campaign, explore, build, audit, replay, minimize, or trace",
             arguments[0].to_string_lossy()
         ))),
     }
@@ -3209,6 +3214,213 @@ the trace is authoritative"
         mount,
         harness,
     })
+}
+
+fn parse_trace(mut arguments: Vec<OsString>) -> Result<trace_cmd::TraceInvocation, CliError> {
+    if arguments.is_empty() {
+        return Err(CliError::usage(
+            "trace requires a subcommand: info or events",
+        ));
+    }
+    let subcommand = arguments
+        .remove(0)
+        .into_string()
+        .map_err(|_| CliError::usage("trace subcommand must be valid UTF-8"))?;
+    match subcommand.as_str() {
+        "info" => parse_trace_info(arguments).map(trace_cmd::TraceInvocation::Info),
+        "events" => parse_trace_events(arguments).map(trace_cmd::TraceInvocation::Events),
+        "stats" | "diff" => Err(CliError::usage(format!(
+            "trace {subcommand} is planned for a later stage; this build supports trace info and trace events"
+        ))),
+        other => Err(CliError::usage(format!(
+            "unsupported trace subcommand {other:?}; expected info or events"
+        ))),
+    }
+}
+
+fn parse_trace_info(arguments: Vec<OsString>) -> Result<trace_cmd::TraceInfo, CliError> {
+    let scan = locate_positionals("trace", &arguments, 1);
+    let trace = scan.positionals.first().cloned().map(PathBuf::from);
+    let mut timeline = None;
+    let mut index = 0;
+    while index < scan.rest.len() {
+        let text = scan.rest[index]
+            .to_str()
+            .ok_or_else(|| CliError::usage("trace info options must be valid UTF-8"))?;
+        let opt = split_opt(text);
+        match opt.name {
+            "--timeline" => {
+                let value = required_value(opt, &scan.rest, &mut index)?;
+                set_once(&mut timeline, value.to_string(), "--timeline")?;
+            }
+            "--kind" | "--task" | "--seq" | "--first" | "--last" | "--notable" => {
+                return Err(CliError::usage(format!(
+                    "trace info reads metadata only and does not accept {}",
+                    opt.name
+                )));
+            }
+            flag if flag.starts_with('-') => {
+                return Err(CliError::usage(format!(
+                    "unsupported trace info option {flag:?}"
+                )));
+            }
+            _ => {
+                return Err(CliError::usage(format!(
+                    "unexpected trace info positional {:?}",
+                    scan.rest[index].to_string_lossy()
+                )));
+            }
+        }
+        index += 1;
+    }
+    let path = trace.ok_or_else(|| CliError::usage("trace info requires a trace path"))?;
+    Ok(trace_cmd::TraceInfo {
+        path,
+        timeline: timeline.unwrap_or_else(|| "main".to_string()),
+    })
+}
+
+fn parse_trace_events(arguments: Vec<OsString>) -> Result<trace_cmd::TraceEvents, CliError> {
+    let scan = locate_positionals("trace", &arguments, 1);
+    let trace = scan.positionals.first().cloned().map(PathBuf::from);
+    let mut timeline = None;
+    let mut kind_filter: Option<(BTreeSet<String>, BTreeSet<trace_view::Category>)> = None;
+    let mut filters = trace_cmd::EventFilters::default();
+    let mut index = 0;
+    while index < scan.rest.len() {
+        let text = scan.rest[index]
+            .to_str()
+            .ok_or_else(|| CliError::usage("trace events options must be valid UTF-8"))?;
+        let opt = split_opt(text);
+        match opt.name {
+            "--timeline" => {
+                let value = required_value(opt, &scan.rest, &mut index)?;
+                set_once(&mut timeline, value.to_string(), "--timeline")?;
+            }
+            "--kind" => {
+                let value = required_value(opt, &scan.rest, &mut index)?;
+                set_once(&mut kind_filter, parse_trace_kind_list(value)?, "--kind")?;
+            }
+            "--task" => {
+                let value = required_value(opt, &scan.rest, &mut index)?;
+                filters.tasks.insert(parse_task_selector(value)?);
+            }
+            "--seq" => {
+                let value = required_value(opt, &scan.rest, &mut index)?;
+                set_once(&mut filters.seq, parse_u64_range("--seq", value)?, "--seq")?;
+            }
+            "--first" => {
+                let value = required_value(opt, &scan.rest, &mut index)?;
+                set_once(
+                    &mut filters.first,
+                    parse_positive_u64("--first", value)?,
+                    "--first",
+                )?;
+            }
+            "--last" => {
+                let value = required_value(opt, &scan.rest, &mut index)?;
+                set_once(
+                    &mut filters.last,
+                    parse_positive_u64("--last", value)?,
+                    "--last",
+                )?;
+            }
+            "--notable" => {
+                reject_inline(opt)?;
+                filters.notable = true;
+            }
+            flag if flag.starts_with('-') => {
+                return Err(CliError::usage(format!(
+                    "unsupported trace events option {flag:?}"
+                )));
+            }
+            _ => {
+                return Err(CliError::usage(format!(
+                    "unexpected trace events positional {:?}",
+                    scan.rest[index].to_string_lossy()
+                )));
+            }
+        }
+        index += 1;
+    }
+    if let Some((op_kinds, categories)) = kind_filter {
+        filters.op_kinds = op_kinds;
+        filters.categories = categories;
+    }
+    if filters.first.is_some() && filters.last.is_some() {
+        return Err(CliError::usage(
+            "--first and --last are mutually exclusive for trace events",
+        ));
+    }
+    let path = trace.ok_or_else(|| CliError::usage("trace events requires a trace path"))?;
+    Ok(trace_cmd::TraceEvents {
+        path,
+        timeline: timeline.unwrap_or_else(|| "main".to_string()),
+        filters,
+    })
+}
+
+fn parse_trace_kind_list(
+    value: &str,
+) -> Result<(BTreeSet<String>, BTreeSet<trace_view::Category>), CliError> {
+    let valid_kinds = trace_view::valid_op_kinds();
+    let valid_categories = trace_view::valid_category_labels();
+    let mut kinds = BTreeSet::new();
+    let mut categories = BTreeSet::new();
+    for token in value.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            return Err(CliError::usage("--kind entries must be non-empty"));
+        }
+        if valid_kinds.contains(token) {
+            kinds.insert(token.to_string());
+        } else if let Some(category) = trace_view::Category::parse_label(token) {
+            categories.insert(category);
+        } else {
+            let kind_list = valid_kinds.iter().copied().collect::<Vec<_>>().join(",");
+            let category_list = valid_categories
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+                .join(",");
+            return Err(CliError::usage(format!(
+                "unknown --kind token {token:?}; valid operation tags: {kind_list}; valid categories: {category_list}"
+            )));
+        }
+    }
+    if kinds.is_empty() && categories.is_empty() {
+        return Err(CliError::usage("--kind requires at least one entry"));
+    }
+    Ok((kinds, categories))
+}
+
+fn parse_task_selector(value: &str) -> Result<trace_view::LaneKey, CliError> {
+    if value == "main" {
+        return Ok(trace_view::LaneKey::Main);
+    }
+    parse_u64("--task", value).map(trace_view::LaneKey::Task)
+}
+
+fn parse_u64_range(name: &str, value: &str) -> Result<(u64, u64), CliError> {
+    let (start, end) = value
+        .split_once("..")
+        .ok_or_else(|| CliError::usage(format!("{name} must be an inclusive A..B range")))?;
+    let start = parse_u64(name, start)?;
+    let end = parse_u64(name, end)?;
+    if start > end {
+        return Err(CliError::usage(format!(
+            "{name} range start must be <= end; got {value:?}"
+        )));
+    }
+    Ok((start, end))
+}
+
+fn parse_positive_u64(name: &str, value: &str) -> Result<u64, CliError> {
+    let parsed = parse_u64(name, value)?;
+    if parsed == 0 {
+        return Err(CliError::usage(format!("{name} must be >= 1")));
+    }
+    Ok(parsed)
 }
 
 fn parse_minimize(mut arguments: Vec<OsString>) -> Result<MinimizeInvocation, CliError> {
@@ -7990,14 +8202,16 @@ mod tests {
         // `-h`/`--help` in the first flag position of every verb and subcommand
         // routes to Help — never consumed as a positional, never an error.
         for verb in [
-            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize",
+            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize", "trace",
         ] {
             assert!(is_help(&[verb, "--help"]), "{verb} --help");
             assert!(is_help(&[verb, "-h"]), "{verb} -h");
         }
-        // Explore subcommands.
+        // Explore/trace subcommands.
         assert!(is_help(&["explore", "run", "--help"]));
         assert!(is_help(&["explore", "test", "--help"]));
+        assert!(is_help(&["trace", "info", "--help"]));
+        assert!(is_help(&["trace", "events", "--help"]));
         // After a positional (the old bug: `--help` swallowed as an artifact/trace
         // path or an unsupported option).
         assert!(is_help(&["run", "./bin", "--help"]));
@@ -8007,6 +8221,7 @@ mod tests {
         assert!(is_help(&["build", "src.rs", "--help"]));
         assert!(is_help(&["minimize", "trace.patina", "--help"]));
         assert!(is_help(&["explore", "run", "artifact", "--help"]));
+        assert!(is_help(&["trace", "events", "trace.patina", "--help"]));
         // Top-level.
         assert!(is_help(&["--help"]));
         assert!(is_help(&["-h"]));
@@ -8159,8 +8374,91 @@ mod tests {
                 "--seed-budget",
                 "--param",
             ],
+            "trace" => &[
+                "--timeline",
+                "--kind",
+                "--task",
+                "--seq",
+                "--first",
+                "--last",
+                "--notable",
+            ],
             other => panic!("unknown verb {other}"),
         }
+    }
+
+    #[test]
+    fn parses_trace_info_and_events_filters() {
+        match parse(strings(&[
+            "trace",
+            "info",
+            "--timeline",
+            "b1",
+            "run.patina",
+        ]))
+        .unwrap()
+        {
+            ParseResult::Trace(trace_cmd::TraceInvocation::Info(info)) => {
+                assert_eq!(info.path, PathBuf::from("run.patina"));
+                assert_eq!(info.timeline, "b1");
+            }
+            _ => panic!("expected trace info"),
+        }
+
+        match parse(strings(&[
+            "trace",
+            "events",
+            "--kind",
+            "fs_write,network",
+            "--task",
+            "main",
+            "--task=2",
+            "--seq",
+            "2..5",
+            "--first",
+            "3",
+            "run.patina",
+        ]))
+        .unwrap()
+        {
+            ParseResult::Trace(trace_cmd::TraceInvocation::Events(events)) => {
+                assert_eq!(events.path, PathBuf::from("run.patina"));
+                assert_eq!(events.timeline, "main");
+                assert!(events.filters.op_kinds.contains("fs_write"));
+                assert!(
+                    events
+                        .filters
+                        .categories
+                        .contains(&trace_view::Category::Net)
+                );
+                assert!(events.filters.tasks.contains(&trace_view::LaneKey::Main));
+                assert!(events.filters.tasks.contains(&trace_view::LaneKey::Task(2)));
+                assert_eq!(events.filters.seq, Some((2, 5)));
+                assert_eq!(events.filters.first, Some(3));
+            }
+            _ => panic!("expected trace events"),
+        }
+
+        assert!(
+            parse_error(&["trace", "events", "--kind", "nope", "run.patina"])
+                .contains("unknown --kind token")
+        );
+        assert!(
+            parse_error(&[
+                "trace",
+                "events",
+                "--first",
+                "1",
+                "--last",
+                "1",
+                "run.patina",
+            ])
+            .contains("mutually exclusive")
+        );
+        assert!(
+            parse_error(&["trace", "info", "--kind", "fs_write", "run.patina"])
+                .contains("does not accept --kind")
+        );
     }
 
     #[test]
@@ -8168,7 +8466,7 @@ mod tests {
         // The whole flag universe a verb may present: its registered groups plus
         // the always-available global help/output flags.
         for verb_name in [
-            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize",
+            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize", "trace",
         ] {
             let verb = help::verb(verb_name).expect("verb registered");
             let mut registered: BTreeSet<&str> = BTreeSet::new();
@@ -8428,6 +8726,15 @@ mod tests {
                 vec!["0..0", "0..1000", "5..10", "0..18446744073709551615"],
                 vec!["0:1000", "abc", "", "10..5", "0..", "..5", "5", "0..abc"],
             ),
+            Kind::U64Range => (
+                vec!["0..0", "0..1000", "5..10", "0..18446744073709551615"],
+                vec!["0:1000", "abc", "", "10..5", "0..", "..5", "5", "0..abc"],
+            ),
+            Kind::OpKindList => (
+                vec!["fs_write", "network", "fs_write,net_send", "clock,entropy"],
+                vec!["unknown_op", "", "fs_write,", ",network", "NETWORK"],
+            ),
+            Kind::TaskSelector => (vec!["main", "0", "1", "42"], vec!["-1", "abc", ""]),
             Kind::CrashSpec => (
                 vec![
                     "open", "write", "sync", "close", "open:1", "write:3", "close:10",
@@ -8701,6 +9008,13 @@ mod tests {
             ))
             .map(|_| ()),
 
+            ("trace", "--timeline") => {
+                parse_trace(strings(&[&["info", "t.patina"][..], toks].concat())).map(|_| ())
+            }
+            ("trace", "--kind" | "--task" | "--seq" | "--first" | "--last") => {
+                parse_trace(strings(&[&["events", "t.patina"][..], toks].concat())).map(|_| ())
+            }
+
             _ => return None,
         };
         Some(outcome)
@@ -8938,7 +9252,7 @@ mod tests {
     #[test]
     fn version_intercepted_across_verbs_before_separator() {
         for verb in [
-            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize",
+            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize", "trace",
         ] {
             assert!(
                 matches!(

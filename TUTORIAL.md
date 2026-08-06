@@ -152,6 +152,19 @@ config, active sites), per-task rollups, and a notable-events list. Rendering
 only reads the trace, so the replay hash is unchanged whether or not you pass
 `--render`.
 
+For CLI-only inspection of an existing trace, use `trace info` and a filtered
+`trace events` dump:
+
+```
+$ cargo patina trace info ./bug.patina
+$ cargo patina trace events ./bug.patina --notable
+$ cargo patina trace events ./bug.patina --kind filesystem --first 20 --format json
+```
+
+The last command emits `patina.trace.events/v1` JSON Lines: a header, one object
+per emitted event (raw `operation`/`outcome` intact), and a matched/emitted
+summary.
+
 Prefer a one-shot failure report? `--report OUT.html` renders the timeline *only
 when the run fails*, leading with a failure summary:
 
@@ -162,7 +175,8 @@ $ cargo patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina --re
 ## 8. Machine-readable output for agents
 
 Any verb accepts `--format json`, emitting one result envelope on stdout (schema
-`patina.result/v1`) with the guest output folded in:
+`patina.result/v1`) with the guest output folded in, except `trace events`, which
+uses streaming JSON Lines:
 
 ```
 $ cargo patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina --format json

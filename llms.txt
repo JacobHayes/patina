@@ -38,6 +38,12 @@ with no `--target` -> the Cargo package family (in-process boundary API). A
   are restored from the trace (the trace is authoritative; a re-supplied semantic
   flag that conflicts is refused). A fingerprint or operation mismatch fails
   closed with a nonzero exit.
+- `cargo patina trace info <TRACE> [--timeline ID]` / `trace events <TRACE> [--kind LIST] [--task SEL]... [--seq A..B] [--first N|--last N] [--notable]`
+  Inspect an existing trace without executing a guest. `info` prints metadata,
+  timelines, resolved event count, and virtual-time span. `events` prints the
+  shared decoded event view; `--kind` accepts operation tags or categories
+  (`filesystem`, `network`, `scheduling`, `sleep`, `clock`, `entropy`, `crash`,
+  `other`), and `--task` accepts a task id or `main`.
 - `cargo patina audit <ARTIFACT|SOURCE> [--allow SYMBOL]...`
   Strict fail-closed import allowlist. Any un-interposed effect symbol is a
   finding. Audit source-first (or a `cargo patina build` artifact): only a
@@ -65,7 +71,9 @@ with no `--target` -> the Cargo package family (in-process boundary API). A
 
 - `--format human|json` (default human). `json` prints ONE result envelope on
   stdout (schema `patina.result/v1`) and folds captured guest output into it;
-  human output is unchanged by default. NOTE: the selector is `--format`, not
+  `trace events --format json` is the streaming exception and emits
+  `patina.trace.events/v1` JSON Lines. Human output is unchanged by default.
+  NOTE: the selector is `--format`, not
   `--output`, because `--output PATH` is already the build/minimize artifact path.
 - `--render OUT.html` (run/replay with a trace): write a self-contained,
   single-file HTML timeline — per-task lanes over trace sequence, colored by
@@ -86,7 +94,11 @@ One line of JSON on stdout. Always: `schema`, `verb`, `result`
 `PATINA_*`/`*_VIOLATION`/`BUG_CAUGHT` lines), `result_line`, `stdout`, `stderr`,
 `message`, and `trace` = `{path, format_version, timelines[], event_count,
 metadata}` where `metadata` is the raw trace metadata (seed, faults, buggify,
-guest_argv, and any future fields, rendered generically).
+guest_argv, and any future fields, rendered generically). `trace info --format
+json` is a normal `patina.result/v1` envelope with a nested
+`patina.trace.info/v1` `trace_info` payload; `trace events --format json` emits
+`patina.trace.events/v1` JSONL (header/events/summary; event lines carry raw
+`operation`/`outcome`).
 
 ## SDK macros (crate `patina-dst`, default features = dependency-light SDK)
 

@@ -6,19 +6,19 @@
 //! replay hashes (the render path only reads the file and writes a separate
 //! `.html`).
 //!
-//! Forward-compatibility with concurrent runtime work is deliberate: operations
-//! are categorized by their serde `kind` tag *prefix* rather than by an
-//! exhaustive `match` on the [`patina_dst_abi::Operation`] enum, and the metadata
-//! panel is rendered generically from the raw JSON object. A new operation
-//! variant or a new metadata field therefore surfaces in the render with no code
-//! change here — it lands in the "other" lane / an extra metadata row rather than
-//! breaking the build or being silently dropped.
+//! Event decoding is shared with the `trace` CLI through `trace_view`, including
+//! the operation-kind registry that fails the build when a new ABI operation is
+//! not consciously made inspectable. The metadata panel is still rendered
+//! generically from the raw JSON object, so a new metadata field surfaces with no
+//! renderer change.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use patina_dst_trace::{TraceBundle, TraceError};
 use serde_json::Value;
+
+use crate::trace_view::{self, Category, FlatEvent as Ev, LaneKey, Notable, TaskStat, human_nanos};
 
 /// Above this many events the per-event timeline is aggregated into density
 /// buckets (with a visible banner) instead of drawing one mark per event, so a
@@ -63,123 +63,6 @@ pub struct FailureSummary {
     pub messages: Vec<String>,
 }
 
-/// The category a boundary operation falls into for lane coloring and stats.
-/// Derived from the operation's serde `kind` tag prefix so it stays exhaustive
-/// over future additions.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Category {
-    Schedule,
-    Sleep,
-    Net,
-    Fs,
-    Crash,
-    Entropy,
-    Clock,
-    Other,
-}
-
-impl Category {
-    fn of_kind(kind: &str) -> Self {
-        match kind {
-            "fs_crash" => Category::Crash,
-            "sleep_until" => Category::Sleep,
-            "clock_now" => Category::Clock,
-            "entropy_fill" => Category::Entropy,
-            "scheduler_next" => Category::Schedule,
-            _ if kind.starts_with("task_") => Category::Schedule,
-            _ if kind.starts_with("net_") => Category::Net,
-            _ if kind.starts_with("fs_") => Category::Fs,
-            _ => Category::Other,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Category::Schedule => "scheduling",
-            Category::Sleep => "sleep",
-            Category::Net => "network",
-            Category::Fs => "filesystem",
-            Category::Crash => "crash",
-            Category::Entropy => "entropy",
-            Category::Clock => "clock",
-            Category::Other => "other",
-        }
-    }
-
-    /// A stable CSS class suffix (also the color key in the stylesheet).
-    fn css(self) -> &'static str {
-        match self {
-            Category::Schedule => "sched",
-            Category::Sleep => "sleep",
-            Category::Net => "net",
-            Category::Fs => "fs",
-            Category::Crash => "crash",
-            Category::Entropy => "entropy",
-            Category::Clock => "clock",
-            Category::Other => "other",
-        }
-    }
-
-    const ALL: [Category; 8] = [
-        Category::Schedule,
-        Category::Sleep,
-        Category::Net,
-        Category::Fs,
-        Category::Crash,
-        Category::Entropy,
-        Category::Clock,
-        Category::Other,
-    ];
-}
-
-/// One event flattened for rendering: which lane owns it, its category, a short
-/// human label, an optional virtual-time reading, and whether it is "notable"
-/// (an error, crash, or dropped datagram surfaced in full).
-struct Ev {
-    seq: u64,
-    lane: LaneKey,
-    category: Category,
-    kind: String,
-    detail: String,
-    vtime: Option<u64>,
-    notable: Option<Notable>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum LaneKey {
-    /// Events attributed to no scheduled task (e.g. a single-threaded run with no
-    /// scheduler decisions, or ops before the first `SchedulerNext`).
-    Main,
-    Task(u64),
-}
-
-impl LaneKey {
-    fn label(self) -> String {
-        match self {
-            LaneKey::Main => "main".to_string(),
-            LaneKey::Task(id) => format!("task {id}"),
-        }
-    }
-}
-
-enum Notable {
-    Error { code: String, message: String },
-    Crash,
-    Drop { to: String, reason: String },
-}
-
-/// Per-task rollup for the summary table.
-#[derive(Default)]
-struct TaskStat {
-    ops: u64,
-    yields: u64,
-    parks: u64,
-    completed: bool,
-    label: Option<String>,
-    first_seq: Option<u64>,
-    last_seq: u64,
-}
-
 /// Load a trace from disk and render it to a standalone HTML document.
 ///
 /// The raw JSON is parsed a second time (cheaply, it is already size-limited by
@@ -215,312 +98,42 @@ pub fn render_trace_file(
 /// Render a loaded bundle to a self-contained HTML string. Pure and
 /// filesystem-free, so it is unit-testable on a hand-built bundle.
 pub fn render(input: &RenderInput<'_>) -> String {
-    let events = input
-        .bundle
-        .resolved_timeline(input.timeline)
-        .unwrap_or_default();
-    let total = events.len();
-
-    // Walk the event stream once, tracking the currently-running task (chosen by
-    // the most recent SchedulerNext) and a virtual-time cursor reconstructed from
-    // clock reads and the `now_nanos` fields carried by net ops.
-    let mut current = LaneKey::Main;
-    let mut vtime: Option<u64> = None;
-    let mut vt_min: Option<u64> = None;
-    let mut vt_max: Option<u64> = None;
-    let mut flat: Vec<Ev> = Vec::with_capacity(total);
-    let mut lanes: BTreeMap<LaneKey, TaskStat> = BTreeMap::new();
-    let mut cat_counts: BTreeMap<Category, u64> = BTreeMap::new();
-    let mut notable: Vec<Ev> = Vec::new();
-
-    for event in &events {
-        let op = serde_json::to_value(&event.operation).unwrap_or(Value::Null);
-        let out = serde_json::to_value(&event.outcome).unwrap_or(Value::Null);
-        let kind = op
-            .get("kind")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-        let category = Category::of_kind(&kind);
-
-        // Advance the virtual-time cursor from any absolute reading on this event.
-        if kind == "clock_now" {
-            if let Some(n) = outcome_u64(&out) {
-                vtime = Some(n);
-            }
-        }
-        if let Some(n) = op.get("now_nanos").and_then(Value::as_u64) {
-            vtime = Some(n);
-        }
-        if let Some(n) = vtime {
-            vt_min = Some(vt_min.map_or(n, |m| m.min(n)));
-            vt_max = Some(vt_max.map_or(n, |m| m.max(n)));
-        }
-
-        // Task attribution: SchedulerNext re-points the current lane; ops before
-        // the first decision (or in a single-threaded run) stay on `main`.
-        if kind == "scheduler_next" {
-            // OptionalTask(Some(id)) re-points the current lane; OptionalTask(None)
-            // (no runnable task) keeps it.
-            if let Some(id) = out.get("value").and_then(Value::as_u64) {
-                current = LaneKey::Task(id);
-            }
-        }
-
-        let lane = match &kind[..] {
-            // Lifecycle ops name their *target* task; attribute the row to that
-            // task's lane so its birth/yield/park/wake/completion sit together.
-            "task_spawn" => {
-                // Spawn is issued by the current task; the child id is in the
-                // outcome. Keep the row on the spawner's lane.
-                current
-            }
-            k if k.starts_with("task_") => op
-                .get("task")
-                .and_then(Value::as_u64)
-                .map(LaneKey::Task)
-                .unwrap_or(current),
-            _ => current,
-        };
-
-        let stat = lanes.entry(lane).or_default();
-        stat.ops += 1;
-        stat.first_seq.get_or_insert(event.sequence);
-        stat.last_seq = event.sequence;
-        if kind == "task_yield" {
-            stat.yields += 1;
-        }
-        if kind == "task_park" || kind == "task_park_timed" {
-            stat.parks += 1;
-        }
-        if kind == "task_spawn" {
-            // Record the child lane's label eagerly so a task that never runs a
-            // boundary op of its own still appears with its spawn label.
-            if let Some(id) = outcome_task(&out) {
-                let child = lanes.entry(LaneKey::Task(id)).or_default();
-                if child.label.is_none() {
-                    child.label = op.get("label").and_then(Value::as_str).map(str::to_string);
-                }
-            }
-        }
-        if kind == "task_complete" {
-            if let Some(id) = op.get("task").and_then(Value::as_u64) {
-                lanes.entry(LaneKey::Task(id)).or_default().completed = true;
-            }
-        }
-        *cat_counts.entry(category).or_insert(0) += 1;
-
-        let detail = summarize(&kind, &op, &out);
-        let note = detect_notable(&kind, &op, &out);
-
-        let ev = Ev {
-            seq: event.sequence,
-            lane,
-            category,
-            kind: kind.clone(),
-            detail,
-            vtime,
-            notable: note,
-        };
-        if ev.notable.is_some() {
-            notable.push(Ev {
-                seq: ev.seq,
-                lane: ev.lane,
-                category: ev.category,
-                kind: ev.kind.clone(),
-                detail: ev.detail.clone(),
-                vtime: ev.vtime,
-                notable: detect_notable(&kind, &op, &out),
-            });
-        }
-        flat.push(ev);
-    }
+    let flat = trace_view::flatten(input.bundle, input.raw, input.timeline).unwrap_or_default();
+    let total = flat.events.len();
 
     // Ensure every lane discovered via lifecycle also owns a stat row.
-    let lane_order: Vec<LaneKey> = lanes.keys().copied().collect();
+    let lane_order: Vec<LaneKey> = flat.lanes.keys().copied().collect();
 
     let mut html = String::with_capacity(64 * 1024);
     write_head(&mut html, input);
     write_body_open(&mut html);
-    write_header(&mut html, input, total, &lane_order, vt_min, vt_max);
+    write_header(
+        &mut html,
+        input,
+        total,
+        &lane_order,
+        flat.vt_min,
+        flat.vt_max,
+    );
     if let Some(failure) = &input.failure {
         write_failure(&mut html, failure);
     }
     write_metadata(&mut html, input);
-    write_stat_tiles(&mut html, total, &lane_order, &cat_counts, vt_min, vt_max);
-    write_timeline(&mut html, &flat, &lane_order, total);
-    write_task_table(&mut html, &lanes);
-    write_notable(&mut html, &notable);
-    write_legend(&mut html, &cat_counts);
+    write_stat_tiles(
+        &mut html,
+        total,
+        &lane_order,
+        &flat.category_counts,
+        flat.vt_min,
+        flat.vt_max,
+    );
+    write_timeline(&mut html, &flat.events, &lane_order, total);
+    write_task_table(&mut html, &flat.lanes);
+    write_notable(&mut html, &flat.notable);
+    write_legend(&mut html, &flat.category_counts);
     write_data_note(&mut html, input);
     write_body_close(&mut html);
     html
-}
-
-fn outcome_u64(out: &Value) -> Option<u64> {
-    match out.get("kind").and_then(Value::as_str)? {
-        "u64" | "usize" => out.get("value").and_then(Value::as_u64),
-        _ => None,
-    }
-}
-
-fn outcome_task(out: &Value) -> Option<u64> {
-    match out.get("kind").and_then(Value::as_str)? {
-        "task" => out.get("value").and_then(Value::as_u64),
-        _ => None,
-    }
-}
-
-/// A one-line human summary of an event, avoiding raw byte payloads (shown as a
-/// length instead). Reads fields generically from the JSON so it never panics on
-/// an unfamiliar operation shape.
-fn summarize(kind: &str, op: &Value, out: &Value) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    // A curated set of the most useful scalar fields, in a stable order.
-    for key in [
-        "path",
-        "from",
-        "to",
-        "target",
-        "link_path",
-        "address",
-        "label",
-        "reason",
-        "clock",
-        "fd",
-        "socket",
-        "listener",
-        "task",
-        "offset",
-        "len",
-        "max_len",
-        "deadline_nanos",
-        "now_nanos",
-        "backlog",
-        "how",
-    ] {
-        if let Some(v) = op.get(key) {
-            if let Some(text) = scalar(v) {
-                parts.push(format!("{key}={text}"));
-            }
-        }
-    }
-    // Byte payloads: show length only.
-    for key in ["bytes"] {
-        if let Some(Value::String(s)) = op.get(key) {
-            parts.push(format!("bytes≈{}", base64_len(s)));
-        }
-    }
-    // Outcome summary.
-    if let Some(k) = out.get("kind").and_then(Value::as_str) {
-        match k {
-            "unit" => {}
-            "error" => {
-                if let Some(v) = out.get("value") {
-                    let code = v
-                        .get("code")
-                        .and_then(Value::as_str)
-                        .unwrap_or("error")
-                        .to_string();
-                    parts.push(format!("→ error:{code}"));
-                }
-            }
-            "bytes" => {
-                if let Some(Value::String(s)) = out.get("value") {
-                    parts.push(format!("→ {} bytes", base64_len(s)));
-                }
-            }
-            "optional_task" | "task" => {
-                if let Some(v) = out.get("value") {
-                    parts.push(format!(
-                        "→ task {}",
-                        scalar(v).unwrap_or_else(|| "-".into())
-                    ));
-                }
-            }
-            "handle" | "socket" | "u64" | "usize" | "optional_u64" => {
-                if let Some(v) = out.get("value") {
-                    if let Some(text) = scalar(v) {
-                        parts.push(format!("→ {text}"));
-                    }
-                }
-            }
-            "send_report" => {
-                if let Some(v) = out.get("value") {
-                    let disp = v
-                        .get("disposition")
-                        .and_then(Value::as_str)
-                        .unwrap_or("queued");
-                    parts.push(format!("→ {disp}"));
-                }
-            }
-            "datagram" => {
-                let present = out.get("value").map(|v| !v.is_null()).unwrap_or(false);
-                parts.push(if present {
-                    "→ datagram".into()
-                } else {
-                    "→ none".into()
-                });
-            }
-            other => parts.push(format!("→ {other}")),
-        }
-    }
-    let _ = kind; // kind already drives the row label elsewhere
-    parts.join(" ")
-}
-
-fn scalar(v: &Value) -> Option<String> {
-    match v {
-        Value::Number(n) => Some(n.to_string()),
-        Value::String(s) => Some(s.clone()),
-        Value::Bool(b) => Some(b.to_string()),
-        _ => None,
-    }
-}
-
-fn base64_len(s: &str) -> usize {
-    // Approximate decoded length of a padded base64 string.
-    let padding = s.bytes().rev().take_while(|&b| b == b'=').count();
-    (s.len() / 4).saturating_mul(3).saturating_sub(padding)
-}
-
-fn detect_notable(kind: &str, op: &Value, out: &Value) -> Option<Notable> {
-    if kind == "fs_crash" {
-        return Some(Notable::Crash);
-    }
-    if out.get("kind").and_then(Value::as_str) == Some("error") {
-        let v = out.get("value")?;
-        return Some(Notable::Error {
-            code: v
-                .get("code")
-                .and_then(Value::as_str)
-                .unwrap_or("error")
-                .to_string(),
-            message: v
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-        });
-    }
-    if out.get("kind").and_then(Value::as_str) == Some("send_report") {
-        let disp = out
-            .get("value")
-            .and_then(|v| v.get("disposition"))
-            .and_then(Value::as_str)
-            .unwrap_or("queued");
-        if disp != "queued" {
-            return Some(Notable::Drop {
-                to: op
-                    .get("to")
-                    .and_then(Value::as_str)
-                    .unwrap_or("?")
-                    .to_string(),
-                reason: disp.to_string(),
-            });
-        }
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -904,12 +517,11 @@ fn write_notable(html: &mut String, notable: &[Ev]) {
     }
     html.push_str("<table>\n<tr><th>seq</th><th>lane</th><th>kind</th><th>what</th></tr>\n");
     for ev in notable {
-        let what = match &ev.notable {
-            Some(Notable::Crash) => "filesystem crash injected".to_string(),
-            Some(Notable::Error { code, message }) => format!("error {code}: {message}"),
-            Some(Notable::Drop { to, reason }) => format!("datagram to {to} dropped ({reason})"),
-            None => ev.detail.clone(),
-        };
+        let what = ev
+            .notable
+            .as_ref()
+            .map(Notable::human)
+            .unwrap_or_else(|| ev.detail.clone());
         let _ = writeln!(
             html,
             "<tr><td>{}</td><td><code>{}</code></td><td><code>{}</code></td><td>{}</td></tr>",
@@ -956,31 +568,6 @@ fn write_data_note(html: &mut String, input: &RenderInput<'_>) {
     html.push_str("<li><strong>Fault injection</strong> (crash point, torn-write granularity, net drop/jitter/latency, sleep jitter) is seed-driven config in <code>faults</code>; its effects surface as <code>fs_crash</code> marks and dropped-datagram outcomes on the timeline.</li>\n");
     html.push_str("<li><strong>Restarts</strong> under crash-recovery appear as an <code>fs_crash</code> mark followed by re-open activity in the same lane.</li>\n");
     html.push_str("</ul>\n</div>\n");
-}
-
-/// Render a nanosecond count in a compact human unit.
-fn human_nanos(n: u64) -> String {
-    if n == 0 {
-        return "0 ns".to_string();
-    }
-    const UNITS: [(u64, &str); 5] = [
-        (1_000_000_000 * 60, "min"),
-        (1_000_000_000, "s"),
-        (1_000_000, "ms"),
-        (1_000, "µs"),
-        (1, "ns"),
-    ];
-    for (scale, unit) in UNITS {
-        if n >= scale {
-            let whole = n / scale;
-            let frac = (n % scale) * 100 / scale;
-            if frac == 0 {
-                return format!("{whole} {unit}");
-            }
-            return format!("{whole}.{frac:02} {unit}");
-        }
-    }
-    format!("{n} ns")
 }
 
 #[cfg(test)]
@@ -1110,6 +697,18 @@ mod tests {
         let html = render_bundle(&bundle);
         assert!(html.contains("Aggregated view"));
         assert!(html.contains("Nothing is dropped"));
+    }
+
+    #[test]
+    fn renders_every_registered_operation_kind() {
+        let bundle = bundle_with(crate::trace_view::representative_events_for_all_op_kinds());
+        let html = render_bundle(&bundle);
+        for (kind, _) in crate::trace_view::OP_KINDS {
+            assert!(
+                html.contains(kind),
+                "render should surface operation kind {kind}"
+            );
+        }
     }
 
     #[test]

@@ -37,6 +37,12 @@ pub enum Kind {
     Permille,
     /// An inclusive `MIN..MAX` nanosecond range with `MIN <= MAX`.
     NanosRange,
+    /// An inclusive `A..B` unsigned sequence-number range with `A <= B`.
+    U64Range,
+    /// A comma-separated list of operation tags and/or category labels.
+    OpKindList,
+    /// A scheduler task id (`u64`) or the literal `main`.
+    TaskSelector,
     /// A filesystem crash spec `open|write|sync|close[:N]` (`N >= 1`).
     CrashSpec,
     /// A `KEY=VALUE` pair with a non-empty key.
@@ -67,6 +73,9 @@ impl Kind {
             Kind::PositiveU64 => "positive-u64",
             Kind::Permille => "permille",
             Kind::NanosRange => "nanos-range",
+            Kind::U64Range => "u64-range",
+            Kind::OpKindList => "op-kind-list",
+            Kind::TaskSelector => "task-selector",
             Kind::CrashSpec => "crash-spec",
             Kind::KeyValue => "key-value",
             Kind::Socket => "socket",
@@ -193,7 +202,7 @@ pub const GLOBAL_OUTPUT: &[Flag] = &[
         "--format",
         None,
         Value::Required("human|json", Kind::Enum(&["human", "json"])),
-        "Result format (default human). `json` prints one machine-readable result envelope (schema patina.result/v1) on stdout; `--help --format json` prints this registry as JSON.",
+        "Result format (default human). `json` prints one machine-readable result envelope (schema patina.result/v1) on stdout; `trace events --format json` is the streaming exception and prints patina.trace.events/v1 JSON Lines. `--help --format json` prints this registry as JSON.",
         false,
     ),
     f(
@@ -1082,6 +1091,89 @@ and the signature store.",
     }],
 };
 
+const TRACE: Verb = Verb {
+    name: "trace",
+    summary: "Inspect a recorded trace: metadata or filtered events, without executing a guest.",
+    synopsis: &[
+        "cargo patina trace info <TRACE> [--timeline ID]",
+        "cargo patina trace events <TRACE> [--timeline ID] [--kind LIST] [--task SEL]... [--seq A..B] [--first N | --last N] [--notable]",
+    ],
+    prose: "\
+`trace` strictly loads and validates an existing .patina trace, then inspects it \n\
+without executing a guest. `trace info` is the cheap index: metadata, timelines, \n\
+resolved event count, and the virtual-time span. `trace events` runs the shared \n\
+semantic walk used by the HTML renderer, so task attribution, operation \n\
+categories, virtual time, summaries, and notable-event detection match the \n\
+rendered timeline.\n\
+\n\
+`trace info --format json` follows the normal result-envelope contract: one \n\
+patina.result/v1 object carrying a nested patina.trace.info/v1 `trace_info` \n\
+payload. `trace events --format json` intentionally streams JSON Lines instead \n\
+of one large envelope: a patina.trace.events/v1 header, one object per emitted \n\
+event (with raw operation/outcome JSON intact), then a matched/emitted summary. \n\
+Buggify per-evaluation firings are not recorded in traces; `info` reports the \n\
+recorded config, active sites, and knobs from metadata.",
+    groups: &[
+        Group {
+            title: "Trace options (trace info/events)",
+            flags: &[f(
+                "--timeline",
+                None,
+                Value::Required("ID", Kind::Str),
+                "Resolved timeline to inspect (default main).",
+                false,
+            )],
+        },
+        Group {
+            title: "Events options (trace events)",
+            flags: &[
+                f(
+                    "--kind",
+                    None,
+                    Value::Required("LIST", Kind::OpKindList),
+                    "Comma-separated operation tags and/or categories (filesystem, network, scheduling, sleep, clock, entropy, crash, other).",
+                    false,
+                ),
+                f(
+                    "--task",
+                    None,
+                    Value::Required("SEL", Kind::TaskSelector),
+                    "Task id or the literal main; repeat to include multiple lanes.",
+                    true,
+                ),
+                f(
+                    "--seq",
+                    None,
+                    Value::Required("A..B", Kind::U64Range),
+                    "Inclusive sequence-number range.",
+                    false,
+                ),
+                f(
+                    "--first",
+                    None,
+                    Value::Required("N", Kind::PositiveU64),
+                    "Emit the first N events after filtering (mutually exclusive with --last).",
+                    false,
+                ),
+                f(
+                    "--last",
+                    None,
+                    Value::Required("N", Kind::PositiveU64),
+                    "Emit the last N events after filtering (mutually exclusive with --first).",
+                    false,
+                ),
+                f(
+                    "--notable",
+                    None,
+                    Value::None,
+                    "Only crashes, boundary errors, and dropped datagrams.",
+                    false,
+                ),
+            ],
+        },
+    ],
+};
+
 const MINIMIZE: Verb = Verb {
     name: "minimize",
     summary: "Shrink a recorded trace, or shrink experiment inputs (--scenario).",
@@ -1166,7 +1258,7 @@ PATINA_SEED/PATINA_PARAMS_JSON protocol.",
 
 /// Every verb, in overview order.
 pub const VERBS: &[&Verb] = &[
-    &RUN, &TEST, &BUILD, &AUDIT, &REPLAY, &EXPLORE, &CAMPAIGN, &MINIMIZE,
+    &RUN, &TEST, &BUILD, &AUDIT, &REPLAY, &EXPLORE, &CAMPAIGN, &TRACE, &MINIMIZE,
 ];
 
 /// The `PATINA_*` environment protocol and honored tool variables.
