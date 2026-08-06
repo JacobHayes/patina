@@ -4359,6 +4359,11 @@ fn build_native_shim(release: bool) -> Result<PathBuf, CliError> {
     // "package ID specification `patina-dst-native-shim` did not match any
     // packages" — the observed `build .` regression.
     let workspace = patina_source_workspace();
+    // Both halves of a native build must come from ONE toolchain. Because the
+    // shim build is pinned to the workspace directory above and the guest build
+    // is not, the two can resolve different compilers; refuse before compiling
+    // anything rather than letting two libstds meet at the guest link.
+    check_native_toolchain_agreement(&workspace)?;
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let mut command = Command::new(&cargo);
     command
@@ -4390,6 +4395,156 @@ fn build_native_shim(release: bool) -> Result<PathBuf, CliError> {
         )));
     }
     Ok(staticlib)
+}
+
+/// A resolved rustc, as `rustc -vV` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RustcIdentity {
+    /// The `rustc -vV` banner line, e.g. `rustc 1.86.0 (05f9846f8 2025-03-31)`.
+    banner: String,
+    /// The full `-vV` block: release, commit hash, host triple, LLVM version.
+    verbose: String,
+}
+
+/// Resolve the rustc that compiles code in `directory`.
+///
+/// The working directory is the input that matters. Under rustup, the `rustc` on
+/// `PATH` is a proxy that picks its toolchain from the `rust-toolchain.toml`
+/// found by walking up from wherever it runs, and Cargo inherits that: even a
+/// toolchain's own `cargo` binary invokes the `PATH` proxy for `rustc`, so the
+/// directory a build runs in — not the `cargo` that drives it — decides which
+/// compiler compiles the crate. Without rustup, `rustc` is a real binary and
+/// every directory resolves the same identity.
+fn rustc_identity(rustc: &OsStr, directory: &Path) -> Result<RustcIdentity, CliError> {
+    let output = Command::new(rustc)
+        .arg("-vV")
+        .current_dir(directory)
+        .output()
+        .map_err(|error| {
+            CliError(format!(
+                "failed to query the rustc identity in {}: {error}",
+                directory.display()
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(CliError(format!(
+            "rustc -vV failed in {}: {}",
+            directory.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let verbose = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let banner = verbose.lines().next().unwrap_or_default().to_owned();
+    if banner.is_empty() {
+        return Err(CliError(format!(
+            "rustc -vV reported no version in {}",
+            directory.display()
+        )));
+    }
+    Ok(RustcIdentity { banner, verbose })
+}
+
+/// The compiler to probe with, honoring `RUSTC` exactly as the builds do so an
+/// explicitly pinned compiler probes as the single identity it is.
+///
+/// The two probes run in two different directories, so the value must name the
+/// same program from both. A bare name is left alone (the OS resolves it against
+/// `PATH`, which does not depend on the working directory); a relative path with
+/// a directory component would resolve against each probe's own directory, so it
+/// is anchored to `from` first.
+fn anchored_rustc(rustc: Option<OsString>, from: &Path) -> OsString {
+    let Some(rustc) = rustc else {
+        return OsString::from("rustc");
+    };
+    let path = Path::new(&rustc);
+    let has_directory = path
+        .parent()
+        .is_some_and(|parent| !parent.as_os_str().is_empty());
+    if path.is_relative() && has_directory {
+        from.join(path).into_os_string()
+    } else {
+        rustc
+    }
+}
+
+/// Refuse a native build whose shim staticlib and guest program would be
+/// compiled by two different toolchains.
+///
+/// [`build_native_shim`] pins the shim's Cargo build to the Patina source
+/// workspace so `-p patina-dst-native-shim` always resolves; the guest build runs
+/// in the caller's working directory. When those two directories resolve
+/// different toolchains — a tree carrying its own `rust-toolchain.toml`, with the
+/// `cargo-patina` binary invoked directly rather than as `cargo patina` — two
+/// Rust standard libraries meet at the guest link. That is a `duplicate symbol:
+/// rust_eh_personality` link error on Linux and, worse, a silent success on
+/// macOS: the guest links and runs carrying two libstds. Name it before either
+/// happens.
+fn check_native_toolchain_agreement(workspace: &Path) -> Result<(), CliError> {
+    if !workspace.is_dir() {
+        // No workspace to build the shim in; let `build_native_shim` report that
+        // in its own terms rather than shadowing it with a probe failure.
+        return Ok(());
+    }
+    let guest_dir = env::current_dir()
+        .map_err(|error| CliError(format!("failed to read the working directory: {error}")))?;
+    let rustc = anchored_rustc(env::var_os("RUSTC"), &guest_dir);
+    let shim = rustc_identity(&rustc, workspace)?;
+    let guest = rustc_identity(&rustc, &guest_dir)?;
+    if shim == guest {
+        return Ok(());
+    }
+    Err(CliError(toolchain_mismatch_message(
+        &shim, workspace, &guest, &guest_dir,
+    )))
+}
+
+/// The refusal text for a shim/guest toolchain split: name both toolchains, the
+/// directory each resolved in, and the two ways to pin one toolchain for both.
+fn toolchain_mismatch_message(
+    shim: &RustcIdentity,
+    shim_dir: &Path,
+    guest: &RustcIdentity,
+    guest_dir: &Path,
+) -> String {
+    let mut message = String::from(
+        "refusing to build: the Patina shim staticlib and the guest program would be compiled by \
+two different rustc toolchains, so two Rust standard libraries would meet at the guest link \
+(`duplicate symbol: rust_eh_personality` on Linux; on macOS the link silently succeeds and the \
+guest carries both).\n",
+    );
+    message.push_str(&format!(
+        "  shim toolchain:  {} (resolved in {})\n  guest toolchain: {} (resolved in {})\n",
+        shim.banner,
+        shim_dir.display(),
+        guest.banner,
+        guest_dir.display()
+    ));
+    if shim.banner == guest.banner {
+        // Same release, different compiler: show the full identities so the
+        // difference (commit hash, host triple, LLVM version) is visible.
+        message.push_str(&format!(
+            "the two report the same version but are not the same compiler:\n  shim:\n{}\n  \
+guest:\n{}\n",
+            indent_lines(&shim.verbose, "    "),
+            indent_lines(&guest.verbose, "    ")
+        ));
+    }
+    message.push_str(
+        "the shim always builds in the Patina source workspace, while the guest builds in the \
+working directory, and rustup's `rustc` proxy picks its toolchain from the rust-toolchain file \
+above whichever directory it runs in. Pin one toolchain for both: invoke through rustup as `cargo \
+patina ...` (the cargo proxy exports RUSTUP_TOOLCHAIN for the whole build), or set RUSTUP_TOOLCHAIN \
+yourself before invoking the cargo-patina binary directly.",
+    );
+    message
+}
+
+/// Prefix every line of `text` with `indent`.
+fn indent_lines(text: &str, indent: &str) -> String {
+    text.lines()
+        .map(|line| format!("{indent}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The `build` (native) verb: build and report the artifact path.
@@ -7208,6 +7363,84 @@ impl std::error::Error for CliError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_relative_rustc_probes_as_one_program_from_both_directories() {
+        let from = Path::new("/work/guest");
+        // A bare name is PATH-resolved, which does not vary by directory.
+        assert_eq!(anchored_rustc(None, from), OsString::from("rustc"));
+        assert_eq!(
+            anchored_rustc(Some("rustc".into()), from),
+            OsString::from("rustc")
+        );
+        // An absolute path already names one program.
+        assert_eq!(
+            anchored_rustc(Some("/opt/rust/bin/rustc".into()), from),
+            OsString::from("/opt/rust/bin/rustc")
+        );
+        // A relative path with a directory component would otherwise resolve
+        // against each probe's own working directory — two different programs,
+        // reported as a toolchain split that does not exist.
+        assert_eq!(
+            anchored_rustc(Some("./tools/rustc".into()), from),
+            OsString::from("/work/guest/./tools/rustc")
+        );
+        assert_eq!(
+            anchored_rustc(Some("tools/rustc".into()), from),
+            OsString::from("/work/guest/tools/rustc")
+        );
+    }
+
+    #[test]
+    fn a_same_version_toolchain_split_still_names_the_difference() {
+        // Two compilers can print the same banner and still be different builds
+        // (a rebuilt nightly, a vendored rustc). The banner alone would then read
+        // as a contradiction — "these two identical toolchains disagree" — so the
+        // refusal falls back to the full `-vV` blocks.
+        let shim = RustcIdentity {
+            banner: "rustc 1.90.0 (aaaaaaaaa 2026-01-01)".into(),
+            verbose: "rustc 1.90.0 (aaaaaaaaa 2026-01-01)\ncommit-hash: aaaaaaaaa\nLLVM version: \
+                      20.1.0"
+                .into(),
+        };
+        let guest = RustcIdentity {
+            banner: shim.banner.clone(),
+            verbose: "rustc 1.90.0 (aaaaaaaaa 2026-01-01)\ncommit-hash: bbbbbbbbb\nLLVM version: \
+                      21.1.0"
+                .into(),
+        };
+        assert_ne!(shim, guest);
+        let message = toolchain_mismatch_message(
+            &shim,
+            Path::new("/patina"),
+            &guest,
+            Path::new("/work/guest"),
+        );
+        assert!(message.contains("refusing to build"), "{message}");
+        assert!(
+            message.contains("/patina") && message.contains("/work/guest"),
+            "{message}"
+        );
+        assert!(
+            message.contains("commit-hash: aaaaaaaaa")
+                && message.contains("commit-hash: bbbbbbbbb"),
+            "the same-banner case must show the full identities:\n{message}"
+        );
+        assert!(message.contains("RUSTUP_TOOLCHAIN"), "{message}");
+
+        // Differing banners are self-explanatory; no full dump.
+        let other = RustcIdentity {
+            banner: "rustc 1.86.0 (05f9846f8 2025-03-31)".into(),
+            verbose: "rustc 1.86.0 (05f9846f8 2025-03-31)\ncommit-hash: 05f9846f8".into(),
+        };
+        let message =
+            toolchain_mismatch_message(&shim, Path::new("/patina"), &other, Path::new("/g"));
+        assert!(message.contains("rustc 1.86.0"), "{message}");
+        assert!(
+            !message.contains("commit-hash: 05f9846f8"),
+            "differing banners need no full dump:\n{message}"
+        );
+    }
 
     #[test]
     fn rustix_use_libc_is_dropped_only_on_sud_capable_targets() {

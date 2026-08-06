@@ -1274,6 +1274,245 @@ fn append_relink_probe(scratch: &Path, staticlib: &Path, generation: u32) {
     );
 }
 
+// A native build links the shim staticlib, always built in the Patina source
+// workspace, into a guest built in the caller's working directory. Under rustup
+// those two directories can resolve DIFFERENT toolchains, and then two Rust
+// standard libraries meet at the guest link: a `duplicate symbol:
+// rust_eh_personality` error on Linux and — as this fixture showed before the
+// detector — a SILENT success on macOS, producing a guest carrying two libstds.
+// The split is staged hermetically here (a `rustc` that reports a distinct
+// identity when probed from the workspace), so the gate holds with or without
+// rustup installed; `a_rust_toolchain_pin_is_refused_when_it_splits_the_build`
+// covers the real rustup mechanism.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_split_shim_guest_toolchain_is_refused_before_the_link() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+
+    // A `rustc` that reports a distinct identity when it runs in the Patina
+    // source workspace and the host identity everywhere else — the same
+    // per-directory resolution rustup's proxy performs, without needing rustup.
+    // The stub compares against the PHYSICAL workspace path: `pwd -P` resolves
+    // symlinks, and a temp or checkout path can sit behind one (macOS `/var` is a
+    // symlink to `/private/var`).
+    let stub = directory.path().join("rustc-split.sh");
+    fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"-vV\" ] && [ \"$(pwd -P)\" = \"{}\" ]; then\n  rustc -vV \
+             | sed '1s/.*/rustc 9.9.9-patina-split-stub (0000000 2000-01-01)/'\n  exit 0\nfi\
+             \nexec rustc \"$@\"\n",
+            fs::canonicalize(workspace).unwrap().display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let package = directory.path().join("guest-pkg");
+    write_plain_package(
+        &package,
+        "patina-toolchain-split-fixture",
+        "fn main() { println!(\"TOOLCHAIN_SPLIT_FIXTURE_OK\"); }\n",
+    );
+    let split_output = package.join("split-build");
+    let agreeing_output = package.join("agreeing-build");
+
+    // Split: the shim half and the guest half resolve different compilers.
+    let refused = invoke_unchecked_clean_env(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        &package,
+        &[
+            "build",
+            package.to_str().unwrap(),
+            "--output",
+            split_output.to_str().unwrap(),
+        ],
+        &[("RUSTC", stub.to_str().unwrap())],
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(
+        !refused.status.success(),
+        "a split shim/guest toolchain built without complaint (exit {}); the guest links two \
+         libstds\nstdout:\n{}\nstderr:\n{stderr}",
+        refused.status,
+        String::from_utf8_lossy(&refused.stdout)
+    );
+    // The refusal must NAME both toolchains, where each resolved, and the fix —
+    // a bare failure would leave the operator with the same confusing link error.
+    for expected in [
+        "refusing to build",
+        "two different rustc toolchains",
+        "9.9.9-patina-split-stub",
+        "shim toolchain:",
+        "guest toolchain:",
+        "RUSTUP_TOOLCHAIN",
+        "cargo patina",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "refusal did not mention {expected:?}:\n{stderr}"
+        );
+    }
+    // The refusal names the shim directory as the CLI holds it (from
+    // `CARGO_MANIFEST_DIR`, which `native_workspace` reproduces) and the guest
+    // directory as `current_dir` reports it — physical, so symlinks are already
+    // resolved there.
+    let package_physical = fs::canonicalize(&package).unwrap();
+    assert!(
+        stderr.contains(&workspace.display().to_string())
+            && stderr.contains(&package_physical.display().to_string()),
+        "refusal did not name both directories ({} and {}):\n{stderr}",
+        workspace.display(),
+        package_physical.display()
+    );
+    assert!(
+        !split_output.exists(),
+        "the refusal produced a binary at {}; it must refuse BEFORE the link",
+        split_output.display()
+    );
+
+    // Agreeing: the same fixture with the split removed must build untouched.
+    // This is what keeps the detector from firing spuriously. The stub is dropped
+    // entirely rather than kept in a pass-through mode, because a `RUSTC` pointing
+    // at a different path changes Cargo's rustc fingerprint and would rebuild the
+    // shim's whole dependency chain in the shared workspace `target/`, then
+    // rebuild it again for the next test.
+    let built = invoke_unchecked_clean_env(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        &package,
+        &[
+            "build",
+            package.to_str().unwrap(),
+            "--output",
+            agreeing_output.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert!(
+        built.status.success(),
+        "an agreeing toolchain was refused: the detector fires on a non-mismatch (exit {})\
+         \nstdout:\n{}\nstderr:\n{}",
+        built.status,
+        String::from_utf8_lossy(&built.stdout),
+        String::from_utf8_lossy(&built.stderr)
+    );
+    assert!(
+        agreeing_output.is_file(),
+        "the agreeing build produced no binary at {}",
+        agreeing_output.display()
+    );
+}
+
+// The reported shape, through the real rustup mechanism rather than a stub: a
+// guest tree carrying its own `rust-toolchain.toml` with the `cargo-patina`
+// binary invoked DIRECTLY. Invoked as `cargo patina`, rustup's cargo proxy
+// exports `RUSTUP_TOOLCHAIN` and pins both halves; invoked directly there is no
+// such variable, and rustup's `rustc` proxy resolves each half from the
+// directory it runs in — the shim in the Patina workspace, the guest under its
+// pin. Skipped (loudly) without rustup or without the MSRV toolchain the check
+// ladder already requires; the hermetic test above never skips.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_rust_toolchain_pin_is_refused_when_it_splits_the_build() {
+    const PINNED: &str = "1.86.0";
+    let Some(installed) = rustup_toolchain_list() else {
+        eprintln!(
+            "SKIP a_rust_toolchain_pin_is_refused_when_it_splits_the_build: no rustup on PATH, \
+             so no per-directory toolchain resolution exists to split"
+        );
+        return;
+    };
+    if !installed.lines().any(|line| line.starts_with(PINNED)) {
+        eprintln!(
+            "SKIP a_rust_toolchain_pin_is_refused_when_it_splits_the_build: rustup toolchain \
+             {PINNED} is not installed (run `mise run setup`)"
+        );
+        return;
+    }
+    // With RUSTUP_TOOLCHAIN cleared, the workspace half resolves the default
+    // toolchain. If that IS the pin, the two halves agree and there is nothing
+    // to detect.
+    let workspace = native_workspace();
+    let default = Command::new("rustup")
+        .args(["show", "active-toolchain"])
+        .current_dir(workspace)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .output()
+        .unwrap();
+    let default = String::from_utf8_lossy(&default.stdout).into_owned();
+    if default.starts_with(PINNED) {
+        eprintln!(
+            "SKIP a_rust_toolchain_pin_is_refused_when_it_splits_the_build: the default toolchain \
+             is already {PINNED}, so the two halves cannot split"
+        );
+        return;
+    }
+
+    let directory = tempdir().unwrap();
+    let package = directory.path().join("pinned-pkg");
+    write_plain_package(
+        &package,
+        "patina-toolchain-pin-fixture",
+        "fn main() { println!(\"TOOLCHAIN_PIN_FIXTURE_OK\"); }\n",
+    );
+    fs::write(
+        package.join("rust-toolchain.toml"),
+        format!("[toolchain]\nchannel = \"{PINNED}\"\n"),
+    )
+    .unwrap();
+    let output_path = package.join("pinned-build");
+
+    // Hold the build lock: if the detection regresses, this invocation compiles.
+    let _build_guard = BUILD_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let refused = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+        .current_dir(&package)
+        .args([
+            "build",
+            package.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+        ])
+        // Exactly the reported invocation: the binary run directly, so nothing
+        // pins a toolchain across both halves.
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("CARGO")
+        .env_remove("RUSTC")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(
+        !refused.status.success(),
+        "a `rust-toolchain.toml`-pinned guest built against a differently-pinned shim without \
+         complaint (exit {})\nstdout:\n{}\nstderr:\n{stderr}",
+        refused.status,
+        String::from_utf8_lossy(&refused.stdout)
+    );
+    assert!(
+        stderr.contains("two different rustc toolchains") && stderr.contains(PINNED),
+        "the refusal did not name the toolchain split or the pinned toolchain {PINNED}:\n{stderr}"
+    );
+    assert!(
+        !output_path.exists(),
+        "the refusal produced a binary at {}; it must refuse BEFORE the link",
+        output_path.display()
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn rustup_toolchain_list() -> Option<String> {
+    let listed = Command::new("rustup")
+        .args(["toolchain", "list"])
+        .output()
+        .ok()?;
+    listed
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&listed.stdout).into_owned())
+}
+
 // Source-first `audit` and `run` honor `--package`/`--bin` against a WORKSPACE
 // manifest — the exact form the help advertises (`audit <Cargo.toml> --package X
 // --bin Y`) and the one the bug report showed rejected. A virtual workspace (no

@@ -149,6 +149,17 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   interpose, or deny-trap the effect.
 - The `cargo-patina` binary embeds native C shim sources at build time. After
   changing the C layer, rebuild `cargo-patina` before trusting native validation.
+- A native build has two halves — the shim staticlib, built in the Patina source
+  workspace, and the guest, built in the caller's working directory — and a build
+  tool that resolves its compiler per directory (rustup's `rustc` proxy reads the
+  rust-toolchain file above wherever it runs) can give them different toolchains.
+  Two libstds in one link is a loud `duplicate symbol` failure on one platform
+  and a silent success on another, so the agreement is checked at the single
+  point where the shim is built rather than trusted. When a mechanism depends on
+  ambient per-directory resolution, verify what the tool actually does before
+  writing the diagnostic: an absolute toolchain `cargo` still invokes the `PATH`
+  `rustc` proxy, so the working directory — not the cargo binary — picks the
+  compiler.
 - Guest binaries relink automatically when the shim or the runtime beneath it
   changes: the injected build flags carry a hash of the link inputs' bytes, so
   Cargo's own fingerprint invalidates. No source-touching or `target/` deletion
