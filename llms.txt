@@ -61,6 +61,12 @@ with no `--target` -> the Cargo package family (in-process boundary API). A
   and knobs are a pure function of the generation number, outcomes are
   classified into seven classes, and novel failure signatures are deduped with
   saved traces and a reproduce command.
+- `cargo patina sites [--crate NAME] [--module PATH] [--group NAME] [--site LABEL] [--all] [--kind KIND] [--runtime driven|observed|invisible] [--no-cache]` / `sites --selftest`
+  Static inventory of Patina SDK assertion/oracle sites, Rust assert/debug_assert,
+  proptest/quickcheck, and antithesis-sdk assertions in the current workspace.
+  JSON output is schema `patina.sites/v1`; per-file cache is
+  `.patina/out/sites-cache.json` unless `--no-cache` is set. Wave 1 is static-only:
+  no `PATINA_SDK_REPORT` exercised join yet.
 - `cargo patina minimize <TRACE> --output PATH -- <ORACLE>` / `minimize --scenario --seed N -- <ORACLE>`
   Delta-debug a failing trace, or shrink the seed/params that trigger a failure.
 

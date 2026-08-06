@@ -1214,6 +1214,115 @@ metadata.",
     ],
 };
 
+const SITES: Verb = Verb {
+    name: "sites",
+    summary: "Inventory static assertion/oracle sites in the current workspace.",
+    synopsis: &[
+        "cargo patina sites [--crate NAME] [--module PATH] [--group NAME] [--site LABEL] [--all] [--kind KIND] [--runtime driven|observed|invisible] [--no-cache]",
+        "cargo patina sites --selftest",
+    ],
+    prose: "\
+`sites` scans the current Cargo workspace with a syn-based static analyzer and reports \
+where Patina SDK sites, Rust assertions, proptest/quickcheck checks, and \
+antithesis-sdk assertions live. Wave 1 is static-only: no runtime/campaign \
+exercised source is joined yet, and invisible sites are inventory rows rather \
+than coverage claims. The default output is a crate/module index; scoped flags \
+or --all opt into per-site drill-down rows. Results are cached per file under \
+.patina/out/sites-cache.json unless --no-cache is set. `--selftest` scans a \
+planted fixture and proves every recognizer class fires.",
+    groups: &[Group {
+        title: "Sites options",
+        flags: &[
+            f(
+                "--crate",
+                None,
+                Value::Required("NAME", Kind::Str),
+                "Drill down to one Cargo package/crate name.",
+                false,
+            ),
+            f(
+                "--module",
+                None,
+                Value::Required("PATH", Kind::Str),
+                "Drill down to one Rust module path.",
+                false,
+            ),
+            f(
+                "--group",
+                None,
+                Value::Required("NAME", Kind::Str),
+                "Drill down to one configured group (groups arrive with .patina config in a later wave).",
+                false,
+            ),
+            f(
+                "--site",
+                None,
+                Value::Required("LABEL", Kind::Str),
+                "Drill down to one SDK/Antithesis label or anonymous site id.",
+                false,
+            ),
+            f(
+                "--all",
+                None,
+                Value::None,
+                "Emit every static site record instead of the summary index.",
+                false,
+            ),
+            f(
+                "--kind",
+                None,
+                Value::Required(
+                    "KIND",
+                    Kind::Enum(&[
+                        "fault",
+                        "delay",
+                        "knob",
+                        "always",
+                        "sometimes",
+                        "reachable",
+                        "assert",
+                        "debug_assert",
+                        "prop_assert",
+                        "proptest",
+                        "quickcheck",
+                        "antithesis_always",
+                        "antithesis_sometimes",
+                        "antithesis_reachable",
+                        "antithesis_unreachable",
+                        "unreachable",
+                    ]),
+                ),
+                "Filter by static site kind.",
+                false,
+            ),
+            f(
+                "--runtime",
+                None,
+                Value::Required(
+                    "driven|observed|invisible",
+                    Kind::Enum(&["driven", "observed", "invisible"]),
+                ),
+                "Filter by Patina runtime relationship.",
+                false,
+            ),
+            f(
+                "--no-cache",
+                None,
+                Value::None,
+                "Rescan files and do not read or write .patina/out/sites-cache.json.",
+                false,
+            ),
+            f(
+                "--selftest",
+                None,
+                Value::None,
+                "Prove the static recognizers fire on a planted fixture, then exit.",
+                false,
+            ),
+        ],
+    }],
+};
+
 const MINIMIZE: Verb = Verb {
     name: "minimize",
     summary: "Shrink a recorded trace, or shrink experiment inputs (--scenario).",
@@ -1298,7 +1407,7 @@ PATINA_SEED/PATINA_PARAMS_JSON protocol.",
 
 /// Every verb, in overview order.
 pub const VERBS: &[&Verb] = &[
-    &RUN, &TEST, &BUILD, &AUDIT, &REPLAY, &EXPLORE, &CAMPAIGN, &TRACE, &MINIMIZE,
+    &RUN, &TEST, &BUILD, &AUDIT, &REPLAY, &EXPLORE, &CAMPAIGN, &SITES, &TRACE, &MINIMIZE,
 ];
 
 /// The `PATINA_*` environment protocol and honored tool variables.

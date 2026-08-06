@@ -1,7 +1,7 @@
 //! Process-level implementation behind the `cargo-patina` binary.
 //!
 //! Internal crate: the `cargo patina` CLI — verb parsing (`build`, `run`,
-//! `test`, `audit`, `replay`, `explore`, `campaign`, `minimize`, `trace`), artifact
+//! `test`, `audit`, `replay`, `explore`, `campaign`, `minimize`, `sites`, `trace`), artifact
 //! family inference (Cargo package / shim-linked native binary / WASI module),
 //! build orchestration, the supervisor protocol that hands the `PATINA_*`
 //! control plane to a guest, and result rendering (`--format json`,
@@ -54,6 +54,8 @@ mod campaign;
 mod help;
 mod output;
 mod render;
+mod rollup;
+mod sites;
 mod trace_cmd;
 mod trace_view;
 
@@ -568,6 +570,7 @@ fn dispatch(arguments: Vec<OsString>) -> Result<i32, CliError> {
         }
         ParseResult::Run(invocation) => execute(invocation),
         ParseResult::Campaign(invocation) => campaign::execute(invocation),
+        ParseResult::Sites(invocation) => sites::execute(invocation),
         ParseResult::Explore(invocation) => execute_explore(invocation),
         ParseResult::WasiBuild(invocation) => execute_wasi_build(invocation),
         ParseResult::WasiAudit(artifact) => execute_wasi_audit(artifact),
@@ -585,6 +588,7 @@ enum ParseResult {
     Version,
     Run(Invocation),
     Campaign(campaign::CampaignInvocation),
+    Sites(sites::SitesInvocation),
     Explore(ExploreInvocation),
     WasiBuild(WasiBuildInvocation),
     WasiAudit(ArtifactRef),
@@ -646,7 +650,7 @@ fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     }
     if arguments.is_empty() {
         return Err(CliError::usage(
-            "missing command (expected run, test, campaign, explore, build, audit, replay, minimize, or trace)",
+            "missing command (expected run, test, campaign, explore, build, audit, replay, minimize, sites, or trace)",
         ));
     }
     // The routed verb (if any). Every known verb records itself so a usage error
@@ -677,6 +681,7 @@ fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
             }
             return match name {
                 "campaign" => campaign::parse(arguments).map(ParseResult::Campaign),
+                "sites" => sites::parse(arguments).map(ParseResult::Sites),
                 "explore" => parse_explore(arguments).map(ParseResult::Explore),
                 "build" => parse_build(arguments),
                 "audit" => parse_audit(arguments),
@@ -697,7 +702,7 @@ fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
         Some("-h" | "--help") => Ok(ParseResult::Help(help::Topic::Overview)),
         Some("-V" | "--version") => Ok(ParseResult::Version),
         _ => Err(CliError::usage(format!(
-            "unsupported command {:?}; expected run, test, campaign, explore, build, audit, replay, minimize, or trace",
+            "unsupported command {:?}; expected run, test, campaign, explore, build, audit, replay, minimize, sites, or trace",
             arguments[0].to_string_lossy()
         ))),
     }
@@ -8335,7 +8340,7 @@ mod tests {
         // `-h`/`--help` in the first flag position of every verb and subcommand
         // routes to Help — never consumed as a positional, never an error.
         for verb in [
-            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize", "trace",
+            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize", "sites", "trace",
         ] {
             assert!(is_help(&[verb, "--help"]), "{verb} --help");
             assert!(is_help(&[verb, "-h"]), "{verb} -h");
@@ -8510,6 +8515,17 @@ mod tests {
                 "--seed-budget",
                 "--param",
             ],
+            "sites" => &[
+                "--crate",
+                "--module",
+                "--group",
+                "--site",
+                "--all",
+                "--kind",
+                "--runtime",
+                "--no-cache",
+                "--selftest",
+            ],
             "trace" => &[
                 "--timeline",
                 "--kind",
@@ -8637,7 +8653,7 @@ mod tests {
         // The whole flag universe a verb may present: its registered groups plus
         // the always-available global help/output flags.
         for verb_name in [
-            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize", "trace",
+            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize", "sites", "trace",
         ] {
             let verb = help::verb(verb_name).expect("verb registered");
             let mut registered: BTreeSet<&str> = BTreeSet::new();
@@ -9156,6 +9172,9 @@ mod tests {
                 campaign::parse(strings(&[&["art.wasm"][..], toks].concat())).map(|_| ())
             }
 
+            // sites: every value-bearing flag is static-report filtering.
+            ("sites", _) => sites::parse(strings(toks)).map(|_| ()),
+
             // minimize: --output/--timeline are trace-mode; --seed/--seed-budget/
             // --param are scenario-mode (need --scenario and a --seed).
             ("minimize", "--output") => parse_minimize(strings(
@@ -9428,7 +9447,7 @@ mod tests {
     #[test]
     fn version_intercepted_across_verbs_before_separator() {
         for verb in [
-            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize", "trace",
+            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize", "sites", "trace",
         ] {
             assert!(
                 matches!(

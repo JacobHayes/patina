@@ -74,7 +74,7 @@ Package names are `patina-dst-*`; workspace directories drop the `-dst-`
 (shown in parentheses where they differ).
 
 ```text
-cargo-patina                # the CLI: build/run/test/audit/replay/explore/campaign/minimize
+cargo-patina                # the CLI: build/run/test/audit/replay/explore/campaign/sites/minimize
 patina-dst (crates/patina)  # cooperative-SUT SDK (dependency-free)
 patina-dst-harness          # configure-then-run harness for ordinary app code under the shim
 patina-dst-abi              # stable deterministic boundary contracts (typed operations/outcomes)

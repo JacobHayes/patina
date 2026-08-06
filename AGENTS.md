@@ -29,7 +29,7 @@ maintainer recipes; it is gitignored and is not project doctrine.
 ## The CLI: verbs, and where its truth lives
 
 `cargo patina` is verb-first: `build`, `run`, `test`, `audit`, `replay`,
-`explore`, `campaign`, `minimize`. Verbs infer the artifact family (Cargo
+`explore`, `campaign`, `sites`, `minimize`. Verbs infer the artifact family (Cargo
 package / native binary / WASI module) from the argument; `run`, `audit`, and
 `replay` are source-first (a `.rs` file, directory, or `Cargo.toml` builds on
 the fly).

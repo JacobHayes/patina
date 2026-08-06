@@ -1,6 +1,6 @@
 # Arc: Invariant visibility
 
-**Status:** design, pre-implementation. Lands as `docs/arcs/invariant-visibility.md` after review.
+**Status:** Wave 1 implemented (static `cargo patina sites` inventory); Waves 2-5 remain design.
 **Depends on:** nothing (wave 1 is standalone). **Feeds:** the coverage-depth arc (shared rollup),
 the sometimes-gate arc (runtime exercised data).
 

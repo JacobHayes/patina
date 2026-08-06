@@ -101,6 +101,17 @@ PATINA_SDK_REPORT enabled=1 fire_permille=250 activation_permille=250 ... \
   sites_registered=1 sites_activated=1 total_firings=2 ... site=batch-commit|fault|...
 ```
 
+Before sweeping, you can inventory the static instrumentation from the `ledger/`
+workspace. Wave 1 of `sites` is static-only: it tells you the site exists and how
+Patina relates to it, not whether this run exercised it.
+
+```
+$ cargo patina sites --no-cache --site batch-commit
+== sites static inventory ==
+...
+src/main.rs:9 fault driven id=batch-commit label=batch-commit ...
+```
+
 Catching seeds are build-specific (the instrumentation shapes the decision
 space), so sweep for one rather than hardcoding it.
 

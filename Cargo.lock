@@ -57,8 +57,11 @@ dependencies = [
  "patina-dst-target",
  "patina-dst-trace",
  "patina-dst-wasi-host",
+ "proc-macro2",
+ "serde",
  "serde_json",
  "sha2",
+ "syn 2.0.119",
  "tempfile",
  "wat",
 ]
