@@ -107,6 +107,11 @@ const NATIVE_SHIM_STATICLIB: &str = "libpatina_dst_native_shim.a";
 /// POSIX/yield helper objects are staged, so their `-Clink-arg` paths stay stable
 /// across builds and Cargo's crate fingerprints stay warm.
 const NATIVE_SHIM_OBJECTS_DIR: &str = "patina-shim-objects";
+/// Cfg name carrying the hash of the shim link inputs a package build injects.
+/// Nothing compiles against it; it exists so Cargo's fingerprint of the injected
+/// `CARGO_ENCODED_RUSTFLAGS` tracks the shim's *bytes* — see
+/// [`shim_link_inputs_hash`].
+const SHIM_BUILD_CFG: &str = "patina_shim_build";
 const DEFAULT_NATIVE_EDITION: &str = "2024";
 const DEFAULT_NATIVE_FINGERPRINT: &str = "patina-native";
 static NATIVE_TRACE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -3409,7 +3414,13 @@ scheduler-hook=patina_yield_point fingerprint-suffix={PATINA_YIELD_FINGERPRINT_S
         None
     };
     let sancov_stub = stage_sancov_stub(&objects_base, yield_object.is_some(), &host_target)?;
-    let rustflags = native_package_rustflags(sancov_stub.as_deref(), &host_target);
+    let rustflags = native_package_rustflags(
+        &object,
+        &staticlib,
+        yield_object.as_deref(),
+        sancov_stub.as_deref(),
+        &host_target,
+    )?;
     let metadata = cargo_metadata(&invocation.manifest)?;
     let target_dir = metadata
         .get("target_directory")
@@ -4742,7 +4753,13 @@ fn build_native_package(
         .expect("shim staticlib path has a profile directory parent")
         .join(NATIVE_SHIM_OBJECTS_DIR);
     let sancov_stub = stage_sancov_stub(&objects_base, yield_object.is_some(), host_target)?;
-    let rustflags = native_package_rustflags(sancov_stub.as_deref(), host_target);
+    let rustflags = native_package_rustflags(
+        object,
+        staticlib,
+        yield_object,
+        sancov_stub.as_deref(),
+        host_target,
+    )?;
 
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let mut command = Command::new(&cargo);
@@ -4969,11 +4986,12 @@ fn host_target_triple() -> Result<String, CliError> {
 }
 
 /// Build the `CARGO_ENCODED_RUSTFLAGS` value for a package build: the
-/// cfg(patina)/cfg(dst) family plus, under `--yield-points`, the
-/// SanitizerCoverage codegen flags. Encoded with the `0x1f` unit separator so
-/// values containing spaces survive intact. Any pre-existing `RUSTFLAGS` are
-/// preserved ahead of the injected flags, matching how `cargo patina run` layers
-/// its cfgs onto the user's flags.
+/// cfg(patina)/cfg(dst) family, the shim-build marker that keys the injected
+/// link inputs' bytes, plus, under `--yield-points`, the SanitizerCoverage
+/// codegen flags. Encoded with the `0x1f` unit separator so values containing
+/// spaces survive intact. Any pre-existing `RUSTFLAGS` are preserved ahead of
+/// the injected flags, matching how `cargo patina run` layers its cfgs onto the
+/// user's flags.
 ///
 /// Everything here is deliberately whole-graph: Cargo forwards `RUSTFLAGS` to
 /// every crate it compiles from source in the invocation, which is exactly what
@@ -4981,8 +4999,16 @@ fn host_target_triple() -> Result<String, CliError> {
 /// need. The shim's *link* arguments must not be whole-graph and live in
 /// [`native_package_link_args`] instead — with one exception, `sancov_stub`,
 /// which is a link argument precisely because the instrumentation above is
-/// whole-graph (see [`PATINA_SANCOV_STUB_OBJECT`]).
-fn native_package_rustflags(sancov_stub: Option<&Path>, target: &str) -> OsString {
+/// whole-graph (see [`PATINA_SANCOV_STUB_OBJECT`]). The link-input paths taken
+/// here are consumed only by [`shim_link_inputs_hash`]; the link arguments
+/// themselves never enter this string.
+fn native_package_rustflags(
+    object: &Path,
+    staticlib: &Path,
+    yield_object: Option<&Path>,
+    sancov_stub: Option<&Path>,
+    target: &str,
+) -> Result<OsString, CliError> {
     let mut tokens: Vec<OsString> = Vec::new();
     if let Some(existing) = env::var_os("RUSTFLAGS") {
         for part in existing.to_string_lossy().split_whitespace() {
@@ -5017,6 +5043,22 @@ fn native_package_rustflags(sancov_stub: Option<&Path>, target: &str) -> OsStrin
         tokens.push(OsString::from("-C"));
         tokens.push(link_arg(sancov_stub));
     }
+    // Key the flag string to the *bytes* of the link inputs injected by
+    // `native_package_link_args`. Cargo fingerprints this string, never the
+    // files it points at, so a rebuilt shim staticlib — which always lands at
+    // the same canonical `<target>/<profile>/libpatina_dst_native_shim.a` —
+    // used to leave the string identical: Cargo called the guest fresh, skipped
+    // the link, and `build` handed back a binary still linked against the
+    // PREVIOUS shim. The helper objects dodge that by being content-addressed
+    // by path (`stage_shim_object`); the staticlib cannot be, so its content
+    // travels in the flags instead. See `shim_link_inputs_hash` for why a cfg
+    // carries it.
+    tokens.push(OsString::from("--cfg"));
+    let mut marker = OsString::from(SHIM_BUILD_CFG);
+    marker.push("=\"");
+    marker.push(shim_link_inputs_hash(object, staticlib, yield_object)?);
+    marker.push("\"");
+    tokens.push(marker);
     let mut encoded = OsString::new();
     for (index, token) in tokens.iter().enumerate() {
         if index > 0 {
@@ -5024,7 +5066,67 @@ fn native_package_rustflags(sancov_stub: Option<&Path>, target: &str) -> OsStrin
         }
         encoded.push(token);
     }
-    encoded
+    Ok(encoded)
+}
+
+/// Hash the contents of every shim link input a package build injects, in a
+/// fixed order, so the value changes exactly when one of those files' bytes
+/// changes.
+///
+/// The value rides in `--cfg patina_shim_build="<hash>"` rather than in a link
+/// argument, for two reasons. It must not perturb the guest: `-C metadata=`
+/// would also invalidate Cargo's fingerprint, but it feeds rustc's symbol
+/// hashes, so an unchanged program would compile to different bytes. And it
+/// must not cost disk: content-addressing the staticlib by path (a hashed copy
+/// or hardlink, the way the small C objects are staged) would strand another
+/// copy of a tens-of-megabytes archive in the target dir on every shim rebuild,
+/// unboundedly over a shim-development session. A cfg no code reads
+/// changes nothing about the compiled output and stores nothing — it only moves
+/// Cargo's fingerprint, which is the whole point. Identical shim bytes give an
+/// identical value, so an unchanged rebuild still hits the cache warm.
+fn shim_link_inputs_hash(
+    object: &Path,
+    staticlib: &Path,
+    yield_object: Option<&Path>,
+) -> Result<String, CliError> {
+    let mut hasher = Sha256::new();
+    for input in [Some(object), Some(staticlib), yield_object]
+        .into_iter()
+        .flatten()
+    {
+        hash_file_contents(&mut hasher, input)?;
+    }
+    Ok(hex(&hasher.finalize()))
+}
+
+/// Fold `path`'s bytes and length into `hasher`, streamed so the multi-megabyte
+/// shim staticlib is never held in memory.
+fn hash_file_contents(hasher: &mut Sha256, path: &Path) -> Result<(), CliError> {
+    use io::Read;
+
+    let mut file = fs::File::open(path).map_err(|error| {
+        CliError(format!(
+            "failed to open the shim link input {}: {error}",
+            path.display()
+        ))
+    })?;
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut length: u64 = 0;
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| {
+            CliError(format!(
+                "failed to read the shim link input {}: {error}",
+                path.display()
+            ))
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        length += read as u64;
+    }
+    hasher.update(length.to_le_bytes());
+    Ok(())
 }
 
 /// Stage [`PATINA_SANCOV_STUB_OBJECT`] when the build is instrumented. The stubs
@@ -7060,8 +7162,15 @@ mod tests {
 
         // The injected flags reflect it: present for aarch64-linux, absent for
         // x86_64-linux.
-        let x86 = native_package_rustflags(None, "x86_64-unknown-linux-gnu");
-        let arm = native_package_rustflags(None, "aarch64-unknown-linux-gnu");
+        let directory = tempfile::tempdir().unwrap();
+        let obj = directory.path().join("o.o");
+        let lib = directory.path().join("l.a");
+        fs::write(&obj, b"object").unwrap();
+        fs::write(&lib, b"staticlib").unwrap();
+        let x86 =
+            native_package_rustflags(&obj, &lib, None, None, "x86_64-unknown-linux-gnu").unwrap();
+        let arm =
+            native_package_rustflags(&obj, &lib, None, None, "aarch64-unknown-linux-gnu").unwrap();
         assert!(!x86.to_string_lossy().contains("rustix_use_libc"));
         assert!(arm.to_string_lossy().contains("rustix_use_libc"));
     }
@@ -7073,16 +7182,28 @@ mod tests {
     // single deliberate exception is the weak SanitizerCoverage stub, which is
     // whole-graph because the instrumentation it answers for is. Any OTHER
     // link-arg leaking back into the rustflags side restores the
-    // dependency-cdylib failure, so pin the boundary directly.
+    // dependency-cdylib failure, so pin the boundary directly. (Real files:
+    // the shim-build marker streams the link inputs' bytes.)
     #[test]
     fn shim_link_args_never_travel_in_whole_graph_rustflags() {
-        let object = Path::new("/tmp/patina_posix.o");
-        let staticlib = Path::new("/tmp/libpatina_dst_native_shim.a");
-        let yield_object = Path::new("/tmp/patina_yield.o");
-        let sancov_stub = Path::new("/tmp/patina_sancov_stub.o");
+        let directory = tempfile::tempdir().unwrap();
+        let object = directory.path().join("patina_posix.o");
+        let staticlib = directory.path().join("libpatina_dst_native_shim.a");
+        let yield_object = directory.path().join("patina_yield.o");
+        let sancov_stub = directory.path().join("patina_sancov_stub.o");
+        for path in [&object, &staticlib, &yield_object, &sancov_stub] {
+            fs::write(path, b"bytes").unwrap();
+        }
 
-        for stub in [None, Some(sancov_stub)] {
-            let rustflags = native_package_rustflags(stub, "x86_64-unknown-linux-gnu");
+        for stub in [None, Some(sancov_stub.as_path())] {
+            let rustflags = native_package_rustflags(
+                &object,
+                &staticlib,
+                None,
+                stub,
+                "x86_64-unknown-linux-gnu",
+            )
+            .unwrap();
             let rustflags = rustflags.to_string_lossy().into_owned();
             assert!(rustflags.contains("patina_shim"));
             // Yield-point instrumentation is codegen, not linking: it must stay
@@ -7100,11 +7221,14 @@ mod tests {
                     link_args.is_empty(),
                     "an uninstrumented build injects nothing whole-graph, got: {link_args:?}"
                 ),
-                Some(_) => assert_eq!(link_args, vec!["link-arg=/tmp/patina_sancov_stub.o"]),
+                Some(_) => assert_eq!(
+                    link_args,
+                    vec![format!("link-arg={}", sancov_stub.display()).as_str()]
+                ),
             }
         }
 
-        let args = native_package_link_args(object, staticlib, Some(yield_object));
+        let args = native_package_link_args(&object, &staticlib, Some(&yield_object));
         let rendered: Vec<String> = args
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -7123,10 +7247,45 @@ mod tests {
             );
         }
         assert!(
-            native_package_link_args(object, staticlib, None)
+            native_package_link_args(&object, &staticlib, None)
                 .iter()
                 .all(|arg| !arg.to_string_lossy().ends_with("patina_yield.o"))
         );
+    }
+
+    // The injected flag string must key the shim link inputs' CONTENT, because
+    // Cargo fingerprints that string and nothing else: same bytes must give the
+    // same string (so an unchanged rebuild stays a cache hit), and changed bytes
+    // must give a different one (so a rebuilt shim forces the guest to relink
+    // instead of silently reusing a binary linked against the previous archive).
+    // The staticlib is the input that needs this — it has one canonical path,
+    // unlike the helper objects, which are content-addressed by path.
+    #[test]
+    fn shim_link_input_bytes_key_the_injected_flags() {
+        let directory = tempfile::tempdir().unwrap();
+        let object = directory.path().join("patina_posix.o");
+        let staticlib = directory.path().join("libpatina_dst_native_shim.a");
+        fs::write(&object, b"object bytes").unwrap();
+        fs::write(&staticlib, b"shim bytes").unwrap();
+        let target = "aarch64-apple-darwin";
+
+        let first = native_package_rustflags(&object, &staticlib, None, None, target).unwrap();
+        let repeat = native_package_rustflags(&object, &staticlib, None, None, target).unwrap();
+        assert_eq!(first, repeat, "unchanged inputs must give identical flags");
+
+        // Same path, different bytes: the pre-fix flag string was byte-identical
+        // here, which is exactly how a stale guest survived a shim change.
+        fs::write(&staticlib, b"rebuilt shim bytes").unwrap();
+        let rebuilt = native_package_rustflags(&object, &staticlib, None, None, target).unwrap();
+        assert_ne!(
+            first, rebuilt,
+            "a rebuilt staticlib at the same path must change the injected flags"
+        );
+
+        // Same length, different content: a size/mtime-shaped key would miss it.
+        fs::write(&staticlib, b"shim bytez").unwrap();
+        let flipped = native_package_rustflags(&object, &staticlib, None, None, target).unwrap();
+        assert_ne!(first, flipped, "a same-length edit must change the flags");
     }
 
     fn strings(values: &[&str]) -> Vec<OsString> {

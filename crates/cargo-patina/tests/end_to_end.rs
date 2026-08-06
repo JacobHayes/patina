@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
+use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::path::Path;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -1081,6 +1084,194 @@ fn collect_files(directory: &Path, into: &mut Vec<std::path::PathBuf>) {
             into.push(path);
         }
     }
+}
+
+// The converse of the cache-hit test above: when the shim staticlib's BYTES
+// change, the guest must relink. Cargo fingerprints the injected
+// `CARGO_ENCODED_RUSTFLAGS` string, never the files it names, and the staticlib
+// has one canonical path — so a shim/runtime change once left the flag string
+// identical, Cargo reported the guest fresh ("Finished in 0.01s"), and `build`
+// handed back a binary still linked against the PREVIOUS shim. Two builders lost
+// a day to that false "the fix didn't work" evidence.
+//
+// The assertion is the GUEST'S OWN OUTPUT, which is the one observable the
+// staleness under test cannot fake: the fixture calls `patina_relink_probe()`,
+// supplied by an extra archive member appended to this test's private copy of
+// the staticlib. Replacing that member with one returning a different value and
+// rebuilding must change what the guest prints. A stale binary keeps printing
+// the old value no matter what the build log says — build-output text and file
+// mtimes are exactly what a skipped link leaves untouched, so neither is
+// trusted here.
+//
+// `CARGO_TARGET_DIR` redirects the whole build into the tempdir so the doctored
+// staticlib is private to this test and the real workspace artifact is never
+// touched, and a stub `CARGO` skips the shim's own `cargo build -p
+// patina-dst-native-shim` (which would overwrite the doctored copy) while
+// forwarding every other Cargo invocation unchanged. Because the observable is
+// guest output rather than a rebuild count, a machine-global `build.build-dir`
+// redirect — the setting that hid this bug, since deleting the guest's local
+// `target/` no longer busts anything — cannot make this pass vacuously.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn changed_shim_staticlib_bytes_relink_the_guest() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+
+    // Build the real shim once, exactly where `build_native_shim` looks for it,
+    // and copy it aside. Only the copy is ever doctored.
+    let real_staticlib = build_workspace_shim_staticlib(workspace, &cargo);
+    let shim_target = directory.path().join("shim-target");
+    let staged = shim_target.join("debug");
+    fs::create_dir_all(&staged).unwrap();
+    let staticlib = staged.join("libpatina_dst_native_shim.a");
+    fs::copy(&real_staticlib, &staticlib).unwrap();
+
+    // A `cargo` stub that no-ops the shim's own build (which would replace our
+    // doctored archive with the pristine one) and forwards everything else.
+    let stub = directory.path().join("cargo-stub.sh");
+    fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \
+             \"patina-dst-native-shim\" ]; then exit 0; fi\ndone\nexec {cargo} \"$@\"\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let package = directory.path().join("probe-pkg");
+    write_plain_package(
+        &package,
+        "patina-relink-probe-fixture",
+        "unsafe extern \"C\" {\n    fn patina_relink_probe() -> u32;\n}\n\nfn main() {\n    \
+         println!(\"RELINK_PROBE={}\", unsafe { patina_relink_probe() });\n}\n",
+    );
+
+    let envs: &[(&str, &str)] = &[
+        ("CARGO", stub.to_str().unwrap()),
+        ("CARGO_TARGET_DIR", shim_target.to_str().unwrap()),
+    ];
+    let mut printed = Vec::new();
+    for (generation, binary) in [(1u32, "gen1"), (2u32, "gen2")] {
+        append_relink_probe(directory.path(), &staticlib, generation);
+        let output = package.join(binary);
+        let built = invoke_unchecked_clean_env(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &[
+                "build",
+                package.to_str().unwrap(),
+                "--output",
+                output.to_str().unwrap(),
+            ],
+            envs,
+        );
+        assert!(
+            built.status.success(),
+            "generation {generation} build failed with {}\nstdout:\n{}\nstderr:\n{}",
+            built.status,
+            String::from_utf8_lossy(&built.stdout),
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let ran = invoke_unchecked_clean_env(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &["run", output.to_str().unwrap(), "--seed", "5"],
+            envs,
+        );
+        assert!(
+            ran.status.success(),
+            "generation {generation} run failed with {}\nstderr:\n{}",
+            ran.status,
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&ran.stdout).into_owned();
+        printed.push(
+            stdout
+                .lines()
+                .find(|line| line.starts_with("RELINK_PROBE="))
+                .unwrap_or_else(|| panic!("missing RELINK_PROBE in stdout:\n{stdout}"))
+                .to_owned(),
+        );
+    }
+
+    assert_eq!(
+        printed,
+        vec!["RELINK_PROBE=1".to_owned(), "RELINK_PROBE=2".to_owned()],
+        "the guest did not relink against the changed shim staticlib: it still runs code \
+         from the previous archive, so a shim or runtime change silently produces a stale \
+         binary"
+    );
+}
+
+// Build the shim staticlib the way `build_native_shim` does and return the path
+// it resolves — same `CARGO_TARGET_DIR`-or-`target` rule, so the test cannot
+// drift from the CLI's own resolution.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn build_workspace_shim_staticlib(workspace: &Path, cargo: &str) -> PathBuf {
+    let _build_guard = BUILD_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let built = Command::new(cargo)
+        .current_dir(workspace)
+        .args(["build", "-p", "patina-dst-native-shim"])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "building the shim staticlib failed:\n{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let target = env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace.join("target"));
+    let staticlib = target.join("debug/libpatina_dst_native_shim.a");
+    assert!(
+        staticlib.is_file(),
+        "expected the shim staticlib at {}",
+        staticlib.display()
+    );
+    staticlib
+}
+
+// Append (or replace) an archive member defining `patina_relink_probe`, so the
+// staticlib's bytes differ per generation AND the difference is visible in the
+// linked guest: the fixture calls the probe, so the linker must pull this member
+// in and the returned value reaches the guest's stdout.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn append_relink_probe(scratch: &Path, staticlib: &Path, generation: u32) {
+    let source = scratch.join("patina_relink_probe.c");
+    fs::write(
+        &source,
+        format!("unsigned patina_relink_probe(void) {{ return {generation}u; }}\n"),
+    )
+    .unwrap();
+    let object = scratch.join("patina_relink_probe.o");
+    let cc = env::var("CC").unwrap_or_else(|_| "cc".to_owned());
+    let compiled = Command::new(&cc)
+        .arg("-c")
+        .arg(&source)
+        .arg("-o")
+        .arg(&object)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "compiling the relink probe failed:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let archived = Command::new("ar")
+        .arg("rcs")
+        .arg(staticlib)
+        .arg(&object)
+        .output()
+        .unwrap();
+    assert!(
+        archived.status.success(),
+        "adding the relink probe to the staticlib failed:\n{}",
+        String::from_utf8_lossy(&archived.stderr)
+    );
 }
 
 // Source-first `audit` and `run` honor `--package`/`--bin` against a WORKSPACE

@@ -136,14 +136,11 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   interpose, or deny-trap the effect.
 - The `cargo-patina` binary embeds native C shim sources at build time. After
   changing the C layer, rebuild `cargo-patina` before trusting native validation.
-- Guest builds link the shim through injected link args, which cargo does not
-  treat as a fingerprint input: after a shim or runtime change, `cargo patina
-  build` can report "Finished" instantly and hand back a guest binary still
-  linked against the old shim. Deleting the guest's local `target/` does not
-  help when a global `build.build-dir` redirects the real build directory.
-  Until the staleness bug is fixed, force a relink (e.g. touch the guest's
-  sources) and confirm the fresh binary actually contains the change before
-  trusting "the fix didn't work" evidence.
+- Guest binaries relink automatically when the shim or the runtime beneath it
+  changes: the injected build flags carry a hash of the link inputs' bytes, so
+  Cargo's own fingerprint invalidates. No source-touching or `target/` deletion
+  is needed to pick up a shim change — and a guest that still shows old shim
+  behavior is a real finding, not a stale build.
 
 ## Local maintainer notes
 

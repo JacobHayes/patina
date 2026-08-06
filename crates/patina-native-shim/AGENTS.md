@@ -36,6 +36,11 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   form for a variadic function.
 - After editing `c/patina_posix.c` or related embedded C sources, rebuild
   `cargo-patina`; validating with a stale runner is an accidental false green.
+- Guest binaries pick a shim change up on their own: the flags `cargo patina
+  build` injects carry a hash of the shim link inputs' bytes, so Cargo relinks
+  the guest whenever this crate (or the runtime beneath it) is rebuilt. A guest
+  still showing the old behavior after a rebuilt `cargo-patina` is a real
+  result, not a stale build.
 - Run targeted shim tests and `scripts/validate-native-shim.sh` for any native
   interposition change. If the change can affect WASI or cross-target behavior,
   also run `scripts/validate-wasi.sh` and `scripts/smoke-cross-target.sh`.
