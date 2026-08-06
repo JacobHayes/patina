@@ -61,6 +61,24 @@ cluster so the fixes have citable symptom records.
   trace-format churn; the cross-target canonical entropy hash was updated
   intentionally because domain-separated seeding changes deterministic entropy
   output (expected, one-time).
+- **2026-08-06 — sites.json store contract (landed with sometimes-gate).**
+  One canonical per-campaign store `<out>/sites.json`
+  (`patina.campaign.sites/v1`): top-level `schema` / `generations_observed`
+  (the resume watermark campaign-steering Stage 3 consumes) / sorted `sites`;
+  per-site label, kind, `@file:line` site, registered/satisfied generation
+  tallies, evals/fires, first-satisfaction seed. `reachable!` participates in
+  tallies but never-reached sites stay invisible until invariant Wave 5's
+  static enumeration (lazy registration). Campaign resume at a nonzero cursor
+  refuses a missing/mismatched store rather than silently dropping coverage.
+- **2026-08-06 — trace `events` JSONL exception.** Every verb's `--format
+  json` emits one patina.result/v1 envelope except `trace events`, which
+  streams patina.trace.events/v1 JSON Lines (a 1M-event envelope would be
+  unusable); the exception is documented in the `--format` registry prose
+  itself.
+- **2026-08-06 — integration structure.** Work landed as three parallel jj
+  stacks (CLI, campaign/sites, runtime/shim) integrated twice: ten
+  verb-table conflicts at point one, doc-only conflicts plus two one-line
+  merges at point two; full battery green at the integrated tip (5m52s).
 - **2026-08-06 — SlateDB-side harness findings are out of scope.** Items in
   `SLATEDB-SANDBOX-NOTES.md` (bank fenced-close neutrality, recovery scenario
   stabilization) live in the sandbox SlateDB checkout, not this repo; nothing
