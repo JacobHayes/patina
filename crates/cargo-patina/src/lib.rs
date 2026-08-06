@@ -4415,7 +4415,8 @@ fn push_platform_link_args(mut configure: impl FnMut(&str)) {
     {
         // Wrap `dlsym` so the shim's host-alias table can reach the real glibc
         // resolver through `__real_dlsym` while guest/std references to `dlsym`
-        // still bind to the shim's neutering `__wrap_dlsym` interposer. This is
+        // still bind to the shim's `__wrap_dlsym` interposer (which resolves only
+        // its deterministic entropy routing table — never a host symbol). This is
         // the Linux half of the host-alias doctrine: `dlsym(RTLD_NEXT, ...)`
         // resolves the trace-fd I/O, baton-semaphore, and host-thread-creation
         // vehicles at runtime, so `__read`/`__write`/`sem_*`/`pthread_create` no

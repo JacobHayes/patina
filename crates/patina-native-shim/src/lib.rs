@@ -482,13 +482,14 @@ struct StdioCapture {
 //
 // Both platforms are swept onto this table (see the two `hostapi` modules
 // below). macOS resolves through `dlsym(RTLD_NEXT, ...)` directly. Linux has one
-// wrinkle: the shim interposes `dlsym` itself (to neuter std's optional-symbol
-// probing), and glibc's flat namespace means the shim's own strong `read`/
+// wrinkle: the shim interposes `dlsym` itself (so guest and std dynamic lookups
+// get a deterministic answer instead of a host symbol), and glibc's flat
+// namespace means the shim's own strong `read`/
 // `write`/`sem_*` defs would satisfy any reference the shim made to those names —
-// so a plain `dlsym`-based table would hit the shim's own stub. The Linux
+// so a plain `dlsym`-based table would hit the shim's own interposer. The Linux
 // primitive is instead `__real_dlsym`, the real glibc resolver reached through
 // `-Wl,--wrap=dlsym`; guest
-// `dlsym` binds to the neutering `__wrap_dlsym`, and `dlsym(RTLD_NEXT, "read")`
+// `dlsym` binds to `__wrap_dlsym`, and `dlsym(RTLD_NEXT, "read")`
 // reaches genuine glibc, skipping the shim's strong def. So `__read`/`__write`/
 // `sem_*`/`pthread_create` leave the guest import table on Linux too (each
 // interposed by a strong def, its real vehicle resolved through the table), and
@@ -671,8 +672,9 @@ mod hostapi {
 
 // Linux half of the host-alias doctrine. glibc's flat namespace means the shim's
 // own strong `read`/`write`/`sem_*` definitions would satisfy any reference the
-// shim made to those names, and the shim also interposes `dlsym` itself (to
-// neuter std's optional-symbol probing) — so neither a named import nor a plain
+// shim made to those names, and the shim also interposes `dlsym` itself (so
+// dynamic lookup answers deterministically instead of returning host symbols) —
+// so neither a named import nor a plain
 // `dlsym` can reach the real host vehicles. The resolution primitive is instead
 // `__real_dlsym`, the real glibc resolver reached through `-Wl,--wrap=dlsym`
 // (added by `cargo patina native-build`).
@@ -691,7 +693,8 @@ mod hostapi {
 
     // The real glibc resolver, reached through the `-Wl,--wrap=dlsym` alias
     // `__real_dlsym`. Guest and std `dlsym` references bind to the shim's
-    // neutering `__wrap_dlsym` (patina_posix.c); only this shim-internal path
+    // `__wrap_dlsym` (patina_posix.c), which answers only from its deterministic
+    // entropy routing table; only this shim-internal path
     // reaches the real resolver. Any consumer of the shim staticlib that drives a
     // host vehicle (managed threads / trace-fd I/O / baton) must link
     // `-Wl,--wrap=dlsym`, the single wrap the shim needs (thread creation is a

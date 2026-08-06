@@ -12,6 +12,16 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
 - A shared symbol allowance is not a fix. If a host effect escapes, first add or
   harden detection so the class fails loudly, then model, interpose, or deny-trap
   the specific surface.
+- Dynamic resolution (`dlsym` on Linux) is a second, non-static path into libc:
+  the guest never imports the name, so the pre-run audit cannot see it. It
+  answers from one curated entropy routing table and NULL otherwise. Adding a
+  name to that table is only legitimate when the shim already defines that symbol
+  deterministically — the table returns the code the static linker would have
+  bound the caller to, never a host entry, and never a public interposable symbol
+  (the pointers handed out have internal linkage). Returning NULL is not
+  automatically the conservative answer: for a symbol the shim models, NULL sends
+  the caller down a *less* modeled fallback (this is exactly how `rand::rng()`
+  ended up polling the unmodeled `/dev/random` on Linux).
 - Interposer semantics should match the public path they replace. Raw-syscall
   dispatch, SUD handling, and C ABI entry points should route through the same
   runtime behavior as the corresponding POSIX interposer whenever possible.

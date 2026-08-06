@@ -559,7 +559,8 @@ pub fn shim_control_plane_symbols() -> BTreeSet<String> {
         // creation vehicle is resolved through it at runtime
         // (`dlsym(RTLD_NEXT, ...)`), so `__read`/`__write`/`sem_*`/`pthread_create`
         // no longer appear in the guest import table; guest and std `dlsym`
-        // references bind to the shim's neutering `__wrap_dlsym`. So, as on macOS,
+        // references bind to the shim's `__wrap_dlsym`, which resolves only its
+        // deterministic entropy routing table. So, as on macOS,
         // the whole control plane collapses to the single `dlsym` primitive.
         "dlsym",
     ];

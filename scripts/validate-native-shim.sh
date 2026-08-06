@@ -209,6 +209,14 @@ int main(void) {
     /* putenv stays fail-closed: its entry would have to stay aliased to this
      * caller-owned buffer, which the owned deterministic map cannot model. */
     {
+#ifndef __APPLE__
+        /* glibc guards putenv behind __USE_MISC/__USE_XOPEN, and
+         * _POSIX_C_SOURCE alone sets neither, so declare it here (as for
+         * clearenv below). Unlike clearenv, putenv DOES exist on macOS —
+         * declared unconditionally there — so this guard is only about which
+         * platform needs the declaration, not about where the function lives. */
+        extern int putenv(char *);
+#endif
         static char aliased[] = "GAMMA=3";
         errno = 0;
         if (putenv(aliased) != -1 || errno != ENOSYS) return 70;
@@ -1271,6 +1279,155 @@ fi
   --fingerprint native-urandom-v1 >"$tmp/urandom-replay"
 cmp "$tmp/urandom-record" "$tmp/urandom-replay"
 cmp "$tmp/urandom-seed-1" "$tmp/urandom-replay"
+
+# dlsym entropy routing table. The failure class is "a libc-resolution path
+# bypasses the interposers and reaches an unmodeled surface": the `getrandom`
+# crate's Linux backend resolves `getrandom` through dlsym rather than by
+# linking, so a flat NULL from the shim's `dlsym` interposer silently demoted
+# every dependency RNG to the crate's use_file fallback, which opens and polls
+# /dev/random (unmodeled). The shim answers dlsym from a curated table of the
+# entropy symbols it already implements deterministically; everything else still
+# resolves to nothing. Both halves are asserted here, plus that the routed
+# implementations draw seeded (not host, not constant) bytes.
+#
+# The table is a distinct symbol so this leg is real on BOTH platforms: only
+# Linux links `-Wl,--wrap=dlsym` (ld64 has no `--wrap`), and the probe checks the
+# real dlsym round trip there on top of the table itself.
+cat >"$tmp/dlsym_probe.rs" <<'RS'
+use std::ffi::{CString, c_void};
+use std::os::raw::c_char;
+use std::ptr::NonNull;
+
+unsafe extern "C" {
+    fn patina_dlsym_entropy(symbol: *const c_char) -> *mut c_void;
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+}
+
+type GetRandomFn = unsafe extern "C" fn(*mut c_void, usize, u32) -> isize;
+type GetEntropyFn = unsafe extern "C" fn(*mut c_void, usize) -> i32;
+
+fn table(symbol: &str) -> *mut c_void {
+    let name = CString::new(symbol).expect("symbol name carries no NUL");
+    unsafe { patina_dlsym_entropy(name.as_ptr()) }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn main() {
+    // std's optional-symbol probe, dynamic loading, an unmodeled entropy symbol,
+    // and ordinary host effects must all still resolve to nothing.
+    for denied in [
+        "__pthread_get_minstack",
+        "dlopen",
+        "arc4random_buf",
+        "open",
+        "getpid",
+        "",
+    ] {
+        assert!(table(denied).is_null(), "dlsym allowlist leaked {denied:?}");
+    }
+
+    let getrandom_ptr = table("getrandom");
+    let getentropy_ptr = table("getentropy");
+    assert!(!getrandom_ptr.is_null(), "getrandom is not routed");
+    assert!(!getentropy_ptr.is_null(), "getentropy is not routed");
+    let getrandom: GetRandomFn = unsafe { std::mem::transmute(getrandom_ptr) };
+    let getentropy: GetEntropyFn = unsafe { std::mem::transmute(getentropy_ptr) };
+
+    // The availability probe the `getrandom` crate runs immediately after
+    // resolving the pointer: a zero-length call through a dangling pointer. A
+    // negative answer there makes the crate mark getrandom unavailable and take
+    // the /dev/random fallback, so this exact shape has to succeed.
+    let dangling = NonNull::<u8>::dangling().as_ptr().cast::<c_void>();
+    assert_eq!(unsafe { getrandom(dangling, 0, 0) }, 0, "availability probe failed");
+
+    let mut from_getrandom = [0u8; 24];
+    let filled = unsafe {
+        getrandom(
+            from_getrandom.as_mut_ptr().cast(),
+            from_getrandom.len(),
+            0,
+        )
+    };
+    assert_eq!(filled, from_getrandom.len() as isize, "short getrandom fill");
+
+    let mut from_getentropy = [0u8; 24];
+    let status = unsafe {
+        getentropy(from_getentropy.as_mut_ptr().cast(), from_getentropy.len())
+    };
+    assert_eq!(status, 0, "getentropy failed");
+
+    // Successive draws off one seeded stream: neither empty nor the same block.
+    assert_ne!(from_getrandom, [0u8; 24], "getrandom wrote nothing");
+    assert_ne!(from_getrandom, from_getentropy, "two draws were identical");
+
+    // Unknown GRND_* flags stay fail-closed rather than silently succeeding.
+    let mut scratch = [0u8; 8];
+    let rejected = unsafe {
+        getrandom(scratch.as_mut_ptr().cast(), scratch.len(), 0x4000_0000)
+    };
+    assert_eq!(rejected, -1, "unknown getrandom flags were accepted");
+
+    let link = {
+        #[cfg(target_os = "linux")]
+        {
+            // RTLD_DEFAULT is NULL on glibc: the handle both the `getrandom`
+            // crate and std pass. The wrapped dlsym must hand back the very
+            // pointer the table holds, and must still refuse everything else.
+            let name = CString::new("getrandom").unwrap();
+            let resolved = unsafe { dlsym(std::ptr::null_mut(), name.as_ptr()) };
+            assert_eq!(resolved, getrandom_ptr, "dlsym did not return the routed getrandom");
+            let name = CString::new("__pthread_get_minstack").unwrap();
+            let probed = unsafe { dlsym(std::ptr::null_mut(), name.as_ptr()) };
+            assert!(probed.is_null(), "dlsym leaked a host symbol");
+            "wrapped"
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            "table-only"
+        }
+    };
+
+    println!(
+        "NATIVE_DLSYM_ENTROPY link={link} getrandom={} getentropy={}",
+        hex(&from_getrandom),
+        hex(&from_getentropy)
+    );
+}
+RS
+"$runner" build "$tmp/dlsym_probe.rs" --output "$tmp/dlsym-probe" >/dev/null
+"$runner" audit "$tmp/dlsym-probe" "${shim_allow[@]}" >/dev/null
+"$runner" run "$tmp/dlsym-probe" --seed 1 >"$tmp/dlsym-seed-1"
+"$runner" run "$tmp/dlsym-probe" --seed 1 >"$tmp/dlsym-seed-1-again"
+"$runner" run "$tmp/dlsym-probe" --seed 2 >"$tmp/dlsym-seed-2"
+cmp "$tmp/dlsym-seed-1" "$tmp/dlsym-seed-1-again"
+if [[ "$(uname -s)" == Linux ]]; then
+  dlsym_link=wrapped
+else
+  dlsym_link=table-only
+fi
+if ! grep -Eq "^NATIVE_DLSYM_ENTROPY link=$dlsym_link getrandom=[0-9a-f]{48} getentropy=[0-9a-f]{48}$" \
+  "$tmp/dlsym-seed-1"; then
+  echo "validate-native-shim: dlsym entropy probe did not report link=$dlsym_link with two seeded draws" >&2
+  cat "$tmp/dlsym-seed-1" >&2
+  exit 1
+fi
+if cmp -s "$tmp/dlsym-seed-1" "$tmp/dlsym-seed-2"; then
+  echo 'validate-native-shim: dlsym-routed entropy did not vary across seeds (the routed implementation is not drawing from the seeded stream)' >&2
+  exit 1
+fi
+"$runner" run "$tmp/dlsym-probe" --seed 1 --record "$tmp/dlsym.patina" \
+  --fingerprint native-dlsym-entropy-v1 >"$tmp/dlsym-record"
+"$runner" replay "$tmp/dlsym-probe" "$tmp/dlsym.patina" \
+  --fingerprint native-dlsym-entropy-v1 >"$tmp/dlsym-replay"
+cmp "$tmp/dlsym-record" "$tmp/dlsym-replay"
+cmp "$tmp/dlsym-seed-1" "$tmp/dlsym-replay"
 
 # R20 config-differential double-run: the SAME single-threaded source built plain
 # and with `--yield-points` must produce a byte-identical RESULT at the same seed.
