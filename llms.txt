@@ -94,7 +94,11 @@ unknown option.
   generation, and the persisted novelty log, truncated below the generation being
   derived so a resumed campaign re-derives identically), records the per-generation
   decision on the `PATINA_CAMPAIGN_GEN` line as `guided=exploit:<gen>|explore|none`,
-  and is refused when the artifact supplies no novelty signal.
+  and is refused when the artifact supplies no novelty signal. Status: guidance has
+  NO CONSISTENT MEASURED ADVANTAGE over the default sweep yet — on the
+  `testbeds/guided-efficacy/` staircase it is usually a tie, sometimes markedly slower,
+  and occasionally wins a seed the default sweep never solves — so prefer the default
+  sweep unless you are experimenting with the policy.
 - `cargo patina coverage <BINARY> <MAP|CAMPAIGN-OUT-DIR> [--focus CRATE::module] [--top N]`
   Read-only offline symbolization for native yield-point coverage. Resolves
   covmap PCs from the `patina_yield_point` anchor, demangles symbols, rolls edges

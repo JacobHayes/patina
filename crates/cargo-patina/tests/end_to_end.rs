@@ -12922,3 +12922,98 @@ fn campaign_guided_resume_after_a_tear_re_derives_the_same_generation() {
         "the re-run generation must be derived exactly as the original run derived it"
     );
 }
+
+// A guest with NO seed-dependent behaviour: identical fuel and identical hostcall
+// kinds every generation, so only the bootstrap generation is ever novel. With the
+// bootstrap excluded from the ancestor pool that leaves nothing to steer toward,
+// which must surface as an unguided-identical stream AND a loud vacuity line —
+// never as steering that quietly resamples the baseline.
+const WASI_CONSTANT_MODULE: &str = r#"(module
+    (import "wasi_snapshot_preview1" "fd_write"
+        (func $write (param i32 i32 i32 i32) (result i32)))
+    (memory (export "memory") 1)
+    (data (i32.const 64) "constant\n")
+    (func (export "_start")
+        (i32.store (i32.const 0) (i32.const 64))
+        (i32.store (i32.const 4) (i32.const 9))
+        (drop (call $write (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 16)))))"#;
+
+#[test]
+fn campaign_guided_reports_vacuous_when_only_the_bootstrap_was_novel() {
+    let directory = tempdir().unwrap();
+    let module = directory.path().join("constant.wasm");
+    fs::write(&module, wat::parse_str(WASI_CONSTANT_MODULE).unwrap()).unwrap();
+    let module_path = module.to_str().unwrap().to_string();
+    let run = |owned: Vec<String>| {
+        let refs = owned.iter().map(String::as_str).collect::<Vec<_>>();
+        invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), directory.path(), &refs)
+    };
+    let args = |out: &Path, guided: bool| {
+        let mut args = vec![
+            "campaign".to_string(),
+            module_path.clone(),
+            "--gens".to_string(),
+            "12".to_string(),
+            "--progress-every".to_string(),
+            "1".to_string(),
+            "--out-dir".to_string(),
+            out.to_str().unwrap().to_string(),
+        ];
+        if guided {
+            args.push("--guided".to_string());
+        }
+        args
+    };
+
+    let guided_out = directory.path().join("guided");
+    let plain_out = directory.path().join("plain");
+    let guided = run(args(&guided_out, true));
+    let plain = run(args(&plain_out, false));
+    assert!(guided.status.success() && plain.status.success());
+    let guided_stdout = String::from_utf8_lossy(&guided.stdout).into_owned();
+
+    // Only the bootstrap was novel, so the pool is empty and every generation
+    // reports that it had nothing to steer toward.
+    let novelty = campaign_depth_meta(&guided_out)["new_depth_log"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(
+        novelty, 1,
+        "this fixture must produce exactly one (bootstrap) novelty entry"
+    );
+    assert!(
+        guided_stdout.contains("PATINA_CAMPAIGN_GUIDED_VACUOUS"),
+        "a guided campaign that never steered must say so:\n{guided_stdout}"
+    );
+    assert_eq!(
+        campaign_gen_lines(&guided_stdout)
+            .lines()
+            .filter(|line| line.contains(" guided=none"))
+            .count(),
+        12,
+        "every generation had no ancestor to steer toward"
+    );
+
+    // And the derivation is byte-identical to the unguided sweep: an empty pool
+    // degrades to the default scheme rather than to something arbitrary.
+    let strip = |stream: String| {
+        stream
+            .lines()
+            .map(|line| line.split(" guided=").next().unwrap_or(line).to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(
+        strip(campaign_gen_lines(&guided_stdout)),
+        strip(campaign_gen_lines(&String::from_utf8_lossy(&plain.stdout))),
+        "with nothing to steer toward, guided must reproduce the unguided stream"
+    );
+
+    let json_out = directory.path().join("json");
+    let mut json_args = args(&json_out, true);
+    json_args.extend(["--format".to_string(), "json".to_string()]);
+    let envelope = campaign_json_stdout(&run(json_args));
+    assert_eq!(envelope["guidance"]["state"], "vacuous");
+    assert_eq!(envelope["guidance"]["exploited"], 0);
+}

@@ -146,9 +146,29 @@ impl GuidancePlan {
     /// Resolve a plan from a persisted novelty log. Entries must be strictly
     /// increasing by generation (both stores validate that on load); any weight
     /// below 1 is lifted to 1 so a novel generation is never unselectable.
+    ///
+    /// The FIRST entry is dropped. A campaign's first generation is novel by
+    /// construction — it opens the program's whole baseline (`main`, startup,
+    /// every path the workload always takes), not a discovery — and weighting by
+    /// raw novelty count therefore made it permanently dominate the pool.
+    /// Measured before this exclusion: over a 60-generation guided run the log
+    /// was `[[0, 88], [4, 13], [24, 1], [41, 40]]` and the bootstrap generation
+    /// was chosen as the ancestor 34 times out of 42 exploits, so ~81% of the
+    /// exploitation budget resampled around one arbitrary configuration —
+    /// strictly worse than sampling independently, and `--guided` measurably lost
+    /// to the default sweep (`testbeds/guided-efficacy/`). The pool now holds only
+    /// generations that found something the baseline did not.
+    ///
+    /// Dropping the first entry is prefix-stable, so the tear-safety argument in
+    /// the module docs is unaffected: truncation only ever removes from the END of
+    /// the log, so "the earliest entry" is the same entry at every generation.
+    /// A campaign whose only novelty is that bootstrap generation therefore has an
+    /// EMPTY pool and derives exactly like an unguided one — reported honestly as
+    /// vacuous rather than dressed up as steering.
     pub(crate) fn new(seed_base: u64, plateau_window: u64, log: &[NoveltyEntry]) -> Self {
         let ancestors: Vec<NoveltyEntry> = log
             .iter()
+            .skip(1)
             .map(|entry| NoveltyEntry {
                 generation: entry.generation,
                 weight: entry.weight.max(1),
@@ -272,6 +292,7 @@ pub(crate) fn campaign_detector_selftest() -> Vec<(&'static str, bool, String)> 
         detector_exploit_inherits_its_ancestor(),
         detector_prefix_determinism(),
         detector_drought_broadens_exploration(),
+        detector_bootstrap_generation_is_not_an_ancestor(),
     ]
 }
 
@@ -388,6 +409,41 @@ fn detector_prefix_determinism() -> (&'static str, bool, String) {
     )
 }
 
+fn detector_bootstrap_generation_is_not_an_ancestor() -> (&'static str, bool, String) {
+    const NAME: &str = "guided-bootstrap-excluded-from-pool";
+    // The first novel generation opens the program's baseline, not a discovery.
+    // Weighted by raw novelty it dominated the pool and made `--guided` LOSE to
+    // the default sweep (see `GuidancePlan::new`). It must never be selected.
+    // RED: removing the `.skip(1)` sends `bootstrap_picks` straight up.
+    let plan = GuidancePlan::new(0, 200, &log(&[(0, 88), (4, 13), (24, 1), (41, 40)]));
+    let mut bootstrap_picks = 0;
+    let mut other_picks = 0;
+    for generation in 0..200 {
+        if let (_, GuidanceDecision::Exploit { ancestor }) = plan.generation_hash(generation) {
+            if ancestor == 0 {
+                bootstrap_picks += 1;
+            } else {
+                other_picks += 1;
+            }
+        }
+    }
+    // A log holding ONLY the bootstrap leaves nothing to steer toward, and that
+    // must read as unguided rather than as steering toward the baseline.
+    let bootstrap_only = GuidancePlan::new(0, 200, &log(&[(0, 88)]));
+    let degrades_honestly = (0..32).all(|generation| {
+        let (hash, decision) = bootstrap_only.generation_hash(generation);
+        hash == base_generation_hash(0, generation) && decision == GuidanceDecision::NoAncestors
+    });
+    (
+        NAME,
+        bootstrap_picks == 0 && other_picks > 0 && degrades_honestly,
+        format!(
+            "bootstrap chosen {bootstrap_picks}x, genuine discoveries {other_picks}x; \
+             a bootstrap-only log derives unguided"
+        ),
+    )
+}
+
 fn detector_drought_broadens_exploration() -> (&'static str, bool, String) {
     const NAME: &str = "guided-drought-broadens-exploration";
     let fresh = exploit_permille(0, 200);
@@ -446,12 +502,14 @@ mod tests {
     fn ancestors_are_chosen_proportionally_to_their_novelty() {
         // A heavily weighted ancestor must win most selections; an equal-weight
         // pair must split. This pins that the ticket walk reads weights at all.
-        let plan = GuidancePlan::new(3, 200, &log(&[(0, 1), (1, 99)]));
+        // The leading entry is the bootstrap generation and is excluded from the
+        // pool, so the two competing ancestors come after it.
+        let plan = GuidancePlan::new(3, 200, &log(&[(0, 50), (1, 1), (2, 99)]));
         let mut heavy = 0;
         let mut light = 0;
-        for generation in 2..400 {
+        for generation in 3..400 {
             if let (_, GuidanceDecision::Exploit { ancestor }) = plan.generation_hash(generation) {
-                if ancestor == 1 {
+                if ancestor == 2 {
                     heavy += 1;
                 } else {
                     light += 1;
@@ -467,14 +525,41 @@ mod tests {
 
     #[test]
     fn weights_below_one_are_lifted_so_every_novel_generation_stays_selectable() {
-        let plan = GuidancePlan::new(1, 200, &log(&[(0, 0)]));
-        let reached = (1..64).any(|g| {
+        // Entry 0 is the excluded bootstrap; entry 1 carries the zero weight.
+        let plan = GuidancePlan::new(1, 200, &log(&[(0, 7), (1, 0)]));
+        let reached = (2..64).any(|g| {
             matches!(
                 plan.generation_hash(g),
-                (_, GuidanceDecision::Exploit { ancestor: 0 })
+                (_, GuidanceDecision::Exploit { ancestor: 1 })
             )
         });
         assert!(reached, "a zero-weight entry must still be selectable");
+    }
+
+    #[test]
+    fn a_bootstrap_only_log_leaves_nothing_to_steer_and_reports_vacuous() {
+        // The bootstrap generation is excluded from the pool, so a campaign whose
+        // ONLY novelty was that first generation has no ancestors at all. It must
+        // then derive exactly like an unguided campaign AND report itself vacuous —
+        // never present resampling around the baseline as if it were steering.
+        let plan = GuidancePlan::new(4, 200, &log(&[(0, 88)]));
+        let mut tally = GuidanceTally::default();
+        for generation in 0..40 {
+            let (hash, decision) = plan.generation_hash(generation);
+            assert_eq!(
+                hash,
+                base_generation_hash(4, generation),
+                "generation {generation} must derive exactly as unguided"
+            );
+            assert_eq!(decision, GuidanceDecision::NoAncestors);
+            tally.record(decision);
+        }
+        assert!(
+            tally.is_vacuous(),
+            "a campaign that never steered must report vacuous: {tally:?}"
+        );
+        assert_eq!(tally.exploited, 0);
+        assert_eq!(tally.no_ancestors, 40);
     }
 
     #[test]

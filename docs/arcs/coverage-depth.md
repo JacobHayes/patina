@@ -433,6 +433,24 @@ Wave-E implementation notes:
   exploit/explore/no-ancestor counts. A guided campaign that never steered anything prints
   `PATINA_CAMPAIGN_GUIDED_VACUOUS` — an inert knob is a bug, and a clean result from one
   says nothing about guidance.
+- **The bootstrap generation is excluded from the ancestor pool.** A campaign's first
+  generation is novel by construction — it opens the program's whole baseline, not a
+  discovery — and weighting by raw novelty made it permanently dominant (measured: 34 of
+  42 exploits mutated it). Pinned by the `guided-bootstrap-excluded-from-pool` selftest
+  class.
+- **Honest status: `--guided` has NO CONSISTENT MEASURED ADVANTAGE over the default
+  sweep.** On the purpose-built staircase fixture in `testbeds/guided-efficacy/` — three
+  stages gated on three knobs living in different derivation bytes, so partial progress is
+  inheritable — guidance after the bootstrap fix was slower on two of six native seed
+  bases and tied on four; on the WASI depth shape it was slower on two, tied on three, and
+  faster on one (the hard seed where the unguided sweep never reached the target at all).
+  High variance, no reliable gain. A recency-weighted variant changed nothing and was not kept; rarity
+  weighting is structurally unavailable because it needs the cumulative per-edge arrays
+  that prefix-determinism deliberately excludes. The mechanism is correct and its
+  determinism is proven; the selection policy has not yet earned its cost. The leading
+  hypothesis is that novelty here is only weakly correlated with progress toward a
+  specific target, so concentrating the budget near past discoveries starves the
+  exploration that actually finds it.
 
 Waves are separable and land independently; A must precede B/C; D is independent of B/C;
 E follows C.
