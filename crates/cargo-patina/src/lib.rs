@@ -8341,7 +8341,8 @@ mod tests {
         // `-h`/`--help` in the first flag position of every verb and subcommand
         // routes to Help — never consumed as a positional, never an error.
         for verb in [
-            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize", "sites", "trace",
+            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize", "sites",
+            "trace",
         ] {
             assert!(is_help(&[verb, "--help"]), "{verb} --help");
             assert!(is_help(&[verb, "-h"]), "{verb} -h");
@@ -8655,7 +8656,8 @@ mod tests {
         // The whole flag universe a verb may present: its registered groups plus
         // the always-available global help/output flags.
         for verb_name in [
-            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize", "sites", "trace",
+            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize", "sites",
+            "trace",
         ] {
             let verb = help::verb(verb_name).expect("verb registered");
             let mut registered: BTreeSet<&str> = BTreeSet::new();
@@ -9449,7 +9451,8 @@ mod tests {
     #[test]
     fn version_intercepted_across_verbs_before_separator() {
         for verb in [
-            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize", "sites", "trace",
+            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize", "sites",
+            "trace",
         ] {
             assert!(
                 matches!(
