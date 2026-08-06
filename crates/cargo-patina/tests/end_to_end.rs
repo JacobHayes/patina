@@ -7813,6 +7813,264 @@ fn native_render_produces_standalone_timeline_and_preserves_replay_hash() {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
+fn native_run_source_json_artifact_names_source_not_tempdir() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("source_json.rs");
+    fs::write(&source, "fn main() { println!(\"SOURCE_JSON_OK\"); }\n").unwrap();
+    let output = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        native_workspace(),
+        &[
+            "run",
+            source.to_str().unwrap(),
+            "--seed",
+            "0",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "source-first json run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
+    assert_eq!(value["artifact"], source.to_str().unwrap());
+    assert!(
+        !value["artifact"]
+            .as_str()
+            .unwrap()
+            .contains("patina-run-artifact"),
+        "source-first envelope must not name the throwaway build artifact: {value}"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn explore_failure_reports_copy_paste_repro_in_line_and_json() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("explore_fail.rs");
+    fs::write(
+        &source,
+        "fn main() { eprintln!(\"BUG_CAUGHT explore planted\"); std::process::exit(3); }\n",
+    )
+    .unwrap();
+    let output = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        native_workspace(),
+        &[
+            "explore",
+            "run",
+            source.to_str().unwrap(),
+            "--seeds",
+            "1",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(3));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("PATINA_EXPLORE_FAILURE seed=0 exit=3 repro="),
+        "missing explore repro line:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("cargo patina run") && stderr.contains("--seed 0"),
+        "repro line should be copy-pasteable:\n{stderr}"
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
+    assert_eq!(value["verb"], "explore");
+    assert_eq!(value["result"], "failure");
+    assert!(
+        value["message"]
+            .as_str()
+            .unwrap()
+            .contains("repro: cargo patina run"),
+        "JSON envelope should carry the repro: {value}"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_harness_mode_filters_records_replays_and_refuses_missing_target() {
+    let directory = tempdir().unwrap();
+    create_native_harness_fixture(directory.path());
+    let patina = env!("CARGO_BIN_EXE_cargo-patina");
+    let harness = "dst_harness_fixture";
+    let passing_args = [
+        "test",
+        ".",
+        "--harness-target",
+        harness,
+        "--exact",
+        "tests::epoch_is_seeded",
+        "--seed",
+        "1",
+        "--format",
+        "json",
+    ];
+    let first = invoke_unchecked(patina, directory.path(), &passing_args);
+    assert!(
+        first.status.success(),
+        "first filtered harness run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let second = invoke_unchecked(patina, directory.path(), &passing_args);
+    assert!(
+        second.status.success(),
+        "second filtered harness run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&second.stdout),
+        "filtered harness JSON stdout should be byte-identical across repeats"
+    );
+
+    let pass_guest = directory.path().join(
+        "target/patina/dst/dst_harness_fixture/dst_harness_fixture/tests__epoch_is_seeded/guest",
+    );
+    assert!(
+        pass_guest.exists(),
+        "staged pass harness missing: {pass_guest:?}"
+    );
+    let audit = invoke_unchecked(
+        patina,
+        directory.path(),
+        &["audit", pass_guest.to_str().unwrap()],
+    );
+    assert!(
+        audit.status.success(),
+        "libtest harness audit surface should pass:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&audit.stdout),
+        String::from_utf8_lossy(&audit.stderr)
+    );
+
+    let failing = invoke_unchecked(
+        patina,
+        directory.path(),
+        &[
+            "test",
+            ".",
+            "--harness-target",
+            harness,
+            "--exact",
+            "tests::buggify_failure_records",
+            "--seeds",
+            "3",
+            "--buggify=1000",
+            "--buggify-activation-permille",
+            "1000",
+        ],
+    );
+    assert_eq!(failing.status.code(), Some(101));
+    let fail_stderr = String::from_utf8_lossy(&failing.stderr);
+    assert!(
+        fail_stderr.contains(
+            "patina dst test failed: dst_harness_fixture::tests::buggify_failure_records"
+        ),
+        "failure block missing test name:\n{fail_stderr}"
+    );
+    assert!(
+        fail_stderr.contains("seed 0 of 0..3")
+            && fail_stderr.contains("cargo patina test")
+            && fail_stderr.contains("cargo patina replay"),
+        "failure block missing seed/repro commands:\n{fail_stderr}"
+    );
+    let fail_guest = directory.path().join(
+        "target/patina/dst/dst_harness_fixture/dst_harness_fixture/tests__buggify_failure_records/guest",
+    );
+    let trace = directory.path().join(
+        "target/patina/dst/dst_harness_fixture/dst_harness_fixture/tests__buggify_failure_records/seed-0.patina",
+    );
+    assert!(trace.exists(), "record-on-failure trace missing: {trace:?}");
+    let replay = invoke_unchecked(
+        patina,
+        directory.path(),
+        &[
+            "replay",
+            fail_guest.to_str().unwrap(),
+            trace.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(replay.status.code(), Some(101));
+    assert!(
+        String::from_utf8_lossy(&replay.stderr).contains("HARNESS_BUG"),
+        "replay should reproduce the recorded failing libtest body:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&replay.stdout),
+        String::from_utf8_lossy(&replay.stderr)
+    );
+
+    let missing = invoke_unchecked(
+        patina,
+        directory.path(),
+        &[
+            "test",
+            ".",
+            "--harness-target",
+            "missing_harness",
+            "--exact",
+            "tests::epoch_is_seeded",
+            "--seed",
+            "0",
+        ],
+    );
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no libtest harness target named"),
+        "missing harness target should refuse loudly:\n{}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn create_native_harness_fixture(root: &Path) {
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"dst_harness_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dev-dependencies]\npatina-dst = {{ path = \"{}\" }}\n",
+            native_workspace().join("crates/patina").display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/lib.rs"),
+        r#"
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn epoch_is_seeded() {
+        let epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        println!("HARNESS_PASS epoch={epoch}");
+        assert_eq!(epoch, 0);
+    }
+
+    #[test]
+    fn buggify_failure_records() {
+        if patina_dst::buggify_with_prob!("native-harness-record", 1.0) {
+            eprintln!("HARNESS_BUG record-on-failure");
+            panic!("HARNESS_BUG");
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
 fn native_run_json_envelope_has_stable_shape() {
     let directory = tempdir().unwrap();
     let source = directory.path().join("json_guest.rs");

@@ -288,6 +288,7 @@ struct ExploreInvocation {
     target: ExploreTarget,
     start_seed: u64,
     seed_count: u64,
+    wrapped_command: Vec<OsString>,
 }
 
 /// What `explore` sweeps across seeds. The Cargo package family re-runs the whole
@@ -299,6 +300,50 @@ enum ExploreTarget {
     Cargo(Invocation),
     Wasi(WasiInvocation),
     Native(NativeRunInvocation),
+}
+
+struct NativeHarnessInvocation {
+    origin: PathBuf,
+    manifest: PathBuf,
+    package: Option<String>,
+    harness_target: String,
+    exact: String,
+    seeds: HarnessSeeds,
+    release: bool,
+    yield_points: bool,
+    faults: NativeFaults,
+    buggify: Option<NativeBuggify>,
+    schedule: NativeSchedule,
+    liveness: NativeLiveness,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HarnessSeeds {
+    One(u64),
+    Range(u64),
+}
+
+impl HarnessSeeds {
+    fn iter(self) -> Box<dyn Iterator<Item = u64>> {
+        match self {
+            HarnessSeeds::One(seed) => Box::new(std::iter::once(seed)),
+            HarnessSeeds::Range(count) => Box::new(0..count),
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            HarnessSeeds::One(seed) => format!("seed {seed}"),
+            HarnessSeeds::Range(count) => format!("seeds 0..{count}"),
+        }
+    }
+
+    fn contains(self, seed: u64) -> String {
+        match self {
+            HarnessSeeds::One(_) => format!("seed {seed}"),
+            HarnessSeeds::Range(count) => format!("seed {seed} of 0..{count}"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -587,6 +632,7 @@ fn dispatch(arguments: Vec<OsString>) -> Result<i32, CliError> {
         ParseResult::NativeAudit(invocation) => execute_native_audit(invocation),
         ParseResult::NativeBuild(invocation) => execute_native_build(invocation),
         ParseResult::NativeRun(invocation) => execute_native_run(invocation),
+        ParseResult::NativeHarness(invocation) => execute_native_harness(invocation),
         ParseResult::Minimize(invocation) => execute_minimize(invocation),
         ParseResult::Trace(invocation) => trace_cmd::execute(invocation),
     }
@@ -605,6 +651,7 @@ enum ParseResult {
     NativeAudit(NativeAuditInvocation),
     NativeBuild(NativeBuildInvocation),
     NativeRun(NativeRunInvocation),
+    NativeHarness(NativeHarnessInvocation),
     Minimize(MinimizeInvocation),
     Trace(trace_cmd::TraceInvocation),
 }
@@ -695,7 +742,7 @@ fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
                 "build" => parse_build(arguments),
                 "audit" => parse_audit(arguments),
                 "run" => parse_run(arguments),
-                "test" => parse_cargo("test".to_string(), arguments),
+                "test" => parse_test(arguments),
                 // `replay` is the sole replay entry point for all three families,
                 // routed by the same artifact inference as `run`: it restores each
                 // family's semantic config (seed, fault knobs, buggify, guest argv)
@@ -1467,6 +1514,266 @@ fn parse_run(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
         // positional dir/Cargo.toml, which Cargo interprets) to `parse_cargo`.
         None => parse_cargo("run".to_string(), rest),
     }
+}
+
+/// Route `test`: with no source positional this remains the Cargo package
+/// family; a directory or `Cargo.toml` positional selects the native libtest
+/// harness mode used by point-solution DST tests.
+fn parse_test(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
+    let scan = locate_positionals("test", &arguments, 1);
+    let Some(first) = scan.positionals.first().cloned() else {
+        if let Some(stop) = scan.stop {
+            reject_stranded_artifact("test", &arguments[stop..])?;
+        }
+        return parse_cargo("test".to_string(), arguments);
+    };
+    match classify_arg(&first)? {
+        ArgKind::SourcePackage(manifest) => {
+            parse_native_harness_from(PathBuf::from(&first), manifest, scan.rest)
+                .map(ParseResult::NativeHarness)
+        }
+        ArgKind::SourceFile(_) => Err(CliError::usage(
+            "test native harness mode requires a Cargo package (directory or Cargo.toml), not a single .rs source",
+        )),
+        ArgKind::Artifact(_) => Err(CliError::usage(
+            "test native harness mode requires a Cargo package (directory or Cargo.toml), not a prebuilt artifact",
+        )),
+        ArgKind::Other => parse_cargo("test".to_string(), arguments),
+    }
+}
+
+fn parse_native_harness_from(
+    origin: PathBuf,
+    manifest: PathBuf,
+    arguments: Vec<OsString>,
+) -> Result<NativeHarnessInvocation, CliError> {
+    let selection = take_package_bin(arguments)?;
+    if selection.bin.is_some() {
+        return Err(CliError::usage(
+            "--bin does not select a libtest harness; use --harness-target with the Cargo test target name",
+        ));
+    }
+    let mut harness_target = None;
+    let mut exact = None;
+    let mut seed = None;
+    let mut seeds = None;
+    let mut release = false;
+    let mut yield_points = false;
+    let mut faults = NativeFaults::default();
+    let mut buggify: Option<NativeBuggify> = None;
+    let mut schedule = NativeSchedule::default();
+    let mut liveness = NativeLiveness::default();
+    let mut index = 0;
+    let arguments = selection.rest;
+    while index < arguments.len() {
+        if arguments[index] == "--" {
+            return Err(CliError::usage(
+                "test native harness mode does not accept a `--` tail; it supplies the libtest --exact filter itself",
+            ));
+        }
+        let Some(text) = arguments[index].to_str() else {
+            return Err(CliError::usage(
+                "test native harness options must be valid UTF-8",
+            ));
+        };
+        let opt = split_opt(text);
+        match opt.name {
+            "--harness-target" => {
+                let value = required_value(opt, &arguments, &mut index)?;
+                if value.is_empty() {
+                    return Err(CliError::usage("--harness-target must not be empty"));
+                }
+                set_once(&mut harness_target, value.to_string(), "--harness-target")?;
+            }
+            "--exact" => {
+                let value = required_value(opt, &arguments, &mut index)?;
+                if value.is_empty() {
+                    return Err(CliError::usage("--exact must not be empty"));
+                }
+                set_once(&mut exact, value.to_string(), "--exact")?;
+            }
+            "--seed" => {
+                let value = required_value(opt, &arguments, &mut index)?;
+                set_once(&mut seed, parse_u64("--seed", value)?, "--seed")?;
+            }
+            "--seeds" => {
+                let value = required_value(opt, &arguments, &mut index)?;
+                set_once(&mut seeds, parse_u64("--seeds", value)?, "--seeds")?;
+            }
+            "--release" => {
+                reject_inline(opt)?;
+                release = true;
+            }
+            "--yield-points" => {
+                reject_inline(opt)?;
+                yield_points = true;
+            }
+            name if FAULT_FLAGS.contains(&name) => {
+                let value = required_value(opt, &arguments, &mut index)?;
+                apply_fault_flag(&mut faults, name, value)?;
+            }
+            "--buggify" => {
+                let entry = buggify.get_or_insert_with(NativeBuggify::default);
+                if let Some(value) = opt.inline {
+                    let permille = parse_u64("--buggify", value)?;
+                    if permille > 1000 {
+                        return Err(CliError::usage(
+                            "--buggify permille must be within [0, 1000]",
+                        ));
+                    }
+                    set_once(&mut entry.fire_permille, permille.to_string(), "--buggify")?;
+                }
+            }
+            "--buggify-activation-permille" => {
+                let value = required_value(opt, &arguments, &mut index)?;
+                let permille = parse_u64("--buggify-activation-permille", value)?;
+                if permille > 1000 {
+                    return Err(CliError::usage(
+                        "--buggify-activation-permille must be within [0, 1000]",
+                    ));
+                }
+                let entry = buggify.get_or_insert_with(NativeBuggify::default);
+                set_once(
+                    &mut entry.activation_permille,
+                    permille.to_string(),
+                    "--buggify-activation-permille",
+                )?;
+            }
+            "--buggify-cutoff-nanos" => {
+                let value = required_value(opt, &arguments, &mut index)?;
+                let nanos = parse_u64("--buggify-cutoff-nanos", value)?;
+                let entry = buggify.get_or_insert_with(NativeBuggify::default);
+                set_once(
+                    &mut entry.cutoff_nanos,
+                    nanos.to_string(),
+                    "--buggify-cutoff-nanos",
+                )?;
+            }
+            "--buggify-after-setup" => {
+                reject_inline(opt)?;
+                buggify
+                    .get_or_insert_with(NativeBuggify::default)
+                    .after_setup = true;
+            }
+            "--sched-pct" => {
+                let value = match opt.inline {
+                    Some(value) => {
+                        let parsed = parse_u64("--sched-pct", value)?;
+                        if parsed < 1 {
+                            return Err(CliError::usage("--sched-pct bug depth must be >= 1"));
+                        }
+                        parsed.to_string()
+                    }
+                    None => String::new(),
+                };
+                set_once(&mut schedule.pct, value, "--sched-pct")?;
+            }
+            "--sched-pct-steps" => {
+                let value = required_value(opt, &arguments, &mut index)?;
+                let steps = parse_u64("--sched-pct-steps", value)?;
+                if steps < 1 {
+                    return Err(CliError::usage("--sched-pct-steps must be >= 1"));
+                }
+                set_once(
+                    &mut schedule.pct_steps,
+                    steps.to_string(),
+                    "--sched-pct-steps",
+                )?;
+            }
+            "--starve" => {
+                let value = match opt.inline {
+                    Some(value) => {
+                        let parsed = parse_u64("--starve", value)?;
+                        if parsed < 1 {
+                            return Err(CliError::usage("--starve interval count must be >= 1"));
+                        }
+                        parsed.to_string()
+                    }
+                    None => String::new(),
+                };
+                set_once(&mut schedule.starve, value, "--starve")?;
+            }
+            "--starve-max-len" => {
+                let value = required_value(opt, &arguments, &mut index)?;
+                let len = parse_u64("--starve-max-len", value)?;
+                if len < 1 {
+                    return Err(CliError::usage("--starve-max-len must be >= 1"));
+                }
+                set_once(
+                    &mut schedule.starve_max_len,
+                    len.to_string(),
+                    "--starve-max-len",
+                )?;
+            }
+            "--starve-window" => {
+                let value = required_value(opt, &arguments, &mut index)?;
+                let window = parse_u64("--starve-window", value)?;
+                if window < 1 {
+                    return Err(CliError::usage("--starve-window must be >= 1"));
+                }
+                set_once(
+                    &mut schedule.starve_window,
+                    window.to_string(),
+                    "--starve-window",
+                )?;
+            }
+            "--swarm" => {
+                reject_inline(opt)?;
+                schedule.swarm = true;
+            }
+            _ => {
+                if !parse_liveness_flag(opt, &arguments, &mut index, &mut liveness)? {
+                    return Err(CliError::usage(format!(
+                        "unsupported option {:?} for `test` native harness mode",
+                        opt.name
+                    )));
+                }
+            }
+        }
+        index += 1;
+    }
+
+    if seed.is_some() && seeds.is_some() {
+        return Err(CliError::usage("--seed and --seeds are mutually exclusive"));
+    }
+    if let Some(count) = seeds {
+        if count == 0 || count > 1_000_000 {
+            return Err(CliError::usage("--seeds must be between 1 and 1000000"));
+        }
+    }
+    if schedule.pct.is_none() && schedule.pct_steps.is_some() {
+        return Err(CliError::usage("--sched-pct-steps requires --sched-pct"));
+    }
+    if schedule.starve.is_none()
+        && (schedule.starve_max_len.is_some() || schedule.starve_window.is_some())
+    {
+        return Err(CliError::usage(
+            "--starve-max-len and --starve-window require --starve",
+        ));
+    }
+    if liveness.converge.is_none() && liveness.heal_after.is_some() {
+        return Err(CliError::usage("--heal-after requires --converge-within"));
+    }
+
+    Ok(NativeHarnessInvocation {
+        origin,
+        manifest,
+        package: selection.package,
+        harness_target: harness_target.ok_or_else(|| {
+            CliError::usage("test native harness mode requires --harness-target <NAME>")
+        })?,
+        exact: exact
+            .ok_or_else(|| CliError::usage("test native harness mode requires --exact <PATH>"))?,
+        seeds: seed
+            .map(HarnessSeeds::One)
+            .unwrap_or_else(|| HarnessSeeds::Range(seeds.unwrap_or(20))),
+        release,
+        yield_points,
+        faults,
+        buggify,
+        schedule,
+        liveness,
+    })
 }
 
 /// Route `audit`: source-first, artifacts accepted. A native binary (built or
@@ -2242,6 +2549,7 @@ fn parse_explore(arguments: Vec<OsString>) -> Result<ExploreInvocation, CliError
     // run and have nothing to sweep. The recursive `parse` re-points the current
     // verb at the wrapped `run`/`test`; restore `explore` so any later usage error
     // here prints the explore synopsis.
+    let wrapped_command = forwarded.clone();
     let parsed = parse(forwarded)?;
     set_current_verb(Some("explore"));
     let (target, mode_seed) = match parsed {
@@ -2275,6 +2583,7 @@ fn parse_explore(arguments: Vec<OsString>) -> Result<ExploreInvocation, CliError
         target,
         start_seed,
         seed_count,
+        wrapped_command,
     })
 }
 
@@ -4339,6 +4648,633 @@ fn build_on_the_fly(spec: BuildSpec) -> Result<ResolvedArtifact, CliError> {
     })
 }
 
+fn shell_quote(value: &OsStr) -> String {
+    let text = value.to_string_lossy();
+    if !text.is_empty()
+        && text.chars().all(|ch| {
+            ch.is_ascii_alphanumeric()
+                || matches!(ch, '-' | '_' | '.' | '/' | ':' | '=' | '+' | ',')
+        })
+    {
+        return text.into_owned();
+    }
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+fn command_line(prefix: &str, args: &[OsString]) -> String {
+    let mut parts = vec![prefix.to_string()];
+    parts.extend(args.iter().map(|arg| shell_quote(arg)));
+    parts.join(" ")
+}
+
+fn command_with_seed(args: &[OsString], seed: u64) -> Vec<OsString> {
+    let seed_text = seed.to_string();
+    let mut out = Vec::with_capacity(args.len() + 2);
+    let mut inserted = false;
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--" {
+            if !inserted {
+                out.push(OsString::from("--seed"));
+                out.push(OsString::from(&seed_text));
+            }
+            out.extend_from_slice(&args[index..]);
+            return out;
+        }
+        if let Some(text) = args[index].to_str() {
+            if text == "--seed" {
+                out.push(OsString::from("--seed"));
+                out.push(OsString::from(&seed_text));
+                inserted = true;
+                index += 2;
+                continue;
+            }
+            if text.starts_with("--seed=") {
+                out.push(OsString::from("--seed"));
+                out.push(OsString::from(&seed_text));
+                inserted = true;
+                index += 1;
+                continue;
+            }
+        }
+        out.push(args[index].clone());
+        index += 1;
+    }
+    if !inserted {
+        out.push(OsString::from("--seed"));
+        out.push(OsString::from(seed_text));
+    }
+    out
+}
+
+fn exploration_repro(wrapped_command: &[OsString], seed: u64) -> String {
+    command_line("cargo patina", &command_with_seed(wrapped_command, seed))
+}
+
+struct BuiltNativeHarness {
+    guest: PathBuf,
+    directory: PathBuf,
+    package_name: String,
+}
+
+struct NativeHarnessArtifact {
+    executable: PathBuf,
+    package_id: String,
+}
+
+struct HarnessSeedRun {
+    exit_code: i32,
+    result: String,
+    stdout: String,
+    stderr: String,
+    message: Option<String>,
+}
+
+fn execute_native_harness(invocation: NativeHarnessInvocation) -> Result<i32, CliError> {
+    let built = build_native_harness(&invocation)?;
+    let test_name = format!("{}::{}", invocation.harness_target, invocation.exact);
+    for seed in invocation.seeds.iter() {
+        let run = run_native_harness_seed(&invocation, &built.guest, seed, None)?;
+        if run.exit_code != 0 {
+            let trace = built.directory.join(format!("seed-{seed}.patina"));
+            let recorded = run_native_harness_seed(&invocation, &built.guest, seed, Some(&trace))?;
+            let reproduced = recorded.exit_code == run.exit_code && recorded.exit_code != 0;
+            let block = native_harness_failure_block(NativeHarnessFailure {
+                invocation: &invocation,
+                built: &built,
+                test_name: &test_name,
+                seed,
+                trace: &trace,
+                first: &run,
+                recorded: &recorded,
+                reproduced,
+            });
+            if !output::options().is_json() {
+                eprintln!("{block}");
+            }
+            let exit = if reproduced { run.exit_code } else { 2 };
+            let result = if reproduced {
+                recorded.result.as_str()
+            } else {
+                "error"
+            };
+            output::emit_simple("test", result, exit, Some(block));
+            return Ok(exit);
+        }
+    }
+    let message = format!(
+        "patina dst test passed: {test_name} {} package={} guest={}",
+        invocation.seeds.label(),
+        built.package_name,
+        built.guest.display()
+    );
+    if output::options().is_json() {
+        output::emit_simple("test", "ok", 0, Some(message));
+    } else {
+        println!("PATINA_DST_TEST_PASS {message}");
+    }
+    Ok(0)
+}
+
+fn build_native_harness(
+    invocation: &NativeHarnessInvocation,
+) -> Result<BuiltNativeHarness, CliError> {
+    if !invocation.manifest.is_file() {
+        return Err(CliError(format!(
+            "no Cargo manifest at {}",
+            invocation.manifest.display()
+        )));
+    }
+    let staticlib = build_native_shim(invocation.release)?;
+    let host_target = host_target_triple()?;
+    let objects_base = staticlib
+        .parent()
+        .expect("shim staticlib path has a profile directory parent")
+        .join(NATIVE_SHIM_OBJECTS_DIR);
+    let object = stage_shim_object(&objects_base, &PATINA_POSIX_OBJECT, &host_target)?;
+    let yield_object = if invocation.yield_points {
+        let yield_note = format!(
+            "PATINA_NATIVE_BUILD_YIELD_POINTS instrumentation=llvm-sancov-trace-pc-guard \
+scheduler-hook=patina_yield_point fingerprint-suffix={PATINA_YIELD_FINGERPRINT_SUFFIX}"
+        );
+        if output::options().is_json() {
+            eprintln!("{yield_note}");
+        } else {
+            println!("{yield_note}");
+        }
+        Some(stage_shim_object(
+            &objects_base,
+            &PATINA_YIELD_OBJECT,
+            &host_target,
+        )?)
+    } else {
+        None
+    };
+    let rustflags =
+        native_package_rustflags(&object, &staticlib, yield_object.as_deref(), &host_target);
+    let metadata = cargo_metadata(&invocation.manifest)?;
+    let target_dir = metadata
+        .get("target_directory")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| CliError("cargo metadata did not report target_directory".into()))?;
+
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let mut command = Command::new(&cargo);
+    command
+        .arg("test")
+        .arg("--no-run")
+        .arg("--manifest-path")
+        .arg(&invocation.manifest)
+        .arg("--target")
+        .arg(&host_target)
+        .arg("--message-format=json-render-diagnostics")
+        .env_remove("RUSTFLAGS")
+        .env("CARGO_ENCODED_RUSTFLAGS", rustflags)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    if let Some(package) = &invocation.package {
+        command.arg("--package").arg(package);
+    }
+    if invocation.release {
+        command.arg("--release");
+    }
+    let built = command.output().map_err(|error| {
+        CliError(format!(
+            "failed to run cargo test --no-run for native harness: {error}"
+        ))
+    })?;
+    if !built.status.success() {
+        return Err(CliError(format!(
+            "building the native libtest harness {:?} failed",
+            invocation.harness_target
+        )));
+    }
+    let artifact = native_harness_executable(&built.stdout, &invocation.harness_target)?;
+    let package_name = metadata_package_name(&metadata, &artifact.package_id)
+        .unwrap_or_else(|| artifact.package_id.clone());
+    let directory = target_dir
+        .join("patina")
+        .join("dst")
+        .join(safe_path_segment(&package_name))
+        .join(safe_path_segment(&invocation.harness_target))
+        .join(safe_path_segment(&invocation.exact));
+    fs::create_dir_all(&directory).map_err(|error| {
+        CliError(format!(
+            "failed to create native harness staging dir {}: {error}",
+            directory.display()
+        ))
+    })?;
+    let guest = directory.join("guest");
+    fs::copy(&artifact.executable, &guest).map_err(|error| {
+        CliError(format!(
+            "failed to stage native harness {} at {}: {error}",
+            artifact.executable.display(),
+            guest.display()
+        ))
+    })?;
+    let permissions = fs::metadata(&artifact.executable)
+        .map_err(|error| {
+            CliError(format!(
+                "failed to read permissions for {}: {error}",
+                artifact.executable.display()
+            ))
+        })?
+        .permissions();
+    fs::set_permissions(&guest, permissions).map_err(|error| {
+        CliError(format!(
+            "failed to copy permissions to staged native harness {}: {error}",
+            guest.display()
+        ))
+    })?;
+    Ok(BuiltNativeHarness {
+        guest,
+        directory,
+        package_name,
+    })
+}
+
+fn cargo_metadata(manifest: &Path) -> Result<serde_json::Value, CliError> {
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = Command::new(&cargo)
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .arg("--manifest-path")
+        .arg(manifest)
+        .output()
+        .map_err(|error| CliError(format!("failed to run cargo metadata: {error}")))?;
+    if !output.status.success() {
+        return Err(CliError(format!(
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| CliError(format!("failed to parse cargo metadata: {error}")))
+}
+
+fn metadata_package_name(metadata: &serde_json::Value, package_id: &str) -> Option<String> {
+    metadata
+        .get("packages")
+        .and_then(serde_json::Value::as_array)?
+        .iter()
+        .find(|package| package.get("id").and_then(serde_json::Value::as_str) == Some(package_id))?
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+fn native_harness_executable(
+    stdout: &[u8],
+    harness_target: &str,
+) -> Result<NativeHarnessArtifact, CliError> {
+    let mut matches = Vec::new();
+    let mut available = BTreeSet::new();
+    for line in stdout.split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(message) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue;
+        };
+        if message.get("reason").and_then(serde_json::Value::as_str) != Some("compiler-artifact") {
+            continue;
+        }
+        let Some(executable) = message
+            .get("executable")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let is_test_profile = message
+            .get("profile")
+            .and_then(|profile| profile.get("test"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        if !is_test_profile {
+            continue;
+        }
+        let target_name = message
+            .get("target")
+            .and_then(|target| target.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("<unknown>");
+        available.insert(target_name.to_string());
+        if target_name == harness_target {
+            let package_id = message
+                .get("package_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<unknown-package>")
+                .to_string();
+            matches.push(NativeHarnessArtifact {
+                executable: PathBuf::from(executable),
+                package_id,
+            });
+        }
+    }
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err(CliError(format!(
+            "no libtest harness target named {harness_target:?} was reported by cargo test --no-run; available harness targets: {}",
+            if available.is_empty() {
+                "<none>".to_string()
+            } else {
+                available.into_iter().collect::<Vec<_>>().join(", ")
+            }
+        ))),
+        _ => Err(CliError(format!(
+            "multiple libtest harness targets named {harness_target:?} were reported; select one workspace member with --package"
+        ))),
+    }
+}
+
+fn safe_path_segment(value: &str) -> String {
+    let mut segment = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            segment.push(ch);
+        } else {
+            segment.push('_');
+        }
+    }
+    if segment.is_empty() {
+        "_".to_string()
+    } else {
+        segment
+    }
+}
+
+fn run_native_harness_seed(
+    invocation: &NativeHarnessInvocation,
+    guest: &Path,
+    seed: u64,
+    record: Option<&Path>,
+) -> Result<HarnessSeedRun, CliError> {
+    let executable = env::current_exe().map_err(|error| {
+        CliError(format!(
+            "failed to locate current cargo-patina executable: {error}"
+        ))
+    })?;
+    let mut args = vec![
+        OsString::from("run"),
+        OsString::from("--format"),
+        OsString::from("json"),
+    ];
+    args.push(guest.as_os_str().to_owned());
+    args.push(OsString::from("--seed"));
+    args.push(OsString::from(seed.to_string()));
+    if let Some(path) = record {
+        args.push(OsString::from("--record"));
+        args.push(path.as_os_str().to_owned());
+    }
+    append_native_harness_run_flags(&mut args, invocation);
+    args.push(OsString::from("--"));
+    args.push(OsString::from("--test-threads=1"));
+    args.push(OsString::from("--exact"));
+    args.push(OsString::from(&invocation.exact));
+    args.push(OsString::from("--nocapture"));
+    let output = Command::new(&executable)
+        .args(&args)
+        .output()
+        .map_err(|error| CliError(format!("failed to run native harness seed {seed}: {error}")))?;
+    let exit_code = exit_code(output.status)?;
+    let stdout_text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let child_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let json_line = stdout_text
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .ok_or_else(|| {
+            CliError(format!(
+                "native harness seed {seed} produced no JSON envelope\nstderr:\n{child_stderr}"
+            ))
+        })?;
+    let envelope: serde_json::Value = serde_json::from_str(json_line).map_err(|error| {
+        CliError(format!(
+            "native harness seed {seed} did not produce a valid JSON envelope: {error}\nstdout:\n{stdout_text}\nstderr:\n{child_stderr}"
+        ))
+    })?;
+    let result = envelope
+        .get("result")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(if exit_code == 0 { "ok" } else { "failure" })
+        .to_string();
+    let guest_stdout = envelope
+        .get("stdout")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let guest_stderr = envelope
+        .get("stderr")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let mut stderr = String::new();
+    if !child_stderr.is_empty() {
+        stderr.push_str(&child_stderr);
+        if !child_stderr.ends_with('\n') && !guest_stderr.is_empty() {
+            stderr.push('\n');
+        }
+    }
+    stderr.push_str(guest_stderr);
+    let message = envelope
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    if stderr.trim().is_empty() {
+        if let Some(message) = &message {
+            stderr.push_str(message);
+        }
+    }
+    Ok(HarnessSeedRun {
+        exit_code,
+        result,
+        stdout: guest_stdout,
+        stderr,
+        message,
+    })
+}
+
+fn append_native_harness_run_flags(args: &mut Vec<OsString>, invocation: &NativeHarnessInvocation) {
+    push_optional_arg(
+        args,
+        "--fs-crash-at",
+        invocation.faults.fs_crash_at.as_deref(),
+    );
+    push_optional_arg(
+        args,
+        "--fs-torn-granularity",
+        invocation.faults.fs_torn_granularity.as_deref(),
+    );
+    push_optional_arg(
+        args,
+        "--sleep-jitter-nanos",
+        invocation.faults.sleep_jitter_nanos.as_deref(),
+    );
+    push_optional_arg(
+        args,
+        "--net-jitter-nanos",
+        invocation.faults.net_jitter_nanos.as_deref(),
+    );
+    push_optional_arg(
+        args,
+        "--net-drop-permille",
+        invocation.faults.net_drop_permille.as_deref(),
+    );
+    if let Some(buggify) = &invocation.buggify {
+        match &buggify.fire_permille {
+            Some(value) => args.push(OsString::from(format!("--buggify={value}"))),
+            None => args.push(OsString::from("--buggify")),
+        }
+        push_optional_arg(
+            args,
+            "--buggify-activation-permille",
+            buggify.activation_permille.as_deref(),
+        );
+        push_optional_arg(
+            args,
+            "--buggify-cutoff-nanos",
+            buggify.cutoff_nanos.as_deref(),
+        );
+        if buggify.after_setup {
+            args.push(OsString::from("--buggify-after-setup"));
+        }
+    }
+    push_optional_value_flag(args, "--sched-pct", invocation.schedule.pct.as_deref());
+    push_optional_arg(
+        args,
+        "--sched-pct-steps",
+        invocation.schedule.pct_steps.as_deref(),
+    );
+    push_optional_value_flag(args, "--starve", invocation.schedule.starve.as_deref());
+    push_optional_arg(
+        args,
+        "--starve-max-len",
+        invocation.schedule.starve_max_len.as_deref(),
+    );
+    push_optional_arg(
+        args,
+        "--starve-window",
+        invocation.schedule.starve_window.as_deref(),
+    );
+    if invocation.schedule.swarm {
+        args.push(OsString::from("--swarm"));
+    }
+    push_optional_value_flag(
+        args,
+        "--liveness-watchdog",
+        invocation.liveness.watchdog.as_deref(),
+    );
+    push_optional_value_flag(
+        args,
+        "--converge-within",
+        invocation.liveness.converge.as_deref(),
+    );
+    push_optional_arg(
+        args,
+        "--heal-after",
+        invocation.liveness.heal_after.as_deref(),
+    );
+}
+
+fn push_optional_arg(args: &mut Vec<OsString>, flag: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        args.push(OsString::from(flag));
+        args.push(OsString::from(value));
+    }
+}
+
+fn push_optional_value_flag(args: &mut Vec<OsString>, flag: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        if value.is_empty() {
+            args.push(OsString::from(flag));
+        } else {
+            args.push(OsString::from(format!("{flag}={value}")));
+        }
+    }
+}
+
+struct NativeHarnessFailure<'a> {
+    invocation: &'a NativeHarnessInvocation,
+    built: &'a BuiltNativeHarness,
+    test_name: &'a str,
+    seed: u64,
+    trace: &'a Path,
+    first: &'a HarnessSeedRun,
+    recorded: &'a HarnessSeedRun,
+    reproduced: bool,
+}
+
+fn native_harness_failure_block(failure: NativeHarnessFailure<'_>) -> String {
+    let repro = native_harness_repro(failure.invocation, failure.seed);
+    let replay = format!(
+        "cargo patina replay {} {}",
+        shell_quote(failure.built.guest.as_os_str()),
+        shell_quote(failure.trace.as_os_str())
+    );
+    let mut block = format!(
+        "patina dst test failed: {}\n  {}  exit={}  class={}\n  trace: {}\n  stderr tail:\n{}\n  reproduce:\n    {repro}\n    {replay}",
+        failure.test_name,
+        failure.invocation.seeds.contains(failure.seed),
+        failure.first.exit_code,
+        failure.recorded.result,
+        failure.trace.display(),
+        indent_tail(&failure.recorded.stderr, 20),
+    );
+    if !failure.reproduced {
+        block.push_str(&format!(
+            "\n  record-on-failure mismatch: first exit={} recorded exit={}; refusing to call this deterministic",
+            failure.first.exit_code, failure.recorded.exit_code
+        ));
+    }
+    if !failure.first.stdout.trim().is_empty() {
+        block.push_str("\n  stdout tail:\n");
+        block.push_str(&indent_tail(&failure.first.stdout, 10));
+    }
+    if let Some(message) = &failure.recorded.message {
+        if !message.trim().is_empty() && !failure.recorded.stderr.contains(message) {
+            block.push_str(&format!("\n  message: {message}"));
+        }
+    }
+    block
+}
+
+fn native_harness_repro(invocation: &NativeHarnessInvocation, seed: u64) -> String {
+    let mut args = vec![
+        OsString::from("test"),
+        invocation.origin.as_os_str().to_owned(),
+    ];
+    if let Some(package) = &invocation.package {
+        args.push(OsString::from("--package"));
+        args.push(OsString::from(package));
+    }
+    args.push(OsString::from("--harness-target"));
+    args.push(OsString::from(&invocation.harness_target));
+    args.push(OsString::from("--exact"));
+    args.push(OsString::from(&invocation.exact));
+    args.push(OsString::from("--seed"));
+    args.push(OsString::from(seed.to_string()));
+    if invocation.release {
+        args.push(OsString::from("--release"));
+    }
+    if invocation.yield_points {
+        args.push(OsString::from("--yield-points"));
+    }
+    append_native_harness_run_flags(&mut args, invocation);
+    command_line("cargo patina", &args)
+}
+
+fn indent_tail(text: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.is_empty() {
+        return "    (empty)".to_string();
+    }
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..]
+        .iter()
+        .map(|line| format!("    {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn execute_explore(exploration: ExploreInvocation) -> Result<i32, CliError> {
     // Explore drives many child runs and reports once, so per-seed run
     // finalization (capture/envelope/render) is suppressed here: each child
@@ -4395,12 +5331,16 @@ fn execute_explore(exploration: ExploreInvocation) -> Result<i32, CliError> {
             }
         };
         if exit != 0 {
-            eprintln!("PATINA_EXPLORE_FAILURE seed={seed} exit={exit}");
+            let repro = exploration_repro(&exploration.wrapped_command, seed);
+            eprintln!(
+                "PATINA_EXPLORE_FAILURE seed={seed} exit={exit} repro={:?}",
+                repro
+            );
             output::emit_simple(
                 "explore",
                 "failure",
                 exit,
-                Some(format!("seed {seed} exited {exit}")),
+                Some(format!("seed {seed} exited {exit}; repro: {repro}")),
             );
             return Ok(exit);
         }
@@ -6546,7 +7486,7 @@ IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
             Some(fingerprint.clone())
         }
     };
-    let artifact = binary.display().to_string();
+    let artifact = resolved.display.display().to_string();
     let exit = output::finalize_run(
         output::RunReport {
             verb: "run",
@@ -8732,6 +9672,7 @@ mod tests {
                 "--release",
             ],
             "test" => &[
+                // cargo family
                 "--seed",
                 "--record",
                 "--budget",
@@ -8741,6 +9682,27 @@ mod tests {
                 "--sleep-jitter-nanos",
                 "--net-jitter-nanos",
                 "--net-drop-permille",
+                // native harness mode
+                "--harness-target",
+                "--exact",
+                "--seeds",
+                "--package",
+                "-p",
+                "--release",
+                "--yield-points",
+                "--buggify",
+                "--buggify-after-setup",
+                "--buggify-activation-permille",
+                "--buggify-cutoff-nanos",
+                "--sched-pct",
+                "--sched-pct-steps",
+                "--starve",
+                "--starve-max-len",
+                "--starve-window",
+                "--swarm",
+                "--liveness-watchdog",
+                "--converge-within",
+                "--heal-after",
             ],
             "build" => &[
                 "--output",
@@ -9264,6 +10226,27 @@ mod tests {
         argv.extend(args.iter().map(OsString::from));
         parse_native_run(argv).map(|_| ())
     }
+    fn drv_native_harness(args: &[&str]) -> Result<(), CliError> {
+        let has_harness_target = args
+            .iter()
+            .any(|arg| *arg == "--harness-target" || arg.starts_with("--harness-target="));
+        let has_exact = args
+            .iter()
+            .any(|arg| *arg == "--exact" || arg.starts_with("--exact="));
+        let mut argv = Vec::new();
+        if !has_harness_target {
+            argv.extend(
+                ["--harness-target", "harness"]
+                    .into_iter()
+                    .map(OsString::from),
+            );
+        }
+        if !has_exact {
+            argv.extend(["--exact", "module::test"].into_iter().map(OsString::from));
+        }
+        argv.extend(args.iter().map(OsString::from));
+        parse_native_harness_from(PathBuf::from("."), PathBuf::from("Cargo.toml"), argv).map(|_| ())
+    }
     fn drv_cargo(command: &str, args: &[&str]) -> Result<(), CliError> {
         parse_cargo(command.to_string(), strings(args)).map(|_| ())
     }
@@ -9371,8 +10354,38 @@ mod tests {
                 .and_then(|(target, _)| target_family(target.as_deref().unwrap_or("native")))
                 .map(|_| ()),
 
-            // test: every flag is the Cargo package family's.
-            ("test", _) => drv_cargo("test", toks),
+            // test: Cargo-family flags stay on the Cargo parser; native harness
+            // mode owns harness selection plus the reused native knobs.
+            ("test", "--record" | "--budget" | "--param") => drv_cargo("test", toks),
+            (
+                "test",
+                "--seed"
+                | "--fs-crash-at"
+                | "--fs-torn-granularity"
+                | "--sleep-jitter-nanos"
+                | "--net-jitter-nanos"
+                | "--net-drop-permille"
+                | "--harness-target"
+                | "--exact"
+                | "--seeds"
+                | "--package"
+                | "--buggify"
+                | "--buggify-activation-permille"
+                | "--buggify-cutoff-nanos"
+                | "--liveness-watchdog"
+                | "--converge-within"
+                | "--sched-pct"
+                | "--starve",
+            ) => drv_native_harness(toks),
+            ("test", "--sched-pct-steps") => {
+                drv_native_harness(&[&["--sched-pct=1"][..], toks].concat())
+            }
+            ("test", "--starve-max-len" | "--starve-window") => {
+                drv_native_harness(&[&["--starve=1"][..], toks].concat())
+            }
+            ("test", "--heal-after") => {
+                drv_native_harness(&[&["--converge-within"][..], toks].concat())
+            }
 
             // build: the native/wasi build parsers; --target through parse_build.
             ("build", "--output") => {

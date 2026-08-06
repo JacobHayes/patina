@@ -123,10 +123,12 @@ stopping at the first failure:
 
 ```
 $ cargo patina explore run ./ledger/ledger --buggify --seeds 50
-PATINA_EXPLORE_FAILURE seed=5 exit=1
+PATINA_EXPLORE_FAILURE seed=5 exit=1 repro="cargo patina run ./ledger/ledger --buggify --seed 5"
 ```
 
 (A clean sweep instead ends with `PATINA_EXPLORE_COMPLETE start=0 seeds=50`.)
+The repro string is also present in the `patina.result/v1` `message` field under
+`--format json`.
 
 ## 5. Record the catching run
 

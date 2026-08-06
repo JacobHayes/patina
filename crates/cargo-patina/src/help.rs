@@ -694,53 +694,121 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
 
 const TEST: Verb = Verb {
     name: "test",
-    summary: "Run a Cargo test binary under the deterministic runtime.",
+    summary: "Run tests under Patina: Cargo-family by default, or a shim-linked native libtest harness for a source package.",
     synopsis: &[
         "cargo patina test [--seed N | --record PATH] [FAULT OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]",
+        "cargo patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test [--seed N | --seeds N] [--release] [--yield-points] [FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]",
     ],
     prose: "\
-`test` is the Cargo package family: the seed/record machinery, seed-driven fault \
-knobs, and typed --param values, with every unrecognized option forwarded to \
-Cargo. Reproducing a recording is the `replay` verb's job, so `test` carries no \
-replay/branch/timeline flags. A --record run captures its seed and fault knobs \
-into the trace metadata so `replay` restores them.",
+With no source positional, `test` is the Cargo package family: the seed/record \
+machinery, seed-driven fault knobs, and typed --param values, with every \
+unrecognized option forwarded to Cargo. Reproducing a recording is the `replay` \
+verb's job, so the Cargo-family form carries no replay/branch/timeline flags. A \
+--record run captures its seed and fault knobs into the trace metadata so \
+`replay` restores them.\n\
+\n\
+A directory or Cargo.toml positional selects native harness mode: Patina rebuilds \
+the requested Cargo libtest target shim-linked with `cargo test --no-run`, stages \
+the harness under target/patina/dst, and runs only the `--exact` test with \
+`--test-threads=1`. `--seeds N` sweeps 0..N (default 20); `--seed N` runs one \
+seed. On the first failure Patina re-runs that seed with --record and prints \
+copy-paste `test` and `replay` repro commands.",
     groups: &[
         Group {
-            title: "Patina options (run/test)",
+            title: "Patina options (Cargo-family run/test)",
             flags: &[
                 f(
                     "--seed",
                     None,
                     Value::Required("U64", Kind::U64),
-                    "Deterministic root seed (default 0).",
+                    "Deterministic root seed (default 0). In native harness mode, run exactly this seed instead of a sweep.",
                     false,
                 ),
                 f(
                     "--record",
                     None,
                     Value::Required("PATH", Kind::Path),
-                    "Record boundary operations and outcomes to PATH.",
+                    "Record boundary operations and outcomes to PATH (Cargo-family form; native harness mode records failures automatically).",
                     false,
                 ),
                 f(
                     "--budget",
                     None,
                     Value::Required("STEPS", Kind::U64),
-                    "Maximum boundary operations before explicit failure.",
+                    "Maximum boundary operations before explicit failure (Cargo-family form).",
                     false,
                 ),
                 f(
                     "--param",
                     None,
                     Value::Required("K=V", Kind::KeyValue),
-                    "Typed-builder parameter exposed through Context.",
+                    "Typed-builder parameter exposed through Context (Cargo-family form).",
                     true,
+                ),
+            ],
+        },
+        Group {
+            title: "Native libtest harness selection (test <DIR|Cargo.toml>)",
+            flags: &[
+                f(
+                    "--harness-target",
+                    None,
+                    Value::Required("NAME", Kind::Symbol),
+                    "Cargo libtest target name to rebuild shim-linked (library, integration test, or bin harness). Required in native harness mode.",
+                    false,
+                ),
+                f(
+                    "--exact",
+                    None,
+                    Value::Required("MOD::test", Kind::Symbol),
+                    "Exact libtest filter to run inside the shim-linked harness. Required in native harness mode.",
+                    false,
+                ),
+                f(
+                    "--seeds",
+                    None,
+                    Value::Required("N", Kind::PositiveU64),
+                    "Run seeds 0..N in native harness mode (default 20; mutually exclusive with --seed).",
+                    false,
+                ),
+                f(
+                    "--package",
+                    Some("-p"),
+                    Value::Required("NAME", Kind::Str),
+                    "Select a workspace member before building the native libtest harness.",
+                    false,
+                ),
+                f(
+                    "--release",
+                    None,
+                    Value::None,
+                    "Build the native libtest harness in release mode (default debug).",
+                    false,
+                ),
+                f(
+                    "--yield-points",
+                    None,
+                    Value::None,
+                    "Instrument the native libtest harness with deterministic yield points.",
+                    false,
                 ),
             ],
         },
         Group {
             title: "Fault options (seed-driven, default off)",
             flags: FAULT_FLAGS,
+        },
+        Group {
+            title: "Buggify options (native harness mode)",
+            flags: BUGGIFY_FLAGS,
+        },
+        Group {
+            title: "Native scheduling options (native harness mode)",
+            flags: NATIVE_SCHEDULE_FLAGS,
+        },
+        Group {
+            title: "Liveness options (native harness mode)",
+            flags: LIVENESS_FLAGS_OPTIONAL,
         },
     ],
 };
@@ -1733,9 +1801,10 @@ guest/oracle untouched, so `--arg=--help` is how a WASI guest receives a literal
         "`run`, `audit`, and `replay` are source-first with artifacts accepted uniformly. A \
 built artifact is recognized by its leading magic bytes (\\0asm for a WASI module, Mach-O/ELF \
 for a native binary) and used as-is; a <SOURCE.rs|DIR|Cargo.toml> is built on the fly through \
-the same pipeline as `build` (honoring --target, default native). A directory, a Cargo.toml, \
-or no artifact with no --target stays the Cargo package family. A positional that names a file \
-path (.wasm/.rs/Cargo.toml, or with a separator) but does not exist is a hard error.\n\
+the same pipeline as `build` (honoring --target, default native). For `test`, no source \
+positional stays the Cargo package family, while a <DIR|Cargo.toml> positional selects native \
+libtest harness mode. A positional that names a file path (.wasm/.rs/Cargo.toml, or with a \
+separator) but does not exist is a hard error.\n\
 \n\
 Options and the artifact may appear in any order, like `cargo build`/`cargo run` — \
 `run --seed 5 app.wasm` and `run app.wasm --seed 5` are identical. Only known options are \

@@ -115,12 +115,13 @@ package/test** (directory or `Cargo.toml`, run in-process), a **native binary**
 (Mach-O/ELF, linked against the deterministic shim), and a **WASI module**
 (`wasm32-wasip1`, run under a deterministic host). `run`, `audit`, and `replay`
 are source-first: hand them a `.rs` file, a directory, or a `Cargo.toml` and
-they build through the same pipeline as `build` first.
+they build through the same pipeline as `build` first. `test` also has a
+source-first native libtest harness mode for one exact test target.
 
 | Verb | What it does | Example |
 |---|---|---|
 | `run` | Build (if needed) and run an artifact deterministically. | `cargo patina run app.rs --seed 7` |
-| `test` | Run a Cargo test target under the deterministic runtime. | `cargo patina test --seed 123` |
+| `test` | Run Cargo-family tests, or rebuild one libtest harness shim-linked and sweep an exact test. | `cargo patina test . --harness-target my_crate --exact tests::case --seeds 20` |
 | `build` | Build the shim-linked native binary (default) or a wasip1 package. | `cargo patina build ./pkg --output app` |
 | `audit` | Report the true residual effect surface of a binary; default-deny. | `cargo patina audit app.rs` |
 | `replay` | Reproduce a recorded trace; seed/faults/argv restored from it. | `cargo patina replay ./app run.patina` |
@@ -129,6 +130,13 @@ they build through the same pipeline as `build` first.
 | `campaign` | Config-driven fault-and-schedule sweep with failure dedup. | `cargo patina campaign ./app --gens 200 --buggify --out-dir out/` |
 | `sites` | Inventory assertion/oracle instrumentation; optionally join a run's SDK report. | `cargo patina sites --exercised sdk.stderr` |
 | `minimize` | Shrink a failing trace (or seed/params) against an oracle. | `cargo patina minimize bug.patina --output small.patina -- ./oracle` |
+
+Native harness mode is the tight point-solution loop: `cargo patina test
+<DIR|Cargo.toml> --harness-target NAME --exact MOD::test --seeds N` runs the
+same Cargo libtest target under the native shim with a single libtest thread.
+The first failing seed is immediately re-run with `--record`; artifacts land under
+`target/patina/dst/...`, and the failure block includes both `cargo patina test`
+and `cargo patina replay` repro commands.
 
 Every verb has `--help`, and `--help --format json` emits a machine-readable
 registry (schema `patina.help/v2`) with progressive disclosure: bare

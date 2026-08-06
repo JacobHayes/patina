@@ -18,7 +18,8 @@ carries its seed, fault config, and buggify config, so `replay` is flag-free.
 
 The verb infers the target from the artifact's magic bytes: `\0asm` -> WASI
 (`wasm32-wasip1`); Mach-O/ELF -> native (linked shim); a directory / `Cargo.toml`
-with no `--target` -> the Cargo package family (in-process boundary API). A
+with no `--target` -> the Cargo package family (in-process boundary API), except
+`test <DIR|Cargo.toml>` which selects native libtest harness mode. A
 `.rs`/dir/`Cargo.toml` source argument is built on the fly, then run.
 
 ## CLI verbs
@@ -35,6 +36,10 @@ with no `--target` -> the Cargo package family (in-process boundary API). A
   edge-counter map and refuses plain native binaries with a `build --yield-points` hint.
 - `cargo patina test [--seed N | --record PATH] [FAULT OPTIONS] [CARGO OPTIONS]`
   The Cargo package family under Patina.
+- `cargo patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test [--seed N | --seeds N] [--release] [--yield-points] [FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]`
+  Native libtest harness mode: rebuilds the named Cargo test target shim-linked,
+  stages it under `target/patina/dst/...`, runs the exact libtest filter with one
+  libtest thread, and records the first failing seed with test/replay repros.
 - `cargo patina replay <ARTIFACT|SOURCE> <TRACE> [--coverage-out PATH] [host inputs]`
   Reproduce a recording. Flag-free: seed, fault knobs, buggify, and guest argv
   are restored from the trace (the trace is authoritative; a re-supplied semantic
@@ -56,7 +61,8 @@ with no `--target` -> the Cargo package family (in-process boundary API). A
   prebuilt binary is refused unless `--raw`.
 - `cargo patina explore run <ARTIFACT|SOURCE> [--seeds N] [--seed-start N] [RUN OPTIONS]`
   Sweep seeds, building once and running that artifact per seed. Stops at the
-  first failing seed with `PATINA_EXPLORE_FAILURE seed=S exit=E`; otherwise
+  first failing seed with `PATINA_EXPLORE_FAILURE seed=S exit=E repro="cargo patina run ... --seed S"`;
+  the JSON envelope's `message` carries the same repro. Otherwise
   `PATINA_EXPLORE_COMPLETE start=... seeds=...`.
 - `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--buggify] [--swarm] [--sched-pct] [--faults]`
   Config-driven deterministic fault-and-schedule sweep: every generation's seed

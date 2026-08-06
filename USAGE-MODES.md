@@ -20,7 +20,9 @@ Ordinary application code instrumented with the cooperative-SUT SDK:
 (`setup_complete()`, `event!`), and `patina_dst::rng()`/`is_simulated()`. The
 crate is dependency-free; every macro is a no-op or plain fallback outside a
 Patina build, so adopters ship it unconditionally with no `cfg(patina)` in
-their code. The runtime enters through `cargo patina build`/`run` (the shim) or
+their code. The runtime enters through `cargo patina build`/`run` (the shim),
+`cargo patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test`
+(the source-first native libtest harness for one point-solution test), or
 `build --target wasi` (the `patina_sdk` host imports), or not at all.
 
 Native startup has one important adopter rule: static constructors (`#[ctor]`,
