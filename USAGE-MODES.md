@@ -34,7 +34,9 @@ link-section constructors, C++ global constructors) must not perform interposed
 Patina effects. They can run before the shim's own startup constructor has
 installed the deterministic runtime, so effectful APIs fail closed with a
 ctor-specific diagnostic (pre-startup `getenv` is hidden and returns NULL rather
-than reading host state). Gate such constructors out of DST builds (for example
+than reading host state; a pre-startup `setenv` gets no such exception and takes
+the abort, since a dropped write would desynchronize the guest's view of the
+environment for the whole run). Gate such constructors out of DST builds (for example
 `#[cfg(not(patina))]` / `#[cfg(not(dst))]`) and move environment/logging/filesystem
 setup into `main` or the harness closure.
 

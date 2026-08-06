@@ -42,6 +42,19 @@ void patina_note_boundary_symbol(const char *symbol);
 void patina_note_startup_constructor_finished(void);
 void patina_control_set_entry(const char *entry);
 char *patina_getenv(const char *name);
+/*
+ * Deterministic guest environment mutation. These update the runtime's guest
+ * env map — the single source of truth the getenv interposer reads — and then
+ * republish the process environ array through the registered installer, so a
+ * direct environ walk can never disagree with a getenv lookup. Mutation is
+ * guest-driven and unrecorded; only the startup map lives in trace metadata.
+ * `patina_publish_environ` republishes without mutating, for the startup path.
+ */
+int32_t patina_setenv(const char *name, const char *value, int32_t overwrite);
+int32_t patina_unsetenv(const char *name);
+int32_t patina_clearenv(void);
+void patina_register_environ_installer(void (*installer)(char **));
+void patina_publish_environ(void);
 int32_t patina_shutdown(void);
 /*
  * The runtime side of the packaged `exit` interposer. Marks the process as

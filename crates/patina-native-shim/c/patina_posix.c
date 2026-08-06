@@ -263,6 +263,15 @@ extern char **environ;
  * deterministic guest map after startup (NULL before startup and when unset);
  * shim-internal startup reads use patina_control_getenv. */
 static char **patina_control_plane = NULL;
+/* Capture runs exactly once. After the deterministic array is published,
+ * patina_environ_base() no longer sees the ambient host entries, so a second
+ * capture would snapshot the guest's own PATINA_-prefixed values instead. */
+static int patina_control_plane_captured = 0;
+/* The AMBIENT host array, remembered at capture time. Everything after startup
+ * must scrub through this rather than through patina_environ_base(): publishing
+ * repoints the environ global at the deterministic array, and `main`'s third
+ * `envp` parameter keeps pointing at the original. */
+static char **patina_host_environ = NULL;
 
 static char **patina_environ_base(void) {
 #ifdef __APPLE__
@@ -273,8 +282,10 @@ static char **patina_environ_base(void) {
 }
 
 static void patina_capture_control_plane(void) {
-    if (patina_control_plane != NULL) return;
+    if (patina_control_plane_captured) return;
+    patina_control_plane_captured = 1;
     char **base = patina_environ_base();
+    patina_host_environ = base;
     if (base == NULL) return;
     size_t kept = 0;
     for (char **entry = base; *entry != NULL; ++entry) {
@@ -298,14 +309,31 @@ static void patina_capture_control_plane(void) {
     patina_control_plane = snapshot;
 }
 
-/* Empty the live environ array in place. Direct environ readers — the Linux
- * `environ` global, Darwin `_NSGetEnviron`, std::env::vars — then see an empty
- * environment; key lookups go through the deterministic getenv interposer. The
- * entry strings stay alive; the snapshot borrows them. */
+/* Empty the AMBIENT host array in place, so nothing holding a pointer to it can
+ * still read the host environment — notably `main`'s third `envp` parameter,
+ * which keeps pointing at the original array after publishing repoints environ.
+ * This must go through patina_host_environ, NOT patina_environ_base(): by the
+ * time this runs, a supervised startup has already installed the runtime and
+ * published the deterministic array, so environ_base() would return that one and
+ * this would wipe the guest's own environment while leaving the host's intact.
+ * The entry strings stay alive; the control-plane snapshot borrows them. */
 static void patina_scrub_environ(void) {
-    char **base = patina_environ_base();
-    if (base == NULL) return;
-    base[0] = NULL;
+    if (patina_host_environ == NULL) return;
+    patina_host_environ[0] = NULL;
+}
+
+/* Publish a deterministic environ array built by the Rust layer from the guest
+ * env map. Direct environ readers — the Linux `environ` global, Darwin
+ * `_NSGetEnviron`, std::env::vars — then see exactly what the getenv interposer
+ * answers, before and after any guest setenv/unsetenv. Storage is owned (and
+ * deliberately leaked) by the Rust side; this only repoints the global, which is
+ * what a libc setenv does when it grows the array. */
+static void patina_environ_install(char **next) {
+#ifdef __APPLE__
+    *_NSGetEnviron() = next;
+#else
+    environ = next;
+#endif
 }
 
 const char *patina_control_getenv(const char *name) {
@@ -325,21 +353,40 @@ char *getenv(const char *name) {
     return patina_getenv(name);
 }
 
-/* The deterministic environment is immutable: mutation through the host libc
- * would repopulate the scrubbed environ behind the runtime's back. */
+/* Guest-driven mutation is deterministic, so it is modeled rather than refused:
+ * these update the runtime's guest env map and republish environ, keeping the
+ * getenv interposer and direct environ walkers in agreement. Host libc is never
+ * reached, so the scrubbed ambient environment stays scrubbed. */
 int setenv(const char *name, const char *value, int overwrite) {
-    (void)name; (void)value; (void)overwrite;
-    return patina_posix_deny("patina: setenv is not modeled; the deterministic environment is immutable; failing closed\n");
+    patina_note_boundary_symbol("setenv");
+    return fail_int(patina_setenv(name, value, overwrite));
 }
 
 int unsetenv(const char *name) {
-    (void)name;
-    return patina_posix_deny("patina: unsetenv is not modeled; the deterministic environment is immutable; failing closed\n");
+    patina_note_boundary_symbol("unsetenv");
+    return fail_int(patina_unsetenv(name));
 }
 
+#ifndef __APPLE__
+/* glibc/musl only; Darwin libc has no clearenv. Interposed for the same reason
+ * as unsetenv: left alone it would empty the published array behind the map's
+ * back, so getenv and environ would disagree for the rest of the run. */
+int clearenv(void) {
+    patina_note_boundary_symbol("clearenv");
+    return fail_int(patina_clearenv());
+}
+#endif
+
+/* putenv is the one env mutator that stays fail-closed. Its entry remains
+ * ALIASED to caller-owned memory: POSIX lets a later write through the caller's
+ * buffer change the environment, and forbids the implementation from copying or
+ * freeing the string. Patina's environment is an owned deterministic map, so
+ * honoring that aliasing would mean tracking guest memory the runtime does not
+ * own — an unmodeled effect whose divergence would surface as a silently stale
+ * value rather than an error. Refuse loudly and name the modeled path. */
 int putenv(char *string) {
     (void)string;
-    return patina_posix_deny("patina: putenv is not modeled; the deterministic environment is immutable; failing closed\n");
+    return patina_posix_deny("patina: putenv is not modeled because its entry stays aliased to caller-owned memory; use setenv (modeled and deterministic); failing closed\n");
 }
 
 pid_t getpid(void) {
@@ -4785,7 +4832,8 @@ unsigned long vm_page_size = 4096;
  * (see ensure_runtime in the Rust layer). The public interposed getenv reads only
  * the deterministic guest map after startup (NULL before startup and when unset);
  * startup reads the PATINA_* control plane through the private snapshot accessor
- * before scrubbing environ for guest code.
+ * before scrubbing the ambient environ and publishing the deterministic one that
+ * guest code sees.
  */
 static void patina_finalize_atexit(void) {
 #ifdef __linux__
@@ -4816,6 +4864,10 @@ static void patina_finalize_atexit(void) {
 __attribute__((constructor(101))) static void patina_native_start(void) {
     atexit(patina_finalize_atexit);
     patina_capture_control_plane();
+    /* Register before init: installing the runtime publishes environ from the
+     * guest env map, and a deferred harness install happens after this
+     * constructor returns. */
+    patina_register_environ_installer(patina_environ_install);
     /* Deferred harness init (PATINA_DEFER_INIT=1, set by `cargo patina run
      * --harness`): still capture the control plane, still register finalization,
      * still scrub the environment — but leave the runtime UNINSTALLED so
@@ -4828,5 +4880,6 @@ __attribute__((constructor(101))) static void patina_native_start(void) {
         patina_init_from_env();
     }
     patina_scrub_environ();
+    patina_publish_environ();
     patina_note_startup_constructor_finished();
 }

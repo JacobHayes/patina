@@ -2829,9 +2829,63 @@ impl Context {
         self.params.get(key).map(String::as_str)
     }
 
-    /// Return one deterministic guest environment value, if supplied at startup.
+    /// Return one deterministic guest environment value.
     pub fn guest_env_var(&self, key: &str) -> Option<&str> {
         self.guest_env.get(key).map(String::as_str)
+    }
+
+    /// The whole live deterministic guest environment, in key order.
+    ///
+    /// This is the run's single source of truth for environment reads, seeded
+    /// from the recorded startup map and updated by [`guest_env_set`] and
+    /// [`guest_env_remove`]. The native shim republishes the process `environ`
+    /// array from it so direct `environ` walkers and the `getenv` interposer
+    /// never disagree.
+    ///
+    /// [`guest_env_set`]: Context::guest_env_set
+    /// [`guest_env_remove`]: Context::guest_env_remove
+    pub const fn guest_env(&self) -> &BTreeMap<String, String> {
+        &self.guest_env
+    }
+
+    /// Set one deterministic guest environment value, returning whether the map
+    /// changed. With `overwrite` false an existing key is left alone (POSIX
+    /// `setenv` semantics).
+    ///
+    /// Guest environment mutation is process memory, not a host effect: it is
+    /// derived entirely from guest control flow, so it takes no boundary step,
+    /// records nothing, and reproduces on replay by re-executing the guest. The
+    /// trace metadata keeps only the startup map the run was configured with.
+    pub fn guest_env_set(
+        &mut self,
+        key: &str,
+        value: &str,
+        overwrite: bool,
+    ) -> Result<bool, RuntimeError> {
+        validate_guest_env_entry(key, value)?;
+        if !overwrite && self.guest_env.contains_key(key) {
+            return Ok(false);
+        }
+        Ok(self
+            .guest_env
+            .insert(key.to_owned(), value.to_owned())
+            .is_none_or(|previous| previous != value))
+    }
+
+    /// Remove one deterministic guest environment value, returning whether the
+    /// key was present. Removing an absent key succeeds (POSIX `unsetenv`).
+    /// See [`guest_env_set`](Context::guest_env_set) for why this is unrecorded.
+    pub fn guest_env_remove(&mut self, key: &str) -> Result<bool, RuntimeError> {
+        validate_guest_env_key(key)?;
+        Ok(self.guest_env.remove(key).is_some())
+    }
+
+    /// Drop every deterministic guest environment value, returning whether the
+    /// map was non-empty. Backs the native `clearenv` interposer.
+    pub fn guest_env_clear(&mut self) -> bool {
+        let changed = !self.guest_env.is_empty();
+        self.guest_env.clear();
+        changed
     }
 
     // ---- Cooperative-SUT (buggify) surface -----------------------------------
@@ -5454,21 +5508,39 @@ fn parse_nanos_range(name: &str, value: &str) -> Result<(u64, u64), RuntimeError
 
 fn validate_guest_env(env: &BTreeMap<String, String>) -> Result<(), RuntimeError> {
     for (key, value) in env {
-        if key.is_empty() {
-            return Err(RuntimeError::Config(
-                "guest environment keys must not be empty".into(),
-            ));
-        }
-        if key.contains('=') {
-            return Err(RuntimeError::Config(format!(
-                "guest environment key {key:?} must not contain '='"
-            )));
-        }
-        if key.contains('\0') || value.contains('\0') {
-            return Err(RuntimeError::Config(format!(
-                "guest environment entry {key:?} must not contain NUL bytes"
-            )));
-        }
+        validate_guest_env_entry(key, value)?;
+    }
+    Ok(())
+}
+
+/// The key half of the guest-environment invariant, shared by startup validation
+/// and the in-run mutators so a `setenv` can never install an entry the startup
+/// path would have rejected.
+fn validate_guest_env_key(key: &str) -> Result<(), RuntimeError> {
+    if key.is_empty() {
+        return Err(RuntimeError::Config(
+            "guest environment keys must not be empty".into(),
+        ));
+    }
+    if key.contains('=') {
+        return Err(RuntimeError::Config(format!(
+            "guest environment key {key:?} must not contain '='"
+        )));
+    }
+    if key.contains('\0') {
+        return Err(RuntimeError::Config(format!(
+            "guest environment entry {key:?} must not contain NUL bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_guest_env_entry(key: &str, value: &str) -> Result<(), RuntimeError> {
+    validate_guest_env_key(key)?;
+    if value.contains('\0') {
+        return Err(RuntimeError::Config(format!(
+            "guest environment entry {key:?} must not contain NUL bytes"
+        )));
     }
     Ok(())
 }
@@ -7005,6 +7077,57 @@ mod tests {
             "trace".to_string(),
         )]));
         assert!(reconcile_replay_guest_env(&conflict, Some(&stored)).is_err());
+    }
+
+    // Guest-driven env mutation is a deterministic in-process operation, so the
+    // context exposes it directly. It must honor POSIX's overwrite flag, hold the
+    // same key/value invariant the startup path validates, and — critically —
+    // leave the recorded startup map alone: the trace metadata is built from the
+    // config, so a guest that rewrites its environment must not rewrite history.
+    #[test]
+    fn guest_env_mutation_follows_posix_and_leaves_the_recorded_startup_map_alone() {
+        let startup = BTreeMap::from([("SEEDED".to_string(), "from-flag".to_string())]);
+        let config = RuntimeConfig::seeded(1).with_guest_env(startup.clone());
+        let mut context = Context::from_config(config.clone()).unwrap();
+        assert_eq!(context.guest_env_var("SEEDED"), Some("from-flag"));
+
+        assert!(context.guest_env_set("ALPHA", "one", true).unwrap());
+        assert_eq!(context.guest_env_var("ALPHA"), Some("one"));
+        // overwrite=false leaves an existing key alone and reports no change.
+        assert!(!context.guest_env_set("ALPHA", "ignored", false).unwrap());
+        assert_eq!(context.guest_env_var("ALPHA"), Some("one"));
+        assert!(context.guest_env_set("ALPHA", "two", true).unwrap());
+        // Rewriting a key to its current value is not a change.
+        assert!(!context.guest_env_set("ALPHA", "two", true).unwrap());
+        // A guest overwrite of a startup key wins for the rest of the run.
+        assert!(context.guest_env_set("SEEDED", "replaced", true).unwrap());
+        assert_eq!(
+            context.guest_env(),
+            &BTreeMap::from([
+                ("ALPHA".to_string(), "two".to_string()),
+                ("SEEDED".to_string(), "replaced".to_string()),
+            ])
+        );
+
+        // The startup invariant holds for mutations too, so a set can never
+        // install an entry the startup validator would have rejected.
+        assert!(context.guest_env_set("", "x", true).is_err());
+        assert!(context.guest_env_set("BAD=NAME", "x", true).is_err());
+        assert!(context.guest_env_set("NUL\0KEY", "x", true).is_err());
+        assert!(context.guest_env_set("OK", "NUL\0VALUE", true).is_err());
+        assert!(context.guest_env_remove("BAD=NAME").is_err());
+
+        // Removing an absent key succeeds and reports no change (POSIX).
+        assert!(!context.guest_env_remove("NEVER_SET").unwrap());
+        assert!(context.guest_env_remove("ALPHA").unwrap());
+        assert_eq!(context.guest_env_var("ALPHA"), None);
+        assert!(context.guest_env_clear());
+        assert!(context.guest_env().is_empty());
+        assert!(!context.guest_env_clear());
+
+        // The trace metadata is derived from the config, so none of the above
+        // reaches the recorded startup map.
+        assert_eq!(guest_env_record(&config), Some(startup));
     }
 
     #[test]

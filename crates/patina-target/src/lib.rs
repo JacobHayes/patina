@@ -2285,8 +2285,9 @@ fn common_native_allowlisted_import(symbol: &str) -> bool {
     // installation is deterministic and delivery happens only on faults.
     const SIGNAL_DIAGNOSTICS: &[&str] = &["sigaction", "sigaltstack", "signal"];
     // The environment pointer itself is startup glue referenced by libc/std
-    // runtime setup. The native shim scrubs the live storage at startup, so
-    // direct environ readers see an empty deterministic environment.
+    // runtime setup. The native shim scrubs the ambient host storage at startup
+    // and repoints this at an array built from the deterministic guest env map,
+    // so direct environ readers see exactly what the getenv interposer answers.
     const ENVIRONMENT_STORAGE: &[&str] = &["environ"];
     // Process-local virtual-memory management backs the allocator, thread
     // stacks, and guard pages; mappings are not guest-observable effects.
@@ -2857,9 +2858,19 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "eventfd",
         "eventfd2",
     ];
-    // Environment mutation/reads; the deterministic environment is empty and
-    // immutable.
-    const ENVIRONMENT: &[&str] = &["getenv", "secure_getenv", "setenv", "unsetenv", "putenv"];
+    // Environment reads and mutation. Reads and guest-driven mutation are
+    // modeled deterministically by the native shim, which owns the guest env map
+    // and the environ array published from it; `putenv` stays fail-closed
+    // because its entry aliases caller-owned memory. Either way an UNINTERPOSED
+    // member would reach the host environment, so the whole family is classified.
+    const ENVIRONMENT: &[&str] = &[
+        "getenv",
+        "secure_getenv",
+        "setenv",
+        "unsetenv",
+        "putenv",
+        "clearenv",
+    ];
     // Dynamic loading can pull in arbitrary uninterposed host code.
     const DYNAMIC: &[&str] = &["dlopen", "dlsym", "dlclose", "dlmopen"];
     // (d) Thread lifecycle: anything that mints a new runnable host context must

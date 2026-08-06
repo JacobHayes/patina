@@ -175,12 +175,58 @@ int main(void) {
     if (close(base) != 0) return 41;
     if (unlink("/state/dup") != 0) return 42;
 
+    /* The deterministic environment starts empty, and guest-driven mutation is
+     * modeled. Every assertion below checks BOTH readers -- the getenv
+     * interposer and the published environ array -- so a mutation that reached
+     * only one of them fails here. */
     extern char **environ;
-    if (environ != NULL && environ[0] != NULL) return 50;
+    if (environ == NULL || environ[0] != NULL) return 50;
+    if (setenv("BETA", "2", 1) != 0) return 51;
+    if (setenv("ALPHA", "1", 1) != 0) return 52;
+    if (getenv("ALPHA") == NULL || strcmp(getenv("ALPHA"), "1") != 0) return 53;
+    /* environ is rebuilt in key order and NULL-terminated at the right length. */
+    if (environ[0] == NULL || strcmp(environ[0], "ALPHA=1") != 0) return 54;
+    if (environ[1] == NULL || strcmp(environ[1], "BETA=2") != 0) return 55;
+    if (environ[2] != NULL) return 56;
+    /* overwrite=0 leaves an existing key alone; overwrite=1 replaces it. */
+    if (setenv("ALPHA", "ignored", 0) != 0) return 57;
+    if (strcmp(getenv("ALPHA"), "1") != 0) return 58;
+    if (setenv("ALPHA", "3", 1) != 0) return 59;
+    if (strcmp(getenv("ALPHA"), "3") != 0) return 60;
+    if (strcmp(environ[0], "ALPHA=3") != 0) return 61;
+    /* Malformed names are EINVAL (POSIX) and must not touch the map. */
     errno = 0;
-    if (setenv("HOSTILE", "1", 1) != -1 || errno != ENOSYS) return 51;
+    if (setenv("BAD=NAME", "x", 1) != -1 || errno != EINVAL) return 62;
     errno = 0;
-    if (unsetenv("HOSTILE") != -1 || errno != ENOSYS) return 52;
+    if (setenv("", "x", 1) != -1 || errno != EINVAL) return 63;
+    if (environ[2] != NULL) return 64;
+    /* unsetenv drops the key from both readers; an absent key succeeds. */
+    if (unsetenv("ALPHA") != 0) return 65;
+    if (getenv("ALPHA") != NULL) return 66;
+    if (environ[0] == NULL || strcmp(environ[0], "BETA=2") != 0) return 67;
+    if (environ[1] != NULL) return 68;
+    if (unsetenv("NEVER_SET") != 0) return 69;
+    /* putenv stays fail-closed: its entry would have to stay aliased to this
+     * caller-owned buffer, which the owned deterministic map cannot model. */
+    {
+        static char aliased[] = "GAMMA=3";
+        errno = 0;
+        if (putenv(aliased) != -1 || errno != ENOSYS) return 70;
+    }
+    if (getenv("GAMMA") != NULL) return 71;
+    if (environ[1] != NULL) return 72;
+#ifndef __APPLE__
+    /* clearenv (glibc/musl) must empty the map, not just the published array.
+     * _POSIX_C_SOURCE turns off _DEFAULT_SOURCE, so glibc does not declare it. */
+    extern int clearenv(void);
+    if (setenv("DELTA", "4", 1) != 0) return 73;
+    if (clearenv() != 0) return 74;
+    if (getenv("BETA") != NULL || getenv("DELTA") != NULL) return 75;
+    if (environ[0] != NULL) return 76;
+#else
+    if (unsetenv("BETA") != 0) return 77;
+    if (environ[0] != NULL) return 78;
+#endif
 
     if (rename("/state/value", "/state/renamed") != 0) return 20;
     if (unlink("/state/renamed") != 0) return 21;
@@ -544,8 +590,12 @@ fn main() {
 RS
 
 cat >"$tmp/env_probe.rs" <<'RS'
-// The deterministic environment is empty: std::env::vars (the direct environ
-// path) sees nothing, and interposed getenv hides every host/control variable.
+// The deterministic environment is empty and guest-owned: std::env::vars (the
+// direct environ path) sees nothing, interposed getenv hides every host/control
+// variable, and guest mutation lands in the deterministic map only -- it never
+// pulls in, or is shadowed by, a host value of the same name. The caller runs
+// this with PATINA_ENV_CANARY_HOST set in the HOST environment, so the canary
+// below collides with a real ambient variable.
 fn main() {
     let leaked: Vec<String> = std::env::vars_os()
         .map(|(key, _)| key.to_string_lossy().into_owned())
@@ -560,9 +610,49 @@ fn main() {
     {
         std::process::exit(61);
     }
+
+    unsafe { std::env::set_var("PATINA_ENV_CANARY_HOST", "guest-owned") };
+    let scanned: Vec<String> = std::env::vars()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
+    if scanned != ["PATINA_ENV_CANARY_HOST=guest-owned"] {
+        eprintln!("environ after set_var: {}", scanned.join(","));
+        std::process::exit(62);
+    }
+    if std::env::var("PATINA_ENV_CANARY_HOST").as_deref() != Ok("guest-owned") {
+        std::process::exit(63);
+    }
+    unsafe { std::env::remove_var("PATINA_ENV_CANARY_HOST") };
+    if std::env::vars_os().next().is_some() || std::env::var_os("PATINA_ENV_CANARY_HOST").is_some()
+    {
+        std::process::exit(64);
+    }
     println!("NATIVE_ENV_RESULT vars=0");
 }
 RS
+
+cat >"$tmp/envp_probe.c" <<'C'
+/* `main`'s third parameter keeps pointing at the ORIGINAL host environ array
+ * after startup repoints the environ global at the deterministic one, so the
+ * ambient host environment must be scrubbed in that original array IN PLACE.
+ * The caller supplies the PATINA_* protocol through the host environment,
+ * because that is the ordering that matters: a supervised startup installs the
+ * runtime -- publishing the deterministic array -- BEFORE the scrub runs, so a
+ * scrub that resolves the array through the environ global would wipe the guest
+ * environment and leave the host's fully readable here. */
+#include <stdio.h>
+
+int main(int argc, char **argv, char **envp) {
+    (void)argc; (void)argv;
+    int count = 0;
+    if (envp != NULL) {
+        for (char **entry = envp; *entry != NULL; ++entry) count += 1;
+    }
+    printf("NATIVE_ENVP_RESULT count=%d first=%s\n", count,
+           (envp != NULL && envp[0] != NULL) ? envp[0] : "<none>");
+    return 0;
+}
+C
 
 cat >"$tmp/escape_probe.c" <<'C'
 #include <pthread.h>
@@ -1025,8 +1115,10 @@ grep -qx 'NATIVE_DUP_RESULT head=abc rest=def mid=bc' "$tmp/dup-seed-1"
 cmp "$tmp/dup-record" "$tmp/dup-replay"
 cmp "$tmp/dup-seed-1" "$tmp/dup-replay"
 
-# The deterministic environment is empty, including direct environ iteration.
-# Host canaries (even PATINA_-prefixed ones) must not affect output or traces.
+# The deterministic environment is empty, including direct environ iteration,
+# and guest setenv/unsetenv mutate only the deterministic map. Host canaries
+# (even PATINA_-prefixed ones, and one that collides with a name the guest sets)
+# must not affect output or traces.
 "$runner" build "$tmp/env_probe.rs" --output "$tmp/env-probe" >/dev/null
 "$runner" audit "$tmp/env-probe" "${shim_allow[@]}" >/dev/null
 PATINA_ENV_CANARY_HOST=one "$runner" run "$tmp/env-probe" --seed 3 >"$tmp/env-seed-1"
@@ -1039,6 +1131,17 @@ CANARY_HOST=two "$runner" replay "$tmp/env-probe" "$tmp/env.patina" \
   --fingerprint native-env-v1 >"$tmp/env-replay"
 cmp "$tmp/env-record" "$tmp/env-replay"
 cmp "$tmp/env-seed-1" "$tmp/env-replay"
+
+# The scrub must empty the ORIGINAL host array, which `main`'s envp parameter
+# still points at after the deterministic array is published. Host canaries --
+# PATINA_-prefixed or not -- must be invisible through that parameter.
+"$cc" -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror \
+  -I"$root/crates/patina-native-shim/include" \
+  "$tmp/envp_probe.c" "$root/crates/patina-native-shim/c/patina_posix.c" \
+  "$target_dir/debug/libpatina_dst_native_shim.a" ${native_wrap[@]+"${native_wrap[@]}"} -o "$tmp/envp-probe"
+PATINA_MODE=seeded PATINA_SEED=9 PATINA_ENVP_CANARY=leak ENVP_CANARY=leak \
+  "$tmp/envp-probe" >"$tmp/envp-result"
+grep -qx 'NATIVE_ENVP_RESULT count=0 first=<none>' "$tmp/envp-result"
 
 # R20 std HashMap seeding: std's `RandomState` draws its hashing keys from the
 # process entropy source, which the shim seeds deterministically. So a HashMap's

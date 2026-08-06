@@ -5724,6 +5724,177 @@ tempfile = "3"
     );
 }
 
+// Guest-driven environment mutation is a deterministic in-process operation, so
+// `setenv`/`unsetenv` succeed and every reader agrees: the `getenv` interposer,
+// the `environ` array std::env::vars walks, and the seeded `--env` map share one
+// source of truth. Mutations are derived from guest control flow rather than the
+// host, so nothing is recorded per mutation — only the initial `--env` set lives
+// in the trace metadata — and replay reproduces the whole sequence byte for byte.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_guest_env_mutation_is_coherent_and_replays() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("env_mutation.rs");
+    fs::write(
+        &source,
+        r#"fn scan() -> String {
+    let mut entries: Vec<String> = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
+    entries.sort();
+    entries.join(",")
+}
+
+fn main() {
+    let seeded = std::env::var("SEEDED").unwrap_or_else(|_| "<missing>".to_string());
+    println!("start seeded={seeded} scan=[{}]", scan());
+
+    unsafe { std::env::set_var("ALPHA", "one") };
+    println!(
+        "set alpha={} scan=[{}]",
+        std::env::var("ALPHA").unwrap(),
+        scan()
+    );
+
+    unsafe { std::env::set_var("ALPHA", "two") };
+    println!(
+        "overwrite alpha={} scan=[{}]",
+        std::env::var("ALPHA").unwrap(),
+        scan()
+    );
+
+    unsafe { std::env::set_var("SEEDED", "replaced") };
+    println!("reseed seeded={} scan=[{}]", std::env::var("SEEDED").unwrap(), scan());
+
+    unsafe { std::env::remove_var("ALPHA") };
+    println!(
+        "remove alpha_missing={} scan=[{}]",
+        std::env::var_os("ALPHA").is_none(),
+        scan()
+    );
+
+    unsafe { std::env::remove_var("SEEDED") };
+    unsafe { std::env::remove_var("NEVER_SET") };
+    println!("drain scan=[{}]", scan());
+}
+"#,
+    )
+    .unwrap();
+
+    let workspace = native_workspace();
+    let bin = directory.path().join("env-mutation");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let bin = bin.to_str().unwrap();
+
+    let seeded_run = invoke_in(
+        workspace,
+        &["run", bin, "--seed", "11", "--env", "SEEDED=from-flag"],
+    );
+    let stdout = String::from_utf8_lossy(&seeded_run.stdout);
+    // The seeded `--env` map is visible to BOTH readers from the first line: the
+    // getenv interposer and the environ array std::env::vars walks.
+    assert!(
+        stdout.contains("start seeded=from-flag scan=[SEEDED=from-flag]"),
+        "{stdout}"
+    );
+    // set_var is visible to getenv and to the rebuilt environ array.
+    assert!(
+        stdout.contains("set alpha=one scan=[ALPHA=one,SEEDED=from-flag]"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("overwrite alpha=two scan=[ALPHA=two,SEEDED=from-flag]"),
+        "{stdout}"
+    );
+    // A guest overwrite of a `--env`-seeded key wins over the seeded value; the
+    // trace metadata still records only what `--env` supplied.
+    assert!(
+        stdout.contains("reseed seeded=replaced scan=[ALPHA=two,SEEDED=replaced]"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("remove alpha_missing=true scan=[SEEDED=replaced]"),
+        "{stdout}"
+    );
+    // Removing every key — including one that was never set — leaves an empty
+    // environ, exactly as the run started before `--env`.
+    assert!(stdout.contains("drain scan=[]"), "{stdout}");
+
+    // Same seed, same bytes: mutation is a pure function of guest control flow.
+    let repeat = invoke_in(
+        workspace,
+        &["run", bin, "--seed", "11", "--env", "SEEDED=from-flag"],
+    );
+    assert_eq!(
+        seeded_run.stdout, repeat.stdout,
+        "guest env mutation must be byte-identical across same-seed runs"
+    );
+
+    let trace = directory.path().join("env-mutation.patina");
+    let recorded = invoke_in(
+        workspace,
+        &[
+            "run",
+            bin,
+            "--seed",
+            "11",
+            "--env",
+            "SEEDED=from-flag",
+            "--record",
+            trace.to_str().unwrap(),
+        ],
+    );
+    let replayed = invoke_in(workspace, &["replay", bin, trace.to_str().unwrap()]);
+    assert_eq!(
+        recorded.stdout, replayed.stdout,
+        "replay must reproduce a guest that mutates its environment, flag-free"
+    );
+    assert_eq!(
+        seeded_run.stdout, replayed.stdout,
+        "the recorded/replayed run must match the seeded run byte for byte"
+    );
+
+    // Only the initial `--env` set is metadata; the guest's later overwrite of
+    // SEEDED and its ALPHA writes leave no per-mutation record.
+    let trace_text = fs::read_to_string(&trace).unwrap();
+    assert!(
+        trace_text.contains("\"SEEDED\":\"from-flag\""),
+        "{trace_text}"
+    );
+    assert!(
+        !trace_text.contains("replaced") && !trace_text.contains("ALPHA"),
+        "guest env mutations must not be recorded as trace events:\n{trace_text}"
+    );
+
+    // Re-recording produces a byte-identical trace: no mutation-derived state
+    // leaks into the recorded stream.
+    let trace_again = directory.path().join("env-mutation-again.patina");
+    invoke_in(
+        workspace,
+        &[
+            "run",
+            bin,
+            "--seed",
+            "11",
+            "--env",
+            "SEEDED=from-flag",
+            "--record",
+            trace_again.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        fs::read(&trace).unwrap(),
+        fs::read(&trace_again).unwrap(),
+        "repeat records of an env-mutating guest must be byte-identical"
+    );
+}
+
 // The trace is authoritative for the fault configuration, so `replay` exposes no
 // fault knobs at all: a flag-free `replay` reproduces the recorded fault run, and
 // supplying a fault knob is refused UP FRONT (a CLI usage error naming the flag),
