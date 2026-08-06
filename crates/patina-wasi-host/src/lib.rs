@@ -877,25 +877,16 @@ impl Preview1Host {
     }
 
     fn fd_pread(&mut self, fd: u32, max_len: usize, offset: u64) -> Result<Vec<u8>, WasiHostError> {
-        let offset = i64::try_from(offset).map_err(|_| {
-            WasiHostError::Runtime(
-                EffectError::new(ErrorCode::InvalidInput, "WASI pread offset exceeds i64").into(),
-            )
-        })?;
-        let handle = match self.descriptors.get(&fd) {
-            Some(WasiDescriptor::File { handle, .. }) => *handle,
+        let (handle, rights) = match self.descriptors.get(&fd) {
+            Some(WasiDescriptor::File { handle, rights, .. }) => (*handle, *rights),
             _ => return Err(WasiHostError::DeniedFd(fd)),
         };
-        let original = self.context.fs_seek(handle, 0, SeekWhence::Current)?;
-        let original = i64::try_from(original).map_err(|_| {
-            WasiHostError::Runtime(
-                EffectError::new(ErrorCode::InvalidInput, "WASI file cursor exceeds i64").into(),
-            )
-        })?;
-        self.context.fs_seek(handle, offset, SeekWhence::Start)?;
-        let operation = self.fd_read(fd, max_len);
-        self.context.fs_seek(handle, original, SeekWhence::Start)?;
-        operation
+        if rights & WASI_RIGHT_FD_READ == 0 {
+            return Err(WasiHostError::NotCapable(fd));
+        }
+        self.context
+            .fs_read_at(handle, offset, max_len)
+            .map_err(Into::into)
     }
 
     fn fd_pwrite(
@@ -905,27 +896,21 @@ impl Preview1Host {
         offset: u64,
     ) -> Result<usize, WasiHostError> {
         self.ensure_writable_fd(fd)?;
-        let offset = i64::try_from(offset).map_err(|_| {
-            WasiHostError::Runtime(
-                EffectError::new(ErrorCode::InvalidInput, "WASI pwrite offset exceeds i64").into(),
-            )
+        let (handle, _) = self.file_write_handle(fd)?;
+        let total = buffers.iter().try_fold(0usize, |written, buffer| {
+            written
+                .checked_add(buffer.len())
+                .ok_or(WasiHostError::OutputSizeOverflow)
         })?;
-        let handle = match self.descriptors.get(&fd) {
-            Some(WasiDescriptor::File { handle, .. }) => *handle,
-            _ => return Err(WasiHostError::DeniedFd(fd)),
-        };
-        let original = self.context.fs_seek(handle, 0, SeekWhence::Current)?;
-        let original = i64::try_from(original).map_err(|_| {
-            WasiHostError::Runtime(
-                EffectError::new(ErrorCode::InvalidInput, "WASI file cursor exceeds i64").into(),
-            )
-        })?;
-        self.context.fs_seek(handle, offset, SeekWhence::Start)?;
+        let mut bytes = Vec::with_capacity(total);
+        for buffer in buffers {
+            bytes.extend_from_slice(buffer);
+        }
         // fd_pwrite is explicitly positioned I/O; it does not consult APPEND,
         // which only affects cursor-based fd_write.
-        let operation = self.fd_write_positioned(fd, buffers);
-        self.context.fs_seek(handle, original, SeekWhence::Start)?;
-        operation
+        self.context
+            .fs_write_at(handle, offset, &bytes)
+            .map_err(Into::into)
     }
 
     fn fd_metadata(&mut self, fd: u32) -> Result<(FsMetadata, String), WasiHostError> {
@@ -1155,6 +1140,7 @@ const WASI_ERRNO_EXIST: i32 = 20;
 const WASI_ERRNO_INVAL: i32 = 28;
 const WASI_ERRNO_CONNREFUSED: i32 = 14;
 const WASI_ERRNO_CONNRESET: i32 = 15;
+const WASI_ERRNO_INTR: i32 = 27;
 const WASI_ERRNO_IO: i32 = 29;
 const WASI_ERRNO_NOTCONN: i32 = 53;
 const WASI_ERRNO_PIPE: i32 = 59;
@@ -1162,6 +1148,7 @@ const WASI_ERRNO_ISDIR: i32 = 31;
 const WASI_ERRNO_LOOP: i32 = 32;
 const WASI_ERRNO_MFILE: i32 = 33;
 const WASI_ERRNO_NOENT: i32 = 44;
+const WASI_ERRNO_NOSPC: i32 = 51;
 const WASI_ERRNO_NOSYS: i32 = 52;
 const WASI_ERRNO_NOTDIR: i32 = 54;
 const WASI_ERRNO_NOTEMPTY: i32 = 55;
@@ -2919,6 +2906,9 @@ fn effect_errno(code: ErrorCode) -> i32 {
         ErrorCode::IsDirectory => WASI_ERRNO_ISDIR,
         ErrorCode::NotDirectory => WASI_ERRNO_NOTDIR,
         ErrorCode::DirectoryNotEmpty => WASI_ERRNO_NOTEMPTY,
+        ErrorCode::Io => WASI_ERRNO_IO,
+        ErrorCode::NoSpace => WASI_ERRNO_NOSPC,
+        ErrorCode::Interrupted => WASI_ERRNO_INTR,
         ErrorCode::Deadlock | ErrorCode::NoRoute | ErrorCode::InvalidState => WASI_ERRNO_IO,
         ErrorCode::ConnectionRefused => WASI_ERRNO_CONNREFUSED,
         ErrorCode::ConnectionReset => WASI_ERRNO_CONNRESET,

@@ -287,6 +287,20 @@ const FAULT_FLAGS: &[Flag] = &[
         false,
     ),
     f(
+        "--fs-error-permille",
+        None,
+        Value::Required("N", Kind::Permille),
+        "Fail eligible fs ops at N per-mille with a seeded errno (EIO/ENOSPC/EINTR per op).",
+        false,
+    ),
+    f(
+        "--fs-short-permille",
+        None,
+        Value::Required("N", Kind::Permille),
+        "Truncate fs reads/writes at N per-mille (short I/O, ≥1 byte).",
+        false,
+    ),
+    f(
         "--sleep-jitter-nanos",
         None,
         Value::Required("MIN..MAX", Kind::NanosRange),
@@ -1069,7 +1083,7 @@ const CAMPAIGN: Verb = Verb {
 A campaign runs `--gens` independent child `cargo patina run` processes over one \
 artifact. Everything is a pure function of the generation number, so a re-run with \
 the same spec reproduces the same seeds, knobs, outcomes, and failure signatures. \
-Each generation is classified into one of seven outcome classes; novel failure \
+Each generation is classified into one of eight outcome classes; novel failure \
 signatures are deduped and their traces saved with a reproduce command. A --spec \
 FILE.json supplies overrides and individual flags override the spec. Campaigns \
 checkpoint their state in --out-dir; `--extend N` adds N generations to the recorded \
@@ -1184,7 +1198,7 @@ never-reached `reachable!` is invisible until static site enumeration lands. \
                 "--faults",
                 None,
                 Value::None,
-                "Randomize fault knobs (net drop, sleep jitter) per generation.",
+                "Randomize fault knobs (fs error/short I/O, net drop, sleep jitter) per generation.",
                 false,
             ),
             f(
@@ -1648,9 +1662,9 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         doc: "Recorded native guest environment map from run --env, restored on replay.",
     },
     EnvVar {
-        name: "PATINA_FS_CRASH_AT / PATINA_FS_TORN_GRANULARITY",
+        name: "PATINA_FS_CRASH_AT / PATINA_FS_TORN_GRANULARITY / PATINA_FS_ERROR_PERMILLE / PATINA_FS_SHORT_PERMILLE",
         scope: "protocol",
-        doc: "Filesystem crash fault knobs (mirror --fs-crash-at/--fs-torn-granularity).",
+        doc: "Filesystem crash, error, and short-I/O fault knobs (mirror the --fs-* flags).",
     },
     EnvVar {
         name: "PATINA_SLEEP_JITTER_NANOS / PATINA_NET_JITTER_NANOS / PATINA_NET_DROP_PERMILLE / PATINA_NET_LATENCY_NANOS",

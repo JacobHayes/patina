@@ -18,7 +18,7 @@
 //!     the existing per-testbed result/violation and `PATINA_SDK_REPORT`
 //!     conventions), plus the runtime's own `PATINA_VIOLATION liveness` /
 //!     `PATINA_SCHEDULE_POLICY` diagnostics;
-//!   * the [`classify`] pure classifier assigns one of seven outcome classes with
+//!   * the [`classify`] pure classifier assigns one of eight outcome classes with
 //!     the same strictness discipline as fuzz-sweep (an explicit finding is never
 //!     downgraded, a nonzero exit is never silently OK, and an unrecognized outcome
 //!     lands loudly in `UNCLASSIFIED`);
@@ -626,6 +626,10 @@ pub enum CampaignClass {
     /// A liveness-watchdog violation (`PATINA_VIOLATION liveness`/`converge`): a
     /// virtual-time no-progress wedge.
     Liveness,
+    /// A configured filesystem fault class was vacuous: eligible filesystem I/O
+    /// occurred, but an enabled fs error/short-I/O fault class applied zero
+    /// effects. This is a coverage failure, not a SUT finding.
+    VacuousFsFault,
     /// Patina fail-closed refusal: a fingerprint/trace mismatch, a duplicate
     /// buggify label, a declared-but-never-called setup gate, a runtime that
     /// refused to initialize, or a bare shim SIGABRT.
@@ -647,6 +651,7 @@ impl CampaignClass {
             CampaignClass::Ok => "OK",
             CampaignClass::Violation => "VIOLATION",
             CampaignClass::Liveness => "LIVENESS",
+            CampaignClass::VacuousFsFault => "VACUOUS_FS_FAULT",
             CampaignClass::FailClosedAbort => "FAIL_CLOSED_ABORT",
             CampaignClass::StarvationStall => "STARVATION_STALL",
             CampaignClass::Infra => "INFRA",
@@ -659,6 +664,7 @@ impl CampaignClass {
             "OK" => Some(CampaignClass::Ok),
             "VIOLATION" => Some(CampaignClass::Violation),
             "LIVENESS" => Some(CampaignClass::Liveness),
+            "VACUOUS_FS_FAULT" => Some(CampaignClass::VacuousFsFault),
             "FAIL_CLOSED_ABORT" => Some(CampaignClass::FailClosedAbort),
             "STARVATION_STALL" => Some(CampaignClass::StarvationStall),
             "INFRA" => Some(CampaignClass::Infra),
@@ -740,26 +746,38 @@ pub fn classify(exit_code: i32, stdout: &str, stderr: &str) -> CampaignClass {
     if has(VIOLATION_MARKERS) {
         return CampaignClass::Violation;
     }
-    // 3. Patina fail-closed refusal: a shim fatal-abort refusal line, or a raw
+    // 3. Fault-plane coverage failure: an fs fault class that should have fired
+    //    repeatedly applied zero effects. SUT/liveness findings above still win.
+    //    The verdict is read off the fs report LINE, never the whole output: the
+    //    net report carries its own `vacuous=` field, so a substring search over
+    //    both streams would file a vacuous NETWORK run under the fs class.
+    if combined.contains("filesystem fault knobs inert")
+        || combined
+            .lines()
+            .any(|line| line.contains("PATINA_FS_FAULT_REPORT") && line.contains("vacuous=1"))
+    {
+        return CampaignClass::VacuousFsFault;
+    }
+    // 4. Patina fail-closed refusal: a shim fatal-abort refusal line, or a raw
     //    SIGABRT carrying no SUT finding (checked after the SUT-violation markers,
     //    so an `always!` abort stays a VIOLATION). Its own class, never a generic
     //    failure.
     if has(FAIL_CLOSED_MARKERS) || exit_code == SIGABRT_EXIT {
         return CampaignClass::FailClosedAbort;
     }
-    // 4. The `--starve` supervisor stall backstop.
+    // 5. The `--starve` supervisor stall backstop.
     if exit_code == STARVATION_STALL_EXIT || combined.contains("patina: starvation stall") {
         return CampaignClass::StarvationStall;
     }
-    // 5. Harness/build infrastructure — only when there is no SUT finding above.
+    // 6. Harness/build infrastructure — only when there is no SUT finding above.
     if has(INFRA_MARKERS) {
         return CampaignClass::Infra;
     }
-    // 6. A clean exit with no finding markers is OK.
+    // 7. A clean exit with no finding markers is OK.
     if exit_code == 0 {
         return CampaignClass::Ok;
     }
-    // 7. A nonzero exit that matched no class above is UNCLASSIFIED — surfaced
+    // 8. A nonzero exit that matched no class above is UNCLASSIFIED — surfaced
     //    loudly for triage, never silently dropped as OK or mislabeled.
     CampaignClass::Unclassified
 }
@@ -807,6 +825,10 @@ fn primary_finding_line(class: CampaignClass, stdout: &str, stderr: &str) -> Str
             "PATINA_ALWAYS_VIOLATION",
             "WORKQ_VIOLATION",
             "BUG_CAUGHT",
+        ],
+        CampaignClass::VacuousFsFault => &[
+            "PATINA_FS_FAULT_REPORT",
+            "PATINA WARNING: filesystem fault knobs inert",
         ],
         CampaignClass::FailClosedAbort => &[
             "PATINA_BUGGIFY_DUPLICATE_LABEL",
@@ -2076,6 +2098,18 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
         );
     }
     if spec.faults {
+        let fs_error = u32::from(hash[14]) * 100 / 255; // [0, 100] permille
+        push_run_flag(
+            &mut flags,
+            "--fs-error-permille",
+            RunValue::Int(u64::from(fs_error)),
+        );
+        let fs_short = u32::from(hash[15]) * 200 / 255; // [0, 200] permille
+        push_run_flag(
+            &mut flags,
+            "--fs-short-permille",
+            RunValue::Int(u64::from(fs_short)),
+        );
         let drop = u32::from(hash[12]) * 200 / 255; // [0, 200] permille
         push_run_flag(
             &mut flags,
@@ -3041,6 +3075,33 @@ fn selftest() -> Result<i32, CliError> {
         classify(101, "", "thread 'main' panicked at src/x.rs:9: boom"),
     );
     check(
+        "vacuous-fs-fault-report",
+        CampaignClass::VacuousFsFault,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA_FS_FAULT_REPORT eligible_ops=4 error_vacuity_diagnosable=1 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1",
+        ),
+    );
+    check(
+        "vacuous-fs-warning",
+        CampaignClass::VacuousFsFault,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA WARNING: filesystem fault knobs inert — 4 fault-eligible filesystem op(s) occurred",
+        ),
+    );
+    check(
+        "net-vacuity-is-not-filed-under-the-fs-class",
+        CampaignClass::Ok,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA_FS_FAULT_REPORT eligible_ops=9 error_vacuity_diagnosable=0 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=0\nPATINA_NET_FAULT_REPORT could_apply=1 send_ops=4 faults_applied=0 vacuous=1",
+        ),
+    );
+    check(
         "bare-nonzero-is-unclassified-not-ok",
         CampaignClass::Unclassified,
         classify(2, "", ""),
@@ -3295,6 +3356,10 @@ mod tests {
             CampaignClass::Violation
         );
         assert_eq!(
+            classify(0, "PATINA_RESULT ok=1", "PATINA_FS_FAULT_REPORT vacuous=1"),
+            CampaignClass::VacuousFsFault
+        );
+        assert_eq!(
             classify(2, "", "PATINA_BUGGIFY_DUPLICATE_LABEL label=x"),
             CampaignClass::FailClosedAbort
         );
@@ -3339,8 +3404,12 @@ mod tests {
         assert!(!wasi.iter().any(|f| f == "--swarm"));
         assert!(!wasi.iter().any(|f| f.starts_with("--sched-pct")));
         assert!(wasi.iter().any(|f| f.starts_with("--buggify=")));
+        assert!(wasi.iter().any(|f| f == "--fs-error-permille"));
+        assert!(wasi.iter().any(|f| f == "--fs-short-permille"));
         let native = derive_flags(&spec, &hash, "native");
         assert!(native.iter().any(|f| f == "--swarm"));
+        assert!(native.iter().any(|f| f == "--fs-error-permille"));
+        assert!(native.iter().any(|f| f == "--fs-short-permille"));
         assert!(native.iter().any(|f| f.starts_with("--sched-pct")));
     }
 

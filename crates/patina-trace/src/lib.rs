@@ -95,6 +95,10 @@ pub struct FaultConfigRecord {
     pub crash_at: Option<CrashPointRecord>,
     #[serde(default, skip_serializing_if = "torn_granularity_is_block")]
     pub torn_granularity: TornGranularity,
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub fs_error_permille: u16,
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub fs_short_permille: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sleep_jitter_nanos: Option<(u64, u64)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -199,9 +203,9 @@ impl SchedulePolicyRecord {
 /// configuration, so replay reproduces the faults from it verbatim; this record
 /// documents the swarm *intent* (candidates) and *decision* (selection) so the
 /// trace is self-describing and a `+swarm` fingerprint rejects a non-swarm
-/// replay. Class names are stable snake_case tokens (`crash`, `sleep_jitter`,
-/// `net_jitter`, `net_drop`, `net_latency`, `buggify`). Absent (`None`) when
-/// swarm was not enabled.
+/// replay. Class names are stable snake_case tokens (`crash`, `fs_error`,
+/// `fs_short`, `sleep_jitter`, `net_jitter`, `net_drop`, `net_latency`,
+/// `buggify`). Absent (`None`) when swarm was not enabled.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SwarmConfigRecord {
@@ -1568,6 +1572,8 @@ mod tests {
                 ordinal: 34,
             }),
             torn_granularity: TornGranularity::Byte,
+            fs_error_permille: 100,
+            fs_short_permille: 200,
             net_drop_permille: 250,
             ..FaultConfigRecord::default()
         };
@@ -1578,6 +1584,8 @@ mod tests {
         // Enum tags serialize by name, and inert knobs are omitted entirely.
         assert!(text.contains("\"op\":\"write\""), "{text}");
         assert!(text.contains("\"torn_granularity\":\"byte\""), "{text}");
+        assert!(text.contains("\"fs_error_permille\":100"), "{text}");
+        assert!(text.contains("\"fs_short_permille\":200"), "{text}");
         assert!(!text.contains("sleep_jitter_nanos"), "{text}");
         assert!(!text.contains("net_latency_nanos"), "{text}");
 

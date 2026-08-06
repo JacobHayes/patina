@@ -287,6 +287,145 @@ fn wasi_replay_restores_guest_argv_and_faults_flag_free() {
     );
 }
 
+const WASI_FS_EIO_READ: &str = r#"(module
+  (import "wasi_snapshot_preview1" "path_filestat_get"
+    (func $path_filestat_get (param i32 i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_write"
+    (func $fd_write (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "file")
+  (data (i32.const 128) "WASI_FS_FAULT_RESULT eio\n")
+  (func $print
+    (i32.store (i32.const 64) (i32.const 128))
+    (i32.store (i32.const 68) (i32.const 25))
+    (drop (call $fd_write (i32.const 1) (i32.const 64) (i32.const 1) (i32.const 80))))
+  (func (export "_start")
+    (local $errno i32)
+    (local.set $errno
+      (call $path_filestat_get
+        (i32.const 3) (i32.const 0) (i32.const 0) (i32.const 4) (i32.const 100)))
+    (if (i32.ne (local.get $errno) (i32.const 29)) (then (call $proc_exit (local.get $errno))))
+    (call $print)))"#;
+
+const WASI_FS_ENOSPC_WRITE: &str = r#"(module
+  (import "wasi_snapshot_preview1" "path_create_directory"
+    (func $path_create_directory (param i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_write"
+    (func $fd_write (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "dir")
+  (data (i32.const 128) "WASI_FS_FAULT_RESULT enospc\n")
+  (func $print
+    (i32.store (i32.const 64) (i32.const 128))
+    (i32.store (i32.const 68) (i32.const 28))
+    (drop (call $fd_write (i32.const 1) (i32.const 64) (i32.const 1) (i32.const 80))))
+  (func (export "_start")
+    (local $errno i32)
+    (local.set $errno (call $path_create_directory (i32.const 3) (i32.const 0) (i32.const 3)))
+    (if (i32.ne (local.get $errno) (i32.const 51)) (then (call $proc_exit (local.get $errno))))
+    (call $print)))"#;
+
+const WASI_FS_SHORT_WRITE: &str = r#"(module
+  (import "wasi_snapshot_preview1" "path_open"
+    (func $path_open (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_write"
+    (func $fd_write (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "file")
+  (data (i32.const 16) "abcdef")
+  (data (i32.const 128) "WASI_FS_FAULT_RESULT short_write\n")
+  (func $print
+    (i32.store (i32.const 64) (i32.const 128))
+    (i32.store (i32.const 68) (i32.const 33))
+    (drop (call $fd_write (i32.const 1) (i32.const 64) (i32.const 1) (i32.const 80))))
+  (func (export "_start")
+    (local $fd i32) (local $errno i32) (local $n i32)
+    (local.set $errno
+      (call $path_open
+        (i32.const 3) (i32.const 0) (i32.const 0) (i32.const 4)
+        (i32.const 1) (i64.const 66) (i64.const 0) (i32.const 0) (i32.const 100)))
+    (if (i32.ne (local.get $errno) (i32.const 0)) (then (call $proc_exit (local.get $errno))))
+    (local.set $fd (i32.load (i32.const 100)))
+    (i32.store (i32.const 64) (i32.const 16))
+    (i32.store (i32.const 68) (i32.const 6))
+    (local.set $errno (call $fd_write (local.get $fd) (i32.const 64) (i32.const 1) (i32.const 80)))
+    (if (i32.ne (local.get $errno) (i32.const 0)) (then (call $proc_exit (local.get $errno))))
+    (local.set $n (i32.load (i32.const 80)))
+    (if (i32.eqz (local.get $n)) (then (call $proc_exit (i32.const 70))))
+    (if (i32.ge_u (local.get $n) (i32.const 6)) (then (call $proc_exit (i32.const 71))))
+    (call $print)))"#;
+
+#[test]
+fn wasi_fs_fault_errors_and_short_io_are_observable() {
+    let directory = tempdir().unwrap();
+    let eio = directory.path().join("eio.wasm");
+    let enospc = directory.path().join("enospc.wasm");
+    let short = directory.path().join("short.wasm");
+    fs::write(&eio, wat::parse_str(WASI_FS_EIO_READ).unwrap()).unwrap();
+    fs::write(&enospc, wat::parse_str(WASI_FS_ENOSPC_WRITE).unwrap()).unwrap();
+    fs::write(&short, wat::parse_str(WASI_FS_SHORT_WRITE).unwrap()).unwrap();
+
+    let patina = env!("CARGO_BIN_EXE_cargo-patina");
+    for (module, seed, flag, value, marker) in [
+        (
+            &eio,
+            "1",
+            "--fs-error-permille",
+            "1000",
+            "WASI_FS_FAULT_RESULT eio",
+        ),
+        (
+            &enospc,
+            "2",
+            "--fs-error-permille",
+            "1000",
+            "WASI_FS_FAULT_RESULT enospc",
+        ),
+        (
+            &short,
+            "5",
+            "--fs-short-permille",
+            "1000",
+            "WASI_FS_FAULT_RESULT short_write",
+        ),
+    ] {
+        let output = invoke_unchecked(
+            patina,
+            directory.path(),
+            &[
+                "run",
+                module.to_str().unwrap(),
+                "--seed",
+                seed,
+                "--preopen",
+                "/fs:rw",
+                flag,
+                value,
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "WASI fs fault module failed with {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(marker),
+            "missing marker {marker}:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("PATINA_FS_FAULT_REPORT") && stderr.contains("vacuous=0"),
+            "WASI fs fault run should be non-vacuous:\n{stderr}"
+        );
+    }
+}
+
 #[test]
 fn separate_processes_repeat_record_and_replay() {
     let directory = tempdir().unwrap();
@@ -5670,6 +5809,192 @@ fn native_replay_rejects_fault_knobs_and_reproduces_flag_free() {
 // A single-process loopback TCP echo: a listener thread reads a fixed 16-byte
 // payload and answers with its checksum; main streams the payload as eight
 // 2-byte segments and prints a deterministic result line. Exercises the SimNet
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const FS_FAULT_SOURCE: &str = r#"
+use std::env;
+use std::fs::OpenOptions;
+use std::io::{Read, Seek, SeekFrom, Write};
+
+fn raw(error: std::io::Error) -> i32 {
+    error.raw_os_error().unwrap_or(-1)
+}
+
+fn expect_errno(label: &str, error: std::io::Error, expected: i32) {
+    let errno = raw(error);
+    assert_eq!(errno, expected, "{label} errno");
+    println!("NATIVE_FS_FAULT_RESULT mode={label} errno={errno}");
+}
+
+fn main() {
+    let mode = env::args().nth(1).expect("mode");
+    match mode.as_str() {
+        "eio_read" => {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open("/fault-eio")
+                .expect("open");
+            file.write_all(b"abcdef").expect("setup write");
+            file.seek(SeekFrom::Start(0)).expect("seek");
+            let mut buf = [0u8; 6];
+            match file.read(&mut buf) {
+                Err(error) => expect_errno("eio_read", error, 5),
+                Ok(read) => panic!("expected EIO read, got {read}"),
+            }
+        }
+        "enospc_write" => {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open("/fault-enospc")
+                .expect("open");
+            match file.write(b"abcdef") {
+                Err(error) => expect_errno("enospc_write", error, 28),
+                Ok(written) => panic!("expected ENOSPC write, wrote {written}"),
+            }
+        }
+        "short_write" => {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open("/fault-short-write")
+                .expect("open");
+            let written = file.write(b"abcdef").expect("short write");
+            assert!((1..6).contains(&written), "written={written}");
+            println!("NATIVE_FS_FAULT_RESULT mode=short_write written={written}");
+        }
+        "short_read" => {
+            std::fs::write("/fault-short-read", b"abcdef").expect("setup write_all");
+            let mut file = OpenOptions::new()
+                .read(true)
+                .open("/fault-short-read")
+                .expect("open read");
+            let mut buf = [0u8; 6];
+            let read = file.read(&mut buf).expect("short read");
+            assert!((1..6).contains(&read), "read={read}");
+            println!("NATIVE_FS_FAULT_RESULT mode=short_read read={read}");
+        }
+        other => panic!("unknown mode {other}"),
+    }
+}
+"#;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_fs_fault_errors_and_shorts_are_deterministic_replayable_and_reported() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("fs_fault.rs");
+    fs::write(&source, FS_FAULT_SOURCE).unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("fs-fault");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let bin = bin.to_str().unwrap().to_owned();
+
+    let trace1 = directory.path().join("eio1.patina");
+    let trace2 = directory.path().join("eio2.patina");
+    let eio_args = |trace: &Path| {
+        vec![
+            "run".to_string(),
+            bin.clone(),
+            "--seed".to_string(),
+            "70".to_string(),
+            "--record".to_string(),
+            trace.to_str().unwrap().to_string(),
+            "--fs-error-permille".to_string(),
+            "100".to_string(),
+            "--".to_string(),
+            "eio_read".to_string(),
+        ]
+    };
+    let run_vec = |args: Vec<String>| {
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        invoke_in(workspace, &refs)
+    };
+    let eio1 = run_vec(eio_args(&trace1));
+    let eio2 = run_vec(eio_args(&trace2));
+    let eio_line = stdout_line_with(&eio1, "NATIVE_FS_FAULT_RESULT");
+    assert_eq!(eio_line, stdout_line_with(&eio2, "NATIVE_FS_FAULT_RESULT"));
+    assert_eq!(fs::read(&trace1).unwrap(), fs::read(&trace2).unwrap());
+    let eio_stderr = String::from_utf8_lossy(&eio1.stderr);
+    assert!(
+        eio_stderr.contains("PATINA_FS_FAULT_REPORT") && eio_stderr.contains("vacuous=0"),
+        "fs fault report must prove the read EIO was non-vacuous:\n{eio_stderr}"
+    );
+
+    let replayed = invoke_in(workspace, &["replay", &bin, trace1.to_str().unwrap()]);
+    assert_eq!(
+        eio_line,
+        stdout_line_with(&replayed, "NATIVE_FS_FAULT_RESULT"),
+        "flag-free replay must reproduce the fs error"
+    );
+    let rejected = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "replay",
+            &bin,
+            trace1.to_str().unwrap(),
+            "--fs-short-permille",
+            "1",
+        ],
+    );
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("--fs-short-permille"));
+
+    let enospc = invoke_in(
+        workspace,
+        &[
+            "run",
+            &bin,
+            "--seed",
+            "29",
+            "--fs-error-permille",
+            "100",
+            "--",
+            "enospc_write",
+        ],
+    );
+    assert!(stdout_line_with(&enospc, "NATIVE_FS_FAULT_RESULT").contains("errno=28"));
+
+    for mode in ["short_write", "short_read"] {
+        let output = invoke_in(
+            workspace,
+            &[
+                "run",
+                &bin,
+                "--seed",
+                "5",
+                "--fs-short-permille",
+                "1000",
+                "--",
+                mode,
+            ],
+        );
+        let line = stdout_line_with(&output, "NATIVE_FS_FAULT_RESULT");
+        assert!(
+            line.contains(mode),
+            "missing short-I/O result for {mode}: {line}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("PATINA_FS_FAULT_REPORT") && stderr.contains("vacuous=0"),
+            "short-I/O run should be non-vacuous for {mode}:\n{stderr}"
+        );
+    }
+}
+
 // TCP *stream* path — the surface the `--net-jitter-nanos`/`--net-drop-permille`
 // knobs historically ignored.
 #[cfg(any(target_os = "linux", target_os = "macos"))]

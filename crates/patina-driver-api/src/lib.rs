@@ -108,6 +108,15 @@ pub trait FsDriver: Send {
     fn crash(&mut self) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("crash"))
     }
+
+    /// End-of-run filesystem fault-injection summary for the default-on vacuity
+    /// diagnostic. A wrapper that models fs faults reports its counts; the
+    /// default (a driver with no fault model) reports `None` and is never
+    /// diagnosed as vacuous. Wrappers forward it so an inner fault-modeling
+    /// driver remains visible.
+    fn fault_report(&self) -> Option<FsFaultReport> {
+        None
+    }
 }
 
 fn unsupported_filesystem_operation(operation: &str) -> EffectError {
@@ -177,6 +186,65 @@ pub struct NetReadiness {
     pub writable: bool,
     pub read_eof: bool,
     pub write_eof: bool,
+}
+
+/// Expected firings a rate-based fault class must have accumulated before a
+/// zero-fire run is diagnosed as vacuous.
+///
+/// A rate knob that draws few times, or draws at a low rate, produces zero fires
+/// as its ORDINARY sampling outcome, not as the silent-inertness signature the
+/// diagnostic exists to catch. Diagnosing those runs turns the warning — and the
+/// campaign class built on it — into noise that fires on healthy runs. Because
+/// `P(zero fires) <= e^-expected` for any per-op rate, requiring five expected
+/// firings keeps a spurious vacuity verdict under 1%.
+pub const VACUITY_MIN_EXPECTED_FIRES: u64 = 5;
+
+/// Whether a zero-fire outcome is anomalous enough to diagnose as vacuous, given
+/// how many firing opportunities a rate knob actually saw at what rate. This is
+/// the precondition behind every `*_vacuity_diagnosable` flag in
+/// [`FsFaultReport`].
+pub fn vacuity_is_diagnosable(opportunities: u64, permille: u16) -> bool {
+    opportunities.saturating_mul(u64::from(permille)) >= VACUITY_MIN_EXPECTED_FIRES * 1000
+}
+
+/// End-of-run summary of filesystem fault-injection activity, for the
+/// default-on vacuity diagnostic. It is deliberately per class: a run with both
+/// error and short-I/O knobs enabled must not hide one inert class behind the
+/// other class firing. The runtime folds this into `PATINA_FS_FAULT_REPORT` and
+/// warns when a class that should have fired repeatedly applied zero effects.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FsFaultReport {
+    /// Fault-eligible filesystem operations observed (all operations except the
+    /// pure bookkeeping/administrative `close`, `dup`, `seek`, and `crash`).
+    pub eligible_ops: u64,
+    /// The error-injection knob was live over enough eligible operations that
+    /// [`vacuity_is_diagnosable`] holds, so zero injected errors is anomalous.
+    pub error_vacuity_diagnosable: bool,
+    /// Operations failed by the fs-error injector.
+    pub errors_injected: u64,
+    /// The short-I/O knob was live over enough truncatable read/write operations
+    /// that [`vacuity_is_diagnosable`] holds, so zero shorts is anomalous.
+    pub short_vacuity_diagnosable: bool,
+    /// Read/write operations whose result was actually bound by an injected
+    /// truncation. A truncation below a length the operation never reached
+    /// anyway (a short read of a buffer the file never filled) is NOT counted:
+    /// it perturbed nothing the guest could observe.
+    pub shorts_applied: u64,
+    /// Reserved for the Context-side fs-latency knob; false in Wave B.
+    pub latency_vacuity_diagnosable: bool,
+    /// Reserved for Context-side fs latency applications; zero in Wave B.
+    pub latency_applied: u64,
+}
+
+impl FsFaultReport {
+    /// Whether any filesystem-fault class went vacuously inert: it was live over
+    /// enough opportunities to be expected to fire repeatedly, yet applied zero
+    /// effects.
+    pub fn is_vacuous(&self) -> bool {
+        (self.error_vacuity_diagnosable && self.errors_injected == 0)
+            || (self.short_vacuity_diagnosable && self.shorts_applied == 0)
+            || (self.latency_vacuity_diagnosable && self.latency_applied == 0)
+    }
 }
 
 /// End-of-run summary of network fault-injection activity, for the default-on

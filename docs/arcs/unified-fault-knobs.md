@@ -1,7 +1,9 @@
 # Unified Fault-Knob System — Design
 
-Status: design approved 2026-07-30; implementation not yet scheduled. All file:line references
-verified against the working tree (post-e135c94). Intended to land under `docs/` as an arc doc.
+Status: design approved 2026-07-30; Wave A (`domain_seed`/`fault_domain` registry, nested
+`FaultConfig`, FaultNet permille migration, swarm coverage gate) and Wave B (`FaultFs` errors +
+short I/O) implemented 2026-08-06; Waves C-F remain planned. The §0 file:line references are as
+verified at design time (post-e135c94) and have since moved.
 
 ## 0. Verified current state (what this builds on, with the gaps found)
 
@@ -193,12 +195,23 @@ another firing one — noted as a follow-up refinement for net):
 ```rust
 pub struct FsFaultReport {
     pub eligible_ops: u64,          // fault-eligible fs ops observed
-    pub error_could_apply: bool, pub errors_injected: u64,
-    pub short_could_apply: bool, pub shorts_applied: u64,
-    pub latency_could_apply: bool, pub latency_applied: u64,   // filled by Context
+    pub error_vacuity_diagnosable: bool, pub errors_injected: u64,
+    pub short_vacuity_diagnosable: bool, pub shorts_applied: u64,
+    pub latency_vacuity_diagnosable: bool, pub latency_applied: u64,   // filled by Context
 }
-// is_vacuous(): any class with could_apply && eligible_ops > 0 && applied == 0
+// is_vacuous(): any class that was diagnosable yet applied == 0
 ```
+
+A class is `*_vacuity_diagnosable` only once its rate over the opportunities it
+actually saw expected at least `VACUITY_MIN_EXPECTED_FIRES` (5) firings. A rate
+knob drawing a handful of times at a low rate produces zero fires as its
+ORDINARY outcome; diagnosing those runs would fire the warning — and the
+campaign class built on it — on healthy runs. Since `P(zero) <= e^-expected`,
+five expected firings holds a spurious verdict under 1%. Correspondingly, a
+short I/O counts as `shorts_applied` only when the truncation actually BOUND the
+result: truncating a read below a length the file never reached perturbs nothing
+the guest can observe, and counting it would let a knob that is inert on the
+exercised I/O path report itself as working.
 
 `FsDriver::fault_report(&self) -> Option<FsFaultReport>` (default `None`, wrappers forward —
 same contract as `NetDriver::fault_report`). At finalization the runtime merges the driver

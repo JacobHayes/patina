@@ -13,4 +13,5 @@ patina-dst-driver-api.workspace = true
 patina-dst-rng-seeded.workspace = true
 
 [dev-dependencies]
+patina-dst-fs-mem.workspace = true
 patina-dst-net-sim.workspace = true

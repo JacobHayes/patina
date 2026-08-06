@@ -17,11 +17,11 @@ patina-dst-rng-seeded.workspace = true
 patina-dst-sched-det.workspace = true
 patina-dst-time-virtual.workspace = true
 patina-dst-trace.workspace = true
+patina-dst-wrapper-fault.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
 patina-dst-fs-crash.workspace = true
 patina-dst-fs-host.workspace = true
-patina-dst-wrapper-fault.workspace = true
 patina-dst-wrapper-latency.workspace = true
 tempfile.workspace = true

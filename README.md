@@ -169,8 +169,10 @@ Replay refuses `[defaults.replay]` because traces are authoritative.
 Faults are seed-driven, default-off, and recorded into the trace so replay
 reproduces them flag-free:
 
-- **Filesystem crashes**: `--fs-crash-at open|write|sync|close[:N]` with
-  block- or byte-granularity torn writes (`--fs-torn-granularity`).
+- **Filesystem faults**: `--fs-crash-at open|write|sync|close[:N]` with
+  block- or byte-granularity torn writes (`--fs-torn-granularity`), plus
+  rate-based `--fs-error-permille` (seeded EIO/ENOSPC/EINTR) and
+  `--fs-short-permille` (short reads/writes).
 - **Network faults**: `--net-drop-permille`, `--net-jitter-nanos MIN..MAX`,
   `--net-latency-nanos`.
 - **Timing**: `--sleep-jitter-nanos MIN..MAX` on every guest sleep.

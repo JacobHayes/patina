@@ -29,12 +29,13 @@ use patina_dst_minimize::{
 use patina_dst_runtime::{
     Context, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION,
     ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN, ENV_COVERAGE_FD,
-    ENV_COVERAGE_REPORT, ENV_DEFER_INIT, ENV_FINGERPRINT, ENV_FS_CRASH_AT, ENV_FS_IMAGE_FD,
-    ENV_FS_TORN_GRANULARITY, ENV_GUEST_ARGV, ENV_GUEST_ENV, ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG,
-    ENV_MODE, ENV_NET_DROP_PERMILLE, ENV_NET_JITTER, ENV_NET_LATENCY, ENV_PARAMS_JSON,
-    ENV_PARENT_TIMELINE, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS, ENV_SCHED_STARVE,
-    ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED, ENV_SLEEP_JITTER, ENV_STEP_BUDGET,
-    ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, RuntimeConfig,
+    ENV_COVERAGE_REPORT, ENV_DEFER_INIT, ENV_FINGERPRINT, ENV_FS_CRASH_AT, ENV_FS_ERROR_PERMILLE,
+    ENV_FS_IMAGE_FD, ENV_FS_SHORT_PERMILLE, ENV_FS_TORN_GRANULARITY, ENV_GUEST_ARGV, ENV_GUEST_ENV,
+    ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG, ENV_MODE, ENV_NET_DROP_PERMILLE, ENV_NET_JITTER,
+    ENV_NET_LATENCY, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS,
+    ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED,
+    ENV_SLEEP_JITTER, ENV_STEP_BUDGET, ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD,
+    RuntimeConfig,
 };
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
@@ -497,6 +498,10 @@ struct NativeFaults {
     /// `byte` (sub-block tearing of the final unsynced write). Only meaningful
     /// alongside `fs_crash_at`.
     fs_torn_granularity: Option<String>,
+    /// Seeded filesystem error probability in per-mille (0..=1000).
+    fs_error_permille: Option<String>,
+    /// Seeded short-read/short-write probability in per-mille (0..=1000).
+    fs_short_permille: Option<String>,
     /// Seeded sleep-latency range `MIN..MAX` nanoseconds.
     sleep_jitter_nanos: Option<String>,
     /// Seeded per-datagram delivery-jitter range `MIN..MAX` nanoseconds.
@@ -2086,6 +2091,12 @@ fn parse_cargo_replay(
                 let value = required_value(opt.expect("matched name"), &arguments, &mut index)?;
                 set_once(&mut parent, value.to_string(), "--parent")?;
             }
+            Some(flag) if FAULT_FLAGS.contains(&flag) => {
+                return Err(CliError::usage(format!(
+                    "replay restores run semantics from the trace and does not accept {flag}; \
+                     the trace is authoritative"
+                )));
+            }
             // Any other flag or value is a Cargo selector, forwarded verbatim so
             // it hashes into the fingerprint exactly as it did on the recording.
             _ => cargo_args.push(argument.clone()),
@@ -2840,6 +2851,8 @@ fn validate_nanos_range(name: &str, value: &str) -> Result<(), CliError> {
 const FAULT_FLAGS: &[&str] = &[
     "--fs-crash-at",
     "--fs-torn-granularity",
+    "--fs-error-permille",
+    "--fs-short-permille",
     "--sleep-jitter-nanos",
     "--net-jitter-nanos",
     "--net-drop-permille",
@@ -2871,6 +2884,32 @@ fn apply_fault_flag(
                 &mut faults.fs_torn_granularity,
                 value.to_string(),
                 "--fs-torn-granularity",
+            )?;
+        }
+        "--fs-error-permille" => {
+            let permille = parse_u64("--fs-error-permille", value)?;
+            if permille > 1000 {
+                return Err(CliError::usage(
+                    "--fs-error-permille must be within [0, 1000]",
+                ));
+            }
+            set_once(
+                &mut faults.fs_error_permille,
+                permille.to_string(),
+                "--fs-error-permille",
+            )?;
+        }
+        "--fs-short-permille" => {
+            let permille = parse_u64("--fs-short-permille", value)?;
+            if permille > 1000 {
+                return Err(CliError::usage(
+                    "--fs-short-permille must be within [0, 1000]",
+                ));
+            }
+            set_once(
+                &mut faults.fs_short_permille,
+                permille.to_string(),
+                "--fs-short-permille",
             )?;
         }
         "--sleep-jitter-nanos" => {
@@ -2919,6 +2958,12 @@ fn fault_env_pairs(faults: &NativeFaults) -> Vec<(&'static str, String)> {
     }
     if let Some(value) = &faults.fs_torn_granularity {
         pairs.push((ENV_FS_TORN_GRANULARITY, value.clone()));
+    }
+    if let Some(value) = &faults.fs_error_permille {
+        pairs.push((ENV_FS_ERROR_PERMILLE, value.clone()));
+    }
+    if let Some(value) = &faults.fs_short_permille {
+        pairs.push((ENV_FS_SHORT_PERMILLE, value.clone()));
     }
     if let Some(value) = &faults.sleep_jitter_nanos {
         pairs.push((ENV_SLEEP_JITTER, value.clone()));
@@ -3138,7 +3183,7 @@ fn parse_native_run_from(
                 let value = required_os_value(opt, &arguments, &mut index)?;
                 set_once(&mut coverage_out, PathBuf::from(value), "--coverage-out")?;
             }
-            // The five seed-driven fault knobs, validated by the shared
+            // The seed-driven fault knobs, validated by the shared
             // `apply_fault_flag` exactly as on the cargo and WASI families.
             name if FAULT_FLAGS.contains(&name) => {
                 let value = required_value(opt, &arguments, &mut index)?;
@@ -3506,6 +3551,8 @@ and native runs cannot branch; branch/timeline replay is the Cargo package and W
             | "--net-latency-nanos"
             | "--fs-crash-at"
             | "--fs-torn-granularity"
+            | "--fs-error-permille"
+            | "--fs-short-permille"
             | "--sleep-jitter-nanos"
             | "--net-jitter-nanos"
             | "--net-drop-permille"
@@ -7315,6 +7362,12 @@ liveness-safe."
     if let Some(value) = &invocation.faults.fs_torn_granularity {
         command.env(ENV_FS_TORN_GRANULARITY, value);
     }
+    if let Some(value) = &invocation.faults.fs_error_permille {
+        command.env(ENV_FS_ERROR_PERMILLE, value);
+    }
+    if let Some(value) = &invocation.faults.fs_short_permille {
+        command.env(ENV_FS_SHORT_PERMILLE, value);
+    }
     if let Some(value) = &invocation.faults.sleep_jitter_nanos {
         command.env(ENV_SLEEP_JITTER, value);
     }
@@ -7900,6 +7953,8 @@ and run/audit the artifact (cargo patina build <DIR|Cargo.toml> --output <PATH>)
         // run that requested no faults.
         .env_remove(ENV_FS_CRASH_AT)
         .env_remove(ENV_FS_TORN_GRANULARITY)
+        .env_remove(ENV_FS_ERROR_PERMILLE)
+        .env_remove(ENV_FS_SHORT_PERMILLE)
         .env_remove(ENV_SLEEP_JITTER)
         .env_remove(ENV_NET_JITTER)
         .env_remove(ENV_NET_DROP_PERMILLE);
@@ -9755,6 +9810,8 @@ mod tests {
                 "--param",
                 "--fs-crash-at",
                 "--fs-torn-granularity",
+                "--fs-error-permille",
+                "--fs-short-permille",
                 "--sleep-jitter-nanos",
                 "--net-jitter-nanos",
                 "--net-drop-permille",
@@ -9807,6 +9864,8 @@ mod tests {
                 "--param",
                 "--fs-crash-at",
                 "--fs-torn-granularity",
+                "--fs-error-permille",
+                "--fs-short-permille",
                 "--sleep-jitter-nanos",
                 "--net-jitter-nanos",
                 "--net-drop-permille",
@@ -10450,6 +10509,8 @@ mod tests {
                 | "--record"
                 | "--fs-crash-at"
                 | "--fs-torn-granularity"
+                | "--fs-error-permille"
+                | "--fs-short-permille"
                 | "--sleep-jitter-nanos"
                 | "--net-jitter-nanos"
                 | "--net-drop-permille"
@@ -10493,6 +10554,8 @@ mod tests {
                 "--seed"
                 | "--fs-crash-at"
                 | "--fs-torn-granularity"
+                | "--fs-error-permille"
+                | "--fs-short-permille"
                 | "--sleep-jitter-nanos"
                 | "--net-jitter-nanos"
                 | "--net-drop-permille"

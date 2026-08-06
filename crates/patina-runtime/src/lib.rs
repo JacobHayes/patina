@@ -96,6 +96,7 @@ use patina_dst_sched_det::{DetScheduler, PctConfig, SchedulePolicy, StarvationCo
 use patina_dst_time_virtual::VirtualClock;
 pub use patina_dst_trace::MAX_TRACE_BYTES;
 use patina_dst_trace::{BranchSession, Recorder, Replayer, RunMetadata, TraceBundle, TraceError};
+use patina_dst_wrapper_fault::FaultFs;
 
 pub const ENV_MODE: &str = "PATINA_MODE";
 pub const ENV_SEED: &str = "PATINA_SEED";
@@ -171,6 +172,14 @@ pub const ENV_FS_CRASH_AT: &str = "PATINA_FS_CRASH_AT";
 /// sub-block byte granularity, modeling a torn in-flight page). Only meaningful
 /// alongside [`ENV_FS_CRASH_AT`]. Off (block) when unset.
 pub const ENV_FS_TORN_GRANULARITY: &str = "PATINA_FS_TORN_GRANULARITY";
+/// Seeded filesystem error probability in per-mille (0..=1000), applied to
+/// eligible filesystem operations by the default `FaultFs` wrapper. Off (zero)
+/// when unset.
+pub const ENV_FS_ERROR_PERMILLE: &str = "PATINA_FS_ERROR_PERMILLE";
+/// Seeded short-read/short-write probability in per-mille (0..=1000), applied
+/// to read/write operations by the default `FaultFs` wrapper. Off (zero) when
+/// unset.
+pub const ENV_FS_SHORT_PERMILLE: &str = "PATINA_FS_SHORT_PERMILLE";
 /// Suppress the default-on end-of-run schedule diagnostic when set to a false-y
 /// value (`0`, `off`, `false`, `no`). The diagnostic is on by default.
 pub const ENV_SCHEDULE_REPORT: &str = "PATINA_SCHEDULE_REPORT";
@@ -180,6 +189,10 @@ pub const ENV_SCHEDULE_REPORT: &str = "PATINA_SCHEDULE_REPORT";
 /// delivery and fault-eligible traffic occurred, yet ZERO fault effects landed
 /// (the silent-inertness class — historically the inert TCP stream path).
 pub const ENV_NET_FAULT_REPORT: &str = "PATINA_NET_FAULT_REPORT";
+/// Suppress the default-on end-of-run filesystem fault-injection diagnostic
+/// when set to a false-y value (`0`, `off`, `false`, `no`). The diagnostic is on
+/// by default when fs fault knobs had eligible traffic.
+pub const ENV_FS_FAULT_REPORT: &str = "PATINA_FS_FAULT_REPORT";
 /// Enable cooperative-SUT (buggify) fault injection. Its value is the
 /// per-evaluation firing probability in per-mille for an active site (0..=1000);
 /// an empty value uses the FoundationDB default of 25% (250). Presence of the
@@ -457,6 +470,10 @@ pub struct FsFaultConfig {
     /// Granularity at which the injected crash tears the final unsynced write.
     /// Inert without `crash_at`; defaults to whole-block.
     pub torn_granularity: TornGranularity,
+    /// Seeded filesystem error probability in per-mille (0..=1000).
+    pub error_permille: u16,
+    /// Seeded short-read/short-write probability in per-mille (0..=1000).
+    pub short_permille: u16,
 }
 
 /// Network fault knobs.
@@ -749,6 +766,20 @@ impl RuntimeConfig {
         self
     }
 
+    /// Fail eligible filesystem operations with the given per-mille (0..=1000)
+    /// probability, choosing a seeded errno from the operation's error set.
+    pub fn with_fs_error_permille(mut self, permille: u16) -> Self {
+        self.faults.fs.error_permille = permille;
+        self
+    }
+
+    /// Truncate filesystem reads and writes with the given per-mille (0..=1000)
+    /// probability.
+    pub fn with_fs_short_permille(mut self, permille: u16) -> Self {
+        self.faults.fs.short_permille = permille;
+        self
+    }
+
     /// Add seeded extra latency to every guest sleep, drawn from `[min, max]`.
     pub fn with_sleep_jitter_nanos(mut self, min: u64, max: u64) -> Self {
         self.faults.clock.sleep_jitter_nanos = Some((min, max));
@@ -793,6 +824,12 @@ impl RuntimeConfig {
         if let Some(value) = get(ENV_FS_TORN_GRANULARITY) {
             self.faults.fs.torn_granularity = parse_torn_granularity(&value)?;
         }
+        if let Some(value) = get(ENV_FS_ERROR_PERMILLE) {
+            self.faults.fs.error_permille = parse_permille(ENV_FS_ERROR_PERMILLE, &value)?;
+        }
+        if let Some(value) = get(ENV_FS_SHORT_PERMILLE) {
+            self.faults.fs.short_permille = parse_permille(ENV_FS_SHORT_PERMILLE, &value)?;
+        }
         if let Some(value) = get(ENV_SLEEP_JITTER) {
             self.faults.clock.sleep_jitter_nanos =
                 Some(parse_nanos_range(ENV_SLEEP_JITTER, &value)?);
@@ -801,17 +838,7 @@ impl RuntimeConfig {
             self.faults.net.jitter_nanos = Some(parse_nanos_range(ENV_NET_JITTER, &value)?);
         }
         if let Some(value) = get(ENV_NET_DROP_PERMILLE) {
-            let permille: u16 = value.parse().map_err(|_| {
-                RuntimeError::Config(format!(
-                    "{ENV_NET_DROP_PERMILLE} must be an integer in [0, 1000]"
-                ))
-            })?;
-            if permille > 1000 {
-                return Err(RuntimeError::Config(format!(
-                    "{ENV_NET_DROP_PERMILLE} must be within [0, 1000] per-mille"
-                )));
-            }
-            self.faults.net.drop_permille = permille;
+            self.faults.net.drop_permille = parse_permille(ENV_NET_DROP_PERMILLE, &value)?;
         }
         Ok(self)
     }
@@ -1621,19 +1648,22 @@ impl RuntimeBuilder {
         // `with_fs_image`; they must not pre-install the final filesystem, so a
         // knob like `--fs-torn-granularity` can never be silently dropped by a
         // filesystem that bypassed the fault config (the gap this replaced).
-        let crash_knobs_set = self.config.faults.fs.crash_at.is_some()
-            || self.config.faults.fs.torn_granularity != TornGranularity::default();
+        let fs_fault_knobs_set = self.config.faults.fs.crash_at.is_some()
+            || self.config.faults.fs.torn_granularity != TornGranularity::default()
+            || self.config.faults.fs.error_permille != 0
+            || self.config.faults.fs.short_permille != 0;
         if self.filesystem.is_some() {
             // An explicit filesystem (`with_filesystem`/`with_captured_filesystem`)
-            // cannot reflect config-driven crash knobs, and an accompanying base
+            // cannot reflect config-driven fs fault knobs, and an accompanying base
             // image would be ignored. Fail closed rather than proceed silently.
-            if crash_knobs_set {
+            if fs_fault_knobs_set {
                 return Err(RuntimeError::Config(
-                    "a filesystem was installed explicitly while crash-consistency \
-                     fault knobs (--fs-crash-at / --fs-torn-granularity) are set; \
-                     those knobs would be silently ignored. Supply the durable \
-                     image via RuntimeBuilder::with_fs_image so the runtime builds \
-                     the crash filesystem from the fault configuration."
+                    "a filesystem was installed explicitly while filesystem fault \
+                     knobs (--fs-crash-at / --fs-torn-granularity / \
+                     --fs-error-permille / --fs-short-permille) are set; those \
+                     knobs would be silently ignored. Supply the durable image via \
+                     RuntimeBuilder::with_fs_image so the runtime builds the \
+                     filesystem from the fault configuration."
                         .into(),
                 ));
             }
@@ -1666,13 +1696,16 @@ impl RuntimeBuilder {
                 // constructors are not equivalent.
                 #[allow(clippy::unwrap_or_default)]
                 let base = self.fs_image.take().unwrap_or_else(MemFs::new);
+                let crash_fs = CrashFs::builder()
+                    .filesystem(base)
+                    .seed(domain_seed(root_seed, fault_domain::FS_CRASH))
+                    .torn_granularity(self.config.faults.fs.torn_granularity)
+                    .build()
+                    .map_err(RuntimeError::Effect)?;
                 self.filesystem = Some(Box::new(
-                    CrashFs::builder()
-                        .filesystem(base)
-                        .seed(domain_seed(root_seed, fault_domain::FS_CRASH))
-                        .torn_granularity(self.config.faults.fs.torn_granularity)
-                        .build()
-                        .map_err(RuntimeError::Effect)?,
+                    FaultFs::new(crash_fs, root_seed)
+                        .error_permille(self.config.faults.fs.error_permille)
+                        .short_permille(self.config.faults.fs.short_permille),
                 ));
             }
             self.clock
@@ -4095,6 +4128,12 @@ impl Context {
         if let Some(report) = self.scheduler.as_ref().and_then(|s| s.policy_report()) {
             emit_schedule_policy_report(&report);
         }
+        // Filesystem fault-injection diagnostic. Default-on so a run configured
+        // with fs fault knobs that never actually perturb eligible I/O is never a
+        // false green.
+        if let Some(report) = self.filesystem.as_ref().and_then(|fs| fs.fault_report()) {
+            emit_fs_fault_report(&report);
+        }
         // Network fault-injection diagnostic. Default-on so a run configured with
         // net fault knobs that never actually perturbed any send (the knobs being
         // silently inert on the exercised code path) is never a false green.
@@ -4608,6 +4647,8 @@ fn fault_record(config: &RuntimeConfig) -> patina_dst_trace::FaultConfigRecord {
                 ordinal: point.ordinal,
             }),
         torn_granularity: torn_granularity_to_record(config.faults.fs.torn_granularity),
+        fs_error_permille: config.faults.fs.error_permille,
+        fs_short_permille: config.faults.fs.short_permille,
         sleep_jitter_nanos: config.faults.clock.sleep_jitter_nanos,
         net_jitter_nanos: config.faults.net.jitter_nanos,
         net_drop_permille: config.faults.net.drop_permille,
@@ -4625,6 +4666,8 @@ fn fault_config_from_record(record: &patina_dst_trace::FaultConfigRecord) -> Fau
                 ordinal: point.ordinal,
             }),
             torn_granularity: torn_granularity_from_record(record.torn_granularity),
+            error_permille: record.fs_error_permille,
+            short_permille: record.fs_short_permille,
         },
         net: NetFaultConfig {
             latency_nanos: record.net_latency_nanos,
@@ -4895,6 +4938,26 @@ fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_dst_trace::SwarmConfig
             },
         );
     }
+    if config.faults.fs.error_permille != 0 {
+        apply_swarm_class(
+            seed,
+            "fs_error",
+            fault_domain::SWARM_FS_ERROR,
+            &mut candidates,
+            &mut selected,
+            || config.faults.fs.error_permille = 0,
+        );
+    }
+    if config.faults.fs.short_permille != 0 {
+        apply_swarm_class(
+            seed,
+            "fs_short",
+            fault_domain::SWARM_FS_SHORT,
+            &mut candidates,
+            &mut selected,
+            || config.faults.fs.short_permille = 0,
+        );
+    }
     if config.faults.clock.sleep_jitter_nanos.is_some() {
         apply_swarm_class(
             seed,
@@ -5053,6 +5116,49 @@ schedulable.",
     }
 }
 
+/// Emit the default-on filesystem fault-injection diagnostic to stderr. A driver
+/// with no fault model reports `None` and stays silent, as does a live knob that
+/// saw no fault-eligible traffic at all. Otherwise the machine-readable
+/// `PATINA_FS_FAULT_REPORT` line lets a campaign tell a genuinely-perturbed run
+/// from an inert one, and a loud warning fires when a class that was expected to
+/// fire repeatedly (see `vacuity_is_diagnosable`) applied zero effects.
+/// Suppressed by a false-y [`ENV_FS_FAULT_REPORT`].
+fn emit_fs_fault_report(report: &patina_dst_driver_api::FsFaultReport) {
+    if report.eligible_ops == 0 {
+        return;
+    }
+    if let Ok(value) = env::var(ENV_FS_FAULT_REPORT) {
+        if matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "false" | "no"
+        ) {
+            return;
+        }
+    }
+    eprintln!(
+        "PATINA_FS_FAULT_REPORT eligible_ops={} error_vacuity_diagnosable={} errors_injected={} \
+short_vacuity_diagnosable={} shorts_applied={} latency_vacuity_diagnosable={} latency_applied={} vacuous={}",
+        report.eligible_ops,
+        u8::from(report.error_vacuity_diagnosable),
+        report.errors_injected,
+        u8::from(report.short_vacuity_diagnosable),
+        report.shorts_applied,
+        u8::from(report.latency_vacuity_diagnosable),
+        report.latency_applied,
+        u8::from(report.is_vacuous()),
+    );
+    if report.is_vacuous() {
+        eprintln!(
+            "PATINA WARNING: filesystem fault knobs inert — {} fault-eligible filesystem op(s) \
+occurred, enough that the configured rate should have fired an enabled fs fault class several \
+times over, yet it applied ZERO effects. A clean result here does NOT mean every configured \
+filesystem fault was tested. Verify the fs fault knobs reach the I/O path the workload uses — a \
+short-I/O knob applies nothing to a guest whose reads never fill their buffer.",
+            report.eligible_ops,
+        );
+    }
+}
+
 /// Emit the default-on network fault-injection diagnostic to stderr. A driver
 /// with no fault model reports `None` and stays silent; a driver whose knobs
 /// cannot perturb anything (`could_apply == false`) is also silent. When the
@@ -5188,7 +5294,7 @@ after_setup={} setup_complete={}",
     eprintln!("{line}");
 }
 
-/// Parse an inclusive `MIN..MAX` nanosecond range, requiring `MIN <= MAX`.
+/// Parse a per-mille probability, requiring an integer in [0, 1000].
 fn parse_permille(name: &str, value: &str) -> Result<u16, RuntimeError> {
     let permille: u16 = value
         .parse()
@@ -5201,6 +5307,7 @@ fn parse_permille(name: &str, value: &str) -> Result<u16, RuntimeError> {
     Ok(permille)
 }
 
+/// Parse an inclusive `MIN..MAX` nanosecond range, requiring `MIN <= MAX`.
 fn parse_nanos_range(name: &str, value: &str) -> Result<(u64, u64), RuntimeError> {
     let (min_text, max_text) = value.split_once("..").ok_or_else(|| {
         RuntimeError::Config(format!("{name} must be a MIN..MAX range; got {value:?}"))
@@ -5860,6 +5967,8 @@ mod tests {
             let trace = directory.path().join(format!("swarm-{seed}.patina"));
             let config = RuntimeConfig::record(seed, &trace, "fp+swarm")
                 .with_crash_at(CrashOp::Close, 1)
+                .with_fs_error_permille(100)
+                .with_fs_short_permille(200)
                 .with_net_drop_permille(100)
                 .with_sleep_jitter_nanos(1, 2)
                 .with_buggify(BuggifyConfig {
@@ -5873,10 +5982,17 @@ mod tests {
         };
         let bundle = build(1);
         let swarm = bundle.metadata.swarm.expect("swarm recorded");
-        // All four enabled classes are candidates.
+        // All six enabled classes are candidates.
         assert_eq!(
             swarm.candidate_classes,
-            vec!["crash", "sleep_jitter", "net_drop", "buggify"]
+            vec![
+                "crash",
+                "fs_error",
+                "fs_short",
+                "sleep_jitter",
+                "net_drop",
+                "buggify"
+            ]
         );
         // The selected subset is a subset of candidates and reflects the applied
         // (masked) config: exactly the classes that survived masking.
@@ -5910,6 +6026,8 @@ mod tests {
         let config = RuntimeConfig::record(9, &trace, "fp+swarm")
             .with_crash_at(CrashOp::Close, 1)
             .with_fs_torn_granularity(TornGranularity::Byte)
+            .with_fs_error_permille(1)
+            .with_fs_short_permille(1)
             .with_sleep_jitter_nanos(1, 2)
             .with_net_jitter_nanos(1, 2)
             .with_net_drop_permille(1)
@@ -5935,6 +6053,8 @@ mod tests {
             swarm.candidate_classes,
             vec![
                 "crash",
+                "fs_error",
+                "fs_short",
                 "sleep_jitter",
                 "net_jitter",
                 "net_drop",
@@ -5949,6 +6069,8 @@ mod tests {
         let seed = 42;
         let expected = [
             ("crash", fault_domain::SWARM_CRASH),
+            ("fs_error", fault_domain::SWARM_FS_ERROR),
+            ("fs_short", fault_domain::SWARM_FS_SHORT),
             ("sleep_jitter", fault_domain::SWARM_SLEEP_JITTER),
             ("net_jitter", fault_domain::SWARM_NET_JITTER),
             ("net_drop", fault_domain::SWARM_NET_DROP),
@@ -5964,6 +6086,8 @@ mod tests {
 
         let mut config = RuntimeConfig::seeded(seed)
             .with_crash_at(CrashOp::Close, 1)
+            .with_fs_error_permille(1)
+            .with_fs_short_permille(1)
             .with_sleep_jitter_nanos(1, 2)
             .with_net_jitter_nanos(1, 2)
             .with_net_drop_permille(1)
@@ -6140,6 +6264,8 @@ mod tests {
                 ordinal: 1,
             }),
             torn_granularity: patina_dst_trace::TornGranularity::Byte,
+            fs_error_permille: 111,
+            fs_short_permille: 222,
             net_latency_nanos: 500,
             ..FaultConfigRecord::default()
         };
@@ -6162,12 +6288,16 @@ mod tests {
             })
         );
         assert_eq!(faults.fs.torn_granularity, TornGranularity::Byte);
+        assert_eq!(faults.fs.error_permille, 111);
+        assert_eq!(faults.fs.short_permille, 222);
         assert_eq!(faults.net.latency_nanos, 500);
 
         // Explicit knobs that MATCH the recording are accepted.
         let matching = RuntimeConfig::seeded(0)
             .with_crash_at(CrashOp::Close, 1)
             .with_fs_torn_granularity(TornGranularity::Byte)
+            .with_fs_error_permille(111)
+            .with_fs_short_permille(222)
             .with_net_latency_nanos(500);
         reconcile_replay_faults(&matching, Some(&stored))
             .unwrap()
