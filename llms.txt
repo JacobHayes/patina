@@ -114,6 +114,23 @@ with no `--target` -> the Cargo package family (in-process boundary API), except
   banner. Rendering only reads the trace, so it never changes a replay hash.
 - `--report OUT.html`: like `--render` but only on failure; the page leads with a
   failure summary (what fired, exit code, the result/violation lines).
+- `--no-config`: ignore `.patina/config.toml` for this invocation. `PATINA_*` env
+  defaults still apply unless the caller scrubs them.
+
+## Repository config (`.patina/config.toml`)
+
+- Discovered by walking up from cwd; first `.patina/config.toml` wins.
+- `[groups.NAME] paths=["glob"] labels=["glob"]` tags `cargo patina sites`
+  rows; generated cache files live under `.patina/out/`, and Patina creates
+  `.patina/.gitignore` with `/out/` on first write.
+- `[defaults.VERB] key = value` supplies verb defaults. Keys are registry-backed
+  long flag names without `--` (campaign uses `generations` for `--gens`).
+  Value grammar is the same registry `Kind` grammar as the parser.
+- Precedence: explicit flag > `PATINA_<KEY>` env default > config file > built-in
+  default. Config-file defaults emit `PATINA_CONFIG applied=<verb>:<keys>
+  path=<file>` and JSON `config.applied[]` provenance. Replay refuses
+  `[defaults.replay]`; campaign child `run` processes get `--no-config` and have
+  run-default env names scrubbed.
 
 ### JSON result envelope (`patina.result/v1`)
 
@@ -122,8 +139,9 @@ One line of JSON on stdout. Always: `schema`, `verb`, `result`
 (`native|wasi|cargo`), `artifact`, `fingerprint`, `seed`, `render`, `findings`
 (audit imports), `output_path` + `content_hash` (build), `markers` (extracted
 `PATINA_*`/`*_VIOLATION`/`BUG_CAUGHT` lines), `result_line`, `stdout`, `stderr`,
-`message`, optional native `coverage` = `{edges_total, edges_covered,
-covered_permille, hits_total, hits_max, saturated, map_path?}`, and `trace` =
+`message`, optional `config` provenance, optional native `coverage` =
+`{edges_total, edges_covered, covered_permille, hits_total, hits_max, saturated,
+map_path?}`, and `trace` =
 `{path, format_version, timelines[], event_count, metadata}` where `metadata` is
 the raw trace metadata (seed, faults, buggify, guest_argv, and any future fields,
 rendered generically). `trace info --format

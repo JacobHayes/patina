@@ -1,9 +1,10 @@
 //! `cargo patina sites` — static inventory of assertion/oracle sites.
 //!
-//! Wave 3 joins a syn static inventory with runtime `PATINA_SDK_REPORT` rows
+//! Wave 4 joins a syn static inventory with runtime `PATINA_SDK_REPORT` rows
 //! supplied through `--exercised FILE`, or with a campaign `<out>/sites.json`
-//! store supplied through `--exercised OUTDIR`. `.patina/config.toml` groups and
-//! link-time static site enumeration are later waves.
+//! store supplied through `--exercised OUTDIR`. `.patina/config.toml` groups are
+//! applied after cache reads so grouping changes never poison the SCA cache;
+//! link-time static site enumeration is a later wave.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -236,7 +237,8 @@ pub(crate) fn execute(invocation: SitesInvocation) -> Result<i32, CliError> {
 }
 
 fn run_scan(options: SitesOptions) -> Result<i32, CliError> {
-    let scan = scan_current_workspace(!options.no_cache)?;
+    let mut scan = scan_current_workspace(!options.no_cache)?;
+    crate::config::apply_site_groups(&mut scan.sites);
     let exercised = options
         .exercised
         .as_deref()
@@ -1314,6 +1316,9 @@ fn build_report(
     if !warnings.is_empty() {
         root.insert("warnings".to_string(), json!(warnings));
     }
+    if let Some(config) = crate::config::provenance_json() {
+        root.insert("config".to_string(), config);
+    }
     root.insert("totals".to_string(), totals);
     root.insert(
         "crates".to_string(),
@@ -1948,6 +1953,8 @@ mod tests {
         let first = scan_packages(root.clone(), vec![package.clone()], true).unwrap();
         assert_eq!(first.cache_state, CacheState::Cold);
         assert_eq!(first.sites.len(), 1);
+        let ignore = fs::read_to_string(root.join(".patina/.gitignore")).unwrap();
+        assert!(ignore.lines().any(|line| line.trim() == "/out/"));
         let second = scan_packages(root.clone(), vec![package.clone()], true).unwrap();
         assert_eq!(second.cache_state, CacheState::Hit);
         fs::write(

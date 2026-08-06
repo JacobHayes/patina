@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 use sha2::{Digest, Sha256};
 
 use crate::render::{self, FailureSummary};
-use crate::{CliError, exit_code};
+use crate::{CliError, config, exit_code};
 
 /// The stable schema identifier stamped into every JSON envelope. Bump the
 /// version suffix only on a breaking change to the documented shape.
@@ -44,6 +44,8 @@ pub struct OutputOptions {
     /// `--report PATH`: write the timeline HTML *only when the run failed*, with a
     /// prominent failure-summary section.
     pub report: Option<PathBuf>,
+    /// `--no-config`: skip `.patina/config.toml` discovery for hermetic invocations.
+    pub no_config: bool,
 }
 
 impl OutputOptions {
@@ -87,10 +89,11 @@ pub fn options() -> &'static OutputOptions {
     OPTIONS.get_or_init(OutputOptions::default)
 }
 
-/// Strip `--format <fmt>`, `--render <path>`, and `--report <path>` from the
-/// leading (pre-`--`) region of an argument list, returning the parsed options
-/// and the arguments with those flags removed. Flags after a `--` separator are
-/// left in place — there they belong to the guest program, not Patina.
+/// Strip `--format <fmt>`, `--render <path>`, `--report <path>`, and
+/// `--no-config` from the leading (pre-`--`) region of an argument list,
+/// returning the parsed options and the arguments with those flags removed.
+/// Flags after a `--` separator are left in place — there they belong to the
+/// guest program, not Patina.
 ///
 /// Mirrors [`crate::extract_target`] so these options can be parsed once,
 /// globally, without touching any per-verb flag loop.
@@ -146,6 +149,15 @@ pub fn extract(arguments: Vec<OsString>) -> Result<(OutputOptions, Vec<OsString>
             Some(value) if value.starts_with("--report=") => {
                 let path = PathBuf::from(&value["--report=".len()..]);
                 crate::set_once(&mut options.report, path, "--report")?;
+            }
+            Some("--no-config") => {
+                options.no_config = true;
+            }
+            Some(value) if value.starts_with("--no-config=") => {
+                return Err(CliError::usage(format!(
+                    "--no-config takes no value; got {:?}",
+                    &value["--no-config=".len()..]
+                )));
             }
             _ => rest.push(argument),
         }
@@ -560,6 +572,7 @@ pub struct Envelope {
     stdout: Option<String>,
     stderr: Option<String>,
     message: Option<String>,
+    config: Option<serde_json::Value>,
 }
 
 impl Envelope {
@@ -583,6 +596,7 @@ impl Envelope {
             stdout: None,
             stderr: None,
             message: None,
+            config: config::provenance_json(),
         }
     }
 
@@ -657,6 +671,9 @@ impl Envelope {
         if let Some(v) = &self.message {
             m.insert("message".into(), Value::from(v.clone()));
         }
+        if let Some(v) = &self.config {
+            m.insert("config".into(), v.clone());
+        }
         Value::Object(m)
     }
 
@@ -725,6 +742,7 @@ mod tests {
             "out.html",
             "--format",
             "json",
+            "--no-config",
             "--",
             "--render",
             "guestflag",
@@ -735,6 +753,7 @@ mod tests {
         let (opts, rest) = extract(args).unwrap();
         assert_eq!(opts.format, OutputFormat::Json);
         assert_eq!(opts.render, Some(PathBuf::from("out.html")));
+        assert!(opts.no_config);
         // The post-`--` `--render` is a guest flag and must survive.
         let rest: Vec<String> = rest
             .iter()

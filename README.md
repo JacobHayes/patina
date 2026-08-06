@@ -157,6 +157,13 @@ detail — handy for scripts and AI agents. Results are available as JSON via
 `trace info|stats|diff` nest their trace payloads in the normal result envelope),
 and `--render out.html` writes a self-contained HTML timeline of any traced run.
 
+Repository config lives at `.patina/config.toml`: `[groups.<name>]` tags `sites`
+rows by path/label globs, and `[defaults.<verb>]` supplies verb defaults. The
+precedence is explicit flag > `PATINA_*` env default > `.patina/config.toml` >
+built-in default; applied config is reported via `PATINA_CONFIG ...` and JSON
+`config` provenance. Use `--no-config` to ignore the file for a hermetic run.
+Replay refuses `[defaults.replay]` because traces are authoritative.
+
 ### Fault injection and schedule exploration
 
 Faults are seed-driven, default-off, and recorded into the trace so replay

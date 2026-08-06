@@ -1920,6 +1920,7 @@ fn run_generation(
     }
     command
         .arg("run")
+        .arg("--no-config")
         .arg(artifact)
         .arg("--seed")
         .arg(seed.to_string())
@@ -1940,6 +1941,7 @@ fn run_generation(
     // Keep the child's diagnostics deterministic and machine-parseable. Pin the
     // SDK report on so a user's inherited PATINA_SDK_REPORT=0 cannot make the
     // campaign coverage gate vacuously green.
+    crate::config::scrub_child_config_env(&mut command, "run");
     command.env("PATINA_LIVENESS_REPORT", "1");
     command.env("PATINA_SDK_REPORT", "1");
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -2844,7 +2846,7 @@ fn build_campaign_envelope(input: CampaignEnvelopeInput<'_>) -> serde_json::Valu
         Path::new(&state.artifact.path),
     );
     let sdk_sites_json = sdk_sites_summary_json(input.coverage, input.coverage_verdict);
-    serde_json::json!({
+    let mut envelope = serde_json::json!({
         "schema": CAMPAIGN_ENVELOPE_SCHEMA,
         "verb": "campaign",
         "result": input.result,
@@ -2862,7 +2864,13 @@ fn build_campaign_envelope(input: CampaignEnvelopeInput<'_>) -> serde_json::Valu
         "sdk_sites": sdk_sites_json,
         "coverage": coverage_json,
         "artifacts": artifacts,
-    })
+    });
+    if let (Some(object), Some(config)) =
+        (envelope.as_object_mut(), crate::config::provenance_json())
+    {
+        object.insert("config".to_string(), config);
+    }
+    envelope
 }
 
 fn coverage_envelope_json(

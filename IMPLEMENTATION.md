@@ -517,6 +517,15 @@ surface (`cargo patina campaign`) generalizing the shell campaign machinery.
    reproduce command, and produces byte-identical outcomes, signatures, and
    `sites.json` coverage stores on a deterministic re-run.
 
+4. **Repository config** (`.patina/config.toml`): `cargo-patina` discovers the
+   nearest repo config, applies `[groups.*]` to `sites` rollups, and layers
+   `[defaults.<verb>]` under explicit flags and `PATINA_*` env defaults. Defaults
+   are validated through the help registry's value grammars, applied values are
+   provenanced in JSON (and config-file defaults emit `PATINA_CONFIG`),
+   `[defaults.replay]` is refused to preserve trace-authoritative replay, and
+   campaign child runs receive `--no-config` plus run-default env scrubbing. The
+   `.patina/out/` cache path is ignored via `.patina/.gitignore` on first write.
+
 ## Dependency order
 
 ```text

@@ -53,6 +53,7 @@ use sha2::{Digest, Sha256};
 // emitting an envelope cannot perturb replay hashes.
 mod aux_store;
 mod campaign;
+mod config;
 mod coverage;
 mod help;
 mod output;
@@ -587,14 +588,15 @@ enum UnsupportedPolicy {
 
 pub fn entrypoint() -> Result<i32, CliError> {
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
-    // Strip the cross-cutting output flags (`--output`, `--render`, `--report`)
-    // once, globally, before any per-verb routing — the same pre-pass shape as
-    // `extract_target`. They are patina-level flags, so they never reach the
-    // guest (anything after `--` is left in place).
+    // Strip the cross-cutting output/config flags (`--format`, `--render`,
+    // `--report`, `--no-config`) once, globally, before any per-verb routing —
+    // the same pre-pass shape as `extract_target`. They are patina-level flags,
+    // so they never reach the guest (anything after `--` is left in place).
     let (options, arguments) = output::extract(arguments)?;
     let is_json = options.is_json();
+    let no_config = options.no_config;
     output::install(options);
-    let result = dispatch(arguments);
+    let result = config::layer_arguments(arguments, no_config).and_then(dispatch);
     // Under `--output json` a CLI-side failure becomes a JSON error envelope
     // rather than the bare `cargo-patina: {error}` stderr line, so an agent always
     // parses one machine-readable object.

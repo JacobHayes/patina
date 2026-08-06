@@ -219,6 +219,13 @@ pub const GLOBAL_OUTPUT: &[Flag] = &[
         "Like --render but only when the run fails; the HTML leads with a failure summary.",
         false,
     ),
+    f(
+        "--no-config",
+        None,
+        Value::None,
+        "Ignore .patina/config.toml for this invocation (PATINA_* environment defaults still apply).",
+        false,
+    ),
 ];
 
 pub const HELP_FLAGS: &[Flag] = &[
@@ -1571,6 +1578,11 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         doc: "Deterministic root seed (mirrors --seed; a scenario-minimize oracle receives its candidate seed here).",
     },
     EnvVar {
+        name: "PATINA_<DEFAULT_KEY>",
+        scope: "user",
+        doc: "CLI default override for `.patina/config.toml` keys (for example PATINA_SEED, PATINA_GENERATIONS): explicit flags still win; campaign scrubs run-default env names from child runs.",
+    },
+    EnvVar {
         name: "PATINA_PARAMS_JSON",
         scope: "user",
         doc: "Typed --param values as a JSON object (the scenario-minimize oracle protocol).",
@@ -1696,6 +1708,14 @@ pub fn verb(name: &str) -> Option<&'static Verb> {
 /// so a parsed-but-unregistered flag is caught there rather than silently read as
 /// an unknown-flag stop.
 pub fn flag_arity(verb_name: &str, name: &str) -> Option<Value> {
+    flag_by_cli_name(verb_name, name).map(|flag| flag.value)
+}
+
+/// Registered flag lookup by long or short CLI spelling, including global/help
+/// flags. This is the parser-facing surface; config defaults use the narrower
+/// `configurable_*` helpers below so help/output switches do not become project
+/// defaults.
+pub fn flag_by_cli_name(verb_name: &str, name: &str) -> Option<&'static Flag> {
     verb(verb_name)
         .into_iter()
         .flat_map(|verb| verb.groups.iter())
@@ -1703,7 +1723,43 @@ pub fn flag_arity(verb_name: &str, name: &str) -> Option<Value> {
         .chain(GLOBAL_OUTPUT.iter())
         .chain(HELP_FLAGS.iter())
         .find(|flag| flag.name == name || flag.short == Some(name))
-        .map(|flag| flag.value)
+}
+
+/// Verb-local flags that may be supplied by `.patina/config.toml` defaults or
+/// PATINA_* env defaults. Global output/help switches are intentionally excluded:
+/// they are parsed before config discovery and are invocation presentation, not
+/// verb defaults.
+pub fn configurable_flags(verb_name: &str) -> Vec<&'static Flag> {
+    verb(verb_name)
+        .into_iter()
+        .flat_map(|verb| verb.groups.iter())
+        .flat_map(|group| group.flags.iter())
+        .collect()
+}
+
+/// Lookup a configurable flag by CLI spelling.
+pub fn configurable_flag_by_cli_name(verb_name: &str, name: &str) -> Option<&'static Flag> {
+    configurable_flags(verb_name)
+        .into_iter()
+        .find(|flag| flag.name == name || flag.short == Some(name))
+}
+
+/// The TOML/env key for a configurable flag. Most keys are the long flag without
+/// leading dashes; `--gens` intentionally uses the readable config key
+/// `generations`, matching `.patina/config.toml`'s project-level vocabulary
+/// without adding a CLI flag alias.
+pub fn config_key(flag: &Flag) -> &'static str {
+    match flag.name {
+        "--gens" => "generations",
+        name => name.trim_start_matches('-'),
+    }
+}
+
+/// Lookup a configurable flag by its TOML/env key.
+pub fn configurable_flag_by_key(verb_name: &str, key: &str) -> Option<&'static Flag> {
+    configurable_flags(verb_name)
+        .into_iter()
+        .find(|flag| config_key(flag) == key)
 }
 
 /// The canonical `Topic` for a routed verb token. `explore run`/`explore test`

@@ -8,17 +8,17 @@ single dependent), but the LOC criteria failed: net parser+bridge delta was
 +117 LOC (baseline 804 → spike 921) with a 116-LOC clap↔passthrough/family
 bridge, plus +3.30s cold build and +2.33 MB (+6.4%) binary. Measured on an
 Apple M4 / rustc 1.97.1 with isolated build dirs. The spike diff was dropped
-per the no-middle-state rule; the config layering design below proceeds on the
-bespoke parsers (owned by invariant-visibility Wave 4).
+per the no-middle-state rule; the config layering design below proceeded on the
+bespoke parsers and landed in invariant-visibility Wave 4.
 Scope: the `cargo-patina` CLI only. Decision owner: user, after the spike defined in §7.
 
 This doc answers four questions about adopting clap for the cargo-patina CLI,
-coupled with the future env-var + config-file configuration story:
+coupled with the env-var + config-file configuration story:
 
 1. Would we expect fewer or more lines and/or bugs? (§4)
 2. Would it improve ergonomics? (§5)
 3. Would it reduce future maintenance burden? (§6)
-4. How does the planned env-var + config-file layer change the cost/benefit? (§3, §8)
+4. How does the env-var + config-file layer change the cost/benefit? (§3, §8)
 
 Every claim about the bespoke system below was verified against source at the
 cited locations.
@@ -143,11 +143,12 @@ verb+family, keeping the registry authoritative. A derive-API rewrite would
 *duplicate* the registry into struct annotations and is ruled out — it reintroduces
 exactly the two-sources drift the current design exists to kill.
 
-## 3. The env-var + config-file layer (design; shared with the .patina/ arc)
+## 3. The env-var + config-file layer (implemented on bespoke parsers)
 
 This is one design referenced from two places: the invariant-visibility arc's
 `.patina/` config dir v1 decision (tags/groups + **default knobs**) and this doc.
-Default-knobs loading there *is* this layering.
+Default-knobs loading there *is* this layering, now implemented by a pre-parse
+injection layer over the existing bespoke parsers.
 
 **Precedence** (highest wins):
 
@@ -160,8 +161,8 @@ flags with exactly this rule — "flags override the spec regardless of argument
 order" (`campaign.rs:234-244`, fixing a real ordering bug noted in that comment).
 The config layer generalizes that shape to every verb.
 
-**Three patina-specific constraints that dominate the design** (and that neither
-clap nor any config crate handles for us):
+**Three patina-specific constraints that dominate the implementation** (and that
+neither clap nor any config crate handles for us):
 
 1. **Replay must not re-apply config.** Replay restores every semantic input
    (seed, fault knobs, buggify, guest argv) from the trace, which is
@@ -170,21 +171,23 @@ clap nor any config crate handles for us):
    therefore apply to `run`/`test`/`campaign` but **never** to `replay`, or a
    project config file silently diverges a replay. The layer needs the same
    host-facts-vs-semantic-inputs split the replay flag surface already encodes.
+   Implemented policy: non-empty `[defaults.replay]` is refused.
 2. **Child-process leakage.** `campaign` and `explore` spawn child
    `cargo patina run` processes. If the CLI honors user-scope env vars, an
    operator's exported `PATINA_SEED` would leak into every child and silently
    override per-generation knobs, breaking "everything is a pure function of the
    generation number" (`help.rs:960-971`). The supervisor must scrub/pin
-   user-scope config env vars when spawning children. Also: user-scope names must
-   never collide with the internal supervisor↔guest protocol vars
-   (`PATINA_MODE`, `PATINA_TRACE`, … — `help.rs:1173-1274`); today `PATINA_SEED`
-   is documented user-scope but is read by the *runtime*, not the CLI — the CLI
-   growing env awareness doubles the readers of that name and needs an explicit
-   ownership decision per var.
+   user-scope config env vars when spawning children. Implemented policy: campaign
+   child `run` invocations receive `--no-config`, and the parent removes the
+   generated `PATINA_*` env-default names for `run` before spawning; the child then
+   receives only explicit per-generation flags plus pinned protocol diagnostics
+   (`PATINA_SDK_REPORT=1`, `PATINA_LIVENESS_REPORT=1`).
 3. **Provenance must be inspectable** (agent-inspectable CLI is a standing
    principle). The resolved value of every knob should be reportable with its
    source (`flag`/`env`/`config`/`default`), e.g. in the `--format json` result
-   envelope and a future `config` verb.
+   envelope and a future `config` verb. Implemented policy: env/config-applied
+   values are reported in a `config` JSON object, and config-file defaults also
+   emit a human `PATINA_CONFIG applied=<verb>:<keys> path=<file>` line.
 
 **Is the layer easier or harder with clap in the middle?**
 

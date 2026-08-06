@@ -1,6 +1,6 @@
 # Arc: Invariant visibility
 
-**Status:** Waves 1-3 implemented (static `cargo patina sites` inventory, runtime report join, campaign `<out>/sites.json` feed); Waves 4-5 remain design.
+**Status:** Waves 1-4 implemented (static `cargo patina sites` inventory, runtime report join, campaign `<out>/sites.json` feed, `.patina/config.toml` groups/defaults); Wave 5 remains design.
 **Depends on:** nothing (wave 1 is standalone). **Feeds:** the coverage-depth arc (shared rollup),
 the sometimes-gate arc (runtime exercised data).
 
@@ -60,12 +60,12 @@ runtime/campaign exercised view, and a merged report — hierarchical, progressi
   and `artifacts.site_coverage`. Wave 3 parses every generation's SDK report into
   `<out>/sites.json` (`patina.campaign.sites/v1`) for `sites --exercised OUTDIR` and the
   sometimes-gate.
-- **CLI** — verbs run/test/build/audit/replay/explore/campaign/sites/minimize
-  (`crates/cargo-patina/src/help.rs`); global `--format human|json`
-  (`help.rs:191-213`, result envelope `patina.result/v1`, `output.rs:24`); help is
-  progressive-disclosure `patina.help/v2` with index vs per-verb payloads (`help.rs:1667-1717`);
-  registry drift gates already exist (`lib.rs:8146` parser↔registry, `:8689` value grammars,
-  `:8820` repeatability) and will automatically cover the new verb.
+- **CLI/config** — verbs run/test/build/audit/replay/explore/campaign/sites/minimize
+  (`crates/cargo-patina/src/help.rs`); global `--format human|json` and `--no-config`
+  (`help.rs` global output group, result envelope `patina.result/v1`, `output.rs`). Help is
+  progressive-disclosure `patina.help/v2` with index vs per-verb payloads. Registry drift gates
+  cover parser↔registry, value grammars, and repeatability; Wave 4 adds registry-driven config
+  validation over the same `Kind` grammars.
 
 ## Design
 
@@ -272,22 +272,29 @@ labels = ["wal-*", "fsync-*", "torn-*"]
 # Default CLI knobs, per verb. Keys must name a registry flag of that verb;
 # values must satisfy the flag's value grammar. A flag on the command line always wins.
 [defaults.campaign]
-generations = 500
+generations = 500   # config key for the CLI's --gens flag
 buggify = true
 
 [defaults.sites]
 exercised = "out/latest"
 ```
 
-- **Precedence:** explicit CLI flag > `.patina/config.toml` `[defaults.<verb>]` > built-in default.
-  `--no-config` (global, alongside `--format`) ignores the file for hermetic runs.
-- **Loudness:** when config supplies any default, the verb prints one
-  `PATINA_CONFIG applied=<verb>:<keys> path=<file>` line and JSON envelopes gain a `config` field —
-  behavior never changes silently.
-- **Validation is registry-driven:** `[defaults.*]` keys resolve through `help::verb`/`flag_arity`
-  (`help.rs:1281-1305`) and values through the same value-grammar table the existing drift gates
-  prove against the parsers (`lib.rs:8689`) — so a flag rename breaks config validation in the same
-  commit, not in a user's repo later.
+- **Precedence:** explicit CLI flag > `PATINA_*` env default > `.patina/config.toml`
+  `[defaults.<verb>]` > built-in default. `--no-config` (global, alongside `--format`) ignores the
+  file for hermetic runs; env defaults remain user-scope and are scrubbed for campaign children.
+- **Loudness/provenance:** when config supplies any default, the verb prints one
+  `PATINA_CONFIG applied=<verb>:<keys> path=<file>` line and JSON envelopes gain a `config` field.
+  Env/config-applied entries include `source`, `flag`, `key`, and path/env details; sites output
+  also names config-loaded groups. Behavior never changes silently.
+- **Validation is registry-driven:** `[defaults.*]` keys resolve through the help registry's
+  configurable flags (global/help flags are not project defaults), and values are checked through
+  the same `Kind` value grammars the parser drift gates exercise. `generations` is the single
+  config key for campaign's `--gens` flag, not a CLI alias.
+- **Replay exclusion:** non-empty `[defaults.replay]` is refused; replay remains
+  trace-authoritative and never re-applies project defaults that could change semantics.
+- **Child scrubbing:** campaign children are launched with `--no-config`, and user-scope config env
+  vars for `run` are removed before spawning so per-generation knobs remain a pure function of the
+  campaign generation.
 - **Generated content:** all generated files live under `.patina/out/` (v1: the SCA cache; campaign
   `--out` defaults may point there later). On first write Patina creates `.patina/.gitignore`
   containing `/out/` if absent.
@@ -314,9 +321,9 @@ Class detectors land *with or before* each wave; every one fails loudly, standal
 5. **Aggregation-determinism gate** (wave 3): campaign selftest extension — same spec twice ⇒
    byte-identical `sites.json` (the campaign's existing determinism discipline extended to the new
    artifact).
-6. **Config drift** (wave 4): `[defaults.*]` validation reuses the registry (above); plus a test
-   asserting an unknown group key, an unknown flag key, and a grammar-violating value each produce
-   a loud, path-qualified error.
+6. **Config drift** (wave 4, implemented): `[defaults.*]` validation reuses the registry
+   (above); tests assert an unknown group key, an unknown flag key, and a grammar-violating
+   value each produce a loud, path-qualified error.
 7. **Vacuity guard** (wave 3): if an `--exercised` source contains zero `site=` rows while the
    static inventory has `driven` sites, the report leads with a WARNING (mirrors the
    vacuous-schedule diagnostic doctrine) — an empty join must never render as "100% nothing to do".
@@ -336,9 +343,9 @@ runtime-touching waves and at the arc boundary.
 - **Wave 3 — campaign feed. Implemented.** Per-generation SDK parsing → `<out_dir>/sites.json`;
   envelope `sdk_sites` + `artifacts.site_coverage`; `sites --exercised OUTDIR`; gates 5, 7.
   CLI-only → fast tier; hand the artifact contract to the sometimes-gate arc at this boundary.
-- **Wave 4 — `.patina/` config.** Groups/tags in rollups (both arcs), `[defaults.*]`,
-  `.gitignore` generation, `--no-config`, gate 6. CLI-only → fast tier, then the **arc-boundary
-  full battery**.
+- **Wave 4 — `.patina/` config. Implemented.** Groups/tags in rollups, `[defaults.*]`,
+  `.gitignore` generation, `--no-config`, env/config precedence, replay exclusion, campaign child
+  config/env scrubbing, gate 6. CLI-only → fast tier, then the **arc-boundary full battery**.
 - **Wave 5 — static site enumeration (phase 2, scheduled here — not a separate future
   arc).** Owned by this arc per user directive (2026-07-30: phase-2 items are tackled as
   part of their arcs, never parked for a later prompt). A link-time site table
