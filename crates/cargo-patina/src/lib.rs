@@ -39,7 +39,7 @@ use patina_dst_runtime::{
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
     native_binary_has_sud_marker, native_binary_is_shim_linked, native_deny_trap_armed,
-    native_escape_is_sud_manageable, shim_control_plane_symbols,
+    native_escape_is_sud_manageable, render_native_escapes_grouped, shim_control_plane_symbols,
 };
 use patina_dst_trace::TraceBundle;
 use patina_dst_wasi_host::{
@@ -5439,13 +5439,13 @@ fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<i32, CliErr
                 .map_err(|error| CliError(error.to_string()))?;
             let (sud_instructions, hard): (Vec<_>, Vec<_>) = denied
                 .iter()
+                .cloned()
                 .partition(|escape| sud_marker && native_escape_is_sud_manageable(escape));
             if !hard.is_empty() || sud_instructions.is_empty() {
                 // A genuine escape remains (or there was nothing SUD could manage):
-                // fail closed exactly as before.
-                return Err(CliError(
-                    TargetError::UnsupportedNativeImports(denied).to_string(),
-                ));
+                // fail closed and render the provenance-rich audit result.
+                emit_native_audit_violation(&resolved.path, &denied);
+                return Ok(2);
             }
             // Only SUD-manageable instruction findings, and the dispatcher is
             // linked: report them as SUD-managed (both outcomes) and succeed.
@@ -5455,11 +5455,12 @@ fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<i32, CliErr
                     .iter()
                     .map(|escape| format!("{} (direct-syscall, SUD-managed)", escape.symbol))
                     .collect();
-                output::emit_audit(
+                output::emit_audit_with_details(
                     "audit",
                     "native",
                     &resolved.path.display().to_string(),
                     findings,
+                    native_escape_details(&sud_instructions, Some("SUD-managed")),
                     0,
                 );
             } else {
@@ -5472,6 +5473,13 @@ trapped into the deterministic runtime via syscall-user-dispatch. Runnable on a 
                 );
                 for escape in &sud_instructions {
                     println!("  {} ({})", escape.symbol, escape.category);
+                    for provenance in &escape.provenance {
+                        if let Some(site) = provenance.site_label() {
+                            println!("    {} [{site}]", provenance.label());
+                        } else {
+                            println!("    {}", provenance.label());
+                        }
+                    }
                 }
             }
             return Ok(0);
@@ -5498,6 +5506,69 @@ trapped into the deterministic runtime via syscall-user-dispatch. Runnable on a 
     // binary references — visible up front rather than only when a call aborts.
     emit_native_deny_trap_note(&bytes);
     Ok(0)
+}
+
+fn emit_native_audit_violation(path: &Path, denied: &[NativeEscape]) {
+    let findings = denied.iter().map(native_escape_summary).collect::<Vec<_>>();
+    if output::options().is_json() {
+        output::emit_audit_with_details(
+            "audit",
+            "native",
+            &path.display().to_string(),
+            findings,
+            native_escape_details(denied, None),
+            2,
+        );
+    } else {
+        eprintln!("{}", render_native_escapes_grouped(denied));
+    }
+}
+
+fn native_escape_summary(escape: &NativeEscape) -> String {
+    format!("{} ({})", escape.symbol, escape.category)
+}
+
+fn push_native_escape_provenance_lines(output: &mut String, escape: &NativeEscape, indent: &str) {
+    for provenance in &escape.provenance {
+        output.push('\n');
+        output.push_str(indent);
+        output.push_str(&provenance.label());
+        if let Some(site) = provenance.site_label() {
+            output.push_str(&format!(" [{site}]"));
+        }
+    }
+}
+
+fn native_escape_details(
+    escapes: &[NativeEscape],
+    disposition: Option<&str>,
+) -> Vec<serde_json::Value> {
+    escapes
+        .iter()
+        .map(|escape| {
+            let provenance = escape
+                .provenance
+                .iter()
+                .map(|origin| {
+                    serde_json::json!({
+                        "object": origin.object.clone(),
+                        "crate": origin.crate_name.clone(),
+                        "containing_symbol": origin.containing_symbol.clone(),
+                        "section": origin.section.clone(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut detail = serde_json::json!({
+                "symbol": escape.symbol.clone(),
+                "category": escape.category,
+                "provenance": provenance,
+            });
+            if let Some(disposition) = disposition {
+                detail["disposition"] = serde_json::Value::String(disposition.to_string());
+            }
+            detail
+        })
+        .collect()
 }
 
 fn link_arg(path: &Path) -> OsString {
@@ -6692,7 +6763,8 @@ pass --allow-unsupported-symbols <all|name,name,...> to run anyway with a warnin
             blocked.len()
         );
         for escape in &blocked {
-            message.push_str(&format!("\n  {} ({})", escape.symbol, escape.category));
+            message.push_str(&format!("\n  {}", native_escape_summary(escape)));
+            push_native_escape_provenance_lines(&mut message, escape, "    ");
         }
         if has_raw_syscall {
             // Raw inline syscall instructions present but not SUD-manageable here:
@@ -6756,7 +6828,10 @@ run that reaches one is not reproducible, so it is refused; pass --allow-unsuppo
             downgraded.len()
         );
         for escape in &downgraded {
-            eprintln!("patina:   {} ({})", escape.symbol, escape.category);
+            eprintln!("patina:   {}", native_escape_summary(escape));
+            for provenance in &escape.provenance {
+                eprintln!("patina:     {}", provenance.label());
+            }
         }
         eprintln!(
             "patina: these host symbols are NOT interposed by the deterministic runtime; if the \
@@ -6896,10 +6971,11 @@ fn write_unsupported_sidecar(trace: &Path, downgraded: &[NativeEscape]) -> Resul
     let mut contents = String::from(
         "# This trace was recorded with --allow-unsupported-symbols. The symbols\n\
 # below are NOT interposed by the deterministic runtime; the run's determinism\n\
-# is qualified. Symbol (category):\n",
+# is qualified. Symbol (category), followed by provenance when recoverable:\n",
     );
     for escape in downgraded {
-        contents.push_str(&format!("{} ({})\n", escape.symbol, escape.category));
+        contents.push_str(&format!("{}\n", native_escape_summary(escape)));
+        push_native_escape_provenance_lines(&mut contents, escape, "  ");
     }
     fs::write(&sidecar, contents).map_err(|error| {
         CliError(format!(

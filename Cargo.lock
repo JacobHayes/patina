@@ -428,6 +428,7 @@ name = "patina-dst-target"
 version = "0.1.0"
 dependencies = [
  "object",
+ "rustc-demangle",
  "wasmparser 0.254.0",
 ]
 

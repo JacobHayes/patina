@@ -9,4 +9,5 @@ repository.workspace = true
 
 [dependencies]
 object.workspace = true
+rustc-demangle.workspace = true
 wasmparser.workspace = true

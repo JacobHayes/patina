@@ -565,6 +565,8 @@ pub struct Envelope {
     render: Option<String>,
     /// audit findings / build outputs / mismatch detail — a list of strings.
     findings: Vec<String>,
+    /// Structured audit finding details; additive companion to `findings`.
+    finding_details: Vec<serde_json::Value>,
     output_path: Option<String>,
     content_hash: Option<String>,
     markers: Vec<String>,
@@ -589,6 +591,7 @@ impl Envelope {
             coverage: None,
             render: None,
             findings: Vec::new(),
+            finding_details: Vec::new(),
             output_path: None,
             content_hash: None,
             markers: Vec::new(),
@@ -650,6 +653,12 @@ impl Envelope {
         if !self.findings.is_empty() {
             m.insert("findings".into(), Value::from(self.findings.clone()));
         }
+        if !self.finding_details.is_empty() {
+            m.insert(
+                "finding_details".into(),
+                Value::from(self.finding_details.clone()),
+            );
+        }
         if let Some(v) = &self.output_path {
             m.insert("output_path".into(), Value::from(v.clone()));
         }
@@ -687,6 +696,17 @@ impl Envelope {
 /// Emit a verb's envelope for the audit path: the findings are the flagged /
 /// listed imports.
 pub fn emit_audit(verb: &str, family: &str, artifact: &str, findings: Vec<String>, exit_code: i32) {
+    emit_audit_with_details(verb, family, artifact, findings, Vec::new(), exit_code);
+}
+
+pub fn emit_audit_with_details(
+    verb: &str,
+    family: &str,
+    artifact: &str,
+    findings: Vec<String>,
+    finding_details: Vec<serde_json::Value>,
+    exit_code: i32,
+) {
     if !options().is_json() {
         return;
     }
@@ -695,6 +715,7 @@ pub fn emit_audit(verb: &str, family: &str, artifact: &str, findings: Vec<String
     env.family = Some(family.to_string());
     env.artifact = Some(artifact.to_string());
     env.findings = findings;
+    env.finding_details = finding_details;
     env.emit();
 }
 

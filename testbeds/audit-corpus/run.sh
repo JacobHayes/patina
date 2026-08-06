@@ -84,15 +84,18 @@ is_placeholder() {
 
 # ---- normalization ---------------------------------------------------------
 # Turn a captured audit log into the canonical expectation body: either the
-# single word CLEAN, or sorted `symbol class` lines. The audit prints one line
-#   cargo-patina: unsupported native imports: _sym1 (class1) _sym2 (class2) ...
-# on refusal (and no such line when clean). macOS mangles C symbols with one
-# leading underscore (`_localtime_r`); strip exactly one so the recorded name is
-# the real libc symbol (`localtime_r`). Linux ELF names carry no such prefix and
-# are recorded verbatim (leading underscores there, e.g. `__errno_location`, are
-# real and preserved). A class may itself contain spaces/commas (the SUD-managed
-# label `direct-syscall, SUD-managed`), so pairs are parsed by their parentheses,
-# not by whitespace.
+# single word CLEAN, or sorted `symbol class` lines. The audit refusal is grouped
+# by provenance:
+#   unsupported native imports:
+#     provenance=crate=foo object=libfoo-<hash>.rlib(foo.o) (1 finding)
+#       _sym1 (class1)
+#       _sym2 (class2)
+# macOS mangles C symbols with one leading underscore (`_localtime_r`); strip
+# exactly one so the recorded name is the real libc symbol (`localtime_r`). Linux
+# ELF names carry no such prefix and are recorded verbatim (leading underscores
+# there, e.g. `__errno_location`, are real and preserved). A class may itself
+# contain spaces/commas (the SUD-managed label `direct-syscall, SUD-managed`), so
+# pairs are parsed by their parentheses, not by whitespace.
 normalize() {
   local log="$1"
   local line
@@ -101,20 +104,19 @@ normalize() {
     echo CLEAN
     return
   fi
-  # everything after the marker
-  line="${line#*unsupported native imports: }"
   local strip_underscore=0
   [[ "$platform" == "macos" ]] && strip_underscore=1
-  # Extract `sym (class)` pairs by parentheses; class may hold spaces/commas.
-  grep -oE '[^ ]+ \([^)]+\)' <<<"$line" | awk -v strip="$strip_underscore" '
-    {
+  # Extract indented `sym (class)` finding rows by parentheses; class may hold
+  # spaces/commas. Provenance header rows are intentionally ignored.
+  awk -v strip="$strip_underscore" '
+    /^[[:space:]]+[^[:space:]]+ \([^)]+\)/ && $1 !~ /^provenance=/ {
       sym=$1
       s=index($0,"("); e=index($0,")")
       cls=substr($0, s+1, e-s-1)
       if (strip==1 && substr(sym,1,1)=="_") sym=substr(sym,2)
       print sym, cls
     }
-  ' | LC_ALL=C sort -u
+  ' "$log" | LC_ALL=C sort -u
 }
 
 # ---- audit one crate -------------------------------------------------------

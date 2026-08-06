@@ -4413,6 +4413,126 @@ fn audit_and_replay_are_source_first() {
     );
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_audit_attributes_unsupported_imports_to_dependency_crates() {
+    let directory = tempdir().unwrap();
+    let package = directory.path().join("provenance-pkg");
+    fs::create_dir_all(package.join("src")).unwrap();
+    for crate_name in ["leaker_a", "leaker_b"] {
+        fs::create_dir_all(package.join(crate_name).join("src")).unwrap();
+    }
+    fs::write(
+        package.join("Cargo.toml"),
+        "[package]\nname = \"provenance-pkg\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\nleaker-a = { path = \"leaker_a\" }\nleaker-b = { path = \"leaker_b\" }\n\n[workspace]\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("src/main.rs"),
+        "fn main() { let value = leaker_a::addr() ^ leaker_b::addr(); std::process::exit((value & 1) as i32); }\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("leaker_a/Cargo.toml"),
+        "[package]\nname = \"leaker-a\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("leaker_a/src/lib.rs"),
+        "unsafe extern \"C\" { fn killpg(pgrp: i32, sig: i32) -> i32; }\n#[inline(never)] pub fn addr() -> usize { killpg as *const () as usize }\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("leaker_b/Cargo.toml"),
+        "[package]\nname = \"leaker-b\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("leaker_b/src/lib.rs"),
+        "unsafe extern \"C\" { fn shm_open(name: *const core::ffi::c_char, oflag: i32, mode: u32) -> i32; }\n#[inline(never)] pub fn addr() -> usize { shm_open as *const () as usize }\n",
+    )
+    .unwrap();
+
+    let workspace = native_workspace();
+    let bin = directory.path().join("provenance-bin");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            package.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    let human = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["audit", bin.to_str().unwrap()],
+    );
+    assert!(!human.status.success());
+    let stderr = String::from_utf8_lossy(&human.stderr);
+    for needle in [
+        "unsupported native imports:",
+        "provenance=crate=leaker_a",
+        "provenance=crate=leaker_b",
+        "object=libleaker_a-",
+        "object=libleaker_b-",
+        "killpg (process)",
+        "shm_open (shared-memory-ipc)",
+    ] {
+        assert!(
+            stderr.contains(needle),
+            "missing {needle:?} in provenance-grouped audit stderr:\n{stderr}"
+        );
+    }
+
+    let json = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["audit", bin.to_str().unwrap(), "--format", "json"],
+    );
+    assert!(!json.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap_or_else(|error| {
+        panic!(
+            "audit --format json did not emit JSON: {error}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&json.stdout),
+            String::from_utf8_lossy(&json.stderr)
+        )
+    });
+    assert_eq!(value["result"], "violation");
+    assert_eq!(value["exit_code"], 2);
+    assert_json_finding_has_crate(&value, "killpg", "leaker_a");
+    assert_json_finding_has_crate(&value, "shm_open", "leaker_b");
+}
+
+fn assert_json_finding_has_crate(value: &serde_json::Value, symbol: &str, crate_name: &str) {
+    let details = value["finding_details"]
+        .as_array()
+        .unwrap_or_else(|| panic!("missing finding_details array in {value:#}"));
+    let finding = details
+        .iter()
+        .find(|detail| {
+            detail["symbol"]
+                .as_str()
+                .map(|got| got.trim_start_matches('_') == symbol)
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| panic!("missing finding for {symbol} in {value:#}"));
+    assert!(
+        finding["provenance"]
+            .as_array()
+            .unwrap_or_else(|| panic!("missing provenance for {symbol}: {finding:#}"))
+            .iter()
+            .any(|origin| origin["crate"].as_str() == Some(crate_name)
+                && origin["object"]
+                    .as_str()
+                    .map(|object| object.starts_with(&format!("lib{crate_name}-")))
+                    .unwrap_or(false)),
+        "finding for {symbol} lacks crate/object provenance {crate_name}: {finding:#}"
+    );
+}
+
 // Auditing a *prebuilt* native binary that was NOT produced by `cargo patina
 // build` fails closed: its imports are unsatisfied libc calls (the surface the
 // shim interposes once linked), not the post-interposition residual, so a raw

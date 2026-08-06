@@ -137,7 +137,8 @@ with no `--target` -> the Cargo package family (in-process boundary API), except
 One line of JSON on stdout. Always: `schema`, `verb`, `result`
 (`ok|violation|failure|error`), `exit_code`. When applicable: `family`
 (`native|wasi|cargo`), `artifact`, `fingerprint`, `seed`, `render`, `findings`
-(audit imports), `output_path` + `content_hash` (build), `markers` (extracted
+(audit import/finding strings), `finding_details` (structured audit symbol,
+category, provenance), `output_path` + `content_hash` (build), `markers` (extracted
 `PATINA_*`/`*_VIOLATION`/`BUG_CAUGHT` lines), `result_line`, `stdout`, `stderr`,
 `message`, optional `config` provenance, optional native `coverage` =
 `{edges_total, edges_covered, covered_permille, hits_total, hits_max, saturated,

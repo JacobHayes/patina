@@ -11,9 +11,12 @@ externally-resolved symbol the guest imports and refuse anything that is neither
 **interposed** (defined by the shim, so it never appears as an import) nor
 **known-safe** (an explicitly listed effect-free host-deferred symbol) nor
 caller-`--allow`ed. Anything else fails closed; known host-effect names are
-labeled with their escape *class* (below) for error quality. This is a
-symbol-level gate by design — it does **not** disassemble the binary — so raw
-inlined instructions and flag-dependent behavior are residuals covered (or
+labeled with their escape *class* (below) for error quality. Diagnostics also
+group findings by recovered object/archive-member provenance (and crate when the
+linked image carries enough rlib/symbol context); `provenance=unknown` means the
+image no longer carries attributable context. This is a symbol-level gate by
+design — it does **not** disassemble the binary for call-graph reachability — so
+raw inlined instructions and flag-dependent behavior are residuals covered (or
 honestly not covered) elsewhere; see "Residual gaps".
 
 The class lists live in `native_escape_category` (labeling) and the

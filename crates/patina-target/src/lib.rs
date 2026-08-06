@@ -11,8 +11,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::path::Path;
 
-use object::{Architecture, BinaryFormat, Object, ObjectSection, ObjectSymbol, SectionKind};
+use object::{
+    Architecture, BinaryFormat, Object, ObjectSection, ObjectSymbol, RelocationTarget, SectionKind,
+    SymbolIndex, SymbolKind,
+};
 use wasmparser::{Parser, Payload};
 
 pub const WASI_PREVIEW1_TARGET: &str = "wasm32-wasip1";
@@ -106,10 +110,79 @@ pub struct WasiAudit {
     pub imports: Vec<WasmImport>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NativeProvenance {
+    /// Compact object/archive-member label (`libfoo-<hash>.rlib(member.o)`), or
+    /// `unknown` when the linked image no longer carries enough information.
+    pub object: String,
+    /// Rust crate name recovered from an rlib/member name or a Rust symbol.
+    pub crate_name: Option<String>,
+    /// Function/data symbol containing the reference or instruction site.
+    pub containing_symbol: Option<String>,
+    /// Native section containing the reference or instruction site.
+    pub section: Option<String>,
+}
+
+impl NativeProvenance {
+    pub fn unknown() -> Self {
+        Self {
+            object: "unknown".into(),
+            crate_name: None,
+            containing_symbol: None,
+            section: None,
+        }
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        self.object == "unknown"
+            && self.crate_name.is_none()
+            && self.containing_symbol.is_none()
+            && self.section.is_none()
+    }
+
+    pub fn label(&self) -> String {
+        if self.object == "unknown" && self.crate_name.is_none() {
+            return "provenance=unknown".into();
+        }
+        let mut parts = Vec::new();
+        if let Some(crate_name) = &self.crate_name {
+            parts.push(format!("crate={crate_name}"));
+        }
+        parts.push(format!("object={}", self.object));
+        format!("provenance={}", parts.join(" "))
+    }
+
+    pub fn site_label(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if let Some(symbol) = &self.containing_symbol {
+            parts.push(format!("symbol={symbol}"));
+        }
+        if let Some(section) = &self.section {
+            parts.push(format!("section={section}"));
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" "))
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeEscape {
     pub symbol: String,
     pub category: &'static str,
+    pub provenance: Vec<NativeProvenance>,
+}
+
+impl NativeEscape {
+    fn new(symbol: String, category: &'static str, provenance: Vec<NativeProvenance>) -> Self {
+        Self {
+            symbol,
+            category,
+            provenance: normalize_provenance(provenance),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -131,19 +204,25 @@ impl NativeAudit {
             .collect::<Vec<_>>();
         imports.sort();
         imports.dedup();
+        let provenance = NativeProvenanceIndex::new(&file);
+        let import_provenance = collect_import_provenance(&file, bytes, &provenance);
         let mut denied = imports
             .iter()
             .filter_map(
                 |symbol| match native_import_decision(symbol, format, allow) {
                     NativeImportDecision::Allowed => None,
-                    NativeImportDecision::Denied(category) => Some(NativeEscape {
-                        symbol: symbol.clone(),
+                    NativeImportDecision::Denied(category) => Some(NativeEscape::new(
+                        symbol.clone(),
                         category,
-                    }),
+                        import_provenance
+                            .get(symbol)
+                            .cloned()
+                            .unwrap_or_else(|| vec![NativeProvenance::unknown()]),
+                    )),
                 },
             )
             .collect::<Vec<_>>();
-        denied.extend(scan_forbidden_instructions(&file)?);
+        denied.extend(scan_forbidden_instructions(&file, &provenance)?);
         if !denied.is_empty() {
             return Err(TargetError::UnsupportedNativeImports(denied));
         }
@@ -564,7 +643,634 @@ fn native_allowlisted_import(symbol: &str, format: NativeFormat) -> bool {
         }
 }
 
-fn scan_forbidden_instructions(file: &object::File<'_>) -> Result<Vec<NativeEscape>, TargetError> {
+fn normalize_provenance(mut provenance: Vec<NativeProvenance>) -> Vec<NativeProvenance> {
+    if provenance.is_empty() {
+        return vec![NativeProvenance::unknown()];
+    }
+    provenance.sort();
+    provenance.dedup();
+    if provenance.len() > 1 {
+        provenance.retain(|entry| !entry.is_unknown());
+    }
+    if provenance.is_empty() {
+        vec![NativeProvenance::unknown()]
+    } else {
+        provenance
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AddressProvenance {
+    address: u64,
+    size: u64,
+    object_path: Option<String>,
+    archive_member: Option<String>,
+    symbol: Option<String>,
+}
+
+struct NativeProvenanceIndex {
+    entries: Vec<AddressProvenance>,
+}
+
+impl NativeProvenanceIndex {
+    fn new(file: &object::File<'_>) -> Self {
+        let mut entries = Vec::new();
+
+        // Mach-O keeps STAB-derived object/archive-member provenance. The object
+        // crate exposes it as an address map, so preserve it before falling back
+        // to the generic symbol table below.
+        let object_map = file.object_map();
+        for entry in object_map.symbols() {
+            let object = entry.object(&object_map);
+            entries.push(AddressProvenance {
+                address: entry.address(),
+                size: entry.size(),
+                object_path: Some(bytes_to_string(object.path())),
+                archive_member: object.member().map(bytes_to_string),
+                symbol: Some(bytes_to_string(entry.name())),
+            });
+        }
+
+        // ELF (and stripped-down Mach-O fallback) commonly carries file symbols
+        // followed by local text/data symbols from that file. Keep that context
+        // as best-effort provenance; if the linked image lacks it, lookups below
+        // degrade to `provenance=unknown` rather than guessing.
+        let mut current_file = None;
+        for symbol in file.symbols() {
+            if symbol.kind() == SymbolKind::File {
+                current_file = symbol.name().ok().map(str::to_owned);
+                continue;
+            }
+            if !symbol.is_definition() || symbol.address() == 0 {
+                continue;
+            }
+            if !matches!(
+                symbol.kind(),
+                SymbolKind::Text | SymbolKind::Label | SymbolKind::Data | SymbolKind::Unknown
+            ) {
+                continue;
+            }
+            entries.push(AddressProvenance {
+                address: symbol.address(),
+                size: symbol.size(),
+                object_path: current_file.clone(),
+                archive_member: None,
+                symbol: symbol.name().ok().map(str::to_owned),
+            });
+        }
+
+        entries.sort_by_key(|entry| (entry.address, entry.size));
+        Self { entries }
+    }
+
+    fn for_address(&self, address: u64, section: Option<&str>) -> NativeProvenance {
+        let mut best = None;
+        for entry in &self.entries {
+            if entry.address > address {
+                break;
+            }
+            if address_in_entry(address, entry) {
+                best = match best {
+                    None => Some(entry),
+                    Some(prev) if entry_better(entry, prev) => Some(entry),
+                    Some(prev) => Some(prev),
+                };
+            }
+        }
+
+        let Some(entry) = best else {
+            let mut unknown = NativeProvenance::unknown();
+            unknown.section = section.map(str::to_owned);
+            return unknown;
+        };
+
+        let object = entry
+            .object_path
+            .as_deref()
+            .map(|path| compact_object_label(path, entry.archive_member.as_deref()))
+            .unwrap_or_else(|| "unknown".into());
+        let crate_name = entry
+            .object_path
+            .as_deref()
+            .and_then(|path| crate_name_from_object(path, entry.archive_member.as_deref()))
+            .or_else(|| {
+                entry
+                    .archive_member
+                    .as_deref()
+                    .and_then(crate_name_from_object_member)
+            })
+            .or_else(|| entry.symbol.as_deref().and_then(crate_name_from_symbol));
+
+        NativeProvenance {
+            object,
+            crate_name,
+            containing_symbol: entry.symbol.clone(),
+            section: section.map(str::to_owned),
+        }
+    }
+}
+
+fn address_in_entry(address: u64, entry: &AddressProvenance) -> bool {
+    if entry.size == 0 {
+        address == entry.address
+    } else {
+        address >= entry.address && address < entry.address.saturating_add(entry.size)
+    }
+}
+
+fn entry_better(candidate: &AddressProvenance, current: &AddressProvenance) -> bool {
+    let candidate_has_object = candidate.object_path.is_some();
+    let current_has_object = current.object_path.is_some();
+    candidate_has_object && !current_has_object
+        || candidate_has_object == current_has_object
+            && candidate.size != 0
+            && (current.size == 0 || candidate.size < current.size)
+}
+
+fn bytes_to_string(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+fn compact_object_label(path: &str, member: Option<&str>) -> String {
+    let file = Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path);
+    match member {
+        Some(member) => format!("{file}({member})"),
+        None => file.to_string(),
+    }
+}
+
+fn crate_name_from_object(path: &str, member: Option<&str>) -> Option<String> {
+    let file = Path::new(path).file_name()?.to_str()?;
+    crate_name_from_archive(file)
+        .or_else(|| member.and_then(crate_name_from_object_member))
+        .or_else(|| crate_name_from_source_path(path))
+}
+
+fn crate_name_from_archive(file: &str) -> Option<String> {
+    let stem = file.strip_suffix(".rlib")?;
+    let stem = stem.strip_prefix("lib").unwrap_or(stem);
+    strip_hash_suffix(stem).map(str::to_owned)
+}
+
+fn crate_name_from_object_member(member: &str) -> Option<String> {
+    let file = Path::new(member)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(member);
+    let stem = file.strip_suffix(".o").unwrap_or(file);
+    strip_hash_suffix(stem).map(str::to_owned)
+}
+
+fn crate_name_from_source_path(path: &str) -> Option<String> {
+    let mut prev = None;
+    for component in Path::new(path).components() {
+        let text = component.as_os_str().to_str()?;
+        if text == "src" {
+            return prev.map(str::to_owned);
+        }
+        prev = Some(text);
+    }
+    None
+}
+
+fn strip_hash_suffix(stem: &str) -> Option<&str> {
+    let (prefix, suffix) = stem.rsplit_once('-').unwrap_or((stem, ""));
+    if suffix.len() >= 8 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Some(prefix)
+    } else if !stem.is_empty() {
+        Some(stem)
+    } else {
+        None
+    }
+}
+
+fn crate_name_from_symbol(symbol: &str) -> Option<String> {
+    let stripped = symbol.trim_start_matches('_');
+    let demangled = rustc_demangle::try_demangle(stripped)
+        .or_else(|_| rustc_demangle::try_demangle(symbol))
+        .ok()?;
+    let text = format!("{demangled:#}");
+    let first = text.split("::").next()?.trim();
+    if first.is_empty() || first.starts_with('<') || first.starts_with('{') {
+        None
+    } else {
+        Some(first.to_string())
+    }
+}
+
+fn collect_import_provenance(
+    file: &object::File<'_>,
+    bytes: &[u8],
+    provenance: &NativeProvenanceIndex,
+) -> BTreeMap<String, Vec<NativeProvenance>> {
+    let mut origins: BTreeMap<String, BTreeSet<NativeProvenance>> = BTreeMap::new();
+    collect_section_relocation_provenance(file, provenance, &mut origins);
+
+    let targets = collect_import_targets(file, bytes);
+    if !targets.is_empty() {
+        collect_import_xref_provenance(file, provenance, &targets, &mut origins);
+    }
+
+    origins
+        .into_iter()
+        .map(|(symbol, set)| (symbol, normalize_provenance(set.into_iter().collect())))
+        .collect()
+}
+
+fn collect_section_relocation_provenance(
+    file: &object::File<'_>,
+    provenance: &NativeProvenanceIndex,
+    origins: &mut BTreeMap<String, BTreeSet<NativeProvenance>>,
+) {
+    for section in file.sections() {
+        let section_name = section.name().ok();
+        for (offset, relocation) in section.relocations() {
+            let RelocationTarget::Symbol(index) = relocation.target() else {
+                continue;
+            };
+            let Some(symbol) = file
+                .symbol_by_index(index)
+                .ok()
+                .and_then(|symbol| symbol.name().ok().map(str::to_owned))
+            else {
+                continue;
+            };
+            let address = section.address().saturating_add(offset);
+            insert_origin(
+                origins,
+                &symbol,
+                provenance.for_address(address, section_name),
+            );
+        }
+    }
+}
+
+fn collect_import_targets(file: &object::File<'_>, bytes: &[u8]) -> BTreeMap<u64, String> {
+    let mut targets = BTreeMap::new();
+    collect_elf_import_targets(file, &mut targets);
+    collect_macho_import_targets(file, bytes, &mut targets);
+    targets
+}
+
+fn collect_elf_import_targets(file: &object::File<'_>, targets: &mut BTreeMap<u64, String>) {
+    if !matches!(file.format(), BinaryFormat::Elf) {
+        return;
+    }
+
+    let dyn_symbols = file
+        .dynamic_symbols()
+        .filter_map(|symbol| {
+            symbol
+                .name()
+                .ok()
+                .map(|name| (symbol.index().0, name.to_owned()))
+        })
+        .collect::<BTreeMap<usize, String>>();
+    let mut jump_slots = Vec::new();
+    if let Some(relocations) = file.dynamic_relocations() {
+        let got_plt_ranges = file
+            .sections()
+            .filter_map(|section| {
+                let name = section.name().ok()?;
+                if name == ".got.plt" || name == ".got" {
+                    Some((
+                        section.address(),
+                        section.address().saturating_add(section.size()),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        for (address, relocation) in relocations {
+            let RelocationTarget::Symbol(index) = relocation.target() else {
+                continue;
+            };
+            let Some(symbol) = dyn_symbols.get(&index.0).cloned() else {
+                continue;
+            };
+            targets.insert(address, symbol.clone());
+            if got_plt_ranges
+                .iter()
+                .any(|(start, end)| address >= *start && address < *end)
+            {
+                jump_slots.push((address, symbol));
+            }
+        }
+    }
+
+    if jump_slots.is_empty() {
+        return;
+    }
+    jump_slots.sort_by_key(|(address, _)| *address);
+
+    let (header_size, entry_size) = match file.architecture() {
+        Architecture::X86_64 => (16_u64, 16_u64),
+        Architecture::Aarch64 => (32_u64, 16_u64),
+        _ => return,
+    };
+    for section in file.sections() {
+        let Ok(name) = section.name() else {
+            continue;
+        };
+        if name != ".plt" && name != ".plt.sec" {
+            continue;
+        }
+        let start = if name == ".plt" {
+            section.address().saturating_add(header_size)
+        } else {
+            section.address()
+        };
+        let entries = section.size() / entry_size;
+        for (index, (_, symbol)) in jump_slots.iter().take(entries as usize).enumerate() {
+            targets.insert(start + index as u64 * entry_size, symbol.clone());
+        }
+    }
+}
+
+fn collect_macho_import_targets(
+    file: &object::File<'_>,
+    bytes: &[u8],
+    targets: &mut BTreeMap<u64, String>,
+) {
+    match file {
+        object::File::MachO32(_) => collect_macho_import_targets_for::<
+            object::macho::MachHeader32<object::Endianness>,
+        >(bytes, 4, targets),
+        object::File::MachO64(_) => collect_macho_import_targets_for::<
+            object::macho::MachHeader64<object::Endianness>,
+        >(bytes, 8, targets),
+        _ => {}
+    }
+}
+
+fn collect_macho_import_targets_for<Mach>(
+    bytes: &[u8],
+    pointer_size: u64,
+    targets: &mut BTreeMap<u64, String>,
+) where
+    Mach: object::read::macho::MachHeader,
+{
+    use object::endian::U32;
+    use object::read::ReadRef;
+    use object::read::macho::{Nlist, Section, Segment};
+
+    let Ok(header) = Mach::parse(bytes, 0) else {
+        return;
+    };
+    let Ok(endian) = header.endian() else {
+        return;
+    };
+    let Ok(mut commands) = header.load_commands(endian, bytes, 0) else {
+        return;
+    };
+
+    let mut symtab = None;
+    let mut dysymtab = None;
+    let mut sections = Vec::new();
+    while let Ok(Some(command)) = commands.next() {
+        if let Ok(Some(command)) = command.symtab() {
+            symtab = Some(command);
+        }
+        if let Ok(Some(command)) = command.dysymtab() {
+            dysymtab = Some(command);
+        }
+        if let Ok(Some((segment, section_data))) = Mach::Segment::from_command(command) {
+            if let Ok(segment_sections) = segment.sections(endian, section_data) {
+                for section in segment_sections {
+                    let section_type = section.section_type(endian);
+                    if matches!(
+                        section_type,
+                        object::macho::S_NON_LAZY_SYMBOL_POINTERS
+                            | object::macho::S_LAZY_SYMBOL_POINTERS
+                            | object::macho::S_SYMBOL_STUBS
+                    ) {
+                        let entry_size = if section_type == object::macho::S_SYMBOL_STUBS {
+                            u64::from(section.reserved2(endian)).max(1)
+                        } else {
+                            pointer_size
+                        };
+                        sections.push((
+                            section.addr(endian).into(),
+                            section.size(endian).into(),
+                            section.reserved1(endian),
+                            entry_size,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    let (Some(symtab), Some(dysymtab)) = (symtab, dysymtab) else {
+        return;
+    };
+    let Ok(symbols) = symtab.symbols::<Mach, _>(endian, bytes) else {
+        return;
+    };
+    let indirect_offset = u64::from(dysymtab.indirectsymoff.get(endian));
+    let indirect_count = dysymtab.nindirectsyms.get(endian) as usize;
+    let Ok(indirect) = bytes.read_slice_at::<U32<Mach::Endian>>(indirect_offset, indirect_count)
+    else {
+        return;
+    };
+
+    for (address, size, first_indirect, entry_size) in sections {
+        if entry_size == 0 {
+            continue;
+        }
+        let count = size / entry_size;
+        for index in 0..count {
+            let indirect_index = first_indirect as usize + index as usize;
+            let Some(symbol_index) = indirect.get(indirect_index) else {
+                continue;
+            };
+            let symbol_index = symbol_index.get(endian);
+            if symbol_index & object::macho::INDIRECT_SYMBOL_LOCAL != 0
+                || symbol_index & object::macho::INDIRECT_SYMBOL_ABS != 0
+            {
+                continue;
+            }
+            let Ok(symbol) = symbols.symbol(SymbolIndex(symbol_index as usize)) else {
+                continue;
+            };
+            let Ok(name) = symbol.name(endian, symbols.strings()) else {
+                continue;
+            };
+            targets.insert(address + index * entry_size, bytes_to_string(name));
+        }
+    }
+}
+
+fn collect_import_xref_provenance(
+    file: &object::File<'_>,
+    provenance: &NativeProvenanceIndex,
+    targets: &BTreeMap<u64, String>,
+    origins: &mut BTreeMap<String, BTreeSet<NativeProvenance>>,
+) {
+    for section in file.sections() {
+        if section.kind() != SectionKind::Text {
+            continue;
+        }
+        let Ok(data) = section.data() else {
+            continue;
+        };
+        let section_name = section.name().ok();
+        match file.architecture() {
+            Architecture::Aarch64 => scan_aarch64_import_xrefs(
+                data,
+                section.address(),
+                section_name,
+                targets,
+                provenance,
+                origins,
+            ),
+            Architecture::X86_64 => scan_x86_64_import_xrefs(
+                data,
+                section.address(),
+                section_name,
+                targets,
+                provenance,
+                origins,
+            ),
+            _ => {}
+        }
+    }
+}
+
+fn scan_aarch64_import_xrefs(
+    data: &[u8],
+    section_address: u64,
+    section_name: Option<&str>,
+    targets: &BTreeMap<u64, String>,
+    provenance: &NativeProvenanceIndex,
+    origins: &mut BTreeMap<String, BTreeSet<NativeProvenance>>,
+) {
+    let instructions = data
+        .chunks_exact(4)
+        .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("chunk has four bytes")))
+        .collect::<Vec<_>>();
+    for (index, instruction) in instructions.iter().copied().enumerate() {
+        let pc = section_address + index as u64 * 4;
+        if let Some(target) = aarch64_branch_target(instruction, pc) {
+            if let Some(symbol) = targets.get(&target) {
+                insert_origin(origins, symbol, provenance.for_address(pc, section_name));
+            }
+        }
+        let Some((register, page)) = aarch64_adrp_target(instruction, pc) else {
+            continue;
+        };
+        let Some(next) = instructions.get(index + 1).copied() else {
+            continue;
+        };
+        if let Some(target) = aarch64_ldr_unsigned_target(next, register, page) {
+            if let Some(symbol) = targets.get(&target) {
+                insert_origin(origins, symbol, provenance.for_address(pc, section_name));
+            }
+        }
+    }
+}
+
+fn aarch64_branch_target(instruction: u32, pc: u64) -> Option<u64> {
+    if instruction & 0x7c00_0000 != 0x1400_0000 {
+        return None;
+    }
+    let offset = sign_extend((instruction & 0x03ff_ffff) as u64, 26) << 2;
+    Some(pc.wrapping_add_signed(offset))
+}
+
+fn aarch64_adrp_target(instruction: u32, pc: u64) -> Option<(u32, u64)> {
+    if instruction & 0x9f00_0000 != 0x9000_0000 {
+        return None;
+    }
+    let immlo = ((instruction >> 29) & 0x3) as u64;
+    let immhi = ((instruction >> 5) & 0x7ffff) as u64;
+    let imm = sign_extend((immhi << 2) | immlo, 21) << 12;
+    let page = (pc & !0xfff).wrapping_add_signed(imm);
+    Some((instruction & 0x1f, page))
+}
+
+fn aarch64_ldr_unsigned_target(instruction: u32, base_register: u32, page: u64) -> Option<u64> {
+    if instruction & 0xffc0_0000 != 0xf940_0000 {
+        return None;
+    }
+    let rn = (instruction >> 5) & 0x1f;
+    if rn != base_register {
+        return None;
+    }
+    let imm = u64::from((instruction >> 10) & 0x0fff) * 8;
+    Some(page + imm)
+}
+
+fn scan_x86_64_import_xrefs(
+    data: &[u8],
+    section_address: u64,
+    section_name: Option<&str>,
+    targets: &BTreeMap<u64, String>,
+    provenance: &NativeProvenanceIndex,
+    origins: &mut BTreeMap<String, BTreeSet<NativeProvenance>>,
+) {
+    for offset in 0..data.len() {
+        let pc = section_address + offset as u64;
+        if matches!(data[offset], 0xe8 | 0xe9) && offset + 5 <= data.len() {
+            let displacement = i32::from_le_bytes(data[offset + 1..offset + 5].try_into().unwrap());
+            let target = (pc + 5).wrapping_add_signed(i64::from(displacement));
+            if let Some(symbol) = targets.get(&target) {
+                insert_origin(origins, symbol, provenance.for_address(pc, section_name));
+            }
+        }
+        if data[offset] == 0xff && offset + 6 <= data.len() {
+            let modrm = data[offset + 1];
+            if matches!(modrm, 0x15 | 0x25) {
+                let displacement =
+                    i32::from_le_bytes(data[offset + 2..offset + 6].try_into().unwrap());
+                let target = (pc + 6).wrapping_add_signed(i64::from(displacement));
+                if let Some(symbol) = targets.get(&target) {
+                    insert_origin(origins, symbol, provenance.for_address(pc, section_name));
+                }
+            }
+        }
+        let mut op = offset;
+        if data[op] & 0xf0 == 0x40 {
+            op += 1;
+        }
+        if op + 6 <= data.len() && matches!(data[op], 0x8b | 0x8d) {
+            let modrm = data[op + 1];
+            if modrm & 0xc7 == 0x05 {
+                let displacement = i32::from_le_bytes(data[op + 2..op + 6].try_into().unwrap());
+                let next = section_address + op as u64 + 6;
+                let target = next.wrapping_add_signed(i64::from(displacement));
+                if let Some(symbol) = targets.get(&target) {
+                    insert_origin(origins, symbol, provenance.for_address(pc, section_name));
+                }
+            }
+        }
+    }
+}
+
+fn insert_origin(
+    origins: &mut BTreeMap<String, BTreeSet<NativeProvenance>>,
+    symbol: &str,
+    provenance: NativeProvenance,
+) {
+    origins
+        .entry(symbol.to_string())
+        .or_default()
+        .insert(provenance);
+}
+
+fn sign_extend(value: u64, bits: u8) -> i64 {
+    let shift = 64 - bits;
+    ((value << shift) as i64) >> shift
+}
+
+fn scan_forbidden_instructions(
+    file: &object::File<'_>,
+    provenance: &NativeProvenanceIndex,
+) -> Result<Vec<NativeEscape>, TargetError> {
     // Fail closed on any architecture whose ISA this containment scan cannot
     // decode. A `_ => {}` default arm on the per-section match below silently
     // PASSED unsupported-arch binaries — every instruction unexamined — which is
@@ -593,16 +1299,21 @@ fn scan_forbidden_instructions(file: &object::File<'_>) -> Result<Vec<NativeEsca
                         u32::from_le_bytes(instruction.try_into().expect("chunk has four bytes"));
                     let category = aarch64_instruction_category(instruction);
                     if let Some(category) = category {
-                        escapes.push(NativeEscape {
-                            symbol: format!("instruction@{name}+0x{:x}", index * 4),
+                        let offset = index * 4;
+                        escapes.push(NativeEscape::new(
+                            format!("instruction@{name}+0x{offset:x}"),
                             category,
-                        });
+                            vec![
+                                provenance
+                                    .for_address(section.address() + offset as u64, Some(name)),
+                            ],
+                        ));
                     }
                 }
             }
             Architecture::X86_64 => {
-                x86_scan::scan(data, name, &mut escapes);
-                scan_vsyscall_references(data, name, &mut escapes);
+                x86_scan::scan(data, name, section.address(), provenance, &mut escapes);
+                scan_vsyscall_references(data, name, section.address(), provenance, &mut escapes);
             }
             // Unreachable: the guard above refuses every other architecture. Kept
             // explicit (never a silent `_ => {}`) so a newly-supported arch must be
@@ -625,7 +1336,13 @@ fn scan_forbidden_instructions(file: &object::File<'_>) -> Result<Vec<NativeEsca
 /// per-offset false-positive, effectively never a coincidence. A `vsyscall`
 /// finding is NOT `direct-syscall`, so it is never SUD-downgradable — it always
 /// refuses (see [`native_escape_is_sud_manageable`]). SUD-DESIGN.md §6.3.
-fn scan_vsyscall_references(data: &[u8], name: &str, escapes: &mut Vec<NativeEscape>) {
+fn scan_vsyscall_references(
+    data: &[u8],
+    name: &str,
+    section_address: u64,
+    provenance: &NativeProvenanceIndex,
+    escapes: &mut Vec<NativeEscape>,
+) {
     // Little-endian encoding of any address in [0xffffffffff600000, +0x1000):
     //   b[7..2] == [0xff,0xff,0xff,0xff,0xff,0x60]  (bytes 2..8)
     //   b[1] high nibble == 0                       (page offset < 0x1000)
@@ -643,10 +1360,11 @@ fn scan_vsyscall_references(data: &[u8], name: &str, escapes: &mut Vec<NativeEsc
             && w[7] == 0xff
             && (w[1] & 0xf0) == 0
         {
-            escapes.push(NativeEscape {
-                symbol: format!("immediate@{name}+0x{offset:x}"),
-                category: "vsyscall",
-            });
+            escapes.push(NativeEscape::new(
+                format!("immediate@{name}+0x{offset:x}"),
+                "vsyscall",
+                vec![provenance.for_address(section_address + offset as u64, Some(name))],
+            ));
         }
     }
 }
@@ -735,16 +1453,25 @@ mod x86_scan {
     /// finding for each forbidden opcode at a real boundary and one
     /// `undecodable-instruction` finding (then stopping) if the decoder cannot
     /// measure an instruction.
-    pub(super) fn scan(data: &[u8], name: &str, escapes: &mut Vec<super::NativeEscape>) {
+    pub(super) fn scan(
+        data: &[u8],
+        name: &str,
+        section_address: u64,
+        provenance: &super::NativeProvenanceIndex,
+        escapes: &mut Vec<super::NativeEscape>,
+    ) {
         let mut offset = 0usize;
         while offset < data.len() {
             match decode_one(&data[offset..]) {
                 Step::Insn { len, cat } => {
                     if let Some(category) = cat {
-                        escapes.push(super::NativeEscape {
-                            symbol: format!("instruction@{name}+0x{offset:x}"),
+                        escapes.push(super::NativeEscape::new(
+                            format!("instruction@{name}+0x{offset:x}"),
                             category,
-                        });
+                            vec![
+                                provenance.for_address(section_address + offset as u64, Some(name)),
+                            ],
+                        ));
                     }
                     // Every instruction consumes at least its opcode byte, so
                     // `len >= 1`; the guard only defends the loop invariant.
@@ -754,10 +1481,11 @@ mod x86_scan {
                     offset += len;
                 }
                 Step::Undecodable => {
-                    escapes.push(super::NativeEscape {
-                        symbol: format!("instruction@{name}+0x{offset:x}"),
-                        category: "undecodable-instruction",
-                    });
+                    escapes.push(super::NativeEscape::new(
+                        format!("instruction@{name}+0x{offset:x}"),
+                        "undecodable-instruction",
+                        vec![provenance.for_address(section_address + offset as u64, Some(name))],
+                    ));
                     break;
                 }
             }
@@ -1183,6 +1911,13 @@ mod x86_scan {
             }
         }
 
+        fn scan_test(data: &[u8], escapes: &mut Vec<super::super::NativeEscape>) {
+            let provenance = super::super::NativeProvenanceIndex {
+                entries: Vec::new(),
+            };
+            scan(data, ".text", 0, &provenance, escapes);
+        }
+
         #[test]
         fn measures_representative_instruction_lengths() {
             // (bytes, expected length) across the length-determining features.
@@ -1235,7 +1970,7 @@ mod x86_scan {
             // old byte-slide flagged both.
             let mut escapes = Vec::new();
             let text = [0x48, 0xb8, 0x05, 0x0f, 0x00, 0x31, 0x0f, 0x00, 0x00, 0x00];
-            scan(&text, ".text", &mut escapes);
+            scan_test(&text, &mut escapes);
             assert!(
                 escapes.is_empty(),
                 "operand-embedded opcode bytes must not be flagged: {escapes:?}"
@@ -1243,7 +1978,7 @@ mod x86_scan {
             // The same forbidden bytes at a real boundary (a `syscall` after a nop)
             // must still be caught.
             let mut escapes = Vec::new();
-            scan(&[0x90, 0x0f, 0x05], ".text", &mut escapes);
+            scan_test(&[0x90, 0x0f, 0x05], &mut escapes);
             assert_eq!(escapes.len(), 1);
             assert_eq!(escapes[0].category, "direct-syscall");
             assert_eq!(escapes[0].symbol, "instruction@.text+0x1");
@@ -1256,7 +1991,7 @@ mod x86_scan {
             // the offset rather than skipping past a length guess.
             for bytes in [&[0x62, 0xf1, 0x7c, 0x48][..], &[0x0f, 0x04][..]] {
                 let mut escapes = Vec::new();
-                scan(bytes, ".text", &mut escapes);
+                scan_test(bytes, &mut escapes);
                 assert_eq!(escapes.len(), 1, "should fail closed on {bytes:02x?}");
                 assert_eq!(escapes[0].category, "undecodable-instruction");
                 assert_eq!(escapes[0].symbol, "instruction@.text+0x0");
@@ -1318,7 +2053,7 @@ mod x86_scan {
                 0x66, 0x45, 0x0f, 0x3a, 0x0f, 0xec, 0x08, // palignr (7 bytes)
                 0x0f, 0x05, // syscall at offset 7
             ];
-            scan(&text, ".text", &mut escapes);
+            scan_test(&text, &mut escapes);
             assert_eq!(escapes.len(), 1, "{escapes:?}");
             assert_eq!(escapes[0].category, "direct-syscall");
             assert_eq!(escapes[0].symbol, "instruction@.text+0x7");
@@ -2267,6 +3002,52 @@ impl WasiAudit {
     }
 }
 
+pub fn render_native_escapes_grouped(escapes: &[NativeEscape]) -> String {
+    let mut groups: BTreeMap<String, Vec<(&NativeEscape, NativeProvenance)>> = BTreeMap::new();
+    for escape in escapes {
+        let provenance = if escape.provenance.is_empty() {
+            vec![NativeProvenance::unknown()]
+        } else {
+            escape.provenance.clone()
+        };
+        for origin in provenance {
+            groups
+                .entry(origin.label())
+                .or_default()
+                .push((escape, origin));
+        }
+    }
+
+    let mut groups = groups.into_iter().collect::<Vec<_>>();
+    groups.sort_by(|(left_label, left), (right_label, right)| {
+        right
+            .len()
+            .cmp(&left.len())
+            .then_with(|| left_label.cmp(right_label))
+    });
+
+    let mut output = String::from("unsupported native imports:");
+    if groups.is_empty() {
+        return output;
+    }
+    for (label, findings) in groups {
+        output.push('\n');
+        output.push_str(&format!(
+            "  {label} ({} finding{})",
+            findings.len(),
+            if findings.len() == 1 { "" } else { "s" }
+        ));
+        for (finding, origin) in findings {
+            output.push('\n');
+            output.push_str(&format!("    {} ({})", finding.symbol, finding.category));
+            if let Some(site) = origin.site_label() {
+                output.push_str(&format!(" [{site}]"));
+            }
+        }
+    }
+    output
+}
+
 #[derive(Debug)]
 pub enum TargetError {
     Parse(wasmparser::BinaryReaderError),
@@ -2305,11 +3086,7 @@ fails closed"
                 )
             }
             Self::UnsupportedNativeImports(imports) => {
-                write!(f, "unsupported native imports:")?;
-                for import in imports {
-                    write!(f, " {} ({})", import.symbol, import.category)?;
-                }
-                Ok(())
+                f.write_str(&render_native_escapes_grouped(imports))
             }
         }
     }
@@ -2437,20 +3214,23 @@ mod tests {
         // reads (rdtsc/mrs CNTVCT) cannot be trapped by SUD — downgrading either
         // would silently widen the gate. RED: flip any arm below and the
         // downgrade would admit an untappable escape.
-        let trappable = NativeEscape {
-            symbol: "instruction@.text+0x42".into(),
-            category: "direct-syscall",
-        };
+        let trappable = NativeEscape::new(
+            "instruction@.text+0x42".into(),
+            "direct-syscall",
+            vec![NativeProvenance::unknown()],
+        );
         assert!(native_escape_is_sud_manageable(&trappable));
-        let by_name = NativeEscape {
-            symbol: "syscall".into(),
-            category: "direct-syscall",
-        };
+        let by_name = NativeEscape::new(
+            "syscall".into(),
+            "direct-syscall",
+            vec![NativeProvenance::unknown()],
+        );
         assert!(!native_escape_is_sud_manageable(&by_name));
-        let register_read = NativeEscape {
-            symbol: "instruction@.text+0x42".into(),
-            category: "cpu-nondeterminism",
-        };
+        let register_read = NativeEscape::new(
+            "instruction@.text+0x42".into(),
+            "cpu-nondeterminism",
+            vec![NativeProvenance::unknown()],
+        );
         assert!(!native_escape_is_sud_manageable(&register_read));
     }
 
@@ -2460,8 +3240,11 @@ mod tests {
         // vsyscall gettimeofday entry — is caught by the immediate signal.
         let mut text = vec![0x48u8, 0xb8];
         text.extend_from_slice(&0xffffffffff600000u64.to_le_bytes());
+        let provenance = NativeProvenanceIndex {
+            entries: Vec::new(),
+        };
         let mut escapes = Vec::new();
-        scan_vsyscall_references(&text, ".text", &mut escapes);
+        scan_vsyscall_references(&text, ".text", 0, &provenance, &mut escapes);
         assert_eq!(
             escapes.len(),
             1,
@@ -2476,7 +3259,7 @@ mod tests {
         let mut text2 = vec![0x48u8, 0xb8];
         text2.extend_from_slice(&0xffffffffff600400u64.to_le_bytes());
         let mut escapes2 = Vec::new();
-        scan_vsyscall_references(&text2, ".text", &mut escapes2);
+        scan_vsyscall_references(&text2, ".text", 0, &provenance, &mut escapes2);
         assert_eq!(escapes2.len(), 1, "vsyscall time entry must be found");
 
         // RED control: ordinary text (including a nearby-but-not-on-page address)
@@ -2485,7 +3268,7 @@ mod tests {
         clean.extend_from_slice(&0xffffffffff700000u64.to_le_bytes()); // wrong page
         clean.extend_from_slice(&[0x90; 16]); // nops
         let mut none = Vec::new();
-        scan_vsyscall_references(&clean, ".text", &mut none);
+        scan_vsyscall_references(&clean, ".text", 0, &provenance, &mut none);
         assert!(none.is_empty(), "off-page address must not match: {none:?}");
     }
 
@@ -3007,7 +3790,8 @@ mod tests {
             );
 
             // Private scanner refuses.
-            let scan = scan_forbidden_instructions(&parsed);
+            let provenance = NativeProvenanceIndex::new(&parsed);
+            let scan = scan_forbidden_instructions(&parsed, &provenance);
             assert!(
                 matches!(scan, Err(TargetError::UnsupportedNativeArchitecture(_))),
                 "{label}: scan must refuse an undecodable arch, got {scan:?}"
@@ -3045,7 +3829,8 @@ mod tests {
         for (machine, label) in [(EM_X86_64, "x86_64"), (EM_AARCH64, "aarch64")] {
             let elf = minimal_executable_elf64(machine);
             let parsed = object::File::parse(&*elf).expect("hand-built ELF must parse");
-            let scan = scan_forbidden_instructions(&parsed);
+            let provenance = NativeProvenanceIndex::new(&parsed);
+            let scan = scan_forbidden_instructions(&parsed, &provenance);
             assert!(
                 !matches!(scan, Err(TargetError::UnsupportedNativeArchitecture(_))),
                 "{label}: a supported arch must not be refused by the arch guard, got {scan:?}"
