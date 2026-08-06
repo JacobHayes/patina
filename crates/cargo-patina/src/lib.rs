@@ -7011,6 +7011,34 @@ mod tests {
     }
 
     #[test]
+    fn native_run_buggify_value_form_enables_and_carries_permille() {
+        // Point pin for the `--buggify=N` native parser/plumbing path; class-level
+        // pairing: runtime/trace `+buggify` metadata-coherence fail-closed guard.
+        let parsed = native_run(&[
+            "native-run",
+            "bin",
+            "--buggify=372",
+            "--buggify-activation-permille=330",
+            "--buggify-cutoff-nanos=12345",
+            "--buggify-after-setup",
+        ]);
+        let buggify = parsed.buggify.expect("--buggify must enable SDK buggify");
+        assert_eq!(buggify.fire_permille.as_deref(), Some("372"));
+        assert_eq!(buggify.activation_permille.as_deref(), Some("330"));
+        assert_eq!(buggify.cutoff_nanos.as_deref(), Some("12345"));
+        assert!(buggify.after_setup);
+        let env = buggify_env_pairs(&buggify);
+        assert!(
+            env.iter()
+                .any(|(name, value)| *name == ENV_BUGGIFY && value == "372")
+        );
+        assert!(
+            env.iter()
+                .any(|(name, value)| *name == ENV_BUGGIFY_ACTIVATION && value == "330")
+        );
+    }
+
+    #[test]
     fn strips_cargo_plugin_name_and_forwards_unknown_arguments() {
         let parsed = invocation(&[
             "patina",

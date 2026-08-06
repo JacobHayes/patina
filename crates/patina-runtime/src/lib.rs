@@ -1370,6 +1370,12 @@ impl RuntimeBuilder {
                 }
             }
         }
+        if matches!(
+            self.config.mode,
+            ExecutionMode::Seeded | ExecutionMode::Record { .. } | ExecutionMode::RecordTransport
+        ) {
+            validate_buggify_fingerprint_contract(&self.config)?;
+        }
 
         // Swarm fault-class selection: for a record/seeded run, mask the enabled
         // fault classes down to a seed-derived subset BEFORE any driver or
@@ -1521,6 +1527,7 @@ impl RuntimeBuilder {
         if let Some(policy) = replay_schedule_override {
             self.config.schedule_policy = policy;
         }
+        validate_buggify_fingerprint_contract(&self.config)?;
 
         // The crash-consistency filesystem is built HERE, and only here, from
         // `config.faults` — the single choke point that always consumes the
@@ -4569,6 +4576,20 @@ fn buggify_record(config: &RuntimeConfig) -> Option<patina_dst_trace::BuggifyCon
     })
 }
 
+fn validate_buggify_fingerprint_contract(config: &RuntimeConfig) -> Result<(), RuntimeError> {
+    if fingerprint_declares_component(&config.fingerprint, "buggify") && !config.buggify.enabled {
+        return Err(RuntimeError::Config(
+            "fingerprint declares +buggify but buggify is not enabled; refusing vacuous SDK buggify coverage"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn fingerprint_declares_component(fingerprint: &str, component: &str) -> bool {
+    fingerprint.split('+').skip(1).any(|part| part == component)
+}
+
 /// Rebuild a [`BuggifyConfig`] from a recorded trace's authoritative buggify
 /// metadata.
 fn buggify_config_from_record(record: &patina_dst_trace::BuggifyConfigRecord) -> BuggifyConfig {
@@ -5370,6 +5391,25 @@ mod tests {
         assert!(!diag.enabled);
         assert_eq!(diag.total_firings, 0);
         assert_eq!(context.buggify.to_record(), None);
+    }
+
+    #[test]
+    fn buggify_fingerprint_requires_enabled_config() {
+        // Class-level pairing for SDK buggify value-form point pins: a native
+        // `+buggify` compatibility fingerprint without an armed SDK config is a
+        // vacuous coverage claim and must fail before any trace can be recorded.
+        let directory = tempfile::tempdir().unwrap();
+        let trace = directory.path().join("vacuous-buggify.patina");
+        let error = match Context::from_config(RuntimeConfig::record(7, &trace, "fp+buggify")) {
+            Ok(_) => panic!("+buggify fingerprint without buggify config must fail"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("fingerprint declares +buggify but buggify is not enabled"),
+            "{error}"
+        );
     }
 
     #[test]

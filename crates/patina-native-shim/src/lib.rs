@@ -1639,6 +1639,18 @@ fn runtime_config_from_control_plane() -> Result<(RuntimeConfig, Option<i32>), R
     // Cooperative-SUT (buggify) knobs come from the same control plane through
     // the shared parser, so the shim and the process-environment path agree.
     config = config.apply_buggify_env(control_env)?;
+    if matches!(
+        config.mode(),
+        &patina_dst_runtime::ExecutionMode::Record { .. }
+            | &patina_dst_runtime::ExecutionMode::RecordTransport
+    ) && fingerprint_declares_component(config.fingerprint(), "buggify")
+        && !config.buggify().enabled
+    {
+        return Err(RuntimeError::Config(
+            "fingerprint declares +buggify but buggify is not enabled; refusing vacuous SDK buggify coverage"
+                .into(),
+        ));
+    }
     // Exploration scheduling-policy (PCT / starvation) and swarm fault-class
     // selection knobs travel the same control plane through the shared parsers,
     // so the shim and the process-environment path agree on the protocol.
@@ -1684,6 +1696,10 @@ fn sud_armed_metadata() -> Option<bool> {
 #[cfg(not(target_os = "linux"))]
 fn sud_armed_metadata() -> Option<bool> {
     None
+}
+
+fn fingerprint_declares_component(fingerprint: &str, component: &str) -> bool {
+    fingerprint.split('+').skip(1).any(|part| part == component)
 }
 
 fn install(context: Result<Context, RuntimeError>) -> c_int {

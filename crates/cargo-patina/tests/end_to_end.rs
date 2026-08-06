@@ -6331,6 +6331,16 @@ fn native_buggify_sdk_reports_records_and_replays() {
         String::from_utf8_lossy(&replayed.stdout),
         "record/replay stdout diverged"
     );
+    // Point pin for `--buggify=N` value-form plumbing; class-level pairing:
+    // the trace/runtime `+buggify` fingerprint metadata-coherence invariant.
+    let bundle = patina_dst_trace::TraceBundle::load(&trace).unwrap();
+    let buggify = bundle
+        .metadata
+        .buggify
+        .as_ref()
+        .expect("value-form --buggify must record an armed SDK config");
+    assert_eq!(buggify.fire_permille, 1000);
+    assert_eq!(buggify.activation_permille, 1000);
 }
 
 // A guest that reuses the same label at two different call sites: a fatal

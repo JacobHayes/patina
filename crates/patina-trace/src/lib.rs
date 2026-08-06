@@ -280,9 +280,12 @@ pub struct RunMetadata {
     pub faults: Option<FaultConfigRecord>,
     /// The run's cooperative-SUT (buggify) configuration, authoritative on
     /// replay. Additive: absent (`None`) in traces recorded without buggify,
-    /// which the runtime treats as buggify-disabled. An old trace therefore
-    /// migrates clean, and a conflicting explicit knob at replay fails closed
-    /// exactly like [`RunMetadata::faults`].
+    /// which the runtime treats as buggify-disabled. A native trace whose textual
+    /// fingerprint declares `+buggify` must not omit this field; that would claim
+    /// SDK-fault coverage without an armed SDK config. An old trace therefore
+    /// migrates clean unless it also carries the `+buggify` capability suffix, and
+    /// a conflicting explicit knob at replay fails closed exactly like
+    /// [`RunMetadata::faults`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buggify: Option<BuggifyConfigRecord>,
     /// The guest program arguments (everything after `--`, i.e. `argv[1..]`) the
@@ -603,6 +606,13 @@ impl TraceBundle {
         if self.metadata.decision_policy.is_empty() {
             return Err(TraceError::Invalid(
                 "trace decision policy identifier is empty".into(),
+            ));
+        }
+        if fingerprint_declares_component(&self.metadata.fingerprint, "buggify")
+            && self.metadata.buggify.is_none()
+        {
+            return Err(TraceError::Invalid(
+                "fingerprint declares +buggify but trace metadata has no buggify config".into(),
             ));
         }
         let Some(main) = self.timelines.first() else {
@@ -1027,6 +1037,10 @@ impl BranchSession {
         });
         bundle.write_atomic(self.path)
     }
+}
+
+fn fingerprint_declares_component(fingerprint: &str, component: &str) -> bool {
+    fingerprint.split('+').skip(1).any(|part| part == component)
 }
 
 #[derive(Debug)]
@@ -1503,6 +1517,33 @@ mod tests {
         assert!(!text.contains("buggify"), "{text}");
         let reloaded_plain = TraceBundle::from_slice(plain.to_bytes().unwrap().as_slice()).unwrap();
         assert_eq!(reloaded_plain.metadata.buggify, None);
+    }
+
+    #[test]
+    fn buggify_fingerprint_requires_buggify_metadata() {
+        // Class-level pairing for SDK buggify value-form point pins: a trace whose
+        // fingerprint declares `+buggify` must carry the authoritative buggify
+        // config, or the run is vacuous and replay cannot reproduce SDK decisions.
+        let invalid = serde_json::json!({
+            "format_version": TRACE_FORMAT_VERSION,
+            "metadata": {
+                "root_seed": 7,
+                "decision_policy": "splitmix64-v1",
+                "fingerprint": "fingerprint+buggify"
+            },
+            "timelines": [{
+                "id": MAIN_TIMELINE,
+                "decisions": []
+            }]
+        });
+        let bytes = serde_json::to_vec(&invalid).unwrap();
+        let error = TraceBundle::from_slice(&bytes).expect_err("missing buggify config must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("fingerprint declares +buggify but trace metadata has no buggify config"),
+            "{error}"
+        );
     }
 
     #[test]
