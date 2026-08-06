@@ -2,9 +2,12 @@
 
 Status: design approved 2026-07-30; Wave A (`domain_seed`/`fault_domain` registry, nested
 `FaultConfig`, FaultNet permille migration, swarm coverage gate), Wave B (`FaultFs` errors +
-short I/O) and Wave C (fs latency, `--net-latency-nanos` in the shared fault group, TCP base
-latency, `--budget`/`test`-buggify parity, the crash-placement campaign band) implemented
-2026-08-06; Waves D-F remain planned. The §0 file:line references are as verified at design
+short I/O), Wave C (fs latency, `--net-latency-nanos` in the shared fault group, TCP base
+latency, `--budget`/`test`-buggify parity, the crash-placement campaign band) and the core of
+Wave D (SimNet + shim wildcard-bind routing, `Operation::DnsResolve` + `Context::dns_resolve`,
+the `getaddrinfo`/`freeaddrinfo` interposer, `--dns-entry`/`Kind::DnsEntry` + both fault knobs +
+`DnsConfigRecord` + reconcile, the WASI family exception) implemented 2026-08-06; Waves E-F
+remain planned. Wave D's remaining items are listed in §10. The §0 file:line references are as verified at design
 time (post-e135c94) and have since moved.
 
 ## 0. Verified current state (what this builds on, with the gaps found)
@@ -495,11 +498,31 @@ check ladder; Linux 8-gate at wave boundaries.
   "buggify at the default rate, and 500 is a test filter"). Both are now structurally prevented:
   every family's fault plumbing enumerates ONE knob table gated against the flag registry, and a
   plain token after a bare optional-value flag is a loud parse error.
-- **Wave D — DNS (runtime-touching, full battery).** SimNet wildcard-bind routing rule;
-  `Operation::DnsResolve` + `Context::dns_resolve`; getaddrinfo interposer + real
-  `freeaddrinfo`; `--dns-entry`/`Kind::DnsEntry` + fault knobs + `DnsConfigRecord` +
-  reconcile; harness `dns_entry`/`dns_service`; WASI loud rejection; RED efficacy/vacuity legs
-  (a guest resolves a defined name and observes NXDOMAIN/latency; VACUOUS_DNS_FAULT class).
+- **Wave D — DNS (runtime-touching, full battery). CORE DONE; three items remain.**
+  Delivered: the wildcard-bind routing rule — shared by SimNet AND the native shim, because each
+  resolves addresses independently and a rule in only one of them delivers traffic that nothing
+  wakes for (red-proven in both directions); `Operation::DnsResolve` + `Context::dns_resolve`
+  with the host table, the built-ins, and NXDOMAIN-as-semantics; the `getaddrinfo` interposer
+  returning one heap A record with a real `freeaddrinfo`; `--dns-entry` (`Kind::DnsEntry`),
+  `--dns-fail-permille`, `--dns-latency-nanos`, `DnsConfigRecord` + reconcile, swarm rows, and
+  the WASI family exception (declared by the owning group, so the refusal is registry-driven);
+  `PATINA_DNS_FAULT_REPORT` with per-class vacuity; runtime and native end-to-end efficacy legs.
+  REMAINING: (1) `HarnessBuilder::dns_entry`/`dns_service` (§3.4 part 2); (2) the campaign
+  `--faults` DNS band plus a `VACUOUS_DNS_FAULT` outcome class and its selftest fixture — the
+  runtime already emits the vacuity verdict the classifier would read; (3) TUTORIAL prose.
+
+  One design note against §3.4: the accepted socket's local address stays the LISTENER's
+  (`0.0.0.0:PORT`) rather than the address the client dialed, so `getsockname` on an accepted
+  wildcard socket reports the wildcard. Reporting the dialed address would mean adding a field
+  to the recorded `TcpAccepted` outcome, i.e. a trace-format decision; the stream endpoints are
+  instead paired by the client's ephemeral address, which both sides already hold and which
+  needs no format change.
+
+  The future fix, should the dialed address ever be wanted (a guest asserting on `getsockname`,
+  or a multi-homed model where the IP a client reached is meaningful): add a `local` field to
+  `TcpAccepted` and bump the trace format with a migration — a DELIBERATE format decision taken
+  on its own terms rather than folded into a domain wave. The endpoint pairing would no longer
+  NEED the client's address at that point, though there is no reason to change it back.
 - **Wave E — TCP connect/reset, partition CLI, duplication, tcp-buffer flag, net per-class
   vacuity (roadmap #1 + §7 rows).**
 - **Waves F+ — clock, entropy, spawn, allocator (roadmap #2-#5)**, each a small commit stamped

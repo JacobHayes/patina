@@ -109,6 +109,23 @@ pub struct FaultConfigRecord {
     pub net_drop_permille: u16,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub net_latency_nanos: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub dns_fail_permille: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_latency_nanos: Option<(u64, u64)>,
+}
+
+/// The DNS host table of a recorded run: the names it could resolve and the
+/// virtual IPv4 address each resolved to. Stored in the trace metadata so a
+/// replay is flag-free and a conflicting table at replay fails closed, exactly
+/// like [`FaultConfigRecord`]. Resolution OUTCOMES are recorded operations in
+/// their own right, so this record is for self-description and conflict
+/// detection rather than for correctness.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DnsConfigRecord {
+    /// Name -> dotted-quad IPv4 address, in the runtime's stable key order.
+    pub entries: BTreeMap<String, String>,
 }
 
 /// The seed-driven cooperative-SUT (buggify) configuration of a recorded run.
@@ -338,6 +355,11 @@ pub struct RunMetadata {
     /// [`RunMetadata::faults`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buggify: Option<BuggifyConfigRecord>,
+    /// The run's DNS host table, authoritative on replay. Additive exactly like
+    /// [`RunMetadata::faults`]: absent in traces recorded without a table, which
+    /// the runtime treats as an empty one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns: Option<DnsConfigRecord>,
     /// The guest program arguments (everything after `--`, i.e. `argv[1..]`) the
     /// run was executed with, recorded so a `replay` reproduces them without the
     /// operator re-passing the `--` section. Additive exactly like
@@ -402,6 +424,7 @@ impl RunMetadata {
             fingerprint: fingerprint.into(),
             faults: None,
             buggify: None,
+            dns: None,
             guest_argv: None,
             guest_env: None,
             schedule_policy: None,
@@ -439,6 +462,12 @@ impl RunMetadata {
     /// Attach deterministic guest environment values recorded into the trace.
     /// `None` records nothing; `Some(map)` records exactly the supplied values.
     #[must_use]
+    /// Record the run's DNS host table. `None` records nothing.
+    pub fn with_dns(mut self, dns: Option<DnsConfigRecord>) -> Self {
+        self.dns = dns;
+        self
+    }
+
     pub fn with_guest_env(mut self, guest_env: Option<BTreeMap<String, String>>) -> Self {
         self.guest_env = guest_env;
         self
@@ -970,6 +999,12 @@ impl Replayer {
         self.metadata.guest_env.as_ref()
     }
 
+    /// The DNS host table recorded into the trace, authoritative on replay.
+    /// `None` for a trace recorded without one.
+    pub const fn dns_config(&self) -> Option<&DnsConfigRecord> {
+        self.metadata.dns.as_ref()
+    }
+
     /// Whether the trace was recorded under syscall-user-dispatch. `Some(true)`
     /// when it was; `None` otherwise (see [`RunMetadata::sud`]).
     pub const fn sud(&self) -> Option<bool> {
@@ -1133,6 +1168,11 @@ impl BranchSession {
     /// `None` for a trace recorded before env capture or with no supplied values.
     pub fn guest_env(&self) -> Option<&BTreeMap<String, String>> {
         self.bundle.metadata.guest_env.as_ref()
+    }
+
+    /// The DNS host table inherited from the parent trace.
+    pub const fn dns_config(&self) -> Option<&DnsConfigRecord> {
+        self.bundle.metadata.dns.as_ref()
     }
 
     pub fn expect_prefix(

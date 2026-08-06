@@ -232,7 +232,8 @@ External controls include:
 - run budget (`--budget`);
 - trace path (`--record`, the `replay` verb);
 - explicit host-capture allowlists (`--mount`);
-- fault knobs (`--fs-crash-at`, `--fs-error-permille`, `--fs-short-permille`, `--fs-latency-nanos`, `--net-drop-permille`, `--net-latency-nanos`, …) and buggify knobs, accepted uniformly by every family;
+- fault knobs (`--fs-crash-at`, `--fs-error-permille`, `--fs-short-permille`, `--fs-latency-nanos`, `--net-drop-permille`, `--net-latency-nanos`, `--dns-fail-permille`, `--dns-latency-nanos`, …) and buggify knobs, accepted uniformly by every family that has the surface (DNS is a documented wasip1 exception);
+- the DNS host table (`--dns-entry`), semantic configuration recorded and reconciled like the fault knobs;
 - exploration-policy selection (`--sched-pct`, `--starve`, `--swarm`);
 - liveness oracles (`--liveness-watchdog`, `--converge-within`);
 - simple key/value parameters (`--param`, exposed through `Context::param`).

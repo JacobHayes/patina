@@ -3125,19 +3125,81 @@ int getpeername(int fd, struct sockaddr *addr, socklen_t *len) {
     return 0;
 }
 
-/* IPv6 and DNS are out of scope: fail closed with clear errors. */
+/*
+ * DNS: forward lookup is modeled against the run's deterministic host table.
+ * IPv6 stays out of scope, and so do gethostbyname/getnameinfo — nothing modern
+ * uses them for forward resolution, so they are left undefined and the pre-run
+ * audit keeps denying them rather than growing vocabulary no guest consumes.
+ *
+ * Only a single A record is ever returned: SimNet's address space is IPv4
+ * `ip:port`, so a multi-address answer would offer the guest choices that cannot
+ * differ. The result is heap-allocated and freeaddrinfo really frees it.
+ */
 
 int getaddrinfo(const char *node, const char *service,
                 const struct addrinfo *hints, struct addrinfo **res) {
-    (void)node;
-    (void)service;
-    (void)hints;
-    (void)res;
-    return EAI_FAIL;
+    if (res == NULL) return EAI_FAIL;
+    if (hints != NULL && hints->ai_family == AF_INET6) return EAI_FAMILY;
+    /* A null node is a service-only lookup: it names the loopback address. */
+    const char *name = (node == NULL) ? "localhost" : node;
+
+    uint16_t port = 0;
+    if (service != NULL) {
+        /* Only numeric services resolve: a /etc/services lookup would be a host
+         * dependency, and the virtual network has no service registry.
+         *
+         * Parsed by hand rather than with strtol, which glibc resolves to
+         * __isoc23_strtol — an uninterposed import that the pre-run default-deny
+         * gate (correctly) refuses, and which every native guest would inherit
+         * because this translation unit is always linked. A digits-only parse
+         * also keeps the result locale-independent. */
+        if (*service == '\0') return EAI_SERVICE;
+        unsigned long parsed = 0;
+        for (const char *digit = service; *digit != '\0'; ++digit) {
+            if (*digit < '0' || *digit > '9') return EAI_SERVICE;
+            parsed = parsed * 10u + (unsigned long)(*digit - '0');
+            if (parsed > 65535u) return EAI_SERVICE;
+        }
+        port = (uint16_t)parsed;
+    }
+
+    uint32_t ip = 0;
+    if (patina_dns_resolve(name, &ip) != 0) {
+        /* An injected resolver timeout is transient (EAI_AGAIN, the retry the
+         * guest is supposed to have); anything else is a name that does not
+         * resolve. */
+        return (patina_errno() == EINTR) ? EAI_AGAIN : EAI_NONAME;
+    }
+
+    struct addrinfo *out = calloc(1, sizeof(struct addrinfo));
+    struct sockaddr_in *addr = calloc(1, sizeof(struct sockaddr_in));
+    if (out == NULL || addr == NULL) {
+        free(out);
+        free(addr);
+        return EAI_MEMORY;
+    }
+    addr->sin_family = AF_INET;
+    addr->sin_port = htons(port);
+    addr->sin_addr.s_addr = htonl(ip);
+    out->ai_family = AF_INET;
+    out->ai_socktype = (hints != NULL && hints->ai_socktype != 0) ? hints->ai_socktype : SOCK_STREAM;
+    out->ai_protocol = (hints != NULL) ? hints->ai_protocol : 0;
+    out->ai_addrlen = sizeof(struct sockaddr_in);
+    out->ai_addr = (struct sockaddr *)addr;
+    out->ai_canonname = NULL;
+    out->ai_next = NULL;
+    *res = out;
+    return 0;
 }
 
 void freeaddrinfo(struct addrinfo *res) {
-    (void)res;
+    while (res != NULL) {
+        struct addrinfo *next = res->ai_next;
+        free(res->ai_addr);
+        free(res->ai_canonname);
+        free(res);
+        res = next;
+    }
 }
 
 /*

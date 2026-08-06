@@ -299,6 +299,14 @@ int32_t patina_net_set_nonblocking(int32_t fd, int32_t nonblocking);
 int32_t patina_net_set_read_timeout(int32_t fd, uint64_t nanos);
 int32_t patina_net_is_nonblocking(int32_t fd);
 int32_t patina_net_close(int32_t fd);
+/*
+ * Resolve a host name to a virtual IPv4 address (host byte order) through the
+ * run's deterministic DNS host table. Returns 0 and writes *ip on success; on
+ * failure returns -1 and sets errno (ENOENT for a name that does not resolve,
+ * EINTR for an injected resolver timeout). Backs getaddrinfo; gethostbyname and
+ * getnameinfo stay refused.
+ */
+int32_t patina_dns_resolve(const char *name, uint32_t *ip);
 
 /*
  * In-process pipe / socketpair. Both endpoints live inside this one guest

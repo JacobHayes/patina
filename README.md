@@ -177,6 +177,13 @@ reproduces them flag-free:
   and peers).
 - **Network faults**: `--net-drop-permille`, `--net-jitter-nanos MIN..MAX`,
   `--net-latency-nanos` (base delivery latency, on datagrams and TCP alike).
+- **DNS** (native and Cargo families; wasip1 has no resolution surface):
+  `--dns-entry NAME=ADDR` defines the host table a guest can resolve — every
+  other name is NXDOMAIN — and `--dns-fail-permille` / `--dns-latency-nanos`
+  inject seeded resolution failures and delays against the defined names. A
+  server that binds `0.0.0.0:PORT` is reachable at any address on that port, so
+  ordinary `INADDR_ANY` server code is reached by a resolved name with no
+  service-side registration.
 - **Timing**: `--sleep-jitter-nanos MIN..MAX` on every guest sleep.
 - **Schedule exploration** (native): `--sched-pct` (PCT priority scheduling),
   `--starve` (bounded starvation intervals), `--swarm` (seed-derived fault-class

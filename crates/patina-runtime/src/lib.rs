@@ -190,6 +190,15 @@ pub const ENV_FS_SHORT_PERMILLE: &str = "PATINA_FS_SHORT_PERMILLE";
 /// site that owns the clock). Slow I/O reorders against timers and peers. Off
 /// when unset.
 pub const ENV_FS_LATENCY: &str = "PATINA_FS_LATENCY_NANOS";
+/// Seeded DNS resolution-failure probability in per-mille (0..=1000), applied to
+/// lookups of names the host table defines. Off (zero) when unset.
+pub const ENV_DNS_FAIL_PERMILLE: &str = "PATINA_DNS_FAIL_PERMILLE";
+/// Seeded extra latency `MIN..MAX` in nanoseconds added to every eligible name
+/// resolution, applied by the `Context`. Off when unset.
+pub const ENV_DNS_LATENCY: &str = "PATINA_DNS_LATENCY_NANOS";
+/// The run's DNS host table as a JSON object (`NAME` -> dotted-quad `ADDR`).
+/// Semantic configuration, not a fault knob: names outside it are NXDOMAIN.
+pub const ENV_DNS_ENTRIES: &str = "PATINA_DNS_ENTRIES_JSON";
 /// Suppress the default-on end-of-run schedule diagnostic when set to a false-y
 /// value (`0`, `off`, `false`, `no`). The diagnostic is on by default.
 pub const ENV_SCHEDULE_REPORT: &str = "PATINA_SCHEDULE_REPORT";
@@ -203,6 +212,9 @@ pub const ENV_NET_FAULT_REPORT: &str = "PATINA_NET_FAULT_REPORT";
 /// when set to a false-y value (`0`, `off`, `false`, `no`). The diagnostic is on
 /// by default when fs fault knobs had eligible traffic.
 pub const ENV_FS_FAULT_REPORT: &str = "PATINA_FS_FAULT_REPORT";
+/// Suppress the default-on end-of-run DNS fault-injection diagnostic when set to
+/// a false-y value (`0`, `off`, `false`, `no`).
+pub const ENV_DNS_FAULT_REPORT: &str = "PATINA_DNS_FAULT_REPORT";
 /// Enable cooperative-SUT (buggify) fault injection. Its value is the
 /// per-evaluation firing probability in per-mille for an active site (0..=1000);
 /// an empty value uses the FoundationDB default of 25% (250). Presence of the
@@ -486,6 +498,7 @@ pub struct FaultConfig {
     pub fs: FsFaultConfig,
     pub net: NetFaultConfig,
     pub clock: ClockFaultConfig,
+    pub dns: DnsFaultConfig,
 }
 
 /// Filesystem fault knobs.
@@ -514,6 +527,19 @@ pub struct NetFaultConfig {
     pub jitter_nanos: Option<(u64, u64)>,
     /// Seeded datagram drop probability in per-mille (0..=1000).
     pub drop_permille: u16,
+}
+
+/// DNS fault knobs. They act only on names the run's host table DEFINES: an
+/// undefined name is NXDOMAIN as semantics, not as an injected fault.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DnsFaultConfig {
+    /// Seeded resolution-failure probability in per-mille (0..=1000). On fire, a
+    /// second draw picks NXDOMAIN (a stale or deleted record) or a transient
+    /// timeout (a slow or unreachable resolver).
+    pub fail_permille: u16,
+    /// Inclusive `[min, max]` nanoseconds of seeded latency applied before every
+    /// eligible resolution.
+    pub latency_nanos: Option<(u64, u64)>,
 }
 
 /// Clock fault knobs.
@@ -615,6 +641,14 @@ pub struct RuntimeConfig {
     /// default; recorded into trace metadata when non-empty and restored on
     /// replay. Not a fingerprint input.
     guest_env: BTreeMap<String, String>,
+    /// The DNS host table: the names this run resolves, and the virtual IPv4
+    /// address each resolves to. Semantic configuration rather than a fault knob
+    /// (like `params`): an undefined name is NXDOMAIN deterministically, and the
+    /// `--dns-*` fault knobs act only on the names defined here. Recorded into
+    /// trace metadata and reconciled on replay so a resolution reproduces without
+    /// re-supplying the table. Not a fingerprint input — the recorded op stream
+    /// already reflects every resolution outcome.
+    dns_entries: BTreeMap<String, String>,
     /// The liveness-watchdog configuration. Default (disabled) leaves a run
     /// byte-for-byte unchanged; enabling it only ADDS a possible violation report
     /// and is deliberately NOT a fingerprint input (schedule-invariant).
@@ -641,6 +675,7 @@ impl RuntimeConfig {
             swarm: false,
             guest_argv: None,
             guest_env: BTreeMap::new(),
+            dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             sud: None,
         }
@@ -659,6 +694,7 @@ impl RuntimeConfig {
             swarm: false,
             guest_argv: None,
             guest_env: BTreeMap::new(),
+            dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             sud: None,
         }
@@ -682,6 +718,7 @@ impl RuntimeConfig {
             swarm: false,
             guest_argv: None,
             guest_env: BTreeMap::new(),
+            dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             sud: None,
         }
@@ -706,6 +743,7 @@ impl RuntimeConfig {
             swarm: false,
             guest_argv: None,
             guest_env: BTreeMap::new(),
+            dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             sud: None,
         }
@@ -731,6 +769,7 @@ impl RuntimeConfig {
             swarm: false,
             guest_argv: None,
             guest_env: BTreeMap::new(),
+            dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             sud: None,
         }
@@ -762,6 +801,7 @@ impl RuntimeConfig {
             swarm: false,
             guest_argv: None,
             guest_env: BTreeMap::new(),
+            dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             sud: None,
         }
@@ -814,6 +854,57 @@ impl RuntimeConfig {
     pub fn with_fs_latency_nanos(mut self, min: u64, max: u64) -> Self {
         self.faults.fs.latency_nanos = Some((min, max));
         self
+    }
+
+    /// Fail eligible DNS resolutions with the given per-mille (0..=1000)
+    /// probability, choosing NXDOMAIN or a transient timeout on each fire.
+    pub fn with_dns_fail_permille(mut self, permille: u16) -> Self {
+        self.faults.dns.fail_permille = permille;
+        self
+    }
+
+    /// Add seeded extra latency to every eligible name resolution.
+    pub fn with_dns_latency_nanos(mut self, min: u64, max: u64) -> Self {
+        self.faults.dns.latency_nanos = Some((min, max));
+        self
+    }
+
+    /// Define a name in the run's DNS host table. Names not defined here are
+    /// NXDOMAIN; the `--dns-*` fault knobs act only on defined ones.
+    pub fn with_dns_entry(
+        mut self,
+        name: impl Into<String>,
+        address: impl Into<String>,
+    ) -> Result<Self, RuntimeError> {
+        let (name, address) = (name.into(), address.into());
+        validate_dns_entry(&name, &address)?;
+        self.dns_entries.insert(name, address);
+        Ok(self)
+    }
+
+    /// The run's DNS host table.
+    pub const fn dns_entries(&self) -> &BTreeMap<String, String> {
+        &self.dns_entries
+    }
+
+    /// Apply the DNS host table from a control-plane accessor, mirroring
+    /// [`RuntimeConfig::apply_fault_env`]. The table is a JSON object; a
+    /// malformed entry fails closed rather than silently resolving nothing.
+    pub fn apply_dns_env<F>(mut self, get: F) -> Result<Self, RuntimeError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let Some(value) = get(ENV_DNS_ENTRIES) else {
+            return Ok(self);
+        };
+        let entries: BTreeMap<String, String> = serde_json::from_str(&value).map_err(|error| {
+            RuntimeError::Config(format!("{ENV_DNS_ENTRIES} is invalid: {error}"))
+        })?;
+        for (name, address) in &entries {
+            validate_dns_entry(name, address)?;
+        }
+        self.dns_entries = entries;
+        Ok(self)
     }
 
     /// Add seeded extra latency to every guest sleep, drawn from `[min, max]`.
@@ -878,6 +969,12 @@ impl RuntimeConfig {
         }
         if let Some(value) = get(ENV_NET_DROP_PERMILLE) {
             self.faults.net.drop_permille = parse_permille(ENV_NET_DROP_PERMILLE, &value)?;
+        }
+        if let Some(value) = get(ENV_DNS_FAIL_PERMILLE) {
+            self.faults.dns.fail_permille = parse_permille(ENV_DNS_FAIL_PERMILLE, &value)?;
+        }
+        if let Some(value) = get(ENV_DNS_LATENCY) {
+            self.faults.dns.latency_nanos = Some(parse_nanos_range(ENV_DNS_LATENCY, &value)?);
         }
         if let Some(value) = get(ENV_NET_LATENCY) {
             self.faults.net.latency_nanos = value.trim().parse().map_err(|_| {
@@ -1304,6 +1401,7 @@ impl RuntimeConfig {
             config.params = params;
         }
         let config = config.apply_fault_env(|name| env::var(name).ok())?;
+        let config = config.apply_dns_env(|name| env::var(name).ok())?;
         let config = config.apply_buggify_env(|name| env::var(name).ok())?;
         let config = config.apply_schedule_env(|name| env::var(name).ok())?;
         let config = config.apply_swarm_env(|name| env::var(name).ok())?;
@@ -1536,6 +1634,7 @@ impl RuntimeBuilder {
         let mut replay_buggify_override: Option<BuggifyConfig> = None;
         // Same contract for deterministic guest environment values.
         let mut replay_guest_env_override: Option<BTreeMap<String, String>> = None;
+        let mut replay_dns_override: Option<BTreeMap<String, String>> = None;
         // Same contract for the exploration scheduling policy.
         let mut replay_schedule_override: Option<SchedulePolicy> = None;
         let (execution, root_seed) = match &self.config.mode {
@@ -1551,6 +1650,7 @@ impl RuntimeBuilder {
                             .with_watchdog(watchdog_record(&self.config))
                             .with_guest_argv(self.config.guest_argv.clone())
                             .with_guest_env(guest_env_record(&self.config))
+                            .with_dns(dns_record(&self.config))
                             .with_sud(self.config.sud),
                     ),
                     sink: RecordSink::Path {
@@ -1571,6 +1671,7 @@ impl RuntimeBuilder {
                             .with_watchdog(watchdog_record(&self.config))
                             .with_guest_argv(self.config.guest_argv.clone())
                             .with_guest_env(guest_env_record(&self.config))
+                            .with_dns(dns_record(&self.config))
                             .with_sud(self.config.sud),
                     ),
                     sink: RecordSink::Transport(
@@ -1589,6 +1690,7 @@ impl RuntimeBuilder {
                     reconcile_replay_buggify(&self.config, replayer.buggify_config())?;
                 replay_guest_env_override =
                     reconcile_replay_guest_env(&self.config, replayer.guest_env())?;
+                replay_dns_override = reconcile_replay_dns(&self.config, replayer.dns_config())?;
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
                 reconcile_replay_sud(&self.config, replayer.sud())?;
@@ -1614,6 +1716,7 @@ impl RuntimeBuilder {
                     reconcile_replay_buggify(&self.config, replayer.buggify_config())?;
                 replay_guest_env_override =
                     reconcile_replay_guest_env(&self.config, replayer.guest_env())?;
+                replay_dns_override = reconcile_replay_dns(&self.config, replayer.dns_config())?;
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
                 reconcile_replay_sud(&self.config, replayer.sud())?;
@@ -1644,6 +1747,7 @@ impl RuntimeBuilder {
                     reconcile_replay_buggify(&self.config, session.buggify_config())?;
                 replay_guest_env_override =
                     reconcile_replay_guest_env(&self.config, session.guest_env())?;
+                replay_dns_override = reconcile_replay_dns(&self.config, session.dns_config())?;
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, session.schedule_policy())?;
                 // A branch inherits the parent's swarm decision along with its
@@ -1674,6 +1778,11 @@ impl RuntimeBuilder {
         // replay reproduces environment-dependent guest behavior.
         if let Some(guest_env) = replay_guest_env_override {
             self.config.guest_env = guest_env;
+        }
+        // Likewise the trace's authoritative DNS host table, so a flag-free
+        // replay resolves exactly the names the recording could.
+        if let Some(entries) = replay_dns_override {
+            self.config.dns_entries = entries;
         }
         // Adopt the trace's authoritative exploration scheduling policy. Replay
         // consumes recorded task selections directly (through `select`), so the
@@ -1834,6 +1943,12 @@ impl RuntimeBuilder {
             fs_latency_rng: SplitMix64::new(domain_seed(root_seed, fault_domain::FS_LATENCY)),
             fs_latency_eligible_ops: 0,
             fs_latency_applied: 0,
+            dns_entries: self.config.dns_entries,
+            dns_fail_permille: self.config.faults.dns.fail_permille,
+            dns_fault_rng: SplitMix64::new(domain_seed(root_seed, fault_domain::DNS_FAULT)),
+            dns_latency_nanos: self.config.faults.dns.latency_nanos,
+            dns_latency_rng: SplitMix64::new(domain_seed(root_seed, fault_domain::DNS_LATENCY)),
+            dns_report: patina_dst_driver_api::DnsFaultReport::default(),
             schedule: ScheduleTracker::default(),
             buggify: Buggify::new(self.config.buggify, root_seed),
             liveness,
@@ -2851,6 +2966,17 @@ pub struct Context {
     /// traffic the Context never delayed is exactly the inert-knob signal.
     fs_latency_eligible_ops: u64,
     fs_latency_applied: u64,
+    /// The run's DNS host table: the only names that resolve to an address.
+    dns_entries: BTreeMap<String, String>,
+    /// Seeded DNS resolution-failure knob and its domain-separated stream.
+    dns_fail_permille: u16,
+    dns_fault_rng: SplitMix64,
+    /// Seeded DNS resolution latency, applied Context-side like fs latency
+    /// because it too needs the clock.
+    dns_latency_nanos: Option<(u64, u64)>,
+    dns_latency_rng: SplitMix64,
+    /// Per-class DNS fault accounting for the end-of-run vacuity diagnostic.
+    dns_report: patina_dst_driver_api::DnsFaultReport,
     /// Per-task scheduling-boundary accounting for the vacuous-schedule
     /// diagnostic emitted at [`Context::finish`].
     schedule: ScheduleTracker,
@@ -3823,6 +3949,116 @@ impl Context {
         decode_string(&operation, outcome)
     }
 
+    /// Resolve a host name to a virtual IPv4 address, as a recorded boundary
+    /// operation so a replay reproduces the resolution — including an injected
+    /// failure — straight from the trace.
+    ///
+    /// Three resolution classes, only the last of which the fault knobs touch:
+    ///
+    /// - **Built-ins**, resolved locally and fault-exempt: a dotted-quad literal
+    ///   (libc resolves a numeric node without consulting a resolver) and
+    ///   `localhost`.
+    /// - **Undefined names**, which are NXDOMAIN. That is SEMANTICS, not a
+    ///   fault: it fires at rate 1.0, deterministically, with no knob set. A run
+    ///   that resolves only undefined names has had no fault opportunities at
+    ///   all, which is why those lookups are not counted as eligible.
+    /// - **Defined names**, from the run's host table. These are the
+    ///   fault-eligible resolutions: latency applies before the lookup and the
+    ///   failure knob can turn one into NXDOMAIN or a transient timeout.
+    pub fn dns_resolve(&mut self, name: &str) -> Result<String, RuntimeError> {
+        if let Some(builtin) = builtin_dns_resolution(name) {
+            return Ok(builtin);
+        }
+        let defined = self.dns_entries.get(name).cloned();
+        if defined.is_some() {
+            self.dns_report.resolutions += 1;
+            self.apply_dns_latency()?;
+        }
+        let operation = Operation::DnsResolve { name: name.into() };
+        let expected = self.replay_expected(&operation)?;
+        let actual = match defined {
+            None => Outcome::Error(nxdomain(name)),
+            Some(address) => match self.draw_dns_failure() {
+                Some(error) => {
+                    self.dns_report.failures_injected += 1;
+                    Outcome::Error(error)
+                }
+                None => Outcome::Bytes(address.into_bytes()),
+            },
+        };
+        let outcome = self.reconcile(operation.clone(), expected, actual)?;
+        decode_string(&operation, outcome)
+    }
+
+    /// Delay one eligible resolution by a seeded draw, mirroring
+    /// [`Context::apply_fs_latency`] — same decision-point law, same single-site
+    /// rule, because name resolution is the other classic reorderer (services
+    /// racing on startup lookups).
+    fn apply_dns_latency(&mut self) -> Result<(), RuntimeError> {
+        let Some((min, max)) = self.dns_latency_nanos else {
+            return Ok(());
+        };
+        let latency = if min == max {
+            min
+        } else {
+            min + (self.dns_latency_rng.next_u64() % (max - min + 1))
+        };
+        if latency == 0 {
+            return Ok(());
+        }
+        let now = self.current_monotonic()?;
+        let deadline = now.saturating_add(latency);
+        self.sleep_until(ClockKind::Monotonic, deadline)?;
+        self.dns_report.latency_applied += 1;
+        Ok(())
+    }
+
+    /// Draw the seeded resolution failure for one eligible lookup, or `None`
+    /// when the knob does not fire. Extreme rates are decision-free so the
+    /// never-fail default perturbs no stream.
+    fn draw_dns_failure(&mut self) -> Option<EffectError> {
+        let fires = match self.dns_fail_permille {
+            0 => false,
+            1000 => true,
+            permille => (self.dns_fault_rng.next_u64() % 1000) < u64::from(permille),
+        };
+        if !fires {
+            return None;
+        }
+        // A second draw picks the failure MODE: a vanished record, or a resolver
+        // that did not answer in time. They exercise different guest code —
+        // NXDOMAIN is usually terminal, a timeout is what retry discipline is
+        // for — so a campaign wants both.
+        if self.dns_fault_rng.next_u64() & 1 == 0 {
+            Some(EffectError::new(
+                ErrorCode::NotFound,
+                "injected DNS failure: name does not resolve",
+            ))
+        } else {
+            Some(EffectError::new(
+                ErrorCode::Interrupted,
+                "injected DNS failure: resolver timed out",
+            ))
+        }
+    }
+
+    /// The end-of-run DNS fault summary, or `None` when neither knob was live.
+    /// Filled entirely by the Context: resolution has no driver.
+    pub fn dns_fault_report(&self) -> Option<patina_dst_driver_api::DnsFaultReport> {
+        if self.dns_fail_permille == 0 && self.dns_latency_nanos.is_none() {
+            return None;
+        }
+        let mut report = self.dns_report;
+        report.fail_vacuity_diagnosable = patina_dst_driver_api::vacuity_is_diagnosable(
+            report.resolutions,
+            self.dns_fail_permille,
+        );
+        report.latency_vacuity_diagnosable = self
+            .dns_latency_nanos
+            .is_some_and(|range| fs_latency_is_diagnosable(report.resolutions, range));
+        Some(report)
+    }
+
     pub fn fs_crash(&mut self) -> Result<(), RuntimeError> {
         self.filesystem_unit_undelayed(Operation::FsCrash, |filesystem| filesystem.crash())
     }
@@ -4467,6 +4703,10 @@ impl Context {
         if let Some(report) = self.fs_fault_report() {
             emit_fs_fault_report(&report);
         }
+        // DNS fault-injection diagnostic, on the same default-on terms.
+        if let Some(report) = self.dns_fault_report() {
+            emit_dns_fault_report(&report);
+        }
         // Network fault-injection diagnostic. Default-on so a run configured with
         // net fault knobs that never actually perturbed any send (the knobs being
         // silently inert on the exercised code path) is never a false green.
@@ -4981,6 +5221,15 @@ fn watchdog_record(config: &RuntimeConfig) -> Option<patina_dst_trace::WatchdogC
     })
 }
 
+/// Serialize the run's DNS host table into the trace record, or `None` when the
+/// run defined no names — an empty table records nothing, so a DNS-free run's
+/// metadata is byte-identical to before.
+fn dns_record(config: &RuntimeConfig) -> Option<patina_dst_trace::DnsConfigRecord> {
+    (!config.dns_entries.is_empty()).then(|| patina_dst_trace::DnsConfigRecord {
+        entries: config.dns_entries.clone(),
+    })
+}
+
 /// Serialize the run's effective fault configuration into the trace record so a
 /// fault run replays self-contained. `net_latency_nanos` is folded in because it
 /// too shapes the recorded operation stream, so a flag-free replay must restore
@@ -5003,6 +5252,8 @@ fn fault_record(config: &RuntimeConfig) -> patina_dst_trace::FaultConfigRecord {
         net_jitter_nanos: config.faults.net.jitter_nanos,
         net_drop_permille: config.faults.net.drop_permille,
         net_latency_nanos: config.faults.net.latency_nanos,
+        dns_fail_permille: config.faults.dns.fail_permille,
+        dns_latency_nanos: config.faults.dns.latency_nanos,
     }
 }
 
@@ -5027,6 +5278,10 @@ fn fault_config_from_record(record: &patina_dst_trace::FaultConfigRecord) -> Fau
         },
         clock: ClockFaultConfig {
             sleep_jitter_nanos: record.sleep_jitter_nanos,
+        },
+        dns: DnsFaultConfig {
+            fail_permille: record.dns_fail_permille,
+            latency_nanos: record.dns_latency_nanos,
         },
     }
 }
@@ -5338,6 +5593,26 @@ fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_dst_trace::SwarmConfig
             || config.faults.fs.latency_nanos = None,
         );
     }
+    if config.faults.dns.fail_permille != 0 {
+        apply_swarm_class(
+            seed,
+            "dns_fail",
+            fault_domain::SWARM_DNS_FAIL,
+            None,
+            &mut draw,
+            || config.faults.dns.fail_permille = 0,
+        );
+    }
+    if config.faults.dns.latency_nanos.is_some() {
+        apply_swarm_class(
+            seed,
+            "dns_latency",
+            fault_domain::SWARM_DNS_LATENCY,
+            None,
+            &mut draw,
+            || config.faults.dns.latency_nanos = None,
+        );
+    }
     if config.faults.clock.sleep_jitter_nanos.is_some() {
         apply_swarm_class(
             seed,
@@ -5577,6 +5852,112 @@ schedulable.",
             diag.vacuous.len(),
         );
     }
+}
+
+/// Reject a DNS entry the resolver could not honor: an empty or address-shaped
+/// name, or an address that is not a dotted-quad IPv4 literal. Fails closed at
+/// configuration time rather than at the first lookup, so a typo in
+/// `--dns-entry` is reported before the guest runs.
+fn validate_dns_entry(name: &str, address: &str) -> Result<(), RuntimeError> {
+    if name.trim().is_empty() {
+        return Err(RuntimeError::Config(
+            "DNS entry name must not be empty".into(),
+        ));
+    }
+    if builtin_dns_resolution(name).is_some() {
+        return Err(RuntimeError::Config(format!(
+            "DNS entry {name:?} shadows a built-in resolution (a numeric literal or localhost), \
+             which resolves without the host table"
+        )));
+    }
+    let octets: Vec<&str> = address.split('.').collect();
+    if octets.len() != 4 || !octets.iter().all(|o| o.parse::<u8>().is_ok()) {
+        return Err(RuntimeError::Config(format!(
+            "DNS entry {name:?} must resolve to a dotted-quad IPv4 address; got {address:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Reconcile a recorded trace's authoritative DNS host table with any table the
+/// operator also supplied at replay, exactly like [`reconcile_replay_faults`].
+fn reconcile_replay_dns(
+    config: &RuntimeConfig,
+    recorded: Option<&patina_dst_trace::DnsConfigRecord>,
+) -> Result<Option<BTreeMap<String, String>>, RuntimeError> {
+    let Some(record) = recorded else {
+        return Ok(None);
+    };
+    if !config.dns_entries.is_empty() && config.dns_entries != record.entries {
+        return Err(RuntimeError::Config(
+            "the supplied DNS host table does not match the one recorded in the trace; the trace \
+             is authoritative, so replay without --dns-entry"
+                .into(),
+        ));
+    }
+    Ok(Some(record.entries.clone()))
+}
+
+/// Emit the default-on DNS fault-injection diagnostic. Silent when no eligible
+/// resolution happened at all — a workload that never looks up a defined name
+/// gave the knobs no opportunity, which is not the same as a knob being inert.
+/// Suppressed by a false-y [`ENV_DNS_FAULT_REPORT`].
+fn emit_dns_fault_report(report: &patina_dst_driver_api::DnsFaultReport) {
+    if report.resolutions == 0 {
+        return;
+    }
+    if let Ok(value) = env::var(ENV_DNS_FAULT_REPORT) {
+        if matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "false" | "no"
+        ) {
+            return;
+        }
+    }
+    eprintln!(
+        "PATINA_DNS_FAULT_REPORT resolutions={} fail_vacuity_diagnosable={} failures_injected={} \
+latency_vacuity_diagnosable={} latency_applied={} vacuous={}",
+        report.resolutions,
+        u8::from(report.fail_vacuity_diagnosable),
+        report.failures_injected,
+        u8::from(report.latency_vacuity_diagnosable),
+        report.latency_applied,
+        u8::from(report.is_vacuous()),
+    );
+    if report.is_vacuous() {
+        eprintln!(
+            "PATINA WARNING: DNS fault knobs inert — {} fault-eligible name resolution(s) \
+occurred, enough that the configured rate should have fired an enabled DNS fault class several \
+times over, yet it applied ZERO effects. A clean result here does NOT mean name-resolution \
+failure was tested. Verify the guest resolves names the host table DEFINES — a lookup of an \
+undefined name is NXDOMAIN by semantics and is never fault-eligible.",
+            report.resolutions,
+        );
+    }
+}
+
+/// The resolution a name gets without consulting the host table or the fault
+/// knobs: a dotted-quad literal resolves to itself (libc parses a numeric node
+/// locally rather than asking a resolver) and `localhost` is the loopback
+/// address. Everything else goes through the table.
+fn builtin_dns_resolution(name: &str) -> Option<String> {
+    if name == "localhost" {
+        return Some("127.0.0.1".to_string());
+    }
+    let octets: Vec<&str> = name.split('.').collect();
+    if octets.len() == 4 && octets.iter().all(|o| o.parse::<u8>().is_ok()) {
+        return Some(name.to_string());
+    }
+    None
+}
+
+/// The failure a name outside the host table resolves to. Deterministic
+/// semantics, not an injected fault.
+fn nxdomain(name: &str) -> EffectError {
+    EffectError::new(
+        ErrorCode::NotFound,
+        format!("no virtual DNS entry for {name}"),
+    )
 }
 
 /// Whether a zero-application verdict on the fs-latency knob is anomalous rather
@@ -6593,6 +6974,8 @@ mod tests {
             .with_fs_error_permille(1)
             .with_fs_short_permille(1)
             .with_fs_latency_nanos(1, 2)
+            .with_dns_fail_permille(1)
+            .with_dns_latency_nanos(1, 2)
             .with_sleep_jitter_nanos(1, 2)
             .with_net_jitter_nanos(1, 2)
             .with_net_drop_permille(1)
@@ -6621,6 +7004,8 @@ mod tests {
                 "fs_error",
                 "fs_short",
                 "fs_latency",
+                "dns_fail",
+                "dns_latency",
                 "sleep_jitter",
                 "net_jitter",
                 "net_drop",
@@ -6841,6 +7226,8 @@ mod tests {
             ("fs_error", fault_domain::SWARM_FS_ERROR),
             ("fs_short", fault_domain::SWARM_FS_SHORT),
             ("fs_latency", fault_domain::SWARM_FS_LATENCY),
+            ("dns_fail", fault_domain::SWARM_DNS_FAIL),
+            ("dns_latency", fault_domain::SWARM_DNS_LATENCY),
             ("sleep_jitter", fault_domain::SWARM_SLEEP_JITTER),
             ("net_jitter", fault_domain::SWARM_NET_JITTER),
             ("net_drop", fault_domain::SWARM_NET_DROP),
@@ -6859,6 +7246,8 @@ mod tests {
             .with_fs_error_permille(1)
             .with_fs_short_permille(1)
             .with_fs_latency_nanos(1, 2)
+            .with_dns_fail_permille(1)
+            .with_dns_latency_nanos(1, 2)
             .with_sleep_jitter_nanos(1, 2)
             .with_net_jitter_nanos(1, 2)
             .with_net_drop_permille(1)

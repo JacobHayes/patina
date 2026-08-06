@@ -2208,6 +2208,9 @@ fn runtime_config_from_control_plane() -> Result<(RuntimeConfig, Option<i32>), R
     // environment path uses, so both entry points accept the identical protocol
     // and fail closed on any malformed value.
     config = config.apply_fault_env(control_env)?;
+    // The DNS host table rides the same scrubbed control plane as the fault
+    // knobs, through the same parser, so both entry points accept one protocol.
+    config = config.apply_dns_env(control_env)?;
     // Cooperative-SUT (buggify) knobs come from the same control plane through
     // the shared parser, so the shim and the process-environment path agree.
     config = config.apply_buggify_env(control_env)?;
@@ -6309,6 +6312,9 @@ mod thread {
         /// this many virtual nanoseconds from entry; `None` (or a zero timeval,
         /// which POSIX treats as no timeout) blocks until data or a genuine wake.
         read_timeout_nanos: Option<u64>,
+        /// The `tcp_streams` key of the connection this stream endpoint belongs
+        /// to (the client's local address), for stream sockets only.
+        stream_key: Option<String>,
         recv_waiters: VecDeque<TaskId>,
         send_waiters: VecDeque<TaskId>,
     }
@@ -6323,9 +6329,32 @@ mod thread {
                 peer: None,
                 nonblocking,
                 read_timeout_nanos: None,
+                stream_key: None,
                 recv_waiters: VecDeque::new(),
                 send_waiters: VecDeque::new(),
             }
+        }
+    }
+
+    /// The two guest descriptors of one virtual TCP connection.
+    #[derive(Clone, Copy, Default)]
+    struct TcpPair {
+        client: Option<c_int>,
+        server: Option<c_int>,
+    }
+
+    impl TcpPair {
+        /// The descriptor on the other end from `fd`, if it is still open.
+        fn other(&self, fd: c_int) -> Option<c_int> {
+            match (self.client, self.server) {
+                (Some(client), server) if client == fd => server,
+                (client, Some(server)) if server == fd => client,
+                _ => None,
+            }
+        }
+
+        fn is_empty(&self) -> bool {
+            self.client.is_none() && self.server.is_none()
         }
     }
 
@@ -6333,7 +6362,15 @@ mod thread {
         sockets: BTreeMap<c_int, NetSocket>,
         bound: BTreeMap<String, c_int>,
         tcp_listeners: BTreeMap<String, c_int>,
-        tcp_streams: BTreeMap<(String, String), c_int>,
+        /// Connected stream endpoints, keyed by the CLIENT's local address. That
+        /// address is unique per connection (it carries the ephemeral port) and
+        /// BOTH sides hold it — the client as its own local, the acceptor as the
+        /// peer address the runtime hands back — so the two endpoints agree on
+        /// one key. Keying by `(local, peer)` instead would break under a
+        /// wildcard bind, where the acceptor's local is the listener's
+        /// `0.0.0.0:PORT` while the client's peer is the specific IP it dialed,
+        /// and neither side can derive the other's spelling.
+        tcp_streams: BTreeMap<String, TcpPair>,
         // In-process pipe/socketpair channels. Endpoints share the socket
         // virtual-fd space (`next_fd`) so a virtual fd is a socket XOR a pipe
         // endpoint, never both — the C dispatch tells them apart by table
@@ -6456,12 +6493,36 @@ mod thread {
         }
     }
 
-    fn peer_fd(state: &ThreadRuntime, local: &str, peer: &str) -> Option<c_int> {
-        state
-            .net
-            .tcp_streams
-            .get(&(peer.to_owned(), local.to_owned()))
-            .copied()
+    /// The address a listening socket is registered under for traffic dialed at
+    /// `destination`: the exact address when something is bound there, else the
+    /// wildcard key when a `0.0.0.0:PORT` listener covers it. The shim keeps its
+    /// own address-keyed tables to know which task to WAKE, so it must resolve
+    /// exactly as the runtime routed — a datagram the runtime delivers to a
+    /// wildcard socket whose waiter the shim never wakes is a silent hang.
+    fn resolve_listener_address(state: &ThreadRuntime, destination: &str) -> String {
+        if state.net.tcp_listeners.contains_key(destination) {
+            return destination.to_owned();
+        }
+        match patina_dst_driver_api::wildcard_bind_key(destination) {
+            Some(wildcard) if state.net.tcp_listeners.contains_key(&wildcard) => wildcard,
+            _ => destination.to_owned(),
+        }
+    }
+
+    /// [`resolve_listener_address`] for the datagram table.
+    fn resolve_bound_address(state: &ThreadRuntime, destination: &str) -> String {
+        if state.net.bound.contains_key(destination) {
+            return destination.to_owned();
+        }
+        match patina_dst_driver_api::wildcard_bind_key(destination) {
+            Some(wildcard) if state.net.bound.contains_key(&wildcard) => wildcard,
+            _ => destination.to_owned(),
+        }
+    }
+
+    fn peer_fd(state: &ThreadRuntime, fd: c_int) -> Option<c_int> {
+        let key = state.net.sockets.get(&fd)?.stream_key.as_ref()?;
+        state.net.tcp_streams.get(key)?.other(fd)
     }
 
     fn drain_recv_waiters(state: &mut ThreadRuntime, fd: c_int) -> Vec<TaskId> {
@@ -6684,11 +6745,17 @@ mod thread {
                             peer: Some(peer),
                             nonblocking: false,
                             read_timeout_nanos: None,
+                            stream_key: Some(accepted.peer.clone()),
                             recv_waiters: VecDeque::new(),
                             send_waiters: VecDeque::new(),
                         },
                     );
-                    state.net.tcp_streams.insert((local, accepted.peer), new_fd);
+                    state
+                        .net
+                        .tcp_streams
+                        .entry(accepted.peer)
+                        .or_default()
+                        .server = Some(new_fd);
                     if !ip_out.is_null() {
                         unsafe { ip_out.write(peer.0) };
                     }
@@ -6759,14 +6826,15 @@ mod thread {
         socket.address = Some(local.clone());
         socket.bound = Some(bound);
         socket.peer = Some((ip, port));
-        state
-            .net
-            .tcp_streams
-            .insert((local, destination.clone()), fd);
+        socket.stream_key = Some(local.clone());
+        state.net.tcp_streams.entry(local).or_default().client = Some(fd);
+        // Wake whoever is blocked in `accept`, resolving the listener the same
+        // exact-then-wildcard way the runtime routed the connection.
+        let listener_address = resolve_listener_address(&state, &destination);
         let waiters = state
             .net
             .tcp_listeners
-            .get(&destination)
+            .get(&listener_address)
             .copied()
             .map(|listener_fd| drain_recv_waiters(&mut state, listener_fd))
             .unwrap_or_default();
@@ -6790,10 +6858,11 @@ mod thread {
                 Ok(report) => report,
                 Err(errno) => return super::fail(errno) as isize,
             };
+        let bound_address = resolve_bound_address(&state, destination);
         let waiters = state
             .net
             .bound
-            .get(destination)
+            .get(&bound_address)
             .copied()
             .map(|destination_fd| drain_recv_waiters(&mut state, destination_fd))
             .unwrap_or_default();
@@ -6876,14 +6945,9 @@ mod thread {
         let me = current_task();
         loop {
             let mut state = lock_state();
-            let (socket_id, local, peer, nonblocking) = match state.net.sockets.get(&fd) {
+            let (socket_id, nonblocking) = match state.net.sockets.get(&fd) {
                 Some(socket) if socket.kind == SocketKind::Stream => (
                     socket.socket_id.expect("stream has runtime socket id"),
-                    socket.address.clone().expect("stream has local address"),
-                    format_addr(
-                        socket.peer.expect("stream has peer").0,
-                        socket.peer.expect("stream has peer").1,
-                    ),
                     socket.nonblocking,
                 ),
                 Some(_) => return super::fail(ENOTCONN) as isize,
@@ -6891,7 +6955,7 @@ mod thread {
             };
             match with_context_raw(|context| context.net_tcp_send(socket_id, bytes)) {
                 Ok(written) if written > 0 => {
-                    let waiters = peer_fd(&state, &local, &peer)
+                    let waiters = peer_fd(&state, fd)
                         .map(|peer_fd| drain_recv_waiters(&mut state, peer_fd))
                         .unwrap_or_default();
                     drop(state);
@@ -7068,14 +7132,9 @@ mod thread {
         let me = current_task();
         loop {
             let mut state = lock_state();
-            let (socket_id, local, peer, nonblocking) = match state.net.sockets.get(&fd) {
+            let (socket_id, nonblocking) = match state.net.sockets.get(&fd) {
                 Some(socket) if socket.kind == SocketKind::Stream => (
                     socket.socket_id.expect("stream has runtime socket id"),
-                    socket.address.clone().expect("stream has local address"),
-                    format_addr(
-                        socket.peer.expect("stream has peer").0,
-                        socket.peer.expect("stream has peer").1,
-                    ),
                     socket.nonblocking,
                 ),
                 Some(_) => return super::fail(ENOTCONN) as isize,
@@ -7095,7 +7154,7 @@ mod thread {
                     let waiters = if bytes.is_empty() {
                         Vec::new()
                     } else {
-                        peer_fd(&state, &local, &peer)
+                        peer_fd(&state, fd)
                             .map(|peer_fd| drain_send_waiters(&mut state, peer_fd))
                             .unwrap_or_default()
                     };
@@ -7150,15 +7209,10 @@ mod thread {
             _ => return super::fail(EINVAL),
         };
         let mut state = lock_state();
-        let (socket_id, local, peer) = match state.net.sockets.get(&fd) {
-            Some(socket) if socket.kind == SocketKind::Stream => (
-                socket.socket_id.expect("stream has runtime socket id"),
-                socket.address.clone().expect("stream has local address"),
-                format_addr(
-                    socket.peer.expect("stream has peer").0,
-                    socket.peer.expect("stream has peer").1,
-                ),
-            ),
+        let socket_id = match state.net.sockets.get(&fd) {
+            Some(socket) if socket.kind == SocketKind::Stream => {
+                socket.socket_id.expect("stream has runtime socket id")
+            }
             Some(socket) if socket.kind == SocketKind::StreamUnbound => {
                 return super::fail(ENOTCONN);
             }
@@ -7168,7 +7222,7 @@ mod thread {
         if let Err(errno) = with_context_raw(|context| context.net_tcp_shutdown(socket_id, how)) {
             return super::fail(errno);
         }
-        let peer_fd = peer_fd(&state, &local, &peer);
+        let peer_fd = peer_fd(&state, fd);
         let mut waiters = Vec::new();
         if matches!(how, ShutdownHow::Write | ShutdownHow::Both) {
             if let Some(peer_fd) = peer_fd {
@@ -7276,6 +7330,42 @@ mod thread {
         }
     }
 
+    /// Resolve a host name through the run's deterministic DNS host table.
+    ///
+    /// Writes the resolved address as a host-byte-order `u32` and returns 0; on
+    /// failure returns -1 with errno set. Resolution is a recorded boundary
+    /// operation, so an injected failure or latency reproduces on replay.
+    ///
+    /// # Safety
+    /// C ABI entry point: `name` must be a NUL-terminated string and `ip` must
+    /// point at a writable `uint32_t`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn patina_dns_resolve(name: *const c_char, ip: *mut u32) -> c_int {
+        if let Err(errno) = sched_point() {
+            return super::fail(errno);
+        }
+        if name.is_null() || ip.is_null() {
+            return super::fail(EINVAL);
+        }
+        let Ok(name) = (unsafe { std::ffi::CStr::from_ptr(name) }).to_str() else {
+            return super::fail(EINVAL);
+        };
+        let resolved = match with_context_raw(|context| context.dns_resolve(name)) {
+            Ok(address) => address,
+            Err(errno) => return super::fail(errno),
+        };
+        // The runtime's resolutions are dotted quads by construction (the host
+        // table validates every entry at configuration time), so a malformed one
+        // here means the runtime and this shim disagree — fail loudly rather
+        // than hand the guest a wrong address.
+        let Some((address, _)) = parse_addr(&format!("{resolved}:0")) else {
+            fatal("DNS resolution returned a malformed address");
+        };
+        unsafe { ip.write(address) };
+        super::set_errno(0);
+        0
+    }
+
     /// Close a virtual socket.
     ///
     /// # Safety
@@ -7301,10 +7391,27 @@ mod thread {
                 waiters.extend(socket.send_waiters);
             }
             SocketKind::Stream => {
-                if let (Some(local), Some(peer_tuple)) = (&socket.address, socket.peer) {
-                    let peer = format_addr(peer_tuple.0, peer_tuple.1);
-                    state.net.tcp_streams.remove(&(local.clone(), peer.clone()));
-                    if let Some(peer_fd) = peer_fd(&state, local, &peer) {
+                // The socket is already out of the table, so take the peer from
+                // the connection entry directly, then drop this side from it —
+                // and the whole entry once both sides are gone.
+                if let Some(key) = &socket.stream_key {
+                    let peer = state
+                        .net
+                        .tcp_streams
+                        .get(key)
+                        .and_then(|pair| pair.other(fd));
+                    if let Some(pair) = state.net.tcp_streams.get_mut(key) {
+                        if pair.client == Some(fd) {
+                            pair.client = None;
+                        }
+                        if pair.server == Some(fd) {
+                            pair.server = None;
+                        }
+                        if pair.is_empty() {
+                            state.net.tcp_streams.remove(key);
+                        }
+                    }
+                    if let Some(peer_fd) = peer {
                         waiters.extend(drain_recv_waiters(&mut state, peer_fd));
                         waiters.extend(drain_send_waiters(&mut state, peer_fd));
                     }

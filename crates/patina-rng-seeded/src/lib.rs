@@ -28,6 +28,11 @@ pub mod fault_domain {
 
     /// CrashFs torn-write/crash-model stream.
     pub const FS_CRASH: &str = "patina.fs.crash";
+    /// Seeded DNS resolution-fault stream (failure decision and its errno pick).
+    pub const DNS_FAULT: &str = "patina.dns.fault";
+    /// Context-side per-resolution DNS latency stream.
+    pub const DNS_LATENCY: &str = "patina.dns.latency";
+
     /// Context-side per-operation filesystem latency stream. Latency needs the
     /// clock, so unlike the error/short streams it is drawn by the Context rather
     /// than by a wrapper driver.
@@ -45,6 +50,10 @@ pub mod fault_domain {
     pub const SWARM_FS_SHORT: &str = "patina.swarm.fs_short";
     /// Swarm per-class coin for filesystem operation latency.
     pub const SWARM_FS_LATENCY: &str = "patina.swarm.fs_latency";
+    /// Swarm per-class coin for DNS resolution failure.
+    pub const SWARM_DNS_FAIL: &str = "patina.swarm.dns_fail";
+    /// Swarm per-class coin for DNS resolution latency.
+    pub const SWARM_DNS_LATENCY: &str = "patina.swarm.dns_latency";
     /// Swarm per-class coin for network drop.
     pub const SWARM_NET_DROP: &str = "patina.swarm.net_drop";
     /// Swarm per-class coin for network base latency.

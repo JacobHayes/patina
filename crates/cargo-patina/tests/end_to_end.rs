@@ -7246,6 +7246,284 @@ fn main() {
 }
 "#;
 
+// A guest that binds INADDR_ANY, reached by a client dialing a specific virtual
+// IP — the producer-side enabler for name resolution (a resolved name yields an
+// address the server never had to know about). This must run through the SHIM,
+// not just SimNet: the shim keeps its own address-keyed tables to decide which
+// blocked task to wake, so a routing rule applied only in the driver delivers the
+// datagram and then hangs forever on a receive nothing wakes.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const WILDCARD_BIND_SOURCE: &str = r#"
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::thread;
+use std::time::Duration;
+
+fn main() {
+    // UDP: bind the wildcard, receive a datagram addressed to a specific IP.
+    let server = UdpSocket::bind("0.0.0.0:7100").expect("udp wildcard bind");
+    let receiver = thread::spawn(move || {
+        let mut buf = [0u8; 16];
+        let (len, from) = server.recv_from(&mut buf).expect("recv_from");
+        (String::from_utf8_lossy(&buf[..len]).into_owned(), from.to_string())
+    });
+    let client = UdpSocket::bind("10.0.0.9:7200").expect("udp client bind");
+    // Sleep before sending so the receiver definitely reaches its blocking
+    // recv and PARKS first. Without this the datagram is already queued when
+    // the receiver first looks, and the wake path — the half of the routing
+    // rule that lives in the shim's own address-keyed tables — is never
+    // exercised at all.
+    thread::sleep(Duration::from_millis(1));
+    client.send_to(b"udp-ping", "10.0.0.5:7100").expect("send_to");
+    let (udp_payload, udp_from) = receiver.join().unwrap();
+
+    // TCP: same shape, and the reply proves both wake directions work.
+    let listener = TcpListener::bind("0.0.0.0:7101").expect("tcp wildcard bind");
+    let acceptor = thread::spawn(move || {
+        let (mut sock, peer) = listener.accept().expect("accept");
+        let mut got = [0u8; 8];
+        sock.read_exact(&mut got).expect("read_exact");
+        sock.write_all(b"tcp-pong").expect("reply");
+        (String::from_utf8_lossy(&got).into_owned(), peer.to_string())
+    });
+    thread::sleep(Duration::from_millis(1));
+    let mut stream = TcpStream::connect("10.0.0.5:7101").expect("tcp connect");
+    stream.write_all(b"tcp-ping").expect("write");
+    let mut reply = [0u8; 8];
+    stream.read_exact(&mut reply).expect("read reply");
+    let (tcp_payload, tcp_peer) = acceptor.join().unwrap();
+
+    println!(
+        "WILDCARD_RESULT udp={udp_payload} udp_from={udp_from} tcp={tcp_payload} tcp_peer={tcp_peer} reply={}",
+        String::from_utf8_lossy(&reply)
+    );
+}
+"#;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_wildcard_bound_guest_is_reachable_at_any_address_on_its_port() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("wildcard.rs");
+    fs::write(&source, WILDCARD_BIND_SOURCE).unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("wildcard");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let bin = bin.to_str().unwrap().to_owned();
+    let output = invoke_in(workspace, &["run", &bin, "--seed", "3"]);
+    let line = stdout_line_with(&output, "WILDCARD_RESULT");
+    assert!(
+        line.contains("udp=udp-ping")
+            && line.contains("udp_from=10.0.0.9:7200")
+            && line.contains("tcp=tcp-ping")
+            // The TCP client never bound, so the shim synthesized its ephemeral
+            // local address; what matters is that the acceptor learned it.
+            && line.contains("tcp_peer=127.0.0.1:")
+            && line.contains("reply=tcp-pong"),
+        "wildcard-bound guest did not see the traffic dialed at a specific IP: {line}"
+    );
+}
+
+// DNS end to end: the guest resolves through ordinary `std::net` name lookup
+// (getaddrinfo under the hood), so this proves the interposer, the host table,
+// both fault knobs, and the recorded-resolution replay in one guest.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const DNS_SOURCE: &str = r#"
+use std::env;
+use std::net::{TcpStream, ToSocketAddrs};
+use std::time::Instant;
+
+fn resolve(name: &str) -> Result<String, String> {
+    match (name, 9400).to_socket_addrs() {
+        Ok(mut addrs) => match addrs.next() {
+            Some(addr) => Ok(addr.ip().to_string()),
+            None => Err("empty".to_string()),
+        },
+        Err(error) => Err(format!("{:?}", error.kind())),
+    }
+}
+
+fn main() {
+    match env::args().nth(1).expect("mode").as_str() {
+        "resolve" => {
+            let started = Instant::now();
+            let defined = resolve("db.internal");
+            let elapsed = started.elapsed().as_nanos();
+            let undefined = resolve("absent.internal");
+            println!(
+                "DNS_RESULT defined={defined:?} undefined={undefined:?} elapsed_nanos={elapsed}"
+            );
+        }
+        "connect" => {
+            // The producer side: the server binds INADDR_ANY and the client
+            // reaches it purely by resolving a name to a virtual IP.
+            use std::io::{Read, Write};
+            use std::net::TcpListener;
+            use std::thread;
+            let listener = TcpListener::bind("0.0.0.0:9400").expect("wildcard bind");
+            let server = thread::spawn(move || {
+                let (mut sock, _) = listener.accept().expect("accept");
+                let mut got = [0u8; 4];
+                sock.read_exact(&mut got).expect("read");
+                sock.write_all(b"pong").expect("reply");
+            });
+            let mut client = TcpStream::connect("db.internal:9400").expect("connect by name");
+            client.write_all(b"ping").expect("write");
+            let mut reply = [0u8; 4];
+            client.read_exact(&mut reply).expect("read reply");
+            server.join().unwrap();
+            println!("DNS_RESULT connected={}", String::from_utf8_lossy(&reply));
+        }
+        other => panic!("unknown mode {other}"),
+    }
+}
+"#;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_dns_resolves_the_host_table_injects_faults_and_replays_flag_free() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("dns.rs");
+    fs::write(&source, DNS_SOURCE).unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("dns");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let bin = bin.to_str().unwrap().to_owned();
+    let entry = "db.internal=10.0.0.5";
+
+    // Baseline: a DEFINED name resolves to its address and an undefined one is
+    // NXDOMAIN. Both are ordinary `std` name lookups through the interposer.
+    let resolved = invoke_in(
+        workspace,
+        &[
+            "run",
+            &bin,
+            "--seed",
+            "1",
+            "--dns-entry",
+            entry,
+            "--",
+            "resolve",
+        ],
+    );
+    let line = stdout_line_with(&resolved, "DNS_RESULT");
+    assert!(
+        line.contains(r#"defined=Ok("10.0.0.5")"#) && line.contains("undefined=Err"),
+        "host table did not drive resolution: {line}"
+    );
+    assert!(
+        line.contains("elapsed_nanos=0"),
+        "a knob-free resolution must cost no virtual time: {line}"
+    );
+
+    // The failure knob turns a defined name's resolution into an error, and the
+    // report proves it was applied rather than silently inert.
+    let failed = invoke_in(
+        workspace,
+        &[
+            "run",
+            &bin,
+            "--seed",
+            "1",
+            "--dns-entry",
+            entry,
+            "--dns-fail-permille",
+            "1000",
+            "--",
+            "resolve",
+        ],
+    );
+    let line = stdout_line_with(&failed, "DNS_RESULT");
+    assert!(
+        line.contains("defined=Err"),
+        "the DNS failure knob did not reach the guest: {line}"
+    );
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        stderr.contains("PATINA_DNS_FAULT_REPORT") && stderr.contains("vacuous=0"),
+        "the DNS fault report must prove the knob fired:\n{stderr}"
+    );
+
+    // The latency knob shows up as virtual time inside the guest.
+    let trace = directory.path().join("dns.patina");
+    let delayed = invoke_in(
+        workspace,
+        &[
+            "run",
+            &bin,
+            "--seed",
+            "1",
+            "--dns-entry",
+            entry,
+            "--dns-latency-nanos",
+            "1000000..1000000",
+            "--record",
+            trace.to_str().unwrap(),
+            "--",
+            "resolve",
+        ],
+    );
+    let delayed_line = stdout_line_with(&delayed, "DNS_RESULT");
+    assert!(
+        delayed_line.contains("elapsed_nanos=1000000"),
+        "the DNS latency knob was not observable in the guest: {delayed_line}"
+    );
+
+    // Flag-free replay restores BOTH the host table and the knobs from the
+    // trace, and a re-supplied table is refused.
+    let replayed = invoke_in(workspace, &["replay", &bin, trace.to_str().unwrap()]);
+    assert_eq!(stdout_line_with(&replayed, "DNS_RESULT"), delayed_line);
+    let rejected = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "replay",
+            &bin,
+            trace.to_str().unwrap(),
+            "--dns-entry",
+            entry,
+        ],
+    );
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("--dns-entry"));
+
+    // The producer side end to end: resolve a name, reach a wildcard-bound
+    // listener that never knew the name existed.
+    let connected = invoke_in(
+        workspace,
+        &[
+            "run",
+            &bin,
+            "--seed",
+            "2",
+            "--dns-entry",
+            entry,
+            "--",
+            "connect",
+        ],
+    );
+    assert!(
+        stdout_line_with(&connected, "DNS_RESULT").contains("connected=pong"),
+        "a resolved name did not reach the wildcard-bound listener"
+    );
+}
+
 // The TCP round trip, timed on the virtual clock. `--net-latency-nanos` was a
 // datagram-only knob in practice: SimNet configured a base latency but skipped it
 // on the stream path, so a managed TCP guest saw zero link delay however the

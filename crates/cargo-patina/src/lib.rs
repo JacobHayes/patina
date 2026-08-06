@@ -29,13 +29,14 @@ use patina_dst_minimize::{
 use patina_dst_runtime::{
     Context, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION,
     ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN, ENV_COVERAGE_FD,
-    ENV_COVERAGE_REPORT, ENV_DEFER_INIT, ENV_DEPTH_REPORT, ENV_FINGERPRINT, ENV_FS_CRASH_AT,
-    ENV_FS_ERROR_PERMILLE, ENV_FS_IMAGE_FD, ENV_FS_LATENCY, ENV_FS_SHORT_PERMILLE,
-    ENV_FS_TORN_GRANULARITY, ENV_GUEST_ARGV, ENV_GUEST_ENV, ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG,
-    ENV_MODE, ENV_NET_DROP_PERMILLE, ENV_NET_JITTER, ENV_NET_LATENCY, ENV_PARAMS_JSON,
-    ENV_PARENT_TIMELINE, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS, ENV_SCHED_STARVE,
-    ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED, ENV_SLEEP_JITTER, ENV_STEP_BUDGET,
-    ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, RuntimeConfig,
+    ENV_COVERAGE_REPORT, ENV_DEFER_INIT, ENV_DEPTH_REPORT, ENV_DNS_ENTRIES, ENV_DNS_FAIL_PERMILLE,
+    ENV_DNS_LATENCY, ENV_FINGERPRINT, ENV_FS_CRASH_AT, ENV_FS_ERROR_PERMILLE, ENV_FS_IMAGE_FD,
+    ENV_FS_LATENCY, ENV_FS_SHORT_PERMILLE, ENV_FS_TORN_GRANULARITY, ENV_GUEST_ARGV, ENV_GUEST_ENV,
+    ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG, ENV_MODE, ENV_NET_DROP_PERMILLE, ENV_NET_JITTER,
+    ENV_NET_LATENCY, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS,
+    ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED,
+    ENV_SLEEP_JITTER, ENV_STEP_BUDGET, ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD,
+    RuntimeConfig,
 };
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
@@ -301,6 +302,9 @@ struct Invocation {
     /// trace on the `replay` verb, so a cargo-family replay is flag-free. Default
     /// (all `None`) leaves faults off.
     faults: NativeFaults,
+    /// The run's DNS host table (`--dns-entry`), forwarded over the same control
+    /// plane as the fault knobs and recorded into the trace.
+    dns_entries: Option<String>,
     /// Cooperative-SUT (buggify) knobs, or `None` when `--buggify` was not
     /// passed. Forwarded over the same `PATINA_BUGGIFY*` control plane the other
     /// families use; the guest's `apply_buggify_env` is family-neutral, so only
@@ -472,6 +476,10 @@ struct NativeRunInvocation {
     /// forwarded over the control plane. Family-neutral: the same
     /// `RuntimeConfig::step_budget` the Cargo and WASI families set.
     step_budget: Option<u64>,
+    /// The run's DNS host table (`--dns-entry`), as the JSON object the control
+    /// plane carries. Semantic configuration, recorded into the trace and
+    /// restored on replay, so `replay` refuses a re-supplied table.
+    dns_entries: Option<String>,
     /// Fault-injection knobs forwarded to the guest through the `PATINA_*`
     /// control plane. Each is a validated raw value stored verbatim; the runtime
     /// re-parses it identically on record and replay, so a mismatched flag on
@@ -540,6 +548,10 @@ struct NativeFaults {
     net_drop_permille: Option<String>,
     /// Base per-datagram/segment delivery latency in nanoseconds.
     net_latency_nanos: Option<String>,
+    /// Seeded DNS resolution-failure probability in per-mille (0..=1000).
+    dns_fail_permille: Option<String>,
+    /// Seeded per-resolution DNS latency range `MIN..MAX` nanoseconds.
+    dns_latency_nanos: Option<String>,
 }
 
 /// One fault knob's three spellings: the CLI flag it is parsed from, the
@@ -584,6 +596,12 @@ const FAULT_KNOBS: &[FaultKnob] = &[
     }),
     ("--net-latency-nanos", ENV_NET_LATENCY, |f| {
         f.net_latency_nanos.as_ref()
+    }),
+    ("--dns-fail-permille", ENV_DNS_FAIL_PERMILLE, |f| {
+        f.dns_fail_permille.as_ref()
+    }),
+    ("--dns-latency-nanos", ENV_DNS_LATENCY, |f| {
+        f.dns_latency_nanos.as_ref()
     }),
 ];
 
@@ -1717,6 +1735,7 @@ fn parse_cargo(command: String, arguments: Vec<OsString>) -> Result<ParseResult,
         step_budget: args.u64("--budget"),
         params: key_values(&args, "--param")?,
         faults: faults_of(&args),
+        dns_entries: dns_entries_of(&args)?,
         buggify: buggify_of(&args),
         working_dir: None,
     }))
@@ -1755,6 +1774,7 @@ fn parse_cargo_replay(
         step_budget: None,
         params: BTreeMap::new(),
         faults: NativeFaults::default(),
+        dns_entries: None,
         buggify: None,
         working_dir: Some(package_dir),
     }))
@@ -2066,6 +2086,10 @@ fn native_manifest_path(path: &Path) -> PathBuf {
 /// exact text the operator typed so the runtime re-parses the same protocol
 /// string on record and on replay.
 fn faults_of(args: &cli::Args) -> NativeFaults {
+    // A knob the registry does not give this family is absent, not an error to
+    // read: the DNS knobs are a declared WASI exception, and the exception lives
+    // in the registry rather than being restated here.
+    let knob = |name: &str| args.registered(name).then(|| args.string(name)).flatten();
     NativeFaults {
         fs_crash_at: args.string("--fs-crash-at"),
         fs_torn_granularity: args.string("--fs-torn-granularity"),
@@ -2076,7 +2100,32 @@ fn faults_of(args: &cli::Args) -> NativeFaults {
         net_jitter_nanos: args.string("--net-jitter-nanos"),
         net_drop_permille: args.string("--net-drop-permille"),
         net_latency_nanos: args.string("--net-latency-nanos"),
+        dns_fail_permille: knob("--dns-fail-permille"),
+        dns_latency_nanos: knob("--dns-latency-nanos"),
     }
+}
+
+/// The DNS host table this invocation defined, as the JSON object the runtime's
+/// control plane carries. `None` when no `--dns-entry` was supplied, so a run
+/// without one sets nothing.
+fn dns_entries_of(args: &cli::Args) -> Result<Option<String>, CliError> {
+    if !args.registered("--dns-entry") {
+        return Ok(None);
+    }
+    let entries: BTreeMap<String, String> = args
+        .texts("--dns-entry")
+        .into_iter()
+        .map(|value| {
+            let (name, address) = values::dns_entry("--dns-entry", value).map_err(CliError)?;
+            Ok((name.to_string(), address.to_string()))
+        })
+        .collect::<Result<_, CliError>>()?;
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string(&entries)
+        .map(Some)
+        .map_err(|error| CliError(format!("failed to encode the DNS host table: {error}")))
 }
 
 /// Every knob this invocation set, as `(flag, value)` in registry order.
@@ -2401,6 +2450,7 @@ fn parse_native_run_from(
         program_args,
         environment: key_values(&args, "--env")?,
         step_budget: args.u64("--budget"),
+        dns_entries: dns_entries_of(&args)?,
         faults: faults_of(&args),
         buggify: buggify_of(&args),
         schedule: schedule_of(&args),
@@ -2526,6 +2576,8 @@ fn parse_native_replay(
         // `replay` registers no --budget: it re-executes a recorded operation
         // stream whose length is already fixed by the trace.
         step_budget: None,
+        // Like the fault knobs, the DNS table comes from the trace.
+        dns_entries: None,
         faults: NativeFaults::default(),
         buggify: None,
         // Replay restores the scheduling policy and swarm selection from the
@@ -6201,6 +6253,10 @@ liveness-safe."
     if let Some(budget) = invocation.step_budget {
         command.env(ENV_STEP_BUDGET, budget.to_string());
     }
+    command.env_remove(ENV_DNS_ENTRIES);
+    if let Some(entries) = &invocation.dns_entries {
+        command.env(ENV_DNS_ENTRIES, entries);
+    }
     // Forward whatever fault knobs the operator supplied to the guest. On record
     // and seeded runs these configure the faults and are recorded into the trace
     // metadata. Native replay does not accept semantic re-supply; the trace's
@@ -6807,6 +6863,10 @@ and run/audit the artifact (cargo patina build <DIR|Cargo.toml> --output <PATH>)
     }
     if let Some(budget) = invocation.step_budget {
         command.env(ENV_STEP_BUDGET, budget.to_string());
+    }
+    command.env_remove(ENV_DNS_ENTRIES);
+    if let Some(entries) = &invocation.dns_entries {
+        command.env(ENV_DNS_ENTRIES, entries);
     }
     if !invocation.params.is_empty() {
         command.env(
@@ -9115,6 +9175,18 @@ mod tests {
                 vec!["k=v", "key=", "a=b=c", "x=1"],
                 vec!["=v", "novalue", "", "= "],
             ),
+            Kind::DnsEntry => (
+                vec!["db.internal=10.0.0.5", "a=0.0.0.0", "x=255.255.255.255"],
+                vec![
+                    "=10.0.0.5",
+                    "db.internal",
+                    "db.internal=",
+                    "db.internal=10.0.0",
+                    "db.internal=10.0.0.256",
+                    "db.internal=example.com",
+                    "",
+                ],
+            ),
             Kind::Socket => (
                 vec!["4=a->b", "5=x->y", "100=addr1->addr2"],
                 vec!["3=a->b", "4=a->", "4=->b", "foo=a->b", "4=ab", "", "0=a->b"],
@@ -9533,6 +9605,8 @@ mod tests {
             ("--net-jitter-nanos", "10..20"),
             ("--net-drop-permille", "50"),
             ("--net-latency-nanos", "500"),
+            ("--dns-fail-permille", "100"),
+            ("--dns-latency-nanos", "10..20"),
         ];
         assert_eq!(
             samples
@@ -9556,6 +9630,22 @@ mod tests {
                 ("test", help::Family::Cargo),
                 ("test", help::Family::Harness),
             ] {
+                // wasip1 has no name-resolution surface at all, so the DNS knobs
+                // are a DECLARED family exception: the WASI parser must refuse
+                // them rather than accept a knob that could never fire. The
+                // registry narrows them, so this asks the registry rather than
+                // hard-coding which flags are excepted.
+                if !help::verb(verb)
+                    .expect("registered verb")
+                    .family_flags(family)
+                    .any(|registered| registered.name == flag)
+                {
+                    assert!(
+                        cli::parse(verb, family, strings(&[flag, value])).is_err(),
+                        "{verb} {family:?} must refuse the unregistered {flag}"
+                    );
+                    continue;
+                }
                 let args = cli::parse(verb, family, strings(&[flag, value]))
                     .unwrap_or_else(|error| panic!("{verb} {family:?} rejected {flag}: {error}"));
                 let pairs = fault_env_pairs(&faults_of(&args));

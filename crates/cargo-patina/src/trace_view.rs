@@ -349,6 +349,9 @@ pub fn summarize(kind: &str, op: &Value, out: &Value) -> String {
     let mut parts: Vec<String> = Vec::new();
     for key in [
         "path",
+        // The resolved host name; without it a `dns_resolve` event renders as a
+        // bare byte count, saying nothing about WHICH name was looked up.
+        "name",
         "from",
         "to",
         "target",
@@ -573,6 +576,7 @@ pub const OP_KINDS: &[(&str, Category)] = &[
     ("fs_link", Category::Fs),
     ("fs_symlink", Category::Fs),
     ("fs_read_link", Category::Fs),
+    ("dns_resolve", Category::Net),
     ("fs_crash", Category::Crash),
     ("task_spawn", Category::Schedule),
     ("task_yield", Category::Schedule),
@@ -635,6 +639,7 @@ pub fn operation_kind(operation: &Operation) -> &'static str {
         Operation::FsLink { .. } => "fs_link",
         Operation::FsSymlink { .. } => "fs_symlink",
         Operation::FsReadLink { .. } => "fs_read_link",
+        Operation::DnsResolve { .. } => "dns_resolve",
         Operation::FsCrash => "fs_crash",
         Operation::TaskSpawn { .. } => "task_spawn",
         Operation::TaskYield { .. } => "task_yield",
@@ -820,6 +825,12 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
                 path: "/link".into(),
             },
             Outcome::Bytes(b"/target".to_vec()),
+        ),
+        (
+            Operation::DnsResolve {
+                name: "db.internal".into(),
+            },
+            Outcome::Bytes(b"10.0.0.5".to_vec()),
         ),
         (Operation::FsCrash, Outcome::Unit),
         (

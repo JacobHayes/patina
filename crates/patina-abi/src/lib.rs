@@ -546,6 +546,13 @@ pub enum Operation {
     FsReadLink {
         path: String,
     },
+    /// Resolve a host name to a virtual IPv4 address. The outcome carries the
+    /// dotted-quad address as [`Outcome::Bytes`], exactly like `FsReadLink`
+    /// carries a link target, so a replay reproduces the resolution — including
+    /// an injected failure — from the trace rather than re-deriving it.
+    DnsResolve {
+        name: String,
+    },
     FsCrash,
     TaskSpawn {
         label: String,

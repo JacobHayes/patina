@@ -265,6 +265,16 @@ impl Args {
             })
     }
 
+    /// Whether the registry gives this flag to the family being parsed. Lets a
+    /// shared reader (the fault-knob table, which every family walks) skip a knob
+    /// its family declines — the DNS knobs under WASI, which has no resolution
+    /// surface — instead of each caller re-encoding the exception.
+    pub(crate) fn registered(&self, name: &str) -> bool {
+        self.verb
+            .family_flags(self.family)
+            .any(|flag| flag.name == name)
+    }
+
     /// Whether the operator typed this flag, whatever its shape.
     pub(crate) fn supplied(&self, name: &str) -> bool {
         let _ = self.flag_of(name);

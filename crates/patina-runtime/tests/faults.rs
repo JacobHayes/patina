@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 
 use patina_dst_abi::{ClockKind, OpenFlags, SendDisposition};
-use patina_dst_driver_api::FsFaultReport;
+use patina_dst_driver_api::{DnsFaultReport, FsFaultReport};
 use patina_dst_runtime::{Context, CrashOp, RuntimeConfig, TornGranularity};
 use tempfile::tempdir;
 
@@ -500,4 +500,177 @@ fn fs_latency_replays_self_contained_without_re_supplying_flags() {
     let (replayed_elapsed, _) =
         fs_ops_elapsed_and_report(RuntimeConfig::replay(&path, "patina-test"));
     assert_eq!(recorded_elapsed, replayed_elapsed);
+}
+
+/// Resolve `name` under `config`, returning the outcome and the virtual monotonic
+/// time afterwards (so an injected resolution latency is observable).
+fn resolve_once(
+    config: RuntimeConfig,
+    name: &str,
+) -> (Result<String, String>, u64, Option<DnsFaultReport>) {
+    let mut context = Context::from_config(config).unwrap();
+    let outcome = context.dns_resolve(name).map_err(|error| error.to_string());
+    let elapsed = context.now(ClockKind::Monotonic).unwrap();
+    let report = context.dns_fault_report();
+    context.finish().unwrap();
+    (outcome, elapsed, report)
+}
+
+fn with_entry(config: RuntimeConfig) -> RuntimeConfig {
+    config.with_dns_entry("db.internal", "10.0.0.5").unwrap()
+}
+
+#[test]
+fn dns_resolves_the_host_table_and_nxdomains_everything_else() {
+    // A defined name resolves; an undefined one is NXDOMAIN as SEMANTICS — no
+    // knob is set, and the failure is deterministic.
+    let (resolved, _, report) = resolve_once(with_entry(RuntimeConfig::seeded(1)), "db.internal");
+    assert_eq!(resolved.unwrap(), "10.0.0.5");
+    assert!(report.is_none(), "no DNS knob was live, so no report");
+
+    let (missing, _, _) = resolve_once(with_entry(RuntimeConfig::seeded(1)), "absent.internal");
+    assert!(
+        missing.unwrap_err().contains("no virtual DNS entry"),
+        "an undefined name must be NXDOMAIN"
+    );
+
+    // Built-ins resolve without the table and are never fault-eligible.
+    for (name, expected) in [("localhost", "127.0.0.1"), ("10.0.0.7", "10.0.0.7")] {
+        let (builtin, _, _) = resolve_once(
+            with_entry(RuntimeConfig::seeded(1).with_dns_fail_permille(1000)),
+            name,
+        );
+        assert_eq!(builtin.unwrap(), expected, "{name} must resolve locally");
+    }
+}
+
+#[test]
+fn the_dns_failure_knob_fires_only_on_defined_names_and_is_reported() {
+    // MUST fail: a certain failure rate turns a DEFINED name's resolution into
+    // an injected error, and the report proves it was applied.
+    let (failed, _, report) = resolve_once(
+        with_entry(RuntimeConfig::seeded(4).with_dns_fail_permille(1000)),
+        "db.internal",
+    );
+    assert!(
+        failed.unwrap_err().contains("injected DNS failure"),
+        "a certain failure rate must fail a defined name"
+    );
+    let report = report.expect("a live knob reports");
+    assert_eq!(report.resolutions, 1);
+    assert_eq!(report.failures_injected, 1);
+
+    // An UNDEFINED name is not fault-eligible: it was already NXDOMAIN, so the
+    // knob had no opportunity and the run records none. Counting it would let a
+    // workload that never resolves a real name look like the knob was exercised.
+    let (_, _, absent_report) = resolve_once(
+        with_entry(RuntimeConfig::seeded(4).with_dns_fail_permille(1000)),
+        "absent.internal",
+    );
+    assert_eq!(absent_report.expect("live knob").resolutions, 0);
+}
+
+#[test]
+fn dns_latency_delays_an_eligible_resolution_and_is_seed_driven() {
+    // Control: no knob, no virtual time spent resolving.
+    let (_, clean, _) = resolve_once(with_entry(RuntimeConfig::seeded(2)), "db.internal");
+    assert_eq!(clean, 0);
+
+    let (resolved, elapsed, report) = resolve_once(
+        with_entry(RuntimeConfig::seeded(2).with_dns_latency_nanos(5_000, 5_000)),
+        "db.internal",
+    );
+    assert_eq!(resolved.unwrap(), "10.0.0.5");
+    assert_eq!(elapsed, 5_000);
+    assert_eq!(report.expect("live knob").latency_applied, 1);
+
+    // Seed-driven over a range, not a fixed offset.
+    let spread: BTreeSet<u64> = (0..16)
+        .map(|seed| {
+            resolve_once(
+                with_entry(RuntimeConfig::seeded(seed).with_dns_latency_nanos(1_000, 9_000)),
+                "db.internal",
+            )
+            .1
+        })
+        .collect();
+    assert!(spread.len() > 1, "DNS latency never varied across seeds");
+}
+
+#[test]
+fn a_dns_knob_that_never_fired_over_eligible_traffic_is_diagnosed_vacuous() {
+    // The detector: a live knob, enough eligible resolutions for the configured
+    // rate to be expected to fire repeatedly, and ZERO applications. Built by
+    // hand here because a correctly wired knob cannot produce it — which is
+    // exactly why the class needs its own pinned shape.
+    let inert = DnsFaultReport {
+        resolutions: 40,
+        fail_vacuity_diagnosable: true,
+        failures_injected: 0,
+        ..DnsFaultReport::default()
+    };
+    assert!(inert.is_vacuous());
+
+    // A knob that DID fire over the same traffic is not vacuous.
+    let live = DnsFaultReport {
+        resolutions: 40,
+        fail_vacuity_diagnosable: true,
+        failures_injected: 3,
+        ..DnsFaultReport::default()
+    };
+    assert!(!live.is_vacuous());
+
+    // And a low rate that ordinarily draws zero is not diagnosable at all, so a
+    // healthy run never trips the warning.
+    let (_, _, sparse) = resolve_once(
+        with_entry(RuntimeConfig::seeded(9).with_dns_fail_permille(1)),
+        "db.internal",
+    );
+    let sparse = sparse.expect("live knob");
+    assert!(!sparse.fail_vacuity_diagnosable);
+    assert!(!sparse.is_vacuous());
+}
+
+#[test]
+fn dns_resolution_replays_self_contained_without_re_supplying_the_table() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("dns.patina");
+    let (recorded, recorded_elapsed, _) = resolve_once(
+        with_entry(RuntimeConfig::record(6, &path, "patina-test").with_dns_latency_nanos(300, 700)),
+        "db.internal",
+    );
+    assert_eq!(recorded.unwrap(), "10.0.0.5");
+
+    // Flag-free: no --dns-entry, no knobs. The trace restores both.
+    let (replayed, replayed_elapsed, _) =
+        resolve_once(RuntimeConfig::replay(&path, "patina-test"), "db.internal");
+    assert_eq!(replayed.unwrap(), "10.0.0.5");
+    assert_eq!(recorded_elapsed, replayed_elapsed);
+
+    // A conflicting table at replay fails closed rather than silently resolving
+    // something the recording never did.
+    let conflicting = RuntimeConfig::replay(&path, "patina-test")
+        .with_dns_entry("db.internal", "10.0.0.6")
+        .unwrap();
+    assert!(Context::from_config(conflicting).is_err());
+}
+
+#[test]
+fn a_malformed_dns_entry_fails_closed_at_configuration_time() {
+    assert!(
+        RuntimeConfig::seeded(1)
+            .with_dns_entry("db.internal", "not-an-ip")
+            .is_err()
+    );
+    assert!(
+        RuntimeConfig::seeded(1)
+            .with_dns_entry("", "10.0.0.5")
+            .is_err()
+    );
+    // A name that would resolve without the table cannot be redefined by it.
+    assert!(
+        RuntimeConfig::seeded(1)
+            .with_dns_entry("localhost", "10.0.0.5")
+            .is_err()
+    );
 }

@@ -162,6 +162,41 @@ pub fn canonicalize_path(path: &str) -> DriverResult<String> {
     Ok(format!("/{}", components.join("/")))
 }
 
+/// The address a wildcard-bound listener would be keyed under for traffic dialed
+/// at `address`, or `None` when the rule cannot apply.
+///
+/// The ONE wildcard-bind routing rule, shared by every layer that resolves a
+/// virtual address to a socket: a listener bound to `0.0.0.0:PORT` receives
+/// traffic addressed to any `IP:PORT` that has no exact-match binding. Exact
+/// match always wins; this function only supplies the fallback key.
+///
+/// It lives here, beside [`canonicalize_path`], because two layers resolve
+/// addresses independently — the network driver routes the packet and the native
+/// shim wakes the receiving task from its own address-keyed table. A rule
+/// implemented in only one of them delivers a datagram that nothing ever wakes
+/// for, so both call this.
+///
+/// Addresses are opaque strings in the virtual network (tests and the explicit
+/// API bind bare labels like `"server"`), so anything that is not a dotted-quad
+/// `IP:PORT` yields `None` and keeps exact-match-only behavior. An address that
+/// IS already the wildcard yields `None` too: it is its own exact match, and
+/// returning it would invite a lookup loop.
+pub fn wildcard_bind_key(address: &str) -> Option<String> {
+    let (host, port) = address.rsplit_once(':')?;
+    if host == WILDCARD_HOST {
+        return None;
+    }
+    let octets: Vec<&str> = host.split('.').collect();
+    if octets.len() != 4 || !octets.iter().all(|o| o.parse::<u8>().is_ok()) {
+        return None;
+    }
+    port.parse::<u16>().ok()?;
+    Some(format!("{WILDCARD_HOST}:{port}"))
+}
+
+/// The dotted-quad spelling of `INADDR_ANY`, the host half of a wildcard bind.
+pub const WILDCARD_HOST: &str = "0.0.0.0";
+
 /// Convert an unsigned byte offset to the signed offset `seek` takes, rejecting
 /// values past `i64::MAX` (unreachable for the in-memory filesystems but kept
 /// sound rather than silently wrapping).
@@ -243,6 +278,43 @@ impl FsFaultReport {
     pub fn is_vacuous(&self) -> bool {
         (self.error_vacuity_diagnosable && self.errors_injected == 0)
             || (self.short_vacuity_diagnosable && self.shorts_applied == 0)
+            || (self.latency_vacuity_diagnosable && self.latency_applied == 0)
+    }
+}
+
+/// End-of-run summary of DNS fault-injection activity, for the default-on
+/// vacuity diagnostic. Per class, exactly like [`FsFaultReport`]: a run with both
+/// DNS knobs live must not hide one inert class behind the other firing.
+///
+/// Unlike the filesystem classes there is no driver here — resolution is a
+/// `Context` operation against the run's host table — so the `Context` fills
+/// every field. `resolutions` counts only FAULT-ELIGIBLE lookups: a name that is
+/// not in the table is NXDOMAIN as semantics, at rate 1.0 and knob-free, and a
+/// built-in (`localhost`, a numeric literal) is resolved locally. Counting those
+/// would let a workload that never looks up a defined name report its DNS knobs
+/// as having had opportunities they never had.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DnsFaultReport {
+    /// Fault-eligible resolutions observed: lookups of names the host table
+    /// defines.
+    pub resolutions: u64,
+    /// The failure knob was live over enough eligible resolutions that
+    /// [`vacuity_is_diagnosable`] holds, so zero injected failures is anomalous.
+    pub fail_vacuity_diagnosable: bool,
+    /// Resolutions failed by the DNS fault injector.
+    pub failures_injected: u64,
+    /// The latency knob was live over enough eligible resolutions that
+    /// [`vacuity_is_diagnosable`] holds.
+    pub latency_vacuity_diagnosable: bool,
+    /// Resolutions actually delayed by a non-zero seeded draw.
+    pub latency_applied: u64,
+}
+
+impl DnsFaultReport {
+    /// Whether any DNS-fault class went vacuously inert: live over enough
+    /// opportunities to be expected to fire repeatedly, yet applied nothing.
+    pub fn is_vacuous(&self) -> bool {
+        (self.fail_vacuity_diagnosable && self.failures_injected == 0)
             || (self.latency_vacuity_diagnosable && self.latency_applied == 0)
     }
 }

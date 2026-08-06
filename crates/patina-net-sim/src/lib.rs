@@ -6,7 +6,9 @@ use patina_dst_abi::{
     Datagram, EffectError, ErrorCode, SendDisposition, SendReport, ShutdownHow, SocketId,
     TcpAccepted,
 };
-use patina_dst_driver_api::{DriverResult, NetDriver, NetFaultReport, NetReadiness};
+use patina_dst_driver_api::{
+    DriverResult, NetDriver, NetFaultReport, NetReadiness, wildcard_bind_key,
+};
 use patina_dst_rng_seeded::SplitMix64;
 
 /// TCP drop-retransmit backoff. A stream is reliable, so a "dropped" segment is
@@ -204,6 +206,32 @@ impl SimNet {
             .ok_or_else(|| invalid_socket(socket))
     }
 
+    /// The datagram socket that receives traffic dialed at `to`: the exact
+    /// binding if one exists, else a wildcard (`0.0.0.0:PORT`) binding under the
+    /// shared routing rule. Returns the resolved socket AND the address it is
+    /// actually bound under, because a queued packet is keyed by the RECEIVER's
+    /// bound address — that keeps `recv`, `next_delivery`, `readiness` and
+    /// `close` matching on one string apiece instead of each re-deriving the
+    /// rule.
+    fn resolve_datagram(&self, to: &str) -> Option<(SocketId, String)> {
+        if let Some(socket) = self.addresses.get(to) {
+            return Some((*socket, to.to_owned()));
+        }
+        let wildcard = wildcard_bind_key(to)?;
+        let socket = self.addresses.get(&wildcard)?;
+        Some((*socket, wildcard))
+    }
+
+    /// The TCP listener that accepts a connection dialed at `to`, exact match
+    /// first and then the wildcard rule, mirroring [`SimNet::resolve_datagram`].
+    fn resolve_listener(&self, to: &str) -> Option<SocketId> {
+        if let Some(listener) = self.tcp_listener_addresses.get(to) {
+            return Some(*listener);
+        }
+        let wildcard = wildcard_bind_key(to)?;
+        self.tcp_listener_addresses.get(&wildcard).copied()
+    }
+
     /// Draw the seeded drop decision for one datagram. Extreme probabilities are
     /// decision-free so the never-drop default and always-drop config do not
     /// perturb the stream consumed by jitter draws.
@@ -305,7 +333,7 @@ impl NetDriver for SimNet {
     fn validate_send(&self, socket: SocketId, to: &str) -> DriverResult<()> {
         validate_address(to)?;
         self.address(socket)?;
-        if !self.addresses.contains_key(to) {
+        if self.resolve_datagram(to).is_none() {
             return Err(EffectError::new(
                 ErrorCode::NoRoute,
                 format!("no virtual socket is bound at {to}"),
@@ -323,6 +351,15 @@ impl NetDriver for SimNet {
     ) -> DriverResult<SendReport> {
         self.validate_send(socket, to)?;
         let from = self.address(socket)?.to_owned();
+        // Route once, here, and queue the packet under the address the receiver
+        // is actually BOUND to. A wildcard listener's queue is keyed `0.0.0.0:P`
+        // whichever IP the sender dialed, so every downstream filter (recv,
+        // next_delivery, readiness, close) keeps comparing one string and cannot
+        // drift from the routing rule. The guest never observes this: a datagram
+        // surfaces its `from`, not the address it was dialed at.
+        let (_, destination) = self
+            .resolve_datagram(to)
+            .expect("validate_send resolved a destination");
         if self.partitions.contains(&(from.clone(), to.into())) {
             return Ok(SendReport {
                 written: bytes.len(),
@@ -364,7 +401,7 @@ impl NetDriver for SimNet {
         let packet = Packet {
             id: self.next_packet,
             from,
-            to: to.into(),
+            to: destination,
             bytes: bytes.to_vec(),
             delivery_nanos,
         };
@@ -469,7 +506,13 @@ impl NetDriver for SimNet {
                 format!("virtual TCP pending stream {} is missing", socket.0),
             )
         })?;
-        debug_assert_eq!(endpoint.local, state.address);
+        debug_assert!(
+            endpoint.local == state.address
+                || wildcard_bind_key(&endpoint.local).as_deref() == Some(state.address.as_str()),
+            "accepted stream local {} matches neither the listener address {} nor its wildcard",
+            endpoint.local,
+            state.address
+        );
         Ok(Some(TcpAccepted {
             socket,
             peer: endpoint.peer_addr.clone(),
@@ -488,16 +531,12 @@ impl NetDriver for SimNet {
                 format!("virtual connection refused: {address} -> {to} is partitioned"),
             ));
         }
-        let listener_id = self
-            .tcp_listener_addresses
-            .get(to)
-            .copied()
-            .ok_or_else(|| {
-                EffectError::new(
-                    ErrorCode::ConnectionRefused,
-                    format!("no virtual TCP listener at {to}"),
-                )
-            })?;
+        let listener_id = self.resolve_listener(to).ok_or_else(|| {
+            EffectError::new(
+                ErrorCode::ConnectionRefused,
+                format!("no virtual TCP listener at {to}"),
+            )
+        })?;
         let listener = self
             .tcp_listeners
             .get(&listener_id)
@@ -909,6 +948,69 @@ mod tests {
         net.close(sender).unwrap();
         assert_eq!(net.recv(receiver, 0).unwrap().unwrap().bytes, b"reply");
         net.send(receiver, "sender", b"gone", 0).unwrap_err();
+    }
+
+    #[test]
+    fn a_wildcard_bind_receives_traffic_dialed_at_any_address_on_its_port() {
+        // The producer-side enabler: ordinary server code binds INADDR_ANY as it
+        // would in production, and a client that resolved a name to some virtual
+        // IP reaches it by dialing that IP.
+        let mut net = SimNet::new();
+        let server = net.bind("0.0.0.0:80").unwrap();
+        let client = net.bind("10.0.0.9:5000").unwrap();
+        net.send(client, "10.0.0.5:80", b"hello", 0).unwrap();
+        let datagram = net.recv(server, 0).unwrap().expect("wildcard delivery");
+        assert_eq!(datagram.bytes, b"hello");
+        assert_eq!(datagram.from, "10.0.0.9:5000");
+
+        // TCP takes the same route.
+        let listener = net.tcp_listen("0.0.0.0:81", 4).unwrap();
+        let stream = net.tcp_connect("10.0.0.9:5001", "10.0.0.5:81", 0).unwrap();
+        let accepted = net
+            .tcp_accept(listener, 0)
+            .unwrap()
+            .expect("wildcard TCP accept");
+        assert_eq!(accepted.peer, "10.0.0.9:5001");
+        net.tcp_send(stream, b"ping", 0).unwrap();
+        assert_eq!(
+            net.tcp_recv(accepted.socket, 8, 0).unwrap().unwrap(),
+            b"ping"
+        );
+    }
+
+    #[test]
+    fn an_exact_binding_always_wins_over_a_wildcard_one() {
+        let mut net = SimNet::new();
+        let wildcard = net.bind("0.0.0.0:80").unwrap();
+        let exact = net.bind("10.0.0.5:80").unwrap();
+        let client = net.bind("10.0.0.9:5000").unwrap();
+        net.send(client, "10.0.0.5:80", b"exact", 0).unwrap();
+        assert!(
+            net.recv(wildcard, 0).unwrap().is_none(),
+            "the wildcard socket must not steal an exactly-bound address"
+        );
+        assert_eq!(net.recv(exact, 0).unwrap().unwrap().bytes, b"exact");
+    }
+
+    #[test]
+    fn the_wildcard_rule_never_invents_a_route() {
+        // A port with no wildcard listener stays unroutable, and a non-`ip:port`
+        // address (the explicit API binds bare labels) is exact-match only.
+        let mut net = SimNet::new();
+        net.bind("0.0.0.0:80").unwrap();
+        let client = net.bind("10.0.0.9:5000").unwrap();
+        net.send(client, "10.0.0.5:81", b"nope", 0)
+            .expect_err("no wildcard listener on port 81");
+        net.bind("server").unwrap();
+        net.send(client, "other-label", b"nope", 0)
+            .expect_err("a bare label has no wildcard form");
+        assert_eq!(
+            net.tcp_connect("10.0.0.9:5001", "10.0.0.5:80", 0)
+                .unwrap_err()
+                .code,
+            ErrorCode::ConnectionRefused,
+            "a datagram wildcard bind is not a TCP listener"
+        );
     }
 
     #[test]

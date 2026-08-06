@@ -51,6 +51,10 @@ pub enum Kind {
     CrashSpec,
     /// A `KEY=VALUE` pair with a non-empty key.
     KeyValue,
+    /// `NAME=IPV4`: a DNS host-table entry. Distinct from [`Kind::KeyValue`]
+    /// because the value half must be a dotted-quad address, and a typo there is
+    /// worth catching at parse time rather than at the guest's first lookup.
+    DnsEntry,
     /// A datagram socket `FD=BIND->PEER` (FD a u32 above 3, non-empty addresses).
     Socket,
     /// A preopen `GUEST[:ro|:rw]` with a non-empty guest path.
@@ -82,6 +86,7 @@ impl Kind {
             Kind::TaskSelector => "task-selector",
             Kind::CrashSpec => "crash-spec",
             Kind::KeyValue => "key-value",
+            Kind::DnsEntry => "dns-entry",
             Kind::Socket => "socket",
             Kind::Preopen => "preopen",
             Kind::UnsupportedSymbols => "unsupported-symbols",
@@ -478,6 +483,39 @@ const FAULT_FLAGS: &[Flag] = &[
     ),
 ];
 
+/// The DNS domain: the host table (semantic configuration, like `--param`) and
+/// its two seeded fault knobs.
+///
+/// A slice of its own rather than rows in [`FAULT_FLAGS`], because wasip1 has no
+/// name-resolution surface at all — no `getaddrinfo`, no `sock_addr_resolve` — so
+/// the WASI parser must refuse these loudly instead of accepting knobs that could
+/// never fire. That family exception is declared once, by the owning GROUP in
+/// each verb, which is also the only place that can name families the verb
+/// actually has.
+const DNS_FLAGS: &[Flag] = &[
+    f(
+        "--dns-entry",
+        None,
+        Value::Required("NAME=ADDR", Kind::DnsEntry),
+        "Define NAME to resolve to IPv4 ADDR (repeatable). Undefined names are NXDOMAIN.",
+        true,
+    ),
+    f(
+        "--dns-fail-permille",
+        None,
+        Value::Required("N", Kind::Permille),
+        "Fail resolutions of DEFINED names at N per-mille (seeded NXDOMAIN or timeout).",
+        false,
+    ),
+    f(
+        "--dns-latency-nanos",
+        None,
+        Value::Required("MIN..MAX", Kind::NanosRange),
+        "Add seeded latency drawn from [MIN, MAX] to every resolution of a defined name.",
+        false,
+    ),
+];
+
 const WASI_HOST_FLAGS: &[Flag] = &[
     f(
         "--fuel",
@@ -813,6 +851,13 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
             flags: FAULT_FLAGS,
         },
         Group {
+            // wasip1 has no resolution surface, so the WASI family is absent
+            // here and `run <MODULE.wasm> --dns-entry` is refused.
+            title: "DNS options (no wasip1 resolution surface, so not under --target wasi)",
+            families: &[Family::Cargo, Family::Native],
+            flags: DNS_FLAGS,
+        },
+        Group {
             title: "Native run options (run <BINARY>)",
             families: &[Family::Native],
             flags: &[
@@ -1009,6 +1054,11 @@ copy-paste `test` and `replay` repro commands.",
             title: "Fault options (seed-driven, default off)",
             families: &[Family::Cargo, Family::Harness],
             flags: FAULT_FLAGS,
+        },
+        Group {
+            title: "DNS options",
+            families: &[Family::Cargo, Family::Harness],
+            flags: DNS_FLAGS,
         },
         Group {
             title: "Buggify options",
@@ -1275,7 +1325,7 @@ only --fingerprint, --mount, --coverage-out, --harness, and the \
         // refused here the day it is added, with no second list to remember.
         Refusal {
             families: &[Family::Cargo, Family::Wasi, Family::Native],
-            flags: &[FAULT_FLAGS, BUGGIFY_FLAGS, NATIVE_SCHEDULE_FLAGS],
+            flags: &[FAULT_FLAGS, DNS_FLAGS, BUGGIFY_FLAGS, NATIVE_SCHEDULE_FLAGS],
             names: &["--seed", "--record", "--env"],
             message: "replay restores run semantics from the trace and does not accept {flag}; the trace is authoritative",
         },
@@ -2027,7 +2077,14 @@ pub fn verb(name: &str) -> Option<&'static Verb> {
 /// forwarded by one family and silently dropped by another.
 #[cfg(test)]
 pub fn fault_flag_names() -> impl Iterator<Item = &'static str> {
-    FAULT_FLAGS.iter().map(|flag| flag.name)
+    FAULT_FLAGS
+        .iter()
+        .chain(DNS_FLAGS.iter())
+        // `--dns-entry` is semantic configuration on its own control-plane
+        // variable (like `--param`), not a seeded knob, so it is not part of the
+        // knob table this list gates.
+        .filter(|flag| flag.name != "--dns-entry")
+        .map(|flag| flag.name)
 }
 
 /// The registered value-arity of a flag (matched by its long OR short name)

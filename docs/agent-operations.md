@@ -109,6 +109,19 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
 - Inert knobs are bugs. Fault, schedule, coverage, and buggify controls need
   reports that show whether they affected the run; vacuous clean passes should be
   warnings or classified failures when the tier depends on them.
+- New C code in the native shim is linked into EVERY guest, so one added libc
+  call becomes an uninterposed import that the pre-run default-deny gate refuses
+  for every native program — not just for guests using the new feature. Prefer a
+  few lines of hand-rolled parsing over a libc helper there, and treat a gate
+  refusal naming an unexpected symbol as a real finding rather than an
+  over-strict allowlist. (Found on Linux, where glibc resolves `strtol` to
+  `__isoc23_strtol`; macOS did not surface it.)
+- Syncing a source tree to a verification host with `rsync -a` preserves source
+  mtimes, so a build cache on the target can look NEWER than the freshly synced
+  sources and the toolchain skips the rebuild — the tests then run against stale
+  code and "pass". Tell the sync tool not to preserve times, or touch the tree
+  after syncing, and be suspicious of a cross-host run that compiles
+  suspiciously fast.
 - A knob that several execution families each plumb through their own
   hand-maintained list will eventually be carried by some families and dropped by
   the rest, and a dropped knob looks exactly like a clean run. Derive every

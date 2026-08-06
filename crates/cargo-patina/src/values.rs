@@ -47,6 +47,7 @@ pub(crate) fn validate(kind: Kind, name: &str, value: &str) -> Result<(), String
             Some((key, _)) if !key.is_empty() => Ok(()),
             _ => Err(format!("{name} requires KEY=VALUE")),
         },
+        Kind::DnsEntry => dns_entry(name, value).map(drop),
         Kind::Socket => socket(name, value).map(drop),
         Kind::Preopen => preopen(name, value).map(drop),
         Kind::UnsupportedSymbols => unsupported_symbols(name, value).map(drop),
@@ -114,6 +115,27 @@ fn crash_spec(name: &str, value: &str) -> Result<(), String> {
         )),
         Ok(_) => Ok(()),
     }
+}
+
+/// A DNS host-table entry `NAME=IPV4`. The address half must be a dotted quad:
+/// the virtual network's address space is IPv4 `ip:port` strings, and a name
+/// pointed at something else would resolve to an address nothing can be bound
+/// at — a failure the guest would meet as a confusing connect error rather than
+/// as the typo it is.
+pub(crate) fn dns_entry<'a>(name: &str, value: &'a str) -> Result<(&'a str, &'a str), String> {
+    let Some((host, address)) = value.split_once('=') else {
+        return Err(format!("{name} requires NAME=ADDR"));
+    };
+    if host.is_empty() {
+        return Err(format!("{name} requires a non-empty NAME"));
+    }
+    let octets: Vec<&str> = address.split('.').collect();
+    if octets.len() != 4 || !octets.iter().all(|o| o.parse::<u8>().is_ok()) {
+        return Err(format!(
+            "{name} requires NAME=ADDR with ADDR a dotted-quad IPv4 address; got {address:?}"
+        ));
+    }
+    Ok((host, address))
 }
 
 /// A datagram socket route `FD=BIND->PEER`. Uniqueness of the FD across

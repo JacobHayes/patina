@@ -116,7 +116,11 @@ unknown option.
 
 - `--fs-crash-at open|write|sync|close[:N]`, `--fs-torn-granularity block|byte`, `--fs-error-permille N`, `--fs-short-permille N`, `--fs-latency-nanos MIN..MAX`
 - `--sleep-jitter-nanos MIN..MAX`, `--net-jitter-nanos MIN..MAX`, `--net-drop-permille N`, `--net-latency-nanos N`
-- Every knob above is accepted by `run` and `test` in ALL families (Cargo package, WASI, native) and refused by `replay`, which restores them from the trace.
+- `--dns-entry NAME=ADDR` (repeatable), `--dns-fail-permille N`, `--dns-latency-nanos MIN..MAX`
+- Every knob above is accepted by `run` and `test` in ALL families (Cargo package, WASI, native)
+  and refused by `replay`, which restores them from the trace. EXCEPTION: the `--dns-*` flags are
+  not available under `--target wasi` — wasip1 has no name-resolution surface, so the WASI parser
+  refuses them rather than accepting a knob that could never fire.
 - `--buggify[=PERMILLE]`, `--buggify-activation-permille N`, `--buggify-cutoff-nanos N`, `--buggify-after-setup`
 
 ## Output options (all verbs; stripped before routing, never reach the guest)
