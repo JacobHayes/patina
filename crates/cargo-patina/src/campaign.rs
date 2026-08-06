@@ -1795,7 +1795,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
         if state.spec.guided {
             guidance.record(decision);
         }
-        let seed = u64::from_le_bytes(hash[0..8].try_into().expect("32-byte hash"));
+        let seed = u64::from_le_bytes(hash[gen_byte::SEED].try_into().expect("32-byte hash"));
         let flags = derive_flags(&state.spec, &hash, state.artifact.family);
         let trace_path = traces_dir.join(format!("generation-{generation}.patina"));
         let _ = fs::remove_file(&trace_path);
@@ -2252,9 +2252,69 @@ fn push_run_flag(flags: &mut Vec<String>, name: &str, value: RunValue) {
     }
 }
 
+/// Which byte of the 32-byte generation hash each seed-derived band draws from.
+///
+/// Every band must claim a byte here and read it through the claim, never by
+/// writing a literal index. Two bands sharing a byte would silently *correlate*
+/// their knobs — the campaign would never explore that pair independently, so a
+/// bug reachable only at some combination of the two could be unreachable at
+/// every generation — and nothing about the run would look wrong. One table makes
+/// a collision a testable fact instead of a reviewer's job:
+/// [`generation_byte_claims_are_disjoint`] rejects a duplicate or out-of-range
+/// claim, and [`every_generation_hash_read_goes_through_a_claim`] rejects a raw
+/// literal index that bypassed the table.
+///
+/// Bytes 10 and 23..32 are unclaimed and are where the next band should draw from.
+mod gen_byte {
+    use std::ops::Range;
+
+    /// The child run's `--seed`, little-endian. A slice, not a single byte, so it
+    /// claims eight of them.
+    pub(super) const SEED: Range<usize> = 0..8;
+
+    pub(super) const BUGGIFY_ACTIVATION: usize = 8;
+    pub(super) const BUGGIFY_FIRE: usize = 9;
+    pub(super) const SCHED_PCT_DEPTH: usize = 11;
+    pub(super) const NET_DROP: usize = 12;
+    pub(super) const SLEEP_JITTER_HI: usize = 13;
+    pub(super) const FS_ERROR: usize = 14;
+    pub(super) const FS_SHORT: usize = 15;
+    pub(super) const FS_LATENCY_HI: usize = 16;
+    pub(super) const FS_CRASH_OP: usize = 17;
+    pub(super) const FS_CRASH_ORDINAL: usize = 18;
+    pub(super) const FS_TORN_GRANULARITY: usize = 19;
+    pub(super) const NET_LATENCY: usize = 20;
+    pub(super) const DNS_FAIL: usize = 21;
+    pub(super) const DNS_LATENCY_HI: usize = 22;
+
+    /// Every single-byte claim, for the disjointness gate. A new band that adds a
+    /// constant above but forgets this row stays ungated here — which is why the
+    /// raw-index scan is the second half of the pairing: between them, a band is
+    /// either in this table or it fails a gate. Only the gates read it — the
+    /// derivation itself uses the named constants directly.
+    #[cfg(test)]
+    pub(super) const SINGLE_BYTE_CLAIMS: &[(&str, usize)] = &[
+        ("buggify activation", BUGGIFY_ACTIVATION),
+        ("buggify fire", BUGGIFY_FIRE),
+        ("sched-pct depth", SCHED_PCT_DEPTH),
+        ("net drop", NET_DROP),
+        ("sleep jitter hi", SLEEP_JITTER_HI),
+        ("fs error", FS_ERROR),
+        ("fs short", FS_SHORT),
+        ("fs latency hi", FS_LATENCY_HI),
+        ("fs crash op", FS_CRASH_OP),
+        ("fs crash ordinal", FS_CRASH_ORDINAL),
+        ("fs torn granularity", FS_TORN_GRANULARITY),
+        ("net latency", NET_LATENCY),
+        ("dns fail", DNS_FAIL),
+        ("dns latency hi", DNS_LATENCY_HI),
+    ];
+}
+
 /// Derive the per-generation `run` flags from the generation hash. Native-only
 /// exploration knobs (`--swarm`, `--sched-pct`) are skipped for a WASI module
-/// (single-threaded; the WASI `run` does not accept them).
+/// (single-threaded; the WASI `run` does not accept them). Every draw indexes
+/// through a [`gen_byte`] claim so no two bands can share a byte unnoticed.
 fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> Vec<String> {
     let native = family == "native";
     let mut flags = Vec::new();
@@ -2264,8 +2324,8 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
         // seed-varying band that both activates and fires cooperative-SUT sites
         // often enough to exercise a planted bug across a modest campaign, while
         // still leaving clean generations (neither always nor never firing).
-        let activation = 300 + (u32::from(hash[8]) * 600 / 255);
-        let fire = 300 + (u32::from(hash[9]) * 600 / 255);
+        let activation = 300 + (u32::from(hash[gen_byte::BUGGIFY_ACTIVATION]) * 600 / 255);
+        let fire = 300 + (u32::from(hash[gen_byte::BUGGIFY_FIRE]) * 600 / 255);
         push_run_flag(&mut flags, "--buggify", RunValue::Int(u64::from(fire)));
         push_run_flag(
             &mut flags,
@@ -2274,19 +2334,19 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
         );
     }
     if spec.faults {
-        let fs_error = u32::from(hash[14]) * 100 / 255; // [0, 100] permille
+        let fs_error = u32::from(hash[gen_byte::FS_ERROR]) * 100 / 255; // [0, 100] permille
         push_run_flag(
             &mut flags,
             "--fs-error-permille",
             RunValue::Int(u64::from(fs_error)),
         );
-        let fs_short = u32::from(hash[15]) * 200 / 255; // [0, 200] permille
+        let fs_short = u32::from(hash[gen_byte::FS_SHORT]) * 200 / 255; // [0, 200] permille
         push_run_flag(
             &mut flags,
             "--fs-short-permille",
             RunValue::Int(u64::from(fs_short)),
         );
-        let fs_latency_hi = u64::from(hash[16]) * 10_000; // up to 2.55 ms
+        let fs_latency_hi = u64::from(hash[gen_byte::FS_LATENCY_HI]) * 10_000; // up to 2.55 ms
         push_run_flag(
             &mut flags,
             "--fs-latency-nanos",
@@ -2301,8 +2361,9 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
         // filesystem at different points in the guest's I/O sequence. Ordinals stay
         // in [1, 8] because a crash that never fires (an ordinal past the guest's
         // op count) explores nothing.
-        let crash_op = ["open", "write", "sync", "close"][usize::from(hash[17] % 4)];
-        let crash_ordinal = 1 + u64::from(hash[18] % 8);
+        let crash_op =
+            ["open", "write", "sync", "close"][usize::from(hash[gen_byte::FS_CRASH_OP] % 4)];
+        let crash_ordinal = 1 + u64::from(hash[gen_byte::FS_CRASH_ORDINAL] % 8);
         push_run_flag(
             &mut flags,
             "--fs-crash-at",
@@ -2310,26 +2371,26 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
         );
         // Half the generations tear at sub-block byte granularity, the harder
         // durability model to survive.
-        if hash[19] % 2 == 0 {
+        if hash[gen_byte::FS_TORN_GRANULARITY] % 2 == 0 {
             push_run_flag(
                 &mut flags,
                 "--fs-torn-granularity",
                 RunValue::Text("byte".to_string()),
             );
         }
-        let drop = u32::from(hash[12]) * 200 / 255; // [0, 200] permille
+        let drop = u32::from(hash[gen_byte::NET_DROP]) * 200 / 255; // [0, 200] permille
         push_run_flag(
             &mut flags,
             "--net-drop-permille",
             RunValue::Int(u64::from(drop)),
         );
-        let net_latency = u64::from(hash[20]) * 10_000; // up to 2.55 ms
+        let net_latency = u64::from(hash[gen_byte::NET_LATENCY]) * 10_000; // up to 2.55 ms
         push_run_flag(
             &mut flags,
             "--net-latency-nanos",
             RunValue::Int(net_latency),
         );
-        let jitter_hi = u64::from(hash[13]) * 10_000; // up to 2.55 ms
+        let jitter_hi = u64::from(hash[gen_byte::SLEEP_JITTER_HI]) * 10_000; // up to 2.55 ms
         push_run_flag(
             &mut flags,
             "--sleep-jitter-nanos",
@@ -2348,13 +2409,13 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
             for entry in &spec.dns_entries {
                 push_run_flag(&mut flags, "--dns-entry", RunValue::Text(entry.clone()));
             }
-            let dns_fail = u32::from(hash[21]) * 100 / 255; // [0, 100] permille
+            let dns_fail = u32::from(hash[gen_byte::DNS_FAIL]) * 100 / 255; // [0, 100] permille
             push_run_flag(
                 &mut flags,
                 "--dns-fail-permille",
                 RunValue::Int(u64::from(dns_fail)),
             );
-            let dns_latency_hi = u64::from(hash[22]) * 10_000; // up to 2.55 ms
+            let dns_latency_hi = u64::from(hash[gen_byte::DNS_LATENCY_HI]) * 10_000; // up to 2.55 ms
             push_run_flag(
                 &mut flags,
                 "--dns-latency-nanos",
@@ -2369,7 +2430,7 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
         push_run_flag(&mut flags, "--swarm", RunValue::Switch);
     }
     if spec.pct && native {
-        let depth = 1 + u32::from(hash[11] % 5); // [1, 5]
+        let depth = 1 + u32::from(hash[gen_byte::SCHED_PCT_DEPTH] % 5); // [1, 5]
         push_run_flag(&mut flags, "--sched-pct", RunValue::Int(u64::from(depth)));
     }
     if let Some(nanos) = spec.watchdog_nanos {
@@ -4643,6 +4704,107 @@ mod tests {
                 || error.contains("failed to lock campaign out-dir"),
             "{error}"
         );
+    }
+
+    // The generation hash is one 32-byte namespace shared by every seed-derived
+    // band. Two bands drawing from the same byte would lock their knobs together:
+    // the campaign would sweep a diagonal of the pair's space instead of the
+    // square, so a bug that needs an off-diagonal combination stays unreachable at
+    // EVERY generation while the reports still look healthy. No run surfaces that,
+    // which is why it is gated structurally rather than left to review.
+    //
+    // Class-level pairing: `gen_byte` is the one claims table every band indexes
+    // through, and these two tests are its halves. This one proves the claims are
+    // disjoint and in range; `every_generation_hash_read_goes_through_a_claim`
+    // proves no band bypassed the table with a literal index. A new colliding band
+    // has to fail one of them.
+    #[test]
+    fn generation_byte_claims_are_disjoint() {
+        let mut claimed: BTreeMap<usize, &str> = BTreeMap::new();
+        for (name, index) in gen_byte::SINGLE_BYTE_CLAIMS {
+            assert!(
+                *index < 32,
+                "the {name} band claims generation byte {index}, past the 32-byte hash"
+            );
+            assert!(
+                !gen_byte::SEED.contains(index),
+                "the {name} band claims generation byte {index}, which is inside the seed slice \
+                 {:?} — its draw would be correlated with the child run's seed",
+                gen_byte::SEED
+            );
+            if let Some(other) = claimed.insert(*index, name) {
+                panic!(
+                    "the {name} and {other} bands both claim generation byte {index}; their knobs \
+                     would be correlated in every generation. Claim a free byte instead (10, or \
+                     23..32)."
+                );
+            }
+        }
+        assert_eq!(
+            claimed.len(),
+            gen_byte::SINGLE_BYTE_CLAIMS.len(),
+            "the claims table lost a row to a duplicate index"
+        );
+    }
+
+    // The other half of the pairing: a band that writes `hash[15]` directly would
+    // satisfy the disjointness test above (it never appears in the table) while
+    // still colliding. Scanning the source for a literal index is what makes the
+    // table load-bearing rather than advisory.
+    #[test]
+    fn every_generation_hash_read_goes_through_a_claim() {
+        // Only the non-test half is scanned: this module's own diagnostics spell
+        // the pattern out, and a gate that trips on its own error messages is
+        // useless. The bound is the test MODULE header, not a bare `#[cfg(test)]`
+        // — `gen_byte::SINGLE_BYTE_CLAIMS` carries one of those too, and cutting
+        // there would stop the scan above `derive_flags` and silently cover none
+        // of the bands. Each file also names an anchor that must fall inside the
+        // scanned region, so a future edit that moves the bound fails loudly here
+        // instead of quietly shrinking the gate to nothing.
+        const TEST_MARKER: &str = "#[cfg(test)]\nmod tests {";
+        let needle = format!("hash{}", '[');
+        for (file, source, anchor) in [
+            (
+                "campaign.rs",
+                include_str!("campaign.rs"),
+                "fn derive_flags",
+            ),
+            (
+                "guided.rs",
+                include_str!("guided.rs"),
+                "fn base_generation_hash",
+            ),
+        ] {
+            let end = source.find(TEST_MARKER).unwrap_or_else(|| {
+                panic!("{file} has no `{TEST_MARKER}`; the scan bound is stale")
+            });
+            let scanned = &source[..end];
+            assert!(
+                scanned.contains(anchor),
+                "the scan of {file} stops before `{anchor}`, so it does not cover the derivation \
+                 it is meant to gate"
+            );
+            assert!(
+                scanned.contains(&needle),
+                "the scan of {file} found no generation-hash reads at all, so it proves nothing"
+            );
+            for (offset, line) in scanned.lines().enumerate() {
+                let mut from = 0;
+                while let Some(at) = line[from..].find(&needle) {
+                    let after = from + at + needle.len();
+                    if line[after..].starts_with(|c: char| c.is_ascii_digit()) {
+                        panic!(
+                            "{file}:{} reads the generation hash by literal index:\n  {}\nClaim a \
+                             byte in `gen_byte` and index through the claim, so a collision with \
+                             another band fails `generation_byte_claims_are_disjoint`.",
+                            offset + 1,
+                            line.trim()
+                        );
+                    }
+                    from = after;
+                }
+            }
+        }
     }
 
     #[test]
