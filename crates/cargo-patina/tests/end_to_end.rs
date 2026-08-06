@@ -1,8 +1,9 @@
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use tempfile::tempdir;
 
@@ -2454,6 +2455,36 @@ fn run_and_audit_infer_target_and_reject_cross_target_flags() {
 // resulting module composes with `audit` and `run` inferred from its magic
 // bytes. Requires the wasm32-wasip1 target (installed in CI and by the
 // validate/smoke scripts' preflight).
+fn campaign_gen_lines(text: &str) -> String {
+    text.lines()
+        .filter(|line| line.starts_with("PATINA_CAMPAIGN_GEN"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn campaign_json_without_invocations(value: &serde_json::Value) -> serde_json::Value {
+    let mut value = value.clone();
+    value.as_object_mut().unwrap().remove("invocations");
+    value
+}
+
+fn campaign_state_without_invocations(path: &Path) -> serde_json::Value {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    value.as_object_mut().unwrap().remove("invocations");
+    value
+}
+
+fn campaign_json_stdout(output: &Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "campaign JSON stdout was not a single object: {error}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 // End-to-end coverage for `cargo patina campaign` + the liveness watchdog: build
 // the buggify-driven planted-bug guest (`testbeds/liveness-campaign`), sweep it,
@@ -2551,6 +2582,15 @@ fn campaign_catches_planted_liveness_bug_dedups_and_reproduces() {
         liveness_gens,
         "signature count must equal the number of LIVENESS generations"
     );
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(out.join("campaign-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(state["schema"], "patina.campaign.state/v1");
+    assert_eq!(state["generations_done"], 12);
+    assert_eq!(state["artifact"]["path"], guest.to_str().unwrap());
+    assert!(state["artifact"]["sha256"].as_str().unwrap().len() == 64);
+    assert_eq!(state["signatures"], store["signatures"]);
+    assert_eq!(state["invocations"].as_array().unwrap().len(), 1);
 
     // The recorded reproduce command deterministically re-triggers the violation.
     let reproduce = signature["reproduce"].as_str().unwrap();
@@ -2576,21 +2616,645 @@ fn campaign_catches_planted_liveness_bug_dedups_and_reproduces() {
         workspace,
         &owned2.iter().map(String::as_str).collect::<Vec<_>>(),
     );
-    let gen_lines = |text: &str| {
-        text.lines()
-            .filter(|l| l.starts_with("PATINA_CAMPAIGN_GEN"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
     assert_eq!(
-        gen_lines(&stdout),
-        gen_lines(&String::from_utf8_lossy(&ran2.stdout)),
+        campaign_gen_lines(&stdout),
+        campaign_gen_lines(&String::from_utf8_lossy(&ran2.stdout)),
         "a deterministic re-run must produce identical per-generation outcomes"
     );
     assert_eq!(
         fs::read_to_string(out.join("signatures.json")).unwrap(),
         fs::read_to_string(out2.join("signatures.json")).unwrap(),
         "a deterministic re-run must produce an identical signature store"
+    );
+    assert_eq!(
+        campaign_state_without_invocations(&out.join("campaign-state.json")),
+        campaign_state_without_invocations(&out2.join("campaign-state.json")),
+        "a deterministic re-run must produce identical persisted state except audit invocations"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn campaign_extend_equals_fresh_campaign() {
+    let workspace = native_workspace();
+    let fixture = workspace.join("testbeds/liveness-campaign");
+    let directory = tempdir().unwrap();
+    let guest = directory.path().join("liveness-guest");
+
+    let built = invoke_in(
+        workspace,
+        &[
+            "build",
+            fixture.to_str().unwrap(),
+            "--output",
+            guest.to_str().unwrap(),
+            "--release",
+        ],
+    );
+    assert!(
+        built.status.success(),
+        "building the liveness-campaign guest failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&built.stdout),
+        String::from_utf8_lossy(&built.stderr)
+    );
+
+    let campaign_args = |out: &Path, gens: u64, json: bool| {
+        let mut args = vec![
+            "campaign".to_string(),
+            guest.to_str().unwrap().to_string(),
+            "--gens".to_string(),
+            gens.to_string(),
+            "--progress-every".to_string(),
+            "1".to_string(),
+            "--buggify".to_string(),
+            "--liveness-watchdog".to_string(),
+            "600000000000".to_string(),
+            "--out-dir".to_string(),
+            out.to_str().unwrap().to_string(),
+        ];
+        if json {
+            args.extend(["--format".to_string(), "json".to_string()]);
+        }
+        args
+    };
+    let run = |owned: Vec<String>| {
+        let refs = owned.iter().map(String::as_str).collect::<Vec<_>>();
+        invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, &refs)
+    };
+    let concat_gen_lines = |outputs: &[&str]| {
+        outputs
+            .iter()
+            .map(|text| campaign_gen_lines(text))
+            .filter(|lines| !lines.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let out = directory.path().join("camp");
+    let fresh = run(campaign_args(&out, 12, false));
+    assert_eq!(
+        fresh.status.code(),
+        Some(1),
+        "fresh campaign should find the planted failure\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&fresh.stdout),
+        String::from_utf8_lossy(&fresh.stderr)
+    );
+    let fresh_stdout = String::from_utf8_lossy(&fresh.stdout).into_owned();
+    let fresh_signatures = fs::read_to_string(out.join("signatures.json")).unwrap();
+    let fresh_state = campaign_state_without_invocations(&out.join("campaign-state.json"));
+
+    fs::remove_dir_all(&out).unwrap();
+    let split1 = run(campaign_args(&out, 5, false));
+    assert!(
+        matches!(split1.status.code(), Some(0) | Some(1)),
+        "split segment exited unexpectedly: {}\nstdout:\n{}\nstderr:\n{}",
+        split1.status,
+        String::from_utf8_lossy(&split1.stdout),
+        String::from_utf8_lossy(&split1.stderr)
+    );
+    let extend_args = vec![
+        "campaign".to_string(),
+        "--extend".to_string(),
+        "7".to_string(),
+        "--out-dir".to_string(),
+        out.to_str().unwrap().to_string(),
+        "--progress-every".to_string(),
+        "1".to_string(),
+    ];
+    let split2 = run(extend_args);
+    assert_eq!(
+        split2.status.code(),
+        Some(1),
+        "extended campaign should preserve cumulative failure exit\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&split2.stdout),
+        String::from_utf8_lossy(&split2.stderr)
+    );
+    let split1_stdout = String::from_utf8_lossy(&split1.stdout);
+    let split2_stdout = String::from_utf8_lossy(&split2.stdout);
+    assert!(
+        split2_stdout.contains("PATINA_CAMPAIGN_RESUME")
+            && split2_stdout.contains("done=5")
+            && split2_stdout.contains("target=12"),
+        "extension should announce the recorded cursor and cumulative target:\n{split2_stdout}"
+    );
+    assert!(
+        split2_stdout.contains("PATINA_CAMPAIGN_COMPLETE generations=12"),
+        "extension summary must be cumulative:\n{split2_stdout}"
+    );
+    assert_eq!(
+        campaign_gen_lines(&fresh_stdout),
+        concat_gen_lines(&[&split1_stdout, &split2_stdout]),
+        "k-then-extend must reproduce the fresh per-generation stream"
+    );
+    assert_eq!(
+        split1_stdout.matches("NOVEL").count() + split2_stdout.matches("NOVEL").count(),
+        1,
+        "novelty must survive the split"
+    );
+    assert_eq!(
+        fresh_signatures,
+        fs::read_to_string(out.join("signatures.json")).unwrap(),
+        "k-then-extend must reproduce the fresh signature store"
+    );
+    assert_eq!(
+        fresh_state,
+        campaign_state_without_invocations(&out.join("campaign-state.json")),
+        "k-then-extend must reproduce persisted state except audit invocations"
+    );
+
+    let json_out = directory.path().join("camp-json");
+    let fresh_json = run(campaign_args(&json_out, 12, true));
+    assert_eq!(fresh_json.status.code(), Some(1));
+    let fresh_envelope = campaign_json_stdout(&fresh_json);
+    fs::remove_dir_all(&json_out).unwrap();
+    let split_json1 = run(campaign_args(&json_out, 5, true));
+    assert!(matches!(split_json1.status.code(), Some(0) | Some(1)));
+    let split_json2 = run(vec![
+        "campaign".to_string(),
+        "--extend".to_string(),
+        "7".to_string(),
+        "--out-dir".to_string(),
+        json_out.to_str().unwrap().to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+    ]);
+    assert_eq!(split_json2.status.code(), Some(1));
+    let split_envelope = campaign_json_stdout(&split_json2);
+    assert_eq!(
+        campaign_json_without_invocations(&fresh_envelope),
+        campaign_json_without_invocations(&split_envelope),
+        "k-then-extend final JSON envelope must match fresh except audit invocations"
+    );
+    assert_eq!(split_envelope["invocations"].as_array().unwrap().len(), 2);
+    assert!(
+        split_envelope["artifacts"]["campaign_state"]
+            .as_str()
+            .unwrap()
+            .ends_with("campaign-state.json")
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn campaign_resume_after_interruption_matches_fresh_campaign() {
+    let workspace = native_workspace();
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("burn.rs");
+    let guest = directory.path().join("burn-guest");
+    fs::write(
+        &source,
+        r#"
+fn main() {
+    let mut x = 0u64;
+    for i in 0..20_000_000u64 {
+        x = x.wrapping_add(i.rotate_left((i % 31) as u32));
+        std::hint::black_box(x);
+    }
+    println!("BURN_DONE {x}");
+}
+"#,
+    )
+    .unwrap();
+    let built = invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            guest.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        built.status.success(),
+        "building burn guest failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&built.stdout),
+        String::from_utf8_lossy(&built.stderr)
+    );
+
+    let campaign_args = |out: &Path| {
+        vec![
+            "campaign".to_string(),
+            guest.to_str().unwrap().to_string(),
+            "--gens".to_string(),
+            "8".to_string(),
+            "--progress-every".to_string(),
+            "1".to_string(),
+            "--out-dir".to_string(),
+            out.to_str().unwrap().to_string(),
+        ]
+    };
+    let run = |owned: Vec<String>| {
+        let refs = owned.iter().map(String::as_str).collect::<Vec<_>>();
+        invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, &refs)
+    };
+
+    let out = directory.path().join("camp");
+    let fresh = run(campaign_args(&out));
+    assert!(
+        fresh.status.success(),
+        "fresh burn campaign failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&fresh.stdout),
+        String::from_utf8_lossy(&fresh.stderr)
+    );
+    let fresh_stdout = String::from_utf8_lossy(&fresh.stdout).into_owned();
+    let fresh_state = campaign_state_without_invocations(&out.join("campaign-state.json"));
+    let fresh_signatures = fs::read_to_string(out.join("signatures.json")).unwrap();
+
+    fs::remove_dir_all(&out).unwrap();
+    let owned = campaign_args(&out);
+    let refs = owned.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+        .current_dir(workspace)
+        .args(&refs)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let state_path = out.join("campaign-state.json");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let observed_done = loop {
+        if state_path.exists() {
+            let state: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+            let done = state["generations_done"].as_u64().unwrap();
+            if (2..8).contains(&done) {
+                break done;
+            }
+            assert!(done < 8, "campaign finished before it could be interrupted");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for an interruptible campaign checkpoint"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let concurrent = run(campaign_args(&out));
+    assert_eq!(
+        concurrent.status.code(),
+        Some(2),
+        "second writer should fail immediately while the first campaign holds the lock\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&concurrent.stdout),
+        String::from_utf8_lossy(&concurrent.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&concurrent.stderr)
+            .contains("another campaign is writing this out-dir"),
+        "concurrent writer refusal should name the lock:\n{}",
+        String::from_utf8_lossy(&concurrent.stderr)
+    );
+    child.kill().unwrap();
+    let interrupted = child.wait_with_output().unwrap();
+    assert!(
+        !interrupted.status.success(),
+        "killed campaign unexpectedly exited successfully"
+    );
+    assert!(
+        state_path.exists(),
+        "interrupted campaign left no state file"
+    );
+    assert!(
+        out.join("signatures.json").exists(),
+        "interrupted campaign left no derived signature store"
+    );
+
+    let resumed = run(vec![
+        "campaign".to_string(),
+        "--resume".to_string(),
+        "--out-dir".to_string(),
+        out.to_str().unwrap().to_string(),
+        "--progress-every".to_string(),
+        "1".to_string(),
+    ]);
+    assert!(
+        resumed.status.success(),
+        "resume failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let interrupted_stdout = String::from_utf8_lossy(&interrupted.stdout);
+    let resumed_stdout = String::from_utf8_lossy(&resumed.stdout);
+    assert!(
+        resumed_stdout.contains("PATINA_CAMPAIGN_RESUME")
+            && resumed_stdout.contains(&format!("done={observed_done}"))
+            && resumed_stdout.contains("target=8"),
+        "resume should announce the persisted cursor:\n{resumed_stdout}"
+    );
+    let combined = [
+        campaign_gen_lines(&interrupted_stdout),
+        campaign_gen_lines(&resumed_stdout),
+    ]
+    .into_iter()
+    .filter(|lines| !lines.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n");
+    assert_eq!(
+        campaign_gen_lines(&fresh_stdout),
+        combined,
+        "interrupted + resumed stream must match a fresh campaign"
+    );
+    assert_eq!(
+        fresh_state,
+        campaign_state_without_invocations(&state_path),
+        "interrupted + resumed state must match fresh except audit invocations"
+    );
+    assert_eq!(
+        fresh_signatures,
+        fs::read_to_string(out.join("signatures.json")).unwrap(),
+        "interrupted + resumed signature store must match fresh"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn campaign_continuation_refusals_are_loud() {
+    let directory = tempdir().unwrap();
+    let cwd = directory.path();
+    let module = cwd.join("noop.wasm");
+    fs::write(
+        &module,
+        wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#)
+            .unwrap(),
+    )
+    .unwrap();
+    let patina = env!("CARGO_BIN_EXE_cargo-patina");
+    let run = |args: &[&str]| invoke_unchecked(patina, cwd, args);
+    let assert_refuses = |output: Output, needle: &str| {
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "expected refusal containing {needle:?}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(needle),
+            "refusal did not contain {needle:?}:\n{stderr}"
+        );
+    };
+
+    let missing = cwd.join("missing-out");
+    assert_refuses(
+        run(&[
+            "campaign",
+            "--extend",
+            "1",
+            "--out-dir",
+            missing.to_str().unwrap(),
+        ]),
+        "no campaign-state.json",
+    );
+
+    let pre_steering = cwd.join("pre-steering");
+    fs::create_dir_all(&pre_steering).unwrap();
+    fs::write(
+        pre_steering.join("signatures.json"),
+        r#"{"schema":"patina.campaign.signatures/v1","signatures":[]}"#,
+    )
+    .unwrap();
+    assert_refuses(
+        run(&[
+            "campaign",
+            "--resume",
+            "--out-dir",
+            pre_steering.to_str().unwrap(),
+        ]),
+        "no campaign-state.json",
+    );
+
+    let out = cwd.join("camp");
+    let fresh = run(&[
+        "campaign",
+        module.to_str().unwrap(),
+        "--gens",
+        "1",
+        "--out-dir",
+        out.to_str().unwrap(),
+    ]);
+    assert!(
+        fresh.status.success(),
+        "fresh campaign failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&fresh.stdout),
+        String::from_utf8_lossy(&fresh.stderr)
+    );
+    assert_refuses(
+        run(&[
+            "campaign",
+            module.to_str().unwrap(),
+            "--gens",
+            "1",
+            "--out-dir",
+            out.to_str().unwrap(),
+        ]),
+        "already contains campaign-state.json",
+    );
+    assert_refuses(
+        run(&["campaign", "--resume", "--out-dir", out.to_str().unwrap()]),
+        "campaign complete at 1/1",
+    );
+    assert_refuses(
+        run(&[
+            "campaign",
+            "--extend",
+            "1",
+            "--out-dir",
+            out.to_str().unwrap(),
+            "--gens",
+            "2",
+        ]),
+        "out-dir's recorded spec is authoritative",
+    );
+    assert_refuses(
+        run(&[
+            "campaign",
+            module.to_str().unwrap(),
+            "--extend",
+            "1",
+            "--out-dir",
+            out.to_str().unwrap(),
+        ]),
+        "artifact positional cannot be used with --extend/--resume",
+    );
+    assert_refuses(
+        run(&[
+            "campaign",
+            "--extend",
+            "1",
+            "--resume",
+            "--out-dir",
+            out.to_str().unwrap(),
+        ]),
+        "choose exactly one continuation mode",
+    );
+    assert_refuses(
+        run(&[
+            "campaign",
+            "--extend",
+            "0",
+            "--out-dir",
+            out.to_str().unwrap(),
+        ]),
+        "--extend 0 is redundant",
+    );
+
+    let heartbeat_out = cwd.join("heartbeat-camp");
+    let heartbeat_fresh = run(&[
+        "campaign",
+        module.to_str().unwrap(),
+        "--gens",
+        "3",
+        "--progress-every",
+        "0",
+        "--out-dir",
+        heartbeat_out.to_str().unwrap(),
+    ]);
+    assert!(heartbeat_fresh.status.success());
+    let heartbeat_extend = run(&[
+        "campaign",
+        "--extend",
+        "2",
+        "--out-dir",
+        heartbeat_out.to_str().unwrap(),
+        "--progress-every",
+        "2",
+    ]);
+    assert!(
+        heartbeat_extend.status.success(),
+        "heartbeat extension failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&heartbeat_extend.stdout),
+        String::from_utf8_lossy(&heartbeat_extend.stderr)
+    );
+    let heartbeat_stdout = String::from_utf8_lossy(&heartbeat_extend.stdout);
+    assert!(
+        heartbeat_stdout.contains("PATINA_CAMPAIGN_RESUME")
+            && heartbeat_stdout.contains("done=3")
+            && heartbeat_stdout.contains("target=5"),
+        "resume line should be cumulative:\n{heartbeat_stdout}"
+    );
+    assert!(
+        heartbeat_stdout.contains("PATINA_CAMPAIGN_PROGRESS generation=4/5")
+            && heartbeat_stdout.contains("failures=0")
+            && heartbeat_stdout.contains("OK=4"),
+        "extension heartbeat should be cumulative:\n{heartbeat_stdout}"
+    );
+    assert!(
+        heartbeat_stdout.contains("PATINA_CAMPAIGN_COMPLETE generations=5"),
+        "extension summary should be cumulative:\n{heartbeat_stdout}"
+    );
+
+    let schema_out = cwd.join("schema-camp");
+    let schema_fresh = run(&[
+        "campaign",
+        module.to_str().unwrap(),
+        "--gens",
+        "1",
+        "--out-dir",
+        schema_out.to_str().unwrap(),
+    ]);
+    assert!(schema_fresh.status.success());
+    let schema_path = schema_out.join("campaign-state.json");
+    let mut state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&schema_path).unwrap()).unwrap();
+    state["schema"] = "patina.campaign.state/v999".into();
+    fs::write(&schema_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+    assert_refuses(
+        run(&[
+            "campaign",
+            "--extend",
+            "1",
+            "--out-dir",
+            schema_out.to_str().unwrap(),
+        ]),
+        "different cargo-patina version",
+    );
+
+    let corrupt_out = cwd.join("corrupt-camp");
+    let corrupt_fresh = run(&[
+        "campaign",
+        module.to_str().unwrap(),
+        "--gens",
+        "1",
+        "--out-dir",
+        corrupt_out.to_str().unwrap(),
+    ]);
+    assert!(corrupt_fresh.status.success());
+    let corrupt_path = corrupt_out.join("campaign-state.json");
+    let mut state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&corrupt_path).unwrap()).unwrap();
+    state["classes"] = serde_json::json!({"MYSTERY": 1});
+    fs::write(&corrupt_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+    assert_refuses(
+        run(&[
+            "campaign",
+            "--extend",
+            "1",
+            "--out-dir",
+            corrupt_out.to_str().unwrap(),
+        ]),
+        "corrupt",
+    );
+
+    let missing_artifact_module = cwd.join("missing-artifact.wasm");
+    fs::write(
+        &missing_artifact_module,
+        wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#)
+            .unwrap(),
+    )
+    .unwrap();
+    let missing_artifact_out = cwd.join("missing-artifact-camp");
+    let missing_artifact_fresh = run(&[
+        "campaign",
+        missing_artifact_module.to_str().unwrap(),
+        "--gens",
+        "1",
+        "--out-dir",
+        missing_artifact_out.to_str().unwrap(),
+    ]);
+    assert!(missing_artifact_fresh.status.success());
+    fs::remove_file(&missing_artifact_module).unwrap();
+    assert_refuses(
+        run(&[
+            "campaign",
+            "--extend",
+            "1",
+            "--out-dir",
+            missing_artifact_out.to_str().unwrap(),
+        ]),
+        "cannot be read",
+    );
+
+    let hash_module = cwd.join("hash.wasm");
+    fs::write(
+        &hash_module,
+        wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#)
+            .unwrap(),
+    )
+    .unwrap();
+    let hash_out = cwd.join("hash-camp");
+    let hash_fresh = run(&[
+        "campaign",
+        hash_module.to_str().unwrap(),
+        "--gens",
+        "1",
+        "--out-dir",
+        hash_out.to_str().unwrap(),
+    ]);
+    assert!(hash_fresh.status.success());
+    fs::write(
+        &hash_module,
+        wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start") (nop)))"#)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_refuses(
+        run(&[
+            "campaign",
+            "--extend",
+            "1",
+            "--out-dir",
+            hash_out.to_str().unwrap(),
+        ]),
+        "the artifact changed since this campaign started",
     );
 }
 

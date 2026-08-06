@@ -1,6 +1,7 @@
 # Campaign steering: resumable + extendable campaigns
 
-Status: design approved 2026-07-30; implementation not yet scheduled. Lands as
+Status: design approved 2026-07-30; Stages 1+2 implemented in the current
+campaign-steering arc; Stage 3 remains a later wave. Lands as
 `docs/arcs/campaign-steering.md`.
 
 ## 1. Problem and settled decision

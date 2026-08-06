@@ -37,7 +37,11 @@
 //! rather than one line per generation.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -50,6 +54,8 @@ use crate::{CliError, reject_inline, required_value, set_once, split_opt};
 /// the novel/failing generations (v1's `runs` dumped every generation), and an
 /// `artifacts` object points at the full on-disk detail.
 const CAMPAIGN_ENVELOPE_SCHEMA: &str = "patina.campaign/v2";
+const CAMPAIGN_STATE_SCHEMA: &str = "patina.campaign.state/v1";
+const CAMPAIGN_SIGNATURES_SCHEMA: &str = "patina.campaign.signatures/v1";
 
 /// The default progress-heartbeat cadence: in human mode, print one
 /// `PATINA_CAMPAIGN_PROGRESS` line every this-many generations (on top of the
@@ -170,24 +176,43 @@ fn json_bool(key: &str, value: &serde_json::Value) -> Result<bool, CliError> {
         .ok_or_else(|| CliError(format!("campaign spec {key:?} must be a boolean")))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CampaignMode {
+    Fresh,
+    Extend { additional: u64 },
+    Resume,
+}
+
 /// A parsed `campaign` invocation.
+#[derive(Debug)]
 pub struct CampaignInvocation {
-    artifact: PathBuf,
+    artifact: Option<PathBuf>,
     out_dir: PathBuf,
     spec: CampaignSpec,
+    mode: CampaignMode,
     selftest: bool,
+    /// A continuation-only host-side timeout override. It does not rewrite the
+    /// out-dir's recorded spec; the effective value is recorded on the invocation
+    /// audit record.
+    timeout_secs_override: Option<u64>,
     /// Human-mode progress-heartbeat cadence (generations per
     /// `PATINA_CAMPAIGN_PROGRESS` line). Presentation only — it never affects the
     /// deterministic sweep, so it lives here rather than on [`CampaignSpec`].
     progress_every: u64,
+    /// Best-effort audit spelling for the invocation record. Output/global flags
+    /// stripped before verb parsing are intentionally not reconstructed.
+    cli: String,
 }
 
 // ===========================================================================
 // Parsing + dispatch
 // ===========================================================================
 
-/// Parse `campaign [--selftest] | campaign <ARTIFACT> [flags] [-- GUEST_ARGS…]`.
+/// Parse `campaign [--selftest] | campaign <ARTIFACT> [flags] [-- GUEST_ARGS…] |
+/// campaign --extend N [--out-dir DIR] | campaign --resume [--out-dir DIR]`.
 pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliError> {
+    let cli = campaign_cli(&arguments);
+
     // Split a trailing `-- GUEST_ARGS…` section (the guest argument vector).
     let mut guest_args: Vec<String> = Vec::new();
     if let Some(position) = arguments.iter().position(|a| a == "--") {
@@ -202,22 +227,26 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     // `campaign --selftest` proves every classifier class + the signature store.
     if arguments.iter().any(|a| a == "--selftest") {
         return Ok(CampaignInvocation {
-            artifact: PathBuf::new(),
+            artifact: None,
             out_dir: PathBuf::new(),
             spec: CampaignSpec::default(),
+            mode: CampaignMode::Fresh,
             selftest: true,
+            timeout_secs_override: None,
             progress_every: DEFAULT_PROGRESS_EVERY,
+            cli,
         });
     }
 
+    let continuation_requested = has_continuation_flag(&arguments);
+
     // Options may lead the artifact (`campaign --gens 5 art.wasm`), so locate it
-    // registry-arity-aware rather than insisting it be the first token. A
-    // flag-looking token is never taken as the artifact: an unknown flag with a
-    // real artifact stranded behind it is a loud routing error, and an unknown
-    // flag with no artifact is the plain unsupported-option error (campaign has no
-    // Cargo package family to forward to).
+    // registry-arity-aware rather than insisting it be the first token. In
+    // continuation mode, the absence of an artifact is intentional; a positional
+    // that is present is rejected after parsing so the error names the doctrine.
     let scan = crate::locate_positionals("campaign", &arguments, 1);
-    let Some(artifact) = scan.positionals.into_iter().next() else {
+    let artifact = scan.positionals.into_iter().next().map(PathBuf::from);
+    if artifact.is_none() && !continuation_requested {
         if let Some(stop) = scan.stop {
             crate::reject_stranded_artifact("campaign", &arguments[stop..])?;
             return Err(CliError::usage(format!(
@@ -228,8 +257,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
         return Err(CliError::usage(
             "campaign requires an artifact path (a .wasm module or native binary), or --selftest",
         ));
-    };
-    let artifact = PathBuf::from(artifact);
+    }
     let arguments = scan.rest;
     let mut spec = CampaignSpec::default();
     let mut out_dir: Option<PathBuf> = None;
@@ -242,6 +270,8 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     let mut timeout_secs: Option<u64> = None;
     let mut spec_path: Option<String> = None;
     let mut progress_every: Option<u64> = None;
+    let mut extend: Option<u64> = None;
+    let mut resume: Option<()> = None;
 
     let mut index = 0;
     while index < arguments.len() {
@@ -250,10 +280,22 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
             .ok_or_else(|| CliError::usage("campaign options must be valid UTF-8"))?;
         let opt = split_opt(text);
         match opt.name {
+            "--extend" => {
+                let value =
+                    parse_u64_flag("--extend", required_value(opt, &arguments, &mut index)?)?;
+                set_once(&mut extend, value, "--extend")?;
+            }
+            "--resume" => {
+                reject_inline(opt)?;
+                set_once(&mut resume, (), "--resume")?;
+            }
             "--spec" => {
+                if continuation_requested {
+                    return Err(reject_continuation_override("--spec"));
+                }
                 let path = required_value(opt, &arguments, &mut index)?.to_string();
                 set_once(&mut spec_path, path.clone(), "--spec")?;
-                let text = std::fs::read_to_string(&path)
+                let text = fs::read_to_string(&path)
                     .map_err(|e| CliError(format!("failed to read campaign spec {path}: {e}")))?;
                 let json: serde_json::Value = serde_json::from_str(&text)
                     .map_err(|e| CliError(format!("campaign spec {path} is invalid JSON: {e}")))?;
@@ -264,10 +306,16 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
                 set_once(&mut out_dir, path, "--out-dir")?;
             }
             "--gens" => {
+                if continuation_requested {
+                    return Err(reject_continuation_override("--gens"));
+                }
                 let value = parse_u64_flag("--gens", required_value(opt, &arguments, &mut index)?)?;
                 set_once(&mut generations, value, "--gens")?;
             }
             "--seed-start" => {
+                if continuation_requested {
+                    return Err(reject_continuation_override("--seed-start"));
+                }
                 let value =
                     parse_u64_flag("--seed-start", required_value(opt, &arguments, &mut index)?)?;
                 set_once(&mut seed_start, value, "--seed-start")?;
@@ -287,26 +335,44 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
                 set_once(&mut progress_every, value, "--progress-every")?;
             }
             "--buggify" => {
+                if continuation_requested {
+                    return Err(reject_continuation_override("--buggify"));
+                }
                 reject_inline(opt)?;
                 spec.buggify = true;
             }
             "--swarm" => {
+                if continuation_requested {
+                    return Err(reject_continuation_override("--swarm"));
+                }
                 reject_inline(opt)?;
                 spec.swarm = true;
             }
             "--sched-pct" => {
+                if continuation_requested {
+                    return Err(reject_continuation_override("--sched-pct"));
+                }
                 reject_inline(opt)?;
                 spec.pct = true;
             }
             "--faults" => {
+                if continuation_requested {
+                    return Err(reject_continuation_override("--faults"));
+                }
                 reject_inline(opt)?;
                 spec.faults = true;
             }
             "--report" => {
+                if continuation_requested {
+                    return Err(reject_continuation_override("--report"));
+                }
                 reject_inline(opt)?;
                 spec.report = true;
             }
             "--liveness-watchdog" => {
+                if continuation_requested {
+                    return Err(reject_continuation_override("--liveness-watchdog"));
+                }
                 let value = parse_u64_flag(
                     "--liveness-watchdog",
                     required_value(opt, &arguments, &mut index)?,
@@ -314,6 +380,9 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
                 set_once(&mut spec.watchdog_nanos, value, "--liveness-watchdog")?;
             }
             "--converge-within" => {
+                if continuation_requested {
+                    return Err(reject_continuation_override("--converge-within"));
+                }
                 let value = parse_u64_flag(
                     "--converge-within",
                     required_value(opt, &arguments, &mut index)?,
@@ -321,6 +390,9 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
                 set_once(&mut spec.converge_nanos, value, "--converge-within")?;
             }
             "--heal-after" => {
+                if continuation_requested {
+                    return Err(reject_continuation_override("--heal-after"));
+                }
                 let value =
                     parse_u64_flag("--heal-after", required_value(opt, &arguments, &mut index)?)?;
                 set_once(&mut spec.heal_after_nanos, value, "--heal-after")?;
@@ -333,6 +405,43 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
         }
         index += 1;
     }
+
+    let mode = match (extend, resume.is_some()) {
+        (Some(_), true) => {
+            return Err(CliError::usage(
+                "--extend and --resume are redundant; choose exactly one continuation mode",
+            ));
+        }
+        (Some(0), false) => {
+            return Err(CliError::usage(
+                "--extend 0 is redundant; use --resume to finish an interrupted campaign or --extend N with N > 0",
+            ));
+        }
+        (Some(additional), false) => CampaignMode::Extend { additional },
+        (None, true) => CampaignMode::Resume,
+        (None, false) => CampaignMode::Fresh,
+    };
+
+    let out_dir = out_dir.unwrap_or_else(|| PathBuf::from("patina-campaign-out"));
+    if !matches!(mode, CampaignMode::Fresh) {
+        if artifact.is_some() {
+            return Err(reject_continuation_override("artifact positional"));
+        }
+        if !guest_args.is_empty() {
+            return Err(reject_continuation_override("guest arguments"));
+        }
+        return Ok(CampaignInvocation {
+            artifact: None,
+            out_dir,
+            spec,
+            mode,
+            selftest: false,
+            timeout_secs_override: timeout_secs,
+            progress_every: progress_every.unwrap_or(DEFAULT_PROGRESS_EVERY),
+            cli,
+        });
+    }
+
     if let Some(generations) = generations {
         spec.generations = generations;
     }
@@ -345,14 +454,50 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     if !guest_args.is_empty() {
         spec.guest_args = guest_args;
     }
-    let out_dir = out_dir.unwrap_or_else(|| PathBuf::from("patina-campaign-out"));
+    let artifact = artifact.ok_or_else(|| {
+        CliError::usage(
+            "campaign requires an artifact path (a .wasm module or native binary), or --selftest",
+        )
+    })?;
     Ok(CampaignInvocation {
-        artifact,
+        artifact: Some(artifact),
         out_dir,
         spec,
+        mode,
         selftest: false,
+        timeout_secs_override: None,
         progress_every: progress_every.unwrap_or(DEFAULT_PROGRESS_EVERY),
+        cli,
     })
+}
+
+fn has_continuation_flag(arguments: &[OsString]) -> bool {
+    arguments.iter().any(|argument| {
+        argument
+            .to_str()
+            .is_some_and(|text| matches!(split_opt(text).name, "--extend" | "--resume"))
+    })
+}
+
+fn campaign_cli(arguments: &[OsString]) -> String {
+    let mut parts = vec!["campaign".to_string()];
+    parts.extend(arguments.iter().map(|arg| cli_arg(arg.as_os_str())));
+    parts.join(" ")
+}
+
+fn cli_arg(argument: &OsStr) -> String {
+    let text = argument.to_string_lossy();
+    if text.is_empty() || text.chars().any(char::is_whitespace) {
+        format!("{text:?}")
+    } else {
+        text.into_owned()
+    }
+}
+
+fn reject_continuation_override(name: &str) -> CliError {
+    CliError::usage(format!(
+        "{name} cannot be used with --extend/--resume; the out-dir's recorded spec is authoritative; start a new out-dir to change the spec"
+    ))
 }
 
 fn parse_u64_flag(name: &str, value: &str) -> Result<u64, CliError> {
@@ -411,6 +556,19 @@ impl CampaignClass {
             CampaignClass::StarvationStall => "STARVATION_STALL",
             CampaignClass::Infra => "INFRA",
             CampaignClass::Unclassified => "UNCLASSIFIED",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "OK" => Some(CampaignClass::Ok),
+            "VIOLATION" => Some(CampaignClass::Violation),
+            "LIVENESS" => Some(CampaignClass::Liveness),
+            "FAIL_CLOSED_ABORT" => Some(CampaignClass::FailClosedAbort),
+            "STARVATION_STALL" => Some(CampaignClass::StarvationStall),
+            "INFRA" => Some(CampaignClass::Infra),
+            "UNCLASSIFIED" => Some(CampaignClass::Unclassified),
+            _ => None,
         }
     }
 
@@ -625,7 +783,7 @@ fn policy_annotation(stdout: &str, stderr: &str) -> String {
 // ===========================================================================
 
 /// One accumulated failure signature and its provenance.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct SignatureRecord {
     class: CampaignClass,
     shape: String,
@@ -659,12 +817,51 @@ impl SignatureRecord {
         }
         serde_json::Value::Object(map)
     }
+
+    fn from_json(value: &serde_json::Value) -> Result<(String, Self), String> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| "signature record must be an object".to_string())?;
+        let key = json_required_str(object, "signature")?.to_string();
+        let class_text = json_required_str(object, "class")?;
+        let class = CampaignClass::parse(class_text)
+            .ok_or_else(|| format!("unknown campaign class {class_text:?}"))?;
+        let shape = json_required_str(object, "shape")?.to_string();
+        let policy = json_optional_str(object, "policy")?.unwrap_or_default();
+        let record = SignatureRecord {
+            class,
+            shape,
+            policy,
+            first_seen_gen: json_required_u64(object, "first_seen_gen")?,
+            count: json_required_u64(object, "count")?,
+            seed: json_required_u64(object, "seed")?,
+            reproduce: json_required_str(object, "reproduce")?.to_string(),
+            trace: json_optional_str(object, "trace")?,
+            report: json_optional_str(object, "report")?,
+        };
+        let expected_key = format!(
+            "{}|{}|{}",
+            record.class.as_str(),
+            record.shape,
+            record.policy
+        );
+        if key != expected_key {
+            return Err(format!(
+                "signature key {key:?} does not match canonical key {expected_key:?}"
+            ));
+        }
+        if record.to_json(&key) != *value {
+            return Err("signature record is not in canonical lossless form".to_string());
+        }
+        Ok((key, record))
+    }
 }
 
 // ===========================================================================
 // Campaign driver
 // ===========================================================================
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct GenerationOutcome {
     generation: u64,
     seed: u64,
@@ -674,44 +871,539 @@ struct GenerationOutcome {
     signature_key: Option<String>,
 }
 
+impl GenerationOutcome {
+    fn is_notable(&self) -> bool {
+        self.novel || self.class.is_failure()
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "generation": self.generation,
+            "seed": self.seed,
+            "class": self.class.as_str(),
+            "novel": self.novel,
+            "signature": self.signature_key.clone(),
+            "flags": self.flags.clone(),
+        })
+    }
+
+    fn from_json(value: &serde_json::Value) -> Result<Self, String> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| "notable run must be an object".to_string())?;
+        let class_text = json_required_str(object, "class")?;
+        let class = CampaignClass::parse(class_text)
+            .ok_or_else(|| format!("unknown campaign class {class_text:?}"))?;
+        let flags = object
+            .get("flags")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "notable run flags must be an array".to_string())?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| "notable run flags entries must be strings".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let signature_key = match object.get("signature") {
+            Some(serde_json::Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_str()
+                    .ok_or_else(|| "notable run signature must be a string or null".to_string())?
+                    .to_string(),
+            ),
+            None => return Err("notable run missing signature".to_string()),
+        };
+        let outcome = GenerationOutcome {
+            generation: json_required_u64(object, "generation")?,
+            seed: json_required_u64(object, "seed")?,
+            class,
+            flags,
+            novel: json_required_bool(object, "novel")?,
+            signature_key,
+        };
+        if outcome.to_json() != *value {
+            return Err("notable run is not in canonical lossless form".to_string());
+        }
+        Ok(outcome)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ArtifactIdentity {
+    path: String,
+    sha256: String,
+    family: &'static str,
+}
+
+impl ArtifactIdentity {
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "path": self.path.clone(),
+            "sha256": self.sha256.clone(),
+            "family": self.family,
+        })
+    }
+
+    fn from_json(value: &serde_json::Value) -> Result<Self, String> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| "artifact identity must be an object".to_string())?;
+        let family_text = json_required_str(object, "family")?;
+        let family = parse_artifact_family(family_text)
+            .ok_or_else(|| format!("unknown artifact family {family_text:?}"))?;
+        let identity = ArtifactIdentity {
+            path: json_required_str(object, "path")?.to_string(),
+            sha256: json_required_str(object, "sha256")?.to_string(),
+            family,
+        };
+        if identity.to_json() != *value {
+            return Err("artifact identity is not in canonical lossless form".to_string());
+        }
+        Ok(identity)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InvocationRecord {
+    cli: String,
+    from_gen: u64,
+    gens_run: u64,
+    timeout_secs: u64,
+    elapsed_secs: u64,
+}
+
+impl InvocationRecord {
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "cli": self.cli.clone(),
+            "from_gen": self.from_gen,
+            "gens_run": self.gens_run,
+            "timeout_secs": self.timeout_secs,
+            "elapsed_secs": self.elapsed_secs,
+        })
+    }
+
+    fn from_json(value: &serde_json::Value) -> Result<Self, String> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| "invocation record must be an object".to_string())?;
+        let record = InvocationRecord {
+            cli: json_required_str(object, "cli")?.to_string(),
+            from_gen: json_required_u64(object, "from_gen")?,
+            gens_run: json_required_u64(object, "gens_run")?,
+            timeout_secs: json_required_u64(object, "timeout_secs")?,
+            elapsed_secs: json_required_u64(object, "elapsed_secs")?,
+        };
+        if record.to_json() != *value {
+            return Err("invocation record is not in canonical lossless form".to_string());
+        }
+        Ok(record)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CampaignState {
+    artifact: ArtifactIdentity,
+    spec: CampaignSpec,
+    generations_done: u64,
+    classes: BTreeMap<String, u64>,
+    signatures: BTreeMap<String, SignatureRecord>,
+    notable_runs: Vec<GenerationOutcome>,
+    invocations: Vec<InvocationRecord>,
+}
+
+impl CampaignState {
+    fn fresh(artifact: ArtifactIdentity, spec: CampaignSpec) -> Self {
+        Self {
+            artifact,
+            spec,
+            generations_done: 0,
+            classes: BTreeMap::new(),
+            signatures: BTreeMap::new(),
+            notable_runs: Vec::new(),
+            invocations: Vec::new(),
+        }
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": CAMPAIGN_STATE_SCHEMA,
+            "artifact": self.artifact.to_json(),
+            "spec": spec_to_json(&self.spec),
+            "generations_done": self.generations_done,
+            "classes": self.classes.clone(),
+            "signatures": signatures_to_json(&self.signatures),
+            "notable_runs": self.notable_runs.iter().map(GenerationOutcome::to_json).collect::<Vec<_>>(),
+            "invocations": self.invocations.iter().map(InvocationRecord::to_json).collect::<Vec<_>>(),
+        })
+    }
+
+    fn from_json(value: &serde_json::Value) -> Result<Self, String> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| "campaign state must be a JSON object".to_string())?;
+        let schema = json_required_str(object, "schema")?;
+        if schema != CAMPAIGN_STATE_SCHEMA {
+            return Err(format!("unsupported schema {schema:?}"));
+        }
+        let artifact = ArtifactIdentity::from_json(
+            object
+                .get("artifact")
+                .ok_or_else(|| "campaign state missing artifact".to_string())?,
+        )?;
+        let spec = spec_from_state_json(
+            object
+                .get("spec")
+                .ok_or_else(|| "campaign state missing spec".to_string())?,
+        )?;
+        let generations_done = json_required_u64(object, "generations_done")?;
+        let classes = parse_class_counts(
+            object
+                .get("classes")
+                .ok_or_else(|| "campaign state missing classes".to_string())?,
+        )?;
+        let signatures = parse_signature_records(
+            object
+                .get("signatures")
+                .ok_or_else(|| "campaign state missing signatures".to_string())?,
+        )?;
+        let notable_runs = parse_notable_runs(
+            object
+                .get("notable_runs")
+                .ok_or_else(|| "campaign state missing notable_runs".to_string())?,
+        )?;
+        let invocations = parse_invocations(
+            object
+                .get("invocations")
+                .ok_or_else(|| "campaign state missing invocations".to_string())?,
+        )?;
+        let state = CampaignState {
+            artifact,
+            spec,
+            generations_done,
+            classes,
+            signatures,
+            notable_runs,
+            invocations,
+        };
+        state.validate()?;
+        if state.to_json() != *value {
+            return Err("campaign state is not in canonical lossless form".to_string());
+        }
+        Ok(state)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.generations_done > self.spec.generations {
+            return Err(format!(
+                "generations_done={} exceeds target generations={}",
+                self.generations_done, self.spec.generations
+            ));
+        }
+        let counted: u64 = self.classes.values().sum();
+        if counted != self.generations_done {
+            return Err(format!(
+                "class histogram counts {counted} generations but cursor is {}",
+                self.generations_done
+            ));
+        }
+        let signature_total: u64 = self.signatures.values().map(|record| record.count).sum();
+        let failures = class_counts_failures(&self.classes);
+        if signature_total != failures {
+            return Err(format!(
+                "signature counts {signature_total} failures but class histogram has {failures}"
+            ));
+        }
+        for run in &self.notable_runs {
+            if run.generation >= self.generations_done {
+                return Err(format!(
+                    "notable run generation {} is beyond cursor {}",
+                    run.generation, self.generations_done
+                ));
+            }
+            if !run.is_notable() {
+                return Err(format!(
+                    "non-notable OK generation {} was persisted as notable",
+                    run.generation
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn json_required_str<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<&'a str, String> {
+    object
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("{key} must be a string"))
+}
+
+fn json_optional_str(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<Option<String>, String> {
+    match object.get(key) {
+        Some(value) => value
+            .as_str()
+            .map(|text| Some(text.to_string()))
+            .ok_or_else(|| format!("{key} must be a string")),
+        None => Ok(None),
+    }
+}
+
+fn json_required_u64(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<u64, String> {
+    object
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| format!("{key} must be an unsigned integer"))
+}
+
+fn json_required_bool(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<bool, String> {
+    object
+        .get(key)
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| format!("{key} must be a boolean"))
+}
+
+fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    map.insert("generations".into(), spec.generations.into());
+    map.insert("seed_base".into(), spec.seed_base.into());
+    map.insert("timeout_secs".into(), spec.timeout_secs.into());
+    map.insert("guest_args".into(), spec.guest_args.clone().into());
+    map.insert("buggify".into(), spec.buggify.into());
+    map.insert("swarm".into(), spec.swarm.into());
+    map.insert("pct".into(), spec.pct.into());
+    map.insert("faults".into(), spec.faults.into());
+    if let Some(value) = spec.watchdog_nanos {
+        map.insert("watchdog_nanos".into(), value.into());
+    }
+    if let Some(value) = spec.converge_nanos {
+        map.insert("converge_nanos".into(), value.into());
+    }
+    if let Some(value) = spec.heal_after_nanos {
+        map.insert("heal_after_nanos".into(), value.into());
+    }
+    map.insert("report".into(), spec.report.into());
+    serde_json::Value::Object(map)
+}
+
+fn spec_from_state_json(value: &serde_json::Value) -> Result<CampaignSpec, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "spec must be an object".to_string())?;
+    for key in [
+        "generations",
+        "seed_base",
+        "timeout_secs",
+        "guest_args",
+        "buggify",
+        "swarm",
+        "pct",
+        "faults",
+        "report",
+    ] {
+        if !object.contains_key(key) {
+            return Err(format!("spec missing required key {key:?}"));
+        }
+    }
+    let mut spec = CampaignSpec::default();
+    spec.apply_json(value).map_err(|error| error.to_string())?;
+    if spec_to_json(&spec) != *value {
+        return Err("spec is not in canonical lossless form".to_string());
+    }
+    Ok(spec)
+}
+
+fn signatures_to_json(signatures: &BTreeMap<String, SignatureRecord>) -> Vec<serde_json::Value> {
+    signatures
+        .iter()
+        .map(|(key, record)| record.to_json(key))
+        .collect()
+}
+
+fn parse_signature_records(
+    value: &serde_json::Value,
+) -> Result<BTreeMap<String, SignatureRecord>, String> {
+    let entries = value
+        .as_array()
+        .ok_or_else(|| "signatures must be an array".to_string())?;
+    let mut signatures = BTreeMap::new();
+    for entry in entries {
+        let (key, record) = SignatureRecord::from_json(entry)?;
+        if signatures.insert(key.clone(), record).is_some() {
+            return Err(format!("duplicate signature record {key:?}"));
+        }
+    }
+    Ok(signatures)
+}
+
+fn parse_notable_runs(value: &serde_json::Value) -> Result<Vec<GenerationOutcome>, String> {
+    value
+        .as_array()
+        .ok_or_else(|| "notable_runs must be an array".to_string())?
+        .iter()
+        .map(GenerationOutcome::from_json)
+        .collect()
+}
+
+fn parse_invocations(value: &serde_json::Value) -> Result<Vec<InvocationRecord>, String> {
+    value
+        .as_array()
+        .ok_or_else(|| "invocations must be an array".to_string())?
+        .iter()
+        .map(InvocationRecord::from_json)
+        .collect()
+}
+
+fn parse_class_counts(value: &serde_json::Value) -> Result<BTreeMap<String, u64>, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "classes must be an object".to_string())?;
+    let mut classes = BTreeMap::new();
+    for (class, count) in object {
+        CampaignClass::parse(class).ok_or_else(|| format!("unknown campaign class {class:?}"))?;
+        let count = count
+            .as_u64()
+            .ok_or_else(|| format!("class count for {class:?} must be an unsigned integer"))?;
+        classes.insert(class.clone(), count);
+    }
+    Ok(classes)
+}
+
+fn class_counts_failures(class_counts: &BTreeMap<String, u64>) -> u64 {
+    class_counts
+        .iter()
+        .filter_map(|(class, count)| {
+            CampaignClass::parse(class)
+                .filter(CampaignClass::is_failure)
+                .map(|_| *count)
+        })
+        .sum()
+}
+
 fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
     let CampaignInvocation {
         artifact,
         out_dir,
         spec,
+        mode,
+        timeout_secs_override,
         progress_every,
+        cli,
         ..
     } = invocation;
 
-    // Resolve the artifact once (build a source on the fly), then sweep the SAME
-    // built artifact across every generation — never rebuilt per generation.
-    let resolved = crate::resolve_artifact(crate::ArtifactRef::Prebuilt(artifact.clone()))?;
-    let artifact_path = resolved.path.clone();
-    let family = artifact_family(&artifact_path)?;
+    let state_path = out_dir.join("campaign-state.json");
+    let store_path = out_dir.join("signatures.json");
 
-    std::fs::create_dir_all(&out_dir)
-        .map_err(|e| CliError(format!("failed to create campaign output dir: {e}")))?;
+    if !matches!(mode, CampaignMode::Fresh) && !state_path.is_file() {
+        return Err(CliError(format!(
+            "campaign out-dir {} has no campaign-state.json; nothing recorded to continue",
+            out_dir.display()
+        )));
+    }
+
+    if matches!(mode, CampaignMode::Fresh) {
+        fs::create_dir_all(&out_dir)
+            .map_err(|e| CliError(format!("failed to create campaign output dir: {e}")))?;
+    }
+    let _lock = CampaignLock::acquire(&out_dir)?;
+
+    let mut state = match mode {
+        CampaignMode::Fresh => {
+            if state_path.exists() {
+                return Err(CliError(format!(
+                    "campaign out-dir {} already contains campaign-state.json; use --extend N or --resume, pick a new --out-dir, or delete the old one",
+                    out_dir.display()
+                )));
+            }
+            let artifact = artifact.expect("fresh campaign parser requires an artifact");
+            // Resolve the artifact once (build a source on the fly), then sweep the SAME
+            // built artifact across every generation — never rebuilt per generation.
+            let resolved = crate::resolve_artifact(crate::ArtifactRef::Prebuilt(artifact))?;
+            let identity = artifact_identity(&resolved.path)?;
+            CampaignState::fresh(identity, spec)
+        }
+        CampaignMode::Resume | CampaignMode::Extend { .. } => load_campaign_state(&state_path)?,
+    };
+
+    let artifact_path = PathBuf::from(&state.artifact.path);
+    verify_artifact_identity(&state.artifact)?;
+
+    if let CampaignMode::Resume = mode {
+        if state.generations_done == state.spec.generations {
+            return Err(CliError(format!(
+                "campaign complete at {}/{}; use --extend N to continue",
+                state.generations_done, state.spec.generations
+            )));
+        }
+    }
+    if let CampaignMode::Extend { additional } = mode {
+        state.spec.generations = state
+            .spec
+            .generations
+            .checked_add(additional)
+            .ok_or_else(|| CliError::usage("--extend would overflow the generation target"))?;
+    }
+
     let traces_dir = out_dir.join("traces");
-    std::fs::create_dir_all(&traces_dir)
+    fs::create_dir_all(&traces_dir)
         .map_err(|e| CliError(format!("failed to create traces dir: {e}")))?;
 
     let self_exe = std::env::current_exe()
         .map_err(|e| CliError(format!("failed to resolve cargo-patina binary path: {e}")))?;
 
     let json_output = crate::output::options().is_json();
-    if !json_output {
-        println!(
-            "PATINA_CAMPAIGN_START artifact={} family={family} generations={} seed_base={} out={}",
-            artifact_path.display(),
-            spec.generations,
-            spec.seed_base,
-            out_dir.display(),
-        );
-    }
+    let full_stream = progress_every == 1;
+    let start = std::time::Instant::now();
+    let from_gen = state.generations_done;
+    let effective_timeout_secs = timeout_secs_override.unwrap_or(state.spec.timeout_secs);
+    state.invocations.push(InvocationRecord {
+        cli,
+        from_gen,
+        gens_run: 0,
+        timeout_secs: effective_timeout_secs,
+        elapsed_secs: 0,
+    });
+    let invocation_index = state.invocations.len() - 1;
 
-    let mut class_counts: BTreeMap<&'static str, u64> = BTreeMap::new();
-    let mut signatures: BTreeMap<String, SignatureRecord> = BTreeMap::new();
-    let mut outcomes: Vec<GenerationOutcome> = Vec::new();
+    write_campaign_checkpoint(&state_path, &store_path, &state)?;
+
+    if !json_output {
+        match mode {
+            CampaignMode::Fresh => println!(
+                "PATINA_CAMPAIGN_START artifact={} family={} generations={} seed_base={} out={}",
+                artifact_path.display(),
+                state.artifact.family,
+                state.spec.generations,
+                state.spec.seed_base,
+                out_dir.display(),
+            ),
+            CampaignMode::Extend { .. } | CampaignMode::Resume => println!(
+                "PATINA_CAMPAIGN_RESUME out={} done={} target={} artifact={} sha256={}",
+                out_dir.display(),
+                from_gen,
+                state.spec.generations,
+                artifact_path.display(),
+                state.artifact.sha256,
+            ),
+        }
+        flush_stdout();
+    }
 
     // Human-mode progress disclosure: at cadence 1 every generation prints its
     // per-generation line (the full legacy stream, no separate heartbeat); at any
@@ -719,15 +1411,13 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
     // plus a periodic `PATINA_CAMPAIGN_PROGRESS` heartbeat answering "is it still
     // running?". The wall-clock start is used only for the heartbeat's `elapsed_secs`
     // — it never enters a deterministic (`PATINA_CAMPAIGN_GEN`) line.
-    let full_stream = progress_every == 1;
-    let start = std::time::Instant::now();
-    let mut failures_so_far: u64 = 0;
-    let mut novel_so_far: u64 = 0;
+    let mut failures_so_far = class_counts_failures(&state.classes);
+    let mut novel_so_far = state.signatures.len() as u64;
 
-    for generation in 0..spec.generations {
-        let hash = generation_hash(spec.seed_base, generation);
+    for generation in from_gen..state.spec.generations {
+        let hash = generation_hash(state.spec.seed_base, generation);
         let seed = u64::from_le_bytes(hash[0..8].try_into().expect("32-byte hash"));
-        let flags = derive_flags(&spec, &hash, family);
+        let flags = derive_flags(&state.spec, &hash, state.artifact.family);
         let trace_path = traces_dir.join(format!("generation-{generation}.patina"));
 
         let (exit, stdout, stderr, timed_out) = run_generation(
@@ -736,8 +1426,8 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
             seed,
             &flags,
             &trace_path,
-            &spec.guest_args,
-            spec.timeout_secs,
+            &state.spec.guest_args,
+            effective_timeout_secs,
         )?;
         // A generation that blew the wall-clock budget was killed: it hung in a way
         // neither the virtual-time watchdog nor the child's own budgets caught
@@ -748,7 +1438,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
         } else {
             classify(exit, &stdout, &stderr)
         };
-        *class_counts.entry(class.as_str()).or_insert(0) += 1;
+        *state.classes.entry(class.as_str().to_string()).or_insert(0) += 1;
 
         let mut novel = false;
         let mut signature_key = None;
@@ -765,21 +1455,22 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
                 &artifact_path,
                 seed,
                 &flags,
-                &spec.guest_args,
+                &state.spec.guest_args,
                 saved_trace.as_deref(),
             );
-            let report = if spec.report {
+            let report = if state.spec.report {
                 render_failure_report(
                     &out_dir,
                     saved_trace.as_deref(),
                     &artifact_path,
-                    family,
+                    state.artifact.family,
                     generation,
                 )
             } else {
                 None
             };
-            signatures
+            state
+                .signatures
                 .entry(key.clone())
                 .and_modify(|record| record.count += 1)
                 .or_insert_with(|| {
@@ -801,7 +1492,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
         // already copied into `failures/`, and a clean generation keeps nothing.
         // Remove the scratch file (including an empty abort-reservation file) so the
         // output directory holds only real artifacts.
-        let _ = std::fs::remove_file(&trace_path);
+        let _ = fs::remove_file(&trace_path);
 
         if novel {
             novel_so_far += 1;
@@ -809,6 +1500,21 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
         if class.is_failure() {
             failures_so_far += 1;
         }
+        let outcome = GenerationOutcome {
+            generation,
+            seed,
+            class,
+            flags,
+            novel,
+            signature_key,
+        };
+        if outcome.is_notable() {
+            state.notable_runs.push(outcome.clone());
+        }
+        state.generations_done = generation + 1;
+        state.invocations[invocation_index].gens_run = state.generations_done - from_gen;
+        state.invocations[invocation_index].elapsed_secs = start.elapsed().as_secs();
+
         if !json_output {
             // Always surface a novel or failing generation; surface an ordinary OK
             // generation only in the full-stream mode. The line format is unchanged
@@ -826,55 +1532,36 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
             if !full_stream && progress_every > 0 && (generation + 1) % progress_every == 0 {
                 print_progress_heartbeat(
                     generation + 1,
-                    spec.generations,
+                    state.spec.generations,
                     start.elapsed().as_secs(),
                     failures_so_far,
                     novel_so_far,
-                    &class_counts,
+                    &state.classes,
                 );
             }
+            flush_stdout();
         }
-        outcomes.push(GenerationOutcome {
-            generation,
-            seed,
-            class,
-            flags,
-            novel,
-            signature_key,
-        });
+        write_campaign_checkpoint(&state_path, &store_path, &state)?;
     }
 
-    // Persist the signature store.
-    let store_path = out_dir.join("signatures.json");
-    write_signature_store(&store_path, &signatures)?;
-
-    let failures: u64 = outcomes.iter().filter(|o| o.class.is_failure()).count() as u64;
-    let novel_count = outcomes.iter().filter(|o| o.novel).count() as u64;
+    let failures = class_counts_failures(&state.classes);
+    let novel_count = state.signatures.len() as u64;
     let result = if failures == 0 { "ok" } else { "failure" };
     let exit_code = if failures == 0 { 0 } else { 1 };
 
     if json_output {
-        let envelope = build_campaign_envelope(
-            result,
-            exit_code,
-            &artifact_path,
-            family,
-            &spec,
-            &class_counts,
-            &signatures,
-            &outcomes,
-            &out_dir,
-        );
+        let envelope = build_campaign_envelope(result, exit_code, &state, &out_dir, &state_path);
         println!("{envelope}");
     } else {
         print_campaign_summary(
-            &class_counts,
-            &signatures,
+            &state.classes,
+            &state.signatures,
             failures,
             novel_count,
-            spec.generations,
+            state.spec.generations,
             &store_path,
         );
+        flush_stdout();
     }
     Ok(exit_code)
 }
@@ -1147,13 +1834,104 @@ fn render_failure_report(
     Some(dest.display().to_string())
 }
 
-fn artifact_family(path: &Path) -> Result<&'static str, CliError> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| CliError(format!("failed to read artifact {}: {e}", path.display())))?;
+fn parse_artifact_family(value: &str) -> Option<&'static str> {
+    match value {
+        "native" => Some("native"),
+        "wasi" => Some("wasi"),
+        _ => None,
+    }
+}
+
+fn artifact_family_from_bytes(bytes: &[u8]) -> &'static str {
     if bytes.starts_with(b"\0asm") {
-        Ok("wasi")
+        "wasi"
     } else {
-        Ok("native")
+        "native"
+    }
+}
+
+fn artifact_identity(path: &Path) -> Result<ArtifactIdentity, CliError> {
+    let bytes = fs::read(path)
+        .map_err(|e| CliError(format!("failed to read artifact {}: {e}", path.display())))?;
+    Ok(ArtifactIdentity {
+        path: path.display().to_string(),
+        sha256: sha256_hex(&bytes),
+        family: artifact_family_from_bytes(&bytes),
+    })
+}
+
+fn verify_artifact_identity(recorded: &ArtifactIdentity) -> Result<(), CliError> {
+    let path = PathBuf::from(&recorded.path);
+    let current = artifact_identity(&path).map_err(|error| {
+        CliError(format!(
+            "campaign out-dir records artifact {} but it cannot be read: {error}; start a new out-dir if the artifact moved",
+            recorded.path
+        ))
+    })?;
+    if current.sha256 != recorded.sha256 {
+        return Err(CliError(format!(
+            "campaign out-dir records artifact sha256 {} but {} now hashes {}; the artifact changed since this campaign started. Signatures from different builds are not comparable — start a new out-dir for the new build.",
+            recorded.sha256, recorded.path, current.sha256
+        )));
+    }
+    if current.family != recorded.family {
+        return Err(CliError(format!(
+            "campaign out-dir records artifact family {} but {} is now {}; start a new out-dir for the new build",
+            recorded.family, recorded.path, current.family
+        )));
+    }
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn write_campaign_checkpoint(
+    state_path: &Path,
+    store_path: &Path,
+    state: &CampaignState,
+) -> Result<(), CliError> {
+    write_campaign_state(state_path, state)?;
+    write_signature_store(store_path, &state.signatures)
+}
+
+fn write_campaign_state(path: &Path, state: &CampaignState) -> Result<(), CliError> {
+    state
+        .validate()
+        .map_err(|error| CliError(format!("refusing to write invalid campaign state: {error}")))?;
+    atomic_write_json(path, &state.to_json(), "campaign state")
+}
+
+fn load_campaign_state(path: &Path) -> Result<CampaignState, CliError> {
+    let text = fs::read_to_string(path).map_err(|e| {
+        CliError(format!(
+            "failed to read campaign state {}: {e}",
+            path.display()
+        ))
+    })?;
+    let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        CliError(format!(
+            "campaign state {} is invalid JSON: {e}",
+            path.display()
+        ))
+    })?;
+    match CampaignState::from_json(&json) {
+        Ok(state) => Ok(state),
+        Err(error) if error.starts_with("unsupported schema") => Err(CliError(format!(
+            "campaign state {} has {error}; this out-dir was written by a different cargo-patina version; finish it with that version or start a new out-dir",
+            path.display()
+        ))),
+        Err(error) => Err(CliError(format!(
+            "campaign state {} is corrupt: {error}; refusing to resume partially",
+            path.display()
+        ))),
     }
 }
 
@@ -1161,18 +1939,122 @@ fn write_signature_store(
     path: &Path,
     signatures: &BTreeMap<String, SignatureRecord>,
 ) -> Result<(), CliError> {
-    let entries: Vec<serde_json::Value> = signatures
-        .iter()
-        .map(|(key, record)| record.to_json(key))
-        .collect();
     let store = serde_json::json!({
-        "schema": "patina.campaign.signatures/v1",
-        "signatures": entries,
+        "schema": CAMPAIGN_SIGNATURES_SCHEMA,
+        "signatures": signatures_to_json(signatures),
     });
-    let text = serde_json::to_string_pretty(&store)
-        .map_err(|e| CliError(format!("failed to serialize signature store: {e}")))?;
-    std::fs::write(path, text)
-        .map_err(|e| CliError(format!("failed to write signature store: {e}")))
+    atomic_write_json(path, &store, "signature store")
+}
+
+fn atomic_write_json(path: &Path, value: &serde_json::Value, label: &str) -> Result<(), CliError> {
+    let text = serde_json::to_string_pretty(value)
+        .map_err(|e| CliError(format!("failed to serialize {label}: {e}")))?;
+    atomic_write(path, text.as_bytes(), label)
+}
+
+fn atomic_write(path: &Path, bytes: &[u8], label: &str) -> Result<(), CliError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| CliError(format!("{label} path {} has no parent", path.display())))?;
+    fs::create_dir_all(parent).map_err(|e| {
+        CliError(format!(
+            "failed to create {label} dir {}: {e}",
+            parent.display()
+        ))
+    })?;
+    let tmp = path.with_extension(format!(
+        "{}.tmp",
+        path.extension().and_then(OsStr::to_str).unwrap_or("json")
+    ));
+    {
+        let mut file = File::create(&tmp).map_err(|e| {
+            CliError(format!(
+                "failed to create temporary {label} {}: {e}",
+                tmp.display()
+            ))
+        })?;
+        file.write_all(bytes).map_err(|e| {
+            CliError(format!(
+                "failed to write temporary {label} {}: {e}",
+                tmp.display()
+            ))
+        })?;
+        file.sync_all().map_err(|e| {
+            CliError(format!(
+                "failed to sync temporary {label} {}: {e}",
+                tmp.display()
+            ))
+        })?;
+    }
+    fs::rename(&tmp, path).map_err(|e| {
+        CliError(format!(
+            "failed to atomically replace {label} {}: {e}",
+            path.display()
+        ))
+    })
+}
+
+fn flush_stdout() {
+    let _ = std::io::stdout().flush();
+}
+
+#[derive(Debug)]
+struct CampaignLock {
+    _file: File,
+}
+
+impl CampaignLock {
+    fn acquire(out_dir: &Path) -> Result<Self, CliError> {
+        fs::create_dir_all(out_dir)
+            .map_err(|e| CliError(format!("failed to create campaign output dir: {e}")))?;
+        let path = out_dir.join("campaign.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| {
+                CliError(format!(
+                    "failed to open campaign lock {}: {e}",
+                    path.display()
+                ))
+            })?;
+        acquire_flock(&file, out_dir)?;
+        Ok(Self { _file: file })
+    }
+}
+
+#[cfg(unix)]
+fn acquire_flock(file: &File, out_dir: &Path) -> Result<(), CliError> {
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+    unsafe extern "C" {
+        fn flock(fd: i32, operation: i32) -> i32;
+    }
+    let rc = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return Err(CliError(format!(
+            "another campaign is writing this out-dir: {}",
+            out_dir.display()
+        )));
+    }
+    Err(CliError(format!(
+        "failed to lock campaign out-dir {}: {error}",
+        out_dir.display()
+    )))
+}
+
+#[cfg(not(unix))]
+fn acquire_flock(_file: &File, out_dir: &Path) -> Result<(), CliError> {
+    Err(CliError(format!(
+        "campaign out-dir locking is unsupported on this platform: {}",
+        out_dir.display()
+    )))
 }
 
 /// Print one human-mode progress heartbeat: enough to answer "is it still running,
@@ -1185,7 +2067,7 @@ fn print_progress_heartbeat(
     elapsed_secs: u64,
     failures: u64,
     novel: u64,
-    class_counts: &BTreeMap<&'static str, u64>,
+    class_counts: &BTreeMap<String, u64>,
 ) {
     let mut line = format!(
         "PATINA_CAMPAIGN_PROGRESS generation={done}/{total} elapsed_secs={elapsed_secs} \
@@ -1198,7 +2080,7 @@ fn print_progress_heartbeat(
 }
 
 fn print_campaign_summary(
-    class_counts: &BTreeMap<&'static str, u64>,
+    class_counts: &BTreeMap<String, u64>,
     signatures: &BTreeMap<String, SignatureRecord>,
     failures: u64,
     novel: u64,
@@ -1235,56 +2117,43 @@ fn print_campaign_summary(
 
 /// Build the summary-first `patina.campaign/v2` JSON envelope. Progressive
 /// disclosure: the top level carries the class-count histogram and the deduped
-/// signatures; `runs` holds per-generation detail ONLY for novel and failing
-/// generations (the interesting minority — an OK generation adds no triage value
-/// and is fully accounted for by `classes`); and `artifacts` points at the full
-/// on-disk detail (the signature store, saved failing traces, optional reports) so
-/// nothing the v1 all-runs dump exposed becomes unreachable. Pure (returns the
-/// `Value`) so the shape is unit-testable without capturing stdout.
-#[allow(clippy::too_many_arguments)]
+/// signatures; `notable_runs` holds per-generation detail ONLY for novel and
+/// failing generations (the interesting minority — an OK generation adds no
+/// triage value and is fully accounted for by `classes`); and `artifacts` points
+/// at the full on-disk detail (the state file, signature store, saved failing
+/// traces, optional reports) so nothing the v1 all-runs dump exposed becomes
+/// unreachable. Pure (returns the `Value`) so the shape is unit-testable without
+/// capturing stdout.
 fn build_campaign_envelope(
     result: &str,
     exit_code: i32,
-    artifact: &Path,
-    family: &'static str,
-    spec: &CampaignSpec,
-    class_counts: &BTreeMap<&'static str, u64>,
-    signatures: &BTreeMap<String, SignatureRecord>,
-    outcomes: &[GenerationOutcome],
+    state: &CampaignState,
     out_dir: &Path,
+    state_path: &Path,
 ) -> serde_json::Value {
-    let classes: serde_json::Map<String, serde_json::Value> = class_counts
+    let classes: serde_json::Map<String, serde_json::Value> = state
+        .classes
         .iter()
-        .map(|(class, count)| ((*class).to_string(), serde_json::Value::from(*count)))
+        .map(|(class, count)| (class.clone(), serde_json::Value::from(*count)))
         .collect();
-    let signature_json: Vec<serde_json::Value> = signatures
+    let signature_json = signatures_to_json(&state.signatures);
+    let notable_runs: Vec<serde_json::Value> = state
+        .notable_runs
         .iter()
-        .map(|(key, record)| record.to_json(key))
+        .map(GenerationOutcome::to_json)
         .collect();
-    // Only novel or failing generations carry per-run detail; an ordinary OK
-    // generation is fully accounted for by the `classes` histogram.
-    let notable_runs: Vec<serde_json::Value> = outcomes
-        .iter()
-        .filter(|o| o.novel || o.class.is_failure())
-        .map(|o| {
-            serde_json::json!({
-                "generation": o.generation,
-                "seed": o.seed,
-                "class": o.class.as_str(),
-                "novel": o.novel,
-                "signature": o.signature_key,
-                "flags": o.flags,
-            })
-        })
-        .collect();
-    let failures = outcomes.iter().filter(|o| o.class.is_failure()).count();
-    let novel = outcomes.iter().filter(|o| o.novel).count();
+    let failures = class_counts_failures(&state.classes);
+    let novel = state.signatures.len() as u64;
     // Machine-readable pointers to the full on-disk detail. `failures` and
     // `reports` are directories that exist only once a failing generation has
     // populated them, so they are announced conditionally rather than promising a
     // path that may not exist.
     let mut artifacts = serde_json::Map::new();
     artifacts.insert("out_dir".into(), out_dir.display().to_string().into());
+    artifacts.insert(
+        "campaign_state".into(),
+        state_path.display().to_string().into(),
+    );
     artifacts.insert(
         "signature_store".into(),
         out_dir.join("signatures.json").display().to_string().into(),
@@ -1295,7 +2164,7 @@ fn build_campaign_envelope(
             out_dir.join("failures").display().to_string().into(),
         );
     }
-    if spec.report && failures > 0 {
+    if state.spec.report && failures > 0 {
         artifacts.insert(
             "reports_dir".into(),
             out_dir.join("reports").display().to_string().into(),
@@ -1306,15 +2175,16 @@ fn build_campaign_envelope(
         "verb": "campaign",
         "result": result,
         "exit_code": exit_code,
-        "artifact": artifact.display().to_string(),
-        "family": family,
-        "generations": spec.generations,
-        "seed_base": spec.seed_base,
+        "artifact": state.artifact.path.clone(),
+        "family": state.artifact.family,
+        "generations": state.spec.generations,
+        "seed_base": state.spec.seed_base,
         "failures": failures,
         "novel_signatures": novel,
         "classes": classes,
         "signatures": signature_json,
         "notable_runs": notable_runs,
+        "invocations": state.invocations.iter().map(InvocationRecord::to_json).collect::<Vec<_>>(),
         "artifacts": artifacts,
     })
 }
@@ -1683,24 +2553,30 @@ mod tests {
             mk(2, CampaignClass::Ok, false),
             mk(3, CampaignClass::Liveness, false),
         ];
-        let mut class_counts: BTreeMap<&'static str, u64> = BTreeMap::new();
-        class_counts.insert("OK", 2);
-        class_counts.insert("LIVENESS", 2);
-        let signatures: BTreeMap<String, SignatureRecord> = BTreeMap::new();
-        let spec = CampaignSpec {
-            generations: 4,
-            ..CampaignSpec::default()
-        };
+        let mut state = CampaignState::fresh(
+            ArtifactIdentity {
+                path: "guest".to_string(),
+                sha256: "abc".to_string(),
+                family: "native",
+            },
+            CampaignSpec {
+                generations: 4,
+                ..CampaignSpec::default()
+            },
+        );
+        state.classes.insert("OK".to_string(), 2);
+        state.classes.insert("LIVENESS".to_string(), 2);
+        state.generations_done = 4;
+        state.notable_runs = outcomes
+            .into_iter()
+            .filter(GenerationOutcome::is_notable)
+            .collect();
         let envelope = build_campaign_envelope(
             "failure",
             1,
-            Path::new("guest"),
-            "native",
-            &spec,
-            &class_counts,
-            &signatures,
-            &outcomes,
+            &state,
             Path::new("out"),
+            Path::new("out/campaign-state.json"),
         );
 
         assert_eq!(envelope["schema"], CAMPAIGN_ENVELOPE_SCHEMA);
@@ -1727,6 +2603,12 @@ mod tests {
         let artifacts = &envelope["artifacts"];
         assert_eq!(artifacts["out_dir"], "out");
         assert!(
+            artifacts["campaign_state"]
+                .as_str()
+                .unwrap()
+                .ends_with("campaign-state.json")
+        );
+        assert!(
             artifacts["signature_store"]
                 .as_str()
                 .unwrap()
@@ -1746,26 +2628,22 @@ mod tests {
     #[test]
     fn envelope_clean_campaign_omits_failure_pointers() {
         // A clean campaign advertises no failures dir (it is never created).
-        let outcomes = vec![GenerationOutcome {
-            generation: 0,
-            seed: 0,
-            class: CampaignClass::Ok,
-            flags: Vec::new(),
-            novel: false,
-            signature_key: None,
-        }];
-        let mut class_counts: BTreeMap<&'static str, u64> = BTreeMap::new();
-        class_counts.insert("OK", 1);
+        let mut state = CampaignState::fresh(
+            ArtifactIdentity {
+                path: "guest".to_string(),
+                sha256: "abc".to_string(),
+                family: "native",
+            },
+            CampaignSpec::default(),
+        );
+        state.classes.insert("OK".to_string(), 1);
+        state.generations_done = 1;
         let envelope = build_campaign_envelope(
             "ok",
             0,
-            Path::new("guest"),
-            "native",
-            &CampaignSpec::default(),
-            &class_counts,
-            &BTreeMap::new(),
-            &outcomes,
+            &state,
             Path::new("out"),
+            Path::new("out/campaign-state.json"),
         );
         assert_eq!(envelope["failures"], 0);
         assert!(envelope["notable_runs"].as_array().unwrap().is_empty());
@@ -1794,6 +2672,135 @@ mod tests {
         // Duplicate is rejected (set_once), non-integer is rejected.
         assert!(parse(args(&["art", "--progress-every=1", "--progress-every=2"])).is_err());
         assert!(parse(args(&["art", "--progress-every", "nope"])).is_err());
+    }
+
+    #[test]
+    fn continuation_modes_parse_and_reject_resupplied_spec() {
+        let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+        let extend = parse(args(&["--extend", "7", "--out-dir", "d"])).unwrap();
+        assert_eq!(extend.artifact, None);
+        assert_eq!(extend.mode, CampaignMode::Extend { additional: 7 });
+        assert_eq!(extend.out_dir, PathBuf::from("d"));
+        let resume = parse(args(&[
+            "--resume",
+            "--timeout-secs",
+            "120",
+            "--progress-every",
+            "2",
+        ]))
+        .unwrap();
+        assert_eq!(resume.mode, CampaignMode::Resume);
+        assert_eq!(resume.timeout_secs_override, Some(120));
+        assert_eq!(resume.progress_every, 2);
+
+        assert!(parse(args(&["--extend", "0"])).is_err());
+        assert!(parse(args(&["--extend", "1", "--resume"])).is_err());
+        assert!(parse(args(&["guest", "--extend", "1"])).is_err());
+        assert!(parse(args(&["--extend", "1", "--", "guest-arg"])).is_err());
+        for flag in [
+            "--gens",
+            "--seed-start",
+            "--spec",
+            "--buggify",
+            "--swarm",
+            "--sched-pct",
+            "--faults",
+            "--liveness-watchdog",
+            "--converge-within",
+            "--heal-after",
+            "--report",
+        ] {
+            let values: Vec<&str> = match flag {
+                "--buggify" | "--swarm" | "--sched-pct" | "--faults" | "--report" => {
+                    vec!["--extend", "1", flag]
+                }
+                _ => vec!["--extend", "1", flag, "1"],
+            };
+            let message = parse(args(&values)).unwrap_err().to_string();
+            assert!(
+                message.contains("out-dir's recorded spec is authoritative"),
+                "{message}"
+            );
+            assert!(message.contains(flag), "{message}");
+        }
+    }
+
+    #[test]
+    fn campaign_state_round_trips_byte_stably_and_rejects_corruption() {
+        let mut state = CampaignState::fresh(
+            ArtifactIdentity {
+                path: "guest".to_string(),
+                sha256: "abc".to_string(),
+                family: "native",
+            },
+            CampaignSpec {
+                generations: 3,
+                timeout_secs: 9,
+                buggify: true,
+                watchdog_nanos: Some(5),
+                ..CampaignSpec::default()
+            },
+        );
+        state.generations_done = 2;
+        state.classes.insert("OK".to_string(), 1);
+        state.classes.insert("LIVENESS".to_string(), 1);
+        let key = "LIVENESS|PATINA_VIOLATION liveness #|".to_string();
+        state.signatures.insert(
+            key.clone(),
+            SignatureRecord {
+                class: CampaignClass::Liveness,
+                shape: "PATINA_VIOLATION liveness #".to_string(),
+                policy: String::new(),
+                first_seen_gen: 1,
+                count: 1,
+                seed: 42,
+                reproduce: "cargo patina run guest --seed 42".to_string(),
+                trace: None,
+                report: None,
+            },
+        );
+        state.notable_runs.push(GenerationOutcome {
+            generation: 1,
+            seed: 42,
+            class: CampaignClass::Liveness,
+            flags: vec!["--liveness-watchdog".to_string(), "5".to_string()],
+            novel: true,
+            signature_key: Some(key),
+        });
+        state.invocations.push(InvocationRecord {
+            cli: "campaign guest --gens 3".to_string(),
+            from_gen: 0,
+            gens_run: 2,
+            timeout_secs: 9,
+            elapsed_secs: 1,
+        });
+        let pretty = serde_json::to_string_pretty(&state.to_json()).unwrap();
+        let parsed_json: serde_json::Value = serde_json::from_str(&pretty).unwrap();
+        let loaded = CampaignState::from_json(&parsed_json).unwrap();
+        assert_eq!(
+            pretty,
+            serde_json::to_string_pretty(&loaded.to_json()).unwrap(),
+            "state serialize -> load -> serialize must be byte-stable"
+        );
+
+        let mut bad_schema = parsed_json.clone();
+        bad_schema["schema"] = "patina.campaign.state/v999".into();
+        assert!(CampaignState::from_json(&bad_schema).is_err());
+        let mut bad_class = parsed_json;
+        bad_class["classes"] = serde_json::json!({"MYSTERY": 1, "OK": 1});
+        assert!(CampaignState::from_json(&bad_class).is_err());
+    }
+
+    #[test]
+    fn campaign_lock_refuses_a_second_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let _first = CampaignLock::acquire(dir.path()).unwrap();
+        let error = CampaignLock::acquire(dir.path()).unwrap_err().to_string();
+        assert!(
+            error.contains("another campaign is writing this out-dir")
+                || error.contains("failed to lock campaign out-dir"),
+            "{error}"
+        );
     }
 
     #[test]

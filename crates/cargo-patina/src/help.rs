@@ -964,6 +964,8 @@ const CAMPAIGN: Verb = Verb {
     summary: "Config-driven deterministic fault-and-schedule sweep over one artifact.",
     synopsis: &[
         "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--buggify] [--swarm] [--sched-pct] [--faults] [--liveness-watchdog N] [--converge-within N] [--report] [-- GUEST ARGS]",
+        "cargo patina campaign --extend N [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
+        "cargo patina campaign --resume [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --selftest",
     ],
     prose: "\
@@ -972,12 +974,15 @@ artifact. Everything is a pure function of the generation number, so a re-run wi
 the same spec reproduces the same seeds, knobs, outcomes, and failure signatures. \
 Each generation is classified into one of seven outcome classes; novel failure \
 signatures are deduped and their traces saved with a reproduce command. A --spec \
-FILE.json supplies overrides and individual flags override the spec. Output is \
-summary-first: a human report (novel/failing generations plus a periodic progress \
-heartbeat, tuned by --progress-every) or a patina.campaign/v2 JSON envelope (class \
-counts, deduped signatures, per-run detail for novel/failing generations, and \
-pointers to the full on-disk artifacts). `--selftest` proves every classifier class \
-and the signature store.",
+FILE.json supplies overrides and individual flags override the spec. Campaigns \
+checkpoint their state in --out-dir; `--extend N` adds N generations to the recorded \
+target, and `--resume` finishes an interrupted campaign from the recorded out-dir \
+without re-supplying the artifact or spec flags. Output is summary-first: a human \
+report (novel/failing generations plus a periodic progress heartbeat, tuned by \
+--progress-every) or a patina.campaign/v2 JSON envelope (class counts, deduped \
+signatures, per-run detail for novel/failing generations, and pointers to the full \
+on-disk artifacts). `--selftest` proves every classifier class and the signature \
+store.",
     groups: &[Group {
         title: "Campaign options",
         flags: &[
@@ -993,6 +998,20 @@ and the signature store.",
                 None,
                 Value::Required("DIR", Kind::Path),
                 "Output directory (default patina-campaign-out).",
+                false,
+            ),
+            f(
+                "--extend",
+                None,
+                Value::Required("N", Kind::PositiveU64),
+                "Continue the recorded out-dir with N additional generations; the out-dir's spec is authoritative.",
+                false,
+            ),
+            f(
+                "--resume",
+                None,
+                Value::None,
+                "Finish an interrupted recorded out-dir without adding generations.",
                 false,
             ),
             f(

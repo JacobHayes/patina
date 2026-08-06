@@ -8456,9 +8456,12 @@ mod tests {
             "campaign" => &[
                 "--spec",
                 "--out-dir",
+                "--extend",
+                "--resume",
                 "--gens",
                 "--seed-start",
                 "--timeout-secs",
+                "--progress-every",
                 "--buggify",
                 "--swarm",
                 "--sched-pct",
@@ -9120,6 +9123,7 @@ mod tests {
                 let rendered: Vec<&str> = rendered.iter().map(String::as_str).collect();
                 campaign::parse(strings(&[&["art.wasm"][..], &rendered].concat())).map(|_| ())
             }
+            ("campaign", "--extend") => campaign::parse(strings(toks)).map(|_| ()),
             ("campaign", _) => {
                 campaign::parse(strings(&[&["art.wasm"][..], toks].concat())).map(|_| ())
             }
