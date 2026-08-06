@@ -18,7 +18,7 @@ Per user direction, these are not all bugs — each is classified as **fix**
 | 1 | `--yield-points` link fails on dependency `cdylib` (`R_X86_64_PC32` vs `environ`, non-PIC `patina_posix.o`) | fix | Compile shim objects as PIC and/or stop injecting shim objects into non-binary dependency artifacts (only the final bin link needs them). Builder to determine which; both may be right. |
 | 2 | Audit emits a flat unsupported-symbol list with no provenance | fix | Audit should attribute each unsupported import to the defining object/archive member (and crate where recoverable). Fail-closed behavior itself was correct. |
 | 3 | Static ctors call interposed APIs before runtime setup; error claims the binary wasn't run under `cargo patina run` | fix + docs | Keep failing closed (running ctors deterministically is out of scope for now — **arch**), but the diagnostic must distinguish "interposed call before runtime init (likely static constructor)" from "not launched via cargo patina run". Document the `#[ctor]` limitation and the cfg-guard workaround the SlateDB experiment used. |
-| 4 | Native run clears guest env; `setenv` fails closed | arch + fix | Immutable, empty-by-default deterministic env is by design (host env is a nondeterminism source) — keeping it. Ergonomics fix: add explicit `--env KEY=VALUE` (repeatable) to inject values into the deterministic env, recorded in trace metadata so replay reproduces them. `setenv` stays fail-closed for now; revisit if a real adopter needs in-process mutation (it could be modeled deterministically, but no consumer justifies it yet — no-knobs-pre-users). |
+| 4 | Native run clears guest env; `setenv` fails closed | arch + fix | Empty-by-default deterministic env with host env excluded is by design (host env is a nondeterminism source); explicit `--env KEY=VALUE` injects values, recorded in trace metadata. REVISED per user (2026-08-06): guest-side mutation is supported — `setenv`/`unsetenv`/`clearenv` are modeled deterministic operations on the guest env map with `getenv`/`environ` coherence (implemented; no per-mutation trace records — only the startup `--env` set is metadata). `putenv` stays fail-closed: caller-owned aliasing is unmodelable in an owned map and would fail silently-stale instead of loudly; the error names `setenv` as the path. |
 | 5 | Guest fs starts without `/tmp` | fix | Seed the deterministic fs with `/tmp` (and the guest temp dir convention) by default. A missing-standard-path failure surfacing as an app-level `NotFound` violates fail-loudly ergonomics. |
 | 6 | Host entropy not modeled (`/dev/urandom`, `getrandom` → ThreadRng init fails) | fix (arc) | Model guest entropy from the seeded, PRF domain-separated stream — this is the entropy domain of the unified-fault-knobs arc; pulled forward as an early deliverable of that arc's fs/entropy wave rather than a standalone hack. |
 | 7 | Panic backtraces mostly `<unknown>`; `RUST_BACKTRACE` couldn't be passed | fix + follow-up | `--env` (item 4) unblocks `RUST_BACKTRACE=1`. Symbolization of native-guest backtraces: investigate alongside coverage-depth's offline symbolization work (shared machinery); not blocking. |
@@ -128,6 +128,44 @@ cluster so the fixes have citable symptom records.
   maintainability/bug-class elimination/drift-gate fit with LOC reported but
   not decisive. Sequenced after fault-knobs Wave B and invariant Wave 5 land,
   because those diffs touch the same parser layer.
+- **2026-08-06 (Linux verification round) — item 9 root-caused: `--swarm`
+  masking, not the `--buggify=N` value form.** The Tensorlake verify agent
+  proved from the ORIGINAL run's artifacts (the fork of the dogfooding
+  sandbox) that the two reports carrying `enabled=0` had
+  `fingerprint=...+buggify+pct+swarm` with swarm `selected_classes` excluding
+  `buggify`, while the feedback's "control" run had no `--swarm` — the
+  reduction blamed the wrong knob. The value form arms correctly at the base,
+  observation (4bc5731), and tip commits on Linux x86_64. The landed coherence
+  guard fires loudly on Linux for the masked case. Follow-up fix required:
+  swarm class deselection must be REFLECTED in the fingerprint/metadata
+  (drop `+buggify` when swarm masks it) instead of tripping the vacuity
+  refusal — swarm masking is legitimate, and today a `--swarm --buggify=N`
+  run whose seed deselects buggify aborts exit 134.
+- **2026-08-06 (Linux verification round) — cdylib PIC fix is insufficient;
+  reopened.** On the real SlateDB tree (workarounds reverted in the fork),
+  `-fPIC` clears the `R_X86_64_PC32` relocation error but the same dependency
+  cdylib link then fails with `duplicate symbol: rust_eh_personality` (the
+  shim Rust staticlib bundles its own std; crc-fast's cdylib references the
+  unwind personality; synthetic cdylibs without landing pads link green and
+  mask this). Decision: implement the alternative the patch doc rejected —
+  scope shim link args so they never reach dependency cdylib links, only the
+  final binary — and make the regression fixture a dependency cdylib that
+  references the personality routine. The reproduction also fires WITHOUT
+  `--yield-points`; the flag was incidental. Task #14 stays open; the
+  ws-tracecap patch does not land as-is.
+- **2026-08-06 (Linux verification round) — two more Linux-only defects
+  found.** (a) Feedback item 6 (entropy) is NOT fixed on Linux: getrandom
+  0.3.4 resolves `getrandom` via `dlsym`, the shim's `__wrap_dlsym` returns
+  NULL unconditionally, forcing the file fallback which opens `/dev/random`
+  first (ENOENT; and modeling `/dev/random` alone just advances the failure
+  to an unmodeled `poll`). Chosen direction: `__wrap_dlsym` returns the
+  shim's own deterministic implementations for a curated entropy allowlist.
+  (b) ELF audit provenance is wrong: `object=` resolves to STT_FILE markers
+  (`crtstuff.c`, `patina_posix.c`) and the containing-symbol column is
+  nonsense; two genuine imports expand into ~40 findings across seven bogus
+  groups, and the provenance e2e fails on Linux. Both get dedicated fix
+  builders; every fix re-verifies via a Tensorlake round before its task
+  closes.
 - **2026-08-06 — SlateDB-side harness findings are out of scope.** Items in
   `SLATEDB-SANDBOX-NOTES.md` (bank fenced-close neutrality, recovery scenario
   stabilization) live in the sandbox SlateDB checkout, not this repo; nothing
