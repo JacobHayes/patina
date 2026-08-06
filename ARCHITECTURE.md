@@ -398,7 +398,7 @@ The native ABI shim provides compatibility symbols such as:
 open, read, write, close, fsync
 socket, bind, connect, send, recv
 clock_gettime, gettimeofday, nanosleep
-getrandom
+getrandom, /dev/urandom reads
 pthread_create, pthread_mutex_*, pthread_cond_*
 ```
 

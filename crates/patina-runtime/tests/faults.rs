@@ -357,6 +357,17 @@ fn net_faults_delay_the_tcp_stream_without_losing_data() {
     );
     assert_eq!(clean_bytes, b"hello");
 
+    // Base latency: net latency now lives in the net fault config and applies to
+    // TCP segments as well as datagrams, so the segment is NOT readable at the
+    // send instant and then arrives once virtual time advances.
+    let (latency_ready, latency_bytes) =
+        stream_once(|config| config.with_net_latency_nanos(50_000));
+    assert!(
+        !latency_ready,
+        "net base latency must delay TCP delivery — the latency knob is inert on the stream path otherwise"
+    );
+    assert_eq!(latency_bytes, b"hello", "TCP latency must never lose data");
+
     // Jitter: the fault reaches the TCP path through the runtime, so the segment
     // is NOT readable at the send instant, yet the reliable stream never loses
     // it once the clock advances.

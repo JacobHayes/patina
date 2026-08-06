@@ -91,7 +91,7 @@ use patina_dst_fs_crash::CrashFs;
 pub use patina_dst_fs_crash::TornGranularity;
 use patina_dst_fs_mem::MemFs;
 use patina_dst_net_sim::SimNet;
-use patina_dst_rng_seeded::{SeededEntropy, SplitMix64};
+use patina_dst_rng_seeded::{SeededEntropy, SplitMix64, domain_seed, fault_domain};
 use patina_dst_sched_det::{DetScheduler, PctConfig, SchedulePolicy, StarvationConfig};
 use patina_dst_time_virtual::VirtualClock;
 pub use patina_dst_trace::MAX_TRACE_BYTES;
@@ -132,9 +132,9 @@ pub const ENV_PARAMS_JSON: &str = "PATINA_PARAMS_JSON";
 /// a later `replay` restores them without re-passing the `--` section. Absent
 /// leaves the recorded argv unset. Malformed JSON is rejected fail-closed.
 pub const ENV_GUEST_ARGV: &str = "PATINA_GUEST_ARGV";
-/// Base link latency in nanoseconds applied to the default `SimNet` datagram
-/// network. Blocking receives under a non-zero value park on the virtual-clock
-/// timer queue until delivery. Invalid values are rejected fail-closed.
+/// Base link latency in nanoseconds applied to the default `SimNet` network
+/// (datagrams and TCP segments). Blocking receives under a non-zero value park
+/// on the virtual-clock timer queue until delivery. Invalid values are rejected fail-closed.
 pub const ENV_NET_LATENCY: &str = "PATINA_NET_LATENCY_NANOS";
 /// Seeded per-datagram delivery jitter range `MIN..MAX` in nanoseconds applied
 /// to the default `SimNet`. Varying jitter reorders datagrams relative to their
@@ -426,20 +426,41 @@ impl ScheduleDiagnostics {
 
 /// Seed-driven, default-off fault knobs layered onto the deterministic drivers.
 /// Every field is inert at its default so a run that configures no fault behaves
-/// exactly as before.
+/// exactly as before. Knobs are grouped by domain so new domains add a sub-struct
+/// instead of more loose top-level fields.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FaultConfig {
+    pub fs: FsFaultConfig,
+    pub net: NetFaultConfig,
+    pub clock: ClockFaultConfig,
+}
+
+/// Filesystem fault knobs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FsFaultConfig {
     /// Inject a filesystem crash after a chosen boundary operation.
-    crash_at: Option<CrashPoint>,
+    pub crash_at: Option<CrashPoint>,
     /// Granularity at which the injected crash tears the final unsynced write.
     /// Inert without `crash_at`; defaults to whole-block.
-    torn_granularity: TornGranularity,
-    /// Inclusive `[min, max]` nanoseconds of seeded extra latency per guest sleep.
-    sleep_jitter_nanos: Option<(u64, u64)>,
-    /// Inclusive `[min, max]` nanoseconds of seeded per-datagram delivery jitter.
-    net_jitter_nanos: Option<(u64, u64)>,
+    pub torn_granularity: TornGranularity,
+}
+
+/// Network fault knobs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NetFaultConfig {
+    /// Base link latency in nanoseconds applied to the default `SimNet` network.
+    pub latency_nanos: u64,
+    /// Inclusive `[min, max]` nanoseconds of seeded per-datagram/segment delivery jitter.
+    pub jitter_nanos: Option<(u64, u64)>,
     /// Seeded datagram drop probability in per-mille (0..=1000).
-    net_drop_permille: u16,
+    pub drop_permille: u16,
+}
+
+/// Clock fault knobs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClockFaultConfig {
+    /// Inclusive `[min, max]` nanoseconds of seeded extra latency per guest sleep.
+    pub sleep_jitter_nanos: Option<(u64, u64)>,
 }
 
 /// Seed-driven cooperative-SUT (buggify) configuration. Inert (`enabled =
@@ -518,7 +539,6 @@ pub struct RuntimeConfig {
     fingerprint: String,
     step_budget: Option<u64>,
     params: BTreeMap<String, String>,
-    net_latency_nanos: u64,
     faults: FaultConfig,
     buggify: BuggifyConfig,
     /// The exploration scheduling policy (PCT / starvation). Default is the
@@ -551,7 +571,6 @@ impl RuntimeConfig {
             fingerprint: DEFAULT_FINGERPRINT.into(),
             step_budget: None,
             params: BTreeMap::new(),
-            net_latency_nanos: 0,
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
             schedule_policy: SchedulePolicy::default(),
@@ -569,7 +588,6 @@ impl RuntimeConfig {
             fingerprint: fingerprint.into(),
             step_budget: None,
             params: BTreeMap::new(),
-            net_latency_nanos: 0,
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
             schedule_policy: SchedulePolicy::default(),
@@ -592,7 +610,6 @@ impl RuntimeConfig {
             fingerprint: fingerprint.into(),
             step_budget: None,
             params: BTreeMap::new(),
-            net_latency_nanos: 0,
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
             schedule_policy: SchedulePolicy::default(),
@@ -616,7 +633,6 @@ impl RuntimeConfig {
             fingerprint: fingerprint.into(),
             step_budget: None,
             params: BTreeMap::new(),
-            net_latency_nanos: 0,
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
             schedule_policy: SchedulePolicy::default(),
@@ -641,7 +657,6 @@ impl RuntimeConfig {
             fingerprint: fingerprint.into(),
             step_budget: None,
             params: BTreeMap::new(),
-            net_latency_nanos: 0,
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
             schedule_policy: SchedulePolicy::default(),
@@ -672,7 +687,6 @@ impl RuntimeConfig {
             fingerprint: fingerprint.into(),
             step_budget: None,
             params: BTreeMap::new(),
-            net_latency_nanos: 0,
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
             schedule_policy: SchedulePolicy::default(),
@@ -690,54 +704,54 @@ impl RuntimeConfig {
 
     /// Set the base link latency applied to the default `SimNet` network.
     pub fn with_net_latency_nanos(mut self, nanos: u64) -> Self {
-        self.net_latency_nanos = nanos;
+        self.faults.net.latency_nanos = nanos;
         self
     }
 
     pub const fn net_latency_nanos(&self) -> u64 {
-        self.net_latency_nanos
+        self.faults.net.latency_nanos
     }
 
     /// Inject a filesystem crash after the `ordinal`-th (1-based) `op` boundary.
     pub fn with_crash_at(mut self, op: CrashOp, ordinal: u64) -> Self {
-        self.faults.crash_at = Some(CrashPoint { op, ordinal });
+        self.faults.fs.crash_at = Some(CrashPoint { op, ordinal });
         self
     }
 
     /// Select whole-block or sub-block byte-granularity tearing for an injected
     /// crash. Inert without [`RuntimeConfig::with_crash_at`].
     pub fn with_fs_torn_granularity(mut self, granularity: TornGranularity) -> Self {
-        self.faults.torn_granularity = granularity;
+        self.faults.fs.torn_granularity = granularity;
         self
     }
 
     /// Add seeded extra latency to every guest sleep, drawn from `[min, max]`.
     pub fn with_sleep_jitter_nanos(mut self, min: u64, max: u64) -> Self {
-        self.faults.sleep_jitter_nanos = Some((min, max));
+        self.faults.clock.sleep_jitter_nanos = Some((min, max));
         self
     }
 
     /// Add seeded per-datagram delivery jitter drawn from `[min, max]`.
     pub fn with_net_jitter_nanos(mut self, min: u64, max: u64) -> Self {
-        self.faults.net_jitter_nanos = Some((min, max));
+        self.faults.net.jitter_nanos = Some((min, max));
         self
     }
 
     /// Drop datagrams with the given per-mille (0..=1000) probability.
     pub fn with_net_drop_permille(mut self, permille: u16) -> Self {
-        self.faults.net_drop_permille = permille;
+        self.faults.net.drop_permille = permille;
         self
     }
 
     pub const fn crash_at(&self) -> Option<CrashPoint> {
-        self.faults.crash_at
+        self.faults.fs.crash_at
     }
 
     /// The configured torn-write granularity for `--fs-crash-at`. `Block`
     /// (whole-block revert) unless `--fs-torn-granularity byte` selected the
     /// sub-block model.
     pub const fn torn_granularity(&self) -> TornGranularity {
-        self.faults.torn_granularity
+        self.faults.fs.torn_granularity
     }
 
     /// Apply the fault-injection knobs from a control-plane accessor. Shared by
@@ -750,16 +764,17 @@ impl RuntimeConfig {
         F: Fn(&str) -> Option<String>,
     {
         if let Some(value) = get(ENV_FS_CRASH_AT) {
-            self.faults.crash_at = Some(parse_crash_point(&value)?);
+            self.faults.fs.crash_at = Some(parse_crash_point(&value)?);
         }
         if let Some(value) = get(ENV_FS_TORN_GRANULARITY) {
-            self.faults.torn_granularity = parse_torn_granularity(&value)?;
+            self.faults.fs.torn_granularity = parse_torn_granularity(&value)?;
         }
         if let Some(value) = get(ENV_SLEEP_JITTER) {
-            self.faults.sleep_jitter_nanos = Some(parse_nanos_range(ENV_SLEEP_JITTER, &value)?);
+            self.faults.clock.sleep_jitter_nanos =
+                Some(parse_nanos_range(ENV_SLEEP_JITTER, &value)?);
         }
         if let Some(value) = get(ENV_NET_JITTER) {
-            self.faults.net_jitter_nanos = Some(parse_nanos_range(ENV_NET_JITTER, &value)?);
+            self.faults.net.jitter_nanos = Some(parse_nanos_range(ENV_NET_JITTER, &value)?);
         }
         if let Some(value) = get(ENV_NET_DROP_PERMILLE) {
             let permille: u16 = value.parse().map_err(|_| {
@@ -772,7 +787,7 @@ impl RuntimeConfig {
                     "{ENV_NET_DROP_PERMILLE} must be within [0, 1000] per-mille"
                 )));
             }
-            self.faults.net_drop_permille = permille;
+            self.faults.net.drop_permille = permille;
         }
         Ok(self)
     }
@@ -1160,7 +1175,7 @@ impl RuntimeConfig {
             }
             config.params = params;
         }
-        config.net_latency_nanos = match env::var(ENV_NET_LATENCY) {
+        config.faults.net.latency_nanos = match env::var(ENV_NET_LATENCY) {
             Ok(value) => value.parse().map_err(|_| {
                 RuntimeError::Config(format!(
                     "{ENV_NET_LATENCY} must be an unsigned 64-bit integer"
@@ -1398,7 +1413,7 @@ impl RuntimeBuilder {
         // A replayed or branched trace supplies its own authoritative fault
         // configuration, applied to `self.config` after the match releases its
         // borrow. `None` leaves the operator-supplied configuration in place.
-        let mut replay_fault_override: Option<(FaultConfig, u64)> = None;
+        let mut replay_fault_override: Option<FaultConfig> = None;
         // Same contract for the cooperative-SUT (buggify) configuration: a
         // replayed/branched trace's recorded config is authoritative.
         let mut replay_buggify_override: Option<BuggifyConfig> = None;
@@ -1511,9 +1526,8 @@ impl RuntimeBuilder {
         // Adopt the trace's authoritative fault configuration before any driver
         // is constructed from it, so a flag-free replay rebuilds the same
         // CrashFs/SimNet the recording used.
-        if let Some((faults, net_latency_nanos)) = replay_fault_override {
+        if let Some(faults) = replay_fault_override {
             self.config.faults = faults;
-            self.config.net_latency_nanos = net_latency_nanos;
         }
         // Adopt the trace's authoritative buggify configuration so a flag-free
         // replay re-derives the same activation and firing decisions.
@@ -1535,8 +1549,8 @@ impl RuntimeBuilder {
         // `with_fs_image`; they must not pre-install the final filesystem, so a
         // knob like `--fs-torn-granularity` can never be silently dropped by a
         // filesystem that bypassed the fault config (the gap this replaced).
-        let crash_knobs_set = self.config.faults.crash_at.is_some()
-            || self.config.faults.torn_granularity != TornGranularity::default();
+        let crash_knobs_set = self.config.faults.fs.crash_at.is_some()
+            || self.config.faults.fs.torn_granularity != TornGranularity::default();
         if self.filesystem.is_some() {
             // An explicit filesystem (`with_filesystem`/`with_captured_filesystem`)
             // cannot reflect config-driven crash knobs, and an accompanying base
@@ -1583,16 +1597,20 @@ impl RuntimeBuilder {
                 self.filesystem = Some(Box::new(
                     CrashFs::builder()
                         .filesystem(base)
-                        .seed(root_seed)
-                        .torn_granularity(self.config.faults.torn_granularity)
+                        .seed(domain_seed(root_seed, fault_domain::FS_CRASH))
+                        .torn_granularity(self.config.faults.fs.torn_granularity)
                         .build()
                         .map_err(RuntimeError::Effect)?,
                 ));
             }
             self.clock
                 .get_or_insert_with(|| Box::new(VirtualClock::default()));
-            self.entropy
-                .get_or_insert_with(|| Box::new(SeededEntropy::new(root_seed)));
+            self.entropy.get_or_insert_with(|| {
+                Box::new(SeededEntropy::new(domain_seed(
+                    root_seed,
+                    fault_domain::ENTROPY,
+                )))
+            });
             self.scheduler.get_or_insert_with(|| {
                 Box::new(DetScheduler::with_policy(
                     root_seed,
@@ -1601,10 +1619,10 @@ impl RuntimeBuilder {
             });
             if self.network.is_none() {
                 let mut network = SimNet::builder()
-                    .base_latency_nanos(self.config.net_latency_nanos)
-                    .fault_seed(root_seed)
-                    .drop_permille(self.config.faults.net_drop_permille);
-                if let Some((min, max)) = self.config.faults.net_jitter_nanos {
+                    .base_latency_nanos(self.config.faults.net.latency_nanos)
+                    .fault_seed(domain_seed(root_seed, fault_domain::NET_FAULT))
+                    .drop_permille(self.config.faults.net.drop_permille);
+                if let Some((min, max)) = self.config.faults.net.jitter_nanos {
                     network = network.jitter_nanos(min, max);
                 }
                 self.network = Some(Box::new(network.build().map_err(RuntimeError::Effect)?));
@@ -1656,13 +1674,13 @@ impl RuntimeBuilder {
             scheduler_tasks: std::collections::BTreeSet::new(),
             parked_tasks: std::collections::BTreeSet::new(),
             rescued: Vec::new(),
-            crash_at: self.config.faults.crash_at,
+            crash_at: self.config.faults.fs.crash_at,
             crash_counts: CrashCounts::default(),
             crash_fired: false,
-            sleep_jitter_nanos: self.config.faults.sleep_jitter_nanos,
+            sleep_jitter_nanos: self.config.faults.clock.sleep_jitter_nanos,
             // Domain-separated seed so sleep-jitter draws do not correlate with
-            // the entropy or scheduler streams that also derive from root_seed.
-            sleep_jitter_rng: SplitMix64::new(root_seed ^ 0x5EED_1A7E_0FF5_E720),
+            // the entropy or network-fault streams that also derive from root_seed.
+            sleep_jitter_rng: SplitMix64::new(domain_seed(root_seed, fault_domain::SLEEP_JITTER)),
             schedule: ScheduleTracker::default(),
             buggify: Buggify::new(self.config.buggify, root_seed),
             liveness,
@@ -4504,33 +4522,40 @@ fn fault_record(config: &RuntimeConfig) -> patina_dst_trace::FaultConfigRecord {
     patina_dst_trace::FaultConfigRecord {
         crash_at: config
             .faults
+            .fs
             .crash_at
             .map(|point| patina_dst_trace::CrashPointRecord {
                 op: crash_op_to_record(point.op),
                 ordinal: point.ordinal,
             }),
-        torn_granularity: torn_granularity_to_record(config.faults.torn_granularity),
-        sleep_jitter_nanos: config.faults.sleep_jitter_nanos,
-        net_jitter_nanos: config.faults.net_jitter_nanos,
-        net_drop_permille: config.faults.net_drop_permille,
-        net_latency_nanos: config.net_latency_nanos,
+        torn_granularity: torn_granularity_to_record(config.faults.fs.torn_granularity),
+        sleep_jitter_nanos: config.faults.clock.sleep_jitter_nanos,
+        net_jitter_nanos: config.faults.net.jitter_nanos,
+        net_drop_permille: config.faults.net.drop_permille,
+        net_latency_nanos: config.faults.net.latency_nanos,
     }
 }
 
-/// Rebuild the runtime fault configuration and base net latency from a recorded
-/// trace's authoritative fault metadata.
-fn fault_config_from_record(record: &patina_dst_trace::FaultConfigRecord) -> (FaultConfig, u64) {
-    let faults = FaultConfig {
-        crash_at: record.crash_at.map(|point| CrashPoint {
-            op: crash_op_from_record(point.op),
-            ordinal: point.ordinal,
-        }),
-        torn_granularity: torn_granularity_from_record(record.torn_granularity),
-        sleep_jitter_nanos: record.sleep_jitter_nanos,
-        net_jitter_nanos: record.net_jitter_nanos,
-        net_drop_permille: record.net_drop_permille,
-    };
-    (faults, record.net_latency_nanos)
+/// Rebuild the runtime fault configuration from a recorded trace's authoritative
+/// fault metadata.
+fn fault_config_from_record(record: &patina_dst_trace::FaultConfigRecord) -> FaultConfig {
+    FaultConfig {
+        fs: FsFaultConfig {
+            crash_at: record.crash_at.map(|point| CrashPoint {
+                op: crash_op_from_record(point.op),
+                ordinal: point.ordinal,
+            }),
+            torn_granularity: torn_granularity_from_record(record.torn_granularity),
+        },
+        net: NetFaultConfig {
+            latency_nanos: record.net_latency_nanos,
+            jitter_nanos: record.net_jitter_nanos,
+            drop_permille: record.net_drop_permille,
+        },
+        clock: ClockFaultConfig {
+            sleep_jitter_nanos: record.sleep_jitter_nanos,
+        },
+    }
 }
 
 /// Reconcile a recorded trace's authoritative fault configuration with any fault
@@ -4543,22 +4568,20 @@ fn fault_config_from_record(record: &patina_dst_trace::FaultConfigRecord) -> (Fa
 fn reconcile_replay_faults(
     config: &RuntimeConfig,
     recorded: Option<&patina_dst_trace::FaultConfigRecord>,
-) -> Result<Option<(FaultConfig, u64)>, RuntimeError> {
+) -> Result<Option<FaultConfig>, RuntimeError> {
     let Some(record) = recorded else {
         return Ok(None);
     };
-    let (stored_faults, stored_latency) = fault_config_from_record(record);
-    let supplied_any = config.faults != FaultConfig::default() || config.net_latency_nanos != 0;
-    if supplied_any
-        && (config.faults != stored_faults || config.net_latency_nanos != stored_latency)
-    {
+    let stored_faults = fault_config_from_record(record);
+    let supplied_any = config.faults != FaultConfig::default();
+    if supplied_any && config.faults != stored_faults {
         return Err(RuntimeError::Config(
             "replay fault knobs conflict with the trace's recorded configuration; \
              the trace is authoritative, so omit the flags (or supply matching values)"
                 .into(),
         ));
     }
-    Ok(Some((stored_faults, stored_latency)))
+    Ok(Some(stored_faults))
 }
 
 /// The buggify configuration recorded into a trace at build time. `active_sites`
@@ -4735,73 +4758,81 @@ fn reconcile_replay_sud(
 /// Apply swarm fault-class selection to a record/seeded run's configuration: for
 /// each enabled fault class, a domain-separated seed-derived coin decides whether
 /// it stays active this generation. The masked configuration is what every driver
-/// and the recorded [`FaultConfigRecord`] then consume, so replay reproduces the
-/// selected subset verbatim; the returned [`SwarmConfigRecord`] documents the
+/// and the recorded `FaultConfigRecord` then consume, so replay reproduces the
+/// selected subset verbatim; the returned `SwarmConfigRecord` documents the
 /// candidate set and the seed's selection so the trace is self-describing. Each
 /// class draws independently, so subsets vary across generations (seeds).
 fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_dst_trace::SwarmConfigRecord {
-    // Stable class tokens paired with a live predicate and a dropper. A class is
-    // a candidate only when currently enabled (non-default).
+    // Stable class tokens paired with a live predicate, a domain label, and a
+    // dropper. A class is a candidate only when currently enabled (non-default).
     let mut candidates: Vec<&'static str> = Vec::new();
     let mut selected: Vec<String> = Vec::new();
     let seed = config.seed;
-    // Independent per-class coin, domain-separated from every other seeded stream
-    // and from the other classes by hashing the class token into the draw.
-    let keep = |class: &str| -> bool {
-        let mut rng = SplitMix64::new(seed ^ 0x5A20_4C1A_5500_5EED ^ splitmix_hash_str(class));
-        rng.next_u64() & 1 == 1
-    };
 
-    if config.faults.crash_at.is_some()
-        || config.faults.torn_granularity != TornGranularity::default()
+    if config.faults.fs.crash_at.is_some()
+        || config.faults.fs.torn_granularity != TornGranularity::default()
     {
-        candidates.push("crash");
-        if keep("crash") {
-            selected.push("crash".into());
-        } else {
-            config.faults.crash_at = None;
-            config.faults.torn_granularity = TornGranularity::default();
-        }
+        apply_swarm_class(
+            seed,
+            "crash",
+            fault_domain::SWARM_CRASH,
+            &mut candidates,
+            &mut selected,
+            || {
+                config.faults.fs.crash_at = None;
+                config.faults.fs.torn_granularity = TornGranularity::default();
+            },
+        );
     }
-    if config.faults.sleep_jitter_nanos.is_some() {
-        candidates.push("sleep_jitter");
-        if keep("sleep_jitter") {
-            selected.push("sleep_jitter".into());
-        } else {
-            config.faults.sleep_jitter_nanos = None;
-        }
+    if config.faults.clock.sleep_jitter_nanos.is_some() {
+        apply_swarm_class(
+            seed,
+            "sleep_jitter",
+            fault_domain::SWARM_SLEEP_JITTER,
+            &mut candidates,
+            &mut selected,
+            || config.faults.clock.sleep_jitter_nanos = None,
+        );
     }
-    if config.faults.net_jitter_nanos.is_some() {
-        candidates.push("net_jitter");
-        if keep("net_jitter") {
-            selected.push("net_jitter".into());
-        } else {
-            config.faults.net_jitter_nanos = None;
-        }
+    if config.faults.net.jitter_nanos.is_some() {
+        apply_swarm_class(
+            seed,
+            "net_jitter",
+            fault_domain::SWARM_NET_JITTER,
+            &mut candidates,
+            &mut selected,
+            || config.faults.net.jitter_nanos = None,
+        );
     }
-    if config.faults.net_drop_permille != 0 {
-        candidates.push("net_drop");
-        if keep("net_drop") {
-            selected.push("net_drop".into());
-        } else {
-            config.faults.net_drop_permille = 0;
-        }
+    if config.faults.net.drop_permille != 0 {
+        apply_swarm_class(
+            seed,
+            "net_drop",
+            fault_domain::SWARM_NET_DROP,
+            &mut candidates,
+            &mut selected,
+            || config.faults.net.drop_permille = 0,
+        );
     }
-    if config.net_latency_nanos != 0 {
-        candidates.push("net_latency");
-        if keep("net_latency") {
-            selected.push("net_latency".into());
-        } else {
-            config.net_latency_nanos = 0;
-        }
+    if config.faults.net.latency_nanos != 0 {
+        apply_swarm_class(
+            seed,
+            "net_latency",
+            fault_domain::SWARM_NET_LATENCY,
+            &mut candidates,
+            &mut selected,
+            || config.faults.net.latency_nanos = 0,
+        );
     }
     if config.buggify.enabled {
-        candidates.push("buggify");
-        if keep("buggify") {
-            selected.push("buggify".into());
-        } else {
-            config.buggify.enabled = false;
-        }
+        apply_swarm_class(
+            seed,
+            "buggify",
+            fault_domain::SWARM_BUGGIFY,
+            &mut candidates,
+            &mut selected,
+            || config.buggify.enabled = false,
+        );
     }
 
     patina_dst_trace::SwarmConfigRecord {
@@ -4810,19 +4841,21 @@ fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_dst_trace::SwarmConfig
     }
 }
 
-/// A stable SplitMix64-style hash of a class token, for domain-separating swarm
-/// per-class coins. Order-independent and platform-independent.
-fn splitmix_hash_str(text: &str) -> u64 {
-    let mut state: u64 = 0xD1B5_4A32_D192_ED03;
-    for byte in text.bytes() {
-        state = state
-            .wrapping_add(u64::from(byte))
-            .wrapping_add(0x9E37_79B9_7F4A_7C15);
-        state = (state ^ (state >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        state = (state ^ (state >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        state ^= state >> 31;
+fn apply_swarm_class(
+    seed: u64,
+    token: &'static str,
+    domain: &'static str,
+    candidates: &mut Vec<&'static str>,
+    selected: &mut Vec<String>,
+    drop: impl FnOnce(),
+) {
+    candidates.push(token);
+    let mut rng = SplitMix64::new(domain_seed(seed, domain));
+    if rng.next_u64() & 1 == 1 {
+        selected.push(token.into());
+    } else {
+        drop();
     }
-    state
 }
 
 /// Emit the default-on liveness-watchdog diagnostic at a clean finish. Proves the
@@ -5261,7 +5294,7 @@ fn decode_optional_bytes(
 
 #[cfg(test)]
 mod tests {
-    use patina_dst_abi::ErrorCode;
+    use patina_dst_abi::{ErrorCode, SendDisposition};
     use patina_dst_fs_crash::CrashFs;
     use patina_dst_fs_host::HostCaptureFs;
     use tempfile::tempdir;
@@ -5739,6 +5772,157 @@ mod tests {
     }
 
     #[test]
+    fn swarm_class_table_covers_every_current_fault_field() {
+        let directory = tempdir().unwrap();
+        let trace = directory.path().join("swarm-coverage.patina");
+        let config = RuntimeConfig::record(9, &trace, "fp+swarm")
+            .with_crash_at(CrashOp::Close, 1)
+            .with_fs_torn_granularity(TornGranularity::Byte)
+            .with_sleep_jitter_nanos(1, 2)
+            .with_net_jitter_nanos(1, 2)
+            .with_net_drop_permille(1)
+            .with_net_latency_nanos(1)
+            .with_buggify(BuggifyConfig {
+                enabled: true,
+                ..BuggifyConfig::default()
+            })
+            .with_swarm(true);
+        let context = Context::from_config(config).unwrap();
+        context.finish().unwrap();
+        let swarm = patina_dst_trace::TraceBundle::load(&trace)
+            .unwrap()
+            .metadata
+            .swarm
+            .expect("swarm recorded");
+
+        // Drift gate for Wave A's nested FaultConfig shape: every current
+        // non-defaultable fault field/domain has a swarm class row. If a new
+        // field is added to FaultConfig, extend this test and apply_swarm_mask in
+        // the same change instead of silently leaving the knob outside swarm.
+        assert_eq!(
+            swarm.candidate_classes,
+            vec![
+                "crash",
+                "sleep_jitter",
+                "net_jitter",
+                "net_drop",
+                "net_latency",
+                "buggify",
+            ]
+        );
+    }
+
+    #[test]
+    fn swarm_class_coins_use_the_domain_seed_registry() {
+        let seed = 42;
+        let expected = [
+            ("crash", fault_domain::SWARM_CRASH),
+            ("sleep_jitter", fault_domain::SWARM_SLEEP_JITTER),
+            ("net_jitter", fault_domain::SWARM_NET_JITTER),
+            ("net_drop", fault_domain::SWARM_NET_DROP),
+            ("net_latency", fault_domain::SWARM_NET_LATENCY),
+            ("buggify", fault_domain::SWARM_BUGGIFY),
+        ]
+        .into_iter()
+        .filter_map(|(token, domain)| {
+            let mut rng = SplitMix64::new(domain_seed(seed, domain));
+            (rng.next_u64() & 1 == 1).then_some(token.to_string())
+        })
+        .collect::<Vec<_>>();
+
+        let mut config = RuntimeConfig::seeded(seed)
+            .with_crash_at(CrashOp::Close, 1)
+            .with_sleep_jitter_nanos(1, 2)
+            .with_net_jitter_nanos(1, 2)
+            .with_net_drop_permille(1)
+            .with_net_latency_nanos(1)
+            .with_buggify(BuggifyConfig {
+                enabled: true,
+                ..BuggifyConfig::default()
+            });
+        let swarm = apply_swarm_mask(&mut config);
+        assert_eq!(swarm.selected_classes, expected);
+    }
+
+    #[test]
+    fn default_driver_streams_are_domain_separated() {
+        let seed = 7;
+
+        let mut context = Context::from_config(RuntimeConfig::seeded(seed)).unwrap();
+        let actual_entropy = context.entropy_bytes(24).unwrap();
+        context.finish().unwrap();
+
+        let mut expected_entropy = SeededEntropy::new(domain_seed(seed, fault_domain::ENTROPY));
+        let mut expected = [0; 24];
+        expected_entropy.fill(&mut expected).unwrap();
+        assert_eq!(actual_entropy, expected);
+
+        let mut old_aliased_entropy = SeededEntropy::new(seed);
+        let mut old = [0; 24];
+        old_aliased_entropy.fill(&mut old).unwrap();
+        assert_ne!(
+            actual_entropy, old,
+            "RED-before-GREEN: old runtime entropy used SplitMix64::new(root_seed)"
+        );
+
+        fn runtime_drop_pattern(seed: u64) -> Vec<SendDisposition> {
+            let mut context =
+                Context::from_config(RuntimeConfig::seeded(seed).with_net_drop_permille(500))
+                    .unwrap();
+            let tx = context.net_bind("tx").unwrap();
+            context.net_bind("rx").unwrap();
+            let pattern = (0..64)
+                .map(|seq| {
+                    context
+                        .net_send(tx, "rx", &[seq as u8])
+                        .unwrap()
+                        .disposition
+                })
+                .collect();
+            context.finish().unwrap();
+            pattern
+        }
+
+        fn sim_drop_pattern(fault_seed: u64) -> Vec<SendDisposition> {
+            let mut net = SimNet::builder()
+                .fault_seed(fault_seed)
+                .drop_permille(500)
+                .build()
+                .unwrap();
+            let tx = net.bind("tx").unwrap();
+            net.bind("rx").unwrap();
+            (0..64)
+                .map(|seq| net.send(tx, "rx", &[seq as u8], 0).unwrap().disposition)
+                .collect()
+        }
+
+        let runtime_pattern = runtime_drop_pattern(seed);
+        assert_eq!(
+            runtime_pattern,
+            sim_drop_pattern(domain_seed(seed, fault_domain::NET_FAULT))
+        );
+        assert_ne!(
+            runtime_pattern,
+            sim_drop_pattern(seed),
+            "RED-before-GREEN: old SimNet fault stream used the root seed directly"
+        );
+
+        let jittered = {
+            let mut context = Context::from_config(
+                RuntimeConfig::seeded(seed).with_sleep_jitter_nanos(500, 1_500),
+            )
+            .unwrap();
+            context.sleep_for(1_000).unwrap();
+            let elapsed = context.now(ClockKind::Monotonic).unwrap();
+            context.finish().unwrap();
+            elapsed
+        };
+        let mut sleep_rng = SplitMix64::new(domain_seed(seed, fault_domain::SLEEP_JITTER));
+        let expected_jitter = 500 + (sleep_rng.next_u64() % 1_001);
+        assert_eq!(jittered, 1_000 + expected_jitter);
+    }
+
+    #[test]
     fn apply_schedule_and_swarm_env_parse_the_control_plane() {
         let vars: BTreeMap<&str, String> = [
             (ENV_SCHED_PCT, "4".to_string()),
@@ -5835,18 +6019,18 @@ mod tests {
 
         // Flag-free replay adopts the stored configuration verbatim, so replay is
         // byte-identical without any knobs.
-        let (faults, latency) = reconcile_replay_faults(&RuntimeConfig::seeded(0), Some(&stored))
+        let faults = reconcile_replay_faults(&RuntimeConfig::seeded(0), Some(&stored))
             .unwrap()
             .expect("stored config adopted");
         assert_eq!(
-            faults.crash_at,
+            faults.fs.crash_at,
             Some(CrashPoint {
                 op: CrashOp::Close,
                 ordinal: 1
             })
         );
-        assert_eq!(faults.torn_granularity, TornGranularity::Byte);
-        assert_eq!(latency, 500);
+        assert_eq!(faults.fs.torn_granularity, TornGranularity::Byte);
+        assert_eq!(faults.net.latency_nanos, 500);
 
         // Explicit knobs that MATCH the recording are accepted.
         let matching = RuntimeConfig::seeded(0)

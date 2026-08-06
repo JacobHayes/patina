@@ -1,6 +1,43 @@
-//! A deterministic entropy byte stream based on SplitMix64.
+//! A deterministic entropy byte stream and seed-derivation helpers based on SplitMix64.
 
 use patina_dst_driver_api::{DriverResult, EntropyDriver};
+
+/// Stable domain labels for root-seed-derived fault and nondeterminism streams.
+///
+/// These labels are intentionally human-readable and centralized: any runtime
+/// stream that derives from the root seed should do so through [`domain_seed`]
+/// with one of these labels (or a new label added here), not through ad-hoc XOR
+/// constants or by reusing the root seed directly.
+pub mod fault_domain {
+    /// Guest entropy bytes (`Context::entropy_bytes`, WASI `random_get`, native
+    /// `getrandom`/`getentropy` interposers).
+    pub const ENTROPY: &str = "patina.entropy";
+    /// SimNet's seeded network fault stream (drop, retransmit, jitter).
+    pub const NET_FAULT: &str = "patina.net.fault";
+    /// Seeded extra latency applied to guest sleeps.
+    pub const SLEEP_JITTER: &str = "patina.clock.sleep_jitter";
+
+    /// Explicit `FaultNet` wrapper datagram-drop stream.
+    pub const FAULT_NET_DROP: &str = "patina.wrapper.fault_net.drop";
+    /// Explicit `FaultNet` wrapper datagram-duplication stream.
+    pub const FAULT_NET_DUPLICATE: &str = "patina.wrapper.fault_net.duplicate";
+
+    /// CrashFs torn-write/crash-model stream.
+    pub const FS_CRASH: &str = "patina.fs.crash";
+
+    /// Swarm per-class coin for crash/torn-write knobs.
+    pub const SWARM_CRASH: &str = "patina.swarm.crash";
+    /// Swarm per-class coin for sleep jitter.
+    pub const SWARM_SLEEP_JITTER: &str = "patina.swarm.sleep_jitter";
+    /// Swarm per-class coin for network jitter.
+    pub const SWARM_NET_JITTER: &str = "patina.swarm.net_jitter";
+    /// Swarm per-class coin for network drop.
+    pub const SWARM_NET_DROP: &str = "patina.swarm.net_drop";
+    /// Swarm per-class coin for network base latency.
+    pub const SWARM_NET_LATENCY: &str = "patina.swarm.net_latency";
+    /// Swarm per-class coin for cooperative-SUT buggify.
+    pub const SWARM_BUGGIFY: &str = "patina.swarm.buggify";
+}
 
 /// The specified SplitMix64 stream used by deterministic decision policies.
 pub struct SplitMix64 {
@@ -19,6 +56,46 @@ impl SplitMix64 {
         value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         value ^ (value >> 31)
     }
+}
+
+/// A stable SplitMix64-style hash of a string label.
+///
+/// This is platform-independent and order-independent over UTF-8 bytes. It is
+/// deliberately not Rust's `DefaultHasher`, whose output is not a stable format.
+pub fn splitmix_hash_str(text: &str) -> u64 {
+    let mut state: u64 = 0xD1B5_4A32_D192_ED03;
+    for byte in text.bytes() {
+        state = state
+            .wrapping_add(u64::from(byte))
+            .wrapping_add(0x9E37_79B9_7F4A_7C15);
+        state = (state ^ (state >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        state = (state ^ (state >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        state ^= state >> 31;
+    }
+    state
+}
+
+/// A deterministic pseudo-random 64-bit hash of a sequence of 64-bit words.
+///
+/// Used as the common PRF/finalizer for deriving independent streams from a root
+/// seed. It has no state beyond the inputs and reproduces exactly across
+/// processes and targets.
+pub fn splitmix_hash(inputs: &[u64]) -> u64 {
+    let mut acc = 0xa5a5_a5a5_5a5a_5a5a_u64;
+    for &value in inputs {
+        acc = SplitMix64::new(acc ^ value).next_u64();
+        acc = acc.wrapping_add(value.rotate_left(17));
+    }
+    SplitMix64::new(acc).next_u64()
+}
+
+/// Derive a deterministic, domain-separated stream seed from a run root seed.
+///
+/// This is the shared derivation rule for fault/decision streams: a stream is
+/// keyed by the root seed and a stable domain label, so adding one domain cannot
+/// perturb or alias another domain's sequence.
+pub fn domain_seed(root_seed: u64, domain: &'static str) -> u64 {
+    splitmix_hash(&[root_seed, splitmix_hash_str(domain)])
 }
 
 /// A deterministic entropy source with chunk-independent output.
@@ -100,5 +177,27 @@ mod tests {
         left.fill(&mut left_bytes).unwrap();
         right.fill(&mut right_bytes).unwrap();
         assert_ne!(left_bytes, right_bytes);
+    }
+
+    #[test]
+    fn domain_seed_separates_root_seed_streams() {
+        let entropy_seed = domain_seed(7, fault_domain::ENTROPY);
+        let net_seed = domain_seed(7, fault_domain::NET_FAULT);
+        let sleep_seed = domain_seed(7, fault_domain::SLEEP_JITTER);
+        assert_ne!(entropy_seed, net_seed);
+        assert_ne!(entropy_seed, sleep_seed);
+        assert_ne!(net_seed, sleep_seed);
+        assert_eq!(entropy_seed, domain_seed(7, fault_domain::ENTROPY));
+        assert_ne!(entropy_seed, domain_seed(8, fault_domain::ENTROPY));
+
+        // RED-before-GREEN for the historical aliasing class: before Wave A,
+        // runtime entropy and SimNet net faults both used `SplitMix64::new(root)`.
+        // These first words would therefore have been equal; domain labels make
+        // the streams independent while keeping each stream deterministic.
+        let old_root_first = SplitMix64::new(7).next_u64();
+        let entropy_first = SplitMix64::new(entropy_seed).next_u64();
+        let net_first = SplitMix64::new(net_seed).next_u64();
+        assert_ne!(entropy_first, old_root_first);
+        assert_ne!(entropy_first, net_first);
     }
 }

@@ -1071,6 +1071,94 @@ fi
 cmp "$tmp/hashmap-record" "$tmp/hashmap-replay"
 cmp "$tmp/hashmap-seed-1" "$tmp/hashmap-replay"
 
+# SlateDB feedback #6: dependency RNG initialization through rand::rng() must
+# reach Patina's deterministic entropy, not the host or an unmodeled
+# /dev/urandom fallback. This package uses rand's current API directly (stronger
+# coverage than HashMap's std RandomState wrapper): same seed is byte-identical,
+# another seed changes the bytes, and record->replay reproduces exactly.
+rand_pkg="$tmp/rand-rng-pkg"
+mkdir -p "$rand_pkg/src"
+cat >"$rand_pkg/Cargo.toml" <<'TOML'
+[workspace]
+
+[package]
+name = "rand_rng_probe"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+rand = "=0.9.5"
+TOML
+cat >"$rand_pkg/src/main.rs" <<'RS'
+use rand::RngCore;
+
+fn main() {
+    let mut rng = rand::rng();
+    let first = rng.next_u64();
+    let mut bytes = [0u8; 24];
+    rng.fill_bytes(&mut bytes);
+    print!("NATIVE_RAND_RNG first={first:016x} bytes=");
+    for byte in bytes {
+        print!("{byte:02x}");
+    }
+    println!();
+}
+RS
+"$runner" build "$rand_pkg" --output "$tmp/rand-rng-probe" >/dev/null
+"$runner" audit "$tmp/rand-rng-probe" "${shim_allow[@]}" >/dev/null
+"$runner" run "$tmp/rand-rng-probe" --seed 1 >"$tmp/rand-rng-seed-1"
+"$runner" run "$tmp/rand-rng-probe" --seed 1 >"$tmp/rand-rng-seed-1-again"
+"$runner" run "$tmp/rand-rng-probe" --seed 2 >"$tmp/rand-rng-seed-2"
+cmp "$tmp/rand-rng-seed-1" "$tmp/rand-rng-seed-1-again"
+grep -Eq '^NATIVE_RAND_RNG first=[0-9a-f]{16} bytes=[0-9a-f]{48}$' "$tmp/rand-rng-seed-1"
+if cmp -s "$tmp/rand-rng-seed-1" "$tmp/rand-rng-seed-2"; then
+  echo 'validate-native-shim: rand::rng() output did not vary across seeds' >&2
+  exit 1
+fi
+"$runner" run "$tmp/rand-rng-probe" --seed 1 --record "$tmp/rand-rng.patina" \
+  --fingerprint native-rand-rng-v1 >"$tmp/rand-rng-record"
+"$runner" replay "$tmp/rand-rng-probe" "$tmp/rand-rng.patina" \
+  --fingerprint native-rand-rng-v1 >"$tmp/rand-rng-replay"
+cmp "$tmp/rand-rng-record" "$tmp/rand-rng-replay"
+cmp "$tmp/rand-rng-seed-1" "$tmp/rand-rng-replay"
+
+# Direct /dev/urandom fallback path: some entropy libraries fall back to opening
+# and reading the device if their first getrandom-class probe is unavailable.
+# The shim models /dev/urandom as a read-only deterministic entropy device wired
+# to the same domain-separated entropy stream.
+cat >"$tmp/urandom_probe.rs" <<'RS'
+use std::fs::File;
+use std::io::Read;
+
+fn main() {
+    let mut file = File::open("/dev/urandom").expect("open deterministic urandom");
+    let mut bytes = [0u8; 24];
+    file.read_exact(&mut bytes).expect("read deterministic urandom");
+    print!("NATIVE_URANDOM bytes=");
+    for byte in bytes {
+        print!("{byte:02x}");
+    }
+    println!();
+}
+RS
+"$runner" build "$tmp/urandom_probe.rs" --output "$tmp/urandom-probe" >/dev/null
+"$runner" audit "$tmp/urandom-probe" "${shim_allow[@]}" >/dev/null
+"$runner" run "$tmp/urandom-probe" --seed 1 >"$tmp/urandom-seed-1"
+"$runner" run "$tmp/urandom-probe" --seed 1 >"$tmp/urandom-seed-1-again"
+"$runner" run "$tmp/urandom-probe" --seed 2 >"$tmp/urandom-seed-2"
+cmp "$tmp/urandom-seed-1" "$tmp/urandom-seed-1-again"
+grep -Eq '^NATIVE_URANDOM bytes=[0-9a-f]{48}$' "$tmp/urandom-seed-1"
+if cmp -s "$tmp/urandom-seed-1" "$tmp/urandom-seed-2"; then
+  echo 'validate-native-shim: /dev/urandom output did not vary across seeds' >&2
+  exit 1
+fi
+"$runner" run "$tmp/urandom-probe" --seed 1 --record "$tmp/urandom.patina" \
+  --fingerprint native-urandom-v1 >"$tmp/urandom-record"
+"$runner" replay "$tmp/urandom-probe" "$tmp/urandom.patina" \
+  --fingerprint native-urandom-v1 >"$tmp/urandom-replay"
+cmp "$tmp/urandom-record" "$tmp/urandom-replay"
+cmp "$tmp/urandom-seed-1" "$tmp/urandom-replay"
+
 # R20 config-differential double-run: the SAME single-threaded source built plain
 # and with `--yield-points` must produce a byte-identical RESULT at the same seed.
 # The instrumentation adds scheduling points, but with only one task there is

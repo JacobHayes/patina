@@ -635,10 +635,10 @@ long syscall(long number, ...) {
         /* The `getrandom` crate (rand::thread_rng and similar runtime-seeded
          * randomness) issues the raw SYS_getrandom syscall
          * through this wrapper rather than the libc getrandom() above. Route it to
-         * the same deterministic entropy source; otherwise it returns ENOSYS and
-         * the crate falls back to opening /dev/urandom, which the in-memory FS
-         * lacks (ENOENT) — panicking every rng-using guest thread. GRND_* flags
-         * are irrelevant: deterministic entropy never blocks and has one source. */
+         * the same deterministic entropy source; otherwise older getrandom paths
+         * may fall back to opening /dev/urandom (also modeled by the shim as a
+         * deterministic entropy device). GRND_* flags are irrelevant:
+         * deterministic entropy never blocks and has one source. */
         va_list ap;
         va_start(ap, number);
         void *buffer = va_arg(ap, void *);

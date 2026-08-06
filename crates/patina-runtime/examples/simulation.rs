@@ -22,8 +22,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .build()
                 .expect("example SimNet configuration is valid");
             let network = FaultNet::new(network, 17)
-                .drop_one_in(5)
-                .duplicate_one_in(3);
+                .drop_permille(200)
+                .duplicate_permille(333);
             let network = LatencyNet::new(network, 23)
                 .latency_nanos(100)
                 .jitter_nanos(25);

@@ -140,8 +140,12 @@ const ETIMEDOUT: c_int = 60;
 const ETIMEDOUT: c_int = 110;
 
 const EFBIG: c_int = 27;
+const EMFILE: c_int = 24;
+const ESPIPE: c_int = 29;
 const MAX_CAPTURED_STDIO_BYTES: usize = 64 * 1024 * 1024;
 const HOST_IO_CHUNK: usize = 64 * 1024;
+const URANDOM_FD_BASE: c_int = 0x3fff_ff00;
+const URANDOM_FD_SLOTS: usize = 64;
 
 const O_READ: u32 = 1 << 0;
 const O_WRITE: u32 = 1 << 1;
@@ -224,6 +228,50 @@ impl<T> Drop for SpinGuard<'_, T> {
 
 static CONTEXT: OnceLock<SpinMutex<Option<Context>>> = OnceLock::new();
 static STDIO: OnceLock<SpinMutex<StdioCapture>> = OnceLock::new();
+static URANDOM_FDS: SpinMutex<UrandomFds> = SpinMutex::new(UrandomFds {
+    open: [false; URANDOM_FD_SLOTS],
+});
+
+struct UrandomFds {
+    open: [bool; URANDOM_FD_SLOTS],
+}
+
+fn urandom_open() -> Result<c_int, c_int> {
+    let mut fds = URANDOM_FDS.lock();
+    for (index, open) in fds.open.iter_mut().enumerate() {
+        if !*open {
+            *open = true;
+            let index = c_int::try_from(index).expect("urandom slot index fits");
+            return Ok(URANDOM_FD_BASE + index);
+        }
+    }
+    Err(EMFILE)
+}
+
+fn urandom_index(raw_fd: c_int) -> Option<usize> {
+    let relative = raw_fd.checked_sub(URANDOM_FD_BASE)?;
+    let index = usize::try_from(relative).ok()?;
+    (index < URANDOM_FD_SLOTS).then_some(index)
+}
+
+fn urandom_is_open(raw_fd: c_int) -> bool {
+    let Some(index) = urandom_index(raw_fd) else {
+        return false;
+    };
+    URANDOM_FDS.lock().open[index]
+}
+
+fn urandom_close(raw_fd: c_int) -> Result<(), c_int> {
+    let Some(index) = urandom_index(raw_fd) else {
+        return Err(EBADF);
+    };
+    let mut fds = URANDOM_FDS.lock();
+    if !fds.open[index] {
+        return Err(EBADF);
+    }
+    fds.open[index] = false;
+    Ok(())
+}
 
 /// True from process start until the shim constructor finishes installing the
 /// deterministic runtime ([`patina_init_from_env`] clears it at the end). This is
@@ -2189,6 +2237,24 @@ pub unsafe extern "C" fn patina_open(path: *const c_char, flags: u32) -> c_int {
         append: flags & O_APPEND != 0,
         exclusive: flags & O_EXCLUSIVE != 0,
     };
+    if path == "/dev/urandom" {
+        if flags.read
+            && !flags.write
+            && !flags.create
+            && !flags.truncate
+            && !flags.append
+            && !flags.exclusive
+        {
+            return match urandom_open() {
+                Ok(fd) => {
+                    set_errno(0);
+                    fd
+                }
+                Err(errno) => fail(errno),
+            };
+        }
+        return fail(EACCES);
+    }
     match with_context(|context| context.fs_open(&path, flags)) {
         Ok(fd) => i32::try_from(fd.0).unwrap_or_else(|_| fail(EOVERFLOW)),
         Err(errno) => fail(errno),
@@ -2207,6 +2273,14 @@ pub unsafe extern "C" fn patina_read(
 ) -> isize {
     if length != 0 && destination.is_null() {
         return isize::try_from(fail(EINVAL)).expect("-1 fits in isize");
+    }
+    if urandom_is_open(raw_fd) {
+        let result = unsafe { patina_entropy(destination, length) };
+        return if result == 0 {
+            isize::try_from(length).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
+        } else {
+            fail(patina_errno()) as isize
+        };
     }
     let fd = match fd(raw_fd) {
         Ok(fd) => fd,
@@ -2240,6 +2314,9 @@ pub unsafe extern "C" fn patina_write(
     if length != 0 && source.is_null() {
         return fail(EINVAL) as isize;
     }
+    if urandom_is_open(raw_fd) {
+        return fail(EBADF) as isize;
+    }
     let fd = match fd(raw_fd) {
         Ok(fd) => fd,
         Err(errno) => return fail(errno) as isize,
@@ -2270,6 +2347,9 @@ pub unsafe extern "C" fn patina_pread(
 ) -> isize {
     if length != 0 && destination.is_null() {
         return isize::try_from(fail(EINVAL)).expect("-1 fits in isize");
+    }
+    if urandom_is_open(raw_fd) {
+        return fail(ESPIPE) as isize;
     }
     let offset = match u64::try_from(offset) {
         Ok(offset) => offset,
@@ -2309,6 +2389,9 @@ pub unsafe extern "C" fn patina_pwrite(
     if length != 0 && source.is_null() {
         return fail(EINVAL) as isize;
     }
+    if urandom_is_open(raw_fd) {
+        return fail(EBADF) as isize;
+    }
     let offset = match u64::try_from(offset) {
         Ok(offset) => offset,
         Err(_) => return fail(EINVAL) as isize,
@@ -2331,6 +2414,15 @@ pub unsafe extern "C" fn patina_pwrite(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_close(raw_fd: c_int) -> c_int {
+    if urandom_index(raw_fd).is_some() {
+        return match urandom_close(raw_fd) {
+            Ok(()) => {
+                set_errno(0);
+                0
+            }
+            Err(errno) => fail(errno),
+        };
+    }
     let fd = match fd(raw_fd) {
         Ok(fd) => fd,
         Err(errno) => return fail(errno),
@@ -2422,6 +2514,9 @@ pub extern "C" fn patina_flock(raw_fd: c_int, operation: c_int) -> c_int {
 /// the driver's next fd, not the lowest free number.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_dup(raw_fd: c_int) -> c_int {
+    if urandom_is_open(raw_fd) {
+        return fail(ENOSYS);
+    }
     let fd = match fd(raw_fd) {
         Ok(fd) => fd,
         Err(errno) => return fail(errno),
@@ -2434,6 +2529,9 @@ pub extern "C" fn patina_dup(raw_fd: c_int) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
+    if urandom_is_open(raw_fd) {
+        return i64::from(fail(ESPIPE));
+    }
     let fd = match fd(raw_fd) {
         Ok(fd) => fd,
         Err(errno) => return i64::from(fail(errno)),
@@ -2452,6 +2550,9 @@ pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_fsync(raw_fd: c_int) -> c_int {
+    if urandom_is_open(raw_fd) {
+        return fail(EINVAL);
+    }
     let fd = match fd(raw_fd) {
         Ok(fd) => fd,
         Err(errno) => return fail(errno),
@@ -2464,6 +2565,9 @@ pub extern "C" fn patina_fsync(raw_fd: c_int) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_set_len(raw_fd: c_int, length: u64) -> c_int {
+    if urandom_is_open(raw_fd) {
+        return fail(EBADF);
+    }
     let fd = match fd(raw_fd) {
         Ok(fd) => fd,
         Err(errno) => return fail(errno),

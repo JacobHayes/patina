@@ -190,7 +190,7 @@ cmp "$tmp/wasi-line" "$tmp/native-line"
 # this gate exists to catch. An intentional entropy-affecting change MUST update
 # this literal deliberately -- that friction is the point, the same discipline as
 # the workq canonical outcome hash and the record/replay identity above.
-canonical_entropy='entropy_hash=2d4cdb668affa7b2'
+canonical_entropy='entropy_hash=0e3b7fa3c0b2dbb9'
 for tgt in wasi native; do
   if ! grep -qF "$canonical_entropy" "$tmp/$tgt-line"; then
     echo "smoke-cross-target: $tgt SMOKE_RESULT entropy drift -- expected $canonical_entropy, observed:" >&2

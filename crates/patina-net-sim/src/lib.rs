@@ -553,8 +553,14 @@ impl NetDriver for SimNet {
         bytes: &[u8],
         delivery_nanos: u64,
     ) -> DriverResult<usize> {
-        // SimNet's UDP base_latency_nanos is intentionally not applied here:
-        // TCP latency is deferred to wrapper-level per-segment delivery times.
+        let base_delivery = delivery_nanos
+            .checked_add(self.base_latency_nanos)
+            .ok_or_else(|| {
+                EffectError::new(
+                    ErrorCode::InvalidInput,
+                    "virtual TCP segment deadline overflowed",
+                )
+            })?;
         let endpoint = self.tcp_endpoints.get(&socket).ok_or_else(|| {
             EffectError::new(
                 ErrorCode::InvalidHandle,
@@ -599,7 +605,7 @@ impl NetDriver for SimNet {
         // Seeded stream faults: retransmit backoff (never loses data) + jitter,
         // clamped to preserve in-stream ordering. Drawn only for a segment that
         // is actually enqueued, so a would-block send consumes no fault RNG.
-        let delivery = self.draw_tcp_fault_delivery(delivery_nanos, last_delivery);
+        let delivery = self.draw_tcp_fault_delivery(base_delivery, last_delivery);
         let peer_endpoint = self
             .tcp_endpoints
             .get_mut(&peer)
@@ -1199,6 +1205,18 @@ mod tests {
             out.extend_from_slice(&chunk);
         }
         out
+    }
+
+    #[test]
+    fn tcp_base_latency_delays_delivery_without_fault_knobs() {
+        let mut net = SimNet::builder().base_latency_nanos(50).build().unwrap();
+        let listener = net.tcp_listen("server", 1).unwrap();
+        let client = net.tcp_connect("client", "server", 0).unwrap();
+        let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
+        assert_eq!(net.tcp_send(client, b"latency", 0).unwrap(), 7);
+        assert_eq!(net.tcp_recv(server, 16, 49).unwrap(), None);
+        assert_eq!(net.next_delivery(server, 0).unwrap(), Some(50));
+        assert_eq!(net.tcp_recv(server, 16, 50).unwrap().unwrap(), b"latency");
     }
 
     #[test]

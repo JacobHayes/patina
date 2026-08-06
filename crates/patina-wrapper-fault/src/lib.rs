@@ -2,33 +2,45 @@
 
 use patina_dst_abi::{Datagram, SendDisposition, SendReport, ShutdownHow, SocketId, TcpAccepted};
 use patina_dst_driver_api::{DriverResult, NetDriver, NetFaultReport, NetReadiness};
-use patina_dst_rng_seeded::SplitMix64;
+use patina_dst_rng_seeded::{SplitMix64, domain_seed, fault_domain};
 
 /// Injects seeded packet loss and duplication around another network driver.
 pub struct FaultNet<D> {
     inner: D,
-    generator: SplitMix64,
-    drop_one_in: Option<u64>,
-    duplicate_one_in: Option<u64>,
+    drop_rng: SplitMix64,
+    duplicate_rng: SplitMix64,
+    drop_permille: u16,
+    duplicate_permille: u16,
 }
 
 impl<D> FaultNet<D> {
     pub fn new(inner: D, seed: u64) -> Self {
         Self {
             inner,
-            generator: SplitMix64::new(seed),
-            drop_one_in: None,
-            duplicate_one_in: None,
+            drop_rng: SplitMix64::new(domain_seed(seed, fault_domain::FAULT_NET_DROP)),
+            duplicate_rng: SplitMix64::new(domain_seed(seed, fault_domain::FAULT_NET_DUPLICATE)),
+            drop_permille: 0,
+            duplicate_permille: 0,
         }
     }
 
-    pub fn drop_one_in(mut self, denominator: u64) -> Self {
-        self.drop_one_in = (denominator > 0).then_some(denominator);
+    /// Drop datagrams with the given per-mille (0..=1000) probability.
+    pub fn drop_permille(mut self, permille: u16) -> Self {
+        assert!(
+            permille <= 1000,
+            "FaultNet::drop_permille must be within [0, 1000]"
+        );
+        self.drop_permille = permille;
         self
     }
 
-    pub fn duplicate_one_in(mut self, denominator: u64) -> Self {
-        self.duplicate_one_in = (denominator > 0).then_some(denominator);
+    /// Duplicate datagrams with the given per-mille (0..=1000) probability.
+    pub fn duplicate_permille(mut self, permille: u16) -> Self {
+        assert!(
+            permille <= 1000,
+            "FaultNet::duplicate_permille must be within [0, 1000]"
+        );
+        self.duplicate_permille = permille;
         self
     }
 
@@ -54,11 +66,7 @@ impl<D: NetDriver> NetDriver for FaultNet<D> {
         delivery_nanos: u64,
     ) -> DriverResult<SendReport> {
         self.inner.validate_send(socket, to)?;
-        let choice = self.generator.next_u64();
-        if self
-            .drop_one_in
-            .is_some_and(|denominator| divides(choice, denominator))
-        {
+        if permille_fires(&mut self.drop_rng, self.drop_permille) {
             return Ok(SendReport {
                 written: bytes.len(),
                 copies: 0,
@@ -68,9 +76,7 @@ impl<D: NetDriver> NetDriver for FaultNet<D> {
         }
 
         let first = self.inner.send(socket, to, bytes, delivery_nanos)?;
-        if !self
-            .duplicate_one_in
-            .is_some_and(|denominator| divides(choice, denominator))
+        if !permille_fires(&mut self.duplicate_rng, self.duplicate_permille)
             || first.disposition != SendDisposition::Queued
         {
             return Ok(first);
@@ -148,8 +154,12 @@ impl<D: NetDriver> NetDriver for FaultNet<D> {
     }
 }
 
-fn divides(value: u64, denominator: u64) -> bool {
-    value.checked_rem(denominator) == Some(0)
+fn permille_fires(rng: &mut SplitMix64, permille: u16) -> bool {
+    match permille {
+        0 => false,
+        1000 => true,
+        value => (rng.next_u64() % 1000) < u64::from(value),
+    }
 }
 
 #[cfg(test)]
@@ -160,8 +170,8 @@ mod tests {
 
     fn decisions(seed: u64) -> Vec<(SendDisposition, usize)> {
         let mut net = FaultNet::new(SimNet::new(), seed)
-            .drop_one_in(3)
-            .duplicate_one_in(2);
+            .drop_permille(333)
+            .duplicate_permille(500);
         let left = net.bind("left").unwrap();
         net.bind("right").unwrap();
         (0..100)
@@ -188,7 +198,7 @@ mod tests {
 
     #[test]
     fn duplicated_packets_are_observable_at_the_receiver() {
-        let mut net = FaultNet::new(SimNet::new(), 1).duplicate_one_in(1);
+        let mut net = FaultNet::new(SimNet::new(), 1).duplicate_permille(1000);
         let left = net.bind("left").unwrap();
         let right = net.bind("right").unwrap();
         let report = net.send(left, "right", b"twice", 0).unwrap();
@@ -199,7 +209,7 @@ mod tests {
 
     #[test]
     fn tcp_passes_through_fault_injection_unchanged() {
-        let mut net = FaultNet::new(SimNet::new(), 1).drop_one_in(1);
+        let mut net = FaultNet::new(SimNet::new(), 1).drop_permille(1000);
         let udp_left = net.bind("udp-left").unwrap();
         let udp_right = net.bind("udp-right").unwrap();
         assert_eq!(
@@ -215,5 +225,18 @@ mod tests {
         let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
         assert_eq!(net.tcp_send(client, b"reliable", 0).unwrap(), 8);
         assert_eq!(net.tcp_recv(server, 16, 0).unwrap().unwrap(), b"reliable");
+    }
+
+    #[test]
+    fn drop_and_duplicate_use_separate_domain_streams() {
+        let drop_first = {
+            let mut rng = SplitMix64::new(domain_seed(3, fault_domain::FAULT_NET_DROP));
+            rng.next_u64()
+        };
+        let duplicate_first = {
+            let mut rng = SplitMix64::new(domain_seed(3, fault_domain::FAULT_NET_DUPLICATE));
+            rng.next_u64()
+        };
+        assert_ne!(drop_first, duplicate_first);
     }
 }
