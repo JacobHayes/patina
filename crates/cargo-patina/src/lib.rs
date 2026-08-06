@@ -91,6 +91,10 @@ const PATINA_POSIX_C: &str = patina_dst_native_shim::POSIX_C_SOURCE;
 const PATINA_NATIVE_H: &str = patina_dst_native_shim::NATIVE_HEADER;
 /// Build-time deterministic-preemption hook, linked only under `--yield-points`.
 const PATINA_YIELD_C: &str = include_str!("../c/patina_yield.c");
+/// Weak, inert SanitizerCoverage entry points so an instrumented artifact that
+/// links on its own — a dependency's unused `cdylib` — resolves them. Linked only
+/// under `--yield-points`, alongside (and overridden by) `PATINA_YIELD_C`.
+const PATINA_SANCOV_STUB_C: &str = include_str!("../c/patina_sancov_stub.c");
 /// Marker string the `--yield-points` hook embeds; `native-run` looks for it in
 /// the binary to fold yield-point scheduling into the compatibility fingerprint.
 const PATINA_YIELD_MARKER: &[u8] = b"PATINA_YIELD_POINTS_V1";
@@ -3325,22 +3329,28 @@ scheduler-hook=patina_yield_point fingerprint-suffix={PATINA_YIELD_FINGERPRINT_S
     } else {
         None
     };
-    let rustflags =
-        native_package_rustflags(&object, &staticlib, yield_object.as_deref(), &host_target);
+    let sancov_stub = stage_sancov_stub(&objects_base, yield_object.is_some(), &host_target)?;
+    let rustflags = native_package_rustflags(sancov_stub.as_deref(), &host_target);
     let metadata = cargo_metadata(&invocation.manifest)?;
     let target_dir = metadata
         .get("target_directory")
         .and_then(serde_json::Value::as_str)
         .map(PathBuf::from)
         .ok_or_else(|| CliError("cargo metadata did not report target_directory".into()))?;
+    let selected = select_native_harness_target(
+        &metadata,
+        &invocation.harness_target,
+        invocation.package.as_deref(),
+    )?;
 
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let mut command = Command::new(&cargo);
     command
-        .arg("test")
-        .arg("--no-run")
+        .arg("rustc")
         .arg("--manifest-path")
         .arg(&invocation.manifest)
+        .arg("--package")
+        .arg(&selected.package)
         .arg("--target")
         .arg(&host_target)
         .arg("--message-format=json-render-diagnostics")
@@ -3348,15 +3358,23 @@ scheduler-hook=patina_yield_point fingerprint-suffix={PATINA_YIELD_FINGERPRINT_S
         .env("CARGO_ENCODED_RUSTFLAGS", rustflags)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
-    if let Some(package) = &invocation.package {
-        command.arg("--package").arg(package);
-    }
-    if invocation.release {
-        command.arg("--release");
-    }
+    command.args(selected.kind.select_args(&invocation.harness_target));
+    // `cargo rustc` builds a lib/bin target in test mode only under the `test` or
+    // `bench` profile, and `--release` is rejected alongside `--profile`. `bench`
+    // inherits `release`, so `--release` here means the same codegen settings a
+    // `cargo test --release` harness would get, including any `[profile.release]`
+    // overrides the package declares.
+    command
+        .arg("--profile")
+        .arg(if invocation.release { "bench" } else { "test" });
+    command.arg("--").args(native_package_link_args(
+        &object,
+        &staticlib,
+        yield_object.as_deref(),
+    ));
     let built = command.output().map_err(|error| {
         CliError(format!(
-            "failed to run cargo test --no-run for native harness: {error}"
+            "failed to run cargo rustc for native harness: {error}"
         ))
     })?;
     if !built.status.success() {
@@ -3436,6 +3454,112 @@ fn metadata_package_name(metadata: &serde_json::Value, package_id: &str) -> Opti
         .get("name")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
+}
+
+/// Which `cargo rustc` target-selection flag reaches a libtest harness target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HarnessTargetKind {
+    /// The package's own library, built in test mode (`--harness-target <crate>`
+    /// naming the crate itself — the common shape).
+    Lib,
+    /// An integration test under `tests/`.
+    Test,
+    /// A binary target's inline `#[test]`s.
+    Bin,
+}
+
+impl HarnessTargetKind {
+    fn select_args(self, name: &str) -> Vec<String> {
+        match self {
+            HarnessTargetKind::Lib => vec!["--lib".to_string()],
+            HarnessTargetKind::Test => vec!["--test".to_string(), name.to_string()],
+            HarnessTargetKind::Bin => vec!["--bin".to_string(), name.to_string()],
+        }
+    }
+}
+
+/// The package and target kind a `--harness-target` name resolves to.
+struct SelectedNativeHarness {
+    package: String,
+    kind: HarnessTargetKind,
+}
+
+/// Resolve `--harness-target` to exactly one package and target *before*
+/// building, so the shim link arguments can be scoped to that one unit with
+/// `cargo rustc` (see [`native_package_link_args`]). Fails closed on an unknown
+/// or ambiguous name, listing what the workspace does offer.
+fn select_native_harness_target(
+    metadata: &serde_json::Value,
+    harness_target: &str,
+    package: Option<&str>,
+) -> Result<SelectedNativeHarness, CliError> {
+    let packages = metadata
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| CliError("cargo metadata reported no packages".into()))?;
+    let mut matches: Vec<SelectedNativeHarness> = Vec::new();
+    let mut available = BTreeSet::new();
+    for entry in packages {
+        let Some(package_name) = entry.get("name").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if package.is_some_and(|wanted| wanted != package_name) {
+            continue;
+        }
+        let targets = entry
+            .get("targets")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        for target in targets {
+            let Some(name) = target.get("name").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let kinds: Vec<&str> = target
+                .get("kind")
+                .and_then(serde_json::Value::as_array)
+                .map(|kinds| kinds.iter().filter_map(serde_json::Value::as_str).collect())
+                .unwrap_or_default();
+            // A `[lib]` reports its declared crate types as its kinds, so a
+            // dependency-style `crate-type = ["rlib", "cdylib"]` library is still
+            // selected by `--lib`. Build scripts (`custom-build`) and examples
+            // carry no libtest harness.
+            let kind = if kinds
+                .iter()
+                .all(|kind| matches!(*kind, "lib" | "rlib" | "dylib" | "cdylib" | "proc-macro"))
+                && !kinds.is_empty()
+            {
+                HarnessTargetKind::Lib
+            } else if kinds == ["test"] {
+                HarnessTargetKind::Test
+            } else if kinds == ["bin"] {
+                HarnessTargetKind::Bin
+            } else {
+                continue;
+            };
+            available.insert(name.to_string());
+            if name == harness_target {
+                matches.push(SelectedNativeHarness {
+                    package: package_name.to_string(),
+                    kind,
+                });
+            }
+        }
+    }
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err(CliError(format!(
+            "no libtest harness target named {harness_target:?} in the workspace; available harness targets: {}",
+            if available.is_empty() {
+                "<none>".to_string()
+            } else {
+                available.into_iter().collect::<Vec<_>>().join(", ")
+            }
+        ))),
+        _ => Err(CliError(format!(
+            "multiple targets named {harness_target:?} were found; select one workspace member with --package"
+        ))),
+    }
 }
 
 fn native_harness_executable(
@@ -4285,6 +4409,29 @@ const PATINA_YIELD_OBJECT: ShimObject = ShimObject {
     what: "the Patina yield-point hook",
 };
 
+/// The weak SanitizerCoverage stubs. Unlike every other shim object this one is
+/// injected whole-graph rather than scoped to the guest's final link, because the
+/// instrumentation it answers for is whole-graph too — so it must be
+/// position-independent: the artifacts that need it are shared libraries, and a
+/// non-PIC object referencing anything by absolute address is refused outright by
+/// GNU `ld`/`lld` inside a shared-object link. macOS `cc` compiles PIC by
+/// default, so the flag is a no-op there.
+const PATINA_SANCOV_STUB_OBJECT: ShimObject = ShimObject {
+    object_name: "patina_sancov_stub.o",
+    source_name: "patina_sancov_stub.c",
+    source: PATINA_SANCOV_STUB_C,
+    header: None,
+    cc_flags: &[
+        "-std=c11",
+        "-fno-stack-protector",
+        "-fPIC",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    ],
+    what: "the Patina SanitizerCoverage stubs",
+};
+
 /// Hash the inputs that determine a shim object's bytes: the compiler identity
 /// and its `--version` banner, the target triple, the object name, the exact cc
 /// flags, and the embedded C header/source. The staged path changes only when one
@@ -4498,13 +4645,15 @@ fn build_native_source(
     Ok(output.to_path_buf())
 }
 
-/// Drive a Cargo package's own `cargo build` under Patina control. The cfg
-/// flags and shim link arguments are injected through `CARGO_ENCODED_RUSTFLAGS`,
-/// and an explicit host `--target` isolates them to the final binary: rustc
-/// records link arguments only at the binary link step (rlib compilation
-/// ignores them), and building for an explicit target keeps them off build
-/// scripts and proc macros, which Cargo compiles for the host without these
-/// flags.
+/// Drive a Cargo package's own build under Patina control, as `cargo rustc` so
+/// the two injections land at their correct scopes. The cfg flags travel in
+/// `CARGO_ENCODED_RUSTFLAGS` and reach every crate compiled from source, which
+/// `cfg(patina)`-gated dependency code needs; the shim's link arguments travel
+/// as `cargo rustc`'s trailing arguments and reach only the selected binary's
+/// final link, never an intermediate dependency artifact
+/// ([`native_package_link_args`] has the failure this prevents). The explicit
+/// host `--target` additionally keeps the cfgs off build scripts and proc
+/// macros, which Cargo compiles for the host without these flags.
 #[allow(clippy::too_many_arguments)]
 fn build_native_package(
     manifest: &Path,
@@ -4524,12 +4673,17 @@ fn build_native_package(
         )));
     }
     let selected = select_native_package_bin(manifest, package, bin)?;
-    let rustflags = native_package_rustflags(object, staticlib, yield_object, host_target);
+    let objects_base = staticlib
+        .parent()
+        .expect("shim staticlib path has a profile directory parent")
+        .join(NATIVE_SHIM_OBJECTS_DIR);
+    let sancov_stub = stage_sancov_stub(&objects_base, yield_object.is_some(), host_target)?;
+    let rustflags = native_package_rustflags(sancov_stub.as_deref(), host_target);
 
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let mut command = Command::new(&cargo);
     command
-        .arg("build")
+        .arg("rustc")
         .arg("--manifest-path")
         .arg(manifest)
         .arg("--package")
@@ -4551,9 +4705,12 @@ fn build_native_package(
     if release {
         command.arg("--release");
     }
+    command
+        .arg("--")
+        .args(native_package_link_args(object, staticlib, yield_object));
     let built = command
         .output()
-        .map_err(|error| CliError(format!("failed to run cargo build: {error}")))?;
+        .map_err(|error| CliError(format!("failed to run cargo rustc: {error}")))?;
     if !built.status.success() {
         return Err(CliError(format!(
             "building the native Patina package {:?} failed",
@@ -4747,17 +4904,21 @@ fn host_target_triple() -> Result<String, CliError> {
         .ok_or_else(|| CliError("rustc -vV did not report a host target triple".into()))
 }
 
-/// Build the `CARGO_ENCODED_RUSTFLAGS` value for a package build: cfg(patina)/
-/// cfg(dst) plus the shim link arguments, encoded with the `0x1f` unit
-/// separator so link-argument paths that contain spaces survive intact. Any
-/// pre-existing `RUSTFLAGS` are preserved ahead of the injected flags, matching
-/// how `cargo patina run` layers its cfgs onto the user's flags.
-fn native_package_rustflags(
-    object: &Path,
-    staticlib: &Path,
-    yield_object: Option<&Path>,
-    target: &str,
-) -> OsString {
+/// Build the `CARGO_ENCODED_RUSTFLAGS` value for a package build: the
+/// cfg(patina)/cfg(dst) family plus, under `--yield-points`, the
+/// SanitizerCoverage codegen flags. Encoded with the `0x1f` unit separator so
+/// values containing spaces survive intact. Any pre-existing `RUSTFLAGS` are
+/// preserved ahead of the injected flags, matching how `cargo patina run` layers
+/// its cfgs onto the user's flags.
+///
+/// Everything here is deliberately whole-graph: Cargo forwards `RUSTFLAGS` to
+/// every crate it compiles from source in the invocation, which is exactly what
+/// `cfg(patina)`-gated guest/dependency code and yield-point instrumentation
+/// need. The shim's *link* arguments must not be whole-graph and live in
+/// [`native_package_link_args`] instead — with one exception, `sancov_stub`,
+/// which is a link argument precisely because the instrumentation above is
+/// whole-graph (see [`PATINA_SANCOV_STUB_OBJECT`]).
+fn native_package_rustflags(sancov_stub: Option<&Path>, target: &str) -> OsString {
     let mut tokens: Vec<OsString> = Vec::new();
     if let Some(existing) = env::var_os("RUSTFLAGS") {
         for part in existing.to_string_lossy().split_whitespace() {
@@ -4785,21 +4946,13 @@ fn native_package_rustflags(
         tokens.push(OsString::from("--cfg"));
         tokens.push(OsString::from("rustix_use_libc"));
     }
-    tokens.push(OsString::from("-C"));
-    tokens.push(link_arg(object));
-    tokens.push(OsString::from("-C"));
-    tokens.push(link_arg(staticlib));
-    if let Some(yield_object) = yield_object {
+    if let Some(sancov_stub) = sancov_stub {
         for flag in sancov_rustc_flags() {
             tokens.push(OsString::from(flag));
         }
         tokens.push(OsString::from("-C"));
-        tokens.push(link_arg(yield_object));
+        tokens.push(link_arg(sancov_stub));
     }
-    push_platform_link_args(|arg| {
-        tokens.push(OsString::from("-C"));
-        tokens.push(OsString::from(arg));
-    });
     let mut encoded = OsString::new();
     for (index, token) in tokens.iter().enumerate() {
         if index > 0 {
@@ -4808,6 +4961,66 @@ fn native_package_rustflags(
         encoded.push(token);
     }
     encoded
+}
+
+/// Stage [`PATINA_SANCOV_STUB_OBJECT`] when the build is instrumented. The stubs
+/// exist only to answer the instrumentation, so a build without `--yield-points`
+/// stages nothing and no Patina object reaches a dependency's link at all.
+fn stage_sancov_stub(
+    base: &Path,
+    yield_points: bool,
+    target: &str,
+) -> Result<Option<PathBuf>, CliError> {
+    if !yield_points {
+        return Ok(None);
+    }
+    stage_shim_object(base, &PATINA_SANCOV_STUB_OBJECT, target).map(Some)
+}
+
+/// The shim's link arguments for a package build, as the trailing arguments of
+/// `cargo rustc -- <args>`.
+///
+/// These must NOT travel in `RUSTFLAGS`. rustc forwards `-C link-arg` to the
+/// system linker for every crate-type it actually links, so a whole-graph
+/// injection reaches more than the guest binary: an `rlib` compile has no link
+/// step and ignores them, but a dependency whose `[lib]` declares
+/// `crate-type = ["rlib", "cdylib"]` (crc-fast 1.10.0, from the SlateDB
+/// dogfooding feedback) runs a real `cdylib` link and receives the shim objects
+/// and staticlib too. That link then fails on Linux — `duplicate symbol:
+/// rust_eh_personality`, defined by both the sysroot libstd rlib and the copy of
+/// std bundled inside `libpatina_dst_native_shim.a`, for any cdylib whose code
+/// has landing pads — while producing nothing anyone loads. There is no avoiding
+/// that build: Cargo produces every crate type a path dependency declares,
+/// measured identically with `--target <host>`, without `--target`, and under a
+/// plain `cargo build`. The dependency's link has to succeed, so the shim has to
+/// stay off it.
+///
+/// `cargo rustc` passes its trailing arguments to the final compiler invocation
+/// for the one selected target only, which is the scope the shim link line needs:
+/// the guest binary (or libtest harness) and nothing else. Interposition is
+/// unaffected — the shim's strong symbol definitions still land in that final
+/// link exactly as before. See
+/// `docs/bugs/shim-link-args-reach-dependency-cdylibs.md`.
+fn native_package_link_args(
+    object: &Path,
+    staticlib: &Path,
+    yield_object: Option<&Path>,
+) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec![
+        OsString::from("-C"),
+        link_arg(object),
+        OsString::from("-C"),
+        link_arg(staticlib),
+    ];
+    if let Some(yield_object) = yield_object {
+        args.push(OsString::from("-C"));
+        args.push(link_arg(yield_object));
+    }
+    push_platform_link_args(|arg| {
+        args.push(OsString::from("-C"));
+        args.push(OsString::from(arg));
+    });
+    args
 }
 
 #[cfg(unix)]
@@ -6791,12 +7004,73 @@ mod tests {
 
         // The injected flags reflect it: present for aarch64-linux, absent for
         // x86_64-linux.
-        let obj = Path::new("/tmp/o.o");
-        let lib = Path::new("/tmp/l.a");
-        let x86 = native_package_rustflags(obj, lib, None, "x86_64-unknown-linux-gnu");
-        let arm = native_package_rustflags(obj, lib, None, "aarch64-unknown-linux-gnu");
+        let x86 = native_package_rustflags(None, "x86_64-unknown-linux-gnu");
+        let arm = native_package_rustflags(None, "aarch64-unknown-linux-gnu");
         assert!(!x86.to_string_lossy().contains("rustix_use_libc"));
         assert!(arm.to_string_lossy().contains("rustix_use_libc"));
+    }
+
+    // The scoping split behind
+    // `docs/bugs/shim-link-args-reach-dependency-cdylibs.md`: the whole-graph
+    // `RUSTFLAGS` carry cfgs and instrumentation, and the shim's link arguments
+    // live in the `cargo rustc --` set that reaches one unit's final link. The
+    // single deliberate exception is the weak SanitizerCoverage stub, which is
+    // whole-graph because the instrumentation it answers for is. Any OTHER
+    // link-arg leaking back into the rustflags side restores the
+    // dependency-cdylib failure, so pin the boundary directly.
+    #[test]
+    fn shim_link_args_never_travel_in_whole_graph_rustflags() {
+        let object = Path::new("/tmp/patina_posix.o");
+        let staticlib = Path::new("/tmp/libpatina_dst_native_shim.a");
+        let yield_object = Path::new("/tmp/patina_yield.o");
+        let sancov_stub = Path::new("/tmp/patina_sancov_stub.o");
+
+        for stub in [None, Some(sancov_stub)] {
+            let rustflags = native_package_rustflags(stub, "x86_64-unknown-linux-gnu");
+            let rustflags = rustflags.to_string_lossy().into_owned();
+            assert!(rustflags.contains("patina_shim"));
+            // Yield-point instrumentation is codegen, not linking: it must stay
+            // whole-graph so dependency code gains yield points too.
+            assert_eq!(
+                rustflags.contains("sanitizer-coverage-trace-pc-guard"),
+                stub.is_some()
+            );
+            let link_args: Vec<&str> = rustflags
+                .split('\u{1f}')
+                .filter(|token| token.starts_with("link-arg="))
+                .collect();
+            match stub {
+                None => assert!(
+                    link_args.is_empty(),
+                    "an uninstrumented build injects nothing whole-graph, got: {link_args:?}"
+                ),
+                Some(_) => assert_eq!(link_args, vec!["link-arg=/tmp/patina_sancov_stub.o"]),
+            }
+        }
+
+        let args = native_package_link_args(object, staticlib, Some(yield_object));
+        let rendered: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(rendered.iter().any(|arg| arg.ends_with("patina_posix.o")));
+        assert!(
+            rendered
+                .iter()
+                .any(|arg| arg.ends_with("libpatina_dst_native_shim.a"))
+        );
+        assert!(rendered.iter().any(|arg| arg.ends_with("patina_yield.o")));
+        for arg in &rendered {
+            assert!(
+                arg == "-C" || arg.starts_with("link-arg="),
+                "the scoped set is link arguments only, got: {arg}"
+            );
+        }
+        assert!(
+            native_package_link_args(object, staticlib, None)
+                .iter()
+                .all(|arg| !arg.to_string_lossy().ends_with("patina_yield.o"))
+        );
     }
 
     fn strings(values: &[&str]) -> Vec<OsString> {

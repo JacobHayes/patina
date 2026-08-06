@@ -715,6 +715,170 @@ fn second_native_package_build_reuses_cargo_cache() {
     );
 }
 
+// Regression for the SlateDB dogfooding feedback: a dependency that declares
+// `crate-type = ["rlib", "cdylib"]` (crc-fast 1.10.0 in the field report) makes
+// Cargo build BOTH crate types even though the guest links only the rlib, and
+// the cdylib runs a real link. The shim's link arguments must never reach it: on
+// x86_64 Linux that link is refused outright (`relocation R_X86_64_PC32 cannot
+// be used against symbol 'environ'`, from `patina_environ_base`), and on every
+// platform the whole deterministic shim is force-included into a shared object
+// nobody loads. Scoping the link arguments to `cargo rustc`'s trailing arguments
+// confines them to the guest's own final link.
+//
+// The load-bearing assertion is the shim-symbol one, which goes red on macOS and
+// Linux alike. The personality check is a realism guard — it keeps the
+// dependency a stand-in for crc-fast rather than a trivial arithmetic crate —
+// and is deliberately NOT claimed as the duplicate-symbol discriminator: a
+// dependency like this still links clean under `-fPIC`, so that rung of the
+// original report remains unreproduced synthetically (see
+// `docs/bugs/shim-link-args-reach-dependency-cdylibs.md`). Exercised under
+// `--yield-points`, whose extra object travels the same path.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_build_package_keeps_shim_link_args_off_a_dependency_cdylib() {
+    let directory = tempdir().unwrap();
+    let package = directory.path().join("cdylib-pkg");
+    create_cdylib_dependency_package_fixture(directory.path());
+    let workspace = native_workspace();
+
+    let output = package.join("cdylib-dep-bin");
+    let built = invoke_in(
+        workspace,
+        &[
+            "build",
+            package.to_str().unwrap(),
+            "--yield-points",
+            "--output",
+            output.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        String::from_utf8_lossy(&built.stdout).contains("PATINA_NATIVE_BUILD"),
+        "missing build marker:\n{}",
+        String::from_utf8_lossy(&built.stdout)
+    );
+    assert!(output.is_file());
+
+    let cdylib = find_dependency_cdylib(&package.join("Cargo.toml"));
+    let cdylib_bytes = fs::read(&cdylib).unwrap();
+    assert!(
+        contains_symbol(&cdylib_bytes, b"rust_eh_personality"),
+        "{} does not reference the unwind personality, so it could not have hit \
+         the duplicate-symbol failure this fixture pins; the dependency needs \
+         real landing pads",
+        cdylib.display()
+    );
+    for symbol in SHIM_LINK_MARKER_SYMBOLS {
+        assert!(
+            !contains_symbol(&cdylib_bytes, symbol),
+            "shim symbol {} leaked into the dependency cdylib {}: the shim link \
+             arguments are reaching more than the guest's final link",
+            String::from_utf8_lossy(symbol),
+            cdylib.display()
+        );
+    }
+
+    // The same markers must still be in the guest binary: scoping the link args
+    // must not have weakened interposition on the artifact that matters.
+    let guest_bytes = fs::read(&output).unwrap();
+    for symbol in SHIM_LINK_MARKER_SYMBOLS {
+        assert!(
+            contains_symbol(&guest_bytes, symbol),
+            "shim symbol {} missing from the guest binary {}",
+            String::from_utf8_lossy(symbol),
+            output.display()
+        );
+    }
+
+    let result = String::from_utf8_lossy(
+        &invoke_in(workspace, &["run", output.to_str().unwrap(), "--seed", "1"]).stdout,
+    )
+    .into_owned();
+    assert!(
+        result.contains("NATIVE_CDYLIB_DEP_RESULT"),
+        "missing result marker: {result}"
+    );
+}
+
+/// Symbols that exist only because the shim's C object and staticlib were on a
+/// link line: the POSIX layer's constructor-retained `environ` accessor and the
+/// `--yield-points` hook.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const SHIM_LINK_MARKER_SYMBOLS: &[&[u8]] = &[b"patina_environ_base", b"patina_yield_point"];
+
+/// Whether `image`'s symbol table names `symbol`. Symbol names are stored as
+/// plain NUL-terminated strings in both Mach-O and ELF string tables, so a byte
+/// search reads both without shelling out to `nm`/`objdump`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn contains_symbol(image: &[u8], symbol: &[u8]) -> bool {
+    image.windows(symbol.len()).any(|window| window == symbol)
+}
+
+/// Locate the `cdylib-dep` shared library Cargo built alongside the guest.
+/// Cargo may place intermediates outside `target/` (the `build-dir` setting), so
+/// ask `cargo metadata` for both directories and search each.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn find_dependency_cdylib(manifest: &Path) -> std::path::PathBuf {
+    let metadata = Command::new(env!("CARGO"))
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .arg("--manifest-path")
+        .arg(manifest)
+        .output()
+        .unwrap();
+    assert!(
+        metadata.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&metadata.stderr)
+    );
+    let metadata = String::from_utf8_lossy(&metadata.stdout).into_owned();
+    let roots: Vec<String> = ["target_directory", "build_directory"]
+        .iter()
+        .filter_map(|key| {
+            let needle = format!("\"{key}\":\"");
+            let start = metadata.find(&needle)? + needle.len();
+            let rest = &metadata[start..];
+            Some(rest[..rest.find('"')?].to_string())
+        })
+        .collect();
+    assert!(
+        !roots.is_empty(),
+        "cargo metadata reported no build directories"
+    );
+    let mut found = Vec::new();
+    for root in &roots {
+        collect_files(Path::new(root), &mut found);
+    }
+    let mut cdylibs: Vec<std::path::PathBuf> = found
+        .into_iter()
+        .filter(|path| {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            name.starts_with("libcdylib_dep") && (name.ends_with(".so") || name.ends_with(".dylib"))
+        })
+        .collect();
+    cdylibs.sort();
+    assert!(
+        !cdylibs.is_empty(),
+        "no cdylib-dep shared library under {roots:?}; the dependency's cdylib \
+         crate type was not built, so this fixture would pass vacuously"
+    );
+    cdylibs.remove(0)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn collect_files(directory: &Path, into: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, into);
+        } else {
+            into.push(path);
+        }
+    }
+}
+
 // Source-first `audit` and `run` honor `--package`/`--bin` against a WORKSPACE
 // manifest — the exact form the help advertises (`audit <Cargo.toml> --package X
 // --bin Y`) and the one the bug report showed rejected. A virtual workspace (no
@@ -8242,6 +8406,80 @@ unsafe extern "C" {
 fn main() {
     let reached = killpg as *const ();
     std::process::exit((reached as usize & 1) as i32);
+}
+"#,
+    )
+    .unwrap();
+}
+
+/// A package depending on a local path crate whose `[lib]` declares
+/// `crate-type = ["rlib", "cdylib"]` — the shape that made crc-fast 1.10.0 fail
+/// the native shim link on Linux (see
+/// `native_build_package_keeps_shim_link_args_off_a_dependency_cdylib`). No
+/// external dependency is needed to reproduce the shape: Cargo builds every
+/// declared crate type for a path dependency regardless of which one the
+/// depender actually links against, so the dependency's own `cdylib` link always
+/// runs alongside the guest build.
+///
+/// The dependency's exported functions allocate, format, and catch a panic so
+/// the cdylib has genuine cleanup landing pads and a live `rust_eh_personality`
+/// reference — keeping it a realistic stand-in for crc-fast instead of a trivial
+/// arithmetic crate. That is a realism guard, not the trigger for the
+/// duplicate-symbol rung of the original report: measured on x86_64 Linux, a
+/// dependency shaped exactly like this still links clean once the shim objects
+/// are `-fPIC`.
+fn create_cdylib_dependency_package_fixture(root: &Path) {
+    let dependency = root.join("cdylib-dep");
+    fs::create_dir_all(dependency.join("src")).unwrap();
+    fs::write(
+        dependency.join("Cargo.toml"),
+        "[package]\nname = \"cdylib-dep\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[lib]\ncrate-type = [\"rlib\", \"cdylib\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        dependency.join("src/lib.rs"),
+        r#"use std::panic::{self, AssertUnwindSafe};
+
+/// Exported from the cdylib (so it survives dead-stripping) and full of
+/// unwinding cleanup: the `String`s need drop glue on the unwind path and
+/// `catch_unwind` pulls in the personality routine directly.
+#[unsafe(no_mangle)]
+pub extern "C" fn cdylib_dep_landing_pads(count: u32) -> u32 {
+    let caught = panic::catch_unwind(AssertUnwindSafe(|| {
+        let mut rendered = String::new();
+        for index in 0..count {
+            rendered.push_str(&format!("{index},"));
+            if index == u32::MAX {
+                panic!("unreachable, but the compiler cannot prove it");
+            }
+        }
+        rendered.len() as u32
+    }));
+    caught.unwrap_or(0)
+}
+
+pub fn checksum(bytes: &[u8]) -> u32 {
+    let seed = cdylib_dep_landing_pads(bytes.len() as u32);
+    bytes
+        .iter()
+        .fold(seed, |acc, byte| acc.wrapping_mul(31).wrapping_add(u32::from(*byte)))
+}
+"#,
+    )
+    .unwrap();
+
+    let package = root.join("cdylib-pkg");
+    fs::create_dir_all(package.join("src")).unwrap();
+    fs::write(
+        package.join("Cargo.toml"),
+        "[package]\nname = \"patina-native-cdylib-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\ncdylib-dep = { path = \"../cdylib-dep\" }\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("src/main.rs"),
+        r#"fn main() {
+    let checksum = cdylib_dep::checksum(b"patina");
+    println!("NATIVE_CDYLIB_DEP_RESULT checksum={checksum}");
 }
 "#,
     )

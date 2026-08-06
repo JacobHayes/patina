@@ -181,6 +181,12 @@ Steps, all existing machinery re-composed:
    profile is `test` (covers lib unit harnesses, integration tests, and bin
    harnesses; doctests out of scope). `--yield-points` reuses the existing
    sancov flag injection.
+
+   *As built, this step is `cargo rustc` rather than `cargo test --no-run`, and
+   the harness target is resolved from `cargo metadata` before the build instead
+   of by filtering the artifact stream after it — the shim link arguments have to
+   be scoped to one compilation unit. Same coverage (lib, integration, and bin
+   harnesses); see `docs/bugs/shim-link-args-reach-dependency-cdylibs.md`.*
 2. **Stage it** at `<target-dir>/patina/dst/<pkg>/<harness>/guest` — a stable,
    `cargo clean`-able, gitignored home, so traces recorded against it replay
    without a rebuild.
