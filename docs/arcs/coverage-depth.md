@@ -4,7 +4,8 @@ Status: Waves A-D implemented 2026-08-06 (native yield-point counters, reports,
 `run`/`replay --coverage-out` covmaps, fail-closed detectors, offline `coverage`
 symbolization/rollup, campaign coverage accumulation/plateau, and WASI depth —
 hostcall counters, `PATINA_DEPTH_REPORT`, campaign depth accumulation and
-`depth_plateau`); Wave E remains planned.
+`depth_plateau`, and coverage-GUIDED generation scheduling under
+`campaign --guided`). The arc is complete.
 Lands as `docs/arcs/coverage-depth.md`.
 
 Cross-references:
@@ -393,13 +394,45 @@ precedent was followed):
   load-bearing and RED-proven at both the store and campaign levels.
 
 **Wave E — coverage-GUIDED generation scheduling (phase 2, scheduled here — not a
-separate future arc).** Owned by this arc per user directive (2026-07-30: phase-2 items
-are tackled as part of their arcs, never parked for a later prompt). Builds strictly on
-the §8 interface: a campaign mode that biases knob/seed selection toward novelty using
-`new_edge_log` + `union.bits`, designed and RED-proven in its own right when waves A–C
-have real coverage data to steer on. Determinism constraint carried forward: guided
-selection must remain a pure function of (seed, persisted coverage state), so an
-extended guided campaign stays reproducible.
+separate future arc) — implemented 2026-08-06.** Owned by this arc per user directive
+(2026-07-30: phase-2 items are tackled as part of their arcs, never parked for a later
+prompt). Builds strictly on the §8 interface: `campaign --guided` biases knob/seed
+selection toward novelty. Determinism constraint carried forward and met: guided
+selection is a pure function of (seed base, generation, persisted novelty log).
+
+Wave-E implementation notes:
+
+- **One intervention point.** A generation's seed AND every knob are read out of one
+  32-byte derivation input, so guidance replaces *that value* and touches no knob
+  derivation. Unguided campaigns are byte-unchanged.
+- **The operator.** With probability `exploit_permille(drought)` a generation inherits
+  ~75% of the derivation bytes of a previously novel generation (chosen
+  fitness-proportionately by how much novelty it opened) and takes the rest from its own
+  fresh hash; otherwise it explores exactly as before. Byte-level mutation is what makes
+  exploitation mean anything — re-hashing the ancestor's index would be indistinguishable
+  from exploration, i.e. an inert knob. Exploitation decays from 700‰ to a 200‰ floor as
+  the novelty drought approaches the plateau window, so a stuck campaign broadens instead
+  of grinding on ancestors that stopped paying.
+- **Prefix-determinism instead of `union.bits`.** §8 lists the bitset as a phase-2 input,
+  but a cumulative bitset cannot be rewound to a generation boundary, and the
+  campaign-steering crash model lets an aux store sit one generation ahead of the cursor.
+  A resumed campaign re-deriving generation `g` would then see state that already includes
+  `g`. The selector therefore reads only `new_edge_log` / `new_depth_log` truncated to
+  entries **below `g`** — which also yields the covered-edge count by summation, so the
+  bitset's decision-relevant content is not lost. RED-proven at both levels: dropping the
+  truncation fails the `guided-prefix-determinism-tear-safe` detector AND the
+  campaign-level tear e2e.
+- **WASI too.** A WASI campaign steers on the depth novelty log, so guidance is not
+  native-only.
+- **Fail closed.** `--guided` against an artifact with neither edge coverage nor depth is
+  refused naming `--yield-points`, never silently downgraded to the unguided scheme. It is
+  part of the persisted spec, so toggling it on a continuation is refused by the existing
+  registry-driven continuation gate.
+- **Non-vacuity.** The per-generation decision rides the deterministic
+  `PATINA_CAMPAIGN_GEN` line (guided runs only), and the summary/envelope report
+  exploit/explore/no-ancestor counts. A guided campaign that never steered anything prints
+  `PATINA_CAMPAIGN_GUIDED_VACUOUS` — an inert knob is a bug, and a clean result from one
+  says nothing about guidance.
 
 Waves are separable and land independently; A must precede B/C; D is independent of B/C;
 E follows C.

@@ -58,6 +58,7 @@ mod cli;
 mod config;
 mod coverage;
 mod depth;
+mod guided;
 mod help;
 mod output;
 mod render;

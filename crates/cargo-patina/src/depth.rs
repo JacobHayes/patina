@@ -358,6 +358,21 @@ impl CampaignDepthStore {
         &self.meta
     }
 
+    /// The novelty log as guidance ancestors. A depth generation can be novel
+    /// for opening a new hostcall kind OR for raising the fuel high-water mark;
+    /// the latter records zero new kinds, so the weight floors at 1 to keep it
+    /// selectable.
+    pub(crate) fn novelty_log(&self) -> Vec<crate::guided::NoveltyEntry> {
+        self.meta
+            .new_depth_log
+            .iter()
+            .map(|(generation, new_kinds, _)| crate::guided::NoveltyEntry {
+                generation: *generation,
+                weight: (*new_kinds).max(1),
+            })
+            .collect()
+    }
+
     fn fold_decision(&self, generation: u64) -> Result<AuxFoldDecision, CliError> {
         fold_decision(
             "depth state",

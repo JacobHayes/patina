@@ -71,7 +71,7 @@ unknown option.
   first failing seed with `PATINA_EXPLORE_FAILURE seed=S exit=E repro="cargo patina run ... --seed S"`;
   the JSON envelope's `message` carries the same repro. Otherwise
   `PATINA_EXPLORE_COMPLETE start=... seeds=...`.
-- `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults]`
+- `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults]`
   Config-driven deterministic fault-and-schedule sweep: every generation's seed
   and knobs are a pure function of the generation number, outcomes are
   classified into eight classes, novel failure signatures are deduped with saved
@@ -84,6 +84,14 @@ unknown option.
   a `depth_plateaued` flag from the same `--plateau-after` window. Unsatisfied `sometimes!`/
   `reachable!` oracle sites, including link-time-declared rows with
   `registered_gens=0`, fail the campaign by default unless explicitly waived.
+  `--guided` steers generations instead of deriving them independently: a
+  generation may inherit most of the derivation bytes of an earlier generation
+  that found new coverage/depth, so the sweep concentrates near productive
+  configurations. It stays deterministic (a pure function of seed base,
+  generation, and the persisted novelty log, truncated below the generation being
+  derived so a resumed campaign re-derives identically), records the per-generation
+  decision on the `PATINA_CAMPAIGN_GEN` line as `guided=exploit:<gen>|explore|none`,
+  and is refused when the artifact supplies no novelty signal.
 - `cargo patina coverage <BINARY> <MAP|CAMPAIGN-OUT-DIR> [--focus CRATE::module] [--top N]`
   Read-only offline symbolization for native yield-point coverage. Resolves
   covmap PCs from the `patina_yield_point` anchor, demangles symbols, rolls edges

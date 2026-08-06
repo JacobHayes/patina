@@ -679,6 +679,23 @@ impl CampaignCoverageStore {
         self.meta.as_ref()
     }
 
+    /// The novelty log as guidance ancestors: each generation that turned at
+    /// least one guard from unseen to seen, weighted by how many it opened.
+    pub(crate) fn novelty_log(&self) -> Vec<crate::guided::NoveltyEntry> {
+        self.meta
+            .as_ref()
+            .map(|meta| {
+                meta.new_edge_log
+                    .iter()
+                    .map(|(generation, new_edges)| crate::guided::NoveltyEntry {
+                        generation: *generation,
+                        weight: *new_edges,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub(crate) fn generation_covmap_path(&self, generation: u64) -> PathBuf {
         self.dir.join(format!("gen-{generation}.covmap"))
     }

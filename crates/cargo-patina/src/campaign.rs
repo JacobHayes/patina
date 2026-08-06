@@ -52,6 +52,7 @@ use crate::aux_store::{AuxFoldDecision, fold_decision, validate_resume_watermark
 use crate::cli;
 use crate::coverage::{CampaignCoverageStore, CoverageArtifact, FoldOutcome, top_uncovered_crates};
 use crate::depth::{CampaignDepthStore, DepthFoldOutcome};
+use crate::guided::{GuidanceDecision, GuidancePlan, GuidanceTally, NoveltyEntry};
 use crate::help;
 use crate::sdk_report::{CoverageTally, ExercisedSite};
 
@@ -121,6 +122,10 @@ pub struct CampaignSpec {
     /// Report native edge-coverage plateau after this many generations without a
     /// new edge; 0 disables the plateau flag.
     pub plateau_after: u64,
+    /// Bias generation derivation toward previously productive configurations
+    /// (coverage-depth arc, wave E). Changes the generation stream, so it is part
+    /// of the persisted spec and cannot be toggled on a continuation.
+    pub guided: bool,
     /// Waive the default campaign-level gate for `sometimes!` sites that were
     /// registered but never satisfied.
     pub allow_unmet_sometimes: Option<AllowUnmetSometimes>,
@@ -142,6 +147,7 @@ impl Default for CampaignSpec {
             heal_after_nanos: None,
             report: false,
             plateau_after: DEFAULT_PLATEAU_AFTER,
+            guided: false,
             allow_unmet_sometimes: None,
         }
     }
@@ -181,6 +187,7 @@ impl CampaignSpec {
                 "heal_after_nanos" => self.heal_after_nanos = Some(json_u64(key, val)?),
                 "report" => self.report = json_bool(key, val)?,
                 "plateau_after" => self.plateau_after = json_u64(key, val)?,
+                "guided" => self.guided = json_bool(key, val)?,
                 "allow_unmet_sometimes" => {
                     self.allow_unmet_sometimes = Some(json_allow_unmet_sometimes(key, val)?)
                 }
@@ -188,7 +195,7 @@ impl CampaignSpec {
                     return Err(CliError(format!(
                         "unknown campaign spec key {other:?}; expected generations, seed_base, \
                          timeout_secs, guest_args, buggify, swarm, pct, faults, watchdog_nanos, \
-                         converge_nanos, heal_after_nanos, report, plateau_after, or \
+                         converge_nanos, heal_after_nanos, report, plateau_after, guided, or \
                          allow_unmet_sometimes"
                     )));
                 }
@@ -398,6 +405,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     if let Some(value) = args.u64("--plateau-after") {
         spec.plateau_after = value;
     }
+    spec.guided |= args.flag("--guided");
     if let Some(value) = args.text("--allow-unmet-sometimes") {
         spec.allow_unmet_sometimes = Some(match value {
             "" => AllowUnmetSometimes::Always,
@@ -1184,6 +1192,7 @@ fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     }
     map.insert("report".into(), spec.report.into());
     map.insert("plateau_after".into(), spec.plateau_after.into());
+    map.insert("guided".into(), spec.guided.into());
     if let Some(value) = spec.allow_unmet_sometimes {
         map.insert("allow_unmet_sometimes".into(), allow_unmet_to_json(value));
     }
@@ -1383,6 +1392,43 @@ fn campaign_coverage_fingerprint(spec: &CampaignSpec) -> String {
 /// re-running a WASI campaign under different knobs explores a different space, so
 /// its fuel high-water marks and hostcall sums must not be unioned with the old
 /// ones. Module identity itself rides the artifact hash, not this string.
+/// Which store supplies the guidance signal, or a loud refusal naming why there
+/// is none. Native campaigns steer on edge coverage, WASI campaigns on depth.
+fn guidance_source_or_refuse(
+    edge_coverage: &EdgeCoverageState,
+    depth: &DepthState,
+    family: &'static str,
+) -> Result<(), CliError> {
+    if edge_coverage.active().is_some() || depth.active().is_some() {
+        return Ok(());
+    }
+    let hint = if family == "native" {
+        "rebuild with cargo patina build --yield-points so generations have edge coverage to steer by"
+    } else {
+        "coverage-guided campaigns need a native yield-point binary or a WASI module"
+    };
+    Err(CliError(format!(
+        "--guided needs a novelty signal but this {family} campaign has neither edge coverage nor WASI depth; {hint}"
+    )))
+}
+
+/// Resolve the guidance plan from whichever store is accumulating novelty. Built
+/// per generation rather than cached: the log is sparse, so the forward pass is
+/// a handful of hashes, and rebuilding keeps the derivation an obvious pure
+/// function of the persisted state rather than of loop-carried state.
+fn guidance_plan(
+    spec: &CampaignSpec,
+    edge_coverage: &EdgeCoverageState,
+    depth: &DepthState,
+) -> GuidancePlan {
+    let log: Vec<NoveltyEntry> = match (edge_coverage.active(), depth.active()) {
+        (Some(store), _) => store.novelty_log(),
+        (None, Some(store)) => store.novelty_log(),
+        (None, None) => Vec::new(),
+    };
+    GuidancePlan::new(spec.seed_base, spec.plateau_after, &log)
+}
+
 fn campaign_depth_fingerprint(spec: &CampaignSpec) -> String {
     let mut fingerprint = "patina-wasi".to_string();
     if spec.buggify {
@@ -1557,6 +1603,14 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
 
     let mut edge_coverage = initialize_edge_coverage(&out_dir, &state, state.generations_done)?;
     let mut depth = initialize_depth(&out_dir, &state, state.generations_done)?;
+    if state.spec.guided {
+        // Fail closed rather than quietly degrading to the unguided scheme: a
+        // campaign asked to steer with no signal to steer by is not a campaign
+        // with slightly worse selection, it is a campaign silently running a
+        // different mode than the operator asked for.
+        guidance_source_or_refuse(&edge_coverage, &depth, state.artifact.family)?;
+    }
+    let mut guidance = GuidanceTally::default();
 
     let traces_dir = out_dir.join("traces");
     fs::create_dir_all(&traces_dir)
@@ -1621,7 +1675,22 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
     let mut novel_so_far = state.signatures.len() as u64;
 
     for generation in from_gen..state.spec.generations {
-        let hash = generation_hash(state.spec.seed_base, generation);
+        // Unguided: the pure per-generation hash. Guided: possibly a mutation of
+        // a previously productive generation's hash. Either way ONE 32-byte value
+        // feeds both the seed and every knob, so guidance needs no per-knob
+        // special case and the derivation stays a pure function.
+        let (hash, decision) = if state.spec.guided {
+            let plan = guidance_plan(&state.spec, &edge_coverage, &depth);
+            plan.generation_hash(generation)
+        } else {
+            (
+                generation_hash(state.spec.seed_base, generation),
+                GuidanceDecision::NoAncestors,
+            )
+        };
+        if state.spec.guided {
+            guidance.record(decision);
+        }
         let seed = u64::from_le_bytes(hash[0..8].try_into().expect("32-byte hash"));
         let flags = derive_flags(&state.spec, &hash, state.artifact.family);
         let trace_path = traces_dir.join(format!("generation-{generation}.patina"));
@@ -1747,8 +1816,20 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
             // determinism check stay stable.
             if novel || class.is_failure() || full_stream {
                 let tag = if novel { " NOVEL" } else { "" };
+                // The guidance decision rides the deterministic line (and only
+                // under --guided, so an unguided stream is byte-unchanged): it is
+                // a pure function of the same inputs, and without it there is no
+                // way to see WHICH generations were steered or from where.
+                let steer = match (state.spec.guided, decision) {
+                    (false, _) => String::new(),
+                    (true, GuidanceDecision::Exploit { ancestor }) => {
+                        format!(" guided=exploit:{ancestor}")
+                    }
+                    (true, GuidanceDecision::Explore) => " guided=explore".to_string(),
+                    (true, GuidanceDecision::NoAncestors) => " guided=none".to_string(),
+                };
                 println!(
-                    "PATINA_CAMPAIGN_GEN generation={generation} seed={seed} class={}{tag}",
+                    "PATINA_CAMPAIGN_GEN generation={generation} seed={seed} class={}{tag}{steer}",
                     class.as_str()
                 );
             }
@@ -1765,6 +1846,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
                     coverage: &coverage,
                     edge_coverage: &edge_coverage,
                     depth: &depth,
+                    guidance: state.spec.guided.then_some(guidance),
                 });
             }
             flush_stdout();
@@ -1804,6 +1886,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
             coverage_verdict: &coverage_verdict,
             edge_coverage: &edge_coverage,
             depth: &depth,
+            guidance: state.spec.guided.then_some(guidance),
             out_dir: &out_dir,
             state_path: &state_path,
             sites_path: &sites_path,
@@ -1817,6 +1900,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
             coverage_verdict: &coverage_verdict,
             edge_coverage: &edge_coverage,
             depth: &depth,
+            guidance: state.spec.guided.then_some(guidance),
             artifact_path: &artifact_path,
             failures,
             novel: novel_count,
@@ -2593,6 +2677,7 @@ struct ProgressHeartbeatInput<'a> {
     coverage: &'a CoverageTally,
     edge_coverage: &'a EdgeCoverageState,
     depth: &'a DepthState,
+    guidance: Option<GuidanceTally>,
 }
 
 fn print_progress_heartbeat(input: ProgressHeartbeatInput<'_>) {
@@ -2612,6 +2697,12 @@ fn print_progress_heartbeat(input: ProgressHeartbeatInput<'_>) {
     ));
     append_edge_coverage_progress(&mut line, input.edge_coverage);
     append_depth_progress(&mut line, input.depth);
+    if let Some(guidance) = input.guidance {
+        line.push_str(&format!(
+            " guided_exploit={}/{}",
+            guidance.exploited, guidance.generations
+        ));
+    }
     println!("{line}");
 }
 
@@ -2729,6 +2820,42 @@ fn append_depth_complete(line: &mut String, depth: &DepthState) {
     }
 }
 
+/// The guidance block. Absent entirely for an unguided campaign — the mode is
+/// opt-in, so silence means "not asked for" rather than "asked for and did
+/// nothing", which is exactly the distinction the vacuity line below draws.
+fn print_guidance_summary(guidance: Option<GuidanceTally>) {
+    let Some(guidance) = guidance else {
+        return;
+    };
+    println!("-- guided generation scheduling --");
+    println!(
+        "generations={} exploited={} explored={} no_ancestors={}",
+        guidance.generations, guidance.exploited, guidance.explored, guidance.no_ancestors
+    );
+    if guidance.is_vacuous() {
+        // An inert knob is a bug: every generation was derived exactly as an
+        // unguided campaign would have derived it, so a clean result here says
+        // nothing about guidance.
+        println!(
+            "PATINA_CAMPAIGN_GUIDED_VACUOUS generations={} reason=no-generation-was-novel-to-steer-toward",
+            guidance.generations
+        );
+    }
+}
+
+fn guidance_json(guidance: Option<GuidanceTally>) -> serde_json::Value {
+    match guidance {
+        None => serde_json::json!({ "state": "off" }),
+        Some(guidance) => serde_json::json!({
+            "state": if guidance.is_vacuous() { "vacuous" } else { "active" },
+            "generations": guidance.generations,
+            "exploited": guidance.exploited,
+            "explored": guidance.explored,
+            "no_ancestors": guidance.no_ancestors,
+        }),
+    }
+}
+
 fn depth_json(depth: &DepthState) -> serde_json::Value {
     match depth {
         DepthState::Unavailable { reason, hint } => serde_json::json!({
@@ -2776,6 +2903,7 @@ struct CampaignSummaryInput<'a> {
     coverage_verdict: &'a CoverageVerdict<'a>,
     edge_coverage: &'a EdgeCoverageState,
     depth: &'a DepthState,
+    guidance: Option<GuidanceTally>,
     artifact_path: &'a Path,
     failures: u64,
     novel: u64,
@@ -2813,6 +2941,7 @@ fn print_campaign_summary(input: CampaignSummaryInput<'_>) {
     print_coverage_summary(input.coverage, input.coverage_verdict, input.sites_path);
     print_edge_coverage_summary(input.edge_coverage, input.artifact_path);
     print_depth_summary(input.depth);
+    print_guidance_summary(input.guidance);
     println!("signature store: {}", input.store_path.display());
     let mut complete = format!(
         "PATINA_CAMPAIGN_COMPLETE generations={} failures={} novel={}",
@@ -2820,6 +2949,12 @@ fn print_campaign_summary(input: CampaignSummaryInput<'_>) {
     );
     append_edge_coverage_complete(&mut complete, input.edge_coverage);
     append_depth_complete(&mut complete, input.depth);
+    if let Some(guidance) = input.guidance {
+        complete.push_str(&format!(
+            " guided_exploit={} guided_explore={}",
+            guidance.exploited, guidance.explored
+        ));
+    }
     println!("{complete}");
 }
 
@@ -2937,6 +3072,7 @@ struct CampaignEnvelopeInput<'a> {
     coverage_verdict: &'a CoverageVerdict<'a>,
     edge_coverage: &'a EdgeCoverageState,
     depth: &'a DepthState,
+    guidance: Option<GuidanceTally>,
     out_dir: &'a Path,
     state_path: &'a Path,
     sites_path: &'a Path,
@@ -3026,6 +3162,7 @@ fn build_campaign_envelope(input: CampaignEnvelopeInput<'_>) -> serde_json::Valu
         "sdk_sites": sdk_sites_json,
         "coverage": coverage_json,
         "depth": depth_json(input.depth),
+        "guidance": guidance_json(input.guidance),
         "artifacts": artifacts,
     });
     if let (Some(object), Some(config)) =
@@ -3448,6 +3585,16 @@ fn selftest() -> Result<i32, CliError> {
         }
     }
 
+    println!("-- guided generation scheduling --");
+    for (name, ok, detail) in crate::guided::campaign_detector_selftest() {
+        if ok {
+            println!("  ok   {name:<40} -> {detail}");
+        } else {
+            println!("  FAIL {name:<40} -> {detail}");
+            failures += 1;
+        }
+    }
+
     println!();
     if failures == 0 {
         println!("CAMPAIGN SELFTEST PASSED");
@@ -3813,6 +3960,7 @@ mod tests {
             coverage_verdict: &coverage_verdict,
             edge_coverage: &edge_coverage,
             depth: &depth,
+            guidance: None,
             out_dir: Path::new("out"),
             state_path: Path::new("out/campaign-state.json"),
             sites_path: Path::new("out/sites.json"),
@@ -3903,6 +4051,7 @@ mod tests {
             coverage_verdict: &coverage_verdict,
             edge_coverage: &edge_coverage,
             depth: &depth,
+            guidance: None,
             out_dir: Path::new("out"),
             state_path: Path::new("out/campaign-state.json"),
             sites_path: Path::new("out/sites.json"),

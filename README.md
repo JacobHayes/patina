@@ -253,6 +253,9 @@ Why debug finds more bugs:
   run emits `PATINA_DEPTH_REPORT` (fuel plus per-import hostcall counts) and a
   campaign accumulates it under `<out-dir>/depth/`, plateauing on the same
   `--plateau-after` window.
+  `campaign --guided` closes the loop: generations are biased toward
+  configurations that previously found new coverage or depth, while staying a
+  pure function of the seed base and the persisted novelty log.
 - **Faster inner loop.** Debug compiles quicker, which dominates when you rebuild
   between every edit.
 

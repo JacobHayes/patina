@@ -1426,6 +1426,15 @@ classes.",
                 false,
             ),
             f(
+                "--guided",
+                None,
+                Value::None,
+                "Bias each generation's seed and knobs toward configurations that previously \
+                 found new coverage (native --yield-points) or depth (WASI); refused when \
+                 neither is available.",
+                false,
+            ),
+            f(
                 "--allow-unmet-sometimes",
                 None,
                 Value::Optional("MIN_GENS", Kind::PositiveU64),

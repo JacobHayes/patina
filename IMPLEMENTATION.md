@@ -529,7 +529,21 @@ surface (`cargo patina campaign`) generalizing the shell campaign machinery.
    fingerprint, or canonical hash — and never conflated with coverage in output.
    Both aux stores share the `generations_applied` watermark contract, so a resume
    that re-runs an interrupted generation contributes nothing rather than
-   double-counting the non-idempotent sums. Missing depth is refused, not folded as
+   double-counting the non-idempotent sums. `--guided` closes the measurement loop:
+   a generation's single 32-byte derivation input (which feeds its seed AND every
+   knob) may be a mutation of the input of an earlier generation that opened new
+   coverage or depth — ~75% of the bytes inherited from a fitness-proportionately
+   chosen ancestor, the rest fresh — with the exploitation share decaying from
+   700 to a 200 permille floor as the novelty drought approaches the plateau
+   window, so a stuck campaign broadens rather than grinding. Guidance reads the
+   novelty log truncated to entries BELOW the generation being derived, which
+   makes it prefix-deterministic: a resumed campaign whose store sits one
+   generation ahead of the cursor re-derives that generation identically. It is
+   refused outright when no novelty signal exists (never downgraded to unguided),
+   is part of the persisted spec so it cannot be toggled on a continuation, and
+   reports its per-generation decision on `PATINA_CAMPAIGN_GEN`
+   (`guided=exploit:<gen>|explore|none`) plus a `PATINA_CAMPAIGN_GUIDED_VACUOUS`
+   line when it never steered anything. Missing depth is refused, not folded as
    zero: a cleanly finished generation without a depth line aborts the campaign
    naming the generation, a run whose fuel accounting reports 0 is refused
    outright, and a campaign where no generation reported depth prints
@@ -539,7 +553,9 @@ surface (`cargo patina campaign`) generalizing the shell campaign machinery.
    gate. `--selftest` proves every class reachable, the coverage gate classes,
    malformed-row rejection, the signature dedup/novelty logic, and the native
    coverage / WASI depth store detectors (fingerprint mismatch, plateau exactness,
-   watermark idempotency, missing-depth refusal),
+   watermark idempotency, missing-depth refusal) and the guided-scheduling
+   detectors (no-ancestor fallback, stream actually changes, ancestor inheritance,
+   prefix-determinism, drought decay),
    mirroring the fuzz-sweep classifier selftest. The existing
    `fuzz-sweep.sh` and `buggify-campaign.sh` are untouched and remain the
    battle-tested reference.
