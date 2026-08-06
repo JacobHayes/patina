@@ -543,6 +543,13 @@ pub enum CampaignClass {
     /// finding — and its own class rather than a shared "vacuous fault" bucket so
     /// a campaign report says which fault plane went inert.
     VacuousDnsFault,
+    /// `--swarm` was requested for a generation with no swarm-maskable fault class
+    /// enabled, so the draw had zero candidates: it neither kept nor dropped
+    /// anything and the generation explored exactly what a non-swarm generation
+    /// explores. A coverage failure like [`CampaignClass::VacuousFsFault`] — a
+    /// campaign that asked for fault-subset exploration and got none must not
+    /// read as a clean covered run.
+    VacuousSwarm,
     /// Patina fail-closed refusal: a fingerprint/trace mismatch, a duplicate
     /// buggify label, a declared-but-never-called setup gate, a runtime that
     /// refused to initialize, or a bare shim SIGABRT.
@@ -565,6 +572,7 @@ impl CampaignClass {
             CampaignClass::Violation => "VIOLATION",
             CampaignClass::Liveness => "LIVENESS",
             CampaignClass::VacuousFsFault => "VACUOUS_FS_FAULT",
+            CampaignClass::VacuousSwarm => "VACUOUS_SWARM",
             CampaignClass::VacuousDnsFault => "VACUOUS_DNS_FAULT",
             CampaignClass::FailClosedAbort => "FAIL_CLOSED_ABORT",
             CampaignClass::StarvationStall => "STARVATION_STALL",
@@ -579,6 +587,7 @@ impl CampaignClass {
             "VIOLATION" => Some(CampaignClass::Violation),
             "LIVENESS" => Some(CampaignClass::Liveness),
             "VACUOUS_FS_FAULT" => Some(CampaignClass::VacuousFsFault),
+            "VACUOUS_SWARM" => Some(CampaignClass::VacuousSwarm),
             "VACUOUS_DNS_FAULT" => Some(CampaignClass::VacuousDnsFault),
             "FAIL_CLOSED_ABORT" => Some(CampaignClass::FailClosedAbort),
             "STARVATION_STALL" => Some(CampaignClass::StarvationStall),
@@ -634,6 +643,13 @@ const VIOLATION_MARKERS: &[&str] = &[
     "panicked at",
 ];
 
+/// The leading phrase of the runtime's inert-`--swarm` warning
+/// (`patina_dst_runtime`'s `SWARM_VACUOUS_WARNING`). Only the stable prefix is
+/// matched, so rewording the operator-facing tail of that warning cannot silently
+/// unhook the classifier; the machine-readable `vacuous=1` field of
+/// `PATINA_SWARM_REPORT` is the primary signal either way.
+const SWARM_VACUOUS_WARNING_PREFIX: &str = "PATINA WARNING: swarm fault-class selection inert";
+
 /// The exit code a raw SIGABRT surfaces as (128 + SIGABRT(6)). The native shim
 /// aborts fail-closed via `std::process::abort()` on a fatal refusal it cannot
 /// safely continue past; a SIGABRT that carries no system-under-test finding is a
@@ -686,25 +702,38 @@ pub fn classify(exit_code: i32, stdout: &str, stderr: &str) -> CampaignClass {
         return CampaignClass::VacuousDnsFault;
     }
     // 4. Patina fail-closed refusal: a shim fatal-abort refusal line, or a raw
+    // 4. Exploration-plane coverage failure: the generation asked for swarm
+    //    fault-class selection with nothing to select from. Read off the swarm
+    //    report LINE for the same reason the fs verdict is: several reports carry a
+    //    `vacuous=` field, so a whole-output substring search would file another
+    //    plane's vacuity under this class.
+    if combined.contains(SWARM_VACUOUS_WARNING_PREFIX)
+        || combined
+            .lines()
+            .any(|line| line.contains("PATINA_SWARM_REPORT") && line.contains("vacuous=1"))
+    {
+        return CampaignClass::VacuousSwarm;
+    }
+    // 5. Patina fail-closed refusal: a shim fatal-abort refusal line, or a raw
     //    SIGABRT carrying no SUT finding (checked after the SUT-violation markers,
     //    so an `always!` abort stays a VIOLATION). Its own class, never a generic
     //    failure.
     if has(FAIL_CLOSED_MARKERS) || exit_code == SIGABRT_EXIT {
         return CampaignClass::FailClosedAbort;
     }
-    // 5. The `--starve` supervisor stall backstop.
+    // 6. The `--starve` supervisor stall backstop.
     if exit_code == STARVATION_STALL_EXIT || combined.contains("patina: starvation stall") {
         return CampaignClass::StarvationStall;
     }
-    // 6. Harness/build infrastructure — only when there is no SUT finding above.
+    // 7. Harness/build infrastructure — only when there is no SUT finding above.
     if has(INFRA_MARKERS) {
         return CampaignClass::Infra;
     }
-    // 7. A clean exit with no finding markers is OK.
+    // 8. A clean exit with no finding markers is OK.
     if exit_code == 0 {
         return CampaignClass::Ok;
     }
-    // 8. A nonzero exit that matched no class above is UNCLASSIFIED — surfaced
+    // 9. A nonzero exit that matched no class above is UNCLASSIFIED — surfaced
     //    loudly for triage, never silently dropped as OK or mislabeled.
     CampaignClass::Unclassified
 }
@@ -757,6 +786,7 @@ fn primary_finding_line(class: CampaignClass, stdout: &str, stderr: &str) -> Str
             "PATINA_FS_FAULT_REPORT",
             "PATINA WARNING: filesystem fault knobs inert",
         ],
+        CampaignClass::VacuousSwarm => &["PATINA_SWARM_REPORT", SWARM_VACUOUS_WARNING_PREFIX],
         CampaignClass::VacuousDnsFault => &[
             "PATINA_DNS_FAULT_REPORT",
             "PATINA WARNING: DNS fault knobs inert",
@@ -3594,6 +3624,59 @@ fn selftest() -> Result<i32, CliError> {
             0,
             "PATINA_RESULT ok=1",
             "PATINA_FS_FAULT_REPORT eligible_ops=9 error_vacuity_diagnosable=0 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=0\nPATINA_NET_FAULT_REPORT could_apply=1 send_ops=4 faults_applied=0 vacuous=1",
+        ),
+    );
+    // A generation that requested `--swarm` with no swarm-maskable fault class
+    // enabled explored the plain configuration, so a clean exit is NOT swarm
+    // coverage. Both the machine-readable field and the operator warning fire it.
+    check(
+        "vacuous-swarm-report",
+        CampaignClass::VacuousSwarm,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA_SWARM_REPORT candidates=0 selected=0 deselected=0 vacuous=1",
+        ),
+    );
+    check(
+        "vacuous-swarm-warning",
+        CampaignClass::VacuousSwarm,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA WARNING: swarm fault-class selection inert — --swarm was requested but NO swarm-maskable fault class was enabled",
+        ),
+    );
+    // A draw that dropped every candidate is a legitimate swarm generation: the
+    // knob had something to choose among and chose the empty subset.
+    check(
+        "swarm-that-dropped-every-candidate-is-not-vacuous",
+        CampaignClass::Ok,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA_SWARM_REPORT candidates=2 selected=0 deselected=2 vacuous=0 class=crash|0 class=buggify|0",
+        ),
+    );
+    // Another plane's vacuity must not be filed under the swarm class (the fs
+    // report carries its own `vacuous=` field on its own line).
+    check(
+        "fs-vacuity-is-not-filed-under-the-swarm-class",
+        CampaignClass::VacuousFsFault,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA_SWARM_REPORT candidates=2 selected=1 deselected=1 vacuous=0 class=crash|1 class=fs_error|0\nPATINA_FS_FAULT_REPORT eligible_ops=9 error_vacuity_diagnosable=1 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1",
+        ),
+    );
+    // A real finding still wins: an inert swarm knob never hides a SUT bug.
+    check(
+        "violation-beats-vacuous-swarm",
+        CampaignClass::Violation,
+        classify(
+            0,
+            "PATINA_RESULT ok=0",
+            "PATINA_SWARM_REPORT candidates=0 selected=0 deselected=0 vacuous=1\nPATINA_VIOLATION two-leaders term=4",
         ),
     );
     check(

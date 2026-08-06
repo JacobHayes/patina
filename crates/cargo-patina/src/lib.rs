@@ -2434,12 +2434,18 @@ fn parse_native_run_from(
     let program_args = split_trailing_args(&mut arguments);
     let args = cli::parse("run", help::Family::Native, arguments)?;
     let seed = args.u64("--seed").unwrap_or(0);
+    let record = args.path("--record");
+    // The label is only ever read back off a recorded trace, and the seeded
+    // control plane sets no `PATINA_FINGERPRINT` at all, so `--fingerprint` is
+    // registered as dependent on `--record` (see the native run group in
+    // `help.rs`): a seeded run carrying one is refused by the generic registry
+    // check rather than silently discarding it.
     let fingerprint = args
         .string("--fingerprint")
         .unwrap_or_else(|| DEFAULT_NATIVE_FINGERPRINT.to_string());
     Ok(NativeRunInvocation {
         binary,
-        mode: match args.path("--record") {
+        mode: match record {
             Some(path) => NativeRunMode::Record {
                 seed,
                 path,
@@ -9673,9 +9679,30 @@ mod tests {
                 format!("{}={second}", flag.name),
             ],
         };
-        // A dependent knob is refused without its parent, and every parent in the
-        // registry is an optional-value switch, so the bare form arms it.
-        let mut tokens: Vec<&str> = flag.requires.into_iter().collect();
+        // A dependent knob is refused without its parent, so supply the parent in
+        // whichever form it takes: an optional-value switch is armed bare, while a
+        // required-value parent (`--fingerprint` needs `--record PATH`) needs a
+        // sample of its own kind, taken from the registry rather than hardcoded.
+        let parent = flag.requires.map(|name| {
+            let parent = help::verb(verb)
+                .expect("registered verb")
+                .family_flags(family)
+                .find(|candidate| candidate.name == name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "`{verb}` flag `{}` requires unregistered `{name}`",
+                        flag.name
+                    )
+                });
+            match parent.value.grammar() {
+                Some(kind) => format!(
+                    "{name}={}",
+                    kind_samples(kind).0.first().expect("a valid sample")
+                ),
+                None => name.to_string(),
+            }
+        });
+        let mut tokens: Vec<&str> = parent.iter().map(String::as_str).collect();
         tokens.extend(rendered.iter().map(String::as_str));
         drive_family(verb, family, flag.name, &tokens)
     }
@@ -10290,11 +10317,47 @@ mod tests {
             ParseResult::NativeRun(inv) => inv,
             _ => panic!("expected a native run"),
         };
-        let base = native(&["run", b, "--seed", "5", "--fingerprint", "fp"]);
+        // `--fingerprint` labels a recording, so it rides with `--record` (a seeded
+        // run refuses it; see
+        // `fingerprint_on_a_seeded_native_run_is_refused_not_ignored`).
+        let base = native(&[
+            "run",
+            b,
+            "--seed",
+            "5",
+            "--record",
+            "t.patina",
+            "--fingerprint",
+            "fp",
+        ]);
         for spelling in [
-            &["run", "--seed", "5", "--fingerprint", "fp", b][..],
-            &["run", "--seed=5", "--fingerprint=fp", b][..],
-            &["run", "--fingerprint", "fp", b, "--seed", "5"][..],
+            &[
+                "run",
+                "--seed",
+                "5",
+                "--record",
+                "t.patina",
+                "--fingerprint",
+                "fp",
+                b,
+            ][..],
+            &[
+                "run",
+                "--seed=5",
+                "--record=t.patina",
+                "--fingerprint=fp",
+                b,
+            ][..],
+            &[
+                "run",
+                "--fingerprint",
+                "fp",
+                b,
+                "--seed",
+                "5",
+                "--record",
+                "t.patina",
+            ][..],
         ] {
             let got = native(spelling);
             assert_eq!(got.binary, base.binary);
@@ -10308,6 +10371,52 @@ mod tests {
             }
             _ => panic!("expected record mode"),
         }
+    }
+
+    /// `--fingerprint` is only ever read back off a recorded trace: the seeded
+    /// native path sets no `PATINA_FINGERPRINT` at all, so a label supplied there
+    /// could never be compared against anything. It is refused instead of quietly
+    /// discarded, so "I pinned this run to a build" cannot be believed of a run
+    /// that pinned nothing.
+    #[test]
+    fn fingerprint_on_a_seeded_native_run_is_refused_not_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = native_fixture(&dir, "app");
+        let b = binary.to_str().unwrap();
+        let Err(error) = parse(strings(&["run", b, "--seed", "5", "--fingerprint", "fp"])) else {
+            panic!("a seeded run must refuse a fingerprint it cannot record");
+        };
+        let text = format!("{error}");
+        assert!(text.contains("--record"), "{text}");
+
+        // With a recording the same label is accepted and carried into the trace.
+        match parse(strings(&[
+            "run",
+            b,
+            "--seed",
+            "5",
+            "--record",
+            "t.patina",
+            "--fingerprint",
+            "fp",
+        ]))
+        .unwrap()
+        {
+            ParseResult::NativeRun(inv) => match inv.mode {
+                NativeRunMode::Record { fingerprint, .. } => assert_eq!(fingerprint, "fp"),
+                _ => panic!("expected record mode"),
+            },
+            _ => panic!("expected a native run"),
+        }
+
+        // A seeded run without the flag is untouched.
+        assert!(matches!(
+            parse(strings(&["run", b, "--seed", "5"])).unwrap(),
+            ParseResult::NativeRun(NativeRunInvocation {
+                mode: NativeRunMode::Seeded { seed: 5 },
+                ..
+            })
+        ));
     }
 
     #[test]

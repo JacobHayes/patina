@@ -235,7 +235,7 @@ dev-dependency use under plain `cargo test`.
   `PATINA_DEPTH_REPORT=0` (a campaign pins it on, since it is that campaign's
   measurement channel).
 - `PATINA_SDK_REPORT` (stderr) reports buggify site registration/activation/firing; each `site=` row ends with `|@<file:line>`. `enabled=0 swarm_deselected=1` means buggify WAS requested and this generation's `--swarm` draw dropped it; `enabled=0 swarm_deselected=0` means it was never requested.
-- `PATINA_SWARM_REPORT` (stderr) reports the `--swarm` decision for every fault class: `candidates=N selected=M deselected=K` then one `class=<token>|<0|1>` row per candidate. A class that was never enabled appears in no row. Suppress with `PATINA_SWARM_REPORT=0`.
+- `PATINA_SWARM_REPORT` (stderr) reports the `--swarm` decision for every fault class: `candidates=N selected=M deselected=K vacuous=<0|1>` then one `class=<token>|<0|1>` row per candidate. A class that was never enabled appears in no row. `vacuous=1` means `--swarm` was requested with NO fault class enabled, so the draw had nothing to select and the run explored the plain configuration; the runtime warns and a campaign classifies that generation `VACUOUS_SWARM`. Dropping every candidate of a non-empty set is a legitimate draw (`vacuous=0`). Suppress with `PATINA_SWARM_REPORT=0`.
 - A trace is compact JSON: inspect it with `jq . run.patina`.
 
 ## Docs

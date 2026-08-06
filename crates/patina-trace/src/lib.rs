@@ -268,6 +268,16 @@ impl SwarmConfigRecord {
         self.candidate_classes.iter().any(|name| name == class)
     }
 
+    /// Whether the swarm draw had nothing to draw from: the run asked for swarm
+    /// fault-class selection while no swarm-maskable fault class was enabled, so
+    /// the draw could neither keep nor drop anything and the run explored exactly
+    /// the configuration it would have explored without swarm. An empty selection
+    /// over a NON-empty candidate set is not vacuous — dropping every candidate is
+    /// a legitimate draw, and exploring that subset is the point of swarm testing.
+    pub fn is_vacuous(&self) -> bool {
+        self.candidate_classes.is_empty()
+    }
+
     /// The candidate classes this generation dropped, in candidate order. Derived
     /// from the two stored lists rather than stored alongside them, so the
     /// partition cannot drift out of agreement with itself.
@@ -1882,6 +1892,25 @@ mod tests {
         .validate()
         .expect_err("a duplicated candidate must be refused");
         assert!(format!("{error}").contains("more than once"), "{error}");
+    }
+
+    /// A swarm draw over an empty candidate set is the inert-knob signature: the
+    /// operator asked for `--swarm` and the run had nothing to select from.
+    /// Dropping every candidate of a non-empty set is the opposite — a legitimate
+    /// draw — so the two must not collapse into one predicate.
+    #[test]
+    fn swarm_record_is_vacuous_exactly_when_there_were_no_candidates() {
+        assert!(SwarmConfigRecord::default().is_vacuous());
+        let all_dropped = SwarmConfigRecord {
+            candidate_classes: vec!["crash".to_string(), "buggify".to_string()],
+            selected_classes: Vec::new(),
+        };
+        assert!(!all_dropped.is_vacuous());
+        let all_kept = SwarmConfigRecord {
+            candidate_classes: vec!["crash".to_string()],
+            selected_classes: vec!["crash".to_string()],
+        };
+        assert!(!all_kept.is_vacuous());
     }
 
     #[test]

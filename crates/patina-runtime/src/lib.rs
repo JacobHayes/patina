@@ -5744,7 +5744,10 @@ fn remove_fingerprint_component(fingerprint: &str, component: &str) -> String {
 /// This is the uniform surface for every swarm-maskable class, so a consumer can
 /// tell "this generation ran without fs error injection because swarm dropped it"
 /// from "fs error injection was never requested" without re-deriving the mask.
-/// Suppressed by a false-y [`ENV_SWARM_REPORT`].
+/// A `vacuous=1` run (no candidate at all) also gets a loud warning, in the same
+/// shape as the fs/net inert-knob warnings: `--swarm` with nothing to select from
+/// explores exactly what a run without `--swarm` explores, so a clean result must
+/// not read as swarm coverage. Suppressed by a false-y [`ENV_SWARM_REPORT`].
 fn emit_swarm_report(record: &patina_dst_trace::SwarmConfigRecord) {
     if let Ok(value) = env::var(ENV_SWARM_REPORT) {
         if matches!(
@@ -5754,12 +5757,22 @@ fn emit_swarm_report(record: &patina_dst_trace::SwarmConfigRecord) {
             return;
         }
     }
+    eprintln!("{}", swarm_report_line(record));
+    if record.is_vacuous() {
+        eprintln!("{SWARM_VACUOUS_WARNING}");
+    }
+}
+
+/// The `PATINA_SWARM_REPORT` line for a swarm draw. Pure, so the exact wire shape
+/// the campaign classifier reads is unit-testable without capturing stderr.
+fn swarm_report_line(record: &patina_dst_trace::SwarmConfigRecord) -> String {
     let selected = record.selected_classes.len();
     let mut line = format!(
-        "PATINA_SWARM_REPORT candidates={} selected={} deselected={}",
+        "PATINA_SWARM_REPORT candidates={} selected={} deselected={} vacuous={}",
         record.candidate_classes.len(),
         selected,
         record.candidate_classes.len() - selected,
+        u8::from(record.is_vacuous()),
     );
     for class in &record.candidate_classes {
         line.push_str(&format!(
@@ -5767,8 +5780,17 @@ fn emit_swarm_report(record: &patina_dst_trace::SwarmConfigRecord) {
             u8::from(!record.deselected(class)),
         ));
     }
-    eprintln!("{line}");
+    line
 }
+
+/// The inert-`--swarm` warning. A constant so the runtime and the tests that pin
+/// it (and the campaign/sweep classifiers that key on its leading phrase) cannot
+/// drift apart.
+const SWARM_VACUOUS_WARNING: &str = "PATINA WARNING: swarm fault-class selection inert — \
+--swarm was requested but NO swarm-maskable fault class was enabled, so the draw had nothing to \
+keep or drop and this run explored exactly the configuration it would have explored without \
+--swarm. A clean result here does NOT mean fault-class subsets were tested. Enable the fault or \
+buggify knobs the swarm should choose among, or drop --swarm.";
 
 /// Emit the default-on liveness-watchdog diagnostic at a clean finish. Proves the
 /// watchdog was armed and did not fire (a fired watchdog aborts before finish), so
@@ -6965,6 +6987,40 @@ mod tests {
         assert!(
             subsets.len() > 1,
             "swarm subset must vary across seeds: {subsets:?}"
+        );
+    }
+
+    /// `--swarm` on a run with no fault class enabled is an inert knob: the draw
+    /// has nothing to keep or drop, the run explores what a plain run explores,
+    /// and the report must SAY so rather than reading like covered swarm
+    /// exploration. This is the signature the campaign/sweep `VACUOUS_SWARM`
+    /// classes key on, so the wire shape is pinned here.
+    #[test]
+    fn swarm_with_no_enabled_fault_class_reports_vacuous() {
+        let directory = tempdir().unwrap();
+        let trace = directory.path().join("swarm-vacuous.patina");
+        let config = RuntimeConfig::record(3, &trace, "fp+swarm").with_swarm(true);
+        let context = Context::from_config(config).unwrap();
+        context.finish().unwrap();
+        let bundle = patina_dst_trace::TraceBundle::load(&trace).unwrap();
+        let swarm = bundle.metadata.swarm.expect("swarm recorded");
+        assert!(swarm.candidate_classes.is_empty());
+        assert!(swarm.is_vacuous());
+        assert_eq!(
+            swarm_report_line(&swarm),
+            "PATINA_SWARM_REPORT candidates=0 selected=0 deselected=0 vacuous=1"
+        );
+
+        // A live candidate set is NOT vacuous, even when the draw drops all of it:
+        // exploring the empty subset of a real candidate set is a legitimate draw.
+        let all_dropped = patina_dst_trace::SwarmConfigRecord {
+            candidate_classes: vec!["crash".to_string(), "buggify".to_string()],
+            selected_classes: Vec::new(),
+        };
+        assert_eq!(
+            swarm_report_line(&all_dropped),
+            "PATINA_SWARM_REPORT candidates=2 selected=0 deselected=2 vacuous=0 \
+class=crash|0 class=buggify|0"
         );
     }
 

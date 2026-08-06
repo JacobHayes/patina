@@ -4029,6 +4029,113 @@ fn campaign_with_swarm_and_buggify_has_no_coherence_aborts() {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+// `--swarm` selects a seed-derived SUBSET of the fault classes a run enabled, so
+// a run that enabled none has nothing to select from: the draw keeps and drops
+// nothing, and the generation explores exactly what it would have explored
+// without `--swarm`. That is an inert knob, and an inert knob must not read as
+// coverage. This is the planted zero-candidate fixture for the detector: the
+// runtime reports `vacuous=1` and warns, and the campaign classifies the
+// generation `VACUOUS_SWARM` and fails — while the same guest with one class
+// armed is a clean, non-vacuous swarm run, so the detector is not always-on.
+#[test]
+fn swarm_with_zero_candidate_classes_is_reported_and_classified_vacuous() {
+    let workspace = native_workspace();
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("swarm_zero.rs");
+    fs::write(
+        &source,
+        r#"fn main() {
+    println!("SWARM_ZERO_OK");
+}
+"#,
+    )
+    .unwrap();
+    let guest = directory.path().join("swarm-zero");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            guest.to_str().unwrap(),
+        ],
+    );
+
+    // (1) The run itself reports the inert draw and warns.
+    let inert = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["run", guest.to_str().unwrap(), "--seed", "1", "--swarm"],
+    );
+    let stderr = String::from_utf8_lossy(&inert.stderr).to_string();
+    assert!(
+        inert.status.success(),
+        "an inert --swarm warns; it does not fail the run\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("PATINA_SWARM_REPORT candidates=0 selected=0 deselected=0 vacuous=1"),
+        "missing the vacuous swarm report\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("PATINA WARNING: swarm fault-class selection inert"),
+        "an inert --swarm must warn\nstderr:\n{stderr}"
+    );
+
+    // Non-vacuity control: one armed class gives the draw something to choose
+    // among, and the same knob on the same guest then reports `vacuous=0`.
+    let armed = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "run",
+            guest.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--swarm",
+            "--buggify=372",
+        ],
+    );
+    let armed_stderr = String::from_utf8_lossy(&armed.stderr).to_string();
+    assert!(
+        armed_stderr.contains("PATINA_SWARM_REPORT candidates=1")
+            && armed_stderr.contains("vacuous=0"),
+        "an armed class must make the swarm draw non-vacuous\nstderr:\n{armed_stderr}"
+    );
+    assert!(
+        !armed_stderr.contains("swarm fault-class selection inert"),
+        "a live swarm draw must not warn\nstderr:\n{armed_stderr}"
+    );
+
+    // (2) The campaign classifies such a generation and FAILS: a campaign that
+    // asked for fault-subset exploration and got none is not a covered clean run.
+    let out = directory.path().join("swarm-zero-campaign");
+    let ran = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "campaign",
+            guest.to_str().unwrap(),
+            "--gens",
+            "2",
+            "--swarm",
+            "--progress-every",
+            "1",
+            "--out-dir",
+            out.to_str().unwrap(),
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&ran.stdout).to_string();
+    assert!(
+        stdout.contains("class=VACUOUS_SWARM"),
+        "a zero-candidate --swarm generation must be classified\nstdout:\n{stdout}"
+    );
+    assert!(
+        !ran.status.success(),
+        "a campaign whose --swarm explored nothing must fail\nstdout:\n{stdout}"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn campaign_timeout_does_not_save_incomplete_trace() {
     let workspace = native_workspace();

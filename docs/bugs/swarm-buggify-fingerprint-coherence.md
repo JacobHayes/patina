@@ -124,3 +124,50 @@ Focused regression tests:
 - `cargo test -p cargo-patina --test end_to_end campaign_with_swarm_and_buggify_has_no_coherence_aborts -- --nocapture`
 
 The landing gate for this runtime/trace-touching change is `mise run check`.
+
+## Follow-ups closed after the fix
+
+Two residuals were left when the coherence fix landed. Both are closed.
+
+### `--swarm` with zero candidate classes
+
+`--swarm` selects a subset of the fault classes a run enabled, so a run that
+enabled none has an empty candidate set: the draw keeps and drops nothing and the
+generation explores exactly what it would have explored without `--swarm`. That
+is an inert knob, and an inert knob must not read as coverage.
+
+The report now carries `vacuous=<0|1>`, the runtime emits `PATINA WARNING: swarm
+fault-class selection inert`, and the two classifiers that consume swarm
+generations promote a would-be-clean outcome:
+
+- `cargo patina campaign` gained the `VACUOUS_SWARM` outcome class, tiered with
+  `VACUOUS_FS_FAULT` — a coverage failure that a real finding still outranks.
+- `testbeds/workq/fuzz-sweep.sh` gained the same class via `swarm_check`. The
+  sweep decides when to overlay `--swarm` from its OWN fault-knob count while the
+  runtime derives candidates from the config it built, so this also catches the
+  two drifting apart instead of logging `swarm=on` over an empty draw.
+
+An empty SELECTION over a non-empty candidate set is explicitly not vacuous:
+dropping every candidate is a legitimate draw and is the point of swarm testing.
+Both selftests pin that boundary, and both were proven to fail before the rules
+were added.
+
+### Seeded runs and `--fingerprint`
+
+The coherence guard runs on record/replay/branch, not on seeded runs, because a
+seeded run has no fingerprint to check: the native supervisor sets
+`PATINA_FINGERPRINT` only in record and replay mode, and the runtime does not
+read it in seeded mode at all. That scoping is correct rather than accidental —
+the fingerprint is the compatibility label of an ARTIFACT (composed by the
+supervisor, written into the trace, recomputed and compared at replay), and a
+seeded run produces no artifact whose declared coverage anyone can later read.
+Every campaign generation records, so the coverage-claiming path is covered.
+
+What was wrong was the flag: `cargo patina run <BIN> --seed N --fingerprint LABEL`
+accepted a label that nothing could ever compare, which is exactly the "I pinned
+this run to a build" belief the guard exists to protect. `--fingerprint` is now
+declared dependent on `--record` in the CLI registry, so the generic
+dependent-knob check refuses it (`--fingerprint requires --record`) and the
+machine-readable help advertises `"requires": "--record"`. `explore` already
+refuses record mode from the other side, for the same reason: a sweep pins no
+single artifact.

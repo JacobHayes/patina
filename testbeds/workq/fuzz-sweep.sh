@@ -54,7 +54,10 @@
 #     PATINA_SWEEP_STARVE=1, since deferral can wedge an atomic-spinlock guest;
 #     its supervisor stall backstop is classified STARVATION_STALL;
 #   * swarm fault-subset selection (fault tiers): when >= 2 fault classes are on,
-#     a seed-derived ~1/4 of gens fire a random subset via --swarm (+swarm).
+#     a seed-derived ~1/4 of gens fire a random subset via --swarm (+swarm). The
+#     runtime's PATINA_SWARM_REPORT candidate count is checked against the overlay:
+#     a swarm gen whose draw had NO candidate class explored the plain config, and
+#     is classified VACUOUS_SWARM rather than counted as clean.
 # The PATINA_SCHEDULE_POLICY report's bug_depth / starve_vacuous fields are parsed
 # into each gen's annotation. Two knobs from the shared design have no workq
 # analog and are deliberately NOT ported: a client-side pacing window and its
@@ -202,8 +205,29 @@ sched_check() {
   echo OK
 }
 
-# A class is a FAILURE unless it is tolerated. VACUOUS_SCHEDULE and
-# SCHEDULE_DIVERGENCE are failures: a schedule tier that did not explore, or a
+# Swarm-vacuity verdict -- pure. A gen that armed --swarm must have had something
+# to select from. The sweep counts its OWN fault knobs to decide when to overlay
+# swarm, while the runtime derives the candidate set from the CONFIG it built, so
+# the two can drift: a knob the sweep counts that the runtime does not treat as a
+# swarm class (or one whose sampled value is off) leaves the draw with zero
+# candidates, and every "swarm" gen then explores the plain configuration while
+# the log still says swarm=on. The runtime reports that as
+# `PATINA_SWARM_REPORT ... vacuous=1`; an absent report is treated the same way
+# (like the schedule gate: no evidence of exploration is not exploration).
+# A would-be-clean OK is promoted to VACUOUS_SWARM; a genuine finding keeps
+# priority and is never downgraded.
+swarm_check() {
+  local is_swarm="$1" base="$2" vac="$3" cand="$4"
+  if [[ "$is_swarm" != 1 ]]; then echo "$base"; return; fi
+  if [[ "$base" != OK ]]; then echo "$base"; return; fi
+  if [[ -n "$vac" && "$vac" -gt 0 ]]; then echo VACUOUS_SWARM; return; fi
+  if [[ -z "$cand" || "$cand" -lt 1 ]]; then echo VACUOUS_SWARM; return; fi
+  echo OK
+}
+
+# A class is a FAILURE unless it is tolerated. VACUOUS_SCHEDULE, VACUOUS_SWARM and
+# SCHEDULE_DIVERGENCE are failures: a schedule tier that did not explore, a swarm
+# overlay with nothing to select from, or a
 # yield-point run that is nondeterministic, is a broken guarantee. STARVATION_STALL
 # is a tolerated diagnostic: it only arises on the opt-in --starve path and means
 # a wedged generation the backstop killed, not a workq/patina safety bug.
@@ -401,7 +425,7 @@ sample_schedule() {
 derive_config() {
   local G="$1"
   compute_bytes "$G"
-  DET_RUN=0; IS_SCHEDULE=0; BIN="$built"
+  DET_RUN=0; IS_SCHEDULE=0; IS_SWARM=0; BIN="$built"
   # Reset per-gen overlay descriptors so a previous gen never leaks into the log.
   POLICY_SPEC="uniform"; SWARM_SPEC="off"
   if (( BYTE[21] <= 50 )); then
@@ -434,6 +458,7 @@ derive_config() {
     done
     if (( nfault >= 2 && BYTE[25] < 64 )); then
       PKNOBS+=(--swarm)
+      IS_SWARM=1
       SWARM_SPEC="on(candidates=$nfault)"
       CFG_SUMMARY="$CFG_SUMMARY swarm=$SWARM_SPEC"
     fi
@@ -560,6 +585,36 @@ PATINA_ALWAYS_VIOLATION label=x")" "always-violation-not-downgraded"
   else printf '  FAIL %-24s -> starve_vacuous=%s (want >0)\n' "vacuous-starvation" "$rf_sv2"; SELFTEST_FAIL=1; fi
   rm -f "$pf"
 
+  # VACUOUS_SWARM via swarm_check: a swarm gen whose draw had candidates stays OK
+  # (dropping every candidate is a legitimate draw); zero candidates, an explicit
+  # vacuous=1, or no swarm report at all promotes it; a real finding is NEVER
+  # downgraded; a non-swarm gen passes through untouched.
+  assert_class OK "$(swarm_check 1 OK 0 3)" "swarm-nonvacuous-ok"
+  assert_class OK "$(swarm_check 1 OK 0 1)" "swarm-single-candidate-ok"
+  assert_class VACUOUS_SWARM "$(swarm_check 1 OK 1 0)" "swarm-vacuous-flag"
+  assert_class VACUOUS_SWARM "$(swarm_check 1 OK 0 0)" "swarm-zero-candidates"
+  assert_class VACUOUS_SWARM "$(swarm_check 1 OK '' '')" "swarm-no-report"
+  assert_class SAFETY_BUG "$(swarm_check 1 SAFETY_BUG 1 0)" "swarm-finding-not-downgraded"
+  assert_class OK "$(swarm_check 0 OK 1 0)" "swarm-nonswarm-passthrough"
+
+  # swarm_field reads the SWARM line's own fields. The fs/net reports carry their
+  # own `vacuous=`, so a file-wide grep (report_field) would hand the swarm gate
+  # another plane's verdict -- prove the swarm-scoped reader does not.
+  local wf; wf="$(mktemp)"
+  printf '%s\n%s\n' \
+    'PATINA_FS_FAULT_REPORT eligible_ops=9 errors_injected=0 vacuous=1' \
+    'PATINA_SWARM_REPORT candidates=3 selected=2 deselected=1 vacuous=0 class=crash|1 class=net_drop|1 class=sleep_jitter|0' > "$wf"
+  local wf_c wf_v; wf_c=$(swarm_field candidates "$wf"); wf_v=$(swarm_field vacuous "$wf")
+  if [[ "$wf_c" == 3 && "$wf_v" == 0 ]]; then printf '  ok   %-24s -> candidates=%s vacuous=%s\n' "swarm-field-parse" "$wf_c" "$wf_v"
+  else printf '  FAIL %-24s -> candidates=%s vacuous=%s (want 3/0)\n' "swarm-field-parse" "$wf_c" "$wf_v"; SELFTEST_FAIL=1; fi
+  assert_class OK "$(swarm_check 1 OK "$wf_v" "$wf_c")" "swarm-field-nonvacuous"
+  # The planted inert draw: the runtime's own zero-candidate line fires the class.
+  printf '%s\n' 'PATINA_SWARM_REPORT candidates=0 selected=0 deselected=0 vacuous=1' > "$wf"
+  assert_class VACUOUS_SWARM \
+    "$(swarm_check 1 OK "$(swarm_field vacuous "$wf")" "$(swarm_field candidates "$wf")")" \
+    "swarm-field-vacuous"
+  rm -f "$wf"
+
   # is_infra recognizes environment/build failures and only those; and a
   # "cargo-patina: ..." infra line must NOT be swallowed as a patina crash.
   assert_class UNEXPECTED_ABORT \
@@ -576,7 +631,7 @@ PATINA_ALWAYS_VIOLATION label=x")" "always-violation-not-downgraded"
 
   echo
   if (( SELFTEST_FAIL )); then echo "SELFTEST FAILED"; return 1; fi
-  echo "SELFTEST PASSED (every class covered, incl. planted WORKQ_VIOLATION -> SAFETY_BUG, PATINA_ALWAYS_VIOLATION -> ALWAYS_VIOLATION, STARVATION_STALL, VACUOUS_SCHEDULE, SCHEDULE_DIVERGENCE, and policy bug_depth/starve_vacuous parsing)"
+  echo "SELFTEST PASSED (every class covered, incl. planted WORKQ_VIOLATION -> SAFETY_BUG, PATINA_ALWAYS_VIOLATION -> ALWAYS_VIOLATION, STARVATION_STALL, VACUOUS_SCHEDULE, VACUOUS_SWARM, SCHEDULE_DIVERGENCE, and policy bug_depth/starve_vacuous parsing)"
   return 0
 }
 
@@ -606,6 +661,13 @@ field_of() { sed -n "s/.*$1=\\([0-9][0-9]*\\).*/\\1/p" "$2" | head -1; }
 sha_of()   { if [[ -f "$1" ]]; then shasum -a256 "$1" | cut -d' ' -f1; else echo MISSING; fi; }
 # extract a numeric field from a PATINA_SCHEDULE_REPORT stderr line
 report_field() { /usr/bin/grep -o "$1=[0-9][0-9]*" "$2" 2>/dev/null | head -1 | cut -d= -f2; }
+# extract a numeric field from the PATINA_SWARM_REPORT line SPECIFICALLY: several
+# runtime reports carry a `vacuous=` field, so the file-wide report_field would
+# read another plane's verdict as the swarm one.
+swarm_field() {
+  /usr/bin/grep '^PATINA_SWARM_REPORT' "$2" 2>/dev/null | head -1 \
+    | /usr/bin/grep -o " $1=[0-9][0-9]*" | head -1 | cut -d= -f2
+}
 # the guest --jobs value (the convergence target) out of an HARGS array
 jobs_of() { local i; for (( i = 0; i < ${#HARGS[@]}; i++ )); do [[ "${HARGS[i]}" == "--jobs" ]] && { echo "${HARGS[$(( i + 1 ))]}"; return; }; done; }
 
@@ -613,7 +675,7 @@ jobs_of() { local i; for (( i = 0; i < ${#HARGS[@]}; i++ )); do [[ "${HARGS[i]}"
 c_OK=0; c_SAFETY_BUG=0; c_LIVENESS_TIMEOUT=0; c_UNEXPECTED_LIVENESS=0
 c_FAILCLOSED_ABORT=0; c_UNEXPECTED_ABORT=0; c_UNEXPECTED_CRASH=0; c_DETERMINISM_BUG=0
 c_INFRA_ERROR=0; c_VACUOUS_SCHEDULE=0; c_SCHEDULE_DIVERGENCE=0; c_ALWAYS_VIOLATION=0
-c_STARVATION_STALL=0
+c_STARVATION_STALL=0; c_VACUOUS_SWARM=0
 bump() {
   case "$1" in
     OK) c_OK=$(( c_OK + 1 )) ;;
@@ -628,6 +690,7 @@ bump() {
     DETERMINISM_BUG) c_DETERMINISM_BUG=$(( c_DETERMINISM_BUG + 1 )) ;;
     INFRA_ERROR) c_INFRA_ERROR=$(( c_INFRA_ERROR + 1 )) ;;
     VACUOUS_SCHEDULE) c_VACUOUS_SCHEDULE=$(( c_VACUOUS_SCHEDULE + 1 )) ;;
+    VACUOUS_SWARM) c_VACUOUS_SWARM=$(( c_VACUOUS_SWARM + 1 )) ;;
     SCHEDULE_DIVERGENCE) c_SCHEDULE_DIVERGENCE=$(( c_SCHEDULE_DIVERGENCE + 1 )) ;;
   esac
 }
@@ -751,6 +814,20 @@ run_gen() {
     else sched_note=" schedule(boundaries=${tb:-?} vacuous=${vac:-0})"; fi
   fi
 
+  # Swarm-vacuity gate (swarm-overlay gens only, applied LAST for the same reason:
+  # it never downgrades a real finding). It reads the RUNTIME's candidate count
+  # rather than the sweep's own `nfault` guess, so a drift between the two shows up
+  # as a failure instead of a log line that claims swarm=on over an empty draw.
+  local swarm_note=""
+  if (( IS_SWARM == 1 )); then
+    local svac scand wclass
+    svac=$(swarm_field vacuous "$err"); scand=$(swarm_field candidates "$err")
+    wclass=$(swarm_check 1 "$class" "${svac:-}" "${scand:-}")
+    if [[ "$wclass" != "$class" ]]; then class="$wclass"
+      swarm_note=" (VACUOUS_SWARM: candidates=${scand:-none} vacuous=${svac:-?} spec=$SWARM_SPEC -- --swarm had nothing to select)"
+    else swarm_note=" swarm(candidates=${scand:-?} vacuous=${svac:-0})"; fi
+  fi
+
   # Bug-depth annotation (exploration-policy gens). When a PCT/starvation policy
   # was active the runtime reports a PATINA_SCHEDULE_POLICY line; surface its
   # ordering-depth estimate (priority-change points hit + starvation exclusions),
@@ -774,7 +851,7 @@ run_gen() {
     buggify_sites_join_assert "$PATINA" "$here" "$err" || exit 3
     SITES_JOIN_CHECKED=1
   fi
-  local logline="gen=$G tier=$TIER class=$class exit=$code enqueued=${enq:-?}/${jobs:-?} completed=${comp:-?} failed=${failed:-?} config='$CFG_SUMMARY'$live_note$det_note$sched_note$policy_note"
+  local logline="gen=$G tier=$TIER class=$class exit=$code enqueued=${enq:-?}/${jobs:-?} completed=${comp:-?} failed=${failed:-?} config='$CFG_SUMMARY'$live_note$det_note$sched_note$swarm_note$policy_note"
   echo "$logline" >> "$SWEEP_LOG"; echo "$logline"
 
   if [[ "$class" == OK ]]; then rm -rf "$gd"
@@ -824,7 +901,7 @@ sweep() {
   local c_SOMETIMES_UNMET=${#unmet_sites[@]}
 
   local total=$(( end - start + 1 ))
-  local failures=$(( c_SAFETY_BUG + c_ALWAYS_VIOLATION + c_UNEXPECTED_LIVENESS + c_UNEXPECTED_ABORT + c_UNEXPECTED_CRASH + c_DETERMINISM_BUG + c_VACUOUS_SCHEDULE + c_SCHEDULE_DIVERGENCE + c_SOMETIMES_UNMET ))
+  local failures=$(( c_SAFETY_BUG + c_ALWAYS_VIOLATION + c_UNEXPECTED_LIVENESS + c_UNEXPECTED_ABORT + c_UNEXPECTED_CRASH + c_DETERMINISM_BUG + c_VACUOUS_SCHEDULE + c_VACUOUS_SWARM + c_SCHEDULE_DIVERGENCE + c_SOMETIMES_UNMET ))
   echo
   echo "==> sweep summary (generations $start..$end, $total total)"
   echo "    tiers: SCHEDULE=$c_t_schedule BREADTH=$c_t_breadth TRAFFIC=$c_t_traffic DETERMINISM=$c_t_determinism"
@@ -841,6 +918,7 @@ sweep() {
   echo "    UNEXPECTED_CRASH    = $c_UNEXPECTED_CRASH"
   echo "    DETERMINISM_BUG     = $c_DETERMINISM_BUG"
   echo "    VACUOUS_SCHEDULE    = $c_VACUOUS_SCHEDULE   (SCHEDULE gen did not explore)"
+  echo "    VACUOUS_SWARM       = $c_VACUOUS_SWARM   (--swarm gen had no candidate fault class)"
   echo "    SCHEDULE_DIVERGENCE = $c_SCHEDULE_DIVERGENCE   (yield-points double-run non-deterministic)"
   echo "    TOTAL FAILURES      = $failures"
   if (( c_SOMETIMES_UNMET > 0 )); then

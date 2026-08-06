@@ -391,7 +391,10 @@ original modulo draw verbatim.
    stripped — so a masked generation's fingerprint and metadata describe the run
    that happened. `PATINA_SWARM_REPORT` and `PATINA_SDK_REPORT`'s
    `swarm_deselected` field keep "swarm dropped it" distinguishable from "never
-   requested"; see
+   requested". `--swarm` over a run with no fault class enabled has nothing to
+   select: the report says `vacuous=1`, the runtime warns, and a campaign or
+   sweep generation is classified `VACUOUS_SWARM` rather than counted clean —
+   dropping every candidate of a non-empty set stays a legitimate draw. See
    [docs/bugs/swarm-buggify-fingerprint-coherence.md](./docs/bugs/swarm-buggify-fingerprint-coherence.md).
 
 3. **Starvation intervals** (`patina-dst-sched-det`): `cargo patina run --starve[=N]`
@@ -505,10 +508,13 @@ surface (`cargo patina campaign`) generalizing the shell campaign machinery.
    `SHA-256("patina-campaign-<seed_base>-<gen>")` — no wall clock, no `$RANDOM`,
    exactly the fuzz-sweep scheme — so a re-run reproduces identical outcomes and
    signatures. The spec is a JSON file (`--spec`, `deny`-unknown-keys) and/or flags.
-   A pure classifier assigns one of nine outcome classes — `OK` / `VIOLATION` /
-   `LIVENESS` / `VACUOUS_FS_FAULT` / `VACUOUS_DNS_FAULT` / `FAIL_CLOSED_ABORT` /
-   `STARVATION_STALL` / `INFRA` / `UNCLASSIFIED` — with fuzz-sweep's strictness: an explicit finding is never
-   downgraded, exit 111 is `STARVATION_STALL`, a Patina fail-closed refusal (a
+   A pure classifier assigns one of ten outcome classes — `OK` / `VIOLATION` /
+   `LIVENESS` / `VACUOUS_FS_FAULT` / `VACUOUS_DNS_FAULT` / `VACUOUS_SWARM` /
+   `FAIL_CLOSED_ABORT` / `STARVATION_STALL` / `INFRA` / `UNCLASSIFIED` — with
+   fuzz-sweep's strictness: an explicit finding is never
+   downgraded, exit 111 is `STARVATION_STALL`, a generation that asked for
+   `--swarm` with no fault class to select from is `VACUOUS_SWARM` (an inert
+   exploration knob is a coverage failure, not a clean run), a Patina fail-closed refusal (a
    shim fatal stderr line or a bare SIGABRT carrying no SUT finding) is its own
    class distinct from a generic failure, and any nonzero exit matching no class
    lands LOUDLY in `UNCLASSIFIED` rather than being silently OK or mislabeled. It
