@@ -131,7 +131,7 @@ fn apply_check_outside_lock(spec: &WorkerSpec, job_id: u64, work: u64) {
         .applied_ids()
         .contains(&job_id)
     {
-        return patina_dst::sometimes!(true, "dedup-suppressed-double-apply");
+        return patina_dst::sometimes!(true, "dedup-check-outside-lock-suppressed");
     }
     // Lock dropped above; this sleep is the check-then-act window a concurrent
     // duplicate delivery races through before either apply is recorded.
