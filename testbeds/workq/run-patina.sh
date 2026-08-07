@@ -26,9 +26,10 @@
 #   [6] a buggify sweep via the shared ../buggify-campaign.sh accumulator: every
 #       cooperative-fault gen holds its always! invariants (no ALWAYS_VIOLATION)
 #       and the campaign meets its sometimes! coverage (no SOMETIMES_UNMET).
-#   [7] seeded-bug catch: each `--bug` on its pinned seed+config MUST be caught by
-#       an existing invariant/liveness gate (fail-closed: a bug that slips through
-#       fails the leg), and the failing run records + strict-replays byte-identically.
+#   [7] seeded-bug catch: each `--bug` MUST be caught by an existing
+#       invariant/liveness gate within a bounded seed sweep (fail-closed: a bug
+#       no seed catches fails the leg), and the catching run records +
+#       strict-replays byte-identically.
 # The overriding guard: a WORKQ_VIOLATION on any run fails the script.
 #
 # Determinism model (see the crate module doc for the full statement): Patina is
@@ -248,22 +249,30 @@ for label, r in sorted(s.get("sites", {}).items()):
     print(f"      {label} [{r['kind']}] reached={r['reached']} activated_gens={r['activated_gens']}{extra}")
 PY
 
-echo "==> [7] seeded-bug catch: each --bug on its pinned seed+config MUST be caught"
-# Each entry: NAME | run-seed | extra Patina knobs | extra guest args | expected marker.
-# The demo is FAIL-CLOSED: if a run comes back clean (exit 0, no marker), the bug
-# slipped past the invariants and the leg FAILS -- so it can never go vacuous. Then
-# the failing run is recorded and strict-replayed, requiring a byte-identical result
-# + trace hash (the violation reproduces exactly).
+echo "==> [7] seeded-bug catch: each --bug MUST be caught within a bounded seed sweep"
+# Each entry: NAME | first seed | extra Patina knobs | extra guest args | expected marker.
+# Schedule-sensitive bugs need a schedule that actually interleaves the race, and
+# per-seed schedules are platform-specific AND legitimately shift when scheduler
+# seed derivation changes — so a single pinned seed is brittle by construction
+# (a sched-det domain_seed migration broke the old pinned-seed leg on Linux only).
+# Instead each bug sweeps a bounded seed window and MUST be caught by some seed in
+# it. Still fail-closed: a fixed bug or a weakened invariant is caught by NO seed,
+# and a clean sweep FAILS the leg. The catching run is then recorded and
+# strict-replayed, requiring a byte-identical result + trace hash.
+BUG_SEED_WINDOW=8
 bug_leg() {
-  local name="$1" bseed="$2" pknobs="$3" gargs="$4" marker="$5"
-  local tr="$work/bug.$name.trace" err="$work/bug.$name.err" out code
-  # shellcheck disable=SC2086
-  if out="$(run --seed "$bseed" $pknobs --record "$tr" ${ALLOW[@]+"${ALLOW[@]}"} -- "${ARGS[@]}" $gargs 2>"$err")"; then code=0; else code=$?; fi
+  local name="$1" first="$2" pknobs="$3" gargs="$4" marker="$5"
+  local tr="$work/bug.$name.trace" err="$work/bug.$name.err" out code bseed caught=0
+  for bseed in $(seq "$first" $((first + BUG_SEED_WINDOW - 1))); do
+    # shellcheck disable=SC2086
+    if out="$(run --seed "$bseed" $pknobs --record "$tr" ${ALLOW[@]+"${ALLOW[@]}"} -- "${ARGS[@]}" $gargs 2>"$err")"; then code=0; else code=$?; fi
+    # Caught == nonzero exit AND the expected marker present on stderr.
+    if [[ $code -ne 0 ]] && grep -q "$marker" "$err"; then caught=1; break; fi
+  done
   local res; res="$(result_of <<<"$out")"
   echo "    -- $name (seed $bseed): ${res#WORKQ_RESULT } exit=$code"
-  # Caught == nonzero exit AND the expected marker present on stderr.
-  if [[ $code -eq 0 ]] || ! grep -q "$marker" "$err"; then
-    echo "    FAIL: bug '$name' NOT caught (exit=$code, expected '$marker') -- demo went vacuous"; fail=1; stderr_tail "$err"; return
+  if [[ $caught -ne 1 ]]; then
+    echo "    FAIL: bug '$name' NOT caught by seeds $first..$((first + BUG_SEED_WINDOW - 1)) (expected '$marker') -- demo went vacuous"; fail=1; stderr_tail "$err"; return
   fi
   echo "        caught: $(grep -m1 "$marker" "$err")"
   # Strict replay must reproduce the failing run byte-identically (result + trace).
