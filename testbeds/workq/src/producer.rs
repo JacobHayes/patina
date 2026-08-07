@@ -51,6 +51,11 @@ pub type AckedHandle = Arc<Mutex<AckedLedger>>;
 pub struct ProducerSpec {
     pub id: u32,
     pub server: SocketAddr,
+    /// When set, the numeric `server` above is only the port source: the
+    /// producer resolves `host:port` once at thread startup instead of
+    /// dialing `server` directly (see `wire::resolve_server_host`). `None`
+    /// (the default) is the original zero-DNS numeric path, unchanged.
+    pub server_host: Option<String>,
     pub seed: u64,
     pub count: u64,
     pub acked: AckedHandle,
@@ -66,10 +71,23 @@ pub fn run(spec: ProducerSpec) {
     let _ = socket.set_read_timeout(Some(spec.retry_timeout));
     let mut buffer = [0u8; 512];
 
+    let server = match &spec.server_host {
+        Some(host) => match crate::wire::resolve_server_host(host, spec.server.port()) {
+            Some(addr) => addr,
+            None => {
+                return eprintln!(
+                    "producer {}: dns resolution of {host:?} exhausted retries",
+                    spec.id
+                );
+            }
+        },
+        None => spec.server,
+    };
+
     for client_seq in 0..spec.count {
         let (key, work) = derive_job(spec.seed, spec.id, client_seq);
         while !spec.shutdown.load(Ordering::Relaxed) {
-            Msg::Enqueue(spec.id, client_seq, key, work).send(&socket, spec.server);
+            Msg::Enqueue(spec.id, client_seq, key, work).send(&socket, server);
             if let Some(Msg::EnqueueAck(producer, acked, job_id)) = Msg::recv(&socket, &mut buffer)
             {
                 if producer == spec.id && acked == client_seq {

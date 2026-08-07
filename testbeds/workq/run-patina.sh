@@ -30,6 +30,11 @@
 #       invariant/liveness gate within a bounded seed sweep (fail-closed: a bug
 #       no seed catches fails the leg), and the catching run records +
 #       strict-replays byte-identically.
+#   [8] --server-host: producers/workers resolve the server by name (via
+#       --dns-entry) instead of the numeric 127.0.0.1 path — converges and
+#       records + replays byte-identically, and an injected
+#       --dns-fail-permille still converges (the retry in
+#       wire::resolve_server_host must not wedge under a real DNS fault).
 # The overriding guard: a WORKQ_VIOLATION on any run fails the script.
 #
 # Determinism model (see the crate module doc for the full statement): Patina is
@@ -315,6 +320,29 @@ bug_leg skip-redelivery-commit 2 "--buggify=500 --buggify-after-setup" "--bug sk
 # fires. early-redelivery (buggify) forces the concurrent duplicate; the small tick
 # shrinks redelivery latency into the apply window so the race is deterministic.
 bug_leg apply-check-outside-lock 1 "--buggify=500 --buggify-after-setup" "--tick-ms 2 --bug apply-check-outside-lock" WORKQ_VIOLATION
+
+echo "==> [8] --server-host resolves via --dns-entry: converges, replays byte-identically, survives an injected dns fault"
+DNS_ARGS=(--seed 1 --jobs "$JOBS" --workers 3 --producers 2 --base-port 5001 --data-dir /workq \
+          --timeout-secs 90 --server-host workq-server)
+dhost_out="$(run --seed 1 --dns-entry workq-server=127.0.0.1 ${ALLOW[@]+"${ALLOW[@]}"} -- "${DNS_ARGS[@]}" 2>"$work/dns.err")" || true
+if violated <"$work/dns.err"; then echo "    FAIL: WORKQ_VIOLATION under --server-host"; fail=1; stderr_tail "$work/dns.err"; fi
+dres="$(result_of <<<"$dhost_out")"
+echo "    -- (a) resolved: $dres"
+converged "$dres" || { echo "    FAIL: --server-host run did not converge"; fail=1; stderr_tail "$work/dns.err"; }
+dtrace="$work/dns.trace"
+dr1="$(run --seed 1 --dns-entry workq-server=127.0.0.1 --record "$dtrace" ${ALLOW[@]+"${ALLOW[@]}"} -- "${DNS_ARGS[@]}" 2>/dev/null | result_of)"
+dr2="$(replay "$dtrace" ${ALLOW[@]+"${ALLOW[@]}"} 2>/dev/null | result_of)"
+echo "    -- (b) record: $dr1"; echo "       replay: $dr2"
+if [[ "$dr1" != "$dr2" || -z "$dr1" ]]; then echo "    FAIL: --server-host replay differs from record"; fail=1; fi
+echo "    -- (c) injected --dns-fail-permille still converges (the resolve retry must not wedge) --"
+for s in 1 2 3; do
+  ferr="$work/dnsfail.$s.err"
+  fout="$(run --seed "$s" --dns-entry workq-server=127.0.0.1 --dns-fail-permille 400 ${ALLOW[@]+"${ALLOW[@]}"} -- "${DNS_ARGS[@]}" 2>"$ferr")" || true
+  if violated <"$ferr"; then echo "      FAIL: WORKQ_VIOLATION under --dns-fail-permille seed $s"; fail=1; stderr_tail "$ferr"; fi
+  fres="$(result_of <<<"$fout")"
+  echo "      seed $s: ${fres#WORKQ_RESULT }"
+  converged "$fres" || { echo "      FAIL: --dns-fail-permille seed $s did not converge"; fail=1; stderr_tail "$ferr"; }
+done
 
 elapsed=$(( SECONDS - start_secs ))
 echo "==> wall time: ${elapsed}s"

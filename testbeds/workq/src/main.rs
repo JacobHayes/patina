@@ -53,6 +53,12 @@ struct Options {
     /// Crash + recover the server once `completed` first reaches this (0 = never).
     crash_at_completed: u64,
     bug: Bug,
+    /// When set, producers/workers resolve this name (via
+    /// `wire::resolve_server_host`) instead of dialing `base_port` on the
+    /// literal `127.0.0.1` numeric path. `None` (the default) is unchanged
+    /// behavior; this exists so a `--dns-entry`-backed campaign has a real DNS
+    /// call site to exercise (workq otherwise never resolves a hostname).
+    server_host: Option<String>,
 }
 
 fn main() {
@@ -65,7 +71,8 @@ fn main() {
         eprintln!(
             "usage: workq [--seed N] [--jobs N] [--workers N] [--producers N] [--base-port N] \
              [--data-dir PATH] [--timeout-secs N] [--tick-ms N] [--segment-bytes N] \
-             [--crash-at-completed N] [--bug NAME] | --check-recovery-fail-closed\n\
+             [--crash-at-completed N] [--bug NAME] [--server-host NAME] | \
+             --check-recovery-fail-closed\n\
              valid --bug names: {}",
             Bug::NAMES.join(", ")
         );
@@ -183,6 +190,7 @@ fn orchestrate(options: Options) -> i32 {
         let spec = worker::WorkerSpec {
             id,
             server: bind,
+            server_host: options.server_host.clone(),
             accumulator: accumulator.clone(),
             shutdown: shutdown.clone(),
             poll_timeout: options.tick * 2,
@@ -195,6 +203,7 @@ fn orchestrate(options: Options) -> i32 {
         let spec = producer::ProducerSpec {
             id,
             server: bind,
+            server_host: options.server_host.clone(),
             seed: options.seed,
             count: producer_count(options.jobs, options.producers, id),
             acked: acked.clone(),
@@ -436,6 +445,7 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
         segment_bytes: 4096,
         crash_at_completed: 0,
         bug: Bug::None,
+        server_host: None,
     };
     let mut data_dir: Option<PathBuf> = None;
     while let Some(flag) = args.next() {
@@ -465,6 +475,7 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
             "--tick-ms" => o.tick = Duration::from_millis(n("--tick-ms")?),
             "--segment-bytes" => o.segment_bytes = n("--segment-bytes")?,
             "--crash-at-completed" => o.crash_at_completed = n("--crash-at-completed")?,
+            "--server-host" => o.server_host = Some(val("--server-host")?),
             "--bug" => {
                 let name = val("--bug")?;
                 o.bug = Bug::parse(&name).ok_or_else(|| {

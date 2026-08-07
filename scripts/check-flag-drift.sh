@@ -116,6 +116,7 @@ ALLOWED_FLAGS='
 --tick-ms
 --segment-bytes
 --crash-at-completed
+--server-host
 --check-recovery-fail-closed
 --update
 --dry-run
@@ -139,8 +140,8 @@ ALLOWED_FLAGS='
 # --iters: an example guest program's own argument in IMPLEMENTATION.md.
 # --bug: the workq/pubsub guests' planted-bug selector.
 # --jobs/--data-dir/--base-port/--workers/--producers/--tick-ms/--segment-bytes/
-#   --crash-at-completed/--check-recovery-fail-closed: the workq/pubsub guest
-#   binaries' own workload arguments.
+#   --crash-at-completed/--server-host/--check-recovery-fail-closed: the
+#   workq/pubsub guest binaries' own workload arguments.
 # -- sweep/corpus scripts' own CLI options --
 # --update: audit-corpus run.sh's re-record mode.
 # --dry-run: the fuzz-sweep/wasi-buggify-sweep scripts' no-run mode.

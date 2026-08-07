@@ -70,6 +70,11 @@ pub type AccumulatorHandle = Arc<Mutex<Accumulator>>;
 pub struct WorkerSpec {
     pub id: u32,
     pub server: SocketAddr,
+    /// When set, the numeric `server` above is only the port source: the
+    /// worker resolves `host:port` once at thread startup instead of dialing
+    /// `server` directly (see `wire::resolve_server_host`). `None` (the
+    /// default) is the original zero-DNS numeric path, unchanged.
+    pub server_host: Option<String>,
     pub accumulator: AccumulatorHandle,
     pub shutdown: Arc<AtomicBool>,
     pub poll_timeout: Duration,
@@ -89,11 +94,24 @@ pub fn run(spec: WorkerSpec) {
     let _ = socket.set_read_timeout(Some(spec.poll_timeout));
     let mut buffer = [0u8; 512];
 
+    let server = match &spec.server_host {
+        Some(host) => match crate::wire::resolve_server_host(host, spec.server.port()) {
+            Some(addr) => addr,
+            None => {
+                return eprintln!(
+                    "worker {}: dns resolution of {host:?} exhausted retries",
+                    spec.id
+                );
+            }
+        },
+        None => spec.server,
+    };
+
     while !spec.shutdown.load(Ordering::Relaxed) {
-        Msg::Poll(spec.id).send(&socket, spec.server);
+        Msg::Poll(spec.id).send(&socket, server);
         match Msg::recv(&socket, &mut buffer) {
             Some(Msg::Assign(job_id, work, _)) => {
-                process(&spec, &socket, &mut buffer, job_id, work)
+                process(&spec, &socket, &mut buffer, job_id, work, server)
             }
             Some(Msg::PollEmpty) => std::thread::sleep(spec.backoff),
             _ => {} // stale reply or timeout: poll again
@@ -101,10 +119,17 @@ pub fn run(spec: WorkerSpec) {
     }
 }
 
-fn process(spec: &WorkerSpec, socket: &UdpSocket, buffer: &mut [u8], job_id: u64, work: u64) {
+fn process(
+    spec: &WorkerSpec,
+    socket: &UdpSocket,
+    buffer: &mut [u8],
+    job_id: u64,
+    work: u64,
+    server: SocketAddr,
+) {
     // Cooperative fault: decline the job, driving the terminal-fail path.
     if patina_dst::buggify!("job-fail") {
-        return deliver_complete(spec, socket, buffer, job_id, Outcome::Fail);
+        return deliver_complete(spec, socket, buffer, job_id, Outcome::Fail, server);
     }
     if spec.bug == Bug::ApplyCheckOutsideLock {
         apply_check_outside_lock(spec, job_id, work);
@@ -116,7 +141,7 @@ fn process(spec: &WorkerSpec, socket: &UdpSocket, buffer: &mut [u8], job_id: u64
             ApplyResult::Duplicate => patina_dst::sometimes!(true, "dedup-suppressed-double-apply"),
         }
     }
-    deliver_complete(spec, socket, buffer, job_id, Outcome::Success);
+    deliver_complete(spec, socket, buffer, job_id, Outcome::Success, server);
 }
 
 /// The `apply-check-outside-lock` bug: the "already applied?" check runs OUTSIDE
@@ -146,12 +171,13 @@ fn deliver_complete(
     buffer: &mut [u8],
     job_id: u64,
     outcome: Outcome,
+    server: SocketAddr,
 ) {
     for _ in 0..MAX_COMPLETE_RETRIES {
         if spec.shutdown.load(Ordering::Relaxed) {
             return;
         }
-        Msg::Complete(spec.id, job_id, outcome).send(socket, spec.server);
+        Msg::Complete(spec.id, job_id, outcome).send(socket, server);
         loop {
             match Msg::recv(socket, buffer) {
                 Some(Msg::CompleteAck(acked)) if acked == job_id => return,

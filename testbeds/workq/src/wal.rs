@@ -144,12 +144,19 @@ pub struct Wal {
     durable_seq: u64,
     /// Records written since the last successful fsync.
     dirty: bool,
+    /// The `ignore-short-write` bug: append issues one raw `write()` and
+    /// ignores the returned count instead of looping to completion.
+    ignore_short_write: bool,
 }
 
 impl Wal {
     /// Open (recovering existing segments) and position at the end, returning the
     /// recovered records so the caller can rebuild state.
-    pub fn open(dir: &Path, segment_bytes: u64) -> Result<(Self, Vec<FramedRecord>), WalError> {
+    pub fn open(
+        dir: &Path,
+        segment_bytes: u64,
+        ignore_short_write: bool,
+    ) -> Result<(Self, Vec<FramedRecord>), WalError> {
         fs::create_dir_all(dir)?;
         let recovered = recover(dir)?;
         let path = dir.join(segment_name(recovered.last_index));
@@ -166,6 +173,7 @@ impl Wal {
             segment_bytes,
             durable_seq: recovered.next_seq.saturating_sub(1),
             dirty: false,
+            ignore_short_write,
         };
         Ok((wal, recovered.records))
     }
@@ -179,7 +187,17 @@ impl Wal {
         if self.len > 0 && self.len + frame.len() as u64 > self.segment_bytes {
             self.rotate()?;
         }
-        self.file.write_all(&frame)?;
+        if self.ignore_short_write {
+            // Planted bug (`--bug ignore-short-write`): a single raw `write()`,
+            // ignoring the returned count instead of looping until the whole
+            // frame lands. Under `--fs-short-permille` this silently drops the
+            // frame's tail; recovery truncates at the torn frame and the
+            // durability invariant (acked-job-missing-from-wal in
+            // main.rs::report) catches the vanished record.
+            let _ = self.file.write(&frame)?;
+        } else {
+            self.file.write_all(&frame)?;
+        }
         self.file.flush()?;
         self.len += frame.len() as u64;
         self.next_seq += 1;
@@ -296,14 +314,14 @@ mod tests {
     #[test]
     fn append_recovers_across_rotation() {
         let dir = tempdir("rot");
-        let (mut wal, existing) = Wal::open(&dir, 32).unwrap(); // tiny: forces rotation
+        let (mut wal, existing) = Wal::open(&dir, 32, false).unwrap(); // tiny: forces rotation
         assert!(existing.is_empty());
         for job in 0..20u64 {
             wal.append(&WalRecord::Complete(job)).unwrap();
         }
         drop(wal);
         assert!(segment_paths(&dir).len() > 1, "expected rotation");
-        let (_wal, records) = Wal::open(&dir, 32).unwrap();
+        let (_wal, records) = Wal::open(&dir, 32, false).unwrap();
         assert_eq!(records.len(), 20);
         assert_eq!(records[19].record, WalRecord::Complete(19));
         let _ = fs::remove_dir_all(&dir);

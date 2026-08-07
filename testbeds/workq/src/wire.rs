@@ -3,8 +3,9 @@
 //! `cat`-able. Each WAL line ends with a CRC-32 hex field; recovery uses it to
 //! tell a crash-torn final line (safe to drop) from mid-log corruption (refuse).
 
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::str::{FromStr, Split};
+use std::time::Duration;
 
 /// Number of accumulator buckets a job's key can land in (payload derivation).
 pub const NUM_KEYS: u32 = 8;
@@ -106,6 +107,35 @@ impl Msg {
         let (len, _) = socket.recv_from(buffer).ok()?;
         Msg::decode(&buffer[..len])
     }
+}
+
+/// Retries before a `--server-host` resolution gives up.
+const DNS_RESOLVE_RETRIES: u32 = 30;
+/// Backoff between resolution attempts.
+const DNS_RESOLVE_BACKOFF: Duration = Duration::from_millis(5);
+
+/// Resolve `host:port` (routing through Patina's deterministic resolver under
+/// `--dns-entry`/`--dns-fail-permille`/`--dns-latency-nanos`), retrying on
+/// failure. An UNretried DNS failure is itself one of the unified-fault-knobs
+/// arc's named planted-bug classes, so the clean harness deliberately retries
+/// here with a bounded, short-backoff loop instead of giving up on the first
+/// NXDOMAIN or injected timeout — a real DNS fault is transient by nature, and
+/// giving up on the first failure would wedge the clean (fault-free) path into
+/// spurious non-convergence too. `None` after the bound is exhausted (a
+/// misconfigured or permanently-failing name), so the caller can fail the
+/// thread instead of retrying forever.
+pub fn resolve_server_host(host: &str, port: u16) -> Option<SocketAddr> {
+    for attempt in 0..DNS_RESOLVE_RETRIES {
+        if let Ok(mut addrs) = (host, port).to_socket_addrs() {
+            if let Some(addr) = addrs.next() {
+                return Some(addr);
+            }
+        }
+        if attempt + 1 < DNS_RESOLVE_RETRIES {
+            std::thread::sleep(DNS_RESOLVE_BACKOFF);
+        }
+    }
+    None
 }
 
 // ---- Write-ahead-log records ------------------------------------------------

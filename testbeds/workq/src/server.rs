@@ -48,6 +48,11 @@ pub enum Bug {
     /// mutex-held apply critical section, so two workers holding duplicate
     /// deliveries of one job can both pass the check and double-apply it.
     ApplyCheckOutsideLock,
+    /// The WAL append path issues one raw `write()` and ignores the returned
+    /// count instead of looping to completion. Under `--fs-short-permille` a
+    /// frame's tail is silently dropped; recovery then truncates at the torn
+    /// frame and the durability invariant (acked job present in the WAL) fires.
+    IgnoreShortWrite,
 }
 
 impl Bug {
@@ -55,12 +60,14 @@ impl Bug {
         "dedup-ignore-producer",
         "skip-redelivery-commit",
         "apply-check-outside-lock",
+        "ignore-short-write",
     ];
     pub fn parse(name: &str) -> Option<Bug> {
         match name {
             "dedup-ignore-producer" => Some(Bug::DedupIgnoreProducer),
             "skip-redelivery-commit" => Some(Bug::SkipRedeliveryCommit),
             "apply-check-outside-lock" => Some(Bug::ApplyCheckOutsideLock),
+            "ignore-short-write" => Some(Bug::IgnoreShortWrite),
             _ => None,
         }
     }
@@ -132,7 +139,11 @@ impl Queue {
     /// Open the WAL (recovering prior segments) and rebuild the queue; a
     /// fail-closed corruption surfaces as `WalError`.
     fn open(cfg: ServerConfig) -> Result<Self, WalError> {
-        let (wal, records) = Wal::open(&cfg.dir, cfg.segment_bytes)?;
+        let (wal, records) = Wal::open(
+            &cfg.dir,
+            cfg.segment_bytes,
+            cfg.bug == Bug::IgnoreShortWrite,
+        )?;
         let mut q = Queue {
             cfg,
             wal,
