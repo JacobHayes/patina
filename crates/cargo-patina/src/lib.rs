@@ -10042,6 +10042,57 @@ mod tests {
     }
 
     #[test]
+    fn wasi_run_forwards_every_registered_fault_knob() {
+        // WASI's `run` has no child process to re-emit onto — it applies fault
+        // knobs to the in-process runtime through `knob_env_pairs` — but the same
+        // silent-drop class applies: a knob the registry gives the WASI family
+        // that `parse_wasi_run`/`knob_env_pairs` fails to carry through to the
+        // control-plane pairs would leave that family's faults inert with nothing
+        // to notice, the shape the historical `--net-partition` bug had for WASI.
+        // Driven off `FaultKnob::ALL` and the registry's own family list (never a
+        // hand-kept one), so a future knob is covered the day it is registered,
+        // and the DNS knobs (which WASI's parser refuses outright) are skipped
+        // because the registry says so, not because this test hard-codes it.
+        let registered: Vec<FaultKnob> = FaultKnob::ALL
+            .iter()
+            .copied()
+            .filter(|knob| {
+                help::verb("run")
+                    .expect("registered verb")
+                    .family_flags(help::Family::Wasi)
+                    .any(|flag| flag.name == knob.meta().flag)
+            })
+            .collect();
+        assert!(
+            !registered.is_empty(),
+            "no fault knobs registered for the WASI family — the filter is wrong"
+        );
+        let mut tokens: Vec<OsString> = vec![OsString::from("guest.wasm")];
+        for knob in &registered {
+            tokens.push(OsString::from(knob.meta().flag));
+            tokens.push(OsString::from(knob_sample(*knob)));
+        }
+        let invocation = parse_wasi_run(tokens).expect("wasi run parse");
+        let pairs = knob_env_pairs(&invocation.knobs).expect("encode");
+        for knob in &registered {
+            let meta = knob.meta();
+            let expected = match meta.plumbing {
+                Plumbing::Scalar => knob_sample(*knob).to_string(),
+                Plumbing::Repeatable => {
+                    repeatable_payload(*knob, &[knob_sample(*knob).to_string()])
+                        .expect("every repeatable knob encodes its sample")
+                }
+            };
+            assert!(
+                pairs.contains(&(meta.env, expected.clone())),
+                "WASI run dropped {} on the way to {}: {pairs:?}",
+                meta.flag,
+                meta.env
+            );
+        }
+    }
+
+    #[test]
     fn registry_value_grammars_match_the_parsers() {
         // The generic drift gate: every registered value-bearing flag's declared
         // `help::Kind` is exercised against the REAL parser that consumes it, in
