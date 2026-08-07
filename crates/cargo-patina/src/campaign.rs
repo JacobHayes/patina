@@ -544,6 +544,14 @@ pub enum CampaignClass {
     /// finding — and its own class rather than a shared "vacuous fault" bucket so
     /// a campaign report says which fault plane went inert.
     VacuousDnsFault,
+    /// A configured network fault class was vacuous: fault-eligible traffic
+    /// (sends, connects, or stream ops) occurred often enough for an enabled
+    /// drop/jitter/latency/duplicate/connect-refuse/reset/partition class to have
+    /// fired several times over, yet it applied zero effects. A coverage
+    /// failure, not a SUT finding, and its own class for the same reason
+    /// [`CampaignClass::VacuousDnsFault`] is not folded into
+    /// [`CampaignClass::VacuousFsFault`].
+    VacuousNetFault,
     /// `--swarm` was requested for a generation with no swarm-maskable fault class
     /// enabled, so the draw had zero candidates: it neither kept nor dropped
     /// anything and the generation explored exactly what a non-swarm generation
@@ -575,6 +583,7 @@ impl CampaignClass {
             CampaignClass::VacuousFsFault => "VACUOUS_FS_FAULT",
             CampaignClass::VacuousSwarm => "VACUOUS_SWARM",
             CampaignClass::VacuousDnsFault => "VACUOUS_DNS_FAULT",
+            CampaignClass::VacuousNetFault => "VACUOUS_NET_FAULT",
             CampaignClass::FailClosedAbort => "FAIL_CLOSED_ABORT",
             CampaignClass::StarvationStall => "STARVATION_STALL",
             CampaignClass::Infra => "INFRA",
@@ -590,6 +599,7 @@ impl CampaignClass {
             "VACUOUS_FS_FAULT" => Some(CampaignClass::VacuousFsFault),
             "VACUOUS_SWARM" => Some(CampaignClass::VacuousSwarm),
             "VACUOUS_DNS_FAULT" => Some(CampaignClass::VacuousDnsFault),
+            "VACUOUS_NET_FAULT" => Some(CampaignClass::VacuousNetFault),
             "FAIL_CLOSED_ABORT" => Some(CampaignClass::FailClosedAbort),
             "STARVATION_STALL" => Some(CampaignClass::StarvationStall),
             "INFRA" => Some(CampaignClass::Infra),
@@ -702,7 +712,18 @@ pub fn classify(exit_code: i32, stdout: &str, stderr: &str) -> CampaignClass {
     {
         return CampaignClass::VacuousDnsFault;
     }
-    // 4. Patina fail-closed refusal: a shim fatal-abort refusal line, or a raw
+    // 3c. The same coverage failure on the network plane, its own class for the
+    //    same reason 3b is: `PATINA_NET_FAULT_REPORT` carries one combined
+    //    `vacuous=` bit over drop/jitter/latency/duplicate/connect-refuse/
+    //    reset/partition, read off the report LINE rather than a whole-output
+    //    substring search for the same reason as the fs/DNS checks above.
+    if combined.contains("net fault knobs inert")
+        || combined
+            .lines()
+            .any(|line| line.contains("PATINA_NET_FAULT_REPORT") && line.contains("vacuous=1"))
+    {
+        return CampaignClass::VacuousNetFault;
+    }
     // 4. Exploration-plane coverage failure: the generation asked for swarm
     //    fault-class selection with nothing to select from. Read off the swarm
     //    report LINE for the same reason the fs verdict is: several reports carry a
@@ -791,6 +812,10 @@ fn primary_finding_line(class: CampaignClass, stdout: &str, stderr: &str) -> Str
         CampaignClass::VacuousDnsFault => &[
             "PATINA_DNS_FAULT_REPORT",
             "PATINA WARNING: DNS fault knobs inert",
+        ],
+        CampaignClass::VacuousNetFault => &[
+            "PATINA_NET_FAULT_REPORT",
+            "PATINA WARNING: net fault knobs inert",
         ],
         CampaignClass::FailClosedAbort => &[
             "PATINA_BUGGIFY_DUPLICATE_LABEL",
@@ -2266,7 +2291,7 @@ fn push_run_flag(flags: &mut Vec<String>, name: &str, value: RunValue) {
 /// claim, and [`every_generation_hash_read_goes_through_a_claim`] rejects a raw
 /// literal index that bypassed the table.
 ///
-/// Bytes 10 and 23..32 are unclaimed and are where the next band should draw from.
+/// Bytes 10 and 28..32 are unclaimed and are where the next band should draw from.
 mod gen_byte {
     use std::ops::Range;
 
@@ -2288,6 +2313,11 @@ mod gen_byte {
     pub(super) const NET_LATENCY: usize = 20;
     pub(super) const DNS_FAIL: usize = 21;
     pub(super) const DNS_LATENCY_HI: usize = 22;
+    pub(super) const NET_JITTER_HI: usize = 23;
+    pub(super) const NET_DUPLICATE: usize = 24;
+    pub(super) const NET_CONNECT_REFUSE: usize = 25;
+    pub(super) const NET_RESET: usize = 26;
+    pub(super) const NET_TCP_BUFFER: usize = 27;
 
     /// The bands no fault knob owns, for the disjointness gate. The fault knobs'
     /// own claims come from [`super::campaign_band`], so this list is only the
@@ -2329,24 +2359,43 @@ fn campaign_band(knob: FaultKnob) -> Option<&'static [usize]> {
         FaultKnob::NetLatencyNanos => Some(&[gen_byte::NET_LATENCY]),
         FaultKnob::DnsFailPermille => Some(&[gen_byte::DNS_FAIL]),
         FaultKnob::DnsLatencyNanos => Some(&[gen_byte::DNS_LATENCY_HI]),
-        // KNOWN GAP — `--net-jitter-nanos` predates the campaign's net bands and
-        // never got one, so a `--faults` campaign varies drop and base latency
-        // but never delivery jitter.
-        FaultKnob::NetJitterNanos => None,
-        // KNOWN GAP — the wave-E network faults ship with a `run` flag, a swarm
-        // class and a trace field, but no campaign band yet, so a campaign never
-        // draws them.
-        FaultKnob::NetDuplicatePermille
-        | FaultKnob::NetConnectRefusePermille
-        | FaultKnob::NetResetPermille
-        | FaultKnob::NetPartition
-        | FaultKnob::NetTcpBufferBytes => None,
+        FaultKnob::NetJitterNanos => Some(&[gen_byte::NET_JITTER_HI]),
+        FaultKnob::NetDuplicatePermille => Some(&[gen_byte::NET_DUPLICATE]),
+        FaultKnob::NetConnectRefusePermille => Some(&[gen_byte::NET_CONNECT_REFUSE]),
+        FaultKnob::NetResetPermille => Some(&[gen_byte::NET_RESET]),
+        FaultKnob::NetTcpBufferBytes => Some(&[gen_byte::NET_TCP_BUFFER]),
+        // WAIVED (see `BAND_WAIVERS`) — a partition names virtual ADDRESSES the
+        // guest actually uses, which the campaign has no generic pool for (unlike
+        // `--dns-entry`, there is no `spec.net_partitions` list of candidate
+        // endpoints). Synthesizing addresses the guest never dials would be a
+        // band that provably never fires, which is worse than an honest gap.
+        FaultKnob::NetPartition => None,
         // Not a drawn band by design: the host table is the campaign's SHAPE, not
         // a per-generation draw, and is passed through from the spec (see the
         // DNS block in `derive_flags`).
         FaultKnob::DnsEntry => None,
     }
 }
+
+/// Every [`FaultKnob`] [`campaign_band`] leaves `None` MUST have a waiver here —
+/// a one-line reason the gap is a decision, not an oversight. `every_unbanded_knob_is_waived`
+/// makes a new knob with neither a band nor a waiver a loud compile-adjacent
+/// failure instead of a silent gap `the_campaign_bands_exactly_the_knobs_it_claims_to`
+/// would only catch if someone remembered to update its list by hand.
+#[cfg(test)]
+const BAND_WAIVERS: &[(FaultKnob, &str)] = &[
+    (
+        FaultKnob::NetPartition,
+        "topology-shaped: a partition names virtual addresses the guest actually \
+         dials, and the campaign spec carries no generic pool of candidate \
+         endpoints to draw from (unlike --dns-entry's spec.dns_entries)",
+    ),
+    (
+        FaultKnob::DnsEntry,
+        "table-plane: the host table is the campaign's SHAPE (passed through from \
+         the spec), not a per-generation draw",
+    ),
+];
 
 /// One band's `nth` claimed byte of the generation hash.
 ///
@@ -2375,22 +2424,23 @@ fn vacuity_class(knob: FaultKnob) -> Option<CampaignClass> {
         FaultKnob::DnsFailPermille | FaultKnob::DnsLatencyNanos => {
             Some(CampaignClass::VacuousDnsFault)
         }
-        // KNOWN GAP — `NetFaultReport` carries per-class vacuity counters and
-        // emits `vacuous=1`, but no `CampaignClass` reads it, so a generation
-        // whose network faults were all inert is classified OK. Pinned as a fact
-        // by `known_vacuity_gaps_classify_as_ok`.
+        // `NetFaultReport` carries one combined `vacuous=` bit over all seven of
+        // these classes (drop/jitter/latency/duplicate/connect-refuse/reset/
+        // partition all share one report line), so they share the one
+        // `VacuousNetFault` class rather than each naming its own — the report
+        // itself cannot tell them apart.
         FaultKnob::NetJitterNanos
         | FaultKnob::NetDropPermille
         | FaultKnob::NetLatencyNanos
         | FaultKnob::NetDuplicatePermille
         | FaultKnob::NetConnectRefusePermille
         | FaultKnob::NetResetPermille
-        | FaultKnob::NetPartition => None,
+        | FaultKnob::NetPartition => Some(CampaignClass::VacuousNetFault),
         // No rate to judge inert: a crash fires at a chosen boundary op, a
         // torn-write granularity is a model rather than a rate, a buffer size is
         // a capacity, a delayed sleep is indistinguishable from a longer one, and
         // the host table is workload. Each of these reports nothing, which
-        // `vacuity_classes_have_a_report_to_read` pins against the knob table.
+        // `vacuity_classes_match_the_classifier` pins against the knob table.
         FaultKnob::FsCrashAt
         | FaultKnob::FsTornGranularity
         | FaultKnob::SleepJitterNanos
@@ -2477,6 +2527,45 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
             &mut flags,
             "--net-latency-nanos",
             RunValue::Int(net_latency),
+        );
+        let net_jitter_hi = u64::from(band_byte(hash, FaultKnob::NetJitterNanos, 0)) * 10_000; // up to 2.55 ms
+        push_run_flag(
+            &mut flags,
+            "--net-jitter-nanos",
+            RunValue::NanosRange {
+                lo: 0,
+                hi: net_jitter_hi,
+            },
+        );
+        let net_duplicate =
+            u32::from(band_byte(hash, FaultKnob::NetDuplicatePermille, 0)) * 200 / 255; // [0, 200] permille
+        push_run_flag(
+            &mut flags,
+            "--net-duplicate-permille",
+            RunValue::Int(u64::from(net_duplicate)),
+        );
+        let net_connect_refuse =
+            u32::from(band_byte(hash, FaultKnob::NetConnectRefusePermille, 0)) * 200 / 255; // [0, 200] permille
+        push_run_flag(
+            &mut flags,
+            "--net-connect-refuse-permille",
+            RunValue::Int(u64::from(net_connect_refuse)),
+        );
+        let net_reset = u32::from(band_byte(hash, FaultKnob::NetResetPermille, 0)) * 200 / 255; // [0, 200] permille
+        push_run_flag(
+            &mut flags,
+            "--net-reset-permille",
+            RunValue::Int(u64::from(net_reset)),
+        );
+        // [64, 4096] bytes: small enough to make would-block/partial-send paths
+        // reachable (the flag's own purpose) while staying well clear of 0, which
+        // `SimNet::builder().build()` refuses outright.
+        let net_tcp_buffer =
+            64 + u64::from(band_byte(hash, FaultKnob::NetTcpBufferBytes, 0)) * (4096 - 64) / 255;
+        push_run_flag(
+            &mut flags,
+            "--net-tcp-buffer-bytes",
+            RunValue::Int(net_tcp_buffer),
         );
         let jitter_hi = u64::from(band_byte(hash, FaultKnob::SleepJitterNanos, 0)) * 10_000; // up to 2.55 ms
         push_run_flag(
@@ -3766,13 +3855,55 @@ fn selftest() -> Result<i32, CliError> {
             "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=1 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_DNS_FAULT_REPORT resolutions=40 fail_vacuity_diagnosable=1 failures_injected=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1",
         ),
     );
+    // The network plane's own class: `PATINA_NET_FAULT_REPORT` carries a
+    // combined `vacuous=` bit over all seven net fault knobs, and it must file
+    // under `VacuousNetFault`, not under a healthy fs report's class.
     check(
         "net-vacuity-is-not-filed-under-the-fs-class",
+        CampaignClass::VacuousNetFault,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA_FS_FAULT_REPORT eligible_ops=9 error_vacuity_diagnosable=0 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=0\nPATINA_NET_FAULT_REPORT send_ops=4 drop_vacuity_diagnosable=1 drops_applied=0 jitter_vacuity_diagnosable=0 jitter_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 duplicate_vacuity_diagnosable=0 duplicates_applied=0 connect_ops=0 connect_refuse_vacuity_diagnosable=0 connects_refused=0 stream_ops=0 reset_vacuity_diagnosable=0 resets_injected=0 partition_vacuity_diagnosable=0 partition_blocks=0 vacuous=1",
+        ),
+    );
+    check(
+        "vacuous-net-warning",
+        CampaignClass::VacuousNetFault,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA WARNING: net fault knobs inert — fault-eligible network traffic occurred (4 send(s), 0 connect(s), 0 stream op(s))",
+        ),
+    );
+    check(
+        "net-knobs-that-fired-are-not-vacuous",
         CampaignClass::Ok,
         classify(
             0,
             "PATINA_RESULT ok=1",
-            "PATINA_FS_FAULT_REPORT eligible_ops=9 error_vacuity_diagnosable=0 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=0\nPATINA_NET_FAULT_REPORT could_apply=1 send_ops=4 faults_applied=0 vacuous=1",
+            "PATINA_NET_FAULT_REPORT send_ops=4 drop_vacuity_diagnosable=1 drops_applied=2 jitter_vacuity_diagnosable=0 jitter_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 duplicate_vacuity_diagnosable=0 duplicates_applied=0 connect_ops=0 connect_refuse_vacuity_diagnosable=0 connects_refused=0 stream_ops=0 reset_vacuity_diagnosable=0 resets_injected=0 partition_vacuity_diagnosable=0 partition_blocks=0 vacuous=0",
+        ),
+    );
+    // Priority ordering: fs vacuity still wins over a healthy net report, and
+    // over a vacuous one — the fs/dns/net classes are checked in that order in
+    // `classify`, so one generation always gets exactly one class.
+    check(
+        "fs-vacuity-wins-over-a-healthy-net-report",
+        CampaignClass::VacuousFsFault,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=1 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_NET_FAULT_REPORT send_ops=4 drop_vacuity_diagnosable=1 drops_applied=2 jitter_vacuity_diagnosable=0 jitter_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 duplicate_vacuity_diagnosable=0 duplicates_applied=0 connect_ops=0 connect_refuse_vacuity_diagnosable=0 connects_refused=0 stream_ops=0 reset_vacuity_diagnosable=0 resets_injected=0 partition_vacuity_diagnosable=0 partition_blocks=0 vacuous=0",
+        ),
+    );
+    check(
+        "all-three-planes-vacuous-reports-the-fs-class",
+        CampaignClass::VacuousFsFault,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=1 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_DNS_FAULT_REPORT resolutions=40 fail_vacuity_diagnosable=1 failures_injected=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_NET_FAULT_REPORT send_ops=4 drop_vacuity_diagnosable=1 drops_applied=0 jitter_vacuity_diagnosable=0 jitter_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 duplicate_vacuity_diagnosable=0 duplicates_applied=0 connect_ops=0 connect_refuse_vacuity_diagnosable=0 connects_refused=0 stream_ops=0 reset_vacuity_diagnosable=0 resets_injected=0 partition_vacuity_diagnosable=0 partition_blocks=0 vacuous=1",
         ),
     );
     // A generation that requested `--swarm` with no swarm-maskable fault class
@@ -4874,42 +5005,72 @@ mod tests {
                 "--fs-short-permille",
                 "--fs-latency-nanos",
                 "--sleep-jitter-nanos",
+                "--net-jitter-nanos",
                 "--net-drop-permille",
                 "--net-latency-nanos",
+                "--net-duplicate-permille",
+                "--net-connect-refuse-permille",
+                "--net-reset-permille",
+                "--net-tcp-buffer-bytes",
                 "--dns-fail-permille",
                 "--dns-latency-nanos",
             ]
         );
         // The complement, spelled out: every knob a `--faults` campaign never
-        // draws. Shrinking this list is the point of the follow-up work; growing
-        // it silently is the regression this pins.
+        // draws. Each one MUST carry a `BAND_WAIVERS` entry —
+        // `every_unbanded_knob_is_waived` is the gate that makes growing this
+        // list silently (a knob with neither a band nor a waiver) impossible.
         let inert: Vec<&str> = FaultKnob::ALL
             .iter()
             .filter(|knob| campaign_band(**knob).is_none())
             .map(|knob| knob.meta().flag)
             .collect();
+        assert_eq!(inert, vec!["--net-partition", "--dns-entry"]);
+    }
+
+    /// The band-or-waiver gate: every `FaultKnob` must have EITHER a real
+    /// `campaign_band` OR a `BAND_WAIVERS` entry with a reason — never neither
+    /// (a silently forgotten knob) and never both (a stale waiver nobody
+    /// removed when the knob was later banded). Compile-adjacent, because a new
+    /// `FaultKnob` variant reaches this loop through `FaultKnob::ALL` the moment
+    /// it exists, without needing its own follow-up test.
+    #[test]
+    fn every_unbanded_knob_is_waived() {
+        let waived: BTreeMap<FaultKnob, &str> = BAND_WAIVERS.iter().copied().collect();
         assert_eq!(
-            inert,
-            vec![
-                "--net-jitter-nanos",
-                "--net-duplicate-permille",
-                "--net-connect-refuse-permille",
-                "--net-reset-permille",
-                "--net-partition",
-                "--net-tcp-buffer-bytes",
-                "--dns-entry",
-            ]
+            waived.len(),
+            BAND_WAIVERS.len(),
+            "two BAND_WAIVERS entries name the same knob"
         );
+        for knob in FaultKnob::ALL {
+            match (campaign_band(*knob), waived.get(knob)) {
+                (Some(_), None) => {}
+                (None, Some(reason)) => assert!(
+                    !reason.is_empty(),
+                    "{knob:?}'s BAND_WAIVERS reason is empty"
+                ),
+                (None, None) => panic!(
+                    "{knob:?} has no campaign_band and no BAND_WAIVERS entry — give it a band, \
+                     or waive it with a one-line reason"
+                ),
+                (Some(_), Some(_)) => panic!(
+                    "{knob:?} has both a campaign_band and a BAND_WAIVERS entry — drop the \
+                     waiver, it is now banded"
+                ),
+            }
+        }
     }
 
     /// A knob whose vacuity has an outcome class must have a report to read it
     /// off, and its class must be the one `classify` actually returns for that
-    /// report line. The knobs with a report but NO class are the known gap: they
-    /// classify OK, which is pinned here rather than left to be discovered.
+    /// report line. The network fault-plane gap this test used to pin — a
+    /// report with no class, silently classifying `OK` — is now closed: every
+    /// knob with a report has a matching class (`VacuousFsFault`,
+    /// `VacuousDnsFault`, or `VacuousNetFault`), which is what the `Some`
+    /// branch below proves for each of them.
     #[test]
     fn vacuity_classes_match_the_classifier() {
         let mut with_report = 0;
-        let mut gaps = 0;
         for knob in FaultKnob::ALL {
             let class = vacuity_class(*knob);
             let Some(report) = knob.meta().report else {
@@ -4922,24 +5083,17 @@ mod tests {
             with_report += 1;
             let line = format!("{report} eligible_ops=100 vacuous=1");
             let actual = classify(0, "", &line);
-            match class {
-                Some(expected) => assert_eq!(
-                    actual, expected,
-                    "{knob:?} declares {expected:?} but its report line classifies as {actual:?}"
-                ),
-                None => {
-                    gaps += 1;
-                    assert_eq!(
-                        actual,
-                        CampaignClass::Ok,
-                        "{knob:?} now has a classifier arm — give it a vacuity_class row"
-                    );
-                }
-            }
+            let expected = class.unwrap_or_else(|| {
+                panic!("{knob:?} has a report but no vacuity_class — give it one, or its class")
+            });
+            assert_eq!(
+                actual, expected,
+                "{knob:?} declares {expected:?} but its report line classifies as {actual:?}"
+            );
         }
         assert!(
-            with_report > 0 && gaps > 0,
-            "this gate proves nothing unless some knobs report and some are gaps"
+            with_report > 0,
+            "this gate proves nothing unless some knob has a report to read"
         );
     }
 
