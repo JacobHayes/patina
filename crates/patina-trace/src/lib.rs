@@ -128,6 +128,8 @@ pub struct FaultConfigRecord {
     pub dns_fail_permille: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns_latency_nanos: Option<(u64, u64)>,
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub entropy_fail_permille: u16,
 }
 
 /// The DNS host table of a recorded run: the names it could resolve and the

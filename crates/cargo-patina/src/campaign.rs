@@ -552,6 +552,13 @@ pub enum CampaignClass {
     /// [`CampaignClass::VacuousDnsFault`] is not folded into
     /// [`CampaignClass::VacuousFsFault`].
     VacuousNetFault,
+    /// A configured entropy fault class was vacuous: fault-eligible entropy
+    /// requests occurred often enough for the enabled failure knob to have fired
+    /// several times over, yet it applied zero effects. A coverage failure, not a
+    /// SUT finding, and its own class for the same reason
+    /// [`CampaignClass::VacuousDnsFault`] is not folded into
+    /// [`CampaignClass::VacuousFsFault`].
+    VacuousEntropyFault,
     /// `--swarm` was requested for a generation with no swarm-maskable fault class
     /// enabled, so the draw had zero candidates: it neither kept nor dropped
     /// anything and the generation explored exactly what a non-swarm generation
@@ -584,6 +591,7 @@ impl CampaignClass {
             CampaignClass::VacuousSwarm => "VACUOUS_SWARM",
             CampaignClass::VacuousDnsFault => "VACUOUS_DNS_FAULT",
             CampaignClass::VacuousNetFault => "VACUOUS_NET_FAULT",
+            CampaignClass::VacuousEntropyFault => "VACUOUS_ENTROPY_FAULT",
             CampaignClass::FailClosedAbort => "FAIL_CLOSED_ABORT",
             CampaignClass::StarvationStall => "STARVATION_STALL",
             CampaignClass::Infra => "INFRA",
@@ -600,6 +608,7 @@ impl CampaignClass {
             "VACUOUS_SWARM" => Some(CampaignClass::VacuousSwarm),
             "VACUOUS_DNS_FAULT" => Some(CampaignClass::VacuousDnsFault),
             "VACUOUS_NET_FAULT" => Some(CampaignClass::VacuousNetFault),
+            "VACUOUS_ENTROPY_FAULT" => Some(CampaignClass::VacuousEntropyFault),
             "FAIL_CLOSED_ABORT" => Some(CampaignClass::FailClosedAbort),
             "STARVATION_STALL" => Some(CampaignClass::StarvationStall),
             "INFRA" => Some(CampaignClass::Infra),
@@ -724,6 +733,17 @@ pub fn classify(exit_code: i32, stdout: &str, stderr: &str) -> CampaignClass {
     {
         return CampaignClass::VacuousNetFault;
     }
+    // 3d. The same coverage failure on the entropy plane, its own class for the
+    //    same reason 3b/3c are: read off the entropy report LINE rather than a
+    //    whole-output substring search, so a healthy fs/dns/net report alongside
+    //    it cannot steal this class's verdict or be stolen by it.
+    if combined.contains("entropy fault knobs inert")
+        || combined
+            .lines()
+            .any(|line| line.contains("PATINA_ENTROPY_FAULT_REPORT") && line.contains("vacuous=1"))
+    {
+        return CampaignClass::VacuousEntropyFault;
+    }
     // 4. Exploration-plane coverage failure: the generation asked for swarm
     //    fault-class selection with nothing to select from. Read off the swarm
     //    report LINE for the same reason the fs verdict is: several reports carry a
@@ -816,6 +836,10 @@ fn primary_finding_line(class: CampaignClass, stdout: &str, stderr: &str) -> Str
         CampaignClass::VacuousNetFault => &[
             "PATINA_NET_FAULT_REPORT",
             "PATINA WARNING: net fault knobs inert",
+        ],
+        CampaignClass::VacuousEntropyFault => &[
+            "PATINA_ENTROPY_FAULT_REPORT",
+            "PATINA WARNING: entropy fault knobs inert",
         ],
         CampaignClass::FailClosedAbort => &[
             "PATINA_BUGGIFY_DUPLICATE_LABEL",
@@ -2291,7 +2315,7 @@ fn push_run_flag(flags: &mut Vec<String>, name: &str, value: RunValue) {
 /// claim, and [`every_generation_hash_read_goes_through_a_claim`] rejects a raw
 /// literal index that bypassed the table.
 ///
-/// Bytes 10 and 28..32 are unclaimed and are where the next band should draw from.
+/// Bytes 10 and 29..32 are unclaimed and are where the next band should draw from.
 mod gen_byte {
     use std::ops::Range;
 
@@ -2318,6 +2342,7 @@ mod gen_byte {
     pub(super) const NET_CONNECT_REFUSE: usize = 25;
     pub(super) const NET_RESET: usize = 26;
     pub(super) const NET_TCP_BUFFER: usize = 27;
+    pub(super) const ENTROPY_FAIL: usize = 28;
 
     /// The bands no fault knob owns, for the disjointness gate. The fault knobs'
     /// own claims come from [`super::campaign_band`], so this list is only the
@@ -2364,6 +2389,7 @@ fn campaign_band(knob: FaultKnob) -> Option<&'static [usize]> {
         FaultKnob::NetConnectRefusePermille => Some(&[gen_byte::NET_CONNECT_REFUSE]),
         FaultKnob::NetResetPermille => Some(&[gen_byte::NET_RESET]),
         FaultKnob::NetTcpBufferBytes => Some(&[gen_byte::NET_TCP_BUFFER]),
+        FaultKnob::EntropyFailPermille => Some(&[gen_byte::ENTROPY_FAIL]),
         // WAIVED (see `BAND_WAIVERS`) — a partition names virtual ADDRESSES the
         // guest actually uses, which the campaign has no generic pool for (unlike
         // `--dns-entry`, there is no `spec.net_partitions` list of candidate
@@ -2424,6 +2450,7 @@ fn vacuity_class(knob: FaultKnob) -> Option<CampaignClass> {
         FaultKnob::DnsFailPermille | FaultKnob::DnsLatencyNanos => {
             Some(CampaignClass::VacuousDnsFault)
         }
+        FaultKnob::EntropyFailPermille => Some(CampaignClass::VacuousEntropyFault),
         // `NetFaultReport` carries one combined `vacuous=` bit over all seven of
         // these classes (drop/jitter/latency/duplicate/connect-refuse/reset/
         // partition all share one report line), so they share the one
@@ -2575,6 +2602,16 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
                 lo: 0,
                 hi: jitter_hi,
             },
+        );
+        // Runtime-level like the fs/net bands above, and available to every
+        // family (WASI guests draw entropy too, unlike DNS resolution): no
+        // host-table-shaped gate needed.
+        let entropy_fail =
+            u32::from(band_byte(hash, FaultKnob::EntropyFailPermille, 0)) * 200 / 255; // [0, 200] permille
+        push_run_flag(
+            &mut flags,
+            "--entropy-fail-permille",
+            RunValue::Int(u64::from(entropy_fail)),
         );
         // The DNS band rides on the host table, which is spec config rather than a
         // per-generation draw: with no defined name every lookup is NXDOMAIN by
@@ -3906,6 +3943,69 @@ fn selftest() -> Result<i32, CliError> {
             "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=1 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_DNS_FAULT_REPORT resolutions=40 fail_vacuity_diagnosable=1 failures_injected=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_NET_FAULT_REPORT send_ops=4 drop_vacuity_diagnosable=1 drops_applied=0 jitter_vacuity_diagnosable=0 jitter_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 duplicate_vacuity_diagnosable=0 duplicates_applied=0 connect_ops=0 connect_refuse_vacuity_diagnosable=0 connects_refused=0 stream_ops=0 reset_vacuity_diagnosable=0 resets_injected=0 partition_vacuity_diagnosable=0 partition_blocks=0 vacuous=1",
         ),
     );
+    // The entropy plane's own class, same per-class shape as fs/dns/net: a run
+    // that drew entropy often enough for an enabled failure knob to fire, that
+    // applied nothing.
+    check(
+        "vacuous-entropy-fault-report",
+        CampaignClass::VacuousEntropyFault,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA_ENTROPY_FAULT_REPORT requests=40 fail_vacuity_diagnosable=1 failures_injected=0 vacuous=1",
+        ),
+    );
+    check(
+        "vacuous-entropy-warning",
+        CampaignClass::VacuousEntropyFault,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA WARNING: entropy fault knobs inert — 40 fault-eligible entropy request(s) occurred",
+        ),
+    );
+    check(
+        "entropy-knobs-that-fired-are-not-vacuous",
+        CampaignClass::Ok,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA_ENTROPY_FAULT_REPORT requests=40 fail_vacuity_diagnosable=1 failures_injected=4 vacuous=0",
+        ),
+    );
+    // Per-plane attribution: entropy vacuity must not be filed under a healthy
+    // fs report's class, and vice versa. Both verdicts are read off their own
+    // report LINE, never a substring search over the whole output.
+    check(
+        "entropy-vacuity-is-not-filed-under-the-fs-class",
+        CampaignClass::VacuousEntropyFault,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=1 errors_injected=4 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=0\nPATINA_ENTROPY_FAULT_REPORT requests=40 fail_vacuity_diagnosable=1 failures_injected=0 vacuous=1",
+        ),
+    );
+    // Priority ordering: fs vacuity still wins over a healthy or vacuous entropy
+    // report — the fs/dns/net/entropy classes are checked in that order in
+    // `classify`, so one generation always gets exactly one class.
+    check(
+        "fs-vacuity-wins-over-a-healthy-entropy-report",
+        CampaignClass::VacuousFsFault,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=1 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_ENTROPY_FAULT_REPORT requests=40 fail_vacuity_diagnosable=1 failures_injected=4 vacuous=0",
+        ),
+    );
+    check(
+        "all-four-planes-vacuous-reports-the-fs-class",
+        CampaignClass::VacuousFsFault,
+        classify(
+            0,
+            "PATINA_RESULT ok=1",
+            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=1 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_DNS_FAULT_REPORT resolutions=40 fail_vacuity_diagnosable=1 failures_injected=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_NET_FAULT_REPORT send_ops=4 drop_vacuity_diagnosable=1 drops_applied=0 jitter_vacuity_diagnosable=0 jitter_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 duplicate_vacuity_diagnosable=0 duplicates_applied=0 connect_ops=0 connect_refuse_vacuity_diagnosable=0 connects_refused=0 stream_ops=0 reset_vacuity_diagnosable=0 resets_injected=0 partition_vacuity_diagnosable=0 partition_blocks=0 vacuous=1\nPATINA_ENTROPY_FAULT_REPORT requests=40 fail_vacuity_diagnosable=1 failures_injected=0 vacuous=1",
+        ),
+    );
     // A generation that requested `--swarm` with no swarm-maskable fault class
     // enabled explored the plain configuration, so a clean exit is NOT swarm
     // coverage. Both the machine-readable field and the operator warning fire it.
@@ -5012,6 +5112,7 @@ mod tests {
                 "--net-connect-refuse-permille",
                 "--net-reset-permille",
                 "--net-tcp-buffer-bytes",
+                "--entropy-fail-permille",
                 "--dns-fail-permille",
                 "--dns-latency-nanos",
             ]

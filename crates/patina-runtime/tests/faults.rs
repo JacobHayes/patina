@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 
 use patina_dst_abi::{ClockKind, ErrorCode, OpenFlags, SendDisposition};
-use patina_dst_driver_api::{DnsFaultReport, FsFaultReport, NetFaultReport};
+use patina_dst_driver_api::{DnsFaultReport, EntropyFaultReport, FsFaultReport, NetFaultReport};
 use patina_dst_runtime::{Context, CrashOp, RuntimeConfig, TornGranularity};
 use tempfile::tempdir;
 
@@ -673,6 +673,123 @@ fn a_malformed_dns_entry_fails_closed_at_configuration_time() {
             .with_dns_entry("localhost", "10.0.0.5")
             .is_err()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Entropy-request failure injection
+// ---------------------------------------------------------------------------
+
+fn entropy_once(
+    config: RuntimeConfig,
+    len: usize,
+) -> (Result<Vec<u8>, String>, Option<EntropyFaultReport>) {
+    let mut context = Context::from_config(config).unwrap();
+    let outcome = context
+        .entropy_bytes(len)
+        .map_err(|error| error.to_string());
+    let report = context.entropy_fault_report();
+    context.finish().unwrap();
+    (outcome, report)
+}
+
+#[test]
+fn entropy_bytes_resolves_without_a_knob_and_reports_nothing() {
+    let (bytes, report) = entropy_once(RuntimeConfig::seeded(1), 16);
+    assert_eq!(bytes.unwrap().len(), 16);
+    assert!(report.is_none(), "no entropy knob was live, so no report");
+}
+
+#[test]
+fn the_entropy_failure_knob_fires_and_is_reported() {
+    // MUST fail: a certain failure rate turns a request into an injected error,
+    // and the report proves it was applied.
+    let (failed, report) = entropy_once(
+        RuntimeConfig::seeded(4).with_entropy_fail_permille(1000),
+        16,
+    );
+    assert!(
+        failed.unwrap_err().contains("injected entropy failure"),
+        "a certain failure rate must fail every request"
+    );
+    let report = report.expect("a live knob reports");
+    assert_eq!(report.requests, 1);
+    assert_eq!(report.failures_injected, 1);
+}
+
+#[test]
+fn an_entropy_knob_that_never_fired_over_eligible_traffic_is_diagnosed_vacuous() {
+    // The detector: a live knob, enough eligible requests for the configured
+    // rate to be expected to fire repeatedly, and ZERO applications. Built by
+    // hand here because a correctly wired knob cannot produce it.
+    let inert = EntropyFaultReport {
+        requests: 40,
+        fail_vacuity_diagnosable: true,
+        failures_injected: 0,
+    };
+    assert!(inert.is_vacuous());
+
+    // A knob that DID fire over the same traffic is not vacuous.
+    let live = EntropyFaultReport {
+        requests: 40,
+        fail_vacuity_diagnosable: true,
+        failures_injected: 3,
+    };
+    assert!(!live.is_vacuous());
+
+    // And a low rate that ordinarily draws zero is not diagnosable at all, so a
+    // healthy run never trips the warning.
+    let (_, sparse) = entropy_once(RuntimeConfig::seeded(9).with_entropy_fail_permille(1), 16);
+    let sparse = sparse.expect("live knob");
+    assert!(!sparse.fail_vacuity_diagnosable);
+    assert!(!sparse.is_vacuous());
+}
+
+#[test]
+fn arming_the_entropy_fault_knob_does_not_perturb_a_request_it_does_not_fire_on() {
+    // The §1.2-style guarantee: the fault decision draws from its own
+    // domain-separated stream, never from the entropy stream itself. Find a
+    // seed where a live knob does not fire on the first request, then check the
+    // returned bytes equal the knob-absent baseline for that SAME seed — a
+    // shared decision stream would perturb them.
+    let seed = (0..64)
+        .find(|&seed| {
+            let (_, report) = entropy_once(
+                RuntimeConfig::seeded(seed).with_entropy_fail_permille(500),
+                16,
+            );
+            report.expect("live knob").failures_injected == 0
+        })
+        .expect("some seed in range must not fire at rate 500");
+    let baseline = entropy_once(RuntimeConfig::seeded(seed), 16).0.unwrap();
+    let armed = entropy_once(
+        RuntimeConfig::seeded(seed).with_entropy_fail_permille(500),
+        16,
+    )
+    .0
+    .unwrap();
+    assert_eq!(baseline, armed);
+}
+
+#[test]
+fn entropy_failure_replays_self_contained_without_re_supplying_the_flag() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("entropy.patina");
+    let (recorded, recorded_report) = entropy_once(
+        RuntimeConfig::record(4, &path, "patina-test").with_entropy_fail_permille(1000),
+        16,
+    );
+    let recorded_message = recorded.unwrap_err();
+    assert!(recorded_message.contains("injected entropy failure"));
+    assert_eq!(recorded_report.expect("report").failures_injected, 1);
+
+    // Flag-free: no --entropy-fail-permille. The trace restores it.
+    let (replayed, _) = entropy_once(RuntimeConfig::replay(&path, "patina-test"), 16);
+    assert_eq!(replayed.unwrap_err(), recorded_message);
+
+    // A conflicting knob at replay fails closed rather than silently running a
+    // different fault schedule.
+    let conflicting = RuntimeConfig::replay(&path, "patina-test").with_entropy_fail_permille(1);
+    assert!(Context::from_config(conflicting).is_err());
 }
 
 // ---------------------------------------------------------------------------

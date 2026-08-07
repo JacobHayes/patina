@@ -9920,7 +9920,8 @@ mod tests {
             | FaultKnob::NetDuplicatePermille
             | FaultKnob::NetConnectRefusePermille
             | FaultKnob::NetResetPermille
-            | FaultKnob::DnsFailPermille => "100",
+            | FaultKnob::DnsFailPermille
+            | FaultKnob::EntropyFailPermille => "100",
         }
     }
 

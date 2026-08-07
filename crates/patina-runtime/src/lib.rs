@@ -213,6 +213,9 @@ pub const ENV_FS_LATENCY: &str = "PATINA_FS_LATENCY_NANOS";
 /// Seeded DNS resolution-failure probability in per-mille (0..=1000), applied to
 /// lookups of names the host table defines. Off (zero) when unset.
 pub const ENV_DNS_FAIL_PERMILLE: &str = "PATINA_DNS_FAIL_PERMILLE";
+/// Seeded guest entropy-request failure probability in per-mille (0..=1000),
+/// applied to every `Context::entropy_bytes` call. Off (zero) when unset.
+pub const ENV_ENTROPY_FAIL_PERMILLE: &str = "PATINA_ENTROPY_FAIL_PERMILLE";
 /// Seeded extra latency `MIN..MAX` in nanoseconds added to every eligible name
 /// resolution, applied by the `Context`. Off when unset.
 pub const ENV_DNS_LATENCY: &str = "PATINA_DNS_LATENCY_NANOS";
@@ -235,6 +238,9 @@ pub const ENV_FS_FAULT_REPORT: &str = "PATINA_FS_FAULT_REPORT";
 /// Suppress the default-on end-of-run DNS fault-injection diagnostic when set to
 /// a false-y value (`0`, `off`, `false`, `no`).
 pub const ENV_DNS_FAULT_REPORT: &str = "PATINA_DNS_FAULT_REPORT";
+/// Suppress the default-on end-of-run entropy fault-injection diagnostic when set
+/// to a false-y value (`0`, `off`, `false`, `no`).
+pub const ENV_ENTROPY_FAULT_REPORT: &str = "PATINA_ENTROPY_FAULT_REPORT";
 /// Enable cooperative-SUT (buggify) fault injection. Its value is the
 /// per-evaluation firing probability in per-mille for an active site (0..=1000);
 /// an empty value uses the FoundationDB default of 25% (250). Presence of the
@@ -346,6 +352,9 @@ pub enum Report {
     DnsFault,
     /// `PATINA_NET_FAULT_REPORT` — network fault-injection accounting.
     NetFault,
+    /// `PATINA_ENTROPY_FAULT_REPORT` — guest entropy-request fault-injection
+    /// accounting.
+    EntropyFault,
     /// `PATINA_COVERAGE_REPORT` — native yield-point edge coverage, emitted by
     /// the shim at its own finalization point rather than by [`Context::finish`].
     Coverage,
@@ -358,7 +367,7 @@ impl Report {
     /// Every report, in declaration order. Family plumbing (the native child's
     /// environment, a campaign's pinned child diagnostics) iterates THIS, so a
     /// report added here cannot be carried by one family and dropped by another.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Schedule,
         Self::SchedulePolicy,
         Self::Swarm,
@@ -367,6 +376,7 @@ impl Report {
         Self::FsFault,
         Self::DnsFault,
         Self::NetFault,
+        Self::EntropyFault,
         Self::Coverage,
         Self::Depth,
     ];
@@ -383,6 +393,7 @@ impl Report {
             Self::FsFault => ENV_FS_FAULT_REPORT,
             Self::DnsFault => ENV_DNS_FAULT_REPORT,
             Self::NetFault => ENV_NET_FAULT_REPORT,
+            Self::EntropyFault => ENV_ENTROPY_FAULT_REPORT,
             Self::Coverage => ENV_COVERAGE_REPORT,
             Self::Depth => ENV_DEPTH_REPORT,
         }
@@ -654,6 +665,7 @@ pub struct FaultConfig {
     pub net: NetFaultConfig,
     pub clock: ClockFaultConfig,
     pub dns: DnsFaultConfig,
+    pub entropy: EntropyFaultConfig,
 }
 
 /// Filesystem fault knobs.
@@ -714,6 +726,16 @@ pub struct DnsFaultConfig {
     /// Inclusive `[min, max]` nanoseconds of seeded latency applied before every
     /// eligible resolution.
     pub latency_nanos: Option<(u64, u64)>,
+}
+
+/// Entropy fault knobs. Guest entropy has no undefined-input exemption the way
+/// DNS does — every `Context::entropy_bytes` call is fault-eligible — so there is
+/// only the one knob, no host-table-shaped semantic configuration alongside it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EntropyFaultConfig {
+    /// Seeded entropy-request failure probability in per-mille (0..=1000). On
+    /// fire, the request returns a deterministic named error instead of bytes.
+    pub fail_permille: u16,
 }
 
 /// Clock fault knobs.
@@ -1054,6 +1076,13 @@ impl RuntimeConfig {
         self
     }
 
+    /// Fail guest entropy requests with the given per-mille (0..=1000)
+    /// probability, returning a deterministic named error instead of bytes.
+    pub fn with_entropy_fail_permille(mut self, permille: u16) -> Self {
+        self.faults.entropy.fail_permille = permille;
+        self
+    }
+
     /// Define a name in the run's DNS host table. Names not defined here are
     /// NXDOMAIN; the `--dns-*` fault knobs act only on defined ones.
     pub fn with_dns_entry(
@@ -1267,6 +1296,9 @@ impl RuntimeConfig {
             }
             FaultKnob::DnsLatencyNanos => {
                 self.faults.dns.latency_nanos = Some(parse_nanos_range(env, value)?);
+            }
+            FaultKnob::EntropyFailPermille => {
+                self.faults.entropy.fail_permille = parse_permille(env, value)?;
             }
         }
         Ok(())
@@ -2278,6 +2310,9 @@ impl RuntimeBuilder {
             dns_latency_nanos: self.config.faults.dns.latency_nanos,
             dns_latency_rng: SplitMix64::new(domain_seed(root_seed, fault_domain::DNS_LATENCY)),
             dns_report: patina_dst_driver_api::DnsFaultReport::default(),
+            entropy_fail_permille: self.config.faults.entropy.fail_permille,
+            entropy_fault_rng: SplitMix64::new(domain_seed(root_seed, fault_domain::ENTROPY_FAULT)),
+            entropy_report: patina_dst_driver_api::EntropyFaultReport::default(),
             schedule: ScheduleTracker::default(),
             buggify: Buggify::new(self.config.buggify, root_seed),
             liveness,
@@ -3307,6 +3342,15 @@ pub struct Context {
     dns_latency_rng: SplitMix64,
     /// Per-class DNS fault accounting for the end-of-run vacuity diagnostic.
     dns_report: patina_dst_driver_api::DnsFaultReport,
+    /// Seeded entropy-request failure knob and its domain-separated stream. The
+    /// stream is deliberately NOT the entropy stream itself (see
+    /// [`fault_domain::ENTROPY_FAULT`]): drawing the fire/no-fire decision from
+    /// the guest-visible bytes would perturb every non-faulted request's bytes
+    /// the moment the knob was armed.
+    entropy_fail_permille: u16,
+    entropy_fault_rng: SplitMix64,
+    /// Per-class entropy fault accounting for the end-of-run vacuity diagnostic.
+    entropy_report: patina_dst_driver_api::EntropyFaultReport,
     /// Per-task scheduling-boundary accounting for the vacuous-schedule
     /// diagnostic emitted at [`Context::finish`].
     schedule: ScheduleTracker,
@@ -3712,18 +3756,59 @@ impl Context {
             return decode_bytes(&operation, recorded);
         }
 
-        let mut bytes = vec![0; len];
-        let result = self
-            .entropy
-            .as_mut()
-            .expect("driver was checked")
-            .fill(&mut bytes);
-        let outcome = match result {
-            Ok(()) => Outcome::Bytes(bytes),
-            Err(error) => Outcome::Error(error),
+        self.entropy_report.requests += 1;
+        let outcome = match self.draw_entropy_failure() {
+            Some(error) => {
+                self.entropy_report.failures_injected += 1;
+                Outcome::Error(error)
+            }
+            None => {
+                let mut bytes = vec![0; len];
+                let result = self
+                    .entropy
+                    .as_mut()
+                    .expect("driver was checked")
+                    .fill(&mut bytes);
+                match result {
+                    Ok(()) => Outcome::Bytes(bytes),
+                    Err(error) => Outcome::Error(error),
+                }
+            }
         };
         let outcome = self.complete(operation.clone(), outcome);
         decode_bytes(&operation, outcome)
+    }
+
+    /// Draw the seeded entropy-request failure for one eligible call, or `None`
+    /// when the knob does not fire. Extreme rates are decision-free so the
+    /// never-fail default perturbs no stream, mirroring [`Context::draw_dns_failure`].
+    fn draw_entropy_failure(&mut self) -> Option<EffectError> {
+        let fires = match self.entropy_fail_permille {
+            0 => false,
+            1000 => true,
+            permille => (self.entropy_fault_rng.next_u64() % 1000) < u64::from(permille),
+        };
+        fires.then(|| {
+            EffectError::new(
+                ErrorCode::Interrupted,
+                "injected entropy failure: request did not complete",
+            )
+        })
+    }
+
+    /// The end-of-run entropy fault summary, or `None` when the knob was never
+    /// live. Filled entirely by the Context: entropy has no driver-side fault
+    /// model of its own.
+    pub fn entropy_fault_report(&self) -> Option<patina_dst_driver_api::EntropyFaultReport> {
+        if self.entropy_fail_permille == 0 {
+            return None;
+        }
+        let mut report = self.entropy_report;
+        report.fail_vacuity_diagnosable = patina_dst_driver_api::vacuity_is_diagnosable(
+            report.requests,
+            self.entropy_fail_permille,
+        );
+        Some(report)
     }
 
     pub fn now(&mut self, clock: ClockKind) -> Result<u64, RuntimeError> {
@@ -5056,6 +5141,10 @@ impl Context {
         if let Some(report) = self.net_fault_report() {
             emit_net_fault_report(self.reports, &report);
         }
+        // Entropy fault-injection diagnostic, on the same default-on terms.
+        if let Some(report) = self.entropy_fault_report() {
+            emit_entropy_fault_report(self.reports, &report);
+        }
         // Liveness-watchdog diagnostic: prove the watchdog was actually armed and
         // ran to a clean finish (it did NOT fire — a fired watchdog aborts before
         // finish()). Default-on so "watchdog enabled, run OK" is never silently
@@ -5602,6 +5691,7 @@ fn fault_record(config: &RuntimeConfig) -> patina_dst_trace::FaultConfigRecord {
         net_tcp_buffer_bytes: config.faults.net.tcp_buffer_bytes.map(|bytes| bytes as u64),
         dns_fail_permille: config.faults.dns.fail_permille,
         dns_latency_nanos: config.faults.dns.latency_nanos,
+        entropy_fail_permille: config.faults.entropy.fail_permille,
     }
 }
 
@@ -5640,6 +5730,9 @@ fn fault_config_from_record(record: &patina_dst_trace::FaultConfigRecord) -> Fau
         dns: DnsFaultConfig {
             fail_permille: record.dns_fail_permille,
             latency_nanos: record.dns_latency_nanos,
+        },
+        entropy: EntropyFaultConfig {
+            fail_permille: record.entropy_fail_permille,
         },
     }
 }
@@ -6222,6 +6315,35 @@ times over, yet it applied ZERO effects. A clean result here does NOT mean name-
 failure was tested. Verify the guest resolves names the host table DEFINES — a lookup of an \
 undefined name is NXDOMAIN by semantics and is never fault-eligible.",
             report.resolutions,
+        );
+    }
+}
+
+/// Emit the default-on entropy fault-injection diagnostic. Silent when the knob
+/// was never live at all. Suppressed by a false-y [`ENV_ENTROPY_FAULT_REPORT`].
+fn emit_entropy_fault_report(
+    reports: ReportConfig,
+    report: &patina_dst_driver_api::EntropyFaultReport,
+) {
+    if report.requests == 0 {
+        return;
+    }
+    if !reports.enabled(Report::EntropyFault) {
+        return;
+    }
+    eprintln!(
+        "PATINA_ENTROPY_FAULT_REPORT requests={} fail_vacuity_diagnosable={} failures_injected={} vacuous={}",
+        report.requests,
+        u8::from(report.fail_vacuity_diagnosable),
+        report.failures_injected,
+        u8::from(report.is_vacuous()),
+    );
+    if report.is_vacuous() {
+        eprintln!(
+            "PATINA WARNING: entropy fault knobs inert — {} fault-eligible entropy request(s) \
+occurred, enough that the configured rate should have fired several times over, yet it applied \
+ZERO effects.",
+            report.requests,
         );
     }
 }
@@ -7357,6 +7479,7 @@ class=crash|0 class=buggify|0"
                 fail_permille: 1,
                 latency_nanos: Some((1, 2)),
             },
+            entropy: EntropyFaultConfig { fail_permille: 1 },
         }
     }
 
@@ -7402,6 +7525,7 @@ class=crash|0 class=buggify|0"
                 "net_reset",
                 "net_partition",
                 "net_tcp_buffer",
+                "entropy_fail",
                 "buggify",
             ]
         );

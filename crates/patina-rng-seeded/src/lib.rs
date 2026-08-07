@@ -51,6 +51,12 @@ pub mod fault_domain {
     /// Context-side per-resolution DNS latency stream.
     pub const DNS_LATENCY: &str = "patina.dns.latency";
 
+    /// Seeded entropy-request failure-decision stream (`--entropy-fail-permille`).
+    /// Deliberately separate from [`ENTROPY`]: drawing the fire/no-fire decision
+    /// from the guest-visible entropy stream itself would perturb every
+    /// non-faulted request's bytes the moment the knob was armed.
+    pub const ENTROPY_FAULT: &str = "patina.entropy.fail";
+
     /// Context-side per-operation filesystem latency stream. Latency needs the
     /// clock, so unlike the error/short streams it is drawn by the Context rather
     /// than by a wrapper driver.
@@ -88,6 +94,8 @@ pub mod fault_domain {
     pub const SWARM_NET_TCP_BUFFER: &str = "patina.swarm.net_tcp_buffer";
     /// Swarm per-class coin for cooperative-SUT buggify.
     pub const SWARM_BUGGIFY: &str = "patina.swarm.buggify";
+    /// Swarm per-class coin for entropy-request failure injection.
+    pub const SWARM_ENTROPY_FAIL: &str = "patina.swarm.entropy_fail";
 }
 
 /// The specified SplitMix64 stream used by deterministic decision policies.

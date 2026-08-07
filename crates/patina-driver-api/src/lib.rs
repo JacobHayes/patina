@@ -341,6 +341,32 @@ impl DnsFaultReport {
     }
 }
 
+/// End-of-run summary of guest entropy-request fault-injection activity, for the
+/// default-on vacuity diagnostic. A single class, unlike [`DnsFaultReport`]: the
+/// entropy plane has only the one failure knob, no latency knob of its own.
+///
+/// Owned entirely by the `Context`: guest entropy is a single-site operation
+/// (`Context::entropy_bytes`), so there is no driver to ask.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EntropyFaultReport {
+    /// Fault-eligible entropy requests observed (every `entropy_bytes` call: the
+    /// baseline nondeterminism source has no undefined-name-style exemption).
+    pub requests: u64,
+    /// The failure knob was live over enough eligible requests that
+    /// [`vacuity_is_diagnosable`] holds, so zero injected failures is anomalous.
+    pub fail_vacuity_diagnosable: bool,
+    /// Requests failed by the entropy fault injector.
+    pub failures_injected: u64,
+}
+
+impl EntropyFaultReport {
+    /// Whether the entropy-fault class went vacuously inert: live over enough
+    /// opportunities to be expected to fire repeatedly, yet applied nothing.
+    pub fn is_vacuous(&self) -> bool {
+        self.fail_vacuity_diagnosable && self.failures_injected == 0
+    }
+}
+
 /// End-of-run summary of network fault-injection activity, for the default-on
 /// vacuity diagnostic. Per class, exactly like [`FsFaultReport`] and
 /// [`DnsFaultReport`]: a run with several network knobs live must not hide one

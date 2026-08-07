@@ -522,6 +522,13 @@ const FAULT_FLAGS: &[Flag] = &[
         "Virtual TCP receive-buffer size; smaller values make would-block/partial sends reachable.",
         false,
     ),
+    f(
+        "--entropy-fail-permille",
+        None,
+        Value::Required("N", Kind::Permille),
+        "Fail guest entropy requests at N per-mille with a seeded named error instead of bytes.",
+        false,
+    ),
 ];
 
 /// The DNS domain: the host table (semantic configuration, like `--param`) and
@@ -2027,7 +2034,7 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         doc: "CLI default override for `.patina/config.toml` keys (for example PATINA_SEED, PATINA_GENERATIONS): explicit flags still win; campaign scrubs run-default env names from child runs.",
     },
     EnvVar {
-        name: "PATINA_SCHEDULE_REPORT / PATINA_SCHEDULE_POLICY_REPORT / PATINA_SWARM_REPORT / PATINA_LIVENESS_REPORT / PATINA_SDK_REPORT / PATINA_FS_FAULT_REPORT / PATINA_DNS_FAULT_REPORT / PATINA_NET_FAULT_REPORT / PATINA_COVERAGE_REPORT / PATINA_DEPTH_REPORT",
+        name: "PATINA_SCHEDULE_REPORT / PATINA_SCHEDULE_POLICY_REPORT / PATINA_SWARM_REPORT / PATINA_LIVENESS_REPORT / PATINA_SDK_REPORT / PATINA_FS_FAULT_REPORT / PATINA_DNS_FAULT_REPORT / PATINA_NET_FAULT_REPORT / PATINA_ENTROPY_FAULT_REPORT / PATINA_COVERAGE_REPORT / PATINA_DEPTH_REPORT",
         scope: "user",
         doc: "End-of-run diagnostics, all on by default; a false-y value (0/off/false/no) silences one, on every family. Presentation only: suppressing a report changes no recorded byte, so a quiet run and a loud one replay against each other. A campaign pins them all on, since for a campaign they are classifier inputs rather than cosmetics.",
     },
@@ -2105,6 +2112,11 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         name: "PATINA_SLEEP_JITTER_NANOS / PATINA_NET_JITTER_NANOS / PATINA_NET_DROP_PERMILLE / PATINA_NET_LATENCY_NANOS",
         scope: "protocol",
         doc: "Seed-driven timing/network fault knobs (mirror the --*-nanos/--net-* flags).",
+    },
+    EnvVar {
+        name: "PATINA_ENTROPY_FAIL_PERMILLE",
+        scope: "protocol",
+        doc: "Seeded guest entropy-request failure knob (mirrors --entropy-fail-permille).",
     },
     EnvVar {
         name: "PATINA_BUGGIFY / PATINA_BUGGIFY_ACTIVATION_PERMILLE / PATINA_BUGGIFY_CUTOFF_NANOS / PATINA_BUGGIFY_AFTER_SETUP",
