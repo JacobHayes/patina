@@ -98,6 +98,9 @@ pub use patina_dst_trace::MAX_TRACE_BYTES;
 use patina_dst_trace::{BranchSession, Recorder, Replayer, RunMetadata, TraceBundle, TraceError};
 use patina_dst_wrapper_fault::FaultFs;
 
+mod fault_knob;
+pub use fault_knob::{FaultKnob, KnobMeta, Masks, Plane, Plumbing, SWARM_CLASSES, SwarmClass};
+
 pub const ENV_MODE: &str = "PATINA_MODE";
 pub const ENV_SEED: &str = "PATINA_SEED";
 pub const ENV_TRACE: &str = "PATINA_TRACE";
@@ -1072,21 +1075,16 @@ impl RuntimeConfig {
     /// Apply the DNS host table from a control-plane accessor, mirroring
     /// [`RuntimeConfig::apply_fault_env`]. The table is a JSON object; a
     /// malformed entry fails closed rather than silently resolving nothing.
-    pub fn apply_dns_env<F>(mut self, get: F) -> Result<Self, RuntimeError>
+    ///
+    /// Separate from [`RuntimeConfig::apply_fault_env`] because a family may
+    /// offer the host table WITHOUT the DNS fault knobs — `campaign` does, since
+    /// it draws the knobs per generation — so the two planes are applied
+    /// independently. [`Plane`] is where each knob records which one it lands on.
+    pub fn apply_dns_env<F>(self, get: F) -> Result<Self, RuntimeError>
     where
         F: Fn(&str) -> Option<String>,
     {
-        let Some(value) = get(ENV_DNS_ENTRIES) else {
-            return Ok(self);
-        };
-        let entries: BTreeMap<String, String> = serde_json::from_str(&value).map_err(|error| {
-            RuntimeError::Config(format!("{ENV_DNS_ENTRIES} is invalid: {error}"))
-        })?;
-        for (name, address) in &entries {
-            validate_dns_entry(name, address)?;
-        }
-        self.dns_entries = entries;
-        Ok(self)
+        self.apply_knob_env(Plane::DnsTable, get)
     }
 
     /// Add seeded extra latency to every guest sleep, drawn from `[min, max]`.
@@ -1161,86 +1159,117 @@ impl RuntimeConfig {
     /// native shim (reading its scrubbed constructor-time control plane), so both
     /// entry points parse the fault protocol identically and fail closed on any
     /// malformed value. Each knob defaults off when its variable is absent.
-    pub fn apply_fault_env<F>(mut self, get: F) -> Result<Self, RuntimeError>
+    pub fn apply_fault_env<F>(self, get: F) -> Result<Self, RuntimeError>
     where
         F: Fn(&str) -> Option<String>,
     {
-        if let Some(value) = get(ENV_FS_CRASH_AT) {
-            self.faults.fs.crash_at = Some(parse_crash_point(&value)?);
-        }
-        if let Some(value) = get(ENV_FS_TORN_GRANULARITY) {
-            self.faults.fs.torn_granularity = parse_torn_granularity(&value)?;
-        }
-        if let Some(value) = get(ENV_FS_ERROR_PERMILLE) {
-            self.faults.fs.error_permille = parse_permille(ENV_FS_ERROR_PERMILLE, &value)?;
-        }
-        if let Some(value) = get(ENV_FS_SHORT_PERMILLE) {
-            self.faults.fs.short_permille = parse_permille(ENV_FS_SHORT_PERMILLE, &value)?;
-        }
-        if let Some(value) = get(ENV_FS_LATENCY) {
-            self.faults.fs.latency_nanos = Some(parse_nanos_range(ENV_FS_LATENCY, &value)?);
-        }
-        if let Some(value) = get(ENV_SLEEP_JITTER) {
-            self.faults.clock.sleep_jitter_nanos =
-                Some(parse_nanos_range(ENV_SLEEP_JITTER, &value)?);
-        }
-        if let Some(value) = get(ENV_NET_JITTER) {
-            self.faults.net.jitter_nanos = Some(parse_nanos_range(ENV_NET_JITTER, &value)?);
-        }
-        if let Some(value) = get(ENV_NET_DROP_PERMILLE) {
-            self.faults.net.drop_permille = parse_permille(ENV_NET_DROP_PERMILLE, &value)?;
-        }
-        if let Some(value) = get(ENV_NET_DUPLICATE_PERMILLE) {
-            self.faults.net.duplicate_permille =
-                parse_permille(ENV_NET_DUPLICATE_PERMILLE, &value)?;
-        }
-        if let Some(value) = get(ENV_NET_CONNECT_REFUSE_PERMILLE) {
-            self.faults.net.connect_refuse_permille =
-                parse_permille(ENV_NET_CONNECT_REFUSE_PERMILLE, &value)?;
-        }
-        if let Some(value) = get(ENV_NET_RESET_PERMILLE) {
-            self.faults.net.reset_permille = parse_permille(ENV_NET_RESET_PERMILLE, &value)?;
-        }
-        if let Some(value) = get(ENV_NET_PARTITIONS) {
-            let pairs: Vec<(String, String)> = serde_json::from_str(&value).map_err(|error| {
-                RuntimeError::Config(format!("{ENV_NET_PARTITIONS} is invalid: {error}"))
-            })?;
-            for (left, right) in pairs {
-                validate_partition(&left, &right)?;
-                self.faults
-                    .net
-                    .partitions
-                    .insert((left.clone(), right.clone()));
-                self.faults.net.partitions.insert((right, left));
+        self.apply_knob_env(Plane::Fault, get)
+    }
+
+    /// Read every knob on one configuration plane off the control plane, in
+    /// [`FaultKnob::ALL`] order, and layer it onto this configuration. The knob
+    /// table decides WHICH variable carries each knob and which plane it lands
+    /// on; [`RuntimeConfig::apply_one_knob`] decides how its value is parsed.
+    fn apply_knob_env<F>(mut self, plane: Plane, get: F) -> Result<Self, RuntimeError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        for knob in FaultKnob::ALL {
+            let meta = knob.meta();
+            if meta.plane != plane {
+                continue;
             }
-        }
-        if let Some(value) = get(ENV_NET_TCP_BUFFER_BYTES) {
-            let bytes: usize = value.trim().parse().map_err(|_| {
-                RuntimeError::Config(format!(
-                    "{ENV_NET_TCP_BUFFER_BYTES} must be a non-negative machine integer"
-                ))
-            })?;
-            if bytes == 0 {
-                return Err(RuntimeError::Config(format!(
-                    "{ENV_NET_TCP_BUFFER_BYTES} must be greater than zero"
-                )));
+            if let Some(value) = get(meta.env) {
+                self.apply_one_knob(*knob, &value)?;
             }
-            self.faults.net.tcp_buffer_bytes = Some(bytes);
-        }
-        if let Some(value) = get(ENV_DNS_FAIL_PERMILLE) {
-            self.faults.dns.fail_permille = parse_permille(ENV_DNS_FAIL_PERMILLE, &value)?;
-        }
-        if let Some(value) = get(ENV_DNS_LATENCY) {
-            self.faults.dns.latency_nanos = Some(parse_nanos_range(ENV_DNS_LATENCY, &value)?);
-        }
-        if let Some(value) = get(ENV_NET_LATENCY) {
-            self.faults.net.latency_nanos = value.trim().parse().map_err(|_| {
-                RuntimeError::Config(format!(
-                    "{ENV_NET_LATENCY} must be an unsigned 64-bit integer"
-                ))
-            })?;
         }
         Ok(self)
+    }
+
+    /// Parse one knob's control-plane value and apply it. The exhaustive match is
+    /// the pairing: a knob added to [`FaultKnob`] has no way into a
+    /// configuration until its protocol is written here, so it cannot be
+    /// advertised by the CLI, forwarded by a family, and then silently ignored by
+    /// the runtime — the silent-inertness class, which looks exactly like a clean
+    /// run.
+    fn apply_one_knob(&mut self, knob: FaultKnob, value: &str) -> Result<(), RuntimeError> {
+        let env = knob.meta().env;
+        match knob {
+            FaultKnob::FsCrashAt => self.faults.fs.crash_at = Some(parse_crash_point(value)?),
+            FaultKnob::FsTornGranularity => {
+                self.faults.fs.torn_granularity = parse_torn_granularity(value)?;
+            }
+            FaultKnob::FsErrorPermille => {
+                self.faults.fs.error_permille = parse_permille(env, value)?;
+            }
+            FaultKnob::FsShortPermille => {
+                self.faults.fs.short_permille = parse_permille(env, value)?;
+            }
+            FaultKnob::FsLatencyNanos => {
+                self.faults.fs.latency_nanos = Some(parse_nanos_range(env, value)?);
+            }
+            FaultKnob::SleepJitterNanos => {
+                self.faults.clock.sleep_jitter_nanos = Some(parse_nanos_range(env, value)?);
+            }
+            FaultKnob::NetJitterNanos => {
+                self.faults.net.jitter_nanos = Some(parse_nanos_range(env, value)?);
+            }
+            FaultKnob::NetDropPermille => {
+                self.faults.net.drop_permille = parse_permille(env, value)?;
+            }
+            FaultKnob::NetLatencyNanos => {
+                self.faults.net.latency_nanos = value.trim().parse().map_err(|_| {
+                    RuntimeError::Config(format!("{env} must be an unsigned 64-bit integer"))
+                })?;
+            }
+            FaultKnob::NetDuplicatePermille => {
+                self.faults.net.duplicate_permille = parse_permille(env, value)?;
+            }
+            FaultKnob::NetConnectRefusePermille => {
+                self.faults.net.connect_refuse_permille = parse_permille(env, value)?;
+            }
+            FaultKnob::NetResetPermille => {
+                self.faults.net.reset_permille = parse_permille(env, value)?;
+            }
+            FaultKnob::NetPartition => {
+                let pairs: Vec<(String, String)> = serde_json::from_str(value)
+                    .map_err(|error| RuntimeError::Config(format!("{env} is invalid: {error}")))?;
+                for (left, right) in pairs {
+                    validate_partition(&left, &right)?;
+                    self.faults
+                        .net
+                        .partitions
+                        .insert((left.clone(), right.clone()));
+                    self.faults.net.partitions.insert((right, left));
+                }
+            }
+            FaultKnob::NetTcpBufferBytes => {
+                let bytes: usize = value.trim().parse().map_err(|_| {
+                    RuntimeError::Config(format!("{env} must be a non-negative machine integer"))
+                })?;
+                if bytes == 0 {
+                    return Err(RuntimeError::Config(format!(
+                        "{env} must be greater than zero"
+                    )));
+                }
+                self.faults.net.tcp_buffer_bytes = Some(bytes);
+            }
+            FaultKnob::DnsEntry => {
+                let entries: BTreeMap<String, String> = serde_json::from_str(value)
+                    .map_err(|error| RuntimeError::Config(format!("{env} is invalid: {error}")))?;
+                for (name, address) in &entries {
+                    validate_dns_entry(name, address)?;
+                }
+                self.dns_entries = entries;
+            }
+            FaultKnob::DnsFailPermille => {
+                self.faults.dns.fail_permille = parse_permille(env, value)?;
+            }
+            FaultKnob::DnsLatencyNanos => {
+                self.faults.dns.latency_nanos = Some(parse_nanos_range(env, value)?);
+            }
+        }
+        Ok(())
     }
 
     /// The run's cooperative-SUT (buggify) configuration.
@@ -5871,186 +5900,46 @@ fn reconcile_replay_sud(
 /// rule: the recorded fault/buggify records are derived from the masked config,
 /// and the swarm record names the class as a candidate that was not selected.
 fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_dst_trace::SwarmConfigRecord {
-    // Stable class tokens paired with a live predicate, a domain label, the
-    // fingerprint component the class declares (if any), and a dropper. A class
-    // is a candidate only when currently enabled (non-default).
     let mut draw = SwarmDraw::default();
     let seed = config.seed;
 
-    if config.faults.fs.crash_at.is_some()
-        || config.faults.fs.torn_granularity != TornGranularity::default()
-    {
+    // [`SWARM_CLASSES`] is the draw order, and what each class masks decides both
+    // its candidacy and its dropper — so a knob joins swarm by naming a class in
+    // the knob table, never by growing this function.
+    for class in SWARM_CLASSES {
+        let candidate = match class.masks {
+            Masks::Knobs(knobs) => knobs.iter().any(|knob| knob.is_set(&config.faults)),
+            Masks::Buggify => config.buggify.enabled,
+        };
+        if !candidate {
+            continue;
+        }
         apply_swarm_class(
             seed,
-            "crash",
-            fault_domain::SWARM_CRASH,
-            None,
+            class.token,
+            class.domain,
+            class.fingerprint_component,
             &mut draw,
-            || {
-                config.faults.fs.crash_at = None;
-                config.faults.fs.torn_granularity = TornGranularity::default();
+            || match class.masks {
+                Masks::Knobs(knobs) => {
+                    for knob in knobs {
+                        knob.clear(&mut config.faults);
+                    }
+                }
+                // The WHOLE buggify config is reset, not just `enabled`. Clearing
+                // only the flag left the requested permilles behind, so the run
+                // reported `enabled=0 fire_permille=372` — a half-masked state
+                // that reads like "buggify was asked for and silently ignored".
+                // That line is what the original investigation drew its (wrong)
+                // conclusion from. A dropped class now leaves no residue at all;
+                // the fact that it was requested and dropped is carried
+                // explicitly by the swarm record, the `PATINA_SWARM_REPORT` line,
+                // and `swarm_deselected=1`. Resetting also makes record and
+                // replay agree: the trace records no buggify config for a dropped
+                // class, so a replay that rebuilt one from residue could not
+                // reproduce the recording's diagnostics.
+                Masks::Buggify => config.buggify = BuggifyConfig::default(),
             },
-        );
-    }
-    if config.faults.fs.error_permille != 0 {
-        apply_swarm_class(
-            seed,
-            "fs_error",
-            fault_domain::SWARM_FS_ERROR,
-            None,
-            &mut draw,
-            || config.faults.fs.error_permille = 0,
-        );
-    }
-    if config.faults.fs.short_permille != 0 {
-        apply_swarm_class(
-            seed,
-            "fs_short",
-            fault_domain::SWARM_FS_SHORT,
-            None,
-            &mut draw,
-            || config.faults.fs.short_permille = 0,
-        );
-    }
-    if config.faults.fs.latency_nanos.is_some() {
-        apply_swarm_class(
-            seed,
-            "fs_latency",
-            fault_domain::SWARM_FS_LATENCY,
-            None,
-            &mut draw,
-            || config.faults.fs.latency_nanos = None,
-        );
-    }
-    if config.faults.dns.fail_permille != 0 {
-        apply_swarm_class(
-            seed,
-            "dns_fail",
-            fault_domain::SWARM_DNS_FAIL,
-            None,
-            &mut draw,
-            || config.faults.dns.fail_permille = 0,
-        );
-    }
-    if config.faults.dns.latency_nanos.is_some() {
-        apply_swarm_class(
-            seed,
-            "dns_latency",
-            fault_domain::SWARM_DNS_LATENCY,
-            None,
-            &mut draw,
-            || config.faults.dns.latency_nanos = None,
-        );
-    }
-    if config.faults.clock.sleep_jitter_nanos.is_some() {
-        apply_swarm_class(
-            seed,
-            "sleep_jitter",
-            fault_domain::SWARM_SLEEP_JITTER,
-            None,
-            &mut draw,
-            || config.faults.clock.sleep_jitter_nanos = None,
-        );
-    }
-    if config.faults.net.jitter_nanos.is_some() {
-        apply_swarm_class(
-            seed,
-            "net_jitter",
-            fault_domain::SWARM_NET_JITTER,
-            None,
-            &mut draw,
-            || config.faults.net.jitter_nanos = None,
-        );
-    }
-    if config.faults.net.drop_permille != 0 {
-        apply_swarm_class(
-            seed,
-            "net_drop",
-            fault_domain::SWARM_NET_DROP,
-            None,
-            &mut draw,
-            || config.faults.net.drop_permille = 0,
-        );
-    }
-    if config.faults.net.latency_nanos != 0 {
-        apply_swarm_class(
-            seed,
-            "net_latency",
-            fault_domain::SWARM_NET_LATENCY,
-            None,
-            &mut draw,
-            || config.faults.net.latency_nanos = 0,
-        );
-    }
-    if config.faults.net.duplicate_permille != 0 {
-        apply_swarm_class(
-            seed,
-            "net_duplicate",
-            fault_domain::SWARM_NET_DUPLICATE,
-            None,
-            &mut draw,
-            || config.faults.net.duplicate_permille = 0,
-        );
-    }
-    if config.faults.net.connect_refuse_permille != 0 {
-        apply_swarm_class(
-            seed,
-            "net_connect_refuse",
-            fault_domain::SWARM_NET_CONNECT_REFUSE,
-            None,
-            &mut draw,
-            || config.faults.net.connect_refuse_permille = 0,
-        );
-    }
-    if config.faults.net.reset_permille != 0 {
-        apply_swarm_class(
-            seed,
-            "net_reset",
-            fault_domain::SWARM_NET_RESET,
-            None,
-            &mut draw,
-            || config.faults.net.reset_permille = 0,
-        );
-    }
-    if !config.faults.net.partitions.is_empty() {
-        apply_swarm_class(
-            seed,
-            "net_partition",
-            fault_domain::SWARM_NET_PARTITION,
-            None,
-            &mut draw,
-            || config.faults.net.partitions.clear(),
-        );
-    }
-    if config.faults.net.tcp_buffer_bytes.is_some() {
-        apply_swarm_class(
-            seed,
-            "net_tcp_buffer",
-            fault_domain::SWARM_NET_TCP_BUFFER,
-            None,
-            &mut draw,
-            || config.faults.net.tcp_buffer_bytes = None,
-        );
-    }
-    if config.buggify.enabled {
-        apply_swarm_class(
-            seed,
-            "buggify",
-            fault_domain::SWARM_BUGGIFY,
-            Some(FINGERPRINT_BUGGIFY),
-            &mut draw,
-            // The WHOLE buggify config is reset, not just `enabled`. Clearing only
-            // the flag left the requested permilles behind, so the run reported
-            // `enabled=0 fire_permille=372` — a half-masked state that reads like
-            // "buggify was asked for and silently ignored". That line is what the
-            // original investigation drew its (wrong) conclusion from. A dropped
-            // class now leaves no residue at all; the fact that it was requested
-            // and dropped is carried explicitly by the swarm record, the
-            // `PATINA_SWARM_REPORT` line, and `swarm_deselected=1`. Resetting also
-            // makes record and replay agree: the trace records no buggify config
-            // for a dropped class, so a replay that rebuilt one from residue could
-            // not reproduce the recording's diagnostics.
-            || config.buggify = BuggifyConfig::default(),
         );
     }
 
@@ -7386,6 +7275,50 @@ class=crash|0 class=buggify|0"
         );
     }
 
+    /// Every fault knob must survive the trace round trip. A knob the record
+    /// does not carry replays as its default — the run reproduces WITHOUT the
+    /// fault that was recorded, which is silent inertness wearing a replay's
+    /// clothes. Driven off [`FaultKnob::ALL`], so the gate grows with the enum
+    /// rather than with a hand-kept sample list.
+    #[test]
+    fn every_fault_knob_survives_the_trace_record_round_trip() {
+        for knob in FaultKnob::ALL {
+            if knob.meta().plane != Plane::Fault {
+                // The DNS host table has its own record (`DnsConfigRecord`) and
+                // its own replay reconciliation; see `reconcile_replay_dns`.
+                continue;
+            }
+            let mut config = RuntimeConfig::seeded(1);
+            knob.set_sample(&mut config.faults);
+            let record = fault_record(&config);
+            assert_ne!(
+                record,
+                patina_dst_trace::FaultConfigRecord::default(),
+                "{knob:?} left no trace in the recorded fault configuration"
+            );
+            assert_eq!(
+                fault_config_from_record(&record),
+                config.faults,
+                "{knob:?} did not survive the record round trip"
+            );
+        }
+    }
+
+    /// The two halves of "every knob" must describe the same configuration: the
+    /// FIELD view below, whose exhaustive struct literals make a new
+    /// `*FaultConfig` field a compile error, and the KNOB view, whose exhaustive
+    /// `set_sample` match makes a new [`FaultKnob`] one. A field added without a
+    /// knob (unreachable from any CLI) or a knob added without a field (carried
+    /// to the guest and then dropped) shows up here as a mismatch.
+    #[test]
+    fn fault_config_fields_and_fault_knobs_describe_the_same_configuration() {
+        let mut from_knobs = FaultConfig::default();
+        for knob in FaultKnob::ALL {
+            knob.set_sample(&mut from_knobs);
+        }
+        assert_eq!(from_knobs, every_fault_knob_enabled());
+    }
+
     /// Every fault knob at a non-default value, written as EXHAUSTIVE struct
     /// literals on purpose: a field added to any `*FaultConfig` sub-struct is a
     /// compile error right here, which is what drags a new knob through the
@@ -7446,10 +7379,11 @@ class=crash|0 class=buggify|0"
             .swarm
             .expect("swarm recorded");
 
-        // Drift gate for the nested FaultConfig shape: every non-defaultable
-        // fault field/domain has a swarm class row. Paired with the exhaustive
-        // literals above, a new knob cannot reach here without both a compile
-        // fix and a row in `apply_swarm_mask`.
+        // The recorded candidate ORDER, written out by hand on purpose: it is
+        // the one thing about `SWARM_CLASSES` that a trace can see, so deriving
+        // it from the table would leave a reordered table ungated. That a class
+        // EXISTS for every knob is gated separately, off the table, by
+        // `swarm_classes_and_knobs_agree`.
         assert_eq!(
             swarm.candidate_classes,
             vec![
@@ -7473,47 +7407,45 @@ class=crash|0 class=buggify|0"
         );
     }
 
-    /// Each swarm row must be wired to ITS OWN field: a config with exactly one
-    /// knob enabled offers exactly that one candidate, and a deselected class
-    /// leaves no residue behind. A row copy-pasted onto a neighbouring field —
-    /// the likeliest mistake when a domain grows its fourth knob — shows up here.
+    /// Each swarm row must be wired to ITS OWN knobs: a config with exactly one
+    /// knob set offers exactly that knob's class as the only candidate, and a
+    /// deselected class leaves no residue behind. A row copy-pasted onto a
+    /// neighbouring field — the likeliest mistake when a domain grows its fourth
+    /// knob — shows up here. Driven off [`FaultKnob::ALL`] rather than a sample
+    /// list, so a new knob is covered the day it exists.
     #[test]
-    fn each_new_swarm_class_is_wired_to_its_own_fault_field() {
-        let cases: Vec<(&str, RuntimeConfig)> = vec![
-            (
-                "net_duplicate",
-                RuntimeConfig::seeded(1).with_net_duplicate_permille(5),
-            ),
-            (
-                "net_connect_refuse",
-                RuntimeConfig::seeded(1).with_net_connect_refuse_permille(5),
-            ),
-            (
-                "net_reset",
-                RuntimeConfig::seeded(1).with_net_reset_permille(5),
-            ),
-            (
-                "net_partition",
-                RuntimeConfig::seeded(1).with_net_partition("a", "b"),
-            ),
-            (
-                "net_tcp_buffer",
-                RuntimeConfig::seeded(1).with_net_tcp_buffer_bytes(512),
-            ),
-        ];
-        for (token, config) in cases {
-            let mut config = config.with_swarm(true);
+    fn each_swarm_class_is_wired_to_its_own_fault_knobs() {
+        for knob in FaultKnob::ALL {
+            // The class that MASKS the knob, which is not always the class the
+            // knob declares: `--fs-torn-granularity` declares none and is masked
+            // by `crash`, and `--dns-entry` is masked by nothing at all.
+            let masking = SWARM_CLASSES
+                .iter()
+                .find(|class| matches!(class.masks, Masks::Knobs(knobs) if knobs.contains(knob)));
+            let mut config = RuntimeConfig::seeded(1).with_swarm(true);
+            knob.set_sample(&mut config.faults);
             let record = apply_swarm_mask(&mut config);
+
+            let Some(class) = masking else {
+                assert!(
+                    record.candidate_classes.is_empty(),
+                    "{knob:?} is masked by no class but offered {:?}",
+                    record.candidate_classes
+                );
+                continue;
+            };
             assert_eq!(
                 record.candidate_classes,
-                vec![token.to_string()],
-                "{token} must be the only candidate its knob offers"
+                vec![class.token.to_string()],
+                "{} must be the only candidate {knob:?} offers",
+                class.token
             );
             if record.selected_classes.is_empty() {
                 assert_eq!(
                     config.faults,
                     FaultConfig::default(),
-                    "a deselected {token} must leave no residue"
+                    "a deselected {} must leave no residue",
+                    class.token
                 );
             }
         }
@@ -7737,44 +7669,35 @@ class=crash|0 class=buggify|0"
         ));
     }
 
+    /// Every class's coin must come from `domain_seed` with the label the table
+    /// declares — not from the root seed, and not from a neighbour's label, which
+    /// would make two classes select and deselect together forever. Recomputed
+    /// straight from [`SWARM_CLASSES`], so a class added to the table is covered
+    /// without touching this test, and a class whose coin is rewired to a
+    /// different label fails immediately.
     #[test]
     fn swarm_class_coins_use_the_domain_seed_registry() {
         let seed = 42;
-        let expected = [
-            ("crash", fault_domain::SWARM_CRASH),
-            ("fs_error", fault_domain::SWARM_FS_ERROR),
-            ("fs_short", fault_domain::SWARM_FS_SHORT),
-            ("fs_latency", fault_domain::SWARM_FS_LATENCY),
-            ("dns_fail", fault_domain::SWARM_DNS_FAIL),
-            ("dns_latency", fault_domain::SWARM_DNS_LATENCY),
-            ("sleep_jitter", fault_domain::SWARM_SLEEP_JITTER),
-            ("net_jitter", fault_domain::SWARM_NET_JITTER),
-            ("net_drop", fault_domain::SWARM_NET_DROP),
-            ("net_latency", fault_domain::SWARM_NET_LATENCY),
-            ("buggify", fault_domain::SWARM_BUGGIFY),
-        ]
-        .into_iter()
-        .filter_map(|(token, domain)| {
-            let mut rng = SplitMix64::new(domain_seed(seed, domain));
-            (rng.next_u64() & 1 == 1).then_some(token.to_string())
-        })
-        .collect::<Vec<_>>();
-
         let mut config = RuntimeConfig::seeded(seed)
-            .with_crash_at(CrashOp::Close, 1)
-            .with_fs_error_permille(1)
-            .with_fs_short_permille(1)
-            .with_fs_latency_nanos(1, 2)
-            .with_dns_fail_permille(1)
-            .with_dns_latency_nanos(1, 2)
-            .with_sleep_jitter_nanos(1, 2)
-            .with_net_jitter_nanos(1, 2)
-            .with_net_drop_permille(1)
-            .with_net_latency_nanos(1)
             .with_buggify(BuggifyConfig {
                 enabled: true,
                 ..BuggifyConfig::default()
-            });
+            })
+            .with_swarm(true);
+        config.faults = every_fault_knob_enabled();
+
+        let expected: Vec<String> = SWARM_CLASSES
+            .iter()
+            .filter_map(|class| {
+                let mut rng = SplitMix64::new(domain_seed(seed, class.domain));
+                (rng.next_u64() & 1 == 1).then(|| class.token.to_string())
+            })
+            .collect();
+        assert!(
+            !expected.is_empty() && expected.len() < SWARM_CLASSES.len(),
+            "seed {seed} must select SOME classes and drop others for this to prove anything"
+        );
+
         let swarm = apply_swarm_mask(&mut config);
         assert_eq!(swarm.selected_classes, expected);
     }

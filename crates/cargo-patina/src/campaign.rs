@@ -45,6 +45,7 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use patina_dst_runtime::FaultKnob;
 use sha2::{Digest, Sha256};
 
 use crate::CliError;
@@ -2288,28 +2289,114 @@ mod gen_byte {
     pub(super) const DNS_FAIL: usize = 21;
     pub(super) const DNS_LATENCY_HI: usize = 22;
 
-    /// Every single-byte claim, for the disjointness gate. A new band that adds a
-    /// constant above but forgets this row stays ungated here — which is why the
-    /// raw-index scan is the second half of the pairing: between them, a band is
-    /// either in this table or it fails a gate. Only the gates read it — the
-    /// derivation itself uses the named constants directly.
+    /// The bands no fault knob owns, for the disjointness gate. The fault knobs'
+    /// own claims come from [`super::campaign_band`], so this list is only the
+    /// exploration bands — a `FaultKnob` cannot be missing from it, because it
+    /// was never in it. The raw-index scan is the other half of the pairing:
+    /// between them, a band is either claimed here or through the knob table, or
+    /// it fails a gate.
     #[cfg(test)]
-    pub(super) const SINGLE_BYTE_CLAIMS: &[(&str, usize)] = &[
+    pub(super) const EXPLORATION_CLAIMS: &[(&str, usize)] = &[
         ("buggify activation", BUGGIFY_ACTIVATION),
         ("buggify fire", BUGGIFY_FIRE),
         ("sched-pct depth", SCHED_PCT_DEPTH),
-        ("net drop", NET_DROP),
-        ("sleep jitter hi", SLEEP_JITTER_HI),
-        ("fs error", FS_ERROR),
-        ("fs short", FS_SHORT),
-        ("fs latency hi", FS_LATENCY_HI),
-        ("fs crash op", FS_CRASH_OP),
-        ("fs crash ordinal", FS_CRASH_ORDINAL),
-        ("fs torn granularity", FS_TORN_GRANULARITY),
-        ("net latency", NET_LATENCY),
-        ("dns fail", DNS_FAIL),
-        ("dns latency hi", DNS_LATENCY_HI),
     ];
+}
+
+/// The generation-hash bytes a knob's campaign band draws from, or `None` for a
+/// knob the campaign does not band.
+///
+/// The campaign owns the generation-hash layout, so this facet of the knob table
+/// lives here rather than in the runtime — but it is keyed by the same
+/// [`FaultKnob`], so the exhaustive match still walks a new knob to the decision.
+/// A `None` is a knob that is INERT in every campaign generation: it can be set
+/// by hand on a `run`, but no campaign will ever explore it. That is a real gap,
+/// not an oversight, and writing it out is what makes it visible.
+///
+/// `generation_byte_claims_are_disjoint` reads this to prove no two bands share a
+/// byte, and `every_generation_hash_read_goes_through_a_claim` proves no band
+/// bypassed the table with a literal index.
+fn campaign_band(knob: FaultKnob) -> Option<&'static [usize]> {
+    match knob {
+        // The crash band draws twice: an op class and a low ordinal.
+        FaultKnob::FsCrashAt => Some(&[gen_byte::FS_CRASH_OP, gen_byte::FS_CRASH_ORDINAL]),
+        FaultKnob::FsTornGranularity => Some(&[gen_byte::FS_TORN_GRANULARITY]),
+        FaultKnob::FsErrorPermille => Some(&[gen_byte::FS_ERROR]),
+        FaultKnob::FsShortPermille => Some(&[gen_byte::FS_SHORT]),
+        FaultKnob::FsLatencyNanos => Some(&[gen_byte::FS_LATENCY_HI]),
+        FaultKnob::SleepJitterNanos => Some(&[gen_byte::SLEEP_JITTER_HI]),
+        FaultKnob::NetDropPermille => Some(&[gen_byte::NET_DROP]),
+        FaultKnob::NetLatencyNanos => Some(&[gen_byte::NET_LATENCY]),
+        FaultKnob::DnsFailPermille => Some(&[gen_byte::DNS_FAIL]),
+        FaultKnob::DnsLatencyNanos => Some(&[gen_byte::DNS_LATENCY_HI]),
+        // KNOWN GAP — `--net-jitter-nanos` predates the campaign's net bands and
+        // never got one, so a `--faults` campaign varies drop and base latency
+        // but never delivery jitter.
+        FaultKnob::NetJitterNanos => None,
+        // KNOWN GAP — the wave-E network faults ship with a `run` flag, a swarm
+        // class and a trace field, but no campaign band yet, so a campaign never
+        // draws them.
+        FaultKnob::NetDuplicatePermille
+        | FaultKnob::NetConnectRefusePermille
+        | FaultKnob::NetResetPermille
+        | FaultKnob::NetPartition
+        | FaultKnob::NetTcpBufferBytes => None,
+        // Not a drawn band by design: the host table is the campaign's SHAPE, not
+        // a per-generation draw, and is passed through from the spec (see the
+        // DNS block in `derive_flags`).
+        FaultKnob::DnsEntry => None,
+    }
+}
+
+/// One band's `nth` claimed byte of the generation hash.
+///
+/// Reading through the claim is what makes [`campaign_band`] the single source
+/// rather than a parallel description: a band cannot draw from a byte the table
+/// did not give it, and a knob the table bands `None` cannot draw at all.
+fn band_byte(hash: &[u8; 32], knob: FaultKnob, nth: usize) -> u8 {
+    let band = campaign_band(knob)
+        .unwrap_or_else(|| panic!("{knob:?} draws a band the knob table does not claim"));
+    hash[band[nth]]
+}
+
+/// The outcome class a knob's vacuity — its fault plane reporting that a rate
+/// which should have fired repeatedly applied zero effects — is filed under, or
+/// `None` for a knob whose inertness no class names.
+///
+/// Like [`campaign_band`], this facet belongs to the campaign rather than the
+/// runtime, and like it, the exhaustive match turns a missing class into a
+/// decision instead of an omission.
+#[cfg(test)]
+fn vacuity_class(knob: FaultKnob) -> Option<CampaignClass> {
+    match knob {
+        FaultKnob::FsErrorPermille | FaultKnob::FsShortPermille | FaultKnob::FsLatencyNanos => {
+            Some(CampaignClass::VacuousFsFault)
+        }
+        FaultKnob::DnsFailPermille | FaultKnob::DnsLatencyNanos => {
+            Some(CampaignClass::VacuousDnsFault)
+        }
+        // KNOWN GAP — `NetFaultReport` carries per-class vacuity counters and
+        // emits `vacuous=1`, but no `CampaignClass` reads it, so a generation
+        // whose network faults were all inert is classified OK. Pinned as a fact
+        // by `known_vacuity_gaps_classify_as_ok`.
+        FaultKnob::NetJitterNanos
+        | FaultKnob::NetDropPermille
+        | FaultKnob::NetLatencyNanos
+        | FaultKnob::NetDuplicatePermille
+        | FaultKnob::NetConnectRefusePermille
+        | FaultKnob::NetResetPermille
+        | FaultKnob::NetPartition => None,
+        // No rate to judge inert: a crash fires at a chosen boundary op, a
+        // torn-write granularity is a model rather than a rate, a buffer size is
+        // a capacity, a delayed sleep is indistinguishable from a longer one, and
+        // the host table is workload. Each of these reports nothing, which
+        // `vacuity_classes_have_a_report_to_read` pins against the knob table.
+        FaultKnob::FsCrashAt
+        | FaultKnob::FsTornGranularity
+        | FaultKnob::SleepJitterNanos
+        | FaultKnob::NetTcpBufferBytes
+        | FaultKnob::DnsEntry => None,
+    }
 }
 
 /// Derive the per-generation `run` flags from the generation hash. Native-only
@@ -2335,19 +2422,19 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
         );
     }
     if spec.faults {
-        let fs_error = u32::from(hash[gen_byte::FS_ERROR]) * 100 / 255; // [0, 100] permille
+        let fs_error = u32::from(band_byte(hash, FaultKnob::FsErrorPermille, 0)) * 100 / 255; // [0, 100] permille
         push_run_flag(
             &mut flags,
             "--fs-error-permille",
             RunValue::Int(u64::from(fs_error)),
         );
-        let fs_short = u32::from(hash[gen_byte::FS_SHORT]) * 200 / 255; // [0, 200] permille
+        let fs_short = u32::from(band_byte(hash, FaultKnob::FsShortPermille, 0)) * 200 / 255; // [0, 200] permille
         push_run_flag(
             &mut flags,
             "--fs-short-permille",
             RunValue::Int(u64::from(fs_short)),
         );
-        let fs_latency_hi = u64::from(hash[gen_byte::FS_LATENCY_HI]) * 10_000; // up to 2.55 ms
+        let fs_latency_hi = u64::from(band_byte(hash, FaultKnob::FsLatencyNanos, 0)) * 10_000; // up to 2.55 ms
         push_run_flag(
             &mut flags,
             "--fs-latency-nanos",
@@ -2362,9 +2449,9 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
         // filesystem at different points in the guest's I/O sequence. Ordinals stay
         // in [1, 8] because a crash that never fires (an ordinal past the guest's
         // op count) explores nothing.
-        let crash_op =
-            ["open", "write", "sync", "close"][usize::from(hash[gen_byte::FS_CRASH_OP] % 4)];
-        let crash_ordinal = 1 + u64::from(hash[gen_byte::FS_CRASH_ORDINAL] % 8);
+        let crash_op = ["open", "write", "sync", "close"]
+            [usize::from(band_byte(hash, FaultKnob::FsCrashAt, 0) % 4)];
+        let crash_ordinal = 1 + u64::from(band_byte(hash, FaultKnob::FsCrashAt, 1) % 8);
         push_run_flag(
             &mut flags,
             "--fs-crash-at",
@@ -2372,26 +2459,26 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
         );
         // Half the generations tear at sub-block byte granularity, the harder
         // durability model to survive.
-        if hash[gen_byte::FS_TORN_GRANULARITY] % 2 == 0 {
+        if band_byte(hash, FaultKnob::FsTornGranularity, 0) % 2 == 0 {
             push_run_flag(
                 &mut flags,
                 "--fs-torn-granularity",
                 RunValue::Text("byte".to_string()),
             );
         }
-        let drop = u32::from(hash[gen_byte::NET_DROP]) * 200 / 255; // [0, 200] permille
+        let drop = u32::from(band_byte(hash, FaultKnob::NetDropPermille, 0)) * 200 / 255; // [0, 200] permille
         push_run_flag(
             &mut flags,
             "--net-drop-permille",
             RunValue::Int(u64::from(drop)),
         );
-        let net_latency = u64::from(hash[gen_byte::NET_LATENCY]) * 10_000; // up to 2.55 ms
+        let net_latency = u64::from(band_byte(hash, FaultKnob::NetLatencyNanos, 0)) * 10_000; // up to 2.55 ms
         push_run_flag(
             &mut flags,
             "--net-latency-nanos",
             RunValue::Int(net_latency),
         );
-        let jitter_hi = u64::from(hash[gen_byte::SLEEP_JITTER_HI]) * 10_000; // up to 2.55 ms
+        let jitter_hi = u64::from(band_byte(hash, FaultKnob::SleepJitterNanos, 0)) * 10_000; // up to 2.55 ms
         push_run_flag(
             &mut flags,
             "--sleep-jitter-nanos",
@@ -2410,13 +2497,13 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
             for entry in &spec.dns_entries {
                 push_run_flag(&mut flags, "--dns-entry", RunValue::Text(entry.clone()));
             }
-            let dns_fail = u32::from(hash[gen_byte::DNS_FAIL]) * 100 / 255; // [0, 100] permille
+            let dns_fail = u32::from(band_byte(hash, FaultKnob::DnsFailPermille, 0)) * 100 / 255; // [0, 100] permille
             push_run_flag(
                 &mut flags,
                 "--dns-fail-permille",
                 RunValue::Int(u64::from(dns_fail)),
             );
-            let dns_latency_hi = u64::from(hash[gen_byte::DNS_LATENCY_HI]) * 10_000; // up to 2.55 ms
+            let dns_latency_hi = u64::from(band_byte(hash, FaultKnob::DnsLatencyNanos, 0)) * 10_000; // up to 2.55 ms
             push_run_flag(
                 &mut flags,
                 "--dns-latency-nanos",
@@ -4719,10 +4806,28 @@ mod tests {
     // disjoint and in range; `every_generation_hash_read_goes_through_a_claim`
     // proves no band bypassed the table with a literal index. A new colliding band
     // has to fail one of them.
+    /// Every claim in the campaign, assembled from the knob table plus the
+    /// exploration bands no knob owns. A knob cannot go missing from this list:
+    /// it is derived from [`FaultKnob::ALL`], so a new variant arrives here as
+    /// soon as `campaign_band` gives it a byte.
+    fn every_claim() -> Vec<(String, usize)> {
+        let mut claims: Vec<(String, usize)> = gen_byte::EXPLORATION_CLAIMS
+            .iter()
+            .map(|(name, index)| ((*name).to_string(), *index))
+            .collect();
+        for knob in FaultKnob::ALL {
+            for index in campaign_band(*knob).unwrap_or(&[]) {
+                claims.push((format!("{:?}", knob), *index));
+            }
+        }
+        claims
+    }
+
     #[test]
     fn generation_byte_claims_are_disjoint() {
-        let mut claimed: BTreeMap<usize, &str> = BTreeMap::new();
-        for (name, index) in gen_byte::SINGLE_BYTE_CLAIMS {
+        let claims = every_claim();
+        let mut claimed: BTreeMap<usize, String> = BTreeMap::new();
+        for (name, index) in &claims {
             assert!(
                 *index < 32,
                 "the {name} band claims generation byte {index}, past the 32-byte hash"
@@ -4733,7 +4838,7 @@ mod tests {
                  {:?} — its draw would be correlated with the child run's seed",
                 gen_byte::SEED
             );
-            if let Some(other) = claimed.insert(*index, name) {
+            if let Some(other) = claimed.insert(*index, name.clone()) {
                 panic!(
                     "the {name} and {other} bands both claim generation byte {index}; their knobs \
                      would be correlated in every generation. Claim a free byte instead (10, or \
@@ -4743,8 +4848,98 @@ mod tests {
         }
         assert_eq!(
             claimed.len(),
-            gen_byte::SINGLE_BYTE_CLAIMS.len(),
+            claims.len(),
             "the claims table lost a row to a duplicate index"
+        );
+    }
+
+    /// The campaign bands and the CLI registry are two views of one set. A band
+    /// drawn for a knob the registry does not declare would be emitted onto a
+    /// child `run` that refuses it, and this is also where the knobs the campaign
+    /// leaves INERT are counted — pinned, so a new one is a deliberate decision
+    /// and a fixed one shows up as a failure telling you to update the list.
+    #[test]
+    fn the_campaign_bands_exactly_the_knobs_it_claims_to() {
+        let banded: Vec<&str> = FaultKnob::ALL
+            .iter()
+            .filter(|knob| campaign_band(**knob).is_some())
+            .map(|knob| knob.meta().flag)
+            .collect();
+        assert_eq!(
+            banded,
+            vec![
+                "--fs-crash-at",
+                "--fs-torn-granularity",
+                "--fs-error-permille",
+                "--fs-short-permille",
+                "--fs-latency-nanos",
+                "--sleep-jitter-nanos",
+                "--net-drop-permille",
+                "--net-latency-nanos",
+                "--dns-fail-permille",
+                "--dns-latency-nanos",
+            ]
+        );
+        // The complement, spelled out: every knob a `--faults` campaign never
+        // draws. Shrinking this list is the point of the follow-up work; growing
+        // it silently is the regression this pins.
+        let inert: Vec<&str> = FaultKnob::ALL
+            .iter()
+            .filter(|knob| campaign_band(**knob).is_none())
+            .map(|knob| knob.meta().flag)
+            .collect();
+        assert_eq!(
+            inert,
+            vec![
+                "--net-jitter-nanos",
+                "--net-duplicate-permille",
+                "--net-connect-refuse-permille",
+                "--net-reset-permille",
+                "--net-partition",
+                "--net-tcp-buffer-bytes",
+                "--dns-entry",
+            ]
+        );
+    }
+
+    /// A knob whose vacuity has an outcome class must have a report to read it
+    /// off, and its class must be the one `classify` actually returns for that
+    /// report line. The knobs with a report but NO class are the known gap: they
+    /// classify OK, which is pinned here rather than left to be discovered.
+    #[test]
+    fn vacuity_classes_match_the_classifier() {
+        let mut with_report = 0;
+        let mut gaps = 0;
+        for knob in FaultKnob::ALL {
+            let class = vacuity_class(*knob);
+            let Some(report) = knob.meta().report else {
+                assert_eq!(
+                    class, None,
+                    "{knob:?} has a vacuity class but no report line to read it off"
+                );
+                continue;
+            };
+            with_report += 1;
+            let line = format!("{report} eligible_ops=100 vacuous=1");
+            let actual = classify(0, "", &line);
+            match class {
+                Some(expected) => assert_eq!(
+                    actual, expected,
+                    "{knob:?} declares {expected:?} but its report line classifies as {actual:?}"
+                ),
+                None => {
+                    gaps += 1;
+                    assert_eq!(
+                        actual,
+                        CampaignClass::Ok,
+                        "{knob:?} now has a classifier arm — give it a vacuity_class row"
+                    );
+                }
+            }
+        }
+        assert!(
+            with_report > 0 && gaps > 0,
+            "this gate proves nothing unless some knobs report and some are gaps"
         );
     }
 
@@ -4757,7 +4952,7 @@ mod tests {
         // Only the non-test half is scanned: this module's own diagnostics spell
         // the pattern out, and a gate that trips on its own error messages is
         // useless. The bound is the test MODULE header, not a bare `#[cfg(test)]`
-        // — `gen_byte::SINGLE_BYTE_CLAIMS` carries one of those too, and cutting
+        // — `gen_byte::EXPLORATION_CLAIMS` carries one of those too, and cutting
         // there would stop the scan above `derive_flags` and silently cover none
         // of the bands. Each file also names an anchor that must fall inside the
         // scanned region, so a future edit that moves the bound fails loudly here

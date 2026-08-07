@@ -2147,21 +2147,21 @@ pub fn verb(name: &str) -> Option<&'static Verb> {
     VERBS.iter().copied().find(|verb| verb.name == name)
 }
 
-/// Every seed-driven fault knob's flag name, in registry order. The gate surface
-/// for the CLI's shared knob table, so a knob added to [`FAULT_FLAGS`] cannot be
-/// forwarded by one family and silently dropped by another.
+/// Every fault knob's flag name, in registry order. The gate surface for
+/// `patina_dst_runtime::FaultKnob`, so a knob added to [`FAULT_FLAGS`] or
+/// [`DNS_FLAGS`] cannot be forwarded by one family and silently dropped by
+/// another.
+///
+/// The repeatable knobs (`--dns-entry`, `--net-partition`) are IN this list. They
+/// used to be filtered out because the forwarding table carried one value per
+/// knob and they carry a set — but the set/scalar difference is now a column of
+/// the knob table rather than a reason to live outside it, and excluding them is
+/// what let `run <MODULE.wasm> --net-partition A,B` parse and then vanish.
 #[cfg(test)]
 pub fn fault_flag_names() -> impl Iterator<Item = &'static str> {
     FAULT_FLAGS
         .iter()
         .chain(DNS_FLAGS.iter())
-        // `--dns-entry` is semantic configuration on its own control-plane
-        // variable (like `--param`), not a seeded knob, so it is not part of the
-        // knob table this list gates. `--net-partition` is excluded for the same
-        // reason AND because it is repeatable: the knob table carries one value
-        // per knob, so the partition set rides its own JSON control-plane
-        // variable exactly as the DNS host table does.
-        .filter(|flag| !matches!(flag.name, "--dns-entry" | "--net-partition"))
         .map(|flag| flag.name)
 }
 

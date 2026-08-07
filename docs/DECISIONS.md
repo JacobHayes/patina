@@ -262,3 +262,19 @@ cluster so the fixes have citable symptom records.
   field lists — the registry answers those more accurately than prose.
   Three literal flag tokens in 281 lines; drift-gate coverage proven
   non-vacuous (planted token caught by file and line).
+- **2026-08-07 (consolidation round) — fault knobs are ONE enum; the compiler,
+  not drift gates, walks a new knob to every decision point.** `FaultKnob`
+  (17 variants, registry order) + a KnobMeta table in
+  `crates/patina-runtime/src/fault_knob.rs`; every consumer is an exhaustive
+  match or a fold over `ALL`. Deliberate split of authorities: value grammar/
+  families stay in the CLI registry, campaign bands and vacuity classes stay
+  in campaign.rs — keyed by the enum so they cannot be skipped, but never
+  duplicated. Swarm draw order is trace-visible and is NOT registry order, so
+  it stays a separately pinned ordered table. Behavior preservation proven by
+  an empty pre/post derive_flags diff (gens 0..50 × 3 spec shapes × 3
+  families) and byte-identical traces on fs/net/dns legs. The exhaustiveness
+  immediately caught a real Wave E gap: WASI parsed `--net-partition` and
+  silently dropped it (now forwarded). Remaining knob gaps (bands for the
+  five Wave E knobs, net-jitter, starve; net vacuity class; sched-det XOR
+  seeds) are explicit `None` arms with pinned gate lists that fail loudly
+  when a gap closes.
