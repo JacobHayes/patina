@@ -143,6 +143,16 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   discriminator — the same faults with an unpaced or zero-window control — and
   give workload artifacts their own outcome class instead of counting them as
   failures or silently tolerating them.
+- A control run only exonerates a suspect if the control tree excludes the
+  suspect change. "Main also fails" proves nothing when main already contains
+  the commit under suspicion — a durability regression was once misattributed
+  as a platform quirk because the control included it. Bisect to a first-bad
+  commit and confirm its parent green before attributing anything.
+- Restore binaries with `cp`, never `mv`: `mv` preserves the source mtime, so
+  cargo sees an up-to-date artifact, skips the rebuild, and every subsequent
+  run silently exercises the stale binary. Phantom failures from this cost a
+  debugging round; when a result is surprising, confirm the artifact's mtime is
+  newer than the sources before forming any theory.
 
 ## Native/shim-specific operating rules
 
