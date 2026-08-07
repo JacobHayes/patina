@@ -175,12 +175,13 @@ pub(crate) fn execute(invocation: SitesInvocation) -> Result<i32, CliError> {
 fn run_scan(options: SitesOptions) -> Result<i32, CliError> {
     let mut scan = scan_current_workspace(!options.no_cache)?;
     crate::config::apply_site_groups(&mut scan.sites);
+    let duplicate_labels = find_duplicate_labels(&scan.sites);
     let exercised = options
         .exercised
         .as_deref()
         .map(parse_exercised_file)
         .transpose()?;
-    let report = build_report(&scan, &options, exercised.as_ref());
+    let report = build_report(&scan, &options, exercised.as_ref(), &duplicate_labels);
     if output::options().is_json() {
         println!(
             "{}",
@@ -190,7 +191,13 @@ fn run_scan(options: SitesOptions) -> Result<i32, CliError> {
     } else {
         print_human(&report);
     }
-    Ok(0)
+    // Stderr carries the marker in BOTH modes: stdout is the report (the JSON
+    // envelope, or the human table), and a wrapper that discards stdout must
+    // still see WHICH label collided, not just a nonzero exit.
+    for finding in &duplicate_labels {
+        eprintln!("{}", duplicate_label_marker_line(finding));
+    }
+    Ok(if duplicate_labels.is_empty() { 0 } else { 1 })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1174,10 +1181,77 @@ struct UnmatchedRuntimeSite {
     origin: &'static str,
 }
 
+/// The named marker line for a static duplicate-label finding, mirroring the
+/// runtime's fatal `PATINA_BUGGIFY_DUPLICATE_LABEL` abort (see `Buggify::declare`
+/// / `Buggify::register` in `patina-runtime`) so the same class is visible at
+/// inventory time instead of only at first run.
+const SITES_DUPLICATE_LABEL_MARKER: &str = "PATINA_SITES_DUPLICATE_LABEL";
+
+#[derive(Clone, Debug, Serialize)]
+struct DuplicateLabelFinding {
+    label: String,
+    count: usize,
+    sites: Vec<String>,
+}
+
+fn duplicate_label_marker_line(finding: &DuplicateLabelFinding) -> String {
+    format!(
+        "{SITES_DUPLICATE_LABEL_MARKER} label={} count={} sites={}",
+        finding.label,
+        finding.count,
+        finding.sites.join(",")
+    )
+}
+
+/// Find labels that the runtime would reject as a fatal duplicate: the same
+/// literal label used for the SDK's own cooperative-SUT macros
+/// (`buggify`/`always`/`sometimes`/`reachable`, i.e. `runtime` "driven" or
+/// "observed") at more than one distinct `(file:line, kind)`. This mirrors
+/// `Buggify::declare`/`Buggify::register`'s `existing.site != site ||
+/// existing.kind != kind` test exactly, so the static gate and the runtime
+/// abort agree on what counts as a duplicate. Dynamic labels (unknowable
+/// statically) and antithesis-facade labels (`runtime` "invisible", a
+/// different registry) are not compared.
+fn find_duplicate_labels(sites: &[SiteRecord]) -> Vec<DuplicateLabelFinding> {
+    let mut by_label: BTreeMap<&str, Vec<&SiteRecord>> = BTreeMap::new();
+    for site in sites {
+        if site.label_dynamic || site.runtime == "invisible" {
+            continue;
+        }
+        if let Some(label) = &site.label {
+            by_label.entry(label.as_str()).or_default().push(site);
+        }
+    }
+    by_label
+        .into_iter()
+        .filter_map(|(label, group)| {
+            fn identity(site: &SiteRecord) -> (&str, usize, &str) {
+                (site.file.as_str(), site.line, site.kind.as_str())
+            }
+            let first = identity(group[0]);
+            if !group.iter().any(|site| identity(site) != first) {
+                return None;
+            }
+            let mut sites = group
+                .iter()
+                .map(|site| format!("{}:{}", site.file, site.line))
+                .collect::<Vec<_>>();
+            sites.sort();
+            sites.dedup();
+            Some(DuplicateLabelFinding {
+                label: label.to_string(),
+                count: group.len(),
+                sites,
+            })
+        })
+        .collect()
+}
+
 fn build_report(
     scan: &StaticScan,
     options: &SitesOptions,
     exercised: Option<&ExercisedSource>,
+    duplicate_labels: &[DuplicateLabelFinding],
 ) -> Value {
     let join = exercised
         .map(|source| join_exercised(scan, source))
@@ -1254,6 +1328,9 @@ fn build_report(
     }
     if !warnings.is_empty() {
         root.insert("warnings".to_string(), json!(warnings));
+    }
+    if !duplicate_labels.is_empty() {
+        root.insert("duplicate_labels".to_string(), json!(duplicate_labels));
     }
     if let Some(config) = crate::config::provenance_json() {
         root.insert("config".to_string(), config);
@@ -1528,6 +1605,9 @@ fn print_human(report: &Value) {
             totals["exercised"]["never_exercised"].as_u64().unwrap_or(0),
         );
     }
+    // Duplicate-label findings are NOT re-printed here: the marker goes to
+    // stderr in both output modes at the run_scan level, so wrappers that
+    // discard stdout still see which label collided.
     if let Some(warnings) = report.get("warnings").and_then(Value::as_array) {
         for warning in warnings {
             println!(
@@ -1935,6 +2015,7 @@ mod tests {
                 ..SitesOptions::default()
             },
             None,
+            &[],
         );
         assert_eq!(report["schema"], SITES_SCHEMA);
         assert_eq!(report["sites"].as_array().unwrap().len(), 1);
@@ -2024,6 +2105,7 @@ mod tests {
                 ..SitesOptions::default()
             },
             Some(&source),
+            &[],
         );
         assert_eq!(report["unmatched_runtime_labels"], 0);
         assert_eq!(report["totals"]["exercised"]["joined_runtime_labels"], 2);
@@ -2063,7 +2145,7 @@ mod tests {
             generations_observed: 1,
             sites: exercised_sites,
         };
-        let report = build_report(&scan, &SitesOptions::default(), Some(&source));
+        let report = build_report(&scan, &SitesOptions::default(), Some(&source), &[]);
         assert_eq!(report["unmatched_runtime_labels"], 1);
         assert_eq!(report["unmatched"][0]["origin"], "expanded");
     }
@@ -2098,7 +2180,7 @@ mod tests {
             generations_observed: 3,
             sites: BTreeMap::new(),
         };
-        let report = build_report(&scan, &SitesOptions::default(), Some(&source));
+        let report = build_report(&scan, &SitesOptions::default(), Some(&source), &[]);
         assert!(
             report["warnings"][0]
                 .as_str()
@@ -2106,6 +2188,178 @@ mod tests {
                 .contains("zero SDK site rows"),
             "expected vacuity warning: {report:#}"
         );
+    }
+
+    #[test]
+    fn duplicate_sometimes_label_across_call_sites_is_a_fatal_finding() {
+        // Real historical shape: two `sometimes!` sites both declared under the
+        // label "dedup-suppressed-double-apply" at different call sites. This is
+        // exactly what the runtime's `Buggify::declare`/`register` reject at
+        // first run as `PATINA_BUGGIFY_DUPLICATE_LABEL`; the static gate must
+        // catch it before anything runs.
+        let planted = |file: &str, line: usize| SiteRecord {
+            id: format!("{file}:{line}#sometimes"),
+            kind: "sometimes".to_string(),
+            runtime: "observed".to_string(),
+            label: Some("dedup-suppressed-double-apply".to_string()),
+            label_dynamic: false,
+            file: file.to_string(),
+            line,
+            crate_name: "workq".to_string(),
+            module: "workq".to_string(),
+            context: "src".to_string(),
+            groups: Vec::new(),
+            macro_path: "sometimes".to_string(),
+        };
+        let sites = vec![planted("src/apply.rs", 42), planted("src/dedup.rs", 17)];
+
+        let findings = find_duplicate_labels(&sites);
+        assert_eq!(
+            findings.len(),
+            1,
+            "expected exactly one duplicate label finding: {findings:?}"
+        );
+        assert_eq!(findings[0].label, "dedup-suppressed-double-apply");
+        assert_eq!(findings[0].count, 2);
+        assert_eq!(
+            findings[0].sites,
+            vec!["src/apply.rs:42".to_string(), "src/dedup.rs:17".to_string()]
+        );
+        assert_eq!(
+            duplicate_label_marker_line(&findings[0]),
+            "PATINA_SITES_DUPLICATE_LABEL label=dedup-suppressed-double-apply count=2 sites=src/apply.rs:42,src/dedup.rs:17"
+        );
+
+        // Clean tree (unique labels): the same shape must pass with no findings.
+        let mut clean = sites.clone();
+        clean[1].label = Some("dedup-suppressed-double-apply-2".to_string());
+        assert!(
+            find_duplicate_labels(&clean).is_empty(),
+            "clean tree must have no duplicate-label findings"
+        );
+
+        // The finding is carried into the JSON report, not just returned to the
+        // caller for post-processing.
+        let scan = StaticScan {
+            workspace_root: PathBuf::from("/workspace"),
+            sites,
+            files_scanned: 2,
+            files_unparsed: 0,
+            unparsed: Vec::new(),
+            cache_state: CacheState::Cold,
+        };
+        let report = build_report(&scan, &SitesOptions::default(), None, &findings);
+        assert_eq!(
+            report["duplicate_labels"][0]["label"],
+            "dedup-suppressed-double-apply"
+        );
+        assert_eq!(report["duplicate_labels"][0]["count"], 2);
+    }
+
+    #[test]
+    fn duplicate_label_across_different_kinds_is_also_fatal() {
+        // The runtime's duplicate check compares `(site, kind)`, so the same
+        // label reused for a different SDK macro kind is fatal too, not just a
+        // same-kind reuse.
+        let sites = vec![
+            SiteRecord {
+                id: "src/a.rs:1#fault".to_string(),
+                kind: "fault".to_string(),
+                runtime: "driven".to_string(),
+                label: Some("shared-label".to_string()),
+                label_dynamic: false,
+                file: "src/a.rs".to_string(),
+                line: 1,
+                crate_name: "workq".to_string(),
+                module: "workq".to_string(),
+                context: "src".to_string(),
+                groups: Vec::new(),
+                macro_path: "buggify".to_string(),
+            },
+            SiteRecord {
+                id: "src/b.rs:2#always".to_string(),
+                kind: "always".to_string(),
+                runtime: "observed".to_string(),
+                label: Some("shared-label".to_string()),
+                label_dynamic: false,
+                file: "src/b.rs".to_string(),
+                line: 2,
+                crate_name: "workq".to_string(),
+                module: "workq".to_string(),
+                context: "src".to_string(),
+                groups: Vec::new(),
+                macro_path: "always".to_string(),
+            },
+        ];
+        let findings = find_duplicate_labels(&sites);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].count, 2);
+    }
+
+    #[test]
+    fn dynamic_and_antithesis_labels_are_not_compared() {
+        // Dynamic labels are unknowable statically, and antithesis-facade
+        // labels are a different registry than the SDK's own buggify/always/
+        // sometimes/reachable labels; neither should trip the static gate.
+        let sites = vec![
+            SiteRecord {
+                id: "src/a.rs:1#fault".to_string(),
+                kind: "fault".to_string(),
+                runtime: "driven".to_string(),
+                label: Some("dyn-label".to_string()),
+                label_dynamic: true,
+                file: "src/a.rs".to_string(),
+                line: 1,
+                crate_name: "workq".to_string(),
+                module: "workq".to_string(),
+                context: "src".to_string(),
+                groups: Vec::new(),
+                macro_path: "buggify".to_string(),
+            },
+            SiteRecord {
+                id: "src/b.rs:2#fault".to_string(),
+                kind: "fault".to_string(),
+                runtime: "driven".to_string(),
+                label: Some("dyn-label".to_string()),
+                label_dynamic: true,
+                file: "src/b.rs".to_string(),
+                line: 2,
+                crate_name: "workq".to_string(),
+                module: "workq".to_string(),
+                context: "src".to_string(),
+                groups: Vec::new(),
+                macro_path: "buggify".to_string(),
+            },
+            SiteRecord {
+                id: "src/c.rs:3#antithesis_always".to_string(),
+                kind: "antithesis_always".to_string(),
+                runtime: "invisible".to_string(),
+                label: Some("antithesis-label".to_string()),
+                label_dynamic: false,
+                file: "src/c.rs".to_string(),
+                line: 3,
+                crate_name: "workq".to_string(),
+                module: "workq".to_string(),
+                context: "src".to_string(),
+                groups: Vec::new(),
+                macro_path: "antithesis_sdk::assert_always".to_string(),
+            },
+            SiteRecord {
+                id: "src/d.rs:4#antithesis_always".to_string(),
+                kind: "antithesis_always".to_string(),
+                runtime: "invisible".to_string(),
+                label: Some("antithesis-label".to_string()),
+                label_dynamic: false,
+                file: "src/d.rs".to_string(),
+                line: 4,
+                crate_name: "workq".to_string(),
+                module: "workq".to_string(),
+                context: "src".to_string(),
+                groups: Vec::new(),
+                macro_path: "antithesis_sdk::assert_always".to_string(),
+            },
+        ];
+        assert!(find_duplicate_labels(&sites).is_empty());
     }
 
     #[test]

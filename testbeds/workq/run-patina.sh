@@ -81,6 +81,19 @@ fi
 if ! "$PATINA" patina build "$here" --output "$built" --release >/dev/null; then
   echo "FATAL: patina build of the workq harness failed" >&2; exit 3
 fi
+# A static duplicate label (two SDK sites sharing one buggify/always/sometimes/
+# reachable label) is invisible until the binary first runs, where the runtime
+# aborts every generation with PATINA_BUGGIFY_DUPLICATE_LABEL. `sites` catches
+# the same class ahead of that, so the gate fails here instead of burning a
+# whole sweep on an unrunnable binary.
+sites_err="$(mktemp)"
+if ! (cd "$here" && "$PATINA" patina sites --no-cache >/dev/null 2>"$sites_err"); then
+  echo "FATAL: cargo patina sites found a static duplicate label" >&2
+  cat "$sites_err" >&2
+  rm -f "$sites_err"
+  exit 3
+fi
+rm -f "$sites_err"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
