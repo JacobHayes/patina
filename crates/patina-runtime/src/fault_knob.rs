@@ -22,13 +22,13 @@
 use patina_dst_rng_seeded::fault_domain;
 
 use crate::{
-    ENV_DNS_ENTRIES, ENV_DNS_FAIL_PERMILLE, ENV_DNS_FAULT_REPORT, ENV_DNS_LATENCY,
-    ENV_ENTROPY_FAIL_PERMILLE, ENV_ENTROPY_FAULT_REPORT, ENV_FS_CRASH_AT, ENV_FS_ERROR_PERMILLE,
-    ENV_FS_FAULT_REPORT, ENV_FS_LATENCY, ENV_FS_SHORT_PERMILLE, ENV_FS_TORN_GRANULARITY,
-    ENV_NET_CONNECT_REFUSE_PERMILLE, ENV_NET_DROP_PERMILLE, ENV_NET_DUPLICATE_PERMILLE,
-    ENV_NET_FAULT_REPORT, ENV_NET_JITTER, ENV_NET_LATENCY, ENV_NET_PARTITIONS,
-    ENV_NET_RESET_PERMILLE, ENV_NET_TCP_BUFFER_BYTES, ENV_SLEEP_JITTER, FINGERPRINT_BUGGIFY,
-    FaultConfig, TornGranularity,
+    ENV_CLOCK_FAULT_REPORT, ENV_DNS_ENTRIES, ENV_DNS_FAIL_PERMILLE, ENV_DNS_FAULT_REPORT,
+    ENV_DNS_LATENCY, ENV_ENTROPY_FAIL_PERMILLE, ENV_ENTROPY_FAULT_REPORT, ENV_EPOCH_JUMP_NANOS,
+    ENV_FS_CRASH_AT, ENV_FS_ERROR_PERMILLE, ENV_FS_FAULT_REPORT, ENV_FS_LATENCY,
+    ENV_FS_SHORT_PERMILLE, ENV_FS_TORN_GRANULARITY, ENV_NET_CONNECT_REFUSE_PERMILLE,
+    ENV_NET_DROP_PERMILLE, ENV_NET_DUPLICATE_PERMILLE, ENV_NET_FAULT_REPORT, ENV_NET_JITTER,
+    ENV_NET_LATENCY, ENV_NET_PARTITIONS, ENV_NET_RESET_PERMILLE, ENV_NET_TCP_BUFFER_BYTES,
+    ENV_SLEEP_JITTER, FINGERPRINT_BUGGIFY, FaultConfig, TornGranularity,
 };
 
 /// Every seed-driven fault knob the CLI registry declares, in registry order
@@ -61,6 +61,7 @@ pub enum FaultKnob {
     NetPartition,
     NetTcpBufferBytes,
     EntropyFailPermille,
+    EpochJumpNanos,
     DnsEntry,
     DnsFailPermille,
     DnsLatencyNanos,
@@ -149,6 +150,7 @@ impl FaultKnob {
         Self::NetPartition,
         Self::NetTcpBufferBytes,
         Self::EntropyFailPermille,
+        Self::EpochJumpNanos,
         Self::DnsEntry,
         Self::DnsFailPermille,
         Self::DnsLatencyNanos,
@@ -312,6 +314,15 @@ impl FaultKnob {
                 swarm_class: Some("entropy_fail"),
                 report: Some(ENV_ENTROPY_FAULT_REPORT),
             },
+            Self::EpochJumpNanos => KnobMeta {
+                flag: "--epoch-jump-nanos",
+                env: ENV_EPOCH_JUMP_NANOS,
+                plumbing: Plumbing::Scalar,
+                plane: Plane::Fault,
+                injection_domains: &[fault_domain::EPOCH_JUMP],
+                swarm_class: Some("epoch_jump"),
+                report: Some(ENV_CLOCK_FAULT_REPORT),
+            },
             Self::DnsEntry => KnobMeta {
                 flag: "--dns-entry",
                 env: ENV_DNS_ENTRIES,
@@ -365,6 +376,7 @@ impl FaultKnob {
             Self::NetPartition => !faults.net.partitions.is_empty(),
             Self::NetTcpBufferBytes => faults.net.tcp_buffer_bytes.is_some(),
             Self::EntropyFailPermille => faults.entropy.fail_permille != 0,
+            Self::EpochJumpNanos => faults.clock.epoch_jump_nanos != 0,
             Self::DnsEntry => false,
             Self::DnsFailPermille => faults.dns.fail_permille != 0,
             Self::DnsLatencyNanos => faults.dns.latency_nanos.is_some(),
@@ -390,6 +402,7 @@ impl FaultKnob {
             Self::NetPartition => faults.net.partitions.clear(),
             Self::NetTcpBufferBytes => faults.net.tcp_buffer_bytes = None,
             Self::EntropyFailPermille => faults.entropy.fail_permille = 0,
+            Self::EpochJumpNanos => faults.clock.epoch_jump_nanos = 0,
             Self::DnsEntry => {}
             Self::DnsFailPermille => faults.dns.fail_permille = 0,
             Self::DnsLatencyNanos => faults.dns.latency_nanos = None,
@@ -535,6 +548,16 @@ pub const SWARM_CLASSES: &[SwarmClass] = &[
         fingerprint_component: Some(FINGERPRINT_BUGGIFY),
         masks: Masks::Buggify,
     },
+    // Appended at the END rather than beside the other clock-domain row
+    // (`sleep_jitter`, above): draw order is trace-visible, so a new class
+    // never gets inserted where it would shift every later class's position
+    // in an existing recorded candidate list.
+    SwarmClass {
+        token: "epoch_jump",
+        domain: fault_domain::SWARM_EPOCH_JUMP,
+        fingerprint_component: None,
+        masks: Masks::Knobs(&[FaultKnob::EpochJumpNanos]),
+    },
 ];
 
 #[cfg(test)]
@@ -576,6 +599,7 @@ impl FaultKnob {
             }
             Self::NetTcpBufferBytes => faults.net.tcp_buffer_bytes = Some(4096),
             Self::EntropyFailPermille => faults.entropy.fail_permille = 1,
+            Self::EpochJumpNanos => faults.clock.epoch_jump_nanos = 1,
             Self::DnsEntry => {}
             Self::DnsFailPermille => faults.dns.fail_permille = 1,
             Self::DnsLatencyNanos => faults.dns.latency_nanos = Some((1, 2)),

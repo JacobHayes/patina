@@ -9906,7 +9906,7 @@ mod tests {
         match knob {
             FaultKnob::FsCrashAt => "write:2",
             FaultKnob::FsTornGranularity => "byte",
-            FaultKnob::NetLatencyNanos => "500",
+            FaultKnob::NetLatencyNanos | FaultKnob::EpochJumpNanos => "500",
             FaultKnob::NetTcpBufferBytes => "4096",
             FaultKnob::NetPartition => "a,b",
             FaultKnob::DnsEntry => "svc=10.0.0.9",

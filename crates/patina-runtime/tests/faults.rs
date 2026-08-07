@@ -5,7 +5,9 @@
 use std::collections::BTreeSet;
 
 use patina_dst_abi::{ClockKind, ErrorCode, OpenFlags, SendDisposition};
-use patina_dst_driver_api::{DnsFaultReport, EntropyFaultReport, FsFaultReport, NetFaultReport};
+use patina_dst_driver_api::{
+    ClockFaultReport, DnsFaultReport, EntropyFaultReport, FsFaultReport, NetFaultReport,
+};
 use patina_dst_runtime::{Context, CrashOp, RuntimeConfig, TornGranularity};
 use tempfile::tempdir;
 
@@ -790,6 +792,209 @@ fn entropy_failure_replays_self_contained_without_re_supplying_the_flag() {
     // different fault schedule.
     let conflicting = RuntimeConfig::replay(&path, "patina-test").with_entropy_fail_permille(1);
     assert!(Context::from_config(conflicting).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Realtime-epoch jump injection
+// ---------------------------------------------------------------------------
+
+/// Read `ClockKind::Realtime` once, after advancing the monotonic clock (and
+/// therefore, at epoch 0, the true realtime value) to `advance_to`.
+fn realtime_once(config: RuntimeConfig, advance_to: u64) -> (u64, Option<ClockFaultReport>) {
+    let mut context = Context::from_config(config).unwrap();
+    if advance_to > 0 {
+        context
+            .sleep_until(ClockKind::Monotonic, advance_to)
+            .unwrap();
+    }
+    let value = context.now(ClockKind::Realtime).unwrap();
+    let report = context.clock_fault_report();
+    context.finish().unwrap();
+    (value, report)
+}
+
+#[test]
+fn realtime_now_resolves_without_a_knob_and_reports_nothing() {
+    let (value, report) = realtime_once(RuntimeConfig::seeded(1), 1_000_000);
+    assert_eq!(
+        value, 1_000_000,
+        "no jump knob was live, so the true epoch is untouched"
+    );
+    assert!(
+        report.is_none(),
+        "no epoch-jump knob was live, so no report"
+    );
+}
+
+#[test]
+fn the_epoch_jump_knob_fires_and_is_reported() {
+    // MUST perturb: some seed in range must draw a nonzero offset at a healthy
+    // true epoch, and the report proves it was applied.
+    let seed = (0..64)
+        .find(|&seed| {
+            realtime_once(
+                RuntimeConfig::seeded(seed).with_epoch_jump_nanos(1_000),
+                1_000_000,
+            )
+            .0 != 1_000_000
+        })
+        .expect("some seed in range must draw a nonzero offset");
+    let (value, report) = realtime_once(
+        RuntimeConfig::seeded(seed).with_epoch_jump_nanos(1_000),
+        1_000_000,
+    );
+    assert_ne!(value, 1_000_000, "the knob must have perturbed this read");
+    let report = report.expect("a live knob reports");
+    assert_eq!(report.reads, 1);
+    assert_eq!(report.jumps_applied, 1);
+}
+
+#[test]
+fn an_epoch_jump_knob_that_never_applied_over_eligible_reads_is_diagnosed_vacuous() {
+    // The detector: a live knob, enough eligible reads for the configured range
+    // to be expected to apply repeatedly, and ZERO applications. Built by hand
+    // here because a correctly wired knob cannot produce it.
+    let inert = ClockFaultReport {
+        reads: 40,
+        jump_vacuity_diagnosable: true,
+        jumps_applied: 0,
+    };
+    assert!(inert.is_vacuous());
+
+    // A knob that DID apply over the same traffic is not vacuous.
+    let live = ClockFaultReport {
+        reads: 40,
+        jump_vacuity_diagnosable: true,
+        jumps_applied: 3,
+    };
+    assert!(!live.is_vacuous());
+
+    // `hi == 0` (the off default) never diagnoses: a report is not even emitted.
+    let (_, off) = realtime_once(RuntimeConfig::seeded(0), 1_000_000);
+    assert!(off.is_none());
+}
+
+#[test]
+fn arming_the_epoch_jump_knob_does_not_perturb_monotonic_reads() {
+    // The clock-plane scope boundary: the jump knob touches ONLY
+    // `ClockKind::Realtime`. Monotonic drives timers and the liveness
+    // watchdog, so it must read identically whether or not the knob is armed.
+    let mut baseline = Context::from_config(RuntimeConfig::seeded(7)).unwrap();
+    baseline
+        .sleep_until(ClockKind::Monotonic, 1_000_000)
+        .unwrap();
+    let baseline_monotonic = baseline.now(ClockKind::Monotonic).unwrap();
+    baseline.finish().unwrap();
+
+    let mut armed =
+        Context::from_config(RuntimeConfig::seeded(7).with_epoch_jump_nanos(u64::MAX)).unwrap();
+    armed.sleep_until(ClockKind::Monotonic, 1_000_000).unwrap();
+    let armed_monotonic = armed.now(ClockKind::Monotonic).unwrap();
+    let report = armed.clock_fault_report();
+    armed.finish().unwrap();
+
+    assert_eq!(baseline_monotonic, armed_monotonic);
+    // The knob was live but this Context never read Realtime, so it drew
+    // nothing at all: the report must show zero eligible reads.
+    assert_eq!(report.expect("live knob").reads, 0);
+}
+
+#[test]
+fn epoch_jump_replays_self_contained_without_re_supplying_the_flag() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("epoch-jump.patina");
+
+    let mut recorded = Context::from_config(
+        RuntimeConfig::record(4, &path, "patina-test").with_epoch_jump_nanos(1_000_000),
+    )
+    .unwrap();
+    recorded
+        .sleep_until(ClockKind::Monotonic, 10_000_000)
+        .unwrap();
+    let recorded_value = recorded.now(ClockKind::Realtime).unwrap();
+    recorded.finish().unwrap();
+
+    // Flag-free: no --epoch-jump-nanos. The trace restores it, and replay
+    // reproduces the SAME recorded (already-perturbed) value with no redraw.
+    let mut replayed = Context::from_config(RuntimeConfig::replay(&path, "patina-test")).unwrap();
+    replayed
+        .sleep_until(ClockKind::Monotonic, 10_000_000)
+        .unwrap();
+    let replayed_value = replayed.now(ClockKind::Realtime).unwrap();
+    replayed.finish().unwrap();
+    assert_eq!(replayed_value, recorded_value);
+
+    // A conflicting knob at replay fails closed rather than silently running a
+    // different fault schedule.
+    let conflicting = RuntimeConfig::replay(&path, "patina-test").with_epoch_jump_nanos(1);
+    assert!(Context::from_config(conflicting).is_err());
+}
+
+#[test]
+fn epoch_jump_can_regress_a_read_below_an_earlier_one_at_the_same_true_time() {
+    // The bug class this knob exists for: two adjacent reads of the SAME true
+    // realtime value (no sleep between them) can still disagree, because each
+    // draws its own independent offset — proving the signed draw actually goes
+    // negative, not just that it can be positive.
+    let seed = (0..256)
+        .find(|&seed| {
+            let mut context =
+                Context::from_config(RuntimeConfig::seeded(seed).with_epoch_jump_nanos(1_000_000))
+                    .unwrap();
+            context
+                .sleep_until(ClockKind::Monotonic, 10_000_000)
+                .unwrap();
+            let first = context.now(ClockKind::Realtime).unwrap();
+            let second = context.now(ClockKind::Realtime).unwrap();
+            context.finish().unwrap();
+            second < first
+        })
+        .expect("some seed in range must draw a smaller offset on the second read");
+
+    let mut context =
+        Context::from_config(RuntimeConfig::seeded(seed).with_epoch_jump_nanos(1_000_000)).unwrap();
+    context
+        .sleep_until(ClockKind::Monotonic, 10_000_000)
+        .unwrap();
+    let first = context.now(ClockKind::Realtime).unwrap();
+    let second = context.now(ClockKind::Realtime).unwrap();
+    assert!(
+        second < first,
+        "wall time must be able to regress between adjacent reads: {first} then {second}"
+    );
+    let report = context.clock_fault_report().expect("live knob");
+    assert_eq!(report.reads, 2);
+    assert_eq!(report.jumps_applied, 2);
+    context.finish().unwrap();
+}
+
+#[test]
+fn epoch_jump_saturates_at_zero_rather_than_wrapping_negative() {
+    // Find a seed whose draw, at a healthy true epoch, is negative (the
+    // perturbed read is strictly below the true value) — then, for that SAME
+    // seed, at true epoch 0, the negative draw would go below zero, and the
+    // knob must clamp there rather than wrap a `u64`.
+    let hi = 1_000;
+    let seed = (0..64)
+        .find(|&seed| {
+            realtime_once(
+                RuntimeConfig::seeded(seed).with_epoch_jump_nanos(hi),
+                1_000_000,
+            )
+            .0 < 1_000_000
+        })
+        .expect("some seed in range must draw a negative offset");
+
+    let (at_zero, report) = realtime_once(RuntimeConfig::seeded(seed).with_epoch_jump_nanos(hi), 0);
+    assert_eq!(
+        at_zero, 0,
+        "a negative draw at true epoch 0 must saturate, not wrap"
+    );
+    assert_eq!(
+        report.expect("live knob").jumps_applied,
+        0,
+        "clamped-to-unchanged is not a counted application"
+    );
 }
 
 // ---------------------------------------------------------------------------

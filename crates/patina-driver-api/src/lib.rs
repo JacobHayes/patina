@@ -264,6 +264,25 @@ pub fn range_vacuity_is_diagnosable(opportunities: u64, (min, max): (u64, u64)) 
     vacuity_is_diagnosable(opportunities, permille)
 }
 
+/// Whether a zero-application verdict on a symmetric `[-hi, hi]` epoch-jump
+/// range is anomalous rather than ordinary, judged the same rate-aware way as
+/// [`range_vacuity_is_diagnosable`]: of the `2*hi + 1` values the draw can
+/// land on, exactly one (zero) applies nothing, so the knob's chance of a
+/// NON-ZERO draw over the eligible reads it actually saw must have expected
+/// at least [`VACUITY_MIN_EXPECTED_FIRES`] applied jumps. `hi == 0` never
+/// diagnoses: the knob draws nothing but zero, so it is inert by
+/// construction, not vacuous. `u128` throughout so a `hi` near `u64::MAX`
+/// cannot overflow the span computation.
+pub fn epoch_jump_vacuity_is_diagnosable(reads: u64, hi: u64) -> bool {
+    if hi == 0 {
+        return false;
+    }
+    let span = 2u128 * u128::from(hi) + 1;
+    let nonzero = 2u128 * u128::from(hi);
+    let permille = u16::try_from(nonzero.saturating_mul(1000) / span).unwrap_or(1000);
+    vacuity_is_diagnosable(reads, permille)
+}
+
 /// End-of-run summary of filesystem fault-injection activity, for the
 /// default-on vacuity diagnostic. It is deliberately per class: a run with both
 /// error and short-I/O knobs enabled must not hide one inert class behind the
@@ -364,6 +383,38 @@ impl EntropyFaultReport {
     /// opportunities to be expected to fire repeatedly, yet applied nothing.
     pub fn is_vacuous(&self) -> bool {
         self.fail_vacuity_diagnosable && self.failures_injected == 0
+    }
+}
+
+/// End-of-run summary of guest realtime-epoch fault-injection activity
+/// (`--epoch-jump-nanos`), for the default-on vacuity diagnostic. A single
+/// class, like [`EntropyFaultReport`]: the clock plane's only fault-injecting
+/// knob is the epoch jump (sleep jitter has no vacuity counter of its own —
+/// a delayed sleep is indistinguishable from a longer one).
+///
+/// Owned entirely by the `Context`: every realtime-epoch read is a single-site
+/// operation (`Context::now(ClockKind::Realtime)`), so there is no driver to
+/// ask.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClockFaultReport {
+    /// Fault-eligible realtime-epoch reads observed (every `Context::now`
+    /// call for `ClockKind::Realtime`, whether or not the knob was armed).
+    pub reads: u64,
+    /// The jump knob was live over enough eligible reads that
+    /// [`epoch_jump_vacuity_is_diagnosable`] holds, so zero applied jumps is
+    /// anomalous.
+    pub jump_vacuity_diagnosable: bool,
+    /// Reads whose returned value actually differed from the true virtual
+    /// epoch. A zero draw, or a negative draw saturated away at epoch 0,
+    /// applies nothing and is not counted.
+    pub jumps_applied: u64,
+}
+
+impl ClockFaultReport {
+    /// Whether the epoch-jump class went vacuously inert: live over enough
+    /// opportunities to be expected to fire repeatedly, yet applied nothing.
+    pub fn is_vacuous(&self) -> bool {
+        self.jump_vacuity_diagnosable && self.jumps_applied == 0
     }
 }
 

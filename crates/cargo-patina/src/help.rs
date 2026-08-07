@@ -529,6 +529,13 @@ const FAULT_FLAGS: &[Flag] = &[
         "Fail guest entropy requests at N per-mille with a seeded named error instead of bytes.",
         false,
     ),
+    f(
+        "--epoch-jump-nanos",
+        None,
+        Value::Required("HI", Kind::U64),
+        "Jump each realtime-epoch read by a seeded signed offset in [-HI, HI] nanoseconds (saturating at 0).",
+        false,
+    ),
 ];
 
 /// The DNS domain: the host table (semantic configuration, like `--param`) and
@@ -2034,7 +2041,7 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         doc: "CLI default override for `.patina/config.toml` keys (for example PATINA_SEED, PATINA_GENERATIONS): explicit flags still win; campaign scrubs run-default env names from child runs.",
     },
     EnvVar {
-        name: "PATINA_SCHEDULE_REPORT / PATINA_SCHEDULE_POLICY_REPORT / PATINA_SWARM_REPORT / PATINA_LIVENESS_REPORT / PATINA_SDK_REPORT / PATINA_FS_FAULT_REPORT / PATINA_DNS_FAULT_REPORT / PATINA_NET_FAULT_REPORT / PATINA_ENTROPY_FAULT_REPORT / PATINA_COVERAGE_REPORT / PATINA_DEPTH_REPORT",
+        name: "PATINA_SCHEDULE_REPORT / PATINA_SCHEDULE_POLICY_REPORT / PATINA_SWARM_REPORT / PATINA_LIVENESS_REPORT / PATINA_SDK_REPORT / PATINA_FS_FAULT_REPORT / PATINA_DNS_FAULT_REPORT / PATINA_NET_FAULT_REPORT / PATINA_ENTROPY_FAULT_REPORT / PATINA_CLOCK_FAULT_REPORT / PATINA_COVERAGE_REPORT / PATINA_DEPTH_REPORT",
         scope: "user",
         doc: "End-of-run diagnostics, all on by default; a false-y value (0/off/false/no) silences one, on every family. Presentation only: suppressing a report changes no recorded byte, so a quiet run and a loud one replay against each other. A campaign pins them all on, since for a campaign they are classifier inputs rather than cosmetics.",
     },
@@ -2117,6 +2124,11 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         name: "PATINA_ENTROPY_FAIL_PERMILLE",
         scope: "protocol",
         doc: "Seeded guest entropy-request failure knob (mirrors --entropy-fail-permille).",
+    },
+    EnvVar {
+        name: "PATINA_EPOCH_JUMP_NANOS",
+        scope: "protocol",
+        doc: "Seeded realtime-epoch jump knob (mirrors --epoch-jump-nanos).",
     },
     EnvVar {
         name: "PATINA_BUGGIFY / PATINA_BUGGIFY_ACTIVATION_PERMILLE / PATINA_BUGGIFY_CUTOFF_NANOS / PATINA_BUGGIFY_AFTER_SETUP",

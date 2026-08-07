@@ -57,6 +57,12 @@ pub mod fault_domain {
     /// non-faulted request's bytes the moment the knob was armed.
     pub const ENTROPY_FAULT: &str = "patina.entropy.fail";
 
+    /// Seeded realtime-epoch jump-offset stream (`--epoch-jump-nanos`). Its own
+    /// label rather than riding a clock stream that also exists: there is no
+    /// other Context-side realtime stream to share, and a dedicated label keeps
+    /// a future clock knob from silently correlating with this one.
+    pub const EPOCH_JUMP: &str = "patina.clock.epoch_jump";
+
     /// Context-side per-operation filesystem latency stream. Latency needs the
     /// clock, so unlike the error/short streams it is drawn by the Context rather
     /// than by a wrapper driver.
@@ -96,6 +102,8 @@ pub mod fault_domain {
     pub const SWARM_BUGGIFY: &str = "patina.swarm.buggify";
     /// Swarm per-class coin for entropy-request failure injection.
     pub const SWARM_ENTROPY_FAIL: &str = "patina.swarm.entropy_fail";
+    /// Swarm per-class coin for the realtime-epoch jump.
+    pub const SWARM_EPOCH_JUMP: &str = "patina.swarm.epoch_jump";
 }
 
 /// The specified SplitMix64 stream used by deterministic decision policies.

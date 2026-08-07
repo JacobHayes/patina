@@ -216,6 +216,13 @@ pub const ENV_DNS_FAIL_PERMILLE: &str = "PATINA_DNS_FAIL_PERMILLE";
 /// Seeded guest entropy-request failure probability in per-mille (0..=1000),
 /// applied to every `Context::entropy_bytes` call. Off (zero) when unset.
 pub const ENV_ENTROPY_FAIL_PERMILLE: &str = "PATINA_ENTROPY_FAIL_PERMILLE";
+/// Seeded realtime-epoch jump magnitude in nanoseconds. Every
+/// `Context::now(ClockKind::Realtime)` read draws a signed offset uniformly in
+/// `[-hi, hi]` and applies it to that one read (saturating at 0), so wall time
+/// can regress or leap between adjacent reads — never applied to
+/// `ClockKind::Monotonic`, which drives timers and the liveness watchdog. Off
+/// (zero) when unset.
+pub const ENV_EPOCH_JUMP_NANOS: &str = "PATINA_EPOCH_JUMP_NANOS";
 /// Seeded extra latency `MIN..MAX` in nanoseconds added to every eligible name
 /// resolution, applied by the `Context`. Off when unset.
 pub const ENV_DNS_LATENCY: &str = "PATINA_DNS_LATENCY_NANOS";
@@ -241,6 +248,10 @@ pub const ENV_DNS_FAULT_REPORT: &str = "PATINA_DNS_FAULT_REPORT";
 /// Suppress the default-on end-of-run entropy fault-injection diagnostic when set
 /// to a false-y value (`0`, `off`, `false`, `no`).
 pub const ENV_ENTROPY_FAULT_REPORT: &str = "PATINA_ENTROPY_FAULT_REPORT";
+/// Suppress the default-on end-of-run clock (realtime-epoch jump)
+/// fault-injection diagnostic when set to a false-y value (`0`, `off`, `false`,
+/// `no`).
+pub const ENV_CLOCK_FAULT_REPORT: &str = "PATINA_CLOCK_FAULT_REPORT";
 /// Enable cooperative-SUT (buggify) fault injection. Its value is the
 /// per-evaluation firing probability in per-mille for an active site (0..=1000);
 /// an empty value uses the FoundationDB default of 25% (250). Presence of the
@@ -355,6 +366,9 @@ pub enum Report {
     /// `PATINA_ENTROPY_FAULT_REPORT` — guest entropy-request fault-injection
     /// accounting.
     EntropyFault,
+    /// `PATINA_CLOCK_FAULT_REPORT` — guest realtime-epoch jump fault-injection
+    /// accounting.
+    ClockFault,
     /// `PATINA_COVERAGE_REPORT` — native yield-point edge coverage, emitted by
     /// the shim at its own finalization point rather than by [`Context::finish`].
     Coverage,
@@ -367,7 +381,7 @@ impl Report {
     /// Every report, in declaration order. Family plumbing (the native child's
     /// environment, a campaign's pinned child diagnostics) iterates THIS, so a
     /// report added here cannot be carried by one family and dropped by another.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Schedule,
         Self::SchedulePolicy,
         Self::Swarm,
@@ -377,6 +391,7 @@ impl Report {
         Self::DnsFault,
         Self::NetFault,
         Self::EntropyFault,
+        Self::ClockFault,
         Self::Coverage,
         Self::Depth,
     ];
@@ -394,6 +409,7 @@ impl Report {
             Self::DnsFault => ENV_DNS_FAULT_REPORT,
             Self::NetFault => ENV_NET_FAULT_REPORT,
             Self::EntropyFault => ENV_ENTROPY_FAULT_REPORT,
+            Self::ClockFault => ENV_CLOCK_FAULT_REPORT,
             Self::Coverage => ENV_COVERAGE_REPORT,
             Self::Depth => ENV_DEPTH_REPORT,
         }
@@ -743,6 +759,10 @@ pub struct EntropyFaultConfig {
 pub struct ClockFaultConfig {
     /// Inclusive `[min, max]` nanoseconds of seeded extra latency per guest sleep.
     pub sleep_jitter_nanos: Option<(u64, u64)>,
+    /// Magnitude in nanoseconds of the seeded signed realtime-epoch jump applied
+    /// to each `ClockKind::Realtime` read: an offset drawn uniformly in `[-hi,
+    /// hi]`, independently per read. Zero (the default) is off.
+    pub epoch_jump_nanos: u64,
 }
 
 /// Seed-driven cooperative-SUT (buggify) configuration. Inert (`enabled =
@@ -1122,6 +1142,13 @@ impl RuntimeConfig {
         self
     }
 
+    /// Jump each realtime-epoch read by a seeded signed offset drawn uniformly
+    /// in `[-hi, hi]`, saturating at 0.
+    pub fn with_epoch_jump_nanos(mut self, hi: u64) -> Self {
+        self.faults.clock.epoch_jump_nanos = hi;
+        self
+    }
+
     /// Add seeded per-datagram delivery jitter drawn from `[min, max]`.
     pub fn with_net_jitter_nanos(mut self, min: u64, max: u64) -> Self {
         self.faults.net.jitter_nanos = Some((min, max));
@@ -1299,6 +1326,11 @@ impl RuntimeConfig {
             }
             FaultKnob::EntropyFailPermille => {
                 self.faults.entropy.fail_permille = parse_permille(env, value)?;
+            }
+            FaultKnob::EpochJumpNanos => {
+                self.faults.clock.epoch_jump_nanos = value.trim().parse().map_err(|_| {
+                    RuntimeError::Config(format!("{env} must be an unsigned 64-bit integer"))
+                })?;
             }
         }
         Ok(())
@@ -2313,6 +2345,9 @@ impl RuntimeBuilder {
             entropy_fail_permille: self.config.faults.entropy.fail_permille,
             entropy_fault_rng: SplitMix64::new(domain_seed(root_seed, fault_domain::ENTROPY_FAULT)),
             entropy_report: patina_dst_driver_api::EntropyFaultReport::default(),
+            epoch_jump_nanos: self.config.faults.clock.epoch_jump_nanos,
+            epoch_jump_rng: SplitMix64::new(domain_seed(root_seed, fault_domain::EPOCH_JUMP)),
+            clock_report: patina_dst_driver_api::ClockFaultReport::default(),
             schedule: ScheduleTracker::default(),
             buggify: Buggify::new(self.config.buggify, root_seed),
             liveness,
@@ -3351,6 +3386,15 @@ pub struct Context {
     entropy_fault_rng: SplitMix64,
     /// Per-class entropy fault accounting for the end-of-run vacuity diagnostic.
     entropy_report: patina_dst_driver_api::EntropyFaultReport,
+    /// Magnitude in nanoseconds of the seeded signed realtime-epoch jump and its
+    /// domain-separated stream. Zero means the knob is off. The stream is its
+    /// own label ([`fault_domain::EPOCH_JUMP`]), never the clock driver's own
+    /// state, so the jump decision cannot correlate with any other fault plane.
+    epoch_jump_nanos: u64,
+    epoch_jump_rng: SplitMix64,
+    /// Per-class clock (epoch-jump) fault accounting for the end-of-run vacuity
+    /// diagnostic.
+    clock_report: patina_dst_driver_api::ClockFaultReport,
     /// Per-task scheduling-boundary accounting for the vacuous-schedule
     /// diagnostic emitted at [`Context::finish`].
     schedule: ScheduleTracker,
@@ -3822,11 +3866,61 @@ impl Context {
 
         let result = self.clock.as_mut().expect("driver was checked").now(clock);
         let outcome = match result {
-            Ok(nanos) => Outcome::U64(nanos),
+            Ok(nanos) => {
+                let nanos = match clock {
+                    ClockKind::Realtime => self.apply_epoch_jump(nanos),
+                    ClockKind::Monotonic => nanos,
+                };
+                Outcome::U64(nanos)
+            }
             Err(error) => Outcome::Error(error),
         };
         let outcome = self.complete(operation.clone(), outcome);
         decode_u64(&operation, outcome)
+    }
+
+    /// Perturb one realtime-epoch read with a seeded signed offset in `[-hi,
+    /// hi]`, saturating at 0 (no negative epochs). Draws from its own
+    /// domain-separated stream ([`fault_domain::EPOCH_JUMP`]), never the clock
+    /// driver's own state, so a knob-off run is unperturbed and arming the knob
+    /// never correlates with any other fault plane. No cumulative walk: the
+    /// result is a pure function of this one draw and the true epoch, so a jump
+    /// on one read never carries into the next. The perturbed value flows
+    /// through the same recorded [`Operation::ClockNow`]/[`Outcome::U64`] every
+    /// epoch read already uses, so replay reproduces it without redrawing.
+    fn apply_epoch_jump(&mut self, true_epoch_nanos: u64) -> u64 {
+        self.clock_report.reads += 1;
+        let hi = match self.epoch_jump_nanos {
+            0 => return true_epoch_nanos,
+            hi => hi,
+        };
+        // u128 throughout: `hi` is an unconstrained CLI-supplied u64, so a span
+        // of `2*hi + 1` could overflow u64 for a `hi` near its max.
+        let span = 2u128 * u128::from(hi) + 1;
+        let draw = u128::from(self.epoch_jump_rng.next_u64()) % span;
+        let offset = draw as i128 - i128::from(hi); // in [-hi, hi]
+        let perturbed = i128::from(true_epoch_nanos) + offset;
+        let perturbed = perturbed.clamp(0, i128::from(u64::MAX)) as u64;
+        if perturbed != true_epoch_nanos {
+            self.clock_report.jumps_applied += 1;
+        }
+        perturbed
+    }
+
+    /// The end-of-run clock (epoch-jump) fault summary, or `None` when the knob
+    /// was never live. Filled entirely by the Context: every realtime-epoch read
+    /// is a single-site operation, so there is no driver-side fault model of its
+    /// own.
+    pub fn clock_fault_report(&self) -> Option<patina_dst_driver_api::ClockFaultReport> {
+        if self.epoch_jump_nanos == 0 {
+            return None;
+        }
+        let mut report = self.clock_report;
+        report.jump_vacuity_diagnosable = patina_dst_driver_api::epoch_jump_vacuity_is_diagnosable(
+            report.reads,
+            self.epoch_jump_nanos,
+        );
+        Some(report)
     }
 
     /// Sleep until `deadline_nanos`. Plain: latency jitter is applied by the
@@ -5145,6 +5239,11 @@ impl Context {
         if let Some(report) = self.entropy_fault_report() {
             emit_entropy_fault_report(self.reports, &report);
         }
+        // Clock (epoch-jump) fault-injection diagnostic, on the same
+        // default-on terms.
+        if let Some(report) = self.clock_fault_report() {
+            emit_clock_fault_report(self.reports, &report);
+        }
         // Liveness-watchdog diagnostic: prove the watchdog was actually armed and
         // ran to a clean finish (it did NOT fire — a fired watchdog aborts before
         // finish()). Default-on so "watchdog enabled, run OK" is never silently
@@ -5692,6 +5791,7 @@ fn fault_record(config: &RuntimeConfig) -> patina_dst_trace::FaultConfigRecord {
         dns_fail_permille: config.faults.dns.fail_permille,
         dns_latency_nanos: config.faults.dns.latency_nanos,
         entropy_fail_permille: config.faults.entropy.fail_permille,
+        epoch_jump_nanos: config.faults.clock.epoch_jump_nanos,
     }
 }
 
@@ -5726,6 +5826,7 @@ fn fault_config_from_record(record: &patina_dst_trace::FaultConfigRecord) -> Fau
         },
         clock: ClockFaultConfig {
             sleep_jitter_nanos: record.sleep_jitter_nanos,
+            epoch_jump_nanos: record.epoch_jump_nanos,
         },
         dns: DnsFaultConfig {
             fail_permille: record.dns_fail_permille,
@@ -6344,6 +6445,36 @@ fn emit_entropy_fault_report(
 occurred, enough that the configured rate should have fired several times over, yet it applied \
 ZERO effects.",
             report.requests,
+        );
+    }
+}
+
+/// Emit the default-on clock (epoch-jump) fault-injection diagnostic. Silent
+/// when the knob was never live at all. Suppressed by a false-y
+/// [`ENV_CLOCK_FAULT_REPORT`].
+fn emit_clock_fault_report(
+    reports: ReportConfig,
+    report: &patina_dst_driver_api::ClockFaultReport,
+) {
+    if report.reads == 0 {
+        return;
+    }
+    if !reports.enabled(Report::ClockFault) {
+        return;
+    }
+    eprintln!(
+        "PATINA_CLOCK_FAULT_REPORT reads={} jump_vacuity_diagnosable={} jumps_applied={} vacuous={}",
+        report.reads,
+        u8::from(report.jump_vacuity_diagnosable),
+        report.jumps_applied,
+        u8::from(report.is_vacuous()),
+    );
+    if report.is_vacuous() {
+        eprintln!(
+            "PATINA WARNING: clock fault knobs inert — {} fault-eligible realtime-epoch read(s) \
+occurred, enough that the configured jump range should have applied a non-zero offset several \
+times over, yet it applied ZERO effects.",
+            report.reads,
         );
     }
 }
@@ -7474,6 +7605,7 @@ class=crash|0 class=buggify|0"
             },
             clock: ClockFaultConfig {
                 sleep_jitter_nanos: Some((1, 2)),
+                epoch_jump_nanos: 1,
             },
             dns: DnsFaultConfig {
                 fail_permille: 1,
@@ -7527,6 +7659,7 @@ class=crash|0 class=buggify|0"
                 "net_tcp_buffer",
                 "entropy_fail",
                 "buggify",
+                "epoch_jump",
             ]
         );
     }
