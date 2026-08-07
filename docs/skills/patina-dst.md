@@ -239,6 +239,36 @@ Read these reports. A clean pass with a fault knob that never fired, or a spawne
 thread that never yielded, is a **vacuous** result, and the reports are how you
 tell that apart from a real green.
 
+## Guest patterns that survive the runtime
+
+Hard-won from dogfooding real storage engines under Patina; each avoids a
+class of confusing first-run failures.
+
+- **Static constructors run before the runtime exists.** A `#[ctor]`-style
+  initializer that touches an interposed surface (tracing setup, env reads,
+  sockets) fails closed with a pre-init diagnostic naming the symbol. The
+  pattern: compile the constructor out under your DST cfg and initialize
+  explicitly from `main`.
+- **Vary workloads from the deterministic RNG, never argv.** Campaigns hold
+  guest arguments constant across generations by design — argv is identity, not
+  exploration. Derive per-run workload shape (seeds, paths, sizes) inside the
+  guest from the runtime's entropy; every generation then explores differently
+  while staying replayable from its trace alone.
+- **The guest environment starts empty.** Nothing leaks in from the host. If a
+  run needs a variable (`RUST_BACKTRACE=1` is the common one), inject it
+  explicitly through the run verb's env-injection flag — it becomes part of the
+  recorded, replayable run.
+- **Durability claims require parent-directory fsync.** The crash model loses
+  namespace operations (create/rename/link) that were not made durable by an
+  fsync of the parent directory — faithfully to real filesystems. A harness or
+  storage layer that skips parent-dir sync will see crash sweeps "lose" files
+  it considered written; that finding is about the code, not the model.
+- **Audit output that can fail after injected faults must not `expect()` or
+  swallow.** Fault injection reaches every filesystem read your oracle makes;
+  an `unwrap` turns an injected error into a panic, and an error-swallowing
+  probe (`Path::exists()` is the classic) turns one into a false verdict.
+  Oracles read truth or fail closed, loudly.
+
 ## Doctrine worth carrying
 
 These outlast any flag rename.
