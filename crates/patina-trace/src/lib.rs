@@ -110,6 +110,21 @@ pub struct FaultConfigRecord {
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub net_latency_nanos: u64,
     #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub net_duplicate_permille: u16,
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub net_connect_refuse_permille: u16,
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub net_reset_permille: u16,
+    /// Statically partitioned address pairs, in the runtime's stable key order.
+    /// Both directions of each pair are stored, so the record is the partition
+    /// set verbatim rather than a canonical half of it.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub net_partitions: BTreeSet<(String, String)>,
+    /// Virtual TCP receive-buffer size in bytes, `u64` rather than `usize` so the
+    /// record is independent of the recording target's pointer width.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net_tcp_buffer_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
     pub dns_fail_permille: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns_latency_nanos: Option<(u64, u64)>,

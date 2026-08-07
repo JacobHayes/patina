@@ -14,6 +14,15 @@ pub mod fault_domain {
     pub const ENTROPY: &str = "patina.entropy";
     /// SimNet's seeded network fault stream (drop, retransmit, jitter).
     pub const NET_FAULT: &str = "patina.net.fault";
+    /// SimNet's seeded datagram-duplication stream. Derived from the net-fault
+    /// seed rather than the root seed, like the two labels below: the driver is
+    /// handed ONE network seed, and separating its classes below that seed keeps
+    /// enabling one class from shifting another class's decisions.
+    pub const NET_DUPLICATE: &str = "patina.net.duplicate";
+    /// SimNet's seeded TCP connect-refusal stream.
+    pub const NET_CONNECT_REFUSE: &str = "patina.net.connect_refuse";
+    /// SimNet's seeded TCP stream-reset stream.
+    pub const NET_RESET: &str = "patina.net.reset";
     /// Seeded extra latency applied to guest sleeps.
     pub const SLEEP_JITTER: &str = "patina.clock.sleep_jitter";
 
@@ -58,6 +67,16 @@ pub mod fault_domain {
     pub const SWARM_NET_DROP: &str = "patina.swarm.net_drop";
     /// Swarm per-class coin for network base latency.
     pub const SWARM_NET_LATENCY: &str = "patina.swarm.net_latency";
+    /// Swarm per-class coin for datagram duplication.
+    pub const SWARM_NET_DUPLICATE: &str = "patina.swarm.net_duplicate";
+    /// Swarm per-class coin for TCP connect refusal.
+    pub const SWARM_NET_CONNECT_REFUSE: &str = "patina.swarm.net_connect_refuse";
+    /// Swarm per-class coin for TCP stream reset.
+    pub const SWARM_NET_RESET: &str = "patina.swarm.net_reset";
+    /// Swarm per-class coin for the static network partitions.
+    pub const SWARM_NET_PARTITION: &str = "patina.swarm.net_partition";
+    /// Swarm per-class coin for the virtual TCP receive-buffer size.
+    pub const SWARM_NET_TCP_BUFFER: &str = "patina.swarm.net_tcp_buffer";
     /// Swarm per-class coin for cooperative-SUT buggify.
     pub const SWARM_BUGGIFY: &str = "patina.swarm.buggify";
 }

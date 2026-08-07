@@ -793,6 +793,7 @@ fn kind_tag(kind: Kind) -> &'static str {
         Kind::CrashSpec => "crash-spec",
         Kind::KeyValue => "key-value",
         Kind::DnsEntry => "dns-entry",
+        Kind::AddressPair => "address-pair",
         Kind::Socket => "socket",
         Kind::Preopen => "preopen",
         Kind::UnsupportedSymbols => "unsupported-symbols",

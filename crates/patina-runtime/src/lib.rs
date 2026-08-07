@@ -75,7 +75,7 @@
 //! [ARCHITECTURE.md]: https://github.com/JacobHayes/patina/blob/main/ARCHITECTURE.md
 //! [`block_on`]: https://docs.rs/patina-dst-async
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
 use std::fmt;
@@ -163,6 +163,23 @@ pub const ENV_NET_JITTER: &str = "PATINA_NET_JITTER_NANOS";
 /// Seeded datagram drop probability in per-mille (0..=1000) applied to the
 /// default `SimNet`. Off (zero) when unset.
 pub const ENV_NET_DROP_PERMILLE: &str = "PATINA_NET_DROP_PERMILLE";
+/// Seeded datagram duplication probability in per-mille (0..=1000). Each
+/// duplicate is an independent copy with its own jitter draw, so the twins can
+/// arrive apart — the at-least-once delivery hazard. Off (zero) when unset.
+pub const ENV_NET_DUPLICATE_PERMILLE: &str = "PATINA_NET_DUPLICATE_PERMILLE";
+/// Seeded probability in per-mille (0..=1000) that an otherwise-establishable
+/// TCP connection is refused. Off (zero) when unset.
+pub const ENV_NET_CONNECT_REFUSE_PERMILLE: &str = "PATINA_NET_CONNECT_REFUSE_PERMILLE";
+/// Seeded probability in per-mille (0..=1000) that a fault-eligible established
+/// TCP stream operation tears the stream down with a reset. Off (zero) when unset.
+pub const ENV_NET_RESET_PERMILLE: &str = "PATINA_NET_RESET_PERMILLE";
+/// Statically partitioned address pairs as a JSON array of two-element arrays
+/// (`[["a","b"],…]`). Both directions of each pair are blocked. Deterministic
+/// topology configuration rather than a seeded rate. Empty when unset.
+pub const ENV_NET_PARTITIONS: &str = "PATINA_NET_PARTITIONS_JSON";
+/// Virtual TCP receive-buffer size in bytes. Smaller buffers make would-block
+/// behavior reachable. The driver default applies when unset.
+pub const ENV_NET_TCP_BUFFER_BYTES: &str = "PATINA_NET_TCP_BUFFER_BYTES";
 /// Seeded extra latency `MIN..MAX` in nanoseconds added to every guest sleep,
 /// inflating virtual elapsed time to trip wall-clock deadline assumptions. Off
 /// when unset.
@@ -662,6 +679,25 @@ pub struct NetFaultConfig {
     pub jitter_nanos: Option<(u64, u64)>,
     /// Seeded datagram drop probability in per-mille (0..=1000).
     pub drop_permille: u16,
+    /// Seeded datagram duplication probability in per-mille (0..=1000). A
+    /// duplicate is an independent copy with its own jitter draw.
+    pub duplicate_permille: u16,
+    /// Seeded probability in per-mille (0..=1000) that an otherwise-establishable
+    /// TCP connection is refused.
+    pub connect_refuse_permille: u16,
+    /// Seeded probability in per-mille (0..=1000) that a fault-eligible
+    /// established-stream operation tears the stream down with a reset.
+    pub reset_permille: u16,
+    /// Statically partitioned address pairs. Both directions of each pair are
+    /// blocked: a datagram addressed across it is dropped and a connect across it
+    /// is refused. Deterministic (rate 1.0), unlike the seeded knobs above.
+    pub partitions: BTreeSet<(String, String)>,
+    /// Virtual TCP receive-buffer size in bytes. `None` uses the driver default.
+    /// Not a fault: a capacity setting whose smaller values make would-block
+    /// behavior — and the guest's backpressure handling — reachable, so it has a
+    /// swarm class (an environment shape a generation may or may not adopt) but
+    /// no vacuity class (there is no "should have fired N times" rate to judge).
+    pub tcp_buffer_bytes: Option<usize>,
 }
 
 /// DNS fault knobs. They act only on names the run's host table DEFINES: an
@@ -1071,6 +1107,44 @@ impl RuntimeConfig {
         self
     }
 
+    /// Deliver datagrams twice with the given per-mille (0..=1000) probability.
+    pub fn with_net_duplicate_permille(mut self, permille: u16) -> Self {
+        self.faults.net.duplicate_permille = permille;
+        self
+    }
+
+    /// Refuse otherwise-establishable TCP connections with the given per-mille
+    /// (0..=1000) probability.
+    pub fn with_net_connect_refuse_permille(mut self, permille: u16) -> Self {
+        self.faults.net.connect_refuse_permille = permille;
+        self
+    }
+
+    /// Reset established TCP streams with the given per-mille (0..=1000)
+    /// probability per fault-eligible stream operation.
+    pub fn with_net_reset_permille(mut self, permille: u16) -> Self {
+        self.faults.net.reset_permille = permille;
+        self
+    }
+
+    /// Partition both directions between two exact virtual addresses.
+    pub fn with_net_partition(mut self, left: impl Into<String>, right: impl Into<String>) -> Self {
+        let left = left.into();
+        let right = right.into();
+        self.faults
+            .net
+            .partitions
+            .insert((left.clone(), right.clone()));
+        self.faults.net.partitions.insert((right, left));
+        self
+    }
+
+    /// Set the virtual TCP receive-buffer size in bytes.
+    pub fn with_net_tcp_buffer_bytes(mut self, bytes: usize) -> Self {
+        self.faults.net.tcp_buffer_bytes = Some(bytes);
+        self
+    }
+
     pub const fn crash_at(&self) -> Option<CrashPoint> {
         self.faults.fs.crash_at
     }
@@ -1115,6 +1189,43 @@ impl RuntimeConfig {
         }
         if let Some(value) = get(ENV_NET_DROP_PERMILLE) {
             self.faults.net.drop_permille = parse_permille(ENV_NET_DROP_PERMILLE, &value)?;
+        }
+        if let Some(value) = get(ENV_NET_DUPLICATE_PERMILLE) {
+            self.faults.net.duplicate_permille =
+                parse_permille(ENV_NET_DUPLICATE_PERMILLE, &value)?;
+        }
+        if let Some(value) = get(ENV_NET_CONNECT_REFUSE_PERMILLE) {
+            self.faults.net.connect_refuse_permille =
+                parse_permille(ENV_NET_CONNECT_REFUSE_PERMILLE, &value)?;
+        }
+        if let Some(value) = get(ENV_NET_RESET_PERMILLE) {
+            self.faults.net.reset_permille = parse_permille(ENV_NET_RESET_PERMILLE, &value)?;
+        }
+        if let Some(value) = get(ENV_NET_PARTITIONS) {
+            let pairs: Vec<(String, String)> = serde_json::from_str(&value).map_err(|error| {
+                RuntimeError::Config(format!("{ENV_NET_PARTITIONS} is invalid: {error}"))
+            })?;
+            for (left, right) in pairs {
+                validate_partition(&left, &right)?;
+                self.faults
+                    .net
+                    .partitions
+                    .insert((left.clone(), right.clone()));
+                self.faults.net.partitions.insert((right, left));
+            }
+        }
+        if let Some(value) = get(ENV_NET_TCP_BUFFER_BYTES) {
+            let bytes: usize = value.trim().parse().map_err(|_| {
+                RuntimeError::Config(format!(
+                    "{ENV_NET_TCP_BUFFER_BYTES} must be a non-negative machine integer"
+                ))
+            })?;
+            if bytes == 0 {
+                return Err(RuntimeError::Config(format!(
+                    "{ENV_NET_TCP_BUFFER_BYTES} must be greater than zero"
+                )));
+            }
+            self.faults.net.tcp_buffer_bytes = Some(bytes);
         }
         if let Some(value) = get(ENV_DNS_FAIL_PERMILLE) {
             self.faults.dns.fail_permille = parse_permille(ENV_DNS_FAIL_PERMILLE, &value)?;
@@ -2054,12 +2165,22 @@ impl RuntimeBuilder {
                 ))
             });
             if self.network.is_none() {
+                let net = &self.config.faults.net;
                 let mut network = SimNet::builder()
-                    .base_latency_nanos(self.config.faults.net.latency_nanos)
+                    .base_latency_nanos(net.latency_nanos)
                     .fault_seed(domain_seed(root_seed, fault_domain::NET_FAULT))
-                    .drop_permille(self.config.faults.net.drop_permille);
-                if let Some((min, max)) = self.config.faults.net.jitter_nanos {
+                    .drop_permille(net.drop_permille)
+                    .duplicate_permille(net.duplicate_permille)
+                    .connect_refuse_permille(net.connect_refuse_permille)
+                    .reset_permille(net.reset_permille);
+                if let Some((min, max)) = net.jitter_nanos {
                     network = network.jitter_nanos(min, max);
+                }
+                if let Some(bytes) = net.tcp_buffer_bytes {
+                    network = network.tcp_buffer_bytes(bytes);
+                }
+                for (left, right) in &net.partitions {
+                    network = network.partition(left.clone(), right.clone());
                 }
                 self.network = Some(Box::new(network.build().map_err(RuntimeError::Effect)?));
             }
@@ -3700,9 +3821,9 @@ impl Context {
         let mut report = driver.unwrap_or_default();
         report.eligible_ops = report.eligible_ops.max(self.fs_latency_eligible_ops);
         report.latency_applied = self.fs_latency_applied;
-        report.latency_vacuity_diagnosable = self
-            .fs_latency_nanos
-            .is_some_and(|range| latency_is_diagnosable(report.eligible_ops, range));
+        report.latency_vacuity_diagnosable = self.fs_latency_nanos.is_some_and(|range| {
+            patina_dst_driver_api::range_vacuity_is_diagnosable(report.eligible_ops, range)
+        });
         Some(report)
     }
 
@@ -4236,10 +4357,20 @@ impl Context {
             report.resolutions,
             self.dns_fail_permille,
         );
-        report.latency_vacuity_diagnosable = self
-            .dns_latency_nanos
-            .is_some_and(|range| latency_is_diagnosable(report.resolutions, range));
+        report.latency_vacuity_diagnosable = self.dns_latency_nanos.is_some_and(|range| {
+            patina_dst_driver_api::range_vacuity_is_diagnosable(report.resolutions, range)
+        });
         Some(report)
+    }
+
+    /// The end-of-run network fault summary, or `None` when the installed
+    /// network driver models no faults. Owned entirely by the driver — unlike
+    /// filesystem and DNS latency, every network knob acts inside the driver —
+    /// so the Context merely forwards it. This is what `PATINA_NET_FAULT_REPORT`
+    /// prints at finalization; embedders and tests read it directly to assert a
+    /// knob was non-vacuous.
+    pub fn net_fault_report(&self) -> Option<patina_dst_driver_api::NetFaultReport> {
+        self.network.as_ref().and_then(|net| net.fault_report())
     }
 
     pub fn fs_crash(&mut self) -> Result<(), RuntimeError> {
@@ -4893,7 +5024,7 @@ impl Context {
         // Network fault-injection diagnostic. Default-on so a run configured with
         // net fault knobs that never actually perturbed any send (the knobs being
         // silently inert on the exercised code path) is never a false green.
-        if let Some(report) = self.network.as_ref().and_then(|net| net.fault_report()) {
+        if let Some(report) = self.net_fault_report() {
             emit_net_fault_report(self.reports, &report);
         }
         // Liveness-watchdog diagnostic: prove the watchdog was actually armed and
@@ -5435,6 +5566,11 @@ fn fault_record(config: &RuntimeConfig) -> patina_dst_trace::FaultConfigRecord {
         net_jitter_nanos: config.faults.net.jitter_nanos,
         net_drop_permille: config.faults.net.drop_permille,
         net_latency_nanos: config.faults.net.latency_nanos,
+        net_duplicate_permille: config.faults.net.duplicate_permille,
+        net_connect_refuse_permille: config.faults.net.connect_refuse_permille,
+        net_reset_permille: config.faults.net.reset_permille,
+        net_partitions: config.faults.net.partitions.clone(),
+        net_tcp_buffer_bytes: config.faults.net.tcp_buffer_bytes.map(|bytes| bytes as u64),
         dns_fail_permille: config.faults.dns.fail_permille,
         dns_latency_nanos: config.faults.dns.latency_nanos,
     }
@@ -5458,6 +5594,16 @@ fn fault_config_from_record(record: &patina_dst_trace::FaultConfigRecord) -> Fau
             latency_nanos: record.net_latency_nanos,
             jitter_nanos: record.net_jitter_nanos,
             drop_permille: record.net_drop_permille,
+            duplicate_permille: record.net_duplicate_permille,
+            connect_refuse_permille: record.net_connect_refuse_permille,
+            reset_permille: record.net_reset_permille,
+            partitions: record.net_partitions.clone(),
+            // A recorded buffer size cannot exceed this target's `usize` in any
+            // realistic trace, but saturate rather than wrap if one ever does:
+            // a wrapped buffer would silently change would-block behavior.
+            tcp_buffer_bytes: record
+                .net_tcp_buffer_bytes
+                .map(|bytes| usize::try_from(bytes).unwrap_or(usize::MAX)),
         },
         clock: ClockFaultConfig {
             sleep_jitter_nanos: record.sleep_jitter_nanos,
@@ -5836,6 +5982,56 @@ fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_dst_trace::SwarmConfig
             || config.faults.net.latency_nanos = 0,
         );
     }
+    if config.faults.net.duplicate_permille != 0 {
+        apply_swarm_class(
+            seed,
+            "net_duplicate",
+            fault_domain::SWARM_NET_DUPLICATE,
+            None,
+            &mut draw,
+            || config.faults.net.duplicate_permille = 0,
+        );
+    }
+    if config.faults.net.connect_refuse_permille != 0 {
+        apply_swarm_class(
+            seed,
+            "net_connect_refuse",
+            fault_domain::SWARM_NET_CONNECT_REFUSE,
+            None,
+            &mut draw,
+            || config.faults.net.connect_refuse_permille = 0,
+        );
+    }
+    if config.faults.net.reset_permille != 0 {
+        apply_swarm_class(
+            seed,
+            "net_reset",
+            fault_domain::SWARM_NET_RESET,
+            None,
+            &mut draw,
+            || config.faults.net.reset_permille = 0,
+        );
+    }
+    if !config.faults.net.partitions.is_empty() {
+        apply_swarm_class(
+            seed,
+            "net_partition",
+            fault_domain::SWARM_NET_PARTITION,
+            None,
+            &mut draw,
+            || config.faults.net.partitions.clear(),
+        );
+    }
+    if config.faults.net.tcp_buffer_bytes.is_some() {
+        apply_swarm_class(
+            seed,
+            "net_tcp_buffer",
+            fault_domain::SWARM_NET_TCP_BUFFER,
+            None,
+            &mut draw,
+            || config.faults.net.tcp_buffer_bytes = None,
+        );
+    }
     if config.buggify.enabled {
         apply_swarm_class(
             seed,
@@ -6044,6 +6240,26 @@ schedulable.",
     }
 }
 
+/// Reject a partition the network could not honor: an empty address on either
+/// side, or a pair that partitions an address from itself. Fails closed at
+/// configuration time, like [`validate_dns_entry`] — but note that a partition
+/// naming addresses the run never uses is NOT rejected here (it cannot be known
+/// up front); the network fault report's partition class diagnoses that at the
+/// end of the run instead.
+fn validate_partition(left: &str, right: &str) -> Result<(), RuntimeError> {
+    if left.trim().is_empty() || right.trim().is_empty() {
+        return Err(RuntimeError::Config(
+            "a network partition needs two non-empty virtual addresses".into(),
+        ));
+    }
+    if left == right {
+        return Err(RuntimeError::Config(format!(
+            "a network partition needs two DIFFERENT addresses; got {left:?} twice"
+        )));
+    }
+    Ok(())
+}
+
 /// Reject a DNS entry the resolver could not honor: an empty or address-shaped
 /// name, or an address that is not a dotted-quad IPv4 literal. Fails closed at
 /// configuration time rather than at the first lookup, so a typo in
@@ -6145,28 +6361,6 @@ fn nxdomain(name: &str) -> EffectError {
     )
 }
 
-/// Whether a zero-application verdict on a `MIN..MAX` latency knob is anomalous
-/// rather than ordinary, judged the same rate-aware way as the wrapper's
-/// error/short classes: the knob's chance of drawing a NON-ZERO delay, over the
-/// eligible operations it actually saw, must have expected at least
-/// `VACUITY_MIN_EXPECTED_FIRES` delays. A `0..0` range (and any range whose
-/// draws are all zero) is inert by construction, not vacuous, so it never
-/// diagnoses; a `MIN..MAX` with `MIN >= 1` delays every eligible op and reaches
-/// the threshold as soon as there are five of them.
-///
-/// Domain-neutral on purpose: every latency knob shares this rule, so filesystem
-/// operations and DNS resolutions are judged here rather than each domain
-/// growing its own copy of the arithmetic.
-fn latency_is_diagnosable(eligible_ops: u64, (min, max): (u64, u64)) -> bool {
-    if max == 0 {
-        return false;
-    }
-    let span = max - min + 1;
-    let nonzero = max - min.max(1) + 1;
-    let permille = u16::try_from(nonzero.saturating_mul(1000) / span).unwrap_or(1000);
-    patina_dst_driver_api::vacuity_is_diagnosable(eligible_ops, permille)
-}
-
 /// Emit the default-on filesystem fault-injection diagnostic to stderr. A driver
 /// with no fault model reports `None` and stays silent, as does a live knob that
 /// saw no fault-eligible traffic at all. Otherwise the machine-readable
@@ -6215,26 +6409,48 @@ short-I/O knob applies nothing to a guest whose reads never fill their buffer.",
 /// stream path ignoring the datagram-only fault knobs). Suppressed by a false-y
 /// [`ENV_NET_FAULT_REPORT`].
 fn emit_net_fault_report(reports: ReportConfig, report: &patina_dst_driver_api::NetFaultReport) {
-    if !report.could_apply {
+    if !report.had_opportunities() {
         return;
     }
     if !reports.enabled(Report::NetFault) {
         return;
     }
     eprintln!(
-        "PATINA_NET_FAULT_REPORT could_apply=1 send_ops={} faults_applied={} vacuous={}",
+        "PATINA_NET_FAULT_REPORT send_ops={} drop_vacuity_diagnosable={} drops_applied={} \
+jitter_vacuity_diagnosable={} jitter_applied={} latency_vacuity_diagnosable={} latency_applied={} \
+duplicate_vacuity_diagnosable={} duplicates_applied={} connect_ops={} \
+connect_refuse_vacuity_diagnosable={} connects_refused={} stream_ops={} \
+reset_vacuity_diagnosable={} resets_injected={} partition_vacuity_diagnosable={} \
+partition_blocks={} vacuous={}",
         report.send_ops,
-        report.faults_applied,
+        u8::from(report.drop_vacuity_diagnosable),
+        report.drops_applied,
+        u8::from(report.jitter_vacuity_diagnosable),
+        report.jitter_applied,
+        u8::from(report.latency_vacuity_diagnosable),
+        report.latency_applied,
+        u8::from(report.duplicate_vacuity_diagnosable),
+        report.duplicates_applied,
+        report.connect_ops,
+        u8::from(report.connect_refuse_vacuity_diagnosable),
+        report.connects_refused,
+        report.stream_ops,
+        u8::from(report.reset_vacuity_diagnosable),
+        report.resets_injected,
+        u8::from(report.partition_vacuity_diagnosable),
+        report.partition_blocks,
         u8::from(report.is_vacuous()),
     );
     if report.is_vacuous() {
         eprintln!(
-            "PATINA WARNING: net fault knobs inert — {} fault-eligible send(s) occurred with the \
-drop/jitter knobs configured to perturb delivery, yet ZERO fault effects were applied. The \
-configured network faults are SILENTLY INERT on the code path this run exercised (historically the \
-SimNet TCP stream path ignored the datagram-only fault knobs), so a clean result here does NOT mean \
-the faults were tested. Verify the fault knobs reach the send path the workload uses.",
-            report.send_ops,
+            "PATINA WARNING: net fault knobs inert — fault-eligible network traffic occurred \
+({} send(s), {} connect(s), {} stream op(s)), enough that an enabled net fault class should have \
+fired several times over, yet that class applied ZERO effects. The configured network fault is \
+SILENTLY INERT on the code path this run exercised (historically the SimNet TCP stream path \
+ignored the datagram-only fault knobs), so a clean result here does NOT mean the faults were \
+tested. Verify the knob reaches the path the workload uses — and, for a partition, that it names \
+addresses this run actually connects between.",
+            report.send_ops, report.connect_ops, report.stream_ops,
         );
     }
 }
@@ -7170,27 +7386,58 @@ class=crash|0 class=buggify|0"
         );
     }
 
+    /// Every fault knob at a non-default value, written as EXHAUSTIVE struct
+    /// literals on purpose: a field added to any `*FaultConfig` sub-struct is a
+    /// compile error right here, which is what drags a new knob through the
+    /// swarm-coverage gate below instead of letting it land outside the swarm
+    /// table unnoticed. (A `..Default::default()` tail would leave a new field
+    /// silently absent — exactly the drift this gate exists to prevent.)
+    fn every_fault_knob_enabled() -> FaultConfig {
+        FaultConfig {
+            fs: FsFaultConfig {
+                crash_at: Some(CrashPoint {
+                    op: CrashOp::Close,
+                    ordinal: 1,
+                }),
+                torn_granularity: TornGranularity::Byte,
+                error_permille: 1,
+                short_permille: 1,
+                latency_nanos: Some((1, 2)),
+            },
+            net: NetFaultConfig {
+                latency_nanos: 1,
+                jitter_nanos: Some((1, 2)),
+                drop_permille: 1,
+                duplicate_permille: 1,
+                connect_refuse_permille: 1,
+                reset_permille: 1,
+                partitions: BTreeSet::from([
+                    ("a".to_string(), "b".to_string()),
+                    ("b".to_string(), "a".to_string()),
+                ]),
+                tcp_buffer_bytes: Some(4096),
+            },
+            clock: ClockFaultConfig {
+                sleep_jitter_nanos: Some((1, 2)),
+            },
+            dns: DnsFaultConfig {
+                fail_permille: 1,
+                latency_nanos: Some((1, 2)),
+            },
+        }
+    }
+
     #[test]
     fn swarm_class_table_covers_every_current_fault_field() {
         let directory = tempdir().unwrap();
         let trace = directory.path().join("swarm-coverage.patina");
-        let config = RuntimeConfig::record(9, &trace, "fp+swarm")
-            .with_crash_at(CrashOp::Close, 1)
-            .with_fs_torn_granularity(TornGranularity::Byte)
-            .with_fs_error_permille(1)
-            .with_fs_short_permille(1)
-            .with_fs_latency_nanos(1, 2)
-            .with_dns_fail_permille(1)
-            .with_dns_latency_nanos(1, 2)
-            .with_sleep_jitter_nanos(1, 2)
-            .with_net_jitter_nanos(1, 2)
-            .with_net_drop_permille(1)
-            .with_net_latency_nanos(1)
+        let mut config = RuntimeConfig::record(9, &trace, "fp+swarm")
             .with_buggify(BuggifyConfig {
                 enabled: true,
                 ..BuggifyConfig::default()
             })
             .with_swarm(true);
+        config.faults = every_fault_knob_enabled();
         let context = Context::from_config(config).unwrap();
         context.finish().unwrap();
         let swarm = patina_dst_trace::TraceBundle::load(&trace)
@@ -7199,10 +7446,10 @@ class=crash|0 class=buggify|0"
             .swarm
             .expect("swarm recorded");
 
-        // Drift gate for Wave A's nested FaultConfig shape: every current
-        // non-defaultable fault field/domain has a swarm class row. If a new
-        // field is added to FaultConfig, extend this test and apply_swarm_mask in
-        // the same change instead of silently leaving the knob outside swarm.
+        // Drift gate for the nested FaultConfig shape: every non-defaultable
+        // fault field/domain has a swarm class row. Paired with the exhaustive
+        // literals above, a new knob cannot reach here without both a compile
+        // fix and a row in `apply_swarm_mask`.
         assert_eq!(
             swarm.candidate_classes,
             vec![
@@ -7216,9 +7463,60 @@ class=crash|0 class=buggify|0"
                 "net_jitter",
                 "net_drop",
                 "net_latency",
+                "net_duplicate",
+                "net_connect_refuse",
+                "net_reset",
+                "net_partition",
+                "net_tcp_buffer",
                 "buggify",
             ]
         );
+    }
+
+    /// Each swarm row must be wired to ITS OWN field: a config with exactly one
+    /// knob enabled offers exactly that one candidate, and a deselected class
+    /// leaves no residue behind. A row copy-pasted onto a neighbouring field —
+    /// the likeliest mistake when a domain grows its fourth knob — shows up here.
+    #[test]
+    fn each_new_swarm_class_is_wired_to_its_own_fault_field() {
+        let cases: Vec<(&str, RuntimeConfig)> = vec![
+            (
+                "net_duplicate",
+                RuntimeConfig::seeded(1).with_net_duplicate_permille(5),
+            ),
+            (
+                "net_connect_refuse",
+                RuntimeConfig::seeded(1).with_net_connect_refuse_permille(5),
+            ),
+            (
+                "net_reset",
+                RuntimeConfig::seeded(1).with_net_reset_permille(5),
+            ),
+            (
+                "net_partition",
+                RuntimeConfig::seeded(1).with_net_partition("a", "b"),
+            ),
+            (
+                "net_tcp_buffer",
+                RuntimeConfig::seeded(1).with_net_tcp_buffer_bytes(512),
+            ),
+        ];
+        for (token, config) in cases {
+            let mut config = config.with_swarm(true);
+            let record = apply_swarm_mask(&mut config);
+            assert_eq!(
+                record.candidate_classes,
+                vec![token.to_string()],
+                "{token} must be the only candidate its knob offers"
+            );
+            if record.selected_classes.is_empty() {
+                assert_eq!(
+                    config.faults,
+                    FaultConfig::default(),
+                    "a deselected {token} must leave no residue"
+                );
+            }
+        }
     }
 
     /// The lowest seed for which swarm's `buggify` coin comes up the given way,
@@ -7401,7 +7699,10 @@ class=crash|0 class=buggify|0"
         // that applied ZERO delays. That is the shape a filesystem path
         // bypassing the Context latency choke point produces — the class this
         // detector exists for — and it must be reported as vacuous.
-        assert!(latency_is_diagnosable(20, (1_000, 1_000)));
+        assert!(patina_dst_driver_api::range_vacuity_is_diagnosable(
+            20,
+            (1_000, 1_000)
+        ));
         let bypassed = FsFaultReport {
             eligible_ops: 20,
             latency_vacuity_diagnosable: true,
@@ -7412,16 +7713,28 @@ class=crash|0 class=buggify|0"
 
         // DOES NOT FIRE below the expected-firings floor: four eligible ops are
         // too few to call zero delays anomalous.
-        assert!(!latency_is_diagnosable(4, (1_000, 1_000)));
+        assert!(!patina_dst_driver_api::range_vacuity_is_diagnosable(
+            4,
+            (1_000, 1_000)
+        ));
 
         // DOES NOT FIRE for a range whose every draw is zero: that knob is inert
         // by construction, not inert on the code path.
-        assert!(!latency_is_diagnosable(1_000_000, (0, 0)));
+        assert!(!patina_dst_driver_api::range_vacuity_is_diagnosable(
+            1_000_000,
+            (0, 0)
+        ));
 
         // Rate-aware in between: `0..9` delays nine draws in ten, so it takes six
         // eligible ops to expect five delays.
-        assert!(!latency_is_diagnosable(5, (0, 9)));
-        assert!(latency_is_diagnosable(6, (0, 9)));
+        assert!(!patina_dst_driver_api::range_vacuity_is_diagnosable(
+            5,
+            (0, 9)
+        ));
+        assert!(patina_dst_driver_api::range_vacuity_is_diagnosable(
+            6,
+            (0, 9)
+        ));
     }
 
     #[test]

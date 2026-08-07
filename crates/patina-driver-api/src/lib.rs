@@ -242,6 +242,28 @@ pub fn vacuity_is_diagnosable(opportunities: u64, permille: u16) -> bool {
     opportunities.saturating_mul(u64::from(permille)) >= VACUITY_MIN_EXPECTED_FIRES * 1000
 }
 
+/// Whether a zero-application verdict on an inclusive `MIN..MAX` nanosecond
+/// range knob is anomalous rather than ordinary, judged the same rate-aware way
+/// as [`vacuity_is_diagnosable`] judges a per-mille knob: the knob's chance of
+/// drawing a NON-ZERO delay, over the eligible operations it actually saw, must
+/// have expected at least [`VACUITY_MIN_EXPECTED_FIRES`] delays. A `0..0` range
+/// (and any range whose draws are all zero) is inert by construction, not
+/// vacuous, so it never diagnoses; a range with `MIN >= 1` delays every eligible
+/// operation and reaches the threshold as soon as there are five of them.
+///
+/// Domain-neutral on purpose: every range knob shares this rule — filesystem
+/// latency, DNS latency and network delivery jitter are judged here rather than
+/// each domain growing its own copy of the arithmetic.
+pub fn range_vacuity_is_diagnosable(opportunities: u64, (min, max): (u64, u64)) -> bool {
+    if max == 0 {
+        return false;
+    }
+    let span = max - min + 1;
+    let nonzero = max - min.max(1) + 1;
+    let permille = u16::try_from(nonzero.saturating_mul(1000) / span).unwrap_or(1000);
+    vacuity_is_diagnosable(opportunities, permille)
+}
+
 /// End-of-run summary of filesystem fault-injection activity, for the
 /// default-on vacuity diagnostic. It is deliberately per class: a run with both
 /// error and short-I/O knobs enabled must not hide one inert class behind the
@@ -320,35 +342,100 @@ impl DnsFaultReport {
 }
 
 /// End-of-run summary of network fault-injection activity, for the default-on
-/// vacuity diagnostic. A driver that models faults reports whether the
-/// configured knobs COULD apply (a nonzero drop probability or a nonzero jitter
-/// ceiling), how many fault-eligible send operations the run performed, and how
-/// many of those actually had a fault effect applied (a dropped datagram, or a
-/// send whose delivery time was pushed later by jitter or a drop-retransmit
-/// backoff). The runtime folds these into the machine-readable
-/// `PATINA_NET_FAULT_REPORT` line; when faults could apply and traffic occurred
-/// yet ZERO effects were applied, it raises a loud warning — the analogue of the
+/// vacuity diagnostic. Per class, exactly like [`FsFaultReport`] and
+/// [`DnsFaultReport`]: a run with several network knobs live must not hide one
+/// inert class behind another class firing, which is precisely what the earlier
+/// merged `faults_applied` counter did — a run with drop and jitter both armed
+/// reported "faults applied" from the drops alone while jitter was silently
+/// inert on the exercised path.
+///
+/// Each class carries its own opportunity denominator: `send_ops` for the
+/// per-datagram/segment knobs, `connect_ops` for connection establishment, and
+/// `stream_ops` for established-stream data operations. A class is
+/// `*_vacuity_diagnosable` only once its rate over the opportunities it actually
+/// saw expected at least [`VACUITY_MIN_EXPECTED_FIRES`] firings, so a low rate
+/// producing zero fires — its ORDINARY outcome — is never diagnosed.
+///
+/// The runtime folds these into the machine-readable `PATINA_NET_FAULT_REPORT`
+/// line and raises a loud warning on vacuity — the analogue of the
 /// vacuous-schedule diagnostic, catching the class where a fault knob is
-/// silently inert on a code path (historically: TCP streams).
+/// silently inert on a code path (historically: TCP streams ignoring the
+/// datagram-only knobs, and the TCP path ignoring the base link latency).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NetFaultReport {
-    /// The configured knobs are capable of a nonzero effect (drop per-mille > 0
-    /// or a jitter ceiling > 0). A `false` here means the run was never asked to
-    /// perturb anything, so silence is expected and no warning is warranted.
-    pub could_apply: bool,
-    /// Fault-eligible send operations observed: datagram `send`s plus TCP
-    /// `tcp_send`s that enqueued bytes. Traffic that faults could have acted on.
+    /// Fault-eligible send operations observed: datagram `send`s that reached
+    /// the fault-decision point plus TCP `tcp_send`s that enqueued bytes. The
+    /// opportunity denominator for the drop, jitter, latency and duplication
+    /// classes.
     pub send_ops: u64,
-    /// Send operations that actually had a fault effect applied.
-    pub faults_applied: u64,
+    /// The drop knob was live over enough sends to expect repeated firing.
+    pub drop_vacuity_diagnosable: bool,
+    /// Sends whose delivery was actually perturbed by a drop: a datagram lost,
+    /// or a TCP segment delayed by a reliable-transport retransmit backoff.
+    pub drops_applied: u64,
+    /// The jitter knob was live over enough sends to expect repeated firing.
+    pub jitter_vacuity_diagnosable: bool,
+    /// Sends whose delivery time was actually pushed later by a non-zero jitter
+    /// draw.
+    pub jitter_applied: u64,
+    /// The base link latency was set and enough sends occurred to expect it to
+    /// have applied repeatedly.
+    pub latency_vacuity_diagnosable: bool,
+    /// Sends whose delivery time was actually pushed later by the base link
+    /// latency. Zero here with the knob set is the defect-2 signature: a send
+    /// path that ignores the configured latency entirely.
+    pub latency_applied: u64,
+    /// The duplication knob was live over enough sends to expect repeated firing.
+    pub duplicate_vacuity_diagnosable: bool,
+    /// Datagrams that were actually delivered twice.
+    pub duplicates_applied: u64,
+    /// Fault-eligible connection establishments: `tcp_connect` calls that
+    /// reached the fault-decision point, i.e. that would otherwise have
+    /// succeeded. A connect with no listener or a full backlog is refused by
+    /// semantics and is never an opportunity.
+    pub connect_ops: u64,
+    /// The connect-refusal knob was live over enough connects to expect
+    /// repeated firing.
+    pub connect_refuse_vacuity_diagnosable: bool,
+    /// Connections actually refused by the injector.
+    pub connects_refused: u64,
+    /// Fault-eligible established-stream data operations: sends that enqueued
+    /// bytes and receives that returned data.
+    pub stream_ops: u64,
+    /// The reset knob was live over enough stream operations to expect repeated
+    /// firing.
+    pub reset_vacuity_diagnosable: bool,
+    /// Streams actually torn down by an injected reset.
+    pub resets_injected: u64,
+    /// At least one partition was configured and enough sends/connects occurred
+    /// that a partition matching real traffic should have blocked several.
+    pub partition_vacuity_diagnosable: bool,
+    /// Sends and connects actually blocked by a configured partition. Zero here
+    /// with a partition configured is the operator-error signature: the
+    /// partition names addresses this run never used, so it perturbed nothing.
+    pub partition_blocks: u64,
 }
 
 impl NetFaultReport {
-    /// Whether this run's fault configuration went vacuously inert: the knobs
-    /// could have perturbed delivery, fault-eligible traffic occurred, yet not a
-    /// single fault effect landed. This is the silent-inertness bug signature.
+    /// Whether any network-fault class went vacuously inert: it was live over
+    /// enough opportunities to be expected to fire repeatedly, yet applied zero
+    /// effects. This is the silent-inertness bug signature, judged per class so
+    /// one firing knob cannot vouch for another.
     pub fn is_vacuous(&self) -> bool {
-        self.could_apply && self.send_ops > 0 && self.faults_applied == 0
+        (self.drop_vacuity_diagnosable && self.drops_applied == 0)
+            || (self.jitter_vacuity_diagnosable && self.jitter_applied == 0)
+            || (self.latency_vacuity_diagnosable && self.latency_applied == 0)
+            || (self.duplicate_vacuity_diagnosable && self.duplicates_applied == 0)
+            || (self.connect_refuse_vacuity_diagnosable && self.connects_refused == 0)
+            || (self.reset_vacuity_diagnosable && self.resets_injected == 0)
+            || (self.partition_vacuity_diagnosable && self.partition_blocks == 0)
+    }
+
+    /// Whether this report describes any observed opportunity at all. A run
+    /// whose network knobs never met traffic gave them no chance to fire, which
+    /// is not the same as a knob being inert, so the diagnostic stays silent.
+    pub fn had_opportunities(&self) -> bool {
+        self.send_ops > 0 || self.connect_ops > 0 || self.stream_ops > 0
     }
 }
 

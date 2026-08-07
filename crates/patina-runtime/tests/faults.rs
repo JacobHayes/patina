@@ -4,8 +4,8 @@
 
 use std::collections::BTreeSet;
 
-use patina_dst_abi::{ClockKind, OpenFlags, SendDisposition};
-use patina_dst_driver_api::{DnsFaultReport, FsFaultReport};
+use patina_dst_abi::{ClockKind, ErrorCode, OpenFlags, SendDisposition};
+use patina_dst_driver_api::{DnsFaultReport, FsFaultReport, NetFaultReport};
 use patina_dst_runtime::{Context, CrashOp, RuntimeConfig, TornGranularity};
 use tempfile::tempdir;
 
@@ -673,4 +673,264 @@ fn a_malformed_dns_entry_fails_closed_at_configuration_time() {
             .with_dns_entry("localhost", "10.0.0.5")
             .is_err()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Wave E: connection-level network faults, duplication, partitions, buffers
+// ---------------------------------------------------------------------------
+
+/// Establish one loopback stream, exchange a payload both ways, and report what
+/// the guest observed: whether the connect succeeded, whether the send and the
+/// receive succeeded, and the run's network fault report.
+fn stream_exchange(config: RuntimeConfig) -> (Result<(), ErrorCode>, Option<NetFaultReport>) {
+    let mut context = Context::from_config(config).unwrap();
+    let listener = context.net_tcp_listen("server", 8).unwrap();
+    let outcome = (|| {
+        let client = context
+            .net_tcp_connect("client", "server")
+            .map_err(error_code)?;
+        let server = context
+            .net_tcp_accept(listener)
+            .map_err(error_code)?
+            .expect("a connected stream is pending")
+            .socket;
+        context.net_tcp_send(client, b"ping").map_err(error_code)?;
+        context
+            .net_tcp_recv(server, 64)
+            .map_err(error_code)?
+            .expect("the segment is deliverable at once without delay knobs");
+        Ok(())
+    })();
+    let report = context.net_fault_report();
+    context.finish().unwrap();
+    (outcome, report)
+}
+
+/// The ABI error code behind a runtime effect failure, so a test can assert the
+/// guest saw ECONNREFUSED/ECONNRESET rather than merely "an error".
+fn error_code(error: patina_dst_runtime::RuntimeError) -> ErrorCode {
+    match error {
+        patina_dst_runtime::RuntimeError::Effect(effect) => effect.code,
+        other => panic!("expected an effect error, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_connect_refusal_knob_is_guest_observable_and_reported() {
+    // Control: no knob, the exchange completes and no report exists at all.
+    let (clean, clean_report) = stream_exchange(RuntimeConfig::seeded(3));
+    assert_eq!(clean, Ok(()));
+    assert!(clean_report.is_none());
+
+    // MUST refuse: the guest's connect fails with ConnectionRefused — the
+    // startup-race failure a service must retry through.
+    let (refused, report) =
+        stream_exchange(RuntimeConfig::seeded(3).with_net_connect_refuse_permille(1000));
+    assert_eq!(refused, Err(ErrorCode::ConnectionRefused));
+    let report = report.expect("a live connect-refusal knob must report");
+    assert_eq!(report.connect_ops, 1);
+    assert_eq!(report.connects_refused, 1);
+    assert!(!report.is_vacuous());
+}
+
+#[test]
+fn the_reset_knob_is_guest_observable_and_reported() {
+    let (reset, report) = stream_exchange(RuntimeConfig::seeded(3).with_net_reset_permille(1000));
+    assert_eq!(reset, Err(ErrorCode::ConnectionReset));
+    let report = report.expect("a live reset knob must report");
+    assert_eq!(report.resets_injected, 1);
+    assert!(!report.is_vacuous());
+}
+
+#[test]
+fn the_duplication_knob_delivers_a_datagram_twice() {
+    // Control: exactly one delivery without the knob.
+    assert_eq!(datagram_deliveries(RuntimeConfig::seeded(2)), 1);
+    // MUST duplicate: the receiver observes the same payload twice, which is the
+    // at-least-once hazard a non-idempotent handler mishandles.
+    assert_eq!(
+        datagram_deliveries(RuntimeConfig::seeded(2).with_net_duplicate_permille(1000)),
+        2
+    );
+}
+
+/// Send one datagram and count how many copies the receiver observes.
+fn datagram_deliveries(config: RuntimeConfig) -> usize {
+    let mut context = Context::from_config(config).unwrap();
+    let tx = context.net_bind("tx").unwrap();
+    let rx = context.net_bind("rx").unwrap();
+    context.net_send(tx, "rx", b"once?").unwrap();
+    context.sleep_for(1_000_000).unwrap();
+    let mut delivered = 0;
+    while let Some(datagram) = context.net_recv(rx).unwrap() {
+        assert_eq!(datagram.bytes, b"once?");
+        delivered += 1;
+    }
+    context.finish().unwrap();
+    delivered
+}
+
+#[test]
+fn a_partition_blocks_traffic_and_an_unused_one_is_diagnosed_vacuous() {
+    // MUST block: a partitioned datagram never reaches the peer.
+    let mut context =
+        Context::from_config(RuntimeConfig::seeded(1).with_net_partition("tx", "rx")).unwrap();
+    let tx = context.net_bind("tx").unwrap();
+    let rx = context.net_bind("rx").unwrap();
+    for _ in 0..8 {
+        assert_eq!(
+            context.net_send(tx, "rx", b"blocked").unwrap().disposition,
+            SendDisposition::DroppedByPartition
+        );
+    }
+    assert!(context.net_recv(rx).unwrap().is_none());
+    let report = context.net_fault_report().expect("a partition reports");
+    assert_eq!(report.partition_blocks, 8);
+    assert!(!report.is_vacuous());
+    context.finish().unwrap();
+
+    // MUST diagnose: a partition spelled for addresses this run never uses
+    // blocks nothing, so a clean pass would otherwise read as "tested under
+    // partition". This is the operator-typo signature.
+    let mut context = Context::from_config(
+        RuntimeConfig::seeded(1).with_net_partition("typo-left", "typo-right"),
+    )
+    .unwrap();
+    let tx = context.net_bind("tx").unwrap();
+    context.net_bind("rx").unwrap();
+    for _ in 0..8 {
+        context.net_send(tx, "rx", b"through").unwrap();
+    }
+    let report = context.net_fault_report().expect("a partition reports");
+    assert_eq!(report.partition_blocks, 0);
+    assert!(report.partition_vacuity_diagnosable);
+    assert!(report.is_vacuous());
+    context.finish().unwrap();
+}
+
+#[test]
+fn the_tcp_buffer_knob_makes_backpressure_reachable() {
+    // Control: the default buffer swallows the whole payload in one send.
+    assert_eq!(first_send_accepted(RuntimeConfig::seeded(1), 4096), 4096);
+    // MUST bind: a small buffer forces the would-block/partial-send path a guest
+    // must handle, which is unreachable at the default size.
+    assert_eq!(
+        first_send_accepted(RuntimeConfig::seeded(1).with_net_tcp_buffer_bytes(64), 4096),
+        64
+    );
+}
+
+/// The byte count the first `tcp_send` of `len` bytes accepts.
+fn first_send_accepted(config: RuntimeConfig, len: usize) -> usize {
+    let mut context = Context::from_config(config).unwrap();
+    let listener = context.net_tcp_listen("server", 1).unwrap();
+    let client = context.net_tcp_connect("client", "server").unwrap();
+    context.net_tcp_accept(listener).unwrap().unwrap();
+    let accepted = context.net_tcp_send(client, &vec![7u8; len]).unwrap();
+    context.finish().unwrap();
+    accepted
+}
+
+#[test]
+fn the_new_net_knobs_are_seed_deterministic_and_seed_varying() {
+    // Same seed, same outcome; across seeds the fault lands in different places,
+    // so each knob is genuinely seed-driven rather than a fixed decision.
+    let refusals = |seed: u64| {
+        connect_attempts(RuntimeConfig::seeded(seed).with_net_connect_refuse_permille(500))
+    };
+    for seed in 0..8 {
+        assert_eq!(refusals(seed), refusals(seed), "seed {seed}");
+    }
+    assert!((0..16).map(refusals).collect::<BTreeSet<_>>().len() > 1);
+
+    let duplicates = |seed: u64| {
+        let mut context =
+            Context::from_config(RuntimeConfig::seeded(seed).with_net_duplicate_permille(500))
+                .unwrap();
+        let tx = context.net_bind("tx").unwrap();
+        context.net_bind("rx").unwrap();
+        let copies: Vec<usize> = (0..24)
+            .map(|index| context.net_send(tx, "rx", &[index as u8]).unwrap().copies)
+            .collect();
+        context.finish().unwrap();
+        copies
+    };
+    for seed in 0..8 {
+        assert_eq!(duplicates(seed), duplicates(seed), "seed {seed}");
+    }
+    assert!((0..16).map(duplicates).collect::<BTreeSet<_>>().len() > 1);
+}
+
+/// Which of 16 connects to one listener succeeded.
+fn connect_attempts(config: RuntimeConfig) -> Vec<bool> {
+    let mut context = Context::from_config(config).unwrap();
+    context.net_tcp_listen("server", 64).unwrap();
+    let outcomes = (0..16)
+        .map(|index| {
+            context
+                .net_tcp_connect(&format!("client-{index}"), "server")
+                .is_ok()
+        })
+        .collect();
+    context.finish().unwrap();
+    outcomes
+}
+
+#[test]
+fn connection_faults_replay_self_contained_without_re_supplying_flags() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("connect.patina");
+    let (recorded, _) = stream_exchange(
+        RuntimeConfig::record(5, &path, "patina-test").with_net_connect_refuse_permille(1000),
+    );
+    assert_eq!(recorded, Err(ErrorCode::ConnectionRefused));
+
+    // Flag-free: the recorded outcome stream reproduces the injected refusal.
+    let (replayed, _) = stream_exchange(RuntimeConfig::replay(&path, "patina-test"));
+    assert_eq!(replayed, Err(ErrorCode::ConnectionRefused));
+
+    // Re-supplying a DIFFERENT rate fails closed rather than running a schedule
+    // the recording never took.
+    let conflicting =
+        RuntimeConfig::replay(&path, "patina-test").with_net_connect_refuse_permille(250);
+    assert!(Context::from_config(conflicting).is_err());
+}
+
+#[test]
+fn arming_a_new_net_knob_does_not_perturb_another_domains_stream() {
+    // The §1.2 guarantee, asserted where it would actually break: the jitter
+    // draws of a datagram workload are identical whether or not the TCP-only
+    // knobs are ARMED (not merely left at their defaults). A shared decision
+    // stream would shift every delivery deadline here.
+    let baseline =
+        datagram_delivery_times(RuntimeConfig::seeded(9).with_net_jitter_nanos(1, 1_000));
+    let with_tcp_knobs_armed = datagram_delivery_times(
+        RuntimeConfig::seeded(9)
+            .with_net_jitter_nanos(1, 1_000)
+            .with_net_connect_refuse_permille(500)
+            .with_net_reset_permille(500),
+    );
+    assert_eq!(baseline, with_tcp_knobs_armed);
+    assert!(
+        baseline.iter().any(|nanos| *nanos > 0),
+        "the control must actually have drawn jitter, or this proves nothing"
+    );
+}
+
+/// The delivery deadline of each of eight jittered datagrams, i.e. the exact
+/// sequence of draws the net fault stream produced.
+fn datagram_delivery_times(config: RuntimeConfig) -> Vec<u64> {
+    let mut context = Context::from_config(config).unwrap();
+    let tx = context.net_bind("tx").unwrap();
+    context.net_bind("rx").unwrap();
+    let times = (0..8)
+        .flat_map(|index| {
+            context
+                .net_send(tx, "rx", &[index as u8])
+                .unwrap()
+                .delivery_nanos
+        })
+        .collect();
+    context.finish().unwrap();
+    times
 }

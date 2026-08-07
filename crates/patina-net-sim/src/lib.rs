@@ -7,9 +7,10 @@ use patina_dst_abi::{
     TcpAccepted,
 };
 use patina_dst_driver_api::{
-    DriverResult, NetDriver, NetFaultReport, NetReadiness, wildcard_bind_key,
+    DriverResult, NetDriver, NetFaultReport, NetReadiness, range_vacuity_is_diagnosable,
+    vacuity_is_diagnosable, wildcard_bind_key,
 };
-use patina_dst_rng_seeded::SplitMix64;
+use patina_dst_rng_seeded::{SplitMix64, domain_seed, fault_domain};
 
 /// TCP drop-retransmit backoff. A stream is reliable, so a "dropped" segment is
 /// never lost — it is retransmitted after a retransmission timeout that doubles
@@ -29,6 +30,9 @@ pub struct SimNetBuilder {
     fault_seed: u64,
     jitter_nanos: Option<(u64, u64)>,
     drop_permille: u16,
+    duplicate_permille: u16,
+    connect_refuse_permille: u16,
+    reset_permille: u16,
 }
 
 impl SimNetBuilder {
@@ -67,6 +71,32 @@ impl SimNetBuilder {
         self
     }
 
+    /// Deliver a fraction of datagrams TWICE, expressed in per-mille (0..=1000).
+    /// The duplicate is an independent copy with its own jitter draw, so the two
+    /// arrivals can be separated in time and interleave with other traffic — the
+    /// at-least-once delivery hazard an idempotence bug hides behind.
+    pub fn duplicate_permille(mut self, permille: u16) -> Self {
+        self.duplicate_permille = permille;
+        self
+    }
+
+    /// Refuse a fraction of otherwise-establishable TCP connections, expressed in
+    /// per-mille (0..=1000). Only connects that would have succeeded draw: a
+    /// connect with no listener or a full backlog is refused by semantics.
+    pub fn connect_refuse_permille(mut self, permille: u16) -> Self {
+        self.connect_refuse_permille = permille;
+        self
+    }
+
+    /// Reset a fraction of established TCP streams, expressed in per-mille
+    /// (0..=1000). Each fault-eligible stream operation draws; on a fire the
+    /// stream is torn down in BOTH directions and the operation fails with
+    /// `ConnectionReset`, exactly as a peer RST does.
+    pub fn reset_permille(mut self, permille: u16) -> Self {
+        self.reset_permille = permille;
+        self
+    }
+
     /// Partition both directions between two exact virtual addresses.
     pub fn partition(mut self, left: impl Into<String>, right: impl Into<String>) -> Self {
         let left = left.into();
@@ -92,11 +122,20 @@ impl SimNetBuilder {
                 ));
             }
         }
-        if self.drop_permille > 1000 {
-            return Err(EffectError::new(
-                ErrorCode::InvalidInput,
-                "virtual network drop probability must be within [0, 1000] per-mille",
-            ));
+        for (name, permille) in [
+            ("drop", self.drop_permille),
+            ("duplicate", self.duplicate_permille),
+            ("connect-refusal", self.connect_refuse_permille),
+            ("reset", self.reset_permille),
+        ] {
+            if permille > 1000 {
+                return Err(EffectError::new(
+                    ErrorCode::InvalidInput,
+                    format!(
+                        "virtual network {name} probability must be within [0, 1000] per-mille"
+                    ),
+                ));
+            }
         }
         Ok(SimNet {
             base_latency_nanos: self.base_latency_nanos,
@@ -111,10 +150,25 @@ impl SimNetBuilder {
             tcp_listener_addresses: BTreeMap::new(),
             tcp_endpoints: BTreeMap::new(),
             fault_rng: SplitMix64::new(self.fault_seed),
+            // Each class added after the original drop/jitter pair draws from its
+            // own domain-separated substream of the same net-fault seed, so
+            // enabling one class cannot shift the decisions another class makes —
+            // the §1.2 derivation rule applied within the driver.
+            duplicate_rng: SplitMix64::new(domain_seed(
+                self.fault_seed,
+                fault_domain::NET_DUPLICATE,
+            )),
+            connect_refuse_rng: SplitMix64::new(domain_seed(
+                self.fault_seed,
+                fault_domain::NET_CONNECT_REFUSE,
+            )),
+            reset_rng: SplitMix64::new(domain_seed(self.fault_seed, fault_domain::NET_RESET)),
             jitter_nanos: self.jitter_nanos,
             drop_permille: self.drop_permille,
-            fault_send_ops: 0,
-            faults_applied: 0,
+            duplicate_permille: self.duplicate_permille,
+            connect_refuse_permille: self.connect_refuse_permille,
+            reset_permille: self.reset_permille,
+            counts: FaultCounts::default(),
         })
     }
 }
@@ -172,16 +226,42 @@ pub struct SimNet {
     /// Advanced once per datagram `send` in send order, so its consumption is a
     /// deterministic function of the traffic and reproduces on replay.
     fault_rng: SplitMix64,
+    /// Per-class decision streams, each domain-separated from the drop/jitter
+    /// stream and from each other.
+    duplicate_rng: SplitMix64,
+    connect_refuse_rng: SplitMix64,
+    reset_rng: SplitMix64,
     jitter_nanos: Option<(u64, u64)>,
     drop_permille: u16,
-    /// Fault-eligible send operations observed: datagram `send`s that reached
-    /// the fault-decision point (not pre-empted by a partition) plus `tcp_send`s
-    /// that enqueued a segment. Backs the vacuity diagnostic.
-    fault_send_ops: u64,
-    /// Fault-eligible sends that actually had a fault effect applied — a dropped
-    /// datagram, or a send whose delivery was pushed later by jitter or a TCP
-    /// drop-retransmit backoff.
-    faults_applied: u64,
+    duplicate_permille: u16,
+    connect_refuse_permille: u16,
+    reset_permille: u16,
+    /// Per-class opportunity and application counters backing the vacuity
+    /// diagnostic.
+    counts: FaultCounts,
+}
+
+/// What the network fault plane observed this run, per class. Kept beside the
+/// knobs rather than inside [`NetFaultReport`] because the report also carries
+/// the derived `*_vacuity_diagnosable` verdicts, which are a pure function of
+/// these counts and the configured rates.
+#[derive(Clone, Copy, Debug, Default)]
+struct FaultCounts {
+    /// Datagram sends that reached the fault-decision point (not pre-empted by a
+    /// partition) plus `tcp_send`s that enqueued a segment.
+    send_ops: u64,
+    drops_applied: u64,
+    jitter_applied: u64,
+    latency_applied: u64,
+    duplicates_applied: u64,
+    /// `tcp_connect` calls that would otherwise have succeeded.
+    connect_ops: u64,
+    connects_refused: u64,
+    /// Established-stream operations that moved data.
+    stream_ops: u64,
+    resets_injected: u64,
+    /// Sends and connects blocked by a configured partition.
+    partition_blocks: u64,
 }
 
 impl SimNet {
@@ -243,6 +323,17 @@ impl SimNet {
         }
     }
 
+    /// Draw one seeded per-mille decision from a class's own stream. Extreme
+    /// probabilities are decision-free, so a never-fire default and an
+    /// always-fire configuration both leave the stream untouched.
+    fn permille_fires(rng: &mut SplitMix64, permille: u16) -> bool {
+        match permille {
+            0 => false,
+            1000 => true,
+            value => (rng.next_u64() % 1000) < u64::from(value),
+        }
+    }
+
     /// Draw the seeded per-datagram delivery jitter in nanoseconds, or zero when
     /// no jitter is configured (decision-free so latency-only configs are
     /// unaffected).
@@ -272,29 +363,54 @@ impl SimNet {
     /// Decision-free configs (drop 0/1000, no jitter, jitter min==max) draw
     /// nothing, so a run with the knobs off never perturbs the stream.
     fn draw_tcp_fault_delivery(&mut self, base_delivery: u64, last_delivery: Option<u64>) -> u64 {
-        self.fault_send_ops += 1;
+        self.counts.send_ops += 1;
+        // The base link latency is applied by the caller (it is part of
+        // `base_delivery`); count it here so a send path that skipped it reports
+        // zero applications against a live knob rather than looking clean.
+        if self.base_latency_nanos > 0 {
+            self.counts.latency_applied += 1;
+        }
         let mut delivery = base_delivery;
-        let mut applied = false;
         let mut backoff = TCP_RETRANSMIT_BASE_NANOS;
         let mut retries = 0u32;
         while retries < TCP_MAX_RETRANSMITS && self.decide_drop() {
             delivery = delivery.saturating_add(backoff);
             backoff = backoff.saturating_mul(2).min(TCP_RETRANSMIT_CAP_NANOS);
             retries += 1;
-            applied = true;
+        }
+        if retries > 0 {
+            self.counts.drops_applied += 1;
         }
         let jitter = self.draw_jitter();
         if jitter > 0 {
             delivery = delivery.saturating_add(jitter);
-            applied = true;
+            self.counts.jitter_applied += 1;
         }
         if let Some(last) = last_delivery {
             delivery = delivery.max(last);
         }
-        if applied {
-            self.faults_applied += 1;
-        }
         delivery
+    }
+
+    /// Whether an established-stream operation draws a reset this time, counting
+    /// the opportunity either way. On a fire BOTH endpoints are torn down — a
+    /// reset is not one-sided — and the caller surfaces `ConnectionReset`.
+    fn decide_reset(&mut self, socket: SocketId) -> bool {
+        self.counts.stream_ops += 1;
+        if !Self::permille_fires(&mut self.reset_rng, self.reset_permille) {
+            return false;
+        }
+        self.counts.resets_injected += 1;
+        let peer = self
+            .tcp_endpoints
+            .get(&socket)
+            .and_then(|endpoint| endpoint.peer);
+        for endpoint in [Some(socket), peer].into_iter().flatten() {
+            if let Some(endpoint) = self.tcp_endpoints.get_mut(&endpoint) {
+                endpoint.reset = true;
+            }
+        }
+        true
     }
 
     fn allocate_socket(&mut self) -> DriverResult<SocketId> {
@@ -361,6 +477,7 @@ impl NetDriver for SimNet {
             .resolve_datagram(to)
             .expect("validate_send resolved a destination");
         if self.partitions.contains(&(from.clone(), to.into())) {
+            self.counts.partition_blocks += 1;
             return Ok(SendReport {
                 written: bytes.len(),
                 copies: 0,
@@ -375,9 +492,9 @@ impl NetDriver for SimNet {
         // Count this as a fault-eligible send (the vacuity diagnostic) — it
         // reached the knob-decision point rather than being pre-empted by a
         // partition. Counting does not consume the fault RNG or alter outcomes.
-        self.fault_send_ops += 1;
+        self.counts.send_ops += 1;
         if self.decide_drop() {
-            self.faults_applied += 1;
+            self.counts.drops_applied += 1;
             return Ok(SendReport {
                 written: bytes.len(),
                 copies: 0,
@@ -385,37 +502,53 @@ impl NetDriver for SimNet {
                 disposition: SendDisposition::DroppedByFault,
             });
         }
-        let jitter = self.draw_jitter();
-        if jitter > 0 {
-            self.faults_applied += 1;
-        }
-        let delivery_nanos = delivery_nanos
-            .checked_add(self.base_latency_nanos)
-            .and_then(|value| value.checked_add(jitter))
-            .ok_or_else(|| {
+        // A duplicate is an independent copy: it draws its OWN jitter, so the two
+        // arrivals can be separated in time and interleave with other traffic
+        // rather than being an indistinguishable twin of the original.
+        let copies = if Self::permille_fires(&mut self.duplicate_rng, self.duplicate_permille) {
+            self.counts.duplicates_applied += 1;
+            2
+        } else {
+            1
+        };
+        let mut delivery_times = Vec::with_capacity(copies);
+        for _ in 0..copies {
+            let jitter = self.draw_jitter();
+            if jitter > 0 {
+                self.counts.jitter_applied += 1;
+            }
+            if self.base_latency_nanos > 0 {
+                self.counts.latency_applied += 1;
+            }
+            let delivery_nanos = delivery_nanos
+                .checked_add(self.base_latency_nanos)
+                .and_then(|value| value.checked_add(jitter))
+                .ok_or_else(|| {
+                    EffectError::new(
+                        ErrorCode::InvalidInput,
+                        "virtual packet deadline overflowed",
+                    )
+                })?;
+            let packet = Packet {
+                id: self.next_packet,
+                from: from.clone(),
+                to: destination.clone(),
+                bytes: bytes.to_vec(),
+                delivery_nanos,
+            };
+            self.next_packet = self.next_packet.checked_add(1).ok_or_else(|| {
                 EffectError::new(
-                    ErrorCode::InvalidInput,
-                    "virtual packet deadline overflowed",
+                    ErrorCode::InvalidHandle,
+                    "virtual packet identifiers exhausted",
                 )
             })?;
-        let packet = Packet {
-            id: self.next_packet,
-            from,
-            to: destination,
-            bytes: bytes.to_vec(),
-            delivery_nanos,
-        };
-        self.next_packet = self.next_packet.checked_add(1).ok_or_else(|| {
-            EffectError::new(
-                ErrorCode::InvalidHandle,
-                "virtual packet identifiers exhausted",
-            )
-        })?;
-        self.packets.push(packet);
+            self.packets.push(packet);
+            delivery_times.push(delivery_nanos);
+        }
         Ok(SendReport {
             written: bytes.len(),
-            copies: 1,
-            delivery_nanos: vec![delivery_nanos],
+            copies,
+            delivery_nanos: delivery_times,
             disposition: SendDisposition::Queued,
         })
     }
@@ -526,6 +659,7 @@ impl NetDriver for SimNet {
             .partitions
             .contains(&(address.to_owned(), to.to_owned()))
         {
+            self.counts.partition_blocks += 1;
             return Err(EffectError::new(
                 ErrorCode::ConnectionRefused,
                 format!("virtual connection refused: {address} -> {to} is partitioned"),
@@ -545,6 +679,19 @@ impl NetDriver for SimNet {
             return Err(EffectError::new(
                 ErrorCode::ConnectionRefused,
                 format!("virtual TCP backlog is full at {to}"),
+            ));
+        }
+        // Only a connect that would OTHERWISE HAVE SUCCEEDED is a fault
+        // opportunity. A connect with no listener or a full backlog is refused by
+        // semantics: counting it would inflate the denominator, and "injecting" a
+        // refusal onto an already-refused connect would report an effect the
+        // guest could not distinguish from the semantics.
+        self.counts.connect_ops += 1;
+        if Self::permille_fires(&mut self.connect_refuse_rng, self.connect_refuse_permille) {
+            self.counts.connects_refused += 1;
+            return Err(EffectError::new(
+                ErrorCode::ConnectionRefused,
+                format!("injected virtual connection refusal: {address} -> {to}"),
             ));
         }
 
@@ -641,6 +788,12 @@ impl NetDriver for SimNet {
         if accepted == 0 {
             return Ok(0);
         }
+        // Reset is decided for a send that actually moves bytes, so a caller
+        // spinning on a full buffer (which returns would-block above) does not
+        // make a reset more likely the harder it polls.
+        if self.decide_reset(socket) {
+            return Err(tcp_reset(socket));
+        }
         // Seeded stream faults: retransmit backoff (never loses data) + jitter,
         // clamped to preserve in-stream ordering. Drawn only for a segment that
         // is actually enqueued, so a would-block send consumes no fault RNG.
@@ -695,8 +848,19 @@ impl NetDriver for SimNet {
             }
         }
         if !taken.is_empty() {
+            // A receive that moved data is the other half of the stream's
+            // fault-eligible surface, so a receive-only endpoint can still be
+            // reset. The taken bytes are discarded with the stream, exactly as a
+            // peer RST discards data already in flight.
+            if self.decide_reset(socket) {
+                return Err(tcp_reset(socket));
+            }
             return Ok(Some(taken));
         }
+        let endpoint = self
+            .tcp_endpoints
+            .get(&socket)
+            .expect("endpoint was resolved above");
         if endpoint.remote_write_closed && endpoint.inbox.is_empty() {
             return Ok(Some(Vec::new()));
         }
@@ -799,13 +963,62 @@ impl NetDriver for SimNet {
         Err(invalid_socket(socket))
     }
 
+    /// Report whenever a network knob was live, so the run is self-describing
+    /// about what the fault plane did. A knob-free network models nothing and
+    /// reports `None`, exactly like a filesystem with no fault wrapper: it can
+    /// never be diagnosed as vacuous because it was never asked to perturb.
     fn fault_report(&self) -> Option<NetFaultReport> {
-        let could_apply =
-            self.drop_permille > 0 || self.jitter_nanos.is_some_and(|(_, max)| max > 0);
+        let counts = self.counts;
+        let modeled = self.drop_permille > 0
+            || self.jitter_nanos.is_some_and(|(_, max)| max > 0)
+            || self.base_latency_nanos > 0
+            || self.duplicate_permille > 0
+            || self.connect_refuse_permille > 0
+            || self.reset_permille > 0
+            || !self.partitions.is_empty();
+        if !modeled {
+            return None;
+        }
+        let partition_opportunities = counts
+            .send_ops
+            .saturating_add(counts.connect_ops)
+            .saturating_add(counts.partition_blocks);
         Some(NetFaultReport {
-            could_apply,
-            send_ops: self.fault_send_ops,
-            faults_applied: self.faults_applied,
+            send_ops: counts.send_ops,
+            drop_vacuity_diagnosable: vacuity_is_diagnosable(counts.send_ops, self.drop_permille),
+            drops_applied: counts.drops_applied,
+            jitter_vacuity_diagnosable: self
+                .jitter_nanos
+                .is_some_and(|range| range_vacuity_is_diagnosable(counts.send_ops, range)),
+            jitter_applied: counts.jitter_applied,
+            // The base latency applies to every send at rate 1.0, so five sends
+            // are enough to call zero applications anomalous.
+            latency_vacuity_diagnosable: self.base_latency_nanos > 0
+                && vacuity_is_diagnosable(counts.send_ops, 1000),
+            latency_applied: counts.latency_applied,
+            duplicate_vacuity_diagnosable: vacuity_is_diagnosable(
+                counts.send_ops,
+                self.duplicate_permille,
+            ),
+            duplicates_applied: counts.duplicates_applied,
+            connect_ops: counts.connect_ops,
+            connect_refuse_vacuity_diagnosable: vacuity_is_diagnosable(
+                counts.connect_ops,
+                self.connect_refuse_permille,
+            ),
+            connects_refused: counts.connects_refused,
+            stream_ops: counts.stream_ops,
+            reset_vacuity_diagnosable: vacuity_is_diagnosable(
+                counts.stream_ops,
+                self.reset_permille,
+            ),
+            resets_injected: counts.resets_injected,
+            // A partition blocks at rate 1.0 the traffic it names, so a run with
+            // enough traffic and zero blocks means the partition named addresses
+            // this run never used — the operator-error signature.
+            partition_vacuity_diagnosable: !self.partitions.is_empty()
+                && vacuity_is_diagnosable(partition_opportunities, 1000),
+            partition_blocks: counts.partition_blocks,
         })
     }
 
@@ -1363,9 +1576,8 @@ mod tests {
             "TCP is reliable and in-order: jitter reorders across streams, never within one"
         );
         let report = first.fault_report().unwrap();
-        assert!(report.could_apply);
         assert!(report.send_ops >= 4);
-        assert!(report.faults_applied > 0, "jitter must register as applied");
+        assert!(report.jitter_applied > 0, "jitter must register as applied");
         assert!(!report.is_vacuous());
     }
 
@@ -1393,8 +1605,8 @@ mod tests {
             "TCP drop must never lose data"
         );
         let report = net.fault_report().unwrap();
-        assert!(report.could_apply);
-        assert_eq!(report.faults_applied, 1);
+        assert_eq!(report.drops_applied, 1);
+        assert_eq!(report.jitter_applied, 0, "no jitter knob was configured");
     }
 
     #[test]
@@ -1436,53 +1648,378 @@ mod tests {
             b"hi",
             "no delay without fault knobs"
         );
-        let report = net.fault_report().unwrap();
-        assert!(!report.could_apply);
-        assert_eq!(report.faults_applied, 0);
-        assert_eq!(report.send_ops, 1);
-        assert!(!report.is_vacuous());
+        assert!(
+            net.fault_report().is_none(),
+            "a network with no knob live models no faults and must not be diagnosable"
+        );
     }
 
     #[test]
     fn fault_report_is_vacuous_exactly_on_the_silent_inertness_signature() {
         use patina_dst_driver_api::NetFaultReport;
-        // The signature the pre-fix inert TCP path produced: knobs armed to
+        // The signature the pre-fix inert TCP path produced: a knob armed to
         // perturb, traffic occurred, yet zero effects — the bug this diagnostic
         // exists to catch.
         assert!(
             NetFaultReport {
-                could_apply: true,
                 send_ops: 5,
-                faults_applied: 0,
+                drop_vacuity_diagnosable: true,
+                drops_applied: 0,
+                ..NetFaultReport::default()
             }
             .is_vacuous()
         );
         // Faults actually landed.
         assert!(
             !NetFaultReport {
-                could_apply: true,
                 send_ops: 5,
-                faults_applied: 3,
+                drop_vacuity_diagnosable: true,
+                drops_applied: 3,
+                ..NetFaultReport::default()
             }
             .is_vacuous()
         );
-        // Knobs incapable of any effect — silence is correct.
+        // A knob whose rate over the traffic it saw never expected a fire —
+        // silence is ordinary sampling, not inertness.
         assert!(
             !NetFaultReport {
-                could_apply: false,
                 send_ops: 5,
-                faults_applied: 0,
+                ..NetFaultReport::default()
             }
             .is_vacuous()
         );
         // No fault-eligible traffic — nothing to perturb.
-        assert!(
-            !NetFaultReport {
-                could_apply: true,
-                send_ops: 0,
-                faults_applied: 0,
-            }
-            .is_vacuous()
+        assert!(!NetFaultReport::default().is_vacuous());
+        assert!(!NetFaultReport::default().had_opportunities());
+
+        // The reason the report is PER CLASS. Before Wave E one merged
+        // `faults_applied` counter answered for every knob, so this shape —
+        // drops landing while an equally-live jitter knob applied nothing —
+        // read as "faults applied" and the inert class stayed invisible.
+        let merged_would_have_hidden_it = NetFaultReport {
+            send_ops: 100,
+            drop_vacuity_diagnosable: true,
+            drops_applied: 30,
+            jitter_vacuity_diagnosable: true,
+            jitter_applied: 0,
+            ..NetFaultReport::default()
+        };
+        assert!(merged_would_have_hidden_it.is_vacuous());
+        // Each remaining class fires the verdict on its own.
+        for report in [
+            NetFaultReport {
+                latency_vacuity_diagnosable: true,
+                send_ops: 10,
+                ..NetFaultReport::default()
+            },
+            NetFaultReport {
+                duplicate_vacuity_diagnosable: true,
+                send_ops: 10,
+                ..NetFaultReport::default()
+            },
+            NetFaultReport {
+                connect_refuse_vacuity_diagnosable: true,
+                connect_ops: 10,
+                ..NetFaultReport::default()
+            },
+            NetFaultReport {
+                reset_vacuity_diagnosable: true,
+                stream_ops: 10,
+                ..NetFaultReport::default()
+            },
+            NetFaultReport {
+                partition_vacuity_diagnosable: true,
+                send_ops: 10,
+                ..NetFaultReport::default()
+            },
+        ] {
+            assert!(report.is_vacuous(), "{report:?} must be vacuous");
+            assert!(report.had_opportunities());
+        }
+    }
+
+    // --- Wave E: connection-level and duplication faults ---
+
+    #[test]
+    fn duplicated_datagrams_arrive_twice_with_independent_delivery_times() {
+        let mut net = SimNet::builder()
+            .fault_seed(5)
+            .duplicate_permille(1000)
+            .jitter_nanos(1, 1_000)
+            .build()
+            .unwrap();
+        let tx = net.bind("tx").unwrap();
+        let rx = net.bind("rx").unwrap();
+        let report = net.send(tx, "rx", b"once?", 0).unwrap();
+        assert_eq!(report.copies, 2);
+        assert_eq!(report.delivery_nanos.len(), 2);
+        assert_ne!(
+            report.delivery_nanos[0], report.delivery_nanos[1],
+            "each copy draws its own jitter, so the twins separate in time"
         );
+        assert_eq!(net.recv(rx, u64::MAX).unwrap().unwrap().bytes, b"once?");
+        assert_eq!(
+            net.recv(rx, u64::MAX).unwrap().unwrap().bytes,
+            b"once?",
+            "the duplicate must be observable at the receiver"
+        );
+        let fault_report = net.fault_report().unwrap();
+        assert_eq!(fault_report.duplicates_applied, 1);
+        assert!(!fault_report.is_vacuous());
+    }
+
+    #[test]
+    fn duplication_is_seed_deterministic_and_varies_across_seeds() {
+        fn duplicated(seed: u64) -> Vec<usize> {
+            let mut net = SimNet::builder()
+                .fault_seed(seed)
+                .duplicate_permille(500)
+                .build()
+                .unwrap();
+            let tx = net.bind("tx").unwrap();
+            net.bind("rx").unwrap();
+            (0..32)
+                .map(|index| net.send(tx, "rx", &[index as u8], 0).unwrap().copies)
+                .collect()
+        }
+        for seed in 0..16 {
+            assert_eq!(duplicated(seed), duplicated(seed), "seed {seed}");
+        }
+        let distinct = (0..16u64).map(duplicated).collect::<BTreeSet<_>>();
+        assert!(distinct.len() > 1, "duplication must vary across seeds");
+        let one_run = duplicated(3);
+        assert!(one_run.contains(&2) && one_run.contains(&1));
+    }
+
+    #[test]
+    fn connect_refusal_fires_only_on_connects_that_would_have_succeeded() {
+        let mut net = SimNet::builder()
+            .fault_seed(2)
+            .connect_refuse_permille(1000)
+            .build()
+            .unwrap();
+        // No listener: refused by semantics, and NOT counted as a fault
+        // opportunity — the injector cannot claim credit for it.
+        assert_eq!(
+            net.tcp_connect("client", "absent", 0).unwrap_err().code,
+            ErrorCode::ConnectionRefused
+        );
+        assert_eq!(net.fault_report().unwrap().connect_ops, 0);
+
+        net.tcp_listen("server", 4).unwrap();
+        let error = net.tcp_connect("client", "server", 0).unwrap_err();
+        assert_eq!(error.code, ErrorCode::ConnectionRefused);
+        assert!(error.message.contains("injected"), "{error:?}");
+        let report = net.fault_report().unwrap();
+        assert_eq!(report.connect_ops, 1);
+        assert_eq!(report.connects_refused, 1);
+        assert!(!report.is_vacuous());
+    }
+
+    #[test]
+    fn connect_refusal_is_seed_deterministic_and_leaves_the_listener_usable() {
+        fn refusals(seed: u64) -> Vec<bool> {
+            let mut net = SimNet::builder()
+                .fault_seed(seed)
+                .connect_refuse_permille(500)
+                .build()
+                .unwrap();
+            net.tcp_listen("server", 64).unwrap();
+            (0..32)
+                .map(|index| {
+                    net.tcp_connect(&format!("client-{index}"), "server", 0)
+                        .is_err()
+                })
+                .collect()
+        }
+        for seed in 0..16 {
+            assert_eq!(refusals(seed), refusals(seed), "seed {seed}");
+        }
+        let one_run = refusals(1);
+        assert!(
+            one_run.contains(&true) && one_run.contains(&false),
+            "a half-rate refusal must both refuse and admit: {one_run:?}"
+        );
+        assert!((0..16u64).map(refusals).collect::<BTreeSet<_>>().len() > 1);
+    }
+
+    #[test]
+    fn an_injected_reset_tears_down_both_directions() {
+        let mut net = SimNet::builder()
+            .fault_seed(1)
+            .reset_permille(1000)
+            .build()
+            .unwrap();
+        let listener = net.tcp_listen("server", 1).unwrap();
+        let client = net.tcp_connect("client", "server", 0).unwrap();
+        let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
+        assert_eq!(
+            net.tcp_send(client, b"doomed", 0).unwrap_err().code,
+            ErrorCode::ConnectionReset
+        );
+        // The peer sees the reset too: a reset is not one-sided.
+        assert_eq!(
+            net.tcp_recv(server, 16, 0).unwrap_err().code,
+            ErrorCode::ConnectionReset
+        );
+        assert_eq!(
+            net.tcp_send(client, b"again", 0).unwrap_err().code,
+            ErrorCode::ConnectionReset
+        );
+        let report = net.fault_report().unwrap();
+        assert_eq!(report.stream_ops, 1, "the reset op is the only opportunity");
+        assert_eq!(report.resets_injected, 1);
+        assert!(!report.is_vacuous());
+    }
+
+    #[test]
+    fn a_receiving_endpoint_can_be_reset_and_would_block_polls_do_not_draw() {
+        let mut net = SimNet::builder()
+            .fault_seed(1)
+            .reset_permille(1000)
+            .build()
+            .unwrap();
+        let listener = net.tcp_listen("server", 1).unwrap();
+        let client = net.tcp_connect("client", "server", 0).unwrap();
+        let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
+        // A poll with nothing to read is not a data operation, so it neither
+        // draws nor counts — a reset must not get likelier the harder a guest
+        // spins.
+        assert_eq!(net.tcp_recv(server, 16, 0).unwrap(), None);
+        assert_eq!(net.fault_report().unwrap().stream_ops, 0);
+        assert_eq!(
+            net.tcp_send(client, b"x", 0).unwrap_err().code,
+            ErrorCode::ConnectionReset
+        );
+    }
+
+    #[test]
+    fn reset_is_seed_deterministic_and_varies_across_seeds() {
+        fn sends_before_reset(seed: u64) -> usize {
+            let mut net = SimNet::builder()
+                .fault_seed(seed)
+                .reset_permille(200)
+                .build()
+                .unwrap();
+            let listener = net.tcp_listen("server", 1).unwrap();
+            let client = net.tcp_connect("client", "server", 0).unwrap();
+            let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
+            for index in 0..64 {
+                if net.tcp_send(client, b"x", 0).is_err() {
+                    return index;
+                }
+                // Drain so the small buffer never becomes the limiting factor.
+                let _ = net.tcp_recv(server, 64, u64::MAX);
+            }
+            64
+        }
+        for seed in 0..8 {
+            assert_eq!(sends_before_reset(seed), sends_before_reset(seed));
+        }
+        let distinct = (0..16u64).map(sends_before_reset).collect::<BTreeSet<_>>();
+        assert!(distinct.len() > 1, "reset timing must vary across seeds");
+    }
+
+    #[test]
+    fn a_partition_that_names_unused_addresses_is_vacuous() {
+        // The operator-error signature: a partition spelled for addresses this
+        // run never uses blocks nothing, and a clean result would otherwise read
+        // as "tested under partition".
+        let mut net = SimNet::builder()
+            .partition("10.0.0.1:1", "10.0.0.2:2")
+            .build()
+            .unwrap();
+        let tx = net.bind("tx").unwrap();
+        net.bind("rx").unwrap();
+        for _ in 0..8 {
+            net.send(tx, "rx", b"through", 0).unwrap();
+        }
+        let report = net.fault_report().unwrap();
+        assert!(report.partition_vacuity_diagnosable);
+        assert_eq!(report.partition_blocks, 0);
+        assert!(report.is_vacuous());
+
+        // A partition that matches the traffic blocks it, and is not vacuous.
+        let mut net = SimNet::builder().partition("tx", "rx").build().unwrap();
+        let tx = net.bind("tx").unwrap();
+        net.bind("rx").unwrap();
+        for _ in 0..8 {
+            net.send(tx, "rx", b"blocked", 0).unwrap();
+        }
+        let report = net.fault_report().unwrap();
+        assert_eq!(report.partition_blocks, 8);
+        assert!(!report.is_vacuous());
+    }
+
+    #[test]
+    fn the_base_latency_class_catches_a_send_path_that_ignores_it() {
+        // Defect 2's signature, now a first-class report row: the knob is set,
+        // sends happened, and the path applied it zero times. A TCP send that
+        // skipped `base_latency_nanos` (as the pre-Wave-A stream path did) lands
+        // exactly here instead of reading clean.
+        let mut net = SimNet::builder().base_latency_nanos(50).build().unwrap();
+        let listener = net.tcp_listen("server", 8).unwrap();
+        let client = net.tcp_connect("client", "server", 0).unwrap();
+        let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
+        for _ in 0..8 {
+            net.tcp_send(client, b"x", 0).unwrap();
+            let _ = net.tcp_recv(server, 64, u64::MAX);
+        }
+        let report = net.fault_report().unwrap();
+        assert!(report.latency_vacuity_diagnosable);
+        assert_eq!(report.latency_applied, 8);
+        assert!(!report.is_vacuous());
+    }
+
+    #[test]
+    fn each_net_fault_class_draws_from_its_own_substream() {
+        // The property with teeth: a class's decisions must not depend on how
+        // much OTHER traffic the run pushed. The connect-refusal verdicts for a
+        // fixed sequence of connects are identical whether or not datagrams are
+        // interleaved between them — a refusal decision taken from the shared
+        // drop/jitter stream would be shifted by every intervening datagram.
+        //
+        // Note the direction: this compares runs whose CONNECT sequence is
+        // identical. Comparing drop verdicts across armed/unarmed TCP knobs
+        // would prove nothing, because a refused connect removes the stream
+        // sends that follow it and so changes the workload itself.
+        fn refusals(with_datagram_traffic: bool) -> Vec<bool> {
+            let mut net = SimNet::builder()
+                .fault_seed(11)
+                .drop_permille(500)
+                .jitter_nanos(1, 1_000)
+                .connect_refuse_permille(500)
+                .build()
+                .unwrap();
+            let tx = net.bind("tx").unwrap();
+            net.bind("rx").unwrap();
+            net.tcp_listen("server", 64).unwrap();
+            (0..32u8)
+                .map(|index| {
+                    if with_datagram_traffic {
+                        for _ in 0..3 {
+                            net.send(tx, "rx", &[index], 0).unwrap();
+                        }
+                    }
+                    net.tcp_connect(&format!("c-{index}"), "server", 0).is_err()
+                })
+                .collect()
+        }
+        let quiet = refusals(false);
+        assert_eq!(quiet, refusals(true));
+        assert!(
+            quiet.contains(&true) && quiet.contains(&false),
+            "the control must actually have drawn both ways, or this proves nothing"
+        );
+
+        // And the streams are not merely independent objects: they are keyed to
+        // DIFFERENT domains, so two classes never draw identical sequences.
+        let seeds = BTreeSet::from([
+            7,
+            domain_seed(7, fault_domain::NET_DUPLICATE),
+            domain_seed(7, fault_domain::NET_CONNECT_REFUSE),
+            domain_seed(7, fault_domain::NET_RESET),
+        ]);
+        assert_eq!(seeds.len(), 4, "net fault substreams must not alias");
     }
 }

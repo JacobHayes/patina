@@ -48,6 +48,7 @@ pub(crate) fn validate(kind: Kind, name: &str, value: &str) -> Result<(), String
             _ => Err(format!("{name} requires KEY=VALUE")),
         },
         Kind::DnsEntry => dns_entry(name, value).map(drop),
+        Kind::AddressPair => address_pair(name, value).map(drop),
         Kind::Socket => socket(name, value).map(drop),
         Kind::Preopen => preopen(name, value).map(drop),
         Kind::UnsupportedSymbols => unsupported_symbols(name, value).map(drop),
@@ -136,6 +137,30 @@ pub(crate) fn dns_entry<'a>(name: &str, value: &'a str) -> Result<(&'a str, &'a 
         ));
     }
     Ok((host, address))
+}
+
+/// A partitioned address pair `A,B`: two non-empty, DIFFERENT virtual addresses.
+/// Both directions are blocked, so the order carries no meaning — but naming one
+/// address twice would partition it from itself, which is a typo rather than a
+/// topology, and is refused here instead of silently doing nothing.
+pub(crate) fn address_pair<'a>(name: &str, value: &'a str) -> Result<(&'a str, &'a str), String> {
+    let Some((left, right)) = value.split_once(',') else {
+        return Err(format!("{name} requires A,B"));
+    };
+    if left.trim().is_empty() || right.trim().is_empty() {
+        return Err(format!("{name} requires two non-empty addresses, as A,B"));
+    }
+    if right.contains(',') {
+        return Err(format!(
+            "{name} partitions exactly two addresses; repeat the flag for more"
+        ));
+    }
+    if left == right {
+        return Err(format!(
+            "{name} requires two DIFFERENT addresses; got {left:?} twice"
+        ));
+    }
+    Ok((left, right))
 }
 
 /// A datagram socket route `FD=BIND->PEER`. Uniqueness of the FD across

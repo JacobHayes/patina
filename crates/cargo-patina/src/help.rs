@@ -55,6 +55,11 @@ pub enum Kind {
     /// because the value half must be a dotted-quad address, and a typo there is
     /// worth catching at parse time rather than at the guest's first lookup.
     DnsEntry,
+    /// `A,B`: two different non-empty virtual addresses to partition from each
+    /// other. Its own Kind rather than a free-form string because a pair naming
+    /// one address twice, or carrying a third, is a typo worth refusing at parse
+    /// time rather than at the end-of-run vacuity report.
+    AddressPair,
     /// A datagram socket `FD=BIND->PEER` (FD a u32 above 3, non-empty addresses).
     Socket,
     /// A preopen `GUEST[:ro|:rw]` with a non-empty guest path.
@@ -87,6 +92,7 @@ impl Kind {
             Kind::CrashSpec => "crash-spec",
             Kind::KeyValue => "key-value",
             Kind::DnsEntry => "dns-entry",
+            Kind::AddressPair => "address-pair",
             Kind::Socket => "socket",
             Kind::Preopen => "preopen",
             Kind::UnsupportedSymbols => "unsupported-symbols",
@@ -479,6 +485,41 @@ const FAULT_FLAGS: &[Flag] = &[
         None,
         Value::Required("N", Kind::U64),
         "Base per-datagram/segment delivery latency in nanoseconds.",
+        false,
+    ),
+    f(
+        "--net-duplicate-permille",
+        None,
+        Value::Required("N", Kind::Permille),
+        "Deliver datagrams twice at N per-mille (each copy draws its own jitter).",
+        false,
+    ),
+    f(
+        "--net-connect-refuse-permille",
+        None,
+        Value::Required("N", Kind::Permille),
+        "Refuse otherwise-establishable TCP connections at N per-mille.",
+        false,
+    ),
+    f(
+        "--net-reset-permille",
+        None,
+        Value::Required("N", Kind::Permille),
+        "Reset an established TCP stream at N per-mille per data operation (both directions).",
+        false,
+    ),
+    f(
+        "--net-partition",
+        None,
+        Value::Required("A,B", Kind::AddressPair),
+        "Partition two virtual addresses from each other, both directions (repeatable).",
+        true,
+    ),
+    f(
+        "--net-tcp-buffer-bytes",
+        None,
+        Value::Required("N", Kind::Usize),
+        "Virtual TCP receive-buffer size; smaller values make would-block/partial sends reachable.",
         false,
     ),
 ];
@@ -2116,8 +2157,11 @@ pub fn fault_flag_names() -> impl Iterator<Item = &'static str> {
         .chain(DNS_FLAGS.iter())
         // `--dns-entry` is semantic configuration on its own control-plane
         // variable (like `--param`), not a seeded knob, so it is not part of the
-        // knob table this list gates.
-        .filter(|flag| flag.name != "--dns-entry")
+        // knob table this list gates. `--net-partition` is excluded for the same
+        // reason AND because it is repeatable: the knob table carries one value
+        // per knob, so the partition set rides its own JSON control-plane
+        // variable exactly as the DNS host table does.
+        .filter(|flag| !matches!(flag.name, "--dns-entry" | "--net-partition"))
         .map(|flag| flag.name)
 }
 

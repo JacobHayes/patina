@@ -32,10 +32,12 @@ use patina_dst_runtime::{
     ENV_DEFER_INIT, ENV_DNS_ENTRIES, ENV_DNS_FAIL_PERMILLE, ENV_DNS_LATENCY, ENV_FINGERPRINT,
     ENV_FS_CRASH_AT, ENV_FS_ERROR_PERMILLE, ENV_FS_IMAGE_FD, ENV_FS_LATENCY, ENV_FS_SHORT_PERMILLE,
     ENV_FS_TORN_GRANULARITY, ENV_GUEST_ARGV, ENV_GUEST_ENV, ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG,
-    ENV_MODE, ENV_NET_DROP_PERMILLE, ENV_NET_JITTER, ENV_NET_LATENCY, ENV_PARAMS_JSON,
-    ENV_PARENT_TIMELINE, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS, ENV_SCHED_STARVE,
-    ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED, ENV_SLEEP_JITTER, ENV_STEP_BUDGET,
-    ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, RuntimeConfig,
+    ENV_MODE, ENV_NET_CONNECT_REFUSE_PERMILLE, ENV_NET_DROP_PERMILLE, ENV_NET_DUPLICATE_PERMILLE,
+    ENV_NET_JITTER, ENV_NET_LATENCY, ENV_NET_PARTITIONS, ENV_NET_RESET_PERMILLE,
+    ENV_NET_TCP_BUFFER_BYTES, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_SCHED_PCT,
+    ENV_SCHED_PCT_STEPS, ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW,
+    ENV_SEED, ENV_SLEEP_JITTER, ENV_STEP_BUDGET, ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD,
+    RuntimeConfig,
 };
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
@@ -301,9 +303,10 @@ struct Invocation {
     /// trace on the `replay` verb, so a cargo-family replay is flag-free. Default
     /// (all `None`) leaves faults off.
     faults: NativeFaults,
-    /// The run's DNS host table (`--dns-entry`), forwarded over the same control
-    /// plane as the fault knobs and recorded into the trace.
-    dns_entries: Option<String>,
+    /// The run's repeatable semantic knobs (`--dns-entry`, `--net-partition`),
+    /// forwarded over the same control plane as the fault knobs and recorded
+    /// into the trace.
+    repeatable: RepeatableKnobs,
     /// Cooperative-SUT (buggify) knobs, or `None` when `--buggify` was not
     /// passed. Forwarded over the same `PATINA_BUGGIFY*` control plane the other
     /// families use; the guest's `apply_buggify_env` is family-neutral, so only
@@ -346,6 +349,10 @@ struct NativeHarnessInvocation {
     /// Boundary-operation budget forwarded to each seed's child `run`.
     step_budget: Option<u64>,
     faults: NativeFaults,
+    /// The run's repeatable semantic knobs (`--dns-entry`, `--net-partition`),
+    /// re-emitted onto each seed's child `run` command line by
+    /// [`repeatable_flag_pairs`].
+    repeatable: RepeatableKnobs,
     buggify: Option<NativeBuggify>,
     schedule: NativeSchedule,
     liveness: NativeLiveness,
@@ -475,10 +482,10 @@ struct NativeRunInvocation {
     /// forwarded over the control plane. Family-neutral: the same
     /// `RuntimeConfig::step_budget` the Cargo and WASI families set.
     step_budget: Option<u64>,
-    /// The run's DNS host table (`--dns-entry`), as the JSON object the control
-    /// plane carries. Semantic configuration, recorded into the trace and
-    /// restored on replay, so `replay` refuses a re-supplied table.
-    dns_entries: Option<String>,
+    /// The run's repeatable semantic knobs (`--dns-entry`, `--net-partition`).
+    /// Semantic configuration, recorded into the trace and restored on replay,
+    /// so `replay` refuses a re-supplied set.
+    repeatable: RepeatableKnobs,
     /// Fault-injection knobs forwarded to the guest through the `PATINA_*`
     /// control plane. Each is a validated raw value stored verbatim; the runtime
     /// re-parses it identically on record and replay, so a mismatched flag on
@@ -547,6 +554,14 @@ struct NativeFaults {
     net_drop_permille: Option<String>,
     /// Base per-datagram/segment delivery latency in nanoseconds.
     net_latency_nanos: Option<String>,
+    /// Seeded datagram duplication probability in per-mille (0..=1000).
+    net_duplicate_permille: Option<String>,
+    /// Seeded TCP connect-refusal probability in per-mille (0..=1000).
+    net_connect_refuse_permille: Option<String>,
+    /// Seeded TCP stream-reset probability in per-mille (0..=1000).
+    net_reset_permille: Option<String>,
+    /// Virtual TCP receive-buffer size in bytes.
+    net_tcp_buffer_bytes: Option<String>,
     /// Seeded DNS resolution-failure probability in per-mille (0..=1000).
     dns_fail_permille: Option<String>,
     /// Seeded per-resolution DNS latency range `MIN..MAX` nanoseconds.
@@ -595,6 +610,22 @@ const FAULT_KNOBS: &[FaultKnob] = &[
     }),
     ("--net-latency-nanos", ENV_NET_LATENCY, |f| {
         f.net_latency_nanos.as_ref()
+    }),
+    (
+        "--net-duplicate-permille",
+        ENV_NET_DUPLICATE_PERMILLE,
+        |f| f.net_duplicate_permille.as_ref(),
+    ),
+    (
+        "--net-connect-refuse-permille",
+        ENV_NET_CONNECT_REFUSE_PERMILLE,
+        |f| f.net_connect_refuse_permille.as_ref(),
+    ),
+    ("--net-reset-permille", ENV_NET_RESET_PERMILLE, |f| {
+        f.net_reset_permille.as_ref()
+    }),
+    ("--net-tcp-buffer-bytes", ENV_NET_TCP_BUFFER_BYTES, |f| {
+        f.net_tcp_buffer_bytes.as_ref()
     }),
     ("--dns-fail-permille", ENV_DNS_FAIL_PERMILLE, |f| {
         f.dns_fail_permille.as_ref()
@@ -1624,6 +1655,7 @@ fn parse_native_harness_from(
         yield_points: args.flag("--yield-points"),
         step_budget: args.u64("--budget"),
         faults: faults_of(&args),
+        repeatable: repeatable_of(&args)?,
         buggify: buggify_of(&args),
         schedule: schedule_of(&args),
         liveness: liveness_of(&args),
@@ -1734,7 +1766,7 @@ fn parse_cargo(command: String, arguments: Vec<OsString>) -> Result<ParseResult,
         step_budget: args.u64("--budget"),
         params: key_values(&args, "--param")?,
         faults: faults_of(&args),
-        dns_entries: dns_entries_of(&args)?,
+        repeatable: repeatable_of(&args)?,
         buggify: buggify_of(&args),
         working_dir: None,
     }))
@@ -1773,7 +1805,7 @@ fn parse_cargo_replay(
         step_budget: None,
         params: BTreeMap::new(),
         faults: NativeFaults::default(),
-        dns_entries: None,
+        repeatable: RepeatableKnobs::default(),
         buggify: None,
         working_dir: Some(package_dir),
     }))
@@ -2099,32 +2131,127 @@ fn faults_of(args: &cli::Args) -> NativeFaults {
         net_jitter_nanos: args.string("--net-jitter-nanos"),
         net_drop_permille: args.string("--net-drop-permille"),
         net_latency_nanos: args.string("--net-latency-nanos"),
+        net_duplicate_permille: knob("--net-duplicate-permille"),
+        net_connect_refuse_permille: knob("--net-connect-refuse-permille"),
+        net_reset_permille: knob("--net-reset-permille"),
+        net_tcp_buffer_bytes: knob("--net-tcp-buffer-bytes"),
         dns_fail_permille: knob("--dns-fail-permille"),
         dns_latency_nanos: knob("--dns-latency-nanos"),
     }
 }
 
-/// The DNS host table this invocation defined, as the JSON object the runtime's
-/// control plane carries. `None` when no `--dns-entry` was supplied, so a run
-/// without one sets nothing.
-fn dns_entries_of(args: &cli::Args) -> Result<Option<String>, CliError> {
-    if !args.registered("--dns-entry") {
-        return Ok(None);
-    }
-    let entries: BTreeMap<String, String> = args
-        .texts("--dns-entry")
-        .into_iter()
+/// The repeatable semantic knobs an invocation defined, stored as the raw CLI
+/// texts in registry order.
+///
+/// Separate from [`NativeFaults`] because these carry a SET rather than one
+/// value: the control plane takes the whole set as one encoded variable, while a
+/// child `run` command line takes the flag once per element. Keeping them in
+/// their own table means neither shape has to be special-cased at a call site —
+/// and, like the fault knobs, every family's plumbing iterates the table, so a
+/// knob cannot be carried by one family and silently dropped by another. That
+/// bug was live for `--dns-entry`: `test`'s native-harness family advertised it
+/// and never forwarded it, so every lookup in a harness run went NXDOMAIN as if
+/// no table had been supplied.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RepeatableKnobs {
+    /// `--dns-entry NAME=ADDR` values.
+    dns_entries: Vec<String>,
+    /// `--net-partition A,B` values.
+    net_partitions: Vec<String>,
+}
+
+/// One repeatable knob's four spellings: the CLI flag, the `PATINA_*` variable
+/// that carries the whole set, the accessor for its raw values, and the encoder
+/// that turns those values into the variable's payload. See [`REPEATABLE_KNOBS`].
+type RepeatableKnob = (
+    &'static str,
+    &'static str,
+    fn(&RepeatableKnobs) -> &Vec<String>,
+    fn(&[String]) -> Result<String, CliError>,
+);
+
+/// Every repeatable semantic knob in one table, gated against the registry by
+/// `repeatable_table_covers_every_repeatable_registry_knob`.
+const REPEATABLE_KNOBS: &[RepeatableKnob] = &[
+    (
+        "--dns-entry",
+        ENV_DNS_ENTRIES,
+        |knobs| &knobs.dns_entries,
+        encode_dns_entries,
+    ),
+    (
+        "--net-partition",
+        ENV_NET_PARTITIONS,
+        |knobs| &knobs.net_partitions,
+        encode_net_partitions,
+    ),
+];
+
+/// The DNS host table as the JSON object the runtime's control plane carries.
+fn encode_dns_entries(values: &[String]) -> Result<String, CliError> {
+    let entries: BTreeMap<String, String> = values
+        .iter()
         .map(|value| {
             let (name, address) = values::dns_entry("--dns-entry", value).map_err(CliError)?;
             Ok((name.to_string(), address.to_string()))
         })
         .collect::<Result<_, CliError>>()?;
-    if entries.is_empty() {
-        return Ok(None);
-    }
     serde_json::to_string(&entries)
-        .map(Some)
         .map_err(|error| CliError(format!("failed to encode the DNS host table: {error}")))
+}
+
+/// The partition set as the JSON array of pairs the control plane carries.
+fn encode_net_partitions(values: &[String]) -> Result<String, CliError> {
+    let pairs: Vec<(String, String)> = values
+        .iter()
+        .map(|value| {
+            let (left, right) = values::address_pair("--net-partition", value).map_err(CliError)?;
+            Ok((left.to_string(), right.to_string()))
+        })
+        .collect::<Result<_, CliError>>()?;
+    serde_json::to_string(&pairs)
+        .map_err(|error| CliError(format!("failed to encode the network partitions: {error}")))
+}
+
+/// Every repeatable knob this invocation set, validated at parse time so a
+/// malformed value is reported before anything is built or run.
+fn repeatable_of(args: &cli::Args) -> Result<RepeatableKnobs, CliError> {
+    let mut knobs = RepeatableKnobs::default();
+    for (flag, _, _, encode) in REPEATABLE_KNOBS {
+        let values: Vec<String> = if args.registered(flag) {
+            args.texts(flag).into_iter().map(str::to_string).collect()
+        } else {
+            Vec::new()
+        };
+        if !values.is_empty() {
+            encode(&values)?;
+        }
+        match *flag {
+            "--dns-entry" => knobs.dns_entries = values,
+            "--net-partition" => knobs.net_partitions = values,
+            other => unreachable!("unregistered repeatable knob {other}"),
+        }
+    }
+    Ok(knobs)
+}
+
+/// The `PATINA_*` control-plane pairs carrying the repeatable knobs, empty sets
+/// omitted so a run that defined none sets nothing.
+fn repeatable_env_pairs(knobs: &RepeatableKnobs) -> Result<Vec<(&'static str, String)>, CliError> {
+    REPEATABLE_KNOBS
+        .iter()
+        .filter(|(_, _, get, _)| !get(knobs).is_empty())
+        .map(|(_, variable, get, encode)| Ok((*variable, encode(get(knobs))?)))
+        .collect()
+}
+
+/// The repeatable knobs as `(flag, value)` pairs — the flag repeated once per
+/// value — for re-emission onto a child `run` command line.
+fn repeatable_flag_pairs(knobs: &RepeatableKnobs) -> Vec<(&'static str, &String)> {
+    REPEATABLE_KNOBS
+        .iter()
+        .flat_map(|(flag, _, get, _)| get(knobs).iter().map(move |value| (*flag, value)))
+        .collect()
 }
 
 /// Every knob this invocation set, as `(flag, value)` in registry order.
@@ -2455,7 +2582,7 @@ fn parse_native_run_from(
         program_args,
         environment: key_values(&args, "--env")?,
         step_budget: args.u64("--budget"),
-        dns_entries: dns_entries_of(&args)?,
+        repeatable: repeatable_of(&args)?,
         faults: faults_of(&args),
         buggify: buggify_of(&args),
         schedule: schedule_of(&args),
@@ -2581,8 +2708,9 @@ fn parse_native_replay(
         // `replay` registers no --budget: it re-executes a recorded operation
         // stream whose length is already fixed by the trace.
         step_budget: None,
-        // Like the fault knobs, the DNS table comes from the trace.
-        dns_entries: None,
+        // Like the fault knobs, the repeatable semantic knobs come from the
+        // trace.
+        repeatable: RepeatableKnobs::default(),
         faults: NativeFaults::default(),
         buggify: None,
         // Replay restores the scheduling policy and swarm selection from the
@@ -3882,6 +4010,16 @@ fn append_native_harness_run_flags(args: &mut Vec<OsString>, invocation: &Native
     // Every knob the registry defines, from the shared table: a fault flag the
     // harness parsed but did not re-emit would be silently inert here.
     for (flag, value) in fault_flag_pairs(&invocation.faults) {
+        args.push(OsString::from(flag));
+        args.push(OsString::from(value));
+    }
+    // Same rule for the repeatable semantic knobs (`--dns-entry`,
+    // `--net-partition`): the harness registers them (DNS_FLAGS and FAULT_FLAGS
+    // both list `Family::Harness`), so a value it parsed but never re-emitted
+    // would silently vanish on the way to the child `run` — this was exactly
+    // the historical `--dns-entry` bug the shared `RepeatableKnobs` table
+    // exists to make structurally impossible.
+    for (flag, value) in repeatable_flag_pairs(&invocation.repeatable) {
         args.push(OsString::from(flag));
         args.push(OsString::from(value));
     }
@@ -6416,9 +6554,13 @@ liveness-safe."
     if let Some(budget) = invocation.step_budget {
         command.env(ENV_STEP_BUDGET, budget.to_string());
     }
-    command.env_remove(ENV_DNS_ENTRIES);
-    if let Some(entries) = &invocation.dns_entries {
-        command.env(ENV_DNS_ENTRIES, entries);
+    // Every repeatable semantic knob from the shared table, scrubbing each
+    // variable first so an ambient value cannot leak into a run that set none.
+    for (_, variable, _, _) in REPEATABLE_KNOBS {
+        command.env_remove(variable);
+    }
+    for (variable, value) in repeatable_env_pairs(&invocation.repeatable)? {
+        command.env(variable, value);
     }
     // Forward whatever fault knobs the operator supplied to the guest. On record
     // and seeded runs these configure the faults and are recorded into the trace
@@ -7027,9 +7169,13 @@ and run/audit the artifact (cargo patina build <DIR|Cargo.toml> --output <PATH>)
     if let Some(budget) = invocation.step_budget {
         command.env(ENV_STEP_BUDGET, budget.to_string());
     }
-    command.env_remove(ENV_DNS_ENTRIES);
-    if let Some(entries) = &invocation.dns_entries {
-        command.env(ENV_DNS_ENTRIES, entries);
+    // Every repeatable semantic knob from the shared table, scrubbing each
+    // variable first so an ambient value cannot leak into a run that set none.
+    for (_, variable, _, _) in REPEATABLE_KNOBS {
+        command.env_remove(variable);
+    }
+    for (variable, value) in repeatable_env_pairs(&invocation.repeatable)? {
+        command.env(variable, value);
     }
     if !invocation.params.is_empty() {
         command.env(
@@ -9428,6 +9574,10 @@ mod tests {
                     "",
                 ],
             ),
+            Kind::AddressPair => (
+                vec!["a,b", "10.0.0.1:80,10.0.0.2:80", "left, right"],
+                vec!["a", "a,", ",b", "a,b,c", "", "a,a", " , "],
+            ),
             Kind::Socket => (
                 vec!["4=a->b", "5=x->y", "100=addr1->addr2"],
                 vec!["3=a->b", "4=a->", "4=->b", "foo=a->b", "4=ab", "", "0=a->b"],
@@ -9888,6 +10038,10 @@ mod tests {
             ("--net-jitter-nanos", "10..20"),
             ("--net-drop-permille", "50"),
             ("--net-latency-nanos", "500"),
+            ("--net-duplicate-permille", "50"),
+            ("--net-connect-refuse-permille", "50"),
+            ("--net-reset-permille", "20"),
+            ("--net-tcp-buffer-bytes", "4096"),
             ("--dns-fail-permille", "100"),
             ("--dns-latency-nanos", "10..20"),
         ];
@@ -9977,6 +10131,16 @@ mod tests {
             .position(|t| t == "--net-latency-nanos")
             .expect("net latency knob");
         tokens[scalar + 1] = OsString::from("500");
+        // The repeatable semantic knobs (DNS_FLAGS and `--net-partition`) are
+        // also registered for `Family::Harness` and go through their own
+        // forwarding table (`repeatable_flag_pairs`) rather than `FAULT_KNOBS` —
+        // this is the historical `--dns-entry` bug (advertised by the harness
+        // family, never forwarded to its child `run`), covered here so it
+        // cannot silently regress.
+        tokens.push(OsString::from("--dns-entry"));
+        tokens.push(OsString::from("svc=10.0.0.9"));
+        tokens.push(OsString::from("--net-partition"));
+        tokens.push(OsString::from("a,b"));
 
         let args = cli::parse("test", help::Family::Harness, tokens).expect("harness parse");
         let invocation = NativeHarnessInvocation {
@@ -9990,6 +10154,7 @@ mod tests {
             yield_points: false,
             step_budget: Some(9),
             faults: faults_of(&args),
+            repeatable: repeatable_of(&args).expect("harness repeatable parse"),
             buggify: None,
             schedule: NativeSchedule::default(),
             liveness: NativeLiveness::default(),
@@ -10002,6 +10167,10 @@ mod tests {
                 "native harness dropped {flag} on the way to its child run"
             );
         }
+        assert!(emitted.iter().any(|token| token == "--dns-entry"));
+        assert!(emitted.iter().any(|token| token == "svc=10.0.0.9"));
+        assert!(emitted.iter().any(|token| token == "--net-partition"));
+        assert!(emitted.iter().any(|token| token == "a,b"));
         assert!(emitted.iter().any(|token| token == "--budget"));
     }
 
