@@ -64,16 +64,25 @@ fn segment_name(index: u64) -> String {
 /// Segments are numbered from 0 and never deleted, so recovery probes them by
 /// name (a plain `stat`) rather than `read_dir`, whose syscalls are outside
 /// Patina's interposed filesystem surface.
-fn segment_paths(dir: &Path) -> Vec<PathBuf> {
+///
+/// The probe must NOT use `Path::exists()`: it swallows every stat error, so a
+/// transient I/O failure reads as "no such segment" and the entire intact log
+/// silently vanishes — at startup that corrupts recovery, and in the final
+/// audit it fabricates durability violations against a healthy WAL (found by
+/// fault-injection campaign: an injected stat error at audit time reported
+/// every acked job missing). Only NotFound ends the probe; anything else fails
+/// closed.
+fn segment_paths(dir: &Path) -> Result<Vec<PathBuf>, WalError> {
     let mut paths = Vec::new();
     for index in 0u64.. {
         let path = dir.join(segment_name(index));
-        if !path.exists() {
-            break;
+        match fs::metadata(&path) {
+            Ok(_) => paths.push(path),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => break,
+            Err(e) => return Err(WalError::Io(e)),
         }
-        paths.push(path);
     }
-    paths
+    Ok(paths)
 }
 
 fn framed_len(records: &[FramedRecord]) -> u64 {
@@ -87,7 +96,7 @@ fn framed_len(records: &[FramedRecord]) -> u64 {
 /// cannot explain. A torn tail in the final segment is truncated on disk so
 /// later appends stay clean.
 pub fn recover(dir: &Path) -> Result<Recovered, WalError> {
-    let segments = segment_paths(dir);
+    let segments = segment_paths(dir)?;
     let mut records: Vec<FramedRecord> = Vec::new();
     let mut last_index = 0u64;
     let mut last_len = 0u64;
@@ -320,7 +329,10 @@ mod tests {
             wal.append(&WalRecord::Complete(job)).unwrap();
         }
         drop(wal);
-        assert!(segment_paths(&dir).len() > 1, "expected rotation");
+        assert!(
+            segment_paths(&dir).expect("probe").len() > 1,
+            "expected rotation"
+        );
         let (_wal, records) = Wal::open(&dir, 32, false).unwrap();
         assert_eq!(records.len(), 20);
         assert_eq!(records[19].record, WalRecord::Complete(19));
