@@ -28,7 +28,7 @@ echo "Patina local toolchains are ready."
 # clippy) surface in seconds, not after the multi-minute suites. Each entry
 # must pass before the next runs, so the first failure ends the run.
 [tasks.check]
-description = "Full pre-landing validation, laddered fast -> slow (no heavyweight testbeds)"
+description = "Full pre-landing validation, laddered fast -> slow (heavyweight testbeds: audit-corpus only runs in CI)"
 run = [
   "cargo fmt --all -- --check",
   "cargo clippy --workspace --all-targets --locked -- -D warnings",
@@ -38,6 +38,10 @@ run = [
   "cargo test -p patina-dst --features macros --locked",
   "testbeds/patina-macro-adopter/run.sh",
   "scripts/check-flag-drift.sh",
+  "testbeds/workq/fuzz-sweep.sh --selftest",
+  "cargo run -q -p cargo-patina -- patina campaign --selftest",
+  "testbeds/pubsub/run-patina.sh",
+  "testbeds/workq/run-patina.sh",
   "cargo +1.86.0 test --workspace --locked",
   "cargo +1.86.0 test -p patina-dst --features macros --locked",
   "scripts/validate-wasi.sh",

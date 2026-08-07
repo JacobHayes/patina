@@ -74,9 +74,11 @@ toolchains/targets, including the 1.86 MSRV toolchain with `wasm32-wasip1`):
 
 - `mise run check` — the full pre-landing battery, laddered fast → slow:
   fmt, clippy (host + cross-target `x86_64-unknown-linux-gnu` for Linux-cfg
-  code), docs, workspace tests, `scripts/check-flag-drift.sh`, MSRV tests, then
-  the WASI / cross-target / native-shim validation scripts. **This is the
-  landing gate.**
+  code), docs, workspace tests, `scripts/check-flag-drift.sh`, the sweep and
+  campaign selftests, the workq/pubsub `run-patina.sh` batteries, MSRV tests,
+  then the WASI / cross-target / native-shim validation scripts. **This is the
+  landing gate.** The only CI step it skips is the audit-corpus run (heavy
+  ecosystem builds; `mise run audit-corpus`).
 - `mise run check:fast` — the inner-loop tier (skips the slowest e2e tests, the
   MSRV re-run, `cargo doc`, the flag-drift gate, and
   `validate-native-shim.sh`). Not sufficient for landing.
