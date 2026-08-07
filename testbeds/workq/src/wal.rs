@@ -154,6 +154,9 @@ impl Wal {
         let recovered = recover(dir)?;
         let path = dir.join(segment_name(recovered.last_index));
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        // Creating the segment is a namespace op: without a parent-dir fsync a
+        // crash loses the file itself — and every acked record in it.
+        fsync_dir(dir)?;
         let wal = Wal {
             dir: dir.to_path_buf(),
             file,
@@ -210,9 +213,16 @@ impl Wal {
             .create(true)
             .append(true)
             .open(self.dir.join(segment_name(self.index)))?;
+        fsync_dir(&self.dir)?; // the new segment's dir entry must survive a crash
         self.len = 0;
         Ok(())
     }
+}
+
+/// Make a directory's entries durable: a created file only survives a crash
+/// once its parent directory is fsync'd.
+fn fsync_dir(dir: &Path) -> io::Result<()> {
+    File::open(dir)?.sync_all()
 }
 
 /// Drives the real [`recover`] over synthetic segments: a clean log recovers
