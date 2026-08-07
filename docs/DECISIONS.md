@@ -250,3 +250,15 @@ cluster so the fixes have citable symptom records.
   asserts on shim-symbol leakage (which reproduces on both platforms); the
   scoping fix removes the shim from that link regardless of trigger. The
   real-tree crc-fast rebuild remains a re-verify-round obligation.
+- **2026-08-06 (skills round) — D9 delivered as ONE thin guidance skill,
+  not two task-oriented loop docs.** The user's design call: the skill
+  explains what Patina is and its capabilities in broad strokes, then
+  teaches HOW to learn the current surface from the generated registry
+  (`--help` progressive disclosure, row semantics, the environment
+  registry, refusals-as-teaching), so it does not churn with every flag
+  change. The two planned files shared their churn-prone half; one file
+  ships with both loops as orientation sections. Deliberately rejected in
+  the same pass: enumerating fault knobs, campaign options, or envelope
+  field lists — the registry answers those more accurately than prose.
+  Three literal flag tokens in 281 lines; drift-gate coverage proven
+  non-vacuous (planted token caught by file and line).

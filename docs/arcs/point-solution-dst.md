@@ -1,8 +1,9 @@
 # Arc: point-solution DST — deep exposure for a slice of a project
 
-Status: design approved 2026-07-30; Wave A (native libtest harness mode) and
-Wave B (`#[patina_dst::test]`) implemented; Wave C (skills) remains a separate
-final pass. Lands as `docs/arcs/point-solution-dst.md`.
+Status: design approved 2026-07-30; Wave A (native libtest harness mode), Wave B
+(`#[patina_dst::test]`), and Wave C (`docs/skills/patina-dst.md`, D9 revised
+2026-08-06 to a single thin guidance skill) all implemented. Lands as
+`docs/arcs/point-solution-dst.md`.
 
 Patina today is strongest as a whole-program instrument: build a binary, sweep
 seeds, run campaigns overnight. This arc makes it a **point solution** — deep,
@@ -31,7 +32,7 @@ job). Three deliverables, one phase-2 boundary sketch:
 | D6 | Per-test config | Macro args map mechanically to CLI flags (`fs_crash_at = "write:3"` → `--fs-crash-at write:3`); the CLI parser is the only validator — no second flag registry in the macro |
 | D7 | Defaults | Debug guest profile; `seeds = 20`, fixed range from 0; no wall-clock randomness ever |
 | D8 | Failure UX | Test panic carries failing seed, exit, stderr tail, trace path, and two copy-paste repro commands; artifacts under `<target-dir>/patina/dst/…` |
-| D9 | Skills placement | `docs/skills/dst-point-solution.md` + `docs/skills/dst-whole-system.md`, plain task-oriented markdown, gated by the flag-drift script |
+| D9 | Skills placement | `docs/skills/patina-dst.md` — ONE plain-markdown guidance skill, gated by the flag-drift script. (Revised 2026-08-06; the original two-file, flag-teaching split is superseded — see §2.) |
 | D10 | Source-first polish | Envelope names the source (not the dead tempdir); explore failure line gains a repro command; guest-artifact cache **deferred** (measured: not the bottleneck); no `-e` inline eval (user-rejected), no cargo-script manifest now |
 
 ## Ground truth (verified against the working tree, measured on this machine)
@@ -284,37 +285,46 @@ binary, so the runtime stays unbloated by construction.
 
 Placement: `docs/skills/`, plain markdown, **no** `.claude/skills` artifacts —
 usable verbatim by any agent framework (each can point its own skill index at
-these files) and by humans. Format per file: a one-line "use when" header, a
-task-oriented numbered loop with exact commands, a "reading the output"
-section naming the envelope schemas and load-bearing fields, and a verify step
-(laddered-loop doctrine). Both files join the `DOCS` list in
-`scripts/check-flag-drift.sh` so every flag token they mention is gated
-against the registry; both get llms.txt and README links for discoverability.
+the file) and by humans. It joins the `DOCS` list in
+`scripts/check-flag-drift.sh` so every flag token it mentions is gated against
+the registry, and it gets llms.txt, README, and AGENTS.md doc-map links for
+discoverability.
 
-**`docs/skills/dst-point-solution.md`** — the tight loop this arc exists for.
-Teaches: write a snippet as a plain-std `.rs` (or fn + `#[patina_dst::test]`);
-`cargo patina run snippet.rs --seed N --format json`; read `patina.result/v1`
-(`result`, `exit_code`, `stdout`/`stderr` are inline — no file juggling);
-sweep with `explore run --seeds N` (build-once semantics, per-seed outcomes,
-stops at first failure); turn knobs (`--fs-crash-at`, `--net-drop-permille`,
-`--sleep-jitter-nanos`, `--buggify`); record the failing seed, `replay`
-flag-free, `minimize` against an oracle; escalate to a package directory when
-the snippet needs dependencies (single `.rs` is rustc-only — three-command
-scaffold shown); graduate to `#[patina_dst::test]` when the snippet should
-keep guarding the tree. Debug-profile doctrine stated up front.
+**Delivered as one file: `docs/skills/patina-dst.md`.** The original plan here
+was two task-oriented skills (`dst-point-solution.md`, `dst-whole-system.md`),
+each walking a numbered loop with exact commands and naming the fault knobs it
+turns. The user's 2026-08-06 design call supersedes that:
 
-**`docs/skills/dst-whole-system.md`** — whole-program adoption. Teaches:
-`build` shim-linked + `audit` residual reading (deny-trap notes,
-`--allow-unsupported-symbols` as the loud hatch); seed sweeps vs `campaign`
-(gens, seven-class outcomes, signature dedup, `patina.campaign/v2` envelope,
-per-failure repro commands); buggify/`always!`/`sometimes!` SDK adoption and
-`PATINA_SDK_REPORT`; `--yield-points` + vacuous-schedule reading; record/
-replay/branch triage and `--render` HTML; the three usage modes and when each
-applies; CI wiring (nightly campaign + per-PR dst tests as the two tiers).
+> the skill should be a thin guidance skill that more explains the context of
+> patina and broad strokes about it, but then guide it on HOW to learn about
+> patina using the `--help` or other inspection commands. If we do the skill
+> right, it shouldn't require constant change for every new flag/whatever.
 
-The arc doc deliberately enumerates rather than drafts these: the skills are
-wave-C implementation artifacts written against the then-current CLI, keeping
-them out of drift's reach until they can be gated.
+So the shipped skill is **near-flagless by construction** — three literal flag
+tokens in 280 lines (`--help`, `--format`, `--seed`), each load-bearing for the
+discovery method or the self-check — and its content is (a) what Patina is
+(seed-as-input, fail-closed, link-time interposition, the three families), (b) a
+broad-strokes capability map naming verbs and fault *domains* but not their
+knobs, (c) the two loops (point solution vs whole system) as orientation rather
+than as command scripts, and (d) the bulk of the file: **how to learn the
+current surface** — the help registry's progressive disclosure (index →
+`.verb_detail.command_template` → per-verb `flag_groups`), the group/row
+semantics that carry meaning (`families`, `requires`, `choices`, default-omit),
+the environment registry filtered by `scope`, refusals as a legitimate learning
+channel, and the standing pointers (llms.txt, TUTORIAL.md, testbeds). The
+"reading the output" and verify sections survive from the original format: exit
+codes, the `patina.result/v1` envelope, the `PATINA_*` stderr markers as the
+observability contract, and a runnable determinism self-check.
+
+The one-file consolidation follows from the same call: the point-solution and
+whole-system loops share nearly all of (a), (c-as-method), and (d), so two files
+would have duplicated the churn-prone half twice. A framework wanting two
+triggers can point both at this file.
+
+Rejected in the same pass: enumerating fault knobs, campaign options, or
+envelope field lists in the skill. Every such mention is future churn the
+drift gate can only catch *after* it breaks, and the registry already answers
+those questions more accurately than prose can.
 
 ## 3. Source-first polish (D10)
 
@@ -392,13 +402,15 @@ both repro commands, one PATH-scrubbed run asserting the absence failure);
 double-run identical; MSRV 1.86 build of the new crates; no new deps
 (`cargo tree` asserted in the battery).
 
-**Wave C — skills + links** (two skill docs, drift `DOCS` list, README/llms.txt
-links). Verify: `check-flag-drift.sh` (including its `--selftest`), every
-command in both skills executed once against the built CLI with output pasted
-into the battery log. **Sequencing (user, 2026-07-30): this wave runs as a
-separate FINAL pass after all the other arcs have landed**, so the skills teach
-the finished surface (sites/coverage/trace verbs, fault knobs, --extend) rather
-than a snapshot that goes stale a week later.
+**Wave C — skills + links** (one skill doc, drift `DOCS` list, README/llms.txt/
+AGENTS.md links). Verify: `check-flag-drift.sh`, proved non-vacuous over the new
+file by planting a bogus flag token in it (gate names the file and line, exits 1)
+and confirming the restored file passes; every command the skill cites executed
+against the built CLI, including the self-check block run verbatim. **Sequencing
+(user, 2026-07-30): this wave runs as a separate FINAL pass after all the other
+arcs have landed** — under the revised D9 that matters less for flag spellings
+(there are almost none) and more for the capability map and the shape of the
+help registry the skill teaches readers to query.
 
 Harness fixtures (the §4 sketch) are deliberately NOT scheduled (user call,
 2026-07-31): likely possible over the existing `--harness`/`PATINA_DEFER_INIT`

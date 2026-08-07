@@ -16,6 +16,7 @@ anything; it tells you where truth lives and which gates must stay green.
 | [README.md](./README.md) | the user-facing summary; must stay honest about status |
 | [TUTORIAL.md](./TUTORIAL.md) | the command-by-command walkthrough (every command verified) |
 | `llms.txt` | compact machine-oriented CLI/SDK map |
+| [docs/skills/patina-dst.md](./docs/skills/patina-dst.md) | the tool-agnostic agent skill handed to agents *using* Patina: what it is, the capability map, and how to discover the current surface from the generated registry. Deliberately near-flagless — keep it that way; teach the discovery method, not a flag catalog |
 | [docs/agent-operations.md](./docs/agent-operations.md) | shared agent operating rules: verification, delegation, non-vacuity, cross-platform evidence |
 | [crates/patina-target/ESCAPE-CLASSES.md](./crates/patina-target/ESCAPE-CLASSES.md) | the guest-escape taxonomy behind the audit gate |
 | [testbeds/README.md](./testbeds/README.md) | the dogfooding guests and their conventions |

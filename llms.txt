@@ -251,6 +251,11 @@ dev-dependency use under plain `cargo test`.
 
 ## Docs
 
+- `docs/skills/patina-dst.md`: tool-agnostic agent skill — what Patina is, the
+  capability map, and the method for discovering the current surface (the help
+  registry's progressive disclosure, the environment registry, the report
+  markers). Start here if you are an agent meeting Patina for the first time;
+  come back to this file for exact spellings.
 - `TUTORIAL.md`: instrument a program with `buggify!`, sweep seeds, catch a
   planted bug, replay it, and render the timeline.
 - `ARCHITECTURE.md`, `IMPLEMENTATION.md`, `VALIDATION.md`: design, slice status,

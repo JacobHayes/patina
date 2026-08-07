@@ -72,6 +72,7 @@ cd "$(dirname "$0")/.."
 # newly added script is covered automatically rather than silently escaping.
 DOCS=(README.md TUTORIAL.md USAGE-MODES.md ARCHITECTURE.md IMPLEMENTATION.md
       VALIDATION.md INTENTS.md AGENTS.md llms.txt docs/agent-operations.md
+      docs/skills/patina-dst.md
       crates/patina-target/ESCAPE-CLASSES.md crates/patina-native-shim/AGENTS.md
       testbeds/AGENTS.md testbeds/README.md testbeds/workq/README.md testbeds/pubsub/README.md
       testbeds/audit-corpus/README.md testbeds/rustix-default/README.md
