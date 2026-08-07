@@ -303,7 +303,7 @@ fn report(
 
     let total_published: u64 = published.values().map(|f| f.count).sum();
     println!(
-        "PUBSUB_RESULT seed={} topics={} subscribers={} publishers={} published={} \
+        "PUBSUB_RESULT workload_seed={} topics={} subscribers={} publishers={} published={} \
          delivered={} heartbeats={heartbeats} hash={}",
         options.seed,
         options.topics,

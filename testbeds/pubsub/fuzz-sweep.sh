@@ -35,8 +35,9 @@ repo_root="$(cd "$here/../.." && pwd)"
 built="$here/target/patina/pubsub"
 PATINA="$repo_root/target/release/cargo-patina"
 
-# Fixed workload (matches run-patina.sh): guest --seed fixes payloads/topics;
-# the Patina run --seed varies the schedule.
+# Fixed workload (matches run-patina.sh): guest --seed fixes payloads/topics
+# (echoed as PUBSUB_RESULT workload_seed=, intentionally constant across every
+# leg); the Patina run --seed varies the schedule.
 GUEST_ARGS=(--seed 7 --base-port 6001 --timeout-secs 30)
 EXPECTED_PUBLISHED=32
 EXPECTED_DELIVERED=64
@@ -110,7 +111,7 @@ assert_class() {
 }
 selftest() {
   echo "== pubsub fuzz-sweep classifier selftest =="
-  local ok='PUBSUB_RESULT seed=7 published=32 delivered=64 heartbeats=5 hash='"$EXPECTED_HASH"
+  local ok='PUBSUB_RESULT workload_seed=7 published=32 delivered=64 heartbeats=5 hash='"$EXPECTED_HASH"
   local nfr_applied='PATINA_NET_FAULT_REPORT could_apply=1 send_ops=222 faults_applied=222 vacuous=0'
   local nfr_inert='PATINA_NET_FAULT_REPORT could_apply=1 send_ops=222 faults_applied=0 vacuous=1
 PATINA WARNING: net fault knobs inert — 222 fault-eligible send(s) occurred'
@@ -134,7 +135,7 @@ PATINA WARNING: net fault knobs inert — 222 fault-eligible send(s) occurred'
   # det_check()
   assert_class OK "$(det_check OK "$ok" "$ok" aa aa)" "determinism-ok"
   assert_class DETERMINISM_BUG "$(det_check OK "$ok" "$ok" aa bb)" "determinism-trace-diff"
-  assert_class DETERMINISM_BUG "$(det_check OK "$ok" 'PUBSUB_RESULT seed=7 published=32 delivered=64 heartbeats=9 hash='"$EXPECTED_HASH" aa aa)" "determinism-result-diff"
+  assert_class DETERMINISM_BUG "$(det_check OK "$ok" 'PUBSUB_RESULT workload_seed=7 published=32 delivered=64 heartbeats=9 hash='"$EXPECTED_HASH" aa aa)" "determinism-result-diff"
 
   if (( SELFTEST_FAIL )); then echo "== SELFTEST FAILED =="; exit 1; fi
   echo "== selftest passed =="

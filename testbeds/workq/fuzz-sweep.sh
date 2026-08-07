@@ -478,7 +478,7 @@ assert_class() {
 selftest() {
   echo "== fuzz-sweep classifier selftest =="
   local sched='PATINA_SCHEDULE_REPORT tasks_spawned=7 max_concurrent=7 total_boundaries=1160 vacuous_threads=0'
-  local ok='WORKQ_RESULT seed=7 enqueued=24 completed=24 failed=0 attempts=24 applied_hash=deadbeef'
+  local ok='WORKQ_RESULT workload_seed=7 enqueued=24 completed=24 failed=0 attempts=24 applied_hash=deadbeef'
 
   # OK, and OK even with the benign vacuous-schedule WARNING.
   assert_class OK "$(classify 0 24 24 0 24 0 0 "$ok" "$sched")" "ok-converged"
@@ -500,7 +500,7 @@ $vac_warn")" "ok-vacuous-warn"
   assert_class STARVATION_STALL "$(classify 1 '' '' '' 24 0 0 '' "$stall")" "starvation-stall-not-liveness"
 
   # LIVENESS: heavy config tolerated, non-heavy is a regression.
-  local fail_out='WORKQ_RESULT seed=7 enqueued=24 completed=18 failed=0 attempts=60 applied_hash=x'
+  local fail_out='WORKQ_RESULT workload_seed=7 enqueued=24 completed=18 failed=0 attempts=60 applied_hash=x'
   assert_class LIVENESS_TIMEOUT \
     "$(classify 1 24 18 0 24 1 0 "$fail_out" 'WORKQ_FAILURE not-converged enqueued=24 completed=18 failed=0 target=24')" \
     "liveness-heavy"
@@ -524,7 +524,7 @@ $vac_warn")" "ok-vacuous-warn"
   assert_class UNEXPECTED_CRASH \
     "$(classify 0 24 24 0 24 0 0 '' 'scheduler deadlock: all tasks parked with pending work')" "crash-scheduler-err"
   assert_class UNEXPECTED_CRASH \
-    "$(classify 0 24 18 0 24 0 0 'WORKQ_RESULT seed=7 enqueued=24 completed=18 failed=0 attempts=30 applied_hash=x' '')" "crash-exit0-partial"
+    "$(classify 0 24 18 0 24 0 0 'WORKQ_RESULT workload_seed=7 enqueued=24 completed=18 failed=0 attempts=30 applied_hash=x' '')" "crash-exit0-partial"
   assert_class UNEXPECTED_CRASH "$(classify 134 '' '' '' 24 0 0 '' 'Abort trap: 6')" "crash-exit134"
 
   # ALWAYS_VIOLATION integrated into classify(): fireable on exit 0, not downgraded.

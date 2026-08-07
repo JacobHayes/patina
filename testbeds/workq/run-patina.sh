@@ -60,8 +60,9 @@ if [[ -n "${PATINA_ALLOW_SYMS:-}" ]]; then
 fi
 
 # Fixed workload/base args, identical to the native harness invocation shape. The
-# guest --seed fixes the payload workload; the Patina run --seed varies the
-# schedule and fault draws.
+# guest --seed fixes the payload workload (echoed as WORKQ_RESULT workload_seed=
+# and intentionally constant across every leg below); the Patina run --seed
+# varies the schedule and fault draws.
 JOBS=24
 ARGS=(--seed 7 --jobs "$JOBS" --workers 3 --producers 2 --base-port 5001 --data-dir /workq --timeout-secs 90)
 

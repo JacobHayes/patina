@@ -56,7 +56,7 @@ published to it, `seq`-contiguous.
 
 ## Output contract (workq conventions)
 
-- `PUBSUB_RESULT seed=… published=… delivered=… heartbeats=… hash=…` — the
+- `PUBSUB_RESULT workload_seed=… published=… delivered=… heartbeats=… hash=…` — the
   deterministic final line. `hash` is an **order-invariant** SHA-256 over one
   row per published topic and per (subscriber, topic) delivery, each carrying
   the count and a wrapping-sum-of-FNV payload digest — nothing depends on how

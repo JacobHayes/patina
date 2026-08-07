@@ -395,7 +395,7 @@ fn report(
     // `attempts` is schedule-sensitive, so it is reported but kept OUT of the hash.
     let attempts = supervisor.observation.lock().unwrap().attempts;
     println!(
-        "WORKQ_RESULT seed={} enqueued={enqueued} completed={completed} failed={failed} attempts={attempts} applied_hash={}",
+        "WORKQ_RESULT workload_seed={} enqueued={enqueued} completed={completed} failed={failed} attempts={attempts} applied_hash={}",
         options.seed,
         outcome_hash(&audit)
     );

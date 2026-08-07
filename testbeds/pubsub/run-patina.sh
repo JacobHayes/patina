@@ -48,8 +48,9 @@ if [[ -n "${PATINA_ALLOW_SYMS:-}" ]]; then
   ALLOW=(--allow-unsupported-symbols "$PATINA_ALLOW_SYMS")
 fi
 
-# Fixed workload: the guest --seed fixes payloads/topics; the Patina run --seed
-# varies the schedule. Defaults: 3 topics, 4 subscribers (the last on the
+# Fixed workload: the guest --seed fixes payloads/topics (echoed as PUBSUB_RESULT
+# workload_seed= and intentionally constant across every leg); the Patina run
+# --seed varies the schedule. Defaults: 3 topics, 4 subscribers (the last on the
 # heartbeat-only sentinel), 2 publishers x 16 messages -> published=32,
 # delivered=64.
 ARGS=(--seed 7 --base-port 6001 --timeout-secs 30)
