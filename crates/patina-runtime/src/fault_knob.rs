@@ -686,6 +686,13 @@ mod tests {
         // Guest entropy is not a fault knob: it is the run's baseline
         // nondeterminism source, always active and never masked.
         claimed.insert(fault_domain::ENTROPY);
+        // The scheduler's own streams are not fault knobs: they are the core
+        // selection/exploration-policy generators, always active (default
+        // selection) or gated by the schedule-policy config rather than a
+        // fault knob, and never masked.
+        claimed.insert(fault_domain::SCHED_MAIN);
+        claimed.insert(fault_domain::SCHED_PCT);
+        claimed.insert(fault_domain::SCHED_STARVE);
 
         assert_eq!(
             declared, claimed,

@@ -26,6 +26,15 @@ pub mod fault_domain {
     /// Seeded extra latency applied to guest sleeps.
     pub const SLEEP_JITTER: &str = "patina.clock.sleep_jitter";
 
+    /// The deterministic scheduler's default uniform-random task-selection
+    /// stream.
+    pub const SCHED_MAIN: &str = "patina.sched.main";
+    /// The deterministic scheduler's PCT (Probabilistic Concurrency Testing)
+    /// priority/change-point stream.
+    pub const SCHED_PCT: &str = "patina.sched.pct";
+    /// The deterministic scheduler's starvation-interval placement stream.
+    pub const SCHED_STARVE: &str = "patina.sched.starve";
+
     /// Explicit `FaultNet` wrapper datagram-drop stream.
     pub const FAULT_NET_DROP: &str = "patina.wrapper.fault_net.drop";
     /// Explicit `FaultNet` wrapper datagram-duplication stream.

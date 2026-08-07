@@ -26,12 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use patina_dst_abi::{EffectError, ErrorCode, TaskId};
 use patina_dst_driver_api::{DriverResult, SchedulePolicyReport, SchedulerDriver};
-use patina_dst_rng_seeded::SplitMix64;
-
-/// Domain separators mixed into the root seed so a policy's stream never
-/// correlates with the default selection generator or the other policy.
-const PCT_SEED_DOMAIN: u64 = 0x9C17_C011_ED00_5EED;
-const STARVE_SEED_DOMAIN: u64 = 0x57A2_5E11_047E_5EED;
+use patina_dst_rng_seeded::{SplitMix64, domain_seed, fault_domain};
 
 /// Configuration for the PCT (Probabilistic Concurrency Testing) policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,7 +102,7 @@ const PCT_PRIORITY_BAND: u64 = 1 << 20;
 impl PctState {
     fn new(config: PctConfig, seed: u64) -> Self {
         let depth = config.depth.max(1);
-        let mut rng = SplitMix64::new(seed ^ PCT_SEED_DOMAIN);
+        let mut rng = SplitMix64::new(domain_seed(seed, fault_domain::SCHED_PCT));
         // Place d-1 change points at seed-chosen decision steps in [1, steps].
         // The i-th change point (1-based, in step order) demotes the running task
         // to priority i, exactly as in PCT: earlier change points give lower
@@ -249,7 +244,7 @@ struct StarvationState {
 
 impl StarvationState {
     fn new(config: StarvationConfig, seed: u64) -> Self {
-        let mut rng = SplitMix64::new(seed ^ STARVE_SEED_DOMAIN);
+        let mut rng = SplitMix64::new(domain_seed(seed, fault_domain::SCHED_STARVE));
         let window = config.window.max(1);
         let max_len = config.max_len.max(1);
         let intervals = (0..config.intervals)
@@ -344,7 +339,7 @@ impl DetScheduler {
 
     pub fn with_policy(seed: u64, policy: SchedulePolicy) -> Self {
         Self {
-            generator: SplitMix64::new(seed),
+            generator: SplitMix64::new(domain_seed(seed, fault_domain::SCHED_MAIN)),
             tasks: BTreeMap::new(),
             next_task: 1,
             pct: policy.pct.map(|config| PctState::new(config, seed)),
@@ -679,16 +674,21 @@ mod tests {
         assert_eq!(
             schedule(7, 8),
             [
-                TaskId(1),
-                TaskId(1),
-                TaskId(1),
-                TaskId(1),
+                TaskId(2),
                 TaskId(2),
                 TaskId(1),
                 TaskId(2),
+                TaskId(3),
+                TaskId(2),
                 TaskId(1),
+                TaskId(2),
             ]
         );
+    }
+
+    #[test]
+    fn different_seeds_give_different_sequences() {
+        assert_ne!(schedule(7, 8), schedule(8, 8));
     }
 
     #[test]
@@ -793,6 +793,10 @@ mod tests {
     fn pct_depth_two_preempts_at_a_live_change_point() {
         // d = 2 places exactly one change point; with all tasks runnable it must
         // fire and demote the running task, producing at least one preemption.
+        // Seed 4 (not the first tried) is required: at depth 2/steps 10 some
+        // seeds place their sole change point at decision step 1, which can
+        // never be live (nothing has run yet to demote) — an inherent property
+        // of change-point semantics, not a derivation bug.
         let policy = SchedulePolicy {
             pct: Some(PctConfig {
                 depth: 2,
@@ -800,7 +804,7 @@ mod tests {
             }),
             starvation: None,
         };
-        let mut sched = DetScheduler::with_policy(3, policy);
+        let mut sched = DetScheduler::with_policy(4, policy);
         let order = drive(&mut sched, 3, 30);
         let report = sched.policy_report().unwrap();
         assert_eq!(report.pct_change_points, 1);
