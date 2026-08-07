@@ -278,3 +278,26 @@ cluster so the fixes have citable symptom records.
   five Wave E knobs, net-jitter, starve; net vacuity class; sched-det XOR
   seeds) are explicit `None` arms with pinned gate lists that fail loudly
   when a gap closes.
+- **2026-08-07 (arc-completion round) — unified-fault-knobs acceptance met; two
+  dogfooding catches became structure.** F+ phasing per scout evidence: entropy
+  (`--entropy-fail-permille`, gen byte 28) and clock realtime jumps
+  (`--epoch-jump-nanos`, byte 29, signed per-read draw saturating at zero,
+  monotonic untouched — realtime-anchored deadlines deliberately jump, that is
+  what an OS clock jump does) landed now; clock skew and spawn faults wait for
+  a scheduler/monotonic API wave; allocator faults are out of scope (nothing is
+  interposed). Acceptance is a repeatable script (`testbeds/workq/acceptance.sh`)
+  whose catch selection requires `shorts_applied>0` alongside the marker — its
+  own red-proof caught a marker-only confound. The campaign found TWO real
+  pre-existing workq bugs while proving it: the WAL never parent-dir-fsync'd
+  its segments (dir-fsync model correctly dropped them; fixed with fsync_dir),
+  and the segment probe used `Path::exists()`, which swallows injected stat
+  errors so the audit fabricated violations against an intact log (fixed:
+  NotFound ends the probe, anything else fails closed). Both lessons are now
+  guest guidance in the skill doc. Process: the deterministic testbed gates
+  joined `mise run check` (two incidents proved CI-only steps hide landings);
+  schedule-sensitive seeded-bug demos sweep a bounded seed window instead of
+  pinning one seed (the domain_seed migration re-rolled schedules and broke the
+  Linux pin — verified on both platforms before push). Open fork awaiting user:
+  how guest-deliberate fail-closed aborts become classifiable (standard
+  contract line vs spec-declared markers) — 15/40 acceptance generations filed
+  UNCLASSIFIED off workq's own WORKQ_ABORT dialect.

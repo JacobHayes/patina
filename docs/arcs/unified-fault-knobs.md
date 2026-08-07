@@ -7,8 +7,16 @@ latency, `--budget`/`test`-buggify parity, the crash-placement campaign band) an
 (SimNet + shim wildcard-bind routing, `Operation::DnsResolve` + `Context::dns_resolve`,
 the `getaddrinfo`/`freeaddrinfo` interposer, `--dns-entry`/`Kind::DnsEntry` + both fault knobs +
 `DnsConfigRecord` + reconcile, the WASI family exception, the harness `dns_entry`/`dns_service`
-builders, and the campaign DNS band + `VACUOUS_DNS_FAULT` class) implemented 2026-08-06; Waves E-F
-remain planned. The §0 file:line references are as verified at design
+builders, and the campaign DNS band + `VACUOUS_DNS_FAULT` class) implemented 2026-08-06; Wave E
+(network faults: duplication, connect-refuse, reset, `--net-partition`, TCP buffer sizing) and the
+F+ planes in scope (entropy `--entropy-fail-permille`, clock `--epoch-jump-nanos`) implemented
+2026-08-07, consolidated on the `FaultKnob` enum + one metadata table so a new knob is walked by
+the compiler and the band-or-waiver / vacuity / forwarding gates. **Acceptance met 2026-08-07**
+(repeatable: `testbeds/workq/acceptance.sh`): a `--faults --swarm` campaign over workq shows fs and
+dns generations firing non-vacuously, the planted ignored-short-write bug caught, minimized with
+the violation preserved, and replayed flag-free byte-identically. Clock skew and spawn faults are
+deferred to a scheduler/monotonic-API wave; allocator faults are out of scope (no interposition
+exists). The §0 file:line references are as verified at design
 time (post-e135c94) and have since moved.
 
 ## 0. Verified current state (what this builds on, with the gaps found)
