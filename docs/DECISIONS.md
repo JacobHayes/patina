@@ -301,3 +301,13 @@ cluster so the fixes have citable symptom records.
   how guest-deliberate fail-closed aborts become classifiable (standard
   contract line vs spec-declared markers) — 15/40 acceptance generations filed
   UNCLASSIFIED off workq's own WORKQ_ABORT dialect.
+- **2026-08-07 — ctor limitation reclassified: scope decision, not impossibility.**
+  Patina controls the guest link, so the shim's constructor could be sequenced
+  first and guest ctors treated as a recorded deterministic prologue (their
+  order is fixed for a fixed binary, and traces are build-fingerprinted). It
+  stays out of scope because early-init bring-up is the most fragile corner of
+  both loaders (dyld/glibc init interleaving, TLS and malloc initialization,
+  the shim's own alias resolution) and source-available guests have the
+  two-line cfg-guard pattern. The one case the workaround cannot serve — a
+  binary-only unmodified guest with an effectful static constructor — is the
+  trigger that would promote "ctor prologue support" to a real arc.
