@@ -331,3 +331,22 @@ cluster so the fixes have citable symptom records.
   `crates/*`; the `WORKQ_VIOLATION`/`BUG_CAUGHT` strings in the campaign
   classifier are the named debt the arc removes. Design:
   `docs/arcs/outcome-channel.md`.
+- **2026-08-12 — pre-main probe ran; the platforms are asymmetric.** Measured
+  evidence in `docs/probes/premain-init.md` (probe verified by re-running
+  firsthand). Linux: main-executable `.preinit_array` runs before every
+  `.init_array` constructor in every delivery shape patina uses — static
+  archive, rustc-driven link, `crt-static` — and before all shared-object
+  ctors including `LD_PRELOAD`. Caveats: ordering *within* preinit is link
+  order (a guest can register its own preinit entry — detect and refuse, don't
+  assume), and a DSO `.preinit_array` fails two ways (GNU ld refuses; gold
+  emits a `DT_PREINIT_ARRAY` glibc silently ignores — audit the tag, don't
+  trust the linker). macOS: initializer order follows the link line as
+  claimed, and that is exactly the problem — rustc places crate objects ahead
+  of every `-l static=` library and `-C link-arg` appends (no stable hook to
+  prepend), so **a static shim can never run before guest ctors in a
+  rustc-driven link**; `-force_load` makes it last. Only a dylib wins (linked
+  `-l dylib=`, or `DYLD_INSERT_LIBRARIES` with SIP caveats). Consequence for
+  the init-prologue arc: Linux gets an order-independent guarantee for free;
+  macOS requires a shim packaging change (staticlib → dylib) — that choice is
+  the arc's first design decision. Untested: x86_64 Linux, musl, signed/SIP
+  binaries.
