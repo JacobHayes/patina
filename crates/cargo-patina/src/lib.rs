@@ -38,7 +38,8 @@ use patina_dst_runtime::{
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
     native_binary_has_sud_marker, native_binary_is_shim_linked, native_deny_trap_armed,
-    native_escape_is_sud_manageable, render_native_escapes_grouped, shim_control_plane_symbols,
+    native_escape_is_sud_manageable, render_inert_weak_imports, render_native_escapes_grouped,
+    shim_control_plane_symbols,
 };
 use patina_dst_trace::TraceBundle;
 use patina_dst_wasi_host::{
@@ -4263,6 +4264,12 @@ trapped into the deterministic runtime via syscall-user-dispatch. Runnable on a 
     // import table), so add the non-blocking "fails later" note naming any this
     // binary references — visible up front rather than only when a call aborts.
     emit_native_deny_trap_note(&bytes);
+    // Same visibility rule for imports the undefined-weak rule cleared: the
+    // audit outcome ignores them, but the surface stays named, on stderr in
+    // both output modes so the JSON envelope stays schema-stable.
+    if let Some(note) = render_inert_weak_imports(&audit.inert_weak_imports) {
+        eprintln!("{note}");
+    }
     Ok(0)
 }
 
