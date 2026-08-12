@@ -356,8 +356,13 @@ $ cargo patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina --fo
   That way every generation is still reproducible from its patina seed alone,
   and replay needs no extra flags.
 - Make atomics-only race windows schedulable: `cargo patina build --yield-points`.
-- Shrink a failing trace to its essence: `cargo patina minimize bug.patina
-  --output small.patina -- ./oracle`.
+- Reduce a campaign failure to a one-line reproduction: `cargo patina minimize
+  --generation 14 --out-dir out/ --marker 'wal corruption'` delta-debugs that
+  generation's fault knobs first (usually 17-18 down to 1-2, in about twenty
+  seeded re-runs), prints the standalone command that still fails, and then
+  shrinks a trace recorded from it. Add `--no-trace-phase` for the knobs alone.
+- Shrink a failing trace to its essence against your own oracle:
+  `cargo patina minimize bug.patina --output small.patina -- ./oracle`.
 - See `llms.txt` for the full CLI/SDK map and `testbeds/workq` (a durable work
   queue: WAL crash-recovery, SimNet faults, buggify) for the flagship end-to-end
   demonstration.

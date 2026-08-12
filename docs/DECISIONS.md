@@ -433,3 +433,70 @@ cluster so the fixes have citable symptom records.
   inlined rdtsc — confirming the aws side was a classification gap and the
   foyer side is a genuine cpu-nondeterminism escape (the in-flight TSC trap
   slice is its fix). Sandbox terminated with proof.
+- **2026-08-12 — minimize CLI wave: knobs-first pipeline, patina-owned oracle,
+  `--jobs`, polarity guard.** `cargo patina minimize --generation N --marker
+  TEXT` is the new front door for a campaign failure and runs the user-settled
+  default: reduce the fault-knob vector FIRST, then delta-debug a trace recorded
+  from the minimal-knob run, with `--no-trace-phase` as the knob-only opt-out.
+  Measured on the probe's own case (workq generation 14, macOS arm64, 10 CPUs):
+  18 knobs -> 2 in 22 seeded re-runs, 0.45 s at the default `--jobs` and 0.96 s
+  at `--jobs 1`, landing on the same two knobs the probe found by hand
+  (`--fs-short-permille 122 --dns-entry workq-server=127.0.0.1`), and the printed
+  command reproduces standalone in 32 ms. The trace phase over that reduction is
+  21.5 s at the default (jobs=5 on this host) against 57.6 s at `--jobs 1`,
+  2.7x, for byte-identical output at jobs 1, 5 and 8.
+  Hermeticity is the reason parallelism is safe and is stated as an invariant:
+  patina's own oracle replays each candidate into its own temp directory with
+  the guest's filesystem, clock, network and entropy virtualized, so it is
+  parallel by default; an oracle COMMAND is opaque to patina and stays serial
+  unless `--jobs` opts in, with a printed declination saying why. Parallelism is
+  throughput-only by construction rather than by testing: a reducer offers the
+  oracle the window of candidates a one-at-a-time scan would try next and keeps
+  only the FIRST accept in scan order, so a widened window cannot move the
+  result (red-proved by taking the last accept instead of the first). The
+  built-in oracle also closes the probe's section 4 option 6 fail-open: a
+  candidate still fails only when the marker appears AND the replay did not
+  diverge, and `testbeds/workq/acceptance.sh`'s shell oracle now applies the
+  same rule. Two loud refusals replace two silent wrong answers: an oracle that
+  reports the failure surviving with every reducible decision deleted is refused
+  as inverted exit polarity (the footgun the minimize-core builder hit live),
+  and a generation that does not reproduce its `--marker` from its recorded seed
+  and knobs is refused before anything is dropped rather than "reduced" to
+  nothing. The schedule pass now runs once after the deletion pass settles
+  instead of inside every joint round, since only a schedule rewrite can unblock
+  a further deletion. That pair — one shared memo across the joint loop plus the
+  deferral — is attributed on the acceptance-shape search (the untouched
+  944-decision generation-14 trace, external shell oracle, `--jobs 1`, same host
+  and same trace, one build with the old joint loop and one with the new):
+  5,768 -> 3,631 oracle calls and 174.1 s -> 108.7 s for byte-identical output
+  (944 -> 927 both). The 5,768 reproduces the previous round's recorded 5,767
+  plus this wave's one polarity-guard call, so the two measurements chain.
+- **2026-08-12 — TSC trap slice landed (RDTSC + RDTSCP).** On x86-64 Linux the
+  shim arms `prctl(PR_SET_TSC, PR_TSC_SIGSEGV)` so inline `rdtsc`/`rdtscp` raise
+  a synchronous SIGSEGV the handler answers from the same `patina_clock_now`
+  every interposer and SUD row calls — a trapped counter read records an
+  ordinary `clock_now` op (parity is structural, verified in the trace). 1 tick
+  = 1 virtual ns (nominal 1 GHz), TSC_AUX fixed 0. The audit's
+  cpu-nondeterminism category now carries a per-finding mnemonic and splits on
+  it: rdtsc/rdtscp are TSC-trap-managed (downgraded ONLY on a platform that
+  arms the trap), while rdrand/rdseed and arm64 `cntvct` stay refusals — and the
+  refusal text now NAMES instruction-class findings as unallowable-and-here-
+  untrappable, closing the earlier `--allow`-silence follow-up. Metadata records
+  arming (`"tsc":true`), replay reconciles both directions (mismatch refuses).
+  Structurally mirrors the SUD slice; `sud_fatal` generalized to `trap_fatal`.
+  Cross-platform evidence: x86 Linux positive legs (armed runs, byte-identical
+  same-seed repeats, record->replay identity, rdrand still refused on the same
+  host) proven in a Tensorlake sandbox; arm64 Linux shim compiles clean under
+  `-Werror` and shim+target unit tests pass on the Tart VM (full guest-link
+  validation there is disk-blocked — pre-existing infra limit, and the slice
+  adds no arm64 runtime path); macOS host full battery green. Two disclosed
+  items: under an armed trap Rust std skips installing its stack-overflow
+  SIGSEGV handler (it installs only over SIG_DFL and the shim arms first), so a
+  stack overflow dies on the default action without std's overflow message — a
+  diagnostic regression, determinism kept, documented in the shim; fastant/
+  quanta calibrating-guest demo deferred (the 1 GHz mapping is chosen to make a
+  calibrating guest derive exactly 1 GHz — worth a follow-up). This is the fix
+  for the last SlateDB all-features refusal (foyer/fastant rdtsc). Process: the
+  wave's two builders (TSC, minimize-CLI) shared one working copy, which caused
+  a fmt-clobber and interleaved doc edits — resolved, but the standing rule is
+  now separate worktrees for concurrent builders.

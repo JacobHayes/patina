@@ -125,8 +125,22 @@ unknown option.
   reads raw `PATINA_SDK_REPORT` line(s); `--exercised OUTDIR` reads a campaign's
   `OUTDIR/sites.json`. Both join runtime counters and link-time declared SDK rows
   by label or dynamic-label file:line.
-- `cargo patina minimize <TRACE> --output PATH -- <ORACLE>` / `minimize --scenario --seed N -- <ORACLE>`
+- `cargo patina minimize --generation N [--out-dir DIR] --marker TEXT [--output PATH] [--no-trace-phase] [--jobs N]`
+  Reduce one failing campaign generation, knobs first: delta-debug the fault-knob
+  vector that generation drew (each candidate a fresh seeded `run`), print and
+  write the standalone reproduction command to `DIR/minimized/generation-N.repro`,
+  then delta-debug a trace recorded from that minimal-knob run. `--marker TEXT`
+  (`A|B` matches either) builds patina's own oracle: a candidate still fails only
+  when the marker appears AND the replay did not diverge. Because that oracle is
+  hermetic by construction, candidates are evaluated in parallel by default
+  (`--jobs`, default half the CPUs).
+- `cargo patina minimize <TRACE> --output PATH [--jobs N] -- <ORACLE>` / `minimize --scenario --seed N -- <ORACLE>`
   Delta-debug a failing trace, or shrink the seed/params that trigger a failure.
+  The oracle is handed one candidate at a time at `$PATINA_MINIMIZE_TRACE` and a
+  NON-ZERO exit means "the failure is still present"; an oracle whose verdicts are
+  inverted is refused rather than obeyed. An external oracle is serial unless
+  `--jobs N` opts in, because only a patina-owned oracle is hermetic by
+  construction.
 
 ## Fault + buggify knobs (seed-driven, default off; recorded into the trace)
 

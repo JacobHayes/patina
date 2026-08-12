@@ -58,8 +58,12 @@ stopping at the first failure. `campaign` is the heavier instrument: a
 config-driven fault-and-schedule sweep where every generation's seed and knobs
 are a pure function of the generation number, with outcome classification,
 novel-failure deduplication with saved traces, per-failure repro commands, and
-accumulated coverage. `minimize` shrinks a failing trace, or the seed and
-parameters that trigger a failure, against an oracle.
+accumulated coverage. `minimize` reduces what a campaign found: pointed at a
+failing generation it shrinks the fault-knob vector first — the answer is a
+standalone reproduction command naming the one or two faults that matter, which
+is both the cheaper search and the more useful answer — and then shrinks a trace
+recorded from that reduction. It also shrinks a trace on its own, or the seed and
+parameters that trigger a failure, against an oracle you supply.
 
 **Fault domains** (all seed-driven, off by default, and recorded into the trace
 so replay reproduces them): filesystem crashes at a chosen operation and ordinal,

@@ -137,6 +137,34 @@ exit 134 **without** one is the guest's own doing and classifies
 `ABORT_INTENT`/`VIOLATION` verdict enriches it (label/detail in the report),
 but is not required for the class to fire.
 
+### 4.5 The recognition primitive — one mechanism, two consumers
+
+Campaign classification and `minimize` both need to recognize a failure from a
+run's output, and today they do it with two unrelated oracles: the campaign
+greps hardcoded markers in `classify()`, while `minimize` makes the operator
+hand-write a shell oracle that re-greps the same thing (the campaign already
+knew the generation was a violation, then discards that and asks the user to
+re-encode it). The envelope closes this incoherence without conflating the two
+questions, which are genuinely different:
+
+- **Campaign** asks a multi-way, open question — *which class did this
+  generation land in?* (discovery; the whole `classify()` taxonomy).
+- **Minimize** asks a binary, targeted question — *does this candidate still
+  exhibit the same failure the seed generation had?* (a fixed target).
+
+Extract one primitive, `recognize_verdicts(envelope) -> Set<Verdict>`. Campaign
+classifies *from* it; `minimize` captures the seed generation's verdict set as
+its **target** and its oracle becomes "does this candidate's replay envelope
+still contain that verdict (kind + label)?" — auto-derived, so
+`minimize --generation N` needs no hand-written `--marker`. It reuses only the
+recognition primitive, never the whole classifier (the vacuity/infra classes
+are meaningless for a fixed target), and the external-command/`--marker` oracle
+stays as the level-1 escape hatch, structurally identical to §4.3's
+spec-declared patterns. The built-in replay oracle already shipped for
+`minimize` (marker present AND clean replay) is the stepping-stone; this makes
+the target auto-derived once verdicts are structured. Feeds the
+`custom-ops` arc's boundary discussion (`docs/arcs/custom-ops.md`).
+
 ## 5. Waves
 
 - **Wave A — ABI + envelope.** `patina_verdict` in the shim (host-alias

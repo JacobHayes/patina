@@ -86,7 +86,8 @@ patina-dst-runtime          # runtime context, driver installation, record/repla
                             #   params; explicit-context `run`/`run_with`/`Context`
 patina-dst-async            # deterministic futures executor over the explicit boundary
 patina-dst-trace            # trace bundle format, migration, branch metadata, strict replay matching
-patina-dst-minimize         # pluggable failure-oracle reducers for traces/schedules/scenarios
+patina-dst-minimize         # pluggable failure-oracle reducers for traces/schedules/scenarios;
+                            #   oracles may declare a batch width and judge a speculative window
 patina-dst-target           # target metadata, import audit + escape classes, instruction scan
 patina-dst-proptest         # proptest compatibility: case generation from the run's seeded entropy
 
@@ -372,9 +373,15 @@ Static, pre-run checks reject a native binary before it executes:
   interposed, provably effect-free, or explicitly `--allow`ed; anything unknown
   is a refusal (`cargo patina audit` reports the same surface `run` enforces);
 - an **instruction scan** for raw syscall/clock/entropy opcodes (`svc`/`syscall`,
-  `rdtsc`/`rdrand`, aarch64 `CNTVCT`/`RNDR`) and the x86_64 vsyscall-page
-  address; on x86_64 Linux a raw-syscall finding is downgraded to
-  *SUD-managed* (trapped at runtime) instead of refused, never silently;
+  `rdtsc`/`rdtscp`/`rdrand`/`rdseed`, aarch64 `CNTVCT`/`RNDR`) and the x86_64
+  vsyscall-page address; each finding carries its decoded mnemonic, because two
+  of them are trap-managed rather than refused on x86_64 Linux — a raw-syscall
+  finding is downgraded to *SUD-managed*, and a `rdtsc`/`rdtscp` finding to
+  *TSC-trap-managed* (the shim arms `prctl(PR_SET_TSC, PR_TSC_SIGSEGV)` and
+  answers the counter from the virtual clock). Both downgrades require the
+  matching shim marker and a live platform probe, and both are reported, never
+  silent. The rest of the class (`rdrand`/`rdseed`/`CNTVCT`) has no trap and is
+  refused everywhere;
 - WASI module imports are audited against the host's explicit allowlist before
   instantiation.
 

@@ -130,7 +130,7 @@ source-first native libtest harness mode for one exact test target.
 | `campaign` | Config-driven fault-and-schedule sweep with failure dedup, SDK oracle coverage gate, and native edge-coverage accumulation for yield-point binaries. | `cargo patina campaign ./app --gens 200 --buggify --out-dir out/` |
 | `coverage` | Symbolize and roll up a `patina.covmap/v1` map or campaign coverage store. | `cargo patina coverage ./app out/` |
 | `sites` | Inventory assertion/oracle instrumentation; optionally join a run or campaign SDK report. | `cargo patina sites --exercised out/` |
-| `minimize` | Shrink a failing trace (or seed/params) against an oracle. | `cargo patina minimize bug.patina --output small.patina -- ./oracle` |
+| `minimize` | Reduce a failing campaign generation (fault knobs first, then its trace), a failing trace, or the seed/params, against an oracle. | `cargo patina minimize --generation 14 --out-dir out/ --marker 'wal corruption'` |
 
 Native harness mode is the tight point-solution loop: `cargo patina test
 <DIR|Cargo.toml> --harness-target NAME --exact MOD::test --seeds N` runs the

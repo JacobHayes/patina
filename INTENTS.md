@@ -91,7 +91,7 @@ Unsupported effects are pre-run refusals when they can be detected statically (t
 - host filesystem or network access without explicit policy;
 - CPU instructions such as `rdtsc` or `rdrand` when not virtualized.
 
-Raw inline syscalls follow the same rule with one deepening: where the platform allows it (syscall-user-dispatch on x86_64 Linux), they are trapped *into* the deterministic runtime instead of refused; everywhere else they remain a refusal. Either way, never a silent escape.
+Raw inline syscalls follow the same rule with one deepening: where the platform allows it (syscall-user-dispatch on x86_64 Linux), they are trapped *into* the deterministic runtime instead of refused; everywhere else they remain a refusal. The timestamp counter is the same story with a different mechanism: on x86_64 Linux `rdtsc`/`rdtscp` are trapped (`PR_SET_TSC`) and answered from the virtual clock, so they become an ordinary clock read; `rdrand`/`rdseed` and the arm64 system counter have no trap and stay refusals. Either way, never a silent escape.
 
 `cfg(patina)` and `cfg(dst)` exist as escape hatches for code that genuinely needs deterministic replacements, but they are secondary mechanisms. The primary mechanism is the deterministic platform boundary.
 
