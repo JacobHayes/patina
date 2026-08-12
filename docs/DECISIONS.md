@@ -422,3 +422,14 @@ cluster so the fixes have citable symptom records.
   child failure classifies UNCLASSIFIED today (outcome-channel Wave B
   candidate); inverted oracle polarity "minimizes" everything (polarity guard
   in the CLI wave).
+- **2026-08-12 — aws-features-zero-allow residual CLOSED on the real corpus.**
+  Linux x86 sandbox re-audit at 314c68be: slatedb-dst with every feature except
+  foyer audits EXIT 0 with zero `--allow` — the five aws-lc weak hooks appear
+  under the new inert-weak stderr note (both output modes verified),
+  `__assert_fail` and `__isoc23_sscanf` classify silently into the residual
+  list, the deny-trap set is byte-identical to baseline, and default-features
+  shows no regression (66 residual symbols, no inert-weak note). Full
+  all-features-with-foyer now refuses on exactly ONE finding — the fastant
+  inlined rdtsc — confirming the aws side was a classification gap and the
+  foyer side is a genuine cpu-nondeterminism escape (the in-flight TSC trap
+  slice is its fix). Sandbox terminated with proof.
