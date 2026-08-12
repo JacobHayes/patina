@@ -71,7 +71,7 @@ unknown option.
   first failing seed with `PATINA_EXPLORE_FAILURE seed=S exit=E repro="cargo patina run ... --seed S"`;
   the JSON envelope's `message` carries the same repro. Otherwise
   `PATINA_EXPLORE_COMPLETE start=... seeds=...`.
-- `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults] [--dns-entry NAME=ADDR]`
+- `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults] [--dns-entry NAME=ADDR] [--harness] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...]`
   Config-driven deterministic fault-and-schedule sweep: every generation's seed
   and knobs are a pure function of the generation number. `--faults` bands the
   fs error/short/latency rates, the crash PLACEMENT (op class + ordinal, plus
@@ -82,7 +82,13 @@ unknown option.
   the DNS band (fail per-mille + resolution latency) — with no defined name every
   lookup is NXDOMAIN by semantics and the knobs could not fire, so the band is not
   emitted at all. A WASI campaign carrying a host table is refused (no wasip1
-  resolution surface). Outcomes are
+  resolution surface). `--harness` (a `patina-dst-harness` binary), `--allow
+  SYMBOL` (repeatable), and `--allow-unsupported-symbols` are campaign SHAPE in
+  the same sense: the native `run` invocation is forwarded verbatim to every
+  generation, so a guest that needs the harness deferral or the pre-run gate
+  hatch can be swept at all instead of being refused identically in every
+  generation. They also ride on the reproduce commands, since a trace cannot
+  carry them; a non-native campaign carrying one is refused by name. Outcomes are
   classified into nine classes, novel failure signatures are deduped with saved
   traces, SDK site coverage is folded into `<out-dir>/sites.json` (schema
   `patina.campaign.sites/v1`), and native yield-point edge coverage is folded

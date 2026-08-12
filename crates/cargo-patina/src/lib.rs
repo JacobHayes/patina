@@ -9254,13 +9254,16 @@ mod tests {
                 verb.name
             );
             // The verb's own flags are present; a DIFFERENT verb's unique flag is
-            // not. `run`'s `--harness` is unique to run/replay, so it never appears
-            // in, say, `build`'s payload.
+            // not. `run`'s `--mount` (re-supplying a host corpus) is unique to
+            // run/replay, so it never appears in, say, `build`'s payload.
+            // Deliberately NOT `--harness`: `campaign` forwards that one to its
+            // child runs and registers it too, so it would not be a probe of
+            // leakage.
             let names = flag_names(&json["verb"]["flag_groups"]);
             if verb.name != "run" && verb.name != "replay" {
                 assert!(
-                    !names.contains("--harness"),
-                    "{}'s payload leaked run's unique --harness flag",
+                    !names.contains("--mount"),
+                    "{}'s payload leaked run's unique --mount flag",
                     verb.name
                 );
             }
@@ -9268,8 +9271,8 @@ mod tests {
         // Positive: run's payload does contain its unique flag.
         let run = verb_json("run");
         assert!(
-            flag_names(&run["verb"]["flag_groups"]).contains("--harness"),
-            "run's payload should contain its own --harness flag"
+            flag_names(&run["verb"]["flag_groups"]).contains("--mount"),
+            "run's payload should contain its own --mount flag"
         );
     }
 

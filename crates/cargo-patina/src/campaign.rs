@@ -118,6 +118,19 @@ pub struct CampaignSpec {
     /// are all NXDOMAIN by semantics and no DNS fault is ever eligible — so the
     /// band is only emitted when this is non-empty.
     pub dns_entries: Vec<String>,
+    /// Sweep a `patina-dst-harness` binary: every generation's child `run` gets
+    /// `--harness`, so the guest installs and configures the runtime itself.
+    ///
+    /// Invocation shape rather than a per-generation draw, and — like
+    /// [`Self::allow_symbols`] and [`Self::allow_unsupported_symbols`] — a fact the
+    /// trace cannot carry, so the reproduce commands re-supply it too. Native only:
+    /// there is no WASI harness family.
+    pub harness: bool,
+    /// Symbols added to every generation's pre-run gate allow list (`--allow`).
+    pub allow_symbols: Vec<String>,
+    /// The `--allow-unsupported-symbols` policy (`all` or a symbol list) every
+    /// generation runs under.
+    pub allow_unsupported_symbols: Option<String>,
     /// Generic liveness-watchdog budget (virtual nanoseconds), applied every
     /// generation when set.
     pub watchdog_nanos: Option<u64>,
@@ -152,6 +165,9 @@ impl Default for CampaignSpec {
             pct: false,
             faults: false,
             dns_entries: Vec::new(),
+            harness: false,
+            allow_symbols: Vec::new(),
+            allow_unsupported_symbols: None,
             watchdog_nanos: None,
             converge_nanos: None,
             heal_after_nanos: None,
@@ -212,6 +228,38 @@ impl CampaignSpec {
                         })
                         .collect::<Result<_, CliError>>()?;
                 }
+                "harness" => self.harness = json_bool(key, val)?,
+                "allow_symbols" => {
+                    let array = val
+                        .as_array()
+                        .ok_or_else(|| CliError("allow_symbols must be a JSON array".into()))?;
+                    self.allow_symbols = array
+                        .iter()
+                        .map(|v| {
+                            let symbol = v.as_str().ok_or_else(|| {
+                                CliError("allow_symbols entries must be strings".into())
+                            })?;
+                            // A spec file bypasses the CLI value grammar; hold it to
+                            // the same one so an empty symbol fails here rather than
+                            // as an opaque child-run refusal in every generation.
+                            crate::values::validate(help::Kind::Symbol, "allow_symbols", symbol)
+                                .map_err(|error| CliError(format!("campaign spec {error}")))?;
+                            Ok(symbol.to_string())
+                        })
+                        .collect::<Result<_, CliError>>()?;
+                }
+                "allow_unsupported_symbols" => {
+                    let value = val.as_str().ok_or_else(|| {
+                        CliError("allow_unsupported_symbols must be a string".into())
+                    })?;
+                    crate::values::validate(
+                        help::Kind::UnsupportedSymbols,
+                        "allow_unsupported_symbols",
+                        value,
+                    )
+                    .map_err(|error| CliError(format!("campaign spec {error}")))?;
+                    self.allow_unsupported_symbols = Some(value.to_string());
+                }
                 "watchdog_nanos" => self.watchdog_nanos = Some(json_u64(key, val)?),
                 "converge_nanos" => self.converge_nanos = Some(json_u64(key, val)?),
                 "heal_after_nanos" => self.heal_after_nanos = Some(json_u64(key, val)?),
@@ -225,8 +273,9 @@ impl CampaignSpec {
                     return Err(CliError(format!(
                         "unknown campaign spec key {other:?}; expected generations, seed_base, \
                          timeout_secs, guest_args, buggify, swarm, pct, faults, dns_entries, \
-                         watchdog_nanos, converge_nanos, heal_after_nanos, report, \
-                         plateau_after, guided, or allow_unmet_sometimes"
+                         harness, allow_symbols, allow_unsupported_symbols, watchdog_nanos, \
+                         converge_nanos, heal_after_nanos, report, plateau_after, guided, or \
+                         allow_unmet_sometimes"
                     )));
                 }
             }
@@ -389,6 +438,14 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     let dns_entries = args.texts("--dns-entry");
     if !dns_entries.is_empty() {
         spec.dns_entries = dns_entries.into_iter().map(str::to_string).collect();
+    }
+    spec.harness |= args.flag("--harness");
+    let allow_symbols = args.texts("--allow");
+    if !allow_symbols.is_empty() {
+        spec.allow_symbols = allow_symbols.into_iter().map(str::to_string).collect();
+    }
+    if let Some(value) = args.text("--allow-unsupported-symbols") {
+        spec.allow_unsupported_symbols = Some(value.to_string());
     }
     if let Some(value) = args.u64("--liveness-watchdog") {
         spec.watchdog_nanos = Some(value);
@@ -1348,6 +1405,19 @@ fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     if !spec.dns_entries.is_empty() {
         map.insert("dns_entries".into(), spec.dns_entries.clone().into());
     }
+    // Same default-omit rule as the host table above: a campaign that forwards
+    // none of the native harness/gate surface records exactly the JSON it did
+    // before these keys existed, so an out-dir written by an earlier build still
+    // round-trips through the canonical-form check on `--resume`.
+    if spec.harness {
+        map.insert("harness".into(), true.into());
+    }
+    if !spec.allow_symbols.is_empty() {
+        map.insert("allow_symbols".into(), spec.allow_symbols.clone().into());
+    }
+    if let Some(value) = &spec.allow_unsupported_symbols {
+        map.insert("allow_unsupported_symbols".into(), value.clone().into());
+    }
     if let Some(value) = spec.watchdog_nanos {
         map.insert("watchdog_nanos".into(), value.into());
     }
@@ -1763,6 +1833,21 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
         ));
     }
 
+    // The same shape for the forwarded `run <BINARY>` surface: campaign has one
+    // parsing family, so the native-only restriction is enforced here, where the
+    // artifact family is finally known, and the refusal names the flag the
+    // operator typed rather than silently dropping it from every generation.
+    if state.artifact.family != "native" {
+        if let Some(flag) = non_native_invocation_flag(&state.spec) {
+            return Err(CliError::usage(format!(
+                "{flag} is a native `run` option, but this campaign's artifact is a {} module: \
+                 the harness and pre-run gate surface belong to the native supervisor; sweep a \
+                 native artifact to use it",
+                state.artifact.family
+            )));
+        }
+    }
+
     if let CampaignMode::Resume = mode {
         if state.generations_done == state.spec.generations {
             return Err(CliError(format!(
@@ -1926,6 +2011,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
                 &artifact_path,
                 seed,
                 &flags,
+                &invocation_flags(&state.spec, state.artifact.family),
                 &state.spec.guest_args,
                 saved_trace.as_deref(),
             );
@@ -2503,13 +2589,64 @@ fn vacuity_class(knob: FaultKnob) -> Option<CampaignClass> {
     }
 }
 
+/// The first native-only invocation flag this spec carries, if any — the name a
+/// non-native campaign's refusal quotes.
+fn non_native_invocation_flag(spec: &CampaignSpec) -> Option<&'static str> {
+    if spec.harness {
+        return Some("--harness");
+    }
+    if !spec.allow_symbols.is_empty() {
+        return Some("--allow");
+    }
+    if spec.allow_unsupported_symbols.is_some() {
+        return Some("--allow-unsupported-symbols");
+    }
+    None
+}
+
+/// The child-run flags that are pure INVOCATION SHAPE rather than a seed-derived
+/// draw: `--harness` and the pre-run gate surface (`--allow`,
+/// `--allow-unsupported-symbols`). Every generation gets them verbatim.
+///
+/// Their own function because the reproduce commands need exactly this set and
+/// nothing else. Native replay restores every semantic input from the trace, but
+/// these three are host/build facts a trace cannot carry (see
+/// `parse_native_replay`), so a `cargo patina replay` line that dropped them would
+/// hand the operator a command that fails closed on the guest the campaign just
+/// swept.
+///
+/// Native-only: `--harness` names a native harness binary and the pre-run gate is
+/// the native supervisor's. A non-native campaign carrying one is refused by name
+/// upstream (`run_campaign`), so the family check here is belt and braces —
+/// mirroring the DNS band.
+fn invocation_flags(spec: &CampaignSpec, family: &'static str) -> Vec<String> {
+    let mut flags = Vec::new();
+    if family != "native" {
+        return flags;
+    }
+    if spec.harness {
+        push_run_flag(&mut flags, "--harness", RunValue::Switch);
+    }
+    for symbol in &spec.allow_symbols {
+        push_run_flag(&mut flags, "--allow", RunValue::Text(symbol.clone()));
+    }
+    if let Some(policy) = &spec.allow_unsupported_symbols {
+        push_run_flag(
+            &mut flags,
+            "--allow-unsupported-symbols",
+            RunValue::Text(policy.clone()),
+        );
+    }
+    flags
+}
+
 /// Derive the per-generation `run` flags from the generation hash. Native-only
 /// exploration knobs (`--swarm`, `--sched-pct`) are skipped for a WASI module
 /// (single-threaded; the WASI `run` does not accept them). Every draw indexes
 /// through a [`gen_byte`] claim so no two bands can share a byte unnoticed.
 fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> Vec<String> {
     let native = family == "native";
-    let mut flags = Vec::new();
+    let mut flags = invocation_flags(spec, family);
 
     if spec.buggify {
         // Activation in [300, 900] permille, fire in [300, 900] permille — a wide
@@ -2710,13 +2847,24 @@ fn reproduce_command(
     artifact: &Path,
     seed: u64,
     flags: &[String],
+    invocation: &[String],
     guest_args: &[String],
     trace: Option<&str>,
 ) -> String {
-    // A valid recorded trace replays flag-free (the trace is authoritative); a
-    // traceless failure (a mid-run abort) reproduces by a deterministic re-run.
+    // A valid recorded trace replays flag-free EXCEPT for the invocation shape the
+    // trace cannot carry (`--harness`, the pre-run gate surface): every semantic
+    // input is authoritative in the trace, but a harness binary replayed without
+    // `--harness` fails closed, so those flags ride along. A traceless failure (a
+    // mid-run abort) reproduces by a deterministic re-run, whose `flags` already
+    // contain them.
     if let Some(trace) = trace {
-        return format!("cargo patina replay {} {trace}", artifact.display());
+        let mut parts = vec![
+            "cargo patina replay".to_string(),
+            artifact.display().to_string(),
+            trace.to_string(),
+        ];
+        parts.extend(invocation.iter().cloned());
+        return parts.join(" ");
     }
     let mut parts = vec![
         "cargo patina run".to_string(),
@@ -5451,6 +5599,201 @@ mod tests {
             error.to_string().contains("dotted-quad"),
             "expected a loud grammar error, got {error}"
         );
+    }
+
+    // The native harness/pre-run-gate surface a campaign forwards verbatim. A
+    // guest that needs `--harness` or the gate hatch is not "a campaign that
+    // reports failures" — it is a campaign that cannot run at all, every
+    // generation refused identically, so the forwarding is what makes the sweep
+    // possible.
+    #[test]
+    fn the_native_invocation_surface_is_forwarded_to_every_generation_and_never_to_wasi() {
+        let spec = CampaignSpec {
+            harness: true,
+            allow_symbols: vec!["semaphore_wait".into(), "semaphore_signal".into()],
+            allow_unsupported_symbols: Some("all".into()),
+            ..CampaignSpec::default()
+        };
+        for generation in 0..8 {
+            let native = derive_flags(&spec, &generation_hash(0, generation), "native");
+            assert!(
+                native.iter().any(|f| f == "--harness"),
+                "generation {generation} lost --harness: {native:?}"
+            );
+            let allowed: Vec<&String> = native
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index > 0 && native[index - 1] == "--allow")
+                .map(|(_, value)| value)
+                .collect();
+            assert_eq!(
+                allowed,
+                vec!["semaphore_wait", "semaphore_signal"],
+                "the allow list must be forwarded whole and in order: {native:?}"
+            );
+            let index = native
+                .iter()
+                .position(|f| f == "--allow-unsupported-symbols")
+                .expect("the gate hatch");
+            assert_eq!(native[index + 1], "all");
+        }
+        // No WASI harness family and no WASI pre-run gate: the WASI `run` parser
+        // refuses all three, so forwarding them would turn every generation into a
+        // usage error. The artifact is refused upstream; this is belt and braces.
+        let wasi = derive_flags(&spec, &generation_hash(0, 0), "wasi");
+        for flag in ["--harness", "--allow", "--allow-unsupported-symbols"] {
+            assert!(
+                !wasi.iter().any(|f| f == flag),
+                "the WASI family must never receive {flag}: {wasi:?}"
+            );
+        }
+        // A spec that asks for none of it forwards none of it.
+        let bare = derive_flags(&CampaignSpec::default(), &generation_hash(0, 0), "native");
+        for flag in ["--harness", "--allow", "--allow-unsupported-symbols"] {
+            assert!(!bare.iter().any(|f| f == flag), "unasked-for {flag}");
+        }
+    }
+
+    // The forwarded flags must be spelled exactly as `run <BINARY>` declares them.
+    // Campaign builds each child flag through `push_run_flag`, which reads RUN's
+    // arity, so a campaign row that disagreed with run's would emit a value shape
+    // the child rejects — in every generation, as an INFRA storm rather than a
+    // parse error here.
+    #[test]
+    fn the_forwarded_flags_match_the_run_registry_rows() {
+        let campaign = help::verb("campaign").expect("`campaign` is registered");
+        let run = help::verb("run").expect("`run` is registered");
+        for name in ["--harness", "--allow", "--allow-unsupported-symbols"] {
+            let ours = campaign
+                .family_flags(help::Family::Sole)
+                .find(|flag| flag.name == name)
+                .unwrap_or_else(|| panic!("campaign must register {name}"));
+            let theirs = run
+                .family_flags(help::Family::Native)
+                .find(|flag| flag.name == name)
+                .unwrap_or_else(|| panic!("run <BINARY> must register {name}"));
+            assert_eq!(
+                ours.value.grammar(),
+                theirs.value.grammar(),
+                "{name} grammar differs from run's"
+            );
+            assert_eq!(
+                ours.value.placeholder(),
+                theirs.value.placeholder(),
+                "{name} value shape differs from run's"
+            );
+            assert_eq!(
+                ours.repeatable, theirs.repeatable,
+                "{name} repeatability differs from run's"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reproduce_command_carries_the_invocation_flags_the_trace_cannot() {
+        let spec = CampaignSpec {
+            harness: true,
+            allow_unsupported_symbols: Some("all".into()),
+            ..CampaignSpec::default()
+        };
+        let invocation = invocation_flags(&spec, "native");
+        let artifact = PathBuf::from("guest-bin");
+        // The trace form: replay restores every SEMANTIC input, but `--harness` and
+        // the gate surface are host/build facts it cannot carry, so a repro line
+        // without them fails closed on the operator.
+        let replay = reproduce_command(
+            &artifact,
+            7,
+            &derive_flags(&spec, &generation_hash(0, 0), "native"),
+            &invocation,
+            &[],
+            Some("out/failures/generation-0.patina"),
+        );
+        assert_eq!(
+            replay,
+            "cargo patina replay guest-bin out/failures/generation-0.patina --harness \
+             --allow-unsupported-symbols all"
+        );
+        // The traceless form re-runs, and its flag list already contains them.
+        let rerun = reproduce_command(
+            &artifact,
+            7,
+            &derive_flags(&spec, &generation_hash(0, 0), "native"),
+            &invocation,
+            &[],
+            None,
+        );
+        assert!(
+            rerun.contains("--harness") && rerun.contains("--allow-unsupported-symbols all"),
+            "the re-run repro dropped the invocation shape: {rerun}"
+        );
+    }
+
+    #[test]
+    fn the_native_invocation_surface_round_trips_through_the_recorded_spec() {
+        let spec = CampaignSpec {
+            harness: true,
+            allow_symbols: vec!["dlsym".into()],
+            allow_unsupported_symbols: Some("semaphore_wait,semaphore_signal".into()),
+            ..CampaignSpec::default()
+        };
+        let json = spec_to_json(&spec);
+        assert_eq!(spec_from_state_json(&json).unwrap(), spec);
+        // A campaign that forwards none of it records no key at all, so an out-dir
+        // written before the keys existed still resumes.
+        let bare = spec_to_json(&CampaignSpec::default());
+        for key in ["harness", "allow_symbols", "allow_unsupported_symbols"] {
+            assert!(bare.get(key).is_none(), "a bare spec must not record {key}");
+        }
+        // A spec file bypasses the CLI value grammar, so it is validated here.
+        for (source, expected) in [
+            (r#"{"allow_symbols": [""]}"#, "must not be empty"),
+            (
+                r#"{"allow_unsupported_symbols": ""}"#,
+                "requires `all` or a comma-separated symbol list",
+            ),
+        ] {
+            let json: serde_json::Value = serde_json::from_str(source).unwrap();
+            let error = CampaignSpec::default().apply_json(&json).unwrap_err();
+            assert!(
+                error.to_string().contains(expected),
+                "expected a loud grammar error for {source}, got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_native_invocation_flags_parse_into_the_spec() {
+        let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+        let inv = parse(args(&[
+            "art",
+            "--harness",
+            "--allow",
+            "dlsym",
+            "--allow",
+            "semaphore_wait",
+            "--allow-unsupported-symbols",
+            "all",
+        ]))
+        .unwrap();
+        assert!(inv.spec.harness);
+        assert_eq!(inv.spec.allow_symbols, ["dlsym", "semaphore_wait"]);
+        assert_eq!(inv.spec.allow_unsupported_symbols.as_deref(), Some("all"));
+        // The value grammars are the registry's, enforced at parse time.
+        assert!(parse(args(&["art", "--allow-unsupported-symbols", ""])).is_err());
+        assert!(parse(args(&["art", "--allow"])).is_err());
+        // They describe the campaign's shape, so a continuation cannot change them.
+        for flag in [
+            "--harness",
+            "--allow=dlsym",
+            "--allow-unsupported-symbols=all",
+        ] {
+            let error = parse(args(&["--resume", flag])).unwrap_err().to_string();
+            assert!(
+                error.contains("recorded spec is authoritative"),
+                "{flag} must be refused on a continuation, got {error}"
+            );
+        }
     }
 
     #[test]

@@ -53,7 +53,9 @@ patina_dst_harness::run_with(
 ```
 
 Built and run through `cargo patina build` / `cargo patina run --harness`
-(replays of harness binaries also need `--harness`). Startup is *Option B:
+(replays of harness binaries also need `--harness`, and `cargo patina campaign
+--harness` forwards it to every generation and to the reproduce commands it
+prints). Startup is *Option B:
 deferred init* (the name code comments reference): the flag sets
 `PATINA_DEFER_INIT=1`, the shim's C constructor still
 captures the control plane, registers finalization, and scrubs the

@@ -9568,6 +9568,11 @@ fn replay_config_defaults_are_refused() {
     assert!(stderr.contains("config.toml:2:1"), "{stderr}");
 }
 
+// A campaign's child `run` processes are driven entirely by the derived flags, so
+// `[defaults.run]` and the `PATINA_*` run env defaults must never reach them. Both
+// probes are run-only surfaces the CAMPAIGN verb does not register — `PATINA_FUEL`
+// deliberately, since a leaked `--fuel 1` would exhaust the guest and turn the
+// sweep red, which is what makes this assertion able to fail.
 #[test]
 fn campaign_children_scrub_run_config_and_env_defaults() {
     let directory = tempdir().unwrap();
@@ -9592,7 +9597,7 @@ fn campaign_children_scrub_run_config_and_env_defaults() {
             "--format",
             "json",
         ],
-        &[("PATINA_HARNESS", "1")],
+        &[("PATINA_FUEL", "1")],
     );
     assert!(
         output.status.success(),
@@ -13867,4 +13872,229 @@ fn campaign_guided_reports_vacuous_when_only_the_bootstrap_was_novel() {
     let envelope = campaign_json_stdout(&run(json_args));
     assert_eq!(envelope["guidance"]["state"], "vacuous");
     assert_eq!(envelope["guidance"]["exploited"], 0);
+}
+
+// ---- campaign forwards the native `run` invocation shape ---------------------
+//
+// A campaign spawns child `cargo patina run` processes. `--harness` and the
+// pre-run gate surface (`--allow`, `--allow-unsupported-symbols`) are host/build
+// facts, not seed-derived knobs: without them every generation of an affected
+// guest is refused IDENTICALLY, so the campaign is not a sweep that reports
+// failures, it is a sweep that never ran the guest at all. Each gate below is
+// red-before/green-after in one test: the same guest, same generations, with and
+// without the flag.
+
+/// Run a campaign and return its output, without asserting success.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn campaign_run(out: &Path, guest: &Path, extra: &[&str]) -> Output {
+    let mut args = vec![
+        "campaign",
+        guest.to_str().unwrap(),
+        "--gens",
+        "2",
+        "--progress-every",
+        "1",
+        "--out-dir",
+        out.to_str().unwrap(),
+        "--format",
+        "json",
+    ];
+    args.extend_from_slice(extra);
+    invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        native_workspace(),
+        &args,
+    )
+}
+
+// A harness fixture cheap enough to sweep: one interposed `std::fs` round trip,
+// no faults, so every generation is OK once the harness deferral is forwarded.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const HARNESS_CAMPAIGN_SRC: &str = r#"
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    patina_dst_harness::run(|| {
+        std::fs::create_dir_all("/state")?;
+        std::fs::write("/state/v", b"hello")?;
+        println!("HARNESS_OUT read={}", std::fs::read_to_string("/state/v")?);
+        Ok::<(), std::io::Error>(())
+    })?;
+    Ok(())
+}
+"#;
+
+// Gate: a `patina-dst-harness` binary is sweepable. Without `--harness` the
+// supervisor installs the runtime itself and the guest's own install fails closed
+// (`AlreadyInstalled`) in every generation; with it, every generation runs.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn campaign_forwards_harness_deferral_to_every_generation() {
+    let directory = tempdir().unwrap();
+    let fixture = directory.path().join("camp-harness");
+    write_harness_fixture(&fixture, "harness-campaign", HARNESS_CAMPAIGN_SRC);
+    let guest = directory.path().join("harness-campaign-bin");
+    build_harness_bin(&fixture, &guest);
+
+    // RED: no `--harness`. Every generation fails closed, identically.
+    let refused = campaign_run(&directory.path().join("red"), &guest, &[]);
+    assert!(
+        !refused.status.success(),
+        "a harness guest swept without --harness must not report a clean campaign"
+    );
+    let envelope = campaign_json_stdout(&refused);
+    assert_eq!(
+        envelope["classes"]["OK"],
+        serde_json::Value::Null,
+        "no generation can have run the guest: {}",
+        envelope["classes"]
+    );
+    let signatures = serde_json::to_string(&envelope["signatures"]).unwrap();
+    assert!(
+        signatures.contains("AlreadyInstalled"),
+        "the refusal must be the harness double-install one:\n{signatures}"
+    );
+
+    // GREEN: forwarded to every generation.
+    let swept = campaign_run(&directory.path().join("green"), &guest, &["--harness"]);
+    assert!(
+        swept.status.success(),
+        "the forwarded --harness must let the campaign sweep:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&swept.stdout),
+        String::from_utf8_lossy(&swept.stderr)
+    );
+    assert_eq!(campaign_json_stdout(&swept)["classes"]["OK"], 2);
+
+    // And it is campaign SHAPE: recorded in the out-dir spec, so a continuation
+    // re-derives it without re-supplying (and refuses an attempt to change it).
+    let extended = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        native_workspace(),
+        &[
+            "campaign",
+            "--extend",
+            "1",
+            "--out-dir",
+            directory.path().join("green").to_str().unwrap(),
+            "--format",
+            "json",
+        ],
+    );
+    assert!(
+        extended.status.success(),
+        "a resumed harness campaign must re-derive --harness from the recorded spec:\nstderr:\n{}",
+        String::from_utf8_lossy(&extended.stderr)
+    );
+    assert_eq!(campaign_json_stdout(&extended)["classes"]["OK"], 3);
+}
+
+// Gate: a guest the pre-run default-deny gate refuses is sweepable through the
+// same hatches `run` offers, and — the non-vacuity half — WITHOUT them the
+// campaign still files the child refusal as INFRA, its existing class, rather
+// than regressing to UNCLASSIFIED. macOS-only for the same reason the pre-run
+// gate test is: the Mach semaphore is the still-uninterposed blocking
+// representative (`PLANTED_ESCAPE_SOURCE`).
+#[cfg(target_os = "macos")]
+#[test]
+fn campaign_forwards_the_prerun_gate_hatches_to_every_generation() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("planted_escape.rs");
+    fs::write(&source, PLANTED_ESCAPE_SOURCE).unwrap();
+    let guest = directory.path().join("planted-escape-campaign");
+    invoke_in(
+        native_workspace(),
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            guest.to_str().unwrap(),
+        ],
+    );
+
+    // RED: default-deny. Every generation is the child's pre-run refusal, filed
+    // as INFRA (harness/infrastructure failure, not a SUT finding) — pinned here
+    // so a forwarding change cannot quietly turn a known refusal into an
+    // unrecognized outcome.
+    let denied = campaign_run(&directory.path().join("red"), &guest, &[]);
+    assert!(!denied.status.success(), "the gate must deny every child");
+    let envelope = campaign_json_stdout(&denied);
+    assert_eq!(envelope["classes"]["INFRA"], 2, "{}", envelope["classes"]);
+    assert_eq!(envelope["classes"]["UNCLASSIFIED"], serde_json::Value::Null);
+
+    // GREEN (a): the blanket hatch.
+    let hatched = campaign_run(
+        &directory.path().join("green-all"),
+        &guest,
+        &["--allow-unsupported-symbols", "all"],
+    );
+    assert!(
+        hatched.status.success(),
+        "--allow-unsupported-symbols must reach every generation:\nstderr:\n{}",
+        String::from_utf8_lossy(&hatched.stderr)
+    );
+    assert_eq!(campaign_json_stdout(&hatched)["classes"]["OK"], 2);
+
+    // GREEN (b): the repeatable known-safe list, every occurrence forwarded (one
+    // symbol alone still fails closed on the other, so a truncated list cannot
+    // pass this).
+    let allowed = campaign_run(
+        &directory.path().join("green-allow"),
+        &guest,
+        &["--allow", "semaphore_wait", "--allow", "semaphore_signal"],
+    );
+    assert!(
+        allowed.status.success(),
+        "both --allow occurrences must reach every generation:\nstderr:\n{}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+    assert_eq!(campaign_json_stdout(&allowed)["classes"]["OK"], 2);
+
+    let partial = campaign_run(
+        &directory.path().join("partial"),
+        &guest,
+        &["--allow", "semaphore_wait"],
+    );
+    assert!(
+        !partial.status.success(),
+        "a truncated allow list must still fail closed"
+    );
+}
+
+// A WASI campaign carrying the native invocation surface is refused BY NAME
+// where the artifact family is finally known, not silently swept without it —
+// the same shape as the `--dns-entry` family refusal.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn campaign_refuses_the_native_invocation_surface_for_a_wasi_artifact() {
+    let directory = tempdir().unwrap();
+    let module = directory.path().join("app.wasm");
+    fs::write(&module, b"\0asm\x01\0\0\0").unwrap();
+    for (flag, value) in [
+        ("--harness", None),
+        ("--allow", Some("dlsym")),
+        ("--allow-unsupported-symbols", Some("all")),
+    ] {
+        let out = directory.path().join(flag.trim_start_matches('-'));
+        let mut args = vec![
+            "campaign",
+            module.to_str().unwrap(),
+            "--gens",
+            "1",
+            "--out-dir",
+            out.to_str().unwrap(),
+            flag,
+        ];
+        if let Some(value) = value {
+            args.push(value);
+        }
+        let refused = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            native_workspace(),
+            &args,
+        );
+        assert!(!refused.status.success(), "{flag} must be refused for WASI");
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(
+            stderr.contains(flag) && stderr.contains("native"),
+            "the refusal must name {flag} and the family:\n{stderr}"
+        );
+    }
 }
