@@ -240,9 +240,26 @@ if [[ -n "$catch_gen" && -f "$OUT/failures/generation-$catch_gen.patina" ]]; the
 # fails"; exit 0 means the candidate lost the failure. Matches either surface
 # of the planted bug: a WORKQ_VIOLATION or the recovery-gate's
 # `WORKQ_ABORT ... wal corruption` fail-closed abort.
+#
+# A marker on its own is NOT enough, in both fail-open directions:
+#
+#   * a candidate whose replay DIVERGES after the guest already printed the
+#     marker never reproduced the failure -- the abort preempted the run -- so
+#     accepting it would let the search keep deleting on the strength of a
+#     failure it did not observe (docs/probes/minimize-oracle-perf.md, section
+#     4 option 6);
+#   * a candidate patina REFUSED to run at all (a usage error, an unreadable
+#     guest: `cargo-patina: ...`, exit 2) says nothing about the failure either.
+#
+# Both are rejected here before the marker is even looked for, so this oracle
+# accepts only a clean replay that reproduced the marker. `cargo patina minimize
+# --generation --marker` applies exactly this rule in-process.
 set -uo pipefail
 PATINA="$1"; BIN="$2"; shift 2
 err="$("$PATINA" patina replay "$BIN" "$PATINA_MINIMIZE_TRACE" "$@" 2>&1 >/dev/null)"
+code=$?
+printf '%s' "$err" | grep -q 'patina native shim fatal' && exit 0
+[[ $code -eq 2 ]] && printf '%s' "$err" | grep -q '^cargo-patina: ' && exit 0
 printf '%s' "$err" | grep -qE 'WORKQ_VIOLATION|WORKQ_ABORT final-wal wal corruption' && exit 1
 exit 0
 ORACLE

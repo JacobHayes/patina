@@ -16,6 +16,37 @@ pub trait FailureOracle {
 
     /// Return true only when the candidate preserves the selected failure.
     fn preserves_failure(&mut self, candidate: &TraceBundle) -> Result<bool, Self::Error>;
+
+    /// How many candidates this oracle wants handed to it at once.
+    ///
+    /// The reducers ask before each scan step and offer a window of at most this
+    /// many candidates, in the exact order a one-at-a-time scan would have tried
+    /// them. The default 1 keeps every oracle that does not override this on the
+    /// serial path.
+    fn batch_width(&self) -> usize {
+        1
+    }
+
+    /// Judge a whole window of candidates, one verdict per candidate in order.
+    ///
+    /// The window is *speculative*: it holds the candidates a serial scan would
+    /// try if each earlier one were rejected, so an implementation may evaluate
+    /// them concurrently. The reducer keeps only the first accepted candidate in
+    /// scan order and re-uses the rest as cached verdicts, which is what makes a
+    /// widened window produce byte-identical output to a serial one rather than
+    /// output that depends on which worker finished first.
+    ///
+    /// An implementation that runs candidates concurrently owes the same
+    /// isolation the serial path gets for free: a candidate must be judged from
+    /// its own bytes alone, with no shared mutable path between concurrent
+    /// evaluations.
+    fn judge_batch(&mut self, candidates: &[&TraceBundle]) -> Result<Vec<bool>, Self::Error> {
+        let mut verdicts = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            verdicts.push(self.preserves_failure(candidate)?);
+        }
+        Ok(verdicts)
+    }
 }
 
 impl<F, E> FailureOracle for F
@@ -70,7 +101,7 @@ struct CachedVerdict {
 /// an RNG - so a repeated run re-verifies exactly the same hits and the search
 /// stays reproducible.
 #[derive(Debug)]
-struct CandidateMemo {
+pub struct CandidateMemo {
     verdicts: HashMap<[u8; 32], CachedVerdict>,
     hits: u64,
     misses: u64,
@@ -78,8 +109,17 @@ struct CandidateMemo {
     verification_period: u64,
 }
 
+impl Default for CandidateMemo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CandidateMemo {
-    fn new() -> Self {
+    /// A fresh memo. Share one across the passes of a joint search (see the
+    /// `*_with_memo` entry points) so a candidate two passes both propose is
+    /// judged once.
+    pub fn new() -> Self {
         Self::with_verification_period(VERIFICATION_PERIOD)
     }
 
@@ -103,46 +143,127 @@ impl CandidateMemo {
         candidate: &TraceBundle,
         oracle: &mut O,
     ) -> Result<bool, MinimizeError<O::Error>> {
-        let digest: [u8; 32] = Sha256::digest(candidate.to_bytes().map_err(MinimizeError::Trace)?)
-            .as_slice()
-            .try_into()
-            .expect("SHA-256 produces 32 bytes");
-        let Some(cached) = self.verdicts.get(&digest).copied() else {
-            self.misses += 1;
-            let verdict = oracle
-                .preserves_failure(candidate)
+        Ok(self.first_accepted(&[candidate], oracle)?.is_some())
+    }
+
+    /// Judge a window of candidates in scan order and return the position of the
+    /// first one the oracle accepts, if any.
+    ///
+    /// Every candidate in the window is judged (or served from the cache), not
+    /// just the ones up to the accept: the window is handed to the oracle in one
+    /// [`FailureOracle::judge_batch`] call, so a concurrent oracle has already
+    /// paid for the later verdicts and caching them is free. The *result* is
+    /// still the first accept in scan order, which is what a serial scan would
+    /// have returned, so widening the window changes throughput and never the
+    /// answer.
+    ///
+    /// Two candidates in the SAME window that happen to be byte-identical are
+    /// judged twice rather than deduplicated, because neither one's verdict
+    /// exists yet when the window is planned. That costs a redundant oracle call
+    /// on a trace with interchangeable decisions and changes nothing else: the
+    /// verdicts agree for any oracle that is a function of its candidate, which
+    /// is the assumption the whole cache rests on and which the sampled
+    /// re-verification below polices.
+    fn first_accepted<O: FailureOracle>(
+        &mut self,
+        candidates: &[&TraceBundle],
+        oracle: &mut O,
+    ) -> Result<Option<usize>, MinimizeError<O::Error>> {
+        // Plan every candidate against the cache BEFORE the oracle runs: a miss
+        // must be judged, and a sampled hit must be re-judged so the soundness
+        // guard fires on the same hits it would have sampled one at a time.
+        let mut digests = Vec::with_capacity(candidates.len());
+        let mut plans = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let digest: [u8; 32] =
+                Sha256::digest(candidate.to_bytes().map_err(MinimizeError::Trace)?)
+                    .as_slice()
+                    .try_into()
+                    .expect("SHA-256 produces 32 bytes");
+            let plan = match self.verdicts.get(&digest).copied() {
+                None => {
+                    self.misses += 1;
+                    CandidatePlan::Judge
+                }
+                Some(cached) => {
+                    self.hits += 1;
+                    let hits = cached.hits + 1;
+                    self.verdicts.insert(
+                        digest,
+                        CachedVerdict {
+                            verdict: cached.verdict,
+                            hits,
+                        },
+                    );
+                    // The first repeat of a run is always re-verified, so the
+                    // guard runs at least once against any oracle that is asked
+                    // the same question twice; after that the content-derived
+                    // sample paces it.
+                    if self.verifications > 0 && !self.verifies(&digest, hits) {
+                        CandidatePlan::Cached(cached.verdict)
+                    } else {
+                        self.verifications += 1;
+                        CandidatePlan::Verify(cached.verdict)
+                    }
+                }
+            };
+            digests.push(digest);
+            plans.push(plan);
+        }
+
+        let pending: Vec<&TraceBundle> = plans
+            .iter()
+            .zip(candidates)
+            .filter(|(plan, _)| !matches!(plan, CandidatePlan::Cached(_)))
+            .map(|(_, candidate)| *candidate)
+            .collect();
+        let observed = if pending.is_empty() {
+            Vec::new()
+        } else {
+            let verdicts = oracle
+                .judge_batch(&pending)
                 .map_err(MinimizeError::Oracle)?;
-            self.verdicts
-                .insert(digest, CachedVerdict { verdict, hits: 0 });
-            return Ok(verdict);
+            if verdicts.len() != pending.len() {
+                return Err(MinimizeError::OracleBatchArity {
+                    asked: pending.len(),
+                    answered: verdicts.len(),
+                });
+            }
+            verdicts
         };
-        self.hits += 1;
-        let hits = cached.hits + 1;
-        self.verdicts.insert(
-            digest,
-            CachedVerdict {
-                verdict: cached.verdict,
-                hits,
-            },
-        );
-        // The first repeat of a run is always re-verified, so the guard runs at
-        // least once against any oracle that is asked the same question twice;
-        // after that the content-derived sample paces it.
-        if self.verifications > 0 && !self.verifies(&digest, hits) {
-            return Ok(cached.verdict);
+
+        let mut observed = observed.into_iter();
+        let mut accepted = None;
+        for (index, plan) in plans.into_iter().enumerate() {
+            let verdict = match plan {
+                CandidatePlan::Cached(verdict) => verdict,
+                CandidatePlan::Judge => {
+                    let verdict = observed
+                        .next()
+                        .expect("one verdict per candidate handed to the oracle");
+                    self.verdicts
+                        .insert(digests[index], CachedVerdict { verdict, hits: 0 });
+                    verdict
+                }
+                CandidatePlan::Verify(cached) => {
+                    let observed = observed
+                        .next()
+                        .expect("one verdict per candidate handed to the oracle");
+                    if observed != cached {
+                        return Err(MinimizeError::NondeterministicOracle {
+                            digest: hex(&digests[index]),
+                            cached,
+                            observed,
+                        });
+                    }
+                    observed
+                }
+            };
+            if verdict && accepted.is_none() {
+                accepted = Some(index);
+            }
         }
-        self.verifications += 1;
-        let observed = oracle
-            .preserves_failure(candidate)
-            .map_err(MinimizeError::Oracle)?;
-        if observed != cached.verdict {
-            return Err(MinimizeError::NondeterministicOracle {
-                digest: hex(&digest),
-                cached: cached.verdict,
-                observed,
-            });
-        }
-        Ok(observed)
+        Ok(accepted)
     }
 
     /// Whether this hit is the sampled one. Both inputs are fixed by the search
@@ -151,6 +272,17 @@ impl CandidateMemo {
     fn verifies(&self, digest: &[u8; 32], hits: u64) -> bool {
         u64::from(digest[0]).wrapping_add(hits) % self.verification_period == 0
     }
+}
+
+/// What one candidate of a window needs before its verdict is known.
+enum CandidatePlan {
+    /// Never judged before: the oracle must see it.
+    Judge,
+    /// Judged before, and this repeat is not the sampled one.
+    Cached(bool),
+    /// Judged before, and this repeat is the sampled one: the oracle must see it
+    /// again and agree.
+    Verify(bool),
 }
 
 fn hex(digest: &[u8; 32]) -> String {
@@ -167,6 +299,21 @@ fn verdict_word(verdict: bool) -> &'static str {
     }
 }
 
+/// Ask the oracle about one candidate through a caller-owned memo.
+///
+/// The reducers judge their input this way before shrinking it. It is public so
+/// a caller can probe a candidate of its own — a pre-flight check, a guard
+/// against an oracle that answers every candidate the same way — and have the
+/// verdict cached for the search that follows rather than paid for twice.
+pub fn judge_with_memo<O: FailureOracle>(
+    candidate: &TraceBundle,
+    oracle: &mut O,
+    memo: &mut CandidateMemo,
+) -> Result<bool, MinimizeError<O::Error>> {
+    candidate.validate().map_err(MinimizeError::Trace)?;
+    memo.decide(candidate, oracle)
+}
+
 /// Delta-debug the decisions in an unbranched main timeline.
 ///
 /// Candidates are structurally validated and accepted only when the oracle
@@ -176,10 +323,16 @@ pub fn minimize_main<O: FailureOracle>(
     bundle: &TraceBundle,
     oracle: &mut O,
 ) -> Result<TraceBundle, MinimizeError<O::Error>> {
-    minimize_main_memoized(bundle, oracle, &mut CandidateMemo::new())
+    minimize_main_with_memo(bundle, oracle, &mut CandidateMemo::new())
 }
 
-fn minimize_main_memoized<O: FailureOracle>(
+/// [`minimize_main`] over a caller-owned [`CandidateMemo`].
+///
+/// The passes of a joint search propose many of the same candidates - a
+/// confirmation sweep re-walks a trace it has stopped changing, a second pass
+/// re-proposes what the first already judged - so sharing one memo across them
+/// judges each distinct candidate once instead of once per pass.
+pub fn minimize_main_with_memo<O: FailureOracle>(
     bundle: &TraceBundle,
     oracle: &mut O,
     memo: &mut CandidateMemo,
@@ -208,10 +361,16 @@ pub fn minimize_timeline<O: FailureOracle>(
     timeline_id: &str,
     oracle: &mut O,
 ) -> Result<TraceBundle, MinimizeError<O::Error>> {
-    minimize_timeline_memoized(bundle, timeline_id, oracle, &mut CandidateMemo::new())
+    minimize_timeline_with_memo(bundle, timeline_id, oracle, &mut CandidateMemo::new())
 }
 
-fn minimize_timeline_memoized<O: FailureOracle>(
+/// [`minimize_timeline`] over a caller-owned [`CandidateMemo`].
+///
+/// The passes of a joint search propose many of the same candidates - a
+/// confirmation sweep re-walks a trace it has stopped changing, a second pass
+/// re-proposes what the first already judged - so sharing one memo across them
+/// judges each distinct candidate once instead of once per pass.
+pub fn minimize_timeline_with_memo<O: FailureOracle>(
     bundle: &TraceBundle,
     timeline_id: &str,
     oracle: &mut O,
@@ -261,10 +420,16 @@ pub fn minimize_branch_tree<O: FailureOracle>(
     bundle: &TraceBundle,
     oracle: &mut O,
 ) -> Result<TraceBundle, MinimizeError<O::Error>> {
-    minimize_branch_tree_memoized(bundle, oracle, &mut CandidateMemo::new())
+    minimize_branch_tree_with_memo(bundle, oracle, &mut CandidateMemo::new())
 }
 
-fn minimize_branch_tree_memoized<O: FailureOracle>(
+/// [`minimize_branch_tree`] over a caller-owned [`CandidateMemo`].
+///
+/// The passes of a joint search propose many of the same candidates - a
+/// confirmation sweep re-walks a trace it has stopped changing, a second pass
+/// re-proposes what the first already judged - so sharing one memo across them
+/// judges each distinct candidate once instead of once per pass.
+pub fn minimize_branch_tree_with_memo<O: FailureOracle>(
     bundle: &TraceBundle,
     oracle: &mut O,
     memo: &mut CandidateMemo,
@@ -293,8 +458,8 @@ pub fn minimize_branches<O: FailureOracle>(
     oracle: &mut O,
 ) -> Result<TraceBundle, MinimizeError<O::Error>> {
     let memo = &mut CandidateMemo::new();
-    let pruned = prune_branches_memoized(bundle, oracle, memo)?;
-    minimize_branch_tree_memoized(&pruned, oracle, memo)
+    let pruned = prune_branches_with_memo(bundle, oracle, memo)?;
+    minimize_branch_tree_with_memo(&pruned, oracle, memo)
 }
 
 /// The full trace-minimization pipeline: drop unneeded branch subtrees, then
@@ -314,17 +479,39 @@ pub fn minimize_all<O: FailureOracle>(
     bundle: &TraceBundle,
     oracle: &mut O,
 ) -> Result<TraceBundle, MinimizeError<O::Error>> {
-    let memo = &mut CandidateMemo::new();
-    let mut current = prune_branches_memoized(bundle, oracle, memo)?;
+    minimize_all_with_memo(bundle, oracle, &mut CandidateMemo::new())
+}
+
+/// [`minimize_all`] over a caller-owned [`CandidateMemo`].
+///
+/// The schedule pass runs once the deletion pass has settled rather than inside
+/// every round: only a schedule rewrite can unblock a further deletion, so a
+/// round that rewrote nothing has already proved the joint fixed point and the
+/// confirmation sweep it used to cost accepts nothing by construction.
+pub fn minimize_all_with_memo<O: FailureOracle>(
+    bundle: &TraceBundle,
+    oracle: &mut O,
+    memo: &mut CandidateMemo,
+) -> Result<TraceBundle, MinimizeError<O::Error>> {
+    let mut current = prune_branches_with_memo(bundle, oracle, memo)?;
     loop {
-        let before = current.clone();
-        current = minimize_branch_tree_memoized(&current, oracle, memo)?;
-        current = reduce_schedule_memoized(&current, oracle, memo)?;
-        if current == before {
-            break;
+        // The branch-tree pass shrinks timelines in turn, and shrinking a later
+        // one can unblock a deletion in an earlier one, so it is repeated until
+        // it stops changing.
+        loop {
+            let deleted = minimize_branch_tree_with_memo(&current, oracle, memo)?;
+            let settled = deleted == current;
+            current = deleted;
+            if settled {
+                break;
+            }
         }
+        let scheduled = reduce_schedule_with_memo(&current, oracle, memo)?;
+        if scheduled == current {
+            return Ok(current);
+        }
+        current = scheduled;
     }
-    Ok(current)
 }
 
 /// Drop whole branch subtrees the failure does not need.
@@ -345,10 +532,16 @@ pub fn prune_branches<O: FailureOracle>(
     bundle: &TraceBundle,
     oracle: &mut O,
 ) -> Result<TraceBundle, MinimizeError<O::Error>> {
-    prune_branches_memoized(bundle, oracle, &mut CandidateMemo::new())
+    prune_branches_with_memo(bundle, oracle, &mut CandidateMemo::new())
 }
 
-fn prune_branches_memoized<O: FailureOracle>(
+/// [`prune_branches`] over a caller-owned [`CandidateMemo`].
+///
+/// The passes of a joint search propose many of the same candidates - a
+/// confirmation sweep re-walks a trace it has stopped changing, a second pass
+/// re-proposes what the first already judged - so sharing one memo across them
+/// judges each distinct candidate once instead of once per pass.
+pub fn prune_branches_with_memo<O: FailureOracle>(
     bundle: &TraceBundle,
     oracle: &mut O,
     memo: &mut CandidateMemo,
@@ -471,18 +664,41 @@ fn minimize_index<O: FailureOracle>(
             if start >= live {
                 break;
             }
-            let end = (start + chunk_size).min(live);
-            let mut candidate = current.clone();
-            candidate.timelines[timeline_index]
-                .decisions
-                .drain(protected + start..protected + end);
-            renumber(&mut candidate, timeline_index);
-            candidate.validate().map_err(MinimizeError::Trace)?;
-            if memo.decide(&candidate, oracle)? {
-                current = candidate;
-                reduced = true;
-            } else {
-                start = end;
+            // Build the candidates a one-at-a-time scan would try next if each
+            // were rejected, up to the oracle's batch width. A reject leaves
+            // `current` alone, so every candidate here is the same one the
+            // serial scan would have built; only the first accept is kept, so
+            // the accepted sequence - and therefore the result - is the serial
+            // one whatever the width.
+            let width = oracle.batch_width().max(1);
+            let mut candidates = Vec::with_capacity(width);
+            let mut starts = Vec::with_capacity(width);
+            let mut cursor = start;
+            while candidates.len() < width && cursor < live {
+                let end = (cursor + chunk_size).min(live);
+                let mut candidate = current.clone();
+                candidate.timelines[timeline_index]
+                    .decisions
+                    .drain(protected + cursor..protected + end);
+                renumber(&mut candidate, timeline_index);
+                candidate.validate().map_err(MinimizeError::Trace)?;
+                candidates.push(candidate);
+                starts.push(cursor);
+                cursor = end;
+            }
+            let borrowed: Vec<&TraceBundle> = candidates.iter().collect();
+            match memo.first_accepted(&borrowed, oracle)? {
+                Some(index) => {
+                    // The scan position stays put: the decisions after the
+                    // deleted chunk slide down into it.
+                    start = starts[index];
+                    current = candidates
+                        .into_iter()
+                        .nth(index)
+                        .expect("accepted candidate");
+                    reduced = true;
+                }
+                None => start = cursor,
             }
         }
         if !reduced {
@@ -567,10 +783,16 @@ pub fn reduce_schedule<O: FailureOracle>(
     bundle: &TraceBundle,
     oracle: &mut O,
 ) -> Result<TraceBundle, MinimizeError<O::Error>> {
-    reduce_schedule_memoized(bundle, oracle, &mut CandidateMemo::new())
+    reduce_schedule_with_memo(bundle, oracle, &mut CandidateMemo::new())
 }
 
-fn reduce_schedule_memoized<O: FailureOracle>(
+/// [`reduce_schedule`] over a caller-owned [`CandidateMemo`].
+///
+/// The passes of a joint search propose many of the same candidates - a
+/// confirmation sweep re-walks a trace it has stopped changing, a second pass
+/// re-proposes what the first already judged - so sharing one memo across them
+/// judges each distinct candidate once instead of once per pass.
+pub fn reduce_schedule_with_memo<O: FailureOracle>(
     bundle: &TraceBundle,
     oracle: &mut O,
     memo: &mut CandidateMemo,
@@ -622,33 +844,27 @@ fn collapse_switches<O: FailureOracle>(
 ) -> Result<bool, MinimizeError<O::Error>> {
     let mut changed = false;
     loop {
+        // The rewrites this pass would try, in scan order. Only the (position,
+        // task) pairs are enumerated up front - a candidate bundle is cloned
+        // one window at a time, so a long timeline does not materialize a
+        // thousand copies of itself.
         let positions = scheduler_positions(&current.timelines[index], protected);
-        let mut collapsed = false;
-        for pair in positions.windows(2) {
-            let (earlier, later) = (pair[0], pair[1]);
-            let (Some(earlier_task), Some(later_task)) = (
-                selected_task(&current.timelines[index].decisions[earlier]),
-                selected_task(&current.timelines[index].decisions[later]),
-            ) else {
-                continue;
-            };
-            if earlier_task == later_task {
-                continue;
-            }
-            let mut candidate = current.clone();
-            set_selected(
-                &mut candidate.timelines[index].decisions[later],
-                earlier_task,
-            );
-            if accept_candidate(&candidate, oracle, memo)? {
+        let rewrites: Vec<(usize, TaskId)> = positions
+            .windows(2)
+            .filter_map(|pair| {
+                let (earlier, later) = (pair[0], pair[1]);
+                let earlier_task = selected_task(&current.timelines[index].decisions[earlier])?;
+                let later_task = selected_task(&current.timelines[index].decisions[later])?;
+                (earlier_task != later_task).then_some((later, earlier_task))
+            })
+            .collect();
+        let accepted = first_accepted_rewrite(current, index, &rewrites, oracle, memo)?;
+        match accepted {
+            Some(candidate) => {
                 *current = candidate;
                 changed = true;
-                collapsed = true;
-                break;
             }
-        }
-        if !collapsed {
-            break;
+            None => break,
         }
     }
     Ok(changed)
@@ -668,8 +884,11 @@ fn canonicalize_order<O: FailureOracle>(
 ) -> Result<bool, MinimizeError<O::Error>> {
     let mut changed = false;
     loop {
+        // Every lowering this pass would try, flattened in scan order: each
+        // scheduling point paired with each already-observed id below the one it
+        // currently selects.
         let positions = scheduler_positions(&current.timelines[index], protected);
-        let mut lowered = false;
+        let mut rewrites: Vec<(usize, TaskId)> = Vec::new();
         for position in positions {
             let Some(current_task) = selected_task(&current.timelines[index].decisions[position])
             else {
@@ -679,40 +898,64 @@ fn canonicalize_order<O: FailureOracle>(
                 if candidate_task.0 >= current_task.0 {
                     break;
                 }
-                let mut candidate = current.clone();
-                set_selected(
-                    &mut candidate.timelines[index].decisions[position],
-                    candidate_task,
-                );
-                if accept_candidate(&candidate, oracle, memo)? {
-                    *current = candidate;
-                    changed = true;
-                    lowered = true;
-                    break;
-                }
-            }
-            if lowered {
-                break;
+                rewrites.push((position, candidate_task));
             }
         }
-        if !lowered {
-            break;
+        let accepted = first_accepted_rewrite(current, index, &rewrites, oracle, memo)?;
+        match accepted {
+            Some(candidate) => {
+                *current = candidate;
+                changed = true;
+            }
+            None => break,
         }
     }
     Ok(changed)
 }
 
-/// Structurally validate a rewritten candidate, then ask the oracle whether the
-/// failure survives. A rewrite only touches scheduler outcomes, so validation
-/// cannot fail on a well-formed input, but it is kept for parity with the
-/// delete reducers and to reject any malformed bundle before running the oracle.
-fn accept_candidate<O: FailureOracle>(
-    candidate: &TraceBundle,
+/// Try `rewrites` against one timeline in scan order and return the first
+/// candidate the oracle accepts.
+///
+/// Candidates are cloned one window at a time (the oracle's batch width), so a
+/// batching oracle sees the same speculative window the delete reducer gives it
+/// while memory stays proportional to the width rather than to the number of
+/// rewrites a pass considers. A rejected rewrite leaves the base bundle
+/// untouched, so every candidate in a window is exactly the one a one-at-a-time
+/// scan would have built next.
+fn first_accepted_rewrite<O: FailureOracle>(
+    current: &TraceBundle,
+    index: usize,
+    rewrites: &[(usize, TaskId)],
     oracle: &mut O,
     memo: &mut CandidateMemo,
-) -> Result<bool, MinimizeError<O::Error>> {
-    candidate.validate().map_err(MinimizeError::Trace)?;
-    memo.decide(candidate, oracle)
+) -> Result<Option<TraceBundle>, MinimizeError<O::Error>> {
+    let width = oracle.batch_width().max(1);
+    let mut base = 0usize;
+    while base < rewrites.len() {
+        let end = (base + width).min(rewrites.len());
+        let mut candidates = Vec::with_capacity(end - base);
+        for &(position, task) in &rewrites[base..end] {
+            let mut candidate = current.clone();
+            set_selected(&mut candidate.timelines[index].decisions[position], task);
+            // A rewrite only touches scheduler outcomes, so validation cannot
+            // fail on a well-formed input, but it is kept for parity with the
+            // delete reducers and to reject any malformed bundle before the
+            // oracle runs.
+            candidate.validate().map_err(MinimizeError::Trace)?;
+            candidates.push(candidate);
+        }
+        let borrowed: Vec<&TraceBundle> = candidates.iter().collect();
+        if let Some(accepted) = memo.first_accepted(&borrowed, oracle)? {
+            return Ok(Some(
+                candidates
+                    .into_iter()
+                    .nth(accepted)
+                    .expect("accepted candidate"),
+            ));
+        }
+        base = end;
+    }
+    Ok(None)
 }
 
 /// The decision indices at or beyond `protected` that are schedule decisions
@@ -964,6 +1207,12 @@ pub enum MinimizeError<E = Infallible> {
         cached: bool,
         observed: bool,
     },
+    /// A batching oracle answered a different number of candidates than it was
+    /// asked about, so no verdict can be matched to a candidate.
+    OracleBatchArity {
+        asked: usize,
+        answered: usize,
+    },
 }
 
 impl<E: fmt::Display> fmt::Display for MinimizeError<E> {
@@ -997,6 +1246,11 @@ impl<E: fmt::Display> fmt::Display for MinimizeError<E> {
                  no unseeded randomness) and re-run",
                 verdict_word(*cached),
                 verdict_word(*observed),
+            ),
+            Self::OracleBatchArity { asked, answered } => write!(
+                f,
+                "the failure oracle was asked to judge {asked} candidates and answered {answered}: \
+                 a batching oracle must return exactly one verdict per candidate, in order"
             ),
         }
     }
@@ -1363,7 +1617,7 @@ mod tests {
         let mut oracle =
             |candidate: &TraceBundle| Ok::<_, Infallible>(predicate(&values(candidate)));
         let result = if resumed {
-            minimize_main_memoized(&bundle, &mut oracle, &mut memo)
+            minimize_main_with_memo(&bundle, &mut oracle, &mut memo)
         } else {
             restart_minimize_main(&bundle, &mut oracle, &mut memo)
         }
@@ -1465,7 +1719,7 @@ mod tests {
         let bundle = value_bundle(&start);
         let mut memo = CandidateMemo::new();
         let mut asked = Vec::new();
-        minimize_main_memoized(
+        minimize_main_with_memo(
             &bundle,
             &mut |candidate: &TraceBundle| {
                 asked.push(values(candidate));
@@ -1575,7 +1829,7 @@ mod tests {
         let (start, predicate) = duplicate_heavy();
         let bundle = value_bundle(&start);
         let mut seen = HashMap::new();
-        let error = minimize_main_memoized(
+        let error = minimize_main_with_memo(
             &bundle,
             &mut contradicting_oracle(&mut seen, predicate),
             // Verify every hit so the disagreement is reached deterministically
@@ -1608,7 +1862,7 @@ mod tests {
         // re-run some of its cache hits.
         let bundle = value_bundle(&start);
         let mut memo = CandidateMemo::new();
-        minimize_main_memoized(
+        minimize_main_with_memo(
             &bundle,
             &mut |candidate: &TraceBundle| Ok::<_, Infallible>(predicate(&values(candidate))),
             &mut memo,
@@ -1625,7 +1879,7 @@ mod tests {
         // And that sample is what catches a self-contradicting oracle without
         // any test-only period.
         let mut seen = HashMap::new();
-        let error = minimize_main_memoized(
+        let error = minimize_main_with_memo(
             &bundle,
             &mut contradicting_oracle(&mut seen, predicate),
             &mut CandidateMemo::new(),
@@ -2092,5 +2346,229 @@ mod tests {
             Ok::<_, Infallible>(false)
         });
         assert!(matches!(result, Err(MinimizeError::OriginalDoesNotFail)));
+    }
+
+    /// An oracle that answers a whole window at once, standing in for one that
+    /// evaluates its window concurrently. The verdict function is identical at
+    /// every width, so any difference in the result is a difference the width
+    /// caused.
+    struct WindowedOracle {
+        predicate: Predicate,
+        width: usize,
+        /// Verdicts produced, i.e. what a real oracle would have executed.
+        verdicts: usize,
+        /// Windows handed over, i.e. how many round trips the search made.
+        windows: usize,
+    }
+
+    impl FailureOracle for WindowedOracle {
+        type Error = Infallible;
+
+        fn preserves_failure(&mut self, candidate: &TraceBundle) -> Result<bool, Infallible> {
+            self.verdicts += 1;
+            Ok((self.predicate)(&values(candidate)))
+        }
+
+        fn batch_width(&self) -> usize {
+            self.width
+        }
+
+        fn judge_batch(&mut self, candidates: &[&TraceBundle]) -> Result<Vec<bool>, Infallible> {
+            self.windows += 1;
+            let mut verdicts = Vec::with_capacity(candidates.len());
+            for candidate in candidates {
+                verdicts.push(self.preserves_failure(candidate)?);
+            }
+            Ok(verdicts)
+        }
+    }
+
+    #[test]
+    fn a_widened_candidate_window_changes_throughput_and_not_the_result() {
+        for (name, start, predicate) in shapes() {
+            let bundle = value_bundle(&start);
+            let mut serial = WindowedOracle {
+                predicate,
+                width: 1,
+                verdicts: 0,
+                windows: 0,
+            };
+            let reference = minimize_main(&bundle, &mut serial).unwrap();
+            for width in [2usize, 3, 8, 64] {
+                let mut batched = WindowedOracle {
+                    predicate,
+                    width,
+                    verdicts: 0,
+                    windows: 0,
+                };
+                let result = minimize_main(&bundle, &mut batched).unwrap();
+                assert_eq!(
+                    values(&result),
+                    values(&reference),
+                    "{name}: width {width} moved the result"
+                );
+                assert_eq!(
+                    result.to_bytes().unwrap(),
+                    reference.to_bytes().unwrap(),
+                    "{name}: width {width} produced different bytes"
+                );
+                assert!(
+                    batched.windows <= serial.windows,
+                    "{name}: width {width} made {} round trips against serial's {}",
+                    batched.windows,
+                    serial.windows
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_wide_window_actually_batches_rather_than_falling_back_to_one_at_a_time() {
+        // The saving is real work per round trip: a serial run makes one round
+        // trip per verdict, a batched one must make strictly fewer.
+        let (start, predicate) = duplicate_heavy();
+        let bundle = value_bundle(&start);
+        let mut batched = WindowedOracle {
+            predicate,
+            width: 8,
+            verdicts: 0,
+            windows: 0,
+        };
+        minimize_main(&bundle, &mut batched).unwrap();
+        assert!(
+            batched.windows * 2 < batched.verdicts,
+            "width 8 made {} round trips for {} verdicts",
+            batched.windows,
+            batched.verdicts
+        );
+    }
+
+    /// The self-contradicting oracle above, batching. The window is where a
+    /// disagreement could plausibly get lost: several candidates are judged for
+    /// one scan step, but only one of them is kept, so a search that stopped
+    /// reading verdicts at its accept would skip the re-verification of every
+    /// later member and launder exactly the flakiness the guard exists to catch.
+    struct ContradictingWindowedOracle<'a> {
+        seen: &'a mut HashMap<Vec<u64>, bool>,
+        predicate: Predicate,
+        width: usize,
+    }
+
+    impl FailureOracle for ContradictingWindowedOracle<'_> {
+        type Error = Infallible;
+
+        fn preserves_failure(&mut self, candidate: &TraceBundle) -> Result<bool, Infallible> {
+            let candidate = values(candidate);
+            let honest = (self.predicate)(&candidate);
+            Ok(match self.seen.insert(candidate, honest) {
+                Some(previous) => !previous,
+                None => honest,
+            })
+        }
+
+        fn batch_width(&self) -> usize {
+            self.width
+        }
+    }
+
+    #[test]
+    fn a_contradiction_inside_a_speculative_window_still_aborts_the_run() {
+        let (start, predicate) = duplicate_heavy();
+        let bundle = value_bundle(&start);
+        for width in [2usize, 8, 64] {
+            let mut seen = HashMap::new();
+            let mut oracle = ContradictingWindowedOracle {
+                seen: &mut seen,
+                predicate,
+                width,
+            };
+            let error = minimize_main_with_memo(
+                &bundle,
+                &mut oracle,
+                &mut CandidateMemo::with_verification_period(1),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, MinimizeError::NondeterministicOracle { .. }),
+                "width {width}: expected a nondeterminism refusal, got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_contradiction_after_the_accept_in_a_window_is_not_lost() {
+        // The precise hazard batching introduces, arranged rather than hoped
+        // for: the window's FIRST candidate is accepted and its SECOND is a
+        // cache hit whose sampled re-run disagrees. The accept is the answer
+        // the search wants, so an implementation that stopped reading verdicts
+        // once it had one would return that accept and never see the
+        // contradiction - laundering a flaky oracle exactly when the window is
+        // wide. Every verdict in a window is resolved, so it aborts instead.
+        let accepted = value_bundle(&[999, 1]);
+        let contradicted = value_bundle(&[999, 2]);
+        let mut memo = CandidateMemo::with_verification_period(1);
+        // Seed the cache with an honest "still failing" verdict for the second
+        // candidate, so the window below is a hit rather than a miss.
+        let seeded = judge_with_memo(
+            &contradicted,
+            &mut |_: &TraceBundle| Ok::<_, Infallible>(true),
+            &mut memo,
+        )
+        .unwrap();
+        assert!(seeded, "the cache must be seeded with a positive verdict");
+
+        struct AcceptFirstDenySecond;
+        impl FailureOracle for AcceptFirstDenySecond {
+            type Error = Infallible;
+
+            fn preserves_failure(&mut self, candidate: &TraceBundle) -> Result<bool, Infallible> {
+                // The first candidate still fails; the second now contradicts
+                // the verdict its identical bytes already produced.
+                Ok(values(candidate) == vec![999, 1])
+            }
+
+            fn batch_width(&self) -> usize {
+                2
+            }
+        }
+
+        let error = memo
+            .first_accepted(&[&accepted, &contradicted], &mut AcceptFirstDenySecond)
+            .unwrap_err();
+        assert!(
+            matches!(error, MinimizeError::NondeterministicOracle { .. }),
+            "a contradiction behind an accept was lost: {error}"
+        );
+    }
+
+    /// An oracle that drops verdicts on the floor: a search that matched the
+    /// remaining ones up positionally would silently attribute one candidate's
+    /// verdict to another.
+    struct ShortAnsweringOracle;
+
+    impl FailureOracle for ShortAnsweringOracle {
+        type Error = Infallible;
+
+        fn preserves_failure(&mut self, _candidate: &TraceBundle) -> Result<bool, Infallible> {
+            Ok(true)
+        }
+
+        fn batch_width(&self) -> usize {
+            8
+        }
+
+        fn judge_batch(&mut self, candidates: &[&TraceBundle]) -> Result<Vec<bool>, Infallible> {
+            Ok(vec![true; candidates.len().saturating_sub(1)])
+        }
+    }
+
+    #[test]
+    fn an_oracle_that_answers_the_wrong_number_of_candidates_is_refused() {
+        let bundle = value_bundle(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let error = minimize_main(&bundle, &mut ShortAnsweringOracle).unwrap_err();
+        assert!(
+            matches!(error, MinimizeError::OracleBatchArity { .. }),
+            "expected a batch-arity refusal, got {error}"
+        );
     }
 }

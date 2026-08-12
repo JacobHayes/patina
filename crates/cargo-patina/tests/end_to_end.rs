@@ -9347,6 +9347,217 @@ fn minimize_canonicalizes_a_recorded_schedule_via_replay_oracle() {
     );
 }
 
+/// A guest that fails only on a SHORT WRITE. Every other fault the campaign
+/// draws — I/O errors, latency, the whole network and entropy surface — is
+/// handled or irrelevant here, so a campaign generation that catches this bug
+/// carries one knob that matters and a dozen that do not, which is exactly the
+/// haystack `minimize --generation` exists to reduce.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const SHORT_WRITE_SOURCE: &str = r#"
+use std::fs::OpenOptions;
+use std::io::Write;
+
+fn main() {
+    let mut file = match OpenOptions::new().write(true).create(true).truncate(true).open("/log") {
+        Ok(file) => file,
+        Err(error) => { println!("GUEST_OPEN_FAILED {error}"); return; }
+    };
+    for round in 0..8u32 {
+        match file.write(&[b'x'; 64]) {
+            Ok(64) => {}
+            Ok(short) => {
+                eprintln!("GUEST_TORN round={round} wrote={short} of 64");
+                std::process::exit(3);
+            }
+            Ok(_) => unreachable!(),
+            Err(error) => { println!("GUEST_WRITE_ERROR {error}"); return; }
+        }
+    }
+    println!("GUEST_OK");
+}
+"#;
+
+/// `minimize --generation` end to end: a campaign catches the planted
+/// short-write bug under a wide fault vector, and the reducer must strip that
+/// vector down to the knob that matters, hand back a standalone command that
+/// still fails, and produce the same answer however many candidates it
+/// evaluates at once.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn minimize_generation_reduces_the_fault_vector_to_the_knob_that_matters() {
+    let workspace = native_workspace();
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("short_write.rs");
+    fs::write(&source, SHORT_WRITE_SOURCE).unwrap();
+    let guest = directory.path().join("short-write-guest");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            guest.to_str().unwrap(),
+            "--release",
+        ],
+    );
+
+    let out = directory.path().join("camp");
+    let campaign = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "campaign",
+            guest.to_str().unwrap(),
+            "--gens",
+            "24",
+            "--faults",
+            "--timeout-secs",
+            "30",
+            "--out-dir",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        campaign.status.code(),
+        Some(1),
+        "campaign found no failure to reduce:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&campaign.stdout),
+        String::from_utf8_lossy(&campaign.stderr)
+    );
+
+    // Pick the first generation whose saved trace really replays to the planted
+    // marker: the campaign's other failure classes (a drawn crash point, an I/O
+    // error path) are different bugs and are not what this test reduces.
+    let state = campaign_state_without_invocations(&out.join("campaign-state.json"));
+    let mut caught = None;
+    for run in state["notable_runs"].as_array().unwrap() {
+        let generation = run["generation"].as_u64().unwrap();
+        let trace = out.join(format!("failures/generation-{generation}.patina"));
+        if !trace.exists() {
+            continue;
+        }
+        let replayed = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &["replay", guest.to_str().unwrap(), trace.to_str().unwrap()],
+        );
+        if String::from_utf8_lossy(&replayed.stderr).contains("GUEST_TORN") {
+            caught = Some((generation, run["flags"].as_array().unwrap().len()));
+            break;
+        }
+    }
+    let (generation, flag_tokens) = caught.expect(
+        "no generation reproduced GUEST_TORN; the short-write band never fired in 24 generations",
+    );
+    assert!(
+        flag_tokens > 4,
+        "the campaign drew only {flag_tokens} flag tokens, so there is no vector to reduce"
+    );
+
+    let generation = generation.to_string();
+    let minimize = |output: &Path, extra: &[&str]| -> Output {
+        let mut arguments = vec![
+            "minimize",
+            "--generation",
+            &generation,
+            "--out-dir",
+            out.to_str().unwrap(),
+            "--marker",
+            "GUEST_TORN",
+            "--output",
+            output.to_str().unwrap(),
+        ];
+        arguments.extend_from_slice(extra);
+        invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, &arguments)
+    };
+
+    let serial_output = directory.path().join("serial.patina");
+    let serial = minimize(&serial_output, &["--jobs", "1"]);
+    let stdout = String::from_utf8_lossy(&serial.stdout).into_owned();
+    assert!(
+        serial.status.success(),
+        "minimize --generation failed:\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&serial.stderr)
+    );
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with("PATINA_MINIMIZE_GENERATION_COMPLETE"))
+        .expect("missing the generation completion line");
+    let field = |name: &str| -> u64 {
+        line.split_whitespace()
+            .find_map(|token| token.strip_prefix(name))
+            .unwrap_or_else(|| panic!("{line} has no {name}"))
+            .parse()
+            .unwrap()
+    };
+    let (before, after) = (field("knobs_before="), field("knobs_after="));
+    assert!(
+        after < before,
+        "nothing was reduced: {before} knobs in, {after} out\n{line}"
+    );
+
+    // The reduction's real output is the standalone command, so run it: it must
+    // still fail with the marker on a machine that has no campaign out-dir.
+    let repro = fs::read_to_string(out.join(format!("minimized/generation-{generation}.repro")))
+        .expect("the reproduction command must be written into the out-dir");
+    let tokens: Vec<&str> = repro.split_whitespace().collect();
+    assert_eq!(
+        &tokens[..2],
+        &["cargo", "patina"],
+        "unexpected repro: {repro}"
+    );
+    assert!(
+        tokens.contains(&"--fs-short-permille"),
+        "the reduced command dropped the knob the bug needs: {repro}"
+    );
+    let reproduced = invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, &tokens[2..]);
+    assert!(
+        String::from_utf8_lossy(&reproduced.stderr).contains("GUEST_TORN"),
+        "the reduced command no longer reproduces:\n{repro}\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&reproduced.stdout),
+        String::from_utf8_lossy(&reproduced.stderr)
+    );
+
+    // Parallel candidate evaluation is throughput, not a different search: the
+    // reduced trace must be byte-identical to the serial one.
+    let parallel_output = directory.path().join("parallel.patina");
+    let parallel = minimize(&parallel_output, &["--jobs", "8"]);
+    assert!(
+        parallel.status.success(),
+        "minimize --jobs 8 failed:\n{}",
+        String::from_utf8_lossy(&parallel.stderr)
+    );
+    assert_eq!(
+        fs::read(&serial_output).unwrap(),
+        fs::read(&parallel_output).unwrap(),
+        "--jobs 8 produced a different reduced trace than --jobs 1"
+    );
+
+    // Non-vacuity: the marker is what decides every verdict, so a marker the
+    // generation never prints must be refused rather than "reduced" to nothing.
+    let wrong = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "minimize",
+            "--generation",
+            &generation,
+            "--out-dir",
+            out.to_str().unwrap(),
+            "--marker",
+            "NO_SUCH_MARKER_ANYWHERE",
+            "--output",
+            directory.path().join("wrong.patina").to_str().unwrap(),
+        ],
+    );
+    assert!(!wrong.status.success(), "a wrong marker was accepted");
+    assert!(
+        String::from_utf8_lossy(&wrong.stderr).contains("does not reproduce"),
+        "a wrong marker was not refused by name:\n{}",
+        String::from_utf8_lossy(&wrong.stderr)
+    );
+}
+
 #[cfg(unix)]
 fn schedule_line(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout)

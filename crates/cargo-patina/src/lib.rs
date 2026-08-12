@@ -22,10 +22,6 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use patina_dst_fs_mem::{FsImage, FsImageEntry};
-use patina_dst_minimize::{
-    MinimizeError, Scenario, minimize_all, minimize_branch_tree, minimize_main, minimize_timeline,
-    reduce_scenario, reduce_schedule,
-};
 use patina_dst_runtime::{
     Context, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION,
     ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN, ENV_COVERAGE_FD,
@@ -37,9 +33,10 @@ use patina_dst_runtime::{
 };
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
-    native_binary_has_sud_marker, native_binary_is_shim_linked, native_deny_trap_armed,
-    native_escape_is_sud_manageable, render_inert_weak_imports, render_native_escapes_grouped,
-    shim_control_plane_symbols,
+    native_binary_has_sud_marker, native_binary_has_tsc_marker, native_binary_is_shim_linked,
+    native_deny_trap_armed, native_escape_is_sud_manageable, native_escape_is_tsc_manageable,
+    render_cpu_nondeterminism_note, render_inert_weak_imports, render_native_escapes_grouped,
+    render_tsc_managed_note, shim_control_plane_symbols,
 };
 use patina_dst_trace::TraceBundle;
 use patina_dst_wasi_host::{
@@ -59,6 +56,7 @@ mod coverage;
 mod depth;
 mod guided;
 mod help;
+mod minimize;
 mod output;
 mod render;
 mod rollup;
@@ -265,30 +263,8 @@ struct NativeAuditInvocation {
     raw: bool,
 }
 
-/// A `minimize` request: either shrinking a recorded trace bundle or reducing
-/// the experiment inputs (seed and parameters) that trigger a failure.
-enum MinimizeInvocation {
-    Trace(TraceMinimize),
-    Scenario(ScenarioMinimize),
-}
-
-struct TraceMinimize {
-    trace: PathBuf,
-    output: PathBuf,
-    timeline: Option<String>,
-    prune: bool,
-    oracle: Vec<OsString>,
-}
-
 /// Default number of candidate seeds tried when reducing a scenario's seed.
 const DEFAULT_SEED_BUDGET: u64 = 256;
-
-struct ScenarioMinimize {
-    seed: u64,
-    params: BTreeMap<String, String>,
-    seed_budget: u64,
-    oracle: Vec<OsString>,
-}
 
 #[derive(Clone)]
 struct Invocation {
@@ -681,7 +657,7 @@ fn dispatch(arguments: Vec<OsString>) -> Result<i32, CliError> {
         ParseResult::NativeBuild(invocation) => execute_native_build(invocation),
         ParseResult::NativeRun(invocation) => execute_native_run(invocation),
         ParseResult::NativeHarness(invocation) => execute_native_harness(invocation),
-        ParseResult::Minimize(invocation) => execute_minimize(invocation),
+        ParseResult::Minimize(invocation) => minimize::execute(invocation),
         ParseResult::Trace(invocation) => trace_cmd::execute(invocation),
     }
 }
@@ -701,7 +677,7 @@ enum ParseResult {
     NativeBuild(NativeBuildInvocation),
     NativeRun(NativeRunInvocation),
     NativeHarness(NativeHarnessInvocation),
-    Minimize(MinimizeInvocation),
+    Minimize(minimize::MinimizeInvocation),
     Trace(trace_cmd::TraceInvocation),
 }
 
@@ -2705,7 +2681,14 @@ fn parse_trace_diff(arguments: Vec<OsString>) -> Result<trace_cmd::TraceDiff, Cl
     })
 }
 
-fn parse_minimize(mut arguments: Vec<OsString>) -> Result<MinimizeInvocation, CliError> {
+fn parse_minimize(mut arguments: Vec<OsString>) -> Result<minimize::MinimizeInvocation, CliError> {
+    // `--generation` builds its own oracle, so it is the one form that takes no
+    // `-- <ORACLE>` tail — and must be routed before the tail is demanded. The
+    // name is read through the registry's splitter, so `--generation=14` routes
+    // exactly like `--generation 14`.
+    if has_minimize_flag(&arguments, "--generation") {
+        return parse_minimize_generation(arguments).map(minimize::MinimizeInvocation::Generation);
+    }
     let delimiter = arguments
         .iter()
         .position(|argument| argument == "--")
@@ -2717,17 +2700,27 @@ fn parse_minimize(mut arguments: Vec<OsString>) -> Result<MinimizeInvocation, Cl
             "minimize requires an oracle command after `--`",
         ));
     }
-    if arguments.iter().any(|argument| argument == "--scenario") {
-        parse_minimize_scenario(arguments, oracle).map(MinimizeInvocation::Scenario)
+    if has_minimize_flag(&arguments, "--scenario") {
+        parse_minimize_scenario(arguments, oracle).map(minimize::MinimizeInvocation::Scenario)
     } else {
-        parse_minimize_trace(arguments, oracle).map(MinimizeInvocation::Trace)
+        parse_minimize_trace(arguments, oracle).map(minimize::MinimizeInvocation::Trace)
     }
+}
+
+/// Whether a `minimize` argument list carries `name`, in either the space or
+/// the `=` form.
+fn has_minimize_flag(arguments: &[OsString], name: &str) -> bool {
+    arguments.iter().any(|argument| {
+        argument
+            .to_str()
+            .is_some_and(|text| cli::split_name(text) == name)
+    })
 }
 
 fn parse_minimize_trace(
     arguments: Vec<OsString>,
     oracle: Vec<OsString>,
-) -> Result<TraceMinimize, CliError> {
+) -> Result<minimize::TraceMinimize, CliError> {
     // The trace path may follow options (`minimize --output out.patina trace`),
     // so locate it registry-arity-aware rather than forcing it to lead.
     let scan = locate_positionals("minimize", &arguments, 1);
@@ -2739,7 +2732,7 @@ fn parse_minimize_trace(
             "--prune-branches operates on the whole branch forest and cannot be combined with --timeline",
         ));
     }
-    Ok(TraceMinimize {
+    Ok(minimize::TraceMinimize {
         trace: scan
             .positionals
             .into_iter()
@@ -2752,15 +2745,41 @@ fn parse_minimize_trace(
         timeline,
         prune,
         oracle,
+        jobs: args.usize("--jobs"),
+    })
+}
+
+fn parse_minimize_generation(
+    arguments: Vec<OsString>,
+) -> Result<minimize::GenerationMinimize, CliError> {
+    if arguments.iter().any(|argument| argument == "--") {
+        return Err(CliError::usage(
+            "minimize --generation builds its own oracle (--marker) and takes no `-- <ORACLE>`",
+        ));
+    }
+    let args = cli::parse("minimize", help::Family::Generation, arguments)?;
+    Ok(minimize::GenerationMinimize {
+        out_dir: args
+            .path("--out-dir")
+            .unwrap_or_else(|| PathBuf::from(campaign::DEFAULT_OUT_DIR)),
+        generation: args
+            .u64("--generation")
+            .ok_or_else(|| CliError::usage("minimize --generation requires <N>"))?,
+        marker: args
+            .string("--marker")
+            .ok_or_else(|| CliError::usage("minimize --generation requires --marker <TEXT>"))?,
+        output: args.path("--output"),
+        trace_phase: !args.flag("--no-trace-phase"),
+        jobs: args.usize("--jobs"),
     })
 }
 
 fn parse_minimize_scenario(
     arguments: Vec<OsString>,
     oracle: Vec<OsString>,
-) -> Result<ScenarioMinimize, CliError> {
+) -> Result<minimize::ScenarioMinimize, CliError> {
     let args = cli::parse("minimize", help::Family::Scenario, arguments)?;
-    Ok(ScenarioMinimize {
+    Ok(minimize::ScenarioMinimize {
         seed: args
             .u64("--seed")
             .ok_or_else(|| CliError::usage("minimize --scenario requires --seed <U64>"))?,
@@ -4196,41 +4215,70 @@ fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<i32, CliErr
         Err(TargetError::UnsupportedNativeImports(denied)) => {
             let sud_marker = native_binary_has_sud_marker(&bytes)
                 .map_err(|error| CliError(error.to_string()))?;
-            let (sud_instructions, hard): (Vec<_>, Vec<_>) = denied
-                .iter()
-                .cloned()
-                .partition(|escape| sud_marker && native_escape_is_sud_manageable(escape));
-            if !hard.is_empty() || sud_instructions.is_empty() {
+            // The timestamp-counter trap is the same shape as the SUD downgrade,
+            // one instruction class over: an `rdtsc`/`rdtscp` finding in a
+            // trap-capable binary is answered from the virtual clock at run time
+            // on x86-64 Linux. `audit` stays static, so it reports both outcomes.
+            let tsc_marker = native_binary_has_tsc_marker(&bytes)
+                .map_err(|error| CliError(error.to_string()))?;
+            let (managed, hard): (Vec<_>, Vec<_>) = denied.iter().cloned().partition(|escape| {
+                (sud_marker && native_escape_is_sud_manageable(escape))
+                    || (tsc_marker && native_escape_is_tsc_manageable(escape))
+            });
+            let (sud_instructions, tsc_instructions): (Vec<_>, Vec<_>) = managed
+                .into_iter()
+                .partition(native_escape_is_sud_manageable);
+            if !hard.is_empty() || (sud_instructions.is_empty() && tsc_instructions.is_empty()) {
                 // A genuine escape remains (or there was nothing SUD could manage):
                 // fail closed and render the provenance-rich audit result.
                 emit_native_audit_violation(&resolved.path, &denied);
                 return Ok(2);
             }
-            // Only SUD-manageable instruction findings, and the dispatcher is
-            // linked: report them as SUD-managed (both outcomes) and succeed.
+            // Only trap-manageable instruction findings, and the matching
+            // dispatcher is linked: report them as managed (both outcomes) and
+            // succeed.
             let sites = sud_instructions.len();
+            let tsc_sites = tsc_instructions.len();
             if output::options().is_json() {
-                let findings: Vec<String> = sud_instructions
+                let mut findings: Vec<String> = sud_instructions
                     .iter()
                     .map(|escape| format!("{} (direct-syscall, SUD-managed)", escape.symbol))
                     .collect();
+                findings.extend(tsc_instructions.iter().map(|escape| {
+                    format!("{} (cpu-nondeterminism, TSC-trap-managed)", escape.symbol)
+                }));
+                let mut details = native_escape_details(&sud_instructions, Some("SUD-managed"));
+                details.extend(native_escape_details(
+                    &tsc_instructions,
+                    Some("TSC-trap-managed"),
+                ));
                 output::emit_audit_with_details(
                     "audit",
                     "native",
                     &resolved.path.display().to_string(),
                     findings,
-                    native_escape_details(&sud_instructions, Some("SUD-managed")),
+                    details,
                     0,
                 );
             } else {
-                println!(
-                    "direct-syscall (SUD-managed, {sites} site{}): raw inline syscall instruction(s) \
+                if sites > 0 {
+                    println!(
+                        "direct-syscall (SUD-managed, {sites} site{}): raw inline syscall instruction(s) \
 trapped into the deterministic runtime via syscall-user-dispatch. Runnable on a SUD kernel \
 (x86_64 >= 5.11); refused on kernels without it (notably arm64 today) — rebuild with \
 `--cfg rustix_use_libc` for those.",
-                    if sites == 1 { "" } else { "s" }
-                );
-                for escape in &sud_instructions {
+                        if sites == 1 { "" } else { "s" }
+                    );
+                }
+                if tsc_sites > 0 {
+                    println!(
+                        "cpu-nondeterminism (TSC-trap-managed, {tsc_sites} site{}): inline rdtsc/rdtscp \
+answered from the run's virtual clock via prctl(PR_SET_TSC). Runnable on x86-64 Linux; refused \
+everywhere else (macOS, arm64) — rebuild the guest without the inline counter read for those.",
+                        if tsc_sites == 1 { "" } else { "s" }
+                    );
+                }
+                for escape in sud_instructions.iter().chain(tsc_instructions.iter()) {
                     println!("  {} ({})", escape.symbol, escape.category);
                     for provenance in &escape.provenance {
                         if let Some(site) = provenance.site_label() {
@@ -5743,6 +5791,37 @@ fn kernel_supports_sud() -> bool {
     false
 }
 
+/// Whether this platform can arm the shim's timestamp-counter trap, probed the
+/// same way the shim's C layer probes it: `prctl(PR_GET_TSC, &mode)` returns 0
+/// where `PR_SET_TSC` exists and `-EINVAL` where it does not. `PR_SET_TSC` is an
+/// x86 facility, so the probe is compiled only for x86-64 Linux and every other
+/// platform returns `false` — the rdtsc audit downgrade never fires off it.
+/// Runs in the supervisor process, on the same kernel the guest will run on.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn platform_supports_tsc_trap() -> bool {
+    const PR_GET_TSC: std::ffi::c_int = 25;
+    unsafe extern "C" {
+        fn prctl(option: std::ffi::c_int, ...) -> std::ffi::c_int;
+    }
+    let mut mode: std::ffi::c_int = 0;
+    // SAFETY: PR_GET_TSC only reads the current per-thread setting into `mode`.
+    let rc = unsafe {
+        prctl(
+            PR_GET_TSC,
+            &mut mode as *mut std::ffi::c_int,
+            0usize,
+            0usize,
+            0usize,
+        )
+    };
+    rc == 0
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+fn platform_supports_tsc_trap() -> bool {
+    false
+}
+
 /// The effective symbol allow set the native gate audits against: the shim's own
 /// control-plane vehicle (auto-allowed on every `cargo patina build` binary —
 /// `dlsym` on both platforms) plus the operator's explicit `--allow` symbols.
@@ -5834,11 +5913,31 @@ fn native_prerun_gate(
     // refusal. cpu-nondeterminism findings are never SUD-manageable (register
     // reads SUD cannot trap), so they never enter this split.
     let sud_ok = native_binary_has_sud_marker(&bytes).unwrap_or(false) && kernel_supports_sud();
+    // The timestamp-counter trap downgrade, on the same two conditions: the
+    // binary carries the trap dispatcher AND this platform can arm PR_SET_TSC.
+    // Only rdtsc/rdtscp enter this split — rdrand/rdseed/CNTVCT share the
+    // category but no mechanism traps them, so they stay in `remaining`.
+    let tsc_ok =
+        native_binary_has_tsc_marker(&bytes).unwrap_or(false) && platform_supports_tsc_trap();
     let (sud_instructions, rest): (Vec<_>, Vec<_>) = denied
         .into_iter()
         .partition(native_escape_is_sud_manageable);
+    let (tsc_instructions, rest): (Vec<_>, Vec<_>) =
+        rest.into_iter().partition(native_escape_is_tsc_manageable);
     let mut sud_managed = Vec::new();
     let mut remaining = rest;
+    if tsc_ok {
+        if let Some(note) =
+            render_tsc_managed_note(&tsc_instructions, &binary.display().to_string())
+        {
+            eprintln!("{note}");
+        }
+    } else {
+        // Not trappable here: fold back so the counter reads are blocked (with
+        // the cpu-nondeterminism note below naming why), or force-runnable via
+        // the operator's --allow-unsupported-symbols hatch.
+        remaining.extend(tsc_instructions);
+    }
     if sud_ok {
         sud_managed = sud_instructions;
     } else {
@@ -5887,6 +5986,13 @@ kernel lacks syscall-user-dispatch (arm64 needs the generic-entry kernels; x86_6
 backend emits interposable imports instead), or run on an x86_64 SUD kernel where the shim traps \
 them.",
             );
+        }
+        if let Some(note) = render_cpu_nondeterminism_note(&blocked) {
+            // Instruction-class findings have no symbol name, so `--allow` can
+            // never clear one; and only the timestamp counter is trappable at
+            // all. Say both, rather than leaving the operator to infer them.
+            message.push('\n');
+            message.push_str(&note);
         }
         if blocked
             .iter()
@@ -6767,175 +6873,6 @@ fn execute_native_run(_invocation: NativeRunInvocation) -> Result<i32, CliError>
     Err(CliError(
         "native-run requires a Unix host for the PATINA_TRACE_FD supervisor channel".into(),
     ))
-}
-
-fn execute_minimize(invocation: MinimizeInvocation) -> Result<i32, CliError> {
-    match invocation {
-        MinimizeInvocation::Trace(trace) => execute_minimize_trace(trace),
-        MinimizeInvocation::Scenario(scenario) => execute_minimize_scenario(scenario),
-    }
-}
-
-fn execute_minimize_trace(invocation: TraceMinimize) -> Result<i32, CliError> {
-    let original = TraceBundle::load(&invocation.trace).map_err(|error| {
-        CliError(format!(
-            "failed to load trace {}: {error}",
-            invocation.trace.display()
-        ))
-    })?;
-
-    // Pick the strategy automatically: a leaf timeline (or an unbranched main)
-    // uses the strict suffix path; a non-leaf target or a branched bundle uses
-    // the non-leaf branch-tree policy so shrinking never invalidates an
-    // inherited replay prefix. `--prune-branches` additionally drops whole
-    // branch subtrees the failure does not need.
-    let target_has_children = invocation.timeline.as_deref().is_some_and(|id| {
-        original
-            .timelines
-            .iter()
-            .any(|timeline| timeline.parent.as_deref() == Some(id))
-    });
-    let whole_bundle = invocation.prune
-        || target_has_children
-        || (invocation.timeline.is_none() && original.timelines.len() > 1);
-    let before = minimize_event_count(&original, invocation.timeline.as_deref(), whole_bundle);
-
-    let mut calls = 0_u64;
-    let mut oracle = |candidate: &TraceBundle| -> io::Result<bool> {
-        calls += 1;
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("candidate.patina");
-        candidate.write_atomic(&path).map_err(io::Error::other)?;
-        let status = Command::new(&invocation.oracle[0])
-            .args(&invocation.oracle[1..])
-            .env("PATINA_MINIMIZE_TRACE", &path)
-            .status()?;
-        Ok(!status.success())
-    };
-    // Compose deletion with schedule canonicalization. `--prune-branches` runs
-    // the full pipeline (prune, then shrink and reduce_schedule to a joint fixed
-    // point). Every other strategy interleaves its delete reducer with
-    // reduce_schedule to the same joint fixed point, so a rewritten schedule that
-    // unblocks a deletion (or vice versa) is exploited while each pass stays
-    // failure-preserving.
-    let minimized = if invocation.prune {
-        minimize_all(&original, &mut oracle)
-    } else {
-        let mut joint = || -> Result<TraceBundle, MinimizeError<io::Error>> {
-            let mut current = original.clone();
-            loop {
-                let before = current.clone();
-                current = if whole_bundle {
-                    minimize_branch_tree(&current, &mut oracle)?
-                } else if let Some(timeline) = invocation.timeline.as_deref() {
-                    minimize_timeline(&current, timeline, &mut oracle)?
-                } else {
-                    minimize_main(&current, &mut oracle)?
-                };
-                current = reduce_schedule(&current, &mut oracle)?;
-                if current == before {
-                    return Ok(current);
-                }
-            }
-        };
-        joint()
-    }
-    .map_err(|error| CliError(format!("trace minimization failed: {error}")))?;
-
-    let after = minimize_event_count(&minimized, invocation.timeline.as_deref(), whole_bundle);
-    minimized
-        .write_atomic(&invocation.output)
-        .map_err(|error| {
-            CliError(format!(
-                "failed to write minimized trace {}: {error}",
-                invocation.output.display()
-            ))
-        })?;
-    if output::options().is_json() {
-        output::emit_simple(
-            "minimize",
-            "ok",
-            0,
-            Some(format!(
-                "before={before} after={after} oracle_runs={calls} output={}",
-                invocation.output.display()
-            )),
-        );
-    } else {
-        println!(
-            "PATINA_MINIMIZE_COMPLETE before={before} after={after} oracle_runs={calls} output={}",
-            invocation.output.display()
-        );
-    }
-    Ok(0)
-}
-
-/// Count the decisions the reported before/after totals should cover: every
-/// timeline for a whole-bundle run, one named timeline, or the main timeline.
-fn minimize_event_count(bundle: &TraceBundle, timeline: Option<&str>, whole_bundle: bool) -> usize {
-    if whole_bundle {
-        return bundle
-            .timelines
-            .iter()
-            .map(|timeline| timeline.decisions.len())
-            .sum();
-    }
-    timeline
-        .map_or_else(
-            || bundle.timelines.first(),
-            |id| bundle.timelines.iter().find(|timeline| timeline.id == id),
-        )
-        .map(|timeline| timeline.decisions.len())
-        .unwrap_or(0)
-}
-
-fn execute_minimize_scenario(invocation: ScenarioMinimize) -> Result<i32, CliError> {
-    let mut base = Scenario::new(invocation.seed);
-    base.params = invocation.params;
-    let mut calls = 0_u64;
-    // Each candidate runs the oracle as a fresh seeded child, handing it the
-    // seed and parameters through the same PATINA_* environment protocol a
-    // recorded run uses. A non-zero exit means the failure still reproduces.
-    let mut oracle = |candidate: &Scenario| -> io::Result<bool> {
-        calls += 1;
-        let mut command = Command::new(&invocation.oracle[0]);
-        command
-            .args(&invocation.oracle[1..])
-            .env(ENV_MODE, "seeded")
-            .env(ENV_SEED, candidate.seed.to_string())
-            .env_remove(ENV_PARAMS_JSON);
-        if !candidate.params.is_empty() {
-            let params = serde_json::to_string(&candidate.params).map_err(io::Error::other)?;
-            command.env(ENV_PARAMS_JSON, params);
-        }
-        let status = command.status()?;
-        Ok(!status.success())
-    };
-    let reduced = reduce_scenario(&base, &mut oracle, invocation.seed_budget)
-        .map_err(|error| CliError(format!("scenario minimization failed: {error}")))?;
-    let params = reduced
-        .params
-        .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    if output::options().is_json() {
-        output::emit_simple(
-            "minimize",
-            "ok",
-            0,
-            Some(format!(
-                "seed={} params=[{params}] oracle_runs={calls}",
-                reduced.seed
-            )),
-        );
-    } else {
-        println!(
-            "PATINA_MINIMIZE_SCENARIO_COMPLETE seed={} params=[{params}] oracle_runs={calls}",
-            reduced.seed
-        );
-    }
-    Ok(0)
 }
 
 fn execute(invocation: Invocation) -> Result<i32, CliError> {
@@ -7851,27 +7788,17 @@ mod tests {
         }
     }
 
-    fn trace_invocation(values: &[&str]) -> TraceMinimize {
+    fn trace_invocation(values: &[&str]) -> minimize::TraceMinimize {
         match parse(strings(values)).unwrap() {
-            ParseResult::Minimize(MinimizeInvocation::Trace(invocation)) => invocation,
+            ParseResult::Minimize(minimize::MinimizeInvocation::Trace(invocation)) => invocation,
             _ => panic!("expected trace minimization"),
         }
     }
 
-    fn scenario_invocation(values: &[&str]) -> ScenarioMinimize {
+    fn scenario_invocation(values: &[&str]) -> minimize::ScenarioMinimize {
         match parse(strings(values)).unwrap() {
-            ParseResult::Minimize(MinimizeInvocation::Scenario(invocation)) => invocation,
+            ParseResult::Minimize(minimize::MinimizeInvocation::Scenario(invocation)) => invocation,
             _ => panic!("expected scenario minimization"),
-        }
-    }
-
-    fn clock_event(sequence: u64, value: u64) -> patina_dst_trace::TraceEvent {
-        patina_dst_trace::TraceEvent {
-            sequence,
-            operation: patina_dst_abi::Operation::ClockNow {
-                clock: patina_dst_abi::ClockKind::Monotonic,
-            },
-            outcome: patina_dst_abi::Outcome::U64(value),
         }
     }
 
@@ -7894,97 +7821,6 @@ mod tests {
         assert!(!invocation.prune);
         assert_eq!(invocation.oracle, strings(&["./oracle", "--exact"]));
         assert!(parse(strings(&["minimize", "failure.patina"])).is_err());
-    }
-
-    #[test]
-    fn executes_trace_minimization_with_an_external_oracle() {
-        use patina_dst_abi::Outcome;
-        use patina_dst_trace::RunMetadata;
-
-        let directory = tempfile::tempdir().unwrap();
-        let input = directory.path().join("input.patina");
-        let output = directory.path().join("output.patina");
-        let decisions = (0..6)
-            .map(|sequence| clock_event(sequence, if sequence == 4 { 999 } else { sequence }))
-            .collect();
-        TraceBundle::new(RunMetadata::new(1, "fixture"), decisions)
-            .write_atomic(&input)
-            .unwrap();
-        execute_minimize_trace(TraceMinimize {
-            trace: input,
-            output: output.clone(),
-            timeline: None,
-            prune: false,
-            oracle: strings(&[
-                "sh",
-                "-c",
-                "grep -q 999 \"$PATINA_MINIMIZE_TRACE\" && exit 1; exit 0",
-            ]),
-        })
-        .unwrap();
-        let minimized = TraceBundle::load(output).unwrap();
-        assert_eq!(minimized.timelines[0].decisions.len(), 1);
-        assert_eq!(
-            minimized.timelines[0].decisions[0].outcome,
-            Outcome::U64(999)
-        );
-    }
-
-    fn branched_input(path: &Path) {
-        use patina_dst_trace::{RunMetadata, Timeline};
-        // main -> keeper (holds the 999 marker plus a removable suffix) and
-        // main -> disposable (dead weight the oracle never needs).
-        let mut bundle = TraceBundle::new(RunMetadata::new(1, "fixture"), vec![clock_event(0, 0)]);
-        bundle.timelines.push(Timeline {
-            id: "keeper".into(),
-            parent: Some("main".into()),
-            from_sequence: Some(1),
-            branch_seed: Some(7),
-            decisions: vec![clock_event(1, 999), clock_event(2, 2), clock_event(3, 3)],
-        });
-        bundle.timelines.push(Timeline {
-            id: "disposable".into(),
-            parent: Some("main".into()),
-            from_sequence: Some(1),
-            branch_seed: Some(8),
-            decisions: vec![clock_event(1, 11), clock_event(2, 12)],
-        });
-        bundle.write_atomic(path).unwrap();
-    }
-
-    #[test]
-    fn executes_non_leaf_branch_tree_minimization_automatically() {
-        use patina_dst_abi::Outcome;
-
-        let directory = tempfile::tempdir().unwrap();
-        let input = directory.path().join("input.patina");
-        let output = directory.path().join("output.patina");
-        branched_input(&input);
-
-        // A branched bundle with no --timeline automatically uses the branch-tree
-        // policy: each timeline's safe suffix shrinks, but no subtree is dropped.
-        execute_minimize_trace(TraceMinimize {
-            trace: input,
-            output: output.clone(),
-            timeline: None,
-            prune: false,
-            oracle: strings(&[
-                "sh",
-                "-c",
-                "grep -q 999 \"$PATINA_MINIMIZE_TRACE\" && exit 1; exit 0",
-            ]),
-        })
-        .unwrap();
-
-        let minimized = TraceBundle::load(output).unwrap();
-        let ids: Vec<&str> = minimized.timelines.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(ids, vec!["main", "keeper", "disposable"]);
-        assert_eq!(minimized.timelines[1].decisions.len(), 1);
-        assert_eq!(
-            minimized.timelines[1].decisions[0].outcome,
-            Outcome::U64(999)
-        );
-        minimized.validate().unwrap();
     }
 
     #[test]
@@ -8014,38 +7850,6 @@ mod tests {
                 "./oracle",
             ]))
             .is_err()
-        );
-    }
-
-    #[test]
-    fn executes_branch_pruning_dropping_and_shrinking() {
-        use patina_dst_abi::Outcome;
-
-        let directory = tempfile::tempdir().unwrap();
-        let input = directory.path().join("input.patina");
-        let output = directory.path().join("output.patina");
-        branched_input(&input);
-
-        execute_minimize_trace(TraceMinimize {
-            trace: input,
-            output: output.clone(),
-            timeline: None,
-            prune: true,
-            oracle: strings(&[
-                "sh",
-                "-c",
-                "grep -q 999 \"$PATINA_MINIMIZE_TRACE\" && exit 1; exit 0",
-            ]),
-        })
-        .unwrap();
-
-        let minimized = TraceBundle::load(output).unwrap();
-        let ids: Vec<&str> = minimized.timelines.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(ids, vec!["main", "keeper"]);
-        assert_eq!(minimized.timelines[1].decisions.len(), 1);
-        assert_eq!(
-            minimized.timelines[1].decisions[0].outcome,
-            Outcome::U64(999)
         );
     }
 
@@ -8085,31 +7889,6 @@ mod tests {
             ]))
             .is_err()
         );
-    }
-
-    #[test]
-    fn executes_scenario_minimization_shrinking_seed_and_params() {
-        let invocation = scenario_invocation(&[
-            "minimize",
-            "--scenario",
-            "--seed",
-            "9",
-            "--param",
-            "keep=1",
-            "--param",
-            "drop=5",
-            "--seed-budget",
-            "64",
-            "--",
-            "sh",
-            "-c",
-            // Failure needs seed >= 3 and the `keep` parameter present, read from
-            // the PATINA_* environment protocol.
-            "test \"$PATINA_SEED\" -ge 3 \
-             && printf '%s' \"$PATINA_PARAMS_JSON\" | grep -q '\"keep\"' && exit 1; exit 0",
-        ]);
-        // Smoke-check the scenario reducer runs end-to-end through the oracle.
-        assert_eq!(execute_minimize_scenario(invocation).unwrap(), 0);
     }
 
     #[test]
@@ -9648,6 +9427,11 @@ mod tests {
                 prefix.extend(unless("--output", &["--output=/tmp/o"]));
                 parse_minimize(with(prefix, &["--", "oracle"])).map(|_| ())
             }
+            ("minimize", help::Family::Generation) => {
+                let mut prefix = unless("--generation", &["--generation=1"]);
+                prefix.extend(unless("--marker", &["--marker=boom"]));
+                parse_minimize(with(prefix, &[])).map(|_| ())
+            }
             ("minimize", help::Family::Scenario) => {
                 let mut prefix = vec!["--scenario".to_string()];
                 prefix.extend(unless("--seed", &["--seed=0"]));
@@ -10710,7 +10494,7 @@ mod tests {
         ]))
         .unwrap()
         {
-            ParseResult::Minimize(MinimizeInvocation::Trace(trace)) => {
+            ParseResult::Minimize(minimize::MinimizeInvocation::Trace(trace)) => {
                 assert_eq!(trace.trace, PathBuf::from("trace.patina"));
                 assert_eq!(trace.output, PathBuf::from("out.patina"));
                 assert_eq!(trace.oracle, strings(&["oracle"]));

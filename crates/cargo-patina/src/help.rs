@@ -224,6 +224,9 @@ pub enum Family {
     Harness,
     /// `minimize --scenario`: seed/parameter rather than trace reduction.
     Scenario,
+    /// `minimize --generation N`: reduce a recorded campaign generation, knobs
+    /// first and then its trace.
+    Generation,
     /// `trace info`.
     Info,
     /// `trace events`.
@@ -244,6 +247,7 @@ impl Family {
             Family::Native => "native",
             Family::Harness => "harness",
             Family::Scenario => "scenario",
+            Family::Generation => "generation",
             Family::Info => "info",
             Family::Events => "events",
             Family::Stats => "stats",
@@ -1973,20 +1977,32 @@ planted fixture and proves every recognizer class fires.",
     refusals: NO_REFUSALS,
 };
 
+const MINIMIZE_TRACE_FAMILIES: &[Family] = &[Family::Sole, Family::Generation];
+
 const MINIMIZE: Verb = Verb {
     name: "minimize",
-    summary: "Shrink a recorded trace, or shrink experiment inputs (--scenario).",
+    summary: "Reduce a failing campaign generation, a recorded trace, or experiment inputs.",
     synopsis: &[
-        "cargo patina minimize <TRACE> --output <PATH> [-o <PATH>] [--timeline ID] [--prune-branches] -- <ORACLE> [ARGS]...",
+        "cargo patina minimize --generation <N> --marker <TEXT> [--out-dir <DIR>] [--output <PATH>] [--no-trace-phase] [--jobs N]",
+        "cargo patina minimize <TRACE> --output <PATH> [-o <PATH>] [--timeline ID] [--prune-branches] [--jobs N] -- <ORACLE> [ARGS]...",
         "cargo patina minimize --scenario --seed <U64> [--param K=V]... [--seed-budget N] -- <ORACLE> [ARGS]...",
     ],
     prose: "\
+`minimize --generation N` reduces one failing generation of a recorded campaign, \
+knobs first: it delta-debugs the fault-knob vector that generation drew (each \
+candidate is a fresh seeded `run`, so the answer is a standalone reproduction \
+command, printed and written into the out-dir), then delta-debugs a trace recorded \
+from that minimal-knob run. --no-trace-phase stops after the knobs. The oracle is \
+patina's own — it replays the candidate and requires BOTH the --marker text and a \
+clean replay — so candidates are hermetic and evaluated in parallel by default.\n\
+\n\
 `minimize <TRACE>` shrinks a recorded trace: an unbranched main timeline or a leaf \
 --timeline ID is delta-debugged directly, while a branched bundle is shrunk under a \
 branch-tree policy that never touches an inherited replay prefix. --prune-branches \
 also drops whole branch subtrees the failure does not need. The oracle runs once \
 per candidate with the candidate written to $PATINA_MINIMIZE_TRACE; a non-zero exit \
-means the failure is still present.\n\
+means the failure is still present. An external oracle is run serially unless --jobs \
+opts in, because only a patina-owned oracle is hermetic by construction.\n\
 \n\
 `minimize --scenario` shrinks experiment inputs instead: it drops and shrinks \
 --param values and canonicalizes --seed toward zero, bounded by --seed-budget. Each \
@@ -1994,6 +2010,13 @@ candidate re-runs the oracle as a fresh seeded child through the \
 PATINA_SEED/PATINA_PARAMS_JSON protocol.",
     families: &[
         fam(Family::Sole, "`minimize`", None),
+        fam(
+            Family::Generation,
+            "minimize --generation",
+            Some(
+                "minimize --generation reduces a recorded campaign generation and builds its own oracle",
+            ),
+        ),
         fam(
             Family::Scenario,
             "minimize --scenario",
@@ -2006,13 +2029,6 @@ PATINA_SEED/PATINA_PARAMS_JSON protocol.",
             families: SOLE,
             flags: &[
                 f(
-                    "--output",
-                    Some("-o"),
-                    Value::Required("PATH", Kind::Path),
-                    "Write the minimized trace to PATH (required).",
-                    false,
-                ),
-                f(
                     "--timeline",
                     None,
                     Value::Required("ID", Kind::Str),
@@ -2024,6 +2040,60 @@ PATINA_SEED/PATINA_PARAMS_JSON protocol.",
                     None,
                     Value::None,
                     "Also drop whole branch subtrees the failure does not need.",
+                    false,
+                ),
+            ],
+        },
+        Group {
+            title: "Generation minimization (--generation)",
+            families: &[Family::Generation],
+            flags: &[
+                f(
+                    "--generation",
+                    None,
+                    Value::Required("N", Kind::U64),
+                    "Reduce this recorded campaign generation: fault knobs first, then its trace.",
+                    false,
+                ),
+                f(
+                    "--out-dir",
+                    None,
+                    Value::Required("DIR", Kind::Path),
+                    "The campaign out-dir holding campaign-state.json (default patina-campaign-out).",
+                    false,
+                ),
+                f(
+                    "--marker",
+                    None,
+                    Value::Required("TEXT", Kind::Symbol),
+                    "Failure text the built-in oracle requires on a candidate's output; `A|B` matches either.",
+                    false,
+                ),
+                f(
+                    "--no-trace-phase",
+                    None,
+                    Value::None,
+                    "Stop after the fault-knob reduction instead of also shrinking a trace.",
+                    false,
+                ),
+            ],
+        },
+        Group {
+            title: "Candidate evaluation",
+            families: MINIMIZE_TRACE_FAMILIES,
+            flags: &[
+                f(
+                    "--output",
+                    Some("-o"),
+                    Value::Required("PATH", Kind::Path),
+                    "Write the minimized trace to PATH (required for a trace; defaults under the out-dir for --generation).",
+                    false,
+                ),
+                f(
+                    "--jobs",
+                    None,
+                    Value::Required("N", Kind::PositiveU64),
+                    "Candidates to evaluate at once (default half the CPUs for the built-in oracle, 1 for an external one).",
                     false,
                 ),
             ],

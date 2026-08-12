@@ -93,6 +93,10 @@ const DEFAULT_PROGRESS_EVERY: u64 = 100;
 // Spec
 // ===========================================================================
 
+/// Where a campaign writes when `--out-dir` is not given, and where
+/// `minimize --generation` looks for a recorded campaign for the same reason.
+pub(crate) const DEFAULT_OUT_DIR: &str = "patina-campaign-out";
+
 /// A campaign specification. Every field has a default; a `--spec FILE.json`
 /// supplies overrides and individual flags override the spec, so a campaign can be
 /// driven entirely by flags, entirely by a JSON spec, or a mix.
@@ -459,7 +463,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
 
     let out_dir = args
         .path("--out-dir")
-        .unwrap_or_else(|| PathBuf::from("patina-campaign-out"));
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_OUT_DIR));
     let progress_every = args
         .u64("--progress-every")
         .unwrap_or(DEFAULT_PROGRESS_EVERY);
@@ -2964,6 +2968,106 @@ fn verify_artifact_identity(recorded: &ArtifactIdentity) -> Result<(), CliError>
         )));
     }
     Ok(())
+}
+
+/// Everything needed to re-run one recorded generation of a finished campaign,
+/// read back out of its out-dir.
+///
+/// This is the handoff `minimize --generation` reduces: the campaign drew the
+/// fault-knob vector, so the campaign module is where the knowledge of what a
+/// generation *was* lives, and minimize only reduces it.
+pub(crate) struct GenerationRepro {
+    pub(crate) artifact: PathBuf,
+    pub(crate) seed: u64,
+    /// The generation's full child-`run` flag vector, seed-derived knobs and
+    /// invocation shape together, exactly as the campaign spelled it.
+    pub(crate) flags: Vec<String>,
+    /// The subset of `flags` that is invocation shape rather than a fault knob
+    /// (`--harness`, the pre-run gate surface). These are host/build facts the
+    /// guest needs to run at all, so a reducer must never drop them: doing so
+    /// would lose the failure for a reason that has nothing to do with faults.
+    pub(crate) pinned: Vec<String>,
+    pub(crate) guest_args: Vec<String>,
+    pub(crate) timeout_secs: u64,
+    pub(crate) class: String,
+}
+
+/// Read one generation of a recorded campaign back out of its out-dir.
+///
+/// Refuses loudly rather than reducing something that is not what the campaign
+/// ran: an out-dir with no state, a generation the campaign never recorded as
+/// notable, or an artifact that has changed since the sweep.
+pub(crate) fn generation_repro(
+    out_dir: &Path,
+    generation: u64,
+) -> Result<GenerationRepro, CliError> {
+    let state_path = out_dir.join("campaign-state.json");
+    if !state_path.is_file() {
+        return Err(CliError(format!(
+            "campaign out-dir {} has no campaign-state.json; --generation reduces a recorded campaign generation, so point --out-dir at the out-dir a `cargo patina campaign` run wrote",
+            out_dir.display()
+        )));
+    }
+    let state = load_campaign_state(&state_path)?;
+    verify_artifact_identity(&state.artifact)?;
+    let outcome = state
+        .notable_runs
+        .iter()
+        .find(|run| run.generation == generation)
+        .ok_or_else(|| {
+            let mut failing: Vec<String> = state
+                .notable_runs
+                .iter()
+                .filter(|run| run.class.is_failure())
+                .map(|run| run.generation.to_string())
+                .collect();
+            failing.sort();
+            let known = if failing.is_empty() {
+                "it recorded no failing generation at all".to_string()
+            } else {
+                format!("its failing generations are {}", failing.join(", "))
+            };
+            CliError(format!(
+                "campaign out-dir {} has no recorded generation {generation}; {known}",
+                out_dir.display()
+            ))
+        })?;
+    Ok(GenerationRepro {
+        artifact: PathBuf::from(&state.artifact.path),
+        seed: outcome.seed,
+        flags: outcome.flags.clone(),
+        pinned: invocation_flags(&state.spec, state.artifact.family),
+        guest_args: state.spec.guest_args.clone(),
+        timeout_secs: state.spec.timeout_secs,
+        class: outcome.class.as_str().to_string(),
+    })
+}
+
+/// Run one child `run` exactly as a campaign generation would have, for a
+/// caller reducing that generation. Same child shape, same scrubbed
+/// environment, same pinned reports — the point is that a reduced flag vector is
+/// judged by the same execution the campaign judged.
+pub(crate) fn run_reduced_generation(
+    self_exe: &Path,
+    artifact: &Path,
+    seed: u64,
+    flags: &[String],
+    trace_path: &Path,
+    guest_args: &[String],
+    timeout_secs: u64,
+) -> Result<(i32, String, String, bool), CliError> {
+    run_generation(
+        self_exe,
+        artifact,
+        seed,
+        flags,
+        GenerationFiles {
+            trace_path,
+            coverage_out: None,
+        },
+        guest_args,
+        timeout_secs,
+    )
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
