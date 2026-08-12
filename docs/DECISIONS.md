@@ -394,3 +394,31 @@ cluster so the fixes have citable symptom records.
   a latent fail-open that early-exit variants would make reachable; oracles
   must also require a clean replay. Implementation not started (user to pick
   scope).
+- **2026-08-12 — minimize/audit/campaign wave landed; user decisions recorded.**
+  User-settled design calls: `minimize` becomes knobs-first BY DEFAULT with the
+  trace ddmin phase still on by default behind an opt-out flag (measured trace
+  timing to be reported from the CLI wave); parallel oracles auto-enable only
+  for the patina-owned built-in oracle (hermeticity is an architectural
+  invariant), external command oracles stay serial with an explicit `--jobs`
+  opt-in and a printed declination warning; the TSC trap slice covers RDTSC +
+  RDTSCP only (CPUID deferred; RDRAND/RDSEED and arm64 CNTVCT have no
+  userspace trap and stay refusals); extensibility direction leans SDK
+  custom-op API, tradeoff discussion delivered, arc doc pending. Landed this
+  round, each red-before/green-after with planted-bug non-vacuity checks and
+  one full check battery over the combined tree: aws-lc audit class fixes
+  (alias-generation normalization, `__assert_fail` known-safe, undefined-weak
+  inert rule narrowed to unknown-import — a weak import of a named escape
+  class still refuses; the seven-symbol aws-lc set audits clean with zero
+  `--allow`, Linux corpus re-audit still owed); campaign forwards
+  `--harness`/`--allow`/`--allow-unsupported-symbols` to every child run AND
+  the replay repro line (gap found by the builder: these are host facts the
+  trace cannot restore), wrong-family refusal names the flag, child pre-run
+  refusals still classify INFRA; minimize core resume-sweep + sha256 memo with
+  deterministic sampled re-verification that aborts loudly on a
+  nondeterministic oracle (first cache hit always verified so the guard is
+  never vacuous) — real-trace: 9,014 -> 5,767 oracle calls, 261 -> 168 s,
+  byte-identical output; remaining duplicate-collapse lever moves to the CLI
+  wave via shared memos. Two observations filed: harness-without---harness
+  child failure classifies UNCLASSIFIED today (outcome-channel Wave B
+  candidate); inverted oracle polarity "minimizes" everything (polarity guard
+  in the CLI wave).
