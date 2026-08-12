@@ -1,6 +1,7 @@
 # Arc: trace inspection — `cargo patina trace {info,events,stats,diff}`
 
-Status: design approved 2026-07-30; implementation not yet scheduled.
+Status: design approved 2026-07-30; implemented 2026-08-06 (shared decode layer,
+`trace info/events/stats/diff`, registry-driven parsers). The arc is complete.
 Scope settled by the user: all four surfaces (info, events, diff, stats); "not
 overengineered, but nicely inspectable — discovery/analysis via CLI + --help docs".
 
