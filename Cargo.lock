@@ -399,6 +399,7 @@ dependencies = [
  "patina-dst-abi",
  "patina-dst-runtime",
  "patina-dst-trace",
+ "sha2",
 ]
 
 [[package]]

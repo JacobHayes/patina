@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 patina-dst-abi.workspace = true
 patina-dst-trace.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 patina-dst-runtime.workspace = true

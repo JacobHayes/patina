@@ -2,12 +2,14 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::Infallible;
 use std::fmt;
 
 use patina_dst_abi::{Operation, Outcome, TaskId};
 use patina_dst_trace::{Timeline, TraceBundle, TraceError, TraceEvent};
+use sha2::{Digest, Sha256};
 
 pub trait FailureOracle {
     type Error;
@@ -27,6 +29,144 @@ where
     }
 }
 
+/// One in this many cache hits is re-run against the real oracle, so a
+/// nondeterministic oracle is surfaced rather than silently trusted.
+const VERIFICATION_PERIOD: u64 = 16;
+
+/// A verdict already observed for one candidate, plus how many times the cached
+/// answer has been served, which paces the sampled re-verification.
+#[derive(Clone, Copy, Debug)]
+struct CachedVerdict {
+    verdict: bool,
+    hits: u64,
+}
+
+/// Remembers the oracle's verdict for each distinct candidate of one
+/// minimization.
+///
+/// The first cache hit of a run is always re-verified and one in
+/// [`VERIFICATION_PERIOD`] hits after that, so the soundness guard below can
+/// never sit unused on a short run.
+///
+/// A reducer proposes the same candidate repeatedly - a sweep that re-tries a
+/// position after an unrelated deletion, a confirmation pass that re-walks a
+/// trace it has stopped changing, an up-front failure re-check shared by several
+/// passes. Every such repeat is byte-for-byte the same input the oracle already
+/// judged (measured at 15-19 % of all calls on real workq traces, 55-63 % inside
+/// a confirmation round), so the verdict can be reused. Candidates are keyed by
+/// the SHA-256 of [`TraceBundle::to_bytes`] - the exact canonical bytes a caller
+/// hands its oracle - so two candidates share a verdict only when the oracle
+/// cannot tell them apart.
+///
+/// # Soundness
+///
+/// Reuse is sound exactly as far as the oracle is a function of its candidate.
+/// Rather than assume that, the memo re-runs a deterministic sample of its cache
+/// hits and refuses the whole minimization with
+/// [`MinimizeError::NondeterministicOracle`] if a re-run disagrees with the
+/// cached verdict: a flaky oracle invalidates every result built on top of it,
+/// so it is reported loudly instead of being averaged over. The sample is
+/// derived from the candidate digest and the hit ordinal - never from a clock or
+/// an RNG - so a repeated run re-verifies exactly the same hits and the search
+/// stays reproducible.
+#[derive(Debug)]
+struct CandidateMemo {
+    verdicts: HashMap<[u8; 32], CachedVerdict>,
+    hits: u64,
+    misses: u64,
+    verifications: u64,
+    verification_period: u64,
+}
+
+impl CandidateMemo {
+    fn new() -> Self {
+        Self::with_verification_period(VERIFICATION_PERIOD)
+    }
+
+    /// A memo that re-verifies one in `period` cache hits. `period` of 1
+    /// verifies every hit, which the guard's own tests use to make the
+    /// disagreement path fire deterministically.
+    fn with_verification_period(period: u64) -> Self {
+        Self {
+            verdicts: HashMap::new(),
+            hits: 0,
+            misses: 0,
+            verifications: 0,
+            verification_period: period.max(1),
+        }
+    }
+
+    /// The verdict for `candidate`, from the cache when it has been judged
+    /// before and from `oracle` otherwise.
+    fn decide<O: FailureOracle>(
+        &mut self,
+        candidate: &TraceBundle,
+        oracle: &mut O,
+    ) -> Result<bool, MinimizeError<O::Error>> {
+        let digest: [u8; 32] = Sha256::digest(candidate.to_bytes().map_err(MinimizeError::Trace)?)
+            .as_slice()
+            .try_into()
+            .expect("SHA-256 produces 32 bytes");
+        let Some(cached) = self.verdicts.get(&digest).copied() else {
+            self.misses += 1;
+            let verdict = oracle
+                .preserves_failure(candidate)
+                .map_err(MinimizeError::Oracle)?;
+            self.verdicts
+                .insert(digest, CachedVerdict { verdict, hits: 0 });
+            return Ok(verdict);
+        };
+        self.hits += 1;
+        let hits = cached.hits + 1;
+        self.verdicts.insert(
+            digest,
+            CachedVerdict {
+                verdict: cached.verdict,
+                hits,
+            },
+        );
+        // The first repeat of a run is always re-verified, so the guard runs at
+        // least once against any oracle that is asked the same question twice;
+        // after that the content-derived sample paces it.
+        if self.verifications > 0 && !self.verifies(&digest, hits) {
+            return Ok(cached.verdict);
+        }
+        self.verifications += 1;
+        let observed = oracle
+            .preserves_failure(candidate)
+            .map_err(MinimizeError::Oracle)?;
+        if observed != cached.verdict {
+            return Err(MinimizeError::NondeterministicOracle {
+                digest: hex(&digest),
+                cached: cached.verdict,
+                observed,
+            });
+        }
+        Ok(observed)
+    }
+
+    /// Whether this hit is the sampled one. Both inputs are fixed by the search
+    /// itself - the candidate's content and how often it has recurred - so the
+    /// sample is identical on every repeat of the same minimization.
+    fn verifies(&self, digest: &[u8; 32], hits: u64) -> bool {
+        u64::from(digest[0]).wrapping_add(hits) % self.verification_period == 0
+    }
+}
+
+fn hex(digest: &[u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// How a verdict reads in a diagnostic: an oracle answers whether the selected
+/// failure is still present.
+fn verdict_word(verdict: bool) -> &'static str {
+    if verdict {
+        "still failing"
+    } else {
+        "no longer failing"
+    }
+}
+
 /// Delta-debug the decisions in an unbranched main timeline.
 ///
 /// Candidates are structurally validated and accepted only when the oracle
@@ -36,18 +176,23 @@ pub fn minimize_main<O: FailureOracle>(
     bundle: &TraceBundle,
     oracle: &mut O,
 ) -> Result<TraceBundle, MinimizeError<O::Error>> {
+    minimize_main_memoized(bundle, oracle, &mut CandidateMemo::new())
+}
+
+fn minimize_main_memoized<O: FailureOracle>(
+    bundle: &TraceBundle,
+    oracle: &mut O,
+    memo: &mut CandidateMemo,
+) -> Result<TraceBundle, MinimizeError<O::Error>> {
     bundle.validate().map_err(MinimizeError::Trace)?;
     if bundle.timelines.len() != 1 {
         return Err(MinimizeError::BranchedBundle);
     }
-    if !oracle
-        .preserves_failure(bundle)
-        .map_err(MinimizeError::Oracle)?
-    {
+    if !memo.decide(bundle, oracle)? {
         return Err(MinimizeError::OriginalDoesNotFail);
     }
 
-    minimize_index(bundle, 0, 0, oracle)
+    minimize_index(bundle, 0, 0, oracle, memo)
 }
 
 /// Delta-debug the recorded suffix of a leaf timeline.
@@ -62,6 +207,15 @@ pub fn minimize_timeline<O: FailureOracle>(
     bundle: &TraceBundle,
     timeline_id: &str,
     oracle: &mut O,
+) -> Result<TraceBundle, MinimizeError<O::Error>> {
+    minimize_timeline_memoized(bundle, timeline_id, oracle, &mut CandidateMemo::new())
+}
+
+fn minimize_timeline_memoized<O: FailureOracle>(
+    bundle: &TraceBundle,
+    timeline_id: &str,
+    oracle: &mut O,
+    memo: &mut CandidateMemo,
 ) -> Result<TraceBundle, MinimizeError<O::Error>> {
     bundle.validate().map_err(MinimizeError::Trace)?;
     let index = bundle
@@ -79,13 +233,10 @@ pub fn minimize_timeline<O: FailureOracle>(
     {
         return Err(MinimizeError::TimelineHasChildren(timeline_id.into()));
     }
-    if !oracle
-        .preserves_failure(bundle)
-        .map_err(MinimizeError::Oracle)?
-    {
+    if !memo.decide(bundle, oracle)? {
         return Err(MinimizeError::OriginalDoesNotFail);
     }
-    minimize_index(bundle, index, 0, oracle)
+    minimize_index(bundle, index, 0, oracle, memo)
 }
 
 /// Minimize every timeline in a branched bundle under the non-leaf policy.
@@ -110,17 +261,22 @@ pub fn minimize_branch_tree<O: FailureOracle>(
     bundle: &TraceBundle,
     oracle: &mut O,
 ) -> Result<TraceBundle, MinimizeError<O::Error>> {
+    minimize_branch_tree_memoized(bundle, oracle, &mut CandidateMemo::new())
+}
+
+fn minimize_branch_tree_memoized<O: FailureOracle>(
+    bundle: &TraceBundle,
+    oracle: &mut O,
+    memo: &mut CandidateMemo,
+) -> Result<TraceBundle, MinimizeError<O::Error>> {
     bundle.validate().map_err(MinimizeError::Trace)?;
-    if !oracle
-        .preserves_failure(bundle)
-        .map_err(MinimizeError::Oracle)?
-    {
+    if !memo.decide(bundle, oracle)? {
         return Err(MinimizeError::OriginalDoesNotFail);
     }
     let mut current = bundle.clone();
     for index in 0..current.timelines.len() {
         let protected = protected_prefix_len(&current, index);
-        current = minimize_index(&current, index, protected, oracle)?;
+        current = minimize_index(&current, index, protected, oracle, memo)?;
     }
     Ok(current)
 }
@@ -136,8 +292,9 @@ pub fn minimize_branches<O: FailureOracle>(
     bundle: &TraceBundle,
     oracle: &mut O,
 ) -> Result<TraceBundle, MinimizeError<O::Error>> {
-    let pruned = prune_branches(bundle, oracle)?;
-    minimize_branch_tree(&pruned, oracle)
+    let memo = &mut CandidateMemo::new();
+    let pruned = prune_branches_memoized(bundle, oracle, memo)?;
+    minimize_branch_tree_memoized(&pruned, oracle, memo)
 }
 
 /// The full trace-minimization pipeline: drop unneeded branch subtrees, then
@@ -157,11 +314,12 @@ pub fn minimize_all<O: FailureOracle>(
     bundle: &TraceBundle,
     oracle: &mut O,
 ) -> Result<TraceBundle, MinimizeError<O::Error>> {
-    let mut current = prune_branches(bundle, oracle)?;
+    let memo = &mut CandidateMemo::new();
+    let mut current = prune_branches_memoized(bundle, oracle, memo)?;
     loop {
         let before = current.clone();
-        current = minimize_branch_tree(&current, oracle)?;
-        current = reduce_schedule(&current, oracle)?;
+        current = minimize_branch_tree_memoized(&current, oracle, memo)?;
+        current = reduce_schedule_memoized(&current, oracle, memo)?;
         if current == before {
             break;
         }
@@ -187,11 +345,16 @@ pub fn prune_branches<O: FailureOracle>(
     bundle: &TraceBundle,
     oracle: &mut O,
 ) -> Result<TraceBundle, MinimizeError<O::Error>> {
+    prune_branches_memoized(bundle, oracle, &mut CandidateMemo::new())
+}
+
+fn prune_branches_memoized<O: FailureOracle>(
+    bundle: &TraceBundle,
+    oracle: &mut O,
+    memo: &mut CandidateMemo,
+) -> Result<TraceBundle, MinimizeError<O::Error>> {
     bundle.validate().map_err(MinimizeError::Trace)?;
-    if !oracle
-        .preserves_failure(bundle)
-        .map_err(MinimizeError::Oracle)?
-    {
+    if !memo.decide(bundle, oracle)? {
         return Err(MinimizeError::OriginalDoesNotFail);
     }
     let mut current = bundle.clone();
@@ -205,10 +368,7 @@ pub fn prune_branches<O: FailureOracle>(
                 .timelines
                 .retain(|timeline| !subtree.contains(&timeline.id));
             candidate.validate().map_err(MinimizeError::Trace)?;
-            if oracle
-                .preserves_failure(&candidate)
-                .map_err(MinimizeError::Oracle)?
-            {
+            if memo.decide(&candidate, oracle)? {
                 current = candidate;
                 removed_any = true;
             } else {
@@ -260,43 +420,70 @@ fn protected_prefix_len(bundle: &TraceBundle, timeline_index: usize) -> usize {
     (max_child_branch.saturating_sub(from) as usize).min(timeline.decisions.len())
 }
 
+/// Delta-debug one timeline's reducible region by *resuming* sweeps.
+///
+/// The ladder is textbook ddmin - cut the reducible window into `granularity`
+/// chunks, try deleting each in order, double the granularity when a whole pass
+/// is rejected, stop once a pass at granularity >= window (chunk size 1) accepts
+/// nothing, which is the classic 1-minimality fixed point.
+///
+/// What differs from a restart-at-zero ddmin is what happens *after* an accept.
+/// Restarting the scan at index 0 (and dropping back toward coarse chunks) makes
+/// the cost of a deletion proportional to the whole window: on real traces
+/// accepts landed every 650-850 oracle calls, 449-655 calls per productive
+/// deletion, and 15-19 % of all candidates were exact repeats of ones already
+/// judged. Here an accepted deletion instead leaves the scan position alone -
+/// the decisions after the deleted chunk slide down into it, so the same index
+/// now names new content - and the pass runs on to the end of the window. A pass
+/// that accepted anything is then repeated at the same granularity, so a
+/// deletion that only became possible because of an earlier one (including one
+/// the sweep had already walked past) is still found; the pass repeats until it
+/// accepts nothing, which is the fixed point that makes the resumed scan as
+/// complete as the restarting one.
+///
+/// Resuming plus the verdict cache measured 3-3.7x fewer oracle calls than the
+/// restarting search on two real workq traces, for byte-identical output
+/// (`docs/probes/minimize-oracle-perf.md`). That measurement drove a ladder-free
+/// single-decision sweep; the coarse rungs kept here cost about 15 % of a run on
+/// those traces and are what shrinks a trace with genuinely removable blocks in
+/// a handful of calls instead of one per decision.
 fn minimize_index<O: FailureOracle>(
     bundle: &TraceBundle,
     timeline_index: usize,
     protected: usize,
     oracle: &mut O,
+    memo: &mut CandidateMemo,
 ) -> Result<TraceBundle, MinimizeError<O::Error>> {
     let mut current = bundle.clone();
     let mut granularity = 2usize;
     loop {
-        let window = current.timelines[timeline_index]
-            .decisions
-            .len()
-            .saturating_sub(protected);
+        let window = reducible_window(&current, timeline_index, protected);
         if window < 2 {
             break;
         }
         let chunk_size = window.div_ceil(granularity);
         let mut reduced = false;
         let mut start = 0usize;
-        while start < window {
-            let end = (start + chunk_size).min(window);
+        loop {
+            // Recomputed every step: an accepted deletion shrinks the window
+            // under the scan position.
+            let live = reducible_window(&current, timeline_index, protected);
+            if start >= live {
+                break;
+            }
+            let end = (start + chunk_size).min(live);
             let mut candidate = current.clone();
             candidate.timelines[timeline_index]
                 .decisions
                 .drain(protected + start..protected + end);
             renumber(&mut candidate, timeline_index);
             candidate.validate().map_err(MinimizeError::Trace)?;
-            if oracle
-                .preserves_failure(&candidate)
-                .map_err(MinimizeError::Oracle)?
-            {
+            if memo.decide(&candidate, oracle)? {
                 current = candidate;
-                granularity = granularity.saturating_sub(1).max(2);
                 reduced = true;
-                break;
+            } else {
+                start = end;
             }
-            start = end;
         }
         if !reduced {
             if granularity >= window {
@@ -306,6 +493,15 @@ fn minimize_index<O: FailureOracle>(
         }
     }
     Ok(current)
+}
+
+/// The number of decisions in a timeline that may be deleted: everything past
+/// the prefix a descendant branch inherits.
+fn reducible_window(bundle: &TraceBundle, timeline_index: usize, protected: usize) -> usize {
+    bundle.timelines[timeline_index]
+        .decisions
+        .len()
+        .saturating_sub(protected)
 }
 
 fn renumber(bundle: &mut TraceBundle, timeline_index: usize) {
@@ -371,11 +567,16 @@ pub fn reduce_schedule<O: FailureOracle>(
     bundle: &TraceBundle,
     oracle: &mut O,
 ) -> Result<TraceBundle, MinimizeError<O::Error>> {
+    reduce_schedule_memoized(bundle, oracle, &mut CandidateMemo::new())
+}
+
+fn reduce_schedule_memoized<O: FailureOracle>(
+    bundle: &TraceBundle,
+    oracle: &mut O,
+    memo: &mut CandidateMemo,
+) -> Result<TraceBundle, MinimizeError<O::Error>> {
     bundle.validate().map_err(MinimizeError::Trace)?;
-    if !oracle
-        .preserves_failure(bundle)
-        .map_err(MinimizeError::Oracle)?
-    {
+    if !memo.decide(bundle, oracle)? {
         return Err(MinimizeError::OriginalDoesNotFail);
     }
     // The candidate ids canonicalization may rewrite toward are fixed from the
@@ -399,8 +600,8 @@ pub fn reduce_schedule<O: FailureOracle>(
         let mut changed = false;
         for (index, universe) in universes.iter().enumerate() {
             let protected = protected_prefix_len(&current, index);
-            changed |= collapse_switches(&mut current, index, protected, oracle)?;
-            changed |= canonicalize_order(&mut current, index, protected, universe, oracle)?;
+            changed |= collapse_switches(&mut current, index, protected, oracle, memo)?;
+            changed |= canonicalize_order(&mut current, index, protected, universe, oracle, memo)?;
         }
         if !changed {
             break;
@@ -417,6 +618,7 @@ fn collapse_switches<O: FailureOracle>(
     index: usize,
     protected: usize,
     oracle: &mut O,
+    memo: &mut CandidateMemo,
 ) -> Result<bool, MinimizeError<O::Error>> {
     let mut changed = false;
     loop {
@@ -438,7 +640,7 @@ fn collapse_switches<O: FailureOracle>(
                 &mut candidate.timelines[index].decisions[later],
                 earlier_task,
             );
-            if accept_candidate(&candidate, oracle)? {
+            if accept_candidate(&candidate, oracle, memo)? {
                 *current = candidate;
                 changed = true;
                 collapsed = true;
@@ -462,6 +664,7 @@ fn canonicalize_order<O: FailureOracle>(
     protected: usize,
     ids: &[TaskId],
     oracle: &mut O,
+    memo: &mut CandidateMemo,
 ) -> Result<bool, MinimizeError<O::Error>> {
     let mut changed = false;
     loop {
@@ -481,7 +684,7 @@ fn canonicalize_order<O: FailureOracle>(
                     &mut candidate.timelines[index].decisions[position],
                     candidate_task,
                 );
-                if accept_candidate(&candidate, oracle)? {
+                if accept_candidate(&candidate, oracle, memo)? {
                     *current = candidate;
                     changed = true;
                     lowered = true;
@@ -506,11 +709,10 @@ fn canonicalize_order<O: FailureOracle>(
 fn accept_candidate<O: FailureOracle>(
     candidate: &TraceBundle,
     oracle: &mut O,
+    memo: &mut CandidateMemo,
 ) -> Result<bool, MinimizeError<O::Error>> {
     candidate.validate().map_err(MinimizeError::Trace)?;
-    oracle
-        .preserves_failure(candidate)
-        .map_err(MinimizeError::Oracle)
+    memo.decide(candidate, oracle)
 }
 
 /// The decision indices at or beyond `protected` that are schedule decisions
@@ -754,6 +956,14 @@ pub enum MinimizeError<E = Infallible> {
     OriginalDoesNotFail,
     BranchedBundle,
     TimelineHasChildren(String),
+    /// A sampled re-run of a cached candidate contradicted the verdict the same
+    /// bytes produced earlier: the oracle is not a function of its input, so
+    /// every accept and reject in the run is suspect.
+    NondeterministicOracle {
+        digest: String,
+        cached: bool,
+        observed: bool,
+    },
 }
 
 impl<E: fmt::Display> fmt::Display for MinimizeError<E> {
@@ -772,6 +982,21 @@ impl<E: fmt::Display> fmt::Display for MinimizeError<E> {
                 "refusing to shrink timeline {timeline}: it has child branches whose inherited \
                  replay prefix would be silently invalidated; minimize leaf timelines first, or \
                  use branch-tree minimization to shrink only the safe suffix"
+            ),
+            Self::NondeterministicOracle {
+                digest,
+                cached,
+                observed,
+            } => write!(
+                f,
+                "the failure oracle is nondeterministic: candidate sha256:{digest} was judged \
+                 {} when first run and {} on a sampled re-run of the identical bytes; \
+                 minimization reuses verdicts per candidate and cannot trust an oracle that \
+                 answers differently for the same input - make the oracle decide from the \
+                 candidate alone (no shared state, no wall-clock or timeout-dependent verdict, \
+                 no unseeded randomness) and re-run",
+                verdict_word(*cached),
+                verdict_word(*observed),
             ),
         }
     }
@@ -921,6 +1146,495 @@ mod tests {
             operation: Operation::SchedulerNext,
             outcome: Outcome::OptionalTask(Some(TaskId(task))),
         }
+    }
+
+    /// A single-timeline bundle whose decisions carry `values`, one per clock
+    /// event, so a scripted oracle can be written as a predicate over `Vec<u64>`.
+    fn value_bundle(values: &[u64]) -> TraceBundle {
+        TraceBundle::new(
+            RunMetadata::new(1, "fixture"),
+            values
+                .iter()
+                .enumerate()
+                .map(|(index, &value)| clock_event(index as u64, value))
+                .collect(),
+        )
+    }
+
+    fn values(bundle: &TraceBundle) -> Vec<u64> {
+        bundle.timelines[0]
+            .decisions
+            .iter()
+            .map(|event| match event.outcome {
+                Outcome::U64(value) => value,
+                _ => unreachable!("value bundles carry only U64 outcomes"),
+            })
+            .collect()
+    }
+
+    /// The search this crate used before the resume sweep: restart the scan at
+    /// index 0 and step the granularity back toward coarse after *every*
+    /// accepted deletion. Kept as the reference the current search is checked
+    /// against - same fixed point, fewer oracle calls. It takes the same verdict
+    /// cache the current search does, so a call-count comparison measures the
+    /// two searches rather than the presence of the cache.
+    fn restart_minimize_main<O: FailureOracle>(
+        bundle: &TraceBundle,
+        oracle: &mut O,
+        memo: &mut CandidateMemo,
+    ) -> Result<TraceBundle, MinimizeError<O::Error>> {
+        bundle.validate().map_err(MinimizeError::Trace)?;
+        if !memo.decide(bundle, oracle)? {
+            return Err(MinimizeError::OriginalDoesNotFail);
+        }
+        let mut current = bundle.clone();
+        let mut granularity = 2usize;
+        loop {
+            let window = current.timelines[0].decisions.len();
+            if window < 2 {
+                break;
+            }
+            let chunk_size = window.div_ceil(granularity);
+            let mut reduced = false;
+            let mut start = 0usize;
+            while start < window {
+                let end = (start + chunk_size).min(window);
+                let mut candidate = current.clone();
+                candidate.timelines[0].decisions.drain(start..end);
+                renumber(&mut candidate, 0);
+                candidate.validate().map_err(MinimizeError::Trace)?;
+                if memo.decide(&candidate, oracle)? {
+                    current = candidate;
+                    granularity = granularity.saturating_sub(1).max(2);
+                    reduced = true;
+                    break;
+                }
+                start = end;
+            }
+            if !reduced {
+                if granularity >= window {
+                    break;
+                }
+                granularity = (granularity * 2).min(window);
+            }
+        }
+        Ok(current)
+    }
+
+    /// One resumed single-event sweep with no repetition: what the search would
+    /// do if the fixed-point iteration over sweeps were dropped. Used to show
+    /// that the iteration is load-bearing rather than defensive.
+    fn one_resumed_sweep(start_values: &[u64], predicate: impl Fn(&[u64]) -> bool) -> Vec<u64> {
+        let mut current = start_values.to_vec();
+        let mut index = 0usize;
+        while index < current.len() {
+            let mut candidate = current.clone();
+            candidate.remove(index);
+            if predicate(&candidate) {
+                current = candidate;
+            } else {
+                index += 1;
+            }
+        }
+        current
+    }
+
+    /// The trace length of the "single-decision deletions only" shape.
+    const SINGLE_DELETE_EVENTS: usize = 20;
+
+    /// A scripted oracle: a pure predicate over one candidate's decision values.
+    type Predicate = fn(&[u64]) -> bool;
+
+    /// A named scripted case - what the search starts from and what the oracle
+    /// accepts.
+    type Shape = (&'static str, Vec<u64>, Predicate);
+
+    /// Every scripted shape below is a pure predicate over the decision values,
+    /// so both searches see exactly the same oracle and any difference in the
+    /// result is a difference between the searches.
+    fn shapes() -> Vec<Shape> {
+        fn marker(values: &[u64]) -> bool {
+            values.contains(&999)
+        }
+        fn two_markers(values: &[u64]) -> bool {
+            values.contains(&999) && values.contains(&888)
+        }
+        fn at_least_three(values: &[u64]) -> bool {
+            values.len() >= 3
+        }
+        fn marker_and_even_length(values: &[u64]) -> bool {
+            values.contains(&999) && values.len() % 2 == 0
+        }
+        fn every_even_value_survives(values: &[u64]) -> bool {
+            // Only the odd decisions are droppable, and they alternate with the
+            // mandatory even ones, so every multi-decision chunk is rejected and
+            // every accepted deletion is a single decision. No two candidates
+            // are alike, so the verdict cache cannot help here: the calls saved
+            // are exactly the ones a restart-at-index-0 scan re-spends walking
+            // back to where it already was.
+            values
+                .iter()
+                .copied()
+                .filter(|value| value % 2 == 0)
+                .eq((0..SINGLE_DELETE_EVENTS as u64).step_by(2))
+        }
+        fn marker_and_prefix_tail(values: &[u64]) -> bool {
+            // The marker plus a *prefix* of the original tail: a decision can
+            // only be deleted once every decision after it is already gone, so
+            // progress runs backwards through the trace and a scan that walks
+            // forward finds one deletion per sweep.
+            let Some((first, tail)) = values.split_first() else {
+                return false;
+            };
+            *first == 999 && tail.iter().copied().eq(1..=tail.len() as u64)
+        }
+        vec![
+            (
+                "single marker",
+                (0..10).map(|v| if v == 6 { 999 } else { v }).collect(),
+                marker as Predicate,
+            ),
+            // Interchangeable filler: deleting any one of the repeated
+            // decisions - or any equal-length run of them - yields the same
+            // candidate bytes, which is where duplicate oracle calls come from
+            // on real traces.
+            (
+                "interchangeable filler",
+                duplicate_heavy().0,
+                duplicate_heavy().1,
+            ),
+            (
+                "two markers",
+                (0..16)
+                    .map(|v| {
+                        if v == 3 {
+                            999
+                        } else if v == 12 {
+                            888
+                        } else {
+                            v
+                        }
+                    })
+                    .collect(),
+                two_markers,
+            ),
+            ("length threshold", (0..12).collect(), at_least_three),
+            (
+                "single-decision deletions only",
+                (0..SINGLE_DELETE_EVENTS as u64).collect(),
+                every_even_value_survives,
+            ),
+            (
+                "marker with even length",
+                (0..12).map(|v| if v == 7 { 999 } else { v }).collect(),
+                marker_and_even_length,
+            ),
+            (
+                "deletion unblocks deletion",
+                vec![999, 1, 2, 3, 4, 5],
+                marker_and_prefix_tail,
+            ),
+        ]
+    }
+
+    /// Run `minimize_main` over a scripted predicate, returning the result and
+    /// the exact sequence of candidates the oracle was asked about.
+    fn run_scripted(
+        start_values: &[u64],
+        predicate: impl Fn(&[u64]) -> bool,
+    ) -> (Vec<u64>, Vec<Vec<u64>>) {
+        let bundle = value_bundle(start_values);
+        let mut asked = Vec::new();
+        let result = minimize_main(&bundle, &mut |candidate: &TraceBundle| {
+            let candidate = values(candidate);
+            let verdict = predicate(&candidate);
+            asked.push(candidate);
+            Ok::<_, Infallible>(verdict)
+        })
+        .unwrap();
+        (values(&result), asked)
+    }
+
+    /// Run one search over a scripted predicate with a fresh verdict cache,
+    /// returning the result values and the memo the run filled in.
+    fn run_search(start: &[u64], predicate: Predicate, resumed: bool) -> (Vec<u64>, CandidateMemo) {
+        let bundle = value_bundle(start);
+        let mut memo = CandidateMemo::new();
+        let mut oracle =
+            |candidate: &TraceBundle| Ok::<_, Infallible>(predicate(&values(candidate)));
+        let result = if resumed {
+            minimize_main_memoized(&bundle, &mut oracle, &mut memo)
+        } else {
+            restart_minimize_main(&bundle, &mut oracle, &mut memo)
+        }
+        .unwrap();
+        (values(&result), memo)
+    }
+
+    #[test]
+    fn resume_sweep_reaches_the_same_fixed_point_as_the_restarting_search() {
+        for (name, start, predicate) in shapes() {
+            let (reference, _) = run_search(&start, predicate, false);
+            let (result, _) = run_search(&start, predicate, true);
+            assert_eq!(
+                result, reference,
+                "{name}: resumed sweep and restarting search must agree"
+            );
+            assert!(predicate(&result), "{name}: the failure must survive");
+            value_bundle(&result).validate().unwrap();
+            // The same result also comes back through the public entry point,
+            // which is what callers actually reach.
+            let (public, _) = run_scripted(&start, predicate);
+            assert_eq!(public, result, "{name}: public entry point agrees");
+        }
+    }
+
+    #[test]
+    fn resume_sweep_costs_fewer_oracle_calls_than_restarting() {
+        // Both searches are measured with the same verdict cache, so the
+        // difference is the search and not the memo; `hits + misses` is what
+        // each would have cost without the cache.
+        let mut restart_total = 0usize;
+        let mut resume_total = 0usize;
+        for (name, start, predicate) in shapes() {
+            let (_, restart) = run_search(&start, predicate, false);
+            let (_, resume) = run_search(&start, predicate, true);
+            let restart_calls = (restart.misses + restart.verifications) as usize;
+            let resume_calls = (resume.misses + resume.verifications) as usize;
+            println!(
+                "{name}: {} events, restart {restart_calls} calls ({} without the cache), \
+                 resume {resume_calls} calls ({} without the cache)",
+                start.len(),
+                restart.hits + restart.misses,
+                resume.hits + resume.misses
+            );
+            if name == "single-decision deletions only" {
+                // Every accepted deletion is a single decision and no two
+                // candidates are alike, so the cache cannot help either search:
+                // the whole saving is the rescan the resumed sweep does not pay.
+                assert!(
+                    resume_calls < restart_calls,
+                    "{name}: expected strictly fewer oracle calls, \
+                     got {resume_calls} vs {restart_calls}"
+                );
+            }
+            if name == "interchangeable filler" {
+                // The duplicate-heavy case the probe measured: here the cache is
+                // what pays, and it must actually pay.
+                assert!(
+                    resume.hits > 0 && resume_calls < (resume.hits + resume.misses) as usize,
+                    "{name}: the cache saved nothing"
+                );
+            }
+            // On ten-decision traces the two searches are within a couple of
+            // calls of each other either way - restarting at index 0 is cheap
+            // when the whole window is that small. The measured 3-3.7x is a
+            // 944-decision effect (docs/probes/minimize-oracle-perf.md); what
+            // matters here is that no shape blows up.
+            assert!(
+                resume_calls <= restart_calls + 2,
+                "{name}: resumed sweep cost {resume_calls} calls against restart's {restart_calls}"
+            );
+            restart_total += restart_calls;
+            resume_total += resume_calls;
+        }
+        assert!(
+            resume_total < restart_total,
+            "across all shapes: resume {resume_total} calls, restart {restart_total}"
+        );
+    }
+
+    /// The interchangeable-filler shape: deleting any one of the repeated
+    /// decisions produces the same candidate, so the search proposes the same
+    /// bytes many times over.
+    fn duplicate_heavy() -> (Vec<u64>, Predicate) {
+        fn predicate(values: &[u64]) -> bool {
+            values.contains(&999) && values.len() >= 8
+        }
+        (
+            std::iter::once(999)
+                .chain(std::iter::repeat_n(7, 15))
+                .collect(),
+            predicate,
+        )
+    }
+
+    #[test]
+    fn repeated_candidates_are_decided_once() {
+        let (start, predicate) = duplicate_heavy();
+        let bundle = value_bundle(&start);
+        let mut memo = CandidateMemo::new();
+        let mut asked = Vec::new();
+        minimize_main_memoized(
+            &bundle,
+            &mut |candidate: &TraceBundle| {
+                asked.push(values(candidate));
+                Ok::<_, Infallible>(predicate(&values(candidate)))
+            },
+            &mut memo,
+        )
+        .unwrap();
+        assert!(
+            memo.hits > 0,
+            "the shape must actually repeat candidates, or this proves nothing"
+        );
+        // Every oracle call is a distinct candidate except the sampled re-runs
+        // the soundness guard deliberately repeats.
+        let distinct: HashSet<Vec<u64>> = asked.iter().cloned().collect();
+        assert_eq!(
+            asked.len() - memo.verifications as usize,
+            distinct.len(),
+            "the oracle re-judged a candidate outside the sampled re-verification: \
+             {} calls, {} verifications, {} distinct candidates",
+            asked.len(),
+            memo.verifications,
+            distinct.len()
+        );
+    }
+
+    #[test]
+    fn sweeps_iterate_to_a_fixed_point_rather_than_stopping_after_one_pass() {
+        // Deleting a decision here requires every later decision to be gone
+        // already, so one forward sweep can only ever remove the last one.
+        let start = vec![999, 1, 2, 3, 4, 5];
+        let predicate = |values: &[u64]| {
+            let Some((first, tail)) = values.split_first() else {
+                return false;
+            };
+            *first == 999 && tail.iter().copied().eq(1..=tail.len() as u64)
+        };
+        assert_eq!(
+            one_resumed_sweep(&start, predicate),
+            vec![999, 1, 2, 3, 4],
+            "a single sweep stops one deletion in"
+        );
+        let (result, _) = run_scripted(&start, predicate);
+        assert_eq!(
+            result,
+            vec![999],
+            "the iterated search reaches the fixed point"
+        );
+    }
+
+    #[test]
+    fn the_search_asks_the_same_questions_in_the_same_order_on_a_repeat_run() {
+        for (name, start, predicate) in shapes() {
+            let (first_result, first_asked) = run_scripted(&start, predicate);
+            let (second_result, second_asked) = run_scripted(&start, predicate);
+            assert_eq!(first_result, second_result, "{name}: same result");
+            assert_eq!(
+                first_asked, second_asked,
+                "{name}: same candidate sequence, including which cache hits were re-verified"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sampling_policy_is_content_derived_and_hits_its_advertised_rate() {
+        let memo = CandidateMemo::new();
+        let sampled = (0..=u8::MAX)
+            .filter(|&byte| {
+                let mut digest = [0u8; 32];
+                digest[0] = byte;
+                memo.verifies(&digest, 1)
+            })
+            .count();
+        assert_eq!(
+            sampled,
+            256 / VERIFICATION_PERIOD as usize,
+            "one hit in {VERIFICATION_PERIOD} must be re-verified"
+        );
+        // The same digest at successive hits moves in and out of the sample, so
+        // a candidate that recurs often is re-verified repeatedly rather than
+        // trusted forever, and one that never recurs costs nothing.
+        let digest = [0u8; 32];
+        assert!((1..=VERIFICATION_PERIOD).any(|hits| memo.verifies(&digest, hits)));
+        let every = CandidateMemo::with_verification_period(1);
+        assert!((1..=8).all(|hits| every.verifies(&digest, hits)));
+    }
+
+    /// An oracle that answers honestly the first time it sees a candidate and
+    /// inverts itself on every later look at the identical bytes - exactly the
+    /// flakiness a verdict cache would otherwise launder into a wrong result.
+    fn contradicting_oracle<'a>(
+        seen: &'a mut HashMap<Vec<u64>, bool>,
+        predicate: Predicate,
+    ) -> impl FnMut(&TraceBundle) -> Result<bool, Infallible> + 'a {
+        move |candidate: &TraceBundle| {
+            let candidate = values(candidate);
+            let honest = predicate(&candidate);
+            Ok(match seen.insert(candidate, honest) {
+                Some(previous) => !previous,
+                None => honest,
+            })
+        }
+    }
+
+    #[test]
+    fn a_contradicting_oracle_aborts_the_run_instead_of_being_trusted() {
+        let (start, predicate) = duplicate_heavy();
+        let bundle = value_bundle(&start);
+        let mut seen = HashMap::new();
+        let error = minimize_main_memoized(
+            &bundle,
+            &mut contradicting_oracle(&mut seen, predicate),
+            // Verify every hit so the disagreement is reached deterministically
+            // on this small trace.
+            &mut CandidateMemo::with_verification_period(1),
+        )
+        .unwrap_err();
+        let MinimizeError::NondeterministicOracle {
+            digest,
+            cached,
+            observed,
+        } = &error
+        else {
+            panic!("expected a nondeterminism refusal, got {error}");
+        };
+        assert_eq!(digest.len(), 64, "the refusal names the candidate digest");
+        assert_ne!(cached, observed);
+        let message = error.to_string();
+        assert!(
+            message.contains("nondeterministic") && message.contains("sha256:"),
+            "the refusal must be legible: {message}"
+        );
+    }
+
+    #[test]
+    fn the_default_sample_re_runs_cache_hits_and_still_catches_a_contradiction() {
+        let (start, predicate) = duplicate_heavy();
+
+        // Non-vacuity: under the shipped sampling period a normal run really does
+        // re-run some of its cache hits.
+        let bundle = value_bundle(&start);
+        let mut memo = CandidateMemo::new();
+        minimize_main_memoized(
+            &bundle,
+            &mut |candidate: &TraceBundle| Ok::<_, Infallible>(predicate(&values(candidate))),
+            &mut memo,
+        )
+        .unwrap();
+        assert!(memo.hits > 0, "the run must exercise the cache at all");
+        assert!(
+            memo.verifications > 0,
+            "the re-verification never fired: {} hits, {} misses",
+            memo.hits,
+            memo.misses
+        );
+
+        // And that sample is what catches a self-contradicting oracle without
+        // any test-only period.
+        let mut seen = HashMap::new();
+        let error = minimize_main_memoized(
+            &bundle,
+            &mut contradicting_oracle(&mut seen, predicate),
+            &mut CandidateMemo::new(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, MinimizeError::NondeterministicOracle { .. }),
+            "expected a nondeterminism refusal, got {error}"
+        );
     }
 
     fn selected_tasks(timeline: &Timeline) -> Vec<u64> {
