@@ -120,8 +120,11 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   for every native program — not just for guests using the new feature. Prefer a
   few lines of hand-rolled parsing over a libc helper there, and treat a gate
   refusal naming an unexpected symbol as a real finding rather than an
-  over-strict allowlist. (Found on Linux, where glibc resolves `strtol` to
-  `__isoc23_strtol`; macOS did not surface it.)
+  over-strict allowlist. (Found on Linux, where glibc resolved `strtol` to
+  `__isoc23_strtol`; macOS did not surface it. The audit now normalizes glibc's
+  `__isocNN_` generation aliases onto their base symbol, so that particular
+  spelling no longer refuses — but the "one libc call, every guest" rule stands
+  for any symbol that is not already interposed or known-safe.)
 - Syncing a source tree to a verification host with `rsync -a` preserves source
   mtimes, so a build cache on the target can look NEWER than the freshly synced
   sources and the toolchain skips the rebuild — the tests then run against stale

@@ -3148,11 +3148,14 @@ int getaddrinfo(const char *node, const char *service,
         /* Only numeric services resolve: a /etc/services lookup would be a host
          * dependency, and the virtual network has no service registry.
          *
-         * Parsed by hand rather than with strtol, which glibc resolves to
-         * __isoc23_strtol — an uninterposed import that the pre-run default-deny
-         * gate (correctly) refuses, and which every native guest would inherit
-         * because this translation unit is always linked. A digits-only parse
-         * also keeps the result locale-independent. */
+         * Parsed by hand rather than with strtol. The original reason was the
+         * audit: glibc resolves strtol to __isoc23_strtol, an import the
+         * default-deny gate refused, and every native guest would have inherited
+         * it because this translation unit is always linked. That reason is GONE —
+         * the audit now normalizes the __isocNN_ generation alias onto the base
+         * symbol and strtol is known-safe — but the parser stays, because the
+         * remaining reason stands on its own: a digits-only parse is
+         * locale-independent, where strtol's is not. */
         if (*service == '\0') return EAI_SERVICE;
         unsigned long parsed = 0;
         for (const char *digit = service; *digit != '\0'; ++digit) {
