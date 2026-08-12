@@ -350,3 +350,25 @@ cluster so the fixes have citable symptom records.
   macOS requires a shim packaging change (staticlib → dylib) — that choice is
   the arc's first design decision. Untested: x86_64 Linux, musl, signed/SIP
   binaries.
+- **2026-08-12 — SlateDB all-features audit: NOT clean; the dst feature pin is
+  load-bearing.** Follow-up from the dogfooding round, run in a fresh
+  Tensorlake sandbox (terminated after). With slatedb's full feature set the
+  audit refuses (exit 2, 8 findings), attributed by single-feature isolation
+  builds, not inference: `aws` (in upstream `default`) pulls aws-lc-sys 0.41.0
+  → 7 unknown-import rows (`OPENSSL_memory_*`, `__assert_fail`, `sdallocx`,
+  `__isoc23_sscanf`); `foyer` (also upstream default) pulls fastant 0.1.11 →
+  an inlined `rdtsc` cpu-nondeterminism finding. The dogfooding round's clean
+  result held only because slatedb-dst pins `default-features = false`. With
+  foyer off and the 7 aws-lc imports `--allow`ed: exit 0, 73 symbols vs the
+  66-symbol baseline (delta is exactly those 7), deny-trap set identical.
+  Verified locally against the CLI and audit source: (a) `--allow` cannot
+  absorb an instruction-class finding — correct per the SUD-manageability
+  split (a register read cannot be trapped or interposed; allowing it would be
+  a silent determinism hole), but the refusal text does not say the class is
+  unallowable — follow-up: name it in the diagnostic; (b) neither `build` nor
+  `audit` takes `--features`/`--all-features`, so feature variation means
+  editing the guest manifest — follow-up filed (cargo-like UX says these
+  belong on the cargo family). Guest gotcha for the skill doc pile:
+  slatedb-dst is `#![cfg(tokio_unstable)]`; pre-existing `RUSTFLAGS` compose
+  with the shim flags via `CARGO_ENCODED_RUSTFLAGS`, so `--cfg tokio_unstable`
+  works unchanged under patina.
