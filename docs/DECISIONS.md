@@ -311,3 +311,23 @@ cluster so the fixes have citable symptom records.
   two-line cfg-guard pattern. The one case the workaround cannot serve — a
   binary-only unmodified guest with an effectful static constructor — is the
   trigger that would promote "ctor prologue support" to a real arc.
+- **2026-08-12 — outcome-channel arc approved; core declared guest-agnostic.**
+  The five design decisions settled by the user: (1) guest verdicts are ONE
+  shim-ABI verb, `patina_verdict(kind, label, detail)` — kinds are data, not
+  symbols (validated against Antithesis, whose entire SDK funnels assertions
+  AND lifecycle through the single `fuzz_json_data(ptr, len)` JSON entry point
+  with a JSONL-file fallback and label-keyed aggregation); (2) the
+  `patina.result/v1` envelope becomes the classifier's ONLY input — every
+  marker list deleted in the same change, workq/pubsub migrated, no dual path;
+  (3) level-1 guests classify via spec-declared per-guest patterns + exit-code
+  maps (grep survives only as explicit per-guest config); (4) the pre-main
+  init probe is green-lit as its own track (ELF `.preinit_array` + macOS
+  link-order evidence before any prologue arc); (5) guest deliberate abort is
+  its own campaign class `GUEST_ABORT` — with patina refusals
+  envelope-attributed, an unattributed SIGABRT is the guest's finding, not
+  infra noise. This also closes the 2026-08-07 open fork on classifying
+  guest-deliberate aborts. New doctrine (AGENTS.md): core patina is
+  guest-agnostic — no testbed-specific identifiers or workaround branches in
+  `crates/*`; the `WORKQ_VIOLATION`/`BUG_CAUGHT` strings in the campaign
+  classifier are the named debt the arc removes. Design:
+  `docs/arcs/outcome-channel.md`.

@@ -24,6 +24,7 @@ implementation waves start on explicit go). Ground rules that apply across every
 | [trace-inspection](trace-inspection.md) | `trace info/events/stats/diff` subcommands over a decode layer shared with the HTML renderer; jq-able JSONL event streams. |
 | [point-solution-dst](point-solution-dst.md) | `#[patina_dst::test]` under plain `cargo test` via shim-linked re-exec, source-first polish; Wave C = the final skills pass (harness fixtures deliberately unscheduled). |
 | [clap-config-eval](clap-config-eval.md) | clap adoption evaluation with a mechanical adopt/reject rule (small spike, ~1 agent-hour, launches on explicit go) + the flag > env > `.patina/` > default config layering design. |
+| [outcome-channel](outcome-channel.md) | Structured outcome channel: single `patina_verdict` shim-ABI verb (SDK lowers to it), `patina.result/v1` envelope as the classifier's only input, spec-declared level-1 patterns, `GUEST_ABORT` class, guest-specific markers deleted from core. |
 
 Shared cross-arc contracts: the per-label SDK store is `<out>/sites.json`
 (`patina.campaign.sites/v1`; sometimes-gate writes/gates it, `sites --exercised` reads it,

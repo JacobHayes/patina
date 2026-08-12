@@ -119,6 +119,12 @@ Gates worth knowing individually:
 - **Determinism claims are verified, not asserted.** Byte-identical repeats,
   record→replay identity, and seed variation are the standard evidence shape;
   a check that cannot fail is treated as a bug (see the selftests above).
+- **Core patina is guest-agnostic.** No testbed- or guest-specific identifiers,
+  markers, or workaround branches in the core crates (`crates/*`). Anything a
+  specific guest needs for classification or configuration belongs in that
+  guest's campaign spec or testbed scripts, never hardcoded in patina source.
+  (Known debt scheduled for removal by the outcome-channel arc: the
+  `WORKQ_VIOLATION`/`BUG_CAUGHT` strings in the campaign classifier.)
 
 ## Agent operating habits
 
