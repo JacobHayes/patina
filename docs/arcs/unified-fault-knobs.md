@@ -232,9 +232,12 @@ exercised I/O path report itself as working.
 `FsDriver::fault_report(&self) -> Option<FsFaultReport>` (default `None`, wrappers forward —
 same contract as `NetDriver::fault_report`). At finalization the runtime merges the driver
 report with the Context's latency counters and emits one machine-readable line,
-`PATINA_FS_FAULT_REPORT eligible_ops=... errors_injected=... shorts_applied=...
-latency_applied=... vacuous=...`, plus a loud `PATINA WARNING` on vacuity — suppressed only by
-a false-y `PATINA_FS_FAULT_REPORT` env, exactly like the net report (:4892).
+`PATINA_FS_FAULT_REPORT eligible_ops=... errors_injected=... errors_by_op=... shorts_applied=...
+shorts_by_op=... latency_applied=... vacuous=...`, plus a loud `PATINA WARNING` on vacuity —
+suppressed only by a false-y `PATINA_FS_FAULT_REPORT` env, exactly like the net report (:4892).
+The `*_by_op` fields name the operation kinds a class's effects landed on
+(`open:1,read:2`, or `-` for none), so a non-vacuous knob that only ever fired on one corner of
+the driver surface is visible as the partial coverage it is.
 
 ### 2.5 RED-provability (detection before fixes)
 

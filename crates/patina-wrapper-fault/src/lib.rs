@@ -5,7 +5,7 @@ use patina_dst_abi::{
     SendDisposition, SendReport, ShutdownHow, SocketId, TcpAccepted,
 };
 use patina_dst_driver_api::{
-    DriverResult, FsDriver, FsFaultReport, NetDriver, NetFaultReport, NetReadiness,
+    DriverResult, FsDriver, FsFaultOpKind, FsFaultReport, NetDriver, NetFaultReport, NetReadiness,
     vacuity_is_diagnosable,
 };
 use patina_dst_rng_seeded::{SplitMix64, domain_seed, fault_domain};
@@ -91,12 +91,13 @@ impl<D> FaultFs<D> {
         }
         let code = choose_error_code(&mut self.error_rng, op);
         self.report.errors_injected += 1;
+        self.report.errors_by_op.record(op.kind());
         Some(EffectError::new(
             code,
             format!(
                 "injected filesystem {} fault during {}",
                 code_name(code),
-                op.name()
+                op.kind().name()
             ),
         ))
     }
@@ -127,18 +128,25 @@ impl<D> FaultFs<D> {
     /// guest reading into a buffer larger than the file has left keeps getting
     /// every available byte no matter how the request was truncated, and that is
     /// an unobserved fault, not an applied one.
-    fn count_short_read(&mut self, short: Option<usize>, bytes: &[u8]) {
+    fn count_short_read(&mut self, kind: FsFaultOpKind, short: Option<usize>, bytes: &[u8]) {
         if short == Some(bytes.len()) {
-            self.report.shorts_applied += 1;
+            self.count_short(kind);
         }
     }
 
     /// A fired write truncation is always observable: the caller is told fewer
     /// bytes were written than it asked for.
-    fn count_short_write(&mut self, short: Option<usize>) {
+    fn count_short_write(&mut self, kind: FsFaultOpKind, short: Option<usize>) {
         if short.is_some() {
-            self.report.shorts_applied += 1;
+            self.count_short(kind);
         }
+    }
+
+    /// The one place an applied truncation is booked, so the scalar counter and
+    /// the per-kind breakdown cannot disagree about how many landed.
+    fn count_short(&mut self, kind: FsFaultOpKind) {
+        self.report.shorts_applied += 1;
+        self.report.shorts_by_op.record(kind);
     }
 
     fn merged_report(&self) -> FsFaultReport
@@ -154,8 +162,10 @@ impl<D> FaultFs<D> {
             report.eligible_ops += inner.eligible_ops;
             report.error_vacuity_diagnosable |= inner.error_vacuity_diagnosable;
             report.errors_injected += inner.errors_injected;
+            report.errors_by_op.merge(&inner.errors_by_op);
             report.short_vacuity_diagnosable |= inner.short_vacuity_diagnosable;
             report.shorts_applied += inner.shorts_applied;
+            report.shorts_by_op.merge(&inner.shorts_by_op);
             report.latency_vacuity_diagnosable |= inner.latency_vacuity_diagnosable;
             report.latency_applied += inner.latency_applied;
         }
@@ -180,7 +190,7 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
             return Err(error);
         }
         let bytes = self.inner.read(fd, short.unwrap_or(max_len))?;
-        self.count_short_read(short, &bytes);
+        self.count_short_read(FsFaultOpKind::Read, short, &bytes);
         Ok(bytes)
     }
 
@@ -193,7 +203,7 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         let written = self
             .inner
             .write(fd, &bytes[..short.unwrap_or(bytes.len())])?;
-        self.count_short_write(short);
+        self.count_short_write(FsFaultOpKind::Write, short);
         Ok(written)
     }
 
@@ -204,7 +214,7 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
             return Err(error);
         }
         let bytes = self.inner.read_at(fd, offset, short.unwrap_or(max_len))?;
-        self.count_short_read(short, &bytes);
+        self.count_short_read(FsFaultOpKind::ReadAt, short, &bytes);
         Ok(bytes)
     }
 
@@ -217,7 +227,7 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         let written = self
             .inner
             .write_at(fd, offset, &bytes[..short.unwrap_or(bytes.len())])?;
-        self.count_short_write(short);
+        self.count_short_write(FsFaultOpKind::WriteAt, short);
         Ok(written)
     }
 
@@ -378,27 +388,31 @@ enum FsFaultOp {
 }
 
 impl FsFaultOp {
-    fn name(self) -> &'static str {
+    /// The reported kind. The wrapper's own enum carries the extra facts fault
+    /// selection needs (whether an `open` allocates), while the report's kind is
+    /// the shared vocabulary — one name table, so an error message and a
+    /// breakdown row can never spell the same operation differently.
+    fn kind(self) -> FsFaultOpKind {
         match self {
-            FsFaultOp::Open { .. } => "open",
-            FsFaultOp::Read => "read",
-            FsFaultOp::Write => "write",
-            FsFaultOp::ReadAt => "read_at",
-            FsFaultOp::WriteAt => "write_at",
-            FsFaultOp::Metadata => "metadata",
-            FsFaultOp::FdMetadata => "fd_metadata",
-            FsFaultOp::CreateDirectory => "create_directory",
-            FsFaultOp::RemoveFile => "remove_file",
-            FsFaultOp::Sync => "sync",
-            FsFaultOp::SetLen => "set_len",
-            FsFaultOp::SetTimes => "set_times",
-            FsFaultOp::SetTimesByPath => "set_times_by_path",
-            FsFaultOp::ReadDirectory => "read_directory",
-            FsFaultOp::RemoveDirectory => "remove_directory",
-            FsFaultOp::Rename => "rename",
-            FsFaultOp::Link => "link",
-            FsFaultOp::Symlink => "symlink",
-            FsFaultOp::ReadLink => "read_link",
+            FsFaultOp::Open { .. } => FsFaultOpKind::Open,
+            FsFaultOp::Read => FsFaultOpKind::Read,
+            FsFaultOp::Write => FsFaultOpKind::Write,
+            FsFaultOp::ReadAt => FsFaultOpKind::ReadAt,
+            FsFaultOp::WriteAt => FsFaultOpKind::WriteAt,
+            FsFaultOp::Metadata => FsFaultOpKind::Metadata,
+            FsFaultOp::FdMetadata => FsFaultOpKind::FdMetadata,
+            FsFaultOp::CreateDirectory => FsFaultOpKind::CreateDirectory,
+            FsFaultOp::RemoveFile => FsFaultOpKind::RemoveFile,
+            FsFaultOp::Sync => FsFaultOpKind::Sync,
+            FsFaultOp::SetLen => FsFaultOpKind::SetLen,
+            FsFaultOp::SetTimes => FsFaultOpKind::SetTimes,
+            FsFaultOp::SetTimesByPath => FsFaultOpKind::SetTimesByPath,
+            FsFaultOp::ReadDirectory => FsFaultOpKind::ReadDirectory,
+            FsFaultOp::RemoveDirectory => FsFaultOpKind::RemoveDirectory,
+            FsFaultOp::Rename => FsFaultOpKind::Rename,
+            FsFaultOp::Link => FsFaultOpKind::Link,
+            FsFaultOp::Symlink => FsFaultOpKind::Symlink,
+            FsFaultOp::ReadLink => FsFaultOpKind::ReadLink,
         }
     }
 
@@ -713,6 +727,104 @@ mod tests {
         assert!(report.short_vacuity_diagnosable);
         assert_eq!(report.shorts_applied, 5);
         assert!(!report.is_vacuous());
+    }
+
+    /// Every fault-eligible operation must attribute its injected error to its
+    /// OWN kind, and the breakdown must account for every counted effect. Two
+    /// drift classes this catches: a new eligible operation whose `kind()` arm
+    /// copies a neighbour's (its errors are then reported under the wrong op,
+    /// and the neighbour looks better covered than it is), and a counted effect
+    /// booked into the scalar without an attribution (the breakdown silently
+    /// under-reports). The operation list is driven off `FsFaultOpKind::ALL`, so
+    /// a kind added without a call site here fails rather than going untested.
+    #[test]
+    fn every_fault_eligible_operation_attributes_its_own_kind() {
+        let fd = Fd(0);
+        // Errors fire before the inner filesystem is touched, so an empty MemFs
+        // and a synthetic fd exercise every arm.
+        let drive = |fs: &mut FaultFs<MemFs>, kind: FsFaultOpKind| match kind {
+            FsFaultOpKind::Open => fs.open("/f", OpenFlags::create_truncate_write()).err(),
+            FsFaultOpKind::Read => fs.read(fd, 8).err(),
+            FsFaultOpKind::Write => fs.write(fd, b"abcdef").err(),
+            FsFaultOpKind::ReadAt => fs.read_at(fd, 0, 8).err(),
+            FsFaultOpKind::WriteAt => fs.write_at(fd, 0, b"abcdef").err(),
+            FsFaultOpKind::Metadata => fs.metadata("/f").err(),
+            FsFaultOpKind::FdMetadata => fs.fd_metadata(fd).err(),
+            FsFaultOpKind::CreateDirectory => fs.create_directory("/d").err(),
+            FsFaultOpKind::RemoveFile => fs.remove_file("/f").err(),
+            FsFaultOpKind::Sync => fs.sync(fd).err(),
+            FsFaultOpKind::SetLen => fs.set_len(fd, 1).err(),
+            FsFaultOpKind::SetTimes => fs.set_times(fd, Some(1), Some(1)).err(),
+            FsFaultOpKind::SetTimesByPath => fs.set_times_by_path("/f", Some(1), Some(1)).err(),
+            FsFaultOpKind::ReadDirectory => fs.read_directory("/").err(),
+            FsFaultOpKind::RemoveDirectory => fs.remove_directory("/d").err(),
+            FsFaultOpKind::Rename => fs.rename("/f", "/g").err(),
+            FsFaultOpKind::Link => fs.link("/f", "/g").err(),
+            FsFaultOpKind::Symlink => fs.symlink("/f", "/g").err(),
+            FsFaultOpKind::ReadLink => fs.read_link("/f").err(),
+        };
+
+        for kind in FsFaultOpKind::ALL {
+            let mut fs = FaultFs::new(MemFs::new(), 1).error_permille(1000);
+            let error = drive(&mut fs, kind)
+                .unwrap_or_else(|| panic!("{} must be fault-eligible at rate 1000", kind.name()));
+            assert!(
+                error.message.contains(kind.name()),
+                "{}: injected error names another operation: {}",
+                kind.name(),
+                error.message
+            );
+            let report = fs.fault_report().unwrap();
+            assert_eq!(report.errors_injected, 1, "{}", kind.name());
+            assert_eq!(
+                report.errors_by_op.get(kind),
+                1,
+                "{} attributed its error elsewhere: {}",
+                kind.name(),
+                report.errors_by_op
+            );
+            assert_eq!(
+                report.errors_by_op.total(),
+                report.errors_injected,
+                "{}: breakdown must account for every counted error",
+                kind.name()
+            );
+        }
+
+        // The short class over a mixed read/write workload: its breakdown must
+        // add up too, and may only name truncatable kinds.
+        let mut inner = MemFs::new();
+        let fd = inner
+            .open(
+                "/file",
+                OpenFlags {
+                    read: true,
+                    ..OpenFlags::create_truncate_write()
+                },
+            )
+            .unwrap();
+        let mut fs = FaultFs::new(inner, 1).short_permille(1000);
+        for _ in 0..4 {
+            fs.write(fd, b"abcdef").unwrap();
+            fs.write_at(fd, 0, b"abcdef").unwrap();
+            fs.read_at(fd, 0, 4).unwrap();
+        }
+        let report = fs.fault_report().unwrap();
+        assert_eq!(report.shorts_by_op.total(), report.shorts_applied);
+        assert!(report.shorts_applied > 0);
+        for (kind, _) in report.shorts_by_op.nonzero() {
+            assert!(
+                matches!(
+                    kind,
+                    FsFaultOpKind::Read
+                        | FsFaultOpKind::Write
+                        | FsFaultOpKind::ReadAt
+                        | FsFaultOpKind::WriteAt
+                ),
+                "{} is not truncatable yet absorbed a short",
+                kind.name()
+            );
+        }
     }
 
     #[test]

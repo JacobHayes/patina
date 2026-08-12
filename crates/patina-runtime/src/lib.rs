@@ -6517,18 +6517,7 @@ fn emit_fs_fault_report(reports: ReportConfig, report: &patina_dst_driver_api::F
     if !reports.enabled(Report::FsFault) {
         return;
     }
-    eprintln!(
-        "PATINA_FS_FAULT_REPORT eligible_ops={} error_vacuity_diagnosable={} errors_injected={} \
-short_vacuity_diagnosable={} shorts_applied={} latency_vacuity_diagnosable={} latency_applied={} vacuous={}",
-        report.eligible_ops,
-        u8::from(report.error_vacuity_diagnosable),
-        report.errors_injected,
-        u8::from(report.short_vacuity_diagnosable),
-        report.shorts_applied,
-        u8::from(report.latency_vacuity_diagnosable),
-        report.latency_applied,
-        u8::from(report.is_vacuous()),
-    );
+    eprintln!("{}", fs_fault_report_line(report));
     if report.is_vacuous() {
         eprintln!(
             "PATINA WARNING: filesystem fault knobs inert — {} fault-eligible filesystem op(s) \
@@ -6539,6 +6528,36 @@ short-I/O knob applies nothing to a guest whose reads never fill their buffer.",
             report.eligible_ops,
         );
     }
+}
+
+/// The `PATINA_FS_FAULT_REPORT` line for a filesystem fault summary. Pure, so the
+/// exact wire shape the campaign classifier and the testbed scripts read is
+/// unit-testable without capturing stderr.
+///
+/// Each rate class contributes its scalar count and, immediately after it, the
+/// per-operation-kind breakdown of where those effects landed
+/// (`errors_by_op=open:1,read:2`, or `-` when none did). The breakdown answers
+/// the question the scalar cannot: a knob that fired plenty but only ever on
+/// `open` left every post-open failure path untested, and that reads as healthy
+/// coverage without it. `vacuous=` stays last, and every field stays a
+/// whitespace-delimited `k=v` token, so the campaign classifier and the testbed
+/// greps that read this line are unaffected.
+fn fs_fault_report_line(report: &patina_dst_driver_api::FsFaultReport) -> String {
+    format!(
+        "PATINA_FS_FAULT_REPORT eligible_ops={} error_vacuity_diagnosable={} errors_injected={} \
+errors_by_op={} short_vacuity_diagnosable={} shorts_applied={} shorts_by_op={} \
+latency_vacuity_diagnosable={} latency_applied={} vacuous={}",
+        report.eligible_ops,
+        u8::from(report.error_vacuity_diagnosable),
+        report.errors_injected,
+        report.errors_by_op,
+        u8::from(report.short_vacuity_diagnosable),
+        report.shorts_applied,
+        report.shorts_by_op,
+        u8::from(report.latency_vacuity_diagnosable),
+        report.latency_applied,
+        u8::from(report.is_vacuous()),
+    )
 }
 
 /// Emit the default-on network fault-injection diagnostic to stderr. A driver
@@ -7924,6 +7943,68 @@ class=crash|0 class=buggify|0"
             6,
             (0, 9)
         ));
+    }
+
+    /// The report must name WHICH operation kinds absorbed the injected effects.
+    /// A bare `errors_injected=7` cannot distinguish a run that failed seven
+    /// `open`s from one that failed seven `sync`s, and those are different
+    /// coverage: a durability bug reachable only through a failing `sync` stays
+    /// untested while the report reads identically. Same for short I/O — shorts
+    /// that all landed on reads say nothing about the write path.
+    #[test]
+    fn fs_fault_report_line_attributes_effects_to_operation_kinds() {
+        use patina_dst_driver_api::FsDriver;
+        use patina_dst_fs_mem::MemFs;
+        use patina_dst_wrapper_fault::FaultFs;
+
+        let readable_write = OpenFlags {
+            read: true,
+            ..OpenFlags::create_truncate_write()
+        };
+        let mut inner = MemFs::new();
+        let fd = inner.open("/file", readable_write).unwrap();
+        inner.write(fd, b"abcdef").unwrap();
+
+        // Every eligible operation fails, so the breakdown is exactly the
+        // operations performed, in the report's fixed order rather than the
+        // call order.
+        let mut fs = FaultFs::new(inner, 1).error_permille(1000);
+        assert!(fs.sync(fd).is_err());
+        assert!(fs.metadata("/file").is_err());
+        assert!(fs.open("/other", readable_write).is_err());
+        assert!(fs.read(fd, 4).is_err());
+        assert!(fs.read(fd, 4).is_err());
+        let report = fs.fault_report().unwrap();
+        assert_eq!(report.errors_injected, 5);
+        let line = fs_fault_report_line(&report);
+        assert!(
+            line.contains(" errors_by_op=open:1,read:2,metadata:1,sync:1 "),
+            "error breakdown must name the op kinds in the fixed report order:\n{line}"
+        );
+        assert!(
+            line.contains(" shorts_by_op=- "),
+            "an unfired class renders as the empty-breakdown sentinel:\n{line}"
+        );
+
+        // The short class attributes independently: a truncation counts against
+        // the op kind whose result it bound.
+        let mut inner = MemFs::new();
+        let fd = inner.open("/file", readable_write).unwrap();
+        inner.write(fd, b"abcdef").unwrap();
+        let mut fs = FaultFs::new(inner, 1).short_permille(1000);
+        assert!(fs.write(fd, b"abcdef").unwrap() < 6);
+        assert!(fs.read_at(fd, 0, 6).unwrap().len() < 6);
+        let report = fs.fault_report().unwrap();
+        assert_eq!(report.shorts_applied, 2);
+        let line = fs_fault_report_line(&report);
+        assert!(
+            line.contains(" shorts_by_op=write:1,read_at:1 "),
+            "short breakdown must name the op kinds it bound:\n{line}"
+        );
+        assert!(
+            line.contains(" errors_by_op=- "),
+            "the error class stayed off and must not borrow the short class's ops:\n{line}"
+        );
     }
 
     /// Every class's coin must come from `domain_seed` with the label the table

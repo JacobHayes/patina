@@ -283,6 +283,159 @@ pub fn epoch_jump_vacuity_is_diagnosable(reads: u64, hi: u64) -> bool {
     vacuity_is_diagnosable(reads, permille)
 }
 
+/// A fault-eligible filesystem operation, as the fault reports attribute effects
+/// to it. It lives here rather than in the injecting wrapper because the report
+/// crosses the driver boundary: the wrapper counts by kind and the runtime
+/// renders by kind, and one enum keeps the two from drifting into different
+/// spellings of the same operation.
+///
+/// Declaration order IS the report order — the breakdown must be a deterministic
+/// function of the counts, never of a map's iteration order — so entries may be
+/// added but existing ones should not be reshuffled without expecting the
+/// rendered line to change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FsFaultOpKind {
+    Open,
+    Read,
+    Write,
+    ReadAt,
+    WriteAt,
+    Metadata,
+    FdMetadata,
+    CreateDirectory,
+    RemoveFile,
+    Sync,
+    SetLen,
+    SetTimes,
+    SetTimesByPath,
+    ReadDirectory,
+    RemoveDirectory,
+    Rename,
+    Link,
+    Symlink,
+    ReadLink,
+}
+
+impl FsFaultOpKind {
+    /// Every kind, in report order. The one place the set is enumerated: the
+    /// counter array is sized from it and the breakdown is rendered by walking
+    /// it, so a kind added to the enum reaches the report by adding one row
+    /// here rather than by editing three parallel lists.
+    pub const ALL: [FsFaultOpKind; 19] = [
+        FsFaultOpKind::Open,
+        FsFaultOpKind::Read,
+        FsFaultOpKind::Write,
+        FsFaultOpKind::ReadAt,
+        FsFaultOpKind::WriteAt,
+        FsFaultOpKind::Metadata,
+        FsFaultOpKind::FdMetadata,
+        FsFaultOpKind::CreateDirectory,
+        FsFaultOpKind::RemoveFile,
+        FsFaultOpKind::Sync,
+        FsFaultOpKind::SetLen,
+        FsFaultOpKind::SetTimes,
+        FsFaultOpKind::SetTimesByPath,
+        FsFaultOpKind::ReadDirectory,
+        FsFaultOpKind::RemoveDirectory,
+        FsFaultOpKind::Rename,
+        FsFaultOpKind::Link,
+        FsFaultOpKind::Symlink,
+        FsFaultOpKind::ReadLink,
+    ];
+
+    /// The token the report and the injected-error message spell the operation
+    /// with. Matches the `FsDriver` method name, so a breakdown row names the
+    /// driver surface a reader can go look at.
+    pub const fn name(self) -> &'static str {
+        match self {
+            FsFaultOpKind::Open => "open",
+            FsFaultOpKind::Read => "read",
+            FsFaultOpKind::Write => "write",
+            FsFaultOpKind::ReadAt => "read_at",
+            FsFaultOpKind::WriteAt => "write_at",
+            FsFaultOpKind::Metadata => "metadata",
+            FsFaultOpKind::FdMetadata => "fd_metadata",
+            FsFaultOpKind::CreateDirectory => "create_directory",
+            FsFaultOpKind::RemoveFile => "remove_file",
+            FsFaultOpKind::Sync => "sync",
+            FsFaultOpKind::SetLen => "set_len",
+            FsFaultOpKind::SetTimes => "set_times",
+            FsFaultOpKind::SetTimesByPath => "set_times_by_path",
+            FsFaultOpKind::ReadDirectory => "read_directory",
+            FsFaultOpKind::RemoveDirectory => "remove_directory",
+            FsFaultOpKind::Rename => "rename",
+            FsFaultOpKind::Link => "link",
+            FsFaultOpKind::Symlink => "symlink",
+            FsFaultOpKind::ReadLink => "read_link",
+        }
+    }
+}
+
+/// Per-operation-kind counters for one fault class, dense over
+/// [`FsFaultOpKind::ALL`] so accumulation and rendering are both
+/// order-deterministic — the reason this is an array rather than a map.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FsOpCounts([u64; FsFaultOpKind::ALL.len()]);
+
+/// The value an empty breakdown renders as. A sentinel rather than an empty
+/// string keeps every field on the report line a non-empty `k=v` token, so a
+/// whitespace-splitting reader cannot lose the key.
+pub const EMPTY_OP_BREAKDOWN: &str = "-";
+
+impl FsOpCounts {
+    /// Attribute one effect of this class to `kind`.
+    pub fn record(&mut self, kind: FsFaultOpKind) {
+        self.0[kind as usize] += 1;
+    }
+
+    /// Effects attributed to `kind`.
+    pub fn get(&self, kind: FsFaultOpKind) -> u64 {
+        self.0[kind as usize]
+    }
+
+    /// Effects attributed across all kinds. Must equal the class's scalar
+    /// counter on the same report — a breakdown that does not add up is a
+    /// mis-attribution, not a rounding difference.
+    pub fn total(&self) -> u64 {
+        self.0.iter().sum()
+    }
+
+    /// Fold another report's counters in, per kind. Used when a fault-modeling
+    /// driver is nested inside another and both attribute effects.
+    pub fn merge(&mut self, other: &Self) {
+        for (mine, theirs) in self.0.iter_mut().zip(other.0.iter()) {
+            *mine += *theirs;
+        }
+    }
+
+    /// The kinds that absorbed at least one effect, paired with their counts, in
+    /// [`FsFaultOpKind::ALL`] order.
+    pub fn nonzero(&self) -> impl Iterator<Item = (FsFaultOpKind, u64)> + '_ {
+        FsFaultOpKind::ALL
+            .into_iter()
+            .filter_map(|kind| Some((kind, self.get(kind))).filter(|(_, count)| *count > 0))
+    }
+}
+
+/// `open:3,read:12` in report order, or [`EMPTY_OP_BREAKDOWN`] when no effect
+/// landed. This is the wire shape the fault report lines embed.
+impl core::fmt::Display for FsOpCounts {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut wrote = false;
+        for (kind, count) in self.nonzero() {
+            if wrote {
+                f.write_str(",")?;
+            }
+            write!(f, "{}:{count}", kind.name())?;
+            wrote = true;
+        }
+        if !wrote {
+            f.write_str(EMPTY_OP_BREAKDOWN)?;
+        }
+        Ok(())
+    }
+}
+
 /// End-of-run summary of filesystem fault-injection activity, for the
 /// default-on vacuity diagnostic. It is deliberately per class: a run with both
 /// error and short-I/O knobs enabled must not hide one inert class behind the
@@ -298,6 +451,12 @@ pub struct FsFaultReport {
     pub error_vacuity_diagnosable: bool,
     /// Operations failed by the fs-error injector.
     pub errors_injected: u64,
+    /// Which operation kinds those injected errors landed on. Sums to
+    /// `errors_injected`. A knob can be non-vacuous and still have exercised
+    /// only one corner of the driver surface — errors that all landed on `open`
+    /// leave every post-open failure path untested — and the scalar count alone
+    /// cannot say so.
+    pub errors_by_op: FsOpCounts,
     /// The short-I/O knob was live over enough truncatable read/write operations
     /// that [`vacuity_is_diagnosable`] holds, so zero shorts is anomalous.
     pub short_vacuity_diagnosable: bool,
@@ -306,6 +465,12 @@ pub struct FsFaultReport {
     /// anyway (a short read of a buffer the file never filled) is NOT counted:
     /// it perturbed nothing the guest could observe.
     pub shorts_applied: u64,
+    /// Which operation kinds those applied truncations bound. Sums to
+    /// `shorts_applied`, and only the four truncatable kinds (`read`, `write`,
+    /// `read_at`, `write_at`) can appear. Shorts that all bound reads say
+    /// nothing about the write path, which is the half a torn-record bug lives
+    /// on.
+    pub shorts_by_op: FsOpCounts,
     /// Reserved for the Context-side fs-latency knob; false in Wave B.
     pub latency_vacuity_diagnosable: bool,
     /// Reserved for Context-side fs latency applications; zero in Wave B.
@@ -714,4 +879,46 @@ pub trait NetDriver: Send {
     }
 
     fn close(&mut self, socket: SocketId) -> DriverResult<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The breakdown's rendering is a function of the COUNTS, never of the order
+    /// the effects arrived in — a report whose field text depends on arrival
+    /// order would break byte-identical repeats of the same run. It also merges
+    /// per kind, which is what keeps a nested fault-modeling driver's effects
+    /// attributed rather than pooled.
+    #[test]
+    fn op_breakdown_renders_in_report_order_and_merges_per_kind() {
+        assert_eq!(FsOpCounts::default().to_string(), EMPTY_OP_BREAKDOWN);
+        assert_eq!(FsOpCounts::default().total(), 0);
+
+        // Recorded out of report order; rendered in `FsFaultOpKind::ALL` order.
+        let mut counts = FsOpCounts::default();
+        counts.record(FsFaultOpKind::Sync);
+        counts.record(FsFaultOpKind::Read);
+        counts.record(FsFaultOpKind::Read);
+        counts.record(FsFaultOpKind::Open);
+        assert_eq!(counts.to_string(), "open:1,read:2,sync:1");
+        assert_eq!(counts.total(), 4);
+
+        // Arrival order cannot change the rendering.
+        let mut reversed = FsOpCounts::default();
+        reversed.record(FsFaultOpKind::Open);
+        reversed.record(FsFaultOpKind::Read);
+        reversed.record(FsFaultOpKind::Sync);
+        reversed.record(FsFaultOpKind::Read);
+        assert_eq!(reversed, counts);
+
+        let mut nested = FsOpCounts::default();
+        nested.record(FsFaultOpKind::Read);
+        nested.record(FsFaultOpKind::WriteAt);
+        counts.merge(&nested);
+        assert_eq!(counts.to_string(), "open:1,read:3,write_at:1,sync:1");
+        assert_eq!(counts.total(), 6);
+        assert_eq!(counts.get(FsFaultOpKind::Read), 3);
+        assert_eq!(counts.get(FsFaultOpKind::Write), 0);
+    }
 }

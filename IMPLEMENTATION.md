@@ -75,7 +75,9 @@ Acceptance level: V2.
 - `FaultFs` composes above `CrashFs` for rate-based filesystem errors
   (`--fs-error-permille`, choosing EIO/ENOSPC/EINTR per eligible op) and short
   read/write injection (`--fs-short-permille`), with a default-on
-  `PATINA_FS_FAULT_REPORT` vacuity diagnostic. Filesystem latency
+  `PATINA_FS_FAULT_REPORT` vacuity diagnostic that also breaks each class's
+  applied effects down by the operation kind that absorbed them
+  (`errors_by_op=`, `shorts_by_op=`). Filesystem latency
   (`--fs-latency-nanos MIN..MAX`) is applied instead by the `Context`, the one
   component that owns the clock, before each eligible operation executes; it
   reports its own vacuity class through the same line.
