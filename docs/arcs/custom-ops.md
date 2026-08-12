@@ -131,11 +131,16 @@ primitive"); the custom-op ABI reuses its trace-event and label machinery.
 - **Wave C — docs/skill.** The guest-patterns skill gains a custom-op section;
   ARCHITECTURE/VALIDATION/llms.txt updated; help registry rows.
 
-## 6. Open question for the go decision
+## 6. Value typing (decided 2026-08-12, user go 2026-08-13)
 
-Whether custom-op *values* should be typed through the SDK (serde-style,
-SDK-owned serialization) or stay raw `Vec<u8>` with the guest owning
-encode/decode. Raw bytes are simpler and family-agnostic; typed values are
-friendlier but pull a serialization contract into the ABI. Recommendation: ship
-Wave A raw-bytes, add a typed sugar layer in the SDK only if usage shows the
-raw form is a common footgun — keep the ABI narrow.
+**Typed at the SDK, raw bytes at the ABI.** The user wants typed ergonomics;
+the limitation typing would impose lives entirely at the ABI layer — pinning a
+serialization wire format into the shim ABI and the trace contract forever,
+and coupling non-Rust/level-1-adjacent consumers to a Rust-side format. So the
+split: the shim ABI verb and the trace event carry opaque bytes (narrow,
+family-agnostic, forward-compatible), while the SDK's `custom_op` surface is
+typed from day one — `custom_op<T: Serialize + DeserializeOwned>` with
+SDK-owned encoding to those bytes. The encoding the SDK uses is part of the
+guest's build (recorded traces replay against the same guest binary, which is
+already the fingerprint contract), not part of the ABI. A guest that wants raw
+bytes uses the `Vec<u8>` instantiation; nothing extra to build.
