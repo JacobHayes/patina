@@ -453,6 +453,18 @@ int32_t patina_kevent_gather(int32_t kq, struct patina_kevent *out, int32_t neve
                              int32_t mode, uint64_t timeout_nanos);
 #endif
 
+/*
+ * Timestamp-counter trap (x86-64 Linux). The shim arms
+ * prctl(PR_SET_TSC, PR_TSC_SIGSEGV) so `rdtsc`/`rdtscp` raise a synchronous
+ * SIGSEGV, and the handler answers them from the run's virtual clock. These are
+ * the dispatch outcomes shared by the C handler and src/tsc.rs: the faulting
+ * instruction is not a counter read (the fault is genuine and must be taken),
+ * `rdtsc`, or `rdtscp` (which also reports IA32_TSC_AUX in ECX).
+ */
+#define PATINA_TSC_NONE 0
+#define PATINA_TSC_RDTSC 1
+#define PATINA_TSC_RDTSCP 2
+
 #ifdef __cplusplus
 }
 #endif

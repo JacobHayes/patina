@@ -880,6 +880,12 @@ pub struct RuntimeConfig {
     /// (macOS, non-SUD kernel, standalone). Set by the native shim from the C
     /// arming state; not a fingerprint input. SUD-DESIGN.md §7.3.
     sud: Option<bool>,
+    /// Whether the timestamp-counter trap (`prctl(PR_SET_TSC, PR_TSC_SIGSEGV)`)
+    /// was armed for this run, so `rdtsc`/`rdtscp` were answered from the virtual
+    /// clock. Recorded into the trace's [`RunMetadata::tsc`] and reconciled on
+    /// replay for the same reason as `sud`: the two states observe the counter at
+    /// different boundaries. `None` on every run that did not arm it.
+    tsc: Option<bool>,
 }
 
 impl RuntimeConfig {
@@ -900,6 +906,7 @@ impl RuntimeConfig {
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
             sud: None,
+            tsc: None,
         }
     }
 
@@ -920,6 +927,7 @@ impl RuntimeConfig {
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
             sud: None,
+            tsc: None,
         }
     }
 
@@ -945,6 +953,7 @@ impl RuntimeConfig {
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
             sud: None,
+            tsc: None,
         }
     }
 
@@ -971,6 +980,7 @@ impl RuntimeConfig {
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
             sud: None,
+            tsc: None,
         }
     }
 
@@ -998,6 +1008,7 @@ impl RuntimeConfig {
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
             sud: None,
+            tsc: None,
         }
     }
 
@@ -1031,6 +1042,7 @@ impl RuntimeConfig {
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
             sud: None,
+            tsc: None,
         }
     }
 
@@ -1418,12 +1430,25 @@ impl RuntimeConfig {
         self.sud
     }
 
+    /// Whether the timestamp-counter trap was armed for this run, or `None` when
+    /// it was not (see the field docs).
+    pub const fn tsc(&self) -> Option<bool> {
+        self.tsc
+    }
+
     /// Set whether syscall-user-dispatch was armed for this run. The native shim
     /// calls this from the C arming state so record captures it into the trace
     /// and replay reconciles it. `Some(true)` when armed; `None` otherwise.
     #[must_use]
     pub fn with_sud(mut self, sud: Option<bool>) -> Self {
         self.sud = sud;
+        self
+    }
+
+    /// Record whether this run armed the timestamp-counter trap.
+    #[must_use]
+    pub fn with_tsc(mut self, tsc: Option<bool>) -> Self {
+        self.tsc = tsc;
         self
     }
 
@@ -2034,7 +2059,8 @@ impl RuntimeBuilder {
                             .with_guest_argv(self.config.guest_argv.clone())
                             .with_guest_env(guest_env_record(&self.config))
                             .with_dns(dns_record(&self.config))
-                            .with_sud(self.config.sud),
+                            .with_sud(self.config.sud)
+                            .with_tsc(self.config.tsc),
                     ),
                     sink: RecordSink::Path {
                         path: path.clone(),
@@ -2055,7 +2081,8 @@ impl RuntimeBuilder {
                             .with_guest_argv(self.config.guest_argv.clone())
                             .with_guest_env(guest_env_record(&self.config))
                             .with_dns(dns_record(&self.config))
-                            .with_sud(self.config.sud),
+                            .with_sud(self.config.sud)
+                            .with_tsc(self.config.tsc),
                     ),
                     sink: RecordSink::Transport(
                         self.trace_transport.take().expect("transport was checked"),
@@ -2077,6 +2104,7 @@ impl RuntimeBuilder {
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
                 reconcile_replay_sud(&self.config, replayer.sud())?;
+                reconcile_replay_tsc(&self.config, replayer.tsc())?;
                 // The recording's swarm decision is authoritative and purely
                 // descriptive on replay (the trace's already-masked fault/buggify
                 // records drive the drivers). Adopting it makes a replay emit the
@@ -2103,6 +2131,7 @@ impl RuntimeBuilder {
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
                 reconcile_replay_sud(&self.config, replayer.sud())?;
+                reconcile_replay_tsc(&self.config, replayer.tsc())?;
                 swarm_record = replayer.swarm_config().cloned();
                 (Execution::Replay(replayer), root_seed)
             }
@@ -6068,6 +6097,43 @@ fn reconcile_replay_sud(
             "this run armed syscall-user-dispatch (SUD), but the trace was recorded WITHOUT it — \
              the two observe raw syscalls at different boundaries, so the recorded op-stream \
              cannot be reproduced. Replay on the kernel/platform the trace was recorded on."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Reconcile the trace's recorded timestamp-counter-trap state against this
+/// replay run's arming, and REFUSE a mismatch UP FRONT, for the same reason as
+/// [`reconcile_replay_sud`]: an armed run answers `rdtsc`/`rdtscp` from the
+/// virtual clock (recording a `ClockNow` op per read), while an unarmed run lets
+/// the instruction read the HOST counter — nondeterministically, and without a
+/// recorded op. Neither direction can reproduce the other's op-stream, and the
+/// unarmed direction is a silent host escape, so both refuse. `Some(true)` means
+/// armed; `None` (absent) means not armed (macOS / arm64 / no `PR_SET_TSC` /
+/// standalone / a trace predating the trap).
+fn reconcile_replay_tsc(
+    config: &RuntimeConfig,
+    recorded: Option<bool>,
+) -> Result<(), RuntimeError> {
+    let recorded_armed = recorded == Some(true);
+    let now_armed = config.tsc == Some(true);
+    if recorded_armed && !now_armed {
+        return Err(RuntimeError::Config(
+            "this trace was recorded with the timestamp-counter trap armed (rdtsc/rdtscp answered \
+             from the virtual clock), but this run did not arm it — this is not x86-64 Linux, the \
+             kernel lacks PR_SET_TSC, or the guest was built against a shim without the trap. \
+             Replay on a matching x86-64 Linux host, or rebuild the guest without the inline \
+             counter read and re-record."
+                .into(),
+        ));
+    }
+    if !recorded_armed && now_armed {
+        return Err(RuntimeError::Config(
+            "this run armed the timestamp-counter trap, but the trace was recorded WITHOUT it — \
+             the two observe rdtsc/rdtscp at different boundaries (one records a clock read, the \
+             other reads the host counter), so the recorded op-stream cannot be reproduced. \
+             Replay on the platform the trace was recorded on."
                 .into(),
         ));
     }

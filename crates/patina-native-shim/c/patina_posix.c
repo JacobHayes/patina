@@ -2032,6 +2032,7 @@ static unsigned long patina_sud_libc_len;
 static uintptr_t patina_sud_text_lo;
 static uintptr_t patina_sud_text_hi;
 static int patina_sud_armed; /* set once the main thread arms; gates thread arming */
+static int patina_tsc_armed; /* set once the main thread arms the TSC trap; gates thread arming */
 
 /* Rust side of the boundary (see src/sud.rs / lib.rs). */
 extern long patina_sud_dispatch(long nr, unsigned long a0, unsigned long a1,
@@ -2438,6 +2439,21 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
         errno = EPERM;
         return -1;
     }
+    if (signum == SIGSEGV && act != NULL && patina_tsc_armed) {
+        /* Same hardening, second trap: while the timestamp-counter trap is armed
+         * the SIGSEGV handler IS the containment for rdtsc/rdtscp, so replacing
+         * it would turn every counter read into a crash (or, worse, into a
+         * guest-handled fault that reads on). Rust std never reaches this — it
+         * installs its stack-overflow handler only over SIG_DFL, and the trap
+         * armed first — so this refuses a deliberate guest registration only.
+         * A pure QUERY (act == NULL) is still answered. */
+        patina_posix_deny(
+            "patina: sigaction(SIGSEGV) refused: a guest may not replace the "
+            "timestamp-counter trap handler (it would disable deterministic "
+            "containment of rdtsc/rdtscp)\n");
+        errno = EPERM;
+        return -1;
+    }
     return patina_real_sigaction()(signum, act, oldact);
 }
 
@@ -2446,6 +2462,17 @@ void (*signal(int signum, void (*handler)(int)))(int) {
         patina_posix_deny(
             "patina: signal(SIGSYS) refused: a guest may not register the "
             "syscall-dispatch signal (it would disable deterministic containment)\n");
+        errno = EPERM;
+        return SIG_ERR;
+    }
+    if (signum == SIGSEGV && patina_tsc_armed) {
+        /* The `sigaction` hardening below reaches this path too: `signal()`
+         * installs through the REAL sigaction, so it would otherwise walk around
+         * the refusal and displace the timestamp-counter trap handler. */
+        patina_posix_deny(
+            "patina: signal(SIGSEGV) refused: a guest may not replace the "
+            "timestamp-counter trap handler (it would disable deterministic "
+            "containment of rdtsc/rdtscp)\n");
         errno = EPERM;
         return SIG_ERR;
     }
@@ -2528,9 +2555,199 @@ int pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset) {
     if (set != NULL && (how == SIG_BLOCK || how == SIG_SETMASK)) {
         sigset_t adjusted = *set;
         sigdelset(&adjusted, SIGSYS);
+        if (patina_tsc_armed) {
+            /* A blocked synchronous SIGSEGV would kill the process at the first
+             * rdtsc instead of being answered from the virtual clock — the same
+             * containment argument as SIGSYS above. */
+            sigdelset(&adjusted, SIGSEGV);
+        }
         return patina_real_pthread_sigmask()(how, &adjusted, oldset);
     }
     return patina_real_pthread_sigmask()(how, set, oldset);
+}
+
+/* ==========================================================================
+ * Timestamp-counter trap (x86-64 Linux). `prctl(PR_SET_TSC, PR_TSC_SIGSEGV)`
+ * sets CR4.TSD for the thread (Time Stamp Disable — the counter becomes
+ * privileged), so `rdtsc`/`rdtscp` raise #GP in user mode, which the kernel
+ * delivers as a SYNCHRONOUS, thread-directed SIGSEGV at the exact faulting
+ * instruction. That makes an inline counter read a real effect boundary — the
+ * same shape as an interposed `clock_gettime` — instead of the silent host-time
+ * escape it is otherwise (invisible to the import audit, refused by the
+ * instruction scan, untrappable by SUD, which sees only syscalls).
+ *
+ * The handler decodes at the faulting RIP and answers ONLY `rdtsc` (0f 31) and
+ * `rdtscp` (0f 01 f9), from the run's virtual clock through the same
+ * `patina_clock_now` entry point every interposer uses (see src/tsc.rs for the
+ * frequency mapping and the parity argument). Every other SIGSEGV — a genuine
+ * null dereference, a stack-overflow guard page — falls through to the previous
+ * disposition untouched: the trap contains a determinism escape, it never
+ * swallows a fault.
+ *
+ * Interaction with Rust std: std installs its stack-overflow SIGSEGV handler
+ * only when the current disposition is SIG_DFL (`sys::pal::unix::stack_overflow
+ * ::init`), and this arms first (from `__libc_start_main`, before guest
+ * constructors). So under an armed trap a stack overflow dies on the default
+ * action rather than printing std's "has overflowed its stack" message. That is
+ * the honest trade: the fault still kills the process, at the right address,
+ * with a core dump. std still installs its SIGBUS handler and its altstacks.
+ * ========================================================================== */
+
+/* prctl TSC op numbers (x86 only; present since 2.6.26). */
+#ifndef PR_GET_TSC
+#define PR_GET_TSC 25
+#endif
+#ifndef PR_SET_TSC
+#define PR_SET_TSC 26
+#endif
+#ifndef PR_TSC_SIGSEGV
+#define PR_TSC_SIGSEGV 2
+#endif
+
+/* Rust side of the boundary (see src/tsc.rs). The dispatch symbol is also the
+ * audit's trap marker: a binary that DEFINES it carries a trap-capable shim. */
+extern int patina_tsc_dispatch(const unsigned char *bytes, size_t available,
+                               unsigned long long *tsc_out, unsigned int *aux_out,
+                               size_t *length_out);
+/* The armed flag is OWNED by the Rust lib (an exported AtomicU8), the same C→Rust
+ * ownership direction and rationale as PATINA_SUD_ARMED. */
+extern unsigned char PATINA_TSC_ARMED;
+
+/* The longest instruction the trap decodes (`rdtscp`, 3 bytes). */
+#define PATINA_TSC_MAX_INSN 3
+
+#if defined(__x86_64__)
+/* The SIGSEGV disposition the trap displaced, so a fault it does not recognize
+ * is taken exactly as it would have been. x86-only, like the handler that reads
+ * it — an unused static would not survive -Wall -Wextra -Werror on aarch64. */
+static struct sigaction patina_tsc_prev;
+
+/* Take the fault the way it would have been taken had the trap not been armed:
+ * hand it to the disposition we displaced, or — when that was the default —
+ * restore the default and return, so the faulting instruction re-executes and
+ * the kernel kills the process with the true si_addr and a core dump. Never a
+ * swallow: this path always ends in the fault being taken. */
+static void patina_tsc_take_real_fault(int sig, siginfo_t *info, void *ucontext) {
+    if ((patina_tsc_prev.sa_flags & SA_SIGINFO) != 0 &&
+        patina_tsc_prev.sa_sigaction != NULL) {
+        patina_tsc_prev.sa_sigaction(sig, info, ucontext);
+        return;
+    }
+    if (patina_tsc_prev.sa_handler != SIG_DFL &&
+        patina_tsc_prev.sa_handler != SIG_IGN &&
+        patina_tsc_prev.sa_handler != NULL) {
+        patina_tsc_prev.sa_handler(sig);
+        return;
+    }
+    (void)patina_host_sigaction(sig, &patina_tsc_prev, NULL);
+}
+
+static void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
+    ucontext_t *uc = (ucontext_t *)ucontext;
+    greg_t *r = uc->uc_mcontext.gregs;
+    uintptr_t rip = (uintptr_t)r[REG_RIP];
+    /* Provenance, exactly as the SIGSYS handler requires it: the faulting
+     * instruction must lie in the main executable's text. A counter read from
+     * ld.so, another DSO, or the vDSO is not guest code — reading three bytes at
+     * an arbitrary faulting address would itself fault, and answering it would
+     * emulate a path the runtime does not model. */
+    if (rip >= patina_sud_text_lo && rip < patina_sud_text_hi) {
+        size_t available = (size_t)(patina_sud_text_hi - rip);
+        if (available > PATINA_TSC_MAX_INSN) available = PATINA_TSC_MAX_INSN;
+        int saved_errno = errno;
+        unsigned long long tsc = 0;
+        unsigned int aux = 0;
+        size_t length = 0;
+        int kind = patina_tsc_dispatch((const unsigned char *)rip, available, &tsc,
+                                       &aux, &length);
+        errno = saved_errno;
+        if (kind != PATINA_TSC_NONE) {
+            /* Both instructions write 32-bit halves, which zero-extend into the
+             * full 64-bit registers exactly as the hardware's do. */
+            r[REG_RAX] = (greg_t)(tsc & 0xffffffffULL);
+            r[REG_RDX] = (greg_t)((tsc >> 32) & 0xffffffffULL);
+            if (kind == PATINA_TSC_RDTSCP) { /* rdtscp also reports IA32_TSC_AUX */
+                r[REG_RCX] = (greg_t)aux;
+            }
+            r[REG_RIP] = (greg_t)(rip + length);
+            return;
+        }
+    }
+    patina_tsc_take_real_fault(sig, info, ucontext);
+}
+#endif /* __x86_64__ */
+
+/* Arm the timestamp-counter trap on the calling thread. Called on the main
+ * thread at startup and on every managed thread from the Rust trampoline: the
+ * TSC flag is per-thread, so — like the SUD config — each thread arms once
+ * rather than trusting clone(2) to carry it. A no-op when the trap was not armed
+ * for this run (non-x86, no PR_SET_TSC, or a standalone binary). */
+void patina_tsc_arm_thread(void) {
+    if (!patina_tsc_armed) return;
+    if (patina_host_prctl(PR_SET_TSC, PR_TSC_SIGSEGV, 0, 0, NULL) != 0) {
+        patina_sud_report_fatal(
+            "TSC: failed to arm the timestamp-counter trap on a managed thread");
+    }
+}
+
+/* Main-thread setup, called from the `__libc_start_main` interposer after
+ * `patina_sud_init` (which resolves the host aliases and discovers the text
+ * span) and BEFORE guest constructors. Arms only a managed run on an x86-64
+ * kernel with PR_SET_TSC; every other case is a deliberate no-op, and the
+ * pre-run gate is what refuses a binary that actually needs the trap. */
+static void patina_tsc_init(int argc, char **argv) {
+#if defined(__x86_64__)
+    if (!patina_env_has("PATINA_MODE", argv, argc)) return;
+    if (patina_host_prctl == NULL) {
+        patina_host_prctl = (patina_prctl_fn)__real_dlsym(RTLD_NEXT, "prctl");
+    }
+    (void)patina_real_sigaction();
+    if (patina_host_prctl == NULL || patina_host_sigaction == NULL) return;
+
+    /* Kernel support probe: PR_GET_TSC into local storage reads the current
+     * per-thread setting and mutates nothing. It returns 0 where the facility
+     * exists and -EINVAL where it does not. */
+    int tsc_mode = 0;
+    if (patina_host_prctl(PR_GET_TSC, (unsigned long)(uintptr_t)&tsc_mode, 0, 0,
+                          NULL) != 0) {
+        return; /* no PR_SET_TSC here: leave unarmed (the gate refuses) */
+    }
+
+    /* The handler needs the main executable's text span to bound its decode.
+     * `patina_sud_init` discovers it when it arms; when SUD did not arm (its own
+     * kernel probe failed) it is still needed here. Fail CLOSED rather than arm
+     * a handler that cannot validate a faulting RIP: leaving the trap unarmed
+     * after the audit cleared the binary as trap-managed would turn a contained
+     * escape into a silent one. */
+    if (patina_sud_text_hi == 0 && patina_sud_discover_regions() != 0) {
+        patina_sud_report_fatal(
+            "TSC: could not determine the main-executable text span from "
+            "/proc/self/maps; refusing to arm the timestamp-counter trap on a "
+            "guessed region");
+    }
+
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    action.sa_sigaction = patina_tsc_sigsegv;
+    action.sa_flags = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+    if (patina_host_sigaction(SIGSEGV, &action, &patina_tsc_prev) != 0) {
+        patina_sud_report_fatal("TSC: failed to install the SIGSEGV trap handler");
+    }
+
+    if (patina_host_prctl(PR_SET_TSC, PR_TSC_SIGSEGV, 0, 0, NULL) != 0) {
+        patina_sud_report_fatal(
+            "TSC: PR_GET_TSC succeeded but PR_SET_TSC(PR_TSC_SIGSEGV) failed; "
+            "refusing to run with the timestamp counter readable");
+    }
+    patina_tsc_armed = 1;
+    /* Publish the armed state to the Rust-owned flag so the config path records
+     * the `tsc` trace-metadata field. */
+    PATINA_TSC_ARMED = 1;
+#else
+    (void)argc;
+    (void)argv;
+#endif
 }
 
 #endif /* __linux__ SUD */
@@ -2585,6 +2802,11 @@ int __libc_start_main(patina_main_fn main_fn, int argc, char **argv, void *init,
      * the main thread. environ is still intact here (the ctor scrub runs later),
      * so PATINA_MODE is readable. A no-op on a non-SUD kernel or standalone run. */
     patina_sud_init(argc, argv);
+    /* Arm the timestamp-counter trap (managed run on an x86-64 kernel with
+     * PR_SET_TSC), reusing the host aliases and text span SUD discovered, so a
+     * guest's inline rdtsc/rdtscp is answered from the virtual clock instead of
+     * reading the host counter. A no-op on every other platform or run. */
+    patina_tsc_init(argc, argv);
     patina_libc_start_main_fn real =
         (patina_libc_start_main_fn)__real_dlsym(RTLD_NEXT, "__libc_start_main");
     if (real == NULL) {

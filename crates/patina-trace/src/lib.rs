@@ -443,6 +443,17 @@ pub struct RunMetadata {
     /// the first op is replayed. SUD-DESIGN.md §7.3.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sud: Option<bool>,
+    /// Whether the timestamp-counter trap (`prctl(PR_SET_TSC, PR_TSC_SIGSEGV)`)
+    /// was armed for this run — recorded only when it was (`Some(true)`); absent
+    /// (`None`) on every other run (macOS, arm64, a kernel without `PR_SET_TSC`,
+    /// a standalone binary, and all traces predating the trap). Additive exactly
+    /// like [`sud`](RunMetadata::sud), and reconciled the same way: a guest whose
+    /// `rdtsc`/`rdtscp` were answered from the virtual clock records `tsc:true`,
+    /// and replaying that trace on a run that leaves the counter readable would
+    /// read the HOST counter — so the mismatch is refused before the first op is
+    /// replayed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tsc: Option<bool>,
 }
 
 impl RunMetadata {
@@ -460,6 +471,7 @@ impl RunMetadata {
             swarm: None,
             watchdog: None,
             sud: None,
+            tsc: None,
         }
     }
 
@@ -529,6 +541,14 @@ impl RunMetadata {
     #[must_use]
     pub fn with_sud(mut self, sud: Option<bool>) -> Self {
         self.sud = sud;
+        self
+    }
+
+    /// Record that the timestamp-counter trap was armed for this run;
+    /// `None` records nothing (see [`RunMetadata::tsc`]).
+    #[must_use]
+    pub fn with_tsc(mut self, tsc: Option<bool>) -> Self {
+        self.tsc = tsc;
         self
     }
 }
@@ -1038,6 +1058,12 @@ impl Replayer {
     /// when it was; `None` otherwise (see [`RunMetadata::sud`]).
     pub const fn sud(&self) -> Option<bool> {
         self.metadata.sud
+    }
+
+    /// Whether the trace was recorded with the timestamp-counter trap armed, or
+    /// `None` otherwise (see [`RunMetadata::tsc`]).
+    pub const fn tsc(&self) -> Option<bool> {
+        self.metadata.tsc
     }
 
     pub fn expect(&mut self, operation: &Operation) -> Result<Outcome, TraceError> {
@@ -1953,6 +1979,30 @@ mod tests {
         assert!(!text.contains("sud"), "{text}");
         let reloaded_plain = TraceBundle::from_slice(plain.to_bytes().unwrap().as_slice()).unwrap();
         assert_eq!(reloaded_plain.metadata.sud, None);
+    }
+
+    #[test]
+    fn tsc_metadata_round_trips_and_is_additive() {
+        // A run that armed the timestamp-counter trap records `tsc:true` and
+        // round-trips, independently of the SUD field.
+        let metadata = RunMetadata::new(7, "fingerprint").with_tsc(Some(true));
+        let bundle = TraceBundle::new(metadata, Vec::new());
+        let text = String::from_utf8(bundle.to_bytes().unwrap()).unwrap();
+        assert!(text.contains("\"tsc\":true"), "{text}");
+        let reloaded = TraceBundle::from_slice(bundle.to_bytes().unwrap().as_slice()).unwrap();
+        assert_eq!(reloaded.metadata.tsc, Some(true));
+        assert_eq!(reloaded.metadata.sud, None);
+
+        // Every run that did not arm it records nothing, so a trace taken before
+        // the trap existed stays byte-identical.
+        let plain = TraceBundle::new(
+            RunMetadata::new(7, "fingerprint").with_tsc(None),
+            Vec::new(),
+        );
+        let text = String::from_utf8(plain.to_bytes().unwrap()).unwrap();
+        assert!(!text.contains("tsc"), "{text}");
+        let reloaded_plain = TraceBundle::from_slice(plain.to_bytes().unwrap().as_slice()).unwrap();
+        assert_eq!(reloaded_plain.metadata.tsc, None);
     }
 
     #[test]

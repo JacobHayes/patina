@@ -30,6 +30,18 @@ pub const NATIVE_HEADER: &str = include_str!("../include/patina_native.h");
 #[cfg(target_os = "linux")]
 mod sud;
 
+// Timestamp-counter trap (`rdtsc`/`rdtscp`) — armed by the C layer via
+// `prctl(PR_SET_TSC, PR_TSC_SIGSEGV)` on x86-64 Linux. This module owns the
+// instruction decode and the virtual-clock derivation the SIGSEGV handler writes
+// back into the guest's registers. See `tsc.rs`.
+//
+// Built on every Linux target (the decode is pure byte matching, and the audit's
+// second condition is a live `PR_SET_TSC` probe, so an arm64 build carrying the
+// dispatcher still never downgrades), and under `cfg(test)` everywhere so the
+// decode's fail-closed behaviour is covered on a macOS host too.
+#[cfg(any(target_os = "linux", test))]
+mod tsc;
+
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
@@ -1677,12 +1689,13 @@ fn fail(errno: c_int) -> c_int {
     -1
 }
 
-/// Loud fail-closed for the SUD dispatcher: one deterministic diagnostic line on
-/// the real host stderr, then abort. Mirrors the thread module's `fatal` but is
-/// reachable from the crate-level `sud` module. Used for the unmapped-syscall
-/// abort and the containment-invariant violations (§4.4, §7.4).
-#[cfg(target_os = "linux")]
-pub(crate) fn sud_fatal(message: &str) -> ! {
+/// Loud fail-closed for the trap dispatchers: one deterministic diagnostic line
+/// on the real host stderr, then abort. Mirrors the thread module's `fatal` but
+/// is reachable from the crate-level `sud` and `tsc` modules. Used for the
+/// unmapped-syscall abort, the timestamp-counter trap's refusals, and the
+/// containment-invariant violations of both (§4.4, §7.4).
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn trap_fatal(message: &str) -> ! {
     let text = format!("patina: {message}\n");
     let _ = host_write_all(2, text.as_bytes());
     std::process::abort();
@@ -1702,7 +1715,7 @@ pub unsafe extern "C" fn patina_sud_report_fatal(message: *const c_char) -> ! {
     let text = unsafe { CStr::from_ptr(message) }
         .to_string_lossy()
         .into_owned();
-    sud_fatal(&text);
+    trap_fatal(&text);
 }
 
 /// As [`patina_sud_report_fatal`] with the trapped syscall number and faulting
@@ -1722,7 +1735,7 @@ pub unsafe extern "C" fn patina_sud_report_fatal_addr(
     let text = unsafe { CStr::from_ptr(message) }
         .to_string_lossy()
         .into_owned();
-    sud_fatal(&format!("{text} (syscall {nr} at {addr:#x})"));
+    trap_fatal(&format!("{text} (syscall {nr} at {addr:#x})"));
 }
 
 /// Pass a process-local memory syscall through to the host kernel via glibc's
@@ -2289,6 +2302,12 @@ fn runtime_config_from_control_plane() -> Result<(RuntimeConfig, Option<i32>), R
     // arming state), so a cross-kernel replay is refused up front rather than
     // diverging mid-run (SUD-DESIGN.md §7.3). `None` on every non-SUD run.
     config = config.with_sud(sud_armed_metadata());
+    // Same reconciliation contract for the timestamp-counter trap: a trace
+    // recorded with rdtsc/rdtscp answered from the virtual clock cannot be
+    // replayed on a run that leaves the counter readable, so record the arming
+    // and let the runtime refuse the mismatch up front. `None` on every run that
+    // did not arm.
+    config = config.with_tsc(tsc_armed_metadata());
     Ok((config, trace_fd))
 }
 
@@ -2318,6 +2337,32 @@ fn sud_armed_metadata() -> Option<bool> {
 
 #[cfg(not(target_os = "linux"))]
 fn sud_armed_metadata() -> Option<bool> {
+    None
+}
+
+/// The timestamp-counter trap arming flag, OWNED by Rust and exported so the C
+/// arming path (`patina_tsc_init`) writes it (`PATINA_TSC_ARMED = 1`) when it
+/// arms `prctl(PR_SET_TSC, PR_TSC_SIGSEGV)`. Same C→Rust ownership direction and
+/// rationale as [`PATINA_SUD_ARMED`].
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+pub static PATINA_TSC_ARMED: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// Whether the timestamp-counter trap was armed for this run, shaped for
+/// `RunMetadata::tsc`: `Some(true)` iff the C layer armed it, else `None`
+/// (macOS, arm64, a kernel without `PR_SET_TSC`, a standalone binary). Never
+/// records `Some(false)`, so old and untrapped traces stay byte-identical.
+#[cfg(target_os = "linux")]
+fn tsc_armed_metadata() -> Option<bool> {
+    if PATINA_TSC_ARMED.load(core::sync::atomic::Ordering::Relaxed) != 0 {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn tsc_armed_metadata() -> Option<bool> {
     None
 }
 
@@ -5436,6 +5481,7 @@ mod thread {
     #[cfg(target_os = "linux")]
     unsafe extern "C" {
         fn patina_sud_arm_thread();
+        fn patina_tsc_arm_thread();
     }
     #[cfg(target_os = "linux")]
     core::arch::global_asm!(
@@ -5443,6 +5489,10 @@ mod thread {
         ".weak patina_sud_arm_thread",
         ".p2align 2",
         "patina_sud_arm_thread:",
+        "ret",
+        ".weak patina_tsc_arm_thread",
+        ".p2align 2",
+        "patina_tsc_arm_thread:",
         "ret",
     );
 
@@ -5461,6 +5511,13 @@ mod thread {
         // thread armed SUD for this run.
         unsafe {
             patina_sud_arm_thread()
+        };
+        // The timestamp-counter setting is per-thread too, so it arms at the same
+        // two sites. A no-op when the trap was not armed for this run.
+        #[cfg(target_os = "linux")]
+        // SAFETY: as above, for the TSC trap.
+        unsafe {
+            patina_tsc_arm_thread()
         };
         // Park on this task's baton semaphore until it is first scheduled.
         let sem = lock_state().task_sem(task);

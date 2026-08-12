@@ -4058,6 +4058,188 @@ RS
   fi
 fi
 
+# ===========================================================================
+# Timestamp-counter trap (rdtsc / rdtscp). The shim arms
+# prctl(PR_SET_TSC, PR_TSC_SIGSEGV) so an inline counter read raises a
+# synchronous SIGSEGV and is answered from the run's virtual clock instead of
+# reading the host counter. PR_SET_TSC is an x86 facility, so the legs run on
+# x86-64 Linux and print a loud, counted SKIPPED line anywhere else (never a
+# silent pass). Detection-before-fixes: the untrappable half of the same escape
+# class (rdrand) is proved to STAY refused on the very host where rdtsc runs
+# contained, a genuine segmentation fault is proved not to be swallowed, and a
+# guest attempt to hijack the SIGSEGV handler is proved to be refused.
+# ===========================================================================
+if [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]]; then
+  cat >"$tmp/tsc_support.c" <<'C'
+#include <sys/prctl.h>
+#ifndef PR_GET_TSC
+#define PR_GET_TSC 25
+#endif
+int main(void) {
+    int mode = 0;
+    return prctl(PR_GET_TSC, &mode, 0, 0, 0) == 0 ? 0 : 1;
+}
+C
+  "$cc" "$tmp/tsc_support.c" -o "$tmp/tsc_support"
+  if "$tmp/tsc_support"; then tsc_kernel=1; else tsc_kernel=0; fi
+
+  if [[ $tsc_kernel == 1 ]]; then
+    # The counter guest: both trapped instructions, read across virtual-time
+    # advances so the recorded values are a function of the clock, not the host.
+    cat >"$tmp/tsc_probe.rs" <<'RS'
+use std::arch::x86_64::{__rdtscp, _rdtsc};
+
+fn main() {
+    let mut aux: u32 = 0xdead_beef;
+    for step in 0..3 {
+        // SAFETY: unprivileged counter reads; under patina both trap into the
+        // deterministic runtime rather than reading the host counter.
+        let plain = unsafe { _rdtsc() };
+        let with_aux = unsafe { __rdtscp(&mut aux) };
+        println!("TSC step={step} rdtsc={plain} rdtscp={with_aux} aux={aux}");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    println!("TSC total_ticks={}", unsafe { _rdtsc() });
+}
+RS
+    "$runner" build "$tmp/tsc_probe.rs" --output "$tmp/tsc-probe" >/dev/null
+
+    # The audit reports the sites as trap-managed rather than refusing them, and
+    # names both outcomes (it is static, with no live platform probe).
+    "$runner" audit "$tmp/tsc-probe" >"$tmp/tsc-audit-out"
+    grep -q 'TSC-trap-managed, 2 sites' "$tmp/tsc-audit-out"
+    grep -c 'instruction@' "$tmp/tsc-audit-out" | grep -qx 2
+
+    # NON-VACUITY: the counter is the VIRTUAL clock at 1 GHz (a tick per virtual
+    # nanosecond), so three 5ms sleeps give exactly these ticks. A host counter
+    # read would be a large arbitrary value and a different one every run — this
+    # exact-value assertion is what proves the trap fired and answered.
+    "$runner" run "$tmp/tsc-probe" --seed 7 >"$tmp/tsc-run-1" 2>"$tmp/tsc-run-1-err"
+    grep -q 'timestamp-counter instruction site(s)' "$tmp/tsc-run-1-err"
+    grep -qx 'TSC step=0 rdtsc=0 rdtscp=0 aux=0' "$tmp/tsc-run-1"
+    grep -qx 'TSC step=1 rdtsc=5000000 rdtscp=5000000 aux=0' "$tmp/tsc-run-1"
+    grep -qx 'TSC step=2 rdtsc=10000000 rdtscp=10000000 aux=0' "$tmp/tsc-run-1"
+    grep -qx 'TSC total_ticks=15000000' "$tmp/tsc-run-1"
+
+    # Same seed, byte-identical; record is byte-identical; replay reproduces the
+    # recorded output exactly (the counter reads replay from the trace).
+    "$runner" run "$tmp/tsc-probe" --seed 7 >"$tmp/tsc-run-2" 2>/dev/null
+    cmp "$tmp/tsc-run-1" "$tmp/tsc-run-2"
+    "$runner" run "$tmp/tsc-probe" --seed 7 --record "$tmp/tsc.patina" \
+      --fingerprint native-tsc-v1 >"$tmp/tsc-record" 2>/dev/null
+    "$runner" run "$tmp/tsc-probe" --seed 7 --record "$tmp/tsc-repeat.patina" \
+      --fingerprint native-tsc-v1 >/dev/null 2>&1
+    cmp "$tmp/tsc.patina" "$tmp/tsc-repeat.patina"
+    "$runner" replay "$tmp/tsc-probe" "$tmp/tsc.patina" \
+      --fingerprint native-tsc-v1 >"$tmp/tsc-replay" 2>/dev/null
+    cmp "$tmp/tsc-record" "$tmp/tsc-replay"
+    # Interposer parity, proved from the trace itself: a trapped counter read is
+    # recorded as the SAME `clock_now` operation an interposed clock_gettime
+    # records — there is no second clock model to drift.
+    grep -q '"tsc":true' "$tmp/tsc.patina"
+    grep -q '"kind":"clock_now","clock":"monotonic"' "$tmp/tsc.patina"
+
+    # A different virtual-time progression (seeded sleep jitter) moves the
+    # counter, and the same seed reproduces it exactly.
+    "$runner" run "$tmp/tsc-probe" --seed 1 --sleep-jitter-nanos 0..4000000 \
+      >"$tmp/tsc-jitter-1" 2>/dev/null
+    "$runner" run "$tmp/tsc-probe" --seed 2 --sleep-jitter-nanos 0..4000000 \
+      >"$tmp/tsc-jitter-2" 2>/dev/null
+    "$runner" run "$tmp/tsc-probe" --seed 1 --sleep-jitter-nanos 0..4000000 \
+      >"$tmp/tsc-jitter-1-repeat" 2>/dev/null
+    cmp "$tmp/tsc-jitter-1" "$tmp/tsc-jitter-1-repeat"
+    if cmp -s "$tmp/tsc-jitter-1" "$tmp/tsc-jitter-2"; then
+      echo 'validate-native-shim: distinct seeds gave identical jittered counter values' >&2
+      exit 1
+    fi
+    if cmp -s "$tmp/tsc-jitter-1" "$tmp/tsc-run-1"; then
+      echo 'validate-native-shim: sleep jitter did not move the counter' >&2
+      exit 1
+    fi
+
+    # RED-proved split: rdrand is the same `cpu-nondeterminism` class, but no
+    # mechanism traps it — so on the very host where rdtsc runs contained it must
+    # STILL be refused, with the note naming it unallowable and untrappable.
+    cat >"$tmp/rdrand_probe.rs" <<'RS'
+use std::arch::x86_64::_rdrand64_step;
+
+fn main() {
+    let mut value: u64 = 0;
+    // SAFETY: an unprivileged hardware entropy read.
+    println!("RDRAND ok={} value={value}", unsafe { _rdrand64_step(&mut value) });
+}
+RS
+    "$runner" build "$tmp/rdrand_probe.rs" --output "$tmp/rdrand-probe" >/dev/null
+    if "$runner" run "$tmp/rdrand-probe" --seed 1 >"$tmp/tsc-rdrand-out" 2>&1; then
+      echo 'validate-native-shim: an rdrand guest ran instead of being refused' >&2
+      exit 1
+    fi
+    grep -q 'untrappable anywhere' "$tmp/tsc-rdrand-out"
+    grep -q 'cannot clear one' "$tmp/tsc-rdrand-out"
+
+    # A GENUINE fault is not swallowed: the trap contains a determinism escape,
+    # it does not turn a real segmentation fault into a survivable one.
+    cat >"$tmp/tsc_segv_probe.rs" <<'RS'
+use std::arch::x86_64::_rdtsc;
+
+fn main() {
+    // SAFETY: a counter read, proving the trap is armed in this very process.
+    println!("SEGV probe armed_read={}", unsafe { _rdtsc() });
+    // Aligned (so std's write_volatile precondition passes) but in the unmapped
+    // zero page, so this is a real hardware fault.
+    let wild: *mut u64 = 0x1000 as *mut u64;
+    // SAFETY: deliberately unsound — the fault is the thing under test.
+    unsafe { wild.write_volatile(1) };
+    println!("SEGV probe SURVIVED THE FAULT");
+}
+RS
+    "$runner" build "$tmp/tsc_segv_probe.rs" --output "$tmp/tsc-segv-probe" >/dev/null
+    if "$runner" run "$tmp/tsc-segv-probe" --seed 1 >"$tmp/tsc-segv-out" 2>&1; then
+      echo 'validate-native-shim: a genuine segfault was swallowed by the TSC trap' >&2
+      exit 1
+    fi
+    grep -q 'PATINA_INFRA native_run signal=11' "$tmp/tsc-segv-out"
+    if grep -q 'SURVIVED THE FAULT' "$tmp/tsc-segv-out"; then
+      echo 'validate-native-shim: the guest ran past a genuine segmentation fault' >&2
+      exit 1
+    fi
+
+    # Handler-hijack refusal: while the trap is armed, the SIGSEGV handler IS the
+    # containment, so a guest registration is refused rather than silently
+    # disabling it.
+    cat >"$tmp/tsc_hijack_probe.rs" <<'RS'
+use std::ffi::{c_int, c_void};
+
+unsafe extern "C" {
+    fn signal(signum: c_int, handler: *mut c_void) -> *mut c_void;
+}
+
+extern "C" fn ignore(_signum: c_int) {}
+
+fn main() {
+    // SAFETY: a plain signal(2) registration; the shim refuses SIGSEGV while the
+    // timestamp-counter trap is armed.
+    let previous = unsafe { signal(11, ignore as *mut c_void) };
+    println!("SEGV_REGISTER_REFUSED={}", previous as isize == -1);
+}
+RS
+    "$runner" build "$tmp/tsc_hijack_probe.rs" --output "$tmp/tsc-hijack-probe" >/dev/null
+    "$runner" run "$tmp/tsc-hijack-probe" --seed 1 >"$tmp/tsc-hijack-out" 2>&1
+    grep -qx 'SEGV_REGISTER_REFUSED=true' "$tmp/tsc-hijack-out"
+    grep -q 'signal(SIGSEGV) refused' "$tmp/tsc-hijack-out"
+
+    cat "$tmp/tsc-run-1"
+    cat "$tmp/tsc-hijack-out"
+    # Loud execution proof for CI-log grepping, mirroring SUD_LEGS_RAN: printed
+    # only after every leg above passed.
+    echo 'TSC_LEGS_RAN branch=positive legs=audit-trap-managed,virtual-clock-values,seed-stable,record-replay,clock-op-parity,seed-varying-time,rdrand-still-refused,genuine-segv-not-swallowed,sigsegv-hijack'
+  else
+    echo 'tsc: SKIPPED (kernel lacks PR_SET_TSC) — the counter reads stay refused by the pre-run gate'
+  fi
+elif [[ "$(uname -s)" == Linux ]]; then
+  echo "tsc: SKIPPED (PR_SET_TSC is x86-only; $(uname -m) has no counter trap) — arm64's mrs CNTVCT_EL0 stays a cpu-nondeterminism refusal"
+fi
+
 cat "$tmp/pipe-seed-1-1"
 cat "$tmp/socketpair-seed-1-1"
 cat "$tmp/pipe-epipe-out"

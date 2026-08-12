@@ -340,7 +340,7 @@ thread_local! {
 /// Run `body` with the reentry guard held. A re-entrant dispatch aborts loudly.
 fn with_dispatch_guard<F: FnOnce() -> i64>(nr: i64, body: F) -> i64 {
     if IN_DISPATCH.with(Cell::get) {
-        crate::sud_fatal(&format!(
+        crate::trap_fatal(&format!(
             "SUD re-entered dispatch while servicing syscall {nr}: shim/runtime code executed a raw \
              syscall inside the SIGSYS handler (the instruction scan proves this cannot happen — a \
              reentry means the containment invariant is broken)"
@@ -429,7 +429,7 @@ fn ret_isize(result: isize) -> i64 {
 /// then returns `-ENOSYS`. This is what gives a raw-backend guest and a
 /// libc-backend guest the SAME recorded stderr when they hit the same refusal,
 /// so trace / fingerprint comparison across the two backends does not diverge.
-/// (Distinct from [`crate::sud_fatal`], which aborts and writes to the REAL host
+/// (Distinct from [`crate::trap_fatal`], which aborts and writes to the REAL host
 /// stderr; a deny is a recoverable soft error the guest observes as `-ENOSYS`.)
 /// `message` must be byte-for-byte identical to the C interposer's deny string,
 /// including the `patina: ` prefix and trailing newline.
@@ -1433,7 +1433,7 @@ fn sys_rt_sigaction(signum: i64) -> i64 {
     // symbol door is the interposed sigaction/signal in patina_posix.c).
     const SIGSYS: i64 = 31;
     if signum == SIGSYS {
-        crate::sud_fatal(
+        crate::trap_fatal(
             "SUD trapped rt_sigaction(SIGSYS): a guest may not re-register the syscall-dispatch \
              handler — doing so would disable deterministic containment",
         );
@@ -1448,7 +1448,7 @@ fn sys_mmap(nr: i64, args: [u64; 6]) -> i64 {
     let flags = args[3];
     let fd = args[4] as i64;
     if flags & MAP_ANONYMOUS == 0 || fd != -1 {
-        crate::sud_fatal(
+        crate::trap_fatal(
             "SUD trapped a file-backed mmap: mapping a descriptor into memory bypasses the \
              deterministic filesystem. Only MAP_ANONYMOUS mappings (fd == -1) are process-local \
              and passed through",
@@ -3009,7 +3009,7 @@ fn pr_get_auxv_copy(
 fn sys_prctl(option_reg: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i64 {
     let option = prctl_option(option_reg);
     if option != PR_GET_AUXV {
-        crate::sud_fatal(&format!(
+        crate::trap_fatal(&format!(
             "SUD trapped prctl(option={option:#x}): only PR_GET_AUXV is a deterministic route. Every \
              other prctl option is the process/escape class (PR_SET_SECCOMP, \
              PR_SET_SYSCALL_USER_DISPATCH, PR_SET_NAME, …) and fails closed — routing it would let a \
@@ -3021,7 +3021,7 @@ fn sys_prctl(option_reg: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i64
     if base == 0 || len == 0 {
         // Init never captured the auxv: refuse rather than serve the kernel's
         // pristine (un-scrubbed, vDSO/AT_RANDOM-leaking) auxv or return 0/garbage.
-        crate::sud_fatal(
+        crate::trap_fatal(
             "SUD trapped prctl(PR_GET_AUXV) but the shim never captured the scrubbed auxv at init: \
              refusing to serve auxv bytes (serving the kernel's pristine saved_auxv would reintroduce \
              the AT_RANDOM entropy and AT_SYSINFO_EHDR vDSO escapes)",
@@ -3035,7 +3035,7 @@ fn sys_prctl(option_reg: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i64
 }
 
 fn unmapped(nr: i64, args: [u64; 6]) -> i64 {
-    crate::sud_fatal(&format!(
+    crate::trap_fatal(&format!(
         "SUD trapped unsupported syscall {nr} (args {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}); guest raw \
          syscalls must map to a deterministic route. This is the process/escape class (clone, \
          execve, ptrace, prctl, seccomp, io_uring, …) or a number slice 1 does not yet route — see \

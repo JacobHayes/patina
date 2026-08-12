@@ -186,6 +186,17 @@ pub struct NativeEscape {
     pub symbol: String,
     pub category: &'static str,
     pub provenance: Vec<NativeProvenance>,
+    /// For an *instruction* finding, the decoded mnemonic (`rdtsc`, `rdtscp`,
+    /// `rdrand`, `rdseed`, `syscall`, `svc`, `cntvct`); `None` for a symbol,
+    /// immediate, or undecodable finding.
+    ///
+    /// The category alone cannot decide manageability: `cpu-nondeterminism`
+    /// covers both the timestamp counter (trappable via `PR_SET_TSC` on x86-64
+    /// Linux) and the RNG/system-counter reads (`rdrand`/`rdseed`/`mrs CNTVCT`),
+    /// which no mechanism traps. [`native_escape_is_tsc_manageable`] reads this
+    /// field to keep the two apart, so an escape carrying no mnemonic is never
+    /// downgraded.
+    pub mnemonic: Option<&'static str>,
 }
 
 impl NativeEscape {
@@ -194,7 +205,15 @@ impl NativeEscape {
             symbol,
             category,
             provenance: normalize_provenance(provenance),
+            mnemonic: None,
         }
+    }
+
+    /// Attach the decoded mnemonic of an instruction finding (see
+    /// [`NativeEscape::mnemonic`]).
+    fn with_mnemonic(mut self, mnemonic: &'static str) -> Self {
+        self.mnemonic = Some(mnemonic);
+        self
     }
 }
 
@@ -345,6 +364,129 @@ pub fn native_binary_has_sud_marker(bytes: &[u8]) -> Result<bool, TargetError> {
 /// refuses. This is the escape set the SUD audit downgrade applies to.
 pub fn native_escape_is_sud_manageable(escape: &NativeEscape) -> bool {
     escape.category == "direct-syscall" && escape.symbol.starts_with("instruction@")
+}
+
+/// The shim's timestamp-counter trap entry symbol, defined only when a shim that
+/// arms `prctl(PR_SET_TSC, PR_TSC_SIGSEGV)` and services the resulting SIGSEGV is
+/// linked. Its *defined* presence is condition (a) of the `rdtsc`/`rdtscp` audit
+/// downgrade, exactly as [`SUD_DISPATCH_MARKER`] is for raw syscalls: an older
+/// shim without the trap does not define it, so its rdtsc binaries keep today's
+/// refusal. This is the symbol the SIGSEGV handler calls, so it can never be
+/// present without the handler's dispatcher being linked.
+const TSC_TRAP_MARKER: &str = "patina_tsc_dispatch";
+
+/// Whether a native binary carries the shim's timestamp-counter trap marker
+/// ([`TSC_TRAP_MARKER`]) as a *defined* symbol — i.e. a trap-capable shim is
+/// linked. Used by the audit to decide whether an `rdtsc`/`rdtscp` finding may be
+/// downgraded to "trap-managed" (the live platform probe is the second
+/// condition; see `cargo-patina`). Fails closed on a parse error or unsupported
+/// format, so a malformed input is never treated as trap-capable.
+pub fn native_binary_has_tsc_marker(bytes: &[u8]) -> Result<bool, TargetError> {
+    let file = object::File::parse(bytes).map_err(TargetError::NativeParse)?;
+    NativeFormat::from_binary(file.format())?;
+    Ok(file.symbols().chain(file.dynamic_symbols()).any(|symbol| {
+        symbol.is_definition()
+            && symbol
+                .name()
+                .map(|name| normalize_native_symbol(name) == TSC_TRAP_MARKER)
+                .unwrap_or(false)
+    }))
+}
+
+/// Whether a denied native escape is a timestamp-counter read the shim's TSC trap
+/// can intercept and answer from the virtual clock — i.e. an `rdtsc`/`rdtscp`
+/// *instruction* finding (`instruction@…`).
+///
+/// This is the `cpu-nondeterminism` counterpart of
+/// [`native_escape_is_sud_manageable`], and it is deliberately narrower than its
+/// category: `rdrand`/`rdseed` (hardware entropy) and `mrs CNTVCT_EL0` (the arm64
+/// system counter) share the `cpu-nondeterminism` label but no mechanism traps
+/// them, so they stay refusals. The decision reads the decoded
+/// [`NativeEscape::mnemonic`], so a finding that carries none — a symbol import, a
+/// `vsyscall` immediate, an `undecodable-instruction` — is never downgraded.
+///
+/// Manageability is a property of the *finding*; whether the trap is actually
+/// armable here is the caller's second condition (x86-64 Linux, `PR_SET_TSC`
+/// present, and the marker above).
+pub fn native_escape_is_tsc_manageable(escape: &NativeEscape) -> bool {
+    escape.category == "cpu-nondeterminism"
+        && escape.symbol.starts_with("instruction@")
+        && matches!(escape.mnemonic, Some("rdtsc" | "rdtscp"))
+}
+
+/// The refusal note for `cpu-nondeterminism` *instruction* findings that are
+/// blocked, or `None` when the blocked set has none.
+///
+/// Two things were previously left unsaid at a refusal, and both misled:
+///
+/// 1. an instruction finding has no symbol name, so `--allow <symbol>` can never
+///    clear one — the finding's "symbol" is a `.text` offset;
+/// 2. `rdtsc`/`rdtscp` ARE trap-managed on x86-64 Linux, so the same binary that
+///    is refused here runs contained there, while `rdrand`/`rdseed`/`mrs CNTVCT`
+///    are refused everywhere because no mechanism traps them.
+///
+/// The note names which of the two the blocked findings are, by mnemonic, so the
+/// operator is told whether a different platform (or a rebuild) is the fix.
+pub fn render_cpu_nondeterminism_note(blocked: &[NativeEscape]) -> Option<String> {
+    let instructions: Vec<&NativeEscape> = blocked
+        .iter()
+        .filter(|escape| {
+            escape.category == "cpu-nondeterminism" && escape.symbol.starts_with("instruction@")
+        })
+        .collect();
+    if instructions.is_empty() {
+        return None;
+    }
+    let trappable: BTreeSet<&str> = instructions
+        .iter()
+        .filter(|escape| native_escape_is_tsc_manageable(escape))
+        .filter_map(|escape| escape.mnemonic)
+        .collect();
+    let untrappable: BTreeSet<&str> = instructions
+        .iter()
+        .filter(|escape| !native_escape_is_tsc_manageable(escape))
+        .filter_map(|escape| escape.mnemonic)
+        .collect();
+
+    let mut note = String::from(
+        "note: the cpu-nondeterminism finding(s) above are INSTRUCTIONS, not imports: each names a \
+         .text offset, so --allow <symbol> cannot clear one (there is no symbol to allow).",
+    );
+    if !trappable.is_empty() {
+        note.push_str(&format!(
+            " The {} site(s) read the timestamp counter, which the shim traps into the virtual \
+             clock via prctl(PR_SET_TSC) — but only on x86-64 Linux with a trap-capable shim \
+             linked. Here the trap is unavailable, so they are refused: run on x86-64 Linux, or \
+             rebuild the guest without the inline timestamp read.",
+            trappable.into_iter().collect::<Vec<_>>().join("/")
+        ));
+    }
+    if !untrappable.is_empty() {
+        note.push_str(&format!(
+            " The {} site(s) are unallowable AND untrappable anywhere: no mechanism intercepts a \
+             hardware entropy read or the arm64 system counter, so the deterministic runtime can \
+             neither model nor contain them. The only fix is to remove the instruction — use the \
+             interposed entropy/clock entry points (getrandom/clock_gettime) instead.",
+            untrappable.into_iter().collect::<Vec<_>>().join("/")
+        ));
+    }
+    Some(note)
+}
+
+/// The note naming the `rdtsc`/`rdtscp` sites the TSC trap manages for a run that
+/// proceeds — the counterpart of the SUD-managed note, emitted by both the audit
+/// and the pre-run gate so a contained escape is visible rather than silent.
+pub fn render_tsc_managed_note(managed: &[NativeEscape], subject: &str) -> Option<String> {
+    if managed.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "patina: {} timestamp-counter instruction site(s) in {subject} are trap-managed: \
+         rdtsc/rdtscp raise SIGSEGV via prctl(PR_SET_TSC) and are answered from the run's virtual \
+         clock (1 GHz nominal, so a tick is a virtual nanosecond). These are contained, not \
+         escapes — the run stays deterministic.",
+        managed.len()
+    ))
 }
 
 /// A native symbol the shim strong-defines as a *deny-trap*: merely LINKING it is
@@ -1554,17 +1696,19 @@ fn scan_forbidden_instructions(
                 for (index, instruction) in data.chunks_exact(4).enumerate() {
                     let instruction =
                         u32::from_le_bytes(instruction.try_into().expect("chunk has four bytes"));
-                    let category = aarch64_instruction_category(instruction);
-                    if let Some(category) = category {
+                    if let Some((category, mnemonic)) = aarch64_instruction_category(instruction) {
                         let offset = index * 4;
-                        escapes.push(NativeEscape::new(
-                            format!("instruction@{name}+0x{offset:x}"),
-                            category,
-                            vec![
-                                provenance
-                                    .for_address(section.address() + offset as u64, Some(name)),
-                            ],
-                        ));
+                        escapes.push(
+                            NativeEscape::new(
+                                format!("instruction@{name}+0x{offset:x}"),
+                                category,
+                                vec![
+                                    provenance
+                                        .for_address(section.address() + offset as u64, Some(name)),
+                                ],
+                            )
+                            .with_mnemonic(mnemonic),
+                        );
                     }
                 }
             }
@@ -1626,11 +1770,16 @@ fn scan_vsyscall_references(
     }
 }
 
-fn aarch64_instruction_category(instruction: u32) -> Option<&'static str> {
+/// The forbidden aarch64 opcodes as `(category, mnemonic)`: `svc #0` (a raw
+/// supervisor call) and `mrs Xt, CNTVCT_EL0` (the virtual system counter — the
+/// arm64 analogue of `rdtsc`, and unlike `rdtsc` NOT trappable, so it carries a
+/// mnemonic only for the message, never for a downgrade; see
+/// [`native_escape_is_tsc_manageable`]).
+fn aarch64_instruction_category(instruction: u32) -> Option<(&'static str, &'static str)> {
     if instruction & 0xffe0_001f == 0xd400_0001 {
-        Some("direct-syscall")
+        Some(("direct-syscall", "svc"))
     } else if instruction & !0x1f == 0xd53b_e040 {
-        Some("cpu-nondeterminism")
+        Some(("cpu-nondeterminism", "cntvct"))
     } else {
         None
     }
@@ -1688,21 +1837,28 @@ mod x86_scan {
         Group3Z,
     }
 
+    /// A forbidden opcode as `(escape category, decoded mnemonic)`. The mnemonic
+    /// rides along to the finding so the audit can tell `rdtsc`/`rdtscp` (trap-
+    /// manageable on x86-64 Linux) from `rdrand`/`rdseed` (never manageable),
+    /// which share the `cpu-nondeterminism` category.
+    type Forbidden = (&'static str, &'static str);
+
     struct OpAttr {
         modrm: bool,
         imm: Imm,
         /// A forbidden opcode fixed by the opcode bytes alone (syscall, rdtsc).
-        cat: Option<&'static str>,
-        /// `0f c7` (group 9): rdrand (ModRM.reg 6) vs cmpxchg8b is a reg decision
-        /// resolved after the ModRM byte is read.
+        cat: Option<Forbidden>,
+        /// `0f c7` (group 9): rdrand (ModRM.reg 6) / rdseed (ModRM.reg 7) vs
+        /// cmpxchg8b is a reg decision resolved after the ModRM byte is read.
         group9: bool,
+        /// `0f 01` (group 7): rdtscp is `mod=3, reg=7, rm=1` — the rest of the
+        /// group (sgdt/sidt/lgdt/invlpg/swapgs/…) is not forbidden, so this too
+        /// is a decision resolved after the ModRM byte is read.
+        group7: bool,
     }
 
     enum Step {
-        Insn {
-            len: usize,
-            cat: Option<&'static str>,
-        },
+        Insn { len: usize, cat: Option<Forbidden> },
         Undecodable,
     }
 
@@ -1721,14 +1877,18 @@ mod x86_scan {
         while offset < data.len() {
             match decode_one(&data[offset..]) {
                 Step::Insn { len, cat } => {
-                    if let Some(category) = cat {
-                        escapes.push(super::NativeEscape::new(
-                            format!("instruction@{name}+0x{offset:x}"),
-                            category,
-                            vec![
-                                provenance.for_address(section_address + offset as u64, Some(name)),
-                            ],
-                        ));
+                    if let Some((category, mnemonic)) = cat {
+                        escapes.push(
+                            super::NativeEscape::new(
+                                format!("instruction@{name}+0x{offset:x}"),
+                                category,
+                                vec![
+                                    provenance
+                                        .for_address(section_address + offset as u64, Some(name)),
+                                ],
+                            )
+                            .with_mnemonic(mnemonic),
+                        );
                     }
                     // Every instruction consumes at least its opcode byte, so
                     // `len >= 1`; the guard only defends the loop invariant.
@@ -1869,6 +2029,7 @@ mod x86_scan {
                     },
                     cat: Option::None,
                     group9: false,
+                    group7: false,
                 }
             } else {
                 match two_byte(op2) {
@@ -1894,6 +2055,7 @@ mod x86_scan {
                     imm,
                     cat: Option::None,
                     group9: false,
+                    group7: false,
                 },
                 None => return Step::Undecodable,
             }
@@ -1920,6 +2082,7 @@ mod x86_scan {
                     imm,
                     cat: Option::None,
                     group9: false,
+                    group7: false,
                 },
                 None => return Step::Undecodable,
             }
@@ -1942,10 +2105,26 @@ mod x86_scan {
             let md = m >> 6;
             let reg = (m >> 3) & 7;
             let rm = m & 7;
-            // group 9 (`0f c7`): ModRM.reg 6 is RDRAND (reg 7 RDSEED is not
-            // currently classified; keep parity with the historical reg==6 test).
-            if attr.group9 && reg == 6 {
-                cat = Some("cpu-nondeterminism");
+            // group 9 (`0f c7`): ModRM.reg 6 is RDRAND, reg 7 is RDSEED. Both are
+            // hardware entropy reads — `cpu-nondeterminism` with NO manageability
+            // (no mechanism traps them; they stay refusals, unlike the timestamp
+            // counter). Neither is guarded on `mod == 3` (the true register-form
+            // encoding), keeping the historical reg==6 test's shape: the memory
+            // forms of this group are privileged VMX instructions that fault in
+            // user mode, so the looser test costs nothing and cannot go blind.
+            if attr.group9 {
+                if reg == 6 {
+                    cat = Some(("cpu-nondeterminism", "rdrand"));
+                } else if reg == 7 {
+                    cat = Some(("cpu-nondeterminism", "rdseed"));
+                }
+            }
+            // group 7 (`0f 01`): `mod=3, reg=7, rm=1` is RDTSCP — the timestamp
+            // counter plus IA32_TSC_AUX. `rm=0` at the same reg is SWAPGS
+            // (privileged) and every other encoding is a descriptor-table op, so
+            // the exact triple is required.
+            if attr.group7 && md == 3 && reg == 7 && rm == 1 {
+                cat = Some(("cpu-nondeterminism", "rdtscp"));
             }
             // group 3 (`f6`/`f7`): only TEST (reg 0 or 1) carries an immediate.
             imm = match imm {
@@ -2027,6 +2206,7 @@ mod x86_scan {
             imm,
             cat: None,
             group9: false,
+            group7: false,
         })
     }
 
@@ -2100,29 +2280,46 @@ mod x86_scan {
         }
     }
 
-    /// Two-byte (`0f xx`) opcode attributes. `None` = fail closed. The three
-    /// forbidden opcodes are `0f 05` (syscall), `0f 31` (rdtsc), and `0f c7 /6`
-    /// (rdrand, resolved from ModRM.reg by the caller).
+    /// Two-byte (`0f xx`) opcode attributes. `None` = fail closed. The forbidden
+    /// opcodes are `0f 05` (syscall), `0f 31` (rdtsc), `0f 01 f9` (rdtscp,
+    /// resolved from ModRM by the caller) and `0f c7 /6`, `/7` (rdrand, rdseed,
+    /// likewise resolved from ModRM.reg).
     fn two_byte(op2: u8) -> Option<OpAttr> {
         use Imm::*;
         match op2 {
             0x05 => Some(OpAttr {
                 modrm: false,
                 imm: None,
-                cat: Some("direct-syscall"),
+                cat: Some(("direct-syscall", "syscall")),
                 group9: false,
+                group7: false,
             }),
             0x31 => Some(OpAttr {
                 modrm: false,
                 imm: None,
-                cat: Some("cpu-nondeterminism"),
+                cat: Some(("cpu-nondeterminism", "rdtsc")),
                 group9: false,
+                group7: false,
+            }),
+            // Group 7 (`0f 01`): rdtscp is the `mod=3, reg=7, rm=1` form. The
+            // group's length rules are unchanged (ModRM, no immediate) — it was
+            // already measured correctly by the `0x00..=0x03` arm below; the
+            // group7 flag only adds the classification the old table lacked, so
+            // an `rdtscp` guest is no longer scanned past as an ordinary
+            // instruction.
+            0x01 => Some(OpAttr {
+                modrm: true,
+                imm: None,
+                cat: Option::None,
+                group9: false,
+                group7: true,
             }),
             0xC7 => Some(OpAttr {
                 modrm: true,
                 imm: None,
                 cat: Option::None,
                 group9: true,
+                group7: false,
             }),
             // No ModRM, no immediate (clts/syscall-family/cpuid/push-pop-seg/
             // bswap/rsm/...).
@@ -2155,7 +2352,11 @@ mod x86_scan {
             }
             // ModRM, no immediate (the bulk of the 0F map: SSE2/MMX, cmov, setcc,
             // movzx/movsx, bit ops, xadd, cmpxchg, ...).
-            0x00..=0x03
+            // (`0x01` — group 7, which carries rdtscp — is matched above with the
+            // same length rules and an added classification.)
+            0x00
+            | 0x02
+            | 0x03
             | 0x0D
             | 0x10..=0x1F
             | 0x20..=0x23
@@ -2215,8 +2416,14 @@ mod x86_scan {
         use super::*;
 
         /// Decode one instruction, panicking if the decoder fails closed. Returns
-        /// `(length, forbidden_category)`.
+        /// `(length, forbidden_category)`, dropping the mnemonic (the mnemonic is
+        /// asserted directly by the tests that care).
         fn decode(b: &[u8]) -> (usize, Option<&'static str>) {
+            (decode_full(b).0, decode_full(b).1.map(|(cat, _)| cat))
+        }
+
+        /// As [`decode`], keeping the `(category, mnemonic)` pair intact.
+        fn decode_full(b: &[u8]) -> (usize, Option<Forbidden>) {
             match decode_one(b) {
                 Step::Insn { len, cat } => (len, cat),
                 Step::Undecodable => panic!("decoder failed closed on {b:02x?}"),
@@ -2272,6 +2479,52 @@ mod x86_scan {
             assert_eq!(decode(&[0x0f, 0xc7, 0xf0]).1, Some("cpu-nondeterminism")); // rdrand
             // group 9 reg != 6 (cmpxchg8b) is not forbidden.
             assert_eq!(decode(&[0x48, 0x0f, 0xc7, 0x08]).1, None);
+        }
+
+        /// The two counter/entropy reads the opcode table did not classify.
+        /// `rdtscp` (`0f 01 f9`) was measured as an ordinary group-7 instruction
+        /// and scanned straight past — a guest reading the timestamp counter
+        /// through it audited CLEAN, which is the false-negative direction this
+        /// containment gate must never take. `rdseed` (`0f c7 /7`) was the same
+        /// blind spot one ModRM.reg over from `rdrand`. RED: drop either arm from
+        /// the decoder and this test fails with `None`.
+        #[test]
+        fn classifies_rdtscp_and_rdseed() {
+            // rdtscp: mod=3, reg=7, rm=1. Length is unchanged at 3 bytes.
+            assert_eq!(
+                decode_full(&[0x0f, 0x01, 0xf9]).1,
+                Some(("cpu-nondeterminism", "rdtscp"))
+            );
+            assert_eq!(decode(&[0x0f, 0x01, 0xf9]).0, 3);
+            // rdseed eax: `0f c7 /7`, ModRM f8.
+            assert_eq!(
+                decode_full(&[0x0f, 0xc7, 0xf8]).1,
+                Some(("cpu-nondeterminism", "rdseed"))
+            );
+            // Neighbours in the same groups stay unforbidden: `swapgs`
+            // (`0f 01 f8`, reg 7 / rm 0) and the memory forms of group 7
+            // (`sgdt [rax]`, reg 0) are not counter reads.
+            assert_eq!(decode(&[0x0f, 0x01, 0xf8]).1, None);
+            assert_eq!(decode(&[0x0f, 0x01, 0x00]).1, None);
+            // And the mnemonic rides onto the finding, since the audit's
+            // manageability split reads it rather than the shared category.
+            let mut escapes = Vec::new();
+            scan_test(
+                &[0x0f, 0x31, 0x0f, 0x01, 0xf9, 0x0f, 0xc7, 0xf8],
+                &mut escapes,
+            );
+            let found: Vec<_> = escapes
+                .iter()
+                .map(|escape| (escape.category, escape.mnemonic))
+                .collect();
+            assert_eq!(
+                found,
+                vec![
+                    ("cpu-nondeterminism", Some("rdtsc")),
+                    ("cpu-nondeterminism", Some("rdtscp")),
+                    ("cpu-nondeterminism", Some("rdseed")),
+                ]
+            );
         }
 
         #[test]
@@ -3565,11 +3818,11 @@ mod tests {
         assert_eq!(native_escape_category("secure_getenv"), Some("environment"));
         assert_eq!(
             aarch64_instruction_category(0xd400_0001),
-            Some("direct-syscall")
+            Some(("direct-syscall", "svc"))
         );
         assert_eq!(
             aarch64_instruction_category(0xd53b_e040),
-            Some("cpu-nondeterminism")
+            Some(("cpu-nondeterminism", "cntvct"))
         );
         // The x86-64 boundary-aware scan is covered in `x86_scan::tests`.
     }
@@ -3600,6 +3853,108 @@ mod tests {
             vec![NativeProvenance::unknown()],
         );
         assert!(!native_escape_is_sud_manageable(&register_read));
+    }
+
+    /// Build an instruction finding with a decoded mnemonic, as the scan does.
+    fn instruction_finding(category: &'static str, mnemonic: &'static str) -> NativeEscape {
+        NativeEscape::new(
+            "instruction@.text+0x42".into(),
+            category,
+            vec![NativeProvenance::unknown()],
+        )
+        .with_mnemonic(mnemonic)
+    }
+
+    #[test]
+    fn tsc_manageability_is_the_timestamp_counter_only() {
+        // The TSC trap answers exactly two instructions from the virtual clock.
+        for mnemonic in ["rdtsc", "rdtscp"] {
+            assert!(
+                native_escape_is_tsc_manageable(&instruction_finding(
+                    "cpu-nondeterminism",
+                    mnemonic
+                )),
+                "{mnemonic} is trap-managed"
+            );
+        }
+        // The rest of the shared `cpu-nondeterminism` category is NOT: no
+        // mechanism traps a hardware entropy read or the arm64 system counter, so
+        // downgrading any of them would turn a refusal into a silent host escape.
+        // RED: widen the predicate to the whole category and these fail.
+        for mnemonic in ["rdrand", "rdseed", "cntvct"] {
+            assert!(
+                !native_escape_is_tsc_manageable(&instruction_finding(
+                    "cpu-nondeterminism",
+                    mnemonic
+                )),
+                "{mnemonic} is untrappable and must keep refusing"
+            );
+        }
+        // A finding with no mnemonic (import, vsyscall immediate, undecodable
+        // instruction) is never downgraded, and neither is a raw syscall — that
+        // one belongs to the SUD split, and the two must not cross.
+        let no_mnemonic = NativeEscape::new(
+            "instruction@.text+0x42".into(),
+            "cpu-nondeterminism",
+            vec![NativeProvenance::unknown()],
+        );
+        assert!(!native_escape_is_tsc_manageable(&no_mnemonic));
+        assert!(!native_escape_is_tsc_manageable(&instruction_finding(
+            "direct-syscall",
+            "syscall"
+        )));
+        assert!(!native_escape_is_sud_manageable(&instruction_finding(
+            "cpu-nondeterminism",
+            "rdtsc"
+        )));
+        // A by-name import that happens to be called `rdtsc` is a symbol, not an
+        // instruction the trap can reach.
+        let by_name = NativeEscape::new(
+            "rdtsc".into(),
+            "cpu-nondeterminism",
+            vec![NativeProvenance::unknown()],
+        )
+        .with_mnemonic("rdtsc");
+        assert!(!native_escape_is_tsc_manageable(&by_name));
+    }
+
+    #[test]
+    fn tsc_marker_detection_fails_closed_on_unparseable_input() {
+        // A malformed binary must never be treated as trap-capable: the marker
+        // probe returns an error, not `false`-as-capable or `true`.
+        assert!(native_binary_has_tsc_marker(b"not an object file").is_err());
+    }
+
+    #[test]
+    fn cpu_nondeterminism_note_names_allowability_and_trappability() {
+        // No instruction findings: no note (a by-name cpu-nondeterminism import
+        // is answered by the ordinary symbol machinery).
+        let by_name = NativeEscape::new(
+            "sched_getcpu".into(),
+            "cpu-nondeterminism",
+            vec![NativeProvenance::unknown()],
+        );
+        assert!(render_cpu_nondeterminism_note(&[by_name]).is_none());
+
+        // A blocked timestamp read: say it is trappable elsewhere, and that
+        // --allow cannot clear an instruction finding.
+        let note =
+            render_cpu_nondeterminism_note(&[instruction_finding("cpu-nondeterminism", "rdtscp")])
+                .expect("a blocked instruction finding must carry a note");
+        assert!(note.contains("--allow <symbol> cannot clear one"), "{note}");
+        assert!(note.contains("rdtscp"), "{note}");
+        assert!(note.contains("PR_SET_TSC"), "{note}");
+
+        // A blocked entropy read: say it is untrappable anywhere, so the operator
+        // is not sent hunting for a platform that would run it.
+        let note = render_cpu_nondeterminism_note(&[
+            instruction_finding("cpu-nondeterminism", "rdrand"),
+            instruction_finding("cpu-nondeterminism", "cntvct"),
+        ])
+        .expect("a blocked instruction finding must carry a note");
+        assert!(note.contains("untrappable anywhere"), "{note}");
+        assert!(note.contains("cntvct/rdrand"), "{note}");
+        assert!(!note.contains("PR_SET_TSC"), "{note}");
     }
 
     #[test]

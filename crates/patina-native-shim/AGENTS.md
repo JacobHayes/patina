@@ -28,6 +28,25 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
 - Bootstrap and reentrancy paths are load-bearing. Avoid allocations, locks, or
   formatting in early-init/fatal paths unless the path is proven safe under the
   custom allocator and host-collection rules.
+- A trap handler must contain a determinism escape without swallowing anything
+  else. Both traps (`SIGSYS` for syscall-user-dispatch, `SIGSEGV` for the
+  timestamp counter) decode at the faulting IP, act only on encodings they fully
+  recognize, and hand every other fault to the disposition they displaced — a
+  genuine segmentation fault still kills the process, at the true address. A
+  handler that "helpfully" resumes on an unrecognized fault would step the guest
+  past an instruction it never executed.
+- Installing a signal handler at init changes what Rust std does later. std
+  installs its stack-overflow `SIGSEGV`/`SIGBUS` handlers only over `SIG_DFL`
+  (`sys::pal::unix::stack_overflow::init`), and the shim arms from
+  `__libc_start_main`, i.e. first — so while the timestamp-counter trap is armed
+  a stack overflow dies on the default action instead of printing std's message.
+  That is the accepted trade (the fault still kills, with the right address and a
+  core dump); check this interaction before adding any new handler.
+- A trap that the audit cleared a binary against must fail CLOSED at arming
+  time. The gate decides "this binary is trap-managed here" from a marker plus a
+  live platform probe; if arming then quietly did not happen, a contained escape
+  becomes a silent one. Arming failures abort loudly rather than continuing
+  unarmed.
 
 ## Change checklist
 
