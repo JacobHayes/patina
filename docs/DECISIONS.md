@@ -372,3 +372,25 @@ cluster so the fixes have citable symptom records.
   slatedb-dst is `#![cfg(tokio_unstable)]`; pre-existing `RUSTFLAGS` compose
   with the shim flags via `CARGO_ENCODED_RUSTFLAGS`, so `--cfg tokio_unstable`
   works unchanged under patina.
+- **2026-08-12 — minimize oracle perf measured; trace-shrink is at its
+  intrinsic ceiling and the big lever is a different reducer.** Full measured
+  investigation in `docs/probes/minimize-oracle-perf.md` (attribution is
+  exact: the search was ported and replayed against recorded verdicts;
+  headline repro verified firsthand at 24 ms). Findings: ~2 % shrink is all a
+  strict-replay oracle allows on these traces (deletions desynchronize the
+  stream; only 14/944 positions survive) — no smarter subset search helps;
+  half the 32 ms/candidate is protocol overhead, not replay; the
+  fixed-point confirmation round is 25 % of calls; `reduce_schedule` accepted
+  nothing (as its own docs predict for strict replay). Ranked, measured
+  options: (1) fault-knob vector reduction as a first-class reducer —
+  17-18 knobs → 2 in ~20 oracle runs, 0.3 s vs 290 s (~1000×), fills a real
+  gap (`--scenario` reduces seeds/params, nothing reduces the campaign's
+  fault vector, which is where campaign failures come from); (2) resume-sweep
+  ddmin + memoized candidates — 3-3.7× fewer calls, byte-identical outputs
+  verified with `trace diff` on both traces; (3) `--jobs N` parallel oracle
+  batches — 4.9× at 8 workers, hermetic candidates already isolate;
+  multiplies with (2). Correctness catch worth landing with any of it: the
+  acceptance-oracle recipe greps the marker but ignores replay exit status —
+  a latent fail-open that early-exit variants would make reachable; oracles
+  must also require a clean replay. Implementation not started (user to pick
+  scope).
