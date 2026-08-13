@@ -29,15 +29,15 @@
 # BYTE[18] the split for the rest).
 #
 # The outcome is classified by a PURE function (testable via --selftest) that is
-# deliberately not vacuous: a planted WORKQ_VIOLATION is a SAFETY_BUG even on
+# deliberately not vacuous: a planted violation VERDICT is a SAFETY_BUG even on
 # exit 0; an exit 1 (liveness) is only tolerated for a "heavy" config; an exit 2
-# (fail-closed WORKQ_ABORT) only when an fs-crash is present; any other exit, or
+# (a fail-closed abort_intent verdict) only when an fs-crash is present; any other exit, or
 # a crash marker, is a failure. The campaign NEVER injects --bug: it fuzzes the
 # CLEAN app (the two seeded bugs live in run-patina.sh leg [7]).
 #
 # On OK the gen dir is deleted; every other class is kept for reproduction.
 # ~4% of gens (DETERMINISM tier) re-run the identical config and require a
-# byte-identical WORKQ_RESULT + trace SHA-256, else a DETERMINISM_BUG.
+# an identical verdict stream + trace SHA-256, else a DETERMINISM_BUG.
 #
 # macOS BSD userland: uses shasum -a256 (not sha256sum); bash 3.2 safe (no
 # associative arrays; empty-array expansion via ${A[@]+"${A[@]}"}). set -uo
@@ -119,6 +119,14 @@ CRASH_MARKERS='panicked|internal error|patina: the deterministic runtime|patina 
 INFRA_MARKERS='cargo-patina: |Cargo process terminated|terminated by a signal|could not compile|No such file or directory|native-build failed|Resource temporarily unavailable|Cannot allocate memory'
 is_infra() { printf '%s\n%s' "$1" "$2" | /usr/bin/grep -Eq "$INFRA_MARKERS"; }
 
+# workq's OWN verdict labels: every invariant `report()` and the recovery gate
+# announce through `patina_dst::verdict` (see src/main.rs). This is per-guest
+# configuration living with the guest, the shape docs/arcs/outcome-channel.md
+# 4.3 prescribes -- patina itself knows none of these strings. It exists to keep
+# workq's findings distinguishable from an `always!` violation, which the SDK
+# lowers to the SAME verdict channel under a site label.
+WORKQ_VERDICT_LABELS='durability|no-loss|exactly-once|wal-integrity|recovery-not-fail-closed'
+
 classify() {
   # args: exit enqueued completed failed jobs heavy fs_crash stdout stderr
   local exit_code="$1" enq="$2" comp="$3" failed="$4" jobs="$5" heavy="$6" fs_crash="$7"
@@ -126,22 +134,35 @@ classify() {
   local combined="$out
 $err"
 
-  # 0. A cooperative-SUT (buggify) always! violation is top severity, regardless
-  #    of exit code. Checked first via the shared campaign layer.
+  # 0. A safety violation is ALWAYS a bug, regardless of exit code (a planted
+  #    violation on exit 0 must still be SAFETY_BUG -- the non-vacuous proof).
+  #    The channel is the VERDICT ABI's own wire line
+  #    (patina_dst_abi::verdict_line), not workq's printed WORKQ_VIOLATION
+  #    dialect: the guest reports every self-detected breach through
+  #    `patina_dst::verdict`, so this rule reads the structured outcome channel.
+  #
+  #    Scoped to workq's OWN invariant labels (WORKQ_VERDICT_LABELS) because
+  #    `always!` lowers to the SAME channel: a violation verdict under any other
+  #    label came from an `always!` site, which is the shared buggify layer's
+  #    ALWAYS_VIOLATION in rule 0b. The two stay distinguishable exactly because
+  #    the guest owns its label namespace.
+  if printf '%s' "$combined" | grep -Eq "^PATINA_VERDICT .*kind=violation label=($WORKQ_VERDICT_LABELS) "; then
+    echo SAFETY_BUG; return
+  fi
+
+  # 0b. A cooperative-SUT (buggify) always! violation is top severity, regardless
+  #    of exit code. Checked via the shared campaign layer, which claims every
+  #    violation verdict rule 0 did not.
   local buggify_verdict; buggify_verdict="$(buggify_class "$exit_code" "$out" "$err")"
   if [[ "$buggify_verdict" == ALWAYS_VIOLATION ]]; then echo ALWAYS_VIOLATION; return; fi
 
-  # 0b. Starvation-stall backstop (opt-in --starve path only): the supervisor
+  # 0c. Starvation-stall backstop (opt-in --starve path only): the supervisor
   #     killed an already-wedged run whose guest was spinning inside an
   #     uninstrumented atomic critical section. Classified DISTINCTLY as a
   #     diagnostic (a wedged generation, not a workq/patina safety bug) so a sweep
   #     records it instead of hanging, and it wins over any exit-code verdict. The
   #     marker never appears on any other mode.
   if printf '%s' "$combined" | grep -q 'patina: starvation stall'; then echo STARVATION_STALL; return; fi
-
-  # 1. A safety violation is ALWAYS a bug, regardless of exit code (a planted
-  #    WORKQ_VIOLATION on exit 0 must still be SAFETY_BUG -- the non-vacuous proof).
-  if printf '%s' "$combined" | grep -q 'WORKQ_VIOLATION'; then echo SAFETY_BUG; return; fi
 
   # 2. A hard crash marker anywhere is UNEXPECTED_CRASH even if the exit looks OK.
   if printf '%s' "$combined" | grep -Eq "$CRASH_MARKERS"; then echo UNEXPECTED_CRASH; return; fi
@@ -163,7 +184,7 @@ $err"
       if [[ "$heavy" == 1 ]]; then echo LIVENESS_TIMEOUT; else echo UNEXPECTED_LIVENESS; fi
       ;;
     2)
-      # A fail-closed WORKQ_ABORT is by-design only when an fs-crash is injected
+      # A fail-closed abort is by-design only when an fs-crash is injected
       # (workq has no storage-recovery mode -- an fs-crash always fails closed).
       if [[ "$fs_crash" == 1 ]]; then echo FAILCLOSED_ABORT; else echo UNEXPECTED_ABORT; fi
       ;;
@@ -173,8 +194,8 @@ $err"
   esac
 }
 
-# Determinism verdict -- pure. Given the primary class and two runs' WORKQ_RESULT
-# lines + trace hashes, confirm the class or promote to DETERMINISM_BUG.
+# Determinism verdict -- pure. Given the primary class and two runs' verdict
+# streams + trace hashes, confirm the class or promote to DETERMINISM_BUG.
 det_check() {
   local primary="$1" r1="$2" r2="$3" h1="$4" h2="$5"
   if [[ "$r1" == "$r2" && "$h1" == "$h2" ]]; then echo "$primary"; else echo DETERMINISM_BUG; fi
@@ -478,18 +499,30 @@ assert_class() {
 selftest() {
   echo "== fuzz-sweep classifier selftest =="
   local sched='PATINA_SCHEDULE_REPORT tasks_spawned=7 max_concurrent=7 total_boundaries=1160 vacuous_threads=0'
-  local ok='WORKQ_RESULT workload_seed=7 enqueued=24 completed=24 failed=0 attempts=24 applied_hash=deadbeef'
+  # A clean run's outcome now travels as workq's `pass` verdict; the printed
+  # WORKQ_RESULT line is the human echo of the same facts.
+  local ok='PATINA_VERDICT seq=0 kind=pass label=workq-outcome detail=workload_seed=7\senqueued=24\scompleted=24\sfailed=0\sattempts=24\sapplied_hash=deadbeef'
 
   # OK, and OK even with the benign vacuous-schedule WARNING.
-  assert_class OK "$(classify 0 24 24 0 24 0 0 "$ok" "$sched")" "ok-converged"
+  assert_class OK "$(classify 0 24 24 0 24 0 0 '' "$ok
+$sched")" "ok-converged"
   local vac_warn='PATINA WARNING: vacuous schedule exploration -- 1 spawned thread(s) ran to completion; their internal interleavings were not explored.'
-  assert_class OK "$(classify 0 24 24 0 24 0 0 "$ok" "$sched
+  assert_class OK "$(classify 0 24 24 0 24 0 0 '' "$ok
+$sched
 $vac_warn")" "ok-vacuous-warn"
 
-  # SAFETY_BUG: a planted WORKQ_VIOLATION on exit 0 fully-converged is STILL a bug.
+  # SAFETY_BUG: a planted violation verdict under one of workq's OWN invariant
+  # labels, on exit 0 fully-converged, is STILL a bug.
   assert_class SAFETY_BUG \
-    "$(classify 0 24 24 0 24 0 0 "$ok" 'WORKQ_VIOLATION no-loss acked-job-3-never-terminated')" \
+    "$(classify 0 24 24 0 24 0 0 '' "$ok
+PATINA_VERDICT seq=1 kind=violation label=no-loss detail=acked-job-3-never-terminated")" \
     "safety-on-exit0"
+  # ... and the recovery gate's fail-closed corruption reports under its own
+  # label, so the abort surface of the planted short-write bug is a SAFETY_BUG
+  # rather than a bare exit-2 abort.
+  assert_class SAFETY_BUG \
+    "$(classify 2 '' '' '' 24 0 1 '' 'PATINA_VERDICT seq=0 kind=violation label=wal-integrity detail=final-wal\swal\scorruption:\sbad\srecord')" \
+    "safety-wal-integrity-abort"
 
   # STARVATION_STALL: the opt-in --starve backstop killed a wedged run (distinct
   # exit 111 + named fatal). A diagnostic, distinct from a crash, and it WINS over
@@ -499,21 +532,25 @@ $vac_warn")" "ok-vacuous-warn"
   assert_class STARVATION_STALL "$(classify 111 '' '' '' 24 0 0 '' "$stall")" "starvation-stall"
   assert_class STARVATION_STALL "$(classify 1 '' '' '' 24 0 0 '' "$stall")" "starvation-stall-not-liveness"
 
-  # LIVENESS: heavy config tolerated, non-heavy is a regression.
-  local fail_out='WORKQ_RESULT workload_seed=7 enqueued=24 completed=18 failed=0 attempts=60 applied_hash=x'
+  # LIVENESS: heavy config tolerated, non-heavy is a regression. A convergence
+  # timeout reports NO verdict (the ABI has no liveness kind and only the sweep
+  # knows whether this config should have converged), so the exit code is the
+  # whole signal -- which is exactly why the `heavy` argument decides it.
   assert_class LIVENESS_TIMEOUT \
-    "$(classify 1 24 18 0 24 1 0 "$fail_out" 'WORKQ_FAILURE not-converged enqueued=24 completed=18 failed=0 target=24')" \
+    "$(classify 1 24 18 0 24 1 0 '' 'WORKQ_FAILURE not-converged enqueued=24 completed=18 failed=0 target=24')" \
     "liveness-heavy"
   assert_class UNEXPECTED_LIVENESS \
-    "$(classify 1 24 18 0 24 0 0 "$fail_out" 'WORKQ_FAILURE not-converged enqueued=24 completed=18 failed=0 target=24')" \
+    "$(classify 1 24 18 0 24 0 0 '' 'WORKQ_FAILURE not-converged enqueued=24 completed=18 failed=0 target=24')" \
     "liveness-unexpected"
 
-  # ABORT: exit 2 tolerated with fs-crash, unexpected without.
+  # ABORT: exit 2 tolerated with fs-crash, unexpected without. The guest
+  # attributes its deliberate stop with an `abort_intent` verdict, which is NOT
+  # a violation and so must not be promoted to SAFETY_BUG by rule 0.
   assert_class FAILCLOSED_ABORT \
-    "$(classify 2 '' '' '' 24 0 1 '' 'WORKQ_ABORT storage-fault wal io error: injected crash at write:5')" \
+    "$(classify 2 '' '' '' 24 0 1 '' 'PATINA_VERDICT seq=0 kind=abort_intent label=storage-fault detail=storage-fault\swal\sio\serror:\sinjected\scrash\sat\swrite:5')" \
     "abort-failclosed"
   assert_class UNEXPECTED_ABORT \
-    "$(classify 2 '' '' '' 24 0 0 '' 'WORKQ_ABORT final-wal ???')" "abort-unexpected"
+    "$(classify 2 '' '' '' 24 0 0 '' 'PATINA_VERDICT seq=0 kind=abort_intent label=storage-fault detail=final-wal\swal\sio\serror:\sbad')" "abort-unexpected"
 
   # UNEXPECTED_CRASH vectors: panic marker, patina fatal, scheduler ERROR, exit
   # 0 but partial (contract break), out-of-band exit code.
@@ -524,12 +561,13 @@ $vac_warn")" "ok-vacuous-warn"
   assert_class UNEXPECTED_CRASH \
     "$(classify 0 24 24 0 24 0 0 '' 'scheduler deadlock: all tasks parked with pending work')" "crash-scheduler-err"
   assert_class UNEXPECTED_CRASH \
-    "$(classify 0 24 18 0 24 0 0 'WORKQ_RESULT workload_seed=7 enqueued=24 completed=18 failed=0 attempts=30 applied_hash=x' '')" "crash-exit0-partial"
+    "$(classify 0 24 18 0 24 0 0 '' 'PATINA_VERDICT seq=0 kind=pass label=workq-outcome detail=workload_seed=7\senqueued=24\scompleted=18\sfailed=0\sattempts=30\sapplied_hash=x')" "crash-exit0-partial"
   assert_class UNEXPECTED_CRASH "$(classify 134 '' '' '' 24 0 0 '' 'Abort trap: 6')" "crash-exit134"
 
   # ALWAYS_VIOLATION integrated into classify(): fireable on exit 0, not
   # downgraded. `always!` lowers to the verdict ABI, so the run's structured
-  # `PATINA_VERDICT ... kind=violation` line is what fires the class.
+  # `PATINA_VERDICT ... kind=violation` line is what fires the class -- under a
+  # SITE label, which is what keeps it distinct from workq's own findings above.
   assert_class ALWAYS_VIOLATION \
     "$(classify 0 24 24 0 24 0 0 "$ok" 'PATINA_VERDICT seq=0 kind=violation label=terminal-le-enqueued detail=src/main.rs:42')" "always-violation-exit0"
   assert_class ALWAYS_VIOLATION \
@@ -537,15 +575,15 @@ $vac_warn")" "ok-vacuous-warn"
 PATINA_VERDICT seq=0 kind=violation label=x detail=src/main.rs:42")" "always-violation-not-downgraded"
 
   # DETERMINISM_BUG via the pure det_check helper.
-  assert_class OK "$(det_check OK 'WORKQ_RESULT a' 'WORKQ_RESULT a' hashA hashA)" "det-identical"
-  assert_class DETERMINISM_BUG "$(det_check OK 'WORKQ_RESULT a' 'WORKQ_RESULT b' hashA hashA)" "det-result-diff"
-  assert_class DETERMINISM_BUG "$(det_check OK 'WORKQ_RESULT a' 'WORKQ_RESULT a' hashA hashB)" "det-trace-diff"
+  assert_class OK "$(det_check OK 'PATINA_VERDICT a' 'PATINA_VERDICT a' hashA hashA)" "det-identical"
+  assert_class DETERMINISM_BUG "$(det_check OK 'PATINA_VERDICT a' 'PATINA_VERDICT b' hashA hashA)" "det-result-diff"
+  assert_class DETERMINISM_BUG "$(det_check OK 'PATINA_VERDICT a' 'PATINA_VERDICT a' hashA hashB)" "det-trace-diff"
 
   # SCHEDULE_DIVERGENCE via sched_det_check (same yield-points binary, must be
   # deterministic even under the denser schedule).
-  assert_class OK "$(sched_det_check OK 'WORKQ_RESULT a' 'WORKQ_RESULT a' hashA hashA)" "sched-det-identical"
-  assert_class SCHEDULE_DIVERGENCE "$(sched_det_check OK 'WORKQ_RESULT a' 'WORKQ_RESULT b' hashA hashA)" "sched-det-result-diff"
-  assert_class SCHEDULE_DIVERGENCE "$(sched_det_check OK 'WORKQ_RESULT a' 'WORKQ_RESULT a' hashA hashB)" "sched-det-trace-diff"
+  assert_class OK "$(sched_det_check OK 'PATINA_VERDICT a' 'PATINA_VERDICT a' hashA hashA)" "sched-det-identical"
+  assert_class SCHEDULE_DIVERGENCE "$(sched_det_check OK 'PATINA_VERDICT a' 'PATINA_VERDICT b' hashA hashA)" "sched-det-result-diff"
+  assert_class SCHEDULE_DIVERGENCE "$(sched_det_check OK 'PATINA_VERDICT a' 'PATINA_VERDICT a' hashA hashB)" "sched-det-trace-diff"
 
   # VACUOUS_SCHEDULE via sched_check: a clean OK with a healthy boundary count
   # and zero vacuous workers stays OK; a vacuous worker OR a below-floor boundary
@@ -633,7 +671,7 @@ PATINA_VERDICT seq=0 kind=violation label=x detail=src/main.rs:42")" "always-vio
 
   echo
   if (( SELFTEST_FAIL )); then echo "SELFTEST FAILED"; return 1; fi
-  echo "SELFTEST PASSED (every class covered, incl. planted WORKQ_VIOLATION -> SAFETY_BUG, a violation verdict -> ALWAYS_VIOLATION, STARVATION_STALL, VACUOUS_SCHEDULE, VACUOUS_SWARM, SCHEDULE_DIVERGENCE, and policy bug_depth/starve_vacuous parsing)"
+  echo "SELFTEST PASSED (every class covered, incl. a planted workq violation verdict -> SAFETY_BUG, an always! site verdict -> ALWAYS_VIOLATION, STARVATION_STALL, VACUOUS_SCHEDULE, VACUOUS_SWARM, SCHEDULE_DIVERGENCE, and policy bug_depth/starve_vacuous parsing)"
   return 0
 }
 
@@ -658,8 +696,16 @@ build_all() {
   fi
 }
 
-# pull a numeric field out of a WORKQ_RESULT-bearing stream / a trace file hash
-field_of() { sed -n "s/.*$1=\\([0-9][0-9]*\\).*/\\1/p" "$2" | head -1; }
+# The run's outcome facts come from the guest's `pass` verdict -- the verdict
+# ABI's own wire line on stderr -- not from its printed WORKQ_RESULT dialect.
+# The field is read out of THAT line specifically: a failing run's stderr also
+# carries `enqueued=`/`completed=` on its WORKQ_FAILURE diagnostic, and reading
+# the file at large would pick the wrong one up.
+verdict_line_of() { /usr/bin/grep -m1 "^PATINA_VERDICT .*kind=$1 " "$2" 2>/dev/null || true; }
+field_of() { verdict_line_of pass "$2" | /usr/bin/grep -o "$1=[0-9][0-9]*" | head -1 | cut -d= -f2; }
+# Every verdict the run reported, in order: the recorded outcome stream a
+# determinism re-run must reproduce exactly.
+verdicts_of() { /usr/bin/grep '^PATINA_VERDICT ' "$1" 2>/dev/null || true; }
 sha_of()   { if [[ -f "$1" ]]; then shasum -a256 "$1" | cut -d' ' -f1; else echo MISSING; fi; }
 # extract a numeric field from a PATINA_SCHEDULE_REPORT stderr line
 report_field() { /usr/bin/grep -o "$1=[0-9][0-9]*" "$2" 2>/dev/null | head -1 | cut -d= -f2; }
@@ -748,7 +794,7 @@ run_gen() {
   fi
 
   local enq comp failed
-  enq=$(field_of enqueued "$out"); comp=$(field_of completed "$out"); failed=$(field_of failed "$out")
+  enq=$(field_of enqueued "$err"); comp=$(field_of completed "$err"); failed=$(field_of failed "$err")
   local class
   class=$(classify "$code" "${enq:-}" "${comp:-}" "${failed:-}" "$jobs" "$HEAVY" "$FS_CRASH" "$(cat "$out")" "$(cat "$err")")
 
@@ -770,7 +816,7 @@ run_gen() {
     local eout="$gd/stdout.10x" eerr="$gd/stderr.10x" ecode=0
     if "$PATINA" patina run "$BIN" "${PKNOBS[@]}" -- "${eargs[@]}" >"$eout" 2>"$eerr"; then ecode=0; else ecode=$?; fi
     local ee ec ef everdict
-    ee=$(field_of enqueued "$eout"); ec=$(field_of completed "$eout"); ef=$(field_of failed "$eout")
+    ee=$(field_of enqueued "$eerr"); ec=$(field_of completed "$eerr"); ef=$(field_of failed "$eerr")
     everdict=$(classify "$ecode" "${ee:-}" "${ec:-}" "${ef:-}" "$jobs" "$HEAVY" "$FS_CRASH" "$(cat "$eout")" "$(cat "$eerr")")
     if [[ "$everdict" == OK ]]; then
       class=OK
@@ -781,15 +827,16 @@ run_gen() {
     fi
   fi
 
-  # DETERMINISM tier: re-run the identical config and require byte-identical
-  # WORKQ_RESULT + trace SHA-256. A SCHEDULE-drawn determinism run replays the
+  # DETERMINISM tier: re-run the identical config and require an identical
+  # VERDICT STREAM + trace SHA-256. Verdicts are recorded trace events, so this
+  # compares the run's structured outcome channel rather than a printed line. A SCHEDULE-drawn determinism run replays the
   # SAME yield-points binary; a mismatch is SCHEDULE_DIVERGENCE.
   local det_note=""
   if (( DET_RUN == 1 )); then
     local trace2="$gd/trace.rerun" out2="$gd/stdout.rerun" err2="$gd/stderr.rerun"
     "$PATINA" patina run "$BIN" "${PKNOBS[@]}" --record "$trace2" -- "${HARGS[@]}" >"$out2" 2>"$err2" || true
     local r1 r2 h1 h2
-    r1=$(grep '^WORKQ_RESULT' "$out" 2>/dev/null || true); r2=$(grep '^WORKQ_RESULT' "$out2" 2>/dev/null || true)
+    r1=$(verdicts_of "$err"); r2=$(verdicts_of "$err2")
     h1=$(sha_of "$trace"); h2=$(sha_of "$trace2")
     if (( IS_SCHEDULE == 1 )); then
       local v; v=$(sched_det_check "$class" "$r1" "$r2" "$h1" "$h2")
@@ -960,8 +1007,8 @@ generation re-runs by number and the whole campaign is a pure function of its
 plain binary) crosses net/storage/crash/buggify faults; the SCHEDULE plane
 (~20% of gens, yield-points binary) isolates thread INTERLEAVINGS at atomics
 granularity. A ~4% DETERMINISM tier double-runs the identical config and requires
-a byte-identical WORKQ_RESULT + trace hash. The classifier is pure and
-non-vacuous (a planted WORKQ_VIOLATION is a SAFETY_BUG even on exit 0).
+an identical verdict stream + trace hash. The classifier is pure and
+non-vacuous (a planted violation verdict is a SAFETY_BUG even on exit 0).
 
 Usage:
   fuzz-sweep.sh [START_GEN] [END_GEN]   run generations START..END inclusive.

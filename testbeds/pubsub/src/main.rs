@@ -10,10 +10,19 @@
 //! Under Patina, mio's selector runs on the deterministic readiness reactor
 //! (kqueue on macOS, epoll on Linux) and every timer on the virtual clock.
 //!
-//! Self-checking, workq conventions: an invariant breach prints
-//! `PUBSUB_VIOLATION` (exit 1), a liveness/convergence miss prints
-//! `PUBSUB_FAILURE` (exit 1), and an internal broker fault fails closed with
-//! `PUBSUB_ABORT` (exit 2). The `PUBSUB_RESULT ... hash=` line is an
+//! Self-checking, workq conventions. Outcomes are announced through the
+//! **verdict ABI** (`patina_dst::verdict`), not through the printed `PUBSUB_*`
+//! lines: an invariant breach reports a `Violation` under the invariant's label
+//! (exit 1), an internal broker fault reports an `AbortIntent` before failing
+//! closed (exit 2), and a clean run reports a `Pass` under `pubsub-outcome`
+//! carrying the outcome digest. The `PUBSUB_*` lines stay for log readability;
+//! nothing downstream needs them.
+//!
+//! As in workq, the outcomes with NO verdict are the liveness/transport misses
+//! (`PUBSUB_FAILURE`, exit 1): the verdict ABI has no liveness kind, and whether
+//! a run should have converged depends on the injected fault configuration the
+//! guest cannot see — Patina's liveness watchdog is that structural channel.
+//! The `PUBSUB_RESULT ... hash=` line is an
 //! order-invariant digest over the delivery outcome: per-topic payload digests
 //! are wrapping sums of per-message FNV values, so the hash does not depend on
 //! how two publishers' messages interleaved on a shared topic — for a fixed
@@ -31,6 +40,31 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 
 use clients::{PublisherSpec, StartGate, SubOutcome, SubscriberSpec, TopicFacts};
+use patina_dst::VerdictKind;
+
+/// Report one self-detected invariant breach: the verdict is the announcement,
+/// the printed line is the human echo of it. `label` names the invariant and
+/// aggregates across runs; `detail` carries the run-specific particulars.
+fn report_violation(label: &str, detail: &str) {
+    patina_dst::verdict(VerdictKind::Violation, label, detail);
+    eprintln!("PUBSUB_VIOLATION {label} {detail}");
+}
+
+/// Announce a deliberate fail-closed stop before exiting 2, so the abort is
+/// attributed to this guest rather than mistaken for a Patina refusal.
+fn report_abort(label: &str, detail: &str) {
+    patina_dst::verdict(VerdictKind::AbortIntent, label, detail);
+    eprintln!("PUBSUB_ABORT {label} {detail}");
+}
+
+/// Split a self-reported breach into its invariant label (the leading token,
+/// which is how each site names the invariant it broke) and the rest as detail.
+fn split_label(text: &str) -> (&str, &str) {
+    match text.split_once(' ') {
+        Some((label, rest)) => (label, rest),
+        None => (text, ""),
+    }
+}
 
 /// Broker heartbeat period per subscriber connection. Must be shorter than
 /// [`IDLE_LIMIT`] so an idle-but-alive subscriber never trips its liveness
@@ -140,7 +174,7 @@ async fn orchestrate(options: Options) -> i32 {
     let listener = match TcpListener::bind(&addr).await {
         Ok(listener) => listener,
         Err(error) => {
-            eprintln!("PUBSUB_ABORT bind {addr}: {error}");
+            report_abort("bind", &format!("{addr}: {error}"));
             return 2;
         }
     };
@@ -239,7 +273,7 @@ async fn orchestrate(options: Options) -> i32 {
     let (published, reports, stats) = match tokio::time::timeout(options.timeout, drive).await {
         Ok(Ok(parts)) => parts,
         Ok(Err(message)) => {
-            eprintln!("PUBSUB_ABORT {message}");
+            report_abort("broker-fault", &message);
             return 2;
         }
         Err(_) => {
@@ -260,7 +294,9 @@ fn report(
     reports: &[clients::SubscriberReport],
     heartbeats: u64,
 ) -> i32 {
-    let mut violations: Vec<String> = Vec::new();
+    // (label, detail) per breach: the label names the invariant and is what
+    // verdicts aggregate on, so subscriber/topic particulars stay in the detail.
+    let mut violations: Vec<(String, String)> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
     let mut delivered: u64 = 0;
     for sub in reports {
@@ -271,12 +307,13 @@ fn report(
             //     liveness timeout, unreachable on a clean run because the
             //     heartbeat period is shorter than the idle limit.
             SubOutcome::Violation(detail) => {
-                violations.push(format!("subscriber-{} {detail}", sub.id));
+                let (label, rest) = split_label(detail);
+                violations.push((label.to_string(), format!("subscriber-{} {rest}", sub.id)));
             }
             SubOutcome::TimedOut => {
-                violations.push(format!(
-                    "subscriber-{} liveness-timeout-despite-heartbeats",
-                    sub.id
+                violations.push((
+                    "liveness-timeout".to_string(),
+                    format!("subscriber-{} despite-heartbeats", sub.id),
                 ));
             }
             SubOutcome::Failed(detail) => {
@@ -291,19 +328,25 @@ fn report(
             let got = sub.received.get(&topic).cloned().unwrap_or_default();
             delivered += got.count;
             if got.count != expected.count {
-                violations.push(format!(
-                    "incomplete-delivery subscriber-{} {topic} got={} expected={}",
-                    sub.id, got.count, expected.count
+                violations.push((
+                    "incomplete-delivery".to_string(),
+                    format!(
+                        "subscriber-{} {topic} got={} expected={}",
+                        sub.id, got.count, expected.count
+                    ),
                 ));
             } else if got.digest != expected.digest {
-                violations.push(format!("payload-divergence subscriber-{} {topic}", sub.id));
+                violations.push((
+                    "payload-divergence".to_string(),
+                    format!("subscriber-{} {topic}", sub.id),
+                ));
             }
         }
     }
 
     let total_published: u64 = published.values().map(|f| f.count).sum();
-    println!(
-        "PUBSUB_RESULT workload_seed={} topics={} subscribers={} publishers={} published={} \
+    let outcome = format!(
+        "workload_seed={} topics={} subscribers={} publishers={} published={} \
          delivered={} heartbeats={heartbeats} hash={}",
         options.seed,
         options.topics,
@@ -313,10 +356,11 @@ fn report(
         delivered,
         outcome_hash(options, published, reports)
     );
+    println!("PUBSUB_RESULT {outcome}");
     if !violations.is_empty() {
-        violations
-            .iter()
-            .for_each(|v| eprintln!("PUBSUB_VIOLATION {v}"));
+        for (label, detail) in &violations {
+            report_violation(label, detail);
+        }
         return 1;
     }
     if !failures.is_empty() {
@@ -332,6 +376,11 @@ fn report(
         );
         return 1;
     }
+    // Every invariant held and every message landed: the one place a `Pass` is
+    // meaningful. Its detail carries the order-invariant outcome digest, so a
+    // consumer reading only the verdict channel gets the `hash=` the
+    // cross-platform outcome-invariance property is stated over.
+    patina_dst::verdict(VerdictKind::Pass, "pubsub-outcome", &outcome);
     0
 }
 

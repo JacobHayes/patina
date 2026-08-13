@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::wal::{Durability, Wal, WalError};
+use crate::wal::{Durability, FailClosed, Wal, WalError};
 use crate::wire::{Msg, Outcome, WalRecord};
 
 /// The server's observable counts, republished each tick; the driver reads them
@@ -92,7 +92,7 @@ pub struct ServerSpec {
     pub shutdown: Arc<AtomicBool>,
     pub crash: Arc<AtomicBool>,
     pub observation: ObservationHandle,
-    pub failure: Arc<Mutex<Option<String>>>,
+    pub failure: Arc<Mutex<Option<FailClosed>>>,
 }
 
 /// Per-job in-memory state (durable client facts live in the WAL).
@@ -401,7 +401,7 @@ pub fn run(spec: ServerSpec) {
     let observation = spec.observation.clone();
     let failure = spec.failure.clone();
     if let Err(error) = run_inner(spec) {
-        *failure.lock().unwrap() = Some(error.to_string());
+        *failure.lock().unwrap() = Some(FailClosed::from(&error));
     }
     observation.lock().unwrap().alive = false;
 }

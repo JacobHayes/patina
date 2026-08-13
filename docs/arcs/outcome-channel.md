@@ -1,7 +1,7 @@
 # Arc: structured outcome channel — verdict ABI, envelope classification, guest-agnostic core
 
 Status: design approved 2026-08-12 (all five decisions user-settled, see §2);
-implementation not started. Lands as `docs/arcs/outcome-channel.md`.
+Waves A, B, and C landed. Lands as `docs/arcs/outcome-channel.md`.
 
 ## 1. Problem
 
@@ -185,11 +185,36 @@ the target auto-derived once verdicts are structured. Feeds the
   `always!` violation among them) surfaces as a CLI error rather than a run
   envelope, so such a generation classifies `INFRA`; giving `execute_wasi_run`
   an envelope for a guest-side trap closes it.
-- **Wave C — testbed + docs migration.** workq/pubsub emit verdicts via the
-  SDK instead of `WORKQ_VIOLATION`/`BUG_CAUGHT` prints; their run-patina/
-  acceptance/fuzz-sweep scripts read the JSON envelope instead of grepping;
-  ARCHITECTURE/VALIDATION/TUTORIAL/llms.txt/skill updated; help registry rows
-  for any new flags; flag-drift gate stays green.
+- **Wave C — testbed + docs migration. Landed.** workq and pubsub announce every
+  outcome through `patina_dst::verdict`: a self-detected breach is a `Violation`
+  under the invariant's own label (`durability`, `no-loss`, `exactly-once`,
+  `wal-integrity`; `seq-gap`, `liveness-timeout`, …), a deliberate fail-closed
+  stop is an `AbortIntent` before the exit, and a clean run is a `Pass`
+  (`workq-outcome` / `pubsub-outcome`) whose detail carries the outcome digest.
+  The `WORKQ_*`/`PUBSUB_*` lines still print for log readability and nothing
+  reads them: the acceptance battery classifies from each generation's envelope
+  (`verdicts[]` plus `fault_reports.fs`/`.dns`, replacing its
+  `PATINA_*_FAULT_REPORT` greps), its `classify.patterns` spec is **deleted**
+  (workq is no longer a level-1 guest), its minimize oracle keys on the
+  `PATINA_VERDICT ... kind=violation` wire line, and the run-patina/fuzz-sweep
+  batteries read the verdict stream for both classification and determinism
+  comparison. Two boundaries the migration made explicit and the testbed docs
+  now state: (1) a guest's own **convergence timeout** keeps no verdict — the
+  ABI has no liveness kind and only the injecting layer knows whether a run
+  should have converged, so Patina's liveness watchdog remains the structural
+  channel; (2) `always!` lowers to the *same* `Violation` kind as a guest's own
+  audit, so a sweep that keeps `ALWAYS_VIOLATION` distinct from its safety class
+  scopes the latter to the guest's own label set — per-guest configuration
+  living with the guest, exactly as §4.3 prescribes.
+
+  The Wave B residue is closed: a WASI guest **trap** now produces a real run
+  envelope (`patina_dst_wasi_host::WasiRunError::GuestTrap`, drained verdicts,
+  `guest_exit`, the trap text on stderr), so a WASI campaign generation with an
+  `always!` violation classifies `VIOLATION` instead of `INFRA` — the missing
+  WASI-campaign e2e coverage now exists, red-before/green-after. The split is
+  structural, on the wasm trap code: `OutOfFuel` and `GrowthOperationLimited` are
+  Patina's *own* limits halting the guest, so they stay CLI errors rather than
+  being reported as guest outcomes.
 
 Wave ordering is strict (B needs A's envelope; C needs B's classifier), but
 each wave lands green on the full check ladder independently.
@@ -205,7 +230,11 @@ The arc is done when, demonstrated by a repeatable script:
 3. The workq acceptance battery (`testbeds/workq/acceptance.sh`) passes
    end-to-end with verdict-ABI reporting: planted bug caught, minimized,
    replayed flag-free byte-identically — verdict events included in the
-   replay-identity check.
+   replay-identity check. **Met (Wave C):** the catching generation is found by
+   a `violation` verdict plus `fault_reports.fs.shorts_applied>0` read off the
+   same envelope, the campaign carries no `classify.patterns`, and the flag-free
+   replay leg asserts a non-zero verdict-event count so an identical pair of
+   verdict-free streams cannot pass it vacuously.
 4. A deliberately aborting guest classifies `GUEST_ABORT` (not
    `FAIL_CLOSED_ABORT`); a patina refusal still classifies `FAIL_CLOSED_ABORT`
    via envelope attribution (red-before/green-after for the split).

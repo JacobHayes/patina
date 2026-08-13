@@ -16129,3 +16129,126 @@ fn a_liveness_violation_reaches_the_envelope_despite_the_abort_that_follows_it()
         "a liveness wedge is a finding about the guest, not patina refusing:\n{envelope:#}"
     );
 }
+
+// A wasip1 module whose `always!` invariant is false. The SDK lowers the failure
+// to a `violation` verdict and then TRAPS the guest, which is the shape the two
+// tests below pin: a guest-side trap is the guest's own outcome, so it must
+// still produce a run envelope carrying the verdict it already reported.
+const WASI_ALWAYS_VIOLATION_MODULE: &str = r#"(module
+    (import "patina_sdk" "always"
+        (func $always (param i32 i32 i32 i32 i32) (result i32)))
+    (memory (export "memory") 1)
+    (data (i32.const 0) "must-hold")
+    (data (i32.const 16) "wat:inv")
+    (func (export "_start")
+        (drop (call $always (i32.const 0)
+            (i32.const 0) (i32.const 9) (i32.const 16) (i32.const 7)))))"#;
+
+// A WASI guest that traps is reporting an outcome, not failing to run: the CLI
+// must emit a `patina.result/v1` envelope for it, carrying the verdicts the guest
+// drained before the trap. Before this landed, the trap escaped as a `CliError`
+// and the run produced NO envelope at all — so the `violation` verdict the guest
+// had already reported was discarded with it (docs/arcs/outcome-channel.md,
+// Wave B residue).
+#[test]
+fn wasi_guest_trap_still_emits_a_run_envelope_with_its_verdicts() {
+    let directory = tempdir().unwrap();
+    let module = directory.path().join("always.wasm");
+    fs::write(
+        &module,
+        wat::parse_str(WASI_ALWAYS_VIOLATION_MODULE).unwrap(),
+    )
+    .unwrap();
+
+    let trapped = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        directory.path(),
+        &[
+            "run",
+            module.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(
+        !trapped.status.success(),
+        "an always! violation must fail the run"
+    );
+    let stdout = String::from_utf8_lossy(&trapped.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&trapped.stderr).into_owned();
+    let envelope: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|error| {
+        panic!(
+            "a trapping WASI guest must still emit ONE patina.result/v1 envelope on stdout \
+             ({error})\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        )
+    });
+    assert_eq!(envelope["schema"], "patina.result/v1");
+    assert_eq!(
+        envelope["verdicts"][0]["kind"], "violation",
+        "the verdict the guest reported before trapping must survive the trap:\n{envelope:#}"
+    );
+    assert_eq!(envelope["verdicts"][0]["label"], "must-hold");
+    assert!(
+        envelope["guest_exit"].is_object(),
+        "a trapping guest still exited: {envelope:#}"
+    );
+    assert!(
+        envelope["refusal"].is_null(),
+        "a guest trap is the guest's own doing, not a patina refusal:\n{envelope:#}"
+    );
+    // The trap message stays loud: it rides the run's stderr, so it reaches the
+    // human stream, the envelope, and a campaign's captured output alike.
+    assert!(
+        envelope["stderr"]
+            .as_str()
+            .is_some_and(|text| text.contains("wasm trap") || text.contains("unreachable")),
+        "the trap must still be reported, not swallowed by the envelope:\n{envelope:#}"
+    );
+}
+
+// The residue's real cost: a WASI campaign generation whose guest violates an
+// `always!` invariant classified INFRA (no envelope => "patina's supervisor never
+// reported a result") instead of VIOLATION, filing a genuine safety finding as
+// harness noise. This is the WASI-campaign coverage the arc noted did not exist.
+#[test]
+fn wasi_campaign_generation_with_an_always_violation_classifies_violation() {
+    let directory = tempdir().unwrap();
+    let module = directory.path().join("always.wasm");
+    fs::write(
+        &module,
+        wat::parse_str(WASI_ALWAYS_VIOLATION_MODULE).unwrap(),
+    )
+    .unwrap();
+
+    let out = directory.path().join("campaign-out");
+    let swept = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        directory.path(),
+        &[
+            "campaign",
+            module.to_str().unwrap(),
+            "--gens",
+            "2",
+            "--progress-every",
+            "1",
+            "--out-dir",
+            out.to_str().unwrap(),
+            "--format",
+            "json",
+        ],
+    );
+    let envelope = campaign_json_stdout(&swept);
+    assert_eq!(
+        envelope["classes"]["VIOLATION"], 2,
+        "a WASI guest's always! violation is a safety finding, not infrastructure: {}",
+        envelope["classes"]
+    );
+    assert_eq!(
+        envelope["classes"]["INFRA"],
+        serde_json::Value::Null,
+        "a guest-side trap is not a harness failure: {}",
+        envelope["classes"]
+    );
+}

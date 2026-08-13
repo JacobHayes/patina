@@ -35,6 +35,26 @@ pub enum WalError {
     Corruption(String),
 }
 
+impl WalError {
+    /// The verdict label this error reports under. Corruption of the durable log
+    /// is a broken invariant of the queue itself; an I/O error is the storage
+    /// plane failing under us, which the server refuses to run through but does
+    /// not blame on the queue's own logic.
+    pub fn verdict_label(&self) -> &'static str {
+        match self {
+            WalError::Io(_) => "storage-fault",
+            WalError::Corruption(_) => "wal-integrity",
+        }
+    }
+
+    /// Whether this error is a broken durable-state invariant (as opposed to the
+    /// storage plane erroring out), so a caller reports it as a `Violation`
+    /// rather than an `AbortIntent`.
+    pub fn is_corruption(&self) -> bool {
+        matches!(self, WalError::Corruption(_))
+    }
+}
+
 impl std::fmt::Display for WalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -47,6 +67,27 @@ impl std::fmt::Display for WalError {
 impl From<io::Error> for WalError {
     fn from(error: io::Error) -> Self {
         WalError::Io(error)
+    }
+}
+
+/// A fail-closed WAL error handed from a server thread to the driver. `WalError`
+/// is not `Clone` (its `io::Error` is not), so the shape the driver reports —
+/// the verdict label, whether it is a durable-state violation, and the rendered
+/// message — is captured at the point of failure.
+#[derive(Clone, Debug)]
+pub struct FailClosed {
+    pub label: &'static str,
+    pub corruption: bool,
+    pub message: String,
+}
+
+impl From<&WalError> for FailClosed {
+    fn from(error: &WalError) -> Self {
+        FailClosed {
+            label: error.verdict_label(),
+            corruption: error.is_corruption(),
+            message: error.to_string(),
+        }
     }
 }
 

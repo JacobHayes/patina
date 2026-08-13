@@ -50,13 +50,22 @@ CRASH_MARKERS='panicked|internal error|patina: the deterministic runtime|native 
 INFRA_MARKERS='cargo-patina: |Cargo process terminated|terminated by a signal|could not compile|No such file or directory|native-build failed|Resource temporarily unavailable|Cannot allocate memory'
 is_infra() { printf '%s\n%s' "$1" "$2" | /usr/bin/grep -Eq "$INFRA_MARKERS"; }
 
+# pubsub's OWN verdict labels: every self-detected breach is announced through
+# `patina_dst::verdict` (see src/main.rs), and this is the per-guest
+# configuration docs/arcs/outcome-channel.md 4.3 prescribes -- patina itself
+# knows none of these strings. Scoping by label keeps pubsub's findings distinct
+# from an `always!` site violation, which the SDK lowers to the SAME channel.
+PUBSUB_VERDICT_LABELS='malformed-frame|unsubscribed-topic|seq-gap|liveness-timeout|incomplete-delivery|payload-divergence'
+
 # classify: exit pub del exp_pub exp_del exp_hash obs_hash out err
 classify() {
   local code="$1" pub="$2" del="$3" epub="$4" edel="$5" ehash="$6" ohash="$7" out="$8" err="$9"
   local combined="$out
 $err"
-  # A safety violation is ALWAYS a bug, regardless of exit code.
-  if printf '%s' "$combined" | grep -q 'PUBSUB_VIOLATION'; then echo SAFETY_BUG; return; fi
+  # A safety violation is ALWAYS a bug, regardless of exit code. The channel is
+  # the VERDICT ABI's own wire line (patina_dst_abi::verdict_line), not pubsub's
+  # printed PUBSUB_VIOLATION dialect.
+  if printf '%s' "$combined" | grep -Eq "^PATINA_VERDICT .*kind=violation label=($PUBSUB_VERDICT_LABELS) "; then echo SAFETY_BUG; return; fi
   # A hard crash marker anywhere is UNEXPECTED_CRASH even if the exit looks OK.
   if printf '%s' "$combined" | grep -Eq "$CRASH_MARKERS"; then echo UNEXPECTED_CRASH; return; fi
   case "$code" in
@@ -68,20 +77,31 @@ $err"
       if [[ -n "$ehash" && "$ohash" != "$ehash" ]]; then echo SAFETY_BUG; return; fi
       echo OK
       ;;
-    1) echo UNEXPECTED_LIVENESS ;;   # PUBSUB_FAILURE not-converged (bounded faults must converge)
-    2) echo UNEXPECTED_ABORT ;;      # PUBSUB_ABORT fail-closed
+    1) echo UNEXPECTED_LIVENESS ;;   # a convergence/transport miss, which reports no verdict by design
+    2) echo UNEXPECTED_ABORT ;;      # a deliberate fail-closed stop (abort_intent verdict)
     *) echo UNEXPECTED_CRASH ;;
   esac
 }
 
-# Net-fault vacuity verdict — pure. A NET_FAULT gen must actually perturb: the
-# default-on diagnostic must report the faults as applied. Applied LAST so it
-# never downgrades a real finding.
+# Net-fault vacuity verdict — pure. A NET_FAULT gen must actually perturb, and
+# the authority on that is the runtime's OWN per-plane vacuity bit
+# (`PATINA_NET_FAULT_REPORT ... vacuous=`, mirrored as `fault_reports.net.vacuous`
+# in the result envelope) rather than a count this script re-derives.
+#
+# `vacuous` is REQUIRED: an empty value means no net-fault report was found at
+# all, which is promoted to VACUOUS_NET_FAULT for the same reason the schedule
+# gate does it — no evidence of exploration is not exploration. That rule is
+# load-bearing, not defensive: this gate previously reconstructed the verdict
+# from `could_apply=`/`faults_applied=` fields the unified-fault-knobs report
+# renamed away, so both reads came back empty and the gate could no longer fire.
+# It went inert silently, which is precisely the class it exists to catch.
+#
+# Applied LAST so it never downgrades a real finding.
 net_check() {
-  local is_net="$1" base="$2" could_apply="$3" faults_applied="$4" inert_warn="$5"
+  local is_net="$1" base="$2" vacuous="$3" inert_warn="$4"
   if [[ "$is_net" != 1 || "$base" != OK ]]; then echo "$base"; return; fi
   if [[ "$inert_warn" == 1 ]]; then echo VACUOUS_NET_FAULT; return; fi
-  if [[ "$could_apply" == 1 && "${faults_applied:-0}" -eq 0 ]]; then echo VACUOUS_NET_FAULT; return; fi
+  if [[ -z "$vacuous" || "$vacuous" != 0 ]]; then echo VACUOUS_NET_FAULT; return; fi
   echo OK
 }
 
@@ -111,31 +131,45 @@ assert_class() {
 }
 selftest() {
   echo "== pubsub fuzz-sweep classifier selftest =="
-  local ok='PUBSUB_RESULT workload_seed=7 published=32 delivered=64 heartbeats=5 hash='"$EXPECTED_HASH"
+  # A clean run's outcome now travels as pubsub's `pass` verdict; the printed
+  # PUBSUB_RESULT line is the human echo of the same facts.
+  local ok='PATINA_VERDICT seq=0 kind=pass label=pubsub-outcome detail=workload_seed=7\spublished=32\sdelivered=64\sheartbeats=5\shash='"$EXPECTED_HASH"
   local nfr_applied='PATINA_NET_FAULT_REPORT could_apply=1 send_ops=222 faults_applied=222 vacuous=0'
   local nfr_inert='PATINA_NET_FAULT_REPORT could_apply=1 send_ops=222 faults_applied=0 vacuous=1
 PATINA WARNING: net fault knobs inert — 222 fault-eligible send(s) occurred'
 
   # base classify()
   assert_class OK "$(classify 0 32 64 32 64 "$EXPECTED_HASH" "$EXPECTED_HASH" "$ok" "$nfr_applied")" "ok-converged"
-  assert_class SAFETY_BUG "$(classify 0 32 64 32 64 "$EXPECTED_HASH" "$EXPECTED_HASH" "$ok" 'PUBSUB_VIOLATION subscriber-1 seq-gap')" "violation-exit0"
+  assert_class SAFETY_BUG "$(classify 0 32 64 32 64 "$EXPECTED_HASH" "$EXPECTED_HASH" "$ok" 'PATINA_VERDICT seq=1 kind=violation label=seq-gap detail=subscriber-1\st0\sgot=5\sexpected=4')" "violation-exit0"
   assert_class SAFETY_BUG "$(classify 0 32 64 32 64 "$EXPECTED_HASH" 'deadbeef' "$ok" "")" "hash-changed-data-lost"
   assert_class UNEXPECTED_CRASH "$(classify 0 32 6 32 64 "$EXPECTED_HASH" "$EXPECTED_HASH" "$ok" "")" "exit0-partial-delivery"
   assert_class UNEXPECTED_CRASH "$(classify 0 32 64 32 64 "$EXPECTED_HASH" "$EXPECTED_HASH" "$ok" "thread main panicked at broker.rs")" "crash-panic"
   assert_class UNEXPECTED_LIVENESS "$(classify 1 '' '' 32 64 "$EXPECTED_HASH" '' '' 'PUBSUB_FAILURE not-converged')" "liveness-timeout"
-  assert_class UNEXPECTED_ABORT "$(classify 2 '' '' 32 64 "$EXPECTED_HASH" '' '' 'PUBSUB_ABORT bind-failed')" "abort-failclosed"
+  # A deliberate stop reports `abort_intent`, which is NOT a violation and so
+  # must not be promoted to SAFETY_BUG by the rule above.
+  assert_class UNEXPECTED_ABORT "$(classify 2 '' '' 32 64 "$EXPECTED_HASH" '' '' 'PATINA_VERDICT seq=0 kind=abort_intent label=bind detail=127.0.0.1:6001:\saddress\sin\suse')" "abort-failclosed"
 
-  # net_check() — the new VACUOUS_NET_FAULT class (task #37 regression guard).
-  assert_class OK "$(net_check 1 OK 1 222 0)" "net-faults-applied"
-  assert_class VACUOUS_NET_FAULT "$(net_check 1 OK 1 0 0)" "net-faults-inert-zero-applied"
-  assert_class VACUOUS_NET_FAULT "$(net_check 1 OK 1 222 1)" "net-faults-inert-warning"
-  assert_class OK "$(net_check 0 OK 0 0 0)" "schedule-tier-not-net"
-  assert_class SAFETY_BUG "$(net_check 1 SAFETY_BUG 1 0 0)" "net-check-never-downgrades-finding"
+  # net_check() — the VACUOUS_NET_FAULT class (task #37 regression guard).
+  assert_class OK "$(net_check 1 OK 0 0)" "net-faults-applied"
+  assert_class VACUOUS_NET_FAULT "$(net_check 1 OK 1 0)" "net-faults-plane-vacuous"
+  assert_class VACUOUS_NET_FAULT "$(net_check 1 OK 0 1)" "net-faults-inert-warning"
+  # The drift case: no net-fault report found (a renamed/absent field, a missing
+  # line) reads as EMPTY and must fire, never pass as "faults applied".
+  assert_class VACUOUS_NET_FAULT "$(net_check 1 OK '' 0)" "net-faults-no-report"
+  assert_class OK "$(net_check 0 OK '' 0)" "schedule-tier-not-net"
+  assert_class SAFETY_BUG "$(net_check 1 SAFETY_BUG '' 0)" "net-check-never-downgrades-finding"
+  # The plane-scoped field reader must read the NET plane's `vacuous`, not
+  # another report's: several runtime reports carry a `vacuous=` field.
+  local two_planes='PATINA_SCHEDULE_REPORT tasks_spawned=3 total_boundaries=900 vacuous=1
+PATINA_NET_FAULT_REPORT send_ops=222 drops_applied=33 jitter_applied=222 vacuous=0'
+  local plane_file; plane_file="$(mktemp)"; printf '%s\n' "$two_planes" > "$plane_file"
+  assert_class 0 "$(net_field vacuous "$plane_file")" "net-field-reads-its-own-plane"
+  rm -f "$plane_file"
 
   # det_check()
   assert_class OK "$(det_check OK "$ok" "$ok" aa aa)" "determinism-ok"
   assert_class DETERMINISM_BUG "$(det_check OK "$ok" "$ok" aa bb)" "determinism-trace-diff"
-  assert_class DETERMINISM_BUG "$(det_check OK "$ok" 'PUBSUB_RESULT workload_seed=7 published=32 delivered=64 heartbeats=9 hash='"$EXPECTED_HASH" aa aa)" "determinism-result-diff"
+  assert_class DETERMINISM_BUG "$(det_check OK "$ok" 'PATINA_VERDICT seq=0 kind=pass label=pubsub-outcome detail=workload_seed=7\spublished=32\sdelivered=64\sheartbeats=9\shash='"$EXPECTED_HASH" aa aa)" "determinism-result-diff"
 
   if (( SELFTEST_FAIL )); then echo "== SELFTEST FAILED =="; exit 1; fi
   echo "== selftest passed =="
@@ -235,7 +269,16 @@ EOF
 is_num() { [[ "$1" =~ ^[0-9]+$ ]]; }
 
 report_field() { /usr/bin/grep -o "$1=[0-9][0-9]*" "$2" 2>/dev/null | head -1 | cut -d= -f2; }
-result_line()  { grep '^PUBSUB_RESULT' "$1" 2>/dev/null | head -1 || true; }
+# Read a field from the PATINA_NET_FAULT_REPORT line SPECIFICALLY: several
+# runtime reports carry a `vacuous=` field, so the file-wide report_field would
+# read another plane's verdict as the net plane's.
+net_field() {
+  /usr/bin/grep '^PATINA_NET_FAULT_REPORT' "$2" 2>/dev/null | head -1 \
+    | /usr/bin/grep -o " $1=[0-9][0-9]*" | head -1 | cut -d= -f2
+}
+# The run's outcome facts come from the guest's `pass` verdict -- the verdict
+# ABI's own wire line on stderr -- not from its printed PUBSUB_RESULT dialect.
+result_line()  { /usr/bin/grep -m1 '^PATINA_VERDICT .*kind=pass label=pubsub-outcome ' "$1" 2>/dev/null || true; }
 field_of()     { sed -n "s/.*$1=\\([0-9][0-9]*\\).*/\\1/p" | head -1; }
 hash_of()      { sed -n 's/.*hash=\([0-9a-f]*\).*/\1/p' | head -1; }
 sha_of()       { if [[ -f "$1" ]]; then shasum -a256 "$1" | cut -d' ' -f1; else echo MISSING; fi; }
@@ -326,7 +369,7 @@ run_gen() {
   fi
 
   local res pub del ohash
-  res="$(result_line "$out")"
+  res="$(result_line "$err")"
   pub="$(printf '%s' "$res" | field_of published)"; del="$(printf '%s' "$res" | field_of delivered)"
   ohash="$(printf '%s' "$res" | hash_of)"
   local class
@@ -335,9 +378,9 @@ run_gen() {
   # DETERMINISM double-run.
   local det_note=""
   if (( DET_RUN == 1 )); then
-    local trace2="$gd/trace.rerun" out2="$gd/stdout.rerun"
-    "$PATINA" patina run "$built" "${PKNOBS[@]}" --record "$trace2" -- "${GUEST_ARGS[@]}" >"$out2" 2>/dev/null || true
-    local r1 r2 h1 h2; r1="$(result_line "$out")"; r2="$(result_line "$out2")"; h1="$(sha_of "$trace")"; h2="$(sha_of "$trace2")"
+    local trace2="$gd/trace.rerun" out2="$gd/stdout.rerun" err2="$gd/stderr.rerun"
+    "$PATINA" patina run "$built" "${PKNOBS[@]}" --record "$trace2" -- "${GUEST_ARGS[@]}" >"$out2" 2>"$err2" || true
+    local r1 r2 h1 h2; r1="$(result_line "$err")"; r2="$(result_line "$err2")"; h1="$(sha_of "$trace")"; h2="$(sha_of "$trace2")"
     local v; v="$(det_check "$class" "$r1" "$r2" "$h1" "$h2")"
     if [[ "$v" == DETERMINISM_BUG ]]; then class=DETERMINISM_BUG; det_note=" DETERMINISM(rerun): t1=$h1 t2=$h2"; else det_note=" determinism-ok(trace=${h1:0:12})"; fi
   fi
@@ -345,12 +388,13 @@ run_gen() {
   # Net-fault vacuity gate (applied LAST so it never downgrades a real finding).
   local net_note=""
   if (( IS_NET_FAULT == 1 )); then
-    local could fa inert nc
-    could="$(report_field could_apply "$err")"; fa="$(report_field faults_applied "$err")"
+    local vac drops jit inert nc
+    vac="$(net_field vacuous "$err")"
+    drops="$(net_field drops_applied "$err")"; jit="$(net_field jitter_applied "$err")"
     inert=0; grep -q 'net fault knobs inert' "$err" && inert=1
-    nc="$(net_check 1 "$class" "${could:-0}" "${fa:-0}" "$inert")"
-    if [[ "$nc" != "$class" ]]; then class="$nc"; net_note=" (VACUOUS_NET_FAULT: could_apply=${could:-?} faults_applied=${fa:-?} inert_warn=$inert — faults did NOT bite)"
-    else net_note=" net-fault(applied=${fa:-?}/could=${could:-?})"; fi
+    nc="$(net_check 1 "$class" "$vac" "$inert")"
+    if [[ "$nc" != "$class" ]]; then class="$nc"; net_note=" (VACUOUS_NET_FAULT: vacuous=${vac:-<no net report>} inert_warn=$inert — faults did NOT bite)"
+    else net_note=" net-fault(vacuous=$vac drops=${drops:-0} jitter=${jit:-0})"; fi
   fi
 
   # life=/cause= + boundary annotation from the schedule diagnostic, most

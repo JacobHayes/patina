@@ -38,10 +38,29 @@ Conventions:
   `audit-corpus/run.sh`) take `--help`, and classifier-carrying ones take
   `--selftest`, proving every outcome class can fire. The `run-patina.sh` gates
   take no arguments: run them and read the legs they print.
-- Oracles live inside the guest binaries (nonzero exit + a machine-parseable
-  line: `WORKQ_RESULT …` / `WORKQ_VIOLATION …`, `PUBSUB_RESULT …` /
-  `PUBSUB_VIOLATION …`, and so on per testbed), so a violation under Patina is
-  a deterministic failing run that `explore`/`minimize` can bisect.
+- Oracles live inside the guest binaries, and they **report through the verdict
+  ABI** (`patina_dst::verdict`), not through printed markers: a self-detected
+  breach is a `Violation` under the invariant's label, a deliberate fail-closed
+  stop is an `AbortIntent` before the exit, and a clean run is a `Pass` whose
+  detail carries the outcome digest. So a violation under Patina is a
+  deterministic failing run that `explore`/`minimize` can bisect, and every
+  consumer — the campaign classifier, the sweep scripts, a minimize oracle —
+  reads the run's `patina.result/v1` envelope (`verdicts[]`, `fault_reports{}`)
+  or the ABI's own `PATINA_VERDICT` wire lines. The `WORKQ_*`/`PUBSUB_*` lines
+  the guests still print are a human echo; **nothing downstream needs them**, and
+  no guest string is baked into patina (a guest that only prints its findings
+  declares `classify.patterns` in its campaign spec instead — the level-1 escape
+  hatch of `docs/arcs/outcome-channel.md` §4.3).
+- Two things the verdict channel deliberately does not carry. **Liveness**: the
+  ABI has no liveness kind, and whether a run *should* have converged depends on
+  the injected fault configuration the guest cannot see, so a guest's own
+  convergence timeout stays a printed diagnostic (`WORKQ_FAILURE` /
+  `PUBSUB_FAILURE`) and Patina's liveness watchdog is the structural channel.
+  **Which SDK surface reported it**: `always!` lowers to the same `Violation`
+  verdict a guest's own audit reports, so a sweep that keeps those classes apart
+  scopes its rule to the guest's own label set (`WORKQ_VERDICT_LABELS` /
+  `PUBSUB_VERDICT_LABELS`) and leaves every other violation label to the shared
+  buggify layer's `ALWAYS_VIOLATION`.
 - Every harness's failure path has been demonstrated (corrupted baseline /
   divergent logs / stress-tripped race) — none of these gates is unable to fail.
 - Versions are pinned exactly (`=x.y.z` deps), and each testbed is its own

@@ -54,24 +54,34 @@ Subscribers register before publishers start (a ready barrier), so the
 delivery contract is exact: every subscriber of a topic receives every message
 published to it, `seq`-contiguous.
 
-## Output contract (workq conventions)
+## Outcome contract (workq conventions)
 
-- `PUBSUB_RESULT workload_seed=… published=… delivered=… heartbeats=… hash=…` — the
-  deterministic final line. `hash` is an **order-invariant** SHA-256 over one
+Outcomes are announced through the **verdict ABI** (`patina_dst::verdict`), so
+they arrive in the run's `patina.result/v1` envelope as `verdicts[]` and on
+stderr as `PATINA_VERDICT` wire lines. The `PUBSUB_*` lines below are still
+printed for log readability, but nothing downstream needs them.
+
+- `Pass` under `label=pubsub-outcome` (exit 0) — every invariant held. Its detail
+  carries `workload_seed=… published=… delivered=… heartbeats=… hash=…`, echoed
+  as the `PUBSUB_RESULT` line. `hash` is an **order-invariant** SHA-256 over one
   row per published topic and per (subscriber, topic) delivery, each carrying
   the count and a wrapping-sum-of-FNV payload digest — nothing depends on how
   publishers interleave on a shared topic, so for a fixed guest `--seed` the
   hash is identical across Patina schedule seeds and across platforms.
   `heartbeats` is schedule-sensitive: reported, never hashed (workq's
   `attempts` convention).
-- `PUBSUB_VIOLATION …` (exit 1) — an invariant broke: per-topic `seq` gap,
-  malformed frame, unsubscribed-topic delivery, a liveness timeout despite
-  heartbeats, incomplete delivery, or payload divergence.
-- `PUBSUB_FAILURE …` (exit 1) — a liveness/transport miss: the run did not
-  converge within the virtual-time budget, or a client hit an unexpected
-  transport failure.
-- `PUBSUB_ABORT …` (exit 2) — an internal fail-closed fault (bind failure, a
-  task panic, a broker-side impossibility).
+- `Violation` (exit 1) — an invariant broke, under the invariant's own label:
+  `seq-gap`, `malformed-frame`, `unsubscribed-topic`, `liveness-timeout` (a
+  timeout despite live heartbeats), `incomplete-delivery`, or
+  `payload-divergence`. Echoed as `PUBSUB_VIOLATION`.
+- `AbortIntent` (exit 2) — an internal fail-closed fault, under `bind` or
+  `broker-fault`, announced before the exit so the stop is attributed to this
+  guest and never mistaken for a Patina refusal. Echoed as `PUBSUB_ABORT`.
+- **No verdict**: `PUBSUB_FAILURE …` (exit 1), a liveness/transport miss — the
+  run did not converge within the virtual-time budget, or a client hit an
+  unexpected transport failure. The verdict ABI has no liveness kind, and
+  whether a run *should* have converged depends on the injected faults the guest
+  cannot see; Patina's liveness watchdog is the structural channel for that.
 
 ## Planted bugs (`--bug NAME`)
 
@@ -82,8 +92,8 @@ failing run to record + replay byte-identically.
 | name | site | class | caught by |
 |---|---|---|---|
 | `lost-wakeup` | start gate: `Notify::notify_waiters` (edge, no permit) instead of `watch` (level), fired right after spawning the publishers — before any has been polled to its await, so the edge is lost outright | lost wakeup | convergence timeout → `PUBSUB_FAILURE not-converged` |
-| `drop-read-remainder` | subscriber frame reader: one readiness event assumed to deliver exactly one frame; bytes after the first newline of a read are discarded | readiness-ordering / short-read assumption | per-topic seq contiguity → `PUBSUB_VIOLATION seq-gap` (+ incomplete-delivery) |
-| `stale-timeout` | subscriber liveness deadline computed once at connect, never re-armed by traffic | timeout race | `PUBSUB_VIOLATION … liveness-timeout` (+ incomplete-delivery) |
+| `drop-read-remainder` | subscriber frame reader: one readiness event assumed to deliver exactly one frame; bytes after the first newline of a read are discarded | readiness-ordering / short-read assumption | per-topic seq contiguity → a `violation` verdict under `seq-gap` (+ `incomplete-delivery`) |
+| `stale-timeout` | subscriber liveness deadline computed once at connect, never re-armed by traffic | timeout race | a `violation` verdict under `liveness-timeout` (+ `incomplete-delivery`) |
 
 ## Gate
 

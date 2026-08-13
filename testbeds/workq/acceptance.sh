@@ -13,15 +13,23 @@
 #           (PATINA_FS_FAULT_REPORT shorts_applied>0)
 #   [a-dns] a generation fired a dns fault non-vacuously
 #           (PATINA_DNS_FAULT_REPORT resolutions>0 with an injected effect)
-#   [b]     the planted bug was caught: a WORKQ_VIOLATION or the recovery
-#           gate's `WORKQ_ABORT ... wal corruption` fail-closed abort, WITH
-#           shorts_applied>0 in the SAME generation (see the [b] comment below
-#           for why the shorts_applied>0 requirement is load-bearing, not
-#           incidental)
+#   [b]     the planted bug was caught: a `violation` VERDICT in the run
+#           envelope (both surfaces of a torn short write report one -- the
+#           durability/no-loss audit and the recovery gate's `wal-integrity`),
+#           WITH fs shorts_applied>0 in the SAME generation (see the [b]
+#           comment below for why the shorts_applied>0 requirement is
+#           load-bearing, not incidental)
 #   [c]     `cargo patina minimize` shrinks the catching trace and the
-#           minimized trace still reproduces the same marker
+#           minimized trace still reports the violation verdict
 #   [d]     flag-free `cargo patina replay` (no fault flags -- the trace is
-#           self-contained) reproduces the violation byte-identically
+#           self-contained) reproduces the violation byte-identically,
+#           verdict events included
+#
+# Every criterion above reads the run's `patina.result/v1` envelope -- verdicts
+# and the per-plane fault accounting -- rather than workq's printed WORKQ_*
+# dialect, and the campaign carries NO `classify.patterns` spec: workq reports
+# through the verdict ABI, so the envelope classifies it unaided
+# (docs/arcs/outcome-channel.md, Wave C).
 #
 # workq otherwise has NO DNS surface at all: every socket address in
 # producer.rs/worker.rs/main.rs is a literal 127.0.0.1 numeric address, so a
@@ -92,6 +100,32 @@ record() { CRITERIA_LINES+=("$1"); } # criterion: PASS/FAIL evidence-or-reason
 run() { "$PATINA" patina run "$built" "$@"; }
 replay() { "$PATINA" patina replay "$built" "$@"; }
 
+# Replay a trace and reduce its `patina.result/v1` envelope to the four facts
+# every leg below asks for, one per line:
+#   1  the `violation` verdicts, as `label detail` (empty when there are none)
+#   2  fs shorts_applied     3  dns "resolutions failures_injected latency_applied"
+# Everything comes from the envelope's structured fields -- the verdict channel
+# and the per-plane fault accounting -- so no leg reads the guest's printed
+# WORKQ_* dialect (docs/arcs/outcome-channel.md).
+envelope_facts() {
+  local trace="$1"; shift
+  replay "$trace" --format json "$@" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(); print(0); print("0 0 0"); sys.exit(0)
+v = [x for x in d.get("verdicts", []) if x.get("kind") == "violation"]
+print("; ".join("%s %s" % (x.get("label",""), x.get("detail","")) for x in v))
+planes = d.get("fault_reports") or {}
+fs = planes.get("fs") or {}
+print(fs.get("shorts_applied", 0))
+dns = planes.get("dns") or {}
+print("%s %s %s" % (dns.get("resolutions", 0), dns.get("failures_injected", 0),
+                    dns.get("latency_applied", 0)))
+'
+}
+
 # Tiny, fast workload: small enough that campaign traces stay in the
 # hundreds-of-decisions range (`cargo patina minimize` is oracle-call-bound --
 # a 24-job/3-worker trace runs ~10k scheduling decisions and minimize takes
@@ -105,30 +139,17 @@ HARGS=(--seed 7 --jobs 2 --workers 1 --producers 1 --base-port 5001
 
 OUT="$work/campaign-out"
 
-# workq's own marker dialect, declared as campaign spec configuration rather
-# than baked into patina: the classifier reads the run's structured envelope
-# (verdicts, per-plane fault accounting, refusal, guest exit) and knows nothing
-# about WORKQ_*. A guest that prints its findings instead of reporting them
-# through the verdict ABI declares them here -- the level-1 escape hatch of the
-# outcome-channel arc (docs/arcs/outcome-channel.md 4.3). The two patterns are
-# exactly the two ways a torn short write surfaces (see wal.rs), matching the
-# catch scan in [b] below.
-spec_json="$work/classify-spec.json"
-cat >"$spec_json" <<'JSON'
-{
-  "classify": {
-    "patterns": {
-      "VIOLATION": ["WORKQ_VIOLATION", "WORKQ_ABORT final-wal wal corruption"]
-    }
-  }
-}
-JSON
-
+# NO campaign spec: workq reports its outcomes through the verdict ABI, so the
+# classifier reads them straight off each generation's structured envelope
+# (verdicts, per-plane fault accounting, refusal, guest exit) and needs no
+# per-guest `classify.patterns` declaration at all. The spec-declared patterns
+# of docs/arcs/outcome-channel.md 4.3 are the LEVEL-1 escape hatch -- for a guest
+# that only prints its findings -- and workq is no longer one.
 echo "==> [1] cargo patina campaign --faults --swarm --gens $GENS (--bug ignore-short-write, --dns-entry $SERVER_HOST)"
 campaign_json="$work/campaign.json"
 campaign_err="$work/campaign.err"
 "$PATINA" patina campaign "$built" --gens "$GENS" --out-dir "$OUT" --faults --swarm \
-  --dns-entry "$SERVER_HOST=127.0.0.1" --spec "$spec_json" \
+  --dns-entry "$SERVER_HOST=127.0.0.1" \
   --format json ${ALLOW[@]+"${ALLOW[@]}"} \
   -- "${HARGS[@]}" --bug ignore-short-write \
   >"$campaign_json" 2>"$campaign_err" || true
@@ -149,22 +170,21 @@ echo "    $classes_line"
 # ---------------------------------------------------------------------------
 # [b] catch: scan VIOLATION-, GUEST_ABORT- and UNCLASSIFIED-classified generations (in
 # generation order -- deterministic, gens are a pure function of the spec) for
-# the planted bug's SPECIFIC signature: a WORKQ_VIOLATION or a
-# `WORKQ_ABORT ... wal corruption` marker (the two ways a torn short write
-# surfaces, see wal.rs) TOGETHER WITH PATINA_FS_FAULT_REPORT shorts_applied>0
-# in the SAME generation.
+# the planted bug's SPECIFIC signature: a `violation` VERDICT in the replay's
+# envelope (both ways a torn short write surfaces report one -- the
+# durability/no-loss audit and the recovery gate's `wal-integrity`, see wal.rs)
+# TOGETHER WITH fs `shorts_applied`>0 in the SAME generation's `fault_reports`.
 #
-# shorts_applied>0 is required, not just the marker text, because red-proofing
+# shorts_applied>0 is required, not just a violation, because red-proofing
 # this script surfaced an UNRELATED pre-existing workq defect: a plain
 # fs-error (shorts_applied=0) can also leave an acked job's Enqueue record
 # missing from the durable WAL while the worker still phantom-applies it --
 # reproducible even with --bug unset and even without this arc's
 # --server-host/--dns-entry changes, so it predates and is independent of both.
-# It happens to land a WORKQ_VIOLATION with matching "durability
-# acked-job-N-missing-from-wal" TEXT at a fixed generation in this exact
-# campaign shape, so marker-text matching alone would have silently accepted
-# that unrelated bug's catch as "the planted bug caught". Filed as a separate
-# finding for follow-up; not fixed here (out of this unit's scope).
+# It happens to report the very same `durability` violation verdict at a fixed
+# generation in this exact campaign shape, so matching the verdict alone would
+# silently accept that unrelated bug's catch as "the planted bug caught". Filed
+# as a separate finding for follow-up; not fixed here (out of this unit's scope).
 # ---------------------------------------------------------------------------
 candidate_gens=()
 while IFS= read -r g; do
@@ -177,44 +197,41 @@ print('\n'.join(str(g) for g in gens))
 ")
 
 catch_gen=""
-catch_marker=""
-catch_err="$work/catch.err"
+catch_verdict=""
+catch_shorts=""
 for g in ${candidate_gens[@]+"${candidate_gens[@]}"}; do
   trace="$OUT/failures/generation-$g.patina"
   [[ -f "$trace" ]] || continue
-  err="$(replay "$trace" ${ALLOW[@]+"${ALLOW[@]}"} 2>&1 >/dev/null)"
-  marker="$(printf '%s\n' "$err" | grep -m1 -E 'WORKQ_VIOLATION|WORKQ_ABORT final-wal wal corruption' || true)"
-  [[ -n "$marker" ]] || continue
-  fs_line="$(printf '%s\n' "$err" | grep -m1 'PATINA_FS_FAULT_REPORT' || true)"
-  shorts="$(printf '%s' "$fs_line" | grep -o 'shorts_applied=[0-9]*' | cut -d= -f2)"
+  facts="$(envelope_facts "$trace" ${ALLOW[@]+"${ALLOW[@]}"})"
+  verdicts="$(printf '%s\n' "$facts" | sed -n 1p)"
+  shorts="$(printf '%s\n' "$facts" | sed -n 2p)"
+  [[ -n "$verdicts" ]] || continue
   if [[ "${shorts:-0}" -gt 0 ]]; then
-    catch_gen="$g"; catch_marker="$marker"
-    printf '%s' "$err" > "$catch_err"
+    catch_gen="$g"; catch_verdict="$verdicts"; catch_shorts="$shorts"
     break
   fi
 done
 
 if [[ -z "$catch_gen" ]]; then
-  echo "    FAIL: no generation shows a WORKQ_VIOLATION/wal-corruption marker WITH shorts_applied>0 in $GENS generations -- planted bug NOT caught"
-  record "b-catch: FAIL (no generation with a violation/corruption marker AND shorts_applied>0 in $GENS gens)"
+  echo "    FAIL: no generation reports a violation verdict WITH fs shorts_applied>0 in $GENS generations -- planted bug NOT caught"
+  record "b-catch: FAIL (no generation with a violation verdict AND shorts_applied>0 in $GENS gens)"
   fail=1
 else
   trace="$OUT/failures/generation-$catch_gen.patina"
-  echo "    caught: generation $catch_gen -- $catch_marker"
-  record "b-catch: PASS (generation $catch_gen: $catch_marker)"
+  echo "    caught: generation $catch_gen -- violation verdict: $catch_verdict"
+  record "b-catch: PASS (generation $catch_gen, violation verdict: $catch_verdict)"
 
   # -------------------------------------------------------------------
   # [a-fs] non-vacuous fs-fault firing, read off the SAME catching
-  # generation's fs report (shorts_applied>0 already confirmed above).
+  # generation's fs plane (shorts_applied>0 already confirmed above).
   # -------------------------------------------------------------------
-  fs_line="$(grep -m1 'PATINA_FS_FAULT_REPORT' "$catch_err" || true)"
-  echo "    fs non-vacuous: generation $catch_gen -- $fs_line"
-  record "a-fs: PASS (generation $catch_gen: $fs_line)"
+  echo "    fs non-vacuous: generation $catch_gen -- fault_reports.fs.shorts_applied=$catch_shorts"
+  record "a-fs: PASS (generation $catch_gen: fault_reports.fs.shorts_applied=$catch_shorts)"
 fi
 
 # ---------------------------------------------------------------------------
 # [a-dns] non-vacuous dns-fault firing. Scan every saved failing trace's
-# replay for a PATINA_DNS_FAULT_REPORT line with a real injected effect (a
+# replay for a `fault_reports.dns` plane with a real injected effect (a
 # failure OR a latency application -- --faults bands both dns-fail-permille
 # and dns-latency-nanos once --dns-entry is supplied, and either is a genuine
 # fire, not just the other).
@@ -223,26 +240,22 @@ dns_fired=0
 dns_evidence=""
 for f in "$OUT"/failures/*.patina; do
   [[ -e "$f" ]] || continue
-  err="$(replay "$f" ${ALLOW[@]+"${ALLOW[@]}"} 2>&1 >/dev/null)"
-  line="$(printf '%s\n' "$err" | grep -m1 'PATINA_DNS_FAULT_REPORT' || true)"
-  if [[ -n "$line" ]]; then
-    resolutions="$(printf '%s' "$line" | grep -o 'resolutions=[0-9]*' | cut -d= -f2)"
-    failures_injected="$(printf '%s' "$line" | grep -o 'failures_injected=[0-9]*' | cut -d= -f2)"
-    latency_applied="$(printf '%s' "$line" | grep -o 'latency_applied=[0-9]*' | cut -d= -f2)"
-    if [[ "${resolutions:-0}" -gt 0 && ( "${failures_injected:-0}" -gt 0 || "${latency_applied:-0}" -gt 0 ) ]]; then
-      dns_fired=1; dns_evidence="generation $(basename "$f" .patina): $line"
-      break
-    fi
+  dns_line="$(envelope_facts "$f" ${ALLOW[@]+"${ALLOW[@]}"} | sed -n 3p)"
+  read -r resolutions failures_injected latency_applied <<<"$dns_line"
+  if [[ "${resolutions:-0}" -gt 0 && ( "${failures_injected:-0}" -gt 0 || "${latency_applied:-0}" -gt 0 ) ]]; then
+    dns_fired=1
+    dns_evidence="generation $(basename "$f" .patina): fault_reports.dns resolutions=$resolutions failures_injected=$failures_injected latency_applied=$latency_applied"
+    break
   fi
 done
 if [[ "$dns_fired" -eq 1 ]]; then
   echo "    dns non-vacuous: $dns_evidence"
   record "a-dns: PASS ($dns_evidence)"
 else
-  echo "    FAIL: no generation shows a non-vacuous PATINA_DNS_FAULT_REPORT"
+  echo "    FAIL: no generation shows a non-vacuous fault_reports.dns plane"
   echo "          (resolutions>0 with a failure or latency effect applied) --"
   echo "          named loudly rather than papered over."
-  record "a-dns: FAIL (no generation showed a non-vacuous PATINA_DNS_FAULT_REPORT)"
+  record "a-dns: FAIL (no generation showed a non-vacuous fault_reports.dns plane)"
   fail=1
 fi
 
@@ -256,23 +269,29 @@ if [[ -n "$catch_gen" && -f "$OUT/failures/generation-$catch_gen.patina" ]]; the
 #!/usr/bin/env bash
 # Minimize oracle. `cargo patina minimize` sets PATINA_MINIMIZE_TRACE to the
 # candidate trace path. Args: PATINA_BIN WORKQ_BIN [ALLOW...]. Exit nonzero
-# (the catching marker is still present) means "keep this candidate, still
-# fails"; exit 0 means the candidate lost the failure. Matches either surface
-# of the planted bug: a WORKQ_VIOLATION or the recovery-gate's
-# `WORKQ_ABORT ... wal corruption` fail-closed abort.
+# (the failure is still present) means "keep this candidate, still fails";
+# exit 0 means the candidate lost the failure.
 #
-# A marker on its own is NOT enough, in both fail-open directions:
+# The oracle keys on the VERDICT channel, not on workq's printed dialect: a
+# `PATINA_VERDICT ... kind=violation` line is the guest's structured
+# announcement of a broken invariant, and it covers both surfaces of the
+# planted bug (the durability/no-loss audit and the recovery gate's
+# `wal-integrity`). The line is the ABI's own wire format
+# (patina_dst_abi::verdict_line), so this oracle is guest-agnostic -- the same
+# text works for any guest that reports through the SDK.
 #
-#   * a candidate whose replay DIVERGES after the guest already printed the
-#     marker never reproduced the failure -- the abort preempted the run -- so
+# A verdict on its own is NOT enough, in both fail-open directions:
+#
+#   * a candidate whose replay DIVERGES after the guest already reported the
+#     verdict never reproduced the failure -- the abort preempted the run -- so
 #     accepting it would let the search keep deleting on the strength of a
 #     failure it did not observe (docs/probes/minimize-oracle-perf.md, section
 #     4 option 6);
 #   * a candidate patina REFUSED to run at all (a usage error, an unreadable
 #     guest: `cargo-patina: ...`, exit 2) says nothing about the failure either.
 #
-# Both are rejected here before the marker is even looked for, so this oracle
-# accepts only a clean replay that reproduced the marker. `cargo patina minimize
+# Both are rejected here before the verdict is even looked for, so this oracle
+# accepts only a clean replay that reproduced it. `cargo patina minimize
 # --generation --marker` applies exactly this rule in-process.
 set -uo pipefail
 PATINA="$1"; BIN="$2"; shift 2
@@ -280,7 +299,7 @@ err="$("$PATINA" patina replay "$BIN" "$PATINA_MINIMIZE_TRACE" "$@" 2>&1 >/dev/n
 code=$?
 printf '%s' "$err" | grep -q 'patina native shim fatal' && exit 0
 [[ $code -eq 2 ]] && printf '%s' "$err" | grep -q '^cargo-patina: ' && exit 0
-printf '%s' "$err" | grep -qE 'WORKQ_VIOLATION|WORKQ_ABORT final-wal wal corruption' && exit 1
+printf '%s' "$err" | grep -q '^PATINA_VERDICT .*kind=violation ' && exit 1
 exit 0
 ORACLE
   chmod +x "$oracle"
@@ -300,21 +319,22 @@ ORACLE
     fail=1
   else
     echo "    $min_line"
-    min_err="$work/min-replay.err"
-    replay "$min_trace" ${ALLOW[@]+"${ALLOW[@]}"} >"$work/min-replay.out" 2>"$min_err"
-    min_marker="$(grep -m1 -E 'WORKQ_VIOLATION|WORKQ_ABORT final-wal wal corruption' "$min_err" || true)"
-    if [[ -z "$min_marker" ]]; then
-      echo "    FAIL: minimized trace no longer reproduces the catching marker"
+    min_verdict="$(envelope_facts "$min_trace" ${ALLOW[@]+"${ALLOW[@]}"} | sed -n 1p)"
+    if [[ -z "$min_verdict" ]]; then
+      echo "    FAIL: minimized trace no longer reports a violation verdict"
       record "c-minimize: FAIL (minimized trace lost the violation)"
       fail=1
     else
-      echo "    minimized trace still reproduces: $min_marker"
-      record "c-minimize: PASS ($min_line; still reproduces: $min_marker)"
+      echo "    minimized trace still reproduces: $min_verdict"
+      record "c-minimize: PASS ($min_line; still reproduces: $min_verdict)"
     fi
 
     # -----------------------------------------------------------------
     # [d] flag-free replay: NO fault/campaign flags, just the trace --
-    # two independent replays must agree byte-for-byte.
+    # two independent replays must agree byte-for-byte. Verdicts are recorded
+    # trace events, so the PATINA_VERDICT lines on stderr are PART of the
+    # identity being asserted; the count is checked separately so an identical
+    # pair of verdict-free streams can never pass this leg vacuously.
     # -----------------------------------------------------------------
     r1_out="$work/ff1.out"; r1_err="$work/ff1.err"
     r2_out="$work/ff2.out"; r2_err="$work/ff2.err"
@@ -322,14 +342,18 @@ ORACLE
     c1=$?
     replay "$min_trace" ${ALLOW[@]+"${ALLOW[@]}"} >"$r2_out" 2>"$r2_err"
     c2=$?
+    v1="$(grep -c '^PATINA_VERDICT ' "$r1_err" || true)"
     if [[ $c1 -ne $c2 ]] || ! diff -q "$r1_out" "$r2_out" >/dev/null || ! diff -q "$r1_err" "$r2_err" >/dev/null; then
       echo "    FAIL: flag-free replay is not byte-identical across two runs (exit $c1 vs $c2)"
       record "d-replay: FAIL (not byte-identical: exit $c1 vs $c2)"
       fail=1
+    elif [[ "${v1:-0}" -lt 1 ]]; then
+      echo "    FAIL: flag-free replay carried NO verdict events -- the identity check would be vacuous"
+      record "d-replay: FAIL (replay reproduced no PATINA_VERDICT events)"
+      fail=1
     else
-      result="$(grep -m1 'WORKQ_RESULT' "$r1_out" || true)"
-      echo "    flag-free replay byte-identical (exit=$c1): $result"
-      record "d-replay: PASS (flag-free, byte-identical, exit=$c1: $result)"
+      echo "    flag-free replay byte-identical (exit=$c1, verdict events=$v1): $min_verdict"
+      record "d-replay: PASS (flag-free, byte-identical incl. $v1 verdict events, exit=$c1: $min_verdict)"
     fi
   fi
 else

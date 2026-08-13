@@ -2937,8 +2937,58 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
     }
     let context = Context::from_config(config).map_err(|error| CliError(error.to_string()))?;
     let host = configured_wasi_host(&invocation, &resolved.display, context)?;
-    let mut execution = execute_preview1_with_fuel(&bytes, host, invocation.fuel)
-        .map_err(|error| CliError(error.to_string()))?;
+    let (trace_path, seed, timeline) = match &invocation.mode {
+        Mode::Seeded { seed } => (None, Some(*seed), "main".to_string()),
+        Mode::Record { seed, path } => (Some(path.clone()), Some(*seed), "main".to_string()),
+        Mode::Replay { path, timeline } => (Some(path.clone()), None, timeline.clone()),
+        Mode::Branch {
+            path, branch_id, ..
+        } => (Some(path.clone()), None, branch_id.clone()),
+    };
+    let artifact = resolved.display.display().to_string();
+    let mut execution = match execute_preview1_with_fuel(&bytes, host, invocation.fuel) {
+        Ok(execution) => execution,
+        Err(error) => {
+            // A guest TRAP is an outcome of the guest, not a failure to run it:
+            // an `always!` violation, an `unreachable`, a memory-cap trap. It
+            // gets a real run envelope, so the verdicts the guest drained before
+            // trapping survive and a campaign classifies the generation on them
+            // instead of filing it as harness noise (docs/arcs/outcome-channel.md,
+            // Wave B residue). Every OTHER failure — an audit refusal, an
+            // engine/link error, a host finalization error — is patina or the
+            // module failing and stays a `CliError`.
+            let (trap, stdout, mut stderr) = match error.guest_trap() {
+                Ok(trap) => trap,
+                Err(other) => return Err(CliError(other.to_string())),
+            };
+            // The trap itself stays loud: it rides the run's own stderr, so it
+            // reaches the human stream, the envelope's `stderr`, and a campaign's
+            // captured output through one channel.
+            stderr.extend_from_slice(format!("patina: wasm trap: {trap}\n").as_bytes());
+            // No `depth`: the engine's fuel meter and hostcall counters are only
+            // available from a finished `WasiExecution`, and an absent report must
+            // never read as zero. `facts` is whatever the runtime managed to write
+            // before the trap — absent stays absent.
+            let facts = read_facts_channel(facts_file.as_ref().map(tempfile::NamedTempFile::path))?;
+            return output::finalize_inprocess(
+                output::RunReport {
+                    verb: "run",
+                    family: "wasi",
+                    artifact: &artifact,
+                    trace_path,
+                    timeline: &timeline,
+                    fingerprint: Some(fingerprint),
+                    seed,
+                    coverage: None,
+                    depth: None,
+                    facts,
+                },
+                WASI_TRAP_EXIT,
+                stdout,
+                stderr,
+            );
+        }
+    };
     // WASI depth (fuel + hostcall counts) rides the run's own stderr, exactly as
     // the native family's `PATINA_COVERAGE_REPORT` rides the child's — so the
     // human stream, the envelope's `markers`, and a campaign's captured child
@@ -2951,15 +3001,6 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
             .extend_from_slice(depth.marker_line().as_bytes());
         execution.stderr.push(b'\n');
     }
-    let (trace_path, seed, timeline) = match &invocation.mode {
-        Mode::Seeded { seed } => (None, Some(*seed), "main".to_string()),
-        Mode::Record { seed, path } => (Some(path.clone()), Some(*seed), "main".to_string()),
-        Mode::Replay { path, timeline } => (Some(path.clone()), None, timeline.clone()),
-        Mode::Branch {
-            path, branch_id, ..
-        } => (Some(path.clone()), None, branch_id.clone()),
-    };
-    let artifact = resolved.display.display().to_string();
     let facts = read_facts_channel(facts_file.as_ref().map(tempfile::NamedTempFile::path))?;
     output::finalize_inprocess(
         output::RunReport {
@@ -6967,6 +7008,12 @@ IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
 /// kills a hung `--starve` run, so a sweep can classify `STARVATION_STALL` rather
 /// than treat the run as an ordinary crash.
 const STARVATION_STALL_EXIT: i32 = 111;
+
+/// Exit code for a WASI guest that trapped. A wasm trap carries no exit status
+/// and no signal, so the run reports the ordinary "the guest failed" code rather
+/// than borrowing a signal-death code (`134`) it did not die from — the envelope's
+/// `verdicts[]` and `stderr` carry what actually happened.
+const WASI_TRAP_EXIT: i32 = 1;
 
 #[cfg(not(unix))]
 fn execute_native_run(_invocation: NativeRunInvocation) -> Result<i32, CliError> {

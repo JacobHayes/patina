@@ -23,7 +23,7 @@ use patina_dst_runtime::{
 use patina_dst_target::{TargetError, WasiAudit};
 use wasmi::{
     AsContextMut, Caller, Config as WasmiConfig, Engine, Error as WasmiError, Extern, Linker,
-    Memory, Module, Store, StoreLimits, StoreLimitsBuilder,
+    Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TrapCode,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1628,9 +1628,10 @@ pub fn execute_preview1_with_fuel(
             .map_err(WasiRunError::Engine)?;
         match start.call(&mut store, ()) {
             Ok(()) => Ok(0),
-            Err(error) => error
-                .i32_exit_status()
-                .ok_or_else(|| WasiRunError::Engine(error)),
+            Err(error) => match error.i32_exit_status() {
+                Some(status) => Ok(status),
+                None => Err(classify_start_error(error)),
+            },
         }
     })();
     let fuel_consumed = fuel.saturating_sub(
@@ -1665,6 +1666,25 @@ pub fn execute_preview1_with_fuel(
             run: Box::new(run),
             finalize: Box::new(finalize),
         }),
+    }
+}
+
+/// Attribute a non-`proc_exit` failure out of `_start`.
+///
+/// A wasm trap is the guest's own outcome (an `always!` violation, an
+/// `unreachable`, an out-of-bounds access) EXCEPT for the two trap codes patina
+/// itself causes by installing a limit: `OutOfFuel` is the `--fuel` budget
+/// halting the guest and `GrowthOperationLimited` is the memory cap refusing a
+/// growth. Those are patina stopping the run, not the guest failing, so they stay
+/// [`WasiRunError::Engine`] and keep failing the CLI closed rather than being
+/// reported as a guest outcome. The split is structural — a trap code, never the
+/// trap's message text.
+fn classify_start_error(error: WasmiError) -> WasiRunError {
+    match error.as_trap_code() {
+        Some(TrapCode::OutOfFuel) | Some(TrapCode::GrowthOperationLimited) => {
+            WasiRunError::Engine(error)
+        }
+        _ => WasiRunError::GuestTrap(error),
     }
 }
 
@@ -3469,6 +3489,14 @@ pub struct WasiExit {
 pub enum WasiRunError {
     Target(TargetError),
     Engine(WasmiError),
+    /// The guest itself trapped: `_start` returned an error that is not a WASI
+    /// `proc_exit` status. That is an outcome OF the guest (an `always!`
+    /// violation, an `unreachable`, a memory-cap trap), structurally different
+    /// from an [`WasiRunError::Engine`] failure to build or link the module,
+    /// which is a problem WITH the module or the host. Callers that report run
+    /// results keep the distinction: a trap gets a run envelope, a link failure
+    /// does not.
+    GuestTrap(WasmiError),
     Host(WasiHostError),
     /// Depth accounting (fuel / hostcall counters) did not produce data for a
     /// run that executed. Reported rather than papered over so "no depth data"
@@ -3485,11 +3513,38 @@ pub enum WasiRunError {
     },
 }
 
+impl WasiRunError {
+    /// The guest's own trap and whatever it had written, when this error IS a
+    /// guest trap -- looking through the [`WasiRunError::RunWithOutput`] wrapper
+    /// so a caller never has to re-match the nesting. Returns the trap's rendered
+    /// message plus the stdout/stderr bytes the guest produced before it (both
+    /// empty when the guest wrote nothing).
+    ///
+    /// Every other failure is handed back unchanged in `Err`: an audit refusal, an
+    /// engine/link error, or a host finalization error is not something the guest
+    /// did, and must not be reported as a guest outcome.
+    pub fn guest_trap(self) -> Result<(String, Vec<u8>, Vec<u8>), Self> {
+        match self {
+            Self::GuestTrap(_) => {
+                let message = self.to_string();
+                Ok((message, Vec::new(), Vec::new()))
+            }
+            Self::RunWithOutput {
+                run,
+                stdout,
+                stderr,
+            } if matches!(*run, Self::GuestTrap(_)) => Ok((run.to_string(), stdout, stderr)),
+            other => Err(other),
+        }
+    }
+}
+
 impl fmt::Display for WasiRunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Target(error) => error.fmt(f),
             Self::Engine(error) => error.fmt(f),
+            Self::GuestTrap(error) => error.fmt(f),
             Self::Host(error) => error.fmt(f),
             Self::Depth(message) => f.write_str(message),
             Self::RunWithOutput {
@@ -3521,6 +3576,7 @@ impl std::error::Error for WasiRunError {
         match self {
             Self::Target(error) => Some(error),
             Self::Engine(error) => Some(error),
+            Self::GuestTrap(error) => Some(error),
             Self::Host(error) => Some(error),
             Self::Depth(_) => None,
             Self::RunWithOutput { run, .. } => Some(run),

@@ -252,6 +252,20 @@ tell that apart from a real green.
 Hard-won from dogfooding real storage engines under Patina; each avoids a
 class of confusing first-run failures.
 
+- **Report outcomes through the verdict ABI, not through printed markers.** The
+  SDK's verdict call is the guest's structured outcome channel: a violated
+  invariant is a `Violation` under a label that aggregates across runs, a
+  deliberate `abort()` is preceded by an `AbortIntent` so the resulting SIGABRT
+  is attributed to you rather than mistaken for a Patina refusal, and a run that
+  held is a `Pass` whose detail can carry your outcome digest. Each call is a
+  recorded trace event (so replay reproduces the verdict stream byte-identically,
+  and a divergent one fails closed) and lands in the result envelope's
+  `verdicts[]`, which is what the campaign classifier and a `minimize` oracle
+  read. `always!` lowers to the same channel. A guest that only *prints* its
+  findings is a level-1 guest: it can still be classified, but only by declaring
+  its patterns explicitly in the campaign spec — patina never carries a guest's
+  strings. Keep the printed lines if you like them in logs; just make sure
+  nothing downstream depends on them.
 - **Static constructors run before the runtime exists.** A `#[ctor]`-style
   initializer that touches an interposed surface (tracing setup, env reads,
   sockets) fails closed with a pre-init diagnostic naming the symbol. The

@@ -43,18 +43,22 @@ Two ideas keep it correct under chaos:
    stress-tests across every possible thread interleaving.
 
 At the end of a run the program re-reads the log from disk and checks its
-invariants — durability, no lost jobs, exactly-once. A breach prints
-`WORKQ_VIOLATION` and exits non-zero.
+invariants — durability, no lost jobs, exactly-once. A breach is reported through
+the **verdict ABI** (`patina_dst::verdict`) as a `Violation` under the broken
+invariant's label, and the run exits non-zero. That verdict is what the campaign
+classifier, the sweep scripts, and a `minimize` oracle read; the `WORKQ_*` lines
+the program also prints are a human echo of it.
 
 ### Two kinds of determinism
 
 - **Schedule determinism (per machine).** On one operating system, a given seed
   replays the identical thread interleaving every time, so a recorded run
   reproduces byte-for-byte.
-- **Outcome invariance (across machines).** The `WORKQ_RESULT applied_hash` is a
-  digest of *what happened to each job* — keyed by the job's stable client
-  identity, not the order things finished in. So macOS and Linux, whose thread
-  schedules genuinely differ, still agree on the outcome hash.
+- **Outcome invariance (across machines).** The `applied_hash` a clean run
+  reports in its `Pass` verdict (`label=workq-outcome`) is a digest of *what
+  happened to each job* — keyed by the job's stable client identity, not the
+  order things finished in. So macOS and Linux, whose thread schedules genuinely
+  differ, still agree on the outcome hash.
 
 ## Running it
 

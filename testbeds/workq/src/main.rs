@@ -3,9 +3,22 @@
 //! process jobs, and **producer** threads that enqueue a seeded workload, all over
 //! loopback UDP + append-only WAL segments on the virtual clock. The app has no
 //! fault code of its own; every drop, jitter, fs-crash, and buggify fault comes
-//! from Patina and the seed. A self-checked invariant breach prints
-//! `WORKQ_VIOLATION` (exit 1); a fail-closed recovery abort prints `WORKQ_ABORT`
-//! (exit 2).
+//! from Patina and the seed.
+//!
+//! Outcomes are announced through the **verdict ABI** (`patina_dst::verdict`), not
+//! through the printed `WORKQ_*` lines: a self-checked invariant breach reports a
+//! `Violation` under the invariant's label (exit 1), and a fail-closed recovery
+//! abort reports either a `Violation` (`wal-integrity` — the durable log is
+//! corrupt) or an `AbortIntent` (`storage-fault` — the storage plane errored and
+//! the queue refuses to run on) before exiting 2. A clean converged run reports a
+//! `Pass` under `workq-outcome` carrying the outcome digest. The `WORKQ_*` lines
+//! stay for log readability; nothing downstream needs them.
+//!
+//! The one outcome with no verdict is the guest's own convergence timeout
+//! (`WORKQ_FAILURE not-converged`, exit 1). The verdict ABI has no liveness kind,
+//! and whether a run *should* have converged depends on the injected fault
+//! configuration, which the guest cannot see — Patina's liveness watchdog is the
+//! structural channel for that question.
 //!
 //! Two determinism properties: per-platform **schedule determinism** (one
 //! `(seed, binary)` replays byte-for-byte, so trace hashes are platform-local),
@@ -30,10 +43,20 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
+use patina_dst::VerdictKind;
 use producer::{AckedHandle, AckedLedger};
 use server::{Bug, ServerConfig, ServerObservation, ServerSpec};
+use wal::FailClosed;
 use wire::WalRecord;
 use worker::{Accumulator, AccumulatorHandle};
+
+/// Report one self-detected invariant breach: the verdict is the announcement,
+/// the printed line is the human echo of it. `label` names the invariant and
+/// aggregates across runs; `detail` carries the run-specific particulars.
+fn report_violation(label: &str, detail: &str) {
+    patina_dst::verdict(VerdictKind::Violation, label, detail);
+    eprintln!("WORKQ_VIOLATION {label} {detail}");
+}
 
 /// A job that exhausts this many deliveries without completing is terminally
 /// failed; a delivery is redelivered if not completed within the visibility lease.
@@ -92,7 +115,7 @@ fn run_recovery_selftest() -> i32 {
             0
         }
         Err(detail) => {
-            eprintln!("WORKQ_VIOLATION recovery-not-fail-closed {detail}");
+            report_violation("recovery-not-fail-closed", &detail);
             1
         }
     }
@@ -107,7 +130,7 @@ struct ServerSupervisor {
     observation: ObservationHandle,
     crash: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
-    failure: Arc<Mutex<Option<String>>>,
+    failure: Arc<Mutex<Option<FailClosed>>>,
     join: Option<JoinHandle<()>>,
     restarts: u32,
 }
@@ -141,7 +164,7 @@ impl ServerSupervisor {
         self.join = Some(std::thread::spawn(move || server::run(spec)));
     }
 
-    fn failed(&self) -> Option<String> {
+    fn failed(&self) -> Option<FailClosed> {
         self.failure.lock().unwrap().clone()
     }
 
@@ -223,8 +246,8 @@ fn orchestrate(options: Options) -> i32 {
     }
 
     match outcome {
-        DriveOutcome::FailClosed(message) => {
-            eprintln!("WORKQ_ABORT storage-fault {message}");
+        DriveOutcome::FailClosed(failure) => {
+            report_fail_closed("storage-fault", &failure);
             2
         }
         DriveOutcome::Converged | DriveOutcome::TimedOut => {
@@ -238,7 +261,23 @@ enum DriveOutcome {
     Converged,
     TimedOut,
     /// The server's recovery hit corruption and failed closed.
-    FailClosed(String),
+    FailClosed(FailClosed),
+}
+
+/// Announce a fail-closed WAL stop before exiting 2. Corruption of the durable
+/// log is a broken invariant, so it reports a `Violation`; a storage-plane I/O
+/// error is not the queue's own bug, so it reports the deliberate stop as an
+/// `AbortIntent` — attributed to the guest, never mistaken for a Patina refusal.
+/// `site` names where the stop happened (the running server, or the final audit).
+fn report_fail_closed(site: &str, failure: &FailClosed) {
+    let detail = format!("{site} {}", failure.message);
+    let kind = if failure.corruption {
+        VerdictKind::Violation
+    } else {
+        VerdictKind::AbortIntent
+    };
+    patina_dst::verdict(kind, failure.label, &detail);
+    eprintln!("WORKQ_ABORT {site} {}", failure.message);
 }
 
 /// Watch for convergence, fire the crash-recovery plan, and bail on a fail-closed
@@ -251,8 +290,8 @@ fn drive(
     let deadline = Instant::now() + options.timeout;
     let mut crashed = false;
     loop {
-        if let Some(message) = supervisor.failed() {
-            return DriveOutcome::FailClosed(message);
+        if let Some(failure) = supervisor.failed() {
+            return DriveOutcome::FailClosed(failure);
         }
         if Instant::now() >= deadline {
             return DriveOutcome::TimedOut;
@@ -366,33 +405,35 @@ fn report(
     let recovered = match wal::recover(&options.data_dir) {
         Ok(recovered) => recovered,
         Err(error) => {
-            eprintln!("WORKQ_ABORT final-wal {error}");
+            report_fail_closed("final-wal", &FailClosed::from(&error));
             return 2;
         }
     };
     let audit = audit_wal(&recovered.records);
     let accumulator = accumulator.lock().unwrap();
     let acked = acked.lock().unwrap();
-    let mut violations: Vec<String> = Vec::new();
+    // (label, detail) per breach: the label names the invariant and is what
+    // verdicts aggregate on, so job ids stay in the detail.
+    let mut violations: Vec<(&'static str, String)> = Vec::new();
 
     for &id in acked.ids() {
         // (1) Durability: every acked job is present in the recovered WAL.
         if !audit.enqueued.contains(&id) {
-            violations.push(format!("durability acked-job-{id}-missing-from-wal"));
+            violations.push(("durability", format!("acked-job-{id}-missing-from-wal")));
         // (2) No loss: on a converged run every acked job is terminal (a timeout
         //     is a liveness failure reported separately).
         } else if converged && !audit.completed.contains(&id) && !audit.failed.contains(&id) {
-            violations.push(format!("no-loss acked-job-{id}-never-terminated"));
+            violations.push(("no-loss", format!("acked-job-{id}-never-terminated")));
         }
     }
     // (3) Exactly-once: the accumulator is internally consistent and every applied
     //     job is a real enqueued job.
     if let Err(detail) = accumulator.verify_internal() {
-        violations.push(format!("exactly-once {detail}"));
+        violations.push(("exactly-once", detail));
     }
     for &id in accumulator.applied_ids() {
         if !audit.enqueued.contains(&id) {
-            violations.push(format!("exactly-once phantom-apply-job-{id}"));
+            violations.push(("exactly-once", format!("phantom-apply-job-{id}")));
         }
     }
 
@@ -403,16 +444,17 @@ fn report(
     );
     // `attempts` is schedule-sensitive, so it is reported but kept OUT of the hash.
     let attempts = supervisor.observation.lock().unwrap().attempts;
-    println!(
-        "WORKQ_RESULT workload_seed={} enqueued={enqueued} completed={completed} failed={failed} attempts={attempts} applied_hash={}",
+    let outcome = format!(
+        "workload_seed={} enqueued={enqueued} completed={completed} failed={failed} attempts={attempts} applied_hash={}",
         options.seed,
         outcome_hash(&audit)
     );
+    println!("WORKQ_RESULT {outcome}");
 
     if !violations.is_empty() {
-        violations
-            .iter()
-            .for_each(|v| eprintln!("WORKQ_VIOLATION {v}"));
+        for (label, detail) in &violations {
+            report_violation(label, detail);
+        }
         return 1;
     }
     if !converged {
@@ -429,6 +471,11 @@ fn report(
         );
         return 1;
     }
+    // Every invariant held on a fully converged run: the one place a `Pass` is
+    // meaningful. Its detail carries the outcome digest, so a consumer reading
+    // only the verdict channel gets the schedule-invariant `applied_hash` that
+    // the cross-platform outcome-invariance property is stated over.
+    patina_dst::verdict(VerdictKind::Pass, "workq-outcome", &outcome);
     0
 }
 
