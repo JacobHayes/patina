@@ -2921,6 +2921,19 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
     // reports and the depth line this function appends below.
     let reports = patina_dst_runtime::ReportConfig::default().applied(|name| env::var(name).ok());
     config = config.with_reports(reports);
+    // The structured run-facts channel. A WASI guest's runtime lives in THIS
+    // process, which is not interposed, so the plain path channel is enough — no
+    // descriptor hand-off is needed.
+    let facts_file = if output::facts_active() {
+        Some(tempfile::NamedTempFile::new().map_err(|error| {
+            CliError(format!("failed to create the run-facts channel: {error}"))
+        })?)
+    } else {
+        None
+    };
+    if let Some(file) = &facts_file {
+        config = config.with_facts_path(file.path());
+    }
     let context = Context::from_config(config).map_err(|error| CliError(error.to_string()))?;
     let host = configured_wasi_host(&invocation, &resolved.display, context)?;
     let mut execution = execute_preview1_with_fuel(&bytes, host, invocation.fuel)
@@ -2946,6 +2959,7 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
         } => (Some(path.clone()), None, branch_id.clone()),
     };
     let artifact = resolved.display.display().to_string();
+    let facts = read_facts_channel(facts_file.as_ref().map(tempfile::NamedTempFile::path))?;
     output::finalize_inprocess(
         output::RunReport {
             verb: "run",
@@ -2957,6 +2971,7 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
             seed,
             coverage: None,
             depth: Some(depth),
+            facts,
         },
         execution.exit_code,
         execution.stdout,
@@ -6468,6 +6483,17 @@ liveness-safe."
         })?),
         None => None,
     };
+    // The structured run-facts channel. A native guest is FULLY interposed, so
+    // the document cannot travel over a path — it rides an inherited host
+    // descriptor the shim writes through its private host aliases, exactly like
+    // the trace bundle and the coverage map.
+    let facts_file = if output::facts_active() {
+        Some(tempfile::tempfile().map_err(|error| {
+            CliError(format!("failed to create the run-facts channel: {error}"))
+        })?)
+    } else {
+        None
+    };
 
     // Restore the guest arguments for a replay from the trace's recorded argv, so
     // a bare replay reproduces them without the `--` section being re-passed; a
@@ -6505,6 +6531,12 @@ liveness-safe."
     }
     if let Some(file) = &coverage_file {
         command.env(ENV_COVERAGE_FD, file.as_raw_fd().to_string());
+    }
+    if let Some(file) = &facts_file {
+        command.env(
+            patina_dst_runtime::ENV_FACTS_FD,
+            file.as_raw_fd().to_string(),
+        );
     }
     // The guest's environment is cleared above, so every end-of-run report knob
     // the operator set has to be forwarded explicitly or it never reaches the
@@ -6658,6 +6690,9 @@ liveness-safe."
     if let Some(file) = &coverage_file {
         inherited_fds.push(file.as_raw_fd());
     }
+    if let Some(file) = &facts_file {
+        inherited_fds.push(file.as_raw_fd());
+    }
 
     // Starvation stall backstop (diagnostic, NOT a liveness guarantee; armed only
     // when starvation is enabled, so it has zero effect on any other mode). The
@@ -6674,7 +6709,7 @@ liveness-safe."
     // The kill-able wait loop mirrors `output::execute_command`'s capture
     // semantics (piped when the JSON envelope / render wants guest output,
     // inherited otherwise) so `--starve` composes with `--format json`.
-    let (mut captured, native_signal) = if invocation.schedule.starve.is_some() {
+    let mut captured = if invocation.schedule.starve.is_some() {
         let stall_secs: u64 = std::env::var("PATINA_STARVATION_STALL_SECS")
             .ok()
             .and_then(|value| value.trim().parse().ok())
@@ -6706,6 +6741,7 @@ IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
                         drop(replay_trace_file);
                         drop(image_file);
                         drop(coverage_file);
+                        drop(facts_file);
                         return Ok(STARVATION_STALL_EXIT);
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -6726,15 +6762,13 @@ IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
         })?;
         inherited_guard.restore()?;
         let (exit_code, signal) = native_child_status(output.status);
-        (
-            output::Captured {
-                exit_code,
-                stdout: output.stdout,
-                stderr: output.stderr,
-                captured: capture,
-            },
+        output::Captured {
+            exit_code,
+            stdout: output.stdout,
+            stderr: output.stderr,
+            captured: capture,
             signal,
-        )
+        }
     } else if output::capture_active() {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let (child, inherited_guard) = spawn_native_child(&mut command, &binary, &inherited_fds)?;
@@ -6746,15 +6780,13 @@ IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
         })?;
         inherited_guard.restore()?;
         let (exit_code, signal) = native_child_status(output.status);
-        (
-            output::Captured {
-                exit_code,
-                stdout: output.stdout,
-                stderr: output.stderr,
-                captured: true,
-            },
+        output::Captured {
+            exit_code,
+            stdout: output.stdout,
+            stderr: output.stderr,
+            captured: true,
             signal,
-        )
+        }
     } else {
         let (mut child, inherited_guard) =
             spawn_native_child(&mut command, &binary, &inherited_fds)?;
@@ -6766,15 +6798,13 @@ IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
         })?;
         inherited_guard.restore()?;
         let (exit_code, signal) = native_child_status(status);
-        (
-            output::Captured {
-                exit_code,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                captured: false,
-            },
+        output::Captured {
+            exit_code,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            captured: false,
             signal,
-        )
+        }
     };
     drop(replay_trace_file);
     let mut committed_record_trace = None;
@@ -6800,6 +6830,7 @@ IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
             }
         }
     }
+    let native_signal = captured.signal;
     append_native_infra_marker(
         &mut captured,
         native_signal,
@@ -6809,6 +6840,23 @@ IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
     );
     drop(image_file);
     drop(coverage_file);
+    // Read the facts document back off the inherited descriptor. The child wrote
+    // through the same open file description, so the offset is at the end —
+    // rewind before reading.
+    let facts = match facts_file {
+        Some(mut file) => {
+            use std::io::{Read, Seek};
+            file.rewind().map_err(|error| {
+                CliError(format!("failed to rewind the run-facts channel: {error}"))
+            })?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).map_err(|error| {
+                CliError(format!("failed to read the run-facts channel: {error}"))
+            })?;
+            output::parse_facts(&bytes)?
+        }
+        None => None,
+    };
     let coverage = if let Some(path) = &invocation.coverage_out {
         let len = fs::metadata(path)
             .map(|metadata| metadata.len())
@@ -6844,6 +6892,7 @@ IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
             seed,
             coverage: coverage.clone(),
             depth: None,
+            facts,
         },
         captured,
     )?;
@@ -7018,6 +7067,21 @@ and run/audit the artifact (cargo patina build <DIR|Cargo.toml> --output <PATH>)
     if invocation.cargo_command == "test" {
         command.env("RUST_TEST_THREADS", "1");
     }
+    // The structured run-facts channel. A cargo-family guest is not interposed,
+    // so it writes the document to a plain path like it writes its trace.
+    // Scrubbed first: an ambient value must never redirect a run's facts.
+    command.env_remove(patina_dst_runtime::ENV_FACTS);
+    command.env_remove(patina_dst_runtime::ENV_FACTS_FD);
+    let facts_file = if output::facts_active() {
+        Some(tempfile::NamedTempFile::new().map_err(|error| {
+            CliError(format!("failed to create the run-facts channel: {error}"))
+        })?)
+    } else {
+        None
+    };
+    if let Some(file) = &facts_file {
+        command.env(patina_dst_runtime::ENV_FACTS, file.path());
+    }
 
     let captured = output::execute_command(&mut command)?;
 
@@ -7046,6 +7110,7 @@ integrates the Patina runtime, or record under the native runtime: cargo patina 
         } => (Some(path.clone()), None, branch_id.clone()),
     };
     let artifact = format!("cargo {}", invocation.cargo_command);
+    let facts = read_facts_channel(facts_file.as_ref().map(tempfile::NamedTempFile::path))?;
     output::finalize_run(
         output::RunReport {
             verb: &invocation.cargo_command,
@@ -7057,6 +7122,7 @@ integrates the Patina runtime, or record under the native runtime: cargo patina 
             seed,
             coverage: None,
             depth: None,
+            facts,
         },
         captured,
     )
@@ -7278,6 +7344,24 @@ fn hex(bytes: &[u8]) -> String {
         write!(output, "{byte:02x}").expect("writing to a String cannot fail");
         output
     })
+}
+
+/// Read back the structured `patina.runfacts/v1` document the run wrote to its
+/// facts channel, or `None` when no channel was installed. A channel that was
+/// installed but never written (the guest aborted before finalization) reads as
+/// an empty file, which is `None` too — absent means "the run did not get that
+/// far", never "zero".
+fn read_facts_channel(path: Option<&Path>) -> Result<Option<serde_json::Value>, CliError> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let bytes = fs::read(path).map_err(|error| {
+        CliError(format!(
+            "failed to read the run-facts channel {}: {error}",
+            path.display()
+        ))
+    })?;
+    output::parse_facts(&bytes)
 }
 
 fn exit_code(status: ExitStatus) -> Result<i32, CliError> {

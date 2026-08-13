@@ -1232,6 +1232,20 @@ fn host_write_all(fd: c_int, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// Run-facts channel over a supervisor-provided host descriptor
+/// (`PATINA_FACTS_FD`). The guest's filesystem is fully interposed, so the
+/// structured facts document must leave through the private host aliases exactly
+/// like the trace bundle and the coverage map do.
+struct FdFactsSink {
+    fd: c_int,
+}
+
+impl patina_dst_runtime::FactsSink for FdFactsSink {
+    fn write_facts(&mut self, bytes: &[u8]) -> io::Result<()> {
+        host_write_all(self.fd, bytes)
+    }
+}
+
 /// Trace channel over a supervisor-provided host descriptor (`PATINA_TRACE_FD`).
 struct FdTraceTransport {
     fd: c_int,
@@ -2086,6 +2100,22 @@ fn required_control_string(name: &str) -> Result<String, RuntimeError> {
         .ok_or_else(|| RuntimeError::Config(format!("{name} is required")))
 }
 
+/// Parse `PATINA_FACTS_FD` from the control plane, mirroring `control_trace_fd`.
+/// Present only when the supervisor asked for the structured run-facts document.
+fn control_facts_fd() -> Result<Option<i32>, RuntimeError> {
+    control_env(patina_dst_runtime::ENV_FACTS_FD)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value.parse().map_err(|_| {
+                RuntimeError::Config(format!(
+                    "{} must be a non-negative descriptor number",
+                    patina_dst_runtime::ENV_FACTS_FD
+                ))
+            })
+        })
+        .transpose()
+}
+
 fn control_trace_fd() -> Result<Option<i32>, RuntimeError> {
     control_env(patina_dst_runtime::ENV_TRACE_FD)
         .filter(|value| !value.is_empty())
@@ -2298,6 +2328,10 @@ fn runtime_config_from_control_plane() -> Result<(RuntimeConfig, Option<i32>), R
     // and the interposed `getenv` returns NULL for everything, so a knob read then
     // would silently report "not set" and every suppression request would be inert.
     config = config.with_reports(control_reports());
+    // The run-facts path travels the same control plane. On this family the
+    // supervisor uses the descriptor channel instead, so a path AND a descriptor
+    // together are refused by `RuntimeBuilder::build` — never silently dropped.
+    config = config.apply_facts_env(control_env);
     // Record whether syscall-user-dispatch was armed for this run (the C layer's
     // arming state), so a cross-kernel replay is refused up front rather than
     // diverging mid-run (SUD-DESIGN.md §7.3). `None` on every non-SUD run.
@@ -2496,6 +2530,11 @@ fn init_from_env() -> c_int {
             .with_fs_image(fs_image_base()?);
         if let Some(fd) = trace_fd {
             builder = builder.with_trace_transport(FdTraceTransport { fd });
+        }
+        // The structured run-facts channel. A `PATINA_FACTS` path alongside it is
+        // refused by `build` rather than silently losing one document.
+        if let Some(fd) = control_facts_fd()? {
+            builder = builder.with_facts_sink(FdFactsSink { fd });
         }
         builder.build()
     });

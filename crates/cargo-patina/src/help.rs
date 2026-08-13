@@ -2189,6 +2189,16 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         doc: "Native coverage dump descriptor for --coverage-out.",
     },
     EnvVar {
+        name: "PATINA_FACTS",
+        scope: "protocol",
+        doc: "Path the runtime writes its patina.runfacts/v1 document to (cargo/WASI families). Set by --format json; the CLI folds the document into the envelope's fault_reports/runtime_findings.",
+    },
+    EnvVar {
+        name: "PATINA_FACTS_FD",
+        scope: "protocol",
+        doc: "Inherited descriptor carrying the same patina.runfacts/v1 document on the native family, so a fully interposed guest never writes it through the deterministic FS.",
+    },
+    EnvVar {
         name: "PATINA_FS_IMAGE_FD",
         scope: "protocol",
         doc: "Inherited descriptor streaming the --mount host-directory image to the guest.",

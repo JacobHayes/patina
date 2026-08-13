@@ -130,6 +130,11 @@ pub struct Captured {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub captured: bool,
+    /// The signal that terminated the guest, when it died on one. `exit_code` is
+    /// the shell-style `128 + signal` for such a death, which is lossy (a guest
+    /// that `exit(134)`s and one killed by `SIGABRT` are indistinguishable); the
+    /// envelope's `guest_exit` carries the distinction structurally.
+    pub signal: Option<i32>,
 }
 
 /// Run a fully-configured child command, capturing its output when the installed
@@ -144,6 +149,39 @@ pub fn capture_active() -> bool {
     options().wants_capture() && !suppressed()
 }
 
+/// Whether this invocation wants the runtime's structured `patina.runfacts/v1`
+/// document. Only the JSON envelope consumes it, so a human run installs no
+/// channel at all and the guest is byte-for-byte unaffected.
+pub fn facts_active() -> bool {
+    options().is_json() && !suppressed()
+}
+
+/// Parse a facts document read back off the channel.
+///
+/// An empty channel means the run never wrote one — it aborted before
+/// finalization, or this family does not carry the channel — and the envelope
+/// says so by omitting the fields (absent, never zero). Anything else that is
+/// not a `patina.runfacts/v1` document is a defect in patina's own channel, so
+/// it fails closed rather than being quietly dropped.
+pub fn parse_facts(bytes: &[u8]) -> Result<Option<serde_json::Value>, CliError> {
+    if bytes.iter().all(|byte| byte.is_ascii_whitespace()) {
+        return Ok(None);
+    }
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| {
+        CliError(format!(
+            "the run-facts channel carried {} bytes that are not JSON: {error}",
+            bytes.len()
+        ))
+    })?;
+    match value.get("schema").and_then(serde_json::Value::as_str) {
+        Some(schema) if schema == patina_dst_runtime::FACTS_SCHEMA => Ok(Some(value)),
+        other => Err(CliError(format!(
+            "the run-facts channel carried schema {other:?}; expected {}",
+            patina_dst_runtime::FACTS_SCHEMA
+        ))),
+    }
+}
+
 pub fn execute_command(command: &mut Command) -> Result<Captured, CliError> {
     if capture_active() {
         let output = command
@@ -154,6 +192,7 @@ pub fn execute_command(command: &mut Command) -> Result<Captured, CliError> {
             stdout: output.stdout,
             stderr: output.stderr,
             captured: true,
+            signal: None,
         })
     } else {
         let status: ExitStatus = command
@@ -164,6 +203,7 @@ pub fn execute_command(command: &mut Command) -> Result<Captured, CliError> {
             stdout: Vec::new(),
             stderr: Vec::new(),
             captured: false,
+            signal: None,
         })
     }
 }
@@ -228,6 +268,10 @@ pub struct RunReport<'a> {
     pub seed: Option<u64>,
     pub coverage: Option<CoverageReport>,
     pub depth: Option<DepthReport>,
+    /// The runtime's own `patina.runfacts/v1` document for this run, when the
+    /// facts channel was installed and the run produced one. Read from the
+    /// channel, never re-derived from the `PATINA_*_REPORT` stderr lines.
+    pub facts: Option<serde_json::Value>,
 }
 
 /// Finalize a run/replay after the guest returns: echo captured output for the
@@ -313,6 +357,27 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
             .clone()
             .or_else(|| depth_report_line(&stdout_text, &stderr_text));
         env.verdicts = extract_verdicts(&stdout_text, &stderr_text);
+        // Runtime-owned structured facts, lifted verbatim out of the run's own
+        // `patina.runfacts/v1` document. The `PATINA_*_REPORT` lines still print
+        // and still land in `stderr`/`markers`; these fields are the parallel
+        // structured source, so nothing here parses a line back.
+        if let Some(facts) = &report.facts {
+            env.fault_reports = facts.get("fault_reports").cloned();
+            env.runtime_findings = facts
+                .get("runtime_findings")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+        }
+        // Refusal attribution is the PARENT's job: a fail-closed abort kills the
+        // child before it can write anything structured, so what it already
+        // printed and the code it died with are all there is to work from. This
+        // is what makes an *unattributed* abort meaningful.
+        env.refusal = refusal(captured.exit_code, &stdout_text, &stderr_text);
+        env.guest_exit = Some(GuestExit {
+            code: captured.exit_code,
+            signal: captured.signal,
+        });
         env.markers = extract_markers(&stdout_text, &stderr_text);
         env.result_line = result_line(&stdout_text, &stderr_text);
         env.stdout = Some(stdout_text);
@@ -338,6 +403,7 @@ pub fn finalize_inprocess(
             stdout,
             stderr,
             captured: true,
+            signal: None,
         },
     )
 }
@@ -404,6 +470,89 @@ fn extract_verdicts(stdout: &str, stderr: &str) -> Vec<VerdictFact> {
             })
         })
         .collect()
+}
+
+/// How the guest process ended, structurally. `code` is the process exit status
+/// the CLI itself returns; `signal` is present only when the guest died on a
+/// signal, which `code` alone cannot express (it is `128 + signal` there, the
+/// same value a guest could have returned deliberately).
+pub struct GuestExit {
+    code: i32,
+    signal: Option<i32>,
+}
+
+/// The portable signal names worth spelling out. A signal outside this set keeps
+/// its number and gets no name — a wrong name is worse than none.
+const SIGNAL_NAMES: &[(i32, &str)] = &[
+    (2, "SIGINT"),
+    (4, "SIGILL"),
+    (5, "SIGTRAP"),
+    (6, "SIGABRT"),
+    (8, "SIGFPE"),
+    (9, "SIGKILL"),
+    (11, "SIGSEGV"),
+    (13, "SIGPIPE"),
+    (15, "SIGTERM"),
+];
+
+/// Patina's own fail-closed refusals, keyed by the text each one already prints.
+///
+/// This is the `FAIL_CLOSED_MARKERS` taxonomy made *attributable*: instead of one
+/// undifferentiated "something failed closed" bucket, each refusal carries a
+/// stable class and the line that announced it. Ordered most specific first —
+/// the first match wins.
+const REFUSAL_CLASSES: &[(&str, &str)] = &[
+    ("PATINA_BUGGIFY_DUPLICATE_LABEL", "buggify_duplicate_label"),
+    (
+        "PATINA_BUGGIFY_SETUP_NEVER_CALLED",
+        "buggify_setup_never_called",
+    ),
+    ("fingerprint mismatch", "fingerprint_mismatch"),
+    ("trace operation mismatch", "trace_operation_mismatch"),
+    ("operation mismatch", "trace_operation_mismatch"),
+    (
+        "the deterministic runtime failed to initialize",
+        "runtime_init_failure",
+    ),
+    ("must run under `cargo patina run`", "no_runtime_installed"),
+    (
+        "harness has not installed the runtime yet",
+        "harness_before_install",
+    ),
+    (
+        "interposed call before deterministic runtime initialization",
+        "preinit_interposed_call",
+    ),
+    ("patina native shim fatal:", "shim_fatal"),
+    ("unsupported-import", "unsupported_import"),
+    ("unknown-import", "unknown_import"),
+    ("patina: starvation stall", "starvation_stall"),
+    ("incomplete trace", "incomplete_trace"),
+];
+
+/// Patina's own refusal for this run, or `None` when patina did not fail closed.
+///
+/// A clean exit is never a refusal, and neither is a nonzero exit that matched no
+/// class — the absence is the whole point: an abort with no refusal record is the
+/// *guest's* own doing, not patina's.
+fn refusal(exit_code: i32, stdout: &str, stderr: &str) -> Option<Refusal> {
+    if exit_code == 0 {
+        return None;
+    }
+    let lines: Vec<&str> = stdout.lines().chain(stderr.lines()).collect();
+    REFUSAL_CLASSES.iter().find_map(|(needle, class)| {
+        let line = lines.iter().find(|line| line.contains(needle))?;
+        Some(Refusal {
+            class: (*class).to_string(),
+            message: line.trim().to_string(),
+        })
+    })
+}
+
+/// A patina fail-closed refusal: which class, and the line that announced it.
+pub struct Refusal {
+    class: String,
+    message: String,
 }
 
 /// Known structured marker prefixes emitted by the runtime/SDK/harnesses, worth
@@ -639,6 +788,17 @@ pub struct Envelope {
     verdicts: Vec<VerdictFact>,
     markers: Vec<String>,
     result_line: Option<String>,
+    /// Runtime-owned per-plane fault accounting (`patina.runfacts/v1`'s
+    /// `fault_reports`), carried through verbatim.
+    fault_reports: Option<serde_json::Value>,
+    /// Runtime-detected findings with a `source` attribution (liveness/converge
+    /// watchdog, schedule diagnostics).
+    runtime_findings: Vec<serde_json::Value>,
+    /// Patina's own fail-closed refusal, when patina refused. Absent on a guest's
+    /// own abort.
+    refusal: Option<Refusal>,
+    /// How the guest process ended (exit code, terminating signal).
+    guest_exit: Option<GuestExit>,
     stdout: Option<String>,
     stderr: Option<String>,
     message: Option<String>,
@@ -666,6 +826,10 @@ impl Envelope {
             verdicts: Vec::new(),
             markers: Vec::new(),
             result_line: None,
+            fault_reports: None,
+            runtime_findings: Vec::new(),
+            refusal: None,
+            guest_exit: None,
             stdout: None,
             stderr: None,
             message: None,
@@ -767,6 +931,32 @@ impl Envelope {
         }
         if let Some(v) = &self.result_line {
             m.insert("result_line".into(), Value::from(v.clone()));
+        }
+        if let Some(v) = &self.fault_reports {
+            m.insert("fault_reports".into(), v.clone());
+        }
+        if !self.runtime_findings.is_empty() {
+            m.insert(
+                "runtime_findings".into(),
+                Value::Array(self.runtime_findings.clone()),
+            );
+        }
+        if let Some(v) = &self.refusal {
+            let mut rm = Map::new();
+            rm.insert("class".into(), Value::from(v.class.clone()));
+            rm.insert("message".into(), Value::from(v.message.clone()));
+            m.insert("refusal".into(), Value::Object(rm));
+        }
+        if let Some(v) = &self.guest_exit {
+            let mut gm = Map::new();
+            gm.insert("code".into(), Value::from(v.code));
+            if let Some(signal) = v.signal {
+                gm.insert("signal".into(), Value::from(signal));
+                if let Some((_, name)) = SIGNAL_NAMES.iter().find(|(n, _)| *n == signal) {
+                    gm.insert("signal_name".into(), Value::from(*name));
+                }
+            }
+            m.insert("guest_exit".into(), Value::Object(gm));
         }
         if let Some(v) = &self.stdout {
             m.insert("stdout".into(), Value::from(v.clone()));
@@ -949,6 +1139,202 @@ mod tests {
         // Absent fields are omitted.
         assert!(json.get("trace").is_none());
         assert!(json.get("seed").is_none());
+    }
+
+    /// Every key a fully-populated run envelope emits, pinned. The list is the
+    /// contract: an existing key that disappears or is renamed by a later change
+    /// breaks this outright, which is the point — the outcome-channel fields are
+    /// strictly ADDITIVE to `patina.result/v1`.
+    const ENVELOPE_KEYS: &[&str] = &[
+        "artifact",
+        "config",
+        "content_hash",
+        "coverage",
+        "depth",
+        "exit_code",
+        "family",
+        "fault_reports",
+        "finding_details",
+        "findings",
+        "fingerprint",
+        "guest_exit",
+        "markers",
+        "message",
+        "output_path",
+        "refusal",
+        "render",
+        "result",
+        "result_line",
+        "runtime_findings",
+        "schema",
+        "seed",
+        "stderr",
+        "stdout",
+        "trace",
+        "verb",
+        "verdicts",
+    ];
+
+    fn fully_populated_envelope() -> Envelope {
+        let mut env = Envelope::new("run", "violation", 134);
+        env.family = Some("native".into());
+        env.artifact = Some("guest".into());
+        env.fingerprint = Some("patina-native".into());
+        env.seed = Some(7);
+        env.coverage = Some(CoverageReport {
+            edges_total: 10,
+            edges_covered: 4,
+            covered_permille: 400,
+            hits_total: 99,
+            hits_max: 12,
+            saturated: 1,
+            map_path: Some(PathBuf::from("run.covmap")),
+        });
+        env.depth = Some(DepthReport {
+            family: "wasi".into(),
+            fuel_consumed: 12,
+            hostcalls: vec![("fd_write".into(), 3)],
+        });
+        env.render = Some("out.html".into());
+        env.findings = vec!["libc::open".into()];
+        env.finding_details = vec![serde_json::json!({"symbol": "libc::open"})];
+        env.output_path = Some("guest".into());
+        env.content_hash = Some("sha256:00".into());
+        env.markers = vec!["PATINA_RESULT ok=1".into()];
+        env.result_line = Some("PATINA_RESULT ok=1".into());
+        env.verdicts = extract_verdicts(
+            "",
+            &format!(
+                "{}\n",
+                verdict_line::render(0, VerdictKind::Pass, "queue-drained", "")
+            ),
+        );
+        env.fault_reports = Some(serde_json::json!({"fs": {"vacuous": false}}));
+        env.runtime_findings = vec![serde_json::json!({"source": "liveness"})];
+        env.refusal = Some(Refusal {
+            class: "fingerprint_mismatch".into(),
+            message: "trace fingerprint mismatch".into(),
+        });
+        env.guest_exit = Some(GuestExit {
+            code: 134,
+            signal: Some(6),
+        });
+        env.stdout = Some(String::new());
+        env.stderr = Some(String::new());
+        env.message = Some("detail".into());
+        // Set explicitly: `Envelope::new` fills it from config discovery, which
+        // finds nothing in a unit test.
+        env.config = Some(serde_json::json!({"path": ".patina/config.toml"}));
+        env.trace = Some(TraceFacts {
+            path: "t.patina".into(),
+            format_version: 4,
+            timelines: vec!["main".into()],
+            event_count: 3,
+            metadata: serde_json::Value::Null,
+        });
+        env
+    }
+
+    #[test]
+    fn envelope_keeps_every_field_and_adds_the_outcome_channel_ones() {
+        let json = fully_populated_envelope().to_json();
+        let mut keys: Vec<&str> = json
+            .as_object()
+            .expect("envelope is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ENVELOPE_KEYS);
+    }
+
+    #[test]
+    fn the_outcome_channel_fields_are_omitted_when_nothing_produced_them() {
+        // Absent, never zero: a run with no facts channel, no refusal, and no
+        // exit record must not fabricate empty objects a consumer would read as
+        // "the plane reported nothing".
+        let json = Envelope::new("run", "ok", 0).to_json();
+        assert!(json.get("fault_reports").is_none());
+        assert!(json.get("runtime_findings").is_none());
+        assert!(json.get("refusal").is_none());
+        assert!(json.get("guest_exit").is_none());
+    }
+
+    #[test]
+    fn guest_exit_names_the_signal_the_exit_code_cannot_express() {
+        let mut env = Envelope::new("run", "failure", 134);
+        env.guest_exit = Some(GuestExit {
+            code: 134,
+            signal: Some(6),
+        });
+        let json = env.to_json();
+        assert_eq!(json["guest_exit"]["code"], 134);
+        assert_eq!(json["guest_exit"]["signal"], 6);
+        assert_eq!(json["guest_exit"]["signal_name"], "SIGABRT");
+
+        // A guest that deliberately returns 134 is NOT a signal death, and the
+        // envelope must keep the two apart — that split is what lets a campaign
+        // tell a fail-closed abort from an ordinary exit status.
+        let mut plain = Envelope::new("run", "failure", 134);
+        plain.guest_exit = Some(GuestExit {
+            code: 134,
+            signal: None,
+        });
+        let json = plain.to_json();
+        assert_eq!(json["guest_exit"]["code"], 134);
+        assert!(json["guest_exit"].get("signal").is_none());
+    }
+
+    #[test]
+    fn refusal_attributes_patinas_own_fail_closed_aborts() {
+        let attributed = refusal(
+            134,
+            "",
+            "patina: the deterministic runtime failed to initialize: trace fingerprint mismatch: runtime is a, trace is b",
+        )
+        .expect("a fingerprint mismatch is patina refusing");
+        assert_eq!(attributed.class, "fingerprint_mismatch");
+        assert!(attributed.message.contains("fingerprint mismatch"));
+
+        assert_eq!(
+            refusal(134, "", "patina: this binary was built with `cargo patina build` and must run under `cargo patina run`")
+                .expect("no runtime installed is a refusal")
+                .class,
+            "no_runtime_installed"
+        );
+        assert_eq!(
+            refusal(2, "", "PATINA_BUGGIFY_DUPLICATE_LABEL label=x")
+                .expect("a duplicate buggify label is a refusal")
+                .class,
+            "buggify_duplicate_label"
+        );
+    }
+
+    #[test]
+    fn refusal_is_absent_for_a_guests_own_abort() {
+        // The design point of §4.4: with patina's refusals attributed, an
+        // UNATTRIBUTED SIGABRT is the guest's own doing. If this ever starts
+        // returning Some, the campaign classifier would file a guest's deliberate
+        // abort as patina infrastructure again.
+        assert!(refusal(134, "APP_INVARIANT_BROKEN detail=ledger", "").is_none());
+        // And a clean run is never a refusal, whatever it printed.
+        assert!(refusal(0, "", "fingerprint mismatch").is_none());
+    }
+
+    #[test]
+    fn parse_facts_accepts_the_runtimes_document_and_refuses_anything_else() {
+        assert!(parse_facts(b"").unwrap().is_none());
+        assert!(parse_facts(b"  \n").unwrap().is_none());
+        let document = format!(
+            r#"{{"schema":"{}","fault_reports":{{"fs":{{"vacuous":true}}}}}}"#,
+            patina_dst_runtime::FACTS_SCHEMA
+        );
+        let parsed = parse_facts(document.as_bytes()).unwrap().unwrap();
+        assert_eq!(parsed["fault_reports"]["fs"]["vacuous"], true);
+        // A channel carrying something else is patina's own bug, not a silent
+        // "no facts".
+        assert!(parse_facts(b"not json").is_err());
+        assert!(parse_facts(br#"{"schema":"patina.result/v1"}"#).is_err());
     }
 
     #[test]

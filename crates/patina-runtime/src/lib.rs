@@ -103,6 +103,9 @@ use patina_dst_wrapper_fault::FaultFs;
 mod fault_knob;
 pub use fault_knob::{FaultKnob, KnobMeta, Masks, Plane, Plumbing, SWARM_CLASSES, SwarmClass};
 
+mod facts;
+pub use facts::{FACTS_SCHEMA, FactsSink};
+
 pub const ENV_MODE: &str = "PATINA_MODE";
 pub const ENV_SEED: &str = "PATINA_SEED";
 pub const ENV_TRACE: &str = "PATINA_TRACE";
@@ -112,6 +115,21 @@ pub const ENV_TRACE_FD: &str = "PATINA_TRACE_FD";
 /// native binaries, so the fully interposed guest writes coverage through the
 /// supervisor-owned host descriptor rather than through the deterministic FS.
 pub const ENV_COVERAGE_FD: &str = "PATINA_COVERAGE_FD";
+/// Path the runtime writes this run's structured
+/// [`patina.runfacts/v1`](FACTS_SCHEMA) document to at finalization. Set by
+/// `cargo patina` for the families whose guest can write host files directly
+/// (the cargo family), and by any in-process embedder that wants the facts. The
+/// document carries the same per-plane accounting the `PATINA_*_REPORT` lines
+/// carry, built from the report structs rather than from the lines. Unset =
+/// no document is produced and the run is byte-for-byte unchanged.
+pub const ENV_FACTS: &str = "PATINA_FACTS";
+/// Inherited host descriptor receiving the same [`patina.runfacts/v1`](FACTS_SCHEMA)
+/// document as [`ENV_FACTS`]. Used by the native family, whose guest filesystem
+/// is fully interposed, so the shim writes the document through a
+/// supervisor-owned host descriptor rather than through the deterministic FS —
+/// exactly the split between [`ENV_TRACE`] and [`ENV_TRACE_FD`]. Setting both
+/// [`ENV_FACTS`] and this variable is refused.
+pub const ENV_FACTS_FD: &str = "PATINA_FACTS_FD";
 /// Suppress the default-on native yield-point coverage diagnostic when set to a
 /// false-y value (`0`, `off`, `false`, `no`). The diagnostic is emitted by the
 /// native shim at the same finalization point as the runtime reports.
@@ -888,6 +906,11 @@ pub struct RuntimeConfig {
     /// replay for the same reason as `sud`: the two states observe the counter at
     /// different boundaries. `None` on every run that did not arm it.
     tsc: Option<bool>,
+    /// Where the runtime writes this run's structured facts document, or `None`
+    /// (the default) to produce none. Presentation-adjacent like `reports`: it
+    /// reaches no recorded byte, is never fingerprinted, and is never reconciled
+    /// on replay.
+    facts_path: Option<std::path::PathBuf>,
 }
 
 impl RuntimeConfig {
@@ -909,6 +932,7 @@ impl RuntimeConfig {
             reports: ReportConfig::default(),
             sud: None,
             tsc: None,
+            facts_path: None,
         }
     }
 
@@ -930,6 +954,7 @@ impl RuntimeConfig {
             reports: ReportConfig::default(),
             sud: None,
             tsc: None,
+            facts_path: None,
         }
     }
 
@@ -956,6 +981,7 @@ impl RuntimeConfig {
             reports: ReportConfig::default(),
             sud: None,
             tsc: None,
+            facts_path: None,
         }
     }
 
@@ -983,6 +1009,7 @@ impl RuntimeConfig {
             reports: ReportConfig::default(),
             sud: None,
             tsc: None,
+            facts_path: None,
         }
     }
 
@@ -1011,6 +1038,7 @@ impl RuntimeConfig {
             reports: ReportConfig::default(),
             sud: None,
             tsc: None,
+            facts_path: None,
         }
     }
 
@@ -1045,6 +1073,7 @@ impl RuntimeConfig {
             reports: ReportConfig::default(),
             sud: None,
             tsc: None,
+            facts_path: None,
         }
     }
 
@@ -1631,6 +1660,30 @@ impl RuntimeConfig {
         self
     }
 
+    /// Write this run's structured [`patina.runfacts/v1`](FACTS_SCHEMA) document
+    /// to `path` at finalization. The document carries the same per-plane
+    /// accounting the `PATINA_*_REPORT` lines carry, built from the report
+    /// structs; the lines still print. Independent of [`ReportConfig`], which
+    /// governs printing only.
+    #[must_use]
+    pub fn with_facts_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.facts_path = Some(path.into());
+        self
+    }
+
+    /// Read the facts-document path from the control plane ([`ENV_FACTS`]).
+    pub fn apply_facts_env<F>(mut self, get: F) -> Self
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        if let Some(value) = get(ENV_FACTS) {
+            if !value.trim().is_empty() {
+                self.facts_path = Some(std::path::PathBuf::from(value));
+            }
+        }
+        self
+    }
+
     /// Which end-of-run diagnostic reports this run prints.
     #[must_use]
     pub const fn reports(&self) -> ReportConfig {
@@ -1818,6 +1871,17 @@ impl RuntimeConfig {
         // and never again: finalization must not reach for the process
         // environment (see `ReportConfig`).
         let config = config.apply_report_env(|name| env::var(name).ok());
+        // The facts channel, resolved with every other knob. A descriptor
+        // channel ([`ENV_FACTS_FD`]) is installed by the embedder that owns the
+        // descriptor (the native shim), so the two must never both be live.
+        if env::var_os(ENV_FACTS_FD).is_some_and(|value| !value.is_empty())
+            && env::var_os(ENV_FACTS).is_some_and(|value| !value.is_empty())
+        {
+            return Err(RuntimeError::Config(format!(
+                "{ENV_FACTS} and {ENV_FACTS_FD} must not both be set"
+            )));
+        }
+        let config = config.apply_facts_env(|name| env::var(name).ok());
         Ok(config)
     }
 
@@ -1908,6 +1972,9 @@ pub struct RuntimeBuilder {
     entropy: Option<Box<dyn EntropyDriver>>,
     scheduler: Option<Box<dyn SchedulerDriver>>,
     network: Option<Box<dyn NetDriver>>,
+    /// Byte channel for the run's structured facts document, for embedders whose
+    /// guest cannot write a host file directly (the native shim).
+    facts_sink: Option<Box<dyn FactsSink>>,
 }
 
 impl RuntimeBuilder {
@@ -1923,7 +1990,16 @@ impl RuntimeBuilder {
             entropy: None,
             scheduler: None,
             network: None,
+            facts_sink: None,
         }
+    }
+
+    /// Install the byte channel the run's structured facts document is written
+    /// to. Mutually exclusive with [`RuntimeConfig::with_facts_path`]: two live
+    /// destinations would mean one silently wins, so `build` refuses both.
+    pub fn with_facts_sink(mut self, sink: impl FactsSink + 'static) -> Self {
+        self.facts_sink = Some(Box::new(sink));
+        self
     }
 
     pub fn with_default_drivers(mut self) -> Self {
@@ -2337,6 +2413,19 @@ impl RuntimeBuilder {
             ),
         );
 
+        // The facts channel: exactly one destination, or none. Two live
+        // destinations would silently drop one document, so refuse.
+        let facts = match (self.facts_sink.take(), self.config.facts_path.take()) {
+            (None, None) => None,
+            (Some(sink), None) => Some(facts::FactsOutput::Sink(sink)),
+            (None, Some(path)) => Some(facts::FactsOutput::Path(path)),
+            (Some(_), Some(_)) => {
+                return Err(RuntimeError::Config(format!(
+                    "a run-facts sink and a facts path ({ENV_FACTS}) were both installed; use exactly one"
+                )));
+            }
+        };
+
         Ok(Context {
             root_seed,
             step_budget: self.config.step_budget,
@@ -2386,6 +2475,8 @@ impl RuntimeBuilder {
             liveness,
             swarm: swarm_record,
             reports: self.config.reports,
+            facts,
+            facts_emitted: false,
         })
     }
 }
@@ -2618,6 +2709,9 @@ struct LivenessWatchdog {
     /// Whether detection is live this run (record/seeded and at least one arm).
     active: bool,
     fired: bool,
+    /// The violation that fired, kept so the structured facts document can carry
+    /// the same fields the `PATINA_VIOLATION` line carries.
+    violation: Option<LivenessViolation>,
 }
 
 impl LivenessWatchdog {
@@ -2650,6 +2744,7 @@ impl LivenessWatchdog {
             active: active && !arms.is_empty(),
             arms,
             fired: false,
+            violation: None,
         }
     }
 
@@ -2658,6 +2753,7 @@ impl LivenessWatchdog {
         for arm in &mut self.arms {
             if let Some(violation) = arm.observe(now, progress, deferring) {
                 self.fired = true;
+                self.violation = Some(violation);
                 return Some(violation);
             }
         }
@@ -3481,6 +3577,14 @@ pub struct Context {
     /// Which end-of-run diagnostic reports [`Context::finish`] prints, resolved
     /// at configuration time. Presentation only — it reaches no recorded byte.
     reports: ReportConfig,
+    /// Where this run's structured facts document goes, or `None` when nobody
+    /// asked for one. Like `reports`, it reaches no recorded byte.
+    facts: Option<facts::FactsOutput>,
+    /// Whether the facts document has already been written. The document is
+    /// emitted at [`Context::finish`] on the ordinary path, but a fired liveness
+    /// watchdog aborts the process before `finish` on the interposed families,
+    /// so that path emits it early — this flag keeps it at exactly one write.
+    facts_emitted: bool,
 }
 
 impl Context {
@@ -5323,6 +5427,84 @@ impl Context {
         Ok(contents)
     }
 
+    /// This run's structured facts document ([`patina.runfacts/v1`](FACTS_SCHEMA)):
+    /// the per-plane fault accounting and the runtime-detected findings, built
+    /// from the very same report structs the `PATINA_*_REPORT` stderr lines are
+    /// formatted from.
+    ///
+    /// A plane is present exactly when its human line would have had something to
+    /// say (the plane saw at least one opportunity) — absent means the feature
+    /// did not fire, never "zero". Deliberately independent of
+    /// [`ReportConfig`]: silencing a printed diagnostic must not blind the
+    /// structured channel.
+    pub fn run_facts(&self) -> serde_json::Value {
+        let mut planes = serde_json::Map::new();
+        if let Some(report) = self.fs_fault_report().filter(|r| r.eligible_ops > 0) {
+            planes.insert("fs".into(), facts::fs_plane(&report));
+        }
+        if let Some(report) = self.dns_fault_report().filter(|r| r.resolutions > 0) {
+            planes.insert("dns".into(), facts::dns_plane(&report));
+        }
+        if let Some(report) = self
+            .net_fault_report()
+            .filter(patina_dst_driver_api::NetFaultReport::had_opportunities)
+        {
+            planes.insert("net".into(), facts::net_plane(&report));
+        }
+        if let Some(report) = self.entropy_fault_report().filter(|r| r.requests > 0) {
+            planes.insert("entropy".into(), facts::entropy_plane(&report));
+        }
+        if let Some(report) = self.clock_fault_report().filter(|r| r.reads > 0) {
+            planes.insert("clock".into(), facts::clock_plane(&report));
+        }
+        if let Some(swarm) = self.swarm.as_ref() {
+            planes.insert("swarm".into(), facts::swarm_plane(swarm));
+        }
+        let schedule = self.schedule.diagnostics();
+        if schedule.had_concurrency() {
+            planes.insert("schedule".into(), facts::schedule_plane(&schedule));
+        }
+
+        let mut findings = Vec::new();
+        if let Some(violation) = self.liveness.violation.as_ref() {
+            findings.push(facts::liveness_finding(violation));
+        }
+        if !schedule.vacuous.is_empty() {
+            findings.push(facts::vacuous_schedule_finding(&schedule));
+        }
+        if let Some(report) = self.scheduler.as_ref().and_then(|s| s.policy_report()) {
+            if report.starve_vacuous > 0 {
+                findings.push(facts::vacuous_starvation_finding(report.starve_vacuous));
+            }
+        }
+        facts::document(planes, findings)
+    }
+
+    /// Write the facts document to the installed channel, at most once per run.
+    /// A write failure is loud and classifiable (`PATINA_INFRA`) rather than
+    /// silent — a consumer that asked for the structured channel must never read
+    /// a missing document as "nothing happened".
+    fn emit_facts(&mut self) {
+        if self.facts_emitted || self.facts.is_none() {
+            return;
+        }
+        self.facts_emitted = true;
+        let document = self.run_facts();
+        let mut bytes = match serde_json::to_vec(&document) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!("PATINA_INFRA run_facts serialize_failed reason={error:?}");
+                return;
+            }
+        };
+        bytes.push(b'\n');
+        if let Some(output) = self.facts.as_mut() {
+            if let Err(error) = output.write(&bytes) {
+                eprintln!("PATINA_INFRA run_facts write_failed reason={error:?}");
+            }
+        }
+    }
+
     /// Finalize the run: emit the end-of-run diagnostics (schedule, buggify,
     /// liveness, net-fault), enforce end-of-run oracles, and — in record mode —
     /// write the trace. Consumes the context; [`run`]/[`run_with`] call this
@@ -5387,6 +5569,10 @@ impl Context {
         // set and knob picks.
         let buggify_diag = self.buggify_diagnostics();
         emit_sdk_report(self.reports, &buggify_diag);
+        // The structured parallel of every line emitted above, from the same
+        // structs. Written before the trace so a trace-write failure still
+        // leaves the run's facts on the channel.
+        self.emit_facts();
         let buggify_record = self.buggify.to_record();
         match self.execution {
             Execution::Seeded => Ok(()),
@@ -5525,6 +5711,12 @@ impl Context {
             // driving surface, exactly like the vacuous-starvation `PATINA WARNING`.
             let marker = violation.marker_line();
             eprintln!("{marker}");
+            // The interposed families abort the process on this error without
+            // ever reaching `finish`, so the facts document — which carries this
+            // very violation as a `runtime_findings` entry — has to be written
+            // here or it is never written at all. Idempotent: `finish` will not
+            // write a second one.
+            self.emit_facts();
             return Err(RuntimeError::Liveness {
                 kind: violation.kind,
                 detail: marker,
@@ -7160,6 +7352,104 @@ mod tests {
         cutoff_nanos: DEFAULT_BUGGIFY_CUTOFF_NANOS,
         after_setup: false,
     };
+
+    /// The facts channel is sourced from the same structs the report lines are
+    /// formatted from. Red before the channel existed: the document is absent
+    /// while `PATINA_FS_FAULT_REPORT` reports the very same numbers.
+    #[test]
+    fn a_run_writes_its_fault_planes_to_the_facts_channel() {
+        let directory = tempdir().unwrap();
+        let facts = directory.path().join("facts.json");
+        let config = RuntimeConfig::seeded(9)
+            .with_facts_path(&facts)
+            .apply_fault_env(|name| (name == ENV_FS_ERROR_PERMILLE).then(|| "300".to_string()))
+            .unwrap();
+        let mut context = Context::from_config(config).unwrap();
+        for index in 0..40u32 {
+            let _ = context.write_file(&format!("/entry-{index}"), b"payload");
+        }
+        // The structured plane and the printed line must agree, so capture the
+        // report the line is built from before finalization consumes the context.
+        let report = context.fs_fault_report().expect("fs faults are modeled");
+        let line = fs_fault_report_line(&report);
+        context.finish().unwrap();
+
+        let bytes = std::fs::read(&facts).expect("the facts channel was written");
+        let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(document["schema"], FACTS_SCHEMA);
+        let plane = &document["fault_reports"]["fs"];
+        assert_eq!(plane["eligible_ops"], report.eligible_ops);
+        assert_eq!(plane["errors_injected"], report.errors_injected);
+        assert_eq!(plane["vacuous"], report.is_vacuous());
+        assert!(
+            report.errors_injected > 0,
+            "the knob must have fired for this to prove anything: {line}"
+        );
+        // The breakdown the scalar cannot express reaches the document too.
+        assert_eq!(
+            plane["errors_by_op"]
+                .as_object()
+                .unwrap()
+                .values()
+                .map(|value| value.as_u64().unwrap())
+                .sum::<u64>(),
+            report.errors_injected
+        );
+    }
+
+    /// Same seed, same document — byte for byte. The envelope built from it
+    /// inherits that determinism.
+    #[test]
+    fn the_facts_document_repeats_byte_identically() {
+        let directory = tempdir().unwrap();
+        let write_once = |name: &str| {
+            let facts = directory.path().join(name);
+            let config = RuntimeConfig::seeded(3)
+                .with_facts_path(&facts)
+                .apply_fault_env(|name| (name == ENV_FS_ERROR_PERMILLE).then(|| "250".to_string()))
+                .unwrap();
+            let mut context = Context::from_config(config).unwrap();
+            for index in 0..20u32 {
+                let _ = context.write_file(&format!("/entry-{index}"), b"payload");
+            }
+            context.finish().unwrap();
+            std::fs::read(&facts).unwrap()
+        };
+        assert_eq!(write_once("first.json"), write_once("second.json"));
+    }
+
+    /// A run nobody asked facts of writes nothing and is otherwise unchanged.
+    #[test]
+    fn no_channel_means_no_document() {
+        let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+        context.write_file("/data", b"payload").unwrap();
+        // The facts are still computable on demand; only the emission is opt-in.
+        let facts = context.run_facts();
+        assert_eq!(facts["schema"], FACTS_SCHEMA);
+        context.finish().unwrap();
+    }
+
+    /// Two live destinations would silently drop one document.
+    #[test]
+    fn a_path_and_a_sink_together_are_refused() {
+        struct Discard;
+        impl FactsSink for Discard {
+            fn write_facts(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let built = RuntimeBuilder::new(RuntimeConfig::seeded(1).with_facts_path("/facts.json"))
+            .with_default_drivers()
+            .with_facts_sink(Discard)
+            .build();
+        let Err(error) = built else {
+            panic!("both destinations must be refused");
+        };
+        assert!(
+            error.to_string().contains("use exactly one"),
+            "unexpected error: {error}"
+        );
+    }
 
     #[test]
     fn buggify_activation_is_a_deterministic_function_of_seed_and_label() {

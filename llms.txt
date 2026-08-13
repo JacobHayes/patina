@@ -213,6 +213,37 @@ json` is a normal `patina.result/v1` envelope with a nested
 `patina.trace.events/v1` JSONL (header/events/summary; event lines carry raw
 `operation`/`outcome`).
 
+#### Runtime-owned outcome fields
+
+A run/replay envelope also carries what Patina itself knows about the outcome,
+structurally — no marker-line parsing required. Every field is optional and
+ABSENT means "did not fire", never zero.
+
+- `fault_reports{}` — per-plane accounting, keyed `fs`, `dns`, `net`, `entropy`,
+  `clock`, `swarm`, `schedule`. Each object carries the same fields as its
+  `PATINA_*_REPORT` stderr line (which still prints), including every
+  `*_vacuity_diagnosable` bit, the per-op-kind breakdowns (`errors_by_op`,
+  `shorts_by_op` as `{kind: count}` objects), and the plane's `vacuous` bit. A
+  plane appears only when it saw at least one opportunity. The runtime builds
+  these from the report structs the lines are formatted from and hands them over
+  as a `patina.runfacts/v1` document, so the two sources cannot drift.
+- `runtime_findings[]` — runtime-detected findings, each with a `source`:
+  `liveness` (a fired liveness/converge watchdog, carrying
+  `kind`/`detail`/`vtime_ns`/`budget_ns`/`last_fault_vtime_ns`) and `schedule`
+  (`vacuous_schedule` with the unschedulable `tasks[]`, `vacuous_starvation`
+  with the forced `decisions` count).
+- `refusal` = `{class, message}` — present only when PATINA failed closed
+  (`fingerprint_mismatch`, `trace_operation_mismatch`, `runtime_init_failure`,
+  `no_runtime_installed`, `buggify_duplicate_label`,
+  `buggify_setup_never_called`, `harness_before_install`,
+  `preinit_interposed_call`, `shim_fatal`, `unsupported_import`,
+  `unknown_import`, `starvation_stall`, `incomplete_trace`). Constructed by the
+  supervising process from what the dying child printed and exited with. Its
+  ABSENCE is meaningful: an abort with no `refusal` is the guest's own doing.
+- `guest_exit` = `{code, signal?, signal_name?}` — how the guest process ended.
+  `code` is the shell-style `128 + signal` on a signal death, which cannot be
+  told apart from a deliberate `exit(134)`; `signal` is what tells them apart.
+
 ## SDK macros (crate `patina-dst`, default features = dependency-light SDK)
 
 Instrument a system-under-test; every default-feature macro is a no-op under a

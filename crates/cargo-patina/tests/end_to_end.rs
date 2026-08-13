@@ -14585,3 +14585,294 @@ fn wasi_verdict_import_records_and_refuses_an_unknown_kind() {
         "the refusal must name the unknown kind:\n{stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Outcome channel (docs/arcs/outcome-channel.md §4.2): the `patina.result/v1`
+// envelope's runtime-owned facts. `fault_reports`/`runtime_findings` come from
+// the runtime's own `patina.runfacts/v1` document — the same report structs the
+// `PATINA_*_REPORT` lines are formatted from — while `refusal`/`guest_exit` are
+// constructed by the supervising process, which is all a dying child leaves it.
+// ---------------------------------------------------------------------------
+
+/// A guest that gives the fs fault knobs plenty of eligible traffic.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const FACTS_FS_SOURCE: &str = r#"
+use std::fs;
+
+fn main() {
+    let mut ok = 0u32;
+    let mut errs = 0u32;
+    for index in 0..40u32 {
+        match fs::write(format!("/entry-{index}"), b"payload") {
+            Ok(()) => ok += 1,
+            Err(_) => errs += 1,
+        }
+    }
+    println!("PATINA_RESULT ok={ok} errs={errs}");
+}
+"#;
+
+/// A guest that deliberately aborts on its own invariant, printing nothing
+/// patina owns. Per §4.4 this must NOT read as a patina refusal.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const FACTS_ABORT_SOURCE: &str = r#"
+fn main() {
+    println!("APP_INVARIANT_BROKEN detail=ledger-does-not-balance");
+    std::process::abort();
+}
+"#;
+
+/// A guest that churns on virtual time without making progress, so the liveness
+/// watchdog fires and the shim aborts the process before `finish` — the case a
+/// finalization-only facts channel would lose.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const FACTS_WEDGE_SOURCE: &str = r#"
+use std::time::Duration;
+
+fn main() {
+    for _ in 0..10_000 {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    println!("PATINA_RESULT unreachable=1");
+}
+"#;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn build_facts_guest(directory: &Path, name: &str, source: &str) -> PathBuf {
+    let path = directory.join(format!("{name}.rs"));
+    fs::write(&path, source).unwrap();
+    let binary = directory.join(name);
+    invoke_in(
+        native_workspace(),
+        &[
+            "build",
+            path.to_str().unwrap(),
+            "--output",
+            binary.to_str().unwrap(),
+        ],
+    );
+    binary
+}
+
+/// Parse the whitespace-delimited `k=v` fields of a `PATINA_*` report line. Used
+/// ONLY by the test, to prove the structured plane and the printed line describe
+/// the same run — patina itself never reads a line back.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn report_line_fields(stderr: &str, marker: &str) -> BTreeMap<String, String> {
+    let line = stderr
+        .lines()
+        .find(|line| line.trim_start().starts_with(marker))
+        .unwrap_or_else(|| panic!("missing {marker} line:\n{stderr}"));
+    line.split_whitespace()
+        .skip(1)
+        .filter_map(|token| token.split_once('='))
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn the_envelope_carries_the_runtime_owned_fault_planes_and_repeats_identically() {
+    let directory = tempdir().unwrap();
+    let guest = build_facts_guest(directory.path(), "facts-fs-guest", FACTS_FS_SOURCE);
+
+    let arguments = [
+        "run",
+        guest.to_str().unwrap(),
+        "--seed",
+        "7",
+        "--fs-error-permille",
+        "300",
+        "--format",
+        "json",
+    ];
+    let first = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        native_workspace(),
+        &arguments,
+    );
+    assert!(
+        first.status.success(),
+        "guest failed:\n{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    let plane = &envelope["fault_reports"]["fs"];
+    assert!(
+        !plane.is_null(),
+        "the fs plane must reach the envelope:\n{envelope:#}"
+    );
+
+    // The structured plane and the human line describe the same run, field for
+    // field — including the per-op-kind breakdown and the vacuity bit.
+    let printed = report_line_fields(
+        envelope["stderr"].as_str().unwrap(),
+        "PATINA_FS_FAULT_REPORT",
+    );
+    assert_eq!(
+        plane["eligible_ops"].as_u64().unwrap().to_string(),
+        printed["eligible_ops"]
+    );
+    assert_eq!(
+        plane["errors_injected"].as_u64().unwrap().to_string(),
+        printed["errors_injected"]
+    );
+    assert_eq!(
+        u8::from(plane["vacuous"].as_bool().unwrap()).to_string(),
+        printed["vacuous"]
+    );
+    assert!(
+        plane["errors_injected"].as_u64().unwrap() > 0,
+        "the error knob must have fired for this run to prove anything:\n{envelope:#}"
+    );
+    let structured_kinds: BTreeMap<String, String> = plane["errors_by_op"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(kind, count)| (kind.clone(), count.to_string()))
+        .collect();
+    let printed_kinds: BTreeMap<String, String> = printed["errors_by_op"]
+        .split(',')
+        .filter_map(|token| token.split_once(':'))
+        .map(|(kind, count)| (kind.to_string(), count.to_string()))
+        .collect();
+    assert_eq!(structured_kinds, printed_kinds);
+
+    // Determinism: the same seed produces a byte-identical envelope, new fields
+    // and all (no map iteration order leaks into the JSON).
+    let repeated = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        native_workspace(),
+        &arguments,
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&repeated.stdout),
+        "the envelope must be a deterministic function of the run"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn the_envelope_attributes_a_patina_refusal_and_leaves_a_guest_abort_unattributed() {
+    let directory = tempdir().unwrap();
+
+    // A guest that aborts on its OWN invariant: structurally a signal death, and
+    // deliberately NOT a patina refusal. That absence is what lets a classifier
+    // file it as the guest's finding instead of patina infrastructure.
+    let aborter = build_facts_guest(directory.path(), "facts-abort-guest", FACTS_ABORT_SOURCE);
+    let aborted = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        native_workspace(),
+        &[
+            "run",
+            aborter.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--format",
+            "json",
+        ],
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&aborted.stdout).unwrap();
+    assert_eq!(envelope["guest_exit"]["signal"], 6);
+    assert_eq!(envelope["guest_exit"]["signal_name"], "SIGABRT");
+    assert!(
+        envelope.get("refusal").is_none(),
+        "a guest's own abort must carry no patina refusal:\n{envelope:#}"
+    );
+
+    // Patina refusing, on the other hand, is attributed by class. A trace whose
+    // recorded fingerprint does not match the runtime's is the canonical case.
+    let fs_guest = build_facts_guest(directory.path(), "facts-refusal-guest", FACTS_FS_SOURCE);
+    let trace = directory.path().join("refusal.patina");
+    invoke_in(
+        native_workspace(),
+        &[
+            "run",
+            fs_guest.to_str().unwrap(),
+            "--seed",
+            "7",
+            "--record",
+            trace.to_str().unwrap(),
+        ],
+    );
+    let recorded = fs::read_to_string(&trace).unwrap();
+    let tampered = recorded.replace("\"patina-native\"", "\"patina-native+yieldpoints\"");
+    assert_ne!(
+        recorded, tampered,
+        "the trace fingerprint was not rewritten"
+    );
+    fs::write(&trace, tampered).unwrap();
+    let refused = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        native_workspace(),
+        &[
+            "replay",
+            fs_guest.to_str().unwrap(),
+            trace.to_str().unwrap(),
+            "--format",
+            "json",
+        ],
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(
+        envelope["refusal"]["class"], "fingerprint_mismatch",
+        "patina's own refusal must be attributed:\n{envelope:#}"
+    );
+    assert!(
+        envelope["refusal"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("fingerprint mismatch"),
+        "the refusal must carry the line that announced it:\n{envelope:#}"
+    );
+    assert_eq!(envelope["guest_exit"]["signal_name"], "SIGABRT");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_liveness_violation_reaches_the_envelope_despite_the_abort_that_follows_it() {
+    // The watchdog fires mid-run and the shim aborts the process, so `finish` —
+    // where the facts document is normally written — never runs. The finding has
+    // to survive that anyway, or the structured channel would be silent about
+    // exactly the failures it exists to report.
+    let directory = tempdir().unwrap();
+    let guest = build_facts_guest(directory.path(), "facts-wedge-guest", FACTS_WEDGE_SOURCE);
+    let wedged = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        native_workspace(),
+        &[
+            "run",
+            guest.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--liveness-watchdog=1000000000",
+            "--format",
+            "json",
+        ],
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&wedged.stdout).unwrap();
+    let findings = envelope["runtime_findings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no runtime findings:\n{envelope:#}"));
+    let liveness = findings
+        .iter()
+        .find(|finding| finding["source"] == "liveness")
+        .unwrap_or_else(|| panic!("no liveness finding:\n{envelope:#}"));
+    assert_eq!(liveness["kind"], "liveness");
+    assert_eq!(liveness["detail"], "no-progress");
+    // The same numbers the interface-contract line carries.
+    let printed = report_line_fields(envelope["stderr"].as_str().unwrap(), "PATINA_VIOLATION");
+    assert_eq!(
+        liveness["budget_ns"].as_u64().unwrap().to_string(),
+        printed["budget_ns"]
+    );
+    assert_eq!(
+        liveness["vtime_ns"].as_u64().unwrap().to_string(),
+        printed["vtime_ns"]
+    );
+    assert!(
+        envelope.get("refusal").is_none(),
+        "a liveness wedge is a finding about the guest, not patina refusing:\n{envelope:#}"
+    );
+}
