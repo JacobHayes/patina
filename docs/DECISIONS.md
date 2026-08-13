@@ -628,3 +628,28 @@ cluster so the fixes have citable symptom records.
   either way before), but it is a fail-closed hole now that these guests
   otherwise run: any other first op aborts loudly. Worth its own slice in the
   shim bootstrap.
+- **2026-08-13 — triple wave landed: custom-ops A, outcome-channel B,
+  advance-on-spin.** First full jj-workspace coordination round: three
+  builders in isolated working copies, stacked by `jj rebase` (two merges
+  conflict-free; spin's materialized three trivial union conflicts, resolved
+  in place — no patches). Cross-wave semantic risk verified live: spin's
+  churn abort ships a runtime_findings facts entry, so Wave B's
+  structured-only classifier routes it to Liveness with zero classifier
+  edits. Landed: the custom-op record/replay ABI (three verbs, phase-typed;
+  modeled-effect-in-perform refused at record); the classifier's marker era
+  ended (structured facts + spec-declared rules only, GUEST_ABORT live,
+  guest-agnostic debt gone, two Wave A defects fixed red-first —
+  incomplete_trace-as-refusal had made GUEST_ABORT unreachable); and
+  advance-on-spin (K=1024, 1 µs doubling to 1 ms ceiling, churn abort at 256
+  rescues; ablation-proven non-perturbing, 56/56 battery hashes identical
+  with the rescue disabled) plus budget-abort trace preservation and the
+  manageable-vs-runnable audit rewording. The fastant/foyer closure is now
+  END-TO-END: the unpatched calibrating guest runs to completion at exactly
+  1 GHz in the x86 sandbox (previously a pre-main 100%-CPU hang), so the
+  full SlateDB feature space both audits clean and RUNS natively. New bug
+  filed from spin's disclosure:
+  docs/bugs/replay-init-error-swallowed-for-clock-only-guests.md (bootstrap
+  clock answers 0 without ensure_runtime — a fail-closed hole newly
+  consequential now that clock-only guests otherwise run). Open next:
+  outcome-channel Wave C (testbed verdict migration; WASI-trap envelope
+  residue), custom-ops Wave B (seeded faults), CPUID audit visibility.
