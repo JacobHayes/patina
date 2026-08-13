@@ -507,3 +507,32 @@ cluster so the fixes have citable symptom records.
   rationale (aarch64 has no counter trap; `mrs CNTVCT_EL0` stays a
   cpu-nondeterminism refusal), SUD refusal branch green. All three platforms
   now have full evidence for the wave.
+- **2026-08-13 — fastant calibration probe: the 1 GHz mapping is exact, and a
+  calibrating guest wedges before main.** Full report:
+  `docs/probes/fastant-calibration.md`. Confirmed to the digit: a calibrating
+  guest derives cycles_per_second = 1,000,000,000 with zero error, invariant
+  under sleep jitter (the counter and the clock it calibrates against are the
+  same object). All determinism legs pass (same-seed identical, record->replay,
+  seed variation). THE FINDING: fastant 0.1.11's calibration busy-waits on
+  10 ms of monotonic progress inside a pre-main ctor with no sleep/yield —
+  under frozen virtual time the exit condition is unreachable, so the guest
+  spins at 100% CPU before main, on both the standalone guest and the real
+  SlateDB+foyer native build. The liveness watchdog is structurally blind to
+  it (its no-progress window is measured in virtual ns, which do not advance) —
+  verified with a 1 ms budget not firing against a 60 s hang; `--budget` is
+  the only backstop (loud, but opt-in, and a budget abort loses the recorded
+  trace). The SlateDB full-feature-space audit closure is REAL (foyer's rdtsc
+  now TSC-trap-managed, exit 0, zero --allow) but the audit's "runnable"
+  wording overclaims: the native run hangs in the ctor. Open design decision
+  (user): frozen-clock semantics — named-abort churn detector vs
+  advance-virtual-time-on-spin (leg 3b proves the derived frequency is
+  invariant to how time advances). Follow-ups filed: CPUID is an unaudited,
+  untrapped host read (11 sites invisible in the same binary; the branch that
+  SELECTS fastant's TSC path — cross-host reproducibility hole; cheap first
+  step is audit visibility as a named non-refusal class, ARCH_SET_CPUID trap
+  remains the deferred slice); the audit classifies the native artifact even
+  when the package's real execution family is cargo (verdict should name its
+  family — in the cargo family fastant's rdtsc is a genuine unmanaged host
+  read, empirically non-divergent here but undescribed); source-first `run`
+  leaks the positional source path into guest argv (routing bug); budget-abort
+  record finalization drops the trace that would explain the wedge.
