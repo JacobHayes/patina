@@ -277,6 +277,27 @@ pub(crate) fn liveness_finding(violation: &LivenessViolation) -> Value {
     ])
 }
 
+/// The frozen-clock-churn finding: advance-on-spin fed a spinning guest
+/// `rescues` token advances totalling `advanced_ns` of virtual time and it still
+/// made no genuine progress. Carries the same fields as the
+/// `PATINA_VIOLATION liveness detail=frozen-clock-churn` line.
+pub(crate) fn frozen_clock_churn_finding(
+    vtime_ns: u64,
+    rescues: u64,
+    advanced_ns: u64,
+    clock_ops_per_rescue: u64,
+) -> Value {
+    object(vec![
+        ("source", Value::from("liveness")),
+        ("kind", Value::from("liveness")),
+        ("detail", Value::from("frozen-clock-churn")),
+        ("vtime_ns", Value::from(vtime_ns)),
+        ("rescues", Value::from(rescues)),
+        ("advanced_ns", Value::from(advanced_ns)),
+        ("clock_ops_per_rescue", Value::from(clock_ops_per_rescue)),
+    ])
+}
+
 /// The vacuous-schedule finding: spawned workers whose interleavings were
 /// unreachable at any seed. Same condition as the loud stderr warning.
 pub(crate) fn vacuous_schedule_finding(diagnostics: &ScheduleDiagnostics) -> Value {

@@ -4288,8 +4288,12 @@ trapped into the deterministic runtime via syscall-user-dispatch. Runnable on a 
                 if tsc_sites > 0 {
                     println!(
                         "cpu-nondeterminism (TSC-trap-managed, {tsc_sites} site{}): inline rdtsc/rdtscp \
-answered from the run's virtual clock via prctl(PR_SET_TSC). Runnable on x86-64 Linux; refused \
-everywhere else (macOS, arm64) — rebuild the guest without the inline counter read for those.",
+answered deterministically from the run's virtual clock via prctl(PR_SET_TSC) on x86-64 Linux; \
+refused everywhere else (macOS, arm64) — rebuild the guest without the inline counter read for \
+those. Manageable is not runnable: this says the counter reads are answered, not that the guest \
+progresses. A guest that calibrates the counter by busy-waiting on clock deltas is carried by the \
+runtime's advance-on-spin rescue; one that spins without ever consulting the value stops with a \
+named frozen-clock-churn abort.",
                         if tsc_sites == 1 { "" } else { "s" }
                     );
                 }

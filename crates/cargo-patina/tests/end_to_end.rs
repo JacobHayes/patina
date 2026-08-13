@@ -6291,6 +6291,203 @@ fn main() {
 // are byte-identical, and a recorded run replays byte-identically. Before this
 // wave the audit refused the binary outright ("unsupported native imports:
 // _fdopendir _linkat"), which is the RED evidence this test's fix clears.
+/// The calibration busy-wait, in the pure-`Instant` shape that needs no x86
+/// counter — the loop `fastant`'s pre-`main` constructor runs to measure the
+/// timestamp counter against the OS clock, minus the `rdtsc`. Before
+/// advance-on-spin this guest hung forever at 100% CPU: virtual time only moved
+/// through a recorded sleep and the loop issues none, so `elapsed` was 0 on
+/// every iteration and the exit condition was unreachable.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const CALIBRATION_SPIN_SOURCE: &str = r#"
+use std::time::Instant;
+
+fn main() {
+    let start = Instant::now();
+    let mut reads: u64 = 0;
+    loop {
+        let elapsed = start.elapsed().as_nanos() as u64;
+        reads += 1;
+        if elapsed > 10_000_000 {
+            println!("CALIBRATION elapsed_ns={elapsed} reads={reads}");
+            // Derive a rate the way a calibrating crate does: both sides of the
+            // ratio counted off the same clock.
+            let ticks = Instant::now().duration_since(start).as_nanos() as u64;
+            println!("CALIBRATION hz={}", ticks * 1_000_000_000 / elapsed);
+            return;
+        }
+    }
+}
+"#;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_calibration_busy_wait_converges_and_replays_identically() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("calibration_spin.rs");
+    fs::write(&source, CALIBRATION_SPIN_SOURCE).unwrap();
+    let bin = directory.path().join("calibration-spin");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let patina = env!("CARGO_BIN_EXE_cargo-patina");
+
+    // (a) It converges at all — the RED half of this test is a hang, so any
+    // completion is the signal. And it converges to the EXACT virtual time the
+    // token schedule predicts: ten escalating rescues (1_023_000 ns) plus nine
+    // at the 1 ms ceiling is the least cumulative advance past the 10 ms window.
+    let first = invoke_unchecked(
+        patina,
+        workspace,
+        &["run", bin.to_str().unwrap(), "--seed", "1"],
+    );
+    assert!(
+        first.status.success(),
+        "the calibration spin did not converge\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&first.stdout).into_owned();
+    assert!(
+        stdout.contains("CALIBRATION elapsed_ns=10023000"),
+        "unexpected derived elapsed:\n{stdout}"
+    );
+    // Both sides of the ratio come from the same clock, so the derived rate is
+    // exact — the 1 GHz mapping, confirmed to the digit.
+    assert!(
+        stdout.contains("CALIBRATION hz=1000000000"),
+        "calibration did not derive exactly 1 GHz:\n{stdout}"
+    );
+
+    // (b) Same seed, byte-identical.
+    let second = invoke_unchecked(
+        patina,
+        workspace,
+        &["run", bin.to_str().unwrap(), "--seed", "1"],
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "a same-seed repeat of the calibration spin diverged"
+    );
+
+    // (c) record -> replay identity: the rescue is a recorded `SleepUntil`, so a
+    // replay re-derives the same answer from the trace rather than re-deciding.
+    let trace = directory.path().join("calibration.patina");
+    let recorded = invoke_unchecked(
+        patina,
+        workspace,
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "7",
+            "--record",
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "calibration-spin",
+        ],
+    );
+    assert!(
+        recorded.status.success(),
+        "recording the calibration spin failed:\n{}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    let replayed = invoke_unchecked(
+        patina,
+        workspace,
+        &[
+            "replay",
+            bin.to_str().unwrap(),
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "calibration-spin",
+        ],
+    );
+    assert!(
+        replayed.status.success(),
+        "replaying the calibration spin failed:\n{}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+    assert_eq!(
+        recorded.stdout, replayed.stdout,
+        "replay of the calibration spin diverged from the recording"
+    );
+}
+
+/// A `--record` run stopped by `--budget` used to lose the one artifact that
+/// would explain the wedge: the supervisor's pre-created trace file stayed empty
+/// because the abort skips record finalization. The stop now flushes a
+/// truncated-but-valid trace first.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_budget_abort_under_record_preserves_a_loadable_trace() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("budget_record.rs");
+    fs::write(&source, CALIBRATION_SPIN_SOURCE).unwrap();
+    let bin = directory.path().join("budget-record");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    let trace = directory.path().join("budget.patina");
+    let ran = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--budget",
+            "5000",
+            "--record",
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "budget-record",
+        ],
+    );
+    assert!(
+        !ran.status.success(),
+        "the budget must stop this run\nstderr:\n{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&ran.stderr).into_owned();
+    assert!(
+        stderr.contains("step budget of 5000"),
+        "missing the budget diagnostic:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("empty trace file"),
+        "the budget abort still lost the recording:\n{stderr}"
+    );
+    assert!(
+        trace.is_file(),
+        "the budget abort must leave a truncated trace, not an absent one"
+    );
+    // The artifact is structurally valid and carries the run up to the stop.
+    let bundle: serde_json::Value =
+        serde_json::from_slice(&fs::read(&trace).unwrap()).expect("truncated trace must parse");
+    let events = bundle["timelines"][0]["decisions"].as_array().unwrap();
+    assert_eq!(
+        events.len(),
+        5000,
+        "the truncated trace should hold every op performed before the stop"
+    );
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn native_record_abort_leaves_trace_absent_and_infra_classified() {

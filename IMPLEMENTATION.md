@@ -662,6 +662,46 @@ surface (`cargo patina campaign`) generalizing the shell campaign machinery.
    campaign child runs receive `--no-config` plus run-default env scrubbing. The
    `.patina/out/` cache path is ignored via `.patina/.gitignore` on first write.
 
+## Slice 9: advance-on-spin — Complete
+
+The virtual clock's third advance mechanism, alongside a guest wait and the
+deadlock rescue. It closes the *runnable clock-churn* gap: a guest that is
+runnable and doing nothing but reading the clock observed frozen virtual time
+forever, which is exactly the startup-calibration shape (`fastant`/`minstant`/
+`quanta` busy-wait for a fixed window of monotonic progress inside a pre-`main`
+constructor) and hung before `main` at 100% CPU.
+
+1. **Advance-on-spin** (`patina-dst-runtime`): after 1024 consecutive
+   clock-observation boundary ops at unchanged virtual time with no intervening
+   progress op (`operation_is_progress`, the same predicate the liveness watchdog
+   uses), the runtime advances the monotonic clock through a recorded
+   `SleepUntil` — the deadlock rescue's mechanism — by a token that starts at
+   1 µs and doubles per rescue to a 1 ms ceiling. The advance is clamped so it
+   never steps over a still-future timer deadline. Scheduling/wait ops are
+   neutral (they neither count toward the streak nor break it), so a spinning
+   thread in a multi-task run still accumulates; a progress op, or virtual time
+   moving for any reason the rescue did not cause, ends the episode and its
+   escalation. The trigger is a pure function of the recorded op stream and the
+   driver's monotonic value, so it re-fires at the same operation on replay and
+   the trace is byte-identical.
+2. **Frozen-clock churn backstop**: 256 rescues that bought no genuine progress
+   is a loop ignoring the clock rather than waiting for it. The run stops with
+   `PATINA_VIOLATION liveness detail=frozen-clock-churn vtime_ns=<n> rescues=<n>
+   advanced_ns=<n> clock_ops_per_rescue=<n>` plus a prose diagnostic naming the
+   pattern, a matching `runtime_findings` entry on the facts channel, and a
+   flushed trace — a named abort, never a hang. Because virtual time now moves
+   during a spin, the generic liveness watchdog also regains traction on this
+   class; whichever mechanism trips first stops the run.
+3. **Truncated-trace preservation**: a runtime-initiated stop (step-budget
+   exhaustion, frozen-clock churn) writes the recording as it stands before
+   returning, so the artifact that explains a wedge survives. At most one write
+   per run — the native trace transport is an append-only descriptor — and
+   `Context::finish` skips its own write afterwards. A guest that calls `abort()`
+   itself is untouched and still leaves no trace.
+4. **Audit/gate wording**: the TSC-managed notes keep *manageable* and *runnable*
+   distinct instead of asserting the guest is runnable, and name both outcomes a
+   calibrating guest can now reach.
+
 ## Dependency order
 
 ```text

@@ -1,5 +1,20 @@
 # fastant calibrating-guest demo — report
 
+> **Status: resolved (2026-08-13).** All three consequences below were acted on
+> by the advance-on-spin slice (`IMPLEMENTATION.md` slice 9, `docs/DECISIONS.md`,
+> `ARCHITECTURE.md` "Virtual time"). The wedge is gone: the UNPATCHED fastant
+> guest now runs to completion in about a second on x86-64 Linux and derives
+> exactly 1 GHz, so the leg-3 numbers below — obtained by hand-patching the
+> vendored crate — are reproducible without the patch. Consequence (1) is
+> answered by advance-on-spin plus the frozen-clock churn abort rather than by a
+> watchdog arm; (2) by flushing a truncated-but-valid trace before a
+> runtime-initiated stop; (3) by rewording the audit and gate notes. Everything
+> below is preserved as the original finding, and the "Runnable on x86-64 Linux"
+> quotes are the OLD wording it argued against.
+>
+> One thing here is still open: the **secondary finding** on `CPUID` (unaudited,
+> untrapped host read) is untouched.
+
 Report-only. No repo changes, no git/jj state changes. All execution in two
 Tensorlake x86-64 Linux sandboxes, both terminated (proof at the end).
 

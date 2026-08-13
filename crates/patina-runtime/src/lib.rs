@@ -2478,6 +2478,8 @@ impl RuntimeBuilder {
             reports: self.config.reports,
             facts,
             facts_emitted: false,
+            spin: SpinRescue::default(),
+            recording_flushed: false,
         })
     }
 }
@@ -2759,6 +2761,145 @@ impl LivenessWatchdog {
             }
         }
         None
+    }
+}
+
+/// Consecutive clock-observation boundary ops — at unchanged virtual time and
+/// with no intervening progress op — that the runtime treats as a spin.
+///
+/// Why 1024. The streak is only broken by a *progress* op (see
+/// [`operation_is_progress`]) or by virtual time actually moving, so real code
+/// cannot accumulate it: any effect, entropy draw, spawn, or sleep resets it,
+/// and a clock read is nearly always followed by one of those. 1024 puts the
+/// trigger an order of magnitude beyond even a pathological polling loop that
+/// re-reads the clock a few dozen times per decision, which is what keeps the
+/// rescue invisible to every existing workload (the acceptance constraint: no
+/// recorded artifact anywhere in the tree may change). It is simultaneously
+/// cheap for a genuine spin: the canonical calibration loop issues two clock
+/// ops per iteration, so 1024 is 512 iterations — microseconds of host time.
+const SPIN_RESCUE_CLOCK_OPS: u64 = 1_024;
+
+/// The first rescue's advance within a spin episode: 1 µs, deliberately tiny.
+/// A guest that is merely polling hard — a 100 µs busy-wait, say — must see a
+/// nudge rather than a jump, so the elapsed time it eventually derives is close
+/// to what it asked for instead of being rounded up to the rescue granularity.
+const SPIN_RESCUE_TOKEN_MIN_NANOS: u64 = 1_000;
+
+/// The per-rescue ceiling the token escalates to: 1 ms. The escalation (doubling
+/// per rescue) is what makes a real wedge converge in tens of rescues instead of
+/// millions of loop iterations; the ceiling is what bounds the resulting
+/// overshoot. The calibration pattern in the wild measures a 10 ms window, so a
+/// 1 ms ceiling caps the overshoot on that window at 10%.
+///
+/// Worked example (the fastant calibration loop, 10 ms window): tokens
+/// 1, 2, 4, … 512 µs sum to ~1.02 ms over ten rescues, then the ceiling carries
+/// the remaining ~9 ms in nine more — ~19 rescues, ~19 × 1024 ≈ 20k recorded
+/// clock ops per window. Well under [`patina_dst_trace::MAX_TIMELINE_EVENTS`].
+const SPIN_RESCUE_TOKEN_MAX_NANOS: u64 = 1_000_000;
+
+/// Rescues within one spin episode after which the run is aborted as
+/// frozen-clock churn: 256.
+///
+/// Why 256. At the token ceiling this is >250 ms of virtual time advanced with
+/// zero genuine progress — 25× the 10 ms window the calibration pattern uses,
+/// and ~5× the longest window (50 ms) seen in the crates that use it. A loop
+/// still spinning after that is not *waiting* for time, it is *ignoring* it, and
+/// no amount of further advancing will unwedge it. Bounded trace cost: at most
+/// 256 × 1024 ≈ 262k recorded clock ops before the named abort, so the trace
+/// that explains the wedge is still writable and loadable.
+const SPIN_CHURN_ABORT_RESCUES: u64 = 256;
+
+/// Advance-on-spin state: the runnable-churn counterpart to the deadlock rescue.
+///
+/// The deadlock rescue advances virtual time when the guest *waits* — every task
+/// parked with a timer pending. The gap it leaves is a guest that is *runnable*
+/// and doing nothing but reading the clock: virtual time only moves through a
+/// recorded `SleepUntil`, so a loop whose exit condition is "10 ms of monotonic
+/// progress" and whose body performs no wait never terminates. That is the
+/// pre-`main` calibration shape (`fastant`/`minstant`/`quanta` measure the
+/// timestamp counter against the OS clock over a fixed window at startup), and
+/// it is common in exactly the crates a DST user wants to instrument.
+///
+/// Two levels of state, deliberately distinct:
+///
+/// - The **streak** (`clock_ops` measured from `baseline_nanos`) is the trigger.
+///   It counts consecutive clock observations at unchanged virtual time; it is
+///   reset by a genuine progress op, and by virtual time moving for any reason
+///   other than this rescue's own advance.
+/// - The **episode** (`rescues`, `advanced_nanos`) survives across rescues and
+///   drives both the token escalation and the frozen-clock-churn backstop. Only
+///   a progress op — or a time move the guest itself caused — ends an episode.
+///
+/// Every input is a recorded boundary op or the driver's monotonic value, both
+/// maintained identically on record and replay, so the rescue re-executes at the
+/// same point on replay and the trace is byte-identical.
+#[derive(Debug, Default)]
+struct SpinRescue {
+    /// Consecutive clock-observation ops since `baseline_nanos`.
+    clock_ops: u64,
+    /// The virtual time the current streak is measured at. A clock op observing
+    /// a different time means time moved, which ends the streak (and, unless
+    /// this rescue moved it, the episode).
+    baseline_nanos: u64,
+    /// Rescues performed in the current episode; drives the token escalation and
+    /// is what [`SPIN_CHURN_ABORT_RESCUES`] bounds.
+    rescues: u64,
+    /// Virtual nanoseconds this episode's rescues have advanced in total, for
+    /// the churn diagnostic.
+    advanced_nanos: u64,
+    /// Set while the rescue emits its own `SleepUntil`, so that op does not
+    /// disturb the state the rescue is about to update itself.
+    rescuing: bool,
+    /// The virtual time the frozen-clock-churn backstop fired at, so the facts
+    /// document can carry the same finding the marker line carries.
+    churn_vtime_nanos: Option<u64>,
+}
+
+impl SpinRescue {
+    /// The next rescue's advance: [`SPIN_RESCUE_TOKEN_MIN_NANOS`] doubled once
+    /// per rescue already taken in this episode, saturating at
+    /// [`SPIN_RESCUE_TOKEN_MAX_NANOS`].
+    fn token_nanos(&self) -> u64 {
+        // The shift is clamped to the last doubling that can matter (ten of them
+        // take the token past the ceiling). Leaving it unclamped is a trap:
+        // `1_000 << rescues` overflows u64 around rescue 55 and WRAPS to a
+        // SMALLER token, silently slowing convergence at exactly the point the
+        // churn backstop is counting on it.
+        const MAX_SHIFT: u32 = SPIN_RESCUE_TOKEN_MAX_NANOS.ilog2() + 1;
+        let shift = u32::try_from(self.rescues)
+            .unwrap_or(MAX_SHIFT)
+            .min(MAX_SHIFT);
+        (SPIN_RESCUE_TOKEN_MIN_NANOS << shift).min(SPIN_RESCUE_TOKEN_MAX_NANOS)
+    }
+
+    /// End the episode entirely: the guest made genuine progress, or time moved
+    /// without this rescue moving it.
+    fn end_episode(&mut self, now: u64) {
+        self.clock_ops = 0;
+        self.baseline_nanos = now;
+        self.rescues = 0;
+        self.advanced_nanos = 0;
+    }
+
+    /// Record one completed rescue: the streak restarts at the new virtual time
+    /// while the episode carries on.
+    fn on_rescued(&mut self, target: u64, token: u64) {
+        self.clock_ops = 0;
+        self.baseline_nanos = target;
+        self.rescues += 1;
+        self.advanced_nanos = self.advanced_nanos.saturating_add(token);
+    }
+
+    /// The loud, machine-parseable line the frozen-clock-churn abort emits. It
+    /// reuses the established `PATINA_VIOLATION liveness …` interface contract —
+    /// this IS a liveness failure, and a downstream campaign consumer already
+    /// classifies that prefix — with its own `detail=` reason and its own facts.
+    fn churn_marker_line(&self, vtime_nanos: u64) -> String {
+        format!(
+            "PATINA_VIOLATION liveness detail=frozen-clock-churn vtime_ns={} rescues={} \
+advanced_ns={} clock_ops_per_rescue={}",
+            vtime_nanos, self.rescues, self.advanced_nanos, SPIN_RESCUE_CLOCK_OPS,
+        )
     }
 }
 
@@ -3631,6 +3772,14 @@ pub struct Context {
     /// watchdog aborts the process before `finish` on the interposed families,
     /// so that path emits it early — this flag keeps it at exactly one write.
     facts_emitted: bool,
+    /// Advance-on-spin state. See [`SpinRescue`]; inert until a guest actually
+    /// churns on the clock, so a run that never spins is byte-for-byte unchanged.
+    spin: SpinRescue,
+    /// Whether the recording has already been written out by
+    /// [`Context::flush_recording`] on a runtime-initiated stop. The trace
+    /// transport is an append-only descriptor in the interposed families, so a
+    /// second write would corrupt the bundle: this flag keeps it at exactly one.
+    recording_flushed: bool,
 }
 
 impl Context {
@@ -4343,6 +4492,12 @@ recording was produced by a guest whose result type no longer matches this one"
         if self.clock.is_none() {
             return Err(EffectError::missing_driver("clock").into());
         }
+        // Advance-on-spin: a guest that has done nothing but read the clock for
+        // `SPIN_RESCUE_CLOCK_OPS` ops at frozen virtual time gets a recorded
+        // token advance BEFORE this observation, so the value it is about to
+        // read has moved. Ordered here, ahead of the `ClockNow`, so the recorded
+        // stream for a rescued read is `SleepUntil` then `ClockNow`.
+        self.spin_rescue()?;
         let operation = Operation::ClockNow { clock };
         if let Some((_, recorded)) = self.replay_expected(&operation)? {
             return decode_u64(&operation, recorded);
@@ -5727,6 +5882,14 @@ recording was produced by a guest whose result type no longer matches this one"
         if let Some(violation) = self.liveness.violation.as_ref() {
             findings.push(facts::liveness_finding(violation));
         }
+        if let Some(vtime) = self.spin.churn_vtime_nanos {
+            findings.push(facts::frozen_clock_churn_finding(
+                vtime,
+                self.spin.rescues,
+                self.spin.advanced_nanos,
+                SPIN_RESCUE_CLOCK_OPS,
+            ));
+        }
         if !schedule.vacuous.is_empty() {
             findings.push(facts::vacuous_schedule_finding(&schedule));
         }
@@ -5848,6 +6011,13 @@ a recorded result or a replay fetch",
         // leaves the run's facts on the channel.
         self.emit_facts();
         let buggify_record = self.buggify.to_record();
+        // A runtime-initiated stop already wrote the recording out (a truncated
+        // but valid trace, see `flush_recording`); the transport is append-only,
+        // so writing a second bundle would corrupt it. Nothing is recorded after
+        // such a stop, so the flushed snapshot is the complete artifact.
+        if self.recording_flushed {
+            return Ok(());
+        }
         match self.execution {
             Execution::Seeded => Ok(()),
             Execution::Record { mut recorder, sink } => match sink {
@@ -5999,17 +6169,173 @@ a recorded result or a replay fetch",
         Ok(())
     }
 
+    /// Advance the spin tracker for one boundary op, on both record and replay.
+    /// Pure bookkeeping over the recorded op stream and the driver's monotonic
+    /// value — it records nothing and reads no host state — so the trigger point
+    /// is reproduced exactly on replay.
+    ///
+    /// Three cases, in the order the trigger is defined (K consecutive clock
+    /// observations, zero virtual-time advance, no intervening progress op):
+    /// a progress op ends the episode; a scheduling/wait op is neutral (it
+    /// neither counts nor breaks the streak, so a spinning thread in a
+    /// multi-task run still accumulates); a clock op counts, unless virtual time
+    /// has moved since the streak began, which ends the episode instead.
+    fn spin_track(&mut self, operation: &Operation) -> Result<(), RuntimeError> {
+        // The rescue's own `SleepUntil`: the rescue updates the state itself.
+        if self.spin.rescuing {
+            return Ok(());
+        }
+        if operation_is_progress(operation) {
+            // Genuine state advancement. Whatever this guest is doing, it is not
+            // churning on the clock — drop the whole episode, escalation included.
+            self.spin.end_episode(self.spin.baseline_nanos);
+            return Ok(());
+        }
+        if !matches!(operation, Operation::ClockNow { .. }) {
+            return Ok(());
+        }
+        if self.clock.is_none() {
+            return Ok(());
+        }
+        let now = self.current_monotonic()?;
+        if now != self.spin.baseline_nanos {
+            // Virtual time moved and this rescue did not move it, so the guest
+            // waited: that is the wait the rescue exists to substitute for.
+            self.spin.end_episode(now);
+        }
+        self.spin.clock_ops += 1;
+        Ok(())
+    }
+
+    /// The advance-on-spin rescue itself, invoked from [`Context::now`] before
+    /// the clock observation is recorded. A no-op until the streak reaches
+    /// [`SPIN_RESCUE_CLOCK_OPS`], which is why a run that never spins is
+    /// byte-for-byte unchanged.
+    ///
+    /// It rides the same mechanism as the deadlock rescue: a recorded
+    /// `SleepUntil` on the monotonic clock, replayed from the trace like any
+    /// other. The advance is clamped so it never steps over a pending timer
+    /// deadline — the deadlock rescue owns that boundary, and jumping past it
+    /// here would deliver a sleeping task's wake later than its deadline.
+    fn spin_rescue(&mut self) -> Result<(), RuntimeError> {
+        if self.spin.clock_ops < SPIN_RESCUE_CLOCK_OPS {
+            return Ok(());
+        }
+        let now = self.current_monotonic()?;
+        // The streak counts reads; this is the trigger's other half — that
+        // virtual time did not move across them. It is enforced HERE and not
+        // only in `spin_track` because the op between the streak's last read and
+        // this one may have been the guest's own sleep: `sleep_for` reads the
+        // clock (counted) and only then advances it. Without this check a
+        // poll-and-sleep loop would be rescued on its very next read.
+        if now != self.spin.baseline_nanos {
+            self.spin.end_episode(now);
+            return Ok(());
+        }
+        // Backstop first: a loop that ignores time rather than waiting for it
+        // must become a named abort, not an unbounded stream of rescues.
+        if self.spin.rescues >= SPIN_CHURN_ABORT_RESCUES {
+            return Err(self.frozen_clock_churn(now));
+        }
+        let token = self.spin.token_nanos();
+        let target = now.saturating_add(token);
+        // Never advance past the earliest still-future timer deadline.
+        let target = match self.timers.keys().next() {
+            Some((deadline, _)) if *deadline > now => target.min(*deadline),
+            _ => target,
+        };
+        self.spin.rescuing = true;
+        let result = self.sleep_until(ClockKind::Monotonic, target);
+        self.spin.rescuing = false;
+        result?;
+        self.spin.on_rescued(target, target.saturating_sub(now));
+        Ok(())
+    }
+
+    /// The frozen-clock churn abort: [`SPIN_CHURN_ABORT_RESCUES`] token advances
+    /// bought no genuine progress, so the guest is in a loop that ignores the
+    /// clock it is reading. Loud (a `PATINA_VIOLATION liveness` line naming the
+    /// pattern and what the guest was doing) and fail-closed, in the shape the
+    /// liveness watchdog established.
+    fn frozen_clock_churn(&mut self, now: u64) -> RuntimeError {
+        self.spin.churn_vtime_nanos = Some(now);
+        let marker = self.spin.churn_marker_line(now);
+        eprintln!("{marker}");
+        eprintln!(
+            "patina: frozen-clock churn — the guest has issued {} clock observations per rescue \
+across {} advance-on-spin rescues ({} ns of virtual time) without one genuine boundary effect \
+in between. It is not waiting for the clock it is reading, it is ignoring it: a busy-wait whose \
+exit condition never depends on the value, or one waiting on state only another task can \
+publish. Give the loop a wait the runtime can see (sleep/yield/park), or bound the run with \
+--budget.",
+            SPIN_RESCUE_CLOCK_OPS, self.spin.rescues, self.spin.advanced_nanos,
+        );
+        // The interposed families abort on this without reaching `finish`, so
+        // the artifacts that explain the wedge have to be written here.
+        self.emit_facts();
+        self.flush_recording();
+        RuntimeError::FrozenClockChurn { detail: marker }
+    }
+
+    /// Write the recording as it stands, WITHOUT consuming the context, so a
+    /// runtime-initiated stop leaves a truncated-but-valid trace instead of the
+    /// empty file the supervisor pre-created. The interposed families reach the
+    /// stop through `std::process::abort()`, which skips the atexit-driven
+    /// shutdown that is [`Context::finish`]'s only caller there — so without
+    /// this, the one artifact that would explain the wedge is exactly what is
+    /// lost. At most one write per run ([`Context::recording_flushed`]): the
+    /// native transport is an append-only descriptor.
+    ///
+    /// Deliberately scoped to stops the RUNTIME initiates (step-budget
+    /// exhaustion, frozen-clock churn). A guest that calls `abort()` itself is
+    /// untouched, and still leaves no trace.
+    fn flush_recording(&mut self) {
+        if self.recording_flushed || !matches!(self.execution, Execution::Record { .. }) {
+            return;
+        }
+        self.recording_flushed = true;
+        let buggify_record = self.buggify.to_record();
+        let Execution::Record { recorder, sink } = &mut self.execution else {
+            unreachable!("execution was checked to be Record");
+        };
+        recorder.set_buggify(buggify_record);
+        let bundle = recorder.to_bundle();
+        let result = match sink {
+            RecordSink::Path { path, .. } => bundle
+                .write_atomic(&*path)
+                .map_err(|error| format!("write truncated trace to {}: {error}", path.display())),
+            RecordSink::Transport(transport) => bundle
+                .to_bytes()
+                .map_err(|error| format!("serialize truncated trace: {error}"))
+                .and_then(|bytes| {
+                    transport
+                        .write_bundle(&bytes)
+                        .map_err(|error| format!("write truncated trace to transport: {error}"))
+                }),
+        };
+        if let Err(reason) = result {
+            eprintln!("PATINA_INFRA truncated_trace write_failed reason={reason:?}");
+        }
+    }
+
     fn replay_expected(
         &mut self,
         operation: &Operation,
     ) -> Result<Option<(u64, Outcome)>, RuntimeError> {
         if self.step_budget.is_some_and(|budget| self.steps >= budget) {
+            // Preserve the artifacts before the stop: the interposed families
+            // abort without reaching `finish`, and a budget abort is precisely
+            // the case where the partial trace is the evidence (see
+            // [`Context::flush_recording`]).
+            self.emit_facts();
+            self.flush_recording();
             return Err(RuntimeError::StepBudgetExceeded {
                 budget: self.step_budget.expect("budget was checked"),
             });
         }
         self.steps += 1;
         self.liveness_track(operation)?;
+        self.spin_track(operation)?;
         match &mut self.execution {
             Execution::Replay(replayer) => {
                 let sequence = replayer.consumed();
@@ -6224,6 +6550,14 @@ pub enum RuntimeError {
         label: String,
         detail: String,
     },
+    /// The frozen-clock churn backstop fired: advance-on-spin fed the guest
+    /// [`SPIN_CHURN_ABORT_RESCUES`] token advances and it still made no genuine
+    /// progress, so the loop ignores the clock it reads rather than waiting for
+    /// it. Loud (the `PATINA_VIOLATION liveness detail=frozen-clock-churn` line
+    /// was emitted, and the partial trace flushed); `detail` holds that marker.
+    FrozenClockChurn {
+        detail: String,
+    },
 }
 
 impl fmt::Display for RuntimeError {
@@ -6252,6 +6586,9 @@ impl fmt::Display for RuntimeError {
             ),
             Self::ScheduleDivergence { detail } => f.write_str(detail),
             Self::CustomOp { detail, .. } => f.write_str(detail),
+            Self::FrozenClockChurn { detail } => {
+                write!(f, "Patina frozen-clock churn: {detail}")
+            }
         }
     }
 }
@@ -10381,6 +10718,239 @@ class=crash|0 class=buggify|0"
         let mut replay = Context::from_config(RuntimeConfig::replay(&first, "timer-v1")).unwrap();
         timed_rescue(&mut replay).unwrap();
         replay.finish().unwrap();
+    }
+
+    /// The calibration busy-wait, reduced to its essence: read the monotonic
+    /// clock in a loop until `window` nanoseconds of it have gone by, doing
+    /// nothing else. This is the shape `fastant`/`minstant`/`quanta` run in a
+    /// pre-`main` constructor to measure the timestamp counter, and the shape
+    /// that hangs forever without advance-on-spin. Returns (reads, elapsed).
+    fn calibration_spin(context: &mut Context, window: u64) -> Result<(u64, u64), RuntimeError> {
+        let start = context.now(ClockKind::Monotonic)?;
+        let mut reads = 1u64;
+        loop {
+            let now = context.now(ClockKind::Monotonic)?;
+            reads += 1;
+            if now - start > window {
+                return Ok((reads, now - start));
+            }
+        }
+    }
+
+    #[test]
+    fn advance_on_spin_converges_a_clock_busy_wait_in_tens_of_rescues() {
+        // RED before advance-on-spin: this call never returns — virtual time only
+        // moved through a recorded `SleepUntil`, and the loop issues none.
+        let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+        let (reads, elapsed) = calibration_spin(&mut context, 10_000_000).unwrap();
+
+        // The token schedule pinned exactly (1 µs doubling to the 1 ms ceiling):
+        // ten escalating rescues sum to 1_023_000 ns, then nine at the ceiling
+        // carry the rest — 19 rescues for a 10 ms window, which is the brief's
+        // "tens of rescues, not millions of loop iterations".
+        assert_eq!(context.spin.rescues, 19);
+        assert_eq!(elapsed, 10_023_000);
+        assert_eq!(context.spin.advanced_nanos, 10_023_000);
+        // Each rescue costs exactly `SPIN_RESCUE_CLOCK_OPS` reads, and the read
+        // that observes the escaped deadline is the one that triggers the last.
+        assert_eq!(reads, 19 * SPIN_RESCUE_CLOCK_OPS + 1);
+        // Trace-size sanity: the recorded stream is one op per read plus one
+        // `SleepUntil` per rescue, three orders of magnitude under the cap.
+        assert!(reads + context.spin.rescues < patina_dst_trace::MAX_TIMELINE_EVENTS as u64);
+        context.finish().unwrap();
+    }
+
+    #[test]
+    fn advance_on_spin_leaves_virtual_time_alone_below_the_trigger() {
+        // The non-vacuity guard for the constant: one read short of the streak
+        // must not move the clock by a nanosecond. This is what keeps every
+        // existing recorded artifact byte-identical.
+        let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+        for _ in 0..SPIN_RESCUE_CLOCK_OPS {
+            assert_eq!(context.now(ClockKind::Monotonic).unwrap(), 0);
+        }
+        assert_eq!(context.spin.rescues, 0);
+        // One more read crosses the streak and rescues.
+        assert_eq!(
+            context.now(ClockKind::Monotonic).unwrap(),
+            SPIN_RESCUE_TOKEN_MIN_NANOS
+        );
+        assert_eq!(context.spin.rescues, 1);
+        context.finish().unwrap();
+    }
+
+    #[test]
+    fn a_progress_op_ends_the_spin_episode_so_a_working_run_never_rescues() {
+        // A guest that reads the clock hard but keeps doing real work: the
+        // streak is broken by every genuine effect, so it never accumulates and
+        // the clock never moves. An unbounded number of reads, zero rescues.
+        let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+        for _ in 0..8 {
+            for _ in 0..SPIN_RESCUE_CLOCK_OPS {
+                assert_eq!(context.now(ClockKind::Monotonic).unwrap(), 0);
+            }
+            context.write_file("/work", b"x").unwrap();
+        }
+        assert_eq!(context.spin.rescues, 0);
+        assert_eq!(context.now(ClockKind::Monotonic).unwrap(), 0);
+        context.finish().unwrap();
+    }
+
+    #[test]
+    fn a_guest_sleep_ends_the_spin_episode_so_a_polling_loop_never_rescues() {
+        // The other reset arm: virtual time moving for a reason the rescue did
+        // not cause. A poll loop that sleeps between reads walks the clock on its
+        // own and must never be rescued, however many reads it takes.
+        let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+        for _ in 0..4 {
+            // One short of the streak, leaving room for `sleep_for`'s own
+            // clock read: 1023 reads plus that one is exactly at the trigger,
+            // not past it.
+            for _ in 0..(SPIN_RESCUE_CLOCK_OPS - 1) {
+                context.now(ClockKind::Monotonic).unwrap();
+            }
+            context.sleep_for(1).unwrap();
+        }
+        assert_eq!(context.spin.rescues, 0);
+        // Exactly the four nanoseconds the guest itself slept.
+        assert_eq!(context.now(ClockKind::Monotonic).unwrap(), 4);
+        context.finish().unwrap();
+    }
+
+    #[test]
+    fn advance_on_spin_records_and_replays_byte_identically() {
+        let directory = tempdir().unwrap();
+        let first = directory.path().join("spin-a.patina");
+        let second = directory.path().join("spin-b.patina");
+        let mut recorded = Vec::new();
+        for path in [&first, &second] {
+            let mut record =
+                Context::from_config(RuntimeConfig::record(9, path, "spin-v1")).unwrap();
+            recorded.push(calibration_spin(&mut record, 100_000).unwrap());
+            record.finish().unwrap();
+        }
+        // Same seed, two independent record runs: identical answers and bytes.
+        assert_eq!(recorded[0], recorded[1]);
+        assert_eq!(recorded[0].0, 7 * SPIN_RESCUE_CLOCK_OPS + 1);
+        assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
+
+        // Replay consumes the recorded `SleepUntil`/`ClockNow` stream in order:
+        // the rescue re-fires at the same point because the spin state is a pure
+        // function of that stream, not of anything the record run measured.
+        let mut replay = Context::from_config(RuntimeConfig::replay(&first, "spin-v1")).unwrap();
+        assert_eq!(calibration_spin(&mut replay, 100_000).unwrap(), recorded[0]);
+        replay.finish().unwrap();
+    }
+
+    #[test]
+    fn frozen_clock_churn_aborts_a_loop_that_ignores_the_clock() {
+        // A loop whose exit condition never depends on the clock value it reads:
+        // no amount of advancing frees it, so the backstop must name it rather
+        // than rescue it forever.
+        let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+        let mut reads = 0u64;
+        let error = loop {
+            match context.now(ClockKind::Monotonic) {
+                Ok(_) => reads += 1,
+                Err(error) => break error,
+            }
+        };
+        let RuntimeError::FrozenClockChurn { detail } = error else {
+            panic!("expected a frozen-clock-churn abort, got {error:?}");
+        };
+        // The marker rides the established liveness interface contract, so a
+        // campaign consumer classifies it without a new rule, and names the
+        // pattern and what the guest was doing.
+        assert!(detail.starts_with("PATINA_VIOLATION liveness detail=frozen-clock-churn "));
+        assert!(detail.contains(&format!("rescues={SPIN_CHURN_ABORT_RESCUES}")));
+        // Ten escalating tokens (1_023_000 ns) plus 246 at the 1 ms ceiling.
+        assert!(
+            detail.contains("advanced_ns=247023000"),
+            "marker was: {detail}"
+        );
+        assert_eq!(context.spin.rescues, SPIN_CHURN_ABORT_RESCUES);
+        // The abort fires only once the spin PERSISTS past the last rescue:
+        // a full further streak of reads bought nothing.
+        assert_eq!(
+            reads,
+            (SPIN_CHURN_ABORT_RESCUES + 1) * SPIN_RESCUE_CLOCK_OPS
+        );
+        // The facts document carries the same finding as the line.
+        let finding = &context.run_facts()["runtime_findings"][0];
+        assert_eq!(finding["detail"], "frozen-clock-churn");
+        assert_eq!(finding["rescues"], SPIN_CHURN_ABORT_RESCUES);
+    }
+
+    #[test]
+    fn the_liveness_watchdog_fires_first_on_a_spin_that_advance_on_spin_feeds() {
+        // Before this slice the watchdog structurally could not fire on a clock
+        // spin: its no-progress window is measured in virtual nanoseconds, and
+        // virtual time did not move. Now the rescue feeds it, so a budget the
+        // rescues walk past trips it — and it trips FIRST, long before the
+        // frozen-clock backstop's 256 rescues. One mechanism, cleanly.
+        let mut context =
+            Context::from_config(RuntimeConfig::seeded(1).with_liveness(LivenessConfig {
+                no_progress_budget_nanos: Some(5_000),
+                converge_budget_nanos: None,
+                heal_after_nanos: None,
+            }))
+            .unwrap();
+        let error = loop {
+            if let Err(error) = context.now(ClockKind::Monotonic) {
+                break error;
+            }
+        };
+        let RuntimeError::Liveness { kind, detail } = error else {
+            panic!("expected the liveness watchdog to fire first, got {error:?}");
+        };
+        assert_eq!(kind, LivenessKind::NoProgress);
+        assert!(detail.starts_with("PATINA_VIOLATION liveness detail=no-progress "));
+        // Fired at the third rescue (1+2+4 = 7 µs past a 5 µs budget), so the
+        // churn backstop was nowhere near its own trigger.
+        assert_eq!(context.spin.rescues, 3);
+        assert!(context.spin.rescues < SPIN_CHURN_ABORT_RESCUES);
+    }
+
+    #[test]
+    fn a_step_budget_abort_under_record_leaves_a_loadable_truncated_trace() {
+        // The artifact that would explain a wedge is exactly the one a budget
+        // abort used to destroy: `finish` is never reached in the interposed
+        // families, so the pre-created trace file stayed empty.
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("budget.patina");
+        let mut context =
+            Context::from_config(RuntimeConfig::record(4, &path, "budget-v1").with_step_budget(6))
+                .unwrap();
+        context.write_file("/a", b"one").unwrap();
+        context.write_file("/b", b"two").unwrap();
+        let error = context
+            .write_file("/c", b"three")
+            .expect_err("the budget must stop the run");
+        assert!(matches!(
+            error,
+            RuntimeError::StepBudgetExceeded { budget: 6 }
+        ));
+
+        // The trace exists, loads, and carries the operations up to the abort —
+        // truncated but structurally valid.
+        let bundle = TraceBundle::load(&path).expect("the truncated trace must load");
+        let events = &bundle.timelines[0].decisions;
+        assert_eq!(
+            events.len(),
+            6,
+            "every op performed before the stop is kept"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(&event.operation, Operation::FsWrite { .. }))
+        );
+        // `finish` must not write a second bundle over the flushed one.
+        context.finish().unwrap();
+        assert_eq!(
+            TraceBundle::load(&path).unwrap().timelines,
+            bundle.timelines
+        );
     }
 
     #[test]

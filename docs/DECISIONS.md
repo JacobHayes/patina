@@ -562,3 +562,69 @@ cluster so the fixes have citable symptom records.
   must NOT be used in this colocated repo (index staging triggers a jj
   working-copy reset that silently reverts the apply — plain `git apply`
   only). Full battery green over the merged tree.
+- **2026-08-13 — Advance-on-spin + the frozen-clock churn backstop.** Closes the
+  calibrating-guest gap the fastant probe found (`docs/probes/fastant-
+  calibration.md`): virtual time advanced when a guest *waited* (sleep) or when
+  every task was parked with a timer pending, but not when a guest was
+  *runnable* and doing nothing but reading the clock. That is the shape of a
+  startup calibration loop — `fastant`/`minstant`/`quanta` busy-wait for 10 ms
+  of monotonic progress inside a pre-`main` constructor — so the real unpatched
+  fastant guest hung forever at 100% CPU before `main`, and the audit called it
+  runnable. User-approved design (not relitigated): the baseline clock RATE
+  stays exactly 1 tick = 1 ns; per-op ticking was considered and rejected
+  (timestamp/op-count coupling, tick-size dilemma).
+  **The knobs and why.** K = 1024 consecutive clock-observation ops at unchanged
+  virtual time with no intervening progress op. The streak is broken by any
+  genuine effect and by time moving for any reason the rescue did not cause, so
+  real code cannot accumulate it; 1024 is an order of magnitude past even a
+  pathological polling loop, which is what keeps every existing recorded
+  artifact byte-identical (proven: the full workspace suite plus the workq and
+  pubsub batteries pass unmodified). Token = 1 µs doubling per rescue to a 1 ms
+  ceiling: the first rescue barely perturbs a guest that is merely polling hard,
+  while escalation converges a real wedge in tens of rescues (19 for a 10 ms
+  window) rather than millions of iterations, and the ceiling caps the overshoot
+  on that window at 10%. M = 256 rescues before the frozen-clock churn abort —
+  >250 ms of virtual time bought no progress, 25× the canonical window, so the
+  loop is ignoring the clock rather than waiting for it.
+  **Shape.** The advance rides the deadlock rescue's mechanism: a recorded
+  `SleepUntil` on the monotonic clock, clamped so it never steps over a
+  still-future timer deadline. The trigger is a pure function of the recorded op
+  stream and the driver's monotonic value, so it re-fires at the same op on
+  replay. This IS a semantic change — repeated `Instant::now()` at frozen time
+  is no longer idempotent — which is exactly why it is recorded rather than
+  re-decided. The churn abort reuses the established
+  `PATINA_VIOLATION liveness …` interface contract with `detail=frozen-clock-
+  churn`, so the campaign classifier routes it with no classifier change; a
+  matching `runtime_findings` entry lands on the facts channel. With time now
+  advancing during spins the generic liveness watchdog regains traction on this
+  class too (its window is measured in virtual ns); whichever mechanism trips
+  first stops the run, proven by a test that pits them against each other.
+  **Two related fixes.** (1) A `--record` run stopped by `--budget` used to
+  yield "empty trace file; record finalization did not complete" — the abort
+  skips the atexit shutdown that is `Context::finish`'s only native-family
+  caller, so the one artifact that would explain a wedge was exactly what you
+  lost. Runtime-initiated stops (budget, churn) now flush a truncated-but-valid
+  trace first, at most once (the native transport is an append-only fd, so
+  `finish` skips its write after a flush). Deliberately scoped to runtime stops:
+  a guest that calls `abort()` itself still leaves no trace, and that existing
+  contract is untouched. (2) The audit/gate TSC notes said "Runnable on x86-64
+  Linux", which overclaimed; they now keep manageable and runnable distinct and
+  name both new outcomes.
+  **Evidence.** Local: RED proven by disabling the rescue (the calibration test
+  runs >118 s without finishing; with it the whole 107-test runtime suite takes
+  0.19 s). x86-64 Linux sandbox (`lj32pbzg7js2u8hlme5mm`, terminated): the
+  UNPATCHED fastant guest now runs to completion in ~1 s, derives exactly 1 GHz
+  in all three windows, three same-seed runs byte-identical, record→replay
+  byte-identical. Trace: 30,782 events / 3.45 MB, of which 33 `sleep_until` —
+  30 spin rescues (first at seq 1024, then every 1025 ops, ladder 1→2→4…→1000 µs
+  and holding) and 3 guest sleeps; the last rescue lands at 21,023,000 ns, which
+  is exactly the anchor offset the guest prints. Two orders of magnitude under
+  the 1M-event cap.
+  **Disclosed, not fixed here.** A native replay whose runtime init fails (e.g. a
+  `--fingerprint` mismatch) manifests as an infinite spin rather than the usual
+  loud abort *for a guest whose only boundary ops are clock reads*, because
+  `patina_clock_now`'s bootstrap window answers 0 without calling
+  `ensure_runtime`. Pre-existing and orthogonal to this slice (such a guest hung
+  either way before), but it is a fail-closed hole now that these guests
+  otherwise run: any other first op aborts loudly. Worth its own slice in the
+  shim bootstrap.

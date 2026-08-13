@@ -1806,6 +1806,12 @@ fn runtime_errno(error: &RuntimeError) -> c_int {
             eprintln!("PATINA_CUSTOM_OP_REFUSED label={label}\npatina: {detail}");
             abort_after_flushing_output()
         }
+        // Frozen-clock churn is the same fail-closed shape: the guest is in a
+        // loop that ignores the clock it reads, so advance-on-spin cannot free
+        // it and an errno it could swallow would just resume the spin. The
+        // runtime has already emitted the classifiable marker and flushed the
+        // truncated trace.
+        RuntimeError::FrozenClockChurn { .. } => abort_after_flushing_output(),
         RuntimeError::Config(_)
         | RuntimeError::Io { .. }
         | RuntimeError::Trace(_)

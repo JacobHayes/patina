@@ -960,6 +960,15 @@ impl Recorder {
     pub fn into_bundle(self) -> TraceBundle {
         TraceBundle::new(self.metadata, self.decisions)
     }
+
+    /// A bundle of the decisions recorded SO FAR, leaving the recorder usable.
+    /// The runtime writes one of these when a run is stopped mid-flight (step
+    /// budget exhausted, frozen-clock churn) and the consuming
+    /// [`Recorder::into_bundle`] at finalization is never reached — a truncated
+    /// but structurally valid trace beats the empty file the abort would leave.
+    pub fn to_bundle(&self) -> TraceBundle {
+        TraceBundle::new(self.metadata.clone(), self.decisions.clone())
+    }
 }
 
 pub struct Replayer {

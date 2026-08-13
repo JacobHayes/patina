@@ -495,7 +495,10 @@ pub fn render_tsc_managed_note(managed: &[NativeEscape], subject: &str) -> Optio
         "patina: {} timestamp-counter instruction site(s) in {subject} are trap-managed: \
          rdtsc/rdtscp raise SIGSEGV via prctl(PR_SET_TSC) and are answered from the run's virtual \
          clock (1 GHz nominal, so a tick is a virtual nanosecond). These are contained, not \
-         escapes — the run stays deterministic.",
+         escapes — the run stays deterministic. Determinism is not progress: a guest that \
+         calibrates the counter by busy-waiting on clock deltas is carried by the advance-on-spin \
+         rescue, and one that spins without consulting the value stops with a named \
+         frozen-clock-churn abort rather than hanging.",
         managed.len()
     ))
 }
