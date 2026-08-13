@@ -4,8 +4,10 @@ Status: design approved 2026-08-12 (shape chosen: SDK custom-op API first;
 declarative symbol models as the documented escalation; raw shim-extension ABI
 explicitly not chosen). **Wave A landed** — record/replay custom operations
 across all three families (ARCHITECTURE.md, "The custom-operation ABI";
-IMPLEMENTATION.md item 16). Waves B (seeded custom-op faults) and C
-(docs/skill) are open.
+IMPLEMENTATION.md item 16). **Wave B landed** — seeded custom-op faults
+(`--custom-op-fail-permille`) as a first-class `FaultKnob`, the compiler-walked
+knob consolidation described in `docs/arcs/unified-fault-knobs.md`. Wave C
+(docs/skill) is open.
 
 ## 1. Problem
 
@@ -87,13 +89,42 @@ let bytes = patina_dst::custom_op("s3.get_object", &request_key, || {
 
 The point of Patina is fault injection, not just record/replay. A custom op is
 injectable on the same rate-based, domain-separated PRF path as the built-in
-[[patina-yield-points]]/fault knobs: a guest can declare that `s3.get_object`
-may fail with a seeded probability, and the campaign's fault vector can carry
-it. The op declares its failure shape (an error value the guest handles), and
-the reducer/campaign treat it as one more knob — which is what makes it
-first-class rather than a bolt-on. The custom-op fault plane reports vacuity
-like every other plane (a declared custom fault that never fired is a coverage
-gap, surfaced loudly).
+fault knobs: a guest can declare that `s3.get_object` may fail with a seeded
+probability, and the campaign's fault vector carries it. The op declares its
+failure shape (an error value the guest handles), and the reducer/campaign treat
+it as one more knob — which is what makes it first-class rather than a bolt-on.
+
+**The declaration is one bit on the ABI, and the failure value never crosses
+it.** `custom_op_begin` gained a `fault_eligible` argument and a third answer
+(`2` = "a fault fired"); the guest's `on_fault` closure supplies the value.
+That split is the narrowest change that works, and it is not only narrow but
+correct: only the guest's own types know a value its call site can return, so
+Patina decides *whether* the operation fails and the guest decides *what that
+means*. Carrying the failure payload over the ABI instead would have pinned the
+guest's encoding into the boundary — the very coupling §6 exists to avoid.
+
+The fired fault is recorded as the operation's `Outcome::Error`, not as bytes
+that happen to spell a failure, so replay reproduces it without re-drawing and
+`cargo patina trace` can tell an injected fault from an upstream one the guest
+really saw. Replay never re-consults eligibility — the trace is authoritative —
+but a call site that has since dropped its declaration is refused by name rather
+than handed a value it cannot return.
+
+Each label draws from its own child stream (`fault_domain::CUSTOM_OP_FAULT`
+keyed by the label hash), so arming a fault on one operation class never shifts
+another's decisions.
+
+**Vacuity is stricter here than on any other plane.** Elsewhere zero
+opportunities simply means there was nothing to fault: a run that did no
+filesystem I/O had no filesystem. But a fault-eligible custom op exists only
+because the guest declared one, so an armed knob that reached none is a coverage
+claim with nothing behind it — `PATINA_CUSTOMOP_FAULT_REPORT` reports
+`vacuous=1` for it, and a campaign generation files it under
+`VACUOUS_CUSTOM_OP_FAULT`. That is also why the campaign band is opt-in
+(`campaign --custom-op-faults`, alongside `--faults`): banding it over a guest
+that declares nothing would put a provably inert knob, and its vacuity class,
+into every generation — the same reasoning that makes the DNS band ride on
+`--dns-entry`.
 
 ### 3.3 What it is NOT allowed to do
 
@@ -135,10 +166,22 @@ primitive"); the custom-op ABI reuses its trace-event and label machinery.
   protects. One enforcement beyond the sketch: a `perform` that performs a
   *modeled* boundary operation is refused at record time, since replay skips
   `perform` and could never reproduce those events.
-- **Wave B — seeded custom-op faults.** Declared failure shape on the
-  domain-separated PRF path; campaign fault-vector row; per-plane vacuity
-  report; band-or-waiver gate. Acceptance: a planted custom-op fault is
-  campaign-fireable, non-vacuous, and caught+minimized like a built-in knob.
+- **Wave B — seeded custom-op faults. LANDED.** `--custom-op-fail-permille` as a
+  `FaultKnob` variant, so the compiler walked it to every consumer: registry row,
+  control-plane forwarding, trace record and replay reconcile, swarm class
+  (`custom_op_fail`), campaign band (generation byte 30) and vacuity class
+  (`VACUOUS_CUSTOM_OP_FAULT`), plus the `PATINA_CUSTOMOP_FAULT_REPORT` line and
+  its `custom_op` facts plane. The SDK grew `custom_op_bytes_faultable` and (with
+  the `custom-ops` feature) `custom_op_faultable`; `Context::custom_op_faultable`
+  is the cargo-family mirror. Acceptance met: a guest whose retry policy
+  mishandles its own declared failure only under a two-in-a-row fault pattern is
+  found by an ordinary `campaign --faults --custom-op-faults` and classified
+  through its own verdict, while the same campaign without the band is clean.
+  Two design decisions beyond the sketch: the failure VALUE stays guest-side
+  (§3.2), and zero eligible operations counts as vacuous, which no other plane
+  does. Not in scope, and deferred deliberately: minimization of a custom-op
+  fault vector — the knob is one per-mille rate, so the existing generic
+  reducer already shrinks it, but that has not been demonstrated end to end.
 - **Wave C — docs/skill.** The guest-patterns skill gains a custom-op section;
   ARCHITECTURE/VALIDATION/llms.txt updated; help registry rows.
 

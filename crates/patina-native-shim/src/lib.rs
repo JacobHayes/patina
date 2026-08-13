@@ -4410,12 +4410,21 @@ pub unsafe extern "C" fn patina_verdict(
 //
 // The protocol, which the SDK's `custom_op_bytes` drives:
 //
-//   1. `patina_custom_op_begin(label, key, &out_len)`
+//   1. `patina_custom_op_begin(label, key, fault_eligible, &out_len)`
 //        -> 0: record pass. Run `perform`, then call `patina_custom_op_record`.
 //        -> 1: replay pass. Do NOT run `perform`; `out_len` is the recorded
 //              result's length, fetched with `patina_custom_op_replay_result`.
+//        -> 2: a seeded fault fired (or the recording holds one). Do NOT run
+//              `perform`; return the failure the call declared. The operation is
+//              already closed — there is no phase-2 call.
 //   2a. `patina_custom_op_record(result, result_len)` closes a record pass.
 //   2b. `patina_custom_op_replay_result(out, out_cap)` closes a replay pass.
+//
+// `fault_eligible` (nonzero) is the guest's declaration that this call has a
+// failure shape it handles, which is what `--custom-op-fail-permille` acts on.
+// The declared failure itself never crosses the boundary: only the guest's own
+// types know a value the call site can return, so the shim decides WHETHER the
+// operation fails and the guest supplies WHAT that means.
 //
 // Every runtime-level refusal (a replay divergence on the label or key, a nested
 // or unclosed operation, a modeled effect performed inside `perform`) is fatal:
@@ -4424,8 +4433,9 @@ pub unsafe extern "C" fn patina_verdict(
 // malformed arguments — a non-UTF-8 label, a null pointer with a nonzero length —
 // return `EINVAL`, because those are the guest's own call being wrong.
 
-/// Announce a custom operation; returns 0 for "record pass, run `perform`" or 1
-/// for "replay pass, the answer is recorded". See the module comment above.
+/// Announce a custom operation; returns 0 for "record pass, run `perform`", 1
+/// for "replay pass, the answer is recorded", or 2 for "seeded fault, return the
+/// declared failure". See the module comment above.
 ///
 /// # Safety
 /// `label`/`key` must describe live slices of the given lengths (or be null with
@@ -4436,6 +4446,7 @@ pub unsafe extern "C" fn patina_custom_op_begin(
     label_len: usize,
     key: *const u8,
     key_len: usize,
+    fault_eligible: c_int,
     out_len: *mut usize,
 ) -> c_int {
     // SAFETY: the caller passes live slices.
@@ -4449,7 +4460,7 @@ pub unsafe extern "C" fn patina_custom_op_begin(
     if out_len.is_null() {
         return fail(EINVAL);
     }
-    match with_context(|context| context.custom_op_begin(label, key)) {
+    match with_context(|context| context.custom_op_begin(label, key, fault_eligible != 0)) {
         Ok(CustomOpMode::Record) => {
             // SAFETY: checked non-null above; the caller guarantees writability.
             unsafe { out_len.write(0) };
@@ -4459,6 +4470,11 @@ pub unsafe extern "C" fn patina_custom_op_begin(
             // SAFETY: checked non-null above; the caller guarantees writability.
             unsafe { out_len.write(len) };
             1
+        }
+        Ok(CustomOpMode::Fault) => {
+            // SAFETY: checked non-null above; the caller guarantees writability.
+            unsafe { out_len.write(0) };
+            2
         }
         Err(errno) => fail(errno),
     }

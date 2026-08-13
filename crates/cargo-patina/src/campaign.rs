@@ -114,6 +114,16 @@ pub struct CampaignSpec {
     pub pct: bool,
     /// Randomize fault knobs (net drop, sleep jitter) per generation.
     pub faults: bool,
+    /// Band the custom-op failure knob (`--custom-op-fail-permille`) under
+    /// [`Self::faults`].
+    ///
+    /// Opt-in for the same reason the DNS band rides on [`Self::dns_entries`]:
+    /// a custom operation is fault-eligible only if the GUEST declared a failure
+    /// shape for it, so over a guest that declared none the knob provably cannot
+    /// fire and every generation would report a vacuous custom-op plane. Whether
+    /// the guest declares one is a fact about the guest, which only the operator
+    /// can tell the campaign.
+    pub custom_op_faults: bool,
     /// The DNS host table (`NAME=ADDR` entries) every generation runs with.
     ///
     /// Part of the campaign's shape rather than a per-generation draw: the names
@@ -172,6 +182,7 @@ impl Default for CampaignSpec {
             swarm: false,
             pct: false,
             faults: false,
+            custom_op_faults: false,
             dns_entries: Vec::new(),
             harness: false,
             allow_symbols: Vec::new(),
@@ -217,6 +228,7 @@ impl CampaignSpec {
                 "swarm" => self.swarm = json_bool(key, val)?,
                 "pct" => self.pct = json_bool(key, val)?,
                 "faults" => self.faults = json_bool(key, val)?,
+                "custom_op_faults" => self.custom_op_faults = json_bool(key, val)?,
                 "dns_entries" => {
                     let array = val
                         .as_array()
@@ -282,7 +294,8 @@ impl CampaignSpec {
                 other => {
                     return Err(CliError(format!(
                         "unknown campaign spec key {other:?}; expected generations, seed_base, \
-                         timeout_secs, guest_args, buggify, swarm, pct, faults, dns_entries, \
+                         timeout_secs, guest_args, buggify, swarm, pct, faults, custom_op_faults, \
+                         dns_entries, \
                          harness, allow_symbols, allow_unsupported_symbols, watchdog_nanos, \
                          converge_nanos, heal_after_nanos, report, plateau_after, guided, \
                          allow_unmet_sometimes, or classify"
@@ -573,6 +586,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     spec.swarm |= args.flag("--swarm");
     spec.pct |= args.flag("--sched-pct");
     spec.faults |= args.flag("--faults");
+    spec.custom_op_faults |= args.flag("--custom-op-faults");
     spec.report |= args.flag("--report-failures");
     let dns_entries = args.texts("--dns-entry");
     if !dns_entries.is_empty() {
@@ -766,6 +780,14 @@ pub enum CampaignClass {
     /// reason [`CampaignClass::VacuousDnsFault`] is not folded into
     /// [`CampaignClass::VacuousFsFault`].
     VacuousClockFault,
+    /// A configured custom-op fault class was vacuous: either the generation
+    /// executed no fault-eligible custom operation at all, or it executed enough
+    /// of them for the enabled failure knob to have fired several times over yet
+    /// it applied zero faults. The zero-opportunity half has no analogue in the
+    /// classes above, and that is the point — a fault-eligible custom op exists
+    /// only because the guest declared one, so arming the knob over a guest or a
+    /// path that offers none is a coverage claim with nothing behind it.
+    VacuousCustomOpFault,
     /// `--swarm` was requested for a generation with no swarm-maskable fault class
     /// enabled, so the draw had zero candidates: it neither kept nor dropped
     /// anything and the generation explored exactly what a non-swarm generation
@@ -813,6 +835,7 @@ impl CampaignClass {
         CampaignClass::VacuousNetFault,
         CampaignClass::VacuousEntropyFault,
         CampaignClass::VacuousClockFault,
+        CampaignClass::VacuousCustomOpFault,
         CampaignClass::VacuousSwarm,
         CampaignClass::GuestAbort,
         CampaignClass::FailClosedAbort,
@@ -832,6 +855,7 @@ impl CampaignClass {
             CampaignClass::VacuousNetFault => "VACUOUS_NET_FAULT",
             CampaignClass::VacuousEntropyFault => "VACUOUS_ENTROPY_FAULT",
             CampaignClass::VacuousClockFault => "VACUOUS_CLOCK_FAULT",
+            CampaignClass::VacuousCustomOpFault => "VACUOUS_CUSTOM_OP_FAULT",
             CampaignClass::GuestAbort => "GUEST_ABORT",
             CampaignClass::FailClosedAbort => "FAIL_CLOSED_ABORT",
             CampaignClass::StarvationStall => "STARVATION_STALL",
@@ -856,6 +880,7 @@ impl CampaignClass {
             CampaignClass::VacuousNetFault => Some("net"),
             CampaignClass::VacuousEntropyFault => Some("entropy"),
             CampaignClass::VacuousClockFault => Some("clock"),
+            CampaignClass::VacuousCustomOpFault => Some("custom_op"),
             CampaignClass::VacuousSwarm => Some("swarm"),
             _ => None,
         }
@@ -1623,6 +1648,13 @@ fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     map.insert("swarm".into(), spec.swarm.into());
     map.insert("pct".into(), spec.pct.into());
     map.insert("faults".into(), spec.faults.into());
+    // Default-omitted for the same reason as the keys below: a spec that does
+    // not declare custom-op faults records exactly the JSON it did before this
+    // key existed, so an out-dir written by an earlier build still round-trips
+    // on `--resume`.
+    if spec.custom_op_faults {
+        map.insert("custom_op_faults".into(), true.into());
+    }
     // Emitted only when the campaign HAS a host table, so a DNS-free spec's
     // recorded JSON is byte-identical to what it was before the key existed and
     // an out-dir written by an earlier build still round-trips on `--resume`.
@@ -2838,6 +2870,7 @@ mod gen_byte {
     pub(super) const NET_TCP_BUFFER: usize = 27;
     pub(super) const ENTROPY_FAIL: usize = 28;
     pub(super) const EPOCH_JUMP: usize = 29;
+    pub(super) const CUSTOM_OP_FAIL: usize = 30;
 
     /// The bands no fault knob owns, for the disjointness gate. The fault knobs'
     /// own claims come from [`super::campaign_band`], so this list is only the
@@ -2886,6 +2919,12 @@ fn campaign_band(knob: FaultKnob) -> Option<&'static [usize]> {
         FaultKnob::NetTcpBufferBytes => Some(&[gen_byte::NET_TCP_BUFFER]),
         FaultKnob::EntropyFailPermille => Some(&[gen_byte::ENTROPY_FAIL]),
         FaultKnob::EpochJumpNanos => Some(&[gen_byte::EPOCH_JUMP]),
+        // Banded, but emitted only for a spec that declares `--custom-op-faults`
+        // — the same shape as the DNS knobs riding on `--dns-entry`. A guest
+        // whose custom operations declare no failure shape has nothing this knob
+        // could fail, so banding it unconditionally would put a provably inert
+        // knob, and its vacuity class, into every campaign generation.
+        FaultKnob::CustomOpFailPermille => Some(&[gen_byte::CUSTOM_OP_FAIL]),
         // WAIVED (see `BAND_WAIVERS`) — a partition names virtual ADDRESSES the
         // guest actually uses, which the campaign has no generic pool for (unlike
         // `--dns-entry`, there is no `spec.net_partitions` list of candidate
@@ -2948,6 +2987,7 @@ fn vacuity_class(knob: FaultKnob) -> Option<CampaignClass> {
         }
         FaultKnob::EntropyFailPermille => Some(CampaignClass::VacuousEntropyFault),
         FaultKnob::EpochJumpNanos => Some(CampaignClass::VacuousClockFault),
+        FaultKnob::CustomOpFailPermille => Some(CampaignClass::VacuousCustomOpFault),
         // `NetFaultReport` carries one combined `vacuous=` bit over all seven of
         // these classes (drop/jitter/latency/duplicate/connect-refuse/reset/
         // partition all share one report line), so they share the one
@@ -3173,6 +3213,22 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
             "--epoch-jump-nanos",
             RunValue::Int(epoch_jump_hi),
         );
+        // Opt-in, on the same reasoning as the DNS band below: whether a custom
+        // operation is fault-eligible is the GUEST's declaration, and over a
+        // guest that declares none the knob provably cannot fire. Every
+        // generation would then report a vacuous custom-op plane — a true
+        // statement about a band that should never have been emitted. Once
+        // declared it is family-agnostic: a custom op is guest code, so all
+        // three families have them.
+        if spec.custom_op_faults {
+            let custom_op_fail =
+                u32::from(band_byte(hash, FaultKnob::CustomOpFailPermille, 0)) * 200 / 255; // [0, 200] permille
+            push_run_flag(
+                &mut flags,
+                "--custom-op-fail-permille",
+                RunValue::Int(u64::from(custom_op_fail)),
+            );
+        }
         // The DNS band rides on the host table, which is spec config rather than a
         // per-generation draw: with no defined name every lookup is NXDOMAIN by
         // SEMANTICS and no DNS fault is ever eligible, so banding the knobs there
@@ -4580,6 +4636,7 @@ fn selftest() -> Result<i32, CliError> {
         ("net", CampaignClass::VacuousNetFault),
         ("entropy", CampaignClass::VacuousEntropyFault),
         ("clock", CampaignClass::VacuousClockFault),
+        ("custom_op", CampaignClass::VacuousCustomOpFault),
         ("swarm", CampaignClass::VacuousSwarm),
     ] {
         check(
@@ -5096,6 +5153,7 @@ mod tests {
             classify(&planted(RunFacts::ok().vacuous("net"), ""), &rules),
             classify(&planted(RunFacts::ok().vacuous("entropy"), ""), &rules),
             classify(&planted(RunFacts::ok().vacuous("clock"), ""), &rules),
+            classify(&planted(RunFacts::ok().vacuous("custom_op"), ""), &rules),
             classify(&planted(RunFacts::ok().vacuous("swarm"), ""), &rules),
             classify(
                 &planted(RunFacts::ok().exit(SIGABRT_EXIT).signal(SIGABRT), ""),
@@ -5911,6 +5969,7 @@ mod tests {
                 "--net-tcp-buffer-bytes",
                 "--entropy-fail-permille",
                 "--epoch-jump-nanos",
+                "--custom-op-fail-permille",
                 "--dns-fail-permille",
                 "--dns-latency-nanos",
             ]

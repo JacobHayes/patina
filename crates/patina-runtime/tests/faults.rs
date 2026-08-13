@@ -6,7 +6,8 @@ use std::collections::BTreeSet;
 
 use patina_dst_abi::{ClockKind, ErrorCode, OpenFlags, SendDisposition};
 use patina_dst_driver_api::{
-    ClockFaultReport, DnsFaultReport, EntropyFaultReport, FsFaultReport, NetFaultReport,
+    ClockFaultReport, CustomOpFaultReport, DnsFaultReport, EntropyFaultReport, FsFaultReport,
+    NetFaultReport,
 };
 use patina_dst_runtime::{Context, CrashOp, RuntimeConfig, TornGranularity};
 use tempfile::tempdir;
@@ -1255,4 +1256,247 @@ fn datagram_delivery_times(config: RuntimeConfig) -> Vec<u64> {
         .collect();
     context.finish().unwrap();
     times
+}
+
+// ---------------------------------------------------------------------------
+// Custom-operation failure injection (docs/arcs/custom-ops.md, Wave B)
+// ---------------------------------------------------------------------------
+
+/// Run `count` custom operations under one context and report, per operation,
+/// whether the guest got its declared failure instead of the real result, plus
+/// the run's custom-op fault report. `eligible` is the guest's declaration that
+/// the operation has a failure shape.
+///
+/// The `perform` closure bumps a counter rather than doing I/O, so "did the
+/// wrapped effect run?" is answered directly rather than inferred.
+fn custom_ops(
+    config: RuntimeConfig,
+    label: &str,
+    count: usize,
+    eligible: bool,
+) -> (Vec<bool>, usize, Option<CustomOpFaultReport>) {
+    let mut context = Context::from_config(config).unwrap();
+    let mut performed = 0;
+    let mut failed = Vec::new();
+    for index in 0..count {
+        let value: String = if eligible {
+            context
+                .custom_op_faultable(
+                    label,
+                    &index,
+                    || "FAILED".to_string(),
+                    || {
+                        performed += 1;
+                        "ok".to_string()
+                    },
+                )
+                .unwrap()
+        } else {
+            context
+                .custom_op(label, &index, || {
+                    performed += 1;
+                    "ok".to_string()
+                })
+                .unwrap()
+        };
+        failed.push(value == "FAILED");
+    }
+    let report = context.custom_op_fault_report();
+    context.finish().unwrap();
+    (failed, performed, report)
+}
+
+#[test]
+fn a_custom_op_without_the_knob_performs_and_reports_nothing() {
+    let (failed, performed, report) = custom_ops(RuntimeConfig::seeded(1), "s3.get", 4, true);
+    assert_eq!(failed, vec![false; 4], "no knob is live, so nothing fails");
+    assert_eq!(performed, 4);
+    assert!(report.is_none(), "no custom-op knob was live, so no report");
+}
+
+#[test]
+fn the_custom_op_failure_knob_fires_and_never_runs_perform() {
+    // MUST fail: a certain rate hands back the guest's declared failure for
+    // every eligible operation, and `perform` does not run at all — the fault
+    // replaces the effect rather than discarding its result.
+    let (failed, performed, report) = custom_ops(
+        RuntimeConfig::seeded(4).with_custom_op_fail_permille(1000),
+        "s3.get",
+        4,
+        true,
+    );
+    assert_eq!(failed, vec![true; 4]);
+    assert_eq!(performed, 0, "a faulted operation must not perform");
+    let report = report.expect("a live knob reports");
+    assert_eq!(report.eligible_ops, 4);
+    assert_eq!(report.faults_injected, 4);
+    assert!(!report.is_vacuous());
+}
+
+#[test]
+fn an_op_that_declares_no_failure_shape_is_never_faulted() {
+    // The control: the same certain rate over the same label, with the guest
+    // declaring nothing. Eligibility is the guest's call, so the knob passes it
+    // by — and the plane says so by counting zero opportunities, which is
+    // vacuous rather than quietly clean.
+    let (failed, performed, report) = custom_ops(
+        RuntimeConfig::seeded(4).with_custom_op_fail_permille(1000),
+        "s3.get",
+        4,
+        false,
+    );
+    assert_eq!(failed, vec![false; 4]);
+    assert_eq!(performed, 4);
+    let report = report.expect("a live knob reports");
+    assert_eq!(report.eligible_ops, 0);
+    assert_eq!(report.faults_injected, 0);
+    assert!(
+        report.is_vacuous(),
+        "an armed knob with nothing eligible is a coverage failure, not a clean run"
+    );
+}
+
+#[test]
+fn an_armed_run_that_reaches_no_custom_op_at_all_is_vacuous() {
+    // The other half of the honesty rule: a guest with no declarations at all
+    // (here, no custom operations at all) plus the knob is vacuous too. That is
+    // stricter than every other plane, where zero traffic simply means nothing
+    // to fault — and deliberately so, because a fault-eligible custom op exists
+    // only if the guest wrote one.
+    let context =
+        Context::from_config(RuntimeConfig::seeded(4).with_custom_op_fail_permille(500)).unwrap();
+    let report = context.custom_op_fault_report().expect("live knob");
+    context.finish().unwrap();
+    assert_eq!(report.eligible_ops, 0);
+    assert!(report.is_vacuous());
+
+    // RED twin: the same report shape with the knob unarmed produces no report
+    // at all, so an unarmed run can never trip the class.
+    let context = Context::from_config(RuntimeConfig::seeded(4)).unwrap();
+    assert!(context.custom_op_fault_report().is_none());
+    context.finish().unwrap();
+}
+
+#[test]
+fn a_custom_op_knob_that_never_fired_over_eligible_ops_is_diagnosed_vacuous() {
+    // Built by hand: a correctly wired knob cannot produce this, which is what
+    // makes it a detector rather than an assertion about today's behavior.
+    let inert = CustomOpFaultReport {
+        eligible_ops: 40,
+        fail_vacuity_diagnosable: true,
+        faults_injected: 0,
+    };
+    assert!(inert.is_vacuous());
+    let live = CustomOpFaultReport {
+        eligible_ops: 40,
+        fail_vacuity_diagnosable: true,
+        faults_injected: 3,
+    };
+    assert!(!live.is_vacuous());
+
+    // A rate too low to be expected to fire is not diagnosable, so a healthy
+    // sparse run never trips the warning.
+    let (_, _, sparse) = custom_ops(
+        RuntimeConfig::seeded(9).with_custom_op_fail_permille(1),
+        "s3.get",
+        1,
+        true,
+    );
+    let sparse = sparse.expect("live knob");
+    assert!(!sparse.fail_vacuity_diagnosable);
+    assert!(!sparse.is_vacuous());
+}
+
+#[test]
+fn custom_op_fault_streams_are_domain_separated_per_label() {
+    // Two labels under one seed and one rate must not draw the same pattern: a
+    // shared coin would make arming a fault on one operation class shift the
+    // other's decisions, and would make a campaign's per-class coverage a lie.
+    let pattern = |label: &str| {
+        custom_ops(
+            RuntimeConfig::seeded(7).with_custom_op_fail_permille(500),
+            label,
+            24,
+            true,
+        )
+        .0
+    };
+    let left = pattern("s3.get");
+    let right = pattern("kms.decrypt");
+    assert_ne!(left, right, "two labels must not share a coin");
+    // ... and each label's own pattern is stable across runs at the same seed.
+    assert_eq!(left, pattern("s3.get"));
+
+    // A different seed explores a different pattern.
+    let other_seed = custom_ops(
+        RuntimeConfig::seeded(8).with_custom_op_fail_permille(500),
+        "s3.get",
+        24,
+        true,
+    )
+    .0;
+    assert_ne!(left, other_seed, "seed variation must change the schedule");
+}
+
+#[test]
+fn custom_op_faults_replay_self_contained_without_re_supplying_the_flag() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("custom-op-fault.patina");
+    let (recorded, performed, report) = custom_ops(
+        RuntimeConfig::record(4, &path, "patina-test").with_custom_op_fail_permille(500),
+        "s3.get",
+        24,
+        true,
+    );
+    let report = report.expect("live knob");
+    assert!(
+        report.faults_injected > 0 && report.faults_injected < 24,
+        "the fixture needs a MIX of faulted and performed ops: {report:?}"
+    );
+    assert_eq!(performed, 24 - report.faults_injected as usize);
+
+    // Flag-free replay: the trace restores the knob, and every faulted operation
+    // replays as the same fault at the same position.
+    let (replayed, replay_performed, _) = custom_ops(
+        RuntimeConfig::replay(&path, "patina-test"),
+        "s3.get",
+        24,
+        true,
+    );
+    assert_eq!(replayed, recorded);
+    assert_eq!(
+        replay_performed, 0,
+        "replay reproduces every operation from the recording, faulted or not"
+    );
+
+    // The trace is the authority: a conflicting knob at replay fails closed
+    // rather than silently running a different fault schedule.
+    let conflicting = RuntimeConfig::replay(&path, "patina-test").with_custom_op_fail_permille(1);
+    assert!(Context::from_config(conflicting).is_err());
+}
+
+#[test]
+fn a_recorded_fault_replays_without_consulting_eligibility() {
+    // The trace is authoritative, so the replay never redraws — but a call site
+    // that dropped its failure declaration has no value to return for a
+    // recorded fault, and is refused by name rather than handed something
+    // invented.
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("custom-op-fault-drop.patina");
+    let (recorded, _, _) = custom_ops(
+        RuntimeConfig::record(4, &path, "patina-test").with_custom_op_fail_permille(1000),
+        "s3.get",
+        1,
+        true,
+    );
+    assert_eq!(recorded, vec![true]);
+
+    let mut context = Context::from_config(RuntimeConfig::replay(&path, "patina-test")).unwrap();
+    let error = context
+        .custom_op::<String, usize>("s3.get", &0, || "ok".to_string())
+        .expect_err("a recorded fault needs a declared failure shape");
+    assert!(
+        error.to_string().contains("s3.get") && error.to_string().contains("declares no failure"),
+        "{error}"
+    );
 }

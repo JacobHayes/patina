@@ -236,6 +236,11 @@ pub const ENV_DNS_FAIL_PERMILLE: &str = "PATINA_DNS_FAIL_PERMILLE";
 /// Seeded guest entropy-request failure probability in per-mille (0..=1000),
 /// applied to every `Context::entropy_bytes` call. Off (zero) when unset.
 pub const ENV_ENTROPY_FAIL_PERMILLE: &str = "PATINA_ENTROPY_FAIL_PERMILLE";
+/// Seeded guest custom-operation failure probability in per-mille (0..=1000),
+/// applied to every custom operation the guest declared fault-eligible. On fire
+/// the operation's `perform` closure does not run and the guest is handed the
+/// failure it declared. Off (zero) when unset.
+pub const ENV_CUSTOM_OP_FAIL_PERMILLE: &str = "PATINA_CUSTOM_OP_FAIL_PERMILLE";
 /// Seeded realtime-epoch jump magnitude in nanoseconds. Every
 /// `Context::now(ClockKind::Realtime)` read draws a signed offset uniformly in
 /// `[-hi, hi]` and applies it to that one read (saturating at 0), so wall time
@@ -272,6 +277,9 @@ pub const ENV_ENTROPY_FAULT_REPORT: &str = "PATINA_ENTROPY_FAULT_REPORT";
 /// fault-injection diagnostic when set to a false-y value (`0`, `off`, `false`,
 /// `no`).
 pub const ENV_CLOCK_FAULT_REPORT: &str = "PATINA_CLOCK_FAULT_REPORT";
+/// Suppress the default-on end-of-run custom-operation fault-injection
+/// diagnostic when set to a false-y value (`0`, `off`, `false`, `no`).
+pub const ENV_CUSTOMOP_FAULT_REPORT: &str = "PATINA_CUSTOMOP_FAULT_REPORT";
 /// Enable cooperative-SUT (buggify) fault injection. Its value is the
 /// per-evaluation firing probability in per-mille for an active site (0..=1000);
 /// an empty value uses the FoundationDB default of 25% (250). Presence of the
@@ -389,6 +397,9 @@ pub enum Report {
     /// `PATINA_CLOCK_FAULT_REPORT` — guest realtime-epoch jump fault-injection
     /// accounting.
     ClockFault,
+    /// `PATINA_CUSTOMOP_FAULT_REPORT` — guest custom-operation fault-injection
+    /// accounting.
+    CustomOpFault,
     /// `PATINA_COVERAGE_REPORT` — native yield-point edge coverage, emitted by
     /// the shim at its own finalization point rather than by [`Context::finish`].
     Coverage,
@@ -401,7 +412,7 @@ impl Report {
     /// Every report, in declaration order. Family plumbing (the native child's
     /// environment, a campaign's pinned child diagnostics) iterates THIS, so a
     /// report added here cannot be carried by one family and dropped by another.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Schedule,
         Self::SchedulePolicy,
         Self::Swarm,
@@ -412,6 +423,7 @@ impl Report {
         Self::NetFault,
         Self::EntropyFault,
         Self::ClockFault,
+        Self::CustomOpFault,
         Self::Coverage,
         Self::Depth,
     ];
@@ -430,6 +442,7 @@ impl Report {
             Self::NetFault => ENV_NET_FAULT_REPORT,
             Self::EntropyFault => ENV_ENTROPY_FAULT_REPORT,
             Self::ClockFault => ENV_CLOCK_FAULT_REPORT,
+            Self::CustomOpFault => ENV_CUSTOMOP_FAULT_REPORT,
             Self::Coverage => ENV_COVERAGE_REPORT,
             Self::Depth => ENV_DEPTH_REPORT,
         }
@@ -702,6 +715,7 @@ pub struct FaultConfig {
     pub clock: ClockFaultConfig,
     pub dns: DnsFaultConfig,
     pub entropy: EntropyFaultConfig,
+    pub custom_op: CustomOpFaultConfig,
 }
 
 /// Filesystem fault knobs.
@@ -771,6 +785,21 @@ pub struct DnsFaultConfig {
 pub struct EntropyFaultConfig {
     /// Seeded entropy-request failure probability in per-mille (0..=1000). On
     /// fire, the request returns a deterministic named error instead of bytes.
+    pub fail_permille: u16,
+}
+
+/// Guest custom-operation fault knobs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CustomOpFaultConfig {
+    /// Seeded failure probability in per-mille (0..=1000) for custom operations
+    /// the guest declared fault-eligible. On fire the operation's `perform`
+    /// closure does NOT run and the guest receives the failure it declared,
+    /// exactly as if the wrapped effect had failed.
+    ///
+    /// Applies only to declared-eligible operations: a custom op that declares
+    /// no failure shape has no error the runtime could invent for it, and
+    /// inventing one would mean handing a guest a value its own type does not
+    /// admit.
     pub fail_permille: u16,
 }
 
@@ -1146,6 +1175,14 @@ impl RuntimeConfig {
         self
     }
 
+    /// Fail guest custom operations that declared a failure shape with the given
+    /// per-mille (0..=1000) probability, handing the guest its declared failure
+    /// instead of running `perform`.
+    pub fn with_custom_op_fail_permille(mut self, permille: u16) -> Self {
+        self.faults.custom_op.fail_permille = permille;
+        self
+    }
+
     /// Define a name in the run's DNS host table. Names not defined here are
     /// NXDOMAIN; the `--dns-*` fault knobs act only on defined ones.
     pub fn with_dns_entry(
@@ -1369,6 +1406,9 @@ impl RuntimeConfig {
             }
             FaultKnob::EntropyFailPermille => {
                 self.faults.entropy.fail_permille = parse_permille(env, value)?;
+            }
+            FaultKnob::CustomOpFailPermille => {
+                self.faults.custom_op.fail_permille = parse_permille(env, value)?;
             }
             FaultKnob::EpochJumpNanos => {
                 self.faults.clock.epoch_jump_nanos = value.trim().parse().map_err(|_| {
@@ -2472,6 +2512,10 @@ impl RuntimeBuilder {
             buggify: Buggify::new(self.config.buggify, root_seed),
             verdicts: Vec::new(),
             custom_op: None,
+            custom_op_fail_permille: self.config.faults.custom_op.fail_permille,
+            custom_op_fault_root: domain_seed(root_seed, fault_domain::CUSTOM_OP_FAULT),
+            custom_op_fault_rngs: BTreeMap::new(),
+            custom_op_report: patina_dst_driver_api::CustomOpFaultReport::default(),
             pending_diagnostics: Vec::new(),
             liveness,
             swarm: swarm_record,
@@ -3301,6 +3345,14 @@ pub enum CustomOpMode {
     /// `len` is their length, so a `(pointer, capacity)` ABI caller can size its
     /// buffer before fetching.
     Replay { len: usize },
+    /// A seeded fault fired (`--custom-op-fail-permille`), or the recording says
+    /// one did. `perform` MUST NOT run and the caller returns the failure the
+    /// operation declared at `begin` — the runtime never invents an error value,
+    /// because only the guest knows a shape its own type admits.
+    ///
+    /// The operation is already closed: the fault IS the outcome, recorded when
+    /// it fired, so there is nothing left to report and no closing call to make.
+    Fault,
 }
 
 /// A custom operation announced by [`Context::custom_op_begin`] and not yet
@@ -3743,6 +3795,15 @@ pub struct Context {
     /// `begin` — or across [`Context::finish`] — is refused (see
     /// [`Context::custom_op_begin`]).
     custom_op: Option<PendingCustomOp>,
+    /// Seeded custom-operation failure knob, the root of its per-label stream
+    /// family, and the streams handed out so far — one per label first seen, so
+    /// a label's decisions depend on that label alone. Zero means the knob is
+    /// off, and no label ever gets a stream.
+    custom_op_fail_permille: u16,
+    custom_op_fault_root: u64,
+    custom_op_fault_rngs: BTreeMap<String, SplitMix64>,
+    /// Custom-op fault accounting for the end-of-run vacuity diagnostic.
+    custom_op_report: patina_dst_driver_api::CustomOpFaultReport,
     /// Diagnostic lines the runtime produced but has not printed. The runtime
     /// performs no process I/O in the middle of a run — the same doctrine
     /// [`SiteOutcome`] follows — so the embedder drains this after each entry
@@ -4108,6 +4169,12 @@ impl Context {
     /// a nested custom op would record an inner event that replay — which never
     /// runs the outer `perform` — could never produce.
     ///
+    /// `fault_eligible` is the guest's declaration that this operation has a
+    /// failure shape it handles — the precondition for
+    /// `--custom-op-fail-permille` to fire on it. Declaring eligibility does not
+    /// itself inject anything: with the knob off (the default) an eligible call
+    /// behaves exactly like an ineligible one.
+    ///
     /// Prefer [`Context::custom_op`], which drives this protocol correctly and
     /// types the key and result; these three methods are the raw ABI shape the
     /// embedders lower to.
@@ -4115,6 +4182,7 @@ impl Context {
         &mut self,
         label: &str,
         key: &[u8],
+        fault_eligible: bool,
     ) -> Result<CustomOpMode, RuntimeError> {
         if let Some(open) = self.custom_op.as_ref() {
             return Err(RuntimeError::CustomOp {
@@ -4146,11 +4214,41 @@ so could never reproduce the inner operation",
                 });
                 Ok(CustomOpMode::Replay { len })
             }
+            // A recorded fault. The trace is the authority and eligibility is
+            // NOT re-consulted: whether this call site still declares a failure
+            // shape is a property of the guest source, and replay reproduces the
+            // run that happened, not the run this build would produce. What IS
+            // checked is that the caller can accept one — a call site with no
+            // declared failure has no error to return, so handing it a fault
+            // would leave it to invent a value. Refuse instead.
+            Some((_, Outcome::Error(_))) if fault_eligible => Ok(CustomOpMode::Fault),
+            Some((_, Outcome::Error(_))) => Err(RuntimeError::CustomOp {
+                detail: format!(
+                    "custom op {label:?} was recorded as a seeded fault, but this call declares no \
+failure shape; the recording cannot be reproduced by a guest that no longer handles the operation \
+failing"
+                ),
+                label: label.to_string(),
+            }),
             Some((_, outcome)) => Err(RuntimeError::InvalidOutcome {
                 operation: Box::new(operation),
                 outcome: Box::new(outcome),
             }),
             None => {
+                if fault_eligible {
+                    self.custom_op_report.eligible_ops += 1;
+                    if self.draw_custom_op_fault(label) {
+                        self.custom_op_report.faults_injected += 1;
+                        self.complete(
+                            operation,
+                            Outcome::Error(EffectError::new(
+                                ErrorCode::Interrupted,
+                                "injected custom-op fault: the operation did not run",
+                            )),
+                        );
+                        return Ok(CustomOpMode::Fault);
+                    }
+                }
                 self.custom_op = Some(PendingCustomOp {
                     label: label.to_string(),
                     key: key.to_vec(),
@@ -4160,6 +4258,53 @@ so could never reproduce the inner operation",
                 Ok(CustomOpMode::Record)
             }
         }
+    }
+
+    /// Draw the seeded failure decision for one fault-eligible custom operation.
+    ///
+    /// Each label draws from its own child stream, derived once from the
+    /// custom-op fault domain seed and the label's hash, so two operation
+    /// classes never share a coin and adding a call site to one class cannot
+    /// shift the other's decisions. Extreme rates are decision-free, mirroring
+    /// [`Context::draw_entropy_failure`], so the never-fail default perturbs no
+    /// stream at all.
+    fn draw_custom_op_fault(&mut self, label: &str) -> bool {
+        match self.custom_op_fail_permille {
+            0 => false,
+            1000 => true,
+            permille => {
+                let root = self.custom_op_fault_root;
+                let stream = self
+                    .custom_op_fault_rngs
+                    .entry(label.to_string())
+                    .or_insert_with(|| {
+                        SplitMix64::new(patina_dst_rng_seeded::splitmix_hash(&[
+                            root,
+                            patina_dst_rng_seeded::splitmix_hash_str(label),
+                        ]))
+                    });
+                (stream.next_u64() % 1000) < u64::from(permille)
+            }
+        }
+    }
+
+    /// The end-of-run custom-op fault summary, or `None` when the knob was never
+    /// live. Filled entirely by the Context: a custom operation is announced
+    /// through [`Context::custom_op_begin`], so there is no driver to ask.
+    ///
+    /// Unlike the other planes this is `Some` even when nothing was eligible —
+    /// that case is exactly the vacuity worth reporting (see
+    /// [`patina_dst_driver_api::CustomOpFaultReport::is_vacuous`]).
+    pub fn custom_op_fault_report(&self) -> Option<patina_dst_driver_api::CustomOpFaultReport> {
+        if self.custom_op_fail_permille == 0 {
+            return None;
+        }
+        let mut report = self.custom_op_report;
+        report.fail_vacuity_diagnosable = patina_dst_driver_api::vacuity_is_diagnosable(
+            report.eligible_ops,
+            self.custom_op_fail_permille,
+        );
+        Some(report)
     }
 
     /// The length of the open custom operation's recorded result, or `None` when
@@ -4276,11 +4421,55 @@ recorded bytes without running `perform` and could never reproduce those operati
         T: serde::Serialize + serde::de::DeserializeOwned,
         K: serde::Serialize + ?Sized,
     {
+        self.custom_op_typed(label, key, None::<fn() -> T>, perform)
+    }
+
+    /// Perform one custom operation that declares a failure shape, so
+    /// `--custom-op-fail-permille` can fail it. The cargo-family mirror of the
+    /// SDK's `patina_dst::custom_op_faultable`.
+    ///
+    /// `on_fault` produces the value the guest receives when a seeded fault
+    /// fires. It is the guest's own declaration of what "this operation failed"
+    /// looks like — typically the `Err` variant of a `Result` result type — and
+    /// the runtime never invents one, because only the guest's type knows which
+    /// values it admits. On a fault `perform` does not run, and the fault is
+    /// recorded, so replay reproduces it without redrawing.
+    ///
+    /// Everything else matches [`Context::custom_op`]: same label namespace,
+    /// same key contract, same encoding.
+    pub fn custom_op_faultable<T, K>(
+        &mut self,
+        label: &str,
+        key: &K,
+        on_fault: impl FnOnce() -> T,
+        perform: impl FnOnce() -> T,
+    ) -> Result<T, RuntimeError>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+        K: serde::Serialize + ?Sized,
+    {
+        self.custom_op_typed(label, key, Some(on_fault), perform)
+    }
+
+    /// The one typed custom-op driver both public surfaces lower to: `on_fault`
+    /// present is the eligibility declaration, so the two differ in exactly the
+    /// bit the ABI carries and cannot drift in anything else.
+    fn custom_op_typed<T, K>(
+        &mut self,
+        label: &str,
+        key: &K,
+        on_fault: Option<impl FnOnce() -> T>,
+        perform: impl FnOnce() -> T,
+    ) -> Result<T, RuntimeError>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+        K: serde::Serialize + ?Sized,
+    {
         let key_bytes = serde_json::to_vec(key).map_err(|error| RuntimeError::CustomOp {
             label: label.to_string(),
             detail: format!("custom op {label:?} could not encode its key: {error}"),
         })?;
-        match self.custom_op_begin(label, &key_bytes)? {
+        match self.custom_op_begin(label, &key_bytes, on_fault.is_some())? {
             CustomOpMode::Replay { .. } => {
                 let bytes = self.custom_op_replay_result()?;
                 serde_json::from_slice(&bytes).map_err(|error| RuntimeError::CustomOp {
@@ -4291,6 +4480,9 @@ recording was produced by a guest whose result type no longer matches this one"
                     ),
                 })
             }
+            // `custom_op_begin` only answers `Fault` when eligibility was
+            // declared, which is exactly when `on_fault` is `Some`.
+            CustomOpMode::Fault => Ok(on_fault.expect("a fault needs a declared failure")()),
             CustomOpMode::Record => {
                 let value = perform();
                 let bytes = serde_json::to_vec(&value).map_err(|error| RuntimeError::CustomOp {
@@ -5870,6 +6062,12 @@ recording was produced by a guest whose result type no longer matches this one"
         if let Some(report) = self.clock_fault_report().filter(|r| r.reads > 0) {
             planes.insert("clock".into(), facts::clock_plane(&report));
         }
+        // No `had opportunities` filter, unlike every plane above: zero eligible
+        // custom operations is the plane's most important finding, not a reason
+        // to omit it.
+        if let Some(report) = self.custom_op_fault_report() {
+            planes.insert("custom_op".into(), facts::custom_op_plane(&report));
+        }
         if let Some(swarm) = self.swarm.as_ref() {
             planes.insert("swarm".into(), facts::swarm_plane(swarm));
         }
@@ -5993,6 +6191,10 @@ a recorded result or a replay fetch",
         // default-on terms.
         if let Some(report) = self.clock_fault_report() {
             emit_clock_fault_report(self.reports, &report);
+        }
+        // Custom-op fault-injection diagnostic, on the same default-on terms.
+        if let Some(report) = self.custom_op_fault_report() {
+            emit_customop_fault_report(self.reports, &report);
         }
         // Liveness-watchdog diagnostic: prove the watchdog was actually armed and
         // ran to a clean finish (it did NOT fire — a fired watchdog aborts before
@@ -6799,6 +7001,7 @@ fn fault_record(config: &RuntimeConfig) -> patina_dst_trace::FaultConfigRecord {
         dns_latency_nanos: config.faults.dns.latency_nanos,
         entropy_fail_permille: config.faults.entropy.fail_permille,
         epoch_jump_nanos: config.faults.clock.epoch_jump_nanos,
+        custom_op_fail_permille: config.faults.custom_op.fail_permille,
     }
 }
 
@@ -6841,6 +7044,9 @@ fn fault_config_from_record(record: &patina_dst_trace::FaultConfigRecord) -> Fau
         },
         entropy: EntropyFaultConfig {
             fail_permille: record.entropy_fail_permille,
+        },
+        custom_op: CustomOpFaultConfig {
+            fail_permille: record.custom_op_fail_permille,
         },
     }
 }
@@ -7489,6 +7695,46 @@ fn emit_entropy_fault_report(
 occurred, enough that the configured rate should have fired several times over, yet it applied \
 ZERO effects.",
             report.requests,
+        );
+    }
+}
+
+/// Emit the default-on custom-operation fault-injection diagnostic. Silent when
+/// the knob was never live. Suppressed by a false-y
+/// [`ENV_CUSTOMOP_FAULT_REPORT`].
+///
+/// Unlike the other planes there is no zero-opportunity early return: a run that
+/// armed this knob and reached NO fault-eligible custom op is precisely the
+/// coverage lie the report exists to name.
+fn emit_customop_fault_report(
+    reports: ReportConfig,
+    report: &patina_dst_driver_api::CustomOpFaultReport,
+) {
+    if !reports.enabled(Report::CustomOpFault) {
+        return;
+    }
+    eprintln!(
+        "PATINA_CUSTOMOP_FAULT_REPORT eligible_ops={} fail_vacuity_diagnosable={} \
+faults_injected={} vacuous={}",
+        report.eligible_ops,
+        u8::from(report.fail_vacuity_diagnosable),
+        report.faults_injected,
+        u8::from(report.is_vacuous()),
+    );
+    if report.eligible_ops == 0 {
+        eprintln!(
+            "PATINA WARNING: custom-op fault knob inert — the run armed \
+--custom-op-fail-permille and executed ZERO fault-eligible custom operations, so nothing could \
+have been failed. A clean result here does NOT mean custom-op failure was tested. Verify the \
+guest declares a failure shape on the operations it wraps (`custom_op_faultable`), and that the \
+exercised path reaches them.",
+        );
+    } else if report.is_vacuous() {
+        eprintln!(
+            "PATINA WARNING: custom-op fault knob inert — {} fault-eligible custom operation(s) \
+occurred, enough that the configured rate should have fired several times over, yet it applied \
+ZERO faults.",
+            report.eligible_ops,
         );
     }
 }
@@ -8673,7 +8919,7 @@ mod tests {
         let trace = directory.path().join("custom-op-inner.patina");
         let mut context = Context::from_config(RuntimeConfig::record(3, &trace, "fp")).unwrap();
         assert_eq!(
-            context.custom_op_begin("wrapped.fs", b"k").unwrap(),
+            context.custom_op_begin("wrapped.fs", b"k", false).unwrap(),
             CustomOpMode::Record
         );
         context.entropy_bytes(4).unwrap();
@@ -8694,9 +8940,9 @@ mod tests {
         let directory = tempdir().unwrap();
         let trace = directory.path().join("custom-op-misuse.patina");
         let mut context = Context::from_config(RuntimeConfig::record(3, &trace, "fp")).unwrap();
-        context.custom_op_begin("outer", b"k").unwrap();
+        context.custom_op_begin("outer", b"k", false).unwrap();
         let error = context
-            .custom_op_begin("inner", b"k")
+            .custom_op_begin("inner", b"k", false)
             .expect_err("a nested custom op must be refused");
         assert!(
             error.to_string().contains("inner") && error.to_string().contains("outer"),
@@ -8712,7 +8958,9 @@ mod tests {
         // silently leaving the trace short one event.
         let unclosed = directory.path().join("custom-op-unclosed.patina");
         let mut context = Context::from_config(RuntimeConfig::record(3, &unclosed, "fp")).unwrap();
-        context.custom_op_begin("never-closed", b"k").unwrap();
+        context
+            .custom_op_begin("never-closed", b"k", false)
+            .unwrap();
         let error = context.finish().expect_err("an open custom op must refuse");
         assert!(error.to_string().contains("never-closed"), "{error}");
 
@@ -9090,6 +9338,7 @@ class=crash|0 class=buggify|0"
                 latency_nanos: Some((1, 2)),
             },
             entropy: EntropyFaultConfig { fail_permille: 1 },
+            custom_op: CustomOpFaultConfig { fail_permille: 1 },
         }
     }
 
@@ -9138,6 +9387,7 @@ class=crash|0 class=buggify|0"
                 "entropy_fail",
                 "buggify",
                 "epoch_jump",
+                "custom_op_fail",
             ]
         );
     }

@@ -3099,6 +3099,7 @@ against a newer verdict ABI than this runtime provides"
          label_len: i32,
          key: i32,
          key_len: i32,
+         fault_eligible: i32,
          out_len: i32|
          -> Result<i32, WasmiError> {
             caller.data_mut().count_hostcall("custom_op_begin");
@@ -3107,11 +3108,14 @@ against a newer verdict ABI than this runtime provides"
             let mode = caller
                 .data_mut()
                 .context
-                .custom_op_begin(&label, &key)
+                .custom_op_begin(&label, &key, fault_eligible != 0)
                 .map_err(|error| WasmiError::new(error.to_string()))?;
             let (code, len) = match mode {
                 CustomOpMode::Record => (0, 0),
                 CustomOpMode::Replay { len } => (1, len),
+                // The operation is already closed; the guest returns the failure
+                // it declared and makes no phase-2 call.
+                CustomOpMode::Fault => (2, 0),
             };
             let len = u32::try_from(len).map_err(|_| {
                 WasmiError::new(format!(

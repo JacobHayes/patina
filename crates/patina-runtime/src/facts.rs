@@ -193,6 +193,18 @@ pub(crate) fn entropy_plane(report: &patina_dst_driver_api::EntropyFaultReport) 
     ])
 }
 
+pub(crate) fn custom_op_plane(report: &patina_dst_driver_api::CustomOpFaultReport) -> Value {
+    object(vec![
+        ("eligible_ops", Value::from(report.eligible_ops)),
+        (
+            "fail_vacuity_diagnosable",
+            Value::from(report.fail_vacuity_diagnosable),
+        ),
+        ("faults_injected", Value::from(report.faults_injected)),
+        ("vacuous", Value::from(report.is_vacuous())),
+    ])
+}
+
 pub(crate) fn clock_plane(report: &patina_dst_driver_api::ClockFaultReport) -> Value {
     object(vec![
         ("reads", Value::from(report.reads)),
@@ -427,6 +439,29 @@ mod tests {
         assert_eq!(finding["vtime_ns"], 400);
         assert_eq!(finding["budget_ns"], 300);
         assert_eq!(finding["last_fault_vtime_ns"], 10);
+    }
+
+    /// The custom-op plane carries the one vacuity rule no other plane has: zero
+    /// opportunities is itself vacuous, because a fault-eligible custom op
+    /// exists only if the guest declared one. A structured consumer must see
+    /// that bit, not just the human warning line.
+    #[test]
+    fn the_custom_op_plane_reports_zero_opportunities_as_vacuous() {
+        let armed_but_unreached = custom_op_plane(&patina_dst_driver_api::CustomOpFaultReport {
+            eligible_ops: 0,
+            fail_vacuity_diagnosable: false,
+            faults_injected: 0,
+        });
+        assert_eq!(armed_but_unreached["eligible_ops"], 0);
+        assert_eq!(armed_but_unreached["vacuous"], true);
+
+        let fired = custom_op_plane(&patina_dst_driver_api::CustomOpFaultReport {
+            eligible_ops: 40,
+            fail_vacuity_diagnosable: true,
+            faults_injected: 3,
+        });
+        assert_eq!(fired["faults_injected"], 3);
+        assert_eq!(fired["vacuous"], false);
     }
 
     #[test]

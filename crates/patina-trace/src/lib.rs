@@ -132,6 +132,10 @@ pub struct FaultConfigRecord {
     pub entropy_fail_permille: u16,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub epoch_jump_nanos: u64,
+    /// Per-mille rate at which a guest-declared fault-eligible custom operation
+    /// returns its declared failure instead of running `perform`.
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub custom_op_fail_permille: u16,
 }
 
 /// The DNS host table of a recorded run: the names it could resolve and the

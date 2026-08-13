@@ -15338,6 +15338,290 @@ fn main() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Seeded custom-op faults (docs/arcs/custom-ops.md, Wave B): a guest declares
+// what failure means for an operation it wraps, and `--custom-op-fail-permille`
+// hands back that failure instead of running the effect.
+// ---------------------------------------------------------------------------
+
+// One guest, three modes, so the whole knob is proven against a single build.
+//
+// `probe`  — one faultable op next to one that declares nothing, which is the
+//            control: eligibility is the guest's call, so the knob must pass
+//            the undeclared one by even at a certain rate.
+// `bare`   — no custom operations at all, for the vacuity leg.
+// default  — a read-through cache whose retry policy has an off-by-one: it
+//            treats a SECOND consecutive fetch failure as "upstream unchanged"
+//            and serves a placeholder as though it were real data. The bug is
+//            reachable only under a specific fault PATTERN (two in a row), so
+//            finding it is campaign work rather than a single run's.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const CUSTOM_OP_FAULT_SDK_MAIN: &str = r#"
+use std::sync::atomic::{AtomicU32, Ordering};
+
+static PERFORMED: AtomicU32 = AtomicU32::new(0);
+
+fn fetch(index: u32) -> Result<String, String> {
+    let bytes = patina_dst::custom_op_bytes_faultable(
+        "s3.get_object",
+        &index.to_le_bytes(),
+        || b"UNAVAILABLE".to_vec(),
+        || {
+            PERFORMED.fetch_add(1, Ordering::SeqCst);
+            format!("obj-{index}").into_bytes()
+        },
+    );
+    let text = String::from_utf8(bytes).unwrap();
+    if text == "UNAVAILABLE" {
+        Err(text)
+    } else {
+        Ok(text)
+    }
+}
+
+fn main() {
+    match std::env::args().nth(1).as_deref() {
+        Some("bare") => {
+            println!("PATINA_RESULT mode=bare");
+        }
+        Some("probe") => {
+            let faultable = fetch(1);
+            let plain = patina_dst::custom_op_bytes("host.uptime", b"", || {
+                PERFORMED.fetch_add(1, Ordering::SeqCst);
+                b"7".to_vec()
+            });
+            println!(
+                "PATINA_RESULT performed={} faultable={} plain={}",
+                PERFORMED.load(Ordering::SeqCst),
+                match &faultable {
+                    Ok(value) => value.clone(),
+                    Err(error) => error.clone(),
+                },
+                String::from_utf8_lossy(&plain)
+            );
+        }
+        _ => {
+            let mut consecutive = 0u32;
+            let mut stale = 0u32;
+            for index in 0..200u32 {
+                match fetch(index) {
+                    Ok(_) => consecutive = 0,
+                    Err(_) => {
+                        consecutive += 1;
+                        if consecutive >= 2 {
+                            stale += 1;
+                        }
+                    }
+                }
+            }
+            patina_dst::always!(stale == 0, "no-stale-objects-served");
+            println!("PATINA_RESULT stale={stale}");
+        }
+    }
+}
+"#;
+
+// The knob end to end on the native family: eligibility crosses the shim ABI,
+// a fired fault replaces the effect rather than discarding its result, the
+// undeclared operation is untouched, and the plane reports itself.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_custom_op_faults_fire_report_and_replay() {
+    let directory = tempdir().unwrap();
+    let pkg = directory.path().join("pkg");
+    write_sdk_fixture(&pkg, CUSTOM_OP_FAULT_SDK_MAIN);
+    let workspace = native_workspace();
+    let bin = directory.path().join("custom-op-fault-guest");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            pkg.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let bin = bin.to_str().unwrap();
+
+    // Knob off: the declared failure is never reached, both closures run.
+    let clean = invoke_in(workspace, &["run", bin, "--seed", "4", "--", "probe"]);
+    assert_eq!(
+        result_line(&clean),
+        "PATINA_RESULT performed=2 faultable=obj-1 plain=7"
+    );
+    assert!(
+        !String::from_utf8_lossy(&clean.stderr).contains("PATINA_CUSTOMOP_FAULT_REPORT"),
+        "an unarmed run has no custom-op fault plane to report"
+    );
+
+    // Knob at a certain rate: the faultable op returns the guest's declared
+    // failure WITHOUT performing, and the op that declared nothing is untouched
+    // — so `performed=1` is the whole control in one number.
+    let trace = directory.path().join("custom-op-fault.patina");
+    let faulted = invoke_in(
+        workspace,
+        &[
+            "run",
+            bin,
+            "--seed",
+            "4",
+            "--custom-op-fail-permille",
+            "1000",
+            "--record",
+            trace.to_str().unwrap(),
+            "--",
+            "probe",
+        ],
+    );
+    assert_eq!(
+        result_line(&faulted),
+        "PATINA_RESULT performed=1 faultable=UNAVAILABLE plain=7",
+        "the eligible op must fault without performing; the ineligible one must not:\nstderr:\n{}",
+        String::from_utf8_lossy(&faulted.stderr)
+    );
+    let faulted_stderr = String::from_utf8_lossy(&faulted.stderr);
+    assert!(
+        faulted_stderr
+            .contains("PATINA_CUSTOMOP_FAULT_REPORT eligible_ops=1 fail_vacuity_diagnosable=0 faults_injected=1 vacuous=0"),
+        "the plane must account for the fault it applied:\n{faulted_stderr}"
+    );
+
+    // The fault is in the trace, named as an error rather than as bytes that
+    // happen to spell a failure — so triage can tell an injected fault from an
+    // upstream one the guest really saw.
+    let bundle = patina_dst_trace::TraceBundle::load(&trace).unwrap();
+    let outcomes: Vec<_> = bundle
+        .resolved_timeline("main")
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event.operation {
+            patina_dst_abi::Operation::CustomOp { label, .. } => Some((label, event.outcome)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(outcomes.len(), 2, "{outcomes:?}");
+    assert_eq!(outcomes[0].0, "s3.get_object");
+    assert!(
+        matches!(&outcomes[0].1, patina_dst_abi::Outcome::Error(error)
+            if error.message.contains("injected custom-op fault")),
+        "{outcomes:?}"
+    );
+    assert_eq!(
+        outcomes[1].1,
+        patina_dst_abi::Outcome::Bytes(b"7".to_vec()),
+        "the undeclared op keeps its recorded bytes"
+    );
+
+    // Flag-free replay: the trace restores the knob and reproduces the fault.
+    let replayed = invoke_in(workspace, &["replay", bin, trace.to_str().unwrap()]);
+    assert_eq!(
+        result_line(&replayed),
+        "PATINA_RESULT performed=0 faultable=UNAVAILABLE plain=7",
+        "replay reproduces both operations from the recording, faulted or not:\nstderr:\n{}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+
+    // Vacuity, the honest half: the knob armed over a guest that reached no
+    // fault-eligible operation at all is a coverage failure, not a clean run.
+    let vacuous = invoke_in(
+        workspace,
+        &[
+            "run",
+            bin,
+            "--seed",
+            "4",
+            "--custom-op-fail-permille",
+            "500",
+            "--",
+            "bare",
+        ],
+    );
+    let vacuous_stderr = String::from_utf8_lossy(&vacuous.stderr);
+    assert!(
+        vacuous_stderr.contains("PATINA_CUSTOMOP_FAULT_REPORT eligible_ops=0")
+            && vacuous_stderr.contains("vacuous=1")
+            && vacuous_stderr.contains("PATINA WARNING: custom-op fault knob inert"),
+        "an armed knob that reached nothing eligible must say so loudly:\n{vacuous_stderr}"
+    );
+}
+
+// The campaign leg: the knob is a first-class banded knob, so a bug reachable
+// only under a particular custom-op failure PATTERN is found by ordinary
+// campaign exploration and classified through the guest's own verdict.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn campaign_custom_op_faults_find_a_planted_mishandling() {
+    let directory = tempdir().unwrap();
+    let pkg = directory.path().join("pkg");
+    write_sdk_fixture(&pkg, CUSTOM_OP_FAULT_SDK_MAIN);
+    let workspace = native_workspace();
+    let bin = directory.path().join("custom-op-campaign-guest");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            pkg.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+            "--release",
+        ],
+    );
+    let bin = bin.to_str().unwrap();
+
+    let campaign = |out: &Path, custom_op_faults: bool| {
+        let mut args = vec![
+            "campaign",
+            bin,
+            "--gens",
+            "12",
+            "--faults",
+            "--out-dir",
+            out.to_str().unwrap(),
+        ];
+        if custom_op_faults {
+            args.push("--custom-op-faults");
+        }
+        invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, &args)
+    };
+
+    // RED twin first: without the declaration the knob is not banded, no fetch
+    // ever fails, and the campaign is clean. That is what makes the green leg
+    // below evidence about THIS knob rather than about the campaign at large.
+    let unbanded_out = directory.path().join("camp-unbanded");
+    let unbanded = campaign(&unbanded_out, false);
+    assert_eq!(
+        unbanded.status.code(),
+        Some(0),
+        "with the custom-op band off the planted bug is unreachable:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&unbanded.stdout),
+        String::from_utf8_lossy(&unbanded.stderr)
+    );
+
+    let out = directory.path().join("camp");
+    let found = campaign(&out, true);
+    let stdout = String::from_utf8_lossy(&found.stdout);
+    assert_eq!(
+        found.status.code(),
+        Some(1),
+        "the banded campaign must find the planted mishandling:\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&found.stderr)
+    );
+    assert!(
+        stdout.contains("VIOLATION"),
+        "the finding must be classified through the guest's own verdict:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("VACUOUS_CUSTOM_OP_FAULT"),
+        "no generation may report an inert custom-op plane over a guest that \
+         declares one on every fetch:\n{stdout}"
+    );
+    let signatures = fs::read_to_string(out.join("signatures.json")).unwrap();
+    assert!(
+        signatures.contains("no-stale-objects-served"),
+        "the signature must name the invariant the guest broke:\n{signatures}"
+    );
+}
+
 // The WASI half: the three `patina_sdk` custom-op imports are backed by the same
 // runtime entries, so a wasip1 guest records and replays identically to native.
 // The module exits 10 on the record pass and 20+len+100 on the replay pass, so
@@ -15345,7 +15629,7 @@ fn main() {
 // landed in guest memory.
 const WASI_CUSTOM_OP_MODULE: &str = r#"(module
     (import "patina_sdk" "custom_op_begin"
-        (func $begin (param i32 i32 i32 i32 i32) (result i32)))
+        (func $begin (param i32 i32 i32 i32 i32 i32) (result i32)))
     (import "patina_sdk" "custom_op_replay_result"
         (func $fetch (param i32 i32) (result i32)))
     (import "patina_sdk" "custom_op_record"
@@ -15358,8 +15642,11 @@ const WASI_CUSTOM_OP_MODULE: &str = r#"(module
     (func (export "_start")
         (local $mode i32)
         (local $len i32)
+        ;; the 5th argument is the fault-eligibility declaration: 0 = this call
+        ;; declares no failure shape, so --custom-op-fail-permille passes it by.
         (local.set $mode (call $begin
-            (i32.const 0) (i32.const 13) (i32.const 32) (i32.const 10) (i32.const 96)))
+            (i32.const 0) (i32.const 13) (i32.const 32) (i32.const 10)
+            (i32.const 0) (i32.const 96)))
         (if (i32.eqz (local.get $mode))
             (then
                 (drop (call $record (i32.const 64) (i32.const 6)))
@@ -15432,6 +15719,82 @@ fn wasi_custom_op_imports_record_and_replay_without_reperforming() {
     );
 }
 
+// The wasip1 half of the fault knob: `custom_op_begin`'s eligibility argument
+// and its third answer (2 = the declared failure) are wasm imports like any
+// other, so the seeded knob reaches a WASI guest identically. The module exits
+// 30 + mode, so the exit code alone says which branch the host chose.
+const WASI_CUSTOM_OP_FAULT_MODULE: &str = r#"(module
+    (import "patina_sdk" "custom_op_begin"
+        (func $begin (param i32 i32 i32 i32 i32 i32) (result i32)))
+    (import "patina_sdk" "custom_op_record"
+        (func $record (param i32 i32) (result i32)))
+    (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
+    (memory (export "memory") 1)
+    (data (i32.const 0) "s3.get_object")
+    (data (i32.const 64) "etag-7")
+    (func (export "_start")
+        (local $mode i32)
+        ;; fault_eligible = 1: this call declares a failure shape.
+        (local.set $mode (call $begin
+            (i32.const 0) (i32.const 13) (i32.const 0) (i32.const 0)
+            (i32.const 1) (i32.const 96)))
+        ;; A record pass must still be closed out; a faulted one is already closed.
+        (if (i32.eqz (local.get $mode))
+            (then (drop (call $record (i32.const 64) (i32.const 6)))))
+        (call $proc_exit (i32.add (i32.const 30) (local.get $mode)))))"#;
+
+#[test]
+fn wasi_custom_op_fault_reaches_a_wasip1_guest() {
+    let directory = tempdir().unwrap();
+    let module = directory.path().join("custom-op-fault.wasm");
+    fs::write(
+        &module,
+        wat::parse_str(WASI_CUSTOM_OP_FAULT_MODULE).unwrap(),
+    )
+    .unwrap();
+    let module = module.to_str().unwrap();
+
+    // RED: the same guest with the knob off takes the record branch.
+    let unarmed = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        directory.path(),
+        &["run", module, "--seed", "1"],
+    );
+    assert_eq!(
+        unarmed.status.code(),
+        Some(30),
+        "an unarmed run performs:\nstderr:\n{}",
+        String::from_utf8_lossy(&unarmed.stderr)
+    );
+
+    // GREEN: at a certain rate the host answers 2 and the guest returns its
+    // declared failure without ever performing.
+    let faulted = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        directory.path(),
+        &[
+            "run",
+            module,
+            "--seed",
+            "1",
+            "--custom-op-fail-permille",
+            "1000",
+        ],
+    );
+    assert_eq!(
+        faulted.status.code(),
+        Some(32),
+        "the wasip1 guest must take the fault branch:\nstderr:\n{}",
+        String::from_utf8_lossy(&faulted.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&faulted.stderr)
+            .contains("PATINA_CUSTOMOP_FAULT_REPORT eligible_ops=1"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&faulted.stderr)
+    );
+}
+
 // The wasip1 fail-closed leg: a second `custom_op_begin` while one is open would
 // record an inner operation replay could never reproduce, so the host traps
 // rather than accepting it.
@@ -15444,15 +15807,17 @@ fn wasi_custom_op_refuses_a_nested_begin() {
         wat::parse_str(
             r#"(module
                 (import "patina_sdk" "custom_op_begin"
-                    (func $begin (param i32 i32 i32 i32 i32) (result i32)))
+                    (func $begin (param i32 i32 i32 i32 i32 i32) (result i32)))
                 (memory (export "memory") 1)
                 (data (i32.const 0) "outer")
                 (data (i32.const 16) "inner")
                 (func (export "_start")
                     (drop (call $begin
-                        (i32.const 0) (i32.const 5) (i32.const 0) (i32.const 0) (i32.const 96)))
+                        (i32.const 0) (i32.const 5) (i32.const 0) (i32.const 0)
+                        (i32.const 0) (i32.const 96)))
                     (drop (call $begin
-                        (i32.const 16) (i32.const 5) (i32.const 0) (i32.const 0) (i32.const 96)))))"#,
+                        (i32.const 16) (i32.const 5) (i32.const 0) (i32.const 0)
+                        (i32.const 0) (i32.const 96)))))"#,
         )
         .unwrap(),
     )

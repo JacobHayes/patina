@@ -9850,7 +9850,8 @@ mod tests {
             | FaultKnob::NetConnectRefusePermille
             | FaultKnob::NetResetPermille
             | FaultKnob::DnsFailPermille
-            | FaultKnob::EntropyFailPermille => "100",
+            | FaultKnob::EntropyFailPermille
+            | FaultKnob::CustomOpFailPermille => "100",
         }
     }
 

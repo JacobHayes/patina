@@ -50,8 +50,10 @@
 //!   `verdicts[]`. An `always!` violation reports one automatically.
 //! - [`custom_op_bytes`] — wrap an effect Patina does not model so it is
 //!   recorded on the record pass and reproduced from the recording on replay.
-//!   With the default-off `custom-ops` feature, `custom_op` is the same thing
-//!   with serde-typed keys and results.
+//!   [`custom_op_bytes_faultable`] additionally declares what failure means for
+//!   the operation, which is what `--custom-op-fail-permille` acts on. With the
+//!   default-off `custom-ops` feature, `custom_op` and `custom_op_faultable` are
+//!   the same two with serde-typed keys and results.
 //! - [`is_simulated`] / [`rng`] and the [`lifecycle`] module.
 //! - With the default-off `macros` feature, `#[patina_dst::test]` rebuilds the
 //!   same libtest harness shim-linked and sweeps the annotated test under plain
@@ -334,6 +336,54 @@ pub fn verdict(kind: VerdictKind, label: &str, detail: &str) {
 /// assert_eq!(bytes, vec![1, 2, 3]);
 /// ```
 pub fn custom_op_bytes(label: &str, key: &[u8], perform: impl FnOnce() -> Vec<u8>) -> Vec<u8> {
+    custom_op_bytes_inner(label, key, None::<fn() -> Vec<u8>>, perform)
+}
+
+/// A [`custom_op_bytes`] that **declares a failure shape**, so the seeded
+/// `--custom-op-fail-permille` knob can fail it.
+///
+/// `on_fault` produces the bytes the guest receives when a fault fires; it is
+/// the guest's own answer to "what does this operation failing look like", and
+/// the runtime never invents one, because only the guest knows a value its
+/// caller can handle. When a fault fires, `perform` does **not** run and the
+/// fault is recorded, so a replay reproduces it exactly — without re-consulting
+/// eligibility, because the trace is the authority.
+///
+/// Declaring a failure shape injects nothing on its own: with the knob off (the
+/// default) this behaves exactly like [`custom_op_bytes`]. What it buys is that
+/// a campaign can now exercise the guest's error path for an effect Patina does
+/// not model, which is the whole reason a custom op is worth wrapping.
+///
+/// Outside Patina this is just `perform()`; `on_fault` is never called.
+///
+/// ```
+/// // Outside Patina the real closure runs and the declared failure is unused.
+/// let bytes = patina_dst::custom_op_bytes_faultable(
+///     "s3.get_object",
+///     b"bucket/key",
+///     || b"TIMEOUT".to_vec(),
+///     || b"etag-7".to_vec(),
+/// );
+/// assert_eq!(bytes, b"etag-7".to_vec());
+/// ```
+pub fn custom_op_bytes_faultable(
+    label: &str,
+    key: &[u8],
+    on_fault: impl FnOnce() -> Vec<u8>,
+    perform: impl FnOnce() -> Vec<u8>,
+) -> Vec<u8> {
+    custom_op_bytes_inner(label, key, Some(on_fault), perform)
+}
+
+/// The one place the custom-op protocol is written down: `on_fault` present is
+/// the eligibility declaration the ABI carries, so the faultable and plain
+/// surfaces differ in exactly that bit and can never drift apart in any other.
+fn custom_op_bytes_inner(
+    label: &str,
+    key: &[u8],
+    on_fault: Option<impl FnOnce() -> Vec<u8>>,
+    perform: impl FnOnce() -> Vec<u8>,
+) -> Vec<u8> {
     #[cfg(any(patina_shim, all(patina, target_arch = "wasm32")))]
     {
         let mut len: usize = 0;
@@ -343,6 +393,7 @@ pub fn custom_op_bytes(label: &str, key: &[u8], perform: impl FnOnce() -> Vec<u8
                 label.len(),
                 key.as_ptr(),
                 key.len(),
+                i32::from(on_fault.is_some()),
                 &raw mut len,
             )
         };
@@ -367,6 +418,10 @@ pub fn custom_op_bytes(label: &str, key: &[u8], perform: impl FnOnce() -> Vec<u8
                 );
                 buffer
             }
+            // A seeded (or recorded) fault. The runtime only answers this to a
+            // call that declared a failure shape, so the `expect` is the ABI
+            // contract being upheld, not a hope.
+            2 => on_fault.expect("a custom-op fault needs a declared failure shape")(),
             // Only a malformed call reaches here: every runtime-level refusal is
             // fatal on the embedder side. Fail loudly rather than silently
             // performing an effect replay was supposed to reproduce.
@@ -378,7 +433,7 @@ label or key argument is malformed"
     }
     #[cfg(not(any(patina_shim, all(patina, target_arch = "wasm32"))))]
     {
-        let _ = (label, key);
+        let _ = (label, key, on_fault);
         perform()
     }
 }
@@ -393,17 +448,32 @@ mod custom_op_ffi {
         label_len: usize,
         key: *const u8,
         key_len: usize,
+        fault_eligible: i32,
         out_len: *mut usize,
     ) -> i32 {
         #[cfg(patina_shim)]
         // SAFETY: forwarded from `custom_op_bytes`, which passes live slices.
         unsafe {
-            super::ffi::patina_custom_op_begin(label, label_len, key, key_len, out_len)
+            super::ffi::patina_custom_op_begin(
+                label,
+                label_len,
+                key,
+                key_len,
+                fault_eligible,
+                out_len,
+            )
         }
         #[cfg(not(patina_shim))]
         // SAFETY: as above.
         unsafe {
-            super::wasm_ffi::custom_op_begin(label, label_len, key, key_len, out_len)
+            super::wasm_ffi::custom_op_begin(
+                label,
+                label_len,
+                key,
+                key_len,
+                fault_eligible,
+                out_len,
+            )
         }
     }
 
@@ -490,6 +560,62 @@ where
         bytes
     });
     match performed {
+        Some(value) => value,
+        None => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+            panic!(
+                "patina custom op {label:?}: cannot decode the recorded result: {error}; the \
+recording was produced by a guest whose result type no longer matches this one"
+            )
+        }),
+    }
+}
+
+/// A typed [`custom_op_bytes_faultable`]: [`custom_op`] plus a declared failure
+/// shape, so `--custom-op-fail-permille` can fail the operation and the guest
+/// exercises its own error path.
+///
+/// `on_fault` returns the value a failure produces — for a `Result`-shaped `T`,
+/// the `Err` variant the caller already handles. It runs *instead of* `perform`
+/// when a seeded fault fires, and never otherwise.
+///
+/// ```ignore
+/// let object: Result<Object, FetchError> = patina_dst::custom_op_faultable(
+///     "s3.get_object",
+///     &request_key,
+///     || Err(FetchError::Timeout),        // what failure means here
+///     || real_s3_client.get(&request_key), // runs on record only
+/// );
+/// ```
+///
+/// # Panics
+///
+/// As [`custom_op`]: an unencodable value or an undecodable recorded result.
+#[cfg(feature = "custom-ops")]
+pub fn custom_op_faultable<T, K>(
+    label: &str,
+    key: &K,
+    on_fault: impl FnOnce() -> T,
+    perform: impl FnOnce() -> T,
+) -> T
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+    K: serde::Serialize + ?Sized,
+{
+    let key = serde_json::to_vec(key)
+        .unwrap_or_else(|error| panic!("patina custom op {label:?}: cannot encode key: {error}"));
+    // A `RefCell` rather than `custom_op`'s plain `&mut`: both closures are
+    // handed over at once and exactly one of them runs, so they must share the
+    // slot the produced value comes back through.
+    let produced: core::cell::RefCell<Option<T>> = core::cell::RefCell::new(None);
+    let encode = |value: T| -> Vec<u8> {
+        let bytes = serde_json::to_vec(&value).unwrap_or_else(|error| {
+            panic!("patina custom op {label:?}: cannot encode result: {error}")
+        });
+        *produced.borrow_mut() = Some(value);
+        bytes
+    };
+    let bytes = custom_op_bytes_faultable(label, &key, || encode(on_fault()), || encode(perform()));
+    match produced.into_inner() {
         Some(value) => value,
         None => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
             panic!(
@@ -1211,6 +1337,7 @@ mod ffi {
             label_len: usize,
             key: *const u8,
             key_len: usize,
+            fault_eligible: i32,
             out_len: *mut usize,
         ) -> i32;
         pub fn patina_custom_op_replay_result(out: *mut u8, out_cap: usize) -> isize;
@@ -1288,6 +1415,7 @@ mod wasm_ffi {
             label_len: usize,
             key: *const u8,
             key_len: usize,
+            fault_eligible: i32,
             out_len: *mut usize,
         ) -> i32;
         pub fn custom_op_replay_result(out: *mut u8, out_cap: usize) -> i32;

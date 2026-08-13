@@ -551,6 +551,45 @@ impl EntropyFaultReport {
     }
 }
 
+/// End-of-run summary of guest custom-operation fault-injection activity
+/// (`--custom-op-fail-permille`), for the default-on vacuity diagnostic. A
+/// single class, like [`EntropyFaultReport`].
+///
+/// Produced only when the knob is live, so every field describes an ARMED run —
+/// which is what lets [`Self::is_vacuous`] judge zero opportunities harshly.
+///
+/// Owned entirely by the `Context`: a custom operation is announced through
+/// `Context::custom_op_begin`, so there is no driver to ask.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CustomOpFaultReport {
+    /// Custom operations the guest declared fault-eligible and actually
+    /// executed. A custom op that declares no failure shape is not counted: it
+    /// is not an opportunity the knob passed up, it is an operation the guest
+    /// never offered.
+    pub eligible_ops: u64,
+    /// The failure knob was live over enough eligible operations that
+    /// [`vacuity_is_diagnosable`] holds, so zero injected failures is anomalous.
+    pub fail_vacuity_diagnosable: bool,
+    /// Operations failed by the custom-op fault injector.
+    pub faults_injected: u64,
+}
+
+impl CustomOpFaultReport {
+    /// Whether the custom-op fault class went vacuously inert.
+    ///
+    /// Stricter than every other plane, and deliberately: ZERO eligible
+    /// operations is itself vacuous here. Elsewhere the opportunity denominator
+    /// is a boundary the runtime models unconditionally — a run that did no
+    /// filesystem I/O simply had no filesystem to fault — but a fault-eligible
+    /// custom op exists only because the GUEST declared one. Arming this knob
+    /// over a guest that declared none (or over a path that reached none) is a
+    /// coverage claim with nothing behind it, and it is the exact shape a
+    /// silently-inert custom-op campaign takes: green, and testing nothing.
+    pub fn is_vacuous(&self) -> bool {
+        self.eligible_ops == 0 || (self.fail_vacuity_diagnosable && self.faults_injected == 0)
+    }
+}
+
 /// End-of-run summary of guest realtime-epoch fault-injection activity
 /// (`--epoch-jump-nanos`), for the default-on vacuity diagnostic. A single
 /// class, like [`EntropyFaultReport`]: the clock plane's only fault-injecting

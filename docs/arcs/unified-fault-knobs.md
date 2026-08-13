@@ -463,6 +463,24 @@ not mechanically enumerable, so this table is the tracked list and each wave's r
    by default; blast radius is huge and most Rust guests abort on OOM, so this is last and
    ships only with campaign evidence it classifies cleanly.
 
+**Off this list, and the first knob to arrive from outside it:**
+`--custom-op-fail-permille` (`docs/arcs/custom-ops.md` §3.2, Wave B, landed
+2026-08-13). Its choke point is not a driver or a `Context` boundary operation
+but a guest-declared one — `Context::custom_op_begin`, where the *guest* says
+whether the operation has a failure shape and supplies the value that failure
+produces. It is nonetheless an ordinary `FaultKnob` row: same domain-separated
+PRF path (one child stream per operation label), same control-plane forwarding,
+same trace record and replay reconcile, same swarm class, same campaign
+band-or-waiver and vacuity class. That it needed no new decision point is the
+consolidation working as designed — the compiler walked it to every consumer.
+
+It does bend one rule this document sets, deliberately. §2.4 judges a knob inert
+only when it had opportunities and took none; the custom-op plane also calls
+ZERO opportunities vacuous, because a fault-eligible operation exists only if
+the guest declared one, so an armed knob that reached none is a coverage claim
+with nothing behind it. For the same reason its campaign band is opt-in
+(`campaign --custom-op-faults`), exactly as the DNS band rides on `--dns-entry`.
+
 ## 9. Family parity
 
 Automatic (by construction, because both families share `with_default_drivers` + `Context`):
