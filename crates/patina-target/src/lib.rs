@@ -198,8 +198,8 @@ pub struct NativeEscape {
     pub category: &'static str,
     pub provenance: Vec<NativeProvenance>,
     /// For an *instruction* finding, the decoded mnemonic (`rdtsc`, `rdtscp`,
-    /// `rdrand`, `rdseed`, `syscall`, `svc`, `cntvct`); `None` for a symbol,
-    /// immediate, or undecodable finding.
+    /// `rdrand`, `rdseed`, `syscall`, `svc`, `cntvct`, `cpuid`); `None` for a
+    /// symbol, immediate, or undecodable finding.
     ///
     /// The category alone cannot decide manageability: `cpu-nondeterminism`
     /// covers both the timestamp counter (trappable via `PR_SET_TSC` on x86-64
@@ -226,6 +226,97 @@ impl NativeEscape {
         self.mnemonic = Some(mnemonic);
         self
     }
+}
+
+/// The escape category of a *host-identity* instruction finding: an inline read
+/// of the host CPU's own identity (x86-64 `cpuid`).
+///
+/// It is the one instruction category that INFORMS rather than refuses. Every
+/// other category the scan emits is a containment failure; this one is a
+/// portability caveat. The distinction is load-bearing in two places — the audit
+/// keeps these findings out of the denied set ([`NativeAudit::audit`]), and the
+/// report prints them under their own heading ([`render_host_identity_note`]) —
+/// so both read this constant rather than matching the string.
+///
+/// Why visible and not refused: `cpuid` is near-universal in real binaries (libc
+/// ifunc resolvers pick a `memcpy` from feature bits, `std`'s
+/// `is_x86_feature_detected!` compiles to it, fast-clock crates select a TSC path
+/// from the invariant-TSC bit), so refusing it would refuse essentially every
+/// x86-64 guest. Trapping it is possible but narrow — Linux
+/// `arch_prctl(ARCH_SET_CPUID, 0)` faults CPUID only on capable Intel parts — and
+/// is a deferred slice. Until then the honest position is neither "refused" nor
+/// "silent" but "reported": the run stays deterministic on a given host, and the
+/// note says plainly what is not guaranteed across hosts.
+pub const HOST_IDENTITY_CATEGORY: &str = "host-identity";
+
+/// Whether a native finding is a host-identity read ([`HOST_IDENTITY_CATEGORY`])
+/// — informational, never part of the refusal set.
+pub fn native_escape_is_host_identity(escape: &NativeEscape) -> bool {
+    escape.category == HOST_IDENTITY_CATEGORY
+}
+
+/// The host-identity instruction sites in a native binary: every inline `cpuid`
+/// the scan decodes at a real instruction boundary, with provenance.
+///
+/// This is a standalone scan (like [`native_deny_trap_armed`]) rather than a
+/// field on [`NativeAudit`] because the sites must be reported on EVERY audit
+/// outcome — clean, trap-managed, and refused — and a refusing audit returns an
+/// error, not an audit. One entry point keeps the three report paths from
+/// drifting.
+///
+/// Fails closed on a parse error, an unsupported format, or an architecture the
+/// instruction scan cannot decode: a binary that cannot be scanned must never be
+/// reported as carrying no host-identity reads.
+pub fn native_host_identity_sites(bytes: &[u8]) -> Result<Vec<NativeEscape>, TargetError> {
+    let file = object::File::parse(bytes).map_err(TargetError::NativeParse)?;
+    NativeFormat::from_binary(file.format())?;
+    let provenance = NativeProvenanceIndex::new(&file);
+    Ok(scan_forbidden_instructions(&file, &provenance)?
+        .into_iter()
+        .filter(native_escape_is_host_identity)
+        .collect())
+}
+
+/// Render the "host-identity reads" heading for the sites
+/// [`native_host_identity_sites`] found, or `None` when there are none.
+///
+/// The wording keeps the distinctions the timestamp-counter note draws.
+/// *Manageable* (rdtsc: trapped and answered from the virtual clock) and
+/// *runnable* (the guest actually progresses) are both stronger than what holds
+/// here: a host-identity read is **unmanaged** — patina neither traps nor models
+/// it, and the guest sees the real host's feature bits. What that costs is
+/// stated exactly: determinism ON a host is unaffected (the bits do not change
+/// between runs), while reproducibility ACROSS hosts is not guaranteed wherever
+/// those bits guard behavior. That is not hypothetical — `fastant` selects its
+/// TSC path from the invariant-TSC bit, so the same guest at the same seed takes
+/// a different code path on a host whose bit is clear.
+pub fn render_host_identity_note(sites: &[NativeEscape]) -> Option<String> {
+    if sites.is_empty() {
+        return None;
+    }
+    let mnemonics: BTreeSet<&str> = sites.iter().filter_map(|site| site.mnemonic).collect();
+    let mut note = format!(
+        "host-identity reads ({}, {} site{}): unmanaged — patina neither traps nor models the host \
+         CPU's identity, so the guest reads the real feature bits. This is NOT a refusal and NOT an \
+         escape from a single run's determinism: the bits are constant on a host, so repeats and \
+         record/replay are unaffected. What it costs is cross-host reproducibility — the guest's \
+         code paths may vary across hosts with different CPU feature bits wherever these reads \
+         guard behavior (a fast-clock crate selecting its timestamp-counter path from the \
+         invariant-TSC bit is the live example). Pin the host to reproduce a run exactly.",
+        mnemonics.into_iter().collect::<Vec<_>>().join("/"),
+        sites.len(),
+        if sites.len() == 1 { "" } else { "s" }
+    );
+    for site in sites {
+        note.push_str(&format!("\n  {} ({})", site.symbol, site.category));
+        for provenance in &site.provenance {
+            note.push_str(&format!("\n    {}", provenance.label()));
+            if let Some(label) = provenance.site_label() {
+                note.push_str(&format!(" [{label}]"));
+            }
+        }
+    }
+    Some(note)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -296,7 +387,16 @@ impl NativeAudit {
                     .unwrap_or_else(|| vec![NativeProvenance::unknown()]),
             ));
         }
-        denied.extend(scan_forbidden_instructions(&file, &provenance)?);
+        // Host-identity reads are informational, so they are dropped here rather
+        // than joining the refusal set (`render_host_identity_note` over
+        // `native_host_identity_sites` is what reports them, on every outcome).
+        // The scan still classifies them in one place; only the disposition
+        // differs.
+        denied.extend(
+            scan_forbidden_instructions(&file, &provenance)?
+                .into_iter()
+                .filter(|escape| !native_escape_is_host_identity(escape)),
+        );
         if !denied.is_empty() {
             return Err(TargetError::UnsupportedNativeImports(denied));
         }
@@ -1680,6 +1780,14 @@ fn sign_extend(value: u64, bits: u8) -> i64 {
     ((value << shift) as i64) >> shift
 }
 
+/// Every instruction finding in a binary's text sections.
+///
+/// NOT all of them are refusals. All but one category are — a raw `syscall`, a
+/// counter/entropy read, a `vsyscall` immediate, an undecodable byte run — but
+/// [`HOST_IDENTITY_CATEGORY`] findings are informational and MUST be filtered out
+/// before the result reaches a denial set, or `cpuid` (which nearly every x86-64
+/// binary contains) starts refusing every guest. [`NativeAudit::audit`] does that
+/// filtering; [`native_host_identity_sites`] takes the other half.
 fn scan_forbidden_instructions(
     file: &object::File<'_>,
     provenance: &NativeProvenanceIndex,
@@ -1851,16 +1959,19 @@ mod x86_scan {
         Group3Z,
     }
 
-    /// A forbidden opcode as `(escape category, decoded mnemonic)`. The mnemonic
+    /// A classified opcode as `(escape category, decoded mnemonic)`. The mnemonic
     /// rides along to the finding so the audit can tell `rdtsc`/`rdtscp` (trap-
     /// manageable on x86-64 Linux) from `rdrand`/`rdseed` (never manageable),
     /// which share the `cpu-nondeterminism` category.
+    ///
+    /// Most categories here are refusals; `host-identity` (`cpuid`) is the
+    /// informational one — the decoder classifies, the audit decides disposition.
     type Forbidden = (&'static str, &'static str);
 
     struct OpAttr {
         modrm: bool,
         imm: Imm,
-        /// A forbidden opcode fixed by the opcode bytes alone (syscall, rdtsc).
+        /// A category fixed by the opcode bytes alone (syscall, rdtsc, cpuid).
         cat: Option<Forbidden>,
         /// `0f c7` (group 9): rdrand (ModRM.reg 6) / rdseed (ModRM.reg 7) vs
         /// cmpxchg8b is a reg decision resolved after the ModRM byte is read.
@@ -1877,7 +1988,7 @@ mod x86_scan {
     }
 
     /// Walk `data` (a `.text` section) instruction by instruction, pushing a
-    /// finding for each forbidden opcode at a real boundary and one
+    /// finding for each classified opcode at a real boundary and one
     /// `undecodable-instruction` finding (then stopping) if the decoder cannot
     /// measure an instruction.
     pub(super) fn scan(
@@ -1978,9 +2089,9 @@ mod x86_scan {
         Some((len, reference))
     }
 
-    /// Decode the length of the single instruction at `b[0]`, and whether its
-    /// opcode is forbidden. Returns `Undecodable` for anything the length rules
-    /// below do not cover (fail closed).
+    /// Decode the length of the single instruction at `b[0]`, and its category
+    /// if the opcode carries one. Returns `Undecodable` for anything the length
+    /// rules below do not cover (fail closed).
     fn decode_one(b: &[u8]) -> Step {
         let mut p = 0usize;
         let mut o66 = false;
@@ -2297,7 +2408,8 @@ mod x86_scan {
     /// Two-byte (`0f xx`) opcode attributes. `None` = fail closed. The forbidden
     /// opcodes are `0f 05` (syscall), `0f 31` (rdtsc), `0f 01 f9` (rdtscp,
     /// resolved from ModRM by the caller) and `0f c7 /6`, `/7` (rdrand, rdseed,
-    /// likewise resolved from ModRM.reg).
+    /// likewise resolved from ModRM.reg); `0f a2` (cpuid) is classified here too,
+    /// as the informational `host-identity` category rather than a refusal.
     fn two_byte(op2: u8) -> Option<OpAttr> {
         use Imm::*;
         match op2 {
@@ -2335,8 +2447,21 @@ mod x86_scan {
                 group9: true,
                 group7: false,
             }),
-            // No ModRM, no immediate (clts/syscall-family/cpuid/push-pop-seg/
-            // bswap/rsm/...).
+            // CPUID (`0f a2`): the host-identity read. Its length rules were
+            // already right (it sat in the no-ModRM/no-immediate row below), so
+            // this arm adds only the classification — which is what took the site
+            // from silent to reported. `host-identity` is informational, not a
+            // refusal (see `HOST_IDENTITY_CATEGORY`).
+            0xA2 => Some(OpAttr {
+                modrm: false,
+                imm: None,
+                cat: Some((super::HOST_IDENTITY_CATEGORY, "cpuid")),
+                group9: false,
+                group7: false,
+            }),
+            // No ModRM, no immediate (clts/syscall-family/push-pop-seg/bswap/
+            // rsm/...; `0f a2` cpuid is matched above with the same length rules
+            // and an added classification).
             0x06
             | 0x07
             | 0x08
@@ -2352,7 +2477,6 @@ mod x86_scan {
             | 0x77
             | 0xA0
             | 0xA1
-            | 0xA2
             | 0xA8
             | 0xA9
             | 0xAA
@@ -2537,6 +2661,49 @@ mod x86_scan {
                     ("cpu-nondeterminism", Some("rdtsc")),
                     ("cpu-nondeterminism", Some("rdtscp")),
                     ("cpu-nondeterminism", Some("rdseed")),
+                ]
+            );
+        }
+
+        /// `cpuid` (`0f a2`) is decoded and classified `host-identity` — the
+        /// informational class, not a refusal. It sat in the "no ModRM, no
+        /// immediate" length row with no category, so a guest branching on host
+        /// CPU feature bits (libc ifunc resolvers, std feature detection, a
+        /// fast-clock crate choosing its TSC path) was measured correctly and
+        /// reported NOTHING: the fastant probe found 11 cpuid sites by objdump in
+        /// a binary whose 2 rdtsc sites the audit did report. RED: drop the `0xA2`
+        /// arm and the category is `None` again.
+        #[test]
+        fn classifies_cpuid_as_host_identity() {
+            assert_eq!(
+                decode_full(&[0x0f, 0xa2]).1,
+                Some(("host-identity", "cpuid"))
+            );
+            // Classification only: the length was already right and stays 2.
+            assert_eq!(decode(&[0x0f, 0xa2]).0, 2);
+            // Neighbours in the same length row are untouched: `bswap eax`
+            // (`0f c8`), `cpuid`'s table row-mates `wbinvd` (`0f 09`) and `ud2`
+            // (`0f 0b`) classify as nothing.
+            for bytes in [&[0x0f, 0xc8][..], &[0x0f, 0x09][..], &[0x0f, 0x0b][..]] {
+                assert_eq!(decode(bytes).1, None, "{bytes:02x?} is not host-identity");
+            }
+            // And the counter/entropy neighbours keep their own category.
+            assert_eq!(decode(&[0x0f, 0x31]).1, Some("cpu-nondeterminism"));
+            assert_eq!(decode(&[0x0f, 0xc7, 0xf0]).1, Some("cpu-nondeterminism"));
+            // A scan of mixed text attributes each site to its own class, in
+            // order: cpuid, rdtsc, cpuid.
+            let mut escapes = Vec::new();
+            scan_test(&[0x0f, 0xa2, 0x0f, 0x31, 0x0f, 0xa2], &mut escapes);
+            let found: Vec<_> = escapes
+                .iter()
+                .map(|escape| (escape.symbol.as_str(), escape.category, escape.mnemonic))
+                .collect();
+            assert_eq!(
+                found,
+                vec![
+                    ("instruction@.text+0x0", "host-identity", Some("cpuid")),
+                    ("instruction@.text+0x2", "cpu-nondeterminism", Some("rdtsc")),
+                    ("instruction@.text+0x4", "host-identity", Some("cpuid")),
                 ]
             );
         }
@@ -4428,12 +4595,11 @@ mod tests {
     }
 
     /// Build a minimal but well-formed little-endian ELF64 for `e_machine`, with
-    /// a single `ALLOC|EXECINSTR` PROGBITS `.text` section carrying a few bytes
-    /// plus a `.shstrtab`. Just enough for `object::File::parse` to report the
+    /// a single `ALLOC|EXECINSTR` PROGBITS `.text` section carrying `text` plus a
+    /// `.shstrtab`. Just enough for `object::File::parse` to report the
     /// architecture and a real `SectionKind::Text` section — the `.text` bytes
     /// are the executable code a silent-pass scanner would skip.
-    fn minimal_executable_elf64(e_machine: u16) -> Vec<u8> {
-        let text: [u8; 8] = [0x00; 8];
+    fn minimal_executable_elf64(e_machine: u16, text: &[u8]) -> Vec<u8> {
         // ".text" name at byte 1, ".shstrtab" name at byte 7.
         let shstr: &[u8] = b"\0.text\0.shstrtab\0";
         let text_off = 64u64;
@@ -4462,7 +4628,7 @@ mod tests {
         elf.extend_from_slice(&2u16.to_le_bytes()); // e_shstrndx -> .shstrtab
         assert_eq!(elf.len(), 64, "ELF64 header is 64 bytes");
 
-        elf.extend_from_slice(&text); // .text data at offset 64
+        elf.extend_from_slice(text); // .text data at offset 64
         elf.extend_from_slice(shstr); // .shstrtab data at offset 72
         while (elf.len() as u64) < shoff {
             elf.push(0);
@@ -4508,7 +4674,7 @@ mod tests {
         const EM_S390: u16 = 22;
         const EM_RISCV: u16 = 243;
         for (machine, label) in [(EM_RISCV, "riscv"), (EM_S390, "s390")] {
-            let elf = minimal_executable_elf64(machine);
+            let elf = minimal_executable_elf64(machine, &[0u8; 8]);
 
             // The scenario is the live one: object reports a non-decodable arch and
             // a genuine executable text section (the bytes the old arm skipped).
@@ -4564,7 +4730,7 @@ mod tests {
         const EM_X86_64: u16 = 62;
         const EM_AARCH64: u16 = 183;
         for (machine, label) in [(EM_X86_64, "x86_64"), (EM_AARCH64, "aarch64")] {
-            let elf = minimal_executable_elf64(machine);
+            let elf = minimal_executable_elf64(machine, &[0u8; 8]);
             let parsed = object::File::parse(&*elf).expect("hand-built ELF must parse");
             let provenance = NativeProvenanceIndex::new(&parsed);
             let scan = scan_forbidden_instructions(&parsed, &provenance);
@@ -4580,6 +4746,81 @@ mod tests {
                 "{label}: zeroed .text yields no forbidden-instruction findings"
             );
         }
+    }
+
+    // A `cpuid` site is REPORTED, never refused. CPUID is near-universal in real
+    // binaries (libc ifunc resolvers, std feature detection), so a refusal would
+    // break every guest; the finding is informational, and its whole value is
+    // that it stops being silent. Two properties are pinned together because
+    // either alone is the wrong outcome: the sites are enumerated
+    // (`native_host_identity_sites`), AND they never enter the denied set that
+    // makes `audit` fail closed. The neighbouring instruction classes in the same
+    // `.text` are unchanged — an `rdtsc` next door still refuses.
+    // RED before the `0f a2` decode row: the site count is 0 and the note is
+    // `None`, exactly the silence the fastant probe measured.
+    #[test]
+    fn cpuid_sites_are_reported_without_refusing_the_binary() {
+        const EM_X86_64: u16 = 62;
+        // cpuid; ret; cpuid; ret; nop; nop
+        let elf =
+            minimal_executable_elf64(EM_X86_64, &[0x0f, 0xa2, 0xc3, 0x0f, 0xa2, 0xc3, 0x90, 0x90]);
+        let audit = NativeAudit::audit(&elf, &BTreeSet::new())
+            .expect("a host-identity read must not refuse the binary");
+        assert!(
+            audit.imports.is_empty(),
+            "the synthetic fixture imports nothing"
+        );
+
+        let sites = native_host_identity_sites(&elf).expect("the fixture scans");
+        assert_eq!(sites.len(), 2, "both cpuid sites are enumerated: {sites:?}");
+        for site in &sites {
+            assert_eq!(site.category, HOST_IDENTITY_CATEGORY);
+            assert_eq!(site.mnemonic, Some("cpuid"));
+            assert!(
+                site.symbol.starts_with("instruction@"),
+                "an instruction finding names a .text offset, not a symbol: {}",
+                site.symbol
+            );
+        }
+
+        let note = render_host_identity_note(&sites).expect("a non-empty list renders");
+        assert!(
+            note.contains("host-identity reads (cpuid, 2 sites)")
+                && note.contains("unmanaged")
+                && note.contains("cross-host"),
+            "the note must name the class, the count, and the portability limit: {note}"
+        );
+        assert_eq!(
+            render_host_identity_note(&[]),
+            None,
+            "no sites renders no note"
+        );
+
+        // Same text plus an rdtsc: the counter read still refuses, and the cpuid
+        // site is still reported rather than folded into the refusal.
+        let with_rdtsc =
+            minimal_executable_elf64(EM_X86_64, &[0x0f, 0xa2, 0x0f, 0x31, 0xc3, 0x90, 0x90, 0x90]);
+        let error = NativeAudit::audit(&with_rdtsc, &BTreeSet::new())
+            .expect_err("an rdtsc site still fails closed");
+        let TargetError::UnsupportedNativeImports(denied) = error else {
+            panic!("expected an unsupported-imports refusal, got {error:?}");
+        };
+        assert_eq!(
+            denied
+                .iter()
+                .map(|escape| (escape.category, escape.mnemonic))
+                .collect::<Vec<_>>(),
+            vec![("cpu-nondeterminism", Some("rdtsc"))],
+            "only the counter read is denied; the cpuid site is not a refusal"
+        );
+        assert_eq!(
+            native_host_identity_sites(&with_rdtsc)
+                .expect("the fixture scans")
+                .len(),
+            1,
+            "the host-identity site survives a refusing audit, so a refusal can \
+             report it too"
+        );
     }
 
     // Pure-compute host symbols are known-safe with no `--allow`: they read or

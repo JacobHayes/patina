@@ -35,8 +35,9 @@ use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, WASI_PREVIEW1_TARGET, WasiAudit,
     native_binary_has_sud_marker, native_binary_has_tsc_marker, native_binary_is_shim_linked,
     native_deny_trap_armed, native_escape_is_sud_manageable, native_escape_is_tsc_manageable,
-    render_cpu_nondeterminism_note, render_inert_weak_imports, render_native_escapes_grouped,
-    render_tsc_managed_note, shim_control_plane_symbols,
+    native_host_identity_sites, render_cpu_nondeterminism_note, render_host_identity_note,
+    render_inert_weak_imports, render_native_escapes_grouped, render_tsc_managed_note,
+    shim_control_plane_symbols,
 };
 use patina_dst_trace::TraceBundle;
 use patina_dst_wasi_host::{
@@ -4225,6 +4226,14 @@ fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<i32, CliErr
     // SUD, refused on kernels without it. Any OTHER denial (or the same finding
     // without the SUD marker) still fails closed.
     let effective = effective_native_allow(&invocation.allow);
+    // Host-identity reads (`cpuid`) are informational, so they are reported on
+    // EVERY outcome of the three-way split below — clean, trap-managed, and
+    // refused. Scan for them once here rather than in each arm. The scan can only
+    // fail the ways `NativeAudit::audit` fails on the same bytes (parse, format,
+    // undecodable architecture), so propagating is fail-closed and changes no
+    // message an operator sees.
+    let host_identity =
+        native_host_identity_sites(&bytes).map_err(|error| CliError(error.to_string()))?;
     let audit = match NativeAudit::audit(&bytes, &effective) {
         Ok(audit) => audit,
         Err(TargetError::UnsupportedNativeImports(denied)) => {
@@ -4246,7 +4255,8 @@ fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<i32, CliErr
             if !hard.is_empty() || (sud_instructions.is_empty() && tsc_instructions.is_empty()) {
                 // A genuine escape remains (or there was nothing SUD could manage):
                 // fail closed and render the provenance-rich audit result.
-                emit_native_audit_violation(&resolved.path, &denied);
+                emit_native_audit_violation(&resolved.path, &denied, &host_identity);
+                emit_host_identity_note(&host_identity);
                 return Ok(2);
             }
             // Only trap-manageable instruction findings, and the matching
@@ -4267,6 +4277,7 @@ fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<i32, CliErr
                     &tsc_instructions,
                     Some("TSC-trap-managed"),
                 ));
+                details.extend(host_identity_details(&host_identity));
                 output::emit_audit_with_details(
                     "audit",
                     "native",
@@ -4308,17 +4319,19 @@ named frozen-clock-churn abort.",
                     }
                 }
             }
+            emit_host_identity_note(&host_identity);
             return Ok(0);
         }
         Err(error) => return Err(CliError(error.to_string())),
     };
     let findings: Vec<String> = audit.imports.iter().map(ToString::to_string).collect();
     if output::options().is_json() {
-        output::emit_audit(
+        output::emit_audit_with_details(
             "audit",
             "native",
             &resolved.path.display().to_string(),
             findings,
+            host_identity_details(&host_identity),
             0,
         );
     } else {
@@ -4337,18 +4350,52 @@ named frozen-clock-churn abort.",
     if let Some(note) = render_inert_weak_imports(&audit.inert_weak_imports) {
         eprintln!("{note}");
     }
+    // And for host-identity reads: a clean audit is exactly where their silence
+    // used to be total — the binary passes, and nothing said its code paths can
+    // vary across hosts.
+    emit_host_identity_note(&host_identity);
     Ok(0)
 }
 
-fn emit_native_audit_violation(path: &Path, denied: &[NativeEscape]) {
+/// The disposition label host-identity findings carry in the JSON envelope's
+/// `finding_details`, alongside `SUD-managed` / `TSC-trap-managed`. Both halves
+/// are the point: *unmanaged* (no trap, no model — unlike the timestamp counter)
+/// and *visible* (reported anyway, unlike the silence this replaced).
+const HOST_IDENTITY_DISPOSITION: &str = "unmanaged-visible";
+
+fn host_identity_details(sites: &[NativeEscape]) -> Vec<serde_json::Value> {
+    native_escape_details(sites, Some(HOST_IDENTITY_DISPOSITION))
+}
+
+/// Print the host-identity heading, on stderr in BOTH output modes — the
+/// inert-weak-imports rule. The sites are informational and never change the exit
+/// code, so keeping them off stdout leaves the human import list and the JSON
+/// envelope byte-stable for callers that parse them; JSON consumers get the same
+/// sites as `finding_details` rows carrying [`HOST_IDENTITY_DISPOSITION`].
+fn emit_host_identity_note(sites: &[NativeEscape]) {
+    if let Some(note) = render_host_identity_note(sites) {
+        eprintln!("{note}");
+    }
+}
+
+fn emit_native_audit_violation(
+    path: &Path,
+    denied: &[NativeEscape],
+    host_identity: &[NativeEscape],
+) {
     let findings = denied.iter().map(native_escape_summary).collect::<Vec<_>>();
     if output::options().is_json() {
+        let mut details = native_escape_details(denied, None);
+        // A refusal reports the host-identity sites too: they are not why the
+        // binary was refused, and dropping them here would make the class visible
+        // on some outcomes and silent on others.
+        details.extend(host_identity_details(host_identity));
         output::emit_audit_with_details(
             "audit",
             "native",
             &path.display().to_string(),
             findings,
-            native_escape_details(denied, None),
+            details,
             2,
         );
     } else {

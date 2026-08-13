@@ -6131,6 +6131,173 @@ fn run_source_package_target_wasi_on_the_fly() {
     );
 }
 
+/// Build a minimal well-formed little-endian x86-64 ELF64 whose single
+/// `ALLOC|EXECINSTR` `.text` section carries `text`. Enough for the audit to
+/// parse the file, classify the architecture, and run the instruction scan —
+/// which is the whole subject here. Hand-built rather than compiled because the
+/// instruction under test (`cpuid`) is x86-64-only and this suite must assert the
+/// same reporting on an arm64 host.
+fn synthetic_x86_64_elf(text: &[u8]) -> Vec<u8> {
+    const EM_X86_64: u16 = 62;
+    let shstr: &[u8] = b"\0.text\0.shstrtab\0"; // ".text" at 1, ".shstrtab" at 7
+    let text_off = 64u64;
+    let shstr_off = text_off + text.len() as u64;
+    let shoff = (shstr_off + shstr.len() as u64 + 7) & !7;
+
+    let mut elf = Vec::new();
+    elf.extend_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0]); // ELFCLASS64, LSB
+    elf.extend_from_slice(&[0u8; 8]);
+    elf.extend_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
+    elf.extend_from_slice(&EM_X86_64.to_le_bytes());
+    elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
+    elf.extend_from_slice(&0u64.to_le_bytes()); // e_entry
+    elf.extend_from_slice(&0u64.to_le_bytes()); // e_phoff
+    elf.extend_from_slice(&shoff.to_le_bytes()); // e_shoff
+    elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+    elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
+    elf.extend_from_slice(&0u16.to_le_bytes()); // e_phentsize
+    elf.extend_from_slice(&0u16.to_le_bytes()); // e_phnum
+    elf.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
+    elf.extend_from_slice(&3u16.to_le_bytes()); // e_shnum
+    elf.extend_from_slice(&2u16.to_le_bytes()); // e_shstrndx
+    assert_eq!(elf.len(), 64, "ELF64 header is 64 bytes");
+    elf.extend_from_slice(text);
+    elf.extend_from_slice(shstr);
+    while (elf.len() as u64) < shoff {
+        elf.push(0);
+    }
+    let mut push_shdr = |name: u32, typ: u32, flags: u64, offset: u64, size: u64| {
+        elf.extend_from_slice(&name.to_le_bytes());
+        elf.extend_from_slice(&typ.to_le_bytes());
+        elf.extend_from_slice(&flags.to_le_bytes());
+        elf.extend_from_slice(&0u64.to_le_bytes()); // sh_addr
+        elf.extend_from_slice(&offset.to_le_bytes());
+        elf.extend_from_slice(&size.to_le_bytes());
+        elf.extend_from_slice(&0u32.to_le_bytes()); // sh_link
+        elf.extend_from_slice(&0u32.to_le_bytes()); // sh_info
+        elf.extend_from_slice(&4u64.to_le_bytes()); // sh_addralign
+        elf.extend_from_slice(&0u64.to_le_bytes()); // sh_entsize
+    };
+    push_shdr(0, 0, 0, 0, 0); // SHN_UNDEF
+    push_shdr(1, 1, 0x2 | 0x4, text_off, text.len() as u64); // .text PROGBITS A|X
+    push_shdr(7, 3, 0, shstr_off, shstr.len() as u64); // .shstrtab STRTAB
+    elf
+}
+
+// `audit` REPORTS inline host-identity reads (`cpuid`) instead of passing them in
+// silence — and does not refuse them. This is the end-to-end half of the
+// patina-target unit test: an operator running the real CLI sees the heading, and
+// the exit code is unchanged at 0 on a binary whose only finding is host identity.
+//
+// The gap this closes was measured, not imagined: on the fastant calibrating
+// guest, `objdump` counted 11 `cpuid` sites in a binary whose 2 `rdtsc` sites the
+// audit did report, and in that guest `cpuid` is the branch selecting the
+// timestamp-counter path over the `SystemTime` fallback — so the same guest at
+// the same seed can take a different path on a host with different feature bits,
+// with nothing in the report saying so.
+//
+// RED before the `0f a2` decode row: `--format json` carries no `host-identity`
+// detail and stderr carries no heading, while the exit code is already 0 — i.e.
+// the audit passed the binary and said nothing.
+#[test]
+fn audit_reports_host_identity_reads_without_refusing_them() {
+    let directory = tempdir().unwrap();
+    // cpuid; ret; cpuid; ret; nop; nop
+    let binary = directory.path().join("cpuid-probe");
+    fs::write(
+        &binary,
+        synthetic_x86_64_elf(&[0x0f, 0xa2, 0xc3, 0x0f, 0xa2, 0xc3, 0x90, 0x90]),
+    )
+    .unwrap();
+
+    // `--raw`: the fixture is not shim-linked, and the audit rightly refuses to
+    // report a non-Patina-built binary's imports without it. The instruction scan
+    // — the subject here — runs either way.
+    let audited = invoke(
+        directory.path(),
+        &["audit", binary.to_str().unwrap(), "--raw"],
+    );
+    let stderr = String::from_utf8_lossy(&audited.stderr);
+    assert_eq!(
+        audited.status.code(),
+        Some(0),
+        "a host-identity read is informational and must not change the exit code:\
+         \nstdout:\n{}\nstderr:\n{stderr}",
+        String::from_utf8_lossy(&audited.stdout)
+    );
+    assert!(
+        stderr.contains("host-identity reads (cpuid, 2 sites)"),
+        "the audit must name the class and its site count:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("cross-host") && stderr.contains("unmanaged"),
+        "the note must say what is unmanaged and what it costs:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("instruction@.text+0x0") && stderr.contains("instruction@.text+0x3"),
+        "each site is named by its .text offset:\n{stderr}"
+    );
+
+    // JSON: the sites ride in finding_details like other findings, the result
+    // stays `ok`, and they are NOT promoted into `findings` (which would read as
+    // a violation to a consumer).
+    let json = invoke(
+        directory.path(),
+        &[
+            "audit",
+            binary.to_str().unwrap(),
+            "--raw",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(json.status.code(), Some(0));
+    let envelope: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&json.stdout).trim())
+            .expect("audit --format json emits one envelope");
+    assert_eq!(envelope["result"], "ok");
+    assert_eq!(envelope["exit_code"], 0);
+    let details = envelope["finding_details"]
+        .as_array()
+        .expect("finding_details is an array")
+        .clone();
+    assert_eq!(details.len(), 2, "both sites are detailed: {details:?}");
+    for detail in &details {
+        assert_eq!(detail["category"], "host-identity");
+        assert_eq!(detail["disposition"], "unmanaged-visible");
+    }
+
+    // The neighbouring refusal class is unchanged: an `rdtsc` in the same text
+    // still fails closed with exit 2 on this (non-x86-Linux) host, and the
+    // host-identity site is still reported alongside the refusal.
+    let with_rdtsc = directory.path().join("cpuid-and-rdtsc");
+    fs::write(
+        &with_rdtsc,
+        synthetic_x86_64_elf(&[0x0f, 0xa2, 0x0f, 0x31, 0xc3, 0x90, 0x90, 0x90]),
+    )
+    .unwrap();
+    let refused = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        directory.path(),
+        &["audit", with_rdtsc.to_str().unwrap(), "--raw"],
+    );
+    let refused_stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "the counter read must still refuse:\n{refused_stderr}"
+    );
+    assert!(
+        refused_stderr.contains("cpu-nondeterminism"),
+        "the refusal still names the counter read:\n{refused_stderr}"
+    );
+    assert!(
+        refused_stderr.contains("host-identity reads (cpuid, 1 site)"),
+        "a refusal reports host-identity sites too, or the class is visible on \
+         some outcomes and silent on others:\n{refused_stderr}"
+    );
+}
+
 fn invoke(fixture: &Path, arguments: &[&str]) -> Output {
     invoke_with(env!("CARGO_BIN_EXE_cargo-patina"), fixture, arguments)
 }
