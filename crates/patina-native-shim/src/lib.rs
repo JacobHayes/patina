@@ -300,6 +300,11 @@ fn urandom_close(raw_fd: c_int) -> Result<(), c_int> {
 /// covers the allocator's constructor whichever order it is scheduled in) and
 /// cleared exactly once, before `main`; a single-threaded guest's later, legitimate
 /// deterministic calls (e.g. `readlink` in `main`) are therefore unaffected.
+///
+/// Cleared only by a SUCCESSFUL install, so a failed one leaves it set for the
+/// rest of the process — which is why the window is entered exclusively through
+/// [`in_shim_bootstrap`], where a stored init error turns every answer below it
+/// into a named abort.
 static SHIM_BOOTSTRAP: AtomicBool = AtomicBool::new(true);
 
 #[repr(C)]
@@ -418,9 +423,27 @@ fn descriptor_text(
 /// Whether the process is still in the shim-bootstrap window (see
 /// [`SHIM_BOOTSTRAP`]). Read lock-free so the interposers can branch on it on
 /// entry, before touching any shim lock or the guest allocator.
+///
+/// This is the ONE door into the window, and it fails closed on a failed init:
+/// [`SHIM_BOOTSTRAP`] is cleared only by a SUCCESSFUL [`install`], so an
+/// initialization that failed closed (a `--fingerprint` mismatch, a bad
+/// `--mount` corpus, ...) leaves the window open for the rest of the process.
+/// Every answer behind it — a zero clock, a zero CPU time, `ENOENT` for a
+/// `read_link`, a natively-run lock — is produced WITHOUT reaching
+/// [`ensure_runtime`], so without the check below the guest never learns the run
+/// was refused. That is not hypothetical: a replay of a guest whose only
+/// boundary operations are clock reads used to spin at 100% CPU on a fabricated
+/// frozen clock instead of aborting on the fingerprint mismatch. Consulting the
+/// stored init error HERE, rather than at each answer, covers the paths that
+/// exist and the ones not yet written; `bootstrap_window_lints` keeps it the
+/// only reader of the flag.
 #[inline]
 fn in_shim_bootstrap() -> bool {
-    SHIM_BOOTSTRAP.load(Ordering::Acquire)
+    if !SHIM_BOOTSTRAP.load(Ordering::Acquire) {
+        return false;
+    }
+    abort_if_init_failed();
+    true
 }
 
 thread_local! {
@@ -1667,6 +1690,51 @@ fn init_error() -> &'static SpinMutex<Option<String>> {
     INIT_ERROR.get_or_init(|| SpinMutex::new(None))
 }
 
+/// Lock-free mirror of "[`INIT_ERROR`] holds a message", for the readers that
+/// must decide without taking a lock or allocating — chiefly
+/// [`in_shim_bootstrap`], which runs on the allocator's own init path and is hit
+/// by every clock read of a healthy run.
+static INIT_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// Set once [`abort_if_init_failed`] has begun writing the diagnostic, so a
+/// re-entrant call from inside that write cannot take [`INIT_ERROR`] twice. The
+/// write flushes captured stdio, whose buffers deallocate through the guest
+/// global allocator; with a custom allocator (jemalloc) that deallocation takes
+/// an interposed lock, which re-enters [`in_shim_bootstrap`] while this thread
+/// already holds the non-recursive spinlock.
+static INIT_ERROR_ABORTING: AtomicBool = AtomicBool::new(false);
+
+/// Record the runtime's own init-failure diagnostic. The single writer of
+/// [`INIT_ERROR`], so [`INIT_FAILED`] can never drift from it; the flag is
+/// published after the message, so a reader that sees the flag sees the message.
+fn record_init_error(message: String) {
+    *init_error().lock() = Some(message);
+    INIT_FAILED.store(true, Ordering::Release);
+}
+
+/// Abort with the stored init diagnostic if initialization has already failed
+/// closed, else return and let the caller proceed.
+///
+/// For the paths that would otherwise answer WITHOUT reaching [`ensure_runtime`]
+/// — the shim-bootstrap window. Allocation-free and takes only shim spinlocks,
+/// which is what makes it safe on the allocator-init path that window exists
+/// for; the re-entrancy latch covers the one call the diagnostic write can make
+/// back into it.
+fn abort_if_init_failed() {
+    if !INIT_FAILED.load(Ordering::Acquire) {
+        return;
+    }
+    if INIT_ERROR_ABORTING.swap(true, Ordering::AcqRel) {
+        // Already aborting on this path: this call came back out of the
+        // diagnostic write itself. Returning lets it finish; the abort follows.
+        return;
+    }
+    let guard = init_error().lock();
+    if let Some(message) = guard.as_deref() {
+        abort_with_init_error(message);
+    }
+}
+
 /// The mode a descriptor holds an advisory `flock` in.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FlockMode {
@@ -1956,8 +2024,15 @@ run under `cargo patina run` (or with the PATINA_MODE protocol set); no determin
 /// buffered output, mirroring the process-class deny-trap path.
 fn abort_with_init_error(message: &str) -> ! {
     let _ = flush_captured_stdio();
-    let line = format!("patina: the deterministic runtime failed to initialize: {message}\n");
-    let _ = host_write_all(2, line.as_bytes());
+    // Written in pieces rather than through one `format!`: this is reachable
+    // from the shim-bootstrap window, where a custom global allocator may still
+    // be initializing and an allocation here would re-enter it. Same bytes.
+    let _ = host_write_all(
+        2,
+        b"patina: the deterministic runtime failed to initialize: ",
+    );
+    let _ = host_write_all(2, message.as_bytes());
+    let _ = host_write_all(2, b"\n");
     std::process::abort();
 }
 
@@ -2426,7 +2501,7 @@ fn install(context: Result<Context, RuntimeError>) -> c_int {
         Err(error) => return fail(runtime_errno(&error)),
     };
     if let Err(error) = declare_link_time_sites(&mut context) {
-        *init_error().lock() = Some(error.to_string());
+        record_init_error(error.to_string());
         return fail(runtime_errno(&error));
     }
     let mut guard = slot().lock();
@@ -2557,7 +2632,7 @@ fn init_from_env() -> c_int {
     if let Err(error) = &context {
         // Preserve the runtime's diagnostic before `install` collapses it to a
         // bare errno, so the fail-closed abort path can report *why*.
-        *init_error().lock() = Some(error.to_string());
+        record_init_error(error.to_string());
     }
     install(context)
 }
@@ -2753,6 +2828,15 @@ pub unsafe extern "C" fn patina_stdio_write(
     if length != 0 && source.is_null() {
         return fail(EINVAL) as isize;
     }
+    // Capture accepts bytes with no context installed, so — like the
+    // shim-bootstrap window — it never reaches `ensure_runtime` and would
+    // swallow a fail-closed init error. The buffer is flushed at
+    // `patina_shutdown`, which with no context returns quietly, so a guest whose
+    // only boundary effect is a `println!` used to exit 0 with its output
+    // dropped and the refusal unreported. Not `ensure_runtime`: that would also
+    // fire for a binary run outside the supervisor, whose diagnostic is the
+    // startup path's to give.
+    abort_if_init_failed();
     if let Err(errno) = thread::sched_point() {
         return fail(errno) as isize;
     }
@@ -3157,9 +3241,11 @@ pub extern "C" fn patina_sleep_until(clock_id: u32, deadline_nanos: u64) -> c_in
 ///
 /// Always succeeds writing a value. Before the runtime is installed (a custom
 /// allocator's bootstrap timing, or a binary run outside the supervisor) it
-/// reports a deterministic 0 rather than auto-installing or aborting: a resource
-/// read must never be the thing that forces runtime init, mirroring
-/// [`patina_clock_now`]'s bootstrap leg.
+/// reports a deterministic 0 rather than auto-installing: a resource read must
+/// never be the thing that forces runtime init, mirroring [`patina_clock_now`]'s
+/// bootstrap leg. It does still abort when initialization has already FAILED —
+/// answering 0 there would hand the guest a fabricated value for a run that was
+/// refused (see [`in_shim_bootstrap`]).
 ///
 /// # Safety
 /// `nanos` must be non-null and writable for one `u64`.
@@ -6110,7 +6196,12 @@ mod thread {
         // are allocator-internal, single-owner locks that must not route through
         // the scheduler (it would trip the non-recursive guard or deadlock on the
         // held spinlock). See `SHIM_BOOTSTRAP` and `SPIN_DEPTH`.
-        if super::in_shim_bootstrap() || super::in_shim_critical() {
+        //
+        // The spinlock test comes FIRST because the window test aborts on a
+        // stored init error: shim-internal reentrancy must never be the call that
+        // triggers a fail-closed abort, or the shim's own diagnostic write could
+        // abort from inside its allocator's deallocation.
+        if super::in_shim_critical() || super::in_shim_bootstrap() {
             // SAFETY: the resolved real `os_unfair_lock_lock`; `lock` is a valid
             // `os_unfair_lock` per the caller's contract.
             unsafe { (super::hostapi::get().host_os_unfair_lock_lock)(lock) };
@@ -6144,7 +6235,7 @@ mod thread {
     pub unsafe extern "C" fn patina_os_unfair_lock_trylock(lock: *mut c_void) -> c_int {
         // Allocator-internal lock: run natively (see `patina_os_unfair_lock_lock`).
         // The real `os_unfair_lock_trylock` returns a C `bool`.
-        if super::in_shim_bootstrap() || super::in_shim_critical() {
+        if super::in_shim_critical() || super::in_shim_bootstrap() {
             // SAFETY: the resolved real `os_unfair_lock_trylock`; valid `lock`.
             return c_int::from(unsafe {
                 (super::hostapi::get().host_os_unfair_lock_trylock)(lock)
@@ -6168,7 +6259,7 @@ mod thread {
         // A lock taken natively (bootstrap, or reentrant under a held spinlock) is
         // released natively too; the allocator's lock/unlock pair is balanced
         // within the same window, so none spans a transition.
-        if super::in_shim_bootstrap() || super::in_shim_critical() {
+        if super::in_shim_critical() || super::in_shim_bootstrap() {
             // SAFETY: the resolved real `os_unfair_lock_unlock`; valid `lock`.
             unsafe { (super::hostapi::get().host_os_unfair_lock_unlock)(lock) };
             return;
@@ -10781,6 +10872,72 @@ mod coverage_tests {
             error.contains("sentinel pc=1") && error.contains("covered guard"),
             "covered sentinel pc should fail loudly; got {error}"
         );
+    }
+}
+
+/// Source-level enumeration gate for the shim-bootstrap window.
+///
+/// The window answers interposed calls WITHOUT reaching `ensure_runtime`, which
+/// is exactly the shape that once swallowed a fail-closed init error: a
+/// fingerprint-mismatched replay of a clock-only guest spun at 100% CPU instead
+/// of aborting. The structural answer is that the window is entered through one
+/// predicate that consults the stored init error, so every path is covered by
+/// construction — including paths not yet written. These lints keep that true:
+/// the flag may not be read anywhere else, and a new call site has to be
+/// enumerated here (and given a leg in the cargo-patina e2e
+/// `native_replay_init_error_reaches_every_bootstrap_window_entry_point`).
+#[cfg(test)]
+mod bootstrap_window_lints {
+    /// Every function that answers from the shim-bootstrap window, in source
+    /// order. The three `os_unfair_lock` sites forward an allocator-internal
+    /// lock to the real host primitive; the rest synthesize a value for the
+    /// guest.
+    const BOOTSTRAP_WINDOW_SITES: &[&str] = &[
+        "patina_clock_now",
+        "patina_cpu_time_nanos",
+        "patina_read_link",
+        "patina_os_unfair_lock_lock",
+        "patina_os_unfair_lock_trylock",
+        "patina_os_unfair_lock_unlock",
+    ];
+
+    /// Assembled at runtime so this module's own text cannot match itself.
+    fn call_needle() -> String {
+        format!("in_shim_bootstrap{}", "()")
+    }
+
+    #[test]
+    fn the_bootstrap_flag_is_read_only_through_the_guarded_predicate() {
+        let source = include_str!("lib.rs");
+        let needle = format!("SHIM_BOOTSTRAP.load{}", "(");
+        assert_eq!(
+            source.matches(&needle).count(),
+            1,
+            "the bootstrap flag must be read only by the window predicate, which is where the \
+             stored init error is consulted; a second reader would answer from the window \
+             without that check"
+        );
+    }
+
+    #[test]
+    fn every_bootstrap_window_call_site_is_enumerated() {
+        let source = include_str!("lib.rs");
+        // One occurrence is the definition itself; the rest are call sites.
+        let sites = source.matches(&call_needle()).count() - 1;
+        assert_eq!(
+            sites,
+            BOOTSTRAP_WINDOW_SITES.len(),
+            "the shim-bootstrap window gained or lost an answer path: list it in \
+             BOOTSTRAP_WINDOW_SITES and give it a leg in the cargo-patina e2e \
+             native_replay_init_error_reaches_every_bootstrap_window_entry_point, so a path that \
+             answers before the runtime is installed keeps proving it refuses a failed init"
+        );
+        for site in BOOTSTRAP_WINDOW_SITES {
+            assert!(
+                source.contains(&format!("fn {site}(")),
+                "BOOTSTRAP_WINDOW_SITES names {site}, which this crate does not define"
+            );
+        }
     }
 }
 

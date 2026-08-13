@@ -1953,14 +1953,7 @@ fn audit_and_run_agree_on_the_shim_control_plane_symbol() {
 // tikv-jemallocator MRE hanging/aborting when the fix is reverted (see the shim
 // crate). macOS-specific (`os_unfair_lock`).
 #[cfg(target_os = "macos")]
-#[test]
-fn native_run_supports_a_custom_global_allocator() {
-    let directory = tempdir().unwrap();
-    let workspace = native_workspace();
-    let source = directory.path().join("custom-alloc.rs");
-    fs::write(
-        &source,
-        r#"use std::alloc::{GlobalAlloc, Layout, System};
+const CUSTOM_ALLOCATOR_SOURCE: &str = r#"use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -1991,9 +1984,15 @@ unsafe impl GlobalAlloc for LockingAlloc {
 static GLOBAL: LockingAlloc = LockingAlloc { lock: UnsafeCell::new(0), ready: AtomicU32::new(0) };
 
 fn main() { let v: Vec<u8> = vec![1, 2, 3]; println!("CUSTOM_ALLOC_OK len={}", v.len()); }
-"#,
-    )
-    .unwrap();
+"#;
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_run_supports_a_custom_global_allocator() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("custom-alloc.rs");
+    fs::write(&source, CUSTOM_ALLOCATOR_SOURCE).unwrap();
     let bin = directory.path().join("custom-alloc-bin");
     invoke_in(
         workspace,
@@ -6587,6 +6586,304 @@ fn native_calibration_busy_wait_converges_and_replays_identically() {
     );
 }
 
+/// Exercises exactly ONE interposed entry point per run, selected by `argv[1]`,
+/// and performs no other boundary operation.
+///
+/// The "no other boundary operation" part is the whole point: any effect that
+/// reaches `ensure_runtime` aborts on a stored init error by itself, so the
+/// replay legs below would pass without proving anything about the entry point
+/// under test. Results are checked in-process and a wrong one calls `abort`,
+/// which needs no boundary — so the recording legs' success is what proves each
+/// arm actually ran.
+///
+/// The symbols are the shim's own C ABI (and, for the lock arm, the public
+/// symbol the shim strong-defines); all are defined inside the linked binary, so
+/// the audit sees no unsupported import.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const BOOTSTRAP_WINDOW_PROBE_SOURCE: &str = r#"
+unsafe extern "C" {
+    fn patina_clock_now(clock: u32, nanos: *mut u64) -> i32;
+    fn patina_cpu_time_nanos(nanos: *mut u64) -> i32;
+    fn patina_read_link(path: *const u8, buf: *mut u8, len: usize) -> isize;
+    fn patina_sleep_until(clock: u32, deadline_nanos: u64) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn os_unfair_lock_lock(lock: *mut u32);
+    fn os_unfair_lock_trylock(lock: *mut u32) -> bool;
+    fn os_unfair_lock_unlock(lock: *mut u32);
+}
+
+const MONOTONIC: u32 = 1;
+
+fn main() {
+    let entry = std::env::args().nth(1).unwrap_or_default();
+    match entry.as_str() {
+        "clock" => {
+            let mut nanos = u64::MAX;
+            if unsafe { patina_clock_now(MONOTONIC, &mut nanos) } != 0 {
+                std::process::abort();
+            }
+        }
+        // The field shape from the bug report: poll the clock until virtual time
+        // moves. A healthy run converges through advance-on-spin; a swallowed
+        // init error freezes the clock at zero and this spins at 100% CPU.
+        "clock-until" => {
+            let mut nanos = 0u64;
+            while nanos <= 10_000_000 {
+                if unsafe { patina_clock_now(MONOTONIC, &mut nanos) } != 0 {
+                    std::process::abort();
+                }
+            }
+        }
+        "cpu-time" => {
+            let mut nanos = u64::MAX;
+            if unsafe { patina_cpu_time_nanos(&mut nanos) } != 0 {
+                std::process::abort();
+            }
+        }
+        // The allocator's init-time config probe. The deterministic filesystem
+        // carries no such file either way, so a healthy run answers -1 too.
+        "read-link" => {
+            let mut buf = [0u8; 64];
+            let read = unsafe {
+                patina_read_link(
+                    b"/etc/malloc.conf\0".as_ptr(),
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                )
+            };
+            if read >= 0 {
+                std::process::abort();
+            }
+        }
+        // Not a bootstrap-window path: captured stdio accepts bytes with no
+        // context installed, and `patina_shutdown` then drops the buffer, so a
+        // guest whose only effect is a print exited 0 with its output lost.
+        "stdout" => {
+            println!("BOOTSTRAP_WINDOW_PROBE stdout");
+        }
+        // Control: an entry point that already consults the stored init error,
+        // through `ensure_runtime`. It must keep aborting exactly as before.
+        "sleep" => {
+            if unsafe { patina_sleep_until(MONOTONIC, 5_000_000) } != 0 {
+                std::process::abort();
+            }
+        }
+        #[cfg(target_os = "macos")]
+        "unfair-lock" => {
+            let mut lock = 0u32;
+            unsafe {
+                os_unfair_lock_lock(&mut lock);
+                os_unfair_lock_unlock(&mut lock);
+                if os_unfair_lock_trylock(&mut lock) {
+                    os_unfair_lock_unlock(&mut lock);
+                }
+            }
+        }
+        _ => std::process::abort(),
+    }
+}
+"#;
+
+/// Every entry point known to answer WITHOUT reaching `ensure_runtime`, as an
+/// argument to [`BOOTSTRAP_WINDOW_PROBE_SOURCE`]. The first five and the macOS
+/// lock arm are the shim-bootstrap window; `stdout` is the captured-stdio path,
+/// which answers for the same reason (no context needed) outside the window.
+///
+/// The window entries pair with the shim's own `bootstrap_window_lints` source
+/// lint, which pins the *source* call sites of the window predicate to the same
+/// list — so a new bootstrap-window path cannot be added without both the lint
+/// and a leg here.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const BOOTSTRAP_WINDOW_ENTRY_POINTS: &[&str] = &[
+    "clock",
+    "clock-until",
+    "cpu-time",
+    "read-link",
+    "stdout",
+    "sleep",
+    #[cfg(target_os = "macos")]
+    "unfair-lock",
+];
+
+/// A replay whose runtime initialization fails closed must reach the guest as a
+/// named abort through EVERY interposed entry point, including the ones that
+/// answer without calling `ensure_runtime`.
+///
+/// RED before the fix: `clock`/`clock-until`/`cpu-time`/`read-link` (and the
+/// macOS lock arm) all take a bootstrap-window answer path that never consults
+/// the stored init error, so the fingerprint mismatch is swallowed — `clock-until`
+/// spins at 100% CPU until this test's deadline kills it, and the others exit 0.
+/// `stdout` was swallowed the same way one layer out: captured stdio accepts
+/// bytes with no context and shutdown then drops them, so the guest exited 0
+/// with its output gone. Only the `sleep` control aborted. Every arm now aborts
+/// on its first post-init-failure call.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_replay_init_error_reaches_every_bootstrap_window_entry_point() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("bootstrap_window_probe.rs");
+    fs::write(&source, BOOTSTRAP_WINDOW_PROBE_SOURCE).unwrap();
+    let bin = directory.path().join("bootstrap-window-probe");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let patina = env!("CARGO_BIN_EXE_cargo-patina");
+
+    // Collected rather than asserted per entry: this is a class detector, so a
+    // failure should name every entry point that swallows the error, not just
+    // the first one.
+    let mut swallowed: Vec<String> = Vec::new();
+    for entry in BOOTSTRAP_WINDOW_ENTRY_POINTS {
+        let trace = directory.path().join(format!("{entry}.patina"));
+        // Recording proves the arm runs at all: an unrecognized entry (or an
+        // unexpected result from the call under test) aborts the guest.
+        let recorded = invoke_unchecked(
+            patina,
+            workspace,
+            &[
+                "run",
+                bin.to_str().unwrap(),
+                "--seed",
+                "3",
+                "--record",
+                trace.to_str().unwrap(),
+                "--fingerprint",
+                "bootstrap-window-v1",
+                "--",
+                entry,
+            ],
+        );
+        assert!(
+            recorded.status.success(),
+            "recording the {entry} bootstrap-window probe failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&recorded.stdout),
+            String::from_utf8_lossy(&recorded.stderr)
+        );
+
+        // The same trace replayed under a different fingerprint: initialization
+        // fails closed, and the guest must learn about it through this entry
+        // point. The deadline is what turns the field symptom (an endless spin)
+        // into a failure instead of a hung test.
+        let replayed = invoke_with_deadline(
+            patina,
+            workspace,
+            &[
+                "replay",
+                bin.to_str().unwrap(),
+                trace.to_str().unwrap(),
+                "--fingerprint",
+                "bootstrap-window-other",
+            ],
+            Duration::from_secs(60),
+        );
+        let Some(replayed) = replayed else {
+            swallowed.push(format!(
+                "{entry}: still running at the deadline (the field symptom is a 100% CPU spin)"
+            ));
+            continue;
+        };
+        let stderr = String::from_utf8_lossy(&replayed.stderr).into_owned();
+        if replayed.status.success() {
+            swallowed.push(format!(
+                "{entry}: exited successfully under a mismatched fingerprint"
+            ));
+        } else if !(stderr.contains("the deterministic runtime failed to initialize")
+            && stderr.contains("fingerprint"))
+        {
+            swallowed.push(format!(
+                "{entry}: failed without the init diagnostic:\n{stderr}"
+            ));
+        }
+    }
+    assert!(
+        swallowed.is_empty(),
+        "these bootstrap-window entry points swallowed a fail-closed replay init error:\n{}",
+        swallowed.join("\n")
+    );
+}
+
+/// The bootstrap-window init-error check must not turn a loud refusal into a
+/// deadlock when the guest brings its own global allocator.
+///
+/// The window exists for exactly that guest: an allocator's init takes an
+/// interposed `os_unfair_lock`, which the shim runs natively rather than through
+/// the scheduler. Now that entering the window can abort, the diagnostic write —
+/// which flushes captured stdio, and so deallocates through that same allocator
+/// — can re-enter the check from inside a held shim spinlock. This is the leg
+/// that would hang if the re-entrancy latch or the spinlock-first ordering in
+/// the lock interposers were dropped, so it runs under a deadline.
+#[cfg(target_os = "macos")]
+#[test]
+fn native_replay_init_error_aborts_under_a_custom_global_allocator() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("custom_alloc_init_error.rs");
+    fs::write(&source, CUSTOM_ALLOCATOR_SOURCE).unwrap();
+    let bin = directory.path().join("custom-alloc-init-error");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let patina = env!("CARGO_BIN_EXE_cargo-patina");
+
+    let trace = directory.path().join("custom-alloc.patina");
+    let recorded = invoke_unchecked(
+        patina,
+        workspace,
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--record",
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "custom-alloc-v1",
+        ],
+    );
+    assert!(
+        recorded.status.success(),
+        "recording the custom-allocator guest failed:\n{}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+
+    let replayed = invoke_with_deadline(
+        patina,
+        workspace,
+        &[
+            "replay",
+            bin.to_str().unwrap(),
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "custom-alloc-other",
+        ],
+        Duration::from_secs(60),
+    )
+    .expect("the custom-allocator guest wedged under a fail-closed init error instead of aborting");
+    let stderr = String::from_utf8_lossy(&replayed.stderr).into_owned();
+    assert!(
+        !replayed.status.success()
+            && stderr.contains("the deterministic runtime failed to initialize")
+            && stderr.contains("fingerprint"),
+        "the custom-allocator guest did not abort on the mismatched fingerprint:\n{stderr}"
+    );
+}
+
 /// A `--record` run stopped by `--budget` used to lose the one artifact that
 /// would explain the wedge: the supervisor's pre-created trace file stayed empty
 /// because the abort skips record finalization. The stop now flushes a
@@ -10339,6 +10636,51 @@ fn invoke_unchecked(executable: &str, fixture: &Path, arguments: &[&str]) -> Out
         .args(arguments)
         .output()
         .unwrap()
+}
+
+/// Run an already-built artifact and give up after `deadline`, returning `None`
+/// when the run had to be killed. `invoke_unchecked` blocks forever on a guest
+/// that wedges, which turns a swallowed fail-closed refusal into a hung test
+/// instead of a failing one; this is for the legs whose RED evidence IS the
+/// wedge. Only for non-compiling invocations, so it takes no `BUILD_LOCK`.
+///
+/// The run gets its own process group, and the deadline kills the GROUP.
+/// Signalling the supervisor alone is not enough: the guest it spawned keeps the
+/// inherited stdout/stderr pipes open, so `wait_with_output` would poll them
+/// forever while the guest span at 100% CPU with no parent left to stop it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn invoke_with_deadline(
+    executable: &str,
+    fixture: &Path,
+    arguments: &[&str],
+    deadline: Duration,
+) -> Option<Output> {
+    use std::os::unix::process::CommandExt;
+
+    assert!(
+        !command_compiles(arguments),
+        "invoke_with_deadline does not hold BUILD_LOCK; hand it an already-built artifact"
+    );
+    let mut child = Command::new(executable)
+        .current_dir(fixture)
+        .args(arguments)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let give_up = Instant::now() + deadline;
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= give_up {
+            // The child leads its own group, so its pid IS the group id.
+            let group = format!("-{}", child.id());
+            let _ = Command::new("kill").args(["-9", &group]).status();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Some(child.wait_with_output().unwrap())
 }
 
 fn result_line(output: &Output) -> String {

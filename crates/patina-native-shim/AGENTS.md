@@ -28,6 +28,24 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
 - Bootstrap and reentrancy paths are load-bearing. Avoid allocations, locks, or
   formatting in early-init/fatal paths unless the path is proven safe under the
   custom allocator and host-collection rules.
+- An entry point that can answer WITHOUT reaching `ensure_runtime` must consult
+  the stored init-error state. Otherwise a failed initialization is a refusal the
+  guest never sees: it runs on fabricated values and exits 0, or spins. Two such
+  paths exist. The shim-bootstrap window is the larger one, and it does not close
+  when initialization fails — `SHIM_BOOTSTRAP` is cleared only by a successful
+  install — so enter it only through `in_shim_bootstrap`, which makes the check
+  for you; do not read the flag directly (a source lint enforces both, and pins
+  the window's call sites to a named list). Captured stdio is the other: it
+  accepts bytes with no context installed, and shutdown then drops them. When
+  adding an entry point, ask what it answers with no runtime installed; if it
+  answers at all, call `abort_if_init_failed` and give it a leg in the
+  cargo-patina e2e that drives each such path through a mismatched
+  `--fingerprint` replay.
+- Test the reentrancy, not just the answer. Aborting is not free on these paths:
+  the diagnostic write flushes captured stdio, which deallocates through the
+  guest's global allocator, which can come straight back through an interposed
+  lock. A shim-internal call arriving while a shim spinlock is held must never be
+  the one that triggers the abort.
 - A trap handler must contain a determinism escape without swallowing anything
   else. Both traps (`SIGSYS` for syscall-user-dispatch, `SIGSEGV` for the
   timestamp counter) decode at the faulting IP, act only on encodings they fully
