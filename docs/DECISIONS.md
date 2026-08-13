@@ -536,3 +536,29 @@ cluster so the fixes have citable symptom records.
   read, empirically non-divergent here but undescribed); source-first `run`
   leaks the positional source path into guest argv (routing bug); budget-abort
   record finalization drops the trace that would explain the wedge.
+- **2026-08-13 — outcome-channel Wave A landed (verdict ABI + runtime facts).**
+  Built as two concurrent builders in ISOLATED WORKTREES (first wave under the
+  new rule) and merged by the coordinator: `patina_verdict(kind,label,detail)`
+  across all three families (shim verb / `patina_sdk` WASI import /
+  `Context::verdict`), kinds as pinned u32 data (unknown kind refused, never
+  defaulted), recorded as `Operation::Verdict` riding the ordinary replay
+  reconcile so a divergent verdict stream fails closed; `always!` lowers to a
+  VIOLATION verdict in `Context::always_check` (the shim path never returns,
+  so lowering lives one level up) with the legacy `PATINA_ALWAYS_VIOLATION`
+  print kept as transitional dual-emit until Wave B; runtime does no mid-run
+  I/O — verdict lines queue in pending_diagnostics and drain at SDK entry
+  points (a mid-run eprintln under the shim would re-enter sched_point with
+  the context lock held). Runtime-owned facts ship on a new
+  `patina.runfacts/v1` channel (path for cargo/WASI, inherited fd for native,
+  written via host aliases): envelope gains `verdicts[]`, `fault_reports{}`,
+  `runtime_findings[]`, `refusal` (parent-constructed — a dying child cannot
+  cooperate), and `guest_exit` (signal split from exit code). Facts also emit
+  at watchdog fire so the channel reports exactly the failures it exists for;
+  the channel ignores the PATINA_*_REPORT suppression knobs (printing and
+  facts are different things — a consumer must not blind the future
+  classifier by silencing a diagnostic). Envelope shape pinned by an exact
+  sorted-key test; all fields additive. Merge notes: six conflicting hunks
+  hand-reconciled (both halves extended the envelope); `git apply --3way`
+  must NOT be used in this colocated repo (index staging triggers a jj
+  working-copy reset that silently reverts the apply — plain `git apply`
+  only). Full battery green over the merged tree.
