@@ -599,6 +599,9 @@ pub const OP_KINDS: &[(&str, Category)] = &[
     // A guest verdict is not an effect on any simulated plane; it is the guest
     // reporting a conclusion, so it carries no plane category of its own.
     ("verdict", Category::Other),
+    // A custom op is a guest-declared effect on a plane Patina does not model, so
+    // by construction it belongs to none of the simulated planes.
+    ("custom_op", Category::Other),
 ];
 
 pub fn valid_op_kinds() -> BTreeSet<&'static str> {
@@ -663,6 +666,7 @@ pub fn operation_kind(operation: &Operation) -> &'static str {
         Operation::NetTcpRecv { .. } => "net_tcp_recv",
         Operation::NetTcpShutdown { .. } => "net_tcp_shutdown",
         Operation::Verdict { .. } => "verdict",
+        Operation::CustomOp { .. } => "custom_op",
     }
 }
 
@@ -960,6 +964,13 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
                 detail: "{\"term\":4}".into(),
             },
             Outcome::Unit,
+        ),
+        (
+            Operation::CustomOp {
+                label: "s3.get_object".into(),
+                key: b"bucket/key".to_vec(),
+            },
+            Outcome::Bytes(b"{\"etag\":\"a\"}".to_vec()),
         ),
     ]
 }

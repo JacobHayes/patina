@@ -14587,6 +14587,384 @@ fn wasi_verdict_import_records_and_refuses_an_unknown_kind() {
 }
 
 // ---------------------------------------------------------------------------
+// Custom operations (docs/arcs/custom-ops.md, Wave A): a guest wraps an effect
+// Patina does not model; Patina records the result and reproduces it on replay
+// without ever running the wrapper again.
+// ---------------------------------------------------------------------------
+
+// A guest with two custom ops — one with a key and a nonempty result, one with
+// neither, so the empty cases ride the same path. `perform` bumps a process-local
+// counter instead of doing I/O, so the printed count is a direct, boundary-free
+// answer to "did the closure run?": on record it must be 2, on replay 0.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const CUSTOM_OP_SDK_MAIN: &str = r#"
+use std::sync::atomic::{AtomicU32, Ordering};
+
+static PERFORMED: AtomicU32 = AtomicU32::new(0);
+
+fn main() {
+    let object = patina_dst::custom_op_bytes("s3.get_object", b"bucket/key", || {
+        PERFORMED.fetch_add(1, Ordering::SeqCst);
+        b"etag-7".to_vec()
+    });
+    let empty = patina_dst::custom_op_bytes("host.uptime", b"", || {
+        PERFORMED.fetch_add(1, Ordering::SeqCst);
+        Vec::new()
+    });
+    println!(
+        "PATINA_RESULT performed={} object={} empty_len={}",
+        PERFORMED.load(Ordering::SeqCst),
+        String::from_utf8_lossy(&object),
+        empty.len()
+    );
+}
+"#;
+
+// The native half of the custom-op ABI end to end: `patina_dst::custom_op_bytes`
+// reaches the shim's three verbs, each call becomes a `custom_op` trace event
+// carrying the label, key, and result bytes, and a replay reproduces the guest's
+// observable output from the recording WITHOUT running `perform` — proven by the
+// counter, which the replay must report as zero.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_custom_op_records_replays_and_never_reruns_perform() {
+    let directory = tempdir().unwrap();
+    let pkg = directory.path().join("pkg");
+    write_sdk_fixture(&pkg, CUSTOM_OP_SDK_MAIN);
+    let workspace = native_workspace();
+    let bin = directory.path().join("custom-op-guest");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            pkg.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    let trace = directory.path().join("custom-op.patina");
+    let recorded = invoke_in(
+        workspace,
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "4",
+            "--record",
+            trace.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        result_line(&recorded),
+        "PATINA_RESULT performed=2 object=etag-7 empty_len=0",
+        "the record pass must run both closures:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&recorded.stdout),
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+
+    // Each call is a trace event carrying the label, the key, and the result.
+    let bundle = patina_dst_trace::TraceBundle::load(&trace).unwrap();
+    let events: Vec<_> = bundle
+        .resolved_timeline("main")
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event.operation {
+            patina_dst_abi::Operation::CustomOp { label, key } => Some((label, key, event.outcome)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert_eq!(events[0].0, "s3.get_object");
+    assert_eq!(events[0].1, b"bucket/key".to_vec());
+    assert_eq!(
+        events[0].2,
+        patina_dst_abi::Outcome::Bytes(b"etag-7".to_vec())
+    );
+    assert_eq!(events[1].0, "host.uptime");
+    assert!(events[1].1.is_empty(), "the empty key must survive");
+    assert_eq!(events[1].2, patina_dst_abi::Outcome::Bytes(Vec::new()));
+
+    // Replay: the guest sees the same values, but `perform` never ran.
+    let replayed = invoke_in(
+        workspace,
+        &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
+    );
+    assert_eq!(
+        result_line(&replayed),
+        "PATINA_RESULT performed=0 object=etag-7 empty_len=0",
+        "replay must reproduce the recorded bytes and run neither closure:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&replayed.stdout),
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+
+    // Same seed twice: byte-identical, custom-op stream included.
+    let first = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "4"]);
+    let second = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "4"]);
+    assert_eq!(first.stdout, second.stdout);
+    assert_eq!(first.stderr, second.stderr);
+    assert_eq!(
+        result_line(&first),
+        "PATINA_RESULT performed=2 object=etag-7 empty_len=0",
+        "a plain seeded run performs for real, exactly like the record pass"
+    );
+
+    // A recording that answers a DIFFERENT question is refused, naming the label.
+    // Editing the recorded key is how a guest asking something else looks from
+    // the replayer's side; the guest binary itself cannot be varied without
+    // changing the fingerprint, which would fail for an unrelated reason.
+    let mut edited = patina_dst_trace::TraceBundle::load(&trace).unwrap();
+    let event = edited.timelines[0]
+        .decisions
+        .iter_mut()
+        .find(|event| matches!(event.operation, patina_dst_abi::Operation::CustomOp { .. }))
+        .expect("a recorded custom op");
+    event.operation = patina_dst_abi::Operation::CustomOp {
+        label: "s3.get_object".into(),
+        key: b"another/key".to_vec(),
+    };
+    let mismatched = directory.path().join("custom-op-mismatch.patina");
+    edited.write_atomic(&mismatched).unwrap();
+    let refused = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "replay",
+            bin.to_str().unwrap(),
+            mismatched.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        !refused.status.success(),
+        "a custom-op key mismatch must fail the replay"
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("PATINA_CUSTOM_OP_REFUSED label=s3.get_object")
+            && stderr.contains("another/key"),
+        "the refusal must name the label and the recorded key:\n{stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&refused.stdout).contains("PATINA_RESULT"),
+        "the guest must not carry on past a refused custom op"
+    );
+}
+
+// Audit honesty (arc §3.3): a custom op does NOT exempt the effect it wraps from
+// interposition. `perform` runs for real on the record pass, so an un-modeled raw
+// effect inside it is refused by exactly the same pre-run gate that would refuse
+// it anywhere else — wrapping is not a laundering channel.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_custom_op_wrapping_an_unmodeled_effect_still_fails_closed() {
+    let directory = tempdir().unwrap();
+    let pkg = directory.path().join("pkg");
+    write_sdk_fixture(
+        &pkg,
+        r#"
+unsafe extern "C" { fn killpg(pgrp: i32, sig: i32) -> i32; }
+
+fn main() {
+    // The wrapped effect is an uninterposed process-class symbol: something
+    // Patina does not model, which is the whole reason a guest would reach for a
+    // custom op. Wrapping it changes nothing about the audit.
+    let bytes = patina_dst::custom_op_bytes("proc.signal", b"self", || {
+        let group = std::hint::black_box(0i32);
+        if group != 0 {
+            unsafe { killpg(group, 0) };
+        }
+        vec![1]
+    });
+    println!("PATINA_RESULT laundered={}", bytes.len());
+}
+"#,
+    );
+    let workspace = native_workspace();
+    let bin = directory.path().join("custom-op-escape");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            pkg.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+
+    let refused = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["run", bin.to_str().unwrap(), "--seed", "1"],
+    );
+    assert!(
+        !refused.status.success(),
+        "an un-modeled effect inside a custom op must still be refused"
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("killpg"),
+        "the refusal must still name the wrapped symbol:\n{stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&refused.stdout).contains("PATINA_RESULT"),
+        "the guest must not run"
+    );
+
+    // `audit` says the same thing about the binary: the custom op is not an
+    // exemption, so the symbol is still reported.
+    let audited = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["audit", bin.to_str().unwrap()],
+    );
+    let audit_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&audited.stdout),
+        String::from_utf8_lossy(&audited.stderr)
+    );
+    assert!(
+        audit_text.contains("killpg"),
+        "the audit must still name the wrapped symbol:\n{audit_text}"
+    );
+}
+
+// The WASI half: the three `patina_sdk` custom-op imports are backed by the same
+// runtime entries, so a wasip1 guest records and replays identically to native.
+// The module exits 10 on the record pass and 20+len+100 on the replay pass, so
+// the exit code alone proves which path ran and that the recorded bytes actually
+// landed in guest memory.
+const WASI_CUSTOM_OP_MODULE: &str = r#"(module
+    (import "patina_sdk" "custom_op_begin"
+        (func $begin (param i32 i32 i32 i32 i32) (result i32)))
+    (import "patina_sdk" "custom_op_replay_result"
+        (func $fetch (param i32 i32) (result i32)))
+    (import "patina_sdk" "custom_op_record"
+        (func $record (param i32 i32) (result i32)))
+    (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
+    (memory (export "memory") 1)
+    (data (i32.const 0) "s3.get_object")
+    (data (i32.const 32) "bucket/key")
+    (data (i32.const 64) "etag-7")
+    (func (export "_start")
+        (local $mode i32)
+        (local $len i32)
+        (local.set $mode (call $begin
+            (i32.const 0) (i32.const 13) (i32.const 32) (i32.const 10) (i32.const 96)))
+        (if (i32.eqz (local.get $mode))
+            (then
+                (drop (call $record (i32.const 64) (i32.const 6)))
+                (call $proc_exit (i32.const 10)))
+            (else
+                (local.set $len (call $fetch (i32.const 128) (i32.const 64)))
+                ;; the fetched length must match what begin reported at *96
+                (if (i32.ne (local.get $len) (i32.load (i32.const 96)))
+                    (then (call $proc_exit (i32.const 99))))
+                ;; ... and the bytes must really be in guest memory ('e' = 101)
+                (if (i32.ne (i32.load8_u (i32.const 128)) (i32.const 101))
+                    (then (call $proc_exit (i32.const 98))))
+                (call $proc_exit (i32.add (i32.const 120) (local.get $len)))))))"#;
+
+#[test]
+fn wasi_custom_op_imports_record_and_replay_without_reperforming() {
+    let directory = tempdir().unwrap();
+    let module = directory.path().join("custom-op.wasm");
+    fs::write(&module, wat::parse_str(WASI_CUSTOM_OP_MODULE).unwrap()).unwrap();
+    let trace = directory.path().join("custom-op.patina");
+
+    let recorded = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        directory.path(),
+        &[
+            "run",
+            module.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--record",
+            trace.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        recorded.status.code(),
+        Some(10),
+        "the wasip1 record pass must take the record branch:\nstderr:\n{}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+
+    let bundle = patina_dst_trace::TraceBundle::load(&trace).unwrap();
+    let events: Vec<_> = bundle
+        .resolved_timeline("main")
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event.operation {
+            patina_dst_abi::Operation::CustomOp { label, key } => Some((label, key, event.outcome)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].0, "s3.get_object");
+    assert_eq!(events[0].1, b"bucket/key".to_vec());
+    assert_eq!(
+        events[0].2,
+        patina_dst_abi::Outcome::Bytes(b"etag-7".to_vec())
+    );
+
+    // Flag-free replay takes the replay branch and gets the recorded bytes.
+    let replayed = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        directory.path(),
+        &["replay", module.to_str().unwrap(), trace.to_str().unwrap()],
+    );
+    assert_eq!(
+        replayed.status.code(),
+        Some(126),
+        "replay must return the 6 recorded bytes, starting with 'e':\nstderr:\n{}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+}
+
+// The wasip1 fail-closed leg: a second `custom_op_begin` while one is open would
+// record an inner operation replay could never reproduce, so the host traps
+// rather than accepting it.
+#[test]
+fn wasi_custom_op_refuses_a_nested_begin() {
+    let directory = tempdir().unwrap();
+    let module = directory.path().join("nested.wasm");
+    fs::write(
+        &module,
+        wat::parse_str(
+            r#"(module
+                (import "patina_sdk" "custom_op_begin"
+                    (func $begin (param i32 i32 i32 i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 0) "outer")
+                (data (i32.const 16) "inner")
+                (func (export "_start")
+                    (drop (call $begin
+                        (i32.const 0) (i32.const 5) (i32.const 0) (i32.const 0) (i32.const 96)))
+                    (drop (call $begin
+                        (i32.const 16) (i32.const 5) (i32.const 0) (i32.const 0) (i32.const 96)))))"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let refused = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        directory.path(),
+        &["run", module.to_str().unwrap(), "--seed", "1"],
+    );
+    assert!(
+        !refused.status.success(),
+        "a nested custom op must fail the run"
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("\"inner\"") && stderr.contains("\"outer\""),
+        "the refusal must name both operations:\n{stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Outcome channel (docs/arcs/outcome-channel.md §4.2): the `patina.result/v1`
 // envelope's runtime-owned facts. `fault_reports`/`runtime_findings` come from
 // the runtime's own `patina.runfacts/v1` document — the same report structs the

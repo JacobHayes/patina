@@ -248,6 +248,42 @@ int32_t patina_verdict(uint32_t kind, const uint8_t *label, size_t label_len,
                        const uint8_t *detail, size_t detail_len);
 
 /*
+ * Custom-operation ABI: three verbs, one per phase of a single operation. A
+ * custom op is a guest-declared effect Patina does not model; the guest wraps it
+ * at a boundary it controls so Patina can record the result and reproduce it on
+ * replay. `label` names the op class (it shares the SDK site-label namespace,
+ * registers no site, and may name many calls in a run); `key` is the operation's
+ * logical input, recorded so replay can assert the guest asked the same
+ * question. Both are opaque bytes here: the SDK owns the encoding, the ABI does
+ * not.
+ *
+ *   1. patina_custom_op_begin(...)
+ *        -> PATINA_CUSTOM_OP_RECORD: run the real effect, then call
+ *           patina_custom_op_record with its result bytes.
+ *        -> PATINA_CUSTOM_OP_REPLAY: the answer is recorded; do NOT run the real
+ *           effect. *out_len is its length; fetch it with
+ *           patina_custom_op_replay_result.
+ *        -> -1 (errno EINVAL) for a malformed argument.
+ *   2a. patina_custom_op_record returns 0, or -1 for a malformed argument.
+ *   2b. patina_custom_op_replay_result returns the number of bytes written, or
+ *       -1 (errno EINVAL) when out_cap is smaller than the reported length —
+ *       nothing is copied and the operation stays open, so a retry with a large
+ *       enough buffer still succeeds.
+ *
+ * Every runtime-level refusal (a replay divergence on the label or key, a nested
+ * or unclosed operation, a modeled effect performed between the two halves) is
+ * fatal: the shim emits PATINA_CUSTOM_OP_REFUSED and aborts, because there is no
+ * answer the guest could safely be handed.
+ */
+#define PATINA_CUSTOM_OP_RECORD 0
+#define PATINA_CUSTOM_OP_REPLAY 1
+int32_t patina_custom_op_begin(const uint8_t *label, size_t label_len,
+                               const uint8_t *key, size_t key_len,
+                               size_t *out_len);
+intptr_t patina_custom_op_replay_result(uint8_t *out, size_t out_cap);
+int32_t patina_custom_op_record(const uint8_t *result, size_t result_len);
+
+/*
  * Managed threads and pthread synchronization under the deterministic
  * scheduler. The opt-in POSIX layer routes pthread_create/join/detach/exit,
  * pthread_mutex_*, and pthread_cond_* through these entry points so real host

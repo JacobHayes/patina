@@ -377,6 +377,34 @@ Completed foundations (outcome-channel arc, Wave A — the verdict ABI):
     the embedders still print `PATINA_ALWAYS_VIOLATION` as a transitional
     dual-emit that Wave B removes (`docs/arcs/outcome-channel.md`).
 
+Completed foundations (custom-ops arc, Wave A — record/replay custom operations):
+
+16. **Guest-declared custom operations.** `patina_custom_op_begin(label+len,
+    key+len, out_len)` returns "record" or "replay"; the guest then calls
+    `patina_custom_op_record(result+len)` or
+    `patina_custom_op_replay_result(out, out_cap)`. The `patina_sdk`
+    `custom_op_begin`/`custom_op_replay_result`/`custom_op_record` imports mirror
+    it on wasip1 and `Context::custom_op*` covers an in-process guest;
+    `patina_dst::custom_op_bytes` is the zero-dependency SDK sugar and
+    `patina_dst::custom_op` (default-off `custom-ops` feature) adds serde-typed
+    keys and results, encoded with `serde_json` at the SDK — build-owned, not
+    ABI-owned, since the boundary and the trace carry opaque bytes and a trace
+    only replays against the binary that recorded it. Three verbs rather than one
+    with a phase argument: the phases carry different argument shapes and
+    directions, and the property the verdict doctrine protects (no new symbol per
+    op class) holds anyway, because the class is the `label`. Each call records an
+    `Operation::CustomOp { label, key }` with the result as `Outcome::Bytes`, so a
+    replay whose label or key diverges is refused by name rather than answered
+    from a recording of a different question; the format needs no version bump
+    because serde tags variants by name. Refusals are fatal by design
+    (`PATINA_CUSTOM_OP_REFUSED` + abort natively, a trap on WASI): a replay
+    divergence, a nested or unclosed operation, or a *modeled* boundary operation
+    performed between `begin` and `record` — the last caught at record time,
+    naming the label and the count, because replay skips `perform` and could never
+    reproduce those events. A custom op grants no audit exemption: `perform` runs
+    for real on the record pass, so an un-modeled raw effect inside it refuses and
+    audits exactly as it would anywhere else.
+
 ## Slice 7: exploration tier — Partial (wave 12)
 
 Directed exploration policies that steer *which* interleavings and fault

@@ -17,7 +17,9 @@ use std::fmt;
 use patina_dst_abi::{
     ClockKind, EffectError, ErrorCode, Fd, FsEntryKind, FsMetadata, OpenFlags, SeekWhence, SocketId,
 };
-use patina_dst_runtime::{BuggifyKind, Context, RuntimeError, SiteOutcome, VerdictKind};
+use patina_dst_runtime::{
+    BuggifyKind, Context, CustomOpMode, RuntimeError, SiteOutcome, VerdictKind,
+};
 use patina_dst_target::{TargetError, WasiAudit};
 use wasmi::{
     AsContextMut, Caller, Config as WasmiConfig, Engine, Error as WasmiError, Extern, Linker,
@@ -3066,6 +3068,94 @@ against a newer verdict ABI than this runtime provides"
                 .verdict(kind, &label, &detail)
                 .map_err(|error| WasmiError::new(error.to_string()))?;
             drain_runtime_diagnostics(host);
+            Ok(0)
+        },
+    )?;
+    // The custom-op ABI: three imports, the wasm mirror of the shim's
+    // `patina_custom_op_begin` / `_replay_result` / `_record`. Phases are
+    // separate imports rather than one verb with a phase argument for the same
+    // reason they are separate symbols natively: three argument shapes and three
+    // directions of data flow, where a folded signature would carry arguments
+    // that are ignored on two of the three phases. The op *class* is still data
+    // (the label), so no custom operation ever grows this surface.
+    //
+    // Unlike native, a refusal traps instead of returning an errno: a wasm guest
+    // has no errno to consult, and every custom-op refusal is fatal by design.
+    linker.func_wrap(
+        MODULE,
+        "custom_op_begin",
+        |mut caller: Caller<'_, Preview1Host>,
+         label: i32,
+         label_len: i32,
+         key: i32,
+         key_len: i32,
+         out_len: i32|
+         -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("custom_op_begin");
+            let label = read_patina_label(&caller, label, label_len)?;
+            let key = read_guest_bytes(&caller, key, key_len)?;
+            let mode = caller
+                .data_mut()
+                .context
+                .custom_op_begin(&label, &key)
+                .map_err(|error| WasmiError::new(error.to_string()))?;
+            let (code, len) = match mode {
+                CustomOpMode::Record => (0, 0),
+                CustomOpMode::Replay { len } => (1, len),
+            };
+            let len = u32::try_from(len).map_err(|_| {
+                WasmiError::new(format!(
+                    "patina_sdk custom_op_begin: the recorded result for {label:?} does not fit a \
+wasm32 length"
+                ))
+            })?;
+            write_u32(&mut caller, out_len, len)?;
+            Ok(code)
+        },
+    )?;
+    linker.func_wrap(
+        MODULE,
+        "custom_op_replay_result",
+        |mut caller: Caller<'_, Preview1Host>, out: i32, out_cap: i32| -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("custom_op_replay_result");
+            let out_cap = offset(out_cap)?;
+            // A short buffer leaves the operation open (nothing is consumed), so
+            // the guest can retry with the length `custom_op_begin` reported.
+            let pending = caller.data().context.custom_op_pending_len();
+            if let Some(len) = pending.filter(|len| *len > out_cap) {
+                return Err(WasmiError::new(format!(
+                    "patina_sdk custom_op_replay_result: the recorded result is {len} bytes but \
+the guest offered a {out_cap}-byte buffer"
+                )));
+            }
+            let bytes = caller
+                .data_mut()
+                .context
+                .custom_op_replay_result()
+                .map_err(|error| WasmiError::new(error.to_string()))?;
+            let written = i32::try_from(bytes.len()).map_err(|_| {
+                WasmiError::new("patina_sdk custom_op_replay_result: result exceeds wasm32 length")
+            })?;
+            if !bytes.is_empty() {
+                memory(&caller)?.write(&mut caller, offset(out)?, &bytes)?;
+            }
+            Ok(written)
+        },
+    )?;
+    linker.func_wrap(
+        MODULE,
+        "custom_op_record",
+        |mut caller: Caller<'_, Preview1Host>,
+         result: i32,
+         result_len: i32|
+         -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("custom_op_record");
+            let result = read_guest_bytes(&caller, result, result_len)?;
+            caller
+                .data_mut()
+                .context
+                .custom_op_record(result)
+                .map_err(|error| WasmiError::new(error.to_string()))?;
             Ok(0)
         },
     )?;

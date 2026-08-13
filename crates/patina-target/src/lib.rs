@@ -101,6 +101,13 @@ pub const SUPPORTED_PATINA_SDK_IMPORTS: &[&str] = &[
     // own run state plus a diagnostic line — strictly less than `fd_write`
     // already grants.
     "verdict",
+    // The custom-op ABI. These grant the guest NO new reach: the real effect a
+    // custom op wraps is performed by the guest's own code, through whatever
+    // imports it already has (and audited as such). These three only move opaque
+    // bytes between the guest and the host's recorded trace.
+    "custom_op_begin",
+    "custom_op_replay_result",
+    "custom_op_record",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]

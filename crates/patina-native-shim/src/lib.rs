@@ -60,8 +60,8 @@ use patina_dst_driver_api::canonicalize_path;
 use patina_dst_fs_crash::CrashFs;
 use patina_dst_fs_mem::{FsImage, MemFs};
 use patina_dst_runtime::{
-    BuggifyKind, Context, MAX_TRACE_BYTES, RuntimeBuilder, RuntimeConfig, RuntimeError,
-    SiteOutcome, TraceTransport, VerdictKind,
+    BuggifyKind, Context, CustomOpMode, MAX_TRACE_BYTES, RuntimeBuilder, RuntimeConfig,
+    RuntimeError, SiteOutcome, TraceTransport, VerdictKind,
 };
 pub use thread::{
     patina_cond_broadcast, patina_cond_destroy, patina_cond_init, patina_cond_signal,
@@ -1796,6 +1796,16 @@ fn runtime_errno(error: &RuntimeError) -> c_int {
         // the runtime has already emitted the classifiable PATINA_LIVENESS marker
         // to the captured stderr.
         RuntimeError::Liveness { .. } => abort_after_flushing_output(),
+        // A refused custom operation has no answer the guest could safely be
+        // handed: the recording disagrees with what it asked, or its `perform`
+        // did something replay could never reproduce. Returning an errno would
+        // let the guest swallow that and carry on against a trace that no longer
+        // describes the run, so name it and abort — the same treatment liveness
+        // and the step budget get.
+        RuntimeError::CustomOp { label, detail } => {
+            eprintln!("PATINA_CUSTOM_OP_REFUSED label={label}\npatina: {detail}");
+            abort_after_flushing_output()
+        }
         RuntimeError::Config(_)
         | RuntimeError::Io { .. }
         | RuntimeError::Trace(_)
@@ -4361,6 +4371,157 @@ pub unsafe extern "C" fn patina_verdict(
         Ok(_) => 0,
         Err(errno) => fail(errno),
     }
+}
+
+// The custom-op ABI: three verbs, one per phase of a single operation.
+//
+// Why three symbols rather than one verb with a phase argument (the shape the
+// verdict ABI uses for its kinds): a verdict's kinds are values of ONE call, so
+// carrying them as data keeps the call shape fixed. A custom op's phases are
+// three different calls with three different argument shapes and three different
+// directions of data flow — announce (in), fetch the recorded result (out),
+// report a fresh result (in). Folding them into one signature would mean
+// arguments that are meaningful on one phase and ignored on the others, and
+// ignored arguments are exactly where a fail-closed check goes blind. The
+// property the verdict doctrine protects — no new symbol per *op class* — is
+// intact: the op class is the `label`, which is data.
+//
+// The protocol, which the SDK's `custom_op_bytes` drives:
+//
+//   1. `patina_custom_op_begin(label, key, &out_len)`
+//        -> 0: record pass. Run `perform`, then call `patina_custom_op_record`.
+//        -> 1: replay pass. Do NOT run `perform`; `out_len` is the recorded
+//              result's length, fetched with `patina_custom_op_replay_result`.
+//   2a. `patina_custom_op_record(result, result_len)` closes a record pass.
+//   2b. `patina_custom_op_replay_result(out, out_cap)` closes a replay pass.
+//
+// Every runtime-level refusal (a replay divergence on the label or key, a nested
+// or unclosed operation, a modeled effect performed inside `perform`) is fatal:
+// there is no answer the guest could safely be handed, so the shim aborts loudly
+// rather than returning an errno the guest could swallow and continue past. Only
+// malformed arguments — a non-UTF-8 label, a null pointer with a nonzero length —
+// return `EINVAL`, because those are the guest's own call being wrong.
+
+/// Announce a custom operation; returns 0 for "record pass, run `perform`" or 1
+/// for "replay pass, the answer is recorded". See the module comment above.
+///
+/// # Safety
+/// `label`/`key` must describe live slices of the given lengths (or be null with
+/// a zero length), and `out_len` must be a writable `usize`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_custom_op_begin(
+    label: *const u8,
+    label_len: usize,
+    key: *const u8,
+    key_len: usize,
+    out_len: *mut usize,
+) -> c_int {
+    // SAFETY: the caller passes live slices.
+    let Some(label) = (unsafe { buggify_label(label, label_len) }) else {
+        return fail(EINVAL);
+    };
+    // SAFETY: the caller passes live slices.
+    let Some(key) = (unsafe { custom_op_bytes(key, key_len) }) else {
+        return fail(EINVAL);
+    };
+    if out_len.is_null() {
+        return fail(EINVAL);
+    }
+    match with_context(|context| context.custom_op_begin(label, key)) {
+        Ok(CustomOpMode::Record) => {
+            // SAFETY: checked non-null above; the caller guarantees writability.
+            unsafe { out_len.write(0) };
+            0
+        }
+        Ok(CustomOpMode::Replay { len }) => {
+            // SAFETY: checked non-null above; the caller guarantees writability.
+            unsafe { out_len.write(len) };
+            1
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
+/// Copy the recorded result of the open custom operation into `out`, closing it.
+/// Returns the number of bytes written, or -1 when `out_cap` is smaller than the
+/// length `patina_custom_op_begin` reported (nothing is copied and the operation
+/// stays open, so the caller can retry with a large enough buffer).
+///
+/// # Safety
+/// `out` must be writable for `out_cap` bytes, or be null when `out_cap == 0`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_custom_op_replay_result(out: *mut u8, out_cap: usize) -> isize {
+    // `with_context_raw`, not `with_context`: one custom operation is ONE
+    // boundary, and its scheduling point was already taken by
+    // `patina_custom_op_begin`. Taking a second one here would let another
+    // managed task record operations between the two halves, which is exactly
+    // what `Context::custom_op_record`'s "no modeled effects inside `perform`"
+    // check reads as a guest error.
+    let taken = with_context_raw(|context| {
+        // A short buffer must not consume the recorded result: report the
+        // shortfall and leave the operation open so a retry can still succeed.
+        if context
+            .custom_op_pending_len()
+            .is_some_and(|len| len > out_cap)
+        {
+            return Ok(None);
+        }
+        context.custom_op_replay_result().map(Some)
+    });
+    let bytes = match taken {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
+            set_errno(EINVAL);
+            return -1;
+        }
+        Err(errno) => return fail(errno) as isize,
+    };
+    if !bytes.is_empty() {
+        if out.is_null() {
+            return fail(EINVAL) as isize;
+        }
+        // SAFETY: the caller guarantees `out` is writable for `out_cap >= len`.
+        unsafe { slice::from_raw_parts_mut(out, out_cap)[..bytes.len()].copy_from_slice(&bytes) };
+    }
+    bytes.len() as isize
+}
+
+/// Report what the guest's `perform` produced, closing the open custom operation
+/// and recording its trace event.
+///
+/// # Safety
+/// `result` must describe a live slice of `result_len` bytes (or be null with a
+/// zero length).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_custom_op_record(result: *const u8, result_len: usize) -> c_int {
+    // SAFETY: the caller passes a live slice.
+    let Some(result) = (unsafe { custom_op_bytes(result, result_len) }) else {
+        return fail(EINVAL);
+    };
+    // `with_context_raw` for the same reason as `patina_custom_op_replay_result`:
+    // the operation's single scheduling point was taken at `begin`.
+    match with_context_raw(|context| context.custom_op_record(result.to_vec())) {
+        Ok(()) => 0,
+        Err(errno) => fail(errno),
+    }
+}
+
+/// Reborrow a `(ptr, len)` pair as opaque custom-op bytes. Unlike
+/// [`buggify_label`] there is no UTF-8 requirement — a custom-op key or result is
+/// whatever the guest's encoding produced — but a null pointer with a nonzero
+/// length is still a fail-closed error.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes, or be null when `len == 0`.
+unsafe fn custom_op_bytes<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
+    if len == 0 {
+        return Some(&[]);
+    }
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: guaranteed by this function's documented contract.
+    Some(unsafe { slice::from_raw_parts(ptr, len) })
 }
 
 /// `patina_dst::rng()`: a deterministic 64-bit draw bridged to the root seed.

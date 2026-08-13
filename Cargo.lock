@@ -317,6 +317,8 @@ name = "patina-dst"
 version = "0.1.0"
 dependencies = [
  "patina-dst-macros",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -456,6 +458,7 @@ dependencies = [
  "patina-dst-trace",
  "patina-dst-wrapper-fault",
  "patina-dst-wrapper-latency",
+ "serde",
  "serde_json",
  "tempfile",
 ]

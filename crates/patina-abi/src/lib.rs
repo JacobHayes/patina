@@ -817,6 +817,35 @@ pub enum Operation {
         label: String,
         detail: String,
     },
+    /// One guest-declared custom operation: an effect Patina does not model,
+    /// which the guest wraps at a boundary it controls so Patina can mediate it.
+    /// `label` names the op class; `key` is the operation's logical input. The
+    /// [`Outcome::Bytes`] is the result the guest's `perform` produced on the
+    /// record pass, and it is the authority on replay — replay returns these
+    /// bytes and never runs `perform`.
+    ///
+    /// Both fields are opaque at this layer by deliberate design (custom-ops arc
+    /// §6, "typed at the SDK, raw bytes at the ABI"): pinning a serialization
+    /// format into the boundary contract would couple every non-Rust consumer of
+    /// a trace to a Rust-side encoding. The SDK owns the encoding, and the guest
+    /// binary that produced a trace is already the fingerprint contract for
+    /// replaying it.
+    ///
+    /// A replay whose custom-op stream diverges from the recording — a different
+    /// label, a different key, a missing or extra call — fails closed as an
+    /// ordinary operation mismatch, which is what makes the recorded bytes safe
+    /// to trust.
+    ///
+    /// `label` follows the same rules as a verdict label (see [`VerdictKind`]):
+    /// it shares the `sites.json` label namespace and aggregates the same way,
+    /// but a custom op registers no buggify site, so the duplicate-label gate
+    /// does not apply and one label naming many calls in a run is exactly the
+    /// point — the label names the op *class*, not the call.
+    CustomOp {
+        label: String,
+        #[serde(with = "bytes_base64")]
+        key: Vec<u8>,
+    },
 }
 
 /// The result of a boundary operation.
@@ -1157,6 +1186,28 @@ mod tests {
         assert!(json.contains("\"kind\":\"verdict\""), "{json}");
         assert!(json.contains("\"abort_intent\""), "{json}");
         assert_eq!(serde_json::from_str::<Operation>(&json).unwrap(), operation);
+    }
+
+    // The custom-op key is arbitrary guest bytes, not text: it must survive the
+    // trace round trip verbatim, including bytes that are not valid UTF-8 and the
+    // empty key. A key that silently re-encoded would make a replay key check
+    // compare something other than what the guest asked.
+    #[test]
+    fn custom_op_operation_tag_and_opaque_key_round_trip() {
+        let operation = Operation::CustomOp {
+            label: "s3.get_object".into(),
+            key: vec![0x00, 0xff, 0xfe, b'k', 0x80],
+        };
+        let json = serde_json::to_string(&operation).unwrap();
+        assert!(json.contains("\"kind\":\"custom_op\""), "{json}");
+        assert_eq!(serde_json::from_str::<Operation>(&json).unwrap(), operation);
+
+        let empty = Operation::CustomOp {
+            label: String::new(),
+            key: Vec::new(),
+        };
+        let json = serde_json::to_string(&empty).unwrap();
+        assert_eq!(serde_json::from_str::<Operation>(&json).unwrap(), empty);
     }
 
     #[test]

@@ -2,8 +2,10 @@
 
 Status: design approved 2026-08-12 (shape chosen: SDK custom-op API first;
 declarative symbol models as the documented escalation; raw shim-extension ABI
-explicitly not chosen). Implementation not started. Lands as
-`docs/arcs/custom-ops.md`.
+explicitly not chosen). **Wave A landed** — record/replay custom operations
+across all three families (ARCHITECTURE.md, "The custom-operation ABI";
+IMPLEMENTATION.md item 16). Waves B (seeded custom-op faults) and C
+(docs/skill) are open.
 
 ## 1. Problem
 
@@ -120,10 +122,19 @@ primitive"); the custom-op ABI reuses its trace-event and label machinery.
 
 ## 5. Waves (sketch, to be detailed on go)
 
-- **Wave A — record/replay custom op.** Shim ABI verb + WASI import; SDK macro;
-  trace event kind carrying label/key/result; replay reconcile (key mismatch
-  refuses); audit names record-pass effects. Acceptance: a guest custom op
-  records and replays byte-identically, and a key mismatch on replay refuses.
+- **Wave A — record/replay custom op. LANDED.** Shim ABI verbs + WASI imports;
+  SDK sugar (`custom_op_bytes` untyped, `custom_op` typed behind the `custom-ops`
+  feature); `Operation::CustomOp { label, key }` carrying the result as
+  `Outcome::Bytes`; replay reconcile (a changed label or key refuses by name);
+  audit unchanged, so a record-pass effect is named for what it is. Acceptance
+  met: a guest custom op records and replays byte-identically, replay never runs
+  `perform`, and a key mismatch on replay refuses. One design decision beyond the
+  sketch: the ABI is three verbs (one per phase) rather than one with a phase
+  argument, because the phases carry different argument shapes and directions —
+  the op class stays data (the `label`), which is what the verdict doctrine
+  protects. One enforcement beyond the sketch: a `perform` that performs a
+  *modeled* boundary operation is refused at record time, since replay skips
+  `perform` and could never reproduce those events.
 - **Wave B — seeded custom-op faults.** Declared failure shape on the
   domain-separated PRF path; campaign fault-vector row; per-plane vacuity
   report; band-or-waiver gate. Acceptance: a planted custom-op fault is
