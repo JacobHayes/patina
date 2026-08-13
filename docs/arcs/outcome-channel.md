@@ -175,7 +175,16 @@ the target auto-derived once verdicts are structured. Feeds the
   `GUEST_ABORT` class; spec-declared patterns; delete every marker list and
   the testbed strings from core; campaign selftest re-proves all classes
   (including the new one) fireable through the new channel, red-before/
-  green-after.
+  green-after. **Landed.** Campaign generations run with `--format json`;
+  `built_in_class` takes a text-free `RunFacts`, so guest output structurally
+  cannot decide a built-in class. Two Wave A corrections fell out of it: an
+  incomplete recorded trace is a *consequence* of a guest dying mid-record, not
+  a `refusal` (attributing it made `GUEST_ABORT` unreachable), and the
+  embedders' legacy `PATINA_ALWAYS_VIOLATION` print is gone — the verdict line
+  is the only announcement. Known residue for Wave C: a WASI guest's trap (an
+  `always!` violation among them) surfaces as a CLI error rather than a run
+  envelope, so such a generation classifies `INFRA`; giving `execute_wasi_run`
+  an envelope for a guest-side trap closes it.
 - **Wave C — testbed + docs migration.** workq/pubsub emit verdicts via the
   SDK instead of `WORKQ_VIOLATION`/`BUG_CAUGHT` prints; their run-patina/
   acceptance/fuzz-sweep scripts read the JSON envelope instead of grepping;

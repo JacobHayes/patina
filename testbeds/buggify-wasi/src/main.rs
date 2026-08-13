@@ -10,9 +10,9 @@
 //!
 //! Modes (first `--arg`):
 //!   (none)      normal run; the `always!` invariant holds.
-//!   `violate`   plants an `always!` violation so the host emits
-//!               `PATINA_ALWAYS_VIOLATION` and traps — the WASI mirror of the
-//!               native abort, proving the invariant oracle bites on wasip1.
+//!   `violate`   plants an `always!` violation so the host reports a
+//!               `violation` verdict and traps — the WASI mirror of the native
+//!               abort, proving the invariant oracle bites on wasip1.
 
 use std::io::Write;
 

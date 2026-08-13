@@ -155,6 +155,10 @@ pub struct CampaignSpec {
     /// Waive the default campaign-level gate for `sometimes!` sites that were
     /// registered but never satisfied.
     pub allow_unmet_sometimes: Option<AllowUnmetSometimes>,
+    /// Per-guest classification rules for a guest that never calls the verdict
+    /// ABI (outcome-channel arc §4.3). Core patina is guest-agnostic: a guest's
+    /// own marker dialect lives here, in its campaign spec, and nowhere else.
+    pub classify: ClassifyRules,
 }
 
 impl Default for CampaignSpec {
@@ -179,6 +183,7 @@ impl Default for CampaignSpec {
             plateau_after: DEFAULT_PLATEAU_AFTER,
             guided: false,
             allow_unmet_sometimes: None,
+            classify: ClassifyRules::default(),
         }
     }
 }
@@ -273,13 +278,14 @@ impl CampaignSpec {
                 "allow_unmet_sometimes" => {
                     self.allow_unmet_sometimes = Some(json_allow_unmet_sometimes(key, val)?)
                 }
+                "classify" => self.classify = json_classify_rules(val)?,
                 other => {
                     return Err(CliError(format!(
                         "unknown campaign spec key {other:?}; expected generations, seed_base, \
                          timeout_secs, guest_args, buggify, swarm, pct, faults, dns_entries, \
                          harness, allow_symbols, allow_unsupported_symbols, watchdog_nanos, \
-                         converge_nanos, heal_after_nanos, report, plateau_after, guided, or \
-                         allow_unmet_sometimes"
+                         converge_nanos, heal_after_nanos, report, plateau_after, guided, \
+                         allow_unmet_sometimes, or classify"
                     )));
                 }
             }
@@ -318,6 +324,135 @@ fn json_allow_unmet_sometimes(
     Err(CliError(format!(
         "campaign spec {key:?} must be true or a positive unsigned integer"
     )))
+}
+
+/// Parse the spec's `classify` object into [`ClassifyRules`].
+///
+/// Grammar-validated and loud: an unknown class token, a class that could only
+/// downgrade a finding (`OK`), an empty rule list, or an empty pattern is a spec
+/// error, not a silently inert rule. A rule that cannot fire is exactly the
+/// vacuous check this project treats as a bug.
+fn json_classify_rules(value: &serde_json::Value) -> Result<ClassifyRules, CliError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| CliError("campaign spec \"classify\" must be a JSON object".into()))?;
+    let mut rules = ClassifyRules::default();
+    for (key, val) in object {
+        match key.as_str() {
+            "patterns" => {
+                for (class, entries) in classify_rule_map(key, val)? {
+                    let needles = entries
+                        .iter()
+                        .map(|entry| {
+                            let needle = entry.as_str().ok_or_else(|| {
+                                CliError(format!(
+                                    "campaign spec \"classify.patterns\" entries for {:?} must be strings",
+                                    class.as_str()
+                                ))
+                            })?;
+                            if needle.is_empty() {
+                                return Err(CliError(format!(
+                                    "campaign spec \"classify.patterns\" entry for {:?} is empty; an empty substring matches every generation",
+                                    class.as_str()
+                                )));
+                            }
+                            Ok(needle.to_string())
+                        })
+                        .collect::<Result<Vec<_>, CliError>>()?;
+                    rules.patterns.insert(class, needles);
+                }
+            }
+            "exit_codes" => {
+                for (class, entries) in classify_rule_map(key, val)? {
+                    let codes = entries
+                        .iter()
+                        .map(|entry| {
+                            entry
+                                .as_i64()
+                                .map(|code| code as i32)
+                                .ok_or_else(|| CliError(format!(
+                                    "campaign spec \"classify.exit_codes\" entries for {:?} must be integers",
+                                    class.as_str()
+                                )))
+                        })
+                        .collect::<Result<Vec<_>, CliError>>()?;
+                    rules.exit_codes.insert(class, codes);
+                }
+            }
+            other => {
+                return Err(CliError(format!(
+                    "unknown campaign spec \"classify\" key {other:?}; expected patterns or exit_codes"
+                )));
+            }
+        }
+    }
+    Ok(rules)
+}
+
+/// Validate one `classify.<kind>` object: a map of campaign class token to a
+/// non-empty array of rules.
+fn classify_rule_map(
+    kind: &str,
+    value: &serde_json::Value,
+) -> Result<Vec<(CampaignClass, Vec<serde_json::Value>)>, CliError> {
+    let object = value.as_object().ok_or_else(|| {
+        CliError(format!(
+            "campaign spec \"classify.{kind}\" must be a JSON object of class -> rules"
+        ))
+    })?;
+    let mut rules = Vec::new();
+    for (name, entries) in object {
+        let class = CampaignClass::parse(name).ok_or_else(|| {
+            CliError(format!(
+                "campaign spec \"classify.{kind}\" names unknown class {name:?}; expected one of {}",
+                CampaignClass::ALL
+                    .iter()
+                    .map(|class| class.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
+        if class == CampaignClass::Ok {
+            return Err(CliError(format!(
+                "campaign spec \"classify.{kind}\" declares {:?}; declared rules may only ADD a finding, never downgrade one",
+                class.as_str()
+            )));
+        }
+        let entries = entries.as_array().ok_or_else(|| {
+            CliError(format!(
+                "campaign spec \"classify.{kind}\" rules for {:?} must be a JSON array",
+                class.as_str()
+            ))
+        })?;
+        if entries.is_empty() {
+            return Err(CliError(format!(
+                "campaign spec \"classify.{kind}\" rules for {:?} are empty; a rule that cannot fire is a defect, not a default",
+                class.as_str()
+            )));
+        }
+        rules.push((class, entries.clone()));
+    }
+    Ok(rules)
+}
+
+/// Serialize [`ClassifyRules`] back to the spec's canonical JSON form.
+fn classify_rules_to_json(rules: &ClassifyRules) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    if !rules.patterns.is_empty() {
+        let mut patterns = serde_json::Map::new();
+        for (class, needles) in &rules.patterns {
+            patterns.insert(class.as_str().to_string(), needles.clone().into());
+        }
+        map.insert("patterns".into(), serde_json::Value::Object(patterns));
+    }
+    if !rules.exit_codes.is_empty() {
+        let mut codes = serde_json::Map::new();
+        for (class, values) in &rules.exit_codes {
+            codes.insert(class.as_str().to_string(), values.clone().into());
+        }
+        map.insert("exit_codes".into(), serde_json::Value::Object(codes));
+    }
+    serde_json::Value::Object(map)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -584,16 +719,20 @@ pub fn execute(invocation: CampaignInvocation) -> Result<i32, CliError> {
 
 /// The per-generation outcome classes, in descending severity. An explicit
 /// finding is never downgraded, and a nonzero exit is never silently OK.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// The declaration order is the severity order: [`ClassifyRules`] iterates its
+/// declared classes through it, so two matching declarations always resolve to
+/// the more severe one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CampaignClass {
-    /// The run completed clean (exit 0, no finding markers).
+    /// The run completed clean (exit 0, no finding).
     Ok,
-    /// A system-under-test safety/assertion violation: `PATINA_VIOLATION`,
-    /// `PATINA_ALWAYS_VIOLATION`, a testbed violation marker, `BUG_CAUGHT`, or a
-    /// guest panic.
+    /// A system-under-test safety/assertion violation: a `VerdictKind::Violation`
+    /// the guest reported through the verdict ABI (which `always!` lowers to), or
+    /// a class a campaign spec declared for this guest ([`ClassifyRules`]).
     Violation,
-    /// A liveness-watchdog violation (`PATINA_VIOLATION liveness`/`converge`): a
-    /// virtual-time no-progress wedge.
+    /// A liveness-watchdog violation: a `runtime_findings[]` entry with
+    /// `source=liveness` — a virtual-time no-progress wedge.
     Liveness,
     /// A configured filesystem fault class was vacuous: eligible filesystem I/O
     /// occurred, but an enabled fs error/short-I/O fault class applied zero
@@ -634,14 +773,27 @@ pub enum CampaignClass {
     /// campaign that asked for fault-subset exploration and got none must not
     /// read as a clean covered run.
     VacuousSwarm,
-    /// Patina fail-closed refusal: a fingerprint/trace mismatch, a duplicate
-    /// buggify label, a declared-but-never-called setup gate, a runtime that
-    /// refused to initialize, or a bare shim SIGABRT.
+    /// The guest aborted itself: a SIGABRT (or exit 134) that the envelope did
+    /// NOT attribute to a patina refusal, so it is the guest's own doing — a
+    /// `panic = "abort"` invariant failure, an `assert!`, a bare `abort()`. A
+    /// finding bucket, not infra noise: with patina's own refusals
+    /// envelope-attributed ([`CampaignClass::FailClosedAbort`]), an unattributed
+    /// abort can only have come from the system under test. A preceding
+    /// `abort_intent`/`violation` verdict enriches the signature but is not
+    /// required for the class to fire.
+    GuestAbort,
+    /// Patina fail-closed refusal: the envelope carries a `refusal` record — a
+    /// fingerprint/trace mismatch, a duplicate buggify label, a
+    /// declared-but-never-called setup gate, a runtime that refused to
+    /// initialize, a shim fatal abort.
     FailClosedAbort,
     /// The `--starve` supervisor stall backstop killed a wedged run (exit 111).
     StarvationStall,
-    /// Harness/build infrastructure failure (cargo/build/signal/OOM), not a SUT
-    /// finding.
+    /// Harness/build infrastructure failure, not a SUT finding: the campaign's
+    /// wall-clock backstop killed the generation, or the child `cargo patina run`
+    /// never produced a `patina.result/v1` envelope at all (a build failure, a
+    /// pre-run gate refusal, a supervisor error — patina could not report a
+    /// result for this generation).
     Infra,
     /// A nonzero exit that matched no class above — an unknown/unparseable outcome.
     /// Loud and always a failure, so a novel failure mode is surfaced for triage
@@ -650,6 +802,25 @@ pub enum CampaignClass {
 }
 
 impl CampaignClass {
+    /// Every class, in severity order. A new variant that is not added here fails
+    /// [`every_class_round_trips_its_token`].
+    pub const ALL: &'static [CampaignClass] = &[
+        CampaignClass::Ok,
+        CampaignClass::Violation,
+        CampaignClass::Liveness,
+        CampaignClass::VacuousFsFault,
+        CampaignClass::VacuousDnsFault,
+        CampaignClass::VacuousNetFault,
+        CampaignClass::VacuousEntropyFault,
+        CampaignClass::VacuousClockFault,
+        CampaignClass::VacuousSwarm,
+        CampaignClass::GuestAbort,
+        CampaignClass::FailClosedAbort,
+        CampaignClass::StarvationStall,
+        CampaignClass::Infra,
+        CampaignClass::Unclassified,
+    ];
+
     pub const fn as_str(&self) -> &'static str {
         match self {
             CampaignClass::Ok => "OK",
@@ -661,6 +832,7 @@ impl CampaignClass {
             CampaignClass::VacuousNetFault => "VACUOUS_NET_FAULT",
             CampaignClass::VacuousEntropyFault => "VACUOUS_ENTROPY_FAULT",
             CampaignClass::VacuousClockFault => "VACUOUS_CLOCK_FAULT",
+            CampaignClass::GuestAbort => "GUEST_ABORT",
             CampaignClass::FailClosedAbort => "FAIL_CLOSED_ABORT",
             CampaignClass::StarvationStall => "STARVATION_STALL",
             CampaignClass::Infra => "INFRA",
@@ -669,20 +841,22 @@ impl CampaignClass {
     }
 
     fn parse(value: &str) -> Option<Self> {
-        match value {
-            "OK" => Some(CampaignClass::Ok),
-            "VIOLATION" => Some(CampaignClass::Violation),
-            "LIVENESS" => Some(CampaignClass::Liveness),
-            "VACUOUS_FS_FAULT" => Some(CampaignClass::VacuousFsFault),
-            "VACUOUS_SWARM" => Some(CampaignClass::VacuousSwarm),
-            "VACUOUS_DNS_FAULT" => Some(CampaignClass::VacuousDnsFault),
-            "VACUOUS_NET_FAULT" => Some(CampaignClass::VacuousNetFault),
-            "VACUOUS_ENTROPY_FAULT" => Some(CampaignClass::VacuousEntropyFault),
-            "VACUOUS_CLOCK_FAULT" => Some(CampaignClass::VacuousClockFault),
-            "FAIL_CLOSED_ABORT" => Some(CampaignClass::FailClosedAbort),
-            "STARVATION_STALL" => Some(CampaignClass::StarvationStall),
-            "INFRA" => Some(CampaignClass::Infra),
-            "UNCLASSIFIED" => Some(CampaignClass::Unclassified),
+        CampaignClass::ALL
+            .iter()
+            .copied()
+            .find(|class| class.as_str() == value)
+    }
+
+    /// The `fault_reports{}` plane whose `vacuous` bit fires this class, for the
+    /// per-plane coverage-failure classes.
+    const fn vacuous_plane(&self) -> Option<&'static str> {
+        match self {
+            CampaignClass::VacuousFsFault => Some("fs"),
+            CampaignClass::VacuousDnsFault => Some("dns"),
+            CampaignClass::VacuousNetFault => Some("net"),
+            CampaignClass::VacuousEntropyFault => Some("entropy"),
+            CampaignClass::VacuousClockFault => Some("clock"),
+            CampaignClass::VacuousSwarm => Some("swarm"),
             _ => None,
         }
     }
@@ -694,170 +868,232 @@ impl CampaignClass {
     }
 }
 
-const INFRA_MARKERS: &[&str] = &[
-    "PATINA_INFRA",
-    "incomplete trace",
-    "cargo-patina:",
-    "Cargo process terminated",
-    "terminated by a signal",
-    "could not compile",
-    "No such file or directory",
-    "native-build failed",
-    "Resource temporarily unavailable",
-    "Cannot allocate memory",
-    "failed to execute child process",
-];
+/// The exit code a raw SIGABRT surfaces as (128 + SIGABRT(6)). A guest that dies
+/// on SIGABRT has either hit a patina refusal (the shim aborts fail-closed via
+/// `std::process::abort()`) or aborted itself; the envelope's `refusal` field is
+/// what tells the two apart (§4.4 of the outcome-channel arc).
+const SIGABRT: i32 = 6;
+const SIGABRT_EXIT: i32 = 128 + SIGABRT;
 
-/// Patina *refusal* markers — the deterministic runtime / shim declined to run or
-/// continue (a configuration/fingerprint/audit fail-close), as opposed to a
-/// system-under-test invariant violation.
-const FAIL_CLOSED_MARKERS: &[&str] = &[
-    "PATINA_BUGGIFY_DUPLICATE_LABEL",
-    "PATINA_BUGGIFY_SETUP_NEVER_CALLED",
-    "fingerprint mismatch",
-    "trace operation mismatch",
-    "operation mismatch",
-    "the deterministic runtime failed to initialize",
-    "must run under `cargo patina run`",
-    "unsupported-import",
-    "unknown-import",
-];
+/// One verdict the generation reported through the verdict ABI, reduced to what
+/// classification and signatures need. Lifted from the envelope's `verdicts[]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VerdictFacts {
+    /// The `VerdictKind` token (`violation`, `pass`, `abort_intent`).
+    pub kind: String,
+    pub label: String,
+}
 
-/// System-under-test invariant/safety violations (a real bug), including a Patina
-/// `always!` abort and a guest panic.
-const VIOLATION_MARKERS: &[&str] = &[
-    "PATINA_VIOLATION",
-    "PATINA_ALWAYS_VIOLATION",
-    "WORKQ_VIOLATION",
-    "BUG_CAUGHT",
-    "panicked at",
-];
+/// One runtime-detected finding, reduced to its attribution. Lifted from the
+/// envelope's `runtime_findings[]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FindingFacts {
+    /// `liveness` (the watchdog/converge oracle) or `schedule` (the vacuity
+    /// diagnostics).
+    pub source: String,
+    pub kind: String,
+}
 
-/// The leading phrase of the runtime's inert-`--swarm` warning
-/// (`patina_dst_runtime`'s `SWARM_VACUOUS_WARNING`). Only the stable prefix is
-/// matched, so rewording the operator-facing tail of that warning cannot silently
-/// unhook the classifier; the machine-readable `vacuous=1` field of
-/// `PATINA_SWARM_REPORT` is the primary signal either way.
-const SWARM_VACUOUS_WARNING_PREFIX: &str = "PATINA WARNING: swarm fault-class selection inert";
+/// The **structured** outcome facts of one generation: the child run's
+/// `patina.result/v1` envelope reduced to the fields classification reads, plus
+/// the two facts only the campaign supervisor knows (whether it killed the
+/// generation on the wall-clock backstop, and whether the child produced an
+/// envelope at all).
+///
+/// Deliberately text-free. [`built_in_class`] is a pure function of this struct,
+/// so no built-in class can ever be decided by a substring of guest output; the
+/// captured streams live one level up in [`GenerationFacts`] and are reachable
+/// only by the spec-declared pattern matcher ([`ClassifyRules`]) and by the
+/// signature's last-resort fallback.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunFacts {
+    /// The child process's exit status.
+    pub exit_code: i32,
+    /// The signal the guest died on, from `guest_exit.signal`. `exit_code` alone
+    /// cannot express this (it is `128 + signal` there, the same value a guest
+    /// could have returned deliberately).
+    pub signal: Option<i32>,
+    /// The campaign's wall-clock backstop killed this generation.
+    pub timed_out: bool,
+    /// The child emitted a `patina.result/v1` envelope. `false` means patina's
+    /// own supervisor never reported a result for this generation.
+    pub envelope: bool,
+    /// `refusal.class` — patina's own fail-closed refusal, when patina refused.
+    /// Its ABSENCE is what makes an abort the guest's own doing.
+    pub refusal: Option<String>,
+    /// `verdicts[]`, in call order.
+    pub verdicts: Vec<VerdictFacts>,
+    /// The `fault_reports{}` planes whose `vacuous` bit is set.
+    pub vacuous_planes: Vec<String>,
+    /// `runtime_findings[]`.
+    pub findings: Vec<FindingFacts>,
+}
 
-/// The exit code a raw SIGABRT surfaces as (128 + SIGABRT(6)). The native shim
-/// aborts fail-closed via `std::process::abort()` on a fatal refusal it cannot
-/// safely continue past; a SIGABRT that carries no system-under-test finding is a
-/// fail-closed abort, distinct from a generic nonzero failure.
-const SIGABRT_EXIT: i32 = 134;
+impl RunFacts {
+    fn has_verdict(&self, kind: &str) -> Option<&VerdictFacts> {
+        self.verdicts.iter().find(|verdict| verdict.kind == kind)
+    }
 
-/// Classify one generation's outcome from its exit code and captured streams.
-/// Ordering encodes severity: an explicit finding wins over exit-code heuristics,
-/// a nonzero exit is never silently OK, and anything unrecognized lands LOUDLY in
-/// [`CampaignClass::Unclassified`] rather than being downgraded to a benign class.
-pub fn classify(exit_code: i32, stdout: &str, stderr: &str) -> CampaignClass {
-    let combined = format!("{stdout}\n{stderr}");
-    let has = |needles: &[&str]| needles.iter().any(|n| combined.contains(n));
+    fn has_finding(&self, source: &str) -> Option<&FindingFacts> {
+        self.findings
+            .iter()
+            .find(|finding| finding.source == source)
+    }
 
-    // 1. Liveness is its own class (a "never converges" wedge). Emitted per the
-    //    interface contract as `PATINA_VIOLATION liveness …` / `… converge …`.
-    if combined.contains("PATINA_VIOLATION liveness ")
-        || combined.contains("PATINA_VIOLATION converge ")
-    {
-        return CampaignClass::Liveness;
+    fn plane_vacuous(&self, plane: &str) -> bool {
+        self.vacuous_planes.iter().any(|name| name == plane)
     }
-    // 2. A system-under-test safety/assertion violation — fires even on exit 0 (a
-    //    violated invariant is a bug however the process exited), and is
-    //    distinguished from a Patina refusal below.
-    if has(VIOLATION_MARKERS) {
-        return CampaignClass::Violation;
+
+    /// Whether the guest died on SIGABRT. A signal is authoritative when the
+    /// envelope carried one; exit 134 is the fallback for the families whose
+    /// supervisor only sees a code.
+    fn aborted(&self) -> bool {
+        match self.signal {
+            Some(signal) => signal == SIGABRT,
+            None => self.exit_code == SIGABRT_EXIT,
+        }
     }
-    // 3. Fault-plane coverage failure: an fs fault class that should have fired
-    //    repeatedly applied zero effects. SUT/liveness findings above still win.
-    //    The verdict is read off the fs report LINE, never the whole output: the
-    //    net report carries its own `vacuous=` field, so a substring search over
-    //    both streams would file a vacuous NETWORK run under the fs class.
-    if combined.contains("filesystem fault knobs inert")
-        || combined
-            .lines()
-            .any(|line| line.contains("PATINA_FS_FAULT_REPORT") && line.contains("vacuous=1"))
-    {
-        return CampaignClass::VacuousFsFault;
+}
+
+/// One generation's outcome: the structured facts plus its captured streams.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GenerationFacts {
+    pub facts: RunFacts,
+    /// The generation's captured stdout and stderr, joined. Read ONLY by the
+    /// spec-declared pattern matcher and by the signature's fallback — never by
+    /// [`built_in_class`], which cannot see it.
+    pub output: String,
+}
+
+/// Per-guest classification rules a campaign spec declares (`classify` in the
+/// spec JSON). The grep mechanism survives here, and only here: as explicit,
+/// versioned, per-guest configuration rather than a string baked into patina.
+///
+/// Keyed by [`CampaignClass`], whose `Ord` is the severity order, so two matching
+/// declarations always resolve to the more severe class — deterministically.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClassifyRules {
+    /// class -> output line substrings.
+    patterns: BTreeMap<CampaignClass, Vec<String>>,
+    /// class -> child exit codes.
+    exit_codes: BTreeMap<CampaignClass, Vec<i32>>,
+}
+
+impl ClassifyRules {
+    pub fn is_empty(&self) -> bool {
+        self.patterns.is_empty() && self.exit_codes.is_empty()
     }
-    // 3b. The same coverage failure on the DNS plane, kept a separate class so the
-    //    campaign report names WHICH fault plane went inert. Read off the DNS
-    //    report line for the same reason the fs verdict is: each plane carries its
-    //    own `vacuous=` field, and a whole-output substring search would file one
-    //    plane's vacuity under another's class.
-    if combined.contains("DNS fault knobs inert")
-        || combined
-            .lines()
-            .any(|line| line.contains("PATINA_DNS_FAULT_REPORT") && line.contains("vacuous=1"))
-    {
-        return CampaignClass::VacuousDnsFault;
+
+    /// The class this guest's declared rules assign, if any. Patterns are checked
+    /// before exit codes (a matched line is more specific than a bare code), and
+    /// both in severity order.
+    fn declared(&self, generation: &GenerationFacts) -> Option<CampaignClass> {
+        for (class, needles) in &self.patterns {
+            if needles
+                .iter()
+                .any(|needle| generation.output.contains(needle.as_str()))
+            {
+                return Some(*class);
+            }
+        }
+        for (class, codes) in &self.exit_codes {
+            if codes.contains(&generation.facts.exit_code) {
+                return Some(*class);
+            }
+        }
+        None
     }
-    // 3c. The same coverage failure on the network plane, its own class for the
-    //    same reason 3b is: `PATINA_NET_FAULT_REPORT` carries one combined
-    //    `vacuous=` bit over drop/jitter/latency/duplicate/connect-refuse/
-    //    reset/partition, read off the report LINE rather than a whole-output
-    //    substring search for the same reason as the fs/DNS checks above.
-    if combined.contains("net fault knobs inert")
-        || combined
-            .lines()
-            .any(|line| line.contains("PATINA_NET_FAULT_REPORT") && line.contains("vacuous=1"))
-    {
-        return CampaignClass::VacuousNetFault;
+}
+
+/// Classify one generation from its structured envelope facts plus the spec's
+/// declared rules.
+///
+/// Envelope facts take precedence: a declared rule can only speak when the
+/// structured facts reached no verdict of their own (`OK`, or the loud
+/// `UNCLASSIFIED` catch-all), so a pattern can ADD a finding a level-1 guest
+/// would otherwise hide but can never downgrade one patina detected.
+pub fn classify(generation: &GenerationFacts, rules: &ClassifyRules) -> CampaignClass {
+    let built_in = built_in_class(&generation.facts);
+    if matches!(built_in, CampaignClass::Ok | CampaignClass::Unclassified) {
+        if let Some(declared) = rules.declared(generation) {
+            return declared;
+        }
     }
-    // 3d. The same coverage failure on the entropy plane, its own class for the
-    //    same reason 3b/3c are: read off the entropy report LINE rather than a
-    //    whole-output substring search, so a healthy fs/dns/net report alongside
-    //    it cannot steal this class's verdict or be stolen by it.
-    if combined.contains("entropy fault knobs inert")
-        || combined
-            .lines()
-            .any(|line| line.contains("PATINA_ENTROPY_FAULT_REPORT") && line.contains("vacuous=1"))
-    {
-        return CampaignClass::VacuousEntropyFault;
-    }
-    // 3e. The same coverage failure on the clock plane, its own class for the
-    //    same reason 3b/3c/3d are: read off the clock report LINE rather than a
-    //    whole-output substring search, so a healthy fs/dns/net/entropy report
-    //    alongside it cannot steal this class's verdict or be stolen by it.
-    if combined.contains("clock fault knobs inert")
-        || combined
-            .lines()
-            .any(|line| line.contains("PATINA_CLOCK_FAULT_REPORT") && line.contains("vacuous=1"))
-    {
-        return CampaignClass::VacuousClockFault;
-    }
-    // 4. Exploration-plane coverage failure: the generation asked for swarm
-    //    fault-class selection with nothing to select from. Read off the swarm
-    //    report LINE for the same reason the fs verdict is: several reports carry a
-    //    `vacuous=` field, so a whole-output substring search would file another
-    //    plane's vacuity under this class.
-    if combined.contains(SWARM_VACUOUS_WARNING_PREFIX)
-        || combined
-            .lines()
-            .any(|line| line.contains("PATINA_SWARM_REPORT") && line.contains("vacuous=1"))
-    {
-        return CampaignClass::VacuousSwarm;
-    }
-    // 5. Patina fail-closed refusal: a shim fatal-abort refusal line, or a raw
-    //    SIGABRT carrying no SUT finding (checked after the SUT-violation markers,
-    //    so an `always!` abort stays a VIOLATION). Its own class, never a generic
-    //    failure.
-    if has(FAIL_CLOSED_MARKERS) || exit_code == SIGABRT_EXIT {
-        return CampaignClass::FailClosedAbort;
-    }
-    // 6. The `--starve` supervisor stall backstop.
-    if exit_code == STARVATION_STALL_EXIT || combined.contains("patina: starvation stall") {
-        return CampaignClass::StarvationStall;
-    }
-    // 7. Harness/build infrastructure — only when there is no SUT finding above.
-    if has(INFRA_MARKERS) {
+    built_in
+}
+
+/// The class the envelope's own facts imply, with no guest output in sight.
+/// Ordering encodes severity: an explicit finding wins over exit-status
+/// inference, a nonzero exit is never silently OK, and anything unrecognized
+/// lands LOUDLY in [`CampaignClass::Unclassified`] rather than being downgraded.
+fn built_in_class(facts: &RunFacts) -> CampaignClass {
+    // 1. The campaign's own wall-clock backstop killed this generation: it hung in
+    //    a way neither the virtual-time watchdog nor the child's budgets caught, so
+    //    the outcome is inconclusive (INFRA), never a silent OK.
+    if facts.timed_out {
         return CampaignClass::Infra;
     }
-    // 8. A clean exit with no finding markers is OK.
-    if exit_code == 0 {
+    // 2. The `--starve` supervisor stall backstop. Checked before the envelope
+    //    rule below because the stalled child is killed by its own supervisor,
+    //    which returns this code INSTEAD of finalizing a result.
+    if facts.exit_code == STARVATION_STALL_EXIT {
+        return CampaignClass::StarvationStall;
+    }
+    // 3. No envelope at all: the child `cargo patina run` failed before it could
+    //    report a result (a build failure, a pre-run gate refusal, a supervisor
+    //    error). That is a harness failure, not a system-under-test finding.
+    if !facts.envelope {
+        return CampaignClass::Infra;
+    }
+    // 4. A liveness/converge watchdog finding is its own class (a "never
+    //    converges" wedge), reported by the runtime as a `runtime_findings[]`
+    //    entry with `source=liveness`.
+    if facts.has_finding("liveness").is_some() {
+        return CampaignClass::Liveness;
+    }
+    // 5. A system-under-test safety violation: a `violation` verdict. Fires even
+    //    on exit 0 — a violated invariant is a bug however the process exited.
+    if facts.has_verdict("violation").is_some() {
+        return CampaignClass::Violation;
+    }
+    // 6. Fault- and exploration-plane coverage failures, one class per plane so a
+    //    campaign report names WHICH plane went inert. Each plane's `vacuous` bit
+    //    is its own field of `fault_reports{}`, so one plane's vacuity can never
+    //    be filed under another's class. Checked in a fixed order, so a generation
+    //    with two vacuous planes always gets the same one class.
+    for class in CampaignClass::ALL {
+        if let Some(plane) = class.vacuous_plane() {
+            if facts.plane_vacuous(plane) {
+                return *class;
+            }
+        }
+    }
+    // 7. Patina fail-closed refusal: the envelope attributed the failure to
+    //    patina itself. Checked after the SUT findings above, so an `always!`
+    //    abort stays a VIOLATION.
+    if let Some(class) = &facts.refusal {
+        // A refusal the parent classified as the stall backstop keeps its own
+        // class; every other refusal is the fail-closed bucket.
+        if class == "starvation_stall" {
+            return CampaignClass::StarvationStall;
+        }
+        return CampaignClass::FailClosedAbort;
+    }
+    // 8. An abort patina did NOT attribute to itself is the guest's own doing.
+    //    This is §4.4's inversion: before the envelope carried `refusal`, every
+    //    unattributed SIGABRT was blamed on patina and buried in an infra-looking
+    //    bucket; now it is a finding in its own right.
+    if facts.aborted() {
+        return CampaignClass::GuestAbort;
+    }
+    // 9. A clean exit with no finding is OK.
+    if facts.exit_code == 0 {
         return CampaignClass::Ok;
     }
-    // 9. A nonzero exit that matched no class above is UNCLASSIFIED — surfaced
-    //    loudly for triage, never silently dropped as OK or mislabeled.
+    // 10. A nonzero exit that matched no class above is UNCLASSIFIED — surfaced
+    //    loudly for triage, never silently dropped as OK or mislabeled. A guest
+    //    that fails in a way patina cannot see structurally declares a
+    //    `classify` rule for it in its campaign spec (arc §4.3).
     CampaignClass::Unclassified
 }
 
@@ -883,10 +1119,16 @@ impl Signature {
     }
 }
 
-/// Build a signature from a classified generation's streams.
-pub fn signature(class: CampaignClass, stdout: &str, stderr: &str) -> Signature {
-    let shape = normalize_shape(&primary_finding_line(class, stdout, stderr));
-    let policy = policy_annotation(stdout, stderr);
+/// Build a signature from a classified generation.
+///
+/// The shape comes from the same structured facts the class did, so two
+/// generations that hit the same invariant dedup to one signature regardless of
+/// how the guest worded its output. Only when the facts carry nothing for the
+/// class (`UNCLASSIFIED`, `INFRA`, a declared-pattern class) does it fall back to
+/// the captured output, which is all there is in those cases.
+pub fn signature(class: CampaignClass, generation: &GenerationFacts) -> Signature {
+    let shape = normalize_shape(&primary_finding(class, generation));
+    let policy = policy_annotation(&generation.output);
     Signature {
         class,
         shape,
@@ -894,65 +1136,40 @@ pub fn signature(class: CampaignClass, stdout: &str, stderr: &str) -> Signature 
     }
 }
 
-/// The single most representative finding line for the class.
-fn primary_finding_line(class: CampaignClass, stdout: &str, stderr: &str) -> String {
-    let lines: Vec<&str> = stdout.lines().chain(stderr.lines()).collect();
-    let prefixes: &[&str] = match class {
-        CampaignClass::Liveness => &["PATINA_VIOLATION liveness ", "PATINA_VIOLATION converge "],
-        CampaignClass::Violation => &[
-            "PATINA_VIOLATION",
-            "PATINA_ALWAYS_VIOLATION",
-            "WORKQ_VIOLATION",
-            "BUG_CAUGHT",
-        ],
-        CampaignClass::VacuousFsFault => &[
-            "PATINA_FS_FAULT_REPORT",
-            "PATINA WARNING: filesystem fault knobs inert",
-        ],
-        CampaignClass::VacuousSwarm => &["PATINA_SWARM_REPORT", SWARM_VACUOUS_WARNING_PREFIX],
-        CampaignClass::VacuousDnsFault => &[
-            "PATINA_DNS_FAULT_REPORT",
-            "PATINA WARNING: DNS fault knobs inert",
-        ],
-        CampaignClass::VacuousNetFault => &[
-            "PATINA_NET_FAULT_REPORT",
-            "PATINA WARNING: net fault knobs inert",
-        ],
-        CampaignClass::VacuousEntropyFault => &[
-            "PATINA_ENTROPY_FAULT_REPORT",
-            "PATINA WARNING: entropy fault knobs inert",
-        ],
-        CampaignClass::VacuousClockFault => &[
-            "PATINA_CLOCK_FAULT_REPORT",
-            "PATINA WARNING: clock fault knobs inert",
-        ],
-        CampaignClass::FailClosedAbort => &[
-            "PATINA_BUGGIFY_DUPLICATE_LABEL",
-            "PATINA_BUGGIFY_SETUP_NEVER_CALLED",
-            "fingerprint mismatch",
-            "the deterministic runtime failed to initialize",
-        ],
-        CampaignClass::StarvationStall => &["patina: starvation stall"],
-        CampaignClass::Infra => &[
-            "patina: campaign generation exceeded timeout",
-            "cargo-patina:",
-        ],
-        CampaignClass::Ok | CampaignClass::Unclassified => &[],
+/// The most representative description of the finding for the class, from the
+/// structured facts where they carry one.
+fn primary_finding(class: CampaignClass, generation: &GenerationFacts) -> String {
+    let facts = &generation.facts;
+    let structured = match class {
+        CampaignClass::Liveness => facts
+            .has_finding("liveness")
+            .map(|finding| format!("liveness kind={}", finding.kind)),
+        CampaignClass::Violation => facts
+            .has_verdict("violation")
+            .map(|verdict| format!("verdict kind=violation label={}", verdict.label)),
+        CampaignClass::GuestAbort => Some(match facts.has_verdict("abort_intent") {
+            Some(verdict) => format!("guest_abort label={}", verdict.label),
+            None => "guest_abort unattributed".to_string(),
+        }),
+        CampaignClass::FailClosedAbort => facts
+            .refusal
+            .as_ref()
+            .map(|class| format!("refusal class={class}")),
+        CampaignClass::StarvationStall => Some("starvation stall".to_string()),
+        _ => class
+            .vacuous_plane()
+            .map(|plane| format!("vacuous plane={plane}")),
     };
-    for prefix in prefixes {
-        if let Some(line) = lines.iter().find(|l| l.trim().contains(prefix)) {
-            return line.trim().to_string();
-        }
+    if let Some(shape) = structured {
+        return shape;
     }
-    // Fallbacks: a panic line, else the last non-empty stderr line.
-    if let Some(line) = lines.iter().find(|l| l.contains("panicked at")) {
-        return line.trim().to_string();
-    }
-    stderr
+    // No structured fact for this class: the captured output is all there is.
+    generation
+        .output
         .lines()
         .rev()
-        .find(|l| !l.trim().is_empty())
-        .map(|l| l.trim().to_string())
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line.trim().to_string())
         .unwrap_or_default()
 }
 
@@ -977,9 +1194,12 @@ fn normalize_shape(line: &str) -> String {
 }
 
 /// Extract the exploration-policy bug-depth annotation, if the run emitted one, so
-/// two failures found at different interleaving depths are distinguished.
-fn policy_annotation(stdout: &str, stderr: &str) -> String {
-    for line in stdout.lines().chain(stderr.lines()) {
+/// two failures found at different interleaving depths are distinguished. A
+/// signature *annotation*, never a class: the depth is a property of how the
+/// failure was reached, and the `PATINA_SCHEDULE_POLICY` line is the only place
+/// it is reported.
+fn policy_annotation(output: &str) -> String {
+    for line in output.lines() {
         let line = line.trim();
         if line.starts_with("PATINA_SCHEDULE_POLICY") {
             if let Some(depth) = line
@@ -1436,6 +1656,12 @@ fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     map.insert("guided".into(), spec.guided.into());
     if let Some(value) = spec.allow_unmet_sometimes {
         map.insert("allow_unmet_sometimes".into(), allow_unmet_to_json(value));
+    }
+    // Default-omit, like the host table above: a spec with no declared rules
+    // records exactly the JSON it did before this key existed, so an out-dir
+    // written by an earlier build still round-trips on `--resume`.
+    if !spec.classify.is_empty() {
+        map.insert("classify".into(), classify_rules_to_json(&spec.classify));
     }
     serde_json::Value::Object(map)
 }
@@ -1967,7 +2193,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
             .active()
             .map(|store| store.generation_covmap_path(generation));
 
-        let (exit, stdout, stderr, timed_out) = run_generation(
+        let run = run_generation(
             &self_exe,
             &artifact_path,
             seed,
@@ -1979,21 +2205,16 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
             &state.spec.guest_args,
             effective_timeout_secs,
         )?;
+        let exit = run.facts.facts.exit_code;
+        let timed_out = run.facts.facts.timed_out;
+        let stderr = run.stderr;
         let _sites_fold = fold_sites_generation(&mut coverage, generation, seed, &stderr)?;
         let _edge_fold = fold_edge_coverage_generation(
             &mut edge_coverage,
             generation,
             coverage_map_path.as_deref(),
         )?;
-        // A generation that blew the wall-clock budget was killed: it hung in a way
-        // neither the virtual-time watchdog nor the child's own budgets caught
-        // (e.g. an uninterposed atomics-only busy loop). Classify it INFRA
-        // (inconclusive — harness bound hit), never a silent OK.
-        let class = if timed_out {
-            CampaignClass::Infra
-        } else {
-            classify(exit, &stdout, &stderr)
-        };
+        let class = classify(&run.facts, &state.spec.classify);
         *state.classes.entry(class.as_str().to_string()).or_insert(0) += 1;
         // Depth folds AFTER classification: whether a missing depth line is a
         // tolerable "the guest never finished" or a loud plumbing failure depends
@@ -2003,7 +2224,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
         let mut novel = false;
         let mut signature_key = None;
         if class.is_failure() {
-            let sig = signature(class, &stdout, &stderr);
+            let sig = signature(class, &run.facts);
             let key = sig.key();
             signature_key = Some(key.clone());
             // A failure that ran to a clean finish left a valid trace; a mid-run
@@ -2242,15 +2463,134 @@ fn fold_edge_coverage_generation(
     Ok(Some(outcome))
 }
 
-/// Run one generation as a child `cargo patina run --record` process, capturing
-/// its streams. The virtual-time watchdog and the child's own step/fuel budgets
-/// bound the *deterministic* run, but a guest can still wedge in a way none of
-/// those observe (an uninterposed atomics-only busy loop). `timeout_secs` is a
-/// wall-clock backstop: a generation that overruns it is killed and reported (as
-/// INFRA), so a single hung generation can never wedge the whole campaign.
+/// One generation's completed run: the structured facts the classifier reads,
+/// plus the child's captured streams for the folds that parse their own report
+/// lines (`PATINA_SDK_REPORT`, `PATINA_DEPTH_REPORT`).
+pub(crate) struct GenerationRun {
+    facts: GenerationFacts,
+    stdout: String,
+    stderr: String,
+}
+
+impl GenerationRun {
+    pub(crate) fn timed_out(&self) -> bool {
+        self.facts.facts.timed_out
+    }
+
+    pub(crate) fn streams(&self) -> (&str, &str) {
+        (&self.stdout, &self.stderr)
+    }
+}
+
+/// Reduce the child run's `patina.result/v1` envelope to the classifier's
+/// structured input. Every field is read from the envelope by name — nothing here
+/// parses a diagnostic line back.
+fn facts_from_envelope(envelope: &serde_json::Value) -> RunFacts {
+    let string = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let verdicts = envelope
+        .get("verdicts")
+        .and_then(serde_json::Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .map(|row| VerdictFacts {
+                    kind: string(row.get("kind")),
+                    label: string(row.get("label")),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let findings = envelope
+        .get("runtime_findings")
+        .and_then(serde_json::Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .map(|row| FindingFacts {
+                    source: string(row.get("source")),
+                    kind: string(row.get("kind")),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let vacuous_planes = envelope
+        .get("fault_reports")
+        .and_then(serde_json::Value::as_object)
+        .map(|planes| {
+            planes
+                .iter()
+                .filter(|(_, plane)| {
+                    plane
+                        .get("vacuous")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                })
+                .map(|(name, _)| name.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    RunFacts {
+        exit_code: envelope
+            .get("exit_code")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or_default() as i32,
+        signal: envelope
+            .get("guest_exit")
+            .and_then(|exit| exit.get("signal"))
+            .and_then(serde_json::Value::as_i64)
+            .map(|signal| signal as i32),
+        timed_out: false,
+        envelope: true,
+        refusal: envelope
+            .get("refusal")
+            .and_then(|refusal| refusal.get("class"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        verdicts,
+        vacuous_planes,
+        findings,
+    }
+}
+
+/// The child `run`'s own `patina.result/v1` envelope, if it produced one. The
+/// envelope is a single JSON line on stdout; anything else the child wrote there
+/// is guest output the envelope itself carries, so the scan takes the last
+/// well-formed envelope line and is never confused by a guest that prints JSON.
 ///
-/// Returns `(exit_code, stdout, stderr, timed_out)`. A signal death (including the
-/// timeout kill) has no exit code and surfaces as `-1`.
+/// Only a `run` envelope counts. Under `--format json` a CLI-side failure emits
+/// an envelope of its own (`verb: "cli"`, `result: "error"`) — a build failure, a
+/// pre-run gate refusal, a supervisor error. That is patina declining to run the
+/// generation at all, not a result for it, and it classifies INFRA through the
+/// no-envelope rule.
+fn generation_envelope(stdout: &str) -> Option<serde_json::Value> {
+    stdout.lines().rev().find_map(|line| {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        let field = |key: &str| value.get(key).and_then(serde_json::Value::as_str);
+        (field("schema") == Some(crate::output::ENVELOPE_SCHEMA) && field("verb") == Some("run"))
+            .then_some(value)
+    })
+}
+
+/// Run one generation as a child `cargo patina run --record --format json`
+/// process, capturing its result envelope. The virtual-time watchdog and the
+/// child's own step/fuel budgets bound the *deterministic* run, but a guest can
+/// still wedge in a way none of those observe (an uninterposed atomics-only busy
+/// loop). `timeout_secs` is a wall-clock backstop: a generation that overruns it
+/// is killed and reported (as INFRA), so a single hung generation can never wedge
+/// the whole campaign.
+///
+/// `--format json` is what makes the classifier structural: the child reports its
+/// verdicts, per-plane fault accounting, runtime findings, refusal, and exit
+/// status as named envelope fields, and the campaign never has to read them back
+/// out of human diagnostics. A child that dies before it can emit an envelope is
+/// itself a fact (`RunFacts::envelope`), and classifies INFRA.
 struct GenerationFiles<'a> {
     trace_path: &'a Path,
     coverage_out: Option<&'a Path>,
@@ -2264,7 +2604,7 @@ fn run_generation(
     files: GenerationFiles<'_>,
     guest_args: &[String],
     timeout_secs: u64,
-) -> Result<(i32, String, String, bool), CliError> {
+) -> Result<GenerationRun, CliError> {
     use std::process::Stdio;
     use std::time::{Duration, Instant};
 
@@ -2277,6 +2617,11 @@ fn run_generation(
     command
         .arg("run")
         .arg("--no-config")
+        // The structured outcome channel: the child reports its result as a
+        // `patina.result/v1` envelope rather than as diagnostics the campaign
+        // would have to grep. This is the classifier's ONLY input.
+        .arg("--format")
+        .arg("json")
         .arg(artifact)
         .arg("--seed")
         .arg(seed.to_string())
@@ -2339,19 +2684,54 @@ fn run_generation(
         .wait_with_output()
         .map_err(|e| CliError(format!("failed to collect generation run output: {e}")))?;
     let exit = output.status.code().unwrap_or(-1);
-    let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let child_stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let child_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    // The child's own captured guest output travels inside the envelope; without
+    // one (a build failure, a pre-run refusal, a timeout kill) the child's raw
+    // streams are all there is.
+    let envelope = generation_envelope(&child_stdout);
+    let mut facts = match &envelope {
+        Some(envelope) => facts_from_envelope(envelope),
+        None => RunFacts {
+            exit_code: exit,
+            ..RunFacts::default()
+        },
+    };
+    // The process exit status is the campaign's own observation and stays
+    // authoritative: a child killed after it printed its envelope did not exit
+    // with the code that envelope reported.
+    facts.exit_code = exit;
+    facts.timed_out = timed_out;
+    let envelope_stream = |key: &str| {
+        envelope
+            .as_ref()
+            .and_then(|envelope| envelope.get(key))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    let stdout = envelope_stream("stdout").unwrap_or(child_stdout);
+    let mut stderr = envelope_stream("stderr").unwrap_or(child_stderr.clone());
+    if envelope.is_some() {
+        // A supervisor diagnostic (a trace-finalization note, a build line) rides
+        // the child's own stderr rather than the guest's; keep both, so nothing a
+        // declared pattern might match is dropped.
+        stderr.push_str(&child_stderr);
+    }
     if timed_out {
         // Synthetic marker so the killed generation carries a stable signature.
         stderr.push_str(&format!(
             "\npatina: campaign generation exceeded timeout_secs={timeout_secs}\n"
         ));
     }
-    Ok((
-        exit,
-        String::from_utf8_lossy(&output.stdout).into_owned(),
+    Ok(GenerationRun {
+        facts: GenerationFacts {
+            facts,
+            output: format!("{stdout}\n{stderr}"),
+        },
+        stdout,
         stderr,
-        timed_out,
-    ))
+    })
 }
 
 fn kill_generation_process_tree(child: &mut std::process::Child) {
@@ -3055,7 +3435,7 @@ pub(crate) fn run_reduced_generation(
     trace_path: &Path,
     guest_args: &[String],
     timeout_secs: u64,
-) -> Result<(i32, String, String, bool), CliError> {
+) -> Result<GenerationRun, CliError> {
     run_generation(
         self_exe,
         artifact,
@@ -4011,13 +4391,93 @@ fn sdk_sites_summary_json(
 // Selftest
 // ===========================================================================
 
-/// Prove every classifier class is reachable with planted-outcome fixtures, and
-/// that the signature store dedups repeats and flags novel signatures — mirroring
-/// the fuzz-sweep `--selftest` discipline.
+/// A planted generation for the selftest: structured facts plus the captured
+/// output only the spec-declared matcher may read.
+fn planted(facts: RunFacts, output: &str) -> GenerationFacts {
+    GenerationFacts {
+        facts,
+        output: output.to_string(),
+    }
+}
+
+impl RunFacts {
+    /// A clean, envelope-carrying generation — the base every selftest fixture
+    /// mutates by exactly the one fact it is proving.
+    fn ok() -> Self {
+        RunFacts {
+            envelope: true,
+            ..RunFacts::default()
+        }
+    }
+
+    fn exit(mut self, code: i32) -> Self {
+        self.exit_code = code;
+        self
+    }
+
+    fn signal(mut self, signal: i32) -> Self {
+        self.signal = Some(signal);
+        self
+    }
+
+    fn timed_out(mut self) -> Self {
+        self.timed_out = true;
+        self
+    }
+
+    fn no_envelope(mut self) -> Self {
+        self.envelope = false;
+        self
+    }
+
+    fn refusal(mut self, class: &str) -> Self {
+        self.refusal = Some(class.to_string());
+        self
+    }
+
+    fn verdict(mut self, kind: &str, label: &str) -> Self {
+        self.verdicts.push(VerdictFacts {
+            kind: kind.to_string(),
+            label: label.to_string(),
+        });
+        self
+    }
+
+    fn finding(mut self, source: &str, kind: &str) -> Self {
+        self.findings.push(FindingFacts {
+            source: source.to_string(),
+            kind: kind.to_string(),
+        });
+        self
+    }
+
+    fn vacuous(mut self, plane: &str) -> Self {
+        self.vacuous_planes.push(plane.to_string());
+        self
+    }
+}
+
+/// The selftest's level-1 guest rules, built through the same spec parser an
+/// operator's `--spec FILE.json` goes through — so the selftest proves the
+/// declared-rule GRAMMAR too, not just the matcher.
+fn declared_rules_fixture() -> ClassifyRules {
+    json_classify_rules(&serde_json::json!({
+        "patterns": {"VIOLATION": ["checksum mismatch"]},
+        "exit_codes": {"VIOLATION": [3]},
+    }))
+    .expect("the selftest's declared rules must parse")
+}
+
+/// Prove every classifier class is reachable from the structured envelope facts
+/// (with the spec-declared rules as the only text-reading path), and that the
+/// signature store dedups repeats and flags novel signatures — mirroring the
+/// fuzz-sweep `--selftest` discipline.
 fn selftest() -> Result<i32, CliError> {
     let mut failures = 0u32;
+    let mut fired: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
     let mut check = |name: &str, want: CampaignClass, got: CampaignClass| {
         if want == got {
+            fired.insert(got.as_str());
             println!("  ok   {name:<40} -> {}", got.as_str());
         } else {
             println!(
@@ -4030,476 +4490,323 @@ fn selftest() -> Result<i32, CliError> {
     };
 
     println!("== campaign classifier selftest ==");
+    // Every class must be proven fireable through the STRUCTURED channel, and
+    // every class-deciding fact must be proven load-bearing: each check below is
+    // paired with a red twin that removes exactly the one fact and lands
+    // somewhere else. A check that cannot fail is a bug.
+    let no_rules = ClassifyRules::default();
     check(
         "clean-exit-0",
         CampaignClass::Ok,
-        classify(0, "PATINA_RESULT ok=1", ""),
+        classify(&planted(RunFacts::ok(), ""), &no_rules),
     );
+
+    // -- liveness: a runtime finding attributed to the watchdog ---------------
     check(
-        "liveness-watchdog-marker",
+        "liveness-watchdog-finding",
         CampaignClass::Liveness,
         classify(
-            1,
-            "",
-            "PATINA_VIOLATION liveness detail=no-progress vtime_ns=700 budget_ns=600",
+            &planted(
+                RunFacts::ok().exit(1).finding("liveness", "no_progress"),
+                "",
+            ),
+            &no_rules,
         ),
     );
     check(
-        "heal-then-converge-marker",
+        "heal-then-converge-finding",
         CampaignClass::Liveness,
         classify(
-            2,
-            "",
-            "PATINA_VIOLATION converge detail=did-not-converge vtime_ns=5000 budget_ns=300 last_fault_vtime_ns=300",
+            &planted(RunFacts::ok().exit(2).finding("liveness", "converge"), ""),
+            &no_rules,
         ),
     );
+    // RED twin: the same run WITHOUT the liveness finding is not LIVENESS, so
+    // the finding is what fires the class (a schedule-sourced finding must not).
     check(
-        "violation-marker-on-exit-0",
+        "liveness-red-without-the-finding",
+        CampaignClass::Unclassified,
+        classify(
+            &planted(
+                RunFacts::ok()
+                    .exit(1)
+                    .finding("schedule", "vacuous_schedule"),
+                "",
+            ),
+            &no_rules,
+        ),
+    );
+
+    // -- violation: a `violation` verdict through the verdict ABI -------------
+    check(
+        "violation-verdict-on-exit-0",
         CampaignClass::Violation,
         classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_VIOLATION two-leaders term=4",
+            &planted(RunFacts::ok().verdict("violation", "two-leaders"), ""),
+            &no_rules,
         ),
     );
     check(
-        "always-violation-not-downgraded",
+        "always-violation-abort-is-violation-not-guest-abort",
         CampaignClass::Violation,
         classify(
-            0,
-            "PATINA_SDK_REPORT enabled=1",
-            "PATINA_ALWAYS_VIOLATION label=x",
+            &planted(
+                RunFacts::ok()
+                    .exit(SIGABRT_EXIT)
+                    .signal(SIGABRT)
+                    .verdict("violation", "must-hold"),
+                "",
+            ),
+            &no_rules,
         ),
     );
+    // RED twin: a `pass` verdict is not a finding.
     check(
-        "guest-panic",
-        CampaignClass::Violation,
-        classify(101, "", "thread 'main' panicked at src/x.rs:9: boom"),
-    );
-    check(
-        "vacuous-fs-fault-report",
-        CampaignClass::VacuousFsFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_FS_FAULT_REPORT eligible_ops=4 error_vacuity_diagnosable=1 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1",
-        ),
-    );
-    check(
-        "vacuous-fs-latency-report",
-        CampaignClass::VacuousFsFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=0 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=1 latency_applied=0 vacuous=1",
-        ),
-    );
-    check(
-        "fs-latency-that-fired-is-not-vacuous",
+        "violation-red-a-pass-verdict-is-not-a-finding",
         CampaignClass::Ok,
         classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=0 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=1 latency_applied=40 vacuous=0",
+            &planted(RunFacts::ok().verdict("pass", "queue-drained"), ""),
+            &no_rules,
         ),
     );
+
+    // -- per-plane coverage failures -----------------------------------------
+    // Each plane carries its own `vacuous` bit in `fault_reports{}`, so one
+    // plane's vacuity can never be filed under another's class — the whole
+    // reason these are separate classes.
+    for (name, class) in [
+        ("fs", CampaignClass::VacuousFsFault),
+        ("dns", CampaignClass::VacuousDnsFault),
+        ("net", CampaignClass::VacuousNetFault),
+        ("entropy", CampaignClass::VacuousEntropyFault),
+        ("clock", CampaignClass::VacuousClockFault),
+        ("swarm", CampaignClass::VacuousSwarm),
+    ] {
+        check(
+            &format!("vacuous-{name}-plane"),
+            class,
+            classify(&planted(RunFacts::ok().vacuous(name), ""), &no_rules),
+        );
+    }
+    // RED twin: a plane that is present but NOT vacuous fires nothing.
     check(
-        "vacuous-fs-warning",
-        CampaignClass::VacuousFsFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA WARNING: filesystem fault knobs inert — 4 fault-eligible filesystem op(s) occurred",
-        ),
-    );
-    // The DNS fault plane, same per-class shape: a run that resolved defined
-    // names often enough for an enabled knob to fire, that applied nothing.
-    check(
-        "vacuous-dns-fail-report",
-        CampaignClass::VacuousDnsFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_DNS_FAULT_REPORT resolutions=40 fail_vacuity_diagnosable=1 failures_injected=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1",
-        ),
-    );
-    check(
-        "vacuous-dns-latency-report",
-        CampaignClass::VacuousDnsFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_DNS_FAULT_REPORT resolutions=40 fail_vacuity_diagnosable=0 failures_injected=0 latency_vacuity_diagnosable=1 latency_applied=0 vacuous=1",
-        ),
-    );
-    check(
-        "vacuous-dns-warning",
-        CampaignClass::VacuousDnsFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA WARNING: DNS fault knobs inert — 40 fault-eligible name resolution(s) occurred",
-        ),
-    );
-    check(
-        "dns-knobs-that-fired-are-not-vacuous",
+        "fs-plane-that-fired-is-not-vacuous",
         CampaignClass::Ok,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_DNS_FAULT_REPORT resolutions=40 fail_vacuity_diagnosable=1 failures_injected=4 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=0",
-        ),
+        classify(&planted(RunFacts::ok(), ""), &no_rules),
     );
-    // Per-plane attribution: a vacuous DNS run alongside a healthy fs report must
-    // NOT be filed under the fs class, and vice versa. Both verdicts are read off
-    // their own report LINE, never a substring search over the whole output.
+    // Per-plane attribution, both directions: a vacuous DNS plane alongside a
+    // healthy fs plane is the DNS class, never the fs one.
     check(
         "dns-vacuity-is-not-filed-under-the-fs-class",
         CampaignClass::VacuousDnsFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=1 errors_injected=4 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=0\nPATINA_DNS_FAULT_REPORT resolutions=40 fail_vacuity_diagnosable=1 failures_injected=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1",
-        ),
+        classify(&planted(RunFacts::ok().vacuous("dns"), ""), &no_rules),
     );
-    check(
-        "fs-vacuity-wins-over-a-healthy-dns-report",
-        CampaignClass::VacuousFsFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=1 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_DNS_FAULT_REPORT resolutions=40 fail_vacuity_diagnosable=1 failures_injected=4 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=0",
-        ),
-    );
-    // Both planes vacuous: one generation gets ONE class, and which one is pinned
-    // rather than left to whichever check happens to run first, so the same output
-    // always dedups to the same signature.
+    // Two vacuous planes get ONE class, and which one is pinned rather than left
+    // to whichever check runs first, so the same run always dedups the same way.
     check(
         "both-planes-vacuous-reports-the-fs-class",
         CampaignClass::VacuousFsFault,
         classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=1 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_DNS_FAULT_REPORT resolutions=40 fail_vacuity_diagnosable=1 failures_injected=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1",
+            &planted(RunFacts::ok().vacuous("dns").vacuous("fs"), ""),
+            &no_rules,
         ),
     );
-    // The network plane's own class: `PATINA_NET_FAULT_REPORT` carries a
-    // combined `vacuous=` bit over all seven net fault knobs, and it must file
-    // under `VacuousNetFault`, not under a healthy fs report's class.
-    check(
-        "net-vacuity-is-not-filed-under-the-fs-class",
-        CampaignClass::VacuousNetFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_FS_FAULT_REPORT eligible_ops=9 error_vacuity_diagnosable=0 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=0\nPATINA_NET_FAULT_REPORT send_ops=4 drop_vacuity_diagnosable=1 drops_applied=0 jitter_vacuity_diagnosable=0 jitter_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 duplicate_vacuity_diagnosable=0 duplicates_applied=0 connect_ops=0 connect_refuse_vacuity_diagnosable=0 connects_refused=0 stream_ops=0 reset_vacuity_diagnosable=0 resets_injected=0 partition_vacuity_diagnosable=0 partition_blocks=0 vacuous=1",
-        ),
-    );
-    check(
-        "vacuous-net-warning",
-        CampaignClass::VacuousNetFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA WARNING: net fault knobs inert — fault-eligible network traffic occurred (4 send(s), 0 connect(s), 0 stream op(s))",
-        ),
-    );
-    check(
-        "net-knobs-that-fired-are-not-vacuous",
-        CampaignClass::Ok,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_NET_FAULT_REPORT send_ops=4 drop_vacuity_diagnosable=1 drops_applied=2 jitter_vacuity_diagnosable=0 jitter_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 duplicate_vacuity_diagnosable=0 duplicates_applied=0 connect_ops=0 connect_refuse_vacuity_diagnosable=0 connects_refused=0 stream_ops=0 reset_vacuity_diagnosable=0 resets_injected=0 partition_vacuity_diagnosable=0 partition_blocks=0 vacuous=0",
-        ),
-    );
-    // Priority ordering: fs vacuity still wins over a healthy net report, and
-    // over a vacuous one — the fs/dns/net classes are checked in that order in
-    // `classify`, so one generation always gets exactly one class.
-    check(
-        "fs-vacuity-wins-over-a-healthy-net-report",
-        CampaignClass::VacuousFsFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=1 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_NET_FAULT_REPORT send_ops=4 drop_vacuity_diagnosable=1 drops_applied=2 jitter_vacuity_diagnosable=0 jitter_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 duplicate_vacuity_diagnosable=0 duplicates_applied=0 connect_ops=0 connect_refuse_vacuity_diagnosable=0 connects_refused=0 stream_ops=0 reset_vacuity_diagnosable=0 resets_injected=0 partition_vacuity_diagnosable=0 partition_blocks=0 vacuous=0",
-        ),
-    );
-    check(
-        "all-three-planes-vacuous-reports-the-fs-class",
-        CampaignClass::VacuousFsFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=1 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_DNS_FAULT_REPORT resolutions=40 fail_vacuity_diagnosable=1 failures_injected=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_NET_FAULT_REPORT send_ops=4 drop_vacuity_diagnosable=1 drops_applied=0 jitter_vacuity_diagnosable=0 jitter_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 duplicate_vacuity_diagnosable=0 duplicates_applied=0 connect_ops=0 connect_refuse_vacuity_diagnosable=0 connects_refused=0 stream_ops=0 reset_vacuity_diagnosable=0 resets_injected=0 partition_vacuity_diagnosable=0 partition_blocks=0 vacuous=1",
-        ),
-    );
-    // The entropy plane's own class, same per-class shape as fs/dns/net: a run
-    // that drew entropy often enough for an enabled failure knob to fire, that
-    // applied nothing.
-    check(
-        "vacuous-entropy-fault-report",
-        CampaignClass::VacuousEntropyFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_ENTROPY_FAULT_REPORT requests=40 fail_vacuity_diagnosable=1 failures_injected=0 vacuous=1",
-        ),
-    );
-    check(
-        "vacuous-entropy-warning",
-        CampaignClass::VacuousEntropyFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA WARNING: entropy fault knobs inert — 40 fault-eligible entropy request(s) occurred",
-        ),
-    );
-    check(
-        "entropy-knobs-that-fired-are-not-vacuous",
-        CampaignClass::Ok,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_ENTROPY_FAULT_REPORT requests=40 fail_vacuity_diagnosable=1 failures_injected=4 vacuous=0",
-        ),
-    );
-    // Per-plane attribution: entropy vacuity must not be filed under a healthy
-    // fs report's class, and vice versa. Both verdicts are read off their own
-    // report LINE, never a substring search over the whole output.
-    check(
-        "entropy-vacuity-is-not-filed-under-the-fs-class",
-        CampaignClass::VacuousEntropyFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=1 errors_injected=4 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=0\nPATINA_ENTROPY_FAULT_REPORT requests=40 fail_vacuity_diagnosable=1 failures_injected=0 vacuous=1",
-        ),
-    );
-    // Priority ordering: fs vacuity still wins over a healthy or vacuous entropy
-    // report — the fs/dns/net/entropy classes are checked in that order in
-    // `classify`, so one generation always gets exactly one class.
-    check(
-        "fs-vacuity-wins-over-a-healthy-entropy-report",
-        CampaignClass::VacuousFsFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=1 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_ENTROPY_FAULT_REPORT requests=40 fail_vacuity_diagnosable=1 failures_injected=4 vacuous=0",
-        ),
-    );
-    check(
-        "all-four-planes-vacuous-reports-the-fs-class",
-        CampaignClass::VacuousFsFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=1 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_DNS_FAULT_REPORT resolutions=40 fail_vacuity_diagnosable=1 failures_injected=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_NET_FAULT_REPORT send_ops=4 drop_vacuity_diagnosable=1 drops_applied=0 jitter_vacuity_diagnosable=0 jitter_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 duplicate_vacuity_diagnosable=0 duplicates_applied=0 connect_ops=0 connect_refuse_vacuity_diagnosable=0 connects_refused=0 stream_ops=0 reset_vacuity_diagnosable=0 resets_injected=0 partition_vacuity_diagnosable=0 partition_blocks=0 vacuous=1\nPATINA_ENTROPY_FAULT_REPORT requests=40 fail_vacuity_diagnosable=1 failures_injected=0 vacuous=1",
-        ),
-    );
-    // The clock plane's own class, same per-class shape as fs/dns/net/entropy: a
-    // run that read the realtime epoch often enough for an enabled jump knob to
-    // apply, that applied nothing.
-    check(
-        "vacuous-clock-fault-report",
-        CampaignClass::VacuousClockFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_CLOCK_FAULT_REPORT reads=40 jump_vacuity_diagnosable=1 jumps_applied=0 vacuous=1",
-        ),
-    );
-    check(
-        "vacuous-clock-warning",
-        CampaignClass::VacuousClockFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA WARNING: clock fault knobs inert — 40 fault-eligible realtime-epoch read(s) occurred",
-        ),
-    );
-    check(
-        "clock-knobs-that-fired-are-not-vacuous",
-        CampaignClass::Ok,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_CLOCK_FAULT_REPORT reads=40 jump_vacuity_diagnosable=1 jumps_applied=4 vacuous=0",
-        ),
-    );
-    // Per-plane attribution: clock vacuity must not be filed under a healthy fs
-    // report's class, and vice versa. Both verdicts are read off their own
-    // report LINE, never a substring search over the whole output.
-    check(
-        "clock-vacuity-is-not-filed-under-the-fs-class",
-        CampaignClass::VacuousClockFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=1 errors_injected=4 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=0\nPATINA_CLOCK_FAULT_REPORT reads=40 jump_vacuity_diagnosable=1 jumps_applied=0 vacuous=1",
-        ),
-    );
-    // Priority ordering: fs vacuity still wins over a healthy or vacuous clock
-    // report — the fs/dns/net/entropy/clock classes are checked in that order in
-    // `classify`, so one generation always gets exactly one class.
-    check(
-        "fs-vacuity-wins-over-a-healthy-clock-report",
-        CampaignClass::VacuousFsFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=1 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_CLOCK_FAULT_REPORT reads=40 jump_vacuity_diagnosable=1 jumps_applied=4 vacuous=0",
-        ),
-    );
-    check(
-        "all-five-planes-vacuous-reports-the-fs-class",
-        CampaignClass::VacuousFsFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_FS_FAULT_REPORT eligible_ops=40 error_vacuity_diagnosable=1 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_DNS_FAULT_REPORT resolutions=40 fail_vacuity_diagnosable=1 failures_injected=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1\nPATINA_NET_FAULT_REPORT send_ops=4 drop_vacuity_diagnosable=1 drops_applied=0 jitter_vacuity_diagnosable=0 jitter_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 duplicate_vacuity_diagnosable=0 duplicates_applied=0 connect_ops=0 connect_refuse_vacuity_diagnosable=0 connects_refused=0 stream_ops=0 reset_vacuity_diagnosable=0 resets_injected=0 partition_vacuity_diagnosable=0 partition_blocks=0 vacuous=1\nPATINA_ENTROPY_FAULT_REPORT requests=40 fail_vacuity_diagnosable=1 failures_injected=0 vacuous=1\nPATINA_CLOCK_FAULT_REPORT reads=40 jump_vacuity_diagnosable=1 jumps_applied=0 vacuous=1",
-        ),
-    );
-    // A generation that requested `--swarm` with no swarm-maskable fault class
-    // enabled explored the plain configuration, so a clean exit is NOT swarm
-    // coverage. Both the machine-readable field and the operator warning fire it.
-    check(
-        "vacuous-swarm-report",
-        CampaignClass::VacuousSwarm,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_SWARM_REPORT candidates=0 selected=0 deselected=0 vacuous=1",
-        ),
-    );
-    check(
-        "vacuous-swarm-warning",
-        CampaignClass::VacuousSwarm,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA WARNING: swarm fault-class selection inert — --swarm was requested but NO swarm-maskable fault class was enabled",
-        ),
-    );
-    // A draw that dropped every candidate is a legitimate swarm generation: the
-    // knob had something to choose among and chose the empty subset.
-    check(
-        "swarm-that-dropped-every-candidate-is-not-vacuous",
-        CampaignClass::Ok,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_SWARM_REPORT candidates=2 selected=0 deselected=2 vacuous=0 class=crash|0 class=buggify|0",
-        ),
-    );
-    // Another plane's vacuity must not be filed under the swarm class (the fs
-    // report carries its own `vacuous=` field on its own line).
-    check(
-        "fs-vacuity-is-not-filed-under-the-swarm-class",
-        CampaignClass::VacuousFsFault,
-        classify(
-            0,
-            "PATINA_RESULT ok=1",
-            "PATINA_SWARM_REPORT candidates=2 selected=1 deselected=1 vacuous=0 class=crash|1 class=fs_error|0\nPATINA_FS_FAULT_REPORT eligible_ops=9 error_vacuity_diagnosable=1 errors_injected=0 short_vacuity_diagnosable=0 shorts_applied=0 latency_vacuity_diagnosable=0 latency_applied=0 vacuous=1",
-        ),
-    );
-    // A real finding still wins: an inert swarm knob never hides a SUT bug.
+    // A real finding still wins: an inert fault plane never hides a SUT bug.
     check(
         "violation-beats-vacuous-swarm",
         CampaignClass::Violation,
         classify(
-            0,
-            "PATINA_RESULT ok=0",
-            "PATINA_SWARM_REPORT candidates=0 selected=0 deselected=0 vacuous=1\nPATINA_VIOLATION two-leaders term=4",
+            &planted(
+                RunFacts::ok()
+                    .vacuous("swarm")
+                    .verdict("violation", "two-leaders"),
+                "",
+            ),
+            &no_rules,
+        ),
+    );
+
+    // -- the GUEST_ABORT / FAIL_CLOSED_ABORT split (arc §4.4) ----------------
+    // The same SIGABRT lands in two different classes depending on ONE envelope
+    // field: whether patina attributed the failure to itself.
+    check(
+        "guest-abort-unattributed-sigabrt",
+        CampaignClass::GuestAbort,
+        classify(
+            &planted(RunFacts::ok().exit(SIGABRT_EXIT).signal(SIGABRT), ""),
+            &no_rules,
+        ),
+    );
+    check(
+        "guest-abort-enriched-by-an-abort-intent-verdict",
+        CampaignClass::GuestAbort,
+        classify(
+            &planted(
+                RunFacts::ok()
+                    .exit(SIGABRT_EXIT)
+                    .signal(SIGABRT)
+                    .verdict("abort_intent", "checksum"),
+                "",
+            ),
+            &no_rules,
+        ),
+    );
+    // A family whose supervisor sees only a code still splits on the refusal.
+    check(
+        "guest-abort-exit-134-without-a-signal",
+        CampaignClass::GuestAbort,
+        classify(&planted(RunFacts::ok().exit(SIGABRT_EXIT), ""), &no_rules),
+    );
+    // RED twin: the SAME abort WITH a patina refusal is patina's fault, not the
+    // guest's — this is the split the arc calls for.
+    check(
+        "fail-closed-abort-is-the-same-sigabrt-with-a-refusal",
+        CampaignClass::FailClosedAbort,
+        classify(
+            &planted(
+                RunFacts::ok()
+                    .exit(SIGABRT_EXIT)
+                    .signal(SIGABRT)
+                    .refusal("buggify_duplicate_label"),
+                "",
+            ),
+            &no_rules,
+        ),
+    );
+    check(
+        "fail-closed-refusal-without-an-abort",
+        CampaignClass::FailClosedAbort,
+        classify(
+            &planted(RunFacts::ok().exit(2).refusal("fingerprint_mismatch"), ""),
+            &no_rules,
+        ),
+    );
+
+    // -- the supervisor backstops --------------------------------------------
+    check(
+        "starvation-stall-exit-111",
+        CampaignClass::StarvationStall,
+        classify(
+            &planted(RunFacts::ok().exit(STARVATION_STALL_EXIT).no_envelope(), ""),
+            &no_rules,
+        ),
+    );
+    check(
+        "starvation-stall-refusal-class",
+        CampaignClass::StarvationStall,
+        classify(
+            &planted(RunFacts::ok().exit(2).refusal("starvation_stall"), ""),
+            &no_rules,
+        ),
+    );
+    check(
+        "infra-wall-clock-timeout",
+        CampaignClass::Infra,
+        classify(&planted(RunFacts::ok().timed_out(), ""), &no_rules),
+    );
+    // A child that never produced a result envelope is patina's own harness
+    // failing (a build error, a pre-run gate refusal), not a SUT finding.
+    check(
+        "infra-child-produced-no-envelope",
+        CampaignClass::Infra,
+        classify(
+            &planted(
+                RunFacts::ok().exit(2).no_envelope(),
+                "cargo-patina: could not compile foo",
+            ),
+            &no_rules,
         ),
     );
     check(
         "bare-nonzero-is-unclassified-not-ok",
         CampaignClass::Unclassified,
-        classify(2, "", ""),
+        classify(&planted(RunFacts::ok().exit(2), ""), &no_rules),
     );
+
+    // -- spec-declared rules for a level-1 guest (arc §4.3) ------------------
+    // The grep mechanism survives only as explicit per-guest configuration.
+    let declared = declared_rules_fixture();
     check(
-        "unknown-nonzero-with-noise-is-unclassified",
-        CampaignClass::Unclassified,
-        classify(
-            7,
-            "some guest chatter",
-            "an unexpected message with no marker",
-        ),
-    );
-    check(
-        "fail-closed-duplicate-label",
-        CampaignClass::FailClosedAbort,
-        classify(134, "", "PATINA_BUGGIFY_DUPLICATE_LABEL label=same"),
-    );
-    check(
-        "fail-closed-fingerprint",
-        CampaignClass::FailClosedAbort,
-        classify(
-            2,
-            "",
-            "fingerprint mismatch: trace was recorded for a different build",
-        ),
-    );
-    check(
-        "fail-closed-bare-sigabrt",
-        CampaignClass::FailClosedAbort,
-        classify(134, "", "some shim diagnostic with no SUT marker"),
-    );
-    // An `always!` abort (SIGABRT + its marker) is a SUT VIOLATION, not a Patina
-    // refusal — the marker is checked before the bare-SIGABRT fail-closed rule.
-    check(
-        "always-violation-sigabrt-is-violation-not-fail-closed",
+        "declared-pattern-classifies-a-level-1-guest",
         CampaignClass::Violation,
-        classify(134, "", "PATINA_ALWAYS_VIOLATION label=must-hold"),
-    );
-    check(
-        "starvation-stall-exit-111",
-        CampaignClass::StarvationStall,
         classify(
-            111,
-            "",
-            "patina: starvation stall — no scheduler progress in 60s",
+            &planted(RunFacts::ok(), "GUEST: checksum mismatch on page 7"),
+            &declared,
+        ),
+    );
+    // RED twin: the identical output with NO declared rule stays OK — the
+    // pattern, not the text, is what classifies.
+    check(
+        "declared-pattern-red-without-the-rule",
+        CampaignClass::Ok,
+        classify(
+            &planted(RunFacts::ok(), "GUEST: checksum mismatch on page 7"),
+            &no_rules,
         ),
     );
     check(
-        "infra-cargo-failure",
-        CampaignClass::Infra,
-        classify(2, "", "cargo-patina: Cargo process terminated by a signal"),
+        "declared-exit-code-classifies-a-level-1-guest",
+        CampaignClass::Violation,
+        classify(&planted(RunFacts::ok().exit(3), ""), &declared),
     );
-    // Severity: an explicit finding is never masked by an infra line (the child's
-    // supervisor prints `cargo-patina: … terminated by a signal` alongside the
-    // guest's flushed liveness marker).
     check(
-        "liveness-beats-infra-noise",
+        "declared-exit-code-red-without-the-rule",
+        CampaignClass::Unclassified,
+        classify(&planted(RunFacts::ok().exit(3), ""), &no_rules),
+    );
+    // Declared rules ADD findings; they never downgrade one the envelope made.
+    check(
+        "declared-rules-never-downgrade-an-envelope-finding",
         CampaignClass::Liveness,
         classify(
-            2,
-            "",
-            "PATINA_VIOLATION liveness detail=no-progress vtime_ns=2 budget_ns=1\ncargo-patina: note",
+            &planted(
+                RunFacts::ok().exit(3).finding("liveness", "no_progress"),
+                "GUEST: checksum mismatch on page 7",
+            ),
+            &declared,
         ),
     );
 
-    // Signature dedup + novelty.
+    // Non-vacuity: every class the campaign can report must have been fired
+    // above through the structured channel. A class nobody proved reachable is
+    // a class nobody can trust.
+    println!("-- class coverage --");
+    for class in CampaignClass::ALL {
+        if fired.contains(class.as_str()) {
+            println!("  ok   {:<40} -> fired", class.as_str());
+        } else {
+            println!(
+                "  FAIL {:<40} -> never fired in the selftest",
+                class.as_str()
+            );
+            failures += 1;
+        }
+    }
+
+    // Signature dedup + novelty, from the same structured facts.
     println!("-- signature dedup --");
     let a = signature(
         CampaignClass::Liveness,
-        "",
-        "PATINA_VIOLATION liveness detail=no-progress vtime_ns=700 budget_ns=600",
+        &planted(
+            RunFacts::ok().exit(1).finding("liveness", "no_progress"),
+            "PATINA_VIOLATION liveness detail=no-progress vtime_ns=700 budget_ns=600",
+        ),
     );
     let b = signature(
         CampaignClass::Liveness,
-        "",
-        "PATINA_VIOLATION liveness detail=no-progress vtime_ns=999999 budget_ns=600",
+        &planted(
+            RunFacts::ok().exit(1).finding("liveness", "no_progress"),
+            "PATINA_VIOLATION liveness detail=no-progress vtime_ns=999999 budget_ns=600",
+        ),
     );
     if a.key() == b.key() {
         println!(
-            "  ok   digit-collapse-dedups-elapsed         -> {}",
+            "  ok   run-specific-values-dedup             -> {}",
             a.key()
         );
     } else {
         println!(
-            "  FAIL digit-collapse-dedups-elapsed         -> {} vs {}",
+            "  FAIL run-specific-values-dedup             -> {} vs {}",
             a.key(),
             b.key()
         );
@@ -4507,8 +4814,7 @@ fn selftest() -> Result<i32, CliError> {
     }
     let c = signature(
         CampaignClass::Violation,
-        "",
-        "PATINA_VIOLATION two-leaders term=4",
+        &planted(RunFacts::ok().verdict("violation", "two-leaders"), ""),
     );
     if a.key() != c.key() {
         println!("  ok   distinct-findings-distinct-signatures -> ok");
@@ -4516,16 +4822,31 @@ fn selftest() -> Result<i32, CliError> {
         println!("  FAIL distinct-findings-distinct-signatures");
         failures += 1;
     }
+    // Two violations under DIFFERENT verdict labels are different bugs.
+    let other = signature(
+        CampaignClass::Violation,
+        &planted(RunFacts::ok().verdict("violation", "lost-update"), ""),
+    );
+    if c.key() != other.key() {
+        println!("  ok   verdict-label-distinguishes           -> ok");
+    } else {
+        println!("  FAIL verdict-label-distinguishes");
+        failures += 1;
+    }
     // A policy bug-depth annotation distinguishes otherwise-identical findings.
     let shallow = signature(
         CampaignClass::Violation,
-        "",
-        "PATINA_VIOLATION x\nPATINA_SCHEDULE_POLICY pct=1 bug_depth=1 decisions=10",
+        &planted(
+            RunFacts::ok().verdict("violation", "x"),
+            "PATINA_SCHEDULE_POLICY pct=1 bug_depth=1 decisions=10",
+        ),
     );
     let deep = signature(
         CampaignClass::Violation,
-        "",
-        "PATINA_VIOLATION x\nPATINA_SCHEDULE_POLICY pct=1 bug_depth=5 decisions=10",
+        &planted(
+            RunFacts::ok().verdict("violation", "x"),
+            "PATINA_SCHEDULE_POLICY pct=1 bug_depth=5 decisions=10",
+        ),
     );
     if shallow.key() != deep.key() {
         println!("  ok   bug-depth-annotation-distinguishes    -> ok");
@@ -4740,47 +5061,169 @@ mod tests {
         }
     }
 
+    /// Every class token round-trips, and [`CampaignClass::ALL`] is complete and
+    /// in the declaration (severity) order [`ClassifyRules`] relies on.
     #[test]
-    fn every_class_is_reachable() {
-        assert_eq!(classify(0, "", ""), CampaignClass::Ok);
+    fn every_class_round_trips_its_token() {
+        for class in CampaignClass::ALL {
+            assert_eq!(CampaignClass::parse(class.as_str()), Some(*class));
+        }
+        let mut sorted = CampaignClass::ALL.to_vec();
+        sorted.sort();
         assert_eq!(
-            classify(
-                1,
-                "",
-                "PATINA_VIOLATION liveness detail=no-progress vtime_ns=2 budget_ns=1"
-            ),
-            CampaignClass::Liveness
+            sorted,
+            CampaignClass::ALL.to_vec(),
+            "CampaignClass::ALL must be in `Ord` (severity) order"
         );
-        assert_eq!(
+        assert_eq!(CampaignClass::parse("NOT_A_CLASS"), None);
+    }
+
+    #[test]
+    fn every_class_is_reachable_from_structured_facts() {
+        let rules = ClassifyRules::default();
+        let fired: Vec<CampaignClass> = vec![
+            classify(&planted(RunFacts::ok(), ""), &rules),
             classify(
-                2,
-                "",
-                "PATINA_VIOLATION converge detail=did-not-converge vtime_ns=9 budget_ns=3 last_fault_vtime_ns=3"
+                &planted(RunFacts::ok().verdict("violation", "x"), ""),
+                &rules,
             ),
-            CampaignClass::Liveness
-        );
+            classify(
+                &planted(RunFacts::ok().finding("liveness", "no_progress"), ""),
+                &rules,
+            ),
+            classify(&planted(RunFacts::ok().vacuous("fs"), ""), &rules),
+            classify(&planted(RunFacts::ok().vacuous("dns"), ""), &rules),
+            classify(&planted(RunFacts::ok().vacuous("net"), ""), &rules),
+            classify(&planted(RunFacts::ok().vacuous("entropy"), ""), &rules),
+            classify(&planted(RunFacts::ok().vacuous("clock"), ""), &rules),
+            classify(&planted(RunFacts::ok().vacuous("swarm"), ""), &rules),
+            classify(
+                &planted(RunFacts::ok().exit(SIGABRT_EXIT).signal(SIGABRT), ""),
+                &rules,
+            ),
+            classify(
+                &planted(
+                    RunFacts::ok()
+                        .exit(SIGABRT_EXIT)
+                        .signal(SIGABRT)
+                        .refusal("shim_fatal"),
+                    "",
+                ),
+                &rules,
+            ),
+            classify(
+                &planted(RunFacts::ok().exit(STARVATION_STALL_EXIT).no_envelope(), ""),
+                &rules,
+            ),
+            classify(&planted(RunFacts::ok().timed_out(), ""), &rules),
+            classify(&planted(RunFacts::ok().exit(3), ""), &rules),
+        ];
+        assert_eq!(fired, CampaignClass::ALL.to_vec());
+    }
+
+    /// The structural half of the guest-agnostic doctrine: no built-in class may
+    /// be decided by guest output. `built_in_class` takes [`RunFacts`], which has
+    /// no text in it at all, so the same facts classify identically whatever the
+    /// guest printed.
+    #[test]
+    fn guest_output_alone_never_changes_a_built_in_class() {
+        let rules = ClassifyRules::default();
+        let noisy = "GUEST_VIOLATION two-leaders\nGUEST_BUG reordered\npanicked at src/x.rs:9\nPATINA_FS_FAULT_REPORT vacuous=1";
+        for facts in [
+            RunFacts::ok(),
+            RunFacts::ok().exit(3),
+            RunFacts::ok().exit(SIGABRT_EXIT).signal(SIGABRT),
+        ] {
+            assert_eq!(
+                classify(&planted(facts.clone(), noisy), &rules),
+                classify(&planted(facts, ""), &rules),
+            );
+        }
+    }
+
+    #[test]
+    fn declared_rules_add_findings_but_never_downgrade_one() {
+        let rules = declared_rules_fixture();
+        // A level-1 guest's own text, with zero guest modification.
         assert_eq!(
-            classify(0, "", "PATINA_VIOLATION x"),
+            classify(&planted(RunFacts::ok(), "checksum mismatch"), &rules),
             CampaignClass::Violation
         );
         assert_eq!(
-            classify(0, "PATINA_RESULT ok=1", "PATINA_FS_FAULT_REPORT vacuous=1"),
-            CampaignClass::VacuousFsFault
+            classify(&planted(RunFacts::ok().exit(3), ""), &rules),
+            CampaignClass::Violation
         );
+        // The same text with no rule declared stays OK: the rule classifies, not
+        // the string.
         assert_eq!(
-            classify(2, "", "PATINA_BUGGIFY_DUPLICATE_LABEL label=x"),
+            classify(
+                &planted(RunFacts::ok(), "checksum mismatch"),
+                &ClassifyRules::default()
+            ),
+            CampaignClass::Ok
+        );
+        // An envelope finding always wins over a declared rule.
+        assert_eq!(
+            classify(
+                &planted(
+                    RunFacts::ok().exit(3).refusal("fingerprint_mismatch"),
+                    "checksum mismatch"
+                ),
+                &rules
+            ),
             CampaignClass::FailClosedAbort
         );
+    }
+
+    #[test]
+    fn declared_rules_are_grammar_validated_and_loud() {
+        for bad in [
+            serde_json::json!([]),
+            serde_json::json!({"nonsense": {}}),
+            serde_json::json!({"patterns": {"NOT_A_CLASS": ["x"]}}),
+            serde_json::json!({"patterns": {"OK": ["x"]}}),
+            serde_json::json!({"patterns": {"VIOLATION": []}}),
+            serde_json::json!({"patterns": {"VIOLATION": [""]}}),
+            serde_json::json!({"patterns": {"VIOLATION": [7]}}),
+            serde_json::json!({"exit_codes": {"VIOLATION": ["3"]}}),
+            serde_json::json!({"exit_codes": {"VIOLATION": {}}}),
+        ] {
+            assert!(
+                json_classify_rules(&bad).is_err(),
+                "malformed classify rules must be refused: {bad}"
+            );
+        }
+        let rules = declared_rules_fixture();
         assert_eq!(
-            classify(111, "", "patina: starvation stall"),
-            CampaignClass::StarvationStall
+            classify_rules_to_json(&rules),
+            serde_json::json!({
+                "patterns": {"VIOLATION": ["checksum mismatch"]},
+                "exit_codes": {"VIOLATION": [3]},
+            })
         );
+    }
+
+    /// Declared rules ride the recorded spec, so a `--resume` reclassifies with
+    /// the same rules the fresh campaign used.
+    #[test]
+    fn declared_rules_round_trip_through_the_recorded_spec() {
+        let mut spec = CampaignSpec::default();
+        spec.apply_json(&serde_json::json!({
+            "classify": {"patterns": {"VIOLATION": ["CORRUPTION"]}}
+        }))
+        .unwrap();
+        let json = spec_to_json(&spec);
         assert_eq!(
-            classify(2, "", "cargo-patina: could not compile foo"),
-            CampaignClass::Infra
+            json["classify"],
+            serde_json::json!({"patterns": {"VIOLATION": ["CORRUPTION"]}})
         );
-        // A nonzero exit with no recognized marker is UNCLASSIFIED, never OK.
-        assert_eq!(classify(3, "", ""), CampaignClass::Unclassified);
+        assert_eq!(spec_from_state_json(&json).unwrap(), spec);
+        // Default-omit: a spec with no declared rules records no key at all.
+        assert!(
+            spec_to_json(&CampaignSpec::default())
+                .get("classify")
+                .is_none()
+        );
     }
 
     #[test]
@@ -5518,33 +5961,35 @@ mod tests {
     }
 
     /// A knob whose vacuity has an outcome class must have a report to read it
-    /// off, and its class must be the one `classify` actually returns for that
-    /// report line. The network fault-plane gap this test used to pin — a
-    /// report with no class, silently classifying `OK` — is now closed: every
-    /// knob with a report has a matching class (`VacuousFsFault`,
-    /// `VacuousDnsFault`, or `VacuousNetFault`), which is what the `Some`
-    /// branch below proves for each of them.
+    /// off, that class must name a `fault_reports{}` plane, and a run whose plane
+    /// reports `vacuous` must actually classify as it. The network fault-plane
+    /// gap this test used to pin — a report with no class, silently classifying
+    /// `OK` — is now closed: every knob with a report has a matching class, which
+    /// is what the `Some` branch below proves for each of them.
     #[test]
     fn vacuity_classes_match_the_classifier() {
+        let rules = ClassifyRules::default();
         let mut with_report = 0;
         for knob in FaultKnob::ALL {
             let class = vacuity_class(*knob);
-            let Some(report) = knob.meta().report else {
+            if knob.meta().report.is_none() {
                 assert_eq!(
                     class, None,
-                    "{knob:?} has a vacuity class but no report line to read it off"
+                    "{knob:?} has a vacuity class but no report to read it off"
                 );
                 continue;
             };
             with_report += 1;
-            let line = format!("{report} eligible_ops=100 vacuous=1");
-            let actual = classify(0, "", &line);
             let expected = class.unwrap_or_else(|| {
                 panic!("{knob:?} has a report but no vacuity_class — give it one, or its class")
             });
+            let plane = expected.vacuous_plane().unwrap_or_else(|| {
+                panic!("{expected:?} is a vacuity class with no fault_reports plane to read")
+            });
+            let actual = classify(&planted(RunFacts::ok().vacuous(plane), ""), &rules);
             assert_eq!(
                 actual, expected,
-                "{knob:?} declares {expected:?} but its report line classifies as {actual:?}"
+                "{knob:?} declares {expected:?} but a vacuous {plane:?} plane classifies as {actual:?}"
             );
         }
         assert!(

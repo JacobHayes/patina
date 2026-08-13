@@ -1468,7 +1468,15 @@ const CAMPAIGN: Verb = Verb {
 A campaign runs `--gens` independent child `cargo patina run` processes over one \
 artifact. Everything is a pure function of the generation number, so a re-run with \
 the same spec reproduces the same seeds, knobs, outcomes, and failure signatures. \
-Each generation is classified into one of nine outcome classes; novel failure \
+Each generation runs with --format json and is classified from its \
+patina.result/v1 envelope ALONE — verdicts, per-plane fault_reports vacuity, \
+runtime_findings, refusal, guest_exit — into one of fourteen outcome classes; \
+nothing in the classifier reads guest output. An unattributed SIGABRT is \
+GUEST_ABORT (the guest's own doing); the same abort carrying a patina refusal is \
+FAIL_CLOSED_ABORT. A guest that never calls the verdict ABI declares its own \
+rules in the spec (\"classify\": {\"patterns\": {CLASS: [substring, ...]}, \
+\"exit_codes\": {CLASS: [code, ...]}}), which may only ADD a finding where the \
+envelope reached none. Novel failure \
 signatures are deduped and their traces saved with a reproduce command. A --spec \
 FILE.json supplies overrides and individual flags override the spec. Campaigns \
 checkpoint their state in --out-dir; `--extend N` adds N generations to the recorded \

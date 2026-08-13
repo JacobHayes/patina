@@ -527,12 +527,14 @@ $vac_warn")" "ok-vacuous-warn"
     "$(classify 0 24 18 0 24 0 0 'WORKQ_RESULT workload_seed=7 enqueued=24 completed=18 failed=0 attempts=30 applied_hash=x' '')" "crash-exit0-partial"
   assert_class UNEXPECTED_CRASH "$(classify 134 '' '' '' 24 0 0 '' 'Abort trap: 6')" "crash-exit134"
 
-  # ALWAYS_VIOLATION integrated into classify(): fireable on exit 0, not downgraded.
+  # ALWAYS_VIOLATION integrated into classify(): fireable on exit 0, not
+  # downgraded. `always!` lowers to the verdict ABI, so the run's structured
+  # `PATINA_VERDICT ... kind=violation` line is what fires the class.
   assert_class ALWAYS_VIOLATION \
-    "$(classify 0 24 24 0 24 0 0 "$ok" 'PATINA_ALWAYS_VIOLATION label=terminal-le-enqueued')" "always-violation-exit0"
+    "$(classify 0 24 24 0 24 0 0 "$ok" 'PATINA_VERDICT seq=0 kind=violation label=terminal-le-enqueued detail=src/main.rs:42')" "always-violation-exit0"
   assert_class ALWAYS_VIOLATION \
     "$(classify 0 24 24 0 24 0 0 "$ok" "PATINA_SDK_REPORT enabled=1 sites_registered=8
-PATINA_ALWAYS_VIOLATION label=x")" "always-violation-not-downgraded"
+PATINA_VERDICT seq=0 kind=violation label=x detail=src/main.rs:42")" "always-violation-not-downgraded"
 
   # DETERMINISM_BUG via the pure det_check helper.
   assert_class OK "$(det_check OK 'WORKQ_RESULT a' 'WORKQ_RESULT a' hashA hashA)" "det-identical"
@@ -631,7 +633,7 @@ PATINA_ALWAYS_VIOLATION label=x")" "always-violation-not-downgraded"
 
   echo
   if (( SELFTEST_FAIL )); then echo "SELFTEST FAILED"; return 1; fi
-  echo "SELFTEST PASSED (every class covered, incl. planted WORKQ_VIOLATION -> SAFETY_BUG, PATINA_ALWAYS_VIOLATION -> ALWAYS_VIOLATION, STARVATION_STALL, VACUOUS_SCHEDULE, VACUOUS_SWARM, SCHEDULE_DIVERGENCE, and policy bug_depth/starve_vacuous parsing)"
+  echo "SELFTEST PASSED (every class covered, incl. planted WORKQ_VIOLATION -> SAFETY_BUG, a violation verdict -> ALWAYS_VIOLATION, STARVATION_STALL, VACUOUS_SCHEDULE, VACUOUS_SWARM, SCHEDULE_DIVERGENCE, and policy bug_depth/starve_vacuous parsing)"
   return 0
 }
 

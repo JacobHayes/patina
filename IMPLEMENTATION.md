@@ -310,9 +310,9 @@ Completed foundations (Milestone C — buggify on WASI):
     the diagnostics report, and the lifecycle markers are reused, not
     reimplemented). `patina-dst-target`'s WASI audit allowlists exactly the eleven
     `patina_sdk` names alongside the Preview 1 surface. The fatal outcomes mirror
-    the native shim: an `always!` violation and a duplicate label emit their
-    markers (`PATINA_ALWAYS_VIOLATION` / `PATINA_BUGGIFY_DUPLICATE_LABEL`) to the
-    real process stderr and trap the guest, and the `--buggify-after-setup` gate
+    the native shim: an `always!` violation reports its `violation` verdict and a
+    duplicate label emits the `PATINA_BUGGIFY_DUPLICATE_LABEL` marker to the real
+    process stderr, both trapping the guest, and the `--buggify-after-setup` gate
     emits `PATINA_BUGGIFY_SETUP_NEVER_CALLED` at finish. `patina_dst::rng()` routes
     through the host's `buggify_rng` draw (the seed-bridged buggify entropy
     stream), not the WASI `random_get` entropy, so it is not double-plumbed.
@@ -373,9 +373,9 @@ Completed foundations (outcome-channel arc, Wave A — the verdict ABI):
     json` folds them into the envelope as `verdicts[]` (`seq`, `kind`, `label`,
     `detail`), decoded by the same `patina-dst-abi` codec that renders them, with
     `label`/`detail` escaped so no guest byte can forge a second marker line. An
-    `always!` violation lowers to a `VIOLATION` verdict on the invariant's label;
-    the embedders still print `PATINA_ALWAYS_VIOLATION` as a transitional
-    dual-emit that Wave B removes (`docs/arcs/outcome-channel.md`).
+    `always!` violation lowers to a `VIOLATION` verdict on the invariant's label,
+    and Wave B removed the embedders' legacy `PATINA_ALWAYS_VIOLATION` marker, so
+    the verdict is the only announcement (`docs/arcs/outcome-channel.md`).
 
 Completed foundations (custom-ops arc, Wave A — record/replay custom operations):
 
@@ -566,21 +566,26 @@ surface (`cargo patina campaign`) generalizing the shell campaign machinery.
    `SHA-256("patina-campaign-<seed_base>-<gen>")` — no wall clock, no `$RANDOM`,
    exactly the fuzz-sweep scheme — so a re-run reproduces identical outcomes and
    signatures. The spec is a JSON file (`--spec`, `deny`-unknown-keys) and/or flags.
-   A pure classifier assigns one of ten outcome classes — `OK` / `VIOLATION` /
-   `LIVENESS` / `VACUOUS_FS_FAULT` / `VACUOUS_DNS_FAULT` / `VACUOUS_SWARM` /
-   `FAIL_CLOSED_ABORT` / `STARVATION_STALL` / `INFRA` / `UNCLASSIFIED` — with
-   fuzz-sweep's strictness: an explicit finding is never
-   downgraded, exit 111 is `STARVATION_STALL`, a generation that asked for
-   `--swarm` with no fault class to select from is `VACUOUS_SWARM` (an inert
-   exploration knob is a coverage failure, not a clean run), a Patina fail-closed refusal (a
-   shim fatal stderr line or a bare SIGABRT carrying no SUT finding) is its own
-   class distinct from a generic failure, and any nonzero exit matching no class
-   lands LOUDLY in `UNCLASSIFIED` rather than being silently OK or mislabeled. It
-   generalizes the per-testbed result/violation and `PATINA_SDK_REPORT` conventions
-   to the harness-agnostic `PATINA_RESULT` / `PATINA_VIOLATION` markers and parses
-   the watchdog's `PATINA_VIOLATION liveness`/`converge` contract lines (one format
-   everywhere — no legacy marker parsing). A per-failure signature (class +
-   digit-collapsed violation-detail shape + policy bug-depth annotation) is
+   A pure classifier assigns one of fourteen outcome classes — `OK` / `VIOLATION` /
+   `LIVENESS` / `VACUOUS_FS_FAULT` / `VACUOUS_DNS_FAULT` / `VACUOUS_NET_FAULT` /
+   `VACUOUS_ENTROPY_FAULT` / `VACUOUS_CLOCK_FAULT` / `VACUOUS_SWARM` /
+   `GUEST_ABORT` / `FAIL_CLOSED_ABORT` / `STARVATION_STALL` / `INFRA` /
+   `UNCLASSIFIED` — from each generation's `patina.result/v1` envelope alone
+   (the child runs `--format json`), with fuzz-sweep's strictness: an explicit
+   finding is never downgraded, exit 111 is `STARVATION_STALL`, a generation that
+   asked for `--swarm` with no fault class to select from is `VACUOUS_SWARM` (an
+   inert exploration knob is a coverage failure, not a clean run), a Patina
+   fail-closed refusal (the envelope's `refusal` record) is its own class distinct
+   from an unattributed guest abort (`GUEST_ABORT`), a child that produced no
+   envelope at all is `INFRA`, and any nonzero exit matching no class lands LOUDLY
+   in `UNCLASSIFIED` rather than being silently OK or mislabeled. Nothing in the
+   classifier reads guest output: violations come from `verdicts[]`, liveness from
+   `runtime_findings[] source=liveness`, and per-plane vacuity from
+   `fault_reports{}`. A guest that never calls the verdict ABI declares its own
+   rules in the campaign spec (`classify.patterns` / `classify.exit_codes`), the
+   only path from output text to a class, and one that can only ADD a finding
+   where the envelope reached none. A per-failure signature (class +
+   digit-collapsed finding shape + policy bug-depth annotation) is
    accumulated into `signatures.json` in the output dir: repeats dedup, novel
    signatures are flagged with their first-seen generation and a reproduce command
    (`cargo patina replay <trace>` when a valid trace exists, else a deterministic

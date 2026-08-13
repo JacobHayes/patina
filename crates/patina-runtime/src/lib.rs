@@ -3112,8 +3112,9 @@ pub enum SiteOutcome {
     Ok,
     /// The buggify site fired — the embedder injects the fault / takes the branch.
     Fire,
-    /// An `always!` invariant was violated: the embedder emits the
-    /// `PATINA_ALWAYS_VIOLATION` marker for the label and aborts.
+    /// An `always!` invariant was violated: the violation has already been
+    /// reported through the verdict ABI (a `PATINA_VERDICT … kind=violation`
+    /// line), and the embedder aborts the run.
     AlwaysViolation,
     /// The label is reused at a different call site: a fatal duplicate. The
     /// embedder emits the `PATINA_BUGGIFY_DUPLICATE_LABEL` marker and aborts.
@@ -4168,9 +4169,9 @@ recording was produced by a guest whose result type no longer matches this one"
     /// `VerdictKind::Violation` under the site's label (with the `file:line`
     /// identity as the detail) before returning, so the failure reaches the trace
     /// and the result envelope structurally. This is the SDK-surface lowering
-    /// §4.1 of the outcome-channel arc calls for; the embedders additionally keep
-    /// printing their `PATINA_ALWAYS_VIOLATION` marker, a deliberate transitional
-    /// dual-emit that Wave B removes once the classifier reads the envelope.
+    /// §4.1 of the outcome-channel arc calls for, and it is the violation's ONLY
+    /// announcement: the embedders drain the verdict line and abort, printing no
+    /// marker of their own.
     pub fn always_check(
         &mut self,
         label: &str,

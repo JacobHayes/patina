@@ -11,8 +11,11 @@
 #
 # The two new classes:
 #   ALWAYS_VIOLATION  per-gen, top severity (peer of a safety bug): a
-#                     PATINA_ALWAYS_VIOLATION marker means an `always!` invariant
-#                     was violated. Fires even on exit 0 and is never downgraded.
+#                     `PATINA_VERDICT ... kind=violation` line means an `always!`
+#                     invariant was violated (the SDK lowers `always!` to the
+#                     verdict ABI; the line is the run's structured outcome
+#                     channel, not a marker). Fires even on exit 0 and is never
+#                     downgraded.
 #   SOMETIMES_UNMET   campaign-level, evaluated at sweep end: a `sometimes!` site
 #                     that was reached in the campaign but never satisfied is a
 #                     coverage gap; a campaign with any unmet sometimes-site exits
@@ -32,7 +35,7 @@ buggify_class() {
   # args: exit_code stdout stderr
   local combined="$2
 $3"
-  if printf '%s' "$combined" | /usr/bin/grep -q 'PATINA_ALWAYS_VIOLATION'; then
+  if printf '%s' "$combined" | /usr/bin/grep -Eq 'PATINA_VERDICT .*kind=violation'; then
     echo ALWAYS_VIOLATION; return
   fi
   if printf '%s' "$combined" | /usr/bin/grep -q 'PATINA_BUGGIFY_DUPLICATE_LABEL'; then
@@ -188,12 +191,12 @@ buggify_campaign_selftest() {
   # ALWAYS_VIOLATION is fireable and fires even on exit 0 (a violated invariant
   # is a bug no matter how the process exited).
   _bc_expect ALWAYS_VIOLATION \
-    "$(buggify_class 0 'RESULT ok' 'PATINA_ALWAYS_VIOLATION label=fired-in-bounds')" \
+    "$(buggify_class 0 'RESULT ok' 'PATINA_VERDICT seq=0 kind=violation label=fired-in-bounds detail=src/x.rs:9')" \
     "always-violation-on-exit-0"
   # Not downgraded: present alongside otherwise-clean output, still fires.
   _bc_expect ALWAYS_VIOLATION \
     "$(buggify_class 0 'RESULT ok
-PATINA_SDK_REPORT enabled=1 sites_registered=3' 'PATINA_ALWAYS_VIOLATION label=x')" \
+PATINA_SDK_REPORT enabled=1 sites_registered=3' 'PATINA_VERDICT seq=0 kind=violation label=x detail=src/x.rs:9')" \
     "always-violation-not-downgraded"
   # The runtime's buggify fatal markers are surfaced too.
   _bc_expect BUGGIFY_DUPLICATE_LABEL \

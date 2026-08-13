@@ -42,8 +42,8 @@
 //! - [`buggify_delay!`] — inject a deterministic delay through the virtual clock
 //!   (never a real sleep).
 //! - [`buggify_knob!`] — a per-run perturbed value within a range.
-//! - [`always!`] — a fatal invariant: under Patina a violation emits a
-//!   `PATINA_ALWAYS_VIOLATION` marker and aborts; outside it is a `debug_assert`.
+//! - [`always!`] — a fatal invariant: under Patina a violation reports a
+//!   `violation` verdict and aborts; outside it is a `debug_assert`.
 //! - [`sometimes!`] / [`reachable!`] — coverage oracles.
 //! - [`verdict`] — report a structured outcome ([`VerdictKind`]) about the run:
 //!   recorded as a trace event and surfaced in the result envelope's
@@ -1017,9 +1017,9 @@ pub mod __rt {
         }
         #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
         {
-            // Host-authoritative: on a violation the WASI host emits the
-            // `PATINA_ALWAYS_VIOLATION` marker and traps the guest, so this import
-            // does not return when `condition` is false.
+            // Host-authoritative: on a violation the WASI host records the
+            // `violation` verdict and traps the guest, so this import does not
+            // return when `condition` is false.
             unsafe {
                 super::wasm_ffi::always(
                     i32::from(condition),
@@ -1484,10 +1484,10 @@ macro_rules! buggify_knob {
     };
 }
 
-/// Assert an invariant. Under Patina a violation emits a
-/// `PATINA_ALWAYS_VIOLATION label=<label>` marker and aborts the run — the
-/// violation classifies the seed as a failure a campaign can dedup and a replay
-/// can reproduce. Outside Patina it is a `debug_assert` (checked in debug and
+/// Assert an invariant. Under Patina a violation reports a `violation`
+/// [`VerdictKind`] under the site's label and aborts the run — the verdict
+/// classifies the seed as a failure a campaign can dedup and a replay can
+/// reproduce. Outside Patina it is a `debug_assert` (checked in debug and
 /// test builds, free in release).
 ///
 /// ```

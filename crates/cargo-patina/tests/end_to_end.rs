@@ -5146,11 +5146,11 @@ fn wasi_buggify_fires_and_reports_on_wasip1() {
     );
 }
 
-// An `always!` invariant violation on wasip1 emits the `PATINA_ALWAYS_VIOLATION`
-// marker to stderr and terminates the run with a nonzero exit — the WASI mirror
-// of the native shim's abort.
+// An `always!` invariant violation on wasip1 reports a `violation` verdict and
+// terminates the run with a nonzero exit — the WASI mirror of the native shim's
+// abort. The verdict line is the announcement; there is no legacy marker.
 #[test]
-fn wasi_always_violation_traps_with_marker() {
+fn wasi_always_violation_traps_with_a_violation_verdict() {
     let directory = tempdir().unwrap();
     let module = directory.path().join("always.wasm");
     fs::write(
@@ -5179,11 +5179,14 @@ fn wasi_always_violation_traps_with_marker() {
         !violated.status.success(),
         "an always! violation must fail the run"
     );
+    let stderr = String::from_utf8_lossy(&violated.stderr);
     assert!(
-        String::from_utf8_lossy(&violated.stderr)
-            .contains("PATINA_ALWAYS_VIOLATION label=must-hold"),
-        "missing ALWAYS_VIOLATION marker:\nstderr:\n{}",
-        String::from_utf8_lossy(&violated.stderr)
+        stderr.contains("kind=violation") && stderr.contains("label=must-hold"),
+        "missing violation verdict:\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("PATINA_ALWAYS_VIOLATION"),
+        "the legacy always-violation marker must no longer print:\nstderr:\n{stderr}"
     );
 }
 
@@ -5541,8 +5544,8 @@ wasm32-wasip1 target not installed"
         "wasi buggify replay diverged on the guest digest"
     );
 
-    // `--arg violate` makes the always! invariant false: the host emits the
-    // ALWAYS_VIOLATION marker and fails the run on wasip1.
+    // `--arg violate` makes the always! invariant false: the host records the
+    // `violation` verdict and fails the run on wasip1.
     let violated = invoke_unchecked(
         env!("CARGO_BIN_EXE_cargo-patina"),
         workspace,
@@ -5556,12 +5559,12 @@ wasm32-wasip1 target not installed"
             "violate",
         ],
     );
+    let violated_stderr = String::from_utf8_lossy(&violated.stderr);
     assert!(
         !violated.status.success()
-            && String::from_utf8_lossy(&violated.stderr)
-                .contains("PATINA_ALWAYS_VIOLATION label=guest-invariant"),
-        "always! violation not detected on wasip1:\nstderr:\n{}",
-        String::from_utf8_lossy(&violated.stderr)
+            && violated_stderr.contains("kind=violation")
+            && violated_stderr.contains("label=guest-invariant"),
+        "always! violation not detected on wasip1:\nstderr:\n{violated_stderr}"
     );
 }
 
@@ -11797,7 +11800,7 @@ fn explore_failure_reports_copy_paste_repro_in_line_and_json() {
     let source = directory.path().join("explore_fail.rs");
     fs::write(
         &source,
-        "fn main() { eprintln!(\"BUG_CAUGHT explore planted\"); std::process::exit(3); }\n",
+        "fn main() { eprintln!(\"GUEST_FAILED explore planted\"); std::process::exit(3); }\n",
     )
     .unwrap();
     let output = invoke_unchecked(
@@ -12073,7 +12076,7 @@ fn native_run_json_envelope_has_stable_shape() {
 // report and the `violation` classification.
 const PLANTED_FAILURE_SOURCE: &str = r#"
 fn main() {
-    eprintln!("WORKQ_VIOLATION planted two-leaders term=4");
+    eprintln!("GUEST_VIOLATION planted two-leaders term=4");
     std::process::exit(3);
 }
 "#;
@@ -12124,7 +12127,7 @@ fn native_planted_failure_emits_report_and_json_violation() {
         "failure summary section missing"
     );
     assert!(
-        page.contains("WORKQ_VIOLATION planted"),
+        page.contains("GUEST_VIOLATION planted"),
         "violation line missing from report"
     );
 
@@ -12152,7 +12155,7 @@ fn native_planted_failure_emits_report_and_json_violation() {
     assert_eq!(value["exit_code"], 3);
     assert_eq!(
         value["result_line"],
-        "WORKQ_VIOLATION planted two-leaders term=4"
+        "GUEST_VIOLATION planted two-leaders term=4"
     );
 }
 
@@ -14197,6 +14200,150 @@ fn campaign_forwards_harness_deferral_to_every_generation() {
     assert_eq!(campaign_json_stdout(&extended)["classes"]["OK"], 3);
 }
 
+// A guest that aborts itself, with nothing patina would call a refusal.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const GUEST_ABORT_SOURCE: &str = r#"
+fn main() {
+    eprintln!("GUEST: invariant failed, aborting");
+    std::process::abort();
+}
+"#;
+
+// The outcome-channel arc's §4.4 split, end to end: the SAME SIGABRT lands in two
+// different campaign classes depending on one envelope field. A guest that aborts
+// itself is `GUEST_ABORT` — a finding attributed to the system under test — while
+// a patina fail-closed refusal (a duplicate buggify label, which the shim aborts
+// on) still classifies `FAIL_CLOSED_ABORT`. Before the envelope carried a
+// `refusal` record, EVERY exit-134 generation was blamed on patina and buried in
+// the fail-closed bucket; both halves are asserted here so neither can quietly
+// absorb the other.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn campaign_splits_a_guest_abort_from_a_patina_refusal() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+
+    // (a) the guest's own abort.
+    let source = directory.path().join("guest_abort.rs");
+    fs::write(&source, GUEST_ABORT_SOURCE).unwrap();
+    let aborting = directory.path().join("guest-abort");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            aborting.to_str().unwrap(),
+        ],
+    );
+    let swept = campaign_run(&directory.path().join("guest"), &aborting, &[]);
+    let envelope = campaign_json_stdout(&swept);
+    assert_eq!(
+        envelope["classes"]["GUEST_ABORT"], 2,
+        "an unattributed abort is the guest's own doing: {}",
+        envelope["classes"]
+    );
+    assert_eq!(
+        envelope["classes"]["FAIL_CLOSED_ABORT"],
+        serde_json::Value::Null,
+        "a guest abort must not be blamed on patina: {}",
+        envelope["classes"]
+    );
+
+    // (b) patina's own refusal, on the same exit code.
+    let pkg = directory.path().join("dup");
+    write_sdk_fixture(&pkg, BUGGIFY_DUP_MAIN);
+    let refusing = directory.path().join("dup-label");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            pkg.to_str().unwrap(),
+            "--output",
+            refusing.to_str().unwrap(),
+        ],
+    );
+    let refused = campaign_run(&directory.path().join("refusal"), &refusing, &[]);
+    let envelope = campaign_json_stdout(&refused);
+    assert_eq!(
+        envelope["classes"]["FAIL_CLOSED_ABORT"], 2,
+        "an abort patina attributed to itself stays fail-closed: {}",
+        envelope["classes"]
+    );
+    assert_eq!(
+        envelope["classes"]["GUEST_ABORT"],
+        serde_json::Value::Null,
+        "a patina refusal must not be filed as a guest finding: {}",
+        envelope["classes"]
+    );
+}
+
+// A level-1 guest — no verdict ABI, no patina-visible failure at all — is
+// classified from rules its own campaign spec declares, with zero guest changes.
+// The RED half is in the same test: the identical guest with no declared rules
+// classifies OK, so it is the spec that classifies, never the string.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn campaign_classifies_a_level_one_guest_from_spec_declared_patterns() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let source = directory.path().join("level_one.rs");
+    fs::write(
+        &source,
+        "fn main() { println!(\"GUEST: checksum mismatch on page 7\"); }\n",
+    )
+    .unwrap();
+    let guest = directory.path().join("level-one");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            guest.to_str().unwrap(),
+        ],
+    );
+
+    // RED: exit 0, nothing structured — patina sees a clean run.
+    let bare = campaign_run(&directory.path().join("bare"), &guest, &[]);
+    assert_eq!(campaign_json_stdout(&bare)["classes"]["OK"], 2);
+
+    // GREEN: the guest's own dialect, declared in its spec.
+    let spec = directory.path().join("spec.json");
+    fs::write(
+        &spec,
+        r#"{"classify": {"patterns": {"VIOLATION": ["checksum mismatch"]}}}"#,
+    )
+    .unwrap();
+    let declared = campaign_run(
+        &directory.path().join("declared"),
+        &guest,
+        &["--spec", spec.to_str().unwrap()],
+    );
+    let envelope = campaign_json_stdout(&declared);
+    assert_eq!(
+        envelope["classes"]["VIOLATION"], 2,
+        "declared patterns must classify a level-1 guest: {}",
+        envelope["classes"]
+    );
+
+    // A malformed rule is a loud spec error, never a silently inert rule.
+    fs::write(&spec, r#"{"classify": {"patterns": {"NOPE": ["x"]}}}"#).unwrap();
+    let bad = campaign_run(
+        &directory.path().join("bad"),
+        &guest,
+        &["--spec", spec.to_str().unwrap()],
+    );
+    assert!(!bad.status.success(), "an unknown class must be refused");
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains("unknown class")
+            || String::from_utf8_lossy(&bad.stdout).contains("unknown class"),
+        "the refusal must name the problem:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&bad.stdout),
+        String::from_utf8_lossy(&bad.stderr)
+    );
+}
+
 // Gate: a guest the pre-run default-deny gate refuses is sweepable through the
 // same hatches `run` offers, and — the non-vacuity half — WITHOUT them the
 // campaign still files the child refusal as INFRA, its existing class, rather
@@ -14443,14 +14590,13 @@ fn native_verdict_abi_records_replays_and_reaches_the_envelope() {
     assert_eq!(verdict_lines(&first).len(), 3);
 }
 
-// An `always!` violation lowers to a `VIOLATION` verdict on the same label, so
-// the failure is structured — while the embedder's historical
-// `PATINA_ALWAYS_VIOLATION` marker still prints. That dual emission is
-// deliberate and transitional: Wave B of the outcome-channel arc deletes the
-// marker once the campaign classifier reads the envelope instead of grepping.
+// An `always!` violation lowers to a `VIOLATION` verdict on the same label, and
+// that verdict is the failure's ONLY announcement: Wave B of the outcome-channel
+// arc deleted the embedder's legacy `PATINA_ALWAYS_VIOLATION` marker once the
+// campaign classifier started reading the envelope instead of grepping.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn native_always_violation_lowers_to_a_verdict_and_still_prints_the_marker() {
+fn native_always_violation_lowers_to_a_verdict_and_prints_no_legacy_marker() {
     let directory = tempdir().unwrap();
     let pkg = directory.path().join("pkg");
     write_sdk_fixture(
@@ -14495,10 +14641,10 @@ fn main() {
         "verdict did not carry the violated invariant's label: {}",
         lines[0]
     );
-    // Transitional dual-emit (removed in Wave B).
+    // No second channel: the verdict is the source, so the legacy marker is gone.
     assert!(
-        stderr.contains("PATINA_ALWAYS_VIOLATION label=arithmetic-holds"),
-        "the legacy marker must still print until Wave B:\n{stderr}"
+        !stderr.contains("PATINA_ALWAYS_VIOLATION"),
+        "the legacy always-violation marker must no longer print:\n{stderr}"
     );
     assert!(
         !stderr.contains("UNREACHABLE"),

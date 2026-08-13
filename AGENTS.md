@@ -123,8 +123,10 @@ Gates worth knowing individually:
   markers, or workaround branches in the core crates (`crates/*`). Anything a
   specific guest needs for classification or configuration belongs in that
   guest's campaign spec or testbed scripts, never hardcoded in patina source.
-  (Known debt scheduled for removal by the outcome-channel arc: the
-  `WORKQ_VIOLATION`/`BUG_CAUGHT` strings in the campaign classifier.)
+  The campaign classifier enforces this structurally: it classifies from the
+  run's `patina.result/v1` envelope alone, and a guest's own marker dialect can
+  only reach it through that guest's spec (`classify.patterns` /
+  `classify.exit_codes`).
 
 ## Agent operating habits
 

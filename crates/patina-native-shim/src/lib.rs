@@ -4144,6 +4144,11 @@ unsafe fn buggify_label<'a>(ptr: *const u8, len: usize) -> Option<&'a str> {
 /// Flush captured guest output, emit `<marker> label=<label>` to the real
 /// stderr through the non-interposed host alias, and abort. Mirrors
 /// [`abort_with_init_error`] so the marker lands after buffered guest output.
+///
+/// Reserved for patina's own *refusals* — a duplicate buggify label and its
+/// peers, whose marker is what `cargo patina`'s envelope attributes the refusal
+/// from. A system-under-test finding does NOT come through here: it is reported
+/// as a verdict ([`abort_after_verdict`]).
 fn abort_with_buggify_marker(marker: &str, label: &str) -> ! {
     let _ = flush_captured_stdio();
     let line = format!("{marker} label={label}\n");
@@ -4151,11 +4156,23 @@ fn abort_with_buggify_marker(marker: &str, label: &str) -> ! {
     std::process::abort();
 }
 
+/// Flush captured guest output and abort, printing nothing of the shim's own.
+///
+/// The run's finding has already been reported through the verdict ABI and
+/// drained into the captured stderr as a `PATINA_VERDICT` line, so a second
+/// hand-formatted marker would be a duplicate channel — and the classifier reads
+/// the verdict, never a marker (`docs/arcs/outcome-channel.md`).
+fn abort_after_verdict() -> ! {
+    let _ = flush_captured_stdio();
+    std::process::abort();
+}
+
 /// Move the runtime's queued diagnostic lines (today: `PATINA_VERDICT`) into the
 /// captured stderr stream. The runtime performs no process I/O of its own mid-run,
 /// so every shim entry point that can produce one drains it here — including on
-/// the fatal paths, where [`abort_with_buggify_marker`] flushes the capture before
-/// aborting and the lines therefore still reach the real stderr.
+/// the fatal paths, where [`abort_with_buggify_marker`] / [`abort_after_verdict`]
+/// flush the capture before aborting and the lines therefore still reach the real
+/// stderr.
 fn drain_runtime_diagnostics() {
     let lines = with_context_raw(|context| Ok(context.take_pending_diagnostics()));
     for line in lines.unwrap_or_default() {
@@ -4195,14 +4212,13 @@ fn buggify_site_call(
     };
     let outcome = with_context(|context| invoke(context, label, site));
     // Before acting on the outcome: an `always!` violation lowers to a verdict,
-    // and the fatal arm below never returns.
+    // and the fatal arm below never returns. The drained `PATINA_VERDICT` line is
+    // the violation's ONLY announcement — there is no second marker.
     drain_runtime_diagnostics();
     match outcome {
         Ok(SiteOutcome::Fire) => 1,
         Ok(SiteOutcome::Ok) => 0,
-        Ok(SiteOutcome::AlwaysViolation) => {
-            abort_with_buggify_marker("PATINA_ALWAYS_VIOLATION", label)
-        }
+        Ok(SiteOutcome::AlwaysViolation) => abort_after_verdict(),
         Ok(SiteOutcome::DuplicateLabel) => {
             abort_with_buggify_marker("PATINA_BUGGIFY_DUPLICATE_LABEL", label)
         }

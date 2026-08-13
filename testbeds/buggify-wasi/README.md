@@ -55,7 +55,7 @@ cargo patina replay testbeds/buggify-wasi/target/wasm32-wasip1/debug/buggify-was
 ```
 
 Plant the `always!` violation (the WASI mirror of the native abort — the run
-emits `PATINA_ALWAYS_VIOLATION` and traps):
+reports a `PATINA_VERDICT ... kind=violation` line and traps):
 
 ```sh
 cargo patina run testbeds/buggify-wasi/target/wasm32-wasip1/debug/buggify-wasi-fixture.wasm \

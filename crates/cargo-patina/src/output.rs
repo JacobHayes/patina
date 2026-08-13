@@ -424,7 +424,6 @@ fn classify(exit_code: i32, stdout: &str, stderr: &str) -> String {
         return "liveness".to_string();
     }
     if combined.contains("VIOLATION")
-        || combined.contains("BUG_CAUGHT")
         || combined.contains("mismatch")
         || combined.contains("PATINA_BUGGIFY_SETUP_NEVER_CALLED")
         || combined.contains("PATINA_BUGGIFY_DUPLICATE_LABEL")
@@ -497,10 +496,17 @@ const SIGNAL_NAMES: &[(i32, &str)] = &[
 
 /// Patina's own fail-closed refusals, keyed by the text each one already prints.
 ///
-/// This is the `FAIL_CLOSED_MARKERS` taxonomy made *attributable*: instead of one
-/// undifferentiated "something failed closed" bucket, each refusal carries a
-/// stable class and the line that announced it. Ordered most specific first —
-/// the first match wins.
+/// This is the historical fail-closed marker taxonomy made *attributable*:
+/// instead of one undifferentiated "something failed closed" bucket, each refusal
+/// carries a stable class and the line that announced it. Ordered most specific
+/// first — the first match wins.
+///
+/// Only refusals belong here — cases where PATINA declined to run or continue.
+/// A *consequence* of the guest dying (notably an incomplete recorded trace,
+/// which every guest that aborts mid-record leaves behind) is not a refusal: the
+/// absence of a refusal is what attributes an abort to the guest, so a
+/// consequence listed here would attribute every guest abort to patina and make
+/// `GUEST_ABORT` unreachable.
 const REFUSAL_CLASSES: &[(&str, &str)] = &[
     ("PATINA_BUGGIFY_DUPLICATE_LABEL", "buggify_duplicate_label"),
     (
@@ -527,7 +533,6 @@ const REFUSAL_CLASSES: &[(&str, &str)] = &[
     ("unsupported-import", "unsupported_import"),
     ("unknown-import", "unknown_import"),
     ("patina: starvation stall", "starvation_stall"),
-    ("incomplete trace", "incomplete_trace"),
 ];
 
 /// Patina's own refusal for this run, or `None` when patina did not fail closed.
@@ -555,8 +560,14 @@ pub struct Refusal {
     message: String,
 }
 
-/// Known structured marker prefixes emitted by the runtime/SDK/harnesses, worth
-/// surfacing verbatim in the envelope and failure report.
+/// Known structured marker prefixes **patina itself** emits, worth surfacing
+/// verbatim in the envelope and failure report.
+///
+/// Patina's own prefixes only: core patina is guest-agnostic, so a guest's
+/// private marker dialect never appears here. A guest that wants its markers
+/// classified declares them in its campaign spec (`classify.patterns`); a guest
+/// that wants them structured calls the verdict ABI, and they surface in
+/// `verdicts[]`.
 const MARKER_PREFIXES: &[&str] = &[
     "PATINA_RESULT",
     "PATINA_VIOLATION",
@@ -569,12 +580,8 @@ const MARKER_PREFIXES: &[&str] = &[
     "PATINA_LIVENESS_REPORT",
     "PATINA_INFRA",
     "PATINA_VERDICT",
-    "PATINA_ALWAYS_VIOLATION",
     "PATINA_BUGGIFY_DUPLICATE_LABEL",
     "PATINA_BUGGIFY_SETUP_NEVER_CALLED",
-    "WORKQ_RESULT",
-    "WORKQ_VIOLATION",
-    "BUG_CAUGHT",
 ];
 
 fn extract_markers(stdout: &str, stderr: &str) -> Vec<String> {
@@ -678,7 +685,7 @@ pub(crate) fn parse_depth_report_line(line: &str) -> Option<DepthReport> {
 /// non-empty stderr line.
 fn result_line(stdout: &str, stderr: &str) -> Option<String> {
     let combined: Vec<&str> = stdout.lines().chain(stderr.lines()).collect();
-    for needle in ["PATINA_VIOLATION", "VIOLATION", "BUG_CAUGHT", "mismatch"] {
+    for needle in ["PATINA_VIOLATION", "VIOLATION", "mismatch"] {
         if let Some(line) = combined.iter().find(|l| l.contains(needle)) {
             return Some(line.trim().to_string());
         }
@@ -1319,6 +1326,20 @@ mod tests {
         assert!(refusal(134, "APP_INVARIANT_BROKEN detail=ledger", "").is_none());
         // And a clean run is never a refusal, whatever it printed.
         assert!(refusal(0, "", "fingerprint mismatch").is_none());
+        // The trap this closes: a guest that aborts under `--record` ALWAYS
+        // leaves an incomplete trace, and the supervisor always says so. Reading
+        // that consequence as a refusal attributed every single guest abort to
+        // patina, which made the campaign's `GUEST_ABORT` class unreachable.
+        assert!(
+            refusal(
+                134,
+                "",
+                "PATINA_INFRA native_run signal=6 trace=incomplete trace_path=\"g.patina\" \
+reason=\"incomplete trace .g.patina.tmp: empty trace file; record finalization did not complete\""
+            )
+            .is_none(),
+            "an incomplete trace left by a dying guest is a consequence, not a patina refusal"
+        );
     }
 
     #[test]
@@ -1375,7 +1396,7 @@ mod tests {
     #[test]
     fn classify_detects_violation_markers() {
         assert_eq!(classify(0, "", ""), "ok");
-        assert_eq!(classify(3, "WORKQ_VIOLATION two-leaders", ""), "violation");
+        assert_eq!(classify(3, "GUEST_VIOLATION two-leaders", ""), "violation");
         assert_eq!(
             classify(2, "", "trace operation mismatch at 4"),
             "violation"

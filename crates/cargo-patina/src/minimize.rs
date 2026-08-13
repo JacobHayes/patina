@@ -380,7 +380,7 @@ impl KnobOracle {
         })?;
         let scratch_trace = scratch.path().join("candidate.patina");
         let trace_path = record.unwrap_or(&scratch_trace);
-        let (_exit, stdout, stderr, timed_out) = crate::campaign::run_reduced_generation(
+        let run = crate::campaign::run_reduced_generation(
             &self.self_exe,
             &self.artifact,
             self.seed,
@@ -389,10 +389,11 @@ impl KnobOracle {
             &self.guest_args,
             self.timeout_secs,
         )?;
+        let (stdout, stderr) = run.streams();
         // A candidate that had to be killed never reached its own verdict, so it
         // is rejected rather than read for a marker it may have printed on the
         // way to hanging.
-        Ok(!timed_out && self.marker.preserved(&stdout, &stderr))
+        Ok(!run.timed_out() && self.marker.preserved(stdout, stderr))
     }
 
     /// The verdict for one knob vector, from the memo when it has been run
@@ -1176,15 +1177,15 @@ mod tests {
 
     #[test]
     fn a_marker_matches_any_alternative_and_needs_a_clean_replay() {
-        let marker = Marker::parse("WORKQ_VIOLATION|WORKQ_ABORT final-wal wal corruption").unwrap();
-        assert!(marker.preserved("", "boom: WORKQ_VIOLATION no-loss"));
-        assert!(marker.preserved("", "WORKQ_ABORT final-wal wal corruption"));
+        let marker = Marker::parse("GUEST_VIOLATION|GUEST_ABORT final-wal wal corruption").unwrap();
+        assert!(marker.preserved("", "boom: GUEST_VIOLATION no-loss"));
+        assert!(marker.preserved("", "GUEST_ABORT final-wal wal corruption"));
         assert!(!marker.preserved("", "clean run"));
         // The fail-open direction the probe named: the marker is present, but
         // the replay diverged after printing it.
         assert!(!marker.preserved(
             "",
-            "WORKQ_VIOLATION no-loss\npatina native shim fatal: trace operation mismatch"
+            "GUEST_VIOLATION no-loss\npatina native shim fatal: trace operation mismatch"
         ));
     }
 

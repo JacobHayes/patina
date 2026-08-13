@@ -89,7 +89,16 @@ unknown option.
   hatch can be swept at all instead of being refused identically in every
   generation. They also ride on the reproduce commands, since a trace cannot
   carry them; a non-native campaign carrying one is refused by name. Outcomes are
-  classified into nine classes, novel failure signatures are deduped with saved
+  classified into fourteen classes from each generation's `patina.result/v1`
+  envelope ALONE — verdicts, per-plane `fault_reports` vacuity,
+  `runtime_findings`, `refusal`, `guest_exit` — never from guest output text: an
+  unattributed SIGABRT is `GUEST_ABORT` (the guest's own doing), the same abort
+  with a `refusal` is `FAIL_CLOSED_ABORT`, and a child that produced no envelope
+  at all is `INFRA`. A guest that never calls the verdict ABI declares its own
+  rules in the spec (`classify.patterns` = class -> output substrings,
+  `classify.exit_codes` = class -> exit codes); declared rules only ADD a finding
+  where the envelope reached none and can never downgrade one. Novel failure
+  signatures are deduped with saved
   traces, SDK site coverage is folded into `<out-dir>/sites.json` (schema
   `patina.campaign.sites/v1`), and native yield-point edge coverage is folded
   into `<out-dir>/coverage/` (schema `patina.coverage.campaign/v1`) with a
@@ -261,7 +270,7 @@ dev-dependency use under plain `cargo test`.
 - `patina_dst::buggify_with_prob!("label", 0.9)`, `patina_dst::buggify_delay!("label")`,
   `patina_dst::buggify_knob!("label", default, lo, hi)` -> value.
 - `patina_dst::always!(cond, "label")`: fatal invariant; a violation reports a
-  `violation` verdict (below), emits `PATINA_ALWAYS_VIOLATION`, and aborts.
+  `violation` verdict (below) and aborts. The verdict is the only announcement.
 - `patina_dst::verdict(VerdictKind::{Violation,Pass,AbortIntent}, "label", "detail")`:
   report a structured outcome. One ABI verb; kinds are data. Recorded as a trace
   event (replay reproduces it; a divergent verdict stream fails closed), printed

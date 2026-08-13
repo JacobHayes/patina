@@ -104,11 +104,31 @@ HARGS=(--seed 7 --jobs 2 --workers 1 --producers 1 --base-port 5001
        --data-dir /workq --timeout-secs 30 --server-host "$SERVER_HOST")
 
 OUT="$work/campaign-out"
+
+# workq's own marker dialect, declared as campaign spec configuration rather
+# than baked into patina: the classifier reads the run's structured envelope
+# (verdicts, per-plane fault accounting, refusal, guest exit) and knows nothing
+# about WORKQ_*. A guest that prints its findings instead of reporting them
+# through the verdict ABI declares them here -- the level-1 escape hatch of the
+# outcome-channel arc (docs/arcs/outcome-channel.md 4.3). The two patterns are
+# exactly the two ways a torn short write surfaces (see wal.rs), matching the
+# catch scan in [b] below.
+spec_json="$work/classify-spec.json"
+cat >"$spec_json" <<'JSON'
+{
+  "classify": {
+    "patterns": {
+      "VIOLATION": ["WORKQ_VIOLATION", "WORKQ_ABORT final-wal wal corruption"]
+    }
+  }
+}
+JSON
+
 echo "==> [1] cargo patina campaign --faults --swarm --gens $GENS (--bug ignore-short-write, --dns-entry $SERVER_HOST)"
 campaign_json="$work/campaign.json"
 campaign_err="$work/campaign.err"
 "$PATINA" patina campaign "$built" --gens "$GENS" --out-dir "$OUT" --faults --swarm \
-  --dns-entry "$SERVER_HOST=127.0.0.1" \
+  --dns-entry "$SERVER_HOST=127.0.0.1" --spec "$spec_json" \
   --format json ${ALLOW[@]+"${ALLOW[@]}"} \
   -- "${HARGS[@]}" --bug ignore-short-write \
   >"$campaign_json" 2>"$campaign_err" || true
@@ -127,7 +147,7 @@ print('generations=%s classes=%s' % (d.get('generations'), d.get('classes')))
 echo "    $classes_line"
 
 # ---------------------------------------------------------------------------
-# [b] catch: scan VIOLATION- and UNCLASSIFIED-classified generations (in
+# [b] catch: scan VIOLATION-, GUEST_ABORT- and UNCLASSIFIED-classified generations (in
 # generation order -- deterministic, gens are a pure function of the spec) for
 # the planted bug's SPECIFIC signature: a WORKQ_VIOLATION or a
 # `WORKQ_ABORT ... wal corruption` marker (the two ways a torn short write
@@ -152,7 +172,7 @@ while IFS= read -r g; do
 done < <(python3 -c "
 import json
 d = json.load(open('$campaign_json'))
-gens = sorted(r['generation'] for r in d.get('notable_runs', []) if r['class'] in ('VIOLATION', 'UNCLASSIFIED'))
+gens = sorted(r['generation'] for r in d.get('notable_runs', []) if r['class'] in ('VIOLATION', 'GUEST_ABORT', 'UNCLASSIFIED'))
 print('\n'.join(str(g) for g in gens))
 ")
 

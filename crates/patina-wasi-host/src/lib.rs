@@ -2851,6 +2851,17 @@ fn patina_buggify_fatal(marker: &str, label: &str) -> WasmiError {
     WasmiError::new(format!("{marker} label={label}"))
 }
 
+/// Trap out of an `always!` violation.
+///
+/// No marker of its own: the violation was already reported through the verdict
+/// ABI and drained into the guest's captured stderr as a `PATINA_VERDICT` line
+/// (which the run error carries), and that verdict is what the result envelope
+/// and the campaign classifier read (`docs/arcs/outcome-channel.md`). The trap
+/// message names the label so the human message still says which invariant.
+fn patina_always_violation_trap(label: &str) -> WasmiError {
+    WasmiError::new(format!("patina: always! invariant violated: label={label}"))
+}
+
 /// Move the runtime's queued diagnostic lines (today: `PATINA_VERDICT`) into the
 /// captured guest stderr, mirroring the native shim's `drain_runtime_diagnostics`.
 /// The runtime performs no process I/O of its own mid-run, so every `patina_sdk`
@@ -2881,14 +2892,13 @@ fn patina_sdk_site(
     let outcome = invoke(&mut caller.data_mut().context, &label, &site)
         .map_err(|error| WasmiError::new(error.to_string()))?;
     // Before acting on the outcome: an `always!` violation lowers to a verdict,
-    // and the fatal arms below trap out of this function.
+    // and the fatal arms below trap out of this function. The drained
+    // `PATINA_VERDICT` line is the violation's ONLY announcement.
     drain_runtime_diagnostics(caller.data_mut());
     match outcome {
         SiteOutcome::Fire => Ok(1),
         SiteOutcome::Ok => Ok(0),
-        SiteOutcome::AlwaysViolation => {
-            Err(patina_buggify_fatal("PATINA_ALWAYS_VIOLATION", &label))
-        }
+        SiteOutcome::AlwaysViolation => Err(patina_always_violation_trap(&label)),
         SiteOutcome::DuplicateLabel => Err(patina_buggify_fatal(
             "PATINA_BUGGIFY_DUPLICATE_LABEL",
             &label,
