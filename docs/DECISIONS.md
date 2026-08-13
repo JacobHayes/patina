@@ -653,3 +653,39 @@ cluster so the fixes have citable symptom records.
   consequential now that clock-only guests otherwise run). Open next:
   outcome-channel Wave C (testbed verdict migration; WASI-trap envelope
   residue), custom-ops Wave B (seeded faults), CPUID audit visibility.
+- **2026-08-13 — four-builder round landed: outcome-channel Wave C, custom-op
+  faults, CPUID visibility, replay-init swallow.** Full jj-workspace round,
+  every rebase in the five-commit stack conflict-free. Landed: testbeds report
+  through the verdict ABI (declared patterns dropped — generation 14's
+  wal-integrity catch classifying VIOLATION with NO spec is the proof the
+  envelope is the source; the minimize oracle re-keyed on the ABI's own wire
+  format, now guest-agnostic) and WASI guest traps get run envelopes (an
+  always! trap classifies VIOLATION, was INFRA; the split is structural on
+  trap codes — patina's fuel/memory limits stay engine errors); seeded
+  custom-op faults as a compiler-walked knob (gen byte 30, fault_eligible ABI
+  bit — the guest's failure payload never crosses the boundary; injected
+  faults record as Outcome::Error; zero-eligible-ops is vacuous BY DESIGN,
+  stricter than other planes; opt-in --custom-op-faults band on the DNS-band
+  precedent); cpuid decoded into a new host-identity class, visible-never-
+  refused (deterministic within a host, costs cross-host portability; exit
+  codes unchanged; ARCH_SET_CPUID trapping stays deferred; pre-run gate
+  deliberately not wired — audit is the inspection verb); and the replay-init
+  swallow FIXED detector-first (class detector red first, naming all five
+  swallowing entry points in one collected run; structural fix — one guarded
+  in_shim_bootstrap predicate + source lints forbidding a second
+  SHIM_BOOTSTRAP reader and forcing call-site enumeration; A/B byte-identity
+  6/6). Two additional real bugs surfaced and fixed in the round: pubsub's
+  VACUOUS_NET_FAULT gate had been silently inert since the fault-report field
+  renames (a vacuous vacuity gate — now reads the runtime's own per-plane
+  vacuous bit, absent-is-vacuous) and a second init-error swallow
+  (println!-only guest exited 0 with output dropped, refusal unreported —
+  pre-existing, proven on the parent revision). Merge-time coordinator items
+  applied: scan_forbidden_instructions renamed scan_instruction_classes (the
+  name lied), stale rdseed-residual claims corrected, custom-op ABI prose
+  caught up. Testbed judgment calls accepted: guest liveness timeouts stay
+  printed diagnostics (no verdict kind — whether a run SHOULD converge
+  depends on fault config the guest cannot see); ALWAYS_VIOLATION and
+  SAFETY_BUG stay distinct classes scoped by per-guest label sets. Follow-ups
+  open: call-graph audit of the ~100 non-window C-ABI entry points for the
+  answer-without-ensure_runtime class; minimize auto-target from verdicts
+  (round two, launching).
