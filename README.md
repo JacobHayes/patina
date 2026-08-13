@@ -208,11 +208,17 @@ if patina_dst::buggify!("batch-commit") {
 }
 patina_dst::always!(invariant_holds(), "ledger-sorted");   // fatal if ever false
 patina_dst::sometimes!(cache_hit, "cache-hit-seen");       // coverage oracle
+patina_dst::verdict(patina_dst::VerdictKind::Violation,    // structured outcome
+    "ledger-sorted", "{\"row\": 12}");
 ```
 
 The `patina-dst` crate is dependency-light and every macro is a no-op outside a
 Patina build — adopters ship it unconditionally, with no `cfg(patina)` in their
-code. Enable at run time with `cargo patina run --buggify`; decisions are pure
+code. `verdict()` is the machine-readable outcome channel: one ABI verb whose
+kind is data, recorded as a trace event (so replay reproduces the verdict stream
+and a divergent one fails closed) and surfaced in `--format json` as `verdicts[]`
+rather than as text to grep; an `always!` violation reports one automatically.
+Enable at run time with `cargo patina run --buggify`; decisions are pure
 functions of the seed, and a `PATINA_SDK_REPORT` line proves sites actually
 fired (no vacuous "all clean"). Literal-label SDK macro calls also declare a
 link-time site table under Patina, so never-reached `sometimes!`/`reachable!`

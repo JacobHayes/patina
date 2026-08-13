@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::OnceLock;
 
+use patina_dst_abi::{VerdictKind, verdict_line};
 use sha2::{Digest, Sha256};
 
 use crate::help::{self, Flag};
@@ -311,6 +312,7 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
             .depth
             .clone()
             .or_else(|| depth_report_line(&stdout_text, &stderr_text));
+        env.verdicts = extract_verdicts(&stdout_text, &stderr_text);
         env.markers = extract_markers(&stdout_text, &stderr_text);
         env.result_line = result_line(&stdout_text, &stderr_text);
         env.stdout = Some(stdout_text);
@@ -369,6 +371,41 @@ fn classify(exit_code: i32, stdout: &str, stderr: &str) -> String {
     "failure".to_string()
 }
 
+/// One verdict the run reported through the verdict ABI, for the envelope's
+/// `verdicts[]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerdictFact {
+    pub seq: u64,
+    pub kind: VerdictKind,
+    pub label: String,
+    pub detail: String,
+}
+
+/// Collect the run's `PATINA_VERDICT` lines into structured verdicts, in the
+/// order the guest reported them.
+///
+/// The trace carries the same stream as `Operation::Verdict` events, but a plain
+/// seeded run writes no trace and an aborting guest never finalizes one, so the
+/// marker line is the channel that always exists. Decoding uses the ABI crate's
+/// codec, the same one the runtime renders with, and a malformed line is dropped
+/// rather than half-decoded into a verdict that would read as real.
+fn extract_verdicts(stdout: &str, stderr: &str) -> Vec<VerdictFact> {
+    stdout
+        .lines()
+        .chain(stderr.lines())
+        .filter(|line| line.trim_start().starts_with(verdict_line::PREFIX))
+        .filter_map(|line| {
+            let (seq, kind, label, detail) = verdict_line::parse(line)?;
+            Some(VerdictFact {
+                seq,
+                kind,
+                label,
+                detail,
+            })
+        })
+        .collect()
+}
+
 /// Known structured marker prefixes emitted by the runtime/SDK/harnesses, worth
 /// surfacing verbatim in the envelope and failure report.
 const MARKER_PREFIXES: &[&str] = &[
@@ -382,6 +419,7 @@ const MARKER_PREFIXES: &[&str] = &[
     "PATINA_SWARM_REPORT",
     "PATINA_LIVENESS_REPORT",
     "PATINA_INFRA",
+    "PATINA_VERDICT",
     "PATINA_ALWAYS_VIOLATION",
     "PATINA_BUGGIFY_DUPLICATE_LABEL",
     "PATINA_BUGGIFY_SETUP_NEVER_CALLED",
@@ -596,6 +634,9 @@ pub struct Envelope {
     finding_details: Vec<serde_json::Value>,
     output_path: Option<String>,
     content_hash: Option<String>,
+    /// Guest verdicts reported through the verdict ABI, in call order. Additive:
+    /// omitted entirely when the run reported none.
+    verdicts: Vec<VerdictFact>,
     markers: Vec<String>,
     result_line: Option<String>,
     stdout: Option<String>,
@@ -622,6 +663,7 @@ impl Envelope {
             finding_details: Vec::new(),
             output_path: None,
             content_hash: None,
+            verdicts: Vec::new(),
             markers: Vec::new(),
             result_line: None,
             stdout: None,
@@ -704,6 +746,21 @@ impl Envelope {
         }
         if let Some(v) = &self.content_hash {
             m.insert("content_hash".into(), Value::from(v.clone()));
+        }
+        if !self.verdicts.is_empty() {
+            let rows: Vec<Value> = self
+                .verdicts
+                .iter()
+                .map(|verdict| {
+                    let mut vm = Map::new();
+                    vm.insert("seq".into(), Value::from(verdict.seq));
+                    vm.insert("kind".into(), Value::from(verdict.kind.as_str()));
+                    vm.insert("label".into(), Value::from(verdict.label.clone()));
+                    vm.insert("detail".into(), Value::from(verdict.detail.clone()));
+                    Value::Object(vm)
+                })
+                .collect();
+            m.insert("verdicts".into(), Value::Array(rows));
         }
         if !self.markers.is_empty() {
             m.insert("markers".into(), Value::from(self.markers.clone()));
@@ -892,6 +949,41 @@ mod tests {
         // Absent fields are omitted.
         assert!(json.get("trace").is_none());
         assert!(json.get("seed").is_none());
+    }
+
+    #[test]
+    fn envelope_carries_verdicts_in_report_order() {
+        let stderr = format!(
+            "noise\n{}\n{}\n",
+            verdict_line::render(0, VerdictKind::Pass, "queue-drained", ""),
+            verdict_line::render(1, VerdictKind::Violation, "two leaders", "{\"term\": 4}"),
+        );
+        let mut env = Envelope::new("run", "violation", 3);
+        env.verdicts = extract_verdicts("", &stderr);
+        let json = env.to_json();
+        assert_eq!(json["verdicts"][0]["seq"], 0);
+        assert_eq!(json["verdicts"][0]["kind"], "pass");
+        assert_eq!(json["verdicts"][0]["label"], "queue-drained");
+        assert_eq!(json["verdicts"][0]["detail"], "");
+        assert_eq!(json["verdicts"][1]["kind"], "violation");
+        // Spaces survive the escape round trip in both label and detail.
+        assert_eq!(json["verdicts"][1]["label"], "two leaders");
+        assert_eq!(json["verdicts"][1]["detail"], "{\"term\": 4}");
+    }
+
+    #[test]
+    fn envelope_omits_verdicts_when_the_run_reported_none() {
+        let env = Envelope::new("run", "ok", 0);
+        assert!(env.to_json().get("verdicts").is_none());
+        assert!(extract_verdicts("hello\n", "PATINA_SDK_REPORT enabled=0\n").is_empty());
+    }
+
+    #[test]
+    fn a_malformed_verdict_line_is_dropped_not_half_decoded() {
+        // Truncated (no detail) and unknown-kind lines must not become verdicts:
+        // a partially understood result is worse than no result.
+        let stderr = "PATINA_VERDICT seq=1 kind=pass label=x\nPATINA_VERDICT seq=2 kind=nope label=x detail=\n";
+        assert!(extract_verdicts("", stderr).is_empty());
     }
 
     #[test]

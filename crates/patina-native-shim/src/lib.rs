@@ -61,7 +61,7 @@ use patina_dst_fs_crash::CrashFs;
 use patina_dst_fs_mem::{FsImage, MemFs};
 use patina_dst_runtime::{
     BuggifyKind, Context, MAX_TRACE_BYTES, RuntimeBuilder, RuntimeConfig, RuntimeError,
-    SiteOutcome, TraceTransport,
+    SiteOutcome, TraceTransport, VerdictKind,
 };
 pub use thread::{
     patina_cond_broadcast, patina_cond_destroy, patina_cond_init, patina_cond_signal,
@@ -4102,6 +4102,18 @@ fn abort_with_buggify_marker(marker: &str, label: &str) -> ! {
     std::process::abort();
 }
 
+/// Move the runtime's queued diagnostic lines (today: `PATINA_VERDICT`) into the
+/// captured stderr stream. The runtime performs no process I/O of its own mid-run,
+/// so every shim entry point that can produce one drains it here — including on
+/// the fatal paths, where [`abort_with_buggify_marker`] flushes the capture before
+/// aborting and the lines therefore still reach the real stderr.
+fn drain_runtime_diagnostics() {
+    let lines = with_context_raw(|context| Ok(context.take_pending_diagnostics()));
+    for line in lines.unwrap_or_default() {
+        capture_stderr_line(&line);
+    }
+}
+
 /// Append a diagnostic line to the captured stderr buffer so it interleaves with
 /// guest output and flushes at exit (lifecycle markers). Bounded like guest I/O.
 fn capture_stderr_line(line: &str) {
@@ -4132,7 +4144,11 @@ fn buggify_site_call(
         Some(site) => site,
         None => return fail(EINVAL),
     };
-    match with_context(|context| invoke(context, label, site)) {
+    let outcome = with_context(|context| invoke(context, label, site));
+    // Before acting on the outcome: an `always!` violation lowers to a verdict,
+    // and the fatal arm below never returns.
+    drain_runtime_diagnostics();
+    match outcome {
         Ok(SiteOutcome::Fire) => 1,
         Ok(SiteOutcome::Ok) => 0,
         Ok(SiteOutcome::AlwaysViolation) => {
@@ -4267,6 +4283,45 @@ pub unsafe extern "C" fn patina_reachable(
     buggify_site_call(label, label_len, site, site_len, |context, l, s| {
         context.reachable_mark(l, s)
     })
+}
+
+/// `patina_dst::verdict(...)`: report one structured guest verdict.
+///
+/// The verdict ABI is a SINGLE verb — `kind` is data, not a symbol per kind — so
+/// a new [`VerdictKind`] never grows the shim's export surface. An unknown `kind`
+/// is refused with `EINVAL` rather than defaulted: a guest built against a newer
+/// enum than the shim understands must fail closed, not have its verdict silently
+/// reclassified. The call is recorded in the trace and its `PATINA_VERDICT` line
+/// enters the captured stderr stream, so it survives a subsequent guest abort.
+///
+/// # Safety
+/// Label and detail pointers must describe live UTF-8 slices of the given
+/// lengths (or be null with a zero length).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_verdict(
+    kind: u32,
+    label: *const u8,
+    label_len: usize,
+    detail: *const u8,
+    detail_len: usize,
+) -> c_int {
+    let Some(kind) = VerdictKind::from_abi(kind) else {
+        return fail(EINVAL);
+    };
+    // SAFETY: the caller passes live slices.
+    let Some(label) = (unsafe { buggify_label(label, label_len) }) else {
+        return fail(EINVAL);
+    };
+    // SAFETY: the caller passes live slices.
+    let Some(detail) = (unsafe { buggify_label(detail, detail_len) }) else {
+        return fail(EINVAL);
+    };
+    let result = with_context(|context| context.verdict(kind, label, detail));
+    drain_runtime_diagnostics();
+    match result {
+        Ok(_) => 0,
+        Err(errno) => fail(errno),
+    }
 }
 
 /// `patina_dst::rng()`: a deterministic 64-bit draw bridged to the root seed.

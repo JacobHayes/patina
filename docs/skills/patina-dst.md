@@ -82,6 +82,10 @@ Patina so adopters pay nothing in production builds:
   fires only sometimes, only under simulation, deterministically per seed. This
   is how you make your own code cooperate with the fuzzer.
 - `always!` — a fatal invariant; a violation aborts the run with a marker.
+- `verdict()` — report a structured outcome (violation / pass / abort-intent)
+  under a label, with optional detail. It is the machine-readable channel: each
+  call is a recorded trace event and appears in the run's JSON envelope as
+  `verdicts[]`, so tooling reads results instead of grepping output.
 - `sometimes!` and `reachable!` — coverage oracles. A campaign **fails by
   default** when a declared site never fired, which is what stops a sweep from
   passing vacuously; waiving that is explicit.

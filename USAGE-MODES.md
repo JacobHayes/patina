@@ -16,8 +16,9 @@ inside a harness-configured binary is the expected shape).
 
 Ordinary application code instrumented with the cooperative-SUT SDK:
 `buggify!`/`buggify_with_prob!`/`buggify_delay!`/`buggify_knob!` fault sites,
-`always!`/`sometimes!`/`reachable!` oracles, the `lifecycle` markers
-(`setup_complete()`, `event!`), and `patina_dst::rng()`/`is_simulated()`. The
+`always!`/`sometimes!`/`reachable!` oracles, `verdict()` for structured run
+outcomes, the `lifecycle` markers (`setup_complete()`, `event!`), and
+`patina_dst::rng()`/`is_simulated()`. The
 crate is dependency-free by default; every macro is a no-op or plain fallback
 outside a Patina build, so adopters ship it unconditionally with no `cfg(patina)`
 in their code. The default-off `macros` feature re-exports

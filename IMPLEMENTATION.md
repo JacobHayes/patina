@@ -231,7 +231,10 @@ Completed foundations (Milestone A):
    emit a dependency-free link-time table under `cfg(patina)`: native uses a
    linker section, WASI uses custom-section bytes, and both embedders declare the
    sites before execution. Declarations do not compute activation or enter trace
-   metadata, but they make never-reached sites visible to reports.
+   metadata, but they make never-reached sites visible to reports. Verdict
+   labels (below) share this namespace without being sites: a verdict registers
+   nothing, so the duplicate rule does not apply to it and repeating a label is
+   how verdicts aggregate.
 3. **Damage-control cutoff.** A virtual-time cutoff (default 300 virtual seconds,
    configurable) after which firing stops, checked against the unrecorded
    monotonic clock read.
@@ -305,7 +308,7 @@ Completed foundations (Milestone C — buggify on WASI):
     `patina-dst-runtime` buggify subsystem the native shim drives (activation, the
     counter-keyed firing PRF, the labels registry, the 300-virtual-second cutoff,
     the diagnostics report, and the lifecycle markers are reused, not
-    reimplemented). `patina-dst-target`'s WASI audit allowlists exactly the ten
+    reimplemented). `patina-dst-target`'s WASI audit allowlists exactly the eleven
     `patina_sdk` names alongside the Preview 1 surface. The fatal outcomes mirror
     the native shim: an `always!` violation and a duplicate label emit their
     markers (`PATINA_ALWAYS_VIOLATION` / `PATINA_BUGGIFY_DUPLICATE_LABEL`) to the
@@ -351,6 +354,28 @@ Completed foundations (point-solution DST arc, Wave B):
     proves a passing sweep, a seeded failure panic carrying the seed plus
     `cargo patina test`/`cargo patina replay` repro commands, a PATH-scrubbed
     refusal, double-run identical failure blocks, and the no-new-deps cargo tree.
+
+Completed foundations (outcome-channel arc, Wave A — the verdict ABI):
+
+15. **One verdict verb, kinds as data.** `patina_verdict(kind, label+len,
+    detail+len)` in the native shim, the matching `patina_sdk` `verdict` import
+    on wasip1, and `Context::verdict` in process; `patina_dst::verdict` is the
+    SDK sugar over them. `VerdictKind` (`patina-dst-abi`) is a closed enum whose
+    `u32` wire values are pinned by test on both sides of the FFI, and an
+    unrecognized kind is refused (`EINVAL` natively, a trap on WASI) rather than
+    defaulted. Every call records an `Operation::Verdict` boundary event, so a
+    replay whose verdict stream diverges fails closed like any other operation
+    mismatch; the format needs no version bump because serde tags variants by
+    name. The runtime does no I/O of its own mid-run: it queues each verdict's
+    `PATINA_VERDICT` line and the embedder drains it into captured stderr (so
+    lines interleave with guest output and survive an abort's flush), while an
+    in-process guest's undrained lines print at `Context::finish`. `--format
+    json` folds them into the envelope as `verdicts[]` (`seq`, `kind`, `label`,
+    `detail`), decoded by the same `patina-dst-abi` codec that renders them, with
+    `label`/`detail` escaped so no guest byte can forge a second marker line. An
+    `always!` violation lowers to a `VIOLATION` verdict on the invariant's label;
+    the embedders still print `PATINA_ALWAYS_VIOLATION` as a transitional
+    dual-emit that Wave B removes (`docs/arcs/outcome-channel.md`).
 
 ## Slice 7: exploration tier — Partial (wave 12)
 

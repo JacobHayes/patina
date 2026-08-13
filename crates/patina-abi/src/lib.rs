@@ -440,6 +440,175 @@ pub struct TcpAccepted {
     pub peer: String,
 }
 
+/// What a guest asserts about its own run through the verdict ABI — the single
+/// verb `patina_verdict` (native shim) / the `patina_sdk` `verdict` import
+/// (WASI) / `Context::verdict` (in-process).
+///
+/// A **closed** enum owned by the runtime: kinds are data, never new symbols, so
+/// a new kind is one enum value the compiler walks to every consumer. The `u32`
+/// wire values are the ABI and are pinned by test; the C header
+/// (`patina_native.h`) and the SDK's mirror of it must agree with
+/// [`VerdictKind::as_abi`].
+///
+/// A verdict `label` shares the `sites.json` label namespace with the SDK's
+/// `sometimes!`/`buggify!` site labels and aggregates the same way, but a
+/// verdict is *not* a buggify site: it registers no site, so the duplicate-label
+/// gate does not apply to it and the same label may be reported many times in
+/// one run (that is what aggregation means). Reusing a *site's* label for a
+/// verdict is legal and deliberate — it joins the two views of one invariant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerdictKind {
+    /// The guest detected a violation of its own invariant.
+    Violation,
+    /// The guest confirmed a property held.
+    Pass,
+    /// The guest is about to abort deliberately, on its own invariant — so the
+    /// resulting SIGABRT is attributable to the guest and not to a Patina
+    /// fail-closed refusal.
+    AbortIntent,
+}
+
+impl VerdictKind {
+    /// Every kind, in wire order. Exhaustive by construction: a new variant that
+    /// is not added here fails [`VerdictKind::as_abi`]'s round-trip test.
+    pub const ALL: &'static [VerdictKind] = &[
+        VerdictKind::Violation,
+        VerdictKind::Pass,
+        VerdictKind::AbortIntent,
+    ];
+
+    /// The `u32` this kind travels as across the C / WASI ABI. Numbering starts
+    /// at 1 so a zeroed argument is never a valid kind and fails closed.
+    pub const fn as_abi(self) -> u32 {
+        match self {
+            VerdictKind::Violation => 1,
+            VerdictKind::Pass => 2,
+            VerdictKind::AbortIntent => 3,
+        }
+    }
+
+    /// Decode an ABI `u32`. `None` for any unknown value — the embedder refuses
+    /// the call rather than guessing a kind.
+    pub const fn from_abi(value: u32) -> Option<Self> {
+        match value {
+            1 => Some(VerdictKind::Violation),
+            2 => Some(VerdictKind::Pass),
+            3 => Some(VerdictKind::AbortIntent),
+            _ => None,
+        }
+    }
+
+    /// The stable snake_case name used in the trace, the `PATINA_VERDICT` marker
+    /// line, and the result envelope.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            VerdictKind::Violation => "violation",
+            VerdictKind::Pass => "pass",
+            VerdictKind::AbortIntent => "abort_intent",
+        }
+    }
+
+    /// Parse the name [`VerdictKind::as_str`] renders. `None` is a hard parse
+    /// failure for the caller, never a default kind.
+    pub fn from_name(text: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|kind| kind.as_str() == text)
+    }
+}
+
+/// The verdict wire format: the `PATINA_VERDICT` diagnostic line that carries a
+/// recorded verdict from the guest process to whatever reads its output.
+///
+/// The runtime records every verdict in the trace, but a *plain* seeded run
+/// writes no trace and an aborting guest never finalizes one, so the line is the
+/// channel the result envelope is built from. It lives here, beside the ABI
+/// enum, so the producer (`patina-dst-runtime`) and the consumer (`cargo-patina`
+/// building `patina.result/v1`) share one implementation and cannot drift.
+///
+/// Fields are whitespace-separated `key=value`; `label` and `detail` are escaped
+/// by [`escape_verdict_field`] so no guest-supplied byte can introduce a space or
+/// a newline and forge a second marker line.
+pub mod verdict_line {
+    use super::VerdictKind;
+
+    /// The marker prefix, including its trailing space.
+    pub const PREFIX: &str = "PATINA_VERDICT ";
+
+    /// Render one verdict as its marker line (no trailing newline).
+    pub fn render(seq: u64, kind: VerdictKind, label: &str, detail: &str) -> String {
+        format!(
+            "{PREFIX}seq={seq} kind={} label={} detail={}",
+            kind.as_str(),
+            escape(label),
+            escape(detail),
+        )
+    }
+
+    /// Parse a marker line back into `(seq, kind, label, detail)`. `None` for any
+    /// line that is not a well-formed verdict marker — a truncated or malformed
+    /// line is dropped, never half-decoded into a verdict that reads as real.
+    pub fn parse(line: &str) -> Option<(u64, VerdictKind, String, String)> {
+        let rest = line.trim().strip_prefix(PREFIX)?;
+        let mut seq = None;
+        let mut kind = None;
+        let mut label = None;
+        let mut detail = None;
+        for token in rest.split(' ').filter(|token| !token.is_empty()) {
+            let (key, value) = token.split_once('=')?;
+            match key {
+                "seq" => seq = Some(value.parse().ok()?),
+                "kind" => kind = Some(VerdictKind::from_name(value)?),
+                "label" => label = Some(unescape(value)?),
+                "detail" => detail = Some(unescape(value)?),
+                // Unknown keys are a format the reader does not understand, not
+                // noise to skip: refuse rather than report a partial verdict.
+                _ => return None,
+            }
+        }
+        Some((seq?, kind?, label?, detail?))
+    }
+
+    /// Escape one field so it is a single whitespace-free token that round-trips
+    /// through [`unescape`]. Backslash is the escape character; space, tab, CR,
+    /// and LF get named escapes. Everything else passes through unchanged, so a
+    /// label with no special bytes reads exactly as written.
+    pub fn escape(value: &str) -> String {
+        let mut out = String::with_capacity(value.len());
+        for ch in value.chars() {
+            match ch {
+                '\\' => out.push_str("\\\\"),
+                ' ' => out.push_str("\\s"),
+                '\t' => out.push_str("\\t"),
+                '\r' => out.push_str("\\r"),
+                '\n' => out.push_str("\\n"),
+                other => out.push(other),
+            }
+        }
+        out
+    }
+
+    /// Reverse [`escape`]. `None` on a dangling or unknown escape.
+    pub fn unescape(value: &str) -> Option<String> {
+        let mut out = String::with_capacity(value.len());
+        let mut chars = value.chars();
+        while let Some(ch) = chars.next() {
+            if ch != '\\' {
+                out.push(ch);
+                continue;
+            }
+            match chars.next()? {
+                '\\' => out.push('\\'),
+                's' => out.push(' '),
+                't' => out.push('\t'),
+                'r' => out.push('\r'),
+                'n' => out.push('\n'),
+                _ => return None,
+            }
+        }
+        Some(out)
+    }
+}
+
 /// A typed boundary operation. Its serialized form is part of trace matching.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -634,6 +803,19 @@ pub enum Operation {
     NetTcpShutdown {
         socket: SocketId,
         how: ShutdownHow,
+    },
+    /// One guest verdict reported through the verdict ABI. Recorded like any
+    /// other boundary operation, so a replay whose verdict stream diverges from
+    /// the recording — a missing verdict, an extra one, a changed label/detail,
+    /// or the same verdicts in a different order — fails closed as an ordinary
+    /// operation mismatch rather than being reconciled away.
+    ///
+    /// The field is `verdict_kind` rather than `kind` because `kind` is
+    /// [`Operation`]'s own serde tag.
+    Verdict {
+        verdict_kind: VerdictKind,
+        label: String,
+        detail: String,
     },
 }
 
@@ -944,5 +1126,69 @@ mod tests {
             EffectError::new(ErrorCode::NotConnected, "no peer").to_string(),
             "not_connected: no peer"
         );
+    }
+
+    // The ABI numbering is the contract three independent mirrors compile
+    // against (the C header, the SDK's `extern "C"` block, the WASI import), so
+    // pin the exact values: a renumber here silently misclassifies every verdict
+    // a shim-linked guest reports.
+    #[test]
+    fn verdict_kind_abi_values_are_pinned_and_round_trip() {
+        assert_eq!(VerdictKind::Violation.as_abi(), 1);
+        assert_eq!(VerdictKind::Pass.as_abi(), 2);
+        assert_eq!(VerdictKind::AbortIntent.as_abi(), 3);
+        assert_eq!(VerdictKind::from_abi(0), None);
+        assert_eq!(VerdictKind::from_abi(4), None);
+        for kind in VerdictKind::ALL {
+            assert_eq!(VerdictKind::from_abi(kind.as_abi()), Some(*kind));
+            assert_eq!(VerdictKind::from_name(kind.as_str()), Some(*kind));
+        }
+        assert_eq!(VerdictKind::from_name("violation!"), None);
+    }
+
+    #[test]
+    fn verdict_operation_tag_is_its_snake_case_name() {
+        let operation = Operation::Verdict {
+            verdict_kind: VerdictKind::AbortIntent,
+            label: "checksum".into(),
+            detail: "{\"page\":7}".into(),
+        };
+        let json = serde_json::to_string(&operation).unwrap();
+        assert!(json.contains("\"kind\":\"verdict\""), "{json}");
+        assert!(json.contains("\"abort_intent\""), "{json}");
+        assert_eq!(serde_json::from_str::<Operation>(&json).unwrap(), operation);
+    }
+
+    #[test]
+    fn verdict_marker_line_round_trips_including_hostile_labels() {
+        // A guest-supplied label carrying a newline must not be able to forge a
+        // second marker line, and it must survive the round trip verbatim.
+        let hostile = "two words\nPATINA_VERDICT seq=99 kind=pass label=forged detail=x";
+        let line = verdict_line::render(7, VerdictKind::Violation, hostile, "a b\\c");
+        assert_eq!(line.lines().count(), 1, "escaped line must stay one line");
+        let (seq, kind, label, detail) = verdict_line::parse(&line).unwrap();
+        assert_eq!(seq, 7);
+        assert_eq!(kind, VerdictKind::Violation);
+        assert_eq!(label, hostile);
+        assert_eq!(detail, "a b\\c");
+    }
+
+    #[test]
+    fn malformed_verdict_lines_are_refused_not_half_decoded() {
+        assert!(verdict_line::parse("PATINA_RESULT ok").is_none());
+        // Missing detail key.
+        assert!(verdict_line::parse("PATINA_VERDICT seq=1 kind=pass label=x").is_none());
+        // Unknown kind name.
+        assert!(verdict_line::parse("PATINA_VERDICT seq=1 kind=maybe label=x detail=").is_none());
+        // Unknown key.
+        assert!(
+            verdict_line::parse("PATINA_VERDICT seq=1 kind=pass label=x detail= extra=1").is_none()
+        );
+        // Dangling escape.
+        assert!(verdict_line::parse("PATINA_VERDICT seq=1 kind=pass label=x\\ detail=").is_none());
+        // An empty label/detail is legal and decodes as empty.
+        let (_, _, label, detail) =
+            verdict_line::parse("PATINA_VERDICT seq=0 kind=pass label= detail=").unwrap();
+        assert!(label.is_empty() && detail.is_empty());
     }
 }

@@ -234,6 +234,20 @@ int32_t patina_lifecycle_setup_complete(void);
 int32_t patina_lifecycle_event(const uint8_t *label, size_t label_len);
 
 /*
+ * Verdict ABI: one verb, kinds as data. A guest reports what it concluded about
+ * its own run; the runtime records the call in the trace and emits a
+ * PATINA_VERDICT line. `label` aggregates verdicts (it shares the SDK site label
+ * namespace); `detail` is optional UTF-8, JSON by convention, recorded verbatim.
+ * An unrecognized `kind` is refused with EINVAL rather than defaulted.
+ * Kinds are pinned by patina_dst_abi::VerdictKind::as_abi.
+ */
+#define PATINA_VERDICT_VIOLATION 1u
+#define PATINA_VERDICT_PASS 2u
+#define PATINA_VERDICT_ABORT_INTENT 3u
+int32_t patina_verdict(uint32_t kind, const uint8_t *label, size_t label_len,
+                       const uint8_t *detail, size_t detail_len);
+
+/*
  * Managed threads and pthread synchronization under the deterministic
  * scheduler. The opt-in POSIX layer routes pthread_create/join/detach/exit,
  * pthread_mutex_*, and pthread_cond_* through these entry points so real host

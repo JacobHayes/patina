@@ -340,6 +340,13 @@ $ cargo patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina --fo
 `result` is `ok | violation | failure | error`. The selector is `--format`
 (not `--output`, which is the build/minimize artifact path).
 
+A guest that reports outcomes through the verdict ABI
+(`patina_dst::verdict(kind, label, detail)`, and every `always!` violation) adds
+a `verdicts` array — `{"seq":0,"kind":"violation","label":"ledger-sorted",
+"detail":"{\"row\": 12}"}` — so tooling reads structured results instead of
+grepping `markers`/`result_line` for strings. The field is omitted when the run
+reported none.
+
 ## Where to go next
 
 - Add the other fault domains: `--fs-crash-at`, `--fs-error-permille`,

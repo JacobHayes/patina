@@ -196,7 +196,9 @@ One line of JSON on stdout. Always: `schema`, `verb`, `result`
 (`native|wasi|cargo`), `artifact`, `fingerprint`, `seed`, `render`, `findings`
 (audit import/finding strings), `finding_details` (structured audit symbol,
 category, provenance), `output_path` + `content_hash` (build), `markers` (extracted
-`PATINA_*`/`*_VIOLATION`/`BUG_CAUGHT` lines), `result_line`, `stdout`, `stderr`,
+`PATINA_*`/`*_VIOLATION`/`BUG_CAUGHT` lines), `verdicts` (every verdict the guest
+reported through the verdict ABI, in call order: `{seq, kind, label, detail}`;
+omitted when the run reported none), `result_line`, `stdout`, `stderr`,
 `message`, optional `config` provenance, optional native `coverage` =
 `{edges_total, edges_covered, covered_permille, hits_total, hits_max, saturated,
 map_path?}`, optional WASI `depth` =
@@ -227,8 +229,16 @@ dev-dependency use under plain `cargo test`.
 - `patina_dst::buggify!("label")` -> bool: fires on a rare, seed-deterministic path.
 - `patina_dst::buggify_with_prob!("label", 0.9)`, `patina_dst::buggify_delay!("label")`,
   `patina_dst::buggify_knob!("label", default, lo, hi)` -> value.
-- `patina_dst::always!(cond, "label")`: fatal invariant; a violation emits
-  `PATINA_ALWAYS_VIOLATION` and aborts.
+- `patina_dst::always!(cond, "label")`: fatal invariant; a violation reports a
+  `violation` verdict (below), emits `PATINA_ALWAYS_VIOLATION`, and aborts.
+- `patina_dst::verdict(VerdictKind::{Violation,Pass,AbortIntent}, "label", "detail")`:
+  report a structured outcome. One ABI verb; kinds are data. Recorded as a trace
+  event (replay reproduces it; a divergent verdict stream fails closed), printed
+  as a `PATINA_VERDICT` line, and surfaced in `--format json` as `verdicts[]`
+  (`seq`, `kind`, `label`, `detail`). A verdict changes no control flow:
+  `AbortIntent` attributes an abort the guest performs itself. Labels share the
+  `sites.json` namespace but register no site, so the duplicate-label rule does
+  not apply and repeating a label is how verdicts aggregate.
 - `patina_dst::sometimes!(cond, "label")`, `patina_dst::reachable!("label")`: coverage.
 - `patina_dst::lifecycle::setup_complete()`, `patina_dst::lifecycle::event!("name")`.
 - `patina_dst::rng()`: seed-bridged deterministic entropy. `patina_dst::is_simulated()`.
@@ -257,6 +267,12 @@ dev-dependency use under plain `cargo test`.
 - `PATINA_SDK_REPORT` (stderr) reports buggify site registration/activation/firing; each `site=` row ends with `|@<file:line>`. `enabled=0 swarm_deselected=1` means buggify WAS requested and this generation's `--swarm` draw dropped it; `enabled=0 swarm_deselected=0` means it was never requested.
 - `PATINA_SWARM_REPORT` (stderr) reports the `--swarm` decision for every fault class: `candidates=N selected=M deselected=K vacuous=<0|1>` then one `class=<token>|<0|1>` row per candidate. A class that was never enabled appears in no row. `vacuous=1` means `--swarm` was requested with NO fault class enabled, so the draw had nothing to select and the run explored the plain configuration; the runtime warns and a campaign classifies that generation `VACUOUS_SWARM`. Dropping every candidate of a non-empty set is a legitimate draw (`vacuous=0`). Suppress with `PATINA_SWARM_REPORT=0`.
 - `PATINA_FS_FAULT_REPORT` (stderr) reports the filesystem fault plane per class: `eligible_ops=N`, then for each of the error/short/latency classes a `*_vacuity_diagnosable=<0|1>` bit and its applied count, then `vacuous=<0|1>`. The error and short classes each also carry a per-operation-kind breakdown of where their effects landed — `errors_by_op=open:1,read:2`, `shorts_by_op=write:3` — listing only the kinds that absorbed an effect, in a fixed order, and `-` when none did. The breakdown is what the scalar count cannot say: a knob that fired plenty but only ever on `open` left every post-open failure path untested. `vacuous=1` means a class was live over enough opportunities to expect several firings yet applied zero effects (it is silently inert on the exercised I/O path); the runtime warns and a campaign classifies that generation `VACUOUS_FS_FAULT`. Suppress with `PATINA_FS_FAULT_REPORT=0`.
+- `PATINA_VERDICT seq=N kind=<violation|pass|abort_intent> label=L detail=D`
+  (stderr) is emitted once per verdict ABI call, at the call, on every family.
+  `label`/`detail` escape whitespace (`\s`, `\t`, `\r`, `\n`) and backslash, so a
+  verdict is always exactly one line. Unlike the reports below it has NO
+  suppression variable: a verdict is the run's result, not a diagnostic. Prefer
+  the envelope's `verdicts[]` over parsing these lines.
 - Every end-of-run report above is on by default and is silenced by setting its
   own variable to a false-y value (`0`, `off`, `false`, `no`), on every family:
   `PATINA_SCHEDULE_REPORT`, `PATINA_SCHEDULE_POLICY_REPORT` (gates the

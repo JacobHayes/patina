@@ -97,6 +97,10 @@ pub const SUPPORTED_PATINA_SDK_IMPORTS: &[&str] = &[
     "rng",
     "lifecycle_setup_complete",
     "lifecycle_event",
+    // The verdict ABI. Its effect surface is a structured record in the host's
+    // own run state plus a diagnostic line — strictly less than `fd_write`
+    // already grants.
+    "verdict",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]

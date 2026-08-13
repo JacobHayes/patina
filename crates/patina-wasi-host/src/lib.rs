@@ -17,7 +17,7 @@ use std::fmt;
 use patina_dst_abi::{
     ClockKind, EffectError, ErrorCode, Fd, FsEntryKind, FsMetadata, OpenFlags, SeekWhence, SocketId,
 };
-use patina_dst_runtime::{BuggifyKind, Context, RuntimeError, SiteOutcome};
+use patina_dst_runtime::{BuggifyKind, Context, RuntimeError, SiteOutcome, VerdictKind};
 use patina_dst_target::{TargetError, WasiAudit};
 use wasmi::{
     AsContextMut, Caller, Config as WasmiConfig, Engine, Error as WasmiError, Extern, Linker,
@@ -2849,6 +2849,17 @@ fn patina_buggify_fatal(marker: &str, label: &str) -> WasmiError {
     WasmiError::new(format!("{marker} label={label}"))
 }
 
+/// Move the runtime's queued diagnostic lines (today: `PATINA_VERDICT`) into the
+/// captured guest stderr, mirroring the native shim's `drain_runtime_diagnostics`.
+/// The runtime performs no process I/O of its own mid-run, so every `patina_sdk`
+/// import that can produce a line drains it before returning or trapping.
+fn drain_runtime_diagnostics(host: &mut Preview1Host) {
+    for line in host.context.take_pending_diagnostics() {
+        host.stderr.extend_from_slice(line.as_bytes());
+        host.stderr.push(b'\n');
+    }
+}
+
 /// Shared body for the site-evaluating `patina_sdk` imports: read the label and
 /// call site from guest memory, invoke the context method, and map the outcome to
 /// `1`=fire / `0`=no, trapping on a fatal always-violation or duplicate label.
@@ -2867,6 +2878,9 @@ fn patina_sdk_site(
     let site = read_patina_label(&caller, site_ptr, site_len)?;
     let outcome = invoke(&mut caller.data_mut().context, &label, &site)
         .map_err(|error| WasmiError::new(error.to_string()))?;
+    // Before acting on the outcome: an `always!` violation lowers to a verdict,
+    // and the fatal arms below trap out of this function.
+    drain_runtime_diagnostics(caller.data_mut());
     match outcome {
         SiteOutcome::Fire => Ok(1),
         SiteOutcome::Ok => Ok(0),
@@ -3022,6 +3036,37 @@ fn define_patina_sdk(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError
             patina_sdk_site(caller, label, label_len, site, site_len, |ctx, l, s| {
                 ctx.reachable_mark(l, s)
             })
+        },
+    )?;
+    // The verdict ABI: one import, kinds as data — the wasm mirror of the shim's
+    // `patina_verdict`. An unrecognized kind traps rather than defaulting, so a
+    // guest built against a newer kind set fails closed instead of having its
+    // verdict silently reclassified.
+    linker.func_wrap(
+        MODULE,
+        "verdict",
+        |mut caller: Caller<'_, Preview1Host>,
+         kind: u32,
+         label: i32,
+         label_len: i32,
+         detail: i32,
+         detail_len: i32|
+         -> Result<i32, WasmiError> {
+            caller.data_mut().count_hostcall("verdict");
+            let kind = VerdictKind::from_abi(kind).ok_or_else(|| {
+                WasmiError::new(format!(
+                    "patina_sdk verdict: unknown verdict kind {kind}; the guest was built \
+against a newer verdict ABI than this runtime provides"
+                ))
+            })?;
+            let label = read_patina_label(&caller, label, label_len)?;
+            let detail = read_patina_label(&caller, detail, detail_len)?;
+            let host = caller.data_mut();
+            host.context
+                .verdict(kind, &label, &detail)
+                .map_err(|error| WasmiError::new(error.to_string()))?;
+            drain_runtime_diagnostics(host);
+            Ok(0)
         },
     )?;
     linker.func_wrap(

@@ -596,6 +596,9 @@ pub const OP_KINDS: &[(&str, Category)] = &[
     ("net_tcp_send", Category::Net),
     ("net_tcp_recv", Category::Net),
     ("net_tcp_shutdown", Category::Net),
+    // A guest verdict is not an effect on any simulated plane; it is the guest
+    // reporting a conclusion, so it carries no plane category of its own.
+    ("verdict", Category::Other),
 ];
 
 pub fn valid_op_kinds() -> BTreeSet<&'static str> {
@@ -659,6 +662,7 @@ pub fn operation_kind(operation: &Operation) -> &'static str {
         Operation::NetTcpSend { .. } => "net_tcp_send",
         Operation::NetTcpRecv { .. } => "net_tcp_recv",
         Operation::NetTcpShutdown { .. } => "net_tcp_shutdown",
+        Operation::Verdict { .. } => "verdict",
     }
 }
 
@@ -667,7 +671,7 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
     use patina_dst_abi::{
         ClockKind, Datagram, EffectError, ErrorCode, Fd, FsDirectoryEntry, FsEntryKind, FsMetadata,
         OpenFlags, SeekWhence, SendDisposition, SendReport, ShutdownHow, SocketId, TaskId,
-        TcpAccepted,
+        TcpAccepted, VerdictKind,
     };
 
     let metadata = FsMetadata {
@@ -946,6 +950,14 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
             Operation::NetTcpShutdown {
                 socket: SocketId(4),
                 how: ShutdownHow::Both,
+            },
+            Outcome::Unit,
+        ),
+        (
+            Operation::Verdict {
+                verdict_kind: VerdictKind::Violation,
+                label: "two-leaders".into(),
+                detail: "{\"term\":4}".into(),
             },
             Outcome::Unit,
         ),

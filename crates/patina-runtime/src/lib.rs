@@ -82,9 +82,11 @@ use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
+pub use patina_dst_abi::VerdictKind;
 use patina_dst_abi::{
     ClockKind, Datagram, EffectError, ErrorCode, Fd, FsDirectoryEntry, FsMetadata, OpenFlags,
     Operation, Outcome, SeekWhence, SendReport, ShutdownHow, SocketId, TaskId, TcpAccepted,
+    verdict_line,
 };
 use patina_dst_driver_api::{ClockDriver, EntropyDriver, FsDriver, NetDriver, SchedulerDriver};
 use patina_dst_fs_crash::CrashFs;
@@ -2379,6 +2381,8 @@ impl RuntimeBuilder {
             clock_report: patina_dst_driver_api::ClockFaultReport::default(),
             schedule: ScheduleTracker::default(),
             buggify: Buggify::new(self.config.buggify, root_seed),
+            verdicts: Vec::new(),
+            pending_diagnostics: Vec::new(),
             liveness,
             swarm: swarm_record,
             reports: self.config.reports,
@@ -3019,6 +3023,29 @@ pub enum SiteOutcome {
     DuplicateLabel,
 }
 
+/// One verdict a guest reported through the verdict ABI, in call order.
+///
+/// `seq` is the run-scoped call index (from 0), so a verdict stream is ordered
+/// and countable without timestamps. The record is what the trace's
+/// [`Operation::Verdict`] event and the `PATINA_VERDICT` marker line both
+/// describe; see [`Context::verdict`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerdictRecord {
+    pub seq: u64,
+    pub kind: VerdictKind,
+    pub label: String,
+    pub detail: String,
+}
+
+impl VerdictRecord {
+    /// The `PATINA_VERDICT` diagnostic line for this verdict (no trailing
+    /// newline). Rendered by the shared ABI codec so the producer here and the
+    /// `patina.result/v1` envelope's parser cannot drift.
+    pub fn marker_line(&self) -> String {
+        verdict_line::render(self.seq, self.kind, &self.label, &self.detail)
+    }
+}
+
 /// One link-time declared cooperative-SUT site, keyed by its unique explicit
 /// label. Declarations come from SDK macro linker sections and do not imply that
 /// the site was evaluated in this run.
@@ -3430,6 +3457,17 @@ pub struct Context {
     /// Cooperative-SUT (buggify) site registry and decision engine. Inert when
     /// buggify is disabled, so a run that does not opt in is unaffected.
     buggify: Buggify,
+    /// Every verdict the guest reported this run, in call order. Also recorded in
+    /// the trace as [`Operation::Verdict`], so a replay reproduces the stream.
+    verdicts: Vec<VerdictRecord>,
+    /// Diagnostic lines the runtime produced but has not printed. The runtime
+    /// performs no process I/O in the middle of a run — the same doctrine
+    /// [`SiteOutcome`] follows — so the embedder drains this after each entry
+    /// point and writes the lines into its own captured stderr, where they
+    /// interleave with guest output and survive an abort's flush. Whatever is
+    /// still pending at [`Context::finish`] is printed there, which is what makes
+    /// the in-process (cargo-family) path work with no embedder to drain it.
+    pending_diagnostics: Vec<String>,
     /// Virtual-time liveness watchdog. Inert (`active == false`) unless a budget is
     /// configured on a record/seeded run, so a run that does not opt in — and every
     /// replay — is byte-for-byte unchanged.
@@ -3714,9 +3752,64 @@ impl Context {
         Ok(Ok(value))
     }
 
+    /// Report one guest verdict — the runtime half of the verdict ABI
+    /// (`patina_verdict` natively, the `patina_sdk` `verdict` import on WASI, and
+    /// this method directly for an in-process cargo-family guest).
+    ///
+    /// The call is recorded as an [`Operation::Verdict`] boundary event, so a
+    /// replay whose verdict stream diverges from the recording fails closed like
+    /// any other operation mismatch, and the run's `PATINA_VERDICT` marker line
+    /// is queued for the embedder to surface (see `pending_diagnostics`). The
+    /// verdict itself has no effect on control flow: a `Violation` does not
+    /// abort, and an `AbortIntent` does not abort — it *attributes* an abort the
+    /// guest is about to perform itself.
+    pub fn verdict(
+        &mut self,
+        kind: VerdictKind,
+        label: &str,
+        detail: &str,
+    ) -> Result<VerdictRecord, RuntimeError> {
+        let operation = Operation::Verdict {
+            verdict_kind: kind,
+            label: label.to_string(),
+            detail: detail.to_string(),
+        };
+        let expected = self.replay_expected(&operation)?;
+        self.reconcile(operation, expected, Outcome::Unit)?;
+        let record = VerdictRecord {
+            seq: self.verdicts.len() as u64,
+            kind,
+            label: label.to_string(),
+            detail: detail.to_string(),
+        };
+        self.pending_diagnostics.push(record.marker_line());
+        self.verdicts.push(record.clone());
+        Ok(record)
+    }
+
+    /// Every verdict reported so far, in call order.
+    pub fn verdicts(&self) -> &[VerdictRecord] {
+        &self.verdicts
+    }
+
+    /// Take the diagnostic lines the runtime has queued but not printed. The
+    /// embedder calls this after every SDK entry point and writes each line to
+    /// its captured stderr; see `Context::pending_diagnostics`.
+    pub fn take_pending_diagnostics(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_diagnostics)
+    }
+
     /// Evaluate an `always!` invariant. A false condition is a fatal violation
     /// whenever running under the simulator, independent of buggify being
     /// enabled — the embedder emits the marker and aborts.
+    ///
+    /// A violation lowers to the verdict ABI: it reports
+    /// `VerdictKind::Violation` under the site's label (with the `file:line`
+    /// identity as the detail) before returning, so the failure reaches the trace
+    /// and the result envelope structurally. This is the SDK-surface lowering
+    /// §4.1 of the outcome-channel arc calls for; the embedders additionally keep
+    /// printing their `PATINA_ALWAYS_VIOLATION` marker, a deliberate transitional
+    /// dual-emit that Wave B removes once the classifier reads the envelope.
     pub fn always_check(
         &mut self,
         label: &str,
@@ -3734,11 +3827,11 @@ impl Context {
         entry.reachable = true;
         entry.eval_count += 1;
         if condition {
-            Ok(SiteOutcome::Ok)
-        } else {
-            entry.always_violated = true;
-            Ok(SiteOutcome::AlwaysViolation)
+            return Ok(SiteOutcome::Ok);
         }
+        entry.always_violated = true;
+        self.verdict(VerdictKind::Violation, label, site)?;
+        Ok(SiteOutcome::AlwaysViolation)
     }
 
     /// Evaluate a `sometimes!` coverage oracle: note the site reached, and
@@ -5235,6 +5328,15 @@ impl Context {
     /// write the trace. Consumes the context; [`run`]/[`run_with`] call this
     /// automatically, on error paths too.
     pub fn finish(mut self) -> Result<(), RuntimeError> {
+        // Any runtime diagnostic no embedder drained. The shim and the WASI host
+        // drain after each SDK entry point so the lines interleave with guest
+        // output; an in-process (cargo-family) guest has no embedder, and this is
+        // where its verdicts reach stderr. Drained, so nothing can print twice.
+        // Deliberately not gated by `ReportConfig`: a verdict is the run's
+        // result, not a diagnostic, and a suppressible result is a silent hole.
+        for line in self.take_pending_diagnostics() {
+            eprintln!("{line}");
+        }
         emit_schedule_report(self.reports, &self.schedule.diagnostics());
         // Swarm selection diagnostic. Default-on for every masked run so which
         // classes this generation actually carried is never left to inference
@@ -7344,6 +7446,118 @@ mod tests {
         let mut c = buggify_context(12, BuggifyConfig::default());
         let seq_c: Vec<u64> = (0..8).map(|_| c.buggify_rng()).collect();
         assert_ne!(seq_a, seq_c);
+    }
+
+    #[test]
+    fn verdicts_are_recorded_queued_and_drained_once() {
+        let mut context = buggify_context(11, BuggifyConfig::default());
+        let first = context
+            .verdict(VerdictKind::Pass, "queue drained", "")
+            .unwrap();
+        let second = context
+            .verdict(VerdictKind::AbortIntent, "checksum", "{\"page\":7}")
+            .unwrap();
+        assert_eq!((first.seq, second.seq), (0, 1));
+        assert_eq!(context.verdicts().len(), 2);
+        // The queued lines are exactly the records, and draining is a move: a
+        // second drain yields nothing, so no embedder can double-print them.
+        let lines = context.take_pending_diagnostics();
+        assert_eq!(
+            lines,
+            vec![first.marker_line(), second.marker_line()],
+            "queued diagnostics must be the verdict marker lines in call order"
+        );
+        assert!(context.take_pending_diagnostics().is_empty());
+        assert_eq!(
+            lines[0],
+            "PATINA_VERDICT seq=0 kind=pass label=queue\\sdrained detail="
+        );
+        // The reported set survives the drain: draining is a print queue, not the
+        // record of what happened.
+        assert_eq!(context.verdicts().len(), 2);
+    }
+
+    #[test]
+    fn always_violation_lowers_to_a_violation_verdict() {
+        let mut context = buggify_context(5, BuggifyConfig::default());
+        assert_eq!(
+            context.always_check("inv", "src/main.rs:9", true).unwrap(),
+            SiteOutcome::Ok
+        );
+        assert!(
+            context.verdicts().is_empty(),
+            "a satisfied always! must report nothing"
+        );
+        assert_eq!(
+            context.always_check("inv", "src/main.rs:9", false).unwrap(),
+            SiteOutcome::AlwaysViolation
+        );
+        let verdict = context.verdicts().last().expect("violation verdict");
+        assert_eq!(verdict.kind, VerdictKind::Violation);
+        assert_eq!(verdict.label, "inv");
+        assert_eq!(verdict.detail, "src/main.rs:9");
+    }
+
+    #[test]
+    fn verdict_stream_records_replays_and_refuses_a_divergent_replay() {
+        let directory = tempdir().unwrap();
+        let trace = directory.path().join("verdicts.patina");
+
+        let mut context = Context::from_config(RuntimeConfig::record(3, &trace, "fp")).unwrap();
+        context.entropy_bytes(4).unwrap();
+        context
+            .verdict(VerdictKind::Pass, "phase-one", "a")
+            .unwrap();
+        context
+            .verdict(VerdictKind::Violation, "two-leaders", "{\"term\":4}")
+            .unwrap();
+        context.finish().unwrap();
+
+        // The verdicts are trace events, not just diagnostics.
+        let bundle = TraceBundle::load(&trace).unwrap();
+        let recorded: Vec<_> = bundle
+            .resolved_timeline("main")
+            .unwrap()
+            .into_iter()
+            .filter_map(|event| match event.operation {
+                Operation::Verdict {
+                    verdict_kind,
+                    label,
+                    ..
+                } => Some((verdict_kind, label)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            recorded,
+            vec![
+                (VerdictKind::Pass, "phase-one".to_string()),
+                (VerdictKind::Violation, "two-leaders".to_string()),
+            ]
+        );
+
+        // Replaying the same verdict stream reconciles cleanly.
+        let mut replay = Context::from_config(RuntimeConfig::replay(&trace, "fp")).unwrap();
+        replay.entropy_bytes(4).unwrap();
+        replay.verdict(VerdictKind::Pass, "phase-one", "a").unwrap();
+        replay
+            .verdict(VerdictKind::Violation, "two-leaders", "{\"term\":4}")
+            .unwrap();
+        replay.finish().unwrap();
+
+        // A replay whose verdict stream diverges — same labels, different kind —
+        // fails closed like any other operation mismatch rather than being
+        // reconciled away.
+        let mut diverged = Context::from_config(RuntimeConfig::replay(&trace, "fp")).unwrap();
+        diverged.entropy_bytes(4).unwrap();
+        let error = diverged
+            .verdict(VerdictKind::Violation, "phase-one", "a")
+            .expect_err("a diverging verdict must be refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("mismatch"),
+            "expected an operation mismatch, got: {message}"
+        );
     }
 
     #[test]
