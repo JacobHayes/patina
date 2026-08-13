@@ -500,3 +500,10 @@ cluster so the fixes have citable symptom records.
   wave's two builders (TSC, minimize-CLI) shared one working copy, which caused
   a fmt-clobber and interleaved doc edits — resolved, but the standing rule is
   now separate worktrees for concurrent builders.
+- **2026-08-13 — TSC-slice arm64 residual closed.** With the user-authorized
+  MRE `target/` cleanup freeing 4.2 GB on the Tart VM (sources untouched), the
+  previously disk-blocked full `validate-native-shim.sh` ran on arm64 Linux at
+  main `026269f2`: EXIT 0, TSC legs loud-SKIP with the correct refusal
+  rationale (aarch64 has no counter trap; `mrs CNTVCT_EL0` stays a
+  cpu-nondeterminism refusal), SUD refusal branch green. All three platforms
+  now have full evidence for the wave.
