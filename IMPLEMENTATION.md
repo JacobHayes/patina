@@ -380,7 +380,8 @@ Completed foundations (outcome-channel arc, Wave A — the verdict ABI):
 Completed foundations (custom-ops arc, Wave A — record/replay custom operations):
 
 16. **Guest-declared custom operations.** `patina_custom_op_begin(label+len,
-    key+len, out_len)` returns "record" or "replay"; the guest then calls
+    key+len, fault_eligible, out_len)` returns "record", "replay", or "fault"
+    (a seeded fault fired — Wave B); the guest then calls
     `patina_custom_op_record(result+len)` or
     `patina_custom_op_replay_result(out, out_cap)`. The `patina_sdk`
     `custom_op_begin`/`custom_op_replay_result`/`custom_op_record` imports mirror

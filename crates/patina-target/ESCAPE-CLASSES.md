@@ -279,7 +279,7 @@ is stated plainly:
    Covered on **Linux** by the whole-run `strace` containment pass in
    `validate-native-shim.sh` (every file/net/clock/entropy/descriptor syscall in
    the run must match the loader/std prelude shape) and partially by
-   `scan_forbidden_instructions` (aarch64/x86_64 syscall opcodes are rejected at
+   `scan_instruction_classes` (aarch64/x86_64 syscall opcodes are rejected at
    audit time). **Honestly absent on macOS**: per the ktrace calibration
    (VALIDATION.md), no root-capable SIP-compatible whole-run tracer can separate
    the loader prelude from post-init guest syscalls, so an inlined post-init raw
@@ -290,11 +290,13 @@ is stated plainly:
    the libc-interposition probes (the interposed `clock_gettime`/`mach_absolute_time`
    are what std actually calls), not by the audit; a hand-rolled commpage reader
    that bypasses libc is a residual.
-3. **Instruction-level entropy / time** (`rdrand`/`rdtsc` on x86_64, `RNDR`/`MRS`
-   on aarch64, raw `svc`/`syscall`). `scan_forbidden_instructions` rejects the
-   `rdrand` and `rdtsc` x86 encodings, the aarch64 `RNDR` random-register read,
-   and the `svc`/`syscall` opcodes it knows; other encodings (e.g. `rdseed`) are
-   a residual.
+3. **Instruction-level entropy / time** (`rdrand`/`rdseed`/`rdtsc`/`rdtscp` on
+   x86_64, `RNDR`/`MRS` on aarch64, raw `svc`/`syscall`).
+   `scan_instruction_classes` decodes all of these: `rdtsc`/`rdtscp` are
+   trap-managed on x86-64 Linux, `rdrand`/`rdseed`/`CNTVCT` refuse everywhere,
+   and `cpuid` is reported visible-not-refused (host-identity). The residual is
+   encodings the decoder does not know, which refuse only when they sit at a
+   decode boundary the scan reaches.
 4. **Flag-dependent behavior of an allowlisted symbol.** `mmap(MAP_SHARED)` is a
    genuine IPC channel, but `mmap` is allowlisted as process-local memory and the
    audit cannot see the `MAP_SHARED` flag. Stated, not papered over: `mmap` is

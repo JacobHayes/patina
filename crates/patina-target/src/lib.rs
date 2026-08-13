@@ -271,7 +271,7 @@ pub fn native_host_identity_sites(bytes: &[u8]) -> Result<Vec<NativeEscape>, Tar
     let file = object::File::parse(bytes).map_err(TargetError::NativeParse)?;
     NativeFormat::from_binary(file.format())?;
     let provenance = NativeProvenanceIndex::new(&file);
-    Ok(scan_forbidden_instructions(&file, &provenance)?
+    Ok(scan_instruction_classes(&file, &provenance)?
         .into_iter()
         .filter(native_escape_is_host_identity)
         .collect())
@@ -393,7 +393,7 @@ impl NativeAudit {
         // The scan still classifies them in one place; only the disposition
         // differs.
         denied.extend(
-            scan_forbidden_instructions(&file, &provenance)?
+            scan_instruction_classes(&file, &provenance)?
                 .into_iter()
                 .filter(|escape| !native_escape_is_host_identity(escape)),
         );
@@ -1788,7 +1788,7 @@ fn sign_extend(value: u64, bits: u8) -> i64 {
 /// before the result reaches a denial set, or `cpuid` (which nearly every x86-64
 /// binary contains) starts refusing every guest. [`NativeAudit::audit`] does that
 /// filtering; [`native_host_identity_sites`] takes the other half.
-fn scan_forbidden_instructions(
+fn scan_instruction_classes(
     file: &object::File<'_>,
     provenance: &NativeProvenanceIndex,
 ) -> Result<Vec<NativeEscape>, TargetError> {
@@ -3674,7 +3674,7 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "thread_create_running",
     ];
     // Direct kernel entry by name (the libc wrapper). Inlined syscall
-    // *instructions* are caught separately by `scan_forbidden_instructions`.
+    // *instructions* are caught separately by `scan_instruction_classes`.
     const SYSCALL: &[&str] = &["syscall", "__syscall", "syscall_chk"];
     let classified = [
         (FILESYSTEM, "filesystem"),
@@ -4657,7 +4657,7 @@ mod tests {
     }
 
     // Default-deny for architectures the containment scan cannot decode.
-    // `scan_forbidden_instructions` once had a `_ => {}` arm that SILENTLY passed
+    // `scan_instruction_classes` once had a `_ => {}` arm that SILENTLY passed
     // any binary whose ISA it could not decode: a riscv64/s390x guest — including
     // one carrying a forbidden `ecall`/`svc` in `.text` — sailed through with zero
     // instructions examined, exactly the vacuous-gate failure mode the default-deny
@@ -4694,7 +4694,7 @@ mod tests {
 
             // Private scanner refuses.
             let provenance = NativeProvenanceIndex::new(&parsed);
-            let scan = scan_forbidden_instructions(&parsed, &provenance);
+            let scan = scan_instruction_classes(&parsed, &provenance);
             assert!(
                 matches!(scan, Err(TargetError::UnsupportedNativeArchitecture(_))),
                 "{label}: scan must refuse an undecodable arch, got {scan:?}"
@@ -4733,7 +4733,7 @@ mod tests {
             let elf = minimal_executable_elf64(machine, &[0u8; 8]);
             let parsed = object::File::parse(&*elf).expect("hand-built ELF must parse");
             let provenance = NativeProvenanceIndex::new(&parsed);
-            let scan = scan_forbidden_instructions(&parsed, &provenance);
+            let scan = scan_instruction_classes(&parsed, &provenance);
             assert!(
                 !matches!(scan, Err(TargetError::UnsupportedNativeArchitecture(_))),
                 "{label}: a supported arch must not be refused by the arch guard, got {scan:?}"

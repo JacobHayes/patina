@@ -375,7 +375,7 @@ unit suite — it is in the handful of **structurally unpaired classes** below
 |---|---|---|---|---|
 | Pre-run default-deny import audit (per-format allowlist, fail-closed on `unknown-import`) | `crates/patina-target/src/lib.rs` (`native_allowlisted_import`, `native_escape_category`); enforced in `cargo-patina` `run` | macOS Parker escape (a missed interposer passed silently) | **Class** | Catches any new uninterposed blocking/time/effect symbol. Limit: flat import list only, not inlined instructions or flag-dependent behavior. |
 | Per-class escape taxonomy + non-vacuity test | `patina-target` `every_escape_class_is_detected_and_denied`; e2e `native_run_prerun_gate_refuses_every_escape_class` | Escape-class rot | **Class** | One representative symbol per class must be named; a new class member trips it. |
-| Instruction scan (`scan_forbidden_instructions`: aarch64 `svc`/`mrs CNTVCT`/`RNDR`, x86 `syscall`/`rdtsc`/`rdtscp`/`rdrand`/`rdseed`) | `patina-target/src/lib.rs`; `walks_past_forbidden_bytes_embedded_in_operands`, `fails_closed_on_undecodable_bytes`, `refuses_binaries_of_undecodable_architectures` | Old byte-slide false-positive on operand-embedded bytes; silent pass on undecodable architectures | **Class** | Boundary-aware; discriminates operand bytes from real opcodes; undecodable *architectures* refuse loudly (`UnsupportedNativeArchitecture`, no escape hatch). Limit: known encodings only — `rdseed`, commpage `ldr` time reads are residual. |
+| Instruction scan (`scan_instruction_classes`: aarch64 `svc`/`mrs CNTVCT`/`RNDR`, x86 `syscall`/`rdtsc`/`rdtscp`/`rdrand`/`rdseed`) | `patina-target/src/lib.rs`; `walks_past_forbidden_bytes_embedded_in_operands`, `fails_closed_on_undecodable_bytes`, `refuses_binaries_of_undecodable_architectures` | Old byte-slide false-positive on operand-embedded bytes; silent pass on undecodable architectures | **Class** | Boundary-aware; discriminates operand bytes from real opcodes; undecodable *architectures* refuse loudly (`UnsupportedNativeArchitecture`, no escape hatch). Limit: known encodings only — commpage `ldr` time reads are residual; `cpuid` is decoded but deliberately visible-not-refused (host-identity class). |
 | Linux whole-run `strace` containment | `scripts/validate-native-shim.sh` (Linux branch) + planted-`openat` filter selftest | Inlined raw syscall (no import) | **Class** | Whole-run default-deny; planted escape proves non-vacuity. Linux-only; `PATINA_REQUIRE_STRACE=1` (set on all Linux CI jobs, which install strace) turns the missing-tool soft-skip into a hard failure. |
 | macOS whole-run containment | — | — | **NONE** | Honestly absent: `ktrace` cannot ground a sound gate. `PATINA_REQUIRE_KTRACE=1` hard-fails rather than reporting a vacuous check. Only static scan + import audit on macOS. |
 | Shim host-alias object scan | `cargo-patina` `tests/shim_host_alias.rs` (`shim_objects_name_no_undeclared_host_escape` + `planted_leak_is_caught`) | Dispatch-semaphore Parker sharing the baton's `--allow` | **Class** | Scans shim's own objects for undeclared host escapes; planted leak keeps it honest. |
@@ -419,8 +419,10 @@ unit suite — it is in the handful of **structurally unpaired classes** below
 3. **macOS guest `dlsym` of a non-deny-trapped blocked symbol** (e.g. `killpg`).
    Measured unreachable for any std guest, but no detector — relies on a guest not
    hand-writing `dlsym`. Low risk by measurement, unpaired in principle.
-4. **`mmap(MAP_SHARED)` / instruction-level `rdseed`.** Invisible to the symbol
-   audit and instruction scan; no detector.
+4. **`mmap(MAP_SHARED)`.** Invisible to the symbol audit (the flag is not in
+   the import table); no detector. (`rdseed` no longer belongs here: the TSC
+   slice added its decode row, and `classifies_rdtscp_and_rdseed` pins it as a
+   refuse-only cpu-nondeterminism finding.)
 
 Closed 2026-07-28 (previously ranked here): CI-absent `strace` (now installed +
 `PATINA_REQUIRE_STRACE=1` on every Linux job), classifier selftests absent from
