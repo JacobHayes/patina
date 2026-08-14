@@ -70,7 +70,13 @@ unsafe extern "C" {
 /// the novel/failing generations (v1's `runs` dumped every generation), and an
 /// `artifacts` object points at the full on-disk detail.
 const CAMPAIGN_ENVELOPE_SCHEMA: &str = "patina.campaign/v2";
-const CAMPAIGN_STATE_SCHEMA: &str = "patina.campaign.state/v1";
+/// The out-dir's resumable state. `v2` adds `verdicts` to every notable run: the
+/// `(kind, label)` set the generation reported through the verdict ABI, which is
+/// what `minimize --generation N` targets when no `--marker` is given. It is a
+/// required field, not an optional one — a v1 out-dir is refused by name rather
+/// than resumed with a silently empty verdict set that would make an auto-target
+/// minimize look like "this generation reported nothing".
+const CAMPAIGN_STATE_SCHEMA: &str = "patina.campaign.state/v2";
 const CAMPAIGN_SIGNATURES_SCHEMA: &str = "patina.campaign.signatures/v1";
 const DEFAULT_PLATEAU_AFTER: u64 = 200;
 
@@ -901,12 +907,78 @@ const SIGABRT: i32 = 6;
 const SIGABRT_EXIT: i32 = 128 + SIGABRT;
 
 /// One verdict the generation reported through the verdict ABI, reduced to what
-/// classification and signatures need. Lifted from the envelope's `verdicts[]`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// classification, signatures and `minimize`'s auto-target need. Lifted from the
+/// envelope's `verdicts[]`.
+///
+/// `detail` is deliberately not carried: it is free-form per-call payload (an
+/// outcome digest, a job id, a byte offset), so two runs of the same failure
+/// routinely disagree on it. Identity is `(kind, label)` — the aggregation key
+/// the arc took from Antithesis and the one `sites.json` labels already share.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct VerdictFacts {
     /// The `VerdictKind` token (`violation`, `pass`, `abort_intent`).
     pub kind: String,
     pub label: String,
+}
+
+impl VerdictFacts {
+    /// Whether this verdict announces a failure rather than a confirmation.
+    ///
+    /// `violation` (an invariant the guest found broken) and `abort_intent` (a
+    /// deliberate fail-closed stop the guest is about to take) are the kinds that
+    /// describe something going wrong; `pass` is the guest reporting that a
+    /// property held, which is not a failure anything can be minimized against.
+    pub fn is_failure(&self) -> bool {
+        self.kind == "violation" || self.kind == "abort_intent"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({ "kind": self.kind.clone(), "label": self.label.clone() })
+    }
+
+    fn from_json(value: &serde_json::Value) -> Result<Self, String> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| "notable run verdict must be an object".to_string())?;
+        let facts = VerdictFacts {
+            kind: json_required_str(object, "kind")?.to_string(),
+            label: json_required_str(object, "label")?.to_string(),
+        };
+        if facts.to_json() != *value {
+            return Err("notable run verdict is not in canonical lossless form".to_string());
+        }
+        Ok(facts)
+    }
+}
+
+/// **The recognition primitive** (outcome-channel arc §4.5): the verdicts a
+/// `patina.result/v1` envelope reports, in call order.
+///
+/// One mechanism, two consumers asking different questions of it. The campaign
+/// classifies *from* this set — the multi-way, open "which class did this
+/// generation land in?" of [`built_in_class`]. `minimize` captures a seed
+/// generation's set as a fixed TARGET and asks the binary "does this candidate
+/// still exhibit it?". Neither reimplements the other, so the classifier and the
+/// reducer can never disagree about what a run reported.
+pub fn recognize_verdicts(envelope: &serde_json::Value) -> Vec<VerdictFacts> {
+    let string = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    envelope
+        .get("verdicts")
+        .and_then(serde_json::Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .map(|row| VerdictFacts {
+                    kind: string(row.get("kind")),
+                    label: string(row.get("label")),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// One runtime-detected finding, reduced to its attribution. Lifted from the
@@ -1329,6 +1401,16 @@ struct GenerationOutcome {
     flags: Vec<String>,
     novel: bool,
     signature_key: Option<String>,
+    /// What this generation reported through the verdict ABI, from
+    /// [`recognize_verdicts`]. Persisted because it is the campaign's own record
+    /// of WHICH failure the generation was, and `minimize --generation N` needs
+    /// exactly that to build its oracle without being handed a `--marker`: the
+    /// campaign already recognized the failure, so re-deriving it from a fresh
+    /// run would only ask minimize to target whatever a re-run happens to
+    /// produce. The recorded set is the target; the seed re-run must then still
+    /// contain it, which is what makes an unreproducible target a refusal rather
+    /// than a tautology.
+    verdicts: Vec<VerdictFacts>,
 }
 
 impl GenerationOutcome {
@@ -1344,6 +1426,7 @@ impl GenerationOutcome {
             "novel": self.novel,
             "signature": self.signature_key.clone(),
             "flags": self.flags.clone(),
+            "verdicts": self.verdicts.iter().map(VerdictFacts::to_json).collect::<Vec<_>>(),
         })
     }
 
@@ -1376,6 +1459,13 @@ impl GenerationOutcome {
             ),
             None => return Err("notable run missing signature".to_string()),
         };
+        let verdicts = object
+            .get("verdicts")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "notable run verdicts must be an array".to_string())?
+            .iter()
+            .map(VerdictFacts::from_json)
+            .collect::<Result<Vec<_>, _>>()?;
         let outcome = GenerationOutcome {
             generation: json_required_u64(object, "generation")?,
             seed: json_required_u64(object, "seed")?,
@@ -1383,6 +1473,7 @@ impl GenerationOutcome {
             flags,
             novel: json_required_bool(object, "novel")?,
             signature_key,
+            verdicts,
         };
         if outcome.to_json() != *value {
             return Err("notable run is not in canonical lossless form".to_string());
@@ -2322,6 +2413,7 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
             flags,
             novel,
             signature_key,
+            verdicts: run.facts.facts.verdicts.clone(),
         };
         if outcome.is_notable() {
             state.notable_runs.push(outcome.clone());
@@ -2512,6 +2604,13 @@ impl GenerationRun {
     pub(crate) fn streams(&self) -> (&str, &str) {
         (&self.stdout, &self.stderr)
     }
+
+    /// What the run reported through the verdict ABI. Read off the child's own
+    /// envelope by [`recognize_verdicts`], so a reducer judging a candidate asks
+    /// the same question of it the classifier asked of the seed generation.
+    pub(crate) fn verdicts(&self) -> &[VerdictFacts] {
+        &self.facts.facts.verdicts
+    }
 }
 
 /// Reduce the child run's `patina.result/v1` envelope to the classifier's
@@ -2524,18 +2623,7 @@ fn facts_from_envelope(envelope: &serde_json::Value) -> RunFacts {
             .unwrap_or_default()
             .to_string()
     };
-    let verdicts = envelope
-        .get("verdicts")
-        .and_then(serde_json::Value::as_array)
-        .map(|rows| {
-            rows.iter()
-                .map(|row| VerdictFacts {
-                    kind: string(row.get("kind")),
-                    label: string(row.get("label")),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let verdicts = recognize_verdicts(envelope);
     let findings = envelope
         .get("runtime_findings")
         .and_then(serde_json::Value::as_array)
@@ -2587,17 +2675,21 @@ fn facts_from_envelope(envelope: &serde_json::Value) -> RunFacts {
     }
 }
 
-/// The child `run`'s own `patina.result/v1` envelope, if it produced one. The
+/// A child's own `patina.result/v1` run envelope, if it produced one. The
 /// envelope is a single JSON line on stdout; anything else the child wrote there
 /// is guest output the envelope itself carries, so the scan takes the last
 /// well-formed envelope line and is never confused by a guest that prints JSON.
 ///
-/// Only a `run` envelope counts. Under `--format json` a CLI-side failure emits
-/// an envelope of its own (`verb: "cli"`, `result: "error"`) — a build failure, a
+/// The verb is `run` for a `replay` child too: the envelope describes the run
+/// that happened, not the command that asked for it.
+///
+/// Only a run envelope counts. Under `--format json` a CLI-side failure emits an
+/// envelope of its own (`verb: "cli"`, `result: "error"`) — a build failure, a
 /// pre-run gate refusal, a supervisor error. That is patina declining to run the
-/// generation at all, not a result for it, and it classifies INFRA through the
-/// no-envelope rule.
-fn generation_envelope(stdout: &str) -> Option<serde_json::Value> {
+/// child at all, not a result for it: for a campaign generation it classifies
+/// INFRA through the no-envelope rule, and for a `minimize` candidate it means
+/// the candidate reported nothing and is rejected.
+pub(crate) fn run_envelope(stdout: &str) -> Option<serde_json::Value> {
     stdout.lines().rev().find_map(|line| {
         let line = line.trim();
         if !line.starts_with('{') {
@@ -2722,7 +2814,7 @@ fn run_generation(
     // The child's own captured guest output travels inside the envelope; without
     // one (a build failure, a pre-run refusal, a timeout kill) the child's raw
     // streams are all there is.
-    let envelope = generation_envelope(&child_stdout);
+    let envelope = run_envelope(&child_stdout);
     let mut facts = match &envelope {
         Some(envelope) => facts_from_envelope(envelope),
         None => RunFacts {
@@ -3426,6 +3518,9 @@ pub(crate) struct GenerationRepro {
     pub(crate) guest_args: Vec<String>,
     pub(crate) timeout_secs: u64,
     pub(crate) class: String,
+    /// The verdicts the campaign recognized in this generation, in call order.
+    /// `minimize --generation` targets these when no `--marker` is given.
+    pub(crate) verdicts: Vec<VerdictFacts>,
 }
 
 /// Read one generation of a recorded campaign back out of its out-dir.
@@ -3476,6 +3571,7 @@ pub(crate) fn generation_repro(
         guest_args: state.spec.guest_args.clone(),
         timeout_secs: state.spec.timeout_secs,
         class: outcome.class.as_str().to_string(),
+        verdicts: outcome.verdicts.clone(),
     })
 }
 
@@ -4231,7 +4327,9 @@ fn print_coverage_summary(
 /// disclosure: the top level carries the class-count histogram and the deduped
 /// signatures; `notable_runs` holds per-generation detail ONLY for novel and
 /// failing generations (the interesting minority — an OK generation adds no
-/// triage value and is fully accounted for by `classes`); and `artifacts` points
+/// triage value and is fully accounted for by `classes`), each carrying the
+/// `verdicts` it reported so a reader — `minimize --generation` included — can
+/// see WHICH failure it was without replaying it; and `artifacts` points
 /// at the full on-disk detail (the state file, signature store, saved failing
 /// traces, optional reports) so nothing the v1 all-runs dump exposed becomes
 /// unreachable. Pure (returns the `Value`) so the shape is unit-testable without
@@ -5517,6 +5615,7 @@ mod tests {
             flags: Vec::new(),
             novel,
             signature_key: class.is_failure().then(|| "LIVENESS|shape|".to_string()),
+            verdicts: Vec::new(),
         };
         let outcomes = vec![
             mk(0, CampaignClass::Ok, false),
@@ -5843,6 +5942,10 @@ mod tests {
             flags: vec!["--liveness-watchdog".to_string(), "5".to_string()],
             novel: true,
             signature_key: Some(key),
+            verdicts: vec![VerdictFacts {
+                kind: "violation".to_string(),
+                label: "no-loss".to_string(),
+            }],
         });
         state.invocations.push(InvocationRecord {
             cli: "campaign guest --gens 3".to_string(),
@@ -5860,9 +5963,40 @@ mod tests {
             "state serialize -> load -> serialize must be byte-stable"
         );
 
+        // The notable run's verdicts are what `minimize --generation` targets
+        // without a --marker, so they have to survive the round trip by name.
+        assert_eq!(
+            parsed_json["notable_runs"][0]["verdicts"],
+            serde_json::json!([{"kind": "violation", "label": "no-loss"}]),
+        );
+        assert_eq!(
+            loaded.notable_runs[0].verdicts,
+            state.notable_runs[0].verdicts
+        );
+
         let mut bad_schema = parsed_json.clone();
         bad_schema["schema"] = "patina.campaign.state/v999".into();
         assert!(CampaignState::from_json(&bad_schema).is_err());
+        // A v1 out-dir has no `verdicts` on its notable runs. It is refused by
+        // name rather than read as "this generation reported nothing", which
+        // would make an auto-target minimize refuse for the wrong reason.
+        let mut v1 = parsed_json.clone();
+        v1["schema"] = "patina.campaign.state/v1".into();
+        v1["notable_runs"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("verdicts");
+        let error = CampaignState::from_json(&v1).unwrap_err();
+        assert!(
+            error.starts_with("unsupported schema"),
+            "unexpected error: {error}"
+        );
+        let mut missing_verdicts = parsed_json.clone();
+        missing_verdicts["notable_runs"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("verdicts");
+        assert!(CampaignState::from_json(&missing_verdicts).is_err());
         let mut bad_class = parsed_json;
         bad_class["classes"] = serde_json::json!({"MYSTERY": 1, "OK": 1});
         assert!(CampaignState::from_json(&bad_class).is_err());

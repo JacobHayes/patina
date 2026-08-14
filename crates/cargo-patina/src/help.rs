@@ -2005,7 +2005,7 @@ const MINIMIZE: Verb = Verb {
     name: "minimize",
     summary: "Reduce a failing campaign generation, a recorded trace, or experiment inputs.",
     synopsis: &[
-        "cargo patina minimize --generation <N> --marker <TEXT> [--out-dir <DIR>] [--output <PATH>] [--no-trace-phase] [--jobs N]",
+        "cargo patina minimize --generation <N> [--out-dir <DIR>] [--marker <TEXT>] [--output <PATH>] [--no-trace-phase] [--jobs N]",
         "cargo patina minimize <TRACE> --output <PATH> [-o <PATH>] [--timeline ID] [--prune-branches] [--jobs N] -- <ORACLE> [ARGS]...",
         "cargo patina minimize --scenario --seed <U64> [--param K=V]... [--seed-budget N] -- <ORACLE> [ARGS]...",
     ],
@@ -2015,8 +2015,12 @@ knobs first: it delta-debugs the fault-knob vector that generation drew (each \
 candidate is a fresh seeded `run`, so the answer is a standalone reproduction \
 command, printed and written into the out-dir), then delta-debugs a trace recorded \
 from that minimal-knob run. --no-trace-phase stops after the knobs. The oracle is \
-patina's own — it replays the candidate and requires BOTH the --marker text and a \
-clean replay — so candidates are hermetic and evaluated in parallel by default.\n\
+patina's own and needs no hand-written failure text: it targets the verdicts the \
+campaign recorded for that generation, and a candidate still fails only when it \
+reports every one of them AND the replay did not diverge — so candidates are \
+hermetic and evaluated in parallel by default. --marker overrides the target with \
+literal failure text, for a guest that reports nothing through the verdict ABI; a \
+generation with neither is refused rather than reduced against a guess.\n\
 \n\
 `minimize <TRACE>` shrinks a recorded trace: an unbranched main timeline or a leaf \
 --timeline ID is delta-debugged directly, while a branched bundle is shrunk under a \
@@ -2088,7 +2092,7 @@ PATINA_SEED/PATINA_PARAMS_JSON protocol.",
                     "--marker",
                     None,
                     Value::Required("TEXT", Kind::Symbol),
-                    "Failure text the built-in oracle requires on a candidate's output; `A|B` matches either.",
+                    "Override the auto-derived verdict target with failure text the built-in oracle requires on a candidate's output; `A|B` matches either.",
                     false,
                 ),
                 f(

@@ -62,8 +62,11 @@ accumulated coverage. `minimize` reduces what a campaign found: pointed at a
 failing generation it shrinks the fault-knob vector first — the answer is a
 standalone reproduction command naming the one or two faults that matter, which
 is both the cheaper search and the more useful answer — and then shrinks a trace
-recorded from that reduction. It also shrinks a trace on its own, or the seed and
-parameters that trigger a failure, against an oracle you supply.
+recorded from that reduction. That path needs no oracle from you: the campaign
+already recognized the generation through the verdict channel, and preserving
+those verdicts is the question every candidate is judged on. `minimize` also
+shrinks a trace on its own, or the seed and parameters that trigger a failure,
+against an oracle you supply.
 
 **Fault domains** (all seed-driven, off by default, and recorded into the trace
 so replay reproduces them): filesystem crashes at a chosen operation and ordinal,
@@ -260,11 +263,14 @@ class of confusing first-run failures.
   held is a `Pass` whose detail can carry your outcome digest. Each call is a
   recorded trace event (so replay reproduces the verdict stream byte-identically,
   and a divergent one fails closed) and lands in the result envelope's
-  `verdicts[]`, which is what the campaign classifier and a `minimize` oracle
-  read. `always!` lowers to the same channel. A guest that only *prints* its
-  findings is a level-1 guest: it can still be classified, but only by declaring
-  its patterns explicitly in the campaign spec — patina never carries a guest's
-  strings. Keep the printed lines if you like them in logs; just make sure
+  `verdicts[]`, which is the one thing both the campaign classifier and
+  `minimize`'s built-in oracle read: a campaign asks which class the run landed
+  in, and a reduction of that generation asks whether a candidate still reports
+  the same verdicts. `always!` lowers to the same channel. A guest that only
+  *prints* its findings is a level-1 guest: it can still be classified, but only
+  by declaring its patterns explicitly in the campaign spec, and reducing one of
+  its failures means naming the failure text by hand — patina never carries a
+  guest's strings. Keep the printed lines if you like them in logs; just make sure
   nothing downstream depends on them.
 - **Static constructors run before the runtime exists.** A `#[ctor]`-style
   initializer that touches an interposed surface (tracing setup, env reads,

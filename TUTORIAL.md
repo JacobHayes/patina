@@ -364,10 +364,14 @@ reported none.
   and replay needs no extra flags.
 - Make atomics-only race windows schedulable: `cargo patina build --yield-points`.
 - Reduce a campaign failure to a one-line reproduction: `cargo patina minimize
-  --generation 14 --out-dir out/ --marker 'wal corruption'` delta-debugs that
-  generation's fault knobs first (usually 17-18 down to 1-2, in about twenty
-  seeded re-runs), prints the standalone command that still fails, and then
-  shrinks a trace recorded from it. Add `--no-trace-phase` for the knobs alone.
+  --generation 14 --out-dir out/` delta-debugs that generation's fault knobs
+  first (usually 17-18 down to 1-2, in about twenty seeded re-runs), prints the
+  standalone command that still fails, and then shrinks a trace recorded from
+  it. Add `--no-trace-phase` for the knobs alone. There is no oracle to write:
+  the failure being preserved is the set of verdicts the campaign recorded for
+  that generation, and the completion line names it (`target=verdicts[…]`). A
+  guest that reports nothing through the verdict ABI is refused with a pointer
+  to `--marker 'wal corruption'`, which names the failure text instead.
 - Shrink a failing trace to its essence against your own oracle:
   `cargo patina minimize bug.patina --output small.patina -- ./oracle`.
 - See `llms.txt` for the full CLI/SDK map and `testbeds/workq` (a durable work

@@ -2755,7 +2755,8 @@ fn parse_minimize_generation(
 ) -> Result<minimize::GenerationMinimize, CliError> {
     if arguments.iter().any(|argument| argument == "--") {
         return Err(CliError::usage(
-            "minimize --generation builds its own oracle (--marker) and takes no `-- <ORACLE>`",
+            "minimize --generation builds its own oracle from the generation's recorded verdicts \
+             (or --marker) and takes no `-- <ORACLE>`",
         ));
     }
     let args = cli::parse("minimize", help::Family::Generation, arguments)?;
@@ -2766,9 +2767,10 @@ fn parse_minimize_generation(
         generation: args
             .u64("--generation")
             .ok_or_else(|| CliError::usage("minimize --generation requires <N>"))?,
-        marker: args
-            .string("--marker")
-            .ok_or_else(|| CliError::usage("minimize --generation requires --marker <TEXT>"))?,
+        // Absent is the normal case: the target is auto-derived from the
+        // verdicts the campaign recorded for this generation, and a generation
+        // with none is refused by name rather than guessed at.
+        marker: args.string("--marker"),
         output: args.path("--output"),
         trace_phase: !args.flag("--no-trace-phase"),
         jobs: args.usize("--jobs"),
@@ -9610,8 +9612,7 @@ mod tests {
                 parse_minimize(with(prefix, &["--", "oracle"])).map(|_| ())
             }
             ("minimize", help::Family::Generation) => {
-                let mut prefix = unless("--generation", &["--generation=1"]);
-                prefix.extend(unless("--marker", &["--marker=boom"]));
+                let prefix = unless("--generation", &["--generation=1"]);
                 parse_minimize(with(prefix, &[])).map(|_| ())
             }
             ("minimize", help::Family::Scenario) => {

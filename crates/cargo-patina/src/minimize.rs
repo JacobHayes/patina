@@ -28,16 +28,32 @@
 //! concurrent invocations of someone's shell script would collide on a shared
 //! path, so an external oracle stays serial unless `--jobs` opts in.
 //!
-//! The built-in oracle (`--marker`) is different, and the difference is
-//! architectural rather than a promise: it replays the candidate through
-//! `cargo patina replay`, whose filesystem, clock, network and entropy are all
-//! virtualized, into a temp directory of its own. Two candidates cannot observe
-//! each other — they bind the same ports, write the same paths, and read the
-//! same clock without interacting — so patina parallelizes its own oracle by
-//! default. It also fails closed where a hand-written oracle usually does not:
-//! a candidate counts as still-failing only when the marker appears AND the
-//! replay did not diverge, so a candidate whose replay aborts after the guest
-//! already printed the marker is rejected rather than accepted.
+//! The built-in oracle is different, and the difference is architectural rather
+//! than a promise: it replays the candidate through `cargo patina replay`, whose
+//! filesystem, clock, network and entropy are all virtualized, into a temp
+//! directory of its own. Two candidates cannot observe each other — they bind
+//! the same ports, write the same paths, and read the same clock without
+//! interacting — so patina parallelizes its own oracle by default. It also fails
+//! closed where a hand-written oracle usually does not: a candidate counts as
+//! still-failing only when the target is present AND the replay did not diverge,
+//! so a candidate whose replay aborts after the guest already announced the
+//! failure is rejected rather than accepted.
+//!
+//! # What the oracle targets
+//!
+//! `minimize --generation N` derives its target from the campaign: the verdicts
+//! that generation reported through the verdict ABI are recorded in the out-dir,
+//! and the oracle's question becomes "does this candidate still report them?"
+//! (outcome-channel arc §4.5 — one recognition primitive,
+//! [`crate::campaign::recognize_verdicts`], two consumers). The campaign already
+//! recognized the failure; making the operator re-encode it as a substring was
+//! asking them to reproduce work patina had done.
+//!
+//! `--marker TEXT` overrides that, and is the level-1 escape hatch for a guest
+//! that announces nothing structurally: the same role spec-declared
+//! `classify.patterns` play for the classifier (arc §4.3). A generation with no
+//! failure verdict and no `--marker` is refused by name rather than reduced
+//! against a guessed target.
 
 use std::ffi::OsString;
 use std::io;
@@ -52,6 +68,7 @@ use patina_dst_minimize::{
 };
 use patina_dst_trace::TraceBundle;
 
+use crate::campaign::VerdictFacts;
 use crate::help;
 use crate::output;
 use crate::{CliError, ENV_MODE, ENV_PARAMS_JSON, ENV_SEED};
@@ -76,7 +93,9 @@ pub(crate) struct TraceMinimize {
 pub(crate) struct GenerationMinimize {
     pub(crate) out_dir: PathBuf,
     pub(crate) generation: u64,
-    pub(crate) marker: String,
+    /// The explicit `--marker` override. Absent means the target is auto-derived
+    /// from the verdicts the campaign recorded for this generation.
+    pub(crate) marker: Option<String>,
     /// Where the reduced trace lands; defaults under the out-dir.
     pub(crate) output: Option<PathBuf>,
     /// Whether to delta-debug a trace after the knobs (`--no-trace-phase`).
@@ -152,22 +171,133 @@ impl Marker {
             .iter()
             .any(|alternative| haystack.contains(alternative.as_str()))
     }
+}
 
-    /// Whether one candidate's output means "the failure is still present".
-    ///
-    /// Both halves are load-bearing. The marker alone is fail-open: a candidate
-    /// whose replay diverges *after* the guest printed the marker would be
-    /// accepted, and the search would then keep deleting on the strength of a
-    /// failure it never actually reproduced.
-    fn preserved(&self, stdout: &str, stderr: &str) -> bool {
-        if stderr.contains(REPLAY_DIVERGENCE) || stdout.contains(REPLAY_DIVERGENCE) {
-            return false;
-        }
-        self.matches(stderr) || self.matches(stdout)
+/// The verdicts a candidate must still report for the seed generation's failure
+/// to count as preserved: the `(kind, label)` pairs the campaign recognized in
+/// that generation, deduplicated.
+///
+/// Two choices are worth naming, both narrowing what is targeted rather than
+/// widening it:
+///
+/// * **Only failure verdicts.** A `pass` is the guest reporting that a property
+///   HELD, so preserving it would be preserving a success — and a reduced
+///   candidate that legitimately stops reaching some unrelated check would be
+///   rejected for it. `violation` and `abort_intent` are what a failure is made
+///   of ([`VerdictFacts::is_failure`]).
+/// * **Containment, not equality.** A candidate must still report every target
+///   verdict; verdicts it reports *in addition* are free. Equality would reject a
+///   candidate over an unrelated verdict it gained or lost, which has nothing to
+///   do with whether the targeted failure survived.
+///
+/// Every target verdict is required rather than any one of them, because the
+/// failure being preserved is the whole set the campaign found: a candidate that
+/// reproduces one of two broken invariants reproduces a different, weaker
+/// failure. `--marker` is the escape hatch for an operator who wants a looser
+/// question asked.
+///
+/// `detail` never participates — it is free-form per-call payload
+/// ([`crate::campaign::VerdictFacts`]).
+#[derive(Clone, Debug)]
+struct VerdictTarget {
+    wanted: Vec<VerdictFacts>,
+}
+
+impl VerdictTarget {
+    /// The failure verdicts of a recorded generation, deduplicated and ordered so
+    /// the rendering is stable. `None` when the generation reported none, which
+    /// is the caller's cue to refuse rather than to target nothing.
+    fn capture(recorded: &[VerdictFacts]) -> Option<Self> {
+        let mut wanted: Vec<VerdictFacts> = recorded
+            .iter()
+            .filter(|verdict| verdict.is_failure())
+            .cloned()
+            .collect();
+        wanted.sort();
+        wanted.dedup();
+        (!wanted.is_empty()).then_some(Self { wanted })
+    }
+
+    fn matches(&self, reported: &[VerdictFacts]) -> bool {
+        self.wanted
+            .iter()
+            .all(|target| reported.iter().any(|verdict| verdict == target))
+    }
+
+    fn render(&self) -> String {
+        self.wanted
+            .iter()
+            .map(|verdict| format!("{}:{}", verdict.kind, verdict.label))
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }
 
-/// Patina's own trace oracle: replay the candidate and require the marker plus a
+/// What one candidate run produced, as an oracle sees it.
+struct CandidateOutcome<'a> {
+    stdout: &'a str,
+    stderr: &'a str,
+    /// The candidate's own verdicts, from [`crate::campaign::recognize_verdicts`]
+    /// over its result envelope.
+    verdicts: &'a [VerdictFacts],
+}
+
+/// The failure `minimize --generation` is preserving.
+///
+/// Auto-target is the default and the `--marker` text is the explicit override
+/// (outcome-channel arc §4.5): the campaign already recognized what the seed
+/// generation was, so re-encoding it as a substring is work the operator should
+/// not have to do. `--marker` remains the level-1 escape hatch for a guest that
+/// reports nothing through the verdict ABI.
+#[derive(Clone, Debug)]
+enum Target {
+    Marker(Marker),
+    Verdicts(VerdictTarget),
+}
+
+impl Target {
+    /// Whether one candidate's outcome means "the failure is still present".
+    ///
+    /// The divergence half is load-bearing for both targets and is checked first.
+    /// Either signal alone is fail-open: a candidate whose replay diverges
+    /// *after* the guest reported the failure never actually reproduced it, and
+    /// the search would then keep deleting on the strength of a failure it never
+    /// observed.
+    fn preserved(&self, outcome: &CandidateOutcome<'_>) -> bool {
+        if outcome.stderr.contains(REPLAY_DIVERGENCE) || outcome.stdout.contains(REPLAY_DIVERGENCE)
+        {
+            return false;
+        }
+        match self {
+            Target::Marker(marker) => {
+                marker.matches(outcome.stderr) || marker.matches(outcome.stdout)
+            }
+            Target::Verdicts(target) => target.matches(outcome.verdicts),
+        }
+    }
+
+    /// How the target reads in a refusal and in the completion line's `target=`
+    /// field. Whitespace-free, because that line is a key=value stream readers
+    /// split on spaces.
+    fn render(&self) -> String {
+        match self {
+            Target::Marker(marker) => format!("marker[{}]", marker.alternatives.join("|")),
+            Target::Verdicts(target) => format!("verdicts[{}]", target.render()),
+        }
+    }
+
+    /// Whether judging a candidate needs its structured result envelope.
+    ///
+    /// A marker is looked for in the human-format output an operator would read,
+    /// exactly as they typed it; a verdict target reads `verdicts[]` off the
+    /// `patina.result/v1` envelope, which only `--format json` emits. Each target
+    /// asks its own question through the channel that carries the answer.
+    fn needs_envelope(&self) -> bool {
+        matches!(self, Target::Verdicts(..))
+    }
+}
+
+/// Patina's own trace oracle: replay the candidate and require the target plus a
 /// clean replay.
 struct ReplayOracle {
     self_exe: PathBuf,
@@ -175,7 +305,7 @@ struct ReplayOracle {
     /// Flags a trace cannot carry (`--harness`, the pre-run gate surface), which
     /// a replay of this guest still needs.
     invocation: Vec<String>,
-    marker: Marker,
+    target: Target,
     jobs: usize,
     calls: AtomicU64,
 }
@@ -188,20 +318,46 @@ impl ReplayOracle {
         let path = directory.path().join("candidate.patina");
         candidate.write_atomic(&path).map_err(io::Error::other)?;
         let mut command = Command::new(&self.self_exe);
-        command
-            .arg("replay")
-            .arg("--no-config")
-            .arg(&self.artifact)
-            .arg(&path);
+        command.arg("replay").arg("--no-config");
+        if self.target.needs_envelope() {
+            command.arg("--format").arg("json");
+        }
+        command.arg(&self.artifact).arg(&path);
         for flag in &self.invocation {
             command.arg(flag);
         }
         crate::config::scrub_child_config_env(&mut command, "replay");
         let output = command.output()?;
-        Ok(self.marker.preserved(
-            &String::from_utf8_lossy(&output.stdout),
-            &String::from_utf8_lossy(&output.stderr),
-        ))
+        let child_stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let child_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+        // Under `--format json` the guest's own streams travel INSIDE the
+        // envelope; without one (patina refused to replay at all) the child's raw
+        // streams are all there is, and a candidate that never ran reports
+        // nothing. Same shape the campaign uses for its generations, so the two
+        // read a child's result the same way.
+        let envelope = crate::campaign::run_envelope(&child_stdout);
+        let verdicts = envelope
+            .as_ref()
+            .map(crate::campaign::recognize_verdicts)
+            .unwrap_or_default();
+        let stream = |key: &str| {
+            envelope
+                .as_ref()
+                .and_then(|envelope| envelope.get(key))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        };
+        let stdout = stream("stdout").unwrap_or(child_stdout);
+        // The supervisor's own diagnostics (a divergence abort note) ride the
+        // child's stderr rather than the guest's; keep both.
+        let mut stderr = stream("stderr").unwrap_or_default();
+        stderr.push_str(&child_stderr);
+        Ok(self.target.preserved(&CandidateOutcome {
+            stdout: &stdout,
+            stderr: &stderr,
+            verdicts: &verdicts,
+        }))
     }
 }
 
@@ -343,11 +499,13 @@ fn split_knobs(flags: &[String]) -> Result<Vec<Knob>, CliError> {
 type KnobMemo = std::collections::HashMap<Vec<String>, bool>;
 
 /// Patina's knob oracle: run the candidate flag vector as a fresh seeded child
-/// and require the marker.
+/// and require the target.
 ///
 /// The child is spelled by the campaign's own generation runner, so a candidate
 /// is judged by the same execution the campaign judged: same scrubbed
-/// environment, same pinned reports, same wall-clock backstop.
+/// environment, same pinned reports, same wall-clock backstop — and, since that
+/// runner already asks for `--format json`, the same structured envelope the
+/// campaign classified from.
 struct KnobOracle {
     self_exe: PathBuf,
     artifact: PathBuf,
@@ -356,7 +514,7 @@ struct KnobOracle {
     pinned: Vec<String>,
     guest_args: Vec<String>,
     timeout_secs: u64,
-    marker: Marker,
+    target: Target,
     jobs: usize,
     runs: AtomicU64,
 }
@@ -372,7 +530,7 @@ impl KnobOracle {
     }
 
     /// Run one candidate, optionally keeping its trace, and report whether the
-    /// marker survived.
+    /// target survived.
     fn run(&self, knobs: &[Knob], record: Option<&Path>) -> Result<bool, CliError> {
         self.runs.fetch_add(1, Ordering::Relaxed);
         let scratch = tempfile::tempdir().map_err(|error| {
@@ -391,9 +549,14 @@ impl KnobOracle {
         )?;
         let (stdout, stderr) = run.streams();
         // A candidate that had to be killed never reached its own verdict, so it
-        // is rejected rather than read for a marker it may have printed on the
+        // is rejected rather than read for a failure it may have announced on the
         // way to hanging.
-        Ok(!run.timed_out() && self.marker.preserved(stdout, stderr))
+        Ok(!run.timed_out()
+            && self.target.preserved(&CandidateOutcome {
+                stdout,
+                stderr,
+                verdicts: run.verdicts(),
+            }))
     }
 
     /// The verdict for one knob vector, from the memo when it has been run
@@ -730,9 +893,54 @@ fn execute_trace(invocation: TraceMinimize) -> Result<i32, CliError> {
     Ok(0)
 }
 
+/// The failure `minimize --generation N` will preserve.
+///
+/// Explicit wins: a `--marker` the operator typed is what they meant, whatever
+/// the generation reported. Otherwise the campaign's own recognition of the
+/// generation is the target, and a generation with nothing to target is a
+/// refusal that names both ways forward — never a guess, because guessing here
+/// means silently minimizing against a failure nobody asked for.
+fn generation_target(
+    marker: Option<&str>,
+    generation: u64,
+    repro: &crate::campaign::GenerationRepro,
+) -> Result<Target, CliError> {
+    if let Some(text) = marker {
+        return Ok(Target::Marker(Marker::parse(text)?));
+    }
+    if let Some(target) = VerdictTarget::capture(&repro.verdicts) {
+        return Ok(Target::Verdicts(target));
+    }
+    let reported = if repro.verdicts.is_empty() {
+        "it reported no verdict at all".to_string()
+    } else {
+        format!(
+            "its only verdicts are [{}], and a `pass` verdict reports that a property HELD, so \
+             there is no failure in it to preserve",
+            repro
+                .verdicts
+                .iter()
+                .map(|verdict| format!("{}:{}", verdict.kind, verdict.label))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    Err(CliError(format!(
+        "generation {generation} has no failure verdict to target, so `minimize --generation` \
+         cannot derive what to preserve: {reported}. The campaign classified it {}. Two ways \
+         forward: report the failure through the verdict ABI (`patina_dst::verdict(VerdictKind::\
+         Violation, \"<label>\", ...)`, or `patina_verdict` directly from a non-Rust guest), which \
+         also makes the campaign classify it structurally; or pass --marker <TEXT> to name the \
+         failure text this reduction should look for. Not every failing class travels on the \
+         verdict channel — a LIVENESS wedge is a runtime finding and a vacuity class is fault \
+         accounting, neither of which is a guest verdict — so --marker is the answer for those.",
+        repro.class,
+    )))
+}
+
 fn execute_generation(invocation: GenerationMinimize) -> Result<i32, CliError> {
     let repro = crate::campaign::generation_repro(&invocation.out_dir, invocation.generation)?;
-    let marker = Marker::parse(&invocation.marker)?;
+    let target = generation_target(invocation.marker.as_deref(), invocation.generation, &repro)?;
     let self_exe = std::env::current_exe().map_err(|error| {
         CliError(format!(
             "failed to resolve the cargo-patina binary: {error}"
@@ -756,7 +964,7 @@ fn execute_generation(invocation: GenerationMinimize) -> Result<i32, CliError> {
         pinned: repro.pinned.clone(),
         guest_args: repro.guest_args.clone(),
         timeout_secs: repro.timeout_secs,
-        marker: marker.clone(),
+        target: target.clone(),
         jobs,
         runs: AtomicU64::new(0),
     };
@@ -764,15 +972,28 @@ fn execute_generation(invocation: GenerationMinimize) -> Result<i32, CliError> {
 
     // Nothing may be dropped before the failure is shown to reproduce from what
     // the campaign recorded: without that, every "removable" knob is only
-    // evidence that the marker was never there.
+    // evidence that the target was never there. This is the polarity guard's
+    // shape one level up — an auto-derived target is no more trustworthy than a
+    // typed one until a run has actually exhibited it, and a target that never
+    // reproduces would let the search "reduce" every knob away.
     if !oracle.judge(&knobs, &mut memo)? {
+        let advice = match &target {
+            Target::Marker(..) => {
+                "check the marker text against that generation's output, and re-run the printed \
+                 command to see what it does print"
+            }
+            Target::Verdicts(..) => {
+                "the campaign recorded those verdicts for this generation, so a re-run that does \
+                 not report them means the failure is not a function of the seed and knobs alone \
+                 (an unmodelled host effect, or a guest whose outcome depends on something \
+                 patina does not control); re-run the printed command to see what it does report"
+            }
+        };
         return Err(CliError(format!(
-            "generation {} does not reproduce {:?} from its recorded seed and fault knobs, so \
-             there is nothing to reduce. The campaign classified it {}; check the marker text \
-             against that generation's output, and re-run the printed command to see what it \
-             does print:\n  {}",
+            "generation {} does not reproduce {} from its recorded seed and fault knobs, so there \
+             is nothing to reduce. The campaign classified it {}; {advice}:\n  {}",
             invocation.generation,
-            invocation.marker,
+            target.render(),
             repro.class,
             repro_command(&oracle, &knobs),
         )));
@@ -803,10 +1024,10 @@ fn execute_generation(invocation: GenerationMinimize) -> Result<i32, CliError> {
     let recorded_trace = recording.path().join("minimal.patina");
     if !oracle.run(&minimal, Some(&recorded_trace))? {
         return Err(CliError(format!(
-            "the reduced fault knobs stopped reproducing {:?} when re-run for recording; this \
+            "the reduced fault knobs stopped reproducing {} when re-run for recording; this \
              generation's failure is not a function of its seed and knobs alone, so it cannot be \
              reduced to a standalone command:\n  {command}",
-            invocation.marker
+            target.render()
         )));
     }
     let recorded_bundle = TraceBundle::load(&recorded_trace).map_err(|error| {
@@ -823,7 +1044,7 @@ fn execute_generation(invocation: GenerationMinimize) -> Result<i32, CliError> {
             self_exe,
             artifact: repro.artifact.clone(),
             invocation: repro.pinned.clone(),
-            marker,
+            target: target.clone(),
             jobs,
             calls: AtomicU64::new(0),
         };
@@ -858,9 +1079,10 @@ fn execute_generation(invocation: GenerationMinimize) -> Result<i32, CliError> {
     })?;
 
     let detail = format!(
-        "generation={} knobs_before={} knobs_after={} knob_runs={knob_runs} before={before} \
-         after={after} oracle_runs={trace_calls} jobs={jobs} repro={} output={}",
+        "generation={} target={} knobs_before={} knobs_after={} knob_runs={knob_runs} \
+         before={before} after={after} oracle_runs={trace_calls} jobs={jobs} repro={} output={}",
         invocation.generation,
+        target.render(),
         knobs.len(),
         minimal.len(),
         repro_path.display(),
@@ -1175,16 +1397,40 @@ mod tests {
         );
     }
 
+    fn verdict(kind: &str, label: &str) -> VerdictFacts {
+        VerdictFacts {
+            kind: kind.to_string(),
+            label: label.to_string(),
+        }
+    }
+
+    /// A candidate that reported `verdicts` and nothing else on either stream.
+    fn reported(verdicts: &[VerdictFacts]) -> CandidateOutcome<'_> {
+        CandidateOutcome {
+            stdout: "",
+            stderr: "",
+            verdicts,
+        }
+    }
+
     #[test]
     fn a_marker_matches_any_alternative_and_needs_a_clean_replay() {
-        let marker = Marker::parse("GUEST_VIOLATION|GUEST_ABORT final-wal wal corruption").unwrap();
-        assert!(marker.preserved("", "boom: GUEST_VIOLATION no-loss"));
-        assert!(marker.preserved("", "GUEST_ABORT final-wal wal corruption"));
-        assert!(!marker.preserved("", "clean run"));
+        let target = Target::Marker(
+            Marker::parse("GUEST_VIOLATION|GUEST_ABORT final-wal wal corruption").unwrap(),
+        );
+        let saw = |stderr: &str| {
+            target.preserved(&CandidateOutcome {
+                stdout: "",
+                stderr,
+                verdicts: &[],
+            })
+        };
+        assert!(saw("boom: GUEST_VIOLATION no-loss"));
+        assert!(saw("GUEST_ABORT final-wal wal corruption"));
+        assert!(!saw("clean run"));
         // The fail-open direction the probe named: the marker is present, but
         // the replay diverged after printing it.
-        assert!(!marker.preserved(
-            "",
+        assert!(!saw(
             "GUEST_VIOLATION no-loss\npatina native shim fatal: trace operation mismatch"
         ));
     }
@@ -1193,5 +1439,148 @@ mod tests {
     fn an_empty_marker_is_refused() {
         assert!(Marker::parse("").is_err());
         assert!(Marker::parse("|").is_err());
+    }
+
+    #[test]
+    fn a_verdict_target_captures_only_the_failure_verdicts_deduplicated() {
+        // A generation's recorded stream: the same violation reported twice (the
+        // ABI aggregates by label, so repeats are normal), a second violation,
+        // an abort intent, and a pass.
+        let target = VerdictTarget::capture(&[
+            verdict("violation", "durability"),
+            verdict("pass", "queue-drained"),
+            verdict("violation", "durability"),
+            verdict("abort_intent", "final-wal"),
+            verdict("violation", "wal-integrity"),
+        ])
+        .expect("a generation with violations has a target");
+        assert_eq!(
+            target.render(),
+            "abort_intent:final-wal,violation:durability,violation:wal-integrity"
+        );
+    }
+
+    #[test]
+    fn a_generation_whose_only_verdicts_are_passes_has_no_target() {
+        assert!(
+            VerdictTarget::capture(&[verdict("pass", "queue-drained")]).is_none(),
+            "a `pass` reports that a property HELD; there is no failure in it to preserve"
+        );
+        assert!(VerdictTarget::capture(&[]).is_none());
+    }
+
+    #[test]
+    fn a_verdict_target_is_containment_on_kind_and_label_not_equality() {
+        let target = VerdictTarget::capture(&[
+            verdict("violation", "durability"),
+            verdict("violation", "wal-integrity"),
+        ])
+        .unwrap();
+        let target = Target::Verdicts(target);
+
+        // Exactly the target: preserved.
+        assert!(target.preserved(&reported(&[
+            verdict("violation", "durability"),
+            verdict("violation", "wal-integrity"),
+        ])));
+        // Extra verdicts are free — including a PASS the seed run never had, and
+        // one the reduction dropped. Only the targeted failure decides.
+        assert!(target.preserved(&reported(&[
+            verdict("pass", "queue-drained"),
+            verdict("violation", "wal-integrity"),
+            verdict("violation", "durability"),
+            verdict("violation", "some-other-invariant"),
+        ])));
+        // A candidate that reproduces only half the failure reproduces a
+        // different, weaker failure.
+        assert!(!target.preserved(&reported(&[verdict("violation", "durability")])));
+        // Same label, different kind: not the same verdict.
+        assert!(!target.preserved(&reported(&[
+            verdict("violation", "durability"),
+            verdict("abort_intent", "wal-integrity"),
+        ])));
+        // Nothing reported at all — a candidate patina refused to replay.
+        assert!(!target.preserved(&reported(&[])));
+    }
+
+    #[test]
+    fn a_verdict_target_still_needs_a_clean_replay() {
+        let target =
+            Target::Verdicts(VerdictTarget::capture(&[verdict("violation", "no-loss")]).unwrap());
+        let verdicts = [verdict("violation", "no-loss")];
+        assert!(target.preserved(&reported(&verdicts)));
+        // The same fail-open direction the marker path closes: the guest reported
+        // the violation, then the replay diverged, so the candidate never
+        // actually reproduced the failure.
+        assert!(!target.preserved(&CandidateOutcome {
+            stdout: "",
+            stderr: "patina native shim fatal: trace operation mismatch",
+            verdicts: &verdicts,
+        }));
+    }
+
+    fn repro_with(class: &str, verdicts: Vec<VerdictFacts>) -> crate::campaign::GenerationRepro {
+        crate::campaign::GenerationRepro {
+            artifact: PathBuf::from("guest"),
+            seed: 7,
+            flags: Vec::new(),
+            pinned: Vec::new(),
+            guest_args: Vec::new(),
+            timeout_secs: 30,
+            class: class.to_string(),
+            verdicts,
+        }
+    }
+
+    #[test]
+    fn an_explicit_marker_overrides_the_recorded_verdicts() {
+        let repro = repro_with("VIOLATION", vec![verdict("violation", "durability")]);
+        let target = generation_target(Some("GUEST_TORN"), 14, &repro).unwrap();
+        assert_eq!(target.render(), "marker[GUEST_TORN]");
+    }
+
+    #[test]
+    fn a_generation_with_verdicts_targets_them_without_a_marker() {
+        let repro = repro_with(
+            "VIOLATION",
+            vec![
+                verdict("violation", "durability"),
+                verdict("pass", "queue-drained"),
+            ],
+        );
+        let target = generation_target(None, 14, &repro).unwrap();
+        assert_eq!(target.render(), "verdicts[violation:durability]");
+    }
+
+    #[test]
+    fn a_generation_with_no_failure_verdict_and_no_marker_is_refused_naming_both_options() {
+        // The classes that do not travel on the verdict channel at all: a
+        // liveness wedge is a runtime finding, not a guest verdict.
+        let error = generation_target(None, 14, &repro_with("LIVENESS", Vec::new())).unwrap_err();
+        assert!(
+            error.0.contains("no failure verdict to target")
+                && error.0.contains("reported no verdict at all"),
+            "unexpected error: {}",
+            error.0
+        );
+        assert!(
+            error.0.contains("patina_dst::verdict") && error.0.contains("--marker"),
+            "the refusal must name BOTH ways forward: {}",
+            error.0
+        );
+
+        // A guest that reports only successes is refused for its own reason,
+        // rather than being minimized against a `pass`.
+        let passes = generation_target(
+            None,
+            14,
+            &repro_with("UNCLASSIFIED", vec![verdict("pass", "queue-drained")]),
+        )
+        .unwrap_err();
+        assert!(
+            passes.0.contains("pass:queue-drained") && passes.0.contains("HELD"),
+            "unexpected error: {}",
+            passes.0
+        );
     }
 }

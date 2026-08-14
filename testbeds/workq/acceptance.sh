@@ -19,8 +19,10 @@
 #           WITH fs shorts_applied>0 in the SAME generation (see the [b]
 #           comment below for why the shorts_applied>0 requirement is
 #           load-bearing, not incidental)
-#   [c]     `cargo patina minimize` shrinks the catching trace and the
-#           minimized trace still reports the violation verdict
+#   [c]     `cargo patina minimize --generation` reduces the catching
+#           generation with NO hand-written oracle and NO --marker -- it
+#           targets the verdicts the campaign recorded for that generation --
+#           and the minimized trace still reports the violation verdict
 #   [d]     flag-free `cargo patina replay` (no fault flags -- the trace is
 #           self-contained) reproduces the violation byte-identically,
 #           verdict events included
@@ -52,9 +54,11 @@ Usage: acceptance.sh [--help]
 Builds cargo-patina + the workq harness, runs one `cargo patina campaign
 --faults --swarm` sweep with `--bug ignore-short-write` enabled, then proves:
   a generation fired fs faults non-vacuously, a generation fired dns faults
-  non-vacuously, the planted bug was caught, `cargo patina minimize` shrinks
-  the catching trace and it still reproduces, and a flag-free `cargo patina
-  replay` reproduces the violation byte-identically.
+  non-vacuously, the planted bug was caught, `cargo patina minimize
+  --generation` reduces the catching generation against the verdicts the
+  campaign recorded for it (no oracle, no --marker) and it still reproduces,
+  and a flag-free `cargo patina replay` reproduces the violation
+  byte-identically.
 
 Env overrides:
   WORKQ_ACCEPTANCE_GENS   campaign generation count (default 40)
@@ -260,58 +264,31 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# [c] minimize: shrink the catching trace; the minimized trace must still
-# reproduce the SAME violation via the replay oracle.
+# [c] minimize: reduce the catching GENERATION -- fault knobs first, then a
+# trace recorded from the minimal-knob run -- and the result must still
+# reproduce the SAME violation.
+#
+# No oracle is written here, and no --marker is passed. The campaign already
+# recognized this generation (it recorded the `violation` verdicts it reported
+# in campaign-state.json), so `minimize --generation` targets exactly those
+# verdicts by (kind, label) and requires a candidate to still report every one
+# of them AND to replay without diverging -- in-process, in parallel, with the
+# recorded invocation flags carried along. That is the recognition primitive of
+# docs/arcs/outcome-channel.md 4.5: one mechanism, two consumers. The oracle
+# this leg used to spell out in shell (reject a diverged replay, reject a run
+# patina refused, then look for `PATINA_VERDICT ... kind=violation`) is what
+# the built-in target does structurally -- a refusal produces no run envelope
+# and therefore no verdicts, and a divergence is rejected before the verdicts
+# are even consulted.
 # ---------------------------------------------------------------------------
 if [[ -n "$catch_gen" && -f "$OUT/failures/generation-$catch_gen.patina" ]]; then
-  oracle="$work/oracle.sh"
-  cat > "$oracle" <<'ORACLE'
-#!/usr/bin/env bash
-# Minimize oracle. `cargo patina minimize` sets PATINA_MINIMIZE_TRACE to the
-# candidate trace path. Args: PATINA_BIN WORKQ_BIN [ALLOW...]. Exit nonzero
-# (the failure is still present) means "keep this candidate, still fails";
-# exit 0 means the candidate lost the failure.
-#
-# The oracle keys on the VERDICT channel, not on workq's printed dialect: a
-# `PATINA_VERDICT ... kind=violation` line is the guest's structured
-# announcement of a broken invariant, and it covers both surfaces of the
-# planted bug (the durability/no-loss audit and the recovery gate's
-# `wal-integrity`). The line is the ABI's own wire format
-# (patina_dst_abi::verdict_line), so this oracle is guest-agnostic -- the same
-# text works for any guest that reports through the SDK.
-#
-# A verdict on its own is NOT enough, in both fail-open directions:
-#
-#   * a candidate whose replay DIVERGES after the guest already reported the
-#     verdict never reproduced the failure -- the abort preempted the run -- so
-#     accepting it would let the search keep deleting on the strength of a
-#     failure it did not observe (docs/probes/minimize-oracle-perf.md, section
-#     4 option 6);
-#   * a candidate patina REFUSED to run at all (a usage error, an unreadable
-#     guest: `cargo-patina: ...`, exit 2) says nothing about the failure either.
-#
-# Both are rejected here before the verdict is even looked for, so this oracle
-# accepts only a clean replay that reproduced it. `cargo patina minimize
-# --generation --marker` applies exactly this rule in-process.
-set -uo pipefail
-PATINA="$1"; BIN="$2"; shift 2
-err="$("$PATINA" patina replay "$BIN" "$PATINA_MINIMIZE_TRACE" "$@" 2>&1 >/dev/null)"
-code=$?
-printf '%s' "$err" | grep -q 'patina native shim fatal' && exit 0
-[[ $code -eq 2 ]] && printf '%s' "$err" | grep -q '^cargo-patina: ' && exit 0
-printf '%s' "$err" | grep -q '^PATINA_VERDICT .*kind=violation ' && exit 1
-exit 0
-ORACLE
-  chmod +x "$oracle"
-
   min_trace="$work/minimized.patina"
   min_out="$work/minimize.out"
-  "$PATINA" patina minimize "$OUT/failures/generation-$catch_gen.patina" \
+  "$PATINA" patina minimize --generation "$catch_gen" --out-dir "$OUT" \
     --output "$min_trace" \
-    -- "$oracle" "$PATINA" "$built" ${ALLOW[@]+"${ALLOW[@]}"} \
     >"$min_out" 2>&1
   min_code=$?
-  min_line="$(grep -m1 'PATINA_MINIMIZE_COMPLETE' "$min_out" || true)"
+  min_line="$(grep -m1 'PATINA_MINIMIZE_GENERATION_COMPLETE' "$min_out" || true)"
   if [[ $min_code -ne 0 || -z "$min_line" || ! -f "$min_trace" ]]; then
     echo "    FAIL: minimize did not complete (exit=$min_code)"
     cat "$min_out"

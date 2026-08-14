@@ -137,7 +137,7 @@ Every campaign (not opt-in) maintains `<out-dir>/campaign-state.json`:
 
 ```json
 {
-  "schema": "patina.campaign.state/v1",
+  "schema": "patina.campaign.state/v2",
   "artifact": {
     "path": "testbeds/workq/target/.../workq",
     "sha256": "ab12…",
@@ -158,7 +158,9 @@ Every campaign (not opt-in) maintains `<out-dir>/campaign-state.json`:
   "generations_done": 650,
   "classes": { "OK": 640, "LIVENESS": 10 },
   "signatures": [ { …exact signatures.json record shape… } ],
-  "notable_runs": [ { …exact envelope notable_runs record shape… } ],
+  "notable_runs": [ { …exact envelope notable_runs record shape, including the
+                      `verdicts` the generation reported — `v2`, see
+                      docs/arcs/outcome-channel.md §4.5… } ],
   "invocations": [
     { "cli": "campaign workq --gens 500 …", "from_gen": 0,   "gens_run": 500, "timeout_secs": 60, "elapsed_secs": 812 },
     { "cli": "campaign --extend 500",       "from_gen": 500, "gens_run": 150, "timeout_secs": 60, "elapsed_secs": 240 }

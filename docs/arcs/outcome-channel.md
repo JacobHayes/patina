@@ -137,15 +137,15 @@ exit 134 **without** one is the guest's own doing and classifies
 `ABORT_INTENT`/`VIOLATION` verdict enriches it (label/detail in the report),
 but is not required for the class to fire.
 
-### 4.5 The recognition primitive — one mechanism, two consumers
+### 4.5 The recognition primitive — one mechanism, two consumers. **Landed.**
 
 Campaign classification and `minimize` both need to recognize a failure from a
-run's output, and today they do it with two unrelated oracles: the campaign
-greps hardcoded markers in `classify()`, while `minimize` makes the operator
-hand-write a shell oracle that re-greps the same thing (the campaign already
-knew the generation was a violation, then discards that and asks the user to
-re-encode it). The envelope closes this incoherence without conflating the two
-questions, which are genuinely different:
+run's output, and before this arc they did it with two unrelated oracles: the
+campaign grepped hardcoded markers in `classify()`, while `minimize` made the
+operator hand-write a shell oracle that re-grepped the same thing (the campaign
+already knew the generation was a violation, then discarded that and asked the
+user to re-encode it). The envelope closes this incoherence without conflating
+the two questions, which are genuinely different:
 
 - **Campaign** asks a multi-way, open question — *which class did this
   generation land in?* (discovery; the whole `classify()` taxonomy).
@@ -164,6 +164,36 @@ spec-declared patterns. The built-in replay oracle already shipped for
 `minimize` (marker present AND clean replay) is the stepping-stone; this makes
 the target auto-derived once verdicts are structured. Feeds the
 `custom-ops` arc's boundary discussion (`docs/arcs/custom-ops.md`).
+
+**As landed.** `campaign::recognize_verdicts(envelope) -> Vec<VerdictFacts>` is
+the primitive; `facts_from_envelope` (classification) and `minimize`'s two
+oracles are its only callers. A campaign persists each notable generation's
+verdicts in `campaign-state.json`, whose schema becomes
+`patina.campaign.state/v2` — a required field, so a v1 out-dir is refused by
+name rather than read as "this generation reported nothing". Four boundaries the
+implementation had to settle, each narrowing the target rather than widening it:
+
+1. **Only failure verdicts are targeted** (`violation`, `abort_intent`). A
+   `pass` reports that a property HELD, so preserving it would be preserving a
+   success — and a reduced candidate that stops reaching some unrelated check
+   would be rejected for it.
+2. **Containment, not equality.** A candidate must still report every target
+   verdict; extra verdicts are free. Equality would reject a candidate over an
+   unrelated verdict it gained or lost.
+3. **Every target verdict, not any one.** The failure being preserved is the
+   whole set the campaign found: a candidate reproducing one of two broken
+   invariants reproduces a different, weaker failure. `--marker` is the escape
+   hatch for an operator who wants a looser question asked.
+4. **The polarity guard extends to the target.** An auto-derived target is no
+   more trustworthy than a typed one until a run has exhibited it, so the
+   existing "does the unmodified seed vector still reproduce?" check gates the
+   verdict target too, with its own refusal text.
+
+The classes that do NOT travel on the verdict channel keep `--marker` as their
+only route, and the refusal says so: a LIVENESS wedge is a `runtime_findings[]`
+entry and a vacuity class is fault accounting, neither of which is a guest
+verdict (the same boundary Wave C recorded for a guest's own convergence
+timeout).
 
 ## 5. Waves
 

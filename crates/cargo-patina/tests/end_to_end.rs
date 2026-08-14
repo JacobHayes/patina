@@ -3670,7 +3670,7 @@ fn campaign_catches_planted_liveness_bug_dedups_and_reproduces() {
     let state: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(out.join("campaign-state.json")).unwrap())
             .unwrap();
-    assert_eq!(state["schema"], "patina.campaign.state/v1");
+    assert_eq!(state["schema"], "patina.campaign.state/v2");
     assert_eq!(state["generations_done"], 12);
     assert_eq!(state["artifact"]["path"], guest.to_str().unwrap());
     assert!(state["artifact"]["sha256"].as_str().unwrap().len() == 64);
@@ -10041,6 +10041,232 @@ fn main() {
 }
 "#;
 
+/// The same planted short-write bug, announced through the VERDICT ABI instead
+/// of printed.
+///
+/// The guest calls `patina_verdict` directly rather than through the SDK, both
+/// because a single-source guest links no crates and because it is the surface a
+/// non-Rust guest would use. It prints nothing a marker could match on the
+/// failing path, so a `minimize --generation` that reduces this campaign can
+/// only have derived its target from the recorded verdicts.
+///
+/// The `pass` verdict on the way in is load-bearing for the test: the catching
+/// generation reports BOTH a pass and a violation, and the auto-derived target
+/// must contain only the violation.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const SHORT_WRITE_VERDICT_SOURCE: &str = r#"
+use std::fs::OpenOptions;
+use std::io::Write;
+
+unsafe extern "C" {
+    fn patina_verdict(
+        kind: u32,
+        label: *const u8,
+        label_len: usize,
+        detail: *const u8,
+        detail_len: usize,
+    ) -> i32;
+}
+
+const VIOLATION: u32 = 1;
+const PASS: u32 = 2;
+
+fn verdict(kind: u32, label: &str, detail: &str) {
+    unsafe {
+        patina_verdict(kind, label.as_ptr(), label.len(), detail.as_ptr(), detail.len());
+    }
+}
+
+fn main() {
+    let mut file = match OpenOptions::new().write(true).create(true).truncate(true).open("/log") {
+        Ok(file) => file,
+        Err(error) => { println!("GUEST_OPEN_FAILED {error}"); return; }
+    };
+    verdict(PASS, "log-opened", "");
+    for round in 0..8u32 {
+        match file.write(&[b'x'; 64]) {
+            Ok(64) => {}
+            Ok(short) => {
+                verdict(VIOLATION, "torn-write", &format!("round={round} wrote={short}"));
+                std::process::exit(3);
+            }
+            Ok(_) => unreachable!(),
+            Err(error) => { println!("GUEST_WRITE_ERROR {error}"); return; }
+        }
+    }
+    verdict(PASS, "write-loop-complete", "");
+    println!("GUEST_OK");
+}
+"#;
+
+/// `minimize --generation` with NO `--marker`: the campaign recognized the
+/// generation through the verdict ABI, so the reducer targets what it recognized
+/// (outcome-channel arc §4.5).
+///
+/// The guest prints nothing on the failing path, so there is no text a marker
+/// could have matched — the reduction can only work if the target came from the
+/// recorded verdicts. Three things are asserted beyond "it ran": the target
+/// carries the violation and NOT the pass verdict the same generation reported,
+/// the fault vector actually shrank to the knob that matters, and two runs of
+/// the same reduction agree byte for byte.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn minimize_generation_targets_the_campaigns_own_verdicts_without_a_marker() {
+    let workspace = native_workspace();
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("short_write_verdict.rs");
+    fs::write(&source, SHORT_WRITE_VERDICT_SOURCE).unwrap();
+    let guest = directory.path().join("verdict-guest");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            guest.to_str().unwrap(),
+            "--release",
+        ],
+    );
+
+    let out = directory.path().join("camp");
+    invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "campaign",
+            guest.to_str().unwrap(),
+            "--gens",
+            "24",
+            "--faults",
+            "--timeout-secs",
+            "30",
+            "--out-dir",
+            out.to_str().unwrap(),
+        ],
+    );
+
+    // The catching generation is read straight off the recorded state: the
+    // campaign persists each notable run's verdicts, which is what makes the
+    // auto-target possible at all. No replay, no grep.
+    let state = campaign_state_without_invocations(&out.join("campaign-state.json"));
+    let caught = state["notable_runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|run| {
+            run["verdicts"].as_array().is_some_and(|verdicts| {
+                verdicts.iter().any(|verdict| {
+                    verdict["kind"] == "violation" && verdict["label"] == "torn-write"
+                })
+            })
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no generation recorded a torn-write violation verdict in 24 generations:\n{}",
+                serde_json::to_string_pretty(&state["notable_runs"]).unwrap()
+            )
+        });
+    assert_eq!(
+        caught["class"], "VIOLATION",
+        "a generation with a violation verdict must classify VIOLATION"
+    );
+    let generation = caught["generation"].as_u64().unwrap().to_string();
+    let flag_tokens = caught["flags"].as_array().unwrap().len();
+    assert!(
+        flag_tokens > 4,
+        "the campaign drew only {flag_tokens} flag tokens, so there is no vector to reduce"
+    );
+
+    let minimize = |output: &Path| -> Output {
+        invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &[
+                "minimize",
+                "--generation",
+                &generation,
+                "--out-dir",
+                out.to_str().unwrap(),
+                "--output",
+                output.to_str().unwrap(),
+                "--jobs",
+                "1",
+            ],
+        )
+    };
+
+    let first_output = directory.path().join("first.patina");
+    let first = minimize(&first_output);
+    let stdout = String::from_utf8_lossy(&first.stdout).into_owned();
+    assert!(
+        first.status.success(),
+        "minimize --generation with no --marker failed:\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with("PATINA_MINIMIZE_GENERATION_COMPLETE"))
+        .expect("missing the generation completion line")
+        .to_owned();
+
+    // The target is the generation's failure verdict, and only that: the `pass`
+    // the same run reported is not something a reduction should preserve.
+    assert!(
+        line.contains("target=verdicts[violation:torn-write]"),
+        "the target was not auto-derived from the recorded verdicts: {line}"
+    );
+    assert!(
+        !line.contains("pass:"),
+        "a `pass` verdict must not enter the target: {line}"
+    );
+
+    let field = |name: &str| -> u64 {
+        line.split_whitespace()
+            .find_map(|token| token.strip_prefix(name))
+            .unwrap_or_else(|| panic!("{line} has no {name}"))
+            .parse()
+            .unwrap()
+    };
+    let (before, after) = (field("knobs_before="), field("knobs_after="));
+    assert!(
+        after < before,
+        "nothing was reduced: {before} knobs in, {after} out\n{line}"
+    );
+
+    let repro = fs::read_to_string(out.join(format!("minimized/generation-{generation}.repro")))
+        .expect("the reproduction command must be written into the out-dir");
+    assert!(
+        repro.contains("--fs-short-permille"),
+        "the reduced command dropped the knob the bug needs: {repro}"
+    );
+
+    // Determinism: the same generation reduced twice is the same reduction. Both
+    // the reported counts and the trace bytes have to agree — a target derived
+    // from recorded data cannot be allowed to drift between runs.
+    let second_output = directory.path().join("second.patina");
+    let second = minimize(&second_output);
+    assert!(
+        second.status.success(),
+        "the second minimize run failed:\n{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second_line = String::from_utf8_lossy(&second.stdout)
+        .lines()
+        .find(|line| line.starts_with("PATINA_MINIMIZE_GENERATION_COMPLETE"))
+        .expect("missing the generation completion line")
+        .to_owned();
+    assert_eq!(
+        line.replace(first_output.to_str().unwrap(), "OUT"),
+        second_line.replace(second_output.to_str().unwrap(), "OUT"),
+        "two reductions of the same generation disagreed"
+    );
+    assert_eq!(
+        fs::read(&first_output).unwrap(),
+        fs::read(&second_output).unwrap(),
+        "two reductions of the same generation produced different traces"
+    );
+}
+
 /// `minimize --generation` end to end: a campaign catches the planted
 /// short-write bug under a wide fault vector, and the reducer must strip that
 /// vector down to the knob that matters, hand back a standalone command that
@@ -10219,6 +10445,34 @@ fn minimize_generation_reduces_the_fault_vector_to_the_knob_that_matters() {
         String::from_utf8_lossy(&wrong.stderr).contains("does not reproduce"),
         "a wrong marker was not refused by name:\n{}",
         String::from_utf8_lossy(&wrong.stderr)
+    );
+
+    // This guest only PRINTS its failure — it reports nothing through the verdict
+    // ABI — so there is no target to auto-derive. Dropping --marker must refuse
+    // and name both ways forward, never fall back to reducing against a guess.
+    let no_target = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "minimize",
+            "--generation",
+            &generation,
+            "--out-dir",
+            out.to_str().unwrap(),
+            "--output",
+            directory.path().join("no-target.patina").to_str().unwrap(),
+        ],
+    );
+    let refusal = String::from_utf8_lossy(&no_target.stderr).into_owned();
+    assert!(
+        !no_target.status.success(),
+        "a generation with no verdicts was minimized without a target"
+    );
+    assert!(
+        refusal.contains("no failure verdict to target")
+            && refusal.contains("patina_dst::verdict")
+            && refusal.contains("--marker"),
+        "the refusal must name both ways forward:\n{refusal}"
     );
 }
 
