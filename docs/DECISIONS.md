@@ -689,3 +689,28 @@ cluster so the fixes have citable symptom records.
   open: call-graph audit of the ~100 non-window C-ABI entry points for the
   answer-without-ensure_runtime class; minimize auto-target from verdicts
   (round two, launching).
+- **2026-08-14 — minimize auto-target landed; the outcome-channel arc is
+  COMPLETE.** `minimize --generation N` now derives its oracle target from the
+  campaign's own recorded verdicts — no hand-written `--marker`; the incoherence
+  that started this arc ("the campaign knew the failure, then made the operator
+  re-encode it") is closed. Four target-narrowing boundaries, each pinned:
+  failure verdicts only enter the target (a PASS is a property that HELD —
+  preserving it would preserve a success); containment not equality (extra
+  candidate verdicts are free); ALL target verdicts, not any (reproducing one
+  of two broken invariants is a weaker failure — fail closed; `--marker` is
+  the looser-question escape hatch); detail strings never match (free-form
+  payload). Campaign state schema bumped v1→v2 with `verdicts` as a REQUIRED
+  field on notable runs — a v1 out-dir is refused by name, never read as
+  empty (a missing-field read would produce the WRONG refusal). The
+  reproduction guard extends to auto-derived targets: a target that does not
+  reproduce from the recorded seed+knobs refuses before anything is dropped.
+  workq's acceptance oracle simplified from a 44-line external script to the
+  built-in path, both of its fail-open rejections verified empirically
+  (belt-and-braces: shim-fatal text checked first, verdict containment
+  catches the diverged shapes the text does not). Non-vacuity of the whole
+  path: the e2e guest prints NOTHING on failure, so no marker could match —
+  only the verdict channel can explain the green. Accepted deliberate
+  divergence: before/after decision counts describe the reduced-knob trace,
+  not the campaign's original recording — the designed knobs-first
+  semantics. Acceptance battery now 34 s end-to-end measured. Arc status:
+  outcome-channel §4.5 landed; all sections complete.
