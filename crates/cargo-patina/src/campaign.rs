@@ -1060,6 +1060,15 @@ pub struct GenerationFacts {
     /// spec-declared pattern matcher and by the signature's fallback — never by
     /// [`built_in_class`], which cannot see it.
     pub output: String,
+    /// The child envelope's `result_line`: the run verb's own single most
+    /// representative line of the GUEST's streams (a violation marker, its
+    /// `PATINA_RESULT`, else its last non-empty stderr line). Text, so it lives
+    /// here beside `output` rather than in the text-free [`RunFacts`]; read ONLY
+    /// by the signature's fallback, which prefers it over the raw `output` so a
+    /// supervisor diagnostic the child printed on its own stderr AFTER the guest
+    /// finished (the deny-trap-armed symbol note, a trace-finalization line)
+    /// cannot shadow the guest's finding. Absent without an envelope.
+    pub result_line: Option<String>,
 }
 
 /// Per-guest classification rules a campaign spec declares (`classify` in the
@@ -1260,7 +1269,19 @@ fn primary_finding(class: CampaignClass, generation: &GenerationFacts) -> String
     if let Some(shape) = structured {
         return shape;
     }
-    // No structured fact for this class: the captured output is all there is.
+    // No structured fact for this class. The run verb's own summary of the
+    // GUEST's streams comes first: it was computed from those streams alone, so
+    // a supervisor diagnostic appended after them on the child's own stderr
+    // cannot become the shape. Without an envelope (a build failure, a pre-run
+    // refusal, a timeout kill) the captured output is all there is.
+    if let Some(line) = generation
+        .result_line
+        .as_deref()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        return line.to_string();
+    }
     generation
         .output
         .lines()
@@ -2834,6 +2855,7 @@ fn run_generation(
             .and_then(serde_json::Value::as_str)
             .map(str::to_string)
     };
+    let result_line = envelope_stream("result_line");
     let stdout = envelope_stream("stdout").unwrap_or(child_stdout);
     let mut stderr = envelope_stream("stderr").unwrap_or(child_stderr.clone());
     if envelope.is_some() {
@@ -2852,6 +2874,7 @@ fn run_generation(
         facts: GenerationFacts {
             facts,
             output: format!("{stdout}\n{stderr}"),
+            result_line,
         },
         stdout,
         stderr,
@@ -4551,6 +4574,7 @@ fn planted(facts: RunFacts, output: &str) -> GenerationFacts {
     GenerationFacts {
         facts,
         output: output.to_string(),
+        result_line: None,
     }
 }
 
@@ -5007,6 +5031,48 @@ fn selftest() -> Result<i32, CliError> {
         println!("  ok   bug-depth-annotation-distinguishes    -> ok");
     } else {
         println!("  FAIL bug-depth-annotation-distinguishes");
+        failures += 1;
+    }
+    // An UNCLASSIFIED generation has no structured shape. The envelope's
+    // `result_line` (the guest's own finding) must win over the raw output's
+    // last line, which is a supervisor diagnostic the child appended after the
+    // guest finished — otherwise every such failure under a note-emitting host
+    // (the deny-trap-armed symbol note on Linux) dedups to the NOTE, not the bug.
+    let supervisor_note = "note: 24 linked symbol(s) are deny-trap armed under patina \
+(a call aborts deterministically): fork (process), waitpid (process)";
+    let shadowed = signature(
+        CampaignClass::Unclassified,
+        &GenerationFacts {
+            facts: RunFacts::ok().exit(1),
+            output: format!("\nError: AlreadyInstalled\n{supervisor_note}\n"),
+            result_line: Some("Error: AlreadyInstalled".to_string()),
+        },
+    );
+    if shadowed.shape == "Error: AlreadyInstalled" {
+        println!("  ok   result-line-beats-supervisor-note     -> {}", shadowed.key());
+    } else {
+        println!(
+            "  FAIL result-line-beats-supervisor-note     -> shape {:?}",
+            shadowed.shape
+        );
+        failures += 1;
+    }
+    // Without an envelope there is no result line: the raw output's last line is
+    // the shape (the INFRA timeout marker relies on exactly this).
+    let raw = signature(
+        CampaignClass::Infra,
+        &planted(
+            RunFacts::ok().no_envelope().timed_out(),
+            "some guest line\npatina: campaign generation exceeded timeout_secs=5",
+        ),
+    );
+    if raw.shape == "patina: campaign generation exceeded timeout_secs=#" {
+        println!("  ok   no-envelope-falls-back-to-last-line   -> {}", raw.key());
+    } else {
+        println!(
+            "  FAIL no-envelope-falls-back-to-last-line   -> shape {:?}",
+            raw.shape
+        );
         failures += 1;
     }
 
