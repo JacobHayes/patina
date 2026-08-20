@@ -250,6 +250,35 @@ Read these reports. A clean pass with a fault knob that never fired, or a spawne
 thread that never yielded, is a **vacuous** result, and the reports are how you
 tell that apart from a real green.
 
+## A red verdict is a hypothesis — confirm it outside the harness
+
+A DST run's most dangerous output is a *false* `Violation`: a buggy oracle, or a
+guest that observed the wrong thing, emits a verdict indistinguishable from a
+real bug. In practice false positives come from the guest and its oracle far more
+often than from the runtime — the runtime is small and heavily gated; your guest
+is new code. So treat a red verdict as a hypothesis, not a conclusion, and
+confirm it before you report a bug:
+
+- **Reproduce it outside Patina, in the smallest faithful harness.** A plain
+  `std` test, or the system-under-test's own fault-injection test double, driving
+  the exact operation sequence with the exact fault. If a finding only reproduces
+  inside your guest, suspect the guest first. An *approximate* repro that fails to
+  reproduce proves nothing — match the sequence and the fault's placement and
+  kind precisely, or you have tested a different thing.
+- **Differentially check against a reference** where one exists (a mature
+  implementation of the same contract). Many "bugs" are the oracle encoding the
+  author's assumption instead of the real contract; a reference settles it in one
+  run.
+- **Adjudicate with the trace.** `trace events` shows exactly what the SUT did —
+  which paths it opened, which descriptors it read and wrote (join a descriptor
+  back to its path through the `open` that produced it). "The guest cried
+  data-loss, but the trace shows the SUT never touched the resource under test" is
+  a harness bug, not a finding. The trace is ground truth and outranks the oracle.
+
+The discipline that keeps the runtime honest — a check that cannot fail is a bug
+— applies to your oracle too: an oracle never shown to fire on a *planted* real
+defect has not earned trust.
+
 ## Guest patterns that survive the runtime
 
 Hard-won from dogfooding real storage engines under Patina; each avoids a
@@ -296,6 +325,33 @@ class of confusing first-run failures.
   an `unwrap` turns an injected error into a panic, and an error-swallowing
   probe (`Path::exists()` is the classic) turns one into a false verdict.
   Oracles read truth or fail closed, loudly.
+- **The oracle's expectation must be the SUT's real contract, not yours.** The
+  most common false verdict is an oracle asserting what the author *assumed* the
+  system does rather than what it is specified to do. Pin expectations to the
+  spec (or a reference implementation), and prefer a differential oracle over a
+  hand-written one wherever a reference exists. And confirm the oracle actually
+  exercised what it claims to check — a recovery probe that targets the wrong
+  resource, or state the system served from a live instance instead of the
+  recovery path, greens without testing anything.
+- **Match fault fidelity to the real effect surface.** A fault a real OS would
+  never produce yields findings that cannot happen in production; a fault the
+  injector *cannot* produce hides real ones. Know the distinctions that change
+  code paths: an error at *submit* time (the syscall itself fails) versus at
+  *completion* time (an async op reports failure later) exercise different
+  handlers; a short read/write — fewer bytes, no error — is a legal outcome
+  distinct from an error and is routinely mishandled; and the injected fault must
+  reach the *same* backing store the SUT actually reads (a wrapper that
+  fabricates bytes from a store the backend never wrote is testing nothing).
+- **Guest-side hooks into the SUT must degrade to no-ops.** If your guest calls a
+  DST-only shim compiled into the system-under-test (a crash point, a scheduling
+  hook), guard it so the guest still builds and runs against a *pristine* SUT; a
+  hard dependency couples the two and breaks standalone builds.
+- **Free oracles from an existing assertion macro.** Many codebases already ship
+  an assertion family (`x_assert!`, antithesis-style macros). Route it into the
+  SDK under your DST cfg — `always!` for the fatal ones, `sometimes!` /
+  `reachable!` for observational ones — and you inherit hundreds of invariant and
+  coverage oracles for free, at zero production cost, with no new call sites to
+  write.
 
 ## Doctrine worth carrying
 
@@ -311,6 +367,10 @@ These outlast any flag rename.
 - **No permissive fallbacks.** If Patina refuses an effect, model it, interpose
   it, or accept the refusal. Do not reach for an escape hatch to make a run go
   green; the hatches that exist are explicit, narrow, and fingerprinted.
+- **A verdict is a hypothesis, not a conclusion.** Confirm a finding outside the
+  harness — a minimal faithful repro, or a differential against a reference —
+  before calling it a bug. False positives come from the guest and its oracle far
+  more often than from the runtime.
 - **Debug is the bug-finding profile.**
 
 ## Verify you have it right

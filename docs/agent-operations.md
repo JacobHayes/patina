@@ -47,6 +47,13 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
 - A green gate is only evidence if it can fail. Selftests and planted fixtures
   should prove classifiers, drift detectors, default-deny audits, and vacuity
   checks actually bite.
+- A finding from a harness or oracle is a hypothesis, not a conclusion. Before
+  reporting a bug in a system under test, reproduce it independently — the
+  smallest faithful standalone repro, or a differential against a reference
+  implementation — and adjudicate suspicious verdicts against ground truth (the
+  trace, the actual on-disk state) rather than the oracle's word. False positives
+  come from harness/oracle bugs far more often than from the tool under it, and an
+  approximate repro that fails to reproduce proves nothing.
 - For docs-only changes that mention CLI flags, run `scripts/check-flag-drift.sh`
   at minimum. If a doc or script mentions a Patina flag, it must come from the
   generated CLI registry rather than memory.
