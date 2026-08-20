@@ -2800,12 +2800,33 @@ fn run_generation(
         .spawn()
         .map_err(|e| CliError(format!("failed to spawn generation run: {e}")))?;
 
+    // Drain both pipes CONCURRENTLY with the timeout poll below. The poll loop
+    // does not read the pipes; a generation whose envelope (stdout) or report
+    // lines (stderr) exceed the pipe buffer — a guest with hundreds of SDK
+    // sites prints a PATINA_SDK_REPORT line well past 64 KiB — would block on
+    // write, never exit, and be misclassified as INFRA/timeout. Reader threads
+    // keep the pipes flowing; their bytes are what the classifier reads.
+    fn drain(
+        stream: Option<impl std::io::Read + Send + 'static>,
+    ) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut stream) = stream {
+                let _ = std::io::Read::read_to_end(&mut stream, &mut bytes);
+            }
+            bytes
+        })
+    }
+    let stdout_reader = drain(child.stdout.take());
+    let stderr_reader = drain(child.stderr.take());
+
     let mut timed_out = false;
     if timeout_secs > 0 {
         // Poll the child to completion, killing it if it overruns the wall-clock
-        // budget. Deterministic guest output is small, so the pipe buffers never
-        // fill before the poll observes exit; a genuinely wedged guest is killed at
-        // the deadline. `timeout_secs == 0` disables the backstop (poll-free wait).
+        // budget. The reader threads above keep both pipes drained, so a child
+        // can never be wedged on a full pipe while this loop waits for it; a
+        // genuinely wedged guest is killed at the deadline. `timeout_secs == 0`
+        // disables the backstop (poll-free wait).
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
         loop {
             match child
@@ -2825,12 +2846,14 @@ fn run_generation(
         }
     }
 
-    let output = child
-        .wait_with_output()
+    let status = child
+        .wait()
         .map_err(|e| CliError(format!("failed to collect generation run output: {e}")))?;
-    let exit = output.status.code().unwrap_or(-1);
-    let child_stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let child_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stdout_bytes = stdout_reader.join().unwrap_or_default();
+    let stderr_bytes = stderr_reader.join().unwrap_or_default();
+    let exit = status.code().unwrap_or(-1);
+    let child_stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
+    let child_stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
 
     // The child's own captured guest output travels inside the envelope; without
     // one (a build failure, a pre-run refusal, a timeout kill) the child's raw
@@ -5049,7 +5072,10 @@ fn selftest() -> Result<i32, CliError> {
         },
     );
     if shadowed.shape == "Error: AlreadyInstalled" {
-        println!("  ok   result-line-beats-supervisor-note     -> {}", shadowed.key());
+        println!(
+            "  ok   result-line-beats-supervisor-note     -> {}",
+            shadowed.key()
+        );
     } else {
         println!(
             "  FAIL result-line-beats-supervisor-note     -> shape {:?}",
@@ -5067,7 +5093,10 @@ fn selftest() -> Result<i32, CliError> {
         ),
     );
     if raw.shape == "patina: campaign generation exceeded timeout_secs=#" {
-        println!("  ok   no-envelope-falls-back-to-last-line   -> {}", raw.key());
+        println!(
+            "  ok   no-envelope-falls-back-to-last-line   -> {}",
+            raw.key()
+        );
     } else {
         println!(
             "  FAIL no-envelope-falls-back-to-last-line   -> shape {:?}",

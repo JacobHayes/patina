@@ -15160,6 +15160,62 @@ fn campaign_forwards_harness_deferral_to_every_generation() {
     assert_eq!(campaign_json_stdout(&extended)["classes"]["OK"], 3);
 }
 
+// A guest whose captured streams are well past a pipe buffer (64 KiB on Linux,
+// at most that on macOS). Under `run --format json` they travel INSIDE the
+// envelope, so the child's stdout is one ~200 KiB line.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const WIDE_OUTPUT_SOURCE: &str = r#"
+fn main() {
+    let line = "w".repeat(1023);
+    for _ in 0..200 {
+        eprintln!("{line}");
+    }
+    println!("WIDE_OUT done");
+}
+"#;
+
+// Gate: a generation whose output exceeds the pipe buffer is drained, not wedged.
+// The campaign's timeout loop polls the child without reading its pipes; before
+// the reader threads, a child this wide blocked on its envelope write, never
+// exited, and was killed at the deadline as INFRA — so a guest with hundreds of
+// SDK sites (one `PATINA_SDK_REPORT` line past 64 KiB) could not be swept at
+// all. RED: no OK generation, the run fails, and the deadline is what ends it;
+// GREEN: every generation is OK, well inside the deadline.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn campaign_drains_generation_output_wider_than_the_pipe_buffer() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("wide.rs");
+    fs::write(&source, WIDE_OUTPUT_SOURCE).unwrap();
+    let guest = directory.path().join("wide");
+    invoke_in(
+        native_workspace(),
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            guest.to_str().unwrap(),
+        ],
+    );
+    let swept = campaign_run(
+        &directory.path().join("out"),
+        &guest,
+        &["--timeout-secs", "20"],
+    );
+    assert!(
+        swept.status.success(),
+        "a generation wider than the pipe buffer must be drained, not killed at the deadline:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&swept.stdout),
+        String::from_utf8_lossy(&swept.stderr)
+    );
+    let envelope = campaign_json_stdout(&swept);
+    assert_eq!(
+        envelope["classes"]["OK"], 2,
+        "both generations must run to completion: {}",
+        envelope["classes"]
+    );
+}
+
 // A guest that aborts itself, with nothing patina would call a refusal.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const GUEST_ABORT_SOURCE: &str = r#"
