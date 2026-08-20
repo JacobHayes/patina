@@ -854,7 +854,8 @@ binary under a pre-run default-deny audit: every externally resolved symbol must
 be interposed or known-safe, and any unsupported symbol on the \
 blocking/time/scheduling/effect surface hard-errors. --allow SYMBOL adds a \
 known-safe symbol; --allow-unsupported-symbols <all|name,...> downgrades matching \
-denials to a loud warning.\n\
+denials to a loud warning (an instruction-class finding matches by its own \
+`instruction@.text+OFF` name or by the containing symbol its provenance names).\n\
 \n\
 `--harness` marks a patina-dst-harness (configure-then-run) binary: it defers \
 runtime installation so the harness installs and configures the context itself. \
@@ -992,7 +993,7 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
                     "--allow-unsupported-symbols",
                     None,
                     Value::Required("all|name,...", Kind::UnsupportedSymbols),
-                    "Downgrade matching unsupported-symbol denials to a warning.",
+                    "Downgrade matching unsupported-symbol denials to a warning. An instruction-class finding (`instruction@.text+OFF`, an address that moves on every relink) also matches by the containing symbol its provenance names.",
                     false,
                 ),
             ],
@@ -1382,7 +1383,7 @@ only --fingerprint, --mount, --coverage-out, --harness, and the \
                     "--allow-unsupported-symbols",
                     None,
                     Value::Required("all|name,...", Kind::UnsupportedSymbols),
-                    "Downgrade matching unsupported-symbol denials to a warning.",
+                    "Downgrade matching unsupported-symbol denials to a warning. An instruction-class finding (`instruction@.text+OFF`, an address that moves on every relink) also matches by the containing symbol its provenance names.",
                     false,
                 ),
             ],
@@ -1704,7 +1705,7 @@ refused by name.",
                     "--allow-unsupported-symbols",
                     None,
                     Value::Required("all|name,...", Kind::UnsupportedSymbols),
-                    "Downgrade matching unsupported-symbol denials to a warning in every generation.",
+                    "Downgrade matching unsupported-symbol denials to a warning in every generation. An instruction-class finding (`instruction@.text+OFF`) also matches by the containing symbol its provenance names.",
                     false,
                 ),
             ],
