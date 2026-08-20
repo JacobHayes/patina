@@ -13,7 +13,7 @@
 //! it audits as SUD-managed, is seed-stable, and records/replays byte-identical.
 //! It is SUD-only: `run-patina.sh` skips it loudly on non-SUD / non-Linux hosts.
 
-use rustix::fs::{Dir, Mode, OFlags};
+use rustix::fs::{Dir, FlockOperation, Mode, OFlags};
 use rustix::net::{
     AddressFamily, Ipv4Addr, RecvFlags, SendFlags, SocketAddrV4, SocketType,
 };
@@ -71,6 +71,19 @@ fn main() {
         buf
     };
     assert_eq!(&read_back, payload, "read-back content mismatch");
+
+    // ---- POSIX record lock (raw fcntl F_SETLK / F_SETLKW) ----
+    // rustix `fcntl_lock` is a whole-file, process-scoped record lock — the
+    // open-time lock a storage engine takes. The lone opener acquires,
+    // re-acquires (process-scoped locks never conflict with their holder), and
+    // releases; before the SUD row landed every one of these was a soft ENOSYS.
+    {
+        let fd = rustix::fs::open(path, OFlags::RDWR, Mode::empty()).expect("raw openat (lock)");
+        rustix::fs::fcntl_lock(&fd, FlockOperation::NonBlockingLockExclusive)
+            .expect("raw fcntl(F_SETLK) exclusive");
+        rustix::fs::fcntl_lock(&fd, FlockOperation::LockShared).expect("raw fcntl(F_SETLKW) shared");
+        rustix::fs::fcntl_lock(&fd, FlockOperation::Unlock).expect("raw fcntl(F_SETLKW) unlock");
+    }
 
     // ---- directory iteration (raw getdents64 over a SUD directory fd) ----
     // Create a directory with two files, then iterate it with rustix `Dir`,
@@ -133,7 +146,7 @@ fn main() {
 
     let rand_hex: String = rnd.iter().map(|b| format!("{b:02x}")).collect();
     println!(
-        "RUSTIX_RESULT fs={} dents={} rand={} udp_port={}",
+        "RUSTIX_RESULT fs={} dents={} rand={} udp_port={} lock=ok",
         std::str::from_utf8(&read_back).unwrap(),
         entries.join(","),
         rand_hex,

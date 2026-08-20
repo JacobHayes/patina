@@ -31,6 +31,9 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#ifdef __linux__
+#include <sys/statfs.h>
+#endif
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/uio.h>
@@ -1196,6 +1199,8 @@ int creat(const char *path, mode_t mode) {
     return patina_posix_open(path, O_WRONLY | O_CREAT | O_TRUNC);
 }
 
+static int patina_fcntl_record_lock(int fd, int command, struct flock *lock);
+
 int fcntl(int fd, int command, ...) {
 #ifdef __APPLE__
     /* Virtual kqueue descriptors. F_DUPFD/F_DUPFD_CLOEXEC clone into a second fd
@@ -1295,6 +1300,19 @@ int fcntl(int fd, int command, ...) {
             return patina_posix_deny("patina: duplicating a virtual socket descriptor is not modeled; failing closed\n");
         errno = EINVAL;
         return -1;
+    }
+    /* POSIX record locks (F_GETLK/F_SETLK/F_SETLKW) and the Linux open-file-
+     * description variants (F_OFD_*): see patina_fcntl_record_lock below. */
+    if (command == F_GETLK || command == F_SETLK || command == F_SETLKW
+#ifdef F_OFD_SETLK
+        || command == F_OFD_GETLK || command == F_OFD_SETLK || command == F_OFD_SETLKW
+#endif
+    ) {
+        va_list ap;
+        va_start(ap, command);
+        struct flock *lock = va_arg(ap, struct flock *);
+        va_end(ap);
+        return patina_fcntl_record_lock(fd, command, lock);
     }
 #ifdef __APPLE__
     /* Rust std maps File::sync_all to F_FULLFSYNC on Darwin. */
@@ -1416,7 +1434,7 @@ ssize_t pwrite64(int fd, const void *source, size_t length, off64_t offset) {
 int flock(int fd, int operation) {
     if (fd >= PATINA_SOCKET_FD_BASE)
         return patina_posix_deny("patina: advisory locks on virtual sockets are not modeled; failing closed\n");
-    return patina_flock(fd, operation);
+    return fail_int(patina_flock(fd, operation));
 }
 
 int close(int fd) {
@@ -1509,6 +1527,51 @@ ssize_t writev(int fd, const struct iovec *vectors, int count) {
     return total;
 }
 
+/* Positional vectored I/O. Database file backends batch a transaction's WAL
+ * frames with ONE pwritev (turso's UnixFile::pwritev is the live example), so
+ * these must reach the same deterministic positional I/O as pread/pwrite rather
+ * than be denied. Each vector is one positional runtime op at an advancing
+ * offset; like writev/readv, stop at the first short or failed transfer and
+ * return the running total (a short transfer here is how an injected short
+ * write surfaces to a vectored caller). Sockets have no offset: ESPIPE. */
+ssize_t preadv(int fd, const struct iovec *vectors, int count, off_t offset) {
+    if (count < 0 || (count > 0 && vectors == NULL)) { errno = EINVAL; return -1; }
+    if (fd >= PATINA_SOCKET_FD_BASE) { errno = ESPIPE; return -1; }
+    ssize_t total = 0;
+    for (int index = 0; index < count; ++index) {
+        ssize_t consumed = fail_size(patina_pread(
+            fd, vectors[index].iov_base, vectors[index].iov_len, (int64_t)offset + (int64_t)total));
+        if (consumed < 0) return total > 0 ? total : -1;
+        total += consumed;
+        if ((size_t)consumed < vectors[index].iov_len) break;
+    }
+    return total;
+}
+
+ssize_t pwritev(int fd, const struct iovec *vectors, int count, off_t offset) {
+    if (count < 0 || (count > 0 && vectors == NULL)) { errno = EINVAL; return -1; }
+    if (fd == 1 || fd == 2 || fd >= PATINA_SOCKET_FD_BASE) { errno = ESPIPE; return -1; }
+    ssize_t total = 0;
+    for (int index = 0; index < count; ++index) {
+        ssize_t written = fail_size(patina_pwrite(
+            fd, vectors[index].iov_base, vectors[index].iov_len, (int64_t)offset + (int64_t)total));
+        if (written < 0) return total > 0 ? total : -1;
+        total += written;
+        if ((size_t)written < vectors[index].iov_len) break;
+    }
+    return total;
+}
+
+#ifdef __linux__
+/* Large-file variants, the same way pread64/pwrite64 mirror pread/pwrite. */
+ssize_t preadv64(int fd, const struct iovec *vectors, int count, off64_t offset) {
+    return preadv(fd, vectors, count, (off_t)offset);
+}
+ssize_t pwritev64(int fd, const struct iovec *vectors, int count, off64_t offset) {
+    return pwritev(fd, vectors, count, (off_t)offset);
+}
+#endif
+
 ssize_t readv(int fd, const struct iovec *vectors, int count) {
     if (count < 0 || (count > 0 && vectors == NULL)) {
         errno = EINVAL;
@@ -1600,6 +1663,48 @@ static int patina_metadata_values(const char *path, struct patina_stat_values *v
 static int patina_fd_metadata_values(int fd, struct patina_stat_values *values) {
     return patina_fd_metadata_full(fd, &values->kind, &values->length, &values->ino,
                                    &values->nlink, &values->atime_nanos, &values->mtime_nanos);
+}
+
+/* POSIX record locks (F_GETLK/F_SETLK/F_SETLKW) and the Linux open-file-
+ * description variants (F_OFD_*). A run is ONE process, and process-scoped
+ * record locks never conflict with locks the same process already holds
+ * (POSIX: they are merged, and any close releases them all), so on an open
+ * regular fd F_SETLK/F_SETLKW succeed and F_GETLK reports the range as
+ * unlocked — exactly what the lone opener sees on the host. Storage engines
+ * take such a whole-file lock on every open (turso via rustix fcntl_lock is
+ * the live example); left unmodeled, the lock reports ENOSYS and the engine
+ * aborts at unlock. OFD locks DO conflict across descriptions inside one
+ * process: a whole-file OFD lock routes to the per-inode flock table
+ * (shared/exclusive/unlock; non-blocking for F_OFD_SETLK); a byte-range OFD
+ * lock and F_OFD_GETLK stay a soft ENOSYS rather than a fabricated answer. */
+static int patina_fcntl_record_lock(int fd, int command, struct flock *lock) {
+    if (lock == NULL) { errno = EINVAL; return -1; }
+    /* Descriptor validity is a RANGE check only (virtual sockets and pipes are
+     * rejected above; captured stdio by the range): a record lock is pure
+     * bookkeeping that does no I/O, so it must not consult the filesystem
+     * driver, whose descriptor lookup is fault-eligible (an injected EIO on
+     * fcntl(F_UNLCK) would be a fabricated failure mode — real fcntl locks
+     * cannot fail that way). */
+    if (fd < 3) { errno = EBADF; return -1; }
+    if (lock->l_type != F_RDLCK && lock->l_type != F_WRLCK && lock->l_type != F_UNLCK) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (command == F_GETLK) { lock->l_type = F_UNLCK; return 0; }
+    if (command == F_SETLK || command == F_SETLKW) return 0;
+#ifdef F_OFD_SETLK
+    if (command == F_OFD_GETLK) { errno = ENOSYS; return -1; }
+    if (!(lock->l_whence == SEEK_SET && lock->l_start == 0 && lock->l_len == 0)) {
+        errno = ENOSYS;
+        return -1;
+    }
+    int op = lock->l_type == F_RDLCK ? LOCK_SH : lock->l_type == F_WRLCK ? LOCK_EX : LOCK_UN;
+    if (command == F_OFD_SETLK) op |= LOCK_NB;
+    return fail_int(patina_flock(fd, op));
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
 }
 
 static int patina_resolve_symlink_target(const char *link_path, const char *target,
@@ -1719,6 +1824,65 @@ int fstatat(int directory, const char *restrict path, struct stat *restrict stat
     int result = patina_stat_metadata(path, follow, &values);
     return fill_stat(result, &values, status);
 }
+
+#ifdef __linux__
+/* Filesystem-level metadata (statfs/fstatfs). The virtual filesystem answers as
+ * ONE ext4-like volume (EXT4_SUPER_MAGIC, 4 KiB blocks, 255-byte names) for any
+ * path or descriptor that resolves; a missing path is ENOENT exactly as stat().
+ * Storage engines probe this to decide whether a path's filesystem supports
+ * their multi-process coordination (turso's shared-WAL probe on every open is
+ * the live example); left unmodeled, the call reaches the HOST with a virtual
+ * path and the engine refuses to open at all. The profile is a constant, so it
+ * is the same on record and replay and on every host. */
+static void patina_fill_statfs_profile(struct statfs *out) {
+    memset(out, 0, sizeof *out);
+    out->f_type = 0xEF53; /* EXT4_SUPER_MAGIC */
+    out->f_bsize = 4096;
+    out->f_frsize = 4096;
+    out->f_blocks = 1u << 20;
+    out->f_bfree = 1u << 19;
+    out->f_bavail = 1u << 19;
+    out->f_files = 1u << 20;
+    out->f_ffree = 1u << 19;
+    out->f_namelen = 255;
+}
+static void patina_fill_statfs64_profile(struct statfs64 *out) {
+    memset(out, 0, sizeof *out);
+    out->f_type = 0xEF53; /* EXT4_SUPER_MAGIC */
+    out->f_bsize = 4096;
+    out->f_frsize = 4096;
+    out->f_blocks = 1u << 20;
+    out->f_bfree = 1u << 19;
+    out->f_bavail = 1u << 19;
+    out->f_files = 1u << 20;
+    out->f_ffree = 1u << 19;
+    out->f_namelen = 255;
+}
+int statfs(const char *path, struct statfs *out) {
+    struct patina_stat_values values;
+    if (patina_stat_metadata(path, 1, &values) < 0) return -1;
+    patina_fill_statfs_profile(out);
+    return 0;
+}
+int statfs64(const char *path, struct statfs64 *out) {
+    struct patina_stat_values values;
+    if (patina_stat_metadata(path, 1, &values) < 0) return -1;
+    patina_fill_statfs64_profile(out);
+    return 0;
+}
+int fstatfs(int fd, struct statfs *out) {
+    struct patina_stat_values values;
+    if (patina_fd_metadata_values(fd, &values) < 0) { errno = patina_errno(); return -1; }
+    patina_fill_statfs_profile(out);
+    return 0;
+}
+int fstatfs64(int fd, struct statfs64 *out) {
+    struct patina_stat_values values;
+    if (patina_fd_metadata_values(fd, &values) < 0) { errno = patina_errno(); return -1; }
+    patina_fill_statfs64_profile(out);
+    return 0;
+}
+#endif
 
 #ifdef __linux__
 static int fill_stat64(int result, const struct patina_stat_values *values, struct stat64 *status) {

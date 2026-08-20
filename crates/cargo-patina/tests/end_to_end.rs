@@ -7367,9 +7367,15 @@ fn native_mount_composes_with_record_and_replay_two_inherited_descriptors() {
 // descriptor. The interposed `flock` keys on the deterministic-fs inode, so the
 // second `LOCK_EX | LOCK_NB` must report EWOULDBLOCK (-1) — the contention a
 // single-opener database's open surfaces as an "already open" error — rather than
-// both succeeding as a naive always-0 stub would. Closing the first descriptor
-// releases the lock, so a
-// third opener then acquires it, proving release-on-close.
+// both succeeding as a naive always-0 stub would — and it must report it in
+// libc `errno` (EWOULDBLOCK: 11 on Linux, 35 on Darwin), which is what std's
+// `File::try_lock` reads to say `WouldBlock`; the shim keeps its own thread-local
+// errno, so a C entry that forwards a `patina_*` result without `fail_int` leaves
+// libc errno STALE (the class: every `-1`-returning interposer must translate —
+// `flock` itself did not until this pinned it; the same `fail_int` guards the
+// `fcntl` OFD arm that shares the lock table). Closing the first descriptor
+// releases the lock, so a third opener then acquires it, proving
+// release-on-close.
 const FLOCK_CONTENTION_SOURCE: &str = r#"
 use std::fs::{File, OpenOptions};
 use std::os::unix::io::AsRawFd;
@@ -7394,10 +7400,11 @@ fn main() {
     let first_lock = try_lock(&first);
     let second = File::open("/lock.db").unwrap();
     let second_lock = try_lock(&second);
+    let second_errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
     drop(first);
     let third = File::open("/lock.db").unwrap();
     let third_lock = try_lock(&third);
-    println!("FLOCK first={first_lock} second={second_lock} third={third_lock}");
+    println!("FLOCK first={first_lock} second={second_lock}/{second_errno} third={third_lock}");
 }
 "#;
 
@@ -7423,10 +7430,342 @@ fn native_flock_contends_on_a_second_open_and_releases_on_close() {
     );
     let run = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     let stdout = String::from_utf8_lossy(&run.stdout);
+    let ewouldblock = if cfg!(target_os = "macos") { 35 } else { 11 };
     assert!(
-        stdout.contains("FLOCK first=0 second=-1 third=0"),
-        "per-inode flock must contend the second open and release on close:\nstdout:\n{stdout}\nstderr:\n{}",
+        stdout.contains(&format!("FLOCK first=0 second=-1/{ewouldblock} third=0")),
+        "per-inode flock must contend the second open (EWOULDBLOCK in libc errno) and release on close:\nstdout:\n{stdout}\nstderr:\n{}",
         String::from_utf8_lossy(&run.stderr),
+    );
+}
+
+// The lone opener's POSIX record locks. A run is ONE process and process-scoped
+// record locks never conflict with locks their own process holds (POSIX merges
+// them; any close releases them all), so `F_SETLK`/`F_SETLKW` on an open regular
+// fd succeed and `F_GETLK` reports the range `F_UNLCK` — exactly what the lone
+// opener sees on the host (the open-time whole-file lock a storage engine takes
+// through rustix `fcntl_lock`). Left unmodeled, the lock was `ENOSYS` and the
+// engine aborted at unlock. The modeled answer is not a blanket 0: a bogus lock
+// type is `EINVAL` and captured stdio is `EBADF`. `struct flock` and the command
+// numbers differ between Linux and Darwin, so the guest carries both ABIs.
+const FCNTL_RECORD_LOCK_SOURCE: &str = r#"
+use std::fs::OpenOptions;
+use std::os::unix::io::AsRawFd;
+
+unsafe extern "C" {
+    fn fcntl(fd: i32, command: i32, ...) -> i32;
+}
+
+#[cfg(target_os = "linux")]
+mod abi {
+    pub const F_GETLK: i32 = 5;
+    pub const F_SETLK: i32 = 6;
+    pub const F_SETLKW: i32 = 7;
+    pub const F_RDLCK: i16 = 0;
+    pub const F_WRLCK: i16 = 1;
+    pub const F_UNLCK: i16 = 2;
+    #[repr(C)]
+    pub struct Flock {
+        pub l_type: i16,
+        pub l_whence: i16,
+        pub l_start: i64,
+        pub l_len: i64,
+        pub l_pid: i32,
+    }
+    pub fn whole(l_type: i16) -> Flock {
+        Flock { l_type, l_whence: 0, l_start: 0, l_len: 0, l_pid: 0 }
+    }
+}
+#[cfg(target_os = "macos")]
+mod abi {
+    pub const F_GETLK: i32 = 7;
+    pub const F_SETLK: i32 = 8;
+    pub const F_SETLKW: i32 = 9;
+    pub const F_RDLCK: i16 = 1;
+    pub const F_WRLCK: i16 = 3;
+    pub const F_UNLCK: i16 = 2;
+    #[repr(C)]
+    pub struct Flock {
+        pub l_start: i64,
+        pub l_len: i64,
+        pub l_pid: i32,
+        pub l_type: i16,
+        pub l_whence: i16,
+    }
+    pub fn whole(l_type: i16) -> Flock {
+        Flock { l_start: 0, l_len: 0, l_pid: 0, l_type, l_whence: 0 }
+    }
+}
+use abi::*;
+
+fn errno() -> i32 {
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+fn main() {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open("/locked.db")
+        .unwrap();
+    let fd = file.as_raw_fd();
+    let mut lock = whole(F_WRLCK);
+    let setlk = unsafe { fcntl(fd, F_SETLK, &mut lock as *mut Flock) };
+    let mut probe = whole(F_WRLCK);
+    let getlk = unsafe { fcntl(fd, F_GETLK, &mut probe as *mut Flock) };
+    let mut again = whole(F_RDLCK);
+    let setlkw = unsafe { fcntl(fd, F_SETLKW, &mut again as *mut Flock) };
+    let mut unlock = whole(F_UNLCK);
+    let unlck = unsafe { fcntl(fd, F_SETLK, &mut unlock as *mut Flock) };
+    let mut bogus = whole(7);
+    let bad_type = unsafe { fcntl(fd, F_SETLK, &mut bogus as *mut Flock) };
+    let bad_type_errno = errno();
+    let mut stdio = whole(F_WRLCK);
+    let on_stdio = unsafe { fcntl(1, F_SETLK, &mut stdio as *mut Flock) };
+    let stdio_errno = errno();
+    println!(
+        "FCNTL_LOCK setlk={setlk} getlk={getlk} getlk_type={} setlkw={setlkw} unlck={unlck} bad_type={bad_type}/{bad_type_errno} stdio={on_stdio}/{stdio_errno}",
+        probe.l_type
+    );
+    #[cfg(target_os = "linux")]
+    {
+        const F_OFD_GETLK: i32 = 36;
+        const F_OFD_SETLK: i32 = 37;
+        // Open-file-description locks DO contend inside one process: a second
+        // open's whole-file F_OFD_SETLK meets the first's (the same per-inode
+        // table flock uses) and reports EAGAIN; a byte-range OFD lock and
+        // F_OFD_GETLK are a soft ENOSYS rather than a fabricated answer; the
+        // first description's release lets the second acquire.
+        let mut first = whole(F_WRLCK);
+        let ofd_first = unsafe { fcntl(fd, F_OFD_SETLK, &mut first as *mut Flock) };
+        let second = std::fs::File::open("/locked.db").unwrap();
+        let mut contend = whole(F_WRLCK);
+        let ofd_second =
+            unsafe { fcntl(second.as_raw_fd(), F_OFD_SETLK, &mut contend as *mut Flock) };
+        let ofd_second_errno = errno();
+        let mut range = Flock { l_len: 16, ..whole(F_WRLCK) };
+        let ofd_range = unsafe { fcntl(fd, F_OFD_SETLK, &mut range as *mut Flock) };
+        let ofd_range_errno = errno();
+        let mut get = whole(F_WRLCK);
+        let ofd_getlk = unsafe { fcntl(fd, F_OFD_GETLK, &mut get as *mut Flock) };
+        let ofd_getlk_errno = errno();
+        let mut release = whole(F_UNLCK);
+        let ofd_release = unsafe { fcntl(fd, F_OFD_SETLK, &mut release as *mut Flock) };
+        let mut retry = whole(F_WRLCK);
+        let ofd_retry =
+            unsafe { fcntl(second.as_raw_fd(), F_OFD_SETLK, &mut retry as *mut Flock) };
+        println!(
+            "FCNTL_OFD first={ofd_first} second={ofd_second}/{ofd_second_errno} range={ofd_range}/{ofd_range_errno} getlk={ofd_getlk}/{ofd_getlk_errno} release={ofd_release} retry={ofd_retry}"
+        );
+    }
+}
+"#;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_fcntl_record_locks_are_modeled_for_the_lone_opener() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("fcntl_lock.rs");
+    fs::write(&source, FCNTL_RECORD_LOCK_SOURCE).unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("fcntl-lock");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let run = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stdout.contains(
+            "FCNTL_LOCK setlk=0 getlk=0 getlk_type=2 setlkw=0 unlck=0 bad_type=-1/22 stdio=-1/9"
+        ),
+        "the lone opener's record locks must be taken, reported unlocked, and released — and bad input refused:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    if cfg!(target_os = "linux") {
+        assert!(
+            stdout.contains(
+                "FCNTL_OFD first=0 second=-1/11 range=-1/38 getlk=-1/38 release=0 retry=0"
+            ),
+            "a whole-file OFD lock must contend across descriptions like flock, byte-range/F_OFD_GETLK must be ENOSYS, and release must let the second opener in:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+// Positional vectored I/O: ONE `pwritev` of two frames lands at the given offset
+// without moving the cursor (a database backend batches a transaction's WAL
+// frames this way), `preadv` reads them back across two buffers, a read past
+// the end is short, and stdout has no offset (`ESPIPE`). Before these were
+// interposed, `pwritev` was the gate's planted *uninterposed* filesystem
+// representative — a guest reaching it was refused pre-run.
+const POSITIONAL_VECTORED_IO_SOURCE: &str = r#"
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::unix::io::AsRawFd;
+
+#[repr(C)]
+struct Iovec {
+    base: *const u8,
+    len: usize,
+}
+
+unsafe extern "C" {
+    fn pwritev(fd: i32, iov: *const Iovec, iovcnt: i32, offset: i64) -> isize;
+    fn preadv(fd: i32, iov: *const Iovec, iovcnt: i32, offset: i64) -> isize;
+}
+
+fn main() {
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open("/wal")
+        .unwrap();
+    file.write_all(b"0123456789").unwrap();
+    file.seek(SeekFrom::Start(7)).unwrap();
+    let fd = file.as_raw_fd();
+    let frames = [
+        Iovec { base: b"AB".as_ptr(), len: 2 },
+        Iovec { base: b"CD".as_ptr(), len: 2 },
+    ];
+    let wrote = unsafe { pwritev(fd, frames.as_ptr(), 2, 2) };
+    let cursor = file.stream_position().unwrap();
+    let mut a = [0u8; 3];
+    let mut b = [0u8; 4];
+    let bufs = [
+        Iovec { base: a.as_mut_ptr().cast_const(), len: 3 },
+        Iovec { base: b.as_mut_ptr().cast_const(), len: 4 },
+    ];
+    let read = unsafe { preadv(fd, bufs.as_ptr(), 2, 1) };
+    let mut whole = String::new();
+    file.seek(SeekFrom::Start(0)).unwrap();
+    file.read_to_string(&mut whole).unwrap();
+    let mut tail = [0u8; 8];
+    let tail_bufs = [Iovec { base: tail.as_mut_ptr().cast_const(), len: 8 }];
+    let short = unsafe { preadv(fd, tail_bufs.as_ptr(), 1, 8) };
+    let espipe = unsafe { pwritev(1, frames.as_ptr(), 2, 0) };
+    let espipe_errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    println!(
+        "PVEC wrote={wrote} cursor={cursor} read={read} a={} b={} file={whole} short={short} stdout={espipe}/{espipe_errno}",
+        String::from_utf8_lossy(&a),
+        String::from_utf8_lossy(&b)
+    );
+}
+"#;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_positional_vectored_io_round_trips_through_the_deterministic_fs() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("pvec.rs");
+    fs::write(&source, POSITIONAL_VECTORED_IO_SOURCE).unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("pvec");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let run = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains(
+            "PVEC wrote=4 cursor=7 read=7 a=1AB b=CD67 file=01ABCD6789 short=2 stdout=-1/29"
+        ),
+        "pwritev/preadv must be positional, cursor-independent, short at EOF, and ESPIPE on stdout:\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+// `statfs`/`fstatfs` (Linux): the virtual filesystem answers as ONE constant
+// ext4-like volume for any path or descriptor that resolves, ENOENT for a
+// missing path, EBADF for a bad descriptor. A storage engine probes this on
+// every open to decide whether the path's filesystem supports its multi-process
+// coordination; left unmodeled, the call reached the HOST with a virtual path
+// and the engine refused to open at all.
+#[cfg(target_os = "linux")]
+const STATFS_SOURCE: &str = r#"
+use std::os::unix::io::AsRawFd;
+
+#[repr(C)]
+#[derive(Default)]
+struct Statfs {
+    f_type: i64,
+    f_bsize: i64,
+    f_blocks: u64,
+    f_bfree: u64,
+    f_bavail: u64,
+    f_files: u64,
+    f_ffree: u64,
+    f_fsid: [i32; 2],
+    f_namelen: i64,
+    f_frsize: i64,
+    f_flags: i64,
+    f_spare: [i64; 4],
+}
+
+unsafe extern "C" {
+    fn statfs(path: *const u8, buf: *mut Statfs) -> i32;
+    fn fstatfs(fd: i32, buf: *mut Statfs) -> i32;
+}
+
+fn errno() -> i32 {
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+fn main() {
+    std::fs::create_dir_all("/db").unwrap();
+    std::fs::write("/db/wal", b"frame").unwrap();
+    let mut by_path = Statfs::default();
+    let path_rc = unsafe { statfs(b"/db/wal\0".as_ptr(), &mut by_path) };
+    let mut missing = Statfs::default();
+    let missing_rc = unsafe { statfs(b"/db/nope\0".as_ptr(), &mut missing) };
+    let missing_errno = errno();
+    let file = std::fs::File::open("/db/wal").unwrap();
+    let mut by_fd = Statfs::default();
+    let fd_rc = unsafe { fstatfs(file.as_raw_fd(), &mut by_fd) };
+    let mut closed = Statfs::default();
+    let bad_rc = unsafe { fstatfs(4242, &mut closed) };
+    println!(
+        "STATFS path={path_rc} type={:#x} bsize={} namelen={} missing={missing_rc}/{missing_errno} fd={fd_rc} fd_type={:#x} bad={bad_rc}",
+        by_path.f_type, by_path.f_bsize, by_path.f_namelen, by_fd.f_type
+    );
+}
+"#;
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_statfs_answers_as_one_virtual_volume() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("statfs.rs");
+    fs::write(&source, STATFS_SOURCE).unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("statfs");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let run = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains(
+            "STATFS path=0 type=0xef53 bsize=4096 namelen=255 missing=-1/2 fd=0 fd_type=0xef53 bad=-1"
+        ),
+        "statfs/fstatfs must answer as one virtual ext4-like volume, ENOENT a missing path, and EBADF a bad fd:\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&run.stderr)
     );
 }
 
@@ -9643,10 +9982,10 @@ fn drop_trailing_task_yield(source: &Path, dest: &Path) {
 #[cfg(target_os = "macos")]
 const ESCAPE_CLASSES_SOURCE: &str = r#"
 unsafe extern "C" {
-    // pwritev: an uninterposed positional vectored write -- the filesystem-class
-    // representative. (`link` used to serve here, but hard links are now routed
-    // through the deterministic filesystem, so it is no longer an escape.)
-    fn pwritev(fd: i32, iov: *const u8, iovcnt: i32, offset: i64) -> isize;
+    // truncate: an uninterposed path truncation -- the filesystem-class
+    // representative. (`link`, then `pwritev`, served here before; both are now
+    // routed through the deterministic filesystem, so neither is an escape.)
+    fn truncate(path: *const u8, length: i64) -> i32;
     fn gethostbyname(name: *const u8) -> *mut u8;
     fn select(n: i32, r: *mut u8, w: *mut u8, e: *mut u8, t: *mut u8) -> i32;
     fn semaphore_wait(s: u32) -> i32;
@@ -9660,7 +9999,7 @@ unsafe extern "C" {
 }
 fn main() {
     let ptrs: &[*const ()] = &[
-        pwritev as *const (), gethostbyname as *const (), select as *const (),
+        truncate as *const (), gethostbyname as *const (), select as *const (),
         semaphore_wait as *const (), time as *const (), arc4random as *const (),
         killpg as *const (), dlopen as *const (), shm_open as *const (),
         setitimer as *const (), syscall as *const (),

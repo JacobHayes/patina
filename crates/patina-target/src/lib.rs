@@ -3444,6 +3444,27 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "link",
         "linkat",
         "fdopendir",
+        // Not interposed: the deterministic filesystem has no mode / owner /
+        // timestamp / device-node model, so a reference to one of these is a
+        // host filesystem escape and is LABELED here, never modeled. `truncate`
+        // is the planted filesystem representative of the gate-level e2e
+        // (`native_run_prerun_gate_refuses_every_escape_class`) now that every
+        // symbol above it is shim-defined.
+        "truncate",
+        "truncate64",
+        "chmod",
+        "fchmod",
+        "fchmodat",
+        "chown",
+        "fchown",
+        "lchown",
+        "fchownat",
+        "utimes",
+        "utimensat",
+        "futimens",
+        "mkfifo",
+        "mknod",
+        "mknodat",
     ];
     // (f) Network: BSD sockets. Modeled over SimNet when interposed.
     const NETWORK: &[&str] = &[

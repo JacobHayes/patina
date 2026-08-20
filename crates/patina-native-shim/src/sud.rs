@@ -254,6 +254,31 @@ const F_SETFD: u64 = 2;
 const F_GETFL: u64 = 3;
 const F_SETFL: u64 = 4;
 const F_DUPFD_CLOEXEC: u64 = 1030;
+const F_GETLK: u64 = 5;
+const F_SETLK: u64 = 6;
+const F_SETLKW: u64 = 7;
+const F_OFD_GETLK: u64 = 36;
+const F_OFD_SETLK: u64 = 37;
+const F_OFD_SETLKW: u64 = 38;
+const F_RDLCK: i16 = 0;
+const F_WRLCK: i16 = 1;
+const F_UNLCK: i16 = 2;
+const LOCK_SH: c_int = 1;
+const LOCK_EX: c_int = 2;
+const LOCK_NB: c_int = 4;
+const LOCK_UN: c_int = 8;
+
+/// Kernel `struct flock` as the x86_64 / aarch64 Linux ABI lays it out (the
+/// only two SUD platforms): what rustix's `fcntl_lock` hands `fcntl(2)`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KernelFlock {
+    l_type: i16,
+    l_whence: i16,
+    l_start: i64,
+    l_len: i64,
+    l_pid: i32,
+}
 const FD_CLOEXEC: i64 = 1;
 const O_NONBLOCK: u64 = 0o4000;
 
@@ -1826,6 +1851,52 @@ fn sys_fcntl(fd: i64, command: u64, arg: u64) -> i64 {
                 );
             }
             dup as i64
+        }
+        // POSIX record locks and their OFD variants: mirror the C fcntl lock arm
+        // EXACTLY (patina_posix.c). One process per run, so process-scoped
+        // record locks never conflict with themselves: F_SETLK/F_SETLKW succeed
+        // on an open regular fd and F_GETLK reports the range unlocked. A
+        // whole-file OFD lock routes to the per-inode flock table; a byte-range
+        // OFD lock and F_OFD_GETLK are a soft -ENOSYS.
+        F_GETLK | F_SETLK | F_SETLKW | F_OFD_GETLK | F_OFD_SETLK | F_OFD_SETLKW => {
+            if arg == 0 {
+                return -EINVAL;
+            }
+            // Range check only, as in C: a record lock does no I/O and must not
+            // consult the (fault-eligible) filesystem descriptor lookup.
+            if fd < 3 {
+                return -EBADF;
+            }
+            let lock_ptr = arg as *mut KernelFlock;
+            // SAFETY: `arg` is the guest's `struct flock` per the fcntl(2) contract.
+            let lock = unsafe { lock_ptr.read() };
+            if lock.l_type != F_RDLCK && lock.l_type != F_WRLCK && lock.l_type != F_UNLCK {
+                return -EINVAL;
+            }
+            match command {
+                F_GETLK => {
+                    // SAFETY: same guest struct, writable per the F_GETLK contract.
+                    unsafe { (*lock_ptr).l_type = F_UNLCK };
+                    0
+                }
+                F_SETLK | F_SETLKW => 0,
+                F_OFD_GETLK => -ENOSYS,
+                _ => {
+                    if !(lock.l_whence as u64 == SEEK_SET && lock.l_start == 0 && lock.l_len == 0) {
+                        return -ENOSYS;
+                    }
+                    let mut op = match lock.l_type {
+                        F_RDLCK => LOCK_SH,
+                        F_WRLCK => LOCK_EX,
+                        _ => LOCK_UN,
+                    };
+                    if command == F_OFD_SETLK {
+                        op |= LOCK_NB;
+                    }
+                    // SAFETY: no pointers.
+                    ret_i32(unsafe { patina_flock(cfd, op) })
+                }
+            }
         }
         // F_GETFL / F_SETFL / any unknown command: soft ENOSYS (C parity).
         _ => -ENOSYS,

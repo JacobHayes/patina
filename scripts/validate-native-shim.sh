@@ -4002,6 +4002,47 @@ RS
       "$runner" run "$tmp/raw-fcntl-parity" --seed 1 >"$tmp/raw-fcntl-parity-out"
       grep -qx 'FCNTL_PARITY raw=-38 libc_errno=38' "$tmp/raw-fcntl-parity-out"
 
+      # (j) fcntl record-lock parity: F_SETLK / F_GETLK via the raw syscall and
+      # via the interposed libc symbol agree on a regular file — the lone
+      # opener's whole-file write lock is taken (0) and F_GETLK reports the
+      # range F_UNLCK (2), process-scoped locks never conflicting with their
+      # holder. This is rustix `fcntl_lock` on the linux_raw backend (turso's
+      # open-time lock); before the row landed raw F_SETLK fell to the
+      # unknown-command soft -ENOSYS. RED: raw_set=-38, or a 0 from F_GETLK
+      # that left l_type untouched (raw_type=1).
+      cat >"$tmp/raw_fcntl_lock.rs" <<'RS'
+use std::arch::asm;
+use std::os::fd::AsRawFd;
+#[repr(C)]
+struct Flock { l_type: i16, l_whence: i16, l_start: i64, l_len: i64, l_pid: i32 }
+fn whole(l_type: i16) -> Flock { Flock { l_type, l_whence: 0, l_start: 0, l_len: 0, l_pid: 0 } }
+fn main() {
+    let f = std::fs::File::create("/fcntl-lock.txt").expect("create");
+    let fd = f.as_raw_fd() as i64;
+    const FCNTL: i64 = 72; const F_GETLK: i64 = 5; const F_SETLK: i64 = 6;
+    let mut lock = whole(1);
+    let raw_set: i64;
+    unsafe { asm!("syscall", inlateout("rax") FCNTL => raw_set, in("rdi") fd,
+        in("rsi") F_SETLK, in("rdx") &mut lock as *mut Flock as i64, in("r10") 0i64,
+        out("rcx") _, out("r11") _, options(nostack)); }
+    let mut probe = whole(1);
+    let raw_get: i64;
+    unsafe { asm!("syscall", inlateout("rax") FCNTL => raw_get, in("rdi") fd,
+        in("rsi") F_GETLK, in("rdx") &mut probe as *mut Flock as i64, in("r10") 0i64,
+        out("rcx") _, out("r11") _, options(nostack)); }
+    unsafe extern "C" { fn fcntl(fd: i32, cmd: i32, ...) -> i32; }
+    let mut lib_lock = whole(1);
+    let lib_set = unsafe { fcntl(fd as i32, 6, &mut lib_lock as *mut Flock) };
+    let mut lib_probe = whole(1);
+    let lib_get = unsafe { fcntl(fd as i32, 5, &mut lib_probe as *mut Flock) };
+    println!("FCNTL_LOCK_PARITY raw_set={raw_set} raw_get={raw_get} raw_type={} libc_set={lib_set} libc_get={lib_get} libc_type={}",
+        probe.l_type, lib_probe.l_type);
+}
+RS
+      "$runner" build "$tmp/raw_fcntl_lock.rs" --output "$tmp/raw-fcntl-lock" >/dev/null
+      "$runner" run "$tmp/raw-fcntl-lock" --seed 1 >"$tmp/raw-fcntl-lock-out"
+      grep -qx 'FCNTL_LOCK_PARITY raw_set=0 raw_get=0 raw_type=2 libc_set=0 libc_get=0 libc_type=2' "$tmp/raw-fcntl-lock-out"
+
       cat "$tmp/raw-procstate-out"
       cat "$tmp/raw-epoll-out"
       cat "$tmp/raw-msg-out"
@@ -4010,6 +4051,7 @@ RS
       cat "$tmp/raw-socketpair-out"
       cat "$tmp/raw-ppoll-1"
       cat "$tmp/raw-fcntl-parity-out"
+      cat "$tmp/raw-fcntl-lock-out"
     fi
 
     cat "$tmp/raw-seed-1"
@@ -4018,7 +4060,7 @@ RS
     # Loud execution proof for CI-log grepping: this line prints only after every
     # positive leg above passed, so a skipped-but-green SUD section is impossible
     # to mistake for an executed one.
-    echo 'SUD_LEGS_RAN branch=positive legs=audit-sud-managed,seed-stable,record-replay,thread-arming,seed-varying-entropy,unmapped-abort,auxv-canary,sigsys-hijack,marker-gating,at-random,vsyscall-audit,rustix-mre,procstate-constants,epoll-rows,sendmsg-recvmsg,prctl-get-auxv,legacy-fs-aliases,socketpair-row,ppoll-row,fcntl-getfl-parity'
+    echo 'SUD_LEGS_RAN branch=positive legs=audit-sud-managed,seed-stable,record-replay,thread-arming,seed-varying-entropy,unmapped-abort,auxv-canary,sigsys-hijack,marker-gating,at-random,vsyscall-audit,rustix-mre,procstate-constants,epoll-rows,sendmsg-recvmsg,prctl-get-auxv,legacy-fs-aliases,socketpair-row,ppoll-row,fcntl-getfl-parity,fcntl-record-lock-parity'
   else
     echo "sud: SKIPPED (kernel lacks syscall-user-dispatch) — running the refusal + kernel-independent legs"
 
