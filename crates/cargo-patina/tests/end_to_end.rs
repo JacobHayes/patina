@@ -1126,6 +1126,10 @@ fn changed_shim_staticlib_bytes_relink_the_guest() {
     fs::create_dir_all(&staged).unwrap();
     let staticlib = staged.join("libpatina_dst_native_shim.a");
     fs::copy(&real_staticlib, &staticlib).unwrap();
+    // Cargo 1.98+ writes its artifacts read-only and `fs::copy` carries the mode
+    // over; `ar` rewrites an archive through a temp file it then copies over the
+    // original, so the private copy that gets doctored must be writable.
+    fs::set_permissions(&staticlib, fs::Permissions::from_mode(0o644)).unwrap();
 
     // A `cargo` stub that no-ops the shim's own build (which would replace our
     // doctored archive with the pristine one) and forwards everything else.
