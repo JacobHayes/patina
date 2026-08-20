@@ -145,7 +145,21 @@ ln -sf "$RUSTC_BIN" "$SCRUB_BIN/rustc"
 if [[ -n "$RUSTDOC_BIN" ]]; then
   ln -sf "$RUSTDOC_BIN" "$SCRUB_BIN/rustdoc"
 fi
-SCRUB_PATH="$SCRUB_BIN:/usr/bin:/bin"
+# The leg's claim is "cargo-patina is not on PATH", not "PATH is empty": drop
+# exactly the PATH entries that hold a cargo-patina and keep every other one —
+# the toolchain, and any rustc wrapper (sccache, kache) the user's cargo config
+# names, which cargo resolves by NAME through PATH at startup: lose it and cargo
+# dies on `<wrapper> rustc -vV` before the SDK's own lookup ever runs, so the
+# leg would fail for the wrong reason. cargo/rustc/rustdoc are pinned by
+# absolute symlink above so a dropped directory that also held them (a
+# `cargo install`ed cargo-patina in ~/.cargo/bin) cannot take them along.
+SCRUB_PATH="$SCRUB_BIN"
+IFS=: read -r -a path_entries <<<"${PATH:-}"
+for entry in "${path_entries[@]}"; do
+  [[ -z "$entry" ]] && continue
+  [[ -x "$entry/cargo-patina" ]] && continue
+  SCRUB_PATH+=":$entry"
+done
 if PATH="$SCRUB_PATH" command -v cargo-patina >/dev/null 2>&1; then
   echo "patina-macro-adopter: scrubbed PATH still finds cargo-patina" >&2
   exit 1
