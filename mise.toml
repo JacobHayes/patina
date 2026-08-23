@@ -23,50 +23,22 @@ cc --version >/dev/null
 echo "Patina local toolchains are ready."
 '''
 
-# The full pre-landing checklist, laddered fast -> slow so the common failure
-# classes (formatting, lints — including Linux-cfg lints via cross-target
-# clippy) surface in seconds, not after the multi-minute suites. Each entry
-# must pass before the next runs, so the first failure ends the run.
+# The check runner keeps cheap, high-signal failures serial, then runs reviewed
+# independent heavyweight suites concurrently. It reports one timing line per
+# rung, hides successful command chatter, and replays complete failure logs.
 [tasks.check]
-description = "Full pre-landing validation, laddered fast -> slow (heavyweight testbeds: audit-corpus only runs in CI)"
-run = [
-  "cargo fmt --all -- --check",
-  "cargo clippy --workspace --all-targets --locked -- -D warnings",
-  "cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu -- -D warnings",
-  "cargo doc --workspace --no-deps --locked",
-  "cargo test --workspace --locked",
-  "cargo test -p patina-dst --features macros --locked",
-  "testbeds/patina-macro-adopter/run.sh",
-  "scripts/check-flag-drift.sh",
-  "testbeds/workq/fuzz-sweep.sh --selftest",
-  "cargo run -q -p cargo-patina -- patina campaign --selftest",
-  "testbeds/pubsub/run-patina.sh",
-  "testbeds/workq/run-patina.sh",
-  "cargo +1.86.0 test --workspace --locked",
-  "cargo +1.86.0 test -p patina-dst --features macros --locked",
-  "scripts/validate-wasi.sh",
-  "scripts/smoke-cross-target.sh",
-  "scripts/validate-native-shim.sh",
-]
+description = "Full pre-landing validation (heavyweight testbeds: audit-corpus only runs in CI)"
+run = "scripts/check.sh full"
 
-# Inner-loop tier: same gates as `check` minus the slowest suites — the two
-# end-to-end search/minimization tests and proptest generation (~80s of the
-# e2e wall clock), the MSRV re-run, and validate-native-shim. Not a landing
-# gate: run `mise run check` before landing.
+# Inner-loop tier: the same fast exclusions as the landing gate's stable test
+# pass, without MSRV, docs, drift, testbeds, or native-shim validation.
 [tasks."check:fast"]
 description = "Fast iteration tier of `check`; not sufficient for landing"
-run = [
-  "cargo fmt --all -- --check",
-  "cargo clippy --workspace --all-targets --locked -- -D warnings",
-  "cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu -- -D warnings",
-  "cargo test --workspace --locked -- --skip native_two_axis_stateful_shrink_then_schedule_minimize --skip minimize_canonicalizes_a_recorded_schedule_via_replay_oracle --skip native_proptest_case_generation",
-  "scripts/validate-wasi.sh",
-  "scripts/smoke-cross-target.sh",
-]
+run = "scripts/check.sh fast"
 
 [tasks.msrv]
-description = "Run the root workspace on the documented MSRV"
-run = "cargo +1.86.0 test --workspace --locked"
+description = "Run the root workspace MSRV compatibility gate"
+run = "scripts/check.sh msrv"
 
 [tasks.smoke]
 description = "Run core Patina validation scripts"

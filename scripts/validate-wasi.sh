@@ -226,8 +226,11 @@ RS
 
 rustc --edition 2024 --target wasm32-wasip1 "$tmp/probe.rs" -o "$tmp/probe.wasm"
 rustc --edition 2024 --target wasm32-wasip1 "$tmp/network.rs" -o "$tmp/network.wasm"
-cargo build --locked --manifest-path "$root/Cargo.toml" -p cargo-patina >/dev/null
-runner="$target_dir/debug/cargo-patina"
+# Exercise the optimized supervisor used for distribution. Native validation
+# is invocation-heavy enough that a debug supervisor dominates its runtime; use
+# one profile consistently across the core validation scripts.
+cargo build --release --locked --manifest-path "$root/Cargo.toml" -p cargo-patina >/dev/null
+runner="$target_dir/release/cargo-patina"
 guest=(--arg validation --env MODE=test)
 "$runner" audit "$tmp/probe.wasm" >"$tmp/imports"
 "$runner" run "$tmp/probe.wasm" "${guest[@]}" --seed 123 >"$tmp/seed-1"

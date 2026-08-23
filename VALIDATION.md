@@ -40,7 +40,8 @@ Required:
 - `cargo clippy --workspace --all-targets -- -D warnings` (plus the same run with
   `--target x86_64-unknown-linux-gnu`, so Linux-cfg code lints from any host)
 - `cargo doc --workspace --no-deps`
-- `cargo +1.86.0 test --workspace`
+- `scripts/check.sh msrv` (execute the complete workspace and macro-feature
+  suite on Rust 1.86)
 - `scripts/check-flag-drift.sh` (CLI flag drift gate over the user-facing docs and every shell script)
 - `scripts/validate-wasi.sh` when validating V3
 - `scripts/validate-native-shim.sh` when validating native foundations
@@ -49,9 +50,13 @@ Required:
 These checks must run without network access after dependencies have been
 fetched. For local development, `mise run setup` installs the Rust
 toolchains/targets needed by these gates, and `mise run check` runs the
-root-workspace checks plus the core WASI/native smoke scripts. The mise workflow
-intentionally excludes heavyweight standalone testbed setup such as raft and
-redb.
+root-workspace checks plus the core WASI/native smoke scripts. After cheap
+failure checks, its independent heavyweight suites run concurrently; successful
+rung logs are suppressed and every rung is timed. Stable workspace tests and
+native validation overlap; MSRV remains serial because its nested e2e builds
+share root shim artifacts that cannot safely mix rustc versions. The mise
+workflow intentionally excludes heavyweight standalone testbed setup such as
+raft and redb.
 
 ### V1: deterministic Rust-level vertical slice
 

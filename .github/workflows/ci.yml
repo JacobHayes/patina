@@ -62,7 +62,13 @@ jobs:
         run: cargo fmt --all -- --check
       - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
+      # Both toolchains execute the complete suite. Local orchestration keeps
+      # them serial because nested e2e builds share root shim artifacts; CI runs
+      # each toolchain in its own job and workspace.
+      - if: matrix.toolchain == 'stable'
+        run: cargo test --workspace --locked
+      - if: matrix.toolchain == 'msrv'
+        run: scripts/check.sh msrv
       - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
         run: cargo doc --workspace --no-deps --locked
       # Flag drift gate: every --flag mentioned in the docs OR in any shell script

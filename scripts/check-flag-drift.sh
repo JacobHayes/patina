@@ -99,6 +99,8 @@ ALLOWED_FLAGS='
 --manifest-path
 --quiet
 --test
+--features
+--skip
 --installed
 --cfg
 --emit
@@ -130,7 +132,8 @@ ALLOWED_FLAGS='
 # --all/--all-targets/--check/--no-deps/--workspace/--locked: cargo fmt/clippy/
 #   doc/package/test flags (VALIDATION.md's V0 gates and the scripts' builds).
 # --example: a cargo flag the Cargo package family forwards to `cargo build`.
-# --manifest-path/--quiet/--test: cargo flags in the scripts' build/test preludes.
+# --manifest-path/--quiet/--test/--features/--skip: cargo flags in the scripts'
+#   build/test preludes and timed check runner.
 # --installed: `rustup target list --installed` (smoke/validate-wasi wasip1 probe).
 # --cfg/--emit: rustc flags (`--cfg patina`, `--cfg rustix_use_libc`, `--emit=obj`).
 # --redefine-sym: llvm-objcopy, discussed (and rejected) in VALIDATION.md.

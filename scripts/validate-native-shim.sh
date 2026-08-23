@@ -686,8 +686,14 @@ cat >"$tmp/unknown_import_probe.c" <<'C'
 int main(void) { return puts("unknown-import-probe") < 0; }
 C
 
-cargo build --locked --manifest-path "$root/Cargo.toml" -p patina-dst-native-shim -p cargo-patina >/dev/null
-runner="$target_dir/debug/cargo-patina"
+# The battery invokes cargo-patina hundreds of times and each native run audits
+# the complete guest text. Use an optimized supervisor (the product's normal
+# distribution shape) while retaining the debug shim archive for the direct C
+# probes below. A debug supervisor made this warm battery ~4.5 minutes; release
+# reduces the same audit/run coverage to well under a minute.
+cargo build --locked --manifest-path "$root/Cargo.toml" -p patina-dst-native-shim >/dev/null
+cargo build --release --locked --manifest-path "$root/Cargo.toml" -p cargo-patina >/dev/null
+runner="$target_dir/release/cargo-patina"
 
 # -----------------------------------------------------------------------------
 # Host-alias doctrine: static enforcement over the shim's own objects.
