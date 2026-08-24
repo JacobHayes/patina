@@ -533,6 +533,14 @@ const REFUSAL_CLASSES: &[(&str, &str)] = &[
     ("unsupported-import", "unsupported_import"),
     ("unknown-import", "unknown_import"),
     ("patina: starvation stall", "starvation_stall"),
+    // Patina's OWN recorder gave out at the end of the run — the trace resource
+    // limit exceeded, the trace file unwritable — and the shim `abort()`s. The
+    // guest is then killed by a SIGABRT it did not raise, which without this
+    // entry surfaces as an unattributed GUEST abort: a bug reported against the
+    // system under test for a failure inside patina, whose reproduce command
+    // does not even reproduce it (the abort needs the recording that the
+    // reproduce command omits).
+    ("patina: runtime shutdown failed", "shutdown_failure"),
 ];
 
 /// Patina's own refusal for this run, or `None` when patina did not fail closed.

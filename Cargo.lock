@@ -414,6 +414,7 @@ dependencies = [
  "patina-dst-fs-mem",
  "patina-dst-runtime",
  "patina-dst-sched-det",
+ "patina-dst-trace",
  "serde_json",
 ]
 

@@ -63,6 +63,7 @@ use patina_dst_runtime::{
     BuggifyKind, Context, CustomOpMode, MAX_TRACE_BYTES, RuntimeBuilder, RuntimeConfig,
     RuntimeError, SiteOutcome, TraceTransport, VerdictKind,
 };
+use patina_dst_trace::{TraceError, abandoned_trace_marker};
 pub use thread::{
     patina_cond_broadcast, patina_cond_destroy, patina_cond_init, patina_cond_signal,
     patina_cond_timedwait, patina_cond_wait, patina_futex_wait, patina_futex_wait_timed,
@@ -2764,6 +2765,32 @@ never called patina_dst::lifecycle::setup_complete()\n",
         let _ = host_write_all(2, line.as_bytes());
         std::process::abort();
     }
+    // Patina fails closed by default: a shutdown failure is reported and the
+    // atexit hook aborts on it, so a recorder that misbehaved can never be
+    // mistaken for a clean run. A recorder BUDGET overflow is the one
+    // deliberate exception, and this is the record of what makes it safe: by
+    // the time `finish` runs the guest has already returned from `main` (or
+    // called `exit`), so the run's verdict is FINAL and known — nothing about
+    // the outcome is in doubt, and the only thing lost is the replay artifact.
+    // Aborting here would overwrite that settled verdict with SIGABRT, turning
+    // every sufficiently long recorded run into a phantom failure and, worse,
+    // masking the true exit status and diagnostics of a run that failed for a
+    // real reason. Every OTHER finalization failure — an I/O error, an
+    // unwritable path, a bundle that would not serialize or validate — still
+    // aborts: those mean the recorder itself is broken rather than merely out
+    // of budget, and for them the fail-closed default is exactly right.
+    //
+    // The budget refusal is raised before the recorder writes anything, so the
+    // downgrade can never leave a half-written artifact behind: in path mode no
+    // file is created at all, and on the descriptor channel the marker written
+    // below is the only thing the supervisor ever sees.
+    let finished = match finished {
+        Err(RuntimeError::Trace(error)) if error.is_resource_limit() => {
+            abandon_over_budget_trace(&error);
+            Ok(())
+        }
+        other => other,
+    };
     match (finished, flushed) {
         (Ok(()), Ok(())) => {
             set_errno(0);
@@ -2778,6 +2805,48 @@ never called patina_dst::lifecycle::setup_complete()\n",
             fail(EIO)
         }
     }
+}
+
+/// Report a trace the recorder abandoned because the run outgrew its budget,
+/// and — on the descriptor channel — tell the supervisor so in a form it can
+/// tell apart from a crash-truncated trace.
+///
+/// Two lines reach stderr: the machine-greppable `PATINA_INFRA` marker a sweep
+/// classifies on, and the human sentence that says the verdict stands. The
+/// marker document goes to the trace descriptor because the supervisor's only
+/// other evidence would be an empty file, which is exactly what a guest that
+/// died mid-run leaves; without the marker it could not tell "this run outgrew
+/// its budget" from "this run never finalized", and it must keep failing loudly
+/// on the latter.
+///
+/// In `PATINA_TRACE` path mode there is no descriptor and no file — the budget
+/// is enforced before the trace is created — so the stderr lines are the whole
+/// report and a later `replay` simply finds nothing at the path.
+fn abandon_over_budget_trace(error: &TraceError) {
+    let _ = host_write_all(2, over_budget_diagnostic(error).as_bytes());
+    if let Ok(Some(fd)) = control_trace_fd() {
+        let _ = host_write_all(
+            fd,
+            &abandoned_trace_marker("resource-limit", &error.to_string()),
+        );
+    }
+}
+
+/// The two stderr lines for an over-budget trace: the machine-greppable marker
+/// a sweep classifies on, carrying the figures when the budget is a byte one,
+/// and the human sentence that says what it means for the run.
+fn over_budget_diagnostic(error: &TraceError) -> String {
+    let mut lines = String::from("PATINA_INFRA trace=incomplete reason=resource-limit");
+    if let Some((bytes, limit)) = error.resource_limit_bytes() {
+        lines.push_str(&format!(" bytes={bytes} limit={limit}"));
+    }
+    lines.push('\n');
+    lines.push_str(&format!(
+        "patina: the recorded trace outgrew its budget and was NOT written ({error}). This \
+run's own verdict stands unchanged — the guest ran to completion and its exit status is its \
+own — but the trace is unusable for replay; re-record a shorter run if you need one.\n"
+    ));
+    lines
 }
 
 fn report_shutdown_error(message: &str) {
@@ -10731,6 +10800,68 @@ mod thread {
             scheduler.park(b, "wait-a").unwrap();
             assert!(scheduler.next().is_err());
         }
+    }
+}
+
+/// The recorder-budget exception to patina's fail-closed shutdown: a run that
+/// outgrew its trace budget keeps its own verdict and says so in one greppable
+/// line, while every other finalization failure still aborts.
+#[cfg(test)]
+mod over_budget_trace_tests {
+    use super::*;
+
+    /// The refusal `Context::finish` returns when the serialized bundle is over
+    /// budget, verbatim in shape (see `enforce_trace_byte_limit`).
+    fn over_budget() -> TraceError {
+        TraceError::ResourceLimit {
+            message: format!(
+                "serialized trace is {} bytes; limit is {MAX_TRACE_BYTES}; reduce recorded event \
+                 count or payload volume, or split the run",
+                MAX_TRACE_BYTES + 1
+            ),
+            bytes: Some((MAX_TRACE_BYTES + 1, MAX_TRACE_BYTES)),
+        }
+    }
+
+    #[test]
+    fn an_over_budget_trace_is_classified_and_reported_with_its_figures() {
+        let error = over_budget();
+        assert!(
+            error.is_resource_limit(),
+            "the shutdown downgrade keys off this predicate; got {error}"
+        );
+        let (bytes, limit) = error.resource_limit_bytes().expect("a byte budget");
+        assert_eq!((bytes, limit), (MAX_TRACE_BYTES + 1, MAX_TRACE_BYTES));
+
+        let diagnostic = over_budget_diagnostic(&error);
+        let mut lines = diagnostic.lines();
+        assert_eq!(
+            lines.next().unwrap(),
+            format!(
+                "PATINA_INFRA trace=incomplete reason=resource-limit bytes={bytes} limit={limit}"
+            )
+        );
+        let human = lines.next().unwrap();
+        assert!(
+            human.contains("verdict stands unchanged") && human.contains("unusable for replay"),
+            "the human line must say the run stands and the trace does not; got {human}"
+        );
+        assert!(lines.next().is_none(), "the report is exactly two lines");
+    }
+
+    #[test]
+    fn a_broken_recorder_is_not_downgraded() {
+        // The shutdown path downgrades ONLY a budget refusal. An I/O failure —
+        // the shape an unwritable `--record` path takes — must stay fatal.
+        let broken = RuntimeError::Io {
+            action: "write temporary trace".into(),
+            source: io::Error::from(io::ErrorKind::PermissionDenied),
+        };
+        assert!(
+            !matches!(&broken, RuntimeError::Trace(error) if error.is_resource_limit()),
+            "an I/O failure must not take the budget exception"
+        );
+        assert_eq!(runtime_errno(&broken), EIO);
     }
 }
 

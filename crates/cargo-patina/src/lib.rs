@@ -39,7 +39,7 @@ use patina_dst_target::{
     render_inert_weak_imports, render_native_escapes_grouped, render_tsc_managed_note,
     shim_control_plane_symbols,
 };
-use patina_dst_trace::TraceBundle;
+use patina_dst_trace::{TraceBundle, parse_abandoned_trace_marker};
 use patina_dst_wasi_host::{
     DEFAULT_WASM_FUEL, MountPolicy, Preview1Host, ResourceLimits, execute_preview1_with_fuel,
 };
@@ -6207,6 +6207,29 @@ This run's determinism is NOT guaranteed and any \"deterministic\" claim on it i
     Ok(downgraded)
 }
 
+/// Why a recorded trace never reached its final path.
+enum TraceCommitFailure {
+    /// The recorder deliberately abandoned the trace and left an
+    /// abandoned-trace marker naming why (today: the run outgrew
+    /// `MAX_TRACE_BYTES`). It writes that marker only from finalization, which
+    /// runs after the guest has already exited, so the run's verdict is final
+    /// and stands on its own — only the replay artifact is lost. The run is
+    /// reported, not failed.
+    Abandoned(String),
+    /// Anything else: an empty, truncated, or corrupt trace, or a rename that
+    /// failed. Nothing said why the bundle is missing, so the run cannot be
+    /// trusted and fails.
+    Broken(String),
+}
+
+impl TraceCommitFailure {
+    fn reason(&self) -> &str {
+        match self {
+            Self::Abandoned(reason) | Self::Broken(reason) => reason,
+        }
+    }
+}
+
 struct NativeTraceSink {
     final_path: PathBuf,
     temp_path: PathBuf,
@@ -6262,19 +6285,31 @@ impl NativeTraceSink {
             .as_raw_fd()
     }
 
-    fn commit(mut self) -> Result<PathBuf, String> {
+    fn commit(mut self) -> Result<PathBuf, TraceCommitFailure> {
         drop(self.file.take());
         if let Err(error) = TraceBundle::load(&self.temp_path) {
+            // Tell "the recorder gave up, and said so" apart from "the trace
+            // is simply not there". Both leave no bundle at the temp path, but
+            // only the first is accompanied by an abandoned-trace marker the
+            // recorder wrote deliberately AFTER the guest had already finished.
+            // A guest that died mid-run leaves an empty or truncated file and
+            // no marker, and that must keep failing the run.
+            let abandoned = fs::read(&self.temp_path)
+                .ok()
+                .and_then(|bytes| parse_abandoned_trace_marker(&bytes));
             let _ = fs::remove_file(&self.temp_path);
-            return Err(error.to_string());
+            return Err(match abandoned {
+                Some(_) => TraceCommitFailure::Abandoned(error.to_string()),
+                None => TraceCommitFailure::Broken(error.to_string()),
+            });
         }
         fs::rename(&self.temp_path, &self.final_path).map_err(|error| {
             let _ = fs::remove_file(&self.temp_path);
-            format!(
+            TraceCommitFailure::Broken(format!(
                 "failed to atomically rename temporary trace {} to {}: {error}",
                 self.temp_path.display(),
                 self.final_path.display()
-            )
+            ))
         })?;
         Ok(self.final_path.clone())
     }
@@ -6949,15 +6984,25 @@ IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
                 }
                 committed_record_trace = Some(path);
             }
-            Err(reason) => {
+            Err(failure) => {
                 let path = match &invocation.mode {
                     NativeRunMode::Record { path, .. } => path.clone(),
                     NativeRunMode::Seeded { .. } | NativeRunMode::Replay { .. } => PathBuf::new(),
                 };
-                if captured.exit_code == 0 {
+                // A trace that is missing for an unexplained reason fails the
+                // run: a clean exit code alongside no bundle would report a
+                // recording that does not exist. A trace the recorder
+                // deliberately abandoned after the guest finished is different
+                // in kind — the guest's own status is the run's answer, and
+                // overriding it here would manufacture a failure out of a
+                // completed run (and bury the real status of one that failed
+                // for a genuine reason). Either way the `PATINA_INFRA
+                // trace=incomplete` marker below says the artifact is missing
+                // and why, so nothing is silent.
+                if matches!(failure, TraceCommitFailure::Broken(_)) && captured.exit_code == 0 {
                     captured.exit_code = 2;
                 }
-                trace_finalization_error = Some((path, reason));
+                trace_finalization_error = Some((path, failure.reason().to_string()));
             }
         }
     }
@@ -7534,6 +7579,59 @@ impl std::error::Error for CliError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The supervisor's half of the recorder-budget fix. A trace that never
+    /// landed fails the run — EXCEPT when the recorder left an abandoned-trace
+    /// marker saying it gave up after the guest had already finished, in which
+    /// case the guest's own status is the run's answer. Both cases still remove
+    /// the scratch file, so nothing unreplayable is left behind for a later
+    /// `replay` to trip over.
+    #[cfg(unix)]
+    #[test]
+    fn an_abandoned_trace_is_reported_while_a_missing_one_fails() {
+        use patina_dst_trace::abandoned_trace_marker;
+        use std::io::Write;
+
+        let directory = tempfile::tempdir().unwrap();
+
+        let final_path = directory.path().join("abandoned.patina");
+        let mut sink = NativeTraceSink::create(&final_path).unwrap();
+        let temp_path = sink.temp_path.clone();
+        sink.file
+            .as_mut()
+            .unwrap()
+            .write_all(&abandoned_trace_marker(
+                "resource-limit",
+                "serialized trace is 999 bytes; limit is 100",
+            ))
+            .unwrap();
+        let failure = sink.commit().unwrap_err();
+        assert!(
+            matches!(failure, TraceCommitFailure::Abandoned(_)),
+            "a marker must classify as abandoned; got {}",
+            failure.reason()
+        );
+        assert!(
+            failure.reason().contains("abandoned this trace")
+                && failure.reason().contains("resource-limit"),
+            "the reported reason must name what happened; got {}",
+            failure.reason()
+        );
+        assert!(!temp_path.exists() && !final_path.exists());
+
+        // An empty trace is what a guest that died mid-run leaves: nothing said
+        // why, so it stays a failure.
+        let final_path = directory.path().join("empty.patina");
+        let sink = NativeTraceSink::create(&final_path).unwrap();
+        let temp_path = sink.temp_path.clone();
+        let failure = sink.commit().unwrap_err();
+        assert!(
+            matches!(failure, TraceCommitFailure::Broken(_)),
+            "an unexplained empty trace must stay a failure; got {}",
+            failure.reason()
+        );
+        assert!(!temp_path.exists() && !final_path.exists());
+    }
 
     /// `--allow-unsupported-symbols NAME` against an instruction-class finding:
     /// its own name (`instruction@.text+OFF`) moves on every relink, so the

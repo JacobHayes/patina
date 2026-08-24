@@ -50,6 +50,57 @@ pub const TRACE_FORMAT_VERSION: u32 = 4;
 pub const MIN_SUPPORTED_FORMAT_VERSION: u32 = 1;
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
+
+/// The sole top-level key of an *abandoned-trace marker*: the one-line JSON
+/// document a recorder writes into a trace channel INSTEAD of a bundle when it
+/// deliberately gives up on the artifact (today: the run outgrew
+/// [`MAX_TRACE_BYTES`]). The marker exists so an abandoned trace is never
+/// mistaken for either a complete one or a crash-truncated one: it is a
+/// positive, self-describing statement that no bundle is coming and why.
+///
+/// A bundle can never collide with it — a bundle's top-level object always
+/// carries `format_version` and never this key — so [`TraceBundle::decode`]
+/// recognizes a marker and refuses it as [`TraceError::Incomplete`], which is
+/// what makes `cargo patina replay` say "the recorder abandoned this trace"
+/// rather than misread a marker file as a corrupt bundle.
+pub const ABANDONED_TRACE_KEY: &str = "patina_trace_abandoned";
+
+/// Why a recorder abandoned a trace, as read back off an abandoned-trace
+/// marker. `reason` is the stable machine token (`resource-limit`); `detail` is
+/// the human sentence that goes with it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AbandonedTrace {
+    pub reason: String,
+    pub detail: String,
+}
+
+/// Serialize an abandoned-trace marker, newline terminated, ready to be written
+/// to a trace path or trace descriptor in place of a bundle.
+pub fn abandoned_trace_marker(reason: &str, detail: &str) -> Vec<u8> {
+    let document = serde_json::json!({
+        ABANDONED_TRACE_KEY: AbandonedTrace {
+            reason: reason.to_string(),
+            detail: detail.to_string(),
+        }
+    });
+    let mut bytes = serde_json::to_vec(&document).unwrap_or_else(|_| {
+        // Unreachable in practice (two owned strings always serialize), but the
+        // recorder is already on a degraded path here and must not panic while
+        // reporting it, so fall back to a marker with no detail.
+        format!("{{\"{ABANDONED_TRACE_KEY}\":{{\"reason\":\"unknown\",\"detail\":\"\"}}}}")
+            .into_bytes()
+    });
+    bytes.push(b'\n');
+    bytes
+}
+
+/// Read an abandoned-trace marker back, or `None` if these bytes are not one.
+pub fn parse_abandoned_trace_marker(bytes: &[u8]) -> Option<AbandonedTrace> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    serde_json::from_value(value.get(ABANDONED_TRACE_KEY)?.clone()).ok()
+}
+
 const MAIN_TIMELINE: &str = "main";
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -677,6 +728,24 @@ impl TraceBundle {
     /// oracle as a natively current bundle. Unsupported versions are rejected by
     /// [`migrate_to_current`] before any structural interpretation.
     fn decode(value: serde_json::Value, path: PathBuf) -> Result<Self, TraceError> {
+        // An abandoned-trace marker is a valid JSON document that is not a
+        // bundle. Recognize it FIRST so the refusal names what actually
+        // happened — the recorder gave up on this trace, and why — instead of
+        // the "missing format_version" confusion the migration chain would
+        // otherwise report for a file that is not corrupt at all.
+        if let Some(abandoned) = value
+            .get(ABANDONED_TRACE_KEY)
+            .and_then(|marker| serde_json::from_value::<AbandonedTrace>(marker.clone()).ok())
+        {
+            return Err(TraceError::Incomplete {
+                path,
+                reason: format!(
+                    "the recorder abandoned this trace ({}): {}; it holds no events and cannot be \
+                     replayed",
+                    abandoned.reason, abandoned.detail
+                ),
+            });
+        }
         let value = migrate_to_current(value)?;
         require_complete_current_bundle(&value, &path)?;
         let bundle: Self =
@@ -839,11 +908,14 @@ impl TraceBundle {
         let mut ids = BTreeSet::new();
         for (timeline_index, timeline) in self.timelines.iter().enumerate() {
             if timeline.decisions.len() > MAX_TIMELINE_EVENTS {
-                return Err(TraceError::ResourceLimit(format!(
-                    "timeline {} has {} events; limit is {MAX_TIMELINE_EVENTS}",
-                    timeline.id,
-                    timeline.decisions.len()
-                )));
+                return Err(TraceError::ResourceLimit {
+                    message: format!(
+                        "timeline {} has {} events; limit is {MAX_TIMELINE_EVENTS}",
+                        timeline.id,
+                        timeline.decisions.len()
+                    ),
+                    bytes: None,
+                });
             }
             if timeline.id.is_empty() || !ids.insert(timeline.id.clone()) {
                 return Err(TraceError::Invalid(format!(
@@ -1313,7 +1385,17 @@ pub enum TraceError {
         supported: u32,
     },
     Invalid(String),
-    ResourceLimit(String),
+    /// A *budget* refusal: the trace is larger than a configured limit allows.
+    /// Distinct in kind from every other variant here — nothing is broken or
+    /// corrupt, the run simply produced more than the budget carries — so a
+    /// consumer that must tell "patina is misbehaving" from "this run outgrew
+    /// its budget" can branch on it. `bytes` carries the observed size and the
+    /// limit for a byte budget (`None` for the event-count budget) so that
+    /// consumer can report the numbers without parsing `message` back apart.
+    ResourceLimit {
+        message: String,
+        bytes: Option<(u64, u64)>,
+    },
     UnknownTimeline(String),
     DuplicateTimeline(String),
     FingerprintMismatch {
@@ -1340,6 +1422,27 @@ pub enum TraceError {
     },
 }
 
+impl TraceError {
+    /// Whether this refusal is a budget refusal (see
+    /// [`TraceError::ResourceLimit`]) rather than a broken, corrupt, or
+    /// unwritable trace. Callers that must keep failing closed on a genuine
+    /// recorder fault, while treating "the run outgrew its trace budget" as a
+    /// lost artifact rather than a lost run, branch on this.
+    pub fn is_resource_limit(&self) -> bool {
+        matches!(self, Self::ResourceLimit { .. })
+    }
+
+    /// The observed size and the budget, in bytes, when this refusal is a
+    /// *byte* budget refusal. `None` for every other refusal, including the
+    /// event-count budget, which has no byte figures to report.
+    pub fn resource_limit_bytes(&self) -> Option<(u64, u64)> {
+        match self {
+            Self::ResourceLimit { bytes, .. } => *bytes,
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for TraceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1356,7 +1459,9 @@ impl fmt::Display for TraceError {
                 "unsupported trace format version {found}; this runtime supports {supported}"
             ),
             Self::Invalid(message) => write!(f, "invalid trace: {message}"),
-            Self::ResourceLimit(message) => write!(f, "trace resource limit exceeded: {message}"),
+            Self::ResourceLimit { message, .. } => {
+                write!(f, "trace resource limit exceeded: {message}")
+            }
             Self::UnknownTimeline(timeline) => {
                 write!(f, "trace has no timeline named {timeline:?}")
             }
@@ -1562,9 +1667,12 @@ fn enforce_trace_byte_limit(
     if size <= max_bytes {
         return Ok(());
     }
-    Err(TraceError::ResourceLimit(format!(
-        "{description} is {size} bytes; limit is {max_bytes}; reduce recorded event count or payload volume, or split the run"
-    )))
+    Err(TraceError::ResourceLimit {
+        message: format!(
+            "{description} is {size} bytes; limit is {max_bytes}; reduce recorded event count or payload volume, or split the run"
+        ),
+        bytes: Some((size, max_bytes)),
+    })
 }
 
 fn temporary_path(path: &Path) -> PathBuf {
@@ -1659,13 +1767,13 @@ mod tests {
 
         let error = bundle.to_bytes_with_limit(limit).unwrap_err();
         assert!(
-            matches!(&error, TraceError::ResourceLimit(message) if message.contains("serialized trace")),
+            matches!(&error, TraceError::ResourceLimit { message, bytes: Some(_) } if message.contains("serialized trace")),
             "unexpected error: {error}"
         );
 
         let error = bundle.write_atomic_with_limit(&path, limit).unwrap_err();
         assert!(
-            matches!(&error, TraceError::ResourceLimit(message) if message.contains("serialized trace")),
+            matches!(&error, TraceError::ResourceLimit { message, bytes: Some(_) } if message.contains("serialized trace")),
             "unexpected error: {error}"
         );
         assert!(
@@ -1682,7 +1790,7 @@ mod tests {
         recorder.observe(operation(), Outcome::U64(10));
         let error = recorder.finish_with_limit(&path, limit).unwrap_err();
         assert!(
-            matches!(&error, TraceError::ResourceLimit(message) if message.contains("serialized trace")),
+            matches!(&error, TraceError::ResourceLimit { message, bytes: Some(_) } if message.contains("serialized trace")),
             "unexpected error: {error}"
         );
         assert!(!path.exists(), "Recorder::finish must fail before writing");
@@ -2156,7 +2264,85 @@ mod tests {
             .unwrap();
         assert!(matches!(
             TraceBundle::load(&oversized),
-            Err(TraceError::ResourceLimit(_))
+            Err(TraceError::ResourceLimit { .. })
         ));
+    }
+
+    /// A budget refusal must be distinguishable from a broken trace WITHOUT
+    /// string matching, and must carry the two numbers a diagnostic reports.
+    /// The native shim keeps a run's verdict on the budget refusal and aborts
+    /// on every other one, so this is the seam that decision rests on.
+    #[test]
+    fn a_budget_refusal_is_classifiable_and_carries_its_numbers() {
+        let bundle = TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new());
+        let serialized_len = bundle.to_bytes().unwrap().len() as u64;
+        let limit = serialized_len - 1;
+
+        let error = bundle.to_bytes_with_limit(limit).unwrap_err();
+        assert!(error.is_resource_limit(), "unexpected error: {error}");
+        assert_eq!(error.resource_limit_bytes(), Some((serialized_len, limit)));
+
+        let mut oversized = TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new());
+        oversized.timelines[0].decisions = vec![
+            TraceEvent {
+                sequence: 0,
+                operation: operation(),
+                outcome: Outcome::U64(0),
+            };
+            MAX_TIMELINE_EVENTS + 1
+        ];
+        let error = oversized.validate().unwrap_err();
+        assert!(error.is_resource_limit(), "unexpected error: {error}");
+        assert_eq!(
+            error.resource_limit_bytes(),
+            None,
+            "an event-count budget has no byte figures to report"
+        );
+
+        let broken = TraceError::Invalid("something is wrong".into());
+        assert!(!broken.is_resource_limit());
+    }
+
+    /// An abandoned trace must never be replayable as if it were a recording.
+    /// The marker is what a reader sees in place of a bundle, so loading one
+    /// has to refuse by NAME — "the recorder abandoned this trace" — rather
+    /// than as an unexplained parse failure.
+    #[test]
+    fn an_abandoned_trace_marker_is_refused_by_name() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("abandoned.patina");
+        let marker = abandoned_trace_marker(
+            "resource-limit",
+            "serialized trace is 999 bytes; limit is 100",
+        );
+        assert_eq!(
+            parse_abandoned_trace_marker(&marker),
+            Some(AbandonedTrace {
+                reason: "resource-limit".into(),
+                detail: "serialized trace is 999 bytes; limit is 100".into(),
+            })
+        );
+        fs::write(&path, &marker).unwrap();
+
+        let error = TraceBundle::load(&path).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            matches!(&error, TraceError::Incomplete { .. })
+                && message.contains("abandoned this trace")
+                && message.contains("resource-limit")
+                && message.contains("cannot be replayed"),
+            "an abandoned trace must be refused by name; got {message}"
+        );
+        assert!(
+            TraceBundle::from_slice(&marker).is_err(),
+            "the transport path must refuse a marker too"
+        );
+
+        // A real bundle is never mistaken for a marker.
+        let bundle = TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new());
+        assert_eq!(
+            parse_abandoned_trace_marker(&bundle.to_bytes().unwrap()),
+            None
+        );
     }
 }
