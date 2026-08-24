@@ -1467,7 +1467,7 @@ const CAMPAIGN: Verb = Verb {
     name: "campaign",
     summary: "Config-driven deterministic fault-and-schedule sweep over one artifact.",
     synopsis: &[
-        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--harness] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [-- GUEST ARGS]",
+        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults] [--fault-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--harness] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [-- GUEST ARGS]",
         "cargo patina campaign --extend N [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --resume [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --selftest",
@@ -1500,7 +1500,13 @@ macro sites are declared through the link-time table, so never-reached oracles \
 appear with registered_gens=0; --allow-unmet-sometimes[=MIN_GENS] reports but \
 waives that gate (unconditionally or only below the observed generation \
 threshold). `--selftest` proves every classifier class and the coverage gate \
-classes.\n\
+classes. The `--faults` bands are tuned for an aggressive sweep (up to 100 \
+per-mille of filesystem operations failed, 200 per-mille short); \
+--fault-scale-permille dampens every intensity band uniformly for a workload that \
+needs faults to be RARE enough to run to completion. It is part of the campaign's \
+shape, so it is recorded in the out-dir spec, baked into the per-generation flags \
+the reproduce commands replay, and refused on a continuation like every other spec \
+flag.\n\
 \n\
 A native artifact's `run` invocation shape is forwarded verbatim to every \
 generation: `--harness` for a patina-dst-harness (configure-then-run) binary, and \
@@ -1622,6 +1628,13 @@ refused by name.",
                     None,
                     Value::None,
                     "Randomize fault knobs (fs error/short I/O/crash placement, net drop/latency, sleep jitter, and — with --dns-entry — DNS failure/latency) per generation.",
+                    false,
+                ),
+                f(
+                    "--fault-scale-permille",
+                    None,
+                    Value::Required("N", Kind::Permille),
+                    "Dampen every --faults intensity band to N per-mille of its default (default 1000 = the tuned aggressive bands; 10 = a hundredfold rarer, the regime where the workload runs to completion and only unusual paths are faulted). Also gates how often a generation injects an fs crash. Shape bands (torn-write granularity, TCP buffer size) and the cooperative-SUT knobs are not intensity and are left alone.",
                     false,
                 ),
                 f(

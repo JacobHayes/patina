@@ -83,6 +83,13 @@ const CAMPAIGN_STATE_SCHEMA: &str = "patina.campaign.state/v2";
 const CAMPAIGN_SIGNATURES_SCHEMA: &str = "patina.campaign.signatures/v1";
 const DEFAULT_PLATEAU_AFTER: u64 = 200;
 
+/// The `--fault-scale-permille` value that leaves every seed-drawn fault band
+/// exactly as it was before the flag existed: 1000 per-mille = 1.0 = full
+/// intensity. Also the upper bound — the flag DAMPENS the tuned bands, it never
+/// amplifies them past ceilings that were chosen against the child `run` knobs'
+/// own limits.
+const FAULT_SCALE_FULL: u64 = 1000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AllowUnmetSometimes {
     Always,
@@ -133,6 +140,40 @@ pub struct CampaignSpec {
     /// the guest declares one is a fact about the guest, which only the operator
     /// can tell the campaign.
     pub custom_op_faults: bool,
+    /// Scale (per-mille) applied to every seed-drawn fault INTENSITY under
+    /// [`Self::faults`]: `1000` (the default) leaves the exploration bands exactly
+    /// as they have always been, `10` makes every injected fault a hundredfold
+    /// rarer.
+    ///
+    /// WHY A DIAL AT ALL. The bands are tuned for an aggressive sweep: up to 100
+    /// per-mille of filesystem operations failed outright and 200 per-mille
+    /// short. For a workload that treats the disk as basically working — a
+    /// database's own stress harness, say — that is not fault injection, it is a
+    /// broken disk: the guest dies on the first injected error, every generation
+    /// signature is a different flavour of "startup failed", and the campaign
+    /// explores nothing. The rare-fault regime (Antithesis' `unreliable-libc`
+    /// being the reference point) is where the workload RUNS to completion and
+    /// only unusual paths get exercised. Both are legitimate; only one was
+    /// reachable.
+    ///
+    /// WHY PER-MILLE RATHER THAN A FLOAT. Every rate this scales is already
+    /// per-mille, the CLI already has a `[0, 1000]` value grammar to validate it
+    /// against, and — the load-bearing reason — the whole derivation stays in
+    /// integers. A campaign's central guarantee is that every knob is a pure
+    /// function of the generation number; keeping the scale an integer keeps the
+    /// arithmetic bit-exact under any rounding mode, and keeps the JSON spec
+    /// round-trip exact rather than float-formatted.
+    ///
+    /// WHAT IT DOES NOT TOUCH, and why (see [`scale_intensity`] and
+    /// [`crash_band_fires`]): the bands that pick a fault's SHAPE rather than its
+    /// intensity. `--fs-torn-granularity` is a durability MODEL, not a rate;
+    /// `--net-tcp-buffer-bytes` is a capacity where a SMALLER value is the
+    /// harsher one, so scaling it down would do the opposite of what the operator
+    /// asked; and `--buggify`/`--sched-pct`/`--swarm` configure exploration of the
+    /// guest's own cooperative sites rather than injecting an environment fault.
+    /// The crash band has no intensity to scale either — an ordinal is a place,
+    /// not a rate — so the scale governs how OFTEN a generation crashes at all.
+    pub fault_scale_permille: u64,
     /// The DNS host table (`NAME=ADDR` entries) every generation runs with.
     ///
     /// Part of the campaign's shape rather than a per-generation draw: the names
@@ -192,6 +233,7 @@ impl Default for CampaignSpec {
             pct: false,
             faults: false,
             custom_op_faults: false,
+            fault_scale_permille: FAULT_SCALE_FULL,
             dns_entries: Vec::new(),
             harness: false,
             allow_symbols: Vec::new(),
@@ -238,6 +280,20 @@ impl CampaignSpec {
                 "pct" => self.pct = json_bool(key, val)?,
                 "faults" => self.faults = json_bool(key, val)?,
                 "custom_op_faults" => self.custom_op_faults = json_bool(key, val)?,
+                "fault_scale_permille" => {
+                    // A spec file bypasses the CLI value grammar, so hold it to
+                    // the same `[0, 1000]` bound here rather than letting an
+                    // out-of-range scale silently amplify the bands past their
+                    // tuned ceilings.
+                    let value = json_u64(key, val)?;
+                    if value > FAULT_SCALE_FULL {
+                        return Err(CliError(format!(
+                            "campaign spec \"fault_scale_permille\" must be in [0, {FAULT_SCALE_FULL}] \
+                             (1000 = the default bands); got {value}"
+                        )));
+                    }
+                    self.fault_scale_permille = value;
+                }
                 "dns_entries" => {
                     let array = val
                         .as_array()
@@ -304,7 +360,7 @@ impl CampaignSpec {
                     return Err(CliError(format!(
                         "unknown campaign spec key {other:?}; expected generations, seed_base, \
                          timeout_secs, guest_args, buggify, swarm, pct, faults, custom_op_faults, \
-                         dns_entries, \
+                         fault_scale_permille, dns_entries, \
                          harness, allow_symbols, allow_unsupported_symbols, watchdog_nanos, \
                          converge_nanos, heal_after_nanos, report, plateau_after, guided, \
                          allow_unmet_sometimes, or classify"
@@ -596,6 +652,11 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     spec.pct |= args.flag("--sched-pct");
     spec.faults |= args.flag("--faults");
     spec.custom_op_faults |= args.flag("--custom-op-faults");
+    // A value flag, so — unlike the switches above — it overrides the spec only
+    // when actually supplied; an absent flag leaves the spec's scale alone.
+    if let Some(value) = args.u64("--fault-scale-permille") {
+        spec.fault_scale_permille = value;
+    }
     spec.report |= args.flag("--report-failures");
     let dns_entries = args.texts("--dns-entry");
     if !dns_entries.is_empty() {
@@ -2056,6 +2117,17 @@ fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     // not declare custom-op faults records exactly the JSON it did before this
     // key existed, so an out-dir written by an earlier build still round-trips
     // on `--resume`.
+    // Written only when it differs from the default, exactly like the optional
+    // keys around it: `spec_from_state_json` rebuilds from `CampaignSpec::default()`
+    // and then demands `spec_to_json` reproduce the file byte for byte, so an
+    // unconditional key would make every out-dir recorded before this flag
+    // existed fail its canonical-form check on `--resume`.
+    if spec.fault_scale_permille != FAULT_SCALE_FULL {
+        map.insert(
+            "fault_scale_permille".into(),
+            spec.fault_scale_permille.into(),
+        );
+    }
     if spec.custom_op_faults {
         map.insert("custom_op_faults".into(), true.into());
     }
@@ -3300,7 +3372,7 @@ fn push_run_flag(flags: &mut Vec<String>, name: &str, value: RunValue) {
 /// claim, and [`every_generation_hash_read_goes_through_a_claim`] rejects a raw
 /// literal index that bypassed the table.
 ///
-/// Bytes 10 and 30..32 are unclaimed and are where the next band should draw from.
+/// Byte 31 is unclaimed and is where the next band should draw from.
 mod gen_byte {
     use std::ops::Range;
 
@@ -3310,6 +3382,10 @@ mod gen_byte {
 
     pub(super) const BUGGIFY_ACTIVATION: usize = 8;
     pub(super) const BUGGIFY_FIRE: usize = 9;
+    /// Whether this generation injects a filesystem crash at all. Only ever
+    /// consulted below full `--fault-scale-permille`: at full scale the gate is
+    /// unconditionally open, which is what keeps the default band unchanged.
+    pub(super) const FS_CRASH_FIRE: usize = 10;
     pub(super) const SCHED_PCT_DEPTH: usize = 11;
     pub(super) const NET_DROP: usize = 12;
     pub(super) const SLEEP_JITTER_HI: usize = 13;
@@ -3360,8 +3436,14 @@ mod gen_byte {
 /// bypassed the table with a literal index.
 fn campaign_band(knob: FaultKnob) -> Option<&'static [usize]> {
     match knob {
-        // The crash band draws twice: an op class and a low ordinal.
-        FaultKnob::FsCrashAt => Some(&[gen_byte::FS_CRASH_OP, gen_byte::FS_CRASH_ORDINAL]),
+        // The crash band draws three times: whether this generation crashes at
+        // all (the `--fault-scale-permille` gate — always open at full scale), an
+        // op class, and a low ordinal.
+        FaultKnob::FsCrashAt => Some(&[
+            gen_byte::FS_CRASH_OP,
+            gen_byte::FS_CRASH_ORDINAL,
+            gen_byte::FS_CRASH_FIRE,
+        ]),
         FaultKnob::FsTornGranularity => Some(&[gen_byte::FS_TORN_GRANULARITY]),
         FaultKnob::FsErrorPermille => Some(&[gen_byte::FS_ERROR]),
         FaultKnob::FsShortPermille => Some(&[gen_byte::FS_SHORT]),
@@ -3523,6 +3605,44 @@ fn invocation_flags(spec: &CampaignSpec, family: &'static str) -> Vec<String> {
     flags
 }
 
+/// Dampen one band's drawn INTENSITY by the spec's fault scale.
+///
+/// Applied to the value the band ALREADY drew rather than to the band's ceiling,
+/// which is what makes `FAULT_SCALE_FULL` the exact identity — `(v * 1000 + 500)
+/// / 1000 == v` for every `v` — and therefore what keeps the default sweep byte
+/// for byte the sweep it always was. Scaling the ceiling first would round
+/// differently and silently rewrite every historical generation.
+///
+/// Rounds to NEAREST, not down. The child `run` knobs are per-mille-granular, so
+/// 1 per-mille is the finest non-zero rate that exists; truncating would turn
+/// every draw the scale pushes under that floor into a hard zero, disarming the
+/// plane entirely and (over a busy guest) reporting it as vacuous. Rounding to
+/// nearest instead spreads the same expected intensity over FEWER generations: at
+/// scale 10, a band that drew 50 per-mille yields 1 per-mille and one that drew 20
+/// yields 0, so roughly half the generations carry a real, rare fault rate and the
+/// mean rate is a hundredfold lower — which is the regime the operator asked for.
+fn scale_intensity(value: u64, scale_permille: u64) -> u64 {
+    (value * scale_permille + FAULT_SCALE_FULL / 2) / FAULT_SCALE_FULL
+}
+
+/// Whether this generation injects a filesystem crash at all.
+///
+/// The crash band is the one fault the scale cannot dampen by magnitude: an
+/// `open:3` is a PLACE in the guest's I/O sequence, not a rate, and there is no
+/// "milder" crash. Scaling only the rate knobs and leaving this alone would hand
+/// a rare-fault campaign a torn filesystem and an invalidated descriptor table in
+/// EVERY generation — the single harshest fault in the set, at full intensity,
+/// under a flag that says the opposite. So the scale governs the one dimension a
+/// crash has: how often a generation crashes at all.
+///
+/// At `FAULT_SCALE_FULL` the comparison is `byte * 1000 < 256_000`, true for all
+/// 256 byte values, so the gate is unconditionally open and the default band is
+/// unchanged. Its own claimed hash byte, so the decision is independent of the
+/// op-class and ordinal draws rather than correlated with them.
+fn crash_band_fires(hash: &[u8; 32], scale_permille: u64) -> bool {
+    u64::from(band_byte(hash, FaultKnob::FsCrashAt, 2)) * FAULT_SCALE_FULL < scale_permille * 256
+}
+
 /// Derive the per-generation `run` flags from the generation hash. Native-only
 /// exploration knobs (`--swarm`, `--sched-pct`) are skipped for a WASI module
 /// (single-threaded; the WASI `run` does not accept them). Every draw indexes
@@ -3530,6 +3650,10 @@ fn invocation_flags(spec: &CampaignSpec, family: &'static str) -> Vec<String> {
 fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> Vec<String> {
     let native = family == "native";
     let mut flags = invocation_flags(spec, family);
+    // One binding for the whole band section: every INTENSITY draw below passes
+    // through `scale_intensity` with it, so a band that forgets to is a visible
+    // omission rather than an invisible one.
+    let scale = spec.fault_scale_permille;
 
     if spec.buggify {
         // Activation in [300, 900] permille, fire in [300, 900] permille — a wide
@@ -3546,19 +3670,20 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
         );
     }
     if spec.faults {
-        let fs_error = u32::from(band_byte(hash, FaultKnob::FsErrorPermille, 0)) * 100 / 255; // [0, 100] permille
-        push_run_flag(
-            &mut flags,
-            "--fs-error-permille",
-            RunValue::Int(u64::from(fs_error)),
+        let fs_error = scale_intensity(
+            u64::from(band_byte(hash, FaultKnob::FsErrorPermille, 0)) * 100 / 255, // [0, 100] permille
+            scale,
         );
-        let fs_short = u32::from(band_byte(hash, FaultKnob::FsShortPermille, 0)) * 200 / 255; // [0, 200] permille
-        push_run_flag(
-            &mut flags,
-            "--fs-short-permille",
-            RunValue::Int(u64::from(fs_short)),
+        push_run_flag(&mut flags, "--fs-error-permille", RunValue::Int(fs_error));
+        let fs_short = scale_intensity(
+            u64::from(band_byte(hash, FaultKnob::FsShortPermille, 0)) * 200 / 255, // [0, 200] permille
+            scale,
         );
-        let fs_latency_hi = u64::from(band_byte(hash, FaultKnob::FsLatencyNanos, 0)) * 10_000; // up to 2.55 ms
+        push_run_flag(&mut flags, "--fs-short-permille", RunValue::Int(fs_short));
+        let fs_latency_hi = scale_intensity(
+            u64::from(band_byte(hash, FaultKnob::FsLatencyNanos, 0)) * 10_000, // up to 2.55 ms
+            scale,
+        );
         push_run_flag(
             &mut flags,
             "--fs-latency-nanos",
@@ -3573,14 +3698,18 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
         // filesystem at different points in the guest's I/O sequence. Ordinals stay
         // in [1, 8] because a crash that never fires (an ordinal past the guest's
         // op count) explores nothing.
-        let crash_op = ["open", "write", "sync", "close"]
-            [usize::from(band_byte(hash, FaultKnob::FsCrashAt, 0) % 4)];
-        let crash_ordinal = 1 + u64::from(band_byte(hash, FaultKnob::FsCrashAt, 1) % 8);
-        push_run_flag(
-            &mut flags,
-            "--fs-crash-at",
-            RunValue::Text(format!("{crash_op}:{crash_ordinal}")),
-        );
+        // Gated by the fault scale (`crash_band_fires`): at full scale every
+        // generation crashes, as it always has; below it, proportionally fewer do.
+        if crash_band_fires(hash, scale) {
+            let crash_op = ["open", "write", "sync", "close"]
+                [usize::from(band_byte(hash, FaultKnob::FsCrashAt, 0) % 4)];
+            let crash_ordinal = 1 + u64::from(band_byte(hash, FaultKnob::FsCrashAt, 1) % 8);
+            push_run_flag(
+                &mut flags,
+                "--fs-crash-at",
+                RunValue::Text(format!("{crash_op}:{crash_ordinal}")),
+            );
+        }
         // Half the generations tear at sub-block byte granularity, the harder
         // durability model to survive.
         if band_byte(hash, FaultKnob::FsTornGranularity, 0) % 2 == 0 {
@@ -3590,19 +3719,24 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
                 RunValue::Text("byte".to_string()),
             );
         }
-        let drop = u32::from(band_byte(hash, FaultKnob::NetDropPermille, 0)) * 200 / 255; // [0, 200] permille
-        push_run_flag(
-            &mut flags,
-            "--net-drop-permille",
-            RunValue::Int(u64::from(drop)),
+        let drop = scale_intensity(
+            u64::from(band_byte(hash, FaultKnob::NetDropPermille, 0)) * 200 / 255, // [0, 200] permille
+            scale,
         );
-        let net_latency = u64::from(band_byte(hash, FaultKnob::NetLatencyNanos, 0)) * 10_000; // up to 2.55 ms
+        push_run_flag(&mut flags, "--net-drop-permille", RunValue::Int(drop));
+        let net_latency = scale_intensity(
+            u64::from(band_byte(hash, FaultKnob::NetLatencyNanos, 0)) * 10_000, // up to 2.55 ms
+            scale,
+        );
         push_run_flag(
             &mut flags,
             "--net-latency-nanos",
             RunValue::Int(net_latency),
         );
-        let net_jitter_hi = u64::from(band_byte(hash, FaultKnob::NetJitterNanos, 0)) * 10_000; // up to 2.55 ms
+        let net_jitter_hi = scale_intensity(
+            u64::from(band_byte(hash, FaultKnob::NetJitterNanos, 0)) * 10_000, // up to 2.55 ms
+            scale,
+        );
         push_run_flag(
             &mut flags,
             "--net-jitter-nanos",
@@ -3611,26 +3745,29 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
                 hi: net_jitter_hi,
             },
         );
-        let net_duplicate =
-            u32::from(band_byte(hash, FaultKnob::NetDuplicatePermille, 0)) * 200 / 255; // [0, 200] permille
+        let net_duplicate = scale_intensity(
+            u64::from(band_byte(hash, FaultKnob::NetDuplicatePermille, 0)) * 200 / 255, // [0, 200] permille
+            scale,
+        );
         push_run_flag(
             &mut flags,
             "--net-duplicate-permille",
-            RunValue::Int(u64::from(net_duplicate)),
+            RunValue::Int(net_duplicate),
         );
-        let net_connect_refuse =
-            u32::from(band_byte(hash, FaultKnob::NetConnectRefusePermille, 0)) * 200 / 255; // [0, 200] permille
+        let net_connect_refuse = scale_intensity(
+            u64::from(band_byte(hash, FaultKnob::NetConnectRefusePermille, 0)) * 200 / 255, // [0, 200] permille
+            scale,
+        );
         push_run_flag(
             &mut flags,
             "--net-connect-refuse-permille",
-            RunValue::Int(u64::from(net_connect_refuse)),
+            RunValue::Int(net_connect_refuse),
         );
-        let net_reset = u32::from(band_byte(hash, FaultKnob::NetResetPermille, 0)) * 200 / 255; // [0, 200] permille
-        push_run_flag(
-            &mut flags,
-            "--net-reset-permille",
-            RunValue::Int(u64::from(net_reset)),
+        let net_reset = scale_intensity(
+            u64::from(band_byte(hash, FaultKnob::NetResetPermille, 0)) * 200 / 255, // [0, 200] permille
+            scale,
         );
+        push_run_flag(&mut flags, "--net-reset-permille", RunValue::Int(net_reset));
         // [64, 4096] bytes: small enough to make would-block/partial-send paths
         // reachable (the flag's own purpose) while staying well clear of 0, which
         // `SimNet::builder().build()` refuses outright.
@@ -3641,7 +3778,10 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
             "--net-tcp-buffer-bytes",
             RunValue::Int(net_tcp_buffer),
         );
-        let jitter_hi = u64::from(band_byte(hash, FaultKnob::SleepJitterNanos, 0)) * 10_000; // up to 2.55 ms
+        let jitter_hi = scale_intensity(
+            u64::from(band_byte(hash, FaultKnob::SleepJitterNanos, 0)) * 10_000, // up to 2.55 ms
+            scale,
+        );
         push_run_flag(
             &mut flags,
             "--sleep-jitter-nanos",
@@ -3653,20 +3793,24 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
         // Runtime-level like the fs/net bands above, and available to every
         // family (WASI guests draw entropy too, unlike DNS resolution): no
         // host-table-shaped gate needed.
-        let entropy_fail =
-            u32::from(band_byte(hash, FaultKnob::EntropyFailPermille, 0)) * 200 / 255; // [0, 200] permille
+        let entropy_fail = scale_intensity(
+            u64::from(band_byte(hash, FaultKnob::EntropyFailPermille, 0)) * 200 / 255, // [0, 200] permille
+            scale,
+        );
         push_run_flag(
             &mut flags,
             "--entropy-fail-permille",
-            RunValue::Int(u64::from(entropy_fail)),
+            RunValue::Int(entropy_fail),
         );
         // [0, 255e9] ns: up to ~4.25 minutes each direction. Deliberately
         // seconds-scale rather than the ms-scale fs/net latency bands above —
         // wall-jump bugs (cert-expiry checks, timestamp-ordering) live at the
         // seconds-to-minutes scale a real clock step or NTP correction moves,
         // not the microsecond jitter that exercises reordering against timers.
-        let epoch_jump_hi =
-            u64::from(band_byte(hash, FaultKnob::EpochJumpNanos, 0)) * 1_000_000_000;
+        let epoch_jump_hi = scale_intensity(
+            u64::from(band_byte(hash, FaultKnob::EpochJumpNanos, 0)) * 1_000_000_000,
+            scale,
+        );
         push_run_flag(
             &mut flags,
             "--epoch-jump-nanos",
@@ -3680,12 +3824,14 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
         // declared it is family-agnostic: a custom op is guest code, so all
         // three families have them.
         if spec.custom_op_faults {
-            let custom_op_fail =
-                u32::from(band_byte(hash, FaultKnob::CustomOpFailPermille, 0)) * 200 / 255; // [0, 200] permille
+            let custom_op_fail = scale_intensity(
+                u64::from(band_byte(hash, FaultKnob::CustomOpFailPermille, 0)) * 200 / 255, // [0, 200] permille
+                scale,
+            );
             push_run_flag(
                 &mut flags,
                 "--custom-op-fail-permille",
-                RunValue::Int(u64::from(custom_op_fail)),
+                RunValue::Int(custom_op_fail),
             );
         }
         // The DNS band rides on the host table, which is spec config rather than a
@@ -3698,13 +3844,15 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
             for entry in &spec.dns_entries {
                 push_run_flag(&mut flags, "--dns-entry", RunValue::Text(entry.clone()));
             }
-            let dns_fail = u32::from(band_byte(hash, FaultKnob::DnsFailPermille, 0)) * 100 / 255; // [0, 100] permille
-            push_run_flag(
-                &mut flags,
-                "--dns-fail-permille",
-                RunValue::Int(u64::from(dns_fail)),
+            let dns_fail = scale_intensity(
+                u64::from(band_byte(hash, FaultKnob::DnsFailPermille, 0)) * 100 / 255, // [0, 100] permille
+                scale,
             );
-            let dns_latency_hi = u64::from(band_byte(hash, FaultKnob::DnsLatencyNanos, 0)) * 10_000; // up to 2.55 ms
+            push_run_flag(&mut flags, "--dns-fail-permille", RunValue::Int(dns_fail));
+            let dns_latency_hi = scale_intensity(
+                u64::from(band_byte(hash, FaultKnob::DnsLatencyNanos, 0)) * 10_000, // up to 2.55 ms
+                scale,
+            );
             push_run_flag(
                 &mut flags,
                 "--dns-latency-nanos",
@@ -5992,6 +6140,16 @@ complete\"\n",
         }
     }
 
+    println!("-- fault intensity scaling (--fault-scale-permille) --");
+    for (name, ok, detail) in fault_scale_selftest() {
+        if ok {
+            println!("  ok   {name:<40} -> {detail}");
+        } else {
+            println!("  FAIL {name:<40} -> {detail}");
+            failures += 1;
+        }
+    }
+
     println!("-- guided generation scheduling --");
     for (name, ok, detail) in crate::guided::campaign_detector_selftest() {
         if ok {
@@ -6010,6 +6168,187 @@ complete\"\n",
         println!("CAMPAIGN SELFTEST FAILED ({failures} checks)");
         Ok(1)
     }
+}
+
+/// The `--fault-scale-permille` checks the classifier selftest runs, in the same
+/// `(name, ok, detail)` shape as the coverage/depth/guided detector selftests.
+///
+/// The flag exists to make the fault plane RARER, and a knob that changes the
+/// sweep is only safe because four properties hold: the scaled draw is a pure
+/// function of the generation, the setting is recorded in the out-dir spec, a
+/// continuation cannot change it out from under a half-finished campaign, and the
+/// scaled values reach the reproduce command. Each is checked here rather than
+/// only in `#[cfg(test)]`, so `campaign --selftest` proves them against the
+/// shipped binary the operator is actually running.
+fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
+    let mut out: Vec<(&'static str, bool, String)> = Vec::new();
+    let scaled = |permille: u64| CampaignSpec {
+        faults: true,
+        custom_op_faults: true,
+        fault_scale_permille: permille,
+        ..CampaignSpec::default()
+    };
+    const LOW: u64 = 10; // a hundredfold rarer
+
+    // (1) PURITY. The whole campaign contract: the same spec and the same
+    // generation derive the same flags, always, and different generations still
+    // differ (a scale that collapsed the sweep to one configuration would satisfy
+    // determinism while exploring nothing).
+    let spec = scaled(LOW);
+    let mut stable = true;
+    let mut distinct: std::collections::BTreeSet<Vec<String>> = std::collections::BTreeSet::new();
+    for generation in 0..16u64 {
+        let hash = generation_hash(0, generation);
+        let first = derive_flags(&spec, &hash, "native");
+        let second = derive_flags(&spec, &generation_hash(0, generation), "native");
+        stable &= first == second;
+        distinct.insert(first);
+    }
+    out.push((
+        "scaled-knobs-are-pure-in-the-generation",
+        stable && distinct.len() > 8,
+        format!("stable={stable} distinct_configurations={}", distinct.len()),
+    ));
+
+    // (2) THE DEFAULT IS UNCHANGED. The identity is arithmetic, not a special
+    // case: `scale_intensity` at full scale is `v` for every `v`, and an explicit
+    // full-scale spec derives byte-for-byte what the default spec derives — which
+    // is what makes every campaign recorded before this flag existed still
+    // reproduce.
+    let identity = (0..=2000u64)
+        .chain([10_000, 2_550_000, 255_000_000_000])
+        .all(|value| scale_intensity(value, FAULT_SCALE_FULL) == value);
+    let full = scaled(FAULT_SCALE_FULL);
+    let mut default_spec = full.clone();
+    default_spec.fault_scale_permille = CampaignSpec::default().fault_scale_permille;
+    let unchanged = (0..32u64).all(|generation| {
+        let hash = generation_hash(0, generation);
+        derive_flags(&full, &hash, "native") == derive_flags(&default_spec, &hash, "native")
+    });
+    out.push((
+        "full-scale-leaves-the-default-bands-alone",
+        identity && unchanged,
+        format!("identity={identity} default_matches_explicit_1000={unchanged}"),
+    ));
+
+    // (3) IT ACTUALLY DAMPENS. The point of the flag: the summed injected rate
+    // across a sweep must fall by roughly the scale, and the crash band — which
+    // fires in EVERY generation at full scale — must fire in only a few.
+    let rate_of = |spec: &CampaignSpec| -> (u64, usize) {
+        let mut total = 0;
+        let mut crashes = 0;
+        for generation in 0..256u64 {
+            let flags = derive_flags(spec, &generation_hash(0, generation), "native");
+            for knob in [
+                "--fs-error-permille",
+                "--fs-short-permille",
+                "--net-drop-permille",
+                "--entropy-fail-permille",
+            ] {
+                if let Some(index) = flags.iter().position(|f| f == knob) {
+                    total += flags[index + 1].parse::<u64>().unwrap_or(0);
+                }
+            }
+            if flags.iter().any(|f| f == "--fs-crash-at") {
+                crashes += 1;
+            }
+        }
+        (total, crashes)
+    };
+    let (full_rate, full_crashes) = rate_of(&full);
+    let (low_rate, low_crashes) = rate_of(&spec);
+    let dampened = low_rate * 50 < full_rate && full_crashes == 256 && low_crashes < 16;
+    out.push((
+        "a-low-scale-makes-the-fault-plane-rare",
+        dampened,
+        format!(
+            "summed permille {full_rate} -> {low_rate}, crashing generations \
+             {full_crashes} -> {low_crashes} (of 256)"
+        ),
+    ));
+
+    // (4) RECORDED IN THE OUT-DIR SPEC, and round-tripped losslessly through the
+    // canonical-form gate `--resume`/`--extend` reload through. The default is
+    // recorded by ABSENCE, so an out-dir written before this flag existed still
+    // passes that gate.
+    let json = spec_to_json(&spec);
+    let recorded = json.get("fault_scale_permille") == Some(&serde_json::Value::from(LOW));
+    let round_trip = spec_from_state_json(&json).map(|back| back.fault_scale_permille);
+    let default_absent = spec_to_json(&CampaignSpec::default())
+        .get("fault_scale_permille")
+        .is_none();
+    out.push((
+        "fault-scale-is-recorded-in-the-spec",
+        recorded && round_trip.as_ref().ok() == Some(&LOW) && default_absent,
+        format!("recorded={recorded} reloaded={round_trip:?} default_key_absent={default_absent}"),
+    ));
+
+    // (5) REFUSED ON A CONTINUATION. The recorded spec is authoritative: changing
+    // the fault scale halfway through would make the second half of a campaign a
+    // different experiment wearing the same out-dir.
+    let refused = |arguments: &[&str]| -> Option<String> {
+        parse(arguments.iter().map(OsString::from).collect())
+            .err()
+            .map(|error| error.to_string())
+    };
+    let on_extend = refused(&["--extend", "3", "--fault-scale-permille", "10"]);
+    let on_resume = refused(&["--resume", "--fault-scale-permille", "10"]);
+    let fresh_ok = parse(
+        ["art", "--faults", "--fault-scale-permille", "10"]
+            .iter()
+            .map(OsString::from)
+            .collect(),
+    )
+    .map(|invocation| invocation.spec.fault_scale_permille);
+    out.push((
+        "continuations-refuse-a-changed-fault-scale",
+        on_extend.is_some() && on_resume.is_some() && fresh_ok.as_ref().ok() == Some(&LOW),
+        format!(
+            "extend={} resume={} fresh={fresh_ok:?}",
+            on_extend.is_some(),
+            on_resume.is_some()
+        ),
+    ));
+
+    // (6) IN THE REPRODUCE COMMAND. The scale is not a separate token to re-supply
+    // — it is BAKED INTO the per-generation knob values, so the printed
+    // `cargo patina run … --fs-error-permille N …` re-runs the scaled generation
+    // exactly. That is stronger than echoing the flag: the reproduce command
+    // cannot disagree with the generation it reproduces.
+    let hash = generation_hash(0, 3);
+    let flags = derive_flags(&spec, &hash, "native");
+    let line = reproduce_command(
+        Path::new("art"),
+        7,
+        &flags,
+        &[],
+        &[],
+        None,
+        "campaign-gen-3.trace",
+    );
+    let carried = flags
+        .chunks(2)
+        .filter(|pair| pair.len() == 2 && pair[0].ends_with("-permille"))
+        .all(|pair| line.contains(&format!("{} {}", pair[0], pair[1])));
+    let differs = line != {
+        let full_flags = derive_flags(&full, &hash, "native");
+        reproduce_command(
+            Path::new("art"),
+            7,
+            &full_flags,
+            &[],
+            &[],
+            None,
+            "campaign-gen-3.trace",
+        )
+    };
+    out.push((
+        "reproduce-command-carries-the-scaled-knobs",
+        carried && differs,
+        format!("every_scaled_permille_present={carried} differs_from_full_scale={differs}"),
+    ));
+
+    out
 }
 
 fn coverage_fixture(satisfied: bool) -> Result<CoverageTally, String> {
@@ -6313,6 +6652,97 @@ mod tests {
             assert!(wasi.iter().any(|f| f == banded), "wasi lacks {banded}");
             assert!(native.iter().any(|f| f == banded), "native lacks {banded}");
         }
+    }
+
+    /// The scale dampens INTENSITY and nothing else. The two shape bands are the
+    /// ones that would be actively wrong to scale: `--fs-torn-granularity` is a
+    /// durability model (there is no "10% of a byte tear"), and
+    /// `--net-tcp-buffer-bytes` is a capacity whose SMALL end is the harsh one, so
+    /// multiplying it down would make a rare-fault campaign harsher than the
+    /// default it was asked to be gentler than. Pinned here so a later "scale
+    /// everything uniformly" edit has to argue with a test.
+    #[test]
+    fn the_fault_scale_leaves_the_shape_bands_alone() {
+        let at = |permille: u64, generation: u64| {
+            derive_flags(
+                &CampaignSpec {
+                    faults: true,
+                    fault_scale_permille: permille,
+                    ..CampaignSpec::default()
+                },
+                &generation_hash(0, generation),
+                "native",
+            )
+        };
+        let value = |flags: &[String], name: &str| {
+            flags
+                .iter()
+                .position(|f| f == name)
+                .map(|index| flags[index + 1].clone())
+        };
+        let mut torn_seen = false;
+        for generation in 0..64 {
+            let full = at(FAULT_SCALE_FULL, generation);
+            let low = at(1, generation);
+            assert_eq!(
+                value(&full, "--net-tcp-buffer-bytes"),
+                value(&low, "--net-tcp-buffer-bytes"),
+                "generation {generation}: the TCP buffer capacity must not be scaled — \
+                 a smaller buffer is the HARSHER setting"
+            );
+            let torn = |flags: &[String]| flags.iter().any(|f| f == "--fs-torn-granularity");
+            assert_eq!(
+                torn(&full),
+                torn(&low),
+                "generation {generation}: torn-write granularity is a model, not an intensity"
+            );
+            torn_seen |= torn(&full);
+        }
+        assert!(
+            torn_seen,
+            "the torn-granularity band never fired; nothing was proven"
+        );
+    }
+
+    /// The bound and the precedence, on both the JSON and the flag path: a spec
+    /// file cannot ask for a scale ABOVE the tuned bands (it dampens, it never
+    /// amplifies), and an explicit flag overrides a spec file's value.
+    #[test]
+    fn the_fault_scale_is_bounded_and_the_flag_beats_the_spec_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("spec.json");
+        let spec_flag = path.display().to_string();
+        let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+
+        fs::write(&path, br#"{"faults": true, "fault_scale_permille": 1001}"#).expect("write");
+        let error = parse(args(&["art", "--spec", &spec_flag]))
+            .expect_err("a scale above full intensity must be refused")
+            .to_string();
+        assert!(
+            error.contains("fault_scale_permille") && error.contains("[0, 1000]"),
+            "the refusal must name the key and its bound: {error}"
+        );
+
+        fs::write(&path, br#"{"faults": true, "fault_scale_permille": 250}"#).expect("write");
+        let from_spec = parse(args(&["art", "--spec", &spec_flag])).expect("spec parses");
+        assert_eq!(from_spec.spec.fault_scale_permille, 250);
+        let overridden = parse(args(&[
+            "art",
+            "--spec",
+            &spec_flag,
+            "--fault-scale-permille",
+            "10",
+        ]))
+        .expect("flag parses");
+        assert_eq!(overridden.spec.fault_scale_permille, 10);
+        // Absent flag, absent spec key: the default is full intensity.
+        assert_eq!(
+            parse(args(&["art", "--faults"]))
+                .expect("parses")
+                .spec
+                .fault_scale_permille,
+            FAULT_SCALE_FULL
+        );
     }
 
     #[test]
@@ -6947,8 +7377,7 @@ mod tests {
             if let Some(other) = claimed.insert(*index, name.clone()) {
                 panic!(
                     "the {name} and {other} bands both claim generation byte {index}; their knobs \
-                     would be correlated in every generation. Claim a free byte instead (10, or \
-                     23..32)."
+                     would be correlated in every generation. Claim a free byte instead (31)."
                 );
             }
         }
