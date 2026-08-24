@@ -1496,7 +1496,7 @@ const CAMPAIGN: Verb = Verb {
     name: "campaign",
     summary: "Config-driven deterministic fault-and-schedule sweep over one artifact.",
     synopsis: &[
-        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults] [--fault-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--harness] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [-- GUEST ARGS]",
+        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults] [--fault-scale-permille N] [--starve-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--harness] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [-- GUEST ARGS]",
         "cargo patina campaign --extend N [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --resume [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --selftest",
@@ -1535,7 +1535,14 @@ per-mille of filesystem operations failed, 200 per-mille short); \
 needs faults to be RARE enough to run to completion. It is part of the campaign's \
 shape, so it is recorded in the out-dir spec, baked into the per-generation flags \
 the reproduce commands replay, and refused on a continuation like every other spec \
-flag.\n\
+flag. --starve-scale-permille is the same dial over the starvation policy, for the \
+same measured reason: a starvation sweep that wedges most of its generations spends \
+its budget on runs that finish nothing. It gates how often a generation starves at \
+all and dampens the interval count and hold length; the start window is placement \
+rather than intensity and keeps its full sweep. A generation the stall backstop \
+kills is reported as STARVATION_STALL and is NOT counted as a distinct bug found: \
+the backstop only arms under --starve, so the wedge is patina's own injector, not a \
+verdict on the guest.\n\
 \n\
 A native artifact's `run` invocation shape is forwarded verbatim to every \
 generation: `--harness` for a patina-dst-harness (configure-then-run) binary, and \
@@ -1657,6 +1664,13 @@ refused by name.",
                     None,
                     Value::None,
                     "Randomize a bounded starvation-interval policy (count, start window, max length) per generation (native only).",
+                    false,
+                ),
+                f(
+                    "--starve-scale-permille",
+                    None,
+                    Value::Required("N", Kind::Permille),
+                    "Dampen the --starve policy to N per-mille of its default (default 1000 = today's bands; 100 = a tenth as many generations starve, with a tenth the holds and a tenth the hold length when they do). Gates how often a generation starves at all, and scales the interval count and the maximum hold length. The start window is placement rather than intensity — which end of it is harsh depends on the guest's own schedule — so it keeps its full sweep.",
                     false,
                 ),
                 f(

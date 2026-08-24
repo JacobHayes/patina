@@ -484,7 +484,14 @@ original modulo draw verbatim.
    killed with a named `patina: starvation stall` fatal and a distinct nonzero
    exit (`111`), so a sweep classifies `STARVATION_STALL` instead of silently
    losing the generation. It never touches the recorded operation stream of a run
-   that completes and is unreachable on any healthy run.
+   that completes. It is an ELAPSED-TIME deadline, not a progress detector — the
+   supervisor cannot see the scheduler's decision counter, so it cannot separate a
+   wedge from a run that is merely slower than the deadline — which is why a
+   campaign reports `STARVATION_STALL` but does NOT count it as a distinct bug
+   found: the backstop arms only under `--starve`, so the wedge is patina's own
+   injector meeting the limitation above, not a verdict on the guest. A guest that
+   livelocks on its own, where the scheduler still has decisions to make, is the
+   liveness watchdog's `LIVENESS`, which is counted.
 
 4. **Bug-depth metrics**: an active exploration policy emits a machine-readable
    `PATINA_SCHEDULE_POLICY` stderr line at finalization (via the new

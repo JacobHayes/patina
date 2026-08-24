@@ -90,6 +90,17 @@ const DEFAULT_PLATEAU_AFTER: u64 = 200;
 /// own limits.
 const FAULT_SCALE_FULL: u64 = 1000;
 
+/// The `--starve-scale-permille` value that leaves the starvation sweep exactly
+/// as it was before the flag existed: 1000 per-mille = 1.0 = full intensity.
+/// Also the upper bound, for the reason [`FAULT_SCALE_FULL`] is one — the dial
+/// DAMPENS a tuned band, it never amplifies it past a ceiling chosen against the
+/// child `run` knobs' own limits.
+///
+/// The same grammar and the same identity as the fault dial, so an operator who
+/// has met one has met the other, but its own name: the two govern different
+/// planes, and a report that says "scale 10" has to be unambiguous about which.
+const STARVE_SCALE_FULL: u64 = FAULT_SCALE_FULL;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AllowUnmetSometimes {
     Always,
@@ -142,6 +153,55 @@ pub struct CampaignSpec {
     /// stall backstop turns a wedge into a classified `STARVATION_STALL` rather
     /// than a hung campaign.
     pub starve: bool,
+    /// Scale (per-mille) applied to the seed-drawn starvation policy under
+    /// [`Self::starve`]: `1000` (the default) leaves the sweep exactly as it has
+    /// always been; `100` makes a generation starve a tenth as often, with a
+    /// tenth as many holds and a tenth the hold length when it does.
+    ///
+    /// WHY A DIAL AT ALL. Measured over turso's `turso_stress` at 10,000
+    /// iterations, four campaigns came out 8 of 15, 1 of 11, 4 of 12 and 5 of 14
+    /// generations OK — 60 to 80 per cent of the budget spent on runs the stall
+    /// backstop killed before the workload finished. A wedged generation never
+    /// reaches the checkpoint and recovery sequences the campaign exists to
+    /// exercise, so it is not a harsh sample of the guest, it is no sample at
+    /// all. Exactly the shape `--faults` had before
+    /// [`Self::fault_scale_permille`]: the aggressive policy is a legitimate
+    /// option, and it was wrong only as the ONLY option.
+    ///
+    /// WHICH AXES SCALE, AND IN WHICH DIRECTION. This is the interesting half,
+    /// because the policy's three fields do not all point the same way:
+    ///
+    /// * HOW OFTEN A GENERATION STARVES AT ALL scales, through the same kind of
+    ///   gate as the crash band's — [`starve_band_fires`], on its own claimed
+    ///   band byte so the decision is independent of the policy's shape. It is
+    ///   the dominant lever and the honest one: a generation that does not starve
+    ///   is still a full sample of the guest under every other knob the campaign
+    ///   is sweeping, which is more than a wedged one gives.
+    /// * THE INTERVAL COUNT scales DOWN — 8 holds at full scale, 1 at a tenth.
+    ///   More holds is unambiguously harsher, so a plain dampen is the right way
+    ///   round.
+    /// * THE MAXIMUM HOLD LENGTH scales DOWN, floored at one decision. Longer
+    ///   holds are harsher, and this is also the scheduler's AGING CAP, so it is
+    ///   literally the bound on how long a task can be held off. The floor is not
+    ///   cosmetic: `--starve-max-len` is a positive integer, and a zero-length
+    ///   hold is not a gentler hold, it is no hold — which is the gate's job to
+    ///   express, not this axis's.
+    /// * THE START WINDOW IS DELIBERATELY NOT SCALED, and this is the axis a
+    ///   naive uniform multiply gets wrong. It is a PLACEMENT axis — WHERE the
+    ///   holds land — and which end of it is harsh is a property of the guest,
+    ///   not of the dial. Measured on `turso_stress`: at 512 every hold lands in
+    ///   the startup prefix, the policy defers nothing at all
+    ///   (`starve_events=0`) and the run completes in 26 s; at 65536 the same
+    ///   shaped holds land in the concurrent phase and the run never finishes.
+    ///   The small end was the GENTLE one there, the opposite of the reading that
+    ///   "less is less". For a short guest it inverts again: a large window puts
+    ///   starts past the end of the schedule, so the plane goes silently INERT
+    ///   rather than rare. Scaling it either way is right for one guest and wrong
+    ///   for the other, so it keeps its full log sweep and a dampened campaign
+    ///   still explores where a hold lands — the same call
+    ///   `--net-tcp-buffer-bytes` got from the fault dial, for a sharper reason.
+    ///   Pinned by `the_starve_scale_leaves_the_placement_window_alone`.
+    pub starve_scale_permille: u64,
     /// Randomize fault knobs (net drop, sleep jitter) per generation.
     pub faults: bool,
     /// Band the custom-op failure knob (`--custom-op-fail-permille`) under
@@ -246,6 +306,7 @@ impl Default for CampaignSpec {
             swarm: false,
             pct: false,
             starve: false,
+            starve_scale_permille: STARVE_SCALE_FULL,
             faults: false,
             custom_op_faults: false,
             fault_scale_permille: FAULT_SCALE_FULL,
@@ -294,6 +355,20 @@ impl CampaignSpec {
                 "swarm" => self.swarm = json_bool(key, val)?,
                 "pct" => self.pct = json_bool(key, val)?,
                 "starve" => self.starve = json_bool(key, val)?,
+                "starve_scale_permille" => {
+                    // A spec file bypasses the CLI value grammar, so hold it to
+                    // the same `[0, 1000]` bound here rather than letting an
+                    // out-of-range scale amplify the policy past its tuned
+                    // ceilings.
+                    let value = json_u64(key, val)?;
+                    if value > STARVE_SCALE_FULL {
+                        return Err(CliError(format!(
+                            "campaign spec \"starve_scale_permille\" must be in [0, {STARVE_SCALE_FULL}] \
+                             (1000 = the default policy bands); got {value}"
+                        )));
+                    }
+                    self.starve_scale_permille = value;
+                }
                 "faults" => self.faults = json_bool(key, val)?,
                 "custom_op_faults" => self.custom_op_faults = json_bool(key, val)?,
                 "fault_scale_permille" => {
@@ -376,7 +451,7 @@ impl CampaignSpec {
                     return Err(CliError(format!(
                         "unknown campaign spec key {other:?}; expected generations, seed_base, \
                          timeout_secs, guest_args, buggify, swarm, pct, faults, custom_op_faults, \
-                         fault_scale_permille, dns_entries, \
+                         fault_scale_permille, starve, starve_scale_permille, dns_entries, \
                          harness, allow_symbols, allow_unsupported_symbols, watchdog_nanos, \
                          converge_nanos, heal_after_nanos, report, plateau_after, guided, \
                          allow_unmet_sometimes, or classify"
@@ -674,6 +749,9 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     if let Some(value) = args.u64("--fault-scale-permille") {
         spec.fault_scale_permille = value;
     }
+    if let Some(value) = args.u64("--starve-scale-permille") {
+        spec.starve_scale_permille = value;
+    }
     spec.report |= args.flag("--report-failures");
     let dns_entries = args.texts("--dns-entry");
     if !dns_entries.is_empty() {
@@ -897,6 +975,15 @@ pub enum CampaignClass {
     /// initialize, a shim fatal abort.
     FailClosedAbort,
     /// The `--starve` supervisor stall backstop killed a wedged run (exit 111).
+    ///
+    /// NOT a finding — see [`CampaignClass::is_finding`]. The backstop only arms
+    /// under `--starve`, so every exit 111 is a run that patina's OWN injector
+    /// was holding tasks off in when it stopped making progress, and patina
+    /// cannot today say whether the guest livelocks on its own or whether the
+    /// hold plus an uninstrumented spin loop wedged it. Its own class rather than
+    /// folded into [`CampaignClass::Infra`], because which generations the
+    /// injector wedged is exactly what an operator tunes
+    /// `--starve-scale-permille` against.
     StarvationStall,
     /// Harness/build infrastructure failure, not a SUT finding: the campaign's
     /// wall-clock backstop killed the generation, or the child `cargo patina run`
@@ -980,14 +1067,42 @@ impl CampaignClass {
     }
 
     /// Whether this class is a FINDING — something learned about the system under
-    /// test — as opposed to a condition of the run itself. `INFRA` is the only
-    /// failure that is not: a timeout, a host-side SIGKILL, a build failure, and
-    /// patina's own recorder giving out all say the generation produced no
-    /// answer. They are still surfaced and still deduped, but they must not
-    /// spend the campaign's novel-signature budget, which exists to say "this
-    /// many DISTINCT BUGS were found".
+    /// test — as opposed to a condition of the run itself. `INFRA` is the
+    /// original one that is not: a timeout, a host-side SIGKILL, a build failure,
+    /// and patina's own recorder giving out all say the generation produced no
+    /// answer. They are still surfaced and still deduped, but they must not spend
+    /// the campaign's novel-signature budget, which exists to say "this many
+    /// DISTINCT BUGS were found".
+    ///
+    /// `STARVATION_STALL` joins it, by the same argument that moved the host
+    /// SIGKILL and patina's own recorder failures out of the bug classes. The
+    /// stall backstop arms ONLY under `--starve`, so every exit 111 is a run that
+    /// patina's own injector was holding tasks off in — and the wedge is a
+    /// documented limitation of that injector rather than a fact about the guest:
+    /// std's spin loops carry no yield point, so once a spinner starts while the
+    /// lock holder is held off, the scheduler gets no further decision, its aging
+    /// cap can never fire, and the run is stuck no matter how briefly the hold
+    /// was meant to last. Measured on turso's `turso_stress`: two holds of at
+    /// most four decisions wedge a run that completes in 26 s at the same seed
+    /// with starvation off, and it is still wedged 15 minutes later. Filing that
+    /// as a distinct bug found spends a novel-signature slot on patina's own
+    /// exploration knob and prints a reproduce command whose "failure" is the
+    /// harness.
+    ///
+    /// What this deliberately does NOT do is erase the distinction the class
+    /// exists for. A guest that livelocks on its own, where the scheduler still
+    /// gets decisions to make, is caught by the runtime's liveness watchdog and
+    /// filed as [`CampaignClass::Liveness`] — a finding, and still counted as
+    /// one. A wedge that only exists because patina was starving the guest stays
+    /// visible under its own name, which is what an operator reads to tune
+    /// `--starve-scale-permille`, rather than being flattened into the
+    /// timeout/build-failure bucket. Telling the two apart INSIDE exit 111 needs
+    /// a progress signal the supervisor does not have today — the scheduler's
+    /// decision counter, which a wedged run freezes and a merely slow one does
+    /// not — and until it does, the honest reading of exit 111 is "no answer",
+    /// not "a bug".
     pub const fn is_finding(&self) -> bool {
-        self.is_failure() && !matches!(self, CampaignClass::Infra)
+        self.is_failure() && !matches!(self, CampaignClass::Infra | CampaignClass::StarvationStall)
     }
 }
 
@@ -2202,6 +2317,16 @@ fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     // passes the canonical-form check on `--resume`.
     if spec.starve {
         map.insert("starve".into(), true.into());
+    }
+    // Default-omitted for the same reason as every optional key around it: the
+    // canonical-form gate `--resume` reloads through demands `spec_to_json`
+    // reproduce the recorded file exactly, so an unconditional key would break
+    // every out-dir written before this flag existed.
+    if spec.starve_scale_permille != STARVE_SCALE_FULL {
+        map.insert(
+            "starve_scale_permille".into(),
+            spec.starve_scale_permille.into(),
+        );
     }
     // Emitted only when the campaign HAS a host table, so a DNS-free spec's
     // recorded JSON is byte-identical to what it was before the key existed and
@@ -3476,7 +3601,12 @@ fn push_run_flag(flags: &mut Vec<String>, name: &str, value: RunValue) {
     }
 }
 
-/// Which byte of the 32-byte generation hash each seed-derived band draws from.
+/// The width of a generation's band material: the 32-byte generation hash plus
+/// the 32-byte extension block [`generation_bands`] appends after it.
+const GEN_BAND_BYTES: usize = 64;
+
+/// Which byte of the generation's band material each seed-derived band draws
+/// from.
 ///
 /// Every band must claim a byte here and read it through the claim, never by
 /// writing a literal index. Two bands sharing a byte would silently *correlate*
@@ -3488,12 +3618,16 @@ fn push_run_flag(flags: &mut Vec<String>, name: &str, value: RunValue) {
 /// claim, and [`every_generation_hash_read_goes_through_a_claim`] rejects a raw
 /// literal index that bypassed the table.
 ///
-/// Every byte of the 32-byte hash is now claimed. A NEW band cannot simply take
-/// one: either it belongs to an existing policy's configuration and can be
-/// bit-sliced out of that policy's byte (see [`gen_byte::SCHED_STARVE`]), or the
-/// hash namespace has to grow — a second domain-separated SHA-256 appended after
-/// byte 31, which keeps bytes 0..32 (and therefore every existing campaign's
-/// draws) byte-for-byte identical.
+/// Every byte of the 32-byte generation hash is claimed, so the namespace GREW,
+/// exactly as this comment used to prescribe: [`generation_bands`] appends a
+/// second, domain-separated SHA-256 after byte 31. Bytes 0..32 are the
+/// generation hash itself and are byte-for-byte what they always were — every
+/// campaign recorded before the extension existed still derives the same flags —
+/// and bytes 32..64 are the new draws. A band claims an index in either half and
+/// reads it the same way. Indices 33..64 are unclaimed and are where the next
+/// band should draw from; a band that belongs to an existing policy's
+/// configuration should still be bit-sliced out of that policy's byte instead
+/// (see [`gen_byte::SCHED_STARVE`]).
 mod gen_byte {
     use std::ops::Range;
 
@@ -3539,6 +3673,19 @@ mod gen_byte {
     /// sweep sees several — while leaving every other band's draw untouched.
     pub(super) const SCHED_STARVE: usize = 31;
 
+    /// Whether this generation starves at all. The first claim in the extension
+    /// block (see [`super::generation_bands`]), and it had to be: the three
+    /// starvation sub-knobs consume all eight bits of [`SCHED_STARVE`], and a
+    /// gate sliced out of that same byte would decide "does this generation
+    /// starve" from the very bits that decide "how", so a dampened campaign
+    /// would starve only at one corner of the policy space instead of rarely
+    /// across all of it.
+    ///
+    /// Only ever consulted below full `--starve-scale-permille`: at full scale
+    /// the gate is unconditionally open, which is what keeps the default sweep
+    /// unchanged.
+    pub(super) const STARVE_FIRE: usize = 32;
+
     /// The bands no fault knob owns, for the disjointness gate. The fault knobs'
     /// own claims come from [`super::campaign_band`], so this list is only the
     /// exploration bands — a `FaultKnob` cannot be missing from it, because it
@@ -3551,6 +3698,7 @@ mod gen_byte {
         ("buggify fire", BUGGIFY_FIRE),
         ("sched-pct depth", SCHED_PCT_DEPTH),
         ("starvation policy", SCHED_STARVE),
+        ("starvation fire", STARVE_FIRE),
     ];
 }
 
@@ -3632,12 +3780,38 @@ const BAND_WAIVERS: &[(FaultKnob, &str)] = &[
     ),
 ];
 
-/// One band's `nth` claimed byte of the generation hash.
+/// The band material a generation draws every knob from: its 32-byte generation
+/// hash, followed by a domain-separated 32-byte extension block.
+///
+/// The namespace grew because byte 31 was the last free one and the starvation
+/// fire gate still needed a draw INDEPENDENT of the policy it gates. Appending
+/// rather than re-hashing is the whole point: bytes 0..32 are the generation
+/// hash unchanged, so every band that existed before the extension derives
+/// byte-for-byte what it always did and every recorded campaign still
+/// reproduces.
+///
+/// Keyed on the HASH rather than on `(seed_base, generation)` so it composes
+/// with `--guided`: a guided generation runs a MUTATED hash, and deriving the
+/// extension from that hash keeps [`derive_flags`] a pure function of the hash
+/// alone — a second keying would have handed a mutated generation the unmutated
+/// generation's extension draws.
+fn generation_bands(hash: &[u8; 32]) -> [u8; GEN_BAND_BYTES] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"patina-campaign-bands/v1");
+    hasher.update(hash);
+    let extension: [u8; 32] = hasher.finalize().into();
+    let mut bands = [0u8; GEN_BAND_BYTES];
+    bands[..32].copy_from_slice(hash);
+    bands[32..].copy_from_slice(&extension);
+    bands
+}
+
+/// One band's `nth` claimed byte of the generation's band material.
 ///
 /// Reading through the claim is what makes [`campaign_band`] the single source
 /// rather than a parallel description: a band cannot draw from a byte the table
 /// did not give it, and a knob the table bands `None` cannot draw at all.
-fn band_byte(hash: &[u8; 32], knob: FaultKnob, nth: usize) -> u8 {
+fn band_byte(hash: &[u8; GEN_BAND_BYTES], knob: FaultKnob, nth: usize) -> u8 {
     let band = campaign_band(knob)
         .unwrap_or_else(|| panic!("{knob:?} draws a band the knob table does not claim"));
     hash[band[nth]]
@@ -3738,7 +3912,13 @@ fn invocation_flags(spec: &CampaignSpec, family: &'static str) -> Vec<String> {
     flags
 }
 
-/// Dampen one band's drawn INTENSITY by the spec's fault scale.
+/// Dampen one band's drawn INTENSITY by a per-mille scale.
+///
+/// Shared by both dials — `--fault-scale-permille` over the fault bands and
+/// `--starve-scale-permille` over the starvation policy's count and hold length
+/// — because they are one arithmetic with one identity ([`FAULT_SCALE_FULL`] and
+/// [`STARVE_SCALE_FULL`] are the same 1000), and two copies of it would be two
+/// chances to round differently.
 ///
 /// Applied to the value the band ALREADY drew rather than to the band's ceiling,
 /// which is what makes `FAULT_SCALE_FULL` the exact identity — `(v * 1000 + 500)
@@ -3772,8 +3952,28 @@ fn scale_intensity(value: u64, scale_permille: u64) -> u64 {
 /// 256 byte values, so the gate is unconditionally open and the default band is
 /// unchanged. Its own claimed hash byte, so the decision is independent of the
 /// op-class and ordinal draws rather than correlated with them.
-fn crash_band_fires(hash: &[u8; 32], scale_permille: u64) -> bool {
+fn crash_band_fires(hash: &[u8; GEN_BAND_BYTES], scale_permille: u64) -> bool {
     u64::from(band_byte(hash, FaultKnob::FsCrashAt, 2)) * FAULT_SCALE_FULL < scale_permille * 256
+}
+
+/// Whether this generation runs a starvation policy at all.
+///
+/// The dominant lever of `--starve-scale-permille`, and the analogue of the
+/// crash band's gate. Dampening the policy's fields alone would still hand every
+/// generation a hold: the guest's exposure to the one exploration policy that
+/// can WEDGE it would stay at 100% of the sweep under a flag that says the
+/// opposite. Gating the whole policy is what makes a dampened campaign spend its
+/// budget on runs that finish, and it is not a loss of exploration — an
+/// unstarved generation still samples the guest under buggify, swarm, PCT and
+/// every fault band the campaign enabled.
+///
+/// At `STARVE_SCALE_FULL` the comparison is `byte * 1000 < 256_000`, true for
+/// all 256 byte values, so the gate is unconditionally open and the default
+/// sweep is byte-for-byte the sweep it always was. Its own claimed band byte, so
+/// the decision is independent of the policy's own shape rather than correlated
+/// with it.
+fn starve_band_fires(hash: &[u8; GEN_BAND_BYTES], scale_permille: u64) -> bool {
+    u64::from(hash[gen_byte::STARVE_FIRE]) * STARVE_SCALE_FULL < scale_permille * 256
 }
 
 /// Derive the per-generation `run` flags from the generation hash. Native-only
@@ -3781,6 +3981,12 @@ fn crash_band_fires(hash: &[u8; 32], scale_permille: u64) -> bool {
 /// (single-threaded; the WASI `run` does not accept them). Every draw indexes
 /// through a [`gen_byte`] claim so no two bands can share a byte unnoticed.
 fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> Vec<String> {
+    // From here down `hash` is the generation's full BAND MATERIAL: the hash
+    // itself in bytes 0..32, then the extension block. Shadowing rather than a
+    // new name on purpose — every band read below stays spelled `hash[...]`,
+    // which is the one form `every_generation_hash_read_goes_through_a_claim`
+    // scans for, so widening the namespace did not quietly narrow the gate.
+    let hash = &generation_bands(hash);
     let native = family == "native";
     let mut flags = invocation_flags(spec, family);
     // One binding for the whole band section: every INTENSITY draw below passes
@@ -4022,13 +4228,41 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
         // it is also the scheduler's AGING CAP, so it bounds how long any task can
         // be held off before liveness forces it to run. A narrow hold is what the
         // lost-wakeup / missed-notify bug shapes need; a long one just stalls.
-        let policy = hash[gen_byte::SCHED_STARVE];
-        let intervals = 1 + u64::from(policy & 0b111); // [1, 8]
-        let window = 1u64 << (9 + u32::from((policy >> 3) & 0b111)); // 512..65536
-        let max_len = 1u64 << (4 + u32::from((policy >> 6) & 0b11)); // 16..128
-        push_run_flag(&mut flags, "--starve", RunValue::Int(intervals));
-        push_run_flag(&mut flags, "--starve-window", RunValue::Int(window));
-        push_run_flag(&mut flags, "--starve-max-len", RunValue::Int(max_len));
+        //
+        // The whole policy is gated by `--starve-scale-permille`
+        // (`starve_band_fires`): at full scale every generation starves, as it
+        // always has; below it, proportionally fewer do, and a generation that
+        // does not starve is still a full sample under the campaign's other
+        // knobs. Two of the three fields are then dampened and the third is
+        // deliberately left alone — see `CampaignSpec::starve_scale_permille`
+        // for which way each axis points and why.
+        let starve_scale = spec.starve_scale_permille;
+        if starve_band_fires(hash, starve_scale) {
+            let policy = hash[gen_byte::SCHED_STARVE];
+            // Dampened around the [1, 8] band's FLOOR, not its raw value: a
+            // gated generation starves, so it has at least one interval, and
+            // scaling `count - 1` makes 1000 the exact arithmetic identity.
+            let intervals = 1 + scale_intensity(u64::from(policy & 0b111), starve_scale); // [1, 8]
+            // NOT scaled: placement, not intensity, and WHICH END IS HARSH is a
+            // property of the guest rather than of the dial. Measured on
+            // `turso_stress`, 512 puts every hold in the startup prefix, where
+            // the policy defers nothing at all (`starve_events=0`) and the run
+            // completes; 65536 puts the same-shaped holds in the concurrent
+            // phase, where the run never finishes. For a SHORT guest the
+            // relationship inverts — a large window places starts past the end of
+            // the schedule, so nothing fires. There is no direction a uniform
+            // multiply could move this that is right for both, so it keeps its
+            // full log sweep at every scale.
+            let window = 1u64 << (9 + u32::from((policy >> 3) & 0b111)); // 512..65536
+            // Dampened, floored at one decision: `--starve-max-len` is a
+            // positive integer, and a zero-length hold is not a gentler hold but
+            // no hold at all — which the gate above already expresses honestly.
+            let max_len =
+                scale_intensity(1u64 << (4 + u32::from((policy >> 6) & 0b11)), starve_scale).max(1); // 16..128
+            push_run_flag(&mut flags, "--starve", RunValue::Int(intervals));
+            push_run_flag(&mut flags, "--starve-window", RunValue::Int(window));
+            push_run_flag(&mut flags, "--starve-max-len", RunValue::Int(max_len));
+        }
     }
     if let Some(nanos) = spec.watchdog_nanos {
         push_run_flag(&mut flags, "--liveness-watchdog", RunValue::Int(nanos));
@@ -5094,7 +5328,9 @@ struct CampaignEnvelopeInput<'a> {
 }
 
 /// How many distinct FINDINGS the store holds — the novel-signature budget.
-/// `INFRA` records are excluded: they are conditions of the run, not results.
+/// `INFRA` and `STARVATION_STALL` records are excluded: they are conditions of
+/// the run, not results. Both still appear in the class histogram and keep their
+/// signatures; what they do not do is claim to be a bug.
 fn novel_findings(signatures: &BTreeMap<String, SignatureRecord>) -> u64 {
     signatures
         .values()
@@ -6400,6 +6636,16 @@ complete\"\n",
         }
     }
 
+    println!("-- starvation intensity scaling (--starve-scale-permille) --");
+    for (name, ok, detail) in starve_scale_selftest() {
+        if ok {
+            println!("  ok   {name:<40} -> {detail}");
+        } else {
+            println!("  FAIL {name:<40} -> {detail}");
+            failures += 1;
+        }
+    }
+
     println!("-- guided generation scheduling --");
     for (name, ok, detail) in crate::guided::campaign_detector_selftest() {
         if ok {
@@ -6596,6 +6842,249 @@ fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
         "reproduce-command-carries-the-scaled-knobs",
         carried && differs,
         format!("every_scaled_permille_present={carried} differs_from_full_scale={differs}"),
+    ));
+
+    out
+}
+
+/// The `--starve-scale-permille` checks the classifier selftest runs, in the
+/// same `(name, ok, detail)` shape as [`fault_scale_selftest`].
+///
+/// The same four properties any sweep-changing knob has to hold — the scaled
+/// draw is a pure function of the generation, the setting is recorded in the
+/// out-dir spec, a continuation cannot change it under a half-finished
+/// campaign, and the scaled values reach the reproduce command — plus the one
+/// this dial has and the fault dial did not: each axis moves in the RIGHT
+/// DIRECTION, including the one that is deliberately not moved at all. Proved
+/// here rather than only under `#[cfg(test)]`, so `campaign --selftest` proves
+/// them against the shipped binary the operator is actually running.
+fn starve_scale_selftest() -> Vec<(&'static str, bool, String)> {
+    let mut out: Vec<(&'static str, bool, String)> = Vec::new();
+    let scaled = |permille: u64| CampaignSpec {
+        starve: true,
+        starve_scale_permille: permille,
+        ..CampaignSpec::default()
+    };
+    const LOW: u64 = 100; // a tenth as intense
+    // `--starve` is an optional-value flag, so it renders as one `--starve=N`
+    // token while its two companions render as a name/value pair; read both
+    // forms, the way the sweep's own test does.
+    let value = |flags: &[String], name: &str| -> Option<u64> {
+        let inline = format!("{name}=");
+        let at = flags
+            .iter()
+            .position(|flag| flag == name || flag.starts_with(&inline))?;
+        flags[at]
+            .strip_prefix(&inline)
+            .map(str::to_string)
+            .or_else(|| flags.get(at + 1).cloned())?
+            .parse()
+            .ok()
+    };
+
+    // (1) PURITY. The campaign contract: the same spec and the same generation
+    // derive the same policy, always, and the sweep still sweeps — a scale that
+    // collapsed every gated generation onto one configuration would be
+    // deterministic while exploring nothing.
+    let spec = scaled(LOW);
+    let mut stable = true;
+    let mut distinct: std::collections::BTreeSet<Vec<String>> = std::collections::BTreeSet::new();
+    for generation in 0..64u64 {
+        let hash = generation_hash(0, generation);
+        let first = derive_flags(&spec, &hash, "native");
+        let second = derive_flags(&spec, &generation_hash(0, generation), "native");
+        stable &= first == second;
+        distinct.insert(
+            first
+                .iter()
+                .filter(|flag| flag.starts_with("--starve"))
+                .cloned()
+                .collect(),
+        );
+    }
+    out.push((
+        "scaled-starvation-is-pure-in-the-generation",
+        stable && distinct.len() > 2,
+        format!("stable={stable} distinct_policies={}", distinct.len()),
+    ));
+
+    // (2) THE DEFAULT IS UNCHANGED, arithmetically rather than by a special
+    // case: the gate is unconditionally open at full scale and `scale_intensity`
+    // is the identity there, so an explicit 1000 derives byte for byte what the
+    // default derives — which is what keeps every campaign recorded before this
+    // flag existed reproducible.
+    let full = scaled(STARVE_SCALE_FULL);
+    let mut default_spec = full.clone();
+    default_spec.starve_scale_permille = CampaignSpec::default().starve_scale_permille;
+    let gate_open = (0..256u64).all(|generation| {
+        starve_band_fires(
+            &generation_bands(&generation_hash(0, generation)),
+            STARVE_SCALE_FULL,
+        )
+    });
+    let unchanged = (0..64u64).all(|generation| {
+        let hash = generation_hash(0, generation);
+        derive_flags(&full, &hash, "native") == derive_flags(&default_spec, &hash, "native")
+    });
+    out.push((
+        "full-scale-leaves-the-default-policy-alone",
+        gate_open && unchanged,
+        format!("gate_open_every_generation={gate_open} default_matches_explicit_1000={unchanged}"),
+    ));
+
+    // (3) IT ACTUALLY DAMPENS, on the axis that matters most: how many
+    // generations starve at all. Every generation starves at full scale; at a
+    // tenth of it roughly a tenth do — and the ones that do hold fewer tasks for
+    // fewer decisions.
+    let census = |spec: &CampaignSpec| -> (usize, u64, u64) {
+        let mut starving = 0;
+        let mut intervals = 0;
+        let mut max_len = 0;
+        for generation in 0..256u64 {
+            let flags = derive_flags(spec, &generation_hash(0, generation), "native");
+            if let Some(count) = value(&flags, "--starve") {
+                starving += 1;
+                intervals += count;
+                max_len += value(&flags, "--starve-max-len").unwrap_or(0);
+            }
+        }
+        (starving, intervals, max_len)
+    };
+    let (full_gens, full_intervals, full_len) = census(&full);
+    let (low_gens, low_intervals, low_len) = census(&spec);
+    let dampened = full_gens == 256
+        && (8..56).contains(&low_gens)
+        && low_intervals * 4 < full_intervals
+        && low_len * 4 < full_len;
+    out.push((
+        "a-low-scale-makes-starvation-rare-and-short",
+        dampened,
+        format!(
+            "starving generations {full_gens} -> {low_gens} (of 256), summed intervals \
+             {full_intervals} -> {low_intervals}, summed max-len {full_len} -> {low_len}"
+        ),
+    ));
+
+    // (4) EACH AXIS MOVES ITS OWN WAY. Two are dampened because their harshness
+    // is monotone in them; the START WINDOW is not touched at all, because its
+    // harshness is not — see [`CampaignSpec::starve_scale_permille`]. A future
+    // "just scale everything uniformly" edit has to fail this to land.
+    let mid = scaled(500);
+    let mut directions = true;
+    let mut compared = 0;
+    for generation in 0..256u64 {
+        let hash = generation_hash(0, generation);
+        let full_flags = derive_flags(&full, &hash, "native");
+        let mid_flags = derive_flags(&mid, &hash, "native");
+        if value(&mid_flags, "--starve").is_none() {
+            continue; // the gate closed this generation at the lower scale
+        }
+        compared += 1;
+        directions &= value(&mid_flags, "--starve") <= value(&full_flags, "--starve");
+        directions &=
+            value(&mid_flags, "--starve-max-len") <= value(&full_flags, "--starve-max-len");
+        directions &= value(&mid_flags, "--starve-window") == value(&full_flags, "--starve-window");
+        directions &= value(&mid_flags, "--starve-max-len").unwrap_or(0) >= 1;
+    }
+    out.push((
+        "each-starvation-axis-scales-in-its-own-direction",
+        directions && compared > 32,
+        format!(
+            "generations_compared={compared} \
+             count_and_length_down_window_untouched={directions}"
+        ),
+    ));
+
+    // (5) RECORDED IN THE OUT-DIR SPEC, and round-tripped losslessly through the
+    // canonical-form gate `--resume`/`--extend` reload through. The default is
+    // recorded by ABSENCE, so an out-dir written before this flag existed still
+    // passes that gate.
+    let json = spec_to_json(&spec);
+    let recorded = json.get("starve_scale_permille") == Some(&serde_json::Value::from(LOW));
+    let round_trip = spec_from_state_json(&json).map(|back| back.starve_scale_permille);
+    let default_absent = spec_to_json(&CampaignSpec::default())
+        .get("starve_scale_permille")
+        .is_none();
+    out.push((
+        "starve-scale-is-recorded-in-the-spec",
+        recorded && round_trip.as_ref().ok() == Some(&LOW) && default_absent,
+        format!("recorded={recorded} reloaded={round_trip:?} default_key_absent={default_absent}"),
+    ));
+
+    // (6) REFUSED ON A CONTINUATION. Changing the starvation intensity halfway
+    // through would make the second half of a campaign a different experiment
+    // wearing the same out-dir.
+    let refused =
+        |arguments: &[&str]| parse(arguments.iter().map(OsString::from).collect()).is_err();
+    let on_extend = refused(&["--extend", "3", "--starve-scale-permille", "100"]);
+    let on_resume = refused(&["--resume", "--starve-scale-permille", "100"]);
+    let fresh_ok = parse(
+        ["art", "--starve", "--starve-scale-permille", "100"]
+            .iter()
+            .map(OsString::from)
+            .collect(),
+    )
+    .map(|invocation| invocation.spec.starve_scale_permille);
+    out.push((
+        "continuations-refuse-a-changed-starve-scale",
+        on_extend && on_resume && fresh_ok.as_ref().ok() == Some(&LOW),
+        format!("extend={on_extend} resume={on_resume} fresh={fresh_ok:?}"),
+    ));
+
+    // (7) IN THE REPRODUCE COMMAND. The scale is not a token to re-supply — it
+    // is BAKED INTO the policy the generation runs, so the printed `cargo patina
+    // run … --starve N --starve-window N --starve-max-len N` replays the scaled
+    // generation exactly. The gated-off half matters just as much: a generation
+    // the gate closed prints no starvation flags at all, rather than a policy it
+    // never ran.
+    let line = |spec: &CampaignSpec, generation: u64| {
+        let flags = derive_flags(spec, &generation_hash(0, generation), "native");
+        let text = reproduce_command(
+            Path::new("art"),
+            7,
+            &flags,
+            &[],
+            &[],
+            None,
+            "campaign-gen.trace",
+        );
+        (text, flags)
+    };
+    let starves = |generation: u64| {
+        value(
+            &derive_flags(&spec, &generation_hash(0, generation), "native"),
+            "--starve",
+        )
+        .is_some()
+    };
+    let starving = (0..256u64).find(|generation| starves(*generation));
+    let quiet = (0..256u64).find(|generation| !starves(*generation));
+    let carried = starving.is_some_and(|generation| {
+        let (text, flags) = line(&spec, generation);
+        let (full_text, _) = line(&full, generation);
+        // Every starvation token the generation derived appears verbatim, in the
+        // exact rendering the child `run` parser accepts.
+        let mut tokens = flags
+            .iter()
+            .enumerate()
+            .filter(|(_, flag)| flag.starts_with("--starve"));
+        tokens.all(|(index, flag)| {
+            let rendered = if flag.contains('=') {
+                flag.clone()
+            } else {
+                format!("{flag} {}", flags[index + 1])
+            };
+            text.contains(&rendered)
+        }) && text != full_text
+    });
+    let silent = quiet.is_some_and(|generation| !line(&spec, generation).0.contains("--starve"));
+    out.push((
+        "reproduce-command-carries-the-scaled-policy",
+        carried && silent,
+        format!(
+            "scaled_generation={starving:?} carries_its_policy={carried} \
+             ungated_generation={quiet:?} prints_none={silent}"
+        ),
     ));
 
     out
@@ -7034,6 +7523,182 @@ mod tests {
         assert!(
             torn_seen,
             "the torn-granularity band never fired; nothing was proven"
+        );
+    }
+
+    /// The direction pin, and the reason this dial needed one where the fault
+    /// dial needed only a "left alone" list. `--starve` (how many holds) and
+    /// `--starve-max-len` (how long a hold, and the scheduler's aging cap) are
+    /// monotone in harshness, so they dampen. `--starve-window` is NOT: it is
+    /// where the holds land, and which end of it hurts depends on the guest's own
+    /// schedule. Measured on `turso_stress`, a window of 512 puts every hold in
+    /// the startup prefix where the policy defers nothing at all (`starve_events=0`,
+    /// run completes), while the same shaped holds at 65536 land in the
+    /// concurrent phase and wedge the run. A uniform multiply would have
+    /// concentrated every hold into a prefix, and dilating it would have pushed
+    /// the starts past the end of a short guest's schedule and made the plane
+    /// inert rather than rare — neither is right for both. So the window keeps
+    /// its full log sweep at every scale, and an edit that "just scales
+    /// everything" has to argue with this test.
+    #[test]
+    fn the_starve_scale_leaves_the_placement_window_alone() {
+        let at = |permille: u64, generation: u64| {
+            derive_flags(
+                &CampaignSpec {
+                    starve: true,
+                    starve_scale_permille: permille,
+                    ..CampaignSpec::default()
+                },
+                &generation_hash(0, generation),
+                "native",
+            )
+        };
+        let value = |flags: &[String], name: &str| -> Option<u64> {
+            let inline = format!("{name}=");
+            let at = flags
+                .iter()
+                .position(|flag| flag == name || flag.starts_with(&inline))?;
+            flags[at]
+                .strip_prefix(&inline)
+                .map(str::to_string)
+                .or_else(|| flags.get(at + 1).cloned())?
+                .parse()
+                .ok()
+        };
+        let mut compared = 0;
+        let mut windows: BTreeSet<u64> = BTreeSet::new();
+        let mut shortened = 0;
+        let mut fewer = 0;
+        for generation in 0..256 {
+            let full = at(STARVE_SCALE_FULL, generation);
+            let low = at(100, generation);
+            assert!(
+                value(&full, "--starve").is_some(),
+                "generation {generation}: full scale must starve every generation, as it always has"
+            );
+            let Some(low_window) = value(&low, "--starve-window") else {
+                continue; // the gate closed this generation
+            };
+            compared += 1;
+            windows.insert(low_window);
+            assert_eq!(
+                Some(low_window),
+                value(&full, "--starve-window"),
+                "generation {generation}: the start window is placement, not intensity — \
+                 scaling it DOWN concentrates the holds a gentler campaign asked to spread, and \
+                 scaling it UP pushes them past a short guest's schedule entirely"
+            );
+            let (low_len, full_len) = (
+                value(&low, "--starve-max-len").expect("a gated generation has a hold length"),
+                value(&full, "--starve-max-len").expect("full scale always holds"),
+            );
+            assert!(
+                low_len <= full_len && low_len >= 1,
+                "generation {generation}: the hold length must dampen toward, but never past, one \
+                 decision — got {low_len} from {full_len}"
+            );
+            shortened += u64::from(low_len < full_len);
+            let (low_count, full_count) = (
+                value(&low, "--starve").expect("a gated generation has intervals"),
+                value(&full, "--starve").expect("full scale always starves"),
+            );
+            assert!(
+                low_count <= full_count && low_count >= 1,
+                "generation {generation}: the interval count must dampen toward, but never past, \
+                 one hold — got {low_count} from {full_count}"
+            );
+            fewer += u64::from(low_count < full_count);
+        }
+        assert!(
+            compared > 8 && windows.len() > 2,
+            "the dampened sweep left too little to prove anything: {compared} starving \
+             generation(s) over {} distinct window(s)",
+            windows.len()
+        );
+        assert!(
+            shortened > 0 && fewer > 0,
+            "nothing was actually dampened: {shortened} shorter hold(s), {fewer} smaller count(s)"
+        );
+    }
+
+    /// The bound and the precedence, on both the JSON and the flag path — the
+    /// same contract [`the_fault_scale_is_bounded_and_the_flag_beats_the_spec_file`]
+    /// holds the fault dial to: a spec file cannot ask for a scale ABOVE the
+    /// tuned policy (it dampens, it never amplifies), and an explicit flag
+    /// overrides a spec file's value.
+    #[test]
+    fn the_starve_scale_is_bounded_and_the_flag_beats_the_spec_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("spec.json");
+        let spec_flag = path.display().to_string();
+        let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+
+        fs::write(&path, br#"{"starve": true, "starve_scale_permille": 1001}"#).expect("write");
+        let error = parse(args(&["art", "--spec", &spec_flag]))
+            .expect_err("a scale above full intensity must be refused")
+            .to_string();
+        assert!(
+            error.contains("starve_scale_permille") && error.contains("[0, 1000]"),
+            "the refusal must name the key and its bound: {error}"
+        );
+
+        fs::write(&path, br#"{"starve": true, "starve_scale_permille": 250}"#).expect("write");
+        let from_spec = parse(args(&["art", "--spec", &spec_flag])).expect("spec parses");
+        assert_eq!(from_spec.spec.starve_scale_permille, 250);
+        let overridden = parse(args(&[
+            "art",
+            "--spec",
+            &spec_flag,
+            "--starve-scale-permille",
+            "100",
+        ]))
+        .expect("flag parses");
+        assert_eq!(overridden.spec.starve_scale_permille, 100);
+        // Absent flag, absent spec key: the default is full intensity.
+        assert_eq!(
+            parse(args(&["art", "--starve"]))
+                .expect("parses")
+                .spec
+                .starve_scale_permille,
+            STARVE_SCALE_FULL
+        );
+    }
+
+    /// A wedge the `--starve` backstop killed is not a bug found. The backstop
+    /// arms only under `--starve`, so exit 111 always means patina's own injector
+    /// was holding tasks off when progress stopped, and std's uninstrumented spin
+    /// loops make that wedge a limitation of the injector rather than a verdict
+    /// on the guest. It stays its own class — an operator tunes
+    /// `--starve-scale-permille` by reading it — and it stays a failure, but it
+    /// must not spend the novel-signature budget that counts DISTINCT BUGS. The
+    /// guest's own livelock keeps its finding: that one arrives as `LIVENESS`,
+    /// from a watchdog that fires while the scheduler is still making decisions.
+    #[test]
+    fn a_starvation_stall_is_reported_but_is_not_counted_as_a_bug_found() {
+        assert!(CampaignClass::StarvationStall.is_failure());
+        assert!(!CampaignClass::StarvationStall.is_finding());
+        assert!(CampaignClass::Liveness.is_finding());
+        assert_ne!(
+            CampaignClass::StarvationStall.as_str(),
+            CampaignClass::Infra.as_str(),
+            "folding the stall into INFRA would erase which generations the injector wedged"
+        );
+        // Both halves of the classifier still reach the class: the supervisor's
+        // distinct exit code, and the envelope refusal the child reports.
+        let rules = ClassifyRules::default();
+        assert_eq!(
+            classify(
+                &planted(RunFacts::ok().exit(STARVATION_STALL_EXIT).no_envelope(), ""),
+                &rules
+            ),
+            CampaignClass::StarvationStall
+        );
+        assert_eq!(
+            classify(
+                &planted(RunFacts::ok().exit(2).refusal("starvation_stall"), ""),
+                &rules
+            ),
+            CampaignClass::StarvationStall
         );
     }
 
@@ -7698,8 +8363,9 @@ mod tests {
         let mut claimed: BTreeMap<usize, String> = BTreeMap::new();
         for (name, index) in &claims {
             assert!(
-                *index < 32,
-                "the {name} band claims generation byte {index}, past the 32-byte hash"
+                *index < GEN_BAND_BYTES,
+                "the {name} band claims generation byte {index}, past the {GEN_BAND_BYTES}-byte \
+                 band material"
             );
             assert!(
                 !gen_byte::SEED.contains(index),
@@ -7710,7 +8376,8 @@ mod tests {
             if let Some(other) = claimed.insert(*index, name.clone()) {
                 panic!(
                     "the {name} and {other} bands both claim generation byte {index}; their knobs \
-                     would be correlated in every generation. Claim a free byte instead (31)."
+                     would be correlated in every generation. Claim a free byte instead (33..64, \
+                     in the extension block)."
                 );
             }
         }

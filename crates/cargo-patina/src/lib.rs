@@ -7129,8 +7129,16 @@ liveness-safe."
     // wall-clock) converts an already-hung run into a LOUD named fatal with a
     // distinct nonzero exit so sweeps classify STARVATION_STALL instead of
     // hanging. The threshold is deliberately generous (default 60 real seconds,
-    // `PATINA_STARVATION_STALL_SECS` override) so it is unreachable on any healthy
-    // run; it never touches the recorded operation stream of a run that completes.
+    // `PATINA_STARVATION_STALL_SECS` override) so a healthy run normally finishes
+    // far inside it — a 10,000-iteration `turso_stress` generation takes about
+    // 30 s — though a busy enough host can still cross it; it never touches the
+    // recorded operation stream of a run that completes.
+    // It is an ELAPSED-TIME deadline, not a progress detector: the supervisor
+    // cannot see the scheduler's decision counter, so it cannot separate a wedge
+    // from a run that is merely slower than the deadline. That is exactly why a
+    // campaign files exit 111 under a class that is NOT counted as a bug found
+    // (`CampaignClass::is_finding`), and why the counter is the signal to publish
+    // if the two ever need telling apart from the outside.
     // The kill-able wait loop mirrors `output::execute_command`'s capture
     // semantics (piped when the JSON envelope / render wants guest output,
     // inherited otherwise) so `--starve` composes with `--format json`.
@@ -7155,11 +7163,14 @@ liveness-safe."
                         let _ = child.kill();
                         let _ = child.wait();
                         eprintln!(
-                            "patina: starvation stall — no scheduler progress in {stall_secs}s under \
---starve; the guest is likely spinning inside an uninstrumented atomic critical section (std is not \
-yield-point instrumented, so cooperative scheduling cannot preempt a spinner while the lock holder \
-is starved). This is the documented starvation limitation, not a liveness guarantee — see \
-IMPLEMENTATION.md \"Slice 7: exploration tier\". Killed with a nonzero exit."
+                            "patina: starvation stall — the run did not finish within {stall_secs}s \
+under --starve. What this backstop measures is elapsed wall clock, not scheduler progress: the \
+supervisor cannot see the decision counter, so it cannot tell a guest spinning inside an \
+uninstrumented atomic critical section (std carries no yield point, so cooperative scheduling \
+cannot preempt a spinner while the lock holder is starved — the documented starvation limitation, \
+and the likely cause) from a run that is merely slower than this deadline. Not a liveness \
+guarantee, and not a verdict on the guest — see IMPLEMENTATION.md \"Slice 7: exploration tier\". \
+Killed with a nonzero exit."
                         );
                         inherited_guard.restore()?;
                         drop(trace_sink);
