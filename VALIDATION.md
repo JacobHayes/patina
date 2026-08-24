@@ -52,9 +52,9 @@ fetched. For local development, `mise run setup` installs the Rust
 toolchains/targets needed by these gates, and `mise run check` runs the
 root-workspace checks plus the core WASI/native smoke scripts. After cheap
 failure checks, its independent heavyweight suites run concurrently; successful
-rung logs are suppressed and every rung is timed. Stable workspace tests and
-native validation overlap; MSRV remains serial because its nested e2e builds
-share root shim artifacts that cannot safely mix rustc versions. The mise
+rung logs are suppressed and every rung is timed. Stable, MSRV, and native
+validation overlap safely: the outer MSRV build uses `target/msrv`, while every
+nested native shim cache is keyed by the complete compiler identity. The mise
 workflow intentionally excludes heavyweight standalone testbed setup such as
 raft and redb.
 

@@ -4530,9 +4530,14 @@ fn build_native_shim(release: bool) -> Result<PathBuf, CliError> {
     // anything rather than letting two libstds meet at the guest link.
     check_native_toolchain_agreement(&workspace)?;
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let explicit_target = env::var_os("CARGO_TARGET_DIR");
+    let rustc = anchored_rustc(env::var_os("RUSTC"), &workspace);
+    let toolchain = rustc_identity(&rustc, &workspace)?;
+    let target_dir = native_shim_target_dir(&workspace, explicit_target.as_deref(), &toolchain);
     let mut command = Command::new(&cargo);
     command
         .current_dir(&workspace)
+        .env("CARGO_TARGET_DIR", &target_dir)
         .arg("build")
         .arg("-p")
         .arg("patina-dst-native-shim");
@@ -4547,10 +4552,6 @@ fn build_native_shim(release: bool) -> Result<PathBuf, CliError> {
             "building the patina-dst-native-shim staticlib failed".into(),
         ));
     }
-    let target_dir = match env::var_os("CARGO_TARGET_DIR") {
-        Some(dir) => PathBuf::from(dir),
-        None => workspace.join("target"),
-    };
     let profile = if release { "release" } else { "debug" };
     let staticlib = target_dir.join(profile).join(NATIVE_SHIM_STATICLIB);
     if !staticlib.exists() {
@@ -4560,6 +4561,29 @@ fn build_native_shim(release: bool) -> Result<PathBuf, CliError> {
         )));
     }
     Ok(staticlib)
+}
+
+/// Select the shim's Cargo target directory.
+///
+/// An explicit `CARGO_TARGET_DIR` remains authoritative. Without one, key the
+/// internal shim cache by the complete compiler identity: stable and MSRV can
+/// otherwise publish the same-named staticlib in `<workspace>/target/debug`,
+/// and a nested guest build can consume whichever toolchain wrote last. Cargo's
+/// file locks serialize writes but cannot make this out-of-band path handoff
+/// type-safe.
+fn native_shim_target_dir(
+    workspace: &Path,
+    explicit: Option<&OsStr>,
+    toolchain: &RustcIdentity,
+) -> PathBuf {
+    if let Some(explicit) = explicit {
+        return PathBuf::from(explicit);
+    }
+    let digest = Sha256::digest(toolchain.verbose.as_bytes());
+    workspace
+        .join("target")
+        .join("patina-shim")
+        .join(hex(&digest))
 }
 
 /// A resolved rustc, as `rustc -vV` reports it.
@@ -7594,6 +7618,31 @@ mod tests {
         assert_eq!(
             anchored_rustc(Some("tools/rustc".into()), from),
             OsString::from("/work/guest/tools/rustc")
+        );
+    }
+
+    #[test]
+    fn default_shim_caches_are_separated_by_complete_toolchain_identity() {
+        let workspace = Path::new("/patina");
+        let stable = RustcIdentity {
+            banner: "rustc 1.98.0 (stable)".into(),
+            verbose: "rustc 1.98.0 (stable)\ncommit-hash: stable".into(),
+        };
+        let msrv = RustcIdentity {
+            banner: "rustc 1.86.0 (msrv)".into(),
+            verbose: "rustc 1.86.0 (msrv)\ncommit-hash: msrv".into(),
+        };
+        let stable_dir = native_shim_target_dir(workspace, None, &stable);
+        let msrv_dir = native_shim_target_dir(workspace, None, &msrv);
+        assert_ne!(stable_dir, msrv_dir);
+        assert_eq!(stable_dir, native_shim_target_dir(workspace, None, &stable));
+        assert!(stable_dir.starts_with("/patina/target/patina-shim"));
+
+        // An explicit Cargo target remains the user's authoritative staging
+        // contract rather than being silently rewritten.
+        assert_eq!(
+            native_shim_target_dir(workspace, Some(OsStr::new("/custom-target")), &stable),
+            PathBuf::from("/custom-target")
         );
     }
 

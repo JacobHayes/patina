@@ -132,8 +132,12 @@ wait_rungs() {
 }
 
 run_msrv() {
-  cargo +1.86.0 test --workspace --locked &&
-    cargo +1.86.0 test -p patina-dst --features macros --locked
+  # Keep outer Cargo artifacts separate without exporting CARGO_TARGET_DIR:
+  # e2e fixtures intentionally manage their own nested targets. cargo-patina's
+  # internal shim cache independently keys itself by the complete toolchain.
+  local msrv_target="$root/target/msrv"
+  cargo +1.86.0 test --target-dir "$msrv_target" --workspace --locked &&
+    cargo +1.86.0 test --target-dir "$msrv_target" -p patina-dst --features macros --locked
 }
 
 run_full() {
@@ -149,20 +153,14 @@ run_full() {
   run_rung 'workq classifier selftest' testbeds/workq/fuzz-sweep.sh --selftest || return $?
   run_rung 'campaign classifier selftest' cargo run -q -p cargo-patina -- patina campaign --selftest || return $?
 
-  # Stable workspace tests and native validation use independent scratch paths
-  # and the same toolchain. Keep the pair explicit and bounded: a broader fan-out
-  # oversubscribed the host and made the macro-adopter's nested Cargo run contend.
+  # The stable and MSRV outer Cargo caches are separate, and cargo-patina keys
+  # every nested shim cache by complete compiler identity. Native validation uses
+  # the stable toolchain and independent scratch paths. This bounded group keeps
+  # every test execution while removing the former serial toolchain boundary.
   start_rung 'stable workspace tests' cargo test --workspace --locked
+  start_rung 'MSRV workspace tests' run_msrv
   start_rung 'native-shim validation' scripts/validate-native-shim.sh
   wait_rungs || return $?
-
-  # Keep MSRV serial. Its e2e tests spawn nested cargo-patina builds that resolve
-  # the repository's root shim, so an outer Cargo cache cannot isolate every
-  # artifact and concurrent rustc versions can produce invalid mixed archives.
-  run_rung 'MSRV workspace tests' run_msrv || return $?
-  # Restore the stable root artifacts before stable-toolchain testbeds consume
-  # them. Cargo fingerprints the toolchain transition and rebuilds as needed.
-  run_rung 'restore stable artifacts' cargo build --locked -p patina-dst-native-shim -p cargo-patina || return $?
 
   # The remaining stable-toolchain suites have separate temp/testbed outputs.
   # Their combined serial cost is small, but overlapping them removes it from

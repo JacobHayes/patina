@@ -62,9 +62,8 @@ jobs:
         run: cargo fmt --all -- --check
       - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      # Both toolchains execute the complete suite. Local orchestration keeps
-      # them serial because nested e2e builds share root shim artifacts; CI runs
-      # each toolchain in its own job and workspace.
+      # Both toolchains execute the complete suite. The MSRV helper uses its own
+      # outer Cargo cache; nested Patina shim caches are compiler-identity keyed.
       - if: matrix.toolchain == 'stable'
         run: cargo test --workspace --locked
       - if: matrix.toolchain == 'msrv'
