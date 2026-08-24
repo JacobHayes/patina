@@ -3003,6 +3003,13 @@ fn common_native_allowlisted_import(symbol: &str) -> bool {
         "strncpy_chk",
         "strnlen",
         "strrchr",
+        // Substring and span searches over caller-owned NUL-terminated strings:
+        // pure reads returning a pointer or a length, the same caller-memory
+        // family as `strchr`/`strlen` (SQLite's LIKE/JSON/int parsers and
+        // mimalloc's option parsing import them).
+        "strcspn",
+        "strspn",
+        "strstr",
         // Numeric parse of a caller-owned NUL-terminated string into an integer,
         // optionally writing an end pointer back into caller memory. Pure
         // caller-memory read/compute with no boundary effect, same family as the
@@ -3011,6 +3018,13 @@ fn common_native_allowlisted_import(symbol: &str) -> bool {
         // radix/float parsers are deliberately NOT here — this is an exact list,
         // never a prefix, so an unlisted parser stays denied as `unknown-import`.)
         "strtol",
+        // In-place sort of a caller-owned array through a caller-supplied
+        // comparator: it reads and permutes only caller memory and takes no
+        // boundary effect of its own. The comparator is guest code, which meets
+        // the boundary on its own terms if it does anything effectful; the sort
+        // ORDER for equal elements is implementation-defined but stable for one
+        // libc build, and a run is always replayed against the same libc.
+        "qsort",
     ];
     // Compiler-rt/libgcc 128-bit integer arithmetic intrinsics: pure functions
     // of their register/stack operands with no boundary effect. Rust u128/i128
@@ -3339,8 +3353,12 @@ fn elf_native_allowlisted_import(symbol: &str) -> bool {
     // grow only this process's own address space, exactly like the allocator's
     // `mmap` on macOS. `mprotect`/`munmap` live on the common list. Addresses are
     // never virtualized (like `malloc`/`mmap` pointers), so they carry no
-    // cross-boundary effect; `mmap`'s invisible `MAP_SHARED` flag is the documented
-    // residual (see the coverage matrix), unchanged by adding the plain alias.
+    // cross-boundary effect. These entries now cover only a guest linked WITHOUT
+    // the POSIX layer (the C-ABI staticlib mode): with it, the shim's strong
+    // `mmap`/`mmap64`/`munmap` definitions take these names off the import table
+    // entirely and model a mapping of a VIRTUAL descriptor as a file copy with
+    // write-back, so the `MAP_SHARED` residual the coverage matrix used to record
+    // is closed there rather than merely documented.
     const PROCESS_LOCAL_MEMORY: &[&str] = &["mmap", "mmap64", "sbrk"];
     // Pure in-register byte-order conversion; referenced by the shim's own
     // sockaddr translation.
