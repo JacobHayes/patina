@@ -555,6 +555,12 @@ pub(crate) struct CampaignCoverageStore {
     union_bits: Vec<u8>,
     hits: Vec<u64>,
     sites: Vec<i64>,
+    /// Watermark floor contributed by generations that produced NO coverage map
+    /// before the store had ever seen one (see
+    /// [`Self::note_generation_without_covmap`]). In-memory only: once any
+    /// generation folds a real map the floor is absorbed into the persisted
+    /// `generations_applied`, and a `--resume` reads the watermark from there.
+    skipped_watermark: u64,
 }
 
 impl CampaignCoverageStore {
@@ -573,6 +579,7 @@ impl CampaignCoverageStore {
             union_bits: Vec::new(),
             hits: Vec::new(),
             sites: Vec::new(),
+            skipped_watermark: 0,
         }
     }
 
@@ -668,6 +675,7 @@ impl CampaignCoverageStore {
             union_bits,
             hits,
             sites,
+            skipped_watermark: 0,
         })
     }
 
@@ -704,11 +712,19 @@ impl CampaignCoverageStore {
         fold_decision(
             "coverage state",
             "generations_applied",
-            self.meta
-                .as_ref()
-                .map_or(0, |meta| meta.generations_applied),
+            self.watermark(),
             generation,
         )
+    }
+
+    /// How many generations this store has processed: the persisted count, or —
+    /// before any real map has been folded — the floor left by generations that
+    /// were killed before they could write one.
+    fn watermark(&self) -> u64 {
+        self.meta
+            .as_ref()
+            .map_or(0, |meta| meta.generations_applied)
+            .max(self.skipped_watermark)
     }
 
     pub(crate) fn fold_covmap(
@@ -718,6 +734,14 @@ impl CampaignCoverageStore {
     ) -> Result<FoldOutcome, CliError> {
         if self.meta.is_none() {
             self.initialize(covmap)?;
+            // Generations that were killed before they could write a map still
+            // count as processed; absorb their floor so the very first REAL fold
+            // is not read as a non-sequential gap.
+            let floor = self.skipped_watermark;
+            let meta = self.meta.as_mut().expect("initialized above");
+            meta.generations_applied = meta.generations_applied.max(floor);
+            // The floor is now persisted; do not double-count it.
+            self.skipped_watermark = 0;
         }
         if self.fold_decision(generation)? == AuxFoldDecision::SkipAlreadyApplied {
             return Ok(FoldOutcome {
@@ -777,6 +801,32 @@ impl CampaignCoverageStore {
             &meta.to_json(),
             "coverage meta",
         )
+    }
+
+    /// Record that `generation` contributed no coverage map, advancing the
+    /// watermark so the store's sequential-accumulation invariant still holds.
+    ///
+    /// A generation the supervisor KILLED — a `--timeout-secs` kill, the
+    /// `--starve` stall backstop, a guest that died on a signal — never reaches
+    /// the shim's shutdown dump, so it has no map and never will. Without this
+    /// the next generation's fold reads as a gap and fails the whole campaign,
+    /// which would make coverage and `--starve` mutually exclusive in practice.
+    /// Skipping is not the same as folding nothing: no edge is claimed and the
+    /// plateau window still advances, so a long run of killed generations is
+    /// correctly reported as a plateau rather than as progress.
+    pub(crate) fn note_generation_without_covmap(&mut self, generation: u64) {
+        let next = generation.saturating_add(1);
+        match self.meta.as_mut() {
+            Some(meta) => {
+                if next > meta.generations_applied {
+                    meta.generations_applied = next;
+                    meta.update_plateau(generation);
+                }
+            }
+            // No map has ever been folded, so there is no meta to advance yet;
+            // remember the floor for the first real fold to absorb.
+            None => self.skipped_watermark = self.skipped_watermark.max(next),
+        }
     }
 
     fn initialize(&mut self, covmap: &Covmap) -> Result<(), CliError> {

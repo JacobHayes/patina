@@ -7566,8 +7566,9 @@ fn emit_schedule_report(reports: ReportConfig, diag: &ScheduleDiagnostics) {
 to completion with no more scheduling boundaries than thread spawn/join alone incurs. Any loop in \
 their body was atomics-only and thus invisible to the scheduler, so their internal interleavings \
 are UNREACHABLE at any seed and a clean result here does NOT mean the concurrency was tested. \
-Rebuild with `cargo patina build --yield-points` to make atomics-only race windows \
-schedulable.",
+Rebuild with `cargo patina build --coverage-points=N` (a scheduling point every N basic blocks, \
+so the cost is 1/N of the dense mode) or `--yield-points` (a scheduling point at EVERY basic block) \
+to make atomics-only race windows schedulable.",
             diag.vacuous.len(),
         );
     }
@@ -10690,13 +10691,13 @@ class=crash|0 class=buggify|0"
             context.fs_close(dir)?;
             context.fs_write(fd, b"-volatile")?;
             context.fs_crash()?;
-            assert!(matches!(
-                context.fs_write(fd, b"stale"),
-                Err(RuntimeError::Effect(EffectError {
-                    code: ErrorCode::InvalidHandle,
-                    ..
-                }))
-            ));
+            // A crash rolls back DATA; it cannot invalidate the guest's own
+            // descriptor (see `patina-dst-fs-crash`: no power loss reaches into
+            // a running process to close its files, and an `EBADF` here would
+            // ask the guest to tolerate an impossible failure). Probe with a
+            // read-only op so the check itself does not perturb the image the
+            // record/replay comparison below depends on.
+            assert!(context.fs_fd_metadata(fd).is_ok());
             context.read_file("/state")
         }
 
@@ -10742,14 +10743,10 @@ class=crash|0 class=buggify|0"
             context.fs_seek(fd, 0, SeekWhence::Start)?;
             context.fs_write(fd, b"BBBBBBBB")?;
             context.fs_crash()?;
-            // The pre-crash handle is stale after the modeled restart.
-            assert!(matches!(
-                context.fs_write(fd, b"stale"),
-                Err(RuntimeError::Effect(EffectError {
-                    code: ErrorCode::InvalidHandle,
-                    ..
-                }))
-            ));
+            // The pre-crash handle stays live across the crash; only the bytes
+            // roll back. Probed read-only so the check does not perturb the
+            // torn image this test compares across record and replay.
+            assert!(context.fs_fd_metadata(fd).is_ok());
             context.read_file("/log")
         }
 

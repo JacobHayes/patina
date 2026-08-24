@@ -44,6 +44,15 @@
 //! modeled at the data level — each surviving name keeps the shared content —
 //! but inode identity (shared `nlink`) is not preserved across a crash.
 //!
+//! - **Open descriptors survive.** A crash rebuilds the image, but it never
+//!   invalidates a descriptor the guest is holding: an open file description is
+//!   the process's own object, and no power loss reaches into a running process
+//!   to close its files. The handle table moves onto the rebuilt image and every
+//!   path a live descriptor names is pinned back into the namespace (with its
+//!   data still rolled back), so a post-crash read or write reports a storage
+//!   failure or rolled-back bytes — never `EBADF`, which would tell the guest it
+//!   has a bug of its own.
+//!
 //! All decisions are a deterministic function of the configured seed and the
 //! exact operation sequence, so identical seeds reproduce identical post-crash
 //! images. This lets crash outcomes round-trip through record/replay: the
@@ -530,6 +539,26 @@ impl CrashFs {
             }
         }
 
+        // A crash cannot invalidate a descriptor the guest is still holding.
+        // An open file description is the PROCESS's object; power loss reaches
+        // the disk, not the caller's descriptor table, so no real storage
+        // failure turns a valid fd into `EBADF`. The rebuilt image therefore
+        // pins every path a live descriptor names, even one whose creation did
+        // not survive: the name comes back so the descriptor keeps resolving,
+        // while the DATA still rolls back to the durable baseline below. This
+        // matches the stance MemFs already takes for `unlink` (it refuses to
+        // remove an open file rather than model an anonymous inode), and it
+        // keeps the crash plane injecting only failures a real environment can
+        // produce.
+        let mut resurrected: BTreeSet<String> = BTreeSet::new();
+        for (path, kind) in self.live.open_entries() {
+            let fresh =
+                survival_set(kind, &mut dirs, &mut files, &mut symlinks).insert(path.clone());
+            if fresh && kind == FsEntryKind::File {
+                resurrected.insert(path);
+            }
+        }
+
         // The final unsynced write is eligible for a sub-block partial tear
         // under the byte-granularity policy; every other block still tears
         // wholesale. Captured before the merge loop borrows the rng.
@@ -551,12 +580,20 @@ impl CrashFs {
                 }
                 _ => None,
             };
-            let content = match self.live.contents(path) {
-                Ok(current) => {
-                    let current = current.to_vec();
-                    self.torn_merge(&baseline, &current, partial_region)
+            let content = if resurrected.contains(path) {
+                // Only open-descriptor pinning put this name back: the crash
+                // decided its creation did not survive, so nothing it ever held
+                // is durable. The name exists for the descriptor's sake; the
+                // contents are the durable baseline (empty for a lost create).
+                baseline
+            } else {
+                match self.live.contents(path) {
+                    Ok(current) => {
+                        let current = current.to_vec();
+                        self.torn_merge(&baseline, &current, partial_region)
+                    }
+                    Err(_) => baseline,
                 }
-                Err(_) => baseline,
             };
             file_contents.insert(path.clone(), content);
         }
@@ -598,10 +635,13 @@ impl CrashFs {
         }
 
         self.durable = enumerate(&mut next);
+        // Descriptors survive the crash (see the pinning comment above), so the
+        // handle table and the descriptor-to-path map both move across: a `sync`
+        // on an fd opened before the crash must still be attributed to its file.
+        next.adopt_handles(&self.live);
         self.live = next;
         self.staged_content.clear();
         self.pending.clear();
-        self.open_paths.clear();
         self.last_write = None;
         Ok(())
     }
@@ -1115,7 +1155,7 @@ mod tests {
     }
 
     #[test]
-    fn crash_discards_unsynchronized_data_and_open_handles() {
+    fn crash_discards_unsynchronized_data_but_not_open_handles() {
         let mut fs = CrashFs::default();
         let fd = write(&mut fs, "/volatile", b"lost");
         // Fsync the parent directory to make only the namespace entry durable;
@@ -1124,10 +1164,13 @@ mod tests {
         fs.crash().unwrap();
         assert_eq!(fs.crash_count(), 1);
         assert!(fs.contents("/volatile").unwrap().is_empty());
-        assert_eq!(
-            fs.write(fd, b"stale").unwrap_err().code,
-            ErrorCode::InvalidHandle
-        );
+        // The DATA is gone; the descriptor is not. A write through it lands on
+        // the rebuilt file rather than reporting the guest's own fd invalid.
+        // The cursor is process state and survives with the fd, so the write
+        // lands where the guest left off (past the rolled-back bytes).
+        fs.seek(fd, 0, SeekWhence::Start).unwrap();
+        assert_eq!(fs.write(fd, b"stale").unwrap(), 5);
+        assert_eq!(fs.contents("/volatile").unwrap(), b"stale");
     }
 
     #[test]
@@ -1156,8 +1199,12 @@ mod tests {
         let mounted = image.into_memfs().unwrap();
         let mut fs = CrashFs::new(mounted);
 
-        // A new guest write without an fsync.
-        let _volatile = write(&mut fs, "/scratch/out.txt", b"never-synced");
+        // A new guest write without an fsync, with the descriptor closed before
+        // the crash — an fd still open across a crash pins its name (see
+        // `a_crash_lost_create_keeps_its_open_descriptor_and_loses_its_data`),
+        // and this case is about the namespace, not the descriptor table.
+        let volatile = write(&mut fs, "/scratch/out.txt", b"never-synced");
+        fs.close(volatile).unwrap();
         fs.crash().unwrap();
 
         // The mounted (durable) content survives the crash byte-for-byte.
@@ -1173,7 +1220,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_keeps_synced_data_loses_unsynced_and_reopens_cleanly() {
+    fn a_crash_keeps_synced_data_loses_unsynced_and_leaves_handles_usable() {
         let mut fs = CrashFs::default();
         let durable = write(&mut fs, "/keep", b"durable");
         fs.sync(durable).unwrap();
@@ -1182,22 +1229,23 @@ mod tests {
         fs.sync_directory("/").unwrap();
         fs.crash().unwrap();
 
-        // Handles from before the crash are stale after restart.
-        assert_eq!(
-            fs.read(durable, 4).unwrap_err().code,
-            ErrorCode::InvalidHandle
-        );
-        assert_eq!(
-            fs.write(volatile, b"x").unwrap_err().code,
-            ErrorCode::InvalidHandle
-        );
-
         assert_eq!(fs.contents("/keep").unwrap(), b"durable");
         assert!(fs.contents("/lose").unwrap().is_empty());
 
-        // The restarted process can open durable state through fresh handles.
+        // Handles from before the crash still name their files. A crash rolls
+        // back bytes; it cannot invalidate the guest's descriptor table, and
+        // reporting `InvalidHandle` here would surface as an impossible `EBADF`.
+        fs.seek(durable, 0, SeekWhence::Start).unwrap();
+        assert_eq!(fs.write(durable, b"D").unwrap(), 1);
+        assert_eq!(fs.contents("/keep").unwrap(), b"Durable");
+        fs.seek(volatile, 0, SeekWhence::Start).unwrap();
+        assert_eq!(fs.write(volatile, b"x").unwrap(), 1);
+        assert_eq!(fs.contents("/lose").unwrap(), b"x");
+
+        // A fresh open gets its own descriptor number and sees the live bytes.
         let reopened = fs.open("/keep", OpenFlags::read_only()).unwrap();
-        assert_eq!(fs.read(reopened, 16).unwrap(), b"durable");
+        assert_ne!(reopened, durable);
+        assert_eq!(fs.read(reopened, 16).unwrap(), b"Durable");
     }
 
     fn torn_after_crash(seed: u64) -> Vec<u8> {
@@ -1742,5 +1790,65 @@ mod tests {
         assert_eq!(fs.contents("/b").unwrap(), b"data");
         let metadata = fs.metadata("/a").unwrap();
         assert_eq!((metadata.atime_nanos, metadata.mtime_nanos), (111, 222));
+    }
+
+    /// A crash must never hand the guest `EBADF` for a descriptor it is still
+    /// holding: real storage cannot invalidate a caller's fd, so a guest is
+    /// right not to tolerate one, and a simulator that produces one is testing
+    /// against an impossible world.
+    #[test]
+    fn descriptors_opened_before_a_crash_stay_usable_after_it() {
+        let mut fs = CrashFs::default();
+        let fd = write(&mut fs, "/a", b"durable");
+        fs.sync(fd).unwrap();
+        fs.checkpoint();
+        // A second, unsynced write is what the crash rolls back.
+        fs.write(fd, b"-lost").unwrap();
+        fs.crash().unwrap();
+
+        // Every operation on the pre-crash fd resolves; none reports
+        // `InvalidHandle` (which the POSIX boundary renders as `EBADF`).
+        fs.fd_metadata(fd).expect("fd_metadata after crash");
+        fs.seek(fd, 0, SeekWhence::Start).expect("seek after crash");
+        fs.sync(fd).expect("sync after crash");
+        fs.close(fd).expect("close after crash");
+    }
+
+    /// A file whose creation did not survive still comes back as a NAME for the
+    /// descriptor that is open on it — with its data rolled all the way back.
+    #[test]
+    fn a_crash_lost_create_keeps_its_open_descriptor_and_loses_its_data() {
+        let mut fs = CrashFs::builder()
+            .model_directory_durability(true)
+            .directory_loss_probability(1.0)
+            .build()
+            .unwrap();
+        let fd = write(&mut fs, "/fresh", b"never-durable");
+        fs.crash().unwrap();
+
+        assert_eq!(
+            fs.contents("/fresh").unwrap(),
+            b"",
+            "a lost create keeps no data"
+        );
+        let metadata = fs.fd_metadata(fd).expect("the fd stays valid");
+        assert_eq!(metadata.len, 0);
+        // And it is still writable, so the guest recovers by rewriting.
+        assert_eq!(fs.write(fd, b"again").unwrap(), 5);
+    }
+
+    /// A post-crash `open` must not reuse a descriptor number the guest still
+    /// believes is live: aliasing two files onto one fd is a corruption the
+    /// guest can neither see nor defend against.
+    #[test]
+    fn a_post_crash_open_never_reuses_a_live_descriptor_number() {
+        let mut fs = CrashFs::default();
+        let held = write(&mut fs, "/a", b"data");
+        fs.sync(held).unwrap();
+        fs.checkpoint();
+        fs.crash().unwrap();
+
+        let fresh = fs.open("/a", OpenFlags::create_truncate_write()).unwrap();
+        assert_ne!(fresh, held);
     }
 }

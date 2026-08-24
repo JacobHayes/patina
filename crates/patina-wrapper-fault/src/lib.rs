@@ -416,11 +416,19 @@ impl FsFaultOp {
         }
     }
 
+    /// Whether this operation can consume space, and so can plausibly fail
+    /// `ENOSPC`. `Sync` is here because a filesystem with delayed allocation
+    /// does the allocation at writeback: `fsync(2)` ERRORS lists `ENOSPC`
+    /// explicitly, and a database's durability path meeting a full disk at
+    /// fsync — not at write — is the canonical storage failure it must handle.
+    /// `unlink(2)`/`rmdir(2)` are deliberately absent: neither lists `ENOSPC`,
+    /// and removing a name does not allocate.
     fn can_no_space(self) -> bool {
         match self {
             FsFaultOp::Open { allocating } => allocating,
             FsFaultOp::Write
             | FsFaultOp::WriteAt
+            | FsFaultOp::Sync
             | FsFaultOp::CreateDirectory
             | FsFaultOp::SetLen
             | FsFaultOp::Rename
@@ -431,7 +439,6 @@ impl FsFaultOp {
             | FsFaultOp::Metadata
             | FsFaultOp::FdMetadata
             | FsFaultOp::RemoveFile
-            | FsFaultOp::Sync
             | FsFaultOp::SetTimes
             | FsFaultOp::SetTimesByPath
             | FsFaultOp::ReadDirectory
@@ -440,6 +447,10 @@ impl FsFaultOp {
         }
     }
 
+    /// Whether a signal can land mid-operation and surface as `EINTR`. The
+    /// data-plane calls and `fsync(2)` list it; `open(2)`'s `EINTR` is scoped to
+    /// blocking opens of slow devices and FIFOs, which this filesystem does not
+    /// model, so a regular-file open is not interruptible here.
     fn can_interrupt(self) -> bool {
         matches!(
             self,
@@ -452,6 +463,45 @@ impl FsFaultOp {
     }
 }
 
+/// Pick the errno an injected failure reports, from the set the operation could
+/// actually produce on a real filesystem.
+///
+/// The point of a failure simulator is to inject failures the environment can
+/// actually produce: a guest is entitled to treat an impossible errno as a bug
+/// of its own and die on it, so an implausible injection is not a finding, it is
+/// noise crowding real findings out of a campaign. Two rules follow.
+///
+/// **Never an error the syscall cannot return.** The per-operation predicates
+/// above are checked against the Linux man-page ERRORS sections (`fsync(2)`,
+/// `write(2)`, `read(2)`, `open(2)`, `rename(2)`, `unlink(2)`, `mkdir(2)`,
+/// `link(2)`, `symlink(2)`, `ftruncate(2)`, `stat(2)`) and POSIX.1-2017, which
+/// is where `EIO` comes from for the metadata and namespace calls whose Linux
+/// pages omit it. The resulting sets, in the vocabulary of the errno an
+/// `unreliable-libc`-style shim injects:
+///
+/// | operation                         | injected                       |
+/// |-----------------------------------|--------------------------------|
+/// | read, pread                       | `EIO`, `EINTR`                 |
+/// | write, pwrite                     | `EIO`, `ENOSPC`, `EINTR`       |
+/// | fsync                             | `EIO`, `ENOSPC`, `EINTR`       |
+/// | open (creating)                   | `EIO`, `ENOSPC`                |
+/// | open (existing), stat, fstat      | `EIO`                          |
+/// | ftruncate                         | `EIO`, `ENOSPC`                |
+/// | mkdir, rename, link, symlink      | `EIO`, `ENOSPC`                |
+/// | unlink, rmdir, readdir, readlink  | `EIO`                          |
+/// | utimensat                         | `EIO`                          |
+///
+/// **Never an error that indicts the CALLER rather than the storage.** `EBADF`,
+/// `EFAULT` and `EINVAL` say the program passed a bad descriptor, pointer or
+/// argument; no disk failure produces one, and injecting one asks the guest to
+/// tolerate its own impossible bug. They are unreachable here by construction:
+/// [`ErrorCode::Io`], [`ErrorCode::NoSpace`] and [`ErrorCode::Interrupted`] are
+/// the only codes this function can return. (`EDQUOT` and `EMFILE`/`ENFILE`
+/// would also be plausible for the write and open sets, but the driver ABI has
+/// no code for them and `ENOSPC` already exercises the same guest paths.)
+///
+/// The choice is a pure function of the fault RNG's seeded stream and the
+/// operation, so a seed reproduces the same errno at the same fire.
 fn choose_error_code(rng: &mut SplitMix64, op: FsFaultOp) -> ErrorCode {
     let mut choices = [ErrorCode::Io, ErrorCode::Io, ErrorCode::Io];
     let mut len = 1usize;
@@ -682,6 +732,89 @@ mod tests {
         assert!(seen.contains(&ErrorCode::Io), "seen={seen:?}");
         assert!(seen.contains(&ErrorCode::NoSpace), "seen={seen:?}");
         assert!(seen.contains(&ErrorCode::Interrupted), "seen={seen:?}");
+    }
+
+    /// `fsync(2)` ERRORS lists `ENOSPC`: with delayed allocation the disk-full
+    /// condition surfaces at writeback, not at `write`. A model that could only
+    /// fail fsync with `EIO` never exercises the guest's most important
+    /// durability-path branch.
+    #[test]
+    fn fsync_can_report_a_full_disk() {
+        let mut seen = Vec::new();
+        for seed in 0..256 {
+            let (inner, fd) = fs_with_open_file();
+            let mut fs = FaultFs::new(inner, seed).error_permille(1000);
+            seen.push(fs.sync(fd).unwrap_err().code);
+        }
+        assert!(seen.contains(&ErrorCode::NoSpace), "seen={seen:?}");
+        assert!(seen.contains(&ErrorCode::Io), "seen={seen:?}");
+        assert!(seen.contains(&ErrorCode::Interrupted), "seen={seen:?}");
+    }
+
+    /// The injected set must never contain a code that indicts the CALLER
+    /// (`EBADF`, `EFAULT`, `EINVAL` at the POSIX boundary): no storage failure
+    /// produces one, so a guest that dies on it is right to, and every
+    /// generation that hits it is noise rather than a finding. This walks every
+    /// fault-eligible operation rather than trusting the three-code enum to stay
+    /// three codes.
+    #[test]
+    fn no_operation_injects_an_error_that_blames_the_caller() {
+        let caller_faults = [
+            ErrorCode::InvalidHandle,
+            ErrorCode::InvalidInput,
+            ErrorCode::NotFound,
+            ErrorCode::Denied,
+            ErrorCode::NotReadable,
+            ErrorCode::NotWritable,
+        ];
+        // Every fault-eligible operation, `open` in both of its shapes. Pinned
+        // against the shared kind table below so a new operation cannot slip in
+        // untested.
+        const ALL_FAULT_OPS: [FsFaultOp; 20] = [
+            FsFaultOp::Open { allocating: true },
+            FsFaultOp::Open { allocating: false },
+            FsFaultOp::Read,
+            FsFaultOp::Write,
+            FsFaultOp::ReadAt,
+            FsFaultOp::WriteAt,
+            FsFaultOp::Metadata,
+            FsFaultOp::FdMetadata,
+            FsFaultOp::CreateDirectory,
+            FsFaultOp::RemoveFile,
+            FsFaultOp::Sync,
+            FsFaultOp::SetLen,
+            FsFaultOp::SetTimes,
+            FsFaultOp::SetTimesByPath,
+            FsFaultOp::ReadDirectory,
+            FsFaultOp::RemoveDirectory,
+            FsFaultOp::Rename,
+            FsFaultOp::Link,
+            FsFaultOp::Symlink,
+            FsFaultOp::ReadLink,
+        ];
+        let covered: BTreeSet<&str> = ALL_FAULT_OPS.iter().map(|op| op.kind().name()).collect();
+        let declared: BTreeSet<&str> = FsFaultOpKind::ALL.iter().map(|kind| kind.name()).collect();
+        assert_eq!(
+            covered, declared,
+            "every fault-eligible kind must be walked"
+        );
+
+        let mut rng = SplitMix64::new(0x5eed);
+        for op in ALL_FAULT_OPS {
+            for _ in 0..512 {
+                let code = choose_error_code(&mut rng, op);
+                assert!(
+                    !caller_faults.contains(&code),
+                    "{:?} injected {code:?}",
+                    op.kind().name()
+                );
+                // And only from the set the operation could actually return.
+                let allowed = code == ErrorCode::Io
+                    || (code == ErrorCode::NoSpace && op.can_no_space())
+                    || (code == ErrorCode::Interrupted && op.can_interrupt());
+                assert!(allowed, "{} injected {code:?}", op.kind().name());
+            }
+        }
     }
 
     #[test]

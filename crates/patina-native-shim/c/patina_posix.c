@@ -3556,6 +3556,15 @@ static int patina_main_wrapper(int argc, char **argv, char **envp) {
      * task's instrumented thread-local destructors take no scheduling point.
      */
     patina_note_main_returned();
+    /*
+     * And record the status the guest itself reached. glibc calls `exit()`
+     * through a hidden internal alias on this path, so the `exit` interposer
+     * below never sees it; if finalization then fails, the atexit hook aborts
+     * and SIGABRT is all anything downstream could otherwise observe. A guest
+     * that panicked (101) or returned an error (1) must not be filed as patina
+     * infrastructure just because the recorder gave out on the same run.
+     */
+    patina_note_guest_exit_status(code);
     return code;
 }
 

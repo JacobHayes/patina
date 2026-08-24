@@ -190,8 +190,14 @@ reproduces them flag-free:
 - **Timing**: `--sleep-jitter-nanos MIN..MAX` on every guest sleep.
 - **Schedule exploration** (native): `--sched-pct` (PCT priority scheduling),
   `--starve` (bounded starvation intervals), `--swarm` (seed-derived fault-class
-  subsets). Pair with `cargo patina build --yield-points`, which instruments
-  basic blocks so even atomics-only race windows become schedulable.
+  subsets). `campaign --sched-pct` and `campaign --starve` sweep those policies
+  per generation. Pair with a build that makes atomics-only race windows
+  schedulable: `cargo patina build --yield-points` puts a scheduling point at
+  EVERY basic block (densest, and by far the most expensive), while
+  `--coverage-points=N` puts one every N basic blocks a thread executes — the
+  same reachability guarantee bounded by N, at 1/N of the cost. Bare
+  `--coverage-points` emits the edge counters alone, so `--coverage-out` and
+  `campaign --guided` work without paying for preemption at all.
 - **Liveness oracles**: `--liveness-watchdog` (virtual-time no-progress
   detector) and `--converge-within` (heal-then-converge budget).
 
@@ -257,7 +263,8 @@ Why debug finds more bugs:
 - **Sharper triage.** Un-inlined frames and exact line numbers keep the
   minimize → replay → backtrace loop pointed at the real culprit instead of an
   optimized-away frame.
-- **Denser schedule exploration.** `cargo patina build --yield-points` plants a
+- **Denser schedule exploration.** `cargo patina build --yield-points` (or
+  `--coverage-points=N`) plants a
   scheduling point at each basic-block coverage guard; optimization collapses
   basic blocks, so a release guest hands the seeded scheduler *fewer* windows to
   preempt an atomics-only race. Yield-point binaries also emit

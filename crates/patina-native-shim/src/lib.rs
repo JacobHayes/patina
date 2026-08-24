@@ -2849,8 +2849,60 @@ own — but the trace is unusable for replay; re-record a shorter run if you nee
     lines
 }
 
+/// Sentinel for "the guest's own exit status was never observed" — a platform
+/// or exit path that reaches shutdown without passing through either recording
+/// site (Darwin's natural `main` return keeps libSystem's own `exit`).
+const GUEST_EXIT_UNKNOWN: i32 = i32::MIN;
+
+/// The guest's OWN exit status, recorded the instant its `main` returned or it
+/// called `exit(3)` — before patina's atexit finalization runs and, on a
+/// finalization failure, before `abort()` replaces that status with SIGABRT.
+///
+/// Without this the guest's verdict is unrecoverable in exactly the case that
+/// matters most: a long run that both failed for a real reason AND outgrew or
+/// broke the recorder. The supervisor would see only the shim's SIGABRT, file
+/// the generation as patina's own infrastructure failure, and the real finding
+/// would disappear. See [`report_shutdown_error`].
+static GUEST_EXIT_STATUS: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(GUEST_EXIT_UNKNOWN);
+
+/// Record the guest's own exit status. Called from the `__libc_start_main`
+/// wrapper the moment the guest's `main` returns, and from [`patina_exit`] for
+/// an explicit `exit(3)`/`std::process::exit`. The FIRST recording wins: `main`
+/// returning is the guest's verdict, and glibc's own later `exit()` of that same
+/// code must not be mistaken for a second, independent one.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_note_guest_exit_status(status: c_int) {
+    let _ = GUEST_EXIT_STATUS.compare_exchange(
+        GUEST_EXIT_UNKNOWN,
+        status,
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+fn guest_exit_status() -> Option<i32> {
+    match GUEST_EXIT_STATUS.load(std::sync::atomic::Ordering::Relaxed) {
+        GUEST_EXIT_UNKNOWN => None,
+        status => Some(status),
+    }
+}
+
+/// Report a finalization failure, naming the status the GUEST itself reached.
+///
+/// The atexit hook `abort()`s on this, so the process dies on SIGABRT and the
+/// guest's own status is gone from everything downstream can see. Carrying it on
+/// the refusal line is what lets a supervisor tell "patina's recorder broke on a
+/// run that was otherwise clean" (infrastructure) from "patina's recorder broke
+/// on a run the guest had ALREADY failed" — where the guest's failure is the
+/// finding and the unusable trace is a footnote.
 fn report_shutdown_error(message: &str) {
-    let line = format!("patina: runtime shutdown failed: {message}\n");
+    let mut line = format!("patina: runtime shutdown failed: {message}");
+    match guest_exit_status() {
+        Some(status) => line.push_str(&format!(" guest_exit_code={status}")),
+        None => line.push_str(" guest_exit_code=unknown"),
+    }
+    line.push('\n');
     let _ = host_write_all(2, line.as_bytes());
 }
 
@@ -4218,6 +4270,7 @@ pub extern "C" fn patina_yield_point(site: *const c_void) {
 /// mode) and the TLS destructors, now with the teardown flag set.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_exit(status: c_int) -> ! {
+    patina_note_guest_exit_status(status);
     thread::note_main_returned();
     // SAFETY: `host_exit` is the real libc `exit` resolved once via
     // `dlsym(RTLD_NEXT, "exit")`; it does not return.

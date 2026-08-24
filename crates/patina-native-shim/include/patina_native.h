@@ -56,6 +56,14 @@ int32_t patina_clearenv(void);
 void patina_register_environ_installer(void (*installer)(char **));
 void patina_publish_environ(void);
 int32_t patina_shutdown(void);
+
+/*
+ * Record the guest's OWN exit status, before patina's atexit finalization can
+ * replace it (a finalization failure aborts, and SIGABRT would be all that
+ * survives). Called from the __libc_start_main wrapper when the guest's `main`
+ * returns and from patina_exit for an explicit exit(3). First call wins.
+ */
+void patina_note_guest_exit_status(int32_t status);
 /*
  * The runtime side of the packaged `exit` interposer. Marks the process as
  * having entered post-`main` teardown (so the root task's --yield-points hooks

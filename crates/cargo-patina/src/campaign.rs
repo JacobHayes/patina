@@ -128,6 +128,20 @@ pub struct CampaignSpec {
     pub swarm: bool,
     /// Randomize a PCT bug depth per generation (native only).
     pub pct: bool,
+    /// Randomize a bounded starvation-interval policy per generation (native
+    /// only): how many intervals, how deep into the schedule they may start, and
+    /// how long they may last.
+    ///
+    /// WHY IT IS ITS OWN SWITCH. Starvation is the one exploration policy that
+    /// deliberately holds a RUNNABLE task off, which is what several liveness and
+    /// lost-wakeup bugs need and what a uniform-random scheduler will not produce
+    /// at any seed count. It is also the one policy that can WEDGE a guest whose
+    /// synchronization is invisible to the scheduler (an atomics-only spinlock
+    /// held across a boundary), so it must be asked for rather than inherited —
+    /// the same reason `run` refuses to turn it on implicitly. The supervisor's
+    /// stall backstop turns a wedge into a classified `STARVATION_STALL` rather
+    /// than a hung campaign.
+    pub starve: bool,
     /// Randomize fault knobs (net drop, sleep jitter) per generation.
     pub faults: bool,
     /// Band the custom-op failure knob (`--custom-op-fail-permille`) under
@@ -231,6 +245,7 @@ impl Default for CampaignSpec {
             buggify: false,
             swarm: false,
             pct: false,
+            starve: false,
             faults: false,
             custom_op_faults: false,
             fault_scale_permille: FAULT_SCALE_FULL,
@@ -278,6 +293,7 @@ impl CampaignSpec {
                 "buggify" => self.buggify = json_bool(key, val)?,
                 "swarm" => self.swarm = json_bool(key, val)?,
                 "pct" => self.pct = json_bool(key, val)?,
+                "starve" => self.starve = json_bool(key, val)?,
                 "faults" => self.faults = json_bool(key, val)?,
                 "custom_op_faults" => self.custom_op_faults = json_bool(key, val)?,
                 "fault_scale_permille" => {
@@ -650,6 +666,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     spec.buggify |= args.flag("--buggify");
     spec.swarm |= args.flag("--swarm");
     spec.pct |= args.flag("--sched-pct");
+    spec.starve |= args.flag("--starve");
     spec.faults |= args.flag("--faults");
     spec.custom_op_faults |= args.flag("--custom-op-faults");
     // A value flag, so — unlike the switches above — it overrides the spec only
@@ -1003,6 +1020,9 @@ const HOST_KILL_SHAPE: &str = "killed by SIGKILL (host-side; not a guest failure
 /// `shutdown_failure` refusal class `output.rs` assigns.
 const SHUTDOWN_FAILURE_SHAPE: &str = "refusal class=shutdown_failure";
 
+/// The refusal class patina's own end-of-run recorder failure carries.
+const SHUTDOWN_FAILURE_CLASS: &str = "shutdown_failure";
+
 /// One verdict the generation reported through the verdict ABI, reduced to what
 /// classification, signatures and `minimize`'s auto-target need. Lifted from the
 /// envelope's `verdicts[]`.
@@ -1115,6 +1135,12 @@ pub struct RunFacts {
     /// `refusal.class` — patina's own fail-closed refusal, when patina refused.
     /// Its ABSENCE is what makes an abort the guest's own doing.
     pub refusal: Option<String>,
+    /// `refusal.guest_exit_code` — the status the GUEST itself reached, when the
+    /// refusal destroyed it. A `shutdown_failure` aborts the process from the
+    /// atexit hook, so `exit_code`/`signal` above describe patina's abort rather
+    /// than the guest; only this field can say whether the guest had already
+    /// failed on its own. `None` when the refusal did not record one.
+    pub refusal_guest_exit_code: Option<i32>,
     /// `verdicts[]`, in call order.
     pub verdicts: Vec<VerdictFacts>,
     /// The `fault_reports{}` planes whose `vacuous` bit is set.
@@ -1317,8 +1343,29 @@ fn built_in_class(facts: &RunFacts) -> CampaignClass {
         // inside patina, whose printed reproduce command could not reproduce it
         // (the abort needs the `--record` the reproduce command omitted). It is
         // INFRA for the same reason a timeout is: the harness, not a result.
-        if class == "shutdown_failure" {
-            return CampaignClass::Infra;
+        if class == SHUTDOWN_FAILURE_CLASS {
+            // ...but ONLY when the guest itself came through clean. The trace
+            // budget is spent by LONG runs, which are precisely the runs most
+            // likely to have found something; a generation that both failed for
+            // a real reason and broke the recorder must be filed under the
+            // GUEST's failure, or the finding vanishes into an infra bucket. The
+            // shim records the status the guest reached before the atexit abort
+            // replaced it (`refusal.guest_exit_code`), so the two cases are
+            // distinguishable here. The unusable trace does not stop being true
+            // — the report still says so — it just stops being the headline.
+            //
+            // An unrecorded status (`None`) keeps the INFRA demotion: with no
+            // evidence the guest failed, patina's own recorder is the only thing
+            // known to have gone wrong.
+            match facts.refusal_guest_exit_code {
+                None | Some(0) => return CampaignClass::Infra,
+                // The guest's own class. It cannot have aborted (an `abort()`
+                // skips atexit and never reaches finalization), so what is left
+                // is a panic or a deliberate nonzero exit: rule 11's bucket,
+                // reached directly because `exit_code`/`signal` here describe
+                // patina's abort and would otherwise misfile it as GUEST_ABORT.
+                Some(_) => return CampaignClass::Unclassified,
+            }
         }
         return CampaignClass::FailClosedAbort;
     }
@@ -1382,6 +1429,24 @@ pub fn signature(class: CampaignClass, generation: &GenerationFacts) -> Signatur
 /// The most representative description of the finding for the class, from the
 /// structured facts where they carry one.
 fn primary_finding(class: CampaignClass, generation: &GenerationFacts) -> String {
+    let shape = primary_finding_shape(class, generation);
+    // A generation whose class came from the GUEST while patina's own recorder
+    // also gave out is reproducible only up to a point: the finding stands, but
+    // the trace it would be replayed from was never written. Say so on the shape
+    // itself — it is the line triage reads — rather than let a printed
+    // `reproduce` command promise an artifact that is not there. INFRA already
+    // names the refusal in its own shape and does not need the suffix.
+    if class != CampaignClass::Infra
+        && generation.facts.refusal.as_deref() == Some(SHUTDOWN_FAILURE_CLASS)
+    {
+        return format!("{shape} trace=unusable");
+    }
+    shape
+}
+
+/// The class's own most representative description, before any cross-cutting
+/// annotation [`primary_finding`] adds.
+fn primary_finding_shape(class: CampaignClass, generation: &GenerationFacts) -> String {
     let facts = &generation.facts;
     let structured = match class {
         CampaignClass::Liveness => facts
@@ -2131,6 +2196,13 @@ fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     if spec.custom_op_faults {
         map.insert("custom_op_faults".into(), true.into());
     }
+    // Default-omitted for the same round-trip reason as the keys around it: a
+    // campaign that does not explore starvation records exactly the JSON it did
+    // before this key existed, so an out-dir written by an earlier build still
+    // passes the canonical-form check on `--resume`.
+    if spec.starve {
+        map.insert("starve".into(), true.into());
+    }
     // Emitted only when the campaign HAS a host table, so a DNS-free spec's
     // recorded JSON is byte-identical to what it was before the key existed and
     // an out-dir written by an earlier build still round-trips on `--resume`.
@@ -2314,15 +2386,20 @@ fn initialize_edge_coverage(
         return Ok(EdgeCoverageState::unavailable(
             "not-native",
             Some(
-                "only yield-point native binaries carry edge coverage; a WASI module accumulates depth instead",
+                "only instrumented native binaries carry edge coverage; a WASI module accumulates depth instead",
             ),
         ));
     }
     let artifact_path = PathBuf::from(&state.artifact.path);
-    if !crate::binary_has_yield_points(&artifact_path)? {
+    // Edge coverage rides the SanitizerCoverage counters, which BOTH instrumented
+    // build modes emit. `--coverage-points` emits them without the per-block
+    // scheduler hook, so a guided campaign no longer has to pay --yield-points'
+    // preemption cost just to see coverage.
+    let instrumentation = crate::binary_instrumentation(&artifact_path)?;
+    if !instrumentation.has_coverage() {
         return Ok(EdgeCoverageState::unavailable(
             "not-instrumented",
-            Some("rebuild with cargo patina build --yield-points"),
+            Some("rebuild with cargo patina build --coverage-points (or --yield-points)"),
         ));
     }
     let coverage_dir = out_dir.join("coverage");
@@ -2337,7 +2414,7 @@ fn initialize_edge_coverage(
         sha256: state.artifact.sha256.clone(),
         family: state.artifact.family.to_string(),
     };
-    let fingerprint = campaign_coverage_fingerprint(&state.spec);
+    let fingerprint = campaign_coverage_fingerprint(&state.spec, instrumentation);
     let store = CampaignCoverageStore::load(
         coverage_dir,
         artifact,
@@ -2348,13 +2425,20 @@ fn initialize_edge_coverage(
     Ok(EdgeCoverageState::Active(Box::new(store)))
 }
 
-fn campaign_coverage_fingerprint(spec: &CampaignSpec) -> String {
-    let mut fingerprint = crate::yield_point_fingerprint(crate::DEFAULT_NATIVE_FINGERPRINT, true);
+fn campaign_coverage_fingerprint(
+    spec: &CampaignSpec,
+    instrumentation: crate::GuestInstrumentation,
+) -> String {
+    let mut fingerprint =
+        crate::instrumentation_fingerprint(crate::DEFAULT_NATIVE_FINGERPRINT, instrumentation);
     if spec.buggify {
         fingerprint.push_str("+buggify");
     }
     if spec.pct {
         fingerprint.push_str("+pct");
+    }
+    if spec.starve {
+        fingerprint.push_str("+starve");
     }
     if spec.swarm {
         fingerprint.push_str("+swarm");
@@ -2717,12 +2801,17 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
         let timed_out = run.facts.facts.timed_out;
         let stderr = run.stderr;
         let _sites_fold = fold_sites_generation(&mut coverage, generation, seed, &stderr)?;
+        let class = classify(&run.facts, &state.spec.classify);
+        // Edge coverage folds AFTER classification, for the same reason depth does
+        // below: the shim writes the coverage map at SHUTDOWN, so whether a missing
+        // map is a tolerable "this generation never got there" or a loud plumbing
+        // failure depends entirely on how the generation ended.
         let _edge_fold = fold_edge_coverage_generation(
             &mut edge_coverage,
             generation,
             coverage_map_path.as_deref(),
+            generation_reached_shutdown(&run.facts.facts),
         )?;
-        let class = classify(&run.facts, &state.spec.classify);
         *state.classes.entry(class.as_str().to_string()).or_insert(0) += 1;
         // Depth folds AFTER classification: whether a missing depth line is a
         // tolerable "the guest never finished" or a loud plumbing failure depends
@@ -2949,10 +3038,23 @@ fn fold_sites_generation(
     Ok(decision)
 }
 
+/// Whether this generation could have written its coverage map at all.
+///
+/// The map is dumped from the shim's shutdown path. A generation the supervisor
+/// KILLED never reaches it: a `--timeout-secs` kill and the `--starve` stall
+/// backstop both SIGKILL the process group, and a guest that died on a signal
+/// (an `abort()`, a fatal fault) skips `atexit` by definition. A generation that
+/// exited on its own — with any status, zero or not — did reach shutdown, so a
+/// missing map there is a real plumbing failure and must stay loud.
+fn generation_reached_shutdown(facts: &RunFacts) -> bool {
+    !facts.timed_out && facts.signal.is_none() && facts.exit_code != STARVATION_STALL_EXIT
+}
+
 fn fold_edge_coverage_generation(
     edge_coverage: &mut EdgeCoverageState,
     generation: u64,
     coverage_map_path: Option<&Path>,
+    reached_shutdown: bool,
 ) -> Result<Option<FoldOutcome>, CliError> {
     let Some(store) = edge_coverage.active_mut() else {
         return Ok(None);
@@ -2970,6 +3072,15 @@ fn fold_edge_coverage_generation(
         .map(|metadata| metadata.len())
         .unwrap_or(0);
     if len == 0 {
+        // A killed generation has no coverage to contribute and never claimed to:
+        // it is skipped, exactly like a killed generation's missing depth line.
+        // Failing the whole campaign here would make `--starve` (whose stall
+        // backstop kills a wedged generation BY DESIGN) unusable with coverage.
+        if !reached_shutdown {
+            let _ = fs::remove_file(path);
+            store.note_generation_without_covmap(generation);
+            return Ok(None);
+        }
         return Err(CliError(format!(
             "generation {generation} requested native coverage but did not produce a covmap at {}; refusing a partial coverage campaign",
             path.display()
@@ -3068,6 +3179,11 @@ fn facts_from_envelope(envelope: &serde_json::Value) -> RunFacts {
             .and_then(|refusal| refusal.get("class"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        refusal_guest_exit_code: envelope
+            .get("refusal")
+            .and_then(|refusal| refusal.get("guest_exit_code"))
+            .and_then(serde_json::Value::as_i64)
+            .map(|code| code as i32),
         verdicts,
         vacuous_planes,
         findings,
@@ -3372,7 +3488,12 @@ fn push_run_flag(flags: &mut Vec<String>, name: &str, value: RunValue) {
 /// claim, and [`every_generation_hash_read_goes_through_a_claim`] rejects a raw
 /// literal index that bypassed the table.
 ///
-/// Byte 31 is unclaimed and is where the next band should draw from.
+/// Every byte of the 32-byte hash is now claimed. A NEW band cannot simply take
+/// one: either it belongs to an existing policy's configuration and can be
+/// bit-sliced out of that policy's byte (see [`gen_byte::SCHED_STARVE`]), or the
+/// hash namespace has to grow — a second domain-separated SHA-256 appended after
+/// byte 31, which keeps bytes 0..32 (and therefore every existing campaign's
+/// draws) byte-for-byte identical.
 mod gen_byte {
     use std::ops::Range;
 
@@ -3406,6 +3527,17 @@ mod gen_byte {
     pub(super) const ENTROPY_FAIL: usize = 28;
     pub(super) const EPOCH_JUMP: usize = 29;
     pub(super) const CUSTOM_OP_FAIL: usize = 30;
+    /// The whole starvation policy configuration — interval count, start window,
+    /// and maximum interval length — bit-sliced out of ONE byte.
+    ///
+    /// The three sub-knobs are deliberately correlated with each other and with
+    /// nothing else. They are not three independent faults; they are one policy's
+    /// shape ("how many holds, how deep, how long"), and the campaign's
+    /// disjointness rule exists to stop two UNRELATED knobs from sweeping a
+    /// diagonal of their joint space. Slicing one byte gives 256 distinct
+    /// starvation configurations — every generation of a thousand-generation
+    /// sweep sees several — while leaving every other band's draw untouched.
+    pub(super) const SCHED_STARVE: usize = 31;
 
     /// The bands no fault knob owns, for the disjointness gate. The fault knobs'
     /// own claims come from [`super::campaign_band`], so this list is only the
@@ -3418,6 +3550,7 @@ mod gen_byte {
         ("buggify activation", BUGGIFY_ACTIVATION),
         ("buggify fire", BUGGIFY_FIRE),
         ("sched-pct depth", SCHED_PCT_DEPTH),
+        ("starvation policy", SCHED_STARVE),
     ];
 }
 
@@ -3869,6 +4002,33 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
     if spec.pct && native {
         let depth = 1 + u32::from(hash[gen_byte::SCHED_PCT_DEPTH] % 5); // [1, 5]
         push_run_flag(&mut flags, "--sched-pct", RunValue::Int(u64::from(depth)));
+    }
+    if spec.starve && native {
+        // One byte, three fields. The low three bits pick the interval count; the
+        // next three pick the START WINDOW as a power of two; the top two pick the
+        // maximum interval length, also as a power of two.
+        //
+        // WHY POWERS OF TWO, AND WHY THIS WIDE. The window is measured in
+        // SCHEDULING DECISIONS, and a real guest's schedule length spans orders of
+        // magnitude — a toy two-thread probe takes a handful of decisions, an
+        // instrumented database stress run takes tens of thousands. A linear sweep
+        // over any single range would place every interval in the first fraction
+        // of a percent of the long runs (which is exactly what the fixed
+        // `--starve-window` default does) or would never reach the short ones. A
+        // log sweep from 512 to 65536 puts intervals both near startup and deep
+        // into a long schedule across a campaign.
+        //
+        // The maximum length is deliberately much smaller (16..128 decisions):
+        // it is also the scheduler's AGING CAP, so it bounds how long any task can
+        // be held off before liveness forces it to run. A narrow hold is what the
+        // lost-wakeup / missed-notify bug shapes need; a long one just stalls.
+        let policy = hash[gen_byte::SCHED_STARVE];
+        let intervals = 1 + u64::from(policy & 0b111); // [1, 8]
+        let window = 1u64 << (9 + u32::from((policy >> 3) & 0b111)); // 512..65536
+        let max_len = 1u64 << (4 + u32::from((policy >> 6) & 0b11)); // 16..128
+        push_run_flag(&mut flags, "--starve", RunValue::Int(intervals));
+        push_run_flag(&mut flags, "--starve-window", RunValue::Int(window));
+        push_run_flag(&mut flags, "--starve-max-len", RunValue::Int(max_len));
     }
     if let Some(nanos) = spec.watchdog_nanos {
         push_run_flag(&mut flags, "--liveness-watchdog", RunValue::Int(nanos));
@@ -5184,6 +5344,12 @@ impl RunFacts {
         self
     }
 
+    /// The status the GUEST reached before the refusal's abort replaced it.
+    fn guest_exit(mut self, code: i32) -> Self {
+        self.refusal_guest_exit_code = Some(code);
+        self
+    }
+
     fn verdict(mut self, kind: &str, label: &str) -> Self {
         self.verdicts.push(VerdictFacts {
             kind: kind.to_string(),
@@ -5376,12 +5542,72 @@ fn selftest() -> Result<i32, CliError> {
         ),
     );
 
-    // Patina's own end-of-run recorder failure (the trace resource limit, an
-    // unwritable trace) aborts the guest with a SIGABRT the guest never raised.
-    // That is the harness failing, not a finding: INFRA, like a timeout. Its red
-    // twin is the same SIGABRT with no refusal, two checks below.
+    // Patina's own end-of-run recorder failure (an unwritable trace, a bundle
+    // that would not serialize) aborts the guest with a SIGABRT the guest never
+    // raised. When the GUEST itself came through clean that is the harness
+    // failing, not a finding: INFRA, like a timeout. Its red twin is the same
+    // SIGABRT with no refusal, two checks below.
     check(
-        "shutdown-failure-refusal-is-infra",
+        "shutdown-failure-over-a-clean-guest-is-infra",
+        CampaignClass::Infra,
+        classify(
+            &planted(
+                RunFacts::ok()
+                    .exit(SIGABRT_EXIT)
+                    .signal(SIGABRT)
+                    .refusal("shutdown_failure")
+                    .guest_exit(0),
+                "",
+            ),
+            &no_rules,
+        ),
+    );
+    // RED twin, and the whole point of the rule: the recorder gives out on LONG
+    // runs, which are the runs most likely to have found something. A guest that
+    // had ALREADY failed on its own — a panic (101), a nonzero return — is the
+    // finding; the unusable trace is a footnote the report still carries. Filing
+    // this INFRA would delete a real failure, and delete it selectively from the
+    // deepest generations in the campaign.
+    for guest_code in [1, 101, 2] {
+        check(
+            &format!("shutdown-failure-over-a-failing-guest-{guest_code}-keeps-the-guests-class"),
+            CampaignClass::Unclassified,
+            classify(
+                &planted(
+                    RunFacts::ok()
+                        .exit(SIGABRT_EXIT)
+                        .signal(SIGABRT)
+                        .refusal("shutdown_failure")
+                        .guest_exit(guest_code),
+                    "",
+                ),
+                &no_rules,
+            ),
+        );
+    }
+    // A guest verdict still outranks the refusal, as before: a violation the
+    // guest reported is a VIOLATION whatever the recorder then did.
+    check(
+        "violation-beats-shutdown-failure",
+        CampaignClass::Violation,
+        classify(
+            &planted(
+                RunFacts::ok()
+                    .exit(SIGABRT_EXIT)
+                    .signal(SIGABRT)
+                    .refusal("shutdown_failure")
+                    .guest_exit(101)
+                    .verdict("violation", "integrity-check"),
+                "",
+            ),
+            &no_rules,
+        ),
+    );
+    // With no recorded guest status there is no evidence the guest failed, so
+    // the demotion stands — patina's recorder is the only thing known to have
+    // gone wrong.
+    check(
+        "shutdown-failure-with-no-recorded-guest-status-stays-infra",
         CampaignClass::Infra,
         classify(
             &planted(
@@ -5600,6 +5826,30 @@ fn selftest() -> Result<i32, CliError> {
 
     // Signature dedup + novelty, from the same structured facts.
     println!("-- signature dedup --");
+    // A guest finding recovered from under a recorder failure keeps the guest's
+    // own shape, plus the standing note that its trace was never written — so
+    // the printed `reproduce` command cannot promise a replay that has no
+    // artifact behind it.
+    let unusable = signature(
+        CampaignClass::Unclassified,
+        &planted(
+            RunFacts::ok()
+                .exit(SIGABRT_EXIT)
+                .signal(SIGABRT)
+                .refusal("shutdown_failure")
+                .guest_exit(101),
+            "thread 'main' panicked at src/x.rs:1:1:\nboom\n",
+        ),
+    );
+    if unusable.shape.ends_with(" trace=unusable") {
+        println!(
+            "  ok   shutdown-failure-shape-flags-the-unusable-trace -> {}",
+            unusable.shape
+        );
+    } else {
+        println!("  FAIL shutdown-failure-shape-flags-the-unusable-trace -> {unusable:?}");
+        failures += 1;
+    }
     let a = signature(
         CampaignClass::Liveness,
         &planted(
@@ -6580,6 +6830,89 @@ mod tests {
                 "patterns": {"VIOLATION": ["checksum mismatch"]},
                 "exit_codes": {"VIOLATION": [3]},
             })
+        );
+    }
+
+    /// The starvation sweep is the campaign's one adversarial-deferral knob, so
+    /// its three sub-values must (a) be a pure function of the generation, (b)
+    /// actually MOVE across generations — a sweep pinned to one configuration
+    /// explores nothing — and (c) stay inside the ranges the run parser and the
+    /// scheduler's liveness bound accept.
+    #[test]
+    fn the_starvation_sweep_is_deterministic_and_actually_sweeps() {
+        let mut spec = CampaignSpec::default();
+        spec.starve = true;
+        let value = |flags: &[String], name: &str| -> u64 {
+            let at = flags
+                .iter()
+                .position(|flag| flag == name || flag.starts_with(&format!("{name}=")))
+                .unwrap_or_else(|| panic!("{name} missing from {flags:?}"));
+            let text = flags[at]
+                .strip_prefix(&format!("{name}="))
+                .map(str::to_string)
+                .unwrap_or_else(|| flags[at + 1].clone());
+            text.parse().expect("an integer starvation value")
+        };
+        let mut seen: BTreeMap<(u64, u64, u64), u64> = BTreeMap::new();
+        for generation in 0..256 {
+            let hash = generation_hash(0, generation);
+            let flags = derive_flags(&spec, &hash, "native");
+            // Pure: the same generation derives the same configuration.
+            assert_eq!(flags, derive_flags(&spec, &generation_hash(0, generation), "native"));
+            let intervals = value(&flags, "--starve");
+            let window = value(&flags, "--starve-window");
+            let max_len = value(&flags, "--starve-max-len");
+            assert!((1..=8).contains(&intervals), "intervals {intervals}");
+            assert!(
+                (512..=65_536).contains(&window) && window.is_power_of_two(),
+                "window {window}"
+            );
+            assert!(
+                (16..=128).contains(&max_len) && max_len.is_power_of_two(),
+                "max_len {max_len}"
+            );
+            *seen.entry((intervals, window, max_len)).or_default() += 1;
+        }
+        // The byte is bit-sliced into 8 x 8 x 4 = 256 configurations; 256
+        // generations must reach a large fraction of them, not one corner.
+        assert!(
+            seen.len() > 100,
+            "the starvation sweep collapsed to {} configuration(s)",
+            seen.len()
+        );
+        // Off by default: a spec that did not ask for starvation emits none of it.
+        let quiet = derive_flags(&CampaignSpec::default(), &generation_hash(0, 3), "native");
+        assert!(!quiet.iter().any(|flag| flag.starts_with("--starve")));
+        // WASI has no threads to starve, so the native-only gate holds.
+        let wasi = derive_flags(&spec, &generation_hash(0, 3), "wasi");
+        assert!(!wasi.iter().any(|flag| flag.starts_with("--starve")));
+    }
+
+    /// Starvation rides the recorded spec (so `--resume` sweeps the same policy)
+    /// and is default-omitted from the JSON, so an out-dir written before the key
+    /// existed still passes the canonical-form check.
+    #[test]
+    fn starvation_round_trips_through_the_recorded_spec() {
+        let mut spec = CampaignSpec::default();
+        spec.apply_json(&serde_json::json!({"starve": true})).unwrap();
+        assert!(spec.starve);
+        let json = spec_to_json(&spec);
+        assert_eq!(json["starve"], serde_json::json!(true));
+        assert_eq!(spec_from_state_json(&json).unwrap(), spec);
+        assert!(
+            spec_to_json(&CampaignSpec::default())
+                .get("starve")
+                .is_none()
+        );
+        // The exploration policy is part of the coverage store's compatibility
+        // fingerprint, so a starvation campaign never pools coverage with a
+        // non-starvation one.
+        assert_ne!(
+            campaign_coverage_fingerprint(&spec, crate::GuestInstrumentation::YieldPoints),
+            campaign_coverage_fingerprint(
+                &CampaignSpec::default(),
+                crate::GuestInstrumentation::YieldPoints
+            )
         );
     }
 

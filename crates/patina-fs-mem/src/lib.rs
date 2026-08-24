@@ -104,6 +104,40 @@ impl MemFs {
         snapshot
     }
 
+    /// The paths a live descriptor currently names, with the entry kind each was
+    /// opened as, deduplicated and in path order.
+    ///
+    /// A crash model reads this to keep the guest's descriptors meaningful
+    /// across a rebuilt image: see [`MemFs::adopt_handles`].
+    pub fn open_entries(&self) -> BTreeMap<String, FsEntryKind> {
+        self.handles
+            .values()
+            .filter_map(|id| self.descriptions.get(id))
+            .map(|description| (description.path.clone(), description.kind))
+            .collect()
+    }
+
+    /// Carry `previous`'s open descriptor table onto this image.
+    ///
+    /// A crash model rebuilds the post-crash filesystem as a fresh [`MemFs`];
+    /// without this the guest's still-open descriptors would all become
+    /// unknown handles, and every later read/write/close on one would fail
+    /// `InvalidHandle` — `EBADF` at the POSIX boundary. No real storage failure
+    /// does that: a descriptor is the process's own object, and power loss
+    /// cannot reach into a running process and close its files. Injecting
+    /// `EBADF` would test the guest against an impossible world, so the table
+    /// moves across intact.
+    ///
+    /// Descriptor and description IDs advance past the previous image's, so a
+    /// post-crash `open` can never hand back a number the guest still believes
+    /// is live.
+    pub fn adopt_handles(&mut self, previous: &Self) {
+        self.handles.clone_from(&previous.handles);
+        self.descriptions.clone_from(&previous.descriptions);
+        self.next_fd = self.next_fd.max(previous.next_fd);
+        self.next_description = self.next_description.max(previous.next_description);
+    }
+
     fn allocate_entry_metadata(&mut self) -> EntryMetadata {
         let ino = self.next_inode;
         self.next_inode = self.next_inode.checked_add(1).expect("inode IDs exhausted");

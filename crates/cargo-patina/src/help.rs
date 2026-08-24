@@ -741,7 +741,7 @@ const NATIVE_SCHEDULE_FLAGS: &[Flag] = &[
             "--sched-pct-steps",
             None,
             Value::Required("N", Kind::PositiveU64),
-            "Number of PCT priority-change points (>= 1). Requires --sched-pct.",
+            "Decision-space span the d-1 PCT change points are spread over (>= 1, default 2000). Requires --sched-pct.",
             false,
         ),
         "--sched-pct",
@@ -954,7 +954,7 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
                     "--coverage-out",
                     None,
                     Value::Required("PATH", Kind::Path),
-                    "Write a patina.covmap/v1 edge-counter map (requires --yield-points build).",
+                    "Write a patina.covmap/v1 edge-counter map (requires a --yield-points or --coverage-points build).",
                     false,
                 ),
                 f(
@@ -1134,6 +1134,13 @@ copy-paste `test` and `replay` repro commands.",
                     "Instrument the native libtest harness with deterministic yield points.",
                     false,
                 ),
+                f(
+                    "--coverage-points",
+                    None,
+                    Value::Optional("STRIDE", Kind::PositiveU64),
+                    "Edge counters at every basic block; bare = no added scheduling points, =N = one every N blocks. Excludes --yield-points.",
+                    false,
+                ),
             ],
         },
         Group {
@@ -1169,8 +1176,8 @@ const BUILD: Verb = Verb {
     name: "build",
     summary: "Build the native linked-shim target (default) or a wasm32-wasip1 package.",
     synopsis: &[
-        "cargo patina build <SOURCE.rs> --output <PATH> [--edition YEAR] [--release] [--yield-points] [-- RUSTC OPTIONS]",
-        "cargo patina build <DIR|Cargo.toml> [--output <PATH>] [--package NAME] [--bin NAME] [--release] [--yield-points]",
+        "cargo patina build <SOURCE.rs> --output <PATH> [--edition YEAR] [--release] [--yield-points | --coverage-points[=STRIDE]] [-- RUSTC OPTIONS]",
+        "cargo patina build <DIR|Cargo.toml> [--output <PATH>] [--package NAME] [--bin NAME] [--release] [--yield-points | --coverage-points[=STRIDE]]",
         "cargo patina build <DIR|Cargo.toml> --target wasi [--output PATH] [--package NAME] [--bin NAME] [--release]",
     ],
     prose: "\
@@ -1183,7 +1190,19 @@ and the binary with --bin; --output copies the built binary out.\n\
 \n\
 `--yield-points` instruments the native guest with deterministic cooperative \
 preemption (a hook at every basic block routes into the scheduler), making \
-atomics-only race windows schedulable. It is native-only and rejected under \
+atomics-only race windows schedulable. It is the densest and by far the most \
+expensive mode: every basic block pays a scheduler round trip.\n\
+\n\
+`--coverage-points` splits the two things --yield-points bundles. Bare, it emits \
+the SAME edge counters (so --coverage-out, `cargo patina coverage`, and `campaign \
+--guided` all work) with NO scheduler hook, at counter cost. `--coverage-points=N` \
+adds a scheduling point every N basic blocks a thread executes, bounding the \
+blocks between preemption opportunities by N at 1/N of the --yield-points cost. \
+The stride is compiled into the binary and recovered from it at run time, so it \
+is part of the compatibility fingerprint (`+covpoints:N`) and a trace never \
+cross-replays against a different stride or against --yield-points. The sampling \
+countdown is per-thread, so the sampled sites are a pure function of the seed. \
+The two flags are mutually exclusive. Both are native-only and rejected under \
 --target wasi (wasip1 has no threads to preempt). `build --target wasi` compiles a \
 Cargo package for wasm32-wasip1 and is package-only (a single .rs source is \
 native-only).",
@@ -1231,6 +1250,16 @@ native-only).",
                     None,
                     Value::None,
                     "Instrument deterministic cooperative preemption (native only).",
+                    false,
+                ),
+                &[Family::Native],
+            ),
+            only(
+                f(
+                    "--coverage-points",
+                    None,
+                    Value::Optional("STRIDE", Kind::PositiveU64),
+                    "Edge counters at every basic block; bare = no added scheduling points, =N = one every N blocks. Excludes --yield-points.",
                     false,
                 ),
                 &[Family::Native],
@@ -1621,6 +1650,13 @@ refused by name.",
                     None,
                     Value::None,
                     "Randomize a PCT bug depth per generation (native only).",
+                    false,
+                ),
+                f(
+                    "--starve",
+                    None,
+                    Value::None,
+                    "Randomize a bounded starvation-interval policy (count, start window, max length) per generation (native only).",
                     false,
                 ),
                 f(

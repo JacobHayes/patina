@@ -558,14 +558,31 @@ fn refusal(exit_code: i32, stdout: &str, stderr: &str) -> Option<Refusal> {
         Some(Refusal {
             class: (*class).to_string(),
             message: line.trim().to_string(),
+            guest_exit_code: guest_exit_code(line),
         })
     })
 }
 
-/// A patina fail-closed refusal: which class, and the line that announced it.
+/// The guest's own exit status, when the refusal line names it.
+///
+/// Only the shim's shutdown-failure line carries `guest_exit_code=`; it is
+/// written there because that refusal `abort()`s the process, so the status the
+/// GUEST reached is otherwise destroyed. Parsed structurally here — once, at the
+/// envelope boundary — so the campaign classifier keeps deciding on fields
+/// rather than on text.
+fn guest_exit_code(line: &str) -> Option<i32> {
+    line.split_whitespace()
+        .find_map(|token| token.strip_prefix("guest_exit_code="))
+        .and_then(|value| value.parse().ok())
+}
+
+/// A patina fail-closed refusal: which class, the line that announced it, and —
+/// when the refusal destroyed the guest's own exit status by aborting — what
+/// that status was.
 pub struct Refusal {
     class: String,
     message: String,
+    guest_exit_code: Option<i32>,
 }
 
 /// Known structured marker prefixes **patina itself** emits, worth surfacing
@@ -960,6 +977,9 @@ impl Envelope {
             let mut rm = Map::new();
             rm.insert("class".into(), Value::from(v.class.clone()));
             rm.insert("message".into(), Value::from(v.message.clone()));
+            if let Some(code) = v.guest_exit_code {
+                rm.insert("guest_exit_code".into(), Value::from(code));
+            }
             m.insert("refusal".into(), Value::Object(rm));
         }
         if let Some(v) = &self.guest_exit {
@@ -1229,6 +1249,7 @@ mod tests {
         env.refusal = Some(Refusal {
             class: "fingerprint_mismatch".into(),
             message: "trace fingerprint mismatch".into(),
+            guest_exit_code: None,
         });
         env.guest_exit = Some(GuestExit {
             code: 134,

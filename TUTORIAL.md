@@ -362,7 +362,10 @@ reported none.
   provides — e.g. `rand` under native, `random_get` under WASI) instead of argv.
   That way every generation is still reproducible from its patina seed alone,
   and replay needs no extra flags.
-- Make atomics-only race windows schedulable: `cargo patina build --yield-points`.
+- Make atomics-only race windows schedulable: `cargo patina build --yield-points`
+  (a scheduling point at every basic block) or `cargo patina build
+  --coverage-points=N` (one every N basic blocks, at 1/N of the cost; bare
+  `--coverage-points` is edge counters only, for `--coverage-out`/`--guided`).
 - Reduce a campaign failure to a one-line reproduction: `cargo patina minimize
   --generation 14 --out-dir out/` delta-debugs that generation's fault knobs
   first (usually 17-18 down to 1-2, in about twenty seeded re-runs), prints the
