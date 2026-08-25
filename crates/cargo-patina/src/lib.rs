@@ -3662,8 +3662,10 @@ fn build_native_harness(
             invocation.manifest.display()
         )));
     }
-    let staticlib = build_native_shim(invocation.release)?;
-    let host_target = host_target_triple()?;
+    let workspace = patina_source_workspace();
+    let rustc = check_native_toolchain_agreement(&workspace)?;
+    let staticlib = build_native_shim(invocation.release, &rustc)?;
+    let host_target = host_target_triple(&rustc.command)?;
     let objects_base = staticlib
         .parent()
         .expect("shim staticlib path has a profile directory parent")
@@ -3691,8 +3693,7 @@ fn build_native_harness(
         invocation.package.as_deref(),
     )?;
 
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let mut command = Command::new(&cargo);
+    let mut command = Command::new(&rustc.cargo_command);
     command
         .arg("rustc")
         .arg("--manifest-path")
@@ -3706,6 +3707,7 @@ fn build_native_harness(
         .env("CARGO_ENCODED_RUSTFLAGS", rustflags)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
+    apply_rustc_env(&mut command, &rustc);
     command.args(selected.kind.select_args(&invocation.harness_target));
     // `cargo rustc` builds a lib/bin target in test mode only under the `test` or
     // `bench` profile, and `--release` is rejected alongside `--profile`. `bench`
@@ -4652,7 +4654,7 @@ fn patina_source_workspace() -> PathBuf {
 /// Build the `patina-dst-native-shim` staticlib and return its path. The shim's
 /// Rust boundary is produced by Cargo; the C POSIX layer and header are packaged
 /// into this binary and compiled at link time by [`execute_native_build`].
-fn build_native_shim(release: bool) -> Result<PathBuf, CliError> {
+fn build_native_shim(release: bool, rustc: &RustcInvocation) -> Result<PathBuf, CliError> {
     // The shim crate lives in the Patina source workspace, so `cargo build -p
     // patina-dst-native-shim` must run THERE, not in the caller's CWD. Pinning it
     // is what lets `build .`/`run <DIR>`/`audit <DIR>` succeed from inside the
@@ -4661,23 +4663,17 @@ fn build_native_shim(release: bool) -> Result<PathBuf, CliError> {
     // "package ID specification `patina-dst-native-shim` did not match any
     // packages" — the observed `build .` regression.
     let workspace = patina_source_workspace();
-    // Both halves of a native build must come from ONE toolchain. Because the
-    // shim build is pinned to the workspace directory above and the guest build
-    // is not, the two can resolve different compilers; refuse before compiling
-    // anything rather than letting two libstds meet at the guest link.
-    check_native_toolchain_agreement(&workspace)?;
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let explicit_target = env::var_os("CARGO_TARGET_DIR");
-    let rustc = anchored_rustc(env::var_os("RUSTC"), &workspace);
-    let toolchain = rustc_identity(&rustc, &workspace)?;
+    let toolchain = rustc_identity(&rustc.command, &workspace)?;
     let target_dir = native_shim_target_dir(&workspace, explicit_target.as_deref(), &toolchain);
-    let mut command = Command::new(&cargo);
+    let mut command = Command::new(&rustc.cargo_command);
     command
         .current_dir(&workspace)
         .env("CARGO_TARGET_DIR", &target_dir)
         .arg("build")
         .arg("-p")
         .arg("patina-dst-native-shim");
+    apply_rustc_env(&mut command, rustc);
     if release {
         command.arg("--release");
     }
@@ -4732,6 +4728,31 @@ struct RustcIdentity {
     verbose: String,
 }
 
+#[derive(Debug, Clone)]
+struct RustcInvocation {
+    command: OsString,
+    cargo_command: OsString,
+    cargo_env: Option<OsString>,
+}
+
+fn rustc_invocation_from_env(from: &Path) -> RustcInvocation {
+    let original = env::var_os("RUSTC");
+    let command = anchored_program(original.clone(), from, "rustc");
+    let cargo_command = anchored_program(env::var_os("CARGO"), from, "cargo");
+    let cargo_env = original.and_then(|value| (value != command).then(|| command.clone()));
+    RustcInvocation {
+        command,
+        cargo_command,
+        cargo_env,
+    }
+}
+
+fn apply_rustc_env(command: &mut Command, rustc: &RustcInvocation) {
+    if let Some(value) = &rustc.cargo_env {
+        command.env("RUSTC", value);
+    }
+}
+
 /// Resolve the rustc that compiles code in `directory`.
 ///
 /// The working directory is the input that matters. Under rustup, the `rustc` on
@@ -4778,18 +4799,18 @@ fn rustc_identity(rustc: &OsStr, directory: &Path) -> Result<RustcIdentity, CliE
 /// `PATH`, which does not depend on the working directory); a relative path with
 /// a directory component would resolve against each probe's own directory, so it
 /// is anchored to `from` first.
-fn anchored_rustc(rustc: Option<OsString>, from: &Path) -> OsString {
-    let Some(rustc) = rustc else {
-        return OsString::from("rustc");
+fn anchored_program(program: Option<OsString>, from: &Path, fallback: &str) -> OsString {
+    let Some(program) = program else {
+        return OsString::from(fallback);
     };
-    let path = Path::new(&rustc);
+    let path = Path::new(&program);
     let has_directory = path
         .parent()
         .is_some_and(|parent| !parent.as_os_str().is_empty());
     if path.is_relative() && has_directory {
         from.join(path).into_os_string()
     } else {
-        rustc
+        program
     }
 }
 
@@ -4805,19 +4826,19 @@ fn anchored_rustc(rustc: Option<OsString>, from: &Path) -> OsString {
 /// rust_eh_personality` link error on Linux and, worse, a silent success on
 /// macOS: the guest links and runs carrying two libstds. Name it before either
 /// happens.
-fn check_native_toolchain_agreement(workspace: &Path) -> Result<(), CliError> {
+fn check_native_toolchain_agreement(workspace: &Path) -> Result<RustcInvocation, CliError> {
+    let guest_dir = env::current_dir()
+        .map_err(|error| CliError(format!("failed to read the working directory: {error}")))?;
+    let rustc = rustc_invocation_from_env(&guest_dir);
     if !workspace.is_dir() {
         // No workspace to build the shim in; let `build_native_shim` report that
         // in its own terms rather than shadowing it with a probe failure.
-        return Ok(());
+        return Ok(rustc);
     }
-    let guest_dir = env::current_dir()
-        .map_err(|error| CliError(format!("failed to read the working directory: {error}")))?;
-    let rustc = anchored_rustc(env::var_os("RUSTC"), &guest_dir);
-    let shim = rustc_identity(&rustc, workspace)?;
-    let guest = rustc_identity(&rustc, &guest_dir)?;
+    let shim = rustc_identity(&rustc.command, workspace)?;
+    let guest = rustc_identity(&rustc.command, &guest_dir)?;
     if shim == guest {
-        return Ok(());
+        return Ok(rustc);
     }
     Err(CliError(toolchain_mismatch_message(
         &shim, workspace, &guest, &guest_dir,
@@ -4825,7 +4846,7 @@ fn check_native_toolchain_agreement(workspace: &Path) -> Result<(), CliError> {
 }
 
 /// The refusal text for a shim/guest toolchain split: name both toolchains, the
-/// directory each resolved in, and the two ways to pin one toolchain for both.
+/// directory each resolved in, and scoped remedies for pinning one toolchain.
 fn toolchain_mismatch_message(
     shim: &RustcIdentity,
     shim_dir: &Path,
@@ -4857,10 +4878,11 @@ guest:\n{}\n",
     }
     message.push_str(
         "the shim always builds in the Patina source workspace, while the guest builds in the \
-working directory, and rustup's `rustc` proxy picks its toolchain from the rust-toolchain file \
-above whichever directory it runs in. Pin one toolchain for both: invoke through rustup as `cargo \
-patina ...` (the cargo proxy exports RUSTUP_TOOLCHAIN for the whole build), or set RUSTUP_TOOLCHAIN \
-yourself before invoking the cargo-patina binary directly.",
+working directory. When `rustc` is a rustup proxy, it picks its toolchain from the rust-toolchain \
+file above whichever directory it runs in; in that case invoking through rustup as `cargo patina \
+...` (the cargo proxy exports RUSTUP_TOOLCHAIN for the whole build) or setting RUSTUP_TOOLCHAIN \
+before invoking the cargo-patina binary directly pins both halves. Proxy-agnostic remedy: invoke \
+cargo-patina with absolute, matching RUSTC and CARGO binaries from one toolchain.",
     );
     message
 }
@@ -4888,8 +4910,10 @@ fn execute_native_build(invocation: NativeBuildInvocation) -> Result<i32, CliErr
 /// by the `build` verb and build-on-the-fly (`run`/`audit`/`replay` of a
 /// source): both go through exactly this code.
 fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliError> {
-    let staticlib = build_native_shim(invocation.release)?;
-    let host_target = host_target_triple()?;
+    let workspace = patina_source_workspace();
+    let rustc = check_native_toolchain_agreement(&workspace)?;
+    let staticlib = build_native_shim(invocation.release, &rustc)?;
+    let host_target = host_target_triple(&rustc.command)?;
 
     // Stage the embedded POSIX shim layer at a stable content-addressed path in
     // the shim's own profile target dir (beside the staticlib), compiled below
@@ -4925,6 +4949,7 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
             &staticlib,
             yield_object.as_deref(),
             &rustc_args,
+            &rustc,
         ),
         NativeBuildTarget::Package {
             manifest,
@@ -4940,6 +4965,7 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
             &object,
             &staticlib,
             yield_object.as_deref(),
+            &rustc,
         ),
     }
 }
@@ -5262,9 +5288,9 @@ fn build_native_source(
     staticlib: &Path,
     yield_object: Option<&Path>,
     rustc_args: &[OsString],
+    rustc: &RustcInvocation,
 ) -> Result<PathBuf, CliError> {
-    let rustc = env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
-    let mut command = Command::new(&rustc);
+    let mut command = Command::new(&rustc.command);
     command
         .arg("--edition")
         .arg(edition)
@@ -5310,7 +5336,7 @@ fn build_native_source(
     command.arg(source).arg("-o").arg(output).args(rustc_args);
     let status = command
         .status()
-        .map_err(|error| CliError(format!("failed to run rustc {rustc:?}: {error}")))?;
+        .map_err(|error| CliError(format!("failed to run rustc {:?}: {error}", rustc.command)))?;
     if !status.success() {
         return Err(CliError("linking the native Patina program failed".into()));
     }
@@ -5337,6 +5363,7 @@ fn build_native_package(
     object: &Path,
     staticlib: &Path,
     yield_object: Option<&Path>,
+    rustc: &RustcInvocation,
 ) -> Result<PathBuf, CliError> {
     if !manifest.is_file() {
         return Err(CliError(format!(
@@ -5358,8 +5385,7 @@ fn build_native_package(
         host_target,
     )?;
 
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let mut command = Command::new(&cargo);
+    let mut command = Command::new(&rustc.cargo_command);
     command
         .arg("rustc")
         .arg("--manifest-path")
@@ -5375,6 +5401,7 @@ fn build_native_package(
         .env("CARGO_ENCODED_RUSTFLAGS", rustflags)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
+    apply_rustc_env(&mut command, rustc);
     // The SanitizerCoverage flags carried in the encoded rustflags are stable
     // `-C` codegen options, so no `RUSTC_BOOTSTRAP` is needed. They apply to every
     // crate Cargo compiles from source in this invocation (guest + its
@@ -5564,8 +5591,8 @@ fn native_build_executable(stdout: &[u8], bin: &str) -> Result<PathBuf, CliError
 
 /// Query rustc for the host target triple so the package build isolates its
 /// link arguments to host artifacts.
-fn host_target_triple() -> Result<String, CliError> {
-    let output = Command::new("rustc")
+fn host_target_triple(rustc: &OsStr) -> Result<String, CliError> {
+    let output = Command::new(rustc)
         .arg("-vV")
         .output()
         .map_err(|error| CliError(format!("failed to query rustc host target: {error}")))?;
@@ -5847,7 +5874,11 @@ fn binary_instrumentation(binary: &Path) -> Result<GuestInstrumentation, CliErro
     let Some(tail) = scan_marker(binary, PATINA_COV_MARKER_PREFIX, 11)? else {
         return Ok(GuestInstrumentation::None);
     };
-    let digits: Vec<u8> = tail.iter().copied().take_while(|byte| *byte != b';').collect();
+    let digits: Vec<u8> = tail
+        .iter()
+        .copied()
+        .take_while(|byte| *byte != b';')
+        .collect();
     let stride = std::str::from_utf8(&digits)
         .ok()
         .and_then(|text| text.parse::<u32>().ok())
@@ -8124,25 +8155,28 @@ mod tests {
     fn a_relative_rustc_probes_as_one_program_from_both_directories() {
         let from = Path::new("/work/guest");
         // A bare name is PATH-resolved, which does not vary by directory.
-        assert_eq!(anchored_rustc(None, from), OsString::from("rustc"));
         assert_eq!(
-            anchored_rustc(Some("rustc".into()), from),
+            anchored_program(None, from, "rustc"),
+            OsString::from("rustc")
+        );
+        assert_eq!(
+            anchored_program(Some("rustc".into()), from, "rustc"),
             OsString::from("rustc")
         );
         // An absolute path already names one program.
         assert_eq!(
-            anchored_rustc(Some("/opt/rust/bin/rustc".into()), from),
+            anchored_program(Some("/opt/rust/bin/rustc".into()), from, "rustc"),
             OsString::from("/opt/rust/bin/rustc")
         );
         // A relative path with a directory component would otherwise resolve
         // against each probe's own working directory — two different programs,
         // reported as a toolchain split that does not exist.
         assert_eq!(
-            anchored_rustc(Some("./tools/rustc".into()), from),
+            anchored_program(Some("./tools/rustc".into()), from, "rustc"),
             OsString::from("/work/guest/./tools/rustc")
         );
         assert_eq!(
-            anchored_rustc(Some("tools/rustc".into()), from),
+            anchored_program(Some("tools/rustc".into()), from, "rustc"),
             OsString::from("/work/guest/tools/rustc")
         );
     }
@@ -9417,7 +9451,10 @@ mod tests {
             DEFAULT_NATIVE_FINGERPRINT
         );
         assert_eq!(
-            instrumentation_fingerprint(DEFAULT_NATIVE_FINGERPRINT, GuestInstrumentation::YieldPoints),
+            instrumentation_fingerprint(
+                DEFAULT_NATIVE_FINGERPRINT,
+                GuestInstrumentation::YieldPoints
+            ),
             format!("{DEFAULT_NATIVE_FINGERPRINT}{PATINA_YIELD_FINGERPRINT_SUFFIX}")
         );
         assert_eq!(

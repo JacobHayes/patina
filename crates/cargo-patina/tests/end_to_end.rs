@@ -1350,7 +1350,9 @@ fn a_split_shim_guest_toolchain_is_refused_before_the_link() {
         "9.9.9-patina-split-stub",
         "shim toolchain:",
         "guest toolchain:",
+        "When `rustc` is a rustup proxy",
         "RUSTUP_TOOLCHAIN",
+        "absolute, matching RUSTC and CARGO binaries from one toolchain",
         "cargo patina",
     ] {
         assert!(
@@ -1515,6 +1517,263 @@ fn rustup_toolchain_list() -> Option<String> {
         .status
         .success()
         .then(|| String::from_utf8_lossy(&listed.stdout).into_owned())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn active_toolchain_binary(name: &str) -> PathBuf {
+    let sysroot = Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .output()
+        .unwrap_or_else(|error| panic!("failed to query rustc sysroot: {error}"));
+    assert!(
+        sysroot.status.success(),
+        "rustc --print sysroot failed:\n{}",
+        String::from_utf8_lossy(&sysroot.stderr)
+    );
+    let sysroot = String::from_utf8_lossy(&sysroot.stdout).trim().to_owned();
+    let binary = Path::new(&sysroot).join("bin").join(name);
+    assert!(
+        binary.is_file(),
+        "active toolchain has no {name} binary at {}",
+        binary.display()
+    );
+    binary
+}
+
+// A Mise-like `rustc` proxy ignores RUSTUP_TOOLCHAIN and resolves from its own
+// mechanism instead. The mismatch diagnostic must not present rustup variables as
+// a universal fix; the proxy-agnostic fix is absolute, matching RUSTC and CARGO
+// binaries from one toolchain.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_non_rustup_rustc_proxy_gets_proxy_agnostic_toolchain_guidance() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let real_rustc = active_toolchain_binary("rustc");
+    let real_cargo = active_toolchain_binary("cargo");
+
+    let proxy_dir = directory.path().join("proxy-bin");
+    fs::create_dir_all(&proxy_dir).unwrap();
+    let rustc_proxy = proxy_dir.join("rustc");
+    fs::write(
+        &rustc_proxy,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"-vV\" ] && [ \"$(pwd -P)\" = \"{}\" ]; then\n  \
+             \"{}\" -vV | sed '1s/.*/rustc 9.9.9-patina-mise-like-proxy \
+             (0000000 2000-01-01)/'\n  exit 0\nfi\nexec \"{}\" \"$@\"\n",
+            fs::canonicalize(workspace).unwrap().display(),
+            real_rustc.display(),
+            real_rustc.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&rustc_proxy, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let package = directory.path().join("mise-like-guest");
+    write_plain_package(
+        &package,
+        "patina-toolchain-mise-like-fixture",
+        "fn main() { println!(\"TOOLCHAIN_MISE_LIKE_FIXTURE_OK\"); }\n",
+    );
+    let refused_output = package.join("refused-build");
+    let aligned_output = package.join("aligned-build");
+    let path = format!(
+        "{}:{}",
+        proxy_dir.display(),
+        env::var_os("PATH").unwrap_or_default().to_string_lossy()
+    );
+
+    let _build_guard = BUILD_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let refused = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+        .current_dir(&package)
+        .args([
+            "build",
+            package.to_str().unwrap(),
+            "--output",
+            refused_output.to_str().unwrap(),
+        ])
+        .env("PATH", &path)
+        .env("RUSTUP_TOOLCHAIN", "1.96.1")
+        .env_remove("RUSTC")
+        .env_remove("CARGO")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(
+        !refused.status.success(),
+        "a Mise-like proxy split built without complaint (exit {})\nstdout:\n{}\nstderr:\n{stderr}",
+        refused.status,
+        String::from_utf8_lossy(&refused.stdout)
+    );
+    assert!(
+        stderr.contains("9.9.9-patina-mise-like-proxy")
+            && stderr.contains("When `rustc` is a rustup proxy")
+            && stderr.contains("absolute, matching RUSTC and CARGO binaries from one toolchain"),
+        "refusal did not give proxy-scoped rustup guidance plus the universal absolute-binary \
+         remedy:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("set RUSTUP_TOOLCHAIN yourself"),
+        "refusal still presents RUSTUP_TOOLCHAIN as a universal direct-invocation fix:\n{stderr}"
+    );
+    assert!(
+        !refused_output.exists(),
+        "the refusal produced a binary at {}; it must refuse BEFORE the link",
+        refused_output.display()
+    );
+
+    // From here on, PATH is hostile: the aligned build must use the absolute
+    // RUSTC/CARGO values below for every compiler probe and Cargo child. If any
+    // later step falls back to PATH, this test fails instead of passing vacuously.
+    fs::write(
+        &rustc_proxy,
+        "#!/bin/sh\necho HOSTILE_PATH_RUSTC_USED \"$@\" >&2\nexit 99\n",
+    )
+    .unwrap();
+    let cargo_proxy = proxy_dir.join("cargo");
+    fs::write(
+        &cargo_proxy,
+        "#!/bin/sh\necho HOSTILE_PATH_CARGO_USED \"$@\" >&2\nexit 99\n",
+    )
+    .unwrap();
+    fs::set_permissions(&cargo_proxy, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let aligned = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+        .current_dir(&package)
+        .args([
+            "build",
+            package.to_str().unwrap(),
+            "--output",
+            aligned_output.to_str().unwrap(),
+        ])
+        .env("PATH", &path)
+        .env("RUSTUP_TOOLCHAIN", "1.96.1")
+        .env("RUSTC", &real_rustc)
+        .env("CARGO", &real_cargo)
+        .output()
+        .unwrap();
+    assert!(
+        aligned.status.success(),
+        "absolute, matching RUSTC/CARGO were refused (exit {})\nstdout:\n{}\nstderr:\n{}",
+        aligned.status,
+        String::from_utf8_lossy(&aligned.stdout),
+        String::from_utf8_lossy(&aligned.stderr)
+    );
+    assert!(
+        aligned_output.is_file(),
+        "the aligned build produced no binary at {}",
+        aligned_output.display()
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_relative_rustc_path_is_anchored_for_the_shim_cargo_child() {
+    let directory = tempdir().unwrap();
+    let package = directory.path().join("relative-rustc-guest");
+    write_plain_package(
+        &package,
+        "patina-toolchain-relative-rustc-fixture",
+        "fn main() { println!(\"RELATIVE_RUSTC_FIXTURE_OK\"); }\n",
+    );
+
+    let real_rustc = active_toolchain_binary("rustc");
+    let real_cargo = active_toolchain_binary("cargo");
+    let tools = package.join("tools");
+    fs::create_dir_all(&tools).unwrap();
+    let relative_rustc = tools.join("rustc");
+    fs::write(
+        &relative_rustc,
+        format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", real_rustc.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&relative_rustc, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output_path = package.join("relative-rustc-build");
+    let _build_guard = BUILD_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let built = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+        .current_dir(&package)
+        .args([
+            "build",
+            package.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+        ])
+        .env("RUSTC", "./tools/rustc")
+        .env("CARGO", &real_cargo)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "relative RUSTC was not anchored before the shim Cargo child changed cwd (exit {})\nstdout:\n{}\nstderr:\n{}",
+        built.status,
+        String::from_utf8_lossy(&built.stdout),
+        String::from_utf8_lossy(&built.stderr)
+    );
+    assert!(
+        output_path.is_file(),
+        "the relative-RUSTC build produced no binary at {}",
+        output_path.display()
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_relative_cargo_path_is_anchored_before_the_shim_build_changes_directory() {
+    let directory = tempdir().unwrap();
+    let package = directory.path().join("relative-cargo-guest");
+    write_plain_package(
+        &package,
+        "patina-toolchain-relative-cargo-fixture",
+        "fn main() { println!(\"RELATIVE_CARGO_FIXTURE_OK\"); }\n",
+    );
+
+    let real_rustc = active_toolchain_binary("rustc");
+    let real_cargo = active_toolchain_binary("cargo");
+    let tools = package.join("tools");
+    fs::create_dir_all(&tools).unwrap();
+    let relative_cargo = tools.join("cargo");
+    fs::write(
+        &relative_cargo,
+        format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", real_cargo.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&relative_cargo, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output_path = package.join("relative-cargo-build");
+    let _build_guard = BUILD_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let built = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+        .current_dir(&package)
+        .args([
+            "build",
+            package.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+        ])
+        .env("RUSTC", &real_rustc)
+        .env("CARGO", "./tools/cargo")
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "relative CARGO was not anchored before the shim build changed cwd (exit {})\nstdout:\n{}\nstderr:\n{}",
+        built.status,
+        String::from_utf8_lossy(&built.stdout),
+        String::from_utf8_lossy(&built.stderr)
+    );
+    assert!(
+        output_path.is_file(),
+        "the relative-CARGO build produced no binary at {}",
+        output_path.display()
+    );
 }
 
 // Source-first `audit` and `run` honor `--package`/`--bin` against a WORKSPACE
