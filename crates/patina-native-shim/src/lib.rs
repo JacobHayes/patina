@@ -63,7 +63,7 @@ use patina_dst_runtime::{
     BuggifyKind, Context, CustomOpMode, MAX_TRACE_BYTES, RuntimeBuilder, RuntimeConfig,
     RuntimeError, SiteOutcome, TraceTransport, VerdictKind,
 };
-use patina_dst_trace::{TraceError, abandoned_trace_marker};
+use patina_dst_trace::{TraceError, abandoned_trace_marker, resource_limit_infra_line};
 pub use thread::{
     patina_cond_broadcast, patina_cond_destroy, patina_cond_init, patina_cond_signal,
     patina_cond_timedwait, patina_cond_wait, patina_futex_wait, patina_futex_wait_timed,
@@ -2836,11 +2836,7 @@ fn abandon_over_budget_trace(error: &TraceError) {
 /// a sweep classifies on, carrying the figures when the budget is a byte one,
 /// and the human sentence that says what it means for the run.
 fn over_budget_diagnostic(error: &TraceError) -> String {
-    let mut lines = String::from("PATINA_INFRA trace=incomplete reason=resource-limit");
-    if let Some((bytes, limit)) = error.resource_limit_bytes() {
-        lines.push_str(&format!(" bytes={bytes} limit={limit}"));
-    }
-    lines.push('\n');
+    let mut lines = resource_limit_infra_line(error);
     lines.push_str(&format!(
         "patina: the recorded trace outgrew its budget and was NOT written ({error}). This \
 run's own verdict stands unchanged — the guest ran to completion and its exit status is its \

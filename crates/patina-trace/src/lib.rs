@@ -95,6 +95,21 @@ pub fn abandoned_trace_marker(reason: &str, detail: &str) -> Vec<u8> {
     bytes
 }
 
+/// The machine-greppable line a supervisor classifies an abandoned trace on,
+/// newline terminated, carrying the figures when the budget is a byte one.
+///
+/// Shared because a trace can be abandoned from two places — the shim's
+/// shutdown path, and a runtime-initiated stop that never reaches shutdown —
+/// and a sweep greps for one token, not two spellings of it.
+pub fn resource_limit_infra_line(error: &TraceError) -> String {
+    let mut line = String::from("PATINA_INFRA trace=incomplete reason=resource-limit");
+    if let Some((bytes, limit)) = error.resource_limit_bytes() {
+        line.push_str(&format!(" bytes={bytes} limit={limit}"));
+    }
+    line.push('\n');
+    line
+}
+
 /// Read an abandoned-trace marker back, or `None` if these bytes are not one.
 pub fn parse_abandoned_trace_marker(bytes: &[u8]) -> Option<AbandonedTrace> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
@@ -995,25 +1010,202 @@ impl TraceBundle {
     }
 }
 
+/// A `Write` sink that counts bytes instead of keeping them, so a value can be
+/// measured in its serialized encoding without ever materializing it.
+struct ByteCounter(u64);
+
+impl Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(buf.len() as u64);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Exactly how many bytes `event` occupies inside a serialized bundle, or
+/// `None` when it does not serialize at all.
+///
+/// A `None` is deliberately NOT a budget event: an event that will not
+/// serialize means a broken recorder, and the loud finalization failure that
+/// diagnoses it must be reached rather than pre-empted by a graceful budget
+/// refusal. The ledger charges nothing for such an event and lets finalization
+/// fail the run (see [`EventLedger::admit`]).
+fn serialized_event_len(event: &TraceEvent) -> Option<u64> {
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, event).ok()?;
+    Some(counter.0)
+}
+
+/// A budget refusal decided in flight, kept as the parts of the
+/// [`TraceError::ResourceLimit`] it becomes: `TraceError` is not `Clone`, and
+/// the refusal has to be reproducible at every finalization entry point.
+#[derive(Clone, Debug)]
+struct Overflow {
+    message: String,
+    bytes: Option<(u64, u64)>,
+}
+
+impl Overflow {
+    fn to_error(&self) -> TraceError {
+        TraceError::ResourceLimit {
+            message: self.message.clone(),
+            bytes: self.bytes,
+        }
+    }
+}
+
+/// What the events a recorder is holding will cost in the serialized bundle,
+/// tallied as they arrive, and the budget they are held against.
+///
+/// A recorder used to learn it had outgrown [`MAX_TRACE_BYTES`] only when it
+/// serialized at finalization — by which time the entire run was already in
+/// memory (gigabytes for a long guest) and the artifact was lost anyway. The
+/// ledger moves that discovery to the event that crosses the budget, so a
+/// doomed recording costs a bounded amount of RAM instead of an unbounded one.
+/// The run itself is untouched: recording is write-only, so a recorder that
+/// goes inert cannot change what the guest does or what verdict it reaches.
+///
+/// An event is charged its EXACT serialized length plus the one separator byte
+/// that will precede it in the `decisions` array, so the running total is a
+/// true count of the events' share of the bundle. It deliberately excludes the
+/// bundle's framing and metadata, which makes the total a strict UNDER-estimate
+/// of the file: a recording that would have fit can therefore never be
+/// abandoned in flight, and a trace under budget is byte-identical to one
+/// recorded without a ledger at all. The exact, authoritative check still
+/// happens at serialization ([`TraceBundle::to_bytes_with_limit`]) — this is a
+/// bound on memory, not a second opinion about the limit.
+///
+/// The decision is a pure function of the recorded event stream: the same run
+/// records the same events in the same order and therefore overflows at exactly
+/// the same event, on every host and on every re-run. Nothing here consults the
+/// clock, the allocator, or how much memory the machine has.
+struct EventLedger {
+    /// Serialized bytes of the events admitted so far, separators included.
+    bytes: u64,
+    /// Events admitted so far, including the one that overflowed.
+    events: u64,
+    max_bytes: u64,
+    max_events: u64,
+    overflow: Option<Overflow>,
+}
+
+impl EventLedger {
+    const fn new(max_bytes: u64) -> Self {
+        Self::with_limits(max_bytes, MAX_TIMELINE_EVENTS as u64)
+    }
+
+    const fn with_limits(max_bytes: u64, max_events: u64) -> Self {
+        Self {
+            bytes: 0,
+            events: 0,
+            max_bytes,
+            max_events,
+            overflow: None,
+        }
+    }
+
+    const fn overflowed(&self) -> bool {
+        self.overflow.is_some()
+    }
+
+    fn overflow_error(&self) -> Option<TraceError> {
+        self.overflow.as_ref().map(Overflow::to_error)
+    }
+
+    /// Charge one more event. `true` if the caller may go on holding it;
+    /// `false` once the budget is spent, which means the caller must drop
+    /// everything it holds and record nothing further — the trace is abandoned.
+    ///
+    /// Both of the bundle's recorded budgets are enforced here, the byte budget
+    /// and [`MAX_TIMELINE_EVENTS`], because either one reached at finalization
+    /// costs the artifact anyway; reaching them in flight at least stops paying
+    /// for it in memory.
+    fn admit(&mut self, event: &TraceEvent, timeline: &str) -> bool {
+        if self.overflowed() {
+            return false;
+        }
+        let separator = u64::from(self.events > 0);
+        self.bytes = self
+            .bytes
+            .saturating_add(separator)
+            .saturating_add(serialized_event_len(event).unwrap_or(0));
+        self.events += 1;
+        if self.events > self.max_events {
+            self.overflow = Some(Overflow {
+                message: format!(
+                    "timeline {timeline} reached {} events while recording; limit is {}; the \
+                     recorder abandoned the trace rather than hold more",
+                    self.events, self.max_events
+                ),
+                bytes: None,
+            });
+            return false;
+        }
+        if self.bytes > self.max_bytes {
+            self.overflow = Some(Overflow {
+                message: format!(
+                    "recorded trace reached {} bytes of events at event {} of timeline \
+                     {timeline}; limit is {}; the recorder abandoned the trace rather than hold \
+                     more; reduce recorded event count or payload volume, or split the run",
+                    self.bytes, self.events, self.max_bytes
+                ),
+                bytes: Some((self.bytes, self.max_bytes)),
+            });
+            return false;
+        }
+        true
+    }
+}
+
 pub struct Recorder {
     metadata: RunMetadata,
     decisions: Vec<TraceEvent>,
+    ledger: EventLedger,
 }
 
 impl Recorder {
     pub fn new(metadata: RunMetadata) -> Self {
+        Self::with_limit(metadata, MAX_TRACE_BYTES)
+    }
+
+    /// A recorder that abandons after `max_bytes` of recorded events instead of
+    /// [`MAX_TRACE_BYTES`], so the in-flight budget is testable without
+    /// recording a quarter of a gigabyte.
+    fn with_limit(metadata: RunMetadata, max_bytes: u64) -> Self {
+        Self::with_limits(metadata, max_bytes, MAX_TIMELINE_EVENTS as u64)
+    }
+
+    fn with_limits(metadata: RunMetadata, max_bytes: u64, max_events: u64) -> Self {
         Self {
             metadata,
             decisions: Vec::new(),
+            ledger: EventLedger::with_limits(max_bytes, max_events),
         }
     }
 
+    /// Record one boundary decision — unless this trace has already been
+    /// abandoned for outgrowing its budget, after which the recorder is inert
+    /// and holds nothing. See [`EventLedger`] for why abandoning early is safe.
     pub fn observe(&mut self, operation: Operation, outcome: Outcome) {
-        self.decisions.push(TraceEvent {
+        if self.ledger.overflowed() {
+            return;
+        }
+        let event = TraceEvent {
             sequence: self.decisions.len() as u64,
             operation,
             outcome,
-        });
+        };
+        if self.ledger.admit(&event, MAIN_TIMELINE) {
+            self.decisions.push(event);
+        } else {
+            // Release the held events AND their capacity the moment the trace
+            // is abandoned: the whole point is that a doomed recording stops
+            // costing memory here rather than at finalization.
+            self.decisions = Vec::new();
+        }
     }
 
     /// Overwrite the recorded buggify configuration at finalization. The run's
@@ -1025,16 +1217,29 @@ impl Recorder {
     }
 
     pub fn finish(self, path: impl AsRef<Path>) -> Result<(), TraceError> {
-        self.finish_with_limit(path, MAX_TRACE_BYTES)
+        let max_bytes = self.ledger.max_bytes;
+        self.finish_with_limit(path, max_bytes)
     }
 
     fn finish_with_limit(self, path: impl AsRef<Path>, max_bytes: u64) -> Result<(), TraceError> {
-        self.into_bundle().write_atomic_with_limit(path, max_bytes)
+        self.into_bundle()?.write_atomic_with_limit(path, max_bytes)
     }
 
-    /// Convert the recorded decisions into a bundle without touching storage.
-    pub fn into_bundle(self) -> TraceBundle {
-        TraceBundle::new(self.metadata, self.decisions)
+    /// Convert the recorded decisions into a bundle without touching storage,
+    /// or refuse with the budget error when the trace was abandoned in flight.
+    ///
+    /// The refusal is the SAME [`TraceError::ResourceLimit`] the serialization
+    /// check would have raised, so every consumer of the graceful budget path —
+    /// the shim's shutdown downgrade, the abandoned-trace marker, the
+    /// `PATINA_INFRA` line — behaves exactly as it did when the overflow was
+    /// only discovered at finalization. An abandoned recorder must never yield
+    /// a bundle: it holds no events, and a structurally valid trace claiming
+    /// zero decisions would replay as a lie.
+    pub fn into_bundle(self) -> Result<TraceBundle, TraceError> {
+        match self.ledger.overflow_error() {
+            Some(error) => Err(error),
+            None => Ok(TraceBundle::new(self.metadata, self.decisions)),
+        }
     }
 
     /// A bundle of the decisions recorded SO FAR, leaving the recorder usable.
@@ -1042,8 +1247,15 @@ impl Recorder {
     /// budget exhausted, frozen-clock churn) and the consuming
     /// [`Recorder::into_bundle`] at finalization is never reached — a truncated
     /// but structurally valid trace beats the empty file the abort would leave.
-    pub fn to_bundle(&self) -> TraceBundle {
-        TraceBundle::new(self.metadata.clone(), self.decisions.clone())
+    /// An abandoned trace refuses here too, for the reason above.
+    pub fn to_bundle(&self) -> Result<TraceBundle, TraceError> {
+        match self.ledger.overflow_error() {
+            Some(error) => Err(error),
+            None => Ok(TraceBundle::new(
+                self.metadata.clone(),
+                self.decisions.clone(),
+            )),
+        }
     }
 }
 
@@ -1225,6 +1437,12 @@ pub struct BranchSession {
     from_sequence: u64,
     prefix: Replayer,
     suffix: Vec<TraceEvent>,
+    /// Bounds the branch's OWN suffix the way [`Recorder`]'s ledger bounds a
+    /// recording. The inherited parent bundle is already bounded by the load-
+    /// time byte limit, and budgeting the suffix alone keeps the in-flight
+    /// total a strict under-estimate of the written file, so a branch that
+    /// would have fit is never abandoned.
+    ledger: EventLedger,
 }
 
 impl BranchSession {
@@ -1275,6 +1493,7 @@ impl BranchSession {
             from_sequence,
             prefix,
             suffix: Vec::new(),
+            ledger: EventLedger::new(MAX_TRACE_BYTES),
         })
     }
 
@@ -1336,15 +1555,28 @@ impl BranchSession {
     }
 
     pub fn observe(&mut self, operation: Operation, outcome: Outcome) {
-        self.suffix.push(TraceEvent {
+        if self.ledger.overflowed() {
+            return;
+        }
+        let event = TraceEvent {
             sequence: self.from_sequence + self.suffix.len() as u64,
             operation,
             outcome,
-        });
+        };
+        if self.ledger.admit(&event, &self.branch_id) {
+            self.suffix.push(event);
+        } else {
+            self.suffix = Vec::new();
+        }
     }
 
     pub fn finish(self) -> Result<(), TraceError> {
+        // Prefix reconciliation first: a divergence from the parent trace is a
+        // real finding and stays loud, ahead of the graceful budget refusal.
         self.prefix.finish()?;
+        if let Some(error) = self.ledger.overflow_error() {
+            return Err(error);
+        }
         let mut bundle = self.bundle;
         bundle.timelines.push(Timeline {
             id: self.branch_id,
@@ -1704,7 +1936,7 @@ mod tests {
         let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint"));
         recorder.observe(operation(), Outcome::U64(10));
         recorder.observe(Operation::FsDup { fd: Fd(3) }, Outcome::Handle(Fd(4)));
-        let bundle = recorder.into_bundle();
+        let bundle = recorder.into_bundle().unwrap();
         let bytes = bundle.to_bytes().unwrap();
         bundle.write_atomic(&path).unwrap();
         assert_eq!(fs::read(&path).unwrap(), bytes);
@@ -2301,6 +2533,161 @@ mod tests {
 
         let broken = TraceError::Invalid("something is wrong".into());
         assert!(!broken.is_resource_limit());
+    }
+
+    /// The recorder-memory fix. A recording that outgrows its byte budget must
+    /// stop HOLDING events at the event that crosses it, rather than discover
+    /// the overflow at finalization with the whole run resident — the shape
+    /// that cost ~1.9 GB of RSS per long generation and lost the trace anyway.
+    ///
+    /// Three things are pinned: the memory really is bounded (the held events
+    /// never exceed the budget by more than the single event that crossed it,
+    /// and are released outright at the crossing); the crossing is a pure
+    /// function of the event stream, so a run that abandons abandons at the
+    /// same event every time; and the refusal is still the SAME graceful budget
+    /// error, carrying its figures and writing no file, so the shim's shutdown
+    /// downgrade keeps the guest's own verdict exactly as before.
+    #[test]
+    fn an_over_budget_recording_stops_holding_events_and_still_refuses() {
+        let limit = 64 * 1024;
+        let payload = vec![b'p'; 512];
+        let widest = serialized_event_len(&TraceEvent {
+            sequence: u64::MAX,
+            operation: operation(),
+            outcome: Outcome::Bytes(payload.clone()),
+        })
+        .unwrap()
+            + 1;
+
+        let record = || {
+            let mut recorder = Recorder::with_limit(RunMetadata::new(7, "fingerprint"), limit);
+            let mut crossed_at = None;
+            for index in 0..4_096u64 {
+                recorder.observe(operation(), Outcome::Bytes(payload.clone()));
+                assert!(
+                    recorder.ledger.bytes <= limit + widest,
+                    "held events must never exceed the budget by more than the event that \
+                     crossed it; {} bytes after event {index}",
+                    recorder.ledger.bytes
+                );
+                if recorder.ledger.overflowed() && crossed_at.is_none() {
+                    crossed_at = Some(index);
+                }
+                if crossed_at.is_some() {
+                    assert!(
+                        recorder.decisions.is_empty() && recorder.decisions.capacity() == 0,
+                        "an abandoned recorder must hold nothing, and keep holding nothing"
+                    );
+                }
+            }
+            (crossed_at.expect("the budget must be crossed"), recorder)
+        };
+
+        let (crossing, recorder) = record();
+        let (crossing_again, _) = record();
+        assert_eq!(
+            crossing, crossing_again,
+            "the abandon point must be a function of the recorded events alone"
+        );
+        assert!(
+            crossing > 0 && crossing < 4_096,
+            "the crossing must land inside the run; got {crossing}"
+        );
+
+        let held = recorder.ledger.bytes;
+        assert!(held > limit && held <= limit + widest);
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("abandoned.patina");
+        let error = recorder.finish(&path).unwrap_err();
+        assert!(
+            error.is_resource_limit(),
+            "the shutdown downgrade keys off this predicate; got {error}"
+        );
+        assert_eq!(error.resource_limit_bytes(), Some((held, limit)));
+        assert!(!path.exists(), "an abandoned trace must write no file");
+        assert_eq!(
+            fs::read_dir(directory.path()).unwrap().count(),
+            0,
+            "an abandoned trace must not leave a temporary file either"
+        );
+        // The refusal is the one the graceful path already knows how to report.
+        assert_eq!(
+            parse_abandoned_trace_marker(&abandoned_trace_marker(
+                "resource-limit",
+                &error.to_string()
+            ))
+            .unwrap()
+            .reason,
+            "resource-limit"
+        );
+        assert!(resource_limit_infra_line(&error).starts_with(&format!(
+            "PATINA_INFRA trace=incomplete reason=resource-limit bytes={held} limit={limit}"
+        )));
+    }
+
+    /// The event-count budget bounds memory the same way, for a run whose
+    /// events are too small to reach the byte budget first.
+    #[test]
+    fn an_over_long_recording_is_abandoned_at_the_event_budget() {
+        let mut recorder =
+            Recorder::with_limits(RunMetadata::new(7, "fingerprint"), MAX_TRACE_BYTES, 8);
+        for index in 0..64u64 {
+            recorder.observe(operation(), Outcome::U64(index));
+            assert!(recorder.decisions.len() <= 8);
+        }
+        assert!(recorder.decisions.is_empty());
+        let error = recorder.into_bundle().unwrap_err();
+        assert!(error.is_resource_limit(), "unexpected error: {error}");
+        assert_eq!(
+            error.resource_limit_bytes(),
+            None,
+            "an event-count budget has no byte figures to report"
+        );
+        assert!(
+            error.to_string().contains("reached 9 events"),
+            "the refusal must name the count that crossed the budget; got {error}"
+        );
+    }
+
+    /// The other half of the bargain: a recording that FITS its budget is
+    /// byte-identical to the bundle built straight from its events, and the
+    /// ledger that watched it is an exact tally of those events and a strict
+    /// under-estimate of the whole file — which is why it can never abandon a
+    /// recording that would have fit.
+    #[test]
+    fn an_under_budget_recording_is_byte_identical_and_exactly_tallied() {
+        let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint"));
+        let mut events = Vec::new();
+        for index in 0..64u64 {
+            let outcome = Outcome::Bytes(vec![index as u8; index as usize]);
+            recorder.observe(operation(), outcome.clone());
+            events.push(TraceEvent {
+                sequence: index,
+                operation: operation(),
+                outcome,
+            });
+        }
+
+        let tallied = recorder.ledger.bytes;
+        let expected: u64 = events
+            .iter()
+            .map(|event| serde_json::to_vec(event).unwrap().len() as u64)
+            .sum::<u64>()
+            + events.len() as u64
+            - 1;
+        assert_eq!(tallied, expected, "the ledger must tally events exactly");
+
+        let bundle = TraceBundle::new(RunMetadata::new(7, "fingerprint"), events);
+        let expected_bytes = bundle.to_bytes().unwrap();
+        assert!(
+            tallied < expected_bytes.len() as u64,
+            "the tally must stay under the size of the file it bounds"
+        );
+        assert_eq!(
+            recorder.into_bundle().unwrap().to_bytes().unwrap(),
+            expected_bytes,
+            "a trace under budget must be byte-identical to one recorded without a ledger"
+        );
     }
 
     /// An abandoned trace must never be replayable as if it were a recording.

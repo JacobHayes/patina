@@ -39,7 +39,7 @@ use patina_dst_target::{
     render_inert_weak_imports, render_native_escapes_grouped, render_tsc_managed_note,
     shim_control_plane_symbols,
 };
-use patina_dst_trace::{TraceBundle, parse_abandoned_trace_marker};
+use patina_dst_trace::{TraceBundle, TraceError, parse_abandoned_trace_marker};
 use patina_dst_wasi_host::{
     DEFAULT_WASM_FUEL, MountPolicy, Preview1Host, ResourceLimits, execute_preview1_with_fuel,
 };
@@ -6462,6 +6462,14 @@ This run's determinism is NOT guaranteed and any \"deterministic\" claim on it i
     Ok(downgraded)
 }
 
+/// The one sentence a run prints when its trace CHANNEL failed — the scratch
+/// file could not be opened, read, or renamed. It is a fixed prefix on purpose:
+/// the envelope's refusal table keys on it, so every generation that loses its
+/// trace channel carries the same class and collapses onto ONE signature,
+/// instead of one novel finding per scratch path. The `guest_exit_code=` that
+/// follows is the status the guest itself reached, which stays the run's answer.
+pub(crate) const TRACE_CHANNEL_UNAVAILABLE: &str = "patina: recorded trace channel unavailable";
+
 /// Why a recorded trace never reached its final path.
 enum TraceCommitFailure {
     /// The recorder deliberately abandoned the trace and left an
@@ -6471,16 +6479,24 @@ enum TraceCommitFailure {
     /// and stands on its own — only the replay artifact is lost. The run is
     /// reported, not failed.
     Abandoned(String),
-    /// Anything else: an empty, truncated, or corrupt trace, or a rename that
-    /// failed. Nothing said why the bundle is missing, so the run cannot be
-    /// trusted and fails.
+    /// The trace CHANNEL failed: the recorder's own scratch file could not be
+    /// opened, read, or renamed — it vanished under the run, its directory did,
+    /// or the filesystem refused. That is an operational condition of the host,
+    /// exactly like a wall-clock timeout or an OOM kill, and it says nothing
+    /// about the system under test: the guest ran, and its verdict is whatever
+    /// it reached. Kept apart from [`Self::Broken`] because a truncated bundle
+    /// left behind by a guest that DIED mid-record is a consequence of the run
+    /// and must keep failing it.
+    Unavailable(String),
+    /// Anything else: an empty, truncated, or corrupt trace. Nothing said why
+    /// the bundle is missing, so the run cannot be trusted and fails.
     Broken(String),
 }
 
 impl TraceCommitFailure {
     fn reason(&self) -> &str {
         match self {
-            Self::Abandoned(reason) | Self::Broken(reason) => reason,
+            Self::Abandoned(reason) | Self::Broken(reason) | Self::Unavailable(reason) => reason,
         }
     }
 }
@@ -6555,12 +6571,18 @@ impl NativeTraceSink {
             let _ = fs::remove_file(&self.temp_path);
             return Err(match abandoned {
                 Some(_) => TraceCommitFailure::Abandoned(error.to_string()),
+                // The scratch file could not be OPENED at all — it is gone, or
+                // its directory is. The guest still ran, so this is the channel
+                // failing under the run rather than the run failing.
+                None if matches!(error, TraceError::Io { .. }) => {
+                    TraceCommitFailure::Unavailable(error.to_string())
+                }
                 None => TraceCommitFailure::Broken(error.to_string()),
             });
         }
         fs::rename(&self.temp_path, &self.final_path).map_err(|error| {
             let _ = fs::remove_file(&self.temp_path);
-            TraceCommitFailure::Broken(format!(
+            TraceCommitFailure::Unavailable(format!(
                 "failed to atomically rename temporary trace {} to {}: {error}",
                 self.temp_path.display(),
                 self.final_path.display()
@@ -6586,6 +6608,16 @@ fn native_trace_temp_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// Remove the scratch files a previous, dead recorder left beside `trace_path`.
+///
+/// Scratch names carry the recorder's pid (`native_trace_temp_path`), and a file
+/// whose pid is STILL ALIVE belongs to a recorder that is using it right now:
+/// sweeping it deletes another run's trace out from under it, which surfaces
+/// much later as an unexplained missing artifact at commit. That is exactly what
+/// two campaign processes sharing one out-dir do to each other, and the sweep is
+/// the mechanism — so the sweep declines to touch a live writer's file and
+/// leaves the concurrency to be caught (and reported) by the campaign lock.
+/// A stale file whose pid has been recycled is simply left for the next sweep.
 fn remove_native_trace_scratch(trace_path: &Path) {
     let Some(parent) = trace_path.parent() else {
         return;
@@ -6601,9 +6633,43 @@ fn remove_native_trace_scratch(trace_path: &Path) {
     };
     let prefix = prefix.to_string_lossy().into_owned();
     for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with(&prefix) {
-            let _ = fs::remove_file(entry.path());
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(&prefix) {
+            continue;
         }
+        if scratch_owner_is_alive(&name[prefix.len()..]) {
+            continue;
+        }
+        let _ = fs::remove_file(entry.path());
+    }
+}
+
+/// Whether the process that owns a scratch file is still running, read off the
+/// `<pid>.<counter>` tail of its name. Unparseable tails are treated as dead, so
+/// a name shape from an older patina still gets cleaned up.
+fn scratch_owner_is_alive(tail: &str) -> bool {
+    let Some(pid) = tail
+        .split('.')
+        .next()
+        .and_then(|value| value.parse::<i32>().ok())
+    else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        if pid == std::process::id() as i32 {
+            return true;
+        }
+        // SAFETY: signal 0 performs the permission and existence checks without
+        // delivering anything, which is precisely the liveness question here.
+        unsafe { kill(pid, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
     }
 }
 
@@ -6780,6 +6846,11 @@ fn spawn_native_child(
 }
 
 #[cfg(unix)]
+unsafe extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
+#[cfg(unix)]
 fn native_child_status(status: ExitStatus) -> (i32, Option<i32>) {
     use std::os::unix::process::ExitStatusExt;
 
@@ -6797,6 +6868,7 @@ fn append_native_infra_marker(
     captured: &mut output::Captured,
     signal: Option<i32>,
     trace_error: Option<(&Path, &str)>,
+    channel_unavailable: Option<i32>,
 ) {
     if signal.is_none() && trace_error.is_none() {
         return;
@@ -6813,6 +6885,17 @@ fn append_native_infra_marker(
         ));
     }
     line.push('\n');
+    // A channel failure is patina's own operational condition, not a finding, so
+    // it says so in the attributable form the envelope reads: one stable
+    // sentence (the refusal class keys on it, so every such generation dedups
+    // onto ONE signature instead of one per scratch path) carrying the status
+    // the GUEST itself reached, which stays the run's answer when it has one.
+    if let Some(guest_exit_code) = channel_unavailable {
+        line.push_str(&format!(
+            "{TRACE_CHANNEL_UNAVAILABLE} guest_exit_code={guest_exit_code} — the trace could \
+not be written, so this generation has no replay artifact; the guest's own verdict stands.\n"
+        ));
+    }
     if captured.captured {
         captured.stderr.extend_from_slice(line.as_bytes());
     } else {
@@ -7245,6 +7328,7 @@ Killed with a nonzero exit."
     drop(replay_trace_file);
     let mut committed_record_trace = None;
     let mut trace_finalization_error: Option<(PathBuf, String)> = None;
+    let mut channel_unavailable: Option<i32> = None;
     if let Some(sink) = trace_sink {
         match sink.commit() {
             Ok(path) => {
@@ -7269,8 +7353,19 @@ Killed with a nonzero exit."
                 // for a genuine reason). Either way the `PATINA_INFRA
                 // trace=incomplete` marker below says the artifact is missing
                 // and why, so nothing is silent.
-                if matches!(failure, TraceCommitFailure::Broken(_)) && captured.exit_code == 0 {
+                if matches!(
+                    failure,
+                    TraceCommitFailure::Broken(_) | TraceCommitFailure::Unavailable(_)
+                ) && captured.exit_code == 0
+                {
+                    // The guest's own status is preserved for the classifier on
+                    // the `guest_exit_code=` of the channel line below; this
+                    // status is patina's, and says the artifact is missing.
+                    channel_unavailable =
+                        matches!(failure, TraceCommitFailure::Unavailable(_)).then_some(0);
                     captured.exit_code = 2;
+                } else if matches!(failure, TraceCommitFailure::Unavailable(_)) {
+                    channel_unavailable = Some(captured.exit_code);
                 }
                 trace_finalization_error = Some((path, failure.reason().to_string()));
             }
@@ -7283,6 +7378,7 @@ Killed with a nonzero exit."
         trace_finalization_error
             .as_ref()
             .map(|(path, reason)| (path.as_path(), reason.as_str())),
+        channel_unavailable,
     );
     drop(image_file);
     drop(coverage_file);
@@ -7849,6 +7945,68 @@ impl std::error::Error for CliError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A trace whose scratch file is GONE at commit — it was swept out from
+    /// under the run, or its directory was — is the artifact channel failing,
+    /// not the run failing. It is reported as its own kind so the campaign can
+    /// file it as INFRA under one shared shape, while a trace that is present
+    /// but empty (what a guest that died mid-record leaves) stays Broken and
+    /// keeps failing the run.
+    #[cfg(unix)]
+    #[test]
+    fn a_vanished_scratch_file_is_a_channel_failure_not_a_broken_trace() {
+        let directory = tempfile::tempdir().unwrap();
+
+        let final_path = directory.path().join("vanished.patina");
+        let sink = NativeTraceSink::create(&final_path).unwrap();
+        fs::remove_file(&sink.temp_path).unwrap();
+        let failure = sink.commit().unwrap_err();
+        assert!(
+            matches!(failure, TraceCommitFailure::Unavailable(_)),
+            "a vanished scratch file is a channel failure; got {}",
+            failure.reason()
+        );
+
+        // RED twin: the file is there and simply holds no bundle. That is the
+        // run's own doing and must stay a failure.
+        let final_path = directory.path().join("empty.patina");
+        let sink = NativeTraceSink::create(&final_path).unwrap();
+        assert!(matches!(
+            sink.commit().unwrap_err(),
+            TraceCommitFailure::Broken(_)
+        ));
+    }
+
+    /// The scratch sweep clears what a DEAD recorder left behind and nothing
+    /// else. A file whose owner is still running belongs to a live recorder —
+    /// two campaigns sharing an out-dir is how that happens — and deleting it
+    /// destroys that run's trace, surfacing much later as an unexplained
+    /// missing artifact.
+    #[cfg(unix)]
+    #[test]
+    fn the_scratch_sweep_spares_a_live_recorders_file() {
+        use std::io::Write;
+
+        let directory = tempfile::tempdir().unwrap();
+        let trace_path = directory.path().join("generation-7.patina");
+
+        let live = directory
+            .path()
+            .join(format!(".generation-7.patina.tmp.{}.0", std::process::id()));
+        let stale = directory.path().join(".generation-7.patina.tmp.1.0");
+        let other_generation = directory.path().join(".generation-70.patina.tmp.1.0");
+        for path in [&live, &stale, &other_generation] {
+            fs::File::create(path).unwrap().write_all(b"x").unwrap();
+        }
+
+        remove_native_trace_scratch(&trace_path);
+        assert!(live.exists(), "a live recorder's scratch must be spared");
+        assert!(!stale.exists(), "a dead recorder's scratch must be swept");
+        assert!(
+            other_generation.exists(),
+            "another generation's scratch is not this one's to sweep"
+        );
+    }
 
     /// The supervisor's half of the recorder-budget fix. A trace that never
     /// landed fails the run — EXCEPT when the recorder left an abandoned-trace

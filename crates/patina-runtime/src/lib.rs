@@ -97,7 +97,10 @@ use patina_dst_rng_seeded::{SeededEntropy, SplitMix64, domain_seed, fault_domain
 use patina_dst_sched_det::{DetScheduler, PctConfig, SchedulePolicy, StarvationConfig};
 use patina_dst_time_virtual::VirtualClock;
 pub use patina_dst_trace::MAX_TRACE_BYTES;
-use patina_dst_trace::{BranchSession, Recorder, Replayer, RunMetadata, TraceBundle, TraceError};
+use patina_dst_trace::{
+    BranchSession, Recorder, Replayer, RunMetadata, TraceBundle, TraceError,
+    abandoned_trace_marker, resource_limit_infra_line,
+};
 use patina_dst_wrapper_fault::FaultFs;
 
 mod fault_knob;
@@ -6229,7 +6232,7 @@ a recorded result or a replay fetch",
                 }
                 RecordSink::Transport(mut transport) => {
                     recorder.set_buggify(buggify_record);
-                    let bytes = recorder.into_bundle().to_bytes()?;
+                    let bytes = recorder.into_bundle()?.to_bytes()?;
                     transport
                         .write_bundle(&bytes)
                         .map_err(|source| RuntimeError::Io {
@@ -6501,7 +6504,32 @@ publish. Give the loop a wait the runtime can see (sleep/yield/park), or bound t
             unreachable!("execution was checked to be Record");
         };
         recorder.set_buggify(buggify_record);
-        let bundle = recorder.to_bundle();
+        let bundle = match recorder.to_bundle() {
+            Ok(bundle) => bundle,
+            // The recorder already abandoned this trace for outgrowing its
+            // budget, so it holds nothing to flush. Report it in the same
+            // greppable form `patina_shutdown` uses — this stop aborts and
+            // never reaches that reporting — and leave the supervisor the
+            // marker on the transport, so an abandoned trace still reads as
+            // abandoned rather than as the empty file a mid-run death leaves.
+            Err(error) if error.is_resource_limit() => {
+                eprint!("{}", resource_limit_infra_line(&error));
+                if let RecordSink::Transport(transport) = sink {
+                    let _ = transport.write_bundle(&abandoned_trace_marker(
+                        "resource-limit",
+                        &error.to_string(),
+                    ));
+                }
+                return;
+            }
+            Err(error) => {
+                eprintln!(
+                    "PATINA_INFRA truncated_trace write_failed reason={:?}",
+                    format!("snapshot truncated trace: {error}")
+                );
+                return;
+            }
+        };
         let result = match sink {
             RecordSink::Path { path, .. } => bundle
                 .write_atomic(&*path)

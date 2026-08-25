@@ -541,6 +541,14 @@ const REFUSAL_CLASSES: &[(&str, &str)] = &[
     // does not even reproduce it (the abort needs the recording that the
     // reproduce command omits).
     ("patina: runtime shutdown failed", "shutdown_failure"),
+    // The trace CHANNEL failed under a run that otherwise completed: the
+    // recorder's scratch file could not be opened, read, or renamed. Unlike the
+    // truncated trace a dying guest leaves — which is a consequence of the run
+    // and is deliberately NOT in this table — nothing about the guest went
+    // wrong here, so the supervisor states it as its own refusal, with the
+    // guest's status attached. That is what lets a whole campaign's worth of
+    // them collapse onto one INFRA signature instead of one finding each.
+    (crate::TRACE_CHANNEL_UNAVAILABLE, "trace_unavailable"),
 ];
 
 /// Patina's own refusal for this run, or `None` when patina did not fail closed.
@@ -1343,6 +1351,45 @@ mod tests {
                 .expect("a duplicate buggify label is a refusal")
                 .class,
             "buggify_duplicate_label"
+        );
+    }
+
+    /// A failed trace CHANNEL is patina's own operational condition and says so
+    /// in one fixed sentence, carrying the status the GUEST reached. The fixed
+    /// prefix is what makes every such run share a class — and therefore a
+    /// signature — instead of one novel finding per scratch path.
+    #[test]
+    fn a_failed_trace_channel_is_patinas_own_refusal_and_names_the_guests_status() {
+        let line = format!(
+            "{} guest_exit_code=0 — the trace could not be written",
+            crate::TRACE_CHANNEL_UNAVAILABLE
+        );
+        let refused = refusal(2, "", &line).expect("a failed trace channel is a refusal");
+        assert_eq!(refused.class, "trace_unavailable");
+        assert_eq!(refused.guest_exit_code, Some(0));
+
+        let failing_guest = refusal(
+            101,
+            "",
+            &format!(
+                "{} guest_exit_code=101 — the trace could not be written",
+                crate::TRACE_CHANNEL_UNAVAILABLE
+            ),
+        )
+        .expect("a failed trace channel is a refusal");
+        assert_eq!(failing_guest.guest_exit_code, Some(101));
+
+        // RED twin: the truncated trace a DYING guest leaves is a consequence of
+        // the run, not a refusal — attributing it to patina would make every
+        // guest abort mid-record look like patina's fault.
+        assert!(
+            refusal(
+                134,
+                "",
+                "PATINA_INFRA native_run signal=6 trace=incomplete trace_path=\"t.patina\"                  reason=\"empty trace file; record finalization did not complete\""
+            )
+            .is_none(),
+            "a trace left incomplete by a dying guest must not be attributed to patina"
         );
     }
 

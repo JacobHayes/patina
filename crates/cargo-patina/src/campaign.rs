@@ -1137,6 +1137,10 @@ const SHUTDOWN_FAILURE_SHAPE: &str = "refusal class=shutdown_failure";
 
 /// The refusal class patina's own end-of-run recorder failure carries.
 const SHUTDOWN_FAILURE_CLASS: &str = "shutdown_failure";
+/// The refusal class for a run whose trace CHANNEL failed — patina could not
+/// open, read, or rename the recorder's own scratch file. An operational
+/// condition of the host, in the same family as a timeout or an OOM kill.
+const TRACE_UNAVAILABLE_CLASS: &str = "trace_unavailable";
 
 /// One verdict the generation reported through the verdict ABI, reduced to what
 /// classification, signatures and `minimize`'s auto-target need. Lifted from the
@@ -1458,7 +1462,21 @@ fn built_in_class(facts: &RunFacts) -> CampaignClass {
         // inside patina, whose printed reproduce command could not reproduce it
         // (the abort needs the `--record` the reproduce command omitted). It is
         // INFRA for the same reason a timeout is: the harness, not a result.
-        if class == SHUTDOWN_FAILURE_CLASS {
+        //
+        // A failed trace CHANNEL (the scratch file vanished, its directory did,
+        // the filesystem refused) is the same bargain reached a different way:
+        // the guest ran, its verdict is whatever it reached, and only the
+        // artifact is lost. One difference — a guest that failed here may well
+        // have ABORTED, since nothing about a channel failure skips the guest's
+        // own death — so rather than naming a class outright, a guest that
+        // failed falls THROUGH to the rules below, which read the exit status
+        // and signal that are still its own.
+        if class == TRACE_UNAVAILABLE_CLASS {
+            match facts.refusal_guest_exit_code {
+                None | Some(0) => return CampaignClass::Infra,
+                Some(_) => {}
+            }
+        } else if class == SHUTDOWN_FAILURE_CLASS {
             // ...but ONLY when the guest itself came through clean. The trace
             // budget is spent by LONG runs, which are precisely the runs most
             // likely to have found something; a generation that both failed for
@@ -1481,8 +1499,9 @@ fn built_in_class(facts: &RunFacts) -> CampaignClass {
                 // patina's abort and would otherwise misfile it as GUEST_ABORT.
                 Some(_) => return CampaignClass::Unclassified,
             }
+        } else {
+            return CampaignClass::FailClosedAbort;
         }
-        return CampaignClass::FailClosedAbort;
     }
     // 9. An abort patina did NOT attribute to itself is the guest's own doing.
     //    This is §4.4's inversion: before the envelope carried `refusal`, every
@@ -1552,7 +1571,10 @@ fn primary_finding(class: CampaignClass, generation: &GenerationFacts) -> String
     // `reproduce` command promise an artifact that is not there. INFRA already
     // names the refusal in its own shape and does not need the suffix.
     if class != CampaignClass::Infra
-        && generation.facts.refusal.as_deref() == Some(SHUTDOWN_FAILURE_CLASS)
+        && matches!(
+            generation.facts.refusal.as_deref(),
+            Some(SHUTDOWN_FAILURE_CLASS | TRACE_UNAVAILABLE_CLASS)
+        )
     {
         return format!("{shape} trace=unusable");
     }
@@ -2723,6 +2745,14 @@ fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
         cli,
         ..
     } = invocation;
+
+    // Resolve the out-dir ONCE, here, before a single path is derived from it.
+    // Every generation child is handed a `--record` path built from this one, and
+    // a RELATIVE out-dir would be re-resolved by each child against its own cwd:
+    // the same directory under two names in the logs, and — if a cwd ever
+    // differs — a scratch file created in one place and looked for in another,
+    // which surfaces as a bewildering ENOENT on an artifact nobody moved.
+    let out_dir = absolute_out_dir(&out_dir)?;
 
     let state_path = out_dir.join("campaign-state.json");
     let store_path = out_dir.join("signatures.json");
@@ -4715,6 +4745,23 @@ fn flush_stdout() {
     let _ = std::io::stdout().flush();
 }
 
+/// The campaign out-dir as an absolute path. Nothing is created or canonicalized
+/// — a fresh campaign's out-dir need not exist yet, and resolving symlinks would
+/// rewrite a path the operator typed — the cwd is simply folded in once, at the
+/// only moment the campaign's cwd is known to be the operator's.
+fn absolute_out_dir(out_dir: &Path) -> Result<PathBuf, CliError> {
+    if out_dir.is_absolute() {
+        return Ok(out_dir.to_path_buf());
+    }
+    let cwd = std::env::current_dir().map_err(|e| {
+        CliError(format!(
+            "failed to resolve campaign out-dir {}: {e}",
+            out_dir.display()
+        ))
+    })?;
+    Ok(cwd.join(out_dir))
+}
+
 #[derive(Debug)]
 struct CampaignLock {
     _file: File,
@@ -5857,6 +5904,86 @@ fn selftest() -> Result<i32, CliError> {
         ),
     );
 
+    // Patina's own trace CHANNEL failing — the recorder's scratch file could not
+    // be opened, read, or renamed — is an operational condition of the host, in
+    // the same family as a timeout or an OOM kill. Before this it landed in
+    // UNCLASSIFIED, and because every such run's message named its own scratch
+    // path, one environmental problem read as dozens of separate novel findings.
+    check(
+        "trace-channel-failure-over-a-clean-guest-is-infra",
+        CampaignClass::Infra,
+        classify(
+            &planted(
+                RunFacts::ok()
+                    .exit(2)
+                    .refusal("trace_unavailable")
+                    .guest_exit(0),
+                "",
+            ),
+            &no_rules,
+        ),
+    );
+    // With no recorded guest status, patina's channel is the only thing known to
+    // have gone wrong: the demotion stands.
+    check(
+        "trace-channel-failure-with-no-guest-status-stays-infra",
+        CampaignClass::Infra,
+        classify(
+            &planted(RunFacts::ok().exit(2).refusal("trace_unavailable"), ""),
+            &no_rules,
+        ),
+    );
+    // RED twin, and the difference from the recorder-budget rule: nothing about
+    // a channel failure interferes with the guest's own death, so a guest that
+    // aborted is still a GUEST_ABORT and one that exited nonzero is still
+    // UNCLASSIFIED — the guest's status falls through to its own rules rather
+    // than being consumed by the refusal.
+    check(
+        "trace-channel-failure-over-an-aborting-guest-is-still-a-guest-abort",
+        CampaignClass::GuestAbort,
+        classify(
+            &planted(
+                RunFacts::ok()
+                    .exit(SIGABRT_EXIT)
+                    .signal(SIGABRT)
+                    .refusal("trace_unavailable")
+                    .guest_exit(SIGABRT_EXIT),
+                "",
+            ),
+            &no_rules,
+        ),
+    );
+    check(
+        "trace-channel-failure-over-a-failing-guest-keeps-the-guests-class",
+        CampaignClass::Unclassified,
+        classify(
+            &planted(
+                RunFacts::ok()
+                    .exit(101)
+                    .refusal("trace_unavailable")
+                    .guest_exit(101),
+                "",
+            ),
+            &no_rules,
+        ),
+    );
+    // A guest verdict still outranks it, as with every other refusal.
+    check(
+        "violation-beats-a-trace-channel-failure",
+        CampaignClass::Violation,
+        classify(
+            &planted(
+                RunFacts::ok()
+                    .exit(2)
+                    .refusal("trace_unavailable")
+                    .guest_exit(0)
+                    .verdict("violation", "integrity-check"),
+                "",
+            ),
+            &no_rules,
+        ),
+    );
+
     // -- host-side death vs guest-side death --------------------------------
     // A SIGKILL is never the guest's doing: it cannot raise it, catch it, or
     // survive it. It is INFRA — the same bucket as a timeout — and NOT a bug
@@ -6365,6 +6492,44 @@ into the deterministic runtime via syscall-user-dispatch.",
         println!(
             "  FAIL host-kill-has-one-stable-shape        -> shape {:?}",
             first_kill.shape
+        );
+        failures += 1;
+    }
+    // The same bargain for a failed trace channel: every generation that loses
+    // its trace channel must collapse onto ONE signature. Each such run's own
+    // message names its own scratch path and pid, so without a shared shape a
+    // single environmental problem reads as one novel finding per generation —
+    // which is exactly what it did on this campaign's B02 (26) and B08 (16).
+    let channel_lost = |tail: &str| {
+        signature(
+            CampaignClass::Infra,
+            &planted(
+                RunFacts::ok()
+                    .exit(2)
+                    .refusal(TRACE_UNAVAILABLE_CLASS)
+                    .guest_exit(0),
+                tail,
+            ),
+        )
+    };
+    let first_loss = channel_lost(
+        "PATINA_INFRA native_run trace=incomplete trace_path=\"a/generation-1.patina\"          reason=\"failed to open trace a/.generation-1.patina.tmp.11.0\"\n",
+    );
+    if first_loss.shape == format!("refusal class={TRACE_UNAVAILABLE_CLASS}")
+        && first_loss.key()
+            == channel_lost(
+                "PATINA_INFRA native_run trace=incomplete trace_path=\"a/generation-77.patina\"                  reason=\"failed to open trace a/.generation-77.patina.tmp.22.0\"\n",
+            )
+            .key()
+    {
+        println!(
+            "  ok   trace-channel-loss-has-one-shape      -> {}",
+            first_loss.key()
+        );
+    } else {
+        println!(
+            "  FAIL trace-channel-loss-has-one-shape      -> shape {:?}",
+            first_loss.shape
         );
         failures += 1;
     }
