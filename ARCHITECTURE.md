@@ -241,6 +241,8 @@ External controls include:
 - liveness oracles (`--liveness-watchdog`, `--converge-within`);
 - simple key/value parameters (`--param`, exposed through `Context::param`).
 
+`--fs-crash-at` currently has a known semantic defect: after the selected operation succeeds, it rolls the storage image back but lets the same guest incarnation continue and observe the original success. That is neither a whole-process power cut nor an ordinary live I/O error, and it can manufacture durability findings when the guest later acknowledges data erased by the silent rollback. Treat it only as an aggressive in-process storage-rollback experiment, not as restart/crash-recovery evidence, until the CLI crash boundary terminates the current incarnation and a separate restart path hands the durable image to a fresh process. Targeted live I/O failure remains the `--fs-error-permille` fault class and does not roll the image back.
+
 Named scenario/profile selection remains a planned experiment-plane convenience.
 
 Driver-specific scenario logic remains Rust code. Parameters let CI vary knobs without requiring Patina to define every possible option:

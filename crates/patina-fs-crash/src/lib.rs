@@ -1,13 +1,13 @@
-//! Deterministic crash/restart semantics for the in-memory filesystem.
+//! Deterministic storage-crash rollback semantics for the in-memory filesystem.
 //!
 //! `CrashFs` keeps a live working image and a durable baseline. Ordinary
 //! effects mutate the live image. Durability is reached incrementally: a file
 //! `sync` stages that file's fsynced content, syncing a directory fd commits the
 //! namespace operations of that directory, and `checkpoint` makes the entire
 //! live image durable. `crash` recomputes the post-crash image from the
-//! durable baseline plus seeded torn-write and lost-entry decisions, then
-//! invalidates every open handle so a modeled process restart begins from a
-//! clean descriptor table.
+//! durable baseline plus seeded torn-write and lost-entry decisions, while
+//! preserving the running process's open handles. This is an in-process storage
+//! rollback model, not a whole-process power cut or restart.
 //!
 //! ## Models
 //!
@@ -697,14 +697,31 @@ impl FsDriver for CrashFs {
     }
 
     fn write(&mut self, fd: Fd, bytes: &[u8]) -> DriverResult<usize> {
-        // Capture the write offset before the cursor advances so the byte-
-        // granularity crash model knows which bytes the final write touched.
-        // Positional writes (`write_at`) reach this method after the driver's
-        // default seek-to-offset, so their target offset is recorded too.
-        let offset = self.live.seek(fd, 0, SeekWhence::Current).ok();
         let written = self.live.write(fd, bytes)?;
-        if let (Some(offset), Some(path)) = (offset, self.open_paths.get(&fd).cloned()) {
-            self.last_write = Some((path, offset as usize, written));
+        // Capture the actual byte range after the filesystem has applied open
+        // mode semantics. In particular, O_APPEND chooses EOF at write time, so
+        // the pre-write cursor can be stale after intervening writes or crash
+        // reconstruction.
+        if let (Ok(end), Some(path)) = (
+            self.live.seek(fd, 0, SeekWhence::Current),
+            self.open_paths.get(&fd).cloned(),
+        ) {
+            if let Some(start) = usize::try_from(end)
+                .ok()
+                .and_then(|end| end.checked_sub(written))
+            {
+                self.last_write = Some((path, start, written));
+            }
+        }
+        Ok(written)
+    }
+
+    fn write_at(&mut self, fd: Fd, offset: u64, bytes: &[u8]) -> DriverResult<usize> {
+        let written = self.live.write_at(fd, offset, bytes)?;
+        if let (Ok(offset), Some(path)) =
+            (usize::try_from(offset), self.open_paths.get(&fd).cloned())
+        {
+            self.last_write = Some((path, offset, written));
         }
         Ok(written)
     }
@@ -1083,6 +1100,13 @@ mod tests {
         }
     }
 
+    fn append_write() -> OpenFlags {
+        OpenFlags {
+            append: true,
+            ..write_only()
+        }
+    }
+
     fn write(fs: &mut CrashFs, path: &str, bytes: &[u8]) -> Fd {
         let fd = fs.open(path, OpenFlags::create_truncate_write()).unwrap();
         fs.write(fd, bytes).unwrap();
@@ -1094,8 +1118,9 @@ mod tests {
         // A page-oriented database writes every page through pwrite (write_at),
         // so a positional write MUST be as crash-losable as a cursor write --
         // otherwise the crash campaign would silently miss its real durability
-        // boundary. write_at rides the default seek/write/seek path, so CrashFs
-        // journals it through the same live-vs-durable model. This is the
+        // boundary. CrashFs overrides write_at so an append-mode descriptor
+        // cannot redirect the explicit offset; the write is still journaled
+        // through the same live-vs-durable model. This is the
         // load-bearing guarantee for the whole positional-I/O rung.
         const OFFSET: u64 = 1024;
 
@@ -1152,6 +1177,13 @@ mod tests {
         assert_eq!(positional, b"positional");
         let cursor_pos = fs.seek(fd, 0, SeekWhence::Current).unwrap();
         assert_eq!(cursor_pos, 0, "read_at disturbed the shared cursor");
+
+        fs.seek(fd, 1, SeekWhence::Start).unwrap();
+        fs.write_at(fd, OFFSET + 32, b"X").unwrap();
+        fs.write(fd, b"Y").unwrap();
+        let after = fs.contents("/db").unwrap();
+        assert_eq!(after[1], b'Y', "write_at moved the shared cursor");
+        assert_eq!(after[OFFSET as usize + 32], b'X');
     }
 
     #[test]
@@ -1171,6 +1203,47 @@ mod tests {
         fs.seek(fd, 0, SeekWhence::Start).unwrap();
         assert_eq!(fs.write(fd, b"stale").unwrap(), 5);
         assert_eq!(fs.contents("/volatile").unwrap(), b"stale");
+    }
+
+    #[test]
+    fn append_handle_survives_crash_and_appends_at_rebuilt_eof() {
+        let initial = MemFs::new().with_file("/log", b"stable").unwrap();
+        let mut fs = CrashFs::new(initial);
+        let fd = fs.open("/log", append_write()).unwrap();
+
+        fs.write(fd, b"-volatile").unwrap();
+        fs.crash().unwrap();
+        assert_eq!(fs.contents("/log").unwrap(), b"stable");
+
+        fs.write(fd, b"-after").unwrap();
+        assert_eq!(fs.contents("/log").unwrap(), b"stable-after");
+    }
+
+    #[test]
+    fn byte_torn_append_uses_actual_eof_region_after_intervening_writes() {
+        let initial = MemFs::new().with_file("/log", b"stable").unwrap();
+        let mut fs = CrashFs::builder()
+            .filesystem(initial)
+            .torn_granularity(TornGranularity::Byte)
+            .torn_write_granularity(4096)
+            .torn_write_probability(1.0)
+            .build()
+            .unwrap();
+        let append = fs.open("/log", append_write()).unwrap();
+
+        let regular = fs.open("/log", write_only()).unwrap();
+        fs.seek(regular, 0, SeekWhence::End).unwrap();
+        fs.write(regular, b"-intervening").unwrap();
+        fs.sync(regular).unwrap();
+        fs.close(regular).unwrap();
+
+        fs.write(append, b"-tail").unwrap();
+        fs.crash().unwrap();
+        let after = fs.contents("/log").unwrap();
+        let full = b"stable-intervening-tail";
+        assert_eq!(after.len(), full.len());
+        assert!(after.starts_with(b"stable-intervening-"));
+        assert_ne!(after, full);
     }
 
     #[test]

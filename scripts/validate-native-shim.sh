@@ -116,8 +116,12 @@ int main(int argc, char **argv) {
         !check(patina_fsync(dir) == 0, "fsync dir") ||
         !check(patina_close(dir) == 0, "close dir") ||
         !check(patina_crash() == 0, "crash") ||
-        !check(patina_close(fd) == -1, "stale descriptor rejection")) return 1;
+        !check(patina_seek(fd, 0, PATINA_SEEK_START) == 0, "seek surviving descriptor") ||
+        !check(patina_read(fd, contents, sizeof contents) == 6, "read surviving descriptor") ||
+        !check(memcmp(contents, "stable", 6) == 0, "surviving descriptor sees checkpoint") ||
+        !check(patina_close(fd) == 0, "pre-crash descriptor survives")) return 1;
 
+    memset(contents, 0, sizeof contents);
     fd = patina_open("/state/value", PATINA_O_READ);
     if (!check(fd >= 0, "reopen") ||
         !check(patina_read(fd, contents, sizeof contents) == 6, "read checkpoint") ||

@@ -20,6 +20,7 @@ struct Description {
     cursor: usize,
     readable: bool,
     writable: bool,
+    append: bool,
     kind: FsEntryKind,
     /// Number of fds referencing this open-file description.
     fds: u32,
@@ -185,6 +186,7 @@ impl MemFs {
         cursor: usize,
         readable: bool,
         writable: bool,
+        append: bool,
         kind: FsEntryKind,
     ) -> DriverResult<Fd> {
         let fd = Fd(self.next_fd);
@@ -205,6 +207,7 @@ impl MemFs {
                 cursor,
                 readable,
                 writable,
+                append,
                 kind,
                 fds: 1,
             },
@@ -320,7 +323,7 @@ impl FsDriver for MemFs {
                     format!("virtual filesystem path is a directory: {path}"),
                 ));
             }
-            return self.allocate_handle(path, 0, true, false, FsEntryKind::Directory);
+            return self.allocate_handle(path, 0, true, false, false, FsEntryKind::Directory);
         }
         if self.symlinks.contains_key(&path) {
             return Err(EffectError::new(
@@ -361,7 +364,14 @@ impl FsDriver for MemFs {
         } else {
             0
         };
-        self.allocate_handle(path, cursor, flags.read, flags.write, FsEntryKind::File)
+        self.allocate_handle(
+            path,
+            cursor,
+            flags.read,
+            flags.write,
+            flags.append,
+            FsEntryKind::File,
+        )
     }
 
     fn read(&mut self, fd: Fd, max_len: usize) -> DriverResult<Vec<u8>> {
@@ -407,7 +417,47 @@ impl FsDriver for MemFs {
             ));
         }
         let path = description.path.clone();
-        let start = description.cursor;
+        let cursor = description.cursor;
+        let append = description.append;
+        let inode = self.file_inode(&path)?;
+        let file = &mut self
+            .inodes
+            .get_mut(&inode)
+            .expect("open handle references a file")
+            .contents;
+        let start = if append { file.len() } else { cursor };
+        let end = start.checked_add(bytes.len()).ok_or_else(|| {
+            EffectError::new(ErrorCode::InvalidInput, "virtual file size overflowed")
+        })?;
+        if file.len() < end {
+            file.resize(end, 0);
+        }
+        file[start..end].copy_from_slice(bytes);
+        self.description_mut(fd)?.cursor = end;
+        Ok(bytes.len())
+    }
+
+    fn write_at(&mut self, fd: Fd, offset: u64, bytes: &[u8]) -> DriverResult<usize> {
+        let description = self.description(fd)?;
+        if !description.writable {
+            return Err(EffectError::new(
+                ErrorCode::NotWritable,
+                format!("virtual file handle {} is not writable", fd.0),
+            ));
+        }
+        if description.kind == FsEntryKind::Directory {
+            return Err(EffectError::new(
+                ErrorCode::IsDirectory,
+                format!("virtual file handle {} references a directory", fd.0),
+            ));
+        }
+        let path = description.path.clone();
+        let start = usize::try_from(offset).map_err(|_| {
+            EffectError::new(
+                ErrorCode::InvalidInput,
+                "virtual write offset exceeds the addressable range",
+            )
+        })?;
         let end = start.checked_add(bytes.len()).ok_or_else(|| {
             EffectError::new(ErrorCode::InvalidInput, "virtual file size overflowed")
         })?;
@@ -421,7 +471,6 @@ impl FsDriver for MemFs {
             file.resize(end, 0);
         }
         file[start..end].copy_from_slice(bytes);
-        self.description_mut(fd)?.cursor = end;
         Ok(bytes.len())
     }
 
@@ -1171,6 +1220,73 @@ mod tests {
         assert_eq!(fs.read(second, 3).unwrap(), b"def");
         fs.seek(second, 1, SeekWhence::Start).unwrap();
         assert_eq!(fs.read(first, 2).unwrap(), b"bc");
+    }
+
+    #[test]
+    fn append_descriptions_use_current_eof_and_write_at_stays_positional() {
+        let mut fs = MemFs::new().with_file("/log", b"head").unwrap();
+        let append = fs
+            .open(
+                "/log",
+                OpenFlags {
+                    read: false,
+                    write: true,
+                    create: false,
+                    truncate: false,
+                    append: true,
+                    exclusive: false,
+                },
+            )
+            .unwrap();
+        let duplicate = fs.dup(append).unwrap();
+
+        let regular = fs
+            .open(
+                "/log",
+                OpenFlags {
+                    read: false,
+                    write: true,
+                    create: false,
+                    truncate: false,
+                    append: false,
+                    exclusive: false,
+                },
+            )
+            .unwrap();
+        fs.seek(regular, 0, SeekWhence::End).unwrap();
+        fs.write(regular, b"-intervening").unwrap();
+        fs.close(regular).unwrap();
+
+        fs.seek(append, 0, SeekWhence::Start).unwrap();
+        fs.write(append, b"-a").unwrap();
+        fs.write(duplicate, b"-d").unwrap();
+        fs.write_at(append, 1, b"EA").unwrap();
+        fs.write(append, b"-tail").unwrap();
+
+        assert_eq!(fs.contents("/log").unwrap(), b"hEAd-intervening-a-d-tail");
+    }
+
+    #[test]
+    fn positional_write_does_not_move_the_shared_cursor() {
+        let mut fs = MemFs::new().with_file("/value", b"abcde").unwrap();
+        let fd = fs
+            .open(
+                "/value",
+                OpenFlags {
+                    read: true,
+                    write: true,
+                    create: false,
+                    truncate: false,
+                    append: false,
+                    exclusive: false,
+                },
+            )
+            .unwrap();
+        fs.seek(fd, 2, SeekWhence::Start).unwrap();
+        fs.write_at(fd, 0, b"X").unwrap();
+        fs.write(fd, b"Y").unwrap();
+
+        assert_eq!(fs.contents("/value").unwrap(), b"XbYde");
     }
 
     #[test]
