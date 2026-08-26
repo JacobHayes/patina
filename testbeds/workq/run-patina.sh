@@ -197,10 +197,11 @@ for spec in write:1 write:5 write:12 write:40 sync:1 sync:4 sync:16 close:1 clos
       echo "      FAIL: fs-crash $spec seed $s unexpected exit=$code"; fail=1; stderr_tail "$err"; continue
     fi
     if violated "$err"; then echo "      FAIL: violation verdict fs-crash $spec seed $s"; fail=1; crash_violations=$((crash_violations+1)); fi
-    if grep -q "PATINA_FS_CRASH_RESTART selector=$spec .*result=restarted" "$err"; then
+    marker_count=$(grep -c "PATINA_FS_CRASH_RESTART selector=$spec .*result=restarted" "$err" || true)
+    if [[ $marker_count -eq 1 ]]; then
       crash_restarts=$((crash_restarts+1))
     else
-      echo "      FAIL: fs-crash $spec seed $s missing structured restart marker"; fail=1; stderr_tail "$err"
+      echo "      FAIL: fs-crash $spec seed $s expected exactly one structured restart marker, saw $marker_count"; fail=1; stderr_tail "$err"
     fi
   done
 done
