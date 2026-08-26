@@ -9,8 +9,11 @@ repository.workspace = true
 
 [dependencies]
 patina-dst-abi.workspace = true
+patina-dst-fs-mem.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
+patina-dst-driver-api.workspace = true
 tempfile.workspace = true

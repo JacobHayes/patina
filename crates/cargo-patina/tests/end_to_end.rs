@@ -13619,7 +13619,7 @@ fn native_run_json_envelope_has_stable_shape() {
     assert_eq!(value["result"], "ok");
     assert_eq!(value["exit_code"], 0);
     assert_eq!(value["seed"], 7);
-    assert_eq!(value["trace"]["format_version"], 4);
+    assert_eq!(value["trace"]["format_version"], 5);
     assert!(value["trace"]["event_count"].as_u64().unwrap() > 0);
     // The guest's PATINA_RESULT line is captured and surfaced as a marker.
     assert!(
@@ -13799,10 +13799,11 @@ fn render_without_a_trace_is_rejected() {
     );
 }
 
-/// Count the events in the main timeline of a recorded trace file.
+/// Count flattened v5 events (operations plus lifecycle markers) in the main timeline.
 fn trace_event_count(trace: &Path) -> usize {
     let value: serde_json::Value = serde_json::from_slice(&fs::read(trace).unwrap()).unwrap();
     value["timelines"][0]["decisions"].as_array().unwrap().len()
+        + value["timelines"][0]["lifecycle"].as_array().unwrap().len()
 }
 
 // ---- patina-dst-harness (shim-backed configure-then-run harness) --------------

@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use patina_dst_abi::Operation;
 #[cfg(test)]
 use patina_dst_abi::Outcome;
-use patina_dst_trace::{TraceBundle, TraceError};
+use patina_dst_trace::{LifecycleEvent, LifecycleEventKind, TraceBundle, TraceError};
 use serde_json::Value;
 
 /// The category a boundary operation falls into for lane coloring and rollups.
@@ -30,7 +30,7 @@ pub enum Category {
 impl Category {
     pub fn of_kind(kind: &str) -> Self {
         op_kind_category(kind).unwrap_or_else(|| match kind {
-            "fs_crash" => Category::Crash,
+            "fs_crash" | "lifecycle_crash" | "lifecycle_restart" => Category::Crash,
             "sleep_until" => Category::Sleep,
             "clock_now" => Category::Clock,
             "entropy_fill" => Category::Entropy,
@@ -154,10 +154,22 @@ impl Notable {
     }
 }
 
+/// Whether a flattened row came from a boundary operation or a v5 lifecycle marker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlatEventSource {
+    Operation,
+    Lifecycle,
+}
+
 /// One strict-loaded event flattened for inspection.
 #[derive(Clone, Debug)]
 pub struct FlatEvent {
+    /// Operation sequence for operation rows; lifecycle rows use their global order
+    /// as a stable display/filter value because they do not consume an operation sequence.
     pub seq: u64,
+    pub order: u64,
+    pub incarnation: Option<u64>,
+    pub source: FlatEventSource,
     pub lane: LaneKey,
     pub category: Category,
     pub kind: String,
@@ -209,7 +221,8 @@ pub fn flatten(
     timeline: &str,
 ) -> Result<FlatTrace, TraceError> {
     let resolved = bundle.resolved_timeline(timeline)?;
-    let total = resolved.len();
+    let lifecycle = bundle.resolved_lifecycle(timeline)?;
+    let total = resolved.len() + lifecycle.len();
     let mut current = LaneKey::Main;
     let mut vtime: Option<u64> = None;
     let mut vt_min: Option<u64> = None;
@@ -220,97 +233,134 @@ pub fn flatten(
     let mut category_counts: BTreeMap<Category, u64> = BTreeMap::new();
     let mut notable = Vec::new();
 
-    for event in &resolved {
-        let op = serde_json::to_value(&event.operation).unwrap_or(Value::Null);
-        let out = serde_json::to_value(&event.outcome).unwrap_or(Value::Null);
-        let kind = op
-            .get("kind")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-        debug_assert_eq!(operation_kind(&event.operation), kind.as_str());
-        let category = Category::of_kind(&kind);
+    enum Row<'a> {
+        Operation(&'a patina_dst_trace::TraceEvent),
+        Lifecycle(&'a LifecycleEvent),
+    }
 
-        // Advance the virtual-time cursor from any absolute reading on this event.
-        if kind == "clock_now" {
-            if let Some(n) = outcome_u64(&out) {
-                vtime = Some(n);
-            }
-        }
-        if let Some(n) = op.get("now_nanos").and_then(Value::as_u64) {
-            vtime = Some(n);
-        }
-        if let Some(n) = vtime {
-            vt_min = Some(vt_min.map_or(n, |m| m.min(n)));
-            vt_max = Some(vt_max.map_or(n, |m| m.max(n)));
-        }
+    let mut rows: Vec<Row<'_>> = resolved.iter().map(Row::Operation).collect();
+    rows.extend(lifecycle.iter().map(Row::Lifecycle));
+    rows.sort_by_key(|row| match row {
+        Row::Operation(event) => (event.order, 0u8),
+        Row::Lifecycle(event) => (event.order, 1u8),
+    });
 
-        // SchedulerNext re-points the current lane; ops before the first decision
-        // (or in a single-threaded run) stay on `main`.
-        if kind == "scheduler_next" {
-            if let Some(id) = out.get("value").and_then(Value::as_u64) {
-                current = LaneKey::Task(id);
-            }
-        }
+    for row in rows {
+        let flat = match row {
+            Row::Operation(event) => {
+                let op = serde_json::to_value(&event.operation).unwrap_or(Value::Null);
+                let out = serde_json::to_value(&event.outcome).unwrap_or(Value::Null);
+                let kind = op
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string();
+                debug_assert_eq!(operation_kind(&event.operation), kind.as_str());
+                let category = Category::of_kind(&kind);
 
-        let lane = match &kind[..] {
-            // Spawn is issued by the current task; keep the row on the spawner.
-            "task_spawn" => current,
-            k if k.starts_with("task_") => op
-                .get("task")
-                .and_then(Value::as_u64)
-                .map(LaneKey::Task)
-                .unwrap_or(current),
-            _ => current,
-        };
+                // Advance the virtual-time cursor from any absolute reading on this event.
+                if kind == "clock_now" {
+                    if let Some(n) = outcome_u64(&out) {
+                        vtime = Some(n);
+                    }
+                }
+                if let Some(n) = op.get("now_nanos").and_then(Value::as_u64) {
+                    vtime = Some(n);
+                }
+                if let Some(n) = vtime {
+                    vt_min = Some(vt_min.map_or(n, |m| m.min(n)));
+                    vt_max = Some(vt_max.map_or(n, |m| m.max(n)));
+                }
 
-        let stat = lanes.entry(lane).or_default();
-        stat.ops += 1;
-        stat.first_seq.get_or_insert(event.sequence);
-        stat.last_seq = event.sequence;
-        if kind == "task_yield" {
-            stat.yields += 1;
-        }
-        if kind == "task_park" || kind == "task_park_timed" {
-            stat.parks += 1;
-        }
-        if kind == "task_spawn" {
-            if let Some(id) = outcome_task(&out) {
-                let child = lanes.entry(LaneKey::Task(id)).or_default();
-                if child.label.is_none() {
-                    child.label = op.get("label").and_then(Value::as_str).map(str::to_string);
+                // SchedulerNext re-points the current lane; ops before the first decision
+                // (or in a single-threaded run) stay on `main`.
+                if kind == "scheduler_next" {
+                    if let Some(id) = out.get("value").and_then(Value::as_u64) {
+                        current = LaneKey::Task(id);
+                    }
+                }
+
+                let lane = match &kind[..] {
+                    // Spawn is issued by the current task; keep the row on the spawner.
+                    "task_spawn" => current,
+                    k if k.starts_with("task_") => op
+                        .get("task")
+                        .and_then(Value::as_u64)
+                        .map(LaneKey::Task)
+                        .unwrap_or(current),
+                    _ => current,
+                };
+
+                let stat = lanes.entry(lane).or_default();
+                stat.ops += 1;
+                stat.first_seq.get_or_insert(event.sequence);
+                stat.last_seq = event.sequence;
+                if kind == "task_yield" {
+                    stat.yields += 1;
+                }
+                if kind == "task_park" || kind == "task_park_timed" {
+                    stat.parks += 1;
+                }
+                if kind == "task_spawn" {
+                    if let Some(id) = outcome_task(&out) {
+                        let child = lanes.entry(LaneKey::Task(id)).or_default();
+                        if child.label.is_none() {
+                            child.label =
+                                op.get("label").and_then(Value::as_str).map(str::to_string);
+                        }
+                    }
+                }
+                if kind == "task_complete" {
+                    if let Some(id) = op.get("task").and_then(Value::as_u64) {
+                        lanes.entry(LaneKey::Task(id)).or_default().completed = true;
+                    }
+                }
+
+                let detail = summarize(&kind, &op, &out);
+                let note = detect_notable(&kind, &op, &out);
+                FlatEvent {
+                    seq: event.sequence,
+                    order: event.order,
+                    incarnation: Some(event.incarnation),
+                    source: FlatEventSource::Operation,
+                    lane,
+                    category,
+                    kind,
+                    detail,
+                    vtime,
+                    notable: note,
+                    operation: op,
+                    outcome: out,
                 }
             }
-        }
-        if kind == "task_complete" {
-            if let Some(id) = op.get("task").and_then(Value::as_u64) {
-                lanes.entry(LaneKey::Task(id)).or_default().completed = true;
+            Row::Lifecycle(marker) => {
+                let (kind, incarnation, detail, note) = lifecycle_summary(marker);
+                let category = Category::of_kind(&kind);
+                FlatEvent {
+                    seq: marker.order,
+                    order: marker.order,
+                    incarnation,
+                    source: FlatEventSource::Lifecycle,
+                    lane: LaneKey::Main,
+                    category,
+                    kind,
+                    detail,
+                    vtime,
+                    notable: note,
+                    operation: Value::Null,
+                    outcome: Value::Null,
+                }
             }
-        }
-        *category_counts.entry(category).or_insert(0) += 1;
+        };
 
-        let stat = kind_counts.entry(kind.clone()).or_default();
+        *category_counts.entry(flat.category).or_insert(0) += 1;
+        let stat = kind_counts.entry(flat.kind.clone()).or_default();
         stat.count += 1;
-        if out.get("kind").and_then(Value::as_str) == Some("error") {
+        if flat.outcome.get("kind").and_then(Value::as_str) == Some("error") {
             stat.errors += 1;
         }
-        stat.bytes_in += bytes_in(&op) as u64;
-        stat.bytes_out += bytes_out(&out) as u64;
-
-        let detail = summarize(&kind, &op, &out);
-        let note = detect_notable(&kind, &op, &out);
-
-        let flat = FlatEvent {
-            seq: event.sequence,
-            lane,
-            category,
-            kind,
-            detail,
-            vtime,
-            notable: note,
-            operation: op,
-            outcome: out,
-        };
+        stat.bytes_in += bytes_in(&flat.operation) as u64;
+        stat.bytes_out += bytes_out(&flat.outcome) as u64;
         if flat.notable.is_some() {
             notable.push(flat.clone());
         }
@@ -326,6 +376,42 @@ pub fn flatten(
         vt_max,
         notable,
     })
+}
+
+fn lifecycle_summary(marker: &LifecycleEvent) -> (String, Option<u64>, String, Option<Notable>) {
+    match &marker.kind {
+        LifecycleEventKind::Start { incarnation } => (
+            "lifecycle_start".to_string(),
+            Some(*incarnation),
+            format!("incarnation={incarnation}"),
+            None,
+        ),
+        LifecycleEventKind::Crash {
+            incarnation,
+            snapshot_digest,
+        } => (
+            "lifecycle_crash".to_string(),
+            Some(*incarnation),
+            format!("incarnation={incarnation} snapshot={snapshot_digest}"),
+            Some(Notable::Crash),
+        ),
+        LifecycleEventKind::Restart {
+            from_incarnation,
+            to_incarnation,
+            snapshot_digest,
+        } => (
+            "lifecycle_restart".to_string(),
+            Some(*to_incarnation),
+            format!("{from_incarnation}->{to_incarnation} snapshot={snapshot_digest}"),
+            Some(Notable::Crash),
+        ),
+        LifecycleEventKind::End { incarnation } => (
+            "lifecycle_end".to_string(),
+            Some(*incarnation),
+            format!("incarnation={incarnation}"),
+            None,
+        ),
+    }
 }
 
 fn outcome_u64(out: &Value) -> Option<u64> {
@@ -984,11 +1070,7 @@ mod tests {
         let decisions = events
             .into_iter()
             .enumerate()
-            .map(|(i, (operation, outcome))| TraceEvent {
-                sequence: i as u64,
-                operation,
-                outcome,
-            })
+            .map(|(i, (operation, outcome))| TraceEvent::new(i as u64, operation, outcome))
             .collect();
         TraceBundle::new(RunMetadata::new(7, "fp-test"), decisions)
     }
@@ -1029,11 +1111,19 @@ mod tests {
         let bundle = bundle_with(representative_events_for_all_op_kinds());
         let raw = serde_json::to_value(&bundle).unwrap();
         let flat = flatten(&bundle, &raw, "main").unwrap();
-        assert_eq!(flat.events.len(), OP_KINDS.len());
+        assert_eq!(
+            flat.events.len(),
+            OP_KINDS.len() + bundle.timelines[0].lifecycle.len()
+        );
         assert!(flat.notable.iter().any(|event| event.kind == "fs_open"));
         assert!(flat.notable.iter().any(|event| event.kind == "fs_crash"));
         assert!(flat.notable.iter().any(|event| event.kind == "net_send"));
-        for (event, recorded) in flat.events.iter().zip(&bundle.timelines[0].decisions) {
+        let operation_events: Vec<_> = flat
+            .events
+            .iter()
+            .filter(|event| event.source == FlatEventSource::Operation)
+            .collect();
+        for (event, recorded) in operation_events.iter().zip(&bundle.timelines[0].decisions) {
             assert_eq!(
                 event.operation,
                 serde_json::to_value(&recorded.operation).unwrap()
@@ -1045,8 +1135,188 @@ mod tests {
         }
         let total: u64 = flat.kind_counts.values().map(|stat| stat.count).sum();
         assert_eq!(total, flat.events.len() as u64);
+        assert_eq!(
+            flat.kind_counts
+                .get("lifecycle_start")
+                .map(|stat| stat.count),
+            Some(1)
+        );
+        assert_eq!(
+            flat.kind_counts.get("lifecycle_end").map(|stat| stat.count),
+            Some(1)
+        );
         for (tag, _) in OP_KINDS {
             assert_eq!(flat.kind_counts.get(*tag).map(|stat| stat.count), Some(1));
         }
+    }
+
+    #[test]
+    fn flatten_branch_lifecycle_continues_inherited_incarnation_without_duplicate_start() {
+        let main = vec![TraceEvent::new(
+            0,
+            Operation::ClockNow {
+                clock: patina_dst_abi::ClockKind::Monotonic,
+            },
+            Outcome::U64(5),
+        )];
+        let mut branch_event = TraceEvent::new(
+            1,
+            Operation::EntropyFill { len: 1 },
+            Outcome::Bytes(vec![9]),
+        );
+        branch_event.order = 3;
+        let mut bundle = TraceBundle::new(RunMetadata::new(7, "fp-test"), main);
+        bundle.timelines.push(patina_dst_trace::Timeline {
+            id: "branch".into(),
+            parent: Some("main".into()),
+            from_sequence: Some(1),
+            branch_seed: Some(99),
+            lifecycle: vec![
+                LifecycleEvent {
+                    order: 2,
+                    kind: LifecycleEventKind::Start { incarnation: 0 },
+                },
+                LifecycleEvent {
+                    order: 4,
+                    kind: LifecycleEventKind::End { incarnation: 0 },
+                },
+            ],
+            decisions: vec![branch_event],
+        });
+        let raw = serde_json::to_value(&bundle).unwrap();
+        let flat = flatten(&bundle, &raw, "branch").unwrap();
+        assert_eq!(
+            flat.events
+                .iter()
+                .map(|event| event.order)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 3, 4]
+        );
+        assert_eq!(
+            flat.events
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "lifecycle_start",
+                "clock_now",
+                "entropy_fill",
+                "lifecycle_end",
+            ]
+        );
+        assert_eq!(
+            flat.events
+                .iter()
+                .filter(|event| event.kind == "lifecycle_start")
+                .count(),
+            1,
+            "resolved branch rendering must not duplicate inherited Start(0)"
+        );
+        assert!(
+            flat.events
+                .iter()
+                .all(|event| event.incarnation.is_none_or(|incarnation| incarnation == 0))
+        );
+    }
+
+    #[test]
+    fn flatten_merges_lifecycle_and_operations_by_global_order() {
+        let digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let bundle = TraceBundle {
+            format_version: patina_dst_trace::TRACE_FORMAT_VERSION,
+            metadata: RunMetadata::new(7, "fp-test+crash-restart"),
+            timelines: vec![patina_dst_trace::Timeline {
+                id: "main".into(),
+                parent: None,
+                from_sequence: None,
+                branch_seed: None,
+                lifecycle: vec![
+                    LifecycleEvent {
+                        order: 0,
+                        kind: LifecycleEventKind::Start { incarnation: 0 },
+                    },
+                    LifecycleEvent {
+                        order: 2,
+                        kind: LifecycleEventKind::Crash {
+                            incarnation: 0,
+                            snapshot_digest: digest.into(),
+                        },
+                    },
+                    LifecycleEvent {
+                        order: 3,
+                        kind: LifecycleEventKind::Restart {
+                            from_incarnation: 0,
+                            to_incarnation: 1,
+                            snapshot_digest: digest.into(),
+                        },
+                    },
+                    LifecycleEvent {
+                        order: 4,
+                        kind: LifecycleEventKind::Start { incarnation: 1 },
+                    },
+                    LifecycleEvent {
+                        order: 6,
+                        kind: LifecycleEventKind::End { incarnation: 1 },
+                    },
+                ],
+                decisions: vec![
+                    TraceEvent {
+                        sequence: 0,
+                        order: 1,
+                        incarnation: 0,
+                        operation: Operation::FsWrite {
+                            fd: patina_dst_abi::Fd(3),
+                            bytes: b"trigger".to_vec(),
+                        },
+                        outcome: Outcome::Usize(7),
+                    },
+                    TraceEvent {
+                        sequence: 1,
+                        order: 5,
+                        incarnation: 1,
+                        operation: Operation::ClockNow {
+                            clock: patina_dst_abi::ClockKind::Monotonic,
+                        },
+                        outcome: Outcome::U64(11),
+                    },
+                ],
+            }],
+        };
+        let raw = serde_json::to_value(&bundle).unwrap();
+        let flat = flatten(&bundle, &raw, "main").unwrap();
+        assert_eq!(
+            flat.events
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "lifecycle_start",
+                "fs_write",
+                "lifecycle_crash",
+                "lifecycle_restart",
+                "lifecycle_start",
+                "clock_now",
+                "lifecycle_end",
+            ]
+        );
+        assert_eq!(
+            flat.events
+                .iter()
+                .map(|event| event.order)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4, 5, 6]
+        );
+        assert_eq!(flat.events[1].incarnation, Some(0));
+        assert_eq!(flat.events[5].incarnation, Some(1));
+        assert!(
+            flat.notable
+                .iter()
+                .any(|event| event.kind == "lifecycle_crash")
+        );
+        assert!(
+            flat.notable
+                .iter()
+                .any(|event| event.kind == "lifecycle_restart")
+        );
     }
 }

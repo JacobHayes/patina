@@ -26,7 +26,7 @@ fn expected_operations() -> Vec<Operation> {
 
 #[test]
 fn current_format_fixture_parses_validates_and_is_canonically_encoded() {
-    let bundle = TraceBundle::load(fixture("format-4.patina")).unwrap();
+    let bundle = TraceBundle::load(fixture("format-5.patina")).unwrap();
     assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
     bundle.validate().unwrap();
     // A pre-metadata run records no fault configuration; the field is absent
@@ -42,7 +42,7 @@ fn current_format_fixture_parses_validates_and_is_canonically_encoded() {
     // on-disk encoding and guards against the fixture drifting from the writer.
     let reencoded = bundle.to_bytes().unwrap();
     assert_eq!(
-        std::fs::read(fixture("format-4.patina")).unwrap(),
+        std::fs::read(fixture("format-5.patina")).unwrap(),
         reencoded
     );
     let text = String::from_utf8(reencoded).unwrap();
@@ -58,12 +58,31 @@ fn current_format_fixture_parses_validates_and_is_canonically_encoded() {
 }
 
 #[test]
+fn current_crash_restart_fixture_parses_validates_and_is_canonical() {
+    let bundle = TraceBundle::load(fixture("format-5-crash-restart.patina")).unwrap();
+    bundle.validate().unwrap();
+    assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
+    assert_eq!(bundle.timelines[0].lifecycle.len(), 5);
+    assert_eq!(bundle.timelines[0].decisions[0].order, 1);
+    assert_eq!(bundle.timelines[0].decisions[1].incarnation, 1);
+    assert_eq!(
+        std::fs::read(fixture("format-5-crash-restart.patina")).unwrap(),
+        bundle.to_bytes().unwrap()
+    );
+}
+
+#[test]
 fn every_prior_format_migrates_to_an_equivalent_current_bundle() {
-    // Both supported prior formats upgrade to a bundle byte-for-byte equivalent
-    // to the hand-written current-format fixture: current version, a single
+    // Every supported non-crash prior format upgrades to a bundle byte-for-byte
+    // equivalent to the hand-written current-format fixture: current version, a single
     // unbranched `main` timeline, and absent branch metadata.
-    let current = TraceBundle::load(fixture("format-4.patina")).unwrap();
-    for prior in ["format-1.patina", "format-2.patina", "format-3.patina"] {
+    let current = TraceBundle::load(fixture("format-5.patina")).unwrap();
+    for prior in [
+        "format-1.patina",
+        "format-2.patina",
+        "format-3.patina",
+        "format-4.patina",
+    ] {
         let migrated = TraceBundle::load(fixture(prior)).unwrap();
         assert_eq!(
             migrated, current,
@@ -95,7 +114,12 @@ fn every_prior_format_migrates_to_an_equivalent_current_bundle() {
 
 #[test]
 fn migration_never_rewrites_the_source_file() {
-    for prior in ["format-1.patina", "format-2.patina", "format-3.patina"] {
+    for prior in [
+        "format-1.patina",
+        "format-2.patina",
+        "format-3.patina",
+        "format-4.patina",
+    ] {
         let path = fixture(prior);
         let before = std::fs::read(&path).unwrap();
         TraceBundle::load(&path).unwrap();
@@ -103,6 +127,53 @@ fn migration_never_rewrites_the_source_file() {
         assert_eq!(
             before, after,
             "loading {prior} must not rewrite the on-disk trace"
+        );
+    }
+}
+
+#[test]
+fn legacy_crash_traces_fail_closed_with_named_semantics_error() {
+    for version in [1u32, 2, 3, 4] {
+        let value = if version == 1 {
+            serde_json::json!({
+                "format_version": 1,
+                "metadata": {
+                    "root_seed": 42,
+                    "decision_policy": "splitmix64-v1",
+                    "fingerprint": "fixture-fingerprint"
+                },
+                "decisions": [{
+                    "sequence": 0,
+                    "operation": {"kind": "fs_crash"},
+                    "outcome": {"kind": "unit"}
+                }]
+            })
+        } else {
+            serde_json::json!({
+                "format_version": version,
+                "metadata": {
+                    "root_seed": 42,
+                    "decision_policy": "splitmix64-v1",
+                    "fingerprint": "fixture-fingerprint"
+                },
+                "timelines": [{
+                    "id": "main",
+                    "parent": null,
+                    "from_sequence": null,
+                    "branch_seed": null,
+                    "decisions": [{
+                        "sequence": 0,
+                        "operation": {"kind": "fs_crash"},
+                        "outcome": {"kind": "unit"}
+                    }]
+                }]
+            })
+        };
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let error = TraceBundle::from_slice(&bytes).unwrap_err();
+        assert!(
+            matches!(error, TraceError::LegacyCrashSemantics { format_version } if format_version == version),
+            "version {version} should fail as LegacyCrashSemantics, got {error:?}"
         );
     }
 }
@@ -161,8 +232,13 @@ fn malformed_fixture_is_rejected_as_a_parse_error() {
 fn migration_is_reachable_through_the_in_memory_transport_path() {
     // The same decode path backs `from_slice`, so transported prior-format
     // bundles migrate identically to file loads.
-    let current = TraceBundle::load(fixture("format-4.patina")).unwrap();
-    for prior in ["format-1.patina", "format-2.patina", "format-3.patina"] {
+    let current = TraceBundle::load(fixture("format-5.patina")).unwrap();
+    for prior in [
+        "format-1.patina",
+        "format-2.patina",
+        "format-3.patina",
+        "format-4.patina",
+    ] {
         let bytes = std::fs::read(fixture(prior)).unwrap();
         let migrated = TraceBundle::from_slice(&bytes).unwrap();
         assert_eq!(

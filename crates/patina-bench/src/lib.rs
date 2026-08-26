@@ -26,9 +26,10 @@ use patina_dst_runtime::{Context, RuntimeBuilder, RuntimeConfig, RuntimeError, T
 /// machine-independent budget. The workload measures ~123.6 bytes/event under
 /// the format 3 encoding (compact JSON with base64 byte payloads), down from
 /// ~344 under the previous pretty-JSON number-array encoding. The budget leaves
-/// modest headroom for minor encoding changes while still catching a blow-up
-/// such as a regression back to number arrays or pretty printing.
-pub const MAX_TRACE_BYTES_PER_EVENT: f64 = 150.0;
+/// modest headroom for minor encoding changes (including v5 lifecycle/order
+/// fields) while still catching a blow-up such as a regression back to number
+/// arrays or pretty printing.
+pub const MAX_TRACE_BYTES_PER_EVENT: f64 = 160.0;
 
 /// A generous per-operation ceiling for seeded execution, in nanoseconds. Used
 /// only by the opt-in timing guard; sized to catch pathological regressions

@@ -608,9 +608,15 @@ fn human_event_line(event: &FlatEvent) -> String {
         .as_ref()
         .map(|note| format!("  [notable: {}]", note.kind()))
         .unwrap_or_default();
+    let incarnation = event
+        .incarnation
+        .map(|id| format!(" i{id}"))
+        .unwrap_or_default();
     format!(
-        "#{:06}  {:<8} {:<18} {}{}{}",
+        "#{:06} o={:<6}{} {:<8} {:<18} {}{}{}",
         event.seq,
+        event.order,
+        incarnation,
         event.lane.label(),
         event.kind,
         event.detail,
@@ -703,6 +709,18 @@ fn write_json_event<W: std::io::Write>(out: &mut W, event: &FlatEvent) -> Result
 fn event_value(event: &FlatEvent) -> Value {
     let mut map = Map::new();
     map.insert("seq".into(), Value::from(event.seq));
+    map.insert("order".into(), Value::from(event.order));
+    map.insert(
+        "incarnation".into(),
+        event.incarnation.map(Value::from).unwrap_or(Value::Null),
+    );
+    map.insert(
+        "source".into(),
+        Value::from(match event.source {
+            trace_view::FlatEventSource::Operation => "operation",
+            trace_view::FlatEventSource::Lifecycle => "lifecycle",
+        }),
+    );
     map.insert("task".into(), event.lane.json_value());
     map.insert("kind".into(), Value::from(event.kind.clone()));
     map.insert("category".into(), Value::from(event.category.label()));
@@ -1311,11 +1329,7 @@ mod tests {
         let decisions = events
             .into_iter()
             .enumerate()
-            .map(|(i, (operation, outcome))| TraceEvent {
-                sequence: i as u64,
-                operation,
-                outcome,
-            })
+            .map(|(i, (operation, outcome))| TraceEvent::new(i as u64, operation, outcome))
             .collect();
         TraceBundle::new(RunMetadata::new(7, "fp-test"), decisions)
     }
@@ -1405,8 +1419,8 @@ mod tests {
         let lines = jsonl_lines(&flat, &filters);
         assert_eq!(lines.last().unwrap()["matched"], flat.events.len() as u64);
         assert_eq!(lines.last().unwrap()["emitted"], 2);
-        assert_eq!(lines[1]["seq"], 0);
-        assert_eq!(lines[2]["seq"], 1);
+        assert_eq!(lines[1]["order"], 0);
+        assert_eq!(lines[2]["order"], 1);
 
         let filters = EventFilters {
             last: Some(2),
@@ -1414,8 +1428,8 @@ mod tests {
         };
         let lines = jsonl_lines(&flat, &filters);
         assert_eq!(lines.last().unwrap()["emitted"], 2);
-        assert_eq!(lines[1]["seq"], 3);
-        assert_eq!(lines[2]["seq"], 4);
+        assert_eq!(lines[1]["order"], 5);
+        assert_eq!(lines[2]["order"], 6);
     }
 
     #[test]
@@ -1486,7 +1500,7 @@ mod tests {
         )]);
         let identical = diff_for(&one, &one, 1);
         assert!(identical.identical);
-        assert_eq!(identical.aligned_prefix, 1);
+        assert_eq!(identical.aligned_prefix, 3);
         assert!(identical.divergence.is_none());
         assert_eq!(identical.to_json()["result"], "identical");
 
@@ -1503,7 +1517,7 @@ mod tests {
             operation.divergence.as_ref().unwrap().class,
             "operation-mismatch"
         );
-        assert_eq!(operation.aligned_prefix, 0);
+        assert_eq!(operation.aligned_prefix, 1);
 
         let outcome_changed = bundle_with(vec![(
             Operation::ClockNow {
@@ -1516,7 +1530,7 @@ mod tests {
             outcome.divergence.as_ref().unwrap().class,
             "outcome-mismatch"
         );
-        assert_eq!(outcome.aligned_prefix, 0);
+        assert_eq!(outcome.aligned_prefix, 1);
 
         let longer = bundle_with(vec![
             (
@@ -1528,33 +1542,50 @@ mod tests {
             (Operation::FsSync { fd: Fd(3) }, Outcome::Unit),
         ]);
         let length = diff_for(&one, &longer, 1);
-        assert_eq!(length.divergence.as_ref().unwrap().class, "length");
-        assert_eq!(length.aligned_prefix, 1);
-        assert!(length.divergence.as_ref().unwrap().a_event.is_none());
+        assert_eq!(
+            length.divergence.as_ref().unwrap().class,
+            "operation-mismatch"
+        );
+        assert_eq!(length.aligned_prefix, 2);
+        assert!(length.divergence.as_ref().unwrap().a_event.is_some());
         assert!(length.divergence.as_ref().unwrap().b_event.is_some());
     }
 
     #[test]
     fn info_counts_resolved_branch_and_vtime_from_raw_json() {
-        let main = vec![TraceEvent {
-            sequence: 0,
-            operation: Operation::ClockNow {
+        let main = vec![TraceEvent::new(
+            0,
+            Operation::ClockNow {
                 clock: ClockKind::Monotonic,
             },
-            outcome: Outcome::U64(5),
-        }];
+            Outcome::U64(5),
+        )];
         let mut bundle = TraceBundle::new(RunMetadata::new(9, "fp"), main);
         bundle.timelines.push(patina_dst_trace::Timeline {
             id: "b1".into(),
             parent: Some("main".into()),
             from_sequence: Some(1),
             branch_seed: Some(11),
-            decisions: vec![TraceEvent {
-                sequence: 1,
-                operation: Operation::ClockNow {
-                    clock: ClockKind::Monotonic,
+            lifecycle: vec![
+                patina_dst_trace::LifecycleEvent {
+                    order: 2,
+                    kind: patina_dst_trace::LifecycleEventKind::Start { incarnation: 0 },
                 },
-                outcome: Outcome::U64(20),
+                patina_dst_trace::LifecycleEvent {
+                    order: 4,
+                    kind: patina_dst_trace::LifecycleEventKind::End { incarnation: 0 },
+                },
+            ],
+            decisions: vec![{
+                let mut event = TraceEvent::new(
+                    1,
+                    Operation::ClockNow {
+                        clock: ClockKind::Monotonic,
+                    },
+                    Outcome::U64(20),
+                );
+                event.order = 3;
+                event
             }],
         });
         let raw = serde_json::to_value(&bundle).unwrap();

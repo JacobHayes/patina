@@ -445,7 +445,14 @@ fn write_timeline(html: &mut String, flat: &[Ev], lanes: &[LaneKey], total: usiz
                 .vtime
                 .map(|n| format!(" @ {}", human_nanos(n)))
                 .unwrap_or_default();
-            let title = format!("#{} {}{} — {}", ev.seq, ev.kind, vt, ev.detail);
+            let incarnation = ev
+                .incarnation
+                .map(|id| format!(" incarnation {id}"))
+                .unwrap_or_default();
+            let title = format!(
+                "#{} order {}{} {}{} — {}",
+                ev.seq, ev.order, incarnation, ev.kind, vt, ev.detail
+            );
             let h = if ev.category == Category::Crash {
                 row - 2
             } else {
@@ -461,7 +468,7 @@ fn write_timeline(html: &mut String, flat: &[Ev], lanes: &[LaneKey], total: usiz
         }
     }
     html.push_str("</svg>\n</div>\n");
-    html.push_str("<p class=\"muted\">Hover any mark for its sequence number, kind, virtual time, and detail. Columns are ordered by trace sequence; lanes are scheduler tasks (the <code>main</code> lane holds ops issued before any scheduling decision or in a single-threaded run).</p>\n");
+    html.push_str("<p class=\"muted\">Hover any mark for its sequence/order number, incarnation, kind, virtual time, and detail. Columns are ordered by v5 global order; lanes are scheduler tasks (the <code>main</code> lane holds ops issued before any scheduling decision, lifecycle markers, or single-threaded runs).</p>\n");
 }
 
 /// Crash and network marks win ties over high-frequency clock/scheduling marks
@@ -515,7 +522,7 @@ fn write_notable(html: &mut String, notable: &[Ev]) {
         html.push_str("<p class=\"muted\">No crashes, boundary errors, or dropped datagrams were recorded.</p>\n");
         return;
     }
-    html.push_str("<table>\n<tr><th>seq</th><th>lane</th><th>kind</th><th>what</th></tr>\n");
+    html.push_str("<table>\n<tr><th>seq</th><th>order</th><th>incarnation</th><th>lane</th><th>kind</th><th>what</th></tr>\n");
     for ev in notable {
         let what = ev
             .notable
@@ -524,8 +531,12 @@ fn write_notable(html: &mut String, notable: &[Ev]) {
             .unwrap_or_else(|| ev.detail.clone());
         let _ = writeln!(
             html,
-            "<tr><td>{}</td><td><code>{}</code></td><td><code>{}</code></td><td>{}</td></tr>",
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td><code>{}</code></td><td><code>{}</code></td><td>{}</td></tr>",
             ev.seq,
+            ev.order,
+            ev.incarnation
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "—".to_string()),
             esc(&ev.lane.label()),
             esc(&ev.kind),
             esc(&what)
@@ -558,15 +569,15 @@ fn write_data_note(html: &mut String, input: &RenderInput<'_>) {
         .map(|b| !b.is_null())
         .unwrap_or(false);
     html.push_str("<h2>What this trace records</h2>\n<div class=\"note\">\n");
-    html.push_str("<p>The timeline above is reconstructed from the recorded boundary-operation stream. A few effects are configured in metadata rather than emitted as per-event records, so they are shown from the <em>Run metadata</em> panel, not as timeline marks:</p>\n<ul>\n");
+    html.push_str("<p>The timeline above merges recorded boundary operations with v5 lifecycle markers in global order. A few effects are configured in metadata rather than emitted as per-event records, so they are shown from the <em>Run metadata</em> panel, not as timeline marks:</p>\n<ul>\n");
     html.push_str("<li><strong>Buggify firings &amp; lifecycle</strong> are deterministic functions of the seed and are re-derived on replay, not recorded per evaluation. ");
     if has_buggify {
         html.push_str("This run's buggify config, active sites, and knob picks appear in the metadata panel.</li>\n");
     } else {
         html.push_str("This run recorded no buggify config.</li>\n");
     }
-    html.push_str("<li><strong>Fault injection</strong> (crash point, torn-write granularity, net drop/jitter/latency, sleep jitter) is seed-driven config in <code>faults</code>; its effects surface as <code>fs_crash</code> marks and dropped-datagram outcomes on the timeline.</li>\n");
-    html.push_str("<li><strong>Restarts</strong> under crash-recovery appear as an <code>fs_crash</code> mark followed by re-open activity in the same lane.</li>\n");
+    html.push_str("<li><strong>Fault injection</strong> (crash point, torn-write granularity, net drop/jitter/latency, sleep jitter) is seed-driven config in <code>faults</code>; operation effects and lifecycle crash/restart markers are shown in global order on the timeline.</li>\n");
+    html.push_str("<li><strong>Restarts</strong> under crash-recovery appear as lifecycle crash/restart/start markers with incarnation ids, followed by activity in the fresh incarnation once runtime relaunch is wired.</li>\n");
     html.push_str("</ul>\n</div>\n");
 }
 
@@ -580,11 +591,7 @@ mod tests {
         let decisions = events
             .into_iter()
             .enumerate()
-            .map(|(i, (operation, outcome))| TraceEvent {
-                sequence: i as u64,
-                operation,
-                outcome,
-            })
+            .map(|(i, (operation, outcome))| TraceEvent::new(i as u64, operation, outcome))
             .collect();
         TraceBundle::new(RunMetadata::new(7, "fp-test"), decisions)
     }
@@ -623,7 +630,7 @@ mod tests {
         assert!(!html.contains("http://") && !html.contains("https://"));
         assert!(!html.contains("<script"));
         // Event count surfaces.
-        assert!(html.contains("2 events"));
+        assert!(html.contains("4 events"));
     }
 
     #[test]

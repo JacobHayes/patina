@@ -241,7 +241,7 @@ External controls include:
 - liveness oracles (`--liveness-watchdog`, `--converge-within`);
 - simple key/value parameters (`--param`, exposed through `Context::param`).
 
-`--fs-crash-at` currently has a known semantic defect: after the selected operation succeeds, it rolls the storage image back but lets the same guest incarnation continue and observe the original success. That is neither a whole-process power cut nor an ordinary live I/O error, and it can manufacture durability findings when the guest later acknowledges data erased by the silent rollback. Treat it only as an aggressive in-process storage-rollback experiment, not as restart/crash-recovery evidence, until the CLI crash boundary terminates the current incarnation and a separate restart path hands the durable image to a fresh process. Targeted live I/O failure remains the `--fs-error-permille` fault class and does not roll the image back.
+`--fs-crash-at` has a v5 trace/handoff protocol for crash-boundary restart evidence, but the CLI/runtime relaunch path is not wired in this phase. Until that later runtime work lands, do not cite `--fs-crash-at` CLI runs as restart/crash-recovery evidence. Targeted live I/O failure remains the `--fs-error-permille` fault class and does not roll the image back.
 
 Named scenario/profile selection remains a planned experiment-plane convenience.
 
@@ -338,15 +338,19 @@ bundle:
   timelines:
     main:
       parent: null
-      decisions: [...]
+      lifecycle: [Start(incarnation=0), ..., End(incarnation=0)]
+      decisions: [{sequence, order, incarnation, operation, outcome}, ...]
     branch-1:
       parent: main
-      from: <moment-id>
+      from: <operation-sequence>
       branch_seed: 456
+      lifecycle: [...]
       decisions: [...]
 ```
 
 A simple run contains one timeline. Trace-guided exploration can append additional timelines that branch from recorded moments in the same compatible build and environment. Minimization operates through pluggable reducers that can shrink seeds, schedules, inputs, fault choices, or timeline suffixes while preserving a failure.
+
+Trace format v5 gives lifecycle markers and operation events one logical order namespace per timeline. That is enough to represent a crash-restart boundary without rewriting the triggering operation: `Start(0)`, the successful boundary operation, `Crash(0, snapshot_digest)`, `Restart(0 -> 1, snapshot_digest)`, `Start(1)`, subsequent operations in incarnation 1, and final `End(1)`. Older v1-v4 traces still migrate for non-crash runs, but a legacy trace containing `Operation::FsCrash` is refused with `LegacyCrashSemantics` instead of being reinterpreted as v5 crash-restart.
 
 Strict replay expects matching fingerprints and the same sequence of boundary events. Fingerprint mismatches and boundary-event mismatches are errors by default.
 

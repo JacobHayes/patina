@@ -20,6 +20,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use patina_dst_abi::{Operation, Outcome, TaskId};
 use serde::{Deserialize, Serialize};
 
+mod handoff;
+pub use handoff::{
+    HandoffConsumedState, HandoffError, HandoffSealKey, IncarnationHandoff,
+    MAX_HANDOFF_PAYLOAD_BYTES, VerifiedIncarnationHandoff,
+};
+
 /// The trace bundle format this runtime writes. It is the only version ever
 /// serialized; older supported versions are upgraded in memory on load.
 ///
@@ -40,7 +46,15 @@ use serde::{Deserialize, Serialize};
 /// and falls back to the historical re-supply contract. The metadata field is a
 /// new struct key, not a new operation, so recorded event streams are byte-for-
 /// byte unchanged across the bump.
-pub const TRACE_FORMAT_VERSION: u32 = 4;
+///
+/// Format 5 adds explicit incarnation/lifecycle ordering. Each operation records
+/// the guest incarnation that issued it and an order slot in the same logical
+/// namespace as lifecycle markers, allowing a trace to state: Start(0), a
+/// successful triggering operation, Crash(0,digest), Restart(0->1,digest),
+/// Start(1), and final End(1). Legacy v1-v4 traces that contain `Operation::FsCrash`
+/// are refused as [`TraceError::LegacyCrashSemantics`] rather than migrated with
+/// silently changed crash meaning.
+pub const TRACE_FORMAT_VERSION: u32 = 5;
 /// The oldest trace format version this runtime can read. A bundle at this
 /// version, or any later supported version, is migrated in memory through the
 /// `MIGRATIONS` chain up to [`TRACE_FORMAT_VERSION`] and then validated by
@@ -623,12 +637,62 @@ impl RunMetadata {
     }
 }
 
+/// One incarnation lifecycle marker in a timeline's global logical order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleEvent {
+    /// Global order slot within this timeline. Operation events carry their own
+    /// `order`; lifecycle and operation orders share one namespace and must be
+    /// unique, so crash/restart boundaries can be placed between successful
+    /// boundary operations without changing operation sequence numbers.
+    pub order: u64,
+    #[serde(flatten)]
+    pub kind: LifecycleEventKind,
+}
+
+/// Lifecycle transitions for crash->fresh-incarnation traces.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LifecycleEventKind {
+    Start {
+        incarnation: u64,
+    },
+    Crash {
+        incarnation: u64,
+        snapshot_digest: String,
+    },
+    Restart {
+        from_incarnation: u64,
+        to_incarnation: u64,
+        snapshot_digest: String,
+    },
+    End {
+        incarnation: u64,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TraceEvent {
+    /// Operation sequence number, contiguous among boundary operations only.
     pub sequence: u64,
+    /// Global order slot shared with lifecycle markers.
+    pub order: u64,
+    /// Guest incarnation that issued this operation.
+    pub incarnation: u64,
     pub operation: Operation,
     pub outcome: Outcome,
+}
+
+impl TraceEvent {
+    pub fn new(sequence: u64, operation: Operation, outcome: Outcome) -> Self {
+        Self {
+            sequence,
+            order: sequence.saturating_add(1),
+            incarnation: 0,
+            operation,
+            outcome,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -638,6 +702,7 @@ pub struct Timeline {
     pub parent: Option<String>,
     pub from_sequence: Option<u64>,
     pub branch_seed: Option<u64>,
+    pub lifecycle: Vec<LifecycleEvent>,
     pub decisions: Vec<TraceEvent>,
 }
 
@@ -659,6 +724,7 @@ impl TraceBundle {
                 parent: None,
                 from_sequence: None,
                 branch_seed: None,
+                lifecycle: linear_lifecycle_for(&decisions),
                 decisions,
             }],
         }
@@ -971,6 +1037,7 @@ impl TraceBundle {
                 }
                 from
             };
+            validate_timeline_lifecycle(timeline)?;
             for (index, event) in timeline.decisions.iter().enumerate() {
                 let expected = start + index as u64;
                 if event.sequence != expected {
@@ -979,7 +1046,38 @@ impl TraceBundle {
                         timeline.id, event.sequence
                     )));
                 }
+                if index > 0 && event.order <= timeline.decisions[index - 1].order {
+                    return Err(TraceError::Invalid(format!(
+                        "event {index} in timeline {} has non-increasing global order {}",
+                        timeline.id, event.order
+                    )));
+                }
             }
+        }
+        for index in 0..self.timelines.len() {
+            self.validate_resolved_orders_by_index(index)?;
+        }
+        Ok(())
+    }
+
+    fn validate_resolved_orders_by_index(&self, index: usize) -> Result<(), TraceError> {
+        let timeline = &self.timelines[index];
+        let decisions = self.resolve_by_index(index)?;
+        let lifecycle = self.resolve_lifecycle_by_index(index)?;
+        validate_lifecycle_events(
+            &format!("resolved timeline {}", timeline.id),
+            &lifecycle,
+            &decisions,
+        )?;
+        let mut previous_order = None;
+        for event in &decisions {
+            if previous_order.is_some_and(|previous| event.order <= previous) {
+                return Err(TraceError::Invalid(format!(
+                    "resolved timeline {} operation sequence {} has non-increasing global order {}",
+                    timeline.id, event.sequence, event.order
+                )));
+            }
+            previous_order = Some(event.order);
         }
         Ok(())
     }
@@ -1008,6 +1106,227 @@ impl TraceBundle {
         decisions.extend(timeline.decisions.clone());
         Ok(decisions)
     }
+
+    pub fn resolved_lifecycle(&self, id: &str) -> Result<Vec<LifecycleEvent>, TraceError> {
+        self.validate()?;
+        let index = self
+            .timelines
+            .iter()
+            .position(|timeline| timeline.id == id)
+            .ok_or_else(|| TraceError::UnknownTimeline(id.into()))?;
+        self.resolve_lifecycle_by_index(index)
+    }
+
+    fn resolve_lifecycle_by_index(&self, index: usize) -> Result<Vec<LifecycleEvent>, TraceError> {
+        let timeline = &self.timelines[index];
+        let Some(parent) = &timeline.parent else {
+            return Ok(timeline.lifecycle.clone());
+        };
+        let parent_index = self.timelines[..index]
+            .iter()
+            .position(|candidate| &candidate.id == parent)
+            .ok_or_else(|| TraceError::UnknownTimeline(parent.clone()))?;
+        let parent_lifecycle = self.resolve_lifecycle_by_index(parent_index)?;
+        let parent_prefix = self.resolve_by_index(parent_index)?;
+        let from = timeline.from_sequence.unwrap_or(0) as usize;
+        let prefix_last = parent_prefix.get(from.saturating_sub(1));
+        let prefix_end_order = prefix_last
+            .map(|event| event.order.saturating_add(1))
+            .unwrap_or(0);
+        let parent_active = prefix_last.map(|event| event.incarnation);
+        let mut lifecycle: Vec<_> = parent_lifecycle
+            .into_iter()
+            .filter(|marker| marker.order < prefix_end_order)
+            .collect();
+        let mut suffix_lifecycle = timeline.lifecycle.clone();
+        if let (Some(active), Some(first)) = (parent_active, suffix_lifecycle.first())
+            && matches!(first.kind, LifecycleEventKind::Start { incarnation } if incarnation == active)
+        {
+            suffix_lifecycle.remove(0);
+        }
+        lifecycle.extend(suffix_lifecycle);
+        Ok(lifecycle)
+    }
+}
+
+fn validate_timeline_lifecycle(timeline: &Timeline) -> Result<(), TraceError> {
+    validate_lifecycle_events(
+        &format!("timeline {}", timeline.id),
+        &timeline.lifecycle,
+        &timeline.decisions,
+    )
+}
+
+fn validate_lifecycle_events(
+    label: &str,
+    lifecycle: &[LifecycleEvent],
+    decisions: &[TraceEvent],
+) -> Result<(), TraceError> {
+    if lifecycle.len() < 2 {
+        return Err(TraceError::Invalid(format!(
+            "{label} must record at least Start and End lifecycle events"
+        )));
+    }
+
+    let mut global_orders = BTreeSet::new();
+    let mut active = None;
+    let mut pending_restart_start = None;
+    let mut last_crash: Option<(u64, &str)> = None;
+    for (index, marker) in lifecycle.iter().enumerate() {
+        if !global_orders.insert(marker.order) {
+            return Err(TraceError::Invalid(format!(
+                "{label} has duplicate global order {}",
+                marker.order
+            )));
+        }
+        if index > 0 && marker.order <= lifecycle[index - 1].order {
+            return Err(TraceError::Invalid(format!(
+                "{label} lifecycle order {} is not strictly increasing",
+                marker.order
+            )));
+        }
+        match &marker.kind {
+            LifecycleEventKind::Start { incarnation } => {
+                if active.is_some() {
+                    return Err(TraceError::Invalid(format!(
+                        "{label} starts incarnation {incarnation} while another incarnation is active"
+                    )));
+                }
+                if let Some(expected) = pending_restart_start.take() {
+                    if *incarnation != expected {
+                        return Err(TraceError::Invalid(format!(
+                            "{label} starts incarnation {incarnation} but restart expected {expected}"
+                        )));
+                    }
+                } else if index != 0 {
+                    return Err(TraceError::Invalid(format!(
+                        "{label} has Start({incarnation}) without a preceding Restart"
+                    )));
+                }
+                active = Some(*incarnation);
+            }
+            LifecycleEventKind::Crash {
+                incarnation,
+                snapshot_digest,
+            } => {
+                require_snapshot_digest(snapshot_digest)?;
+                if active != Some(*incarnation) {
+                    return Err(TraceError::Invalid(format!(
+                        "{label} crashes inactive incarnation {incarnation}"
+                    )));
+                }
+                active = None;
+                last_crash = Some((*incarnation, snapshot_digest.as_str()));
+            }
+            LifecycleEventKind::Restart {
+                from_incarnation,
+                to_incarnation,
+                snapshot_digest,
+            } => {
+                require_snapshot_digest(snapshot_digest)?;
+                if active.is_some() {
+                    return Err(TraceError::Invalid(format!(
+                        "{label} restarts while an incarnation is still active"
+                    )));
+                }
+                let Some((crashed, crash_digest)) = last_crash.take() else {
+                    return Err(TraceError::Invalid(format!(
+                        "{label} has Restart without a preceding Crash"
+                    )));
+                };
+                if crashed != *from_incarnation || crash_digest != snapshot_digest {
+                    return Err(TraceError::Invalid(format!(
+                        "{label} Restart does not match preceding Crash"
+                    )));
+                }
+                if to_incarnation <= from_incarnation {
+                    return Err(TraceError::Invalid(format!(
+                        "{label} Restart target must be greater than source"
+                    )));
+                }
+                pending_restart_start = Some(*to_incarnation);
+            }
+            LifecycleEventKind::End { incarnation } => {
+                if active != Some(*incarnation) {
+                    return Err(TraceError::Invalid(format!(
+                        "{label} ends inactive incarnation {incarnation}"
+                    )));
+                }
+                active = None;
+            }
+        }
+    }
+    if active.is_some() || pending_restart_start.is_some() || last_crash.is_some() {
+        return Err(TraceError::Invalid(format!(
+            "{label} lifecycle does not end cleanly"
+        )));
+    }
+
+    for event in decisions {
+        if !global_orders.insert(event.order) {
+            return Err(TraceError::Invalid(format!(
+                "{label} operation sequence {} reuses global order {}",
+                event.sequence, event.order
+            )));
+        }
+        let active_incarnation =
+            active_incarnation_at_order(lifecycle, event.order).ok_or_else(|| {
+                TraceError::Invalid(format!(
+                    "{label} operation sequence {} at order {} is outside any active incarnation",
+                    event.sequence, event.order
+                ))
+            })?;
+        if event.incarnation != active_incarnation {
+            return Err(TraceError::Invalid(format!(
+                "{label} operation sequence {} declares incarnation {}, expected {} from lifecycle",
+                event.sequence, event.incarnation, active_incarnation
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn active_incarnation_at_order(lifecycle: &[LifecycleEvent], order: u64) -> Option<u64> {
+    let mut active = None;
+    let mut pending_restart_start = None;
+    for marker in lifecycle {
+        if marker.order >= order {
+            break;
+        }
+        match marker.kind {
+            LifecycleEventKind::Start { incarnation } => {
+                if pending_restart_start.is_none_or(|expected| expected == incarnation) {
+                    active = Some(incarnation);
+                    pending_restart_start = None;
+                }
+            }
+            LifecycleEventKind::Crash { .. } | LifecycleEventKind::End { .. } => {
+                active = None;
+            }
+            LifecycleEventKind::Restart { to_incarnation, .. } => {
+                pending_restart_start = Some(to_incarnation);
+            }
+        }
+    }
+    active
+}
+
+fn require_snapshot_digest(value: &str) -> Result<(), TraceError> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err(TraceError::Invalid(
+            "snapshot digest must use sha256:<64 lowercase hex>".into(),
+        ));
+    };
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(TraceError::Invalid(
+            "snapshot digest must use sha256:<64 lowercase hex>".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// A `Write` sink that counts bytes instead of keeping them, so a value can be
@@ -1193,11 +1512,7 @@ impl Recorder {
         if self.ledger.overflowed() {
             return;
         }
-        let event = TraceEvent {
-            sequence: self.decisions.len() as u64,
-            operation,
-            outcome,
-        };
+        let event = TraceEvent::new(self.decisions.len() as u64, operation, outcome);
         if self.ledger.admit(&event, MAIN_TIMELINE) {
             self.decisions.push(event);
         } else {
@@ -1437,6 +1752,8 @@ pub struct BranchSession {
     from_sequence: u64,
     prefix: Replayer,
     suffix: Vec<TraceEvent>,
+    suffix_next_order: u64,
+    suffix_incarnation: u64,
     /// Bounds the branch's OWN suffix the way [`Recorder`]'s ledger bounds a
     /// recording. The inherited parent bundle is already bounded by the load-
     /// time byte limit, and budgeting the suffix alone keeps the in-flight
@@ -1479,6 +1796,14 @@ impl BranchSession {
             )));
         }
         prefix_decisions.truncate(from_sequence as usize);
+        let suffix_next_order = prefix_decisions
+            .last()
+            .map(|event| event.order.saturating_add(2))
+            .unwrap_or(1);
+        let suffix_incarnation = prefix_decisions
+            .last()
+            .map(|event| event.incarnation)
+            .unwrap_or(0);
         let prefix = Replayer {
             metadata: bundle.metadata.clone(),
             decisions: prefix_decisions,
@@ -1493,6 +1818,8 @@ impl BranchSession {
             from_sequence,
             prefix,
             suffix: Vec::new(),
+            suffix_next_order,
+            suffix_incarnation,
             ledger: EventLedger::new(MAX_TRACE_BYTES),
         })
     }
@@ -1558,11 +1885,15 @@ impl BranchSession {
         if self.ledger.overflowed() {
             return;
         }
-        let event = TraceEvent {
-            sequence: self.from_sequence + self.suffix.len() as u64,
+        let mut event = TraceEvent::new(
+            self.from_sequence + self.suffix.len() as u64,
             operation,
             outcome,
-        };
+        );
+        event.order = self
+            .suffix_next_order
+            .saturating_add(self.suffix.len() as u64);
+        event.incarnation = self.suffix_incarnation;
         if self.ledger.admit(&event, &self.branch_id) {
             self.suffix.push(event);
         } else {
@@ -1578,15 +1909,54 @@ impl BranchSession {
             return Err(error);
         }
         let mut bundle = self.bundle;
+        let lifecycle = linear_lifecycle_from_start_and_incarnation(
+            self.suffix_next_order.saturating_sub(1),
+            self.suffix_incarnation,
+            &self.suffix,
+        );
         bundle.timelines.push(Timeline {
             id: self.branch_id,
             parent: Some(self.parent),
             from_sequence: Some(self.from_sequence),
             branch_seed: Some(self.branch_seed),
+            lifecycle,
             decisions: self.suffix,
         });
         bundle.write_atomic(self.path)
     }
+}
+
+fn linear_lifecycle_for(decisions: &[TraceEvent]) -> Vec<LifecycleEvent> {
+    let start_order = decisions
+        .first()
+        .map(|event| event.order.saturating_sub(1))
+        .unwrap_or(0);
+    linear_lifecycle_from_start(start_order, decisions)
+}
+
+fn linear_lifecycle_from_start(start_order: u64, decisions: &[TraceEvent]) -> Vec<LifecycleEvent> {
+    linear_lifecycle_from_start_and_incarnation(start_order, 0, decisions)
+}
+
+fn linear_lifecycle_from_start_and_incarnation(
+    start_order: u64,
+    incarnation: u64,
+    decisions: &[TraceEvent],
+) -> Vec<LifecycleEvent> {
+    let end_order = decisions
+        .last()
+        .map(|event| event.order.saturating_add(1))
+        .unwrap_or(start_order.saturating_add(1));
+    vec![
+        LifecycleEvent {
+            order: start_order,
+            kind: LifecycleEventKind::Start { incarnation },
+        },
+        LifecycleEvent {
+            order: end_order,
+            kind: LifecycleEventKind::End { incarnation },
+        },
+    ]
 }
 
 fn fingerprint_declares_component(fingerprint: &str, component: &str) -> bool {
@@ -1615,6 +1985,13 @@ pub enum TraceError {
     UnsupportedVersion {
         found: u32,
         supported: u32,
+    },
+    /// A pre-v5 trace recorded `Operation::FsCrash`, whose old meaning was the
+    /// known hybrid rollback-and-continue model. Migrating it into v5 would
+    /// silently reinterpret a crash boundary, so loading refuses with this named
+    /// error instead.
+    LegacyCrashSemantics {
+        format_version: u32,
     },
     Invalid(String),
     /// A *budget* refusal: the trace is larger than a configured limit allows.
@@ -1690,6 +2067,10 @@ impl fmt::Display for TraceError {
                 f,
                 "unsupported trace format version {found}; this runtime supports {supported}"
             ),
+            Self::LegacyCrashSemantics { format_version } => write!(
+                f,
+                "legacy trace format version {format_version} contains Operation::FsCrash with pre-v5 crash semantics; refuse to migrate it as crash-restart"
+            ),
             Self::Invalid(message) => write!(f, "invalid trace: {message}"),
             Self::ResourceLimit { message, .. } => {
                 write!(f, "trace resource limit exceeded: {message}")
@@ -1752,7 +2133,12 @@ type Migration = fn(serde_json::Value) -> Result<serde_json::Value, TraceError>;
 /// format bump needs exactly one new step appended here (and the constant
 /// [`TRACE_FORMAT_VERSION`] raised). No plugin system: the chain is a fixed,
 /// auditable slice.
-const MIGRATIONS: &[Migration] = &[migrate_v1_to_v2, migrate_v2_to_v3, migrate_v3_to_v4];
+const MIGRATIONS: &[Migration] = &[
+    migrate_v1_to_v2,
+    migrate_v2_to_v3,
+    migrate_v3_to_v4,
+    migrate_v4_to_v5,
+];
 
 // One migration step must exist for each supported prior version; this keeps
 // the chain and the version window from drifting apart on a future bump.
@@ -1784,6 +2170,11 @@ fn migrate_to_current(mut value: serde_json::Value) -> Result<serde_json::Value,
         return Err(TraceError::UnsupportedVersion {
             found,
             supported: TRACE_FORMAT_VERSION,
+        });
+    }
+    if found < 5 && value_contains_legacy_fs_crash(&value) {
+        return Err(TraceError::LegacyCrashSemantics {
+            format_version: found,
         });
     }
     let start = (found - MIN_SUPPORTED_FORMAT_VERSION) as usize;
@@ -1857,6 +2248,168 @@ fn migrate_v3_to_v4(mut value: serde_json::Value) -> Result<serde_json::Value, T
         .ok_or_else(|| TraceError::Invalid("format 3 trace is not a JSON object".into()))?;
     object.insert("format_version".into(), serde_json::Value::from(4u32));
     Ok(value)
+}
+
+/// Upgrade format 4 to format 5 by adding explicit operation incarnation/order
+/// fields and a linear Start(0)/End(0) lifecycle to each timeline. A legacy
+/// bundle containing `Operation::FsCrash` is refused before this function runs:
+/// those events were recorded under the pre-v5 hybrid crash semantics and cannot
+/// be safely reinterpreted as crash-restart.
+fn migrate_v4_to_v5(mut value: serde_json::Value) -> Result<serde_json::Value, TraceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| TraceError::Invalid("format 4 trace is not a JSON object".into()))?;
+    let timelines = object
+        .get_mut("timelines")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| TraceError::Invalid("format 4 trace timelines must be an array".into()))?;
+    for index in 0..timelines.len() {
+        let (previous, current) = timelines.split_at_mut(index);
+        migrate_timeline_to_v5(&mut current[0], previous)?;
+    }
+    object.insert("format_version".into(), serde_json::Value::from(5u32));
+    Ok(value)
+}
+
+fn migrate_timeline_to_v5(
+    timeline: &mut serde_json::Value,
+    previous_timelines: &[serde_json::Value],
+) -> Result<(), TraceError> {
+    let object = timeline
+        .as_object_mut()
+        .ok_or_else(|| TraceError::Invalid("format 4 timeline is not a JSON object".into()))?;
+    let start_sequence = object
+        .get("from_sequence")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let parent_id = object
+        .get("parent")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let start_order = if let Some(parent_id) = &parent_id {
+        let parent_events = resolved_migrated_decision_orders(previous_timelines, parent_id)?;
+        parent_events
+            .get((start_sequence as usize).saturating_sub(1))
+            .map(|(_, order)| order.saturating_add(1))
+            .unwrap_or(1)
+    } else {
+        start_sequence
+    };
+    let decisions = object
+        .get_mut("decisions")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| {
+            TraceError::Invalid("format 4 timeline decisions must be an array".into())
+        })?;
+    let mut last_order = start_order;
+    for event in decisions.iter_mut() {
+        let event_object = event.as_object_mut().ok_or_else(|| {
+            TraceError::Invalid("format 4 trace event is not a JSON object".into())
+        })?;
+        let sequence = event_object
+            .get("sequence")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                TraceError::Invalid("format 4 trace event is missing sequence".into())
+            })?;
+        let order = if parent_id.is_some() {
+            start_order
+                .saturating_add(1)
+                .saturating_add(sequence.saturating_sub(start_sequence))
+        } else {
+            sequence.saturating_add(1)
+        };
+        event_object.insert("order".into(), serde_json::Value::from(order));
+        event_object.insert("incarnation".into(), serde_json::Value::from(0u64));
+        last_order = order;
+    }
+    let end_order = decisions
+        .last()
+        .and_then(|event| event.get("order"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(start_order)
+        .saturating_add(1);
+    object.insert(
+        "lifecycle".into(),
+        serde_json::json!([
+            {"order": start_order, "kind": "start", "incarnation": 0},
+            {"order": end_order.max(last_order.saturating_add(1)), "kind": "end", "incarnation": 0}
+        ]),
+    );
+    Ok(())
+}
+
+fn resolved_migrated_decision_orders(
+    timelines: &[serde_json::Value],
+    id: &str,
+) -> Result<Vec<(u64, u64)>, TraceError> {
+    let timeline = timelines
+        .iter()
+        .find(|timeline| timeline.get("id").and_then(serde_json::Value::as_str) == Some(id))
+        .ok_or_else(|| {
+            TraceError::Invalid(format!(
+                "format 4 timeline refers to missing or later parent {id}"
+            ))
+        })?;
+    let mut resolved =
+        if let Some(parent) = timeline.get("parent").and_then(serde_json::Value::as_str) {
+            let mut parent_events = resolved_migrated_decision_orders(timelines, parent)?;
+            let from = timeline
+                .get("from_sequence")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as usize;
+            parent_events.truncate(from);
+            parent_events
+        } else {
+            Vec::new()
+        };
+    let decisions = timeline
+        .get("decisions")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            TraceError::Invalid("format 5 timeline decisions must be an array".into())
+        })?;
+    for event in decisions {
+        let sequence = event
+            .get("sequence")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                TraceError::Invalid("format 5 trace event is missing sequence".into())
+            })?;
+        let order = event
+            .get("order")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| TraceError::Invalid("format 5 trace event is missing order".into()))?;
+        resolved.push((sequence, order));
+    }
+    Ok(resolved)
+}
+
+fn value_contains_legacy_fs_crash(value: &serde_json::Value) -> bool {
+    fn event_is_fs_crash(event: &serde_json::Value) -> bool {
+        event
+            .get("operation")
+            .and_then(|operation| operation.get("kind"))
+            .and_then(serde_json::Value::as_str)
+            == Some("fs_crash")
+    }
+
+    if let Some(decisions) = value.get("decisions").and_then(serde_json::Value::as_array)
+        && decisions.iter().any(event_is_fs_crash)
+    {
+        return true;
+    }
+    value
+        .get("timelines")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|timelines| {
+            timelines.iter().any(|timeline| {
+                timeline
+                    .get("decisions")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|decisions| decisions.iter().any(event_is_fs_crash))
+            })
+        })
 }
 
 fn require_complete_current_bundle(
@@ -1984,11 +2537,7 @@ mod tests {
     fn save_paths_reject_serialized_trace_that_exceeds_byte_limit() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("oversized.patina");
-        let event = TraceEvent {
-            sequence: 0,
-            operation: operation(),
-            outcome: Outcome::U64(10),
-        };
+        let event = TraceEvent::new(0, operation(), Outcome::U64(10));
         let bundle = TraceBundle::new(RunMetadata::new(7, "fingerprint"), vec![event]);
         let serialized_len = {
             let mut bytes = serde_json::to_vec(&bundle).unwrap();
@@ -2083,7 +2632,85 @@ mod tests {
         let resolved = bundle.resolved_timeline("branch-1").unwrap();
         assert_eq!(resolved[0].outcome, Outcome::U64(10));
         assert_eq!(resolved[1].outcome, Outcome::Bytes(vec![9]));
+        assert_eq!(resolved[0].order, 1);
+        assert_eq!(resolved[1].order, 3);
+        assert_eq!(resolved[0].incarnation, 0);
+        assert_eq!(resolved[1].incarnation, 0);
+        let lifecycle = bundle.resolved_lifecycle("branch-1").unwrap();
+        assert_eq!(
+            lifecycle,
+            vec![
+                LifecycleEvent {
+                    order: 0,
+                    kind: LifecycleEventKind::Start { incarnation: 0 },
+                },
+                LifecycleEvent {
+                    order: 4,
+                    kind: LifecycleEventKind::End { incarnation: 0 },
+                },
+            ],
+            "resolved branch lifecycle continues the inherited incarnation instead of duplicating Start(0)"
+        );
+        assert_eq!(bundle.timelines[1].lifecycle[0].order, 2);
+        assert_eq!(
+            bundle.timelines[1].lifecycle[0].kind,
+            LifecycleEventKind::Start { incarnation: 0 }
+        );
         assert_eq!(bundle.timelines[1].branch_seed, Some(99));
+    }
+
+    #[test]
+    fn resolved_branch_lifecycle_state_is_validated() {
+        let mut main_event = TraceEvent::new(0, operation(), Outcome::U64(10));
+        main_event.order = 1;
+        let mut branch_event = TraceEvent::new(1, operation(), Outcome::U64(20));
+        branch_event.order = 3;
+        branch_event.incarnation = 1;
+        let bundle = TraceBundle {
+            format_version: TRACE_FORMAT_VERSION,
+            metadata: RunMetadata::new(7, "fingerprint"),
+            timelines: vec![
+                Timeline {
+                    id: MAIN_TIMELINE.into(),
+                    parent: None,
+                    from_sequence: None,
+                    branch_seed: None,
+                    lifecycle: vec![
+                        LifecycleEvent {
+                            order: 0,
+                            kind: LifecycleEventKind::Start { incarnation: 0 },
+                        },
+                        LifecycleEvent {
+                            order: 2,
+                            kind: LifecycleEventKind::End { incarnation: 0 },
+                        },
+                    ],
+                    decisions: vec![main_event],
+                },
+                Timeline {
+                    id: "branch-1".into(),
+                    parent: Some(MAIN_TIMELINE.into()),
+                    from_sequence: Some(1),
+                    branch_seed: Some(99),
+                    lifecycle: vec![
+                        LifecycleEvent {
+                            order: 2,
+                            kind: LifecycleEventKind::Start { incarnation: 1 },
+                        },
+                        LifecycleEvent {
+                            order: 4,
+                            kind: LifecycleEventKind::End { incarnation: 1 },
+                        },
+                    ],
+                    decisions: vec![branch_event],
+                },
+            ],
+        };
+        let error = bundle.validate().unwrap_err();
+        assert!(
+            matches!(&error, TraceError::Invalid(message) if message.contains("resolved timeline branch-1 starts incarnation 1 while another incarnation is active")),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -2166,6 +2793,13 @@ mod tests {
             },
             "timelines": [{
                 "id": MAIN_TIMELINE,
+                "parent": null,
+                "from_sequence": null,
+                "branch_seed": null,
+                "lifecycle": [
+                    {"order": 0, "kind": "start", "incarnation": 0},
+                    {"order": 1, "kind": "end", "incarnation": 0}
+                ],
                 "decisions": []
             }]
         });
@@ -2424,14 +3058,208 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_models_crash_restart_with_global_order() {
+        let digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let bundle = TraceBundle {
+            format_version: TRACE_FORMAT_VERSION,
+            metadata: RunMetadata::new(7, "fingerprint+crash-restart"),
+            timelines: vec![Timeline {
+                id: MAIN_TIMELINE.into(),
+                parent: None,
+                from_sequence: None,
+                branch_seed: None,
+                lifecycle: vec![
+                    LifecycleEvent {
+                        order: 0,
+                        kind: LifecycleEventKind::Start { incarnation: 0 },
+                    },
+                    LifecycleEvent {
+                        order: 2,
+                        kind: LifecycleEventKind::Crash {
+                            incarnation: 0,
+                            snapshot_digest: digest.into(),
+                        },
+                    },
+                    LifecycleEvent {
+                        order: 3,
+                        kind: LifecycleEventKind::Restart {
+                            from_incarnation: 0,
+                            to_incarnation: 1,
+                            snapshot_digest: digest.into(),
+                        },
+                    },
+                    LifecycleEvent {
+                        order: 4,
+                        kind: LifecycleEventKind::Start { incarnation: 1 },
+                    },
+                    LifecycleEvent {
+                        order: 6,
+                        kind: LifecycleEventKind::End { incarnation: 1 },
+                    },
+                ],
+                decisions: vec![
+                    TraceEvent {
+                        sequence: 0,
+                        order: 1,
+                        incarnation: 0,
+                        operation: Operation::FsWrite {
+                            fd: Fd(3),
+                            bytes: b"trigger".to_vec(),
+                        },
+                        outcome: Outcome::Usize(7),
+                    },
+                    TraceEvent {
+                        sequence: 1,
+                        order: 5,
+                        incarnation: 1,
+                        operation: operation(),
+                        outcome: Outcome::U64(11),
+                    },
+                ],
+            }],
+        };
+        bundle.validate().unwrap();
+        let bytes = bundle.to_bytes().unwrap();
+        let reloaded = TraceBundle::from_slice(&bytes).unwrap();
+        assert_eq!(reloaded, bundle);
+        assert_eq!(
+            reloaded.to_bytes().unwrap(),
+            bytes,
+            "v5 lifecycle encoding is canonical"
+        );
+    }
+
+    #[test]
+    fn lifecycle_ordering_and_incarnation_mismatches_are_refused() {
+        let mut bundle = TraceBundle::new(
+            RunMetadata::new(1, "fingerprint"),
+            vec![TraceEvent::new(0, operation(), Outcome::U64(0))],
+        );
+        bundle.timelines[0].decisions[0].order = 0;
+        let error = bundle.validate().unwrap_err();
+        assert!(
+            error.to_string().contains("reuses global order"),
+            "duplicate lifecycle/operation order must be named: {error}"
+        );
+
+        let mut bundle = TraceBundle::new(
+            RunMetadata::new(1, "fingerprint"),
+            vec![TraceEvent::new(0, operation(), Outcome::U64(0))],
+        );
+        bundle.timelines[0].decisions[0].incarnation = 1;
+        let error = bundle.validate().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("declares incarnation 1, expected 0"),
+            "incarnation/lifecycle mismatch must be named: {error}"
+        );
+    }
+
+    #[test]
+    fn lifecycle_missing_crash_digest_mismatch_and_unended_states_are_refused() {
+        let digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let other = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let mut bundle = crash_restart_bundle(digest);
+        bundle.timelines[0].lifecycle[1].kind = LifecycleEventKind::End { incarnation: 0 };
+        let error = bundle.validate().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Restart without a preceding Crash"),
+            "missing crash must be named: {error}"
+        );
+
+        let mut bundle = crash_restart_bundle(digest);
+        if let LifecycleEventKind::Restart {
+            snapshot_digest, ..
+        } = &mut bundle.timelines[0].lifecycle[2].kind
+        {
+            *snapshot_digest = other.into();
+        }
+        let error = bundle.validate().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Restart does not match preceding Crash"),
+            "digest mismatch must be named: {error}"
+        );
+
+        let mut bundle = crash_restart_bundle(digest);
+        bundle.timelines[0].lifecycle.pop();
+        let error = bundle.validate().unwrap_err();
+        assert!(
+            error.to_string().contains("lifecycle does not end cleanly"),
+            "unended lifecycle must be named: {error}"
+        );
+    }
+
+    fn crash_restart_bundle(digest: &str) -> TraceBundle {
+        TraceBundle {
+            format_version: TRACE_FORMAT_VERSION,
+            metadata: RunMetadata::new(7, "fingerprint+crash-restart"),
+            timelines: vec![Timeline {
+                id: MAIN_TIMELINE.into(),
+                parent: None,
+                from_sequence: None,
+                branch_seed: None,
+                lifecycle: vec![
+                    LifecycleEvent {
+                        order: 0,
+                        kind: LifecycleEventKind::Start { incarnation: 0 },
+                    },
+                    LifecycleEvent {
+                        order: 2,
+                        kind: LifecycleEventKind::Crash {
+                            incarnation: 0,
+                            snapshot_digest: digest.into(),
+                        },
+                    },
+                    LifecycleEvent {
+                        order: 3,
+                        kind: LifecycleEventKind::Restart {
+                            from_incarnation: 0,
+                            to_incarnation: 1,
+                            snapshot_digest: digest.into(),
+                        },
+                    },
+                    LifecycleEvent {
+                        order: 4,
+                        kind: LifecycleEventKind::Start { incarnation: 1 },
+                    },
+                    LifecycleEvent {
+                        order: 6,
+                        kind: LifecycleEventKind::End { incarnation: 1 },
+                    },
+                ],
+                decisions: vec![
+                    TraceEvent {
+                        sequence: 0,
+                        order: 1,
+                        incarnation: 0,
+                        operation: Operation::FsWrite {
+                            fd: Fd(3),
+                            bytes: b"trigger".to_vec(),
+                        },
+                        outcome: Outcome::Usize(7),
+                    },
+                    TraceEvent {
+                        sequence: 1,
+                        order: 5,
+                        incarnation: 1,
+                        operation: operation(),
+                        outcome: Outcome::U64(11),
+                    },
+                ],
+            }],
+        }
+    }
+
+    #[test]
     fn rejects_non_contiguous_sequences() {
         let mut bundle = TraceBundle::new(
             RunMetadata::new(1, "fingerprint"),
-            vec![TraceEvent {
-                sequence: 4,
-                operation: operation(),
-                outcome: Outcome::U64(0),
-            }],
+            vec![TraceEvent::new(4, operation(), Outcome::U64(0))],
         );
         bundle.timelines[0].decisions[0].sequence = 4;
         assert!(matches!(bundle.validate(), Err(TraceError::Invalid(_))));
@@ -2515,14 +3343,8 @@ mod tests {
         assert_eq!(error.resource_limit_bytes(), Some((serialized_len, limit)));
 
         let mut oversized = TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new());
-        oversized.timelines[0].decisions = vec![
-            TraceEvent {
-                sequence: 0,
-                operation: operation(),
-                outcome: Outcome::U64(0),
-            };
-            MAX_TIMELINE_EVENTS + 1
-        ];
+        oversized.timelines[0].decisions =
+            vec![TraceEvent::new(0, operation(), Outcome::U64(0)); MAX_TIMELINE_EVENTS + 1];
         let error = oversized.validate().unwrap_err();
         assert!(error.is_resource_limit(), "unexpected error: {error}");
         assert_eq!(
@@ -2551,11 +3373,11 @@ mod tests {
     fn an_over_budget_recording_stops_holding_events_and_still_refuses() {
         let limit = 64 * 1024;
         let payload = vec![b'p'; 512];
-        let widest = serialized_event_len(&TraceEvent {
-            sequence: u64::MAX,
-            operation: operation(),
-            outcome: Outcome::Bytes(payload.clone()),
-        })
+        let widest = serialized_event_len(&TraceEvent::new(
+            u64::MAX,
+            operation(),
+            Outcome::Bytes(payload.clone()),
+        ))
         .unwrap()
             + 1;
 
@@ -2661,11 +3483,7 @@ mod tests {
         for index in 0..64u64 {
             let outcome = Outcome::Bytes(vec![index as u8; index as usize]);
             recorder.observe(operation(), outcome.clone());
-            events.push(TraceEvent {
-                sequence: index,
-                operation: operation(),
-                outcome,
-            });
+            events.push(TraceEvent::new(index, operation(), outcome));
         }
 
         let tallied = recorder.ledger.bytes;

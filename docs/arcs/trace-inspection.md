@@ -36,9 +36,10 @@ comparator.
 
 - **Bundle shape** (`patina-trace/src/lib.rs`): `TraceBundle { format_version,
   metadata: RunMetadata, timelines: Vec<Timeline> }`. `Timeline { id, parent,
-  from_sequence, branch_seed, decisions: Vec<TraceEvent> }`;
-  `TraceEvent { sequence, operation, outcome }`. Branch timelines resolve by
-  replaying the parent prefix (`resolved_timeline`, lib.rs:674).
+  from_sequence, branch_seed, lifecycle: Vec<LifecycleEvent>, decisions:
+  Vec<TraceEvent> }`; `TraceEvent { sequence, order, incarnation, operation,
+  outcome }`. Branch timelines resolve by replaying the parent prefix while
+  lifecycle markers share the same v5 global-order namespace.
 - **RunMetadata** (lib.rs:270-335): `root_seed`, `decision_policy`,
   `fingerprint`, plus optional config records: `faults`, `buggify` (incl.
   realized `active_sites`/`knobs`), `guest_argv`, `schedule_policy` (PCT /
@@ -46,10 +47,13 @@ comparator.
   all readable without touching the event stream. Note the brief's list plus
   two the brief omitted: `decision_policy` and `sud`.
 - **Loading is strict and fail-closed**: `TraceBundle::load` enforces the 256 MiB
-  cap, migrates v1..v3 → v4 in memory, then *typed*-deserializes and runs the
-  structural `validate()` oracle (contiguous sequences, main-timeline shape,
-  1M-event cap). `RunMetadata` is `deny_unknown_fields`; `Operation`/`Outcome`
-  are name-tagged enums, so an unknown op tag is a hard parse error. **A
+  cap, migrates non-crash v1..v4 → v5 in memory, then *typed*-deserializes and
+  runs the structural `validate()` oracle (contiguous sequences, lifecycle
+  state, main-timeline shape, 1M-event cap). `RunMetadata` is
+  `deny_unknown_fields`; `Operation`/`Outcome` are name-tagged enums, so an
+  unknown op tag is a hard parse error. Legacy v1..v4 traces containing
+  `Operation::FsCrash` fail closed instead of being reinterpreted as
+  crash-restart. **A
   successfully loaded bundle therefore contains only op tags this build knows.**
   (`render.rs`'s generic raw-JSON walk is forward-compat with *concurrent
   in-tree* additions, not with newer trace files — `render_trace_file` calls the
@@ -159,7 +163,7 @@ attribution walk, the virtual-time cursor, `summarize`, `detect_notable`,
 ```rust
 /// One strict-loaded, resolved timeline flattened for inspection.
 pub struct FlatTrace {
-    pub events: Vec<FlatEvent>,      // seq, lane, category, kind, detail, vtime, notable, raw op/outcome
+    pub events: Vec<FlatEvent>,      // seq, order, incarnation, source, lane, category, kind, detail, vtime, notable, raw op/outcome
     pub lanes: BTreeMap<LaneKey, TaskStat>,
     pub kind_counts: BTreeMap<String, KindStat>,   // count, errors, payload bytes in/out
     pub category_counts: BTreeMap<Category, u64>,
@@ -203,7 +207,7 @@ Human output (one fact per line; absent optional records omitted):
 
 ```
 trace: out/gen-0042.patina
-format_version: 4
+format_version: 5
 fingerprint: patina-native+yieldpoints
 root_seed: 42
 decision_policy: splitmix64-v1
@@ -251,9 +255,9 @@ human surface). `--format json` emits **JSON Lines** (the one deliberate
 deviation from "one envelope", documented in the verb prose and the `--format`
 doc string): first line a header object `{schema: "patina.trace.events/v1",
 path, timeline, total_events, filters: {...}}`, then one line per matching
-event `{seq, task: <u64|"main">, kind, category, vtime_nanos, notable?,
-operation: <raw>, outcome: <raw>}` (operation/outcome verbatim from the trace
-JSON — base64 payloads intact, so lines round-trip), and a final line
+event `{seq, order, incarnation, source, task: <u64|"main">, kind, category,
+vtime_nanos, notable?, operation: <raw|null>, outcome: <raw|null>}`
+(operation/outcome verbatim from operation rows; lifecycle rows use null), and a final line
 `{matched: N, emitted: N}`. A 1M-event dump as a single envelope would be
 agent-hostile; JSONL is the streaming member of the envelope family.
 
@@ -378,9 +382,9 @@ Fail loud, no partial stdout — matching the crate's fail-closed doctrine:
   as truth is exactly the "silently lying tool" the detection-before-fixes
   doctrine forbids. If corrupt-trace triage becomes a recurring need, that is a
   new decision, not a default.
-- `diff` with two differently-versioned but loadable traces works (both migrate
-  to v4 in memory); version difference shows up in the metadata diff via
-  `format_version`.
+- `diff` with two differently-versioned but loadable traces works (supported
+  non-crash prior formats migrate to v5 in memory); version difference shows up
+  in the metadata diff via `format_version`.
 
 ## 8. Registry / help / drift-gate impact (complete checklist)
 

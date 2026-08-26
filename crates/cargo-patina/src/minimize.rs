@@ -1167,13 +1167,13 @@ mod tests {
     }
 
     fn clock_event(sequence: u64, value: u64) -> patina_dst_trace::TraceEvent {
-        patina_dst_trace::TraceEvent {
+        patina_dst_trace::TraceEvent::new(
             sequence,
-            operation: patina_dst_abi::Operation::ClockNow {
+            patina_dst_abi::Operation::ClockNow {
                 clock: patina_dst_abi::ClockKind::Monotonic,
             },
-            outcome: patina_dst_abi::Outcome::U64(value),
-        }
+            patina_dst_abi::Outcome::U64(value),
+        )
     }
 
     #[test]
@@ -1252,24 +1252,54 @@ mod tests {
         );
     }
 
+    fn branch_lifecycle(
+        start_order: u64,
+        decisions: &[patina_dst_trace::TraceEvent],
+    ) -> Vec<patina_dst_trace::LifecycleEvent> {
+        let end_order = decisions
+            .last()
+            .map(|event| event.order.saturating_add(1))
+            .unwrap_or(start_order.saturating_add(1));
+        vec![
+            patina_dst_trace::LifecycleEvent {
+                order: start_order,
+                kind: patina_dst_trace::LifecycleEventKind::Start { incarnation: 0 },
+            },
+            patina_dst_trace::LifecycleEvent {
+                order: end_order,
+                kind: patina_dst_trace::LifecycleEventKind::End { incarnation: 0 },
+            },
+        ]
+    }
+
     fn branched_input(path: &Path) {
         use patina_dst_trace::{RunMetadata, Timeline};
         // main -> keeper (holds the 999 marker plus a removable suffix) and
         // main -> disposable (dead weight the oracle never needs).
         let mut bundle = TraceBundle::new(RunMetadata::new(1, "fixture"), vec![clock_event(0, 0)]);
+        let mut keeper = vec![clock_event(1, 999), clock_event(2, 2), clock_event(3, 3)];
+        for (index, event) in keeper.iter_mut().enumerate() {
+            event.order = 3 + index as u64;
+        }
         bundle.timelines.push(Timeline {
             id: "keeper".into(),
             parent: Some("main".into()),
             from_sequence: Some(1),
             branch_seed: Some(7),
-            decisions: vec![clock_event(1, 999), clock_event(2, 2), clock_event(3, 3)],
+            lifecycle: branch_lifecycle(2, &keeper),
+            decisions: keeper,
         });
+        let mut disposable = vec![clock_event(1, 11), clock_event(2, 12)];
+        for (index, event) in disposable.iter_mut().enumerate() {
+            event.order = 3 + index as u64;
+        }
         bundle.timelines.push(Timeline {
             id: "disposable".into(),
             parent: Some("main".into()),
             from_sequence: Some(1),
             branch_seed: Some(8),
-            decisions: vec![clock_event(1, 11), clock_event(2, 12)],
+            lifecycle: branch_lifecycle(2, &disposable),
+            decisions: disposable,
         });
         bundle.write_atomic(path).unwrap();
     }

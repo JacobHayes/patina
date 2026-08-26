@@ -8,7 +8,9 @@ use std::convert::Infallible;
 use std::fmt;
 
 use patina_dst_abi::{Operation, Outcome, TaskId};
-use patina_dst_trace::{Timeline, TraceBundle, TraceError, TraceEvent};
+use patina_dst_trace::{
+    LifecycleEvent, LifecycleEventKind, Timeline, TraceBundle, TraceError, TraceEvent,
+};
 use sha2::{Digest, Sha256};
 
 pub trait FailureOracle {
@@ -722,13 +724,61 @@ fn reducible_window(bundle: &TraceBundle, timeline_index: usize, protected: usiz
 
 fn renumber(bundle: &mut TraceBundle, timeline_index: usize) {
     let start = bundle.timelines[timeline_index].from_sequence.unwrap_or(0);
+    let linear_incarnation_zero =
+        is_linear_incarnation_zero(&bundle.timelines[timeline_index].lifecycle);
+    let start_order = bundle.timelines[timeline_index]
+        .lifecycle
+        .first()
+        .map(|event| event.order)
+        .unwrap_or(start);
     for (index, event) in bundle.timelines[timeline_index]
         .decisions
         .iter_mut()
         .enumerate()
     {
         event.sequence = start + index as u64;
+        if linear_incarnation_zero {
+            event.order = start_order.saturating_add(1).saturating_add(index as u64);
+            event.incarnation = 0;
+        }
     }
+    if linear_incarnation_zero {
+        bundle.timelines[timeline_index].lifecycle =
+            linear_lifecycle_from_start(start_order, &bundle.timelines[timeline_index].decisions);
+    }
+}
+
+fn is_linear_incarnation_zero(lifecycle: &[LifecycleEvent]) -> bool {
+    matches!(
+        lifecycle,
+        [
+            LifecycleEvent {
+                kind: LifecycleEventKind::Start { incarnation: 0 },
+                ..
+            },
+            LifecycleEvent {
+                kind: LifecycleEventKind::End { incarnation: 0 },
+                ..
+            },
+        ]
+    )
+}
+
+fn linear_lifecycle_from_start(start_order: u64, decisions: &[TraceEvent]) -> Vec<LifecycleEvent> {
+    let end_order = decisions
+        .last()
+        .map(|event| event.order.saturating_add(1))
+        .unwrap_or(start_order.saturating_add(1));
+    vec![
+        LifecycleEvent {
+            order: start_order,
+            kind: LifecycleEventKind::Start { incarnation: 0 },
+        },
+        LifecycleEvent {
+            order: end_order,
+            kind: LifecycleEventKind::End { incarnation: 0 },
+        },
+    ]
 }
 
 /// Canonicalize the schedule of a bundle toward a simpler, more readable
@@ -1279,12 +1329,14 @@ mod tests {
     #[test]
     fn delta_debugging_preserves_only_the_failure_inducing_decision() {
         let mut decisions = (0..10)
-            .map(|sequence| TraceEvent {
-                sequence,
-                operation: Operation::ClockNow {
-                    clock: ClockKind::Monotonic,
-                },
-                outcome: Outcome::U64(sequence),
+            .map(|sequence| {
+                TraceEvent::new(
+                    sequence,
+                    Operation::ClockNow {
+                        clock: ClockKind::Monotonic,
+                    },
+                    Outcome::U64(sequence),
+                )
             })
             .collect::<Vec<_>>();
         decisions[6].outcome = Outcome::U64(999);
@@ -1312,30 +1364,34 @@ mod tests {
     #[test]
     fn minimizes_a_leaf_branch_without_changing_its_inherited_prefix() {
         let main = (0..3)
-            .map(|sequence| TraceEvent {
-                sequence,
-                operation: Operation::ClockNow {
-                    clock: ClockKind::Monotonic,
-                },
-                outcome: Outcome::U64(sequence),
+            .map(|sequence| {
+                TraceEvent::new(
+                    sequence,
+                    Operation::ClockNow {
+                        clock: ClockKind::Monotonic,
+                    },
+                    Outcome::U64(sequence),
+                )
             })
             .collect::<Vec<_>>();
         let mut bundle = TraceBundle::new(RunMetadata::new(1, "fixture"), main.clone());
-        bundle.timelines.push(Timeline {
-            id: "failure".into(),
-            parent: Some("main".into()),
-            from_sequence: Some(2),
-            branch_seed: Some(9),
-            decisions: (2..8)
-                .map(|sequence| TraceEvent {
-                    sequence,
-                    operation: Operation::ClockNow {
-                        clock: ClockKind::Monotonic,
-                    },
-                    outcome: Outcome::U64(if sequence == 6 { 999 } else { sequence }),
+        bundle.timelines.push(test_timeline(
+            "failure",
+            "main",
+            2,
+            9,
+            (2..8)
+                .map(|sequence| {
+                    TraceEvent::new(
+                        sequence,
+                        Operation::ClockNow {
+                            clock: ClockKind::Monotonic,
+                        },
+                        Outcome::U64(if sequence == 6 { 999 } else { sequence }),
+                    )
                 })
                 .collect(),
-        });
+        ));
         let minimized = minimize_timeline(&bundle, "failure", &mut |candidate: &TraceBundle| {
             Ok::<_, Infallible>(
                 candidate.timelines[1]
@@ -1354,20 +1410,12 @@ mod tests {
     #[test]
     fn refuses_to_minimize_a_timeline_with_children() {
         let mut bundle = TraceBundle::new(RunMetadata::new(1, "fixture"), Vec::new());
-        bundle.timelines.push(Timeline {
-            id: "parent".into(),
-            parent: Some("main".into()),
-            from_sequence: Some(0),
-            branch_seed: Some(2),
-            decisions: Vec::new(),
-        });
-        bundle.timelines.push(Timeline {
-            id: "child".into(),
-            parent: Some("parent".into()),
-            from_sequence: Some(0),
-            branch_seed: Some(3),
-            decisions: Vec::new(),
-        });
+        bundle
+            .timelines
+            .push(test_timeline("parent", "main", 0, 2, Vec::new()));
+        bundle
+            .timelines
+            .push(test_timeline("child", "parent", 0, 3, Vec::new()));
         let error = minimize_timeline(&bundle, "parent", &mut |_candidate: &TraceBundle| {
             Ok::<_, Infallible>(true)
         })
@@ -1385,20 +1433,43 @@ mod tests {
     }
 
     fn clock_event(sequence: u64, value: u64) -> TraceEvent {
-        TraceEvent {
+        TraceEvent::new(
             sequence,
-            operation: Operation::ClockNow {
+            Operation::ClockNow {
                 clock: ClockKind::Monotonic,
             },
-            outcome: Outcome::U64(value),
-        }
+            Outcome::U64(value),
+        )
     }
 
     fn sched_event(sequence: u64, task: u64) -> TraceEvent {
-        TraceEvent {
+        TraceEvent::new(
             sequence,
-            operation: Operation::SchedulerNext,
-            outcome: Outcome::OptionalTask(Some(TaskId(task))),
+            Operation::SchedulerNext,
+            Outcome::OptionalTask(Some(TaskId(task))),
+        )
+    }
+
+    fn test_timeline(
+        id: &str,
+        parent: &str,
+        from_sequence: u64,
+        branch_seed: u64,
+        mut decisions: Vec<TraceEvent>,
+    ) -> Timeline {
+        let start_order = from_sequence.saturating_mul(10).saturating_add(1);
+        for (index, event) in decisions.iter_mut().enumerate() {
+            event.order = start_order.saturating_add(1).saturating_add(index as u64);
+            event.incarnation = 0;
+        }
+        let lifecycle = linear_lifecycle_from_start(start_order, &decisions);
+        Timeline {
+            id: id.into(),
+            parent: Some(parent.into()),
+            from_sequence: Some(from_sequence),
+            branch_seed: Some(branch_seed),
+            lifecycle,
+            decisions,
         }
     }
 
@@ -1917,12 +1988,12 @@ mod tests {
             RunMetadata::new(1, "fixture"),
             vec![clock_event(0, 0), clock_event(1, 1)],
         );
-        bundle.timelines.push(Timeline {
-            id: "mid".into(),
-            parent: Some("main".into()),
-            from_sequence: Some(2),
-            branch_seed: Some(7),
-            decisions: vec![
+        bundle.timelines.push(test_timeline(
+            "mid",
+            "main",
+            2,
+            7,
+            vec![
                 clock_event(2, 999),
                 clock_event(3, 3),
                 clock_event(4, 4),
@@ -1930,14 +2001,14 @@ mod tests {
                 clock_event(6, 6),
                 clock_event(7, 7),
             ],
-        });
-        bundle.timelines.push(Timeline {
-            id: "leaf".into(),
-            parent: Some("mid".into()),
-            from_sequence: Some(4),
-            branch_seed: Some(11),
-            decisions: vec![clock_event(4, 40), clock_event(5, 50)],
-        });
+        ));
+        bundle.timelines.push(test_timeline(
+            "leaf",
+            "mid",
+            4,
+            11,
+            vec![clock_event(4, 40), clock_event(5, 50)],
+        ));
         let mid_protected = bundle.timelines[1].decisions[..2].to_vec();
         let leaf_inherited = bundle.resolved_timeline("leaf").unwrap()[..4].to_vec();
 
@@ -2000,27 +2071,27 @@ mod tests {
             RunMetadata::new(1, "fixture"),
             vec![clock_event(0, 0), clock_event(1, 1)],
         );
-        bundle.timelines.push(Timeline {
-            id: "keeper".into(),
-            parent: Some("main".into()),
-            from_sequence: Some(2),
-            branch_seed: Some(7),
-            decisions: vec![clock_event(2, 999)],
-        });
-        bundle.timelines.push(Timeline {
-            id: "disposable".into(),
-            parent: Some("main".into()),
-            from_sequence: Some(2),
-            branch_seed: Some(8),
-            decisions: vec![clock_event(2, 2), clock_event(3, 3)],
-        });
-        bundle.timelines.push(Timeline {
-            id: "grandchild".into(),
-            parent: Some("disposable".into()),
-            from_sequence: Some(3),
-            branch_seed: Some(9),
-            decisions: vec![clock_event(3, 30)],
-        });
+        bundle.timelines.push(test_timeline(
+            "keeper",
+            "main",
+            2,
+            7,
+            vec![clock_event(2, 999)],
+        ));
+        bundle.timelines.push(test_timeline(
+            "disposable",
+            "main",
+            2,
+            8,
+            vec![clock_event(2, 2), clock_event(3, 3)],
+        ));
+        bundle.timelines.push(test_timeline(
+            "grandchild",
+            "disposable",
+            3,
+            9,
+            vec![clock_event(3, 30)],
+        ));
         bundle
     }
 
@@ -2068,6 +2139,12 @@ mod tests {
             clock_event(4, 4),
             clock_event(5, 5),
         ];
+        let start_order = bundle.timelines[1].lifecycle[0].order;
+        for (index, event) in bundle.timelines[1].decisions.iter_mut().enumerate() {
+            event.order = start_order.saturating_add(1).saturating_add(index as u64);
+        }
+        bundle.timelines[1].lifecycle =
+            linear_lifecycle_from_start(start_order, &bundle.timelines[1].decisions);
         let minimized = minimize_branches(&bundle, &mut |candidate: &TraceBundle| {
             Ok::<_, Infallible>(candidate.timelines.iter().any(|timeline| {
                 timeline
@@ -2149,13 +2226,13 @@ mod tests {
                 sched_event(3, 1),
             ],
         );
-        bundle.timelines.push(Timeline {
-            id: "child".into(),
-            parent: Some("main".into()),
-            from_sequence: Some(2),
-            branch_seed: Some(5),
-            decisions: vec![sched_event(2, 2)],
-        });
+        bundle.timelines.push(test_timeline(
+            "child",
+            "main",
+            2,
+            5,
+            vec![sched_event(2, 2)],
+        ));
         let protected_before = bundle.timelines[0].decisions[..2].to_vec();
         let reduced = reduce_schedule(&bundle, &mut |_candidate: &TraceBundle| {
             Ok::<_, Infallible>(true)
