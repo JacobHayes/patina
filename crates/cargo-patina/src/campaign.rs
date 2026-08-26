@@ -7494,8 +7494,10 @@ mod tests {
     /// scheduler's liveness bound accept.
     #[test]
     fn the_starvation_sweep_is_deterministic_and_actually_sweeps() {
-        let mut spec = CampaignSpec::default();
-        spec.starve = true;
+        let spec = CampaignSpec {
+            starve: true,
+            ..CampaignSpec::default()
+        };
         let value = |flags: &[String], name: &str| -> u64 {
             let at = flags
                 .iter()
@@ -7512,7 +7514,10 @@ mod tests {
             let hash = generation_hash(0, generation);
             let flags = derive_flags(&spec, &hash, "native");
             // Pure: the same generation derives the same configuration.
-            assert_eq!(flags, derive_flags(&spec, &generation_hash(0, generation), "native"));
+            assert_eq!(
+                flags,
+                derive_flags(&spec, &generation_hash(0, generation), "native")
+            );
             let intervals = value(&flags, "--starve");
             let window = value(&flags, "--starve-window");
             let max_len = value(&flags, "--starve-max-len");
@@ -7548,7 +7553,8 @@ mod tests {
     #[test]
     fn starvation_round_trips_through_the_recorded_spec() {
         let mut spec = CampaignSpec::default();
-        spec.apply_json(&serde_json::json!({"starve": true})).unwrap();
+        spec.apply_json(&serde_json::json!({"starve": true}))
+            .unwrap();
         assert!(spec.starve);
         let json = spec_to_json(&spec);
         assert_eq!(json["starve"], serde_json::json!(true));
