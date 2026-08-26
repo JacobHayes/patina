@@ -40,18 +40,16 @@
 //! Files, directories, and symlinks are all carried through the durable
 //! baseline and recomputed on crash with the same namespace-durability rules,
 //! so a symlink is never silently dropped. Per-entry timestamps captured at the
-//! last durability point are restored on reconstruction. Hard links are
-//! modeled at the data level — each surviving name keeps the shared content —
-//! but inode identity (shared `nlink`) is not preserved across a crash.
+//! last durability point are restored on reconstruction. Hard-link groups are
+//! reconstructed as one inode per surviving source inode, so shared `nlink`
+//! identity survives crash recovery.
 //!
 //! - **Open descriptors survive.** A crash rebuilds the image, but it never
 //!   invalidates a descriptor the guest is holding: an open file description is
 //!   the process's own object, and no power loss reaches into a running process
-//!   to close its files. The handle table moves onto the rebuilt image and every
-//!   path a live descriptor names is pinned back into the namespace (with its
-//!   data still rolled back), so a post-crash read or write reports a storage
-//!   failure or rolled-back bytes — never `EBADF`, which would tell the guest it
-//!   has a bug of its own.
+//!   to close its files. The handle table moves onto the rebuilt image. Paths
+//!   whose full parent chain survived keep resolving after the crash; lost
+//!   parent directories are not implicitly resurrected.
 //!
 //! All decisions are a deterministic function of the configured seed and the
 //! exact operation sequence, so identical seeds reproduce identical post-crash
@@ -66,7 +64,7 @@ use patina_dst_abi::{
     EffectError, ErrorCode, Fd, FsDirectoryEntry, FsEntryKind, FsMetadata, OpenFlags, SeekWhence,
 };
 use patina_dst_driver_api::{DriverResult, FsDriver};
-use patina_dst_fs_mem::MemFs;
+use patina_dst_fs_mem::{FsSnapshot, MemFs};
 use patina_dst_rng_seeded::SplitMix64;
 
 /// Granularity at which a torn write reverts on crash.
@@ -144,12 +142,20 @@ struct PendingOp {
     source_committed: bool,
 }
 
+/// A file name captured in the durable baseline.
+#[derive(Clone, Debug)]
+struct BaselineFile {
+    inode: u64,
+    contents: Vec<u8>,
+}
+
 /// A durable filesystem baseline captured at a durability point: the directory
-/// set, file contents, symlink targets, and per-entry timestamps.
+/// set, file contents, file inode identity, symlink targets, and per-entry
+/// timestamps.
 #[derive(Clone, Default)]
 struct Baseline {
     dirs: BTreeSet<String>,
-    files: BTreeMap<String, Vec<u8>>,
+    files: BTreeMap<String, BaselineFile>,
     symlinks: BTreeMap<String, String>,
     times: BTreeMap<String, (u64, u64)>,
 }
@@ -316,6 +322,14 @@ impl CrashFs {
         self.staged_content.clear();
         self.pending.clear();
         self.last_write = None;
+    }
+
+    /// Apply this model's crash recovery and export the reconstructed durable
+    /// image as a restart snapshot. The exported image has no open descriptors;
+    /// a fresh incarnation starts with a clean descriptor table.
+    pub fn crash_and_snapshot(&mut self) -> DriverResult<FsSnapshot> {
+        self.crash()?;
+        Ok(self.live.export_snapshot())
     }
 
     /// Commit the namespace operations of one directory, modeling a directory
@@ -542,14 +556,10 @@ impl CrashFs {
         // A crash cannot invalidate a descriptor the guest is still holding.
         // An open file description is the PROCESS's object; power loss reaches
         // the disk, not the caller's descriptor table, so no real storage
-        // failure turns a valid fd into `EBADF`. The rebuilt image therefore
-        // pins every path a live descriptor names, even one whose creation did
-        // not survive: the name comes back so the descriptor keeps resolving,
-        // while the DATA still rolls back to the durable baseline below. This
-        // matches the stance MemFs already takes for `unlink` (it refuses to
-        // remove an open file rather than model an anonymous inode), and it
-        // keeps the crash plane injecting only failures a real environment can
-        // produce.
+        // failure turns a valid fd into `EBADF`. A name can only be pinned back
+        // into the rebuilt namespace when its full parent chain survived; the
+        // crash model must not silently resurrect lost directories to make a
+        // child fit.
         let mut resurrected: BTreeSet<String> = BTreeSet::new();
         for (path, kind) in self.live.open_entries() {
             let fresh =
@@ -558,26 +568,53 @@ impl CrashFs {
                 resurrected.insert(path);
             }
         }
+        prune_to_surviving_parents(&mut dirs, &mut files, &mut symlinks);
+
+        let mut durable_content_by_inode: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+        for file in self.durable.files.values() {
+            durable_content_by_inode
+                .entry(file.inode)
+                .or_insert_with(|| file.contents.clone());
+        }
+        let mut staged_content_by_inode: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+        let staged_content: Vec<(String, Vec<u8>)> = self
+            .staged_content
+            .iter()
+            .map(|(path, bytes)| (path.clone(), bytes.clone()))
+            .collect();
+        for (path, bytes) in staged_content {
+            if let Some(inode) = self.file_source_inode(&path) {
+                staged_content_by_inode.insert(inode, bytes);
+            }
+        }
 
         // The final unsynced write is eligible for a sub-block partial tear
         // under the byte-granularity policy; every other block still tears
         // wholesale. Captured before the merge loop borrows the rng.
+        let last_write = self.last_write.clone();
         let final_write = match self.policy.torn_granularity {
-            TornGranularity::Byte => self.last_write.clone(),
+            TornGranularity::Byte => last_write.as_ref().and_then(|(path, offset, len)| {
+                self.file_source_inode(path)
+                    .map(|inode| (inode, *offset, offset.saturating_add(*len)))
+            }),
             TornGranularity::Block => None,
         };
-        let mut file_contents: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        let mut file_contents_by_inode: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+        let mut file_paths_by_inode: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
         for path in &files {
-            let baseline = self
-                .staged_content
-                .get(path)
-                .or_else(|| self.durable.files.get(path))
+            let source_inode = self.file_source_inode(path).ok_or_else(|| {
+                EffectError::new(
+                    ErrorCode::InvalidState,
+                    format!("surviving file has no source inode: {path}"),
+                )
+            })?;
+            let baseline = staged_content_by_inode
+                .get(&source_inode)
+                .or_else(|| durable_content_by_inode.get(&source_inode))
                 .cloned()
                 .unwrap_or_default();
-            let partial_region = match &final_write {
-                Some((write_path, offset, len)) if write_path == path => {
-                    Some((*offset, offset.saturating_add(*len)))
-                }
+            let partial_region = match final_write {
+                Some((inode, start, end)) if inode == source_inode => Some((start, end)),
                 _ => None,
             };
             let content = if resurrected.contains(path) {
@@ -595,7 +632,13 @@ impl CrashFs {
                     Err(_) => baseline,
                 }
             };
-            file_contents.insert(path.clone(), content);
+            file_contents_by_inode
+                .entry(source_inode)
+                .or_insert(content);
+            file_paths_by_inode
+                .entry(source_inode)
+                .or_default()
+                .insert(path.clone());
         }
         let mut symlink_targets: BTreeMap<String, String> = BTreeMap::new();
         for path in &symlinks {
@@ -611,19 +654,23 @@ impl CrashFs {
         }
 
         let mut next = MemFs::new();
-        for (path, bytes) in &file_contents {
-            next = next.with_file(path, bytes.clone())?;
-        }
         for dir in &dirs {
-            if dir != "/" {
-                ensure_parents(&mut next, dir)?;
-                if next.metadata(dir).is_err() {
-                    next.create_directory(dir)?;
-                }
+            if dir != "/" && next.metadata(dir).is_err() {
+                next.create_directory(dir)?;
+            }
+        }
+        for (source_inode, paths) in &file_paths_by_inode {
+            let first = paths.iter().next().expect("file group is non-empty");
+            let bytes = file_contents_by_inode
+                .get(source_inode)
+                .expect("file group has content")
+                .clone();
+            next = next.with_file(first, bytes)?;
+            for path in paths.iter().skip(1) {
+                next.link(first, path)?;
             }
         }
         for (path, target) in &symlink_targets {
-            ensure_parents(&mut next, path)?;
             next.symlink(target, path)?;
         }
         // Restore durable timestamps for the surviving baseline entries so
@@ -654,6 +701,15 @@ impl CrashFs {
             return true;
         }
         !self.decide(self.policy.directory_loss_probability)
+    }
+
+    fn file_source_inode(&mut self, path: &str) -> Option<u64> {
+        self.live
+            .metadata(path)
+            .ok()
+            .filter(|metadata| metadata.kind == FsEntryKind::File)
+            .map(|metadata| metadata.ino)
+            .or_else(|| self.durable.files.get(path).map(|file| file.inode))
     }
 
     /// Record a namespace mutation in the pending journal, initially uncommitted
@@ -839,11 +895,12 @@ impl FsDriver for CrashFs {
                 }
             }
             FsEntryKind::File => {
-                if let Some(bytes) = self
-                    .staged_content
-                    .remove(&from)
-                    .or_else(|| self.durable.files.get(&from).cloned())
-                {
+                if let Some(bytes) = self.staged_content.remove(&from).or_else(|| {
+                    self.durable
+                        .files
+                        .get(&from)
+                        .map(|file| file.contents.clone())
+                }) {
                     self.staged_content.insert(to.clone(), bytes);
                 }
             }
@@ -924,6 +981,10 @@ impl FsDriver for CrashFs {
         self.crashes = crashes;
         Ok(())
     }
+
+    fn crash_and_export_restart_snapshot(&mut self) -> DriverResult<Vec<u8>> {
+        Ok(self.crash_and_snapshot()?.encode()?)
+    }
 }
 
 fn byte_at(bytes: &[u8], index: usize) -> u8 {
@@ -952,21 +1013,30 @@ fn survival_set<'a>(
     }
 }
 
-/// Create every missing ancestor directory of `path` in `fs`, so a rebuilt
-/// symlink or directory always has a parent to hang from.
-fn ensure_parents(fs: &mut MemFs, path: &str) -> DriverResult<()> {
-    let mut ancestors = Vec::new();
+/// Remove entries whose parent directories did not survive the crash. A child
+/// name is not independently meaningful without its full parent chain, and
+/// reconstruction must not create implicit ancestor directories just to make a
+/// selected child fit.
+fn prune_to_surviving_parents(
+    dirs: &mut BTreeSet<String>,
+    files: &mut BTreeSet<String>,
+    symlinks: &mut BTreeSet<String>,
+) {
+    let selected_dirs = dirs.clone();
+    dirs.retain(|path| path == "/" || full_parent_chain_survives(path, &selected_dirs));
+    files.retain(|path| full_parent_chain_survives(path, dirs));
+    symlinks.retain(|path| full_parent_chain_survives(path, dirs));
+}
+
+fn full_parent_chain_survives(path: &str, dirs: &BTreeSet<String>) -> bool {
     let mut parent = parent_path(path);
     while parent != "/" {
-        ancestors.push(parent.to_owned());
+        if !dirs.contains(parent) {
+            return false;
+        }
         parent = parent_path(parent);
     }
-    for dir in ancestors.into_iter().rev() {
-        if fs.metadata(&dir).is_err() {
-            fs.create_directory(&dir)?;
-        }
-    }
-    Ok(())
+    dirs.contains("/")
 }
 
 /// Move every entry rooted at `from` to be rooted at `to`.
@@ -1004,7 +1074,8 @@ fn enumerate(fs: &mut MemFs) -> Baseline {
         let entries = fs.read_directory(&dir).unwrap_or_default();
         for entry in entries {
             let child = child_path(&dir, &entry.name);
-            if let Ok(metadata) = fs.metadata(&child) {
+            let metadata = fs.metadata(&child).ok();
+            if let Some(metadata) = metadata {
                 baseline
                     .times
                     .insert(child.clone(), (metadata.atime_nanos, metadata.mtime_nanos));
@@ -1015,8 +1086,16 @@ fn enumerate(fs: &mut MemFs) -> Baseline {
                     stack.push(child);
                 }
                 FsEntryKind::File => {
-                    let content = fs.contents(&child).map(<[u8]>::to_vec).unwrap_or_default();
-                    baseline.files.insert(child, content);
+                    if let Some(metadata) = metadata {
+                        let contents = fs.contents(&child).map(<[u8]>::to_vec).unwrap_or_default();
+                        baseline.files.insert(
+                            child,
+                            BaselineFile {
+                                inode: metadata.ino,
+                                contents,
+                            },
+                        );
+                    }
                 }
                 FsEntryKind::Symlink => {
                     let target = fs.read_link(&child).unwrap_or_default();
@@ -1244,6 +1323,88 @@ mod tests {
         assert_eq!(after.len(), full.len());
         assert!(after.starts_with(b"stable-intervening-"));
         assert_ne!(after, full);
+    }
+
+    #[test]
+    fn crash_and_snapshot_exports_recovered_image_without_handles() {
+        let mut fs = CrashFs::default();
+        let fd = fs
+            .open("/state", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.write(fd, b"stable").unwrap();
+        fs.sync(fd).unwrap();
+        fs.sync_directory("/").unwrap();
+        fs.write(fd, b"-volatile").unwrap();
+
+        let snapshot = fs.crash_and_snapshot().unwrap();
+        let encoded = snapshot.encode().unwrap();
+        assert_eq!(
+            FsSnapshot::decode(&encoded).unwrap().encode().unwrap(),
+            encoded
+        );
+        let mut imported = snapshot.into_memfs();
+        assert_eq!(imported.contents("/state").unwrap(), b"stable");
+        assert_eq!(
+            imported.read(fd, 1).unwrap_err().code,
+            ErrorCode::InvalidHandle
+        );
+        assert_eq!(
+            imported.open("/state", OpenFlags::read_only()).unwrap(),
+            Fd(3)
+        );
+    }
+
+    #[test]
+    fn crash_and_snapshot_preserves_hard_link_inode_identity() {
+        let mut base = MemFs::new().with_file("/a", b"stable").unwrap();
+        base.link("/a", "/b").unwrap();
+        let mut fs = CrashFs::new(base);
+        let fd = fs.open("/a", write_only()).unwrap();
+        fs.write(fd, b"volatile").unwrap();
+
+        let snapshot = fs.crash_and_snapshot().unwrap();
+        let mut imported = snapshot.into_memfs();
+        let a = imported.metadata("/a").unwrap();
+        let b = imported.metadata("/b").unwrap();
+        assert_eq!(a.ino, b.ino);
+        assert_eq!(a.nlink, 2);
+        assert_eq!(b.nlink, 2);
+        assert_eq!(imported.contents("/a").unwrap(), b"stable");
+        assert_eq!(imported.contents("/b").unwrap(), b"stable");
+    }
+
+    #[test]
+    fn crash_prunes_children_whose_parent_chain_was_lost() {
+        let mut fs = CrashFs::builder()
+            .model_directory_durability(true)
+            .directory_loss_probability(1.0)
+            .build()
+            .unwrap();
+        fs.create_directory("/parent").unwrap();
+        fs.create_directory("/parent/child").unwrap();
+        let fd = write(&mut fs, "/parent/child/file", b"data");
+        fs.close(fd).unwrap();
+        fs.symlink("file", "/parent/child/link").unwrap();
+        fs.sync_directory("/parent").unwrap();
+        fs.sync_directory("/parent/child").unwrap();
+
+        fs.crash().unwrap();
+        assert_eq!(
+            fs.metadata("/parent").unwrap_err().code,
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            fs.metadata("/parent/child").unwrap_err().code,
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            fs.metadata("/parent/child/file").unwrap_err().code,
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            fs.metadata("/parent/child/link").unwrap_err().code,
+            ErrorCode::NotFound
+        );
     }
 
     #[test]

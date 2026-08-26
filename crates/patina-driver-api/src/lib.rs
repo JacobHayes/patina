@@ -109,6 +109,16 @@ pub trait FsDriver: Send {
         Err(unsupported_filesystem_operation("crash"))
     }
 
+    /// Recover from a modeled storage crash and export the durable filesystem
+    /// image for a fresh incarnation. Drivers that cannot produce a canonical
+    /// restart snapshot must fail closed; the default deliberately refuses so a
+    /// custom filesystem never silently pretends to support crash restart.
+    fn crash_and_export_restart_snapshot(&mut self) -> DriverResult<Vec<u8>> {
+        Err(unsupported_filesystem_operation(
+            "crash restart snapshot export",
+        ))
+    }
+
     /// End-of-run filesystem fault-injection summary for the default-on vacuity
     /// diagnostic. A wrapper that models fs faults reports its counts; the
     /// default (a driver with no fault model) reports `None` and is never
@@ -923,6 +933,46 @@ pub trait NetDriver: Send {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct MinimalFs;
+
+    impl FsDriver for MinimalFs {
+        fn open(&mut self, _path: &str, _flags: OpenFlags) -> DriverResult<Fd> {
+            Err(EffectError::new(
+                patina_dst_abi::ErrorCode::Denied,
+                "unused",
+            ))
+        }
+
+        fn read(&mut self, _fd: Fd, _max_len: usize) -> DriverResult<Vec<u8>> {
+            Err(EffectError::new(
+                patina_dst_abi::ErrorCode::Denied,
+                "unused",
+            ))
+        }
+
+        fn write(&mut self, _fd: Fd, _bytes: &[u8]) -> DriverResult<usize> {
+            Err(EffectError::new(
+                patina_dst_abi::ErrorCode::Denied,
+                "unused",
+            ))
+        }
+
+        fn close(&mut self, _fd: Fd) -> DriverResult<()> {
+            Err(EffectError::new(
+                patina_dst_abi::ErrorCode::Denied,
+                "unused",
+            ))
+        }
+    }
+
+    #[test]
+    fn restart_snapshot_export_fails_closed_by_default() {
+        let mut filesystem = MinimalFs;
+        let error = filesystem.crash_and_export_restart_snapshot().unwrap_err();
+        assert_eq!(error.code, patina_dst_abi::ErrorCode::Denied);
+        assert!(error.message.contains("crash restart snapshot export"));
+    }
 
     /// The breakdown's rendering is a function of the COUNTS, never of the order
     /// the effects arrived in — a report whose field text depends on arrival

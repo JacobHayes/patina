@@ -355,6 +355,10 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         self.inner.crash()
     }
 
+    fn crash_and_export_restart_snapshot(&mut self) -> DriverResult<Vec<u8>> {
+        self.inner.crash_and_export_restart_snapshot()
+    }
+
     /// Report whenever a knob was live, so the run is self-describing about what
     /// the fault plane did. Deciding whether the numbers are worth printing —
     /// and whether they are vacuous — belongs to the consumer.
@@ -704,6 +708,36 @@ mod tests {
         let (inner, fd) = fs_with_open_file();
         let mut fs = FaultFs::new(inner, seed).short_permille(1000);
         fs.write(fd, b"abcdef").unwrap()
+    }
+
+    struct RestartSnapshotDriver;
+
+    impl FsDriver for RestartSnapshotDriver {
+        fn open(&mut self, _path: &str, _flags: OpenFlags) -> DriverResult<Fd> {
+            Err(EffectError::new(ErrorCode::Denied, "unused"))
+        }
+
+        fn read(&mut self, _fd: Fd, _max_len: usize) -> DriverResult<Vec<u8>> {
+            Err(EffectError::new(ErrorCode::Denied, "unused"))
+        }
+
+        fn write(&mut self, _fd: Fd, _bytes: &[u8]) -> DriverResult<usize> {
+            Err(EffectError::new(ErrorCode::Denied, "unused"))
+        }
+
+        fn close(&mut self, _fd: Fd) -> DriverResult<()> {
+            Err(EffectError::new(ErrorCode::Denied, "unused"))
+        }
+
+        fn crash_and_export_restart_snapshot(&mut self) -> DriverResult<Vec<u8>> {
+            Ok(b"snapshot".to_vec())
+        }
+    }
+
+    #[test]
+    fn restart_snapshot_export_forwards_through_fault_wrapper() {
+        let mut fs = FaultFs::new(RestartSnapshotDriver, 1).error_permille(1000);
+        assert_eq!(fs.crash_and_export_restart_snapshot().unwrap(), b"snapshot");
     }
 
     #[test]

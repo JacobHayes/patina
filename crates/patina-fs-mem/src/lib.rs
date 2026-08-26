@@ -1,8 +1,10 @@
 //! A small deterministic in-memory filesystem driver.
 
 pub mod image;
+pub mod snapshot;
 
 pub use image::{FsImage, FsImageEntry, FsImageError};
+pub use snapshot::{FsSnapshot, FsSnapshotError};
 
 use std::collections::BTreeMap;
 
@@ -102,7 +104,21 @@ impl MemFs {
         let mut snapshot = self.clone();
         snapshot.handles.clear();
         snapshot.descriptions.clear();
+        snapshot.next_fd = 3;
+        snapshot.next_description = 1;
         snapshot
+    }
+
+    /// Export a canonical, versioned restart snapshot. Open descriptors and
+    /// descriptions are deliberately omitted; inode identity, timestamps, names,
+    /// contents, and future inode allocation state are preserved.
+    pub fn export_snapshot(&self) -> FsSnapshot {
+        FsSnapshot::from_memfs(self)
+    }
+
+    /// Import a restart snapshot as a fresh filesystem image with no descriptors.
+    pub fn import_snapshot(snapshot: &FsSnapshot) -> Self {
+        snapshot.into_memfs()
     }
 
     /// The paths a live descriptor currently names, with the entry kind each was
