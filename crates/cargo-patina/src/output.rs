@@ -268,6 +268,10 @@ pub struct RunReport<'a> {
     pub seed: Option<u64>,
     pub coverage: Option<CoverageReport>,
     pub depth: Option<DepthReport>,
+    /// Supervisor-owned native crash-restart facts. These are produced by the
+    /// native parent, not recovered by parsing stderr markers, so JSON consumers
+    /// can reason about restarts structurally.
+    pub crash_restart: Option<serde_json::Value>,
     /// The runtime's own `patina.runfacts/v1` document for this run, when the
     /// facts channel was installed and the run produced one. Read from the
     /// channel, never re-derived from the `PATINA_*_REPORT` stderr lines.
@@ -356,6 +360,7 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
             .depth
             .clone()
             .or_else(|| depth_report_line(&stdout_text, &stderr_text));
+        env.crash_restart = report.crash_restart.clone();
         env.verdicts = extract_verdicts(&stdout_text, &stderr_text);
         // Runtime-owned structured facts, lifted verbatim out of the run's own
         // `patina.runfacts/v1` document. The `PATINA_*_REPORT` lines still print
@@ -834,6 +839,8 @@ pub struct Envelope {
     /// Runtime-detected findings with a `source` attribution (liveness/converge
     /// watchdog, schedule diagnostics).
     runtime_findings: Vec<serde_json::Value>,
+    /// Native crash-restart facts, if the supervisor performed a modeled restart.
+    crash_restart: Option<serde_json::Value>,
     /// Patina's own fail-closed refusal, when patina refused. Absent on a guest's
     /// own abort.
     refusal: Option<Refusal>,
@@ -868,6 +875,7 @@ impl Envelope {
             result_line: None,
             fault_reports: None,
             runtime_findings: Vec::new(),
+            crash_restart: None,
             refusal: None,
             guest_exit: None,
             stdout: None,
@@ -980,6 +988,9 @@ impl Envelope {
                 "runtime_findings".into(),
                 Value::Array(self.runtime_findings.clone()),
             );
+        }
+        if let Some(v) = &self.crash_restart {
+            m.insert("crash_restart".into(), v.clone());
         }
         if let Some(v) = &self.refusal {
             let mut rm = Map::new();
@@ -1193,6 +1204,7 @@ mod tests {
         "config",
         "content_hash",
         "coverage",
+        "crash_restart",
         "depth",
         "exit_code",
         "family",
@@ -1254,6 +1266,11 @@ mod tests {
         );
         env.fault_reports = Some(serde_json::json!({"fs": {"vacuous": false}}));
         env.runtime_findings = vec![serde_json::json!({"source": "liveness"})];
+        env.crash_restart = Some(serde_json::json!({
+            "reached": true,
+            "crash_count": 1,
+            "restart_count": 1
+        }));
         env.refusal = Some(Refusal {
             class: "fingerprint_mismatch".into(),
             message: "trace fingerprint mismatch".into(),
@@ -1300,6 +1317,7 @@ mod tests {
         let json = Envelope::new("run", "ok", 0).to_json();
         assert!(json.get("fault_reports").is_none());
         assert!(json.get("runtime_findings").is_none());
+        assert!(json.get("crash_restart").is_none());
         assert!(json.get("refusal").is_none());
         assert!(json.get("guest_exit").is_none());
     }

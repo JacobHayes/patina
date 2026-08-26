@@ -68,14 +68,16 @@ those verdicts is the question every candidate is judged on. `minimize` also
 shrinks a trace on its own, or the seed and parameters that trigger a failure,
 against an oracle you supply.
 
-**Fault domains** (all seed-driven, off by default, and recorded into the trace
-so replay reproduces them): filesystem crashes at a chosen operation and ordinal,
-write tearing, I/O errors, short writes, and latency; network drop, latency, and
-jitter; name resolution failure and latency; sleep jitter; scheduler preemption
-and task starvation; liveness watchdogs. A *swarm* mode deselects a seeded subset
-of the enabled fault classes per run, so a sweep varies which faults are in play
-rather than always running all of them. Which of these a given verb and family
-accept is registry-defined — do not assume.
+**Fault domains** are seed-driven and off by default. Most are recorded into the
+trace so replay reproduces them: I/O errors, short writes and latency; network drop,
+latency, and jitter; name resolution failure and latency; sleep jitter; scheduler
+preemption and task starvation; liveness watchdogs. The current exception is
+native `--fs-crash-at`: it performs a real fresh-process restart in seeded native
+runs, while record/replay and Cargo/WASI refuse it; campaigns do not draw it.
+Filesystem write tearing is therefore currently meaningful only with that seeded
+native crash selector. A *swarm* mode deselects a seeded subset of enabled fault
+classes per run. Which controls a verb and family accept is registry-defined — do
+not assume.
 
 **The SDK** (`patina-dst`, used as `patina_dst::` in code) instruments a
 system-under-test from the inside, and every macro compiles to a no-op outside

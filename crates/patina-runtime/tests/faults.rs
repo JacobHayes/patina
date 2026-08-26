@@ -9,7 +9,7 @@ use patina_dst_driver_api::{
     ClockFaultReport, CustomOpFaultReport, DnsFaultReport, EntropyFaultReport, FsFaultReport,
     NetFaultReport,
 };
-use patina_dst_runtime::{Context, CrashOp, RuntimeConfig, TornGranularity};
+use patina_dst_runtime::{Context, CrashOp, RuntimeConfig, RuntimeError, TornGranularity};
 use tempfile::tempdir;
 
 fn sync_directory(context: &mut Context, path: &str) {
@@ -37,7 +37,13 @@ fn write_wal_and_reopen(seed: u64, crash: Option<CrashOp>) -> usize {
     // Make the namespace entry durable but do NOT fsync the file data: the
     // record is announced durable but never flushed.
     sync_directory(&mut context, "/");
-    context.fs_close(fd).unwrap();
+    if let Err(RuntimeError::InjectedFsCrash(control)) = context.fs_close(fd) {
+        return control
+            .snapshot
+            .into_memfs()
+            .contents("/commit.log")
+            .map_or(0, <[u8]>::len);
+    }
 
     let fd = context
         .fs_open("/commit.log", OpenFlags::read_only())
@@ -58,185 +64,78 @@ fn crash_at_close_drops_unsynced_records_but_clean_run_keeps_them() {
 }
 
 #[test]
-fn crash_injection_replays_self_contained_without_re_supplying_flags() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("crash.patina");
-
-    let recorded = {
-        let mut context = Context::from_config(
-            RuntimeConfig::record(0, &path, "fault-v1").with_crash_at(CrashOp::Close, 1),
-        )
+fn automatic_crash_returns_uncatchable_restart_control() {
+    let mut context =
+        Context::from_config(RuntimeConfig::seeded(0).with_crash_at(CrashOp::Close, 1)).unwrap();
+    let fd = context
+        .fs_open("/commit.log", OpenFlags::create_truncate_write())
         .unwrap();
-        let fd = context
-            .fs_open("/commit.log", OpenFlags::create_truncate_write())
-            .unwrap();
-        context.fs_write(fd, b"durable-record-0001").unwrap();
-        sync_directory(&mut context, "/");
-        context.fs_close(fd).unwrap();
-        let fd = context
-            .fs_open("/commit.log", OpenFlags::read_only())
-            .unwrap();
-        let bytes = context.fs_read(fd, 4096).unwrap();
-        context.fs_close(fd).unwrap();
-        context.finish().unwrap();
-        bytes.len()
+    context.fs_write(fd, b"durable-record-0001").unwrap();
+    sync_directory(&mut context, "/");
+    let error = context.fs_close(fd).unwrap_err();
+    let RuntimeError::InjectedFsCrash(control) = error else {
+        panic!("expected injected crash control, got {error}");
     };
+    assert_eq!(control.from_incarnation, 0);
+    assert_eq!(control.to_incarnation, 1);
+    assert_eq!(control.consumed.operations, 5);
     assert_eq!(
-        recorded, 0,
-        "the recorded run must observe the dropped record"
+        control
+            .snapshot
+            .into_memfs()
+            .contents("/commit.log")
+            .unwrap_or(b""),
+        b""
     );
-
-    // Replay supplies NO crash flag: the trace's recorded fault configuration is
-    // authoritative, so the injected FsCrash reproduces the loss byte-identically
-    // from the metadata alone.
-    let mut replay = Context::from_config(RuntimeConfig::replay(&path, "fault-v1")).unwrap();
-    let fd = replay
-        .fs_open("/commit.log", OpenFlags::create_truncate_write())
-        .unwrap();
-    replay.fs_write(fd, b"durable-record-0001").unwrap();
-    sync_directory(&mut replay, "/");
-    replay.fs_close(fd).unwrap();
-    let fd = replay
-        .fs_open("/commit.log", OpenFlags::read_only())
-        .unwrap();
-    assert_eq!(replay.fs_read(fd, 4096).unwrap().len(), 0);
-    replay.fs_close(fd).unwrap();
-    replay.finish().unwrap();
-}
-
-#[test]
-fn replay_with_matching_flags_is_still_accepted() {
-    // Explicitly re-supplying the SAME knobs the recording used remains valid —
-    // they match the authoritative trace configuration and are adopted.
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("crash-match.patina");
-    {
-        let mut context = Context::from_config(
-            RuntimeConfig::record(0, &path, "fault-v1").with_crash_at(CrashOp::Close, 1),
-        )
-        .unwrap();
-        let fd = context
-            .fs_open("/commit.log", OpenFlags::create_truncate_write())
-            .unwrap();
-        context.fs_write(fd, b"durable-record-0001").unwrap();
-        sync_directory(&mut context, "/");
-        context.fs_close(fd).unwrap();
-        let fd = context
-            .fs_open("/commit.log", OpenFlags::read_only())
-            .unwrap();
-        context.fs_read(fd, 4096).unwrap();
-        context.fs_close(fd).unwrap();
-        context.finish().unwrap();
-    }
-    let mut replay = Context::from_config(
-        RuntimeConfig::replay(&path, "fault-v1").with_crash_at(CrashOp::Close, 1),
-    )
-    .unwrap();
-    let fd = replay
-        .fs_open("/commit.log", OpenFlags::create_truncate_write())
-        .unwrap();
-    replay.fs_write(fd, b"durable-record-0001").unwrap();
-    sync_directory(&mut replay, "/");
-    replay.fs_close(fd).unwrap();
-    let fd = replay
-        .fs_open("/commit.log", OpenFlags::read_only())
-        .unwrap();
-    assert_eq!(replay.fs_read(fd, 4096).unwrap().len(), 0);
-    replay.fs_close(fd).unwrap();
-    replay.finish().unwrap();
 }
 
 #[test]
 fn replay_with_a_different_crash_point_fails_closed() {
     let directory = tempdir().unwrap();
-    let path = directory.path().join("crash-mismatch.patina");
-
-    // Record a crash pinned to the first close.
+    let path = directory.path().join("no-crash.patina");
     {
-        let mut context = Context::from_config(
-            RuntimeConfig::record(0, &path, "fault-v1").with_crash_at(CrashOp::Close, 1),
-        )
-        .unwrap();
+        let mut context =
+            Context::from_config(RuntimeConfig::record(0, &path, "fault-v1")).unwrap();
         let fd = context
             .fs_open("/commit.log", OpenFlags::create_truncate_write())
             .unwrap();
         context.fs_write(fd, b"durable-record-0001").unwrap();
-        sync_directory(&mut context, "/");
-        context.fs_close(fd).unwrap();
-        let fd = context
-            .fs_open("/commit.log", OpenFlags::read_only())
-            .unwrap();
-        context.fs_read(fd, 4096).unwrap();
-        context.fs_close(fd).unwrap();
         context.finish().unwrap();
     }
-
-    // Replay explicitly supplying a DIFFERENT crash point (second close). The
-    // trace's stored configuration is authoritative, so the conflicting flag is
-    // rejected fail-closed as the runtime is built — before any operation runs —
-    // rather than silently running a different fault schedule.
     let conflicting = Context::from_config(
         RuntimeConfig::replay(&path, "fault-v1").with_crash_at(CrashOp::Close, 2),
     );
-    assert!(
-        conflicting.is_err(),
-        "replay with a conflicting crash point must fail closed, got a runtime"
-    );
+    assert!(conflicting.is_err());
 }
 
 #[test]
-fn byte_granularity_crash_records_a_torn_image_and_replays_self_contained() {
-    // A byte-granularity crash records the torn (partial) final-write image, and
-    // a flag-free replay reproduces the same bytes from the trace metadata alone
-    // — the sub-block model round-tripping through record/replay.
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("torn.patina");
-
-    // Durable baseline, then an unsynced overwrite crashed part-way through.
-    // The crash fires right after the second write, invalidating that handle, so
-    // the stale fd is not closed — the modeled process restarts and reopens.
-    fn drive(context: &mut Context) -> Vec<u8> {
-        let fd = context
-            .fs_open("/db", OpenFlags::create_truncate_write())
-            .unwrap();
-        context.fs_write(fd, &[b'A'; 4096]).unwrap();
-        context.fs_sync(fd).unwrap();
-        sync_directory(context, "/");
-        // The final unsynced write; the injected crash fires immediately after.
-        context.fs_write(fd, &[b'B'; 4096]).unwrap();
-        let fd = context.fs_open("/db", OpenFlags::read_only()).unwrap();
-        let bytes = context.fs_read(fd, 8192).unwrap();
-        context.fs_close(fd).unwrap();
-        bytes
-    }
-
-    let recorded = {
-        let mut context = Context::from_config(
-            RuntimeConfig::record(7, &path, "fault-v1")
-                .with_crash_at(CrashOp::Write, 2)
-                .with_fs_torn_granularity(TornGranularity::Byte),
-        )
+fn byte_granularity_crash_exports_a_torn_snapshot() {
+    let mut context = Context::from_config(
+        RuntimeConfig::seeded(7)
+            .with_crash_at(CrashOp::Write, 2)
+            .with_fs_torn_granularity(TornGranularity::Byte),
+    )
+    .unwrap();
+    let fd = context
+        .fs_open("/db", OpenFlags::create_truncate_write())
         .unwrap();
-        let bytes = drive(&mut context);
-        context.finish().unwrap();
-        bytes
+    context.fs_write(fd, &[b'A'; 4096]).unwrap();
+    context.fs_sync(fd).unwrap();
+    sync_directory(&mut context, "/");
+    let error = context.fs_write(fd, &[b'B'; 4096]).unwrap_err();
+    let RuntimeError::InjectedFsCrash(control) = error else {
+        panic!("expected injected crash control, got {error}");
     };
-    // The reconstructed image is a genuine partial tear: some live 'B' bytes
-    // survived and some durable 'A' bytes remain, so it differs from BOTH the
-    // durable baseline and the fully-applied write.
-    assert!(recorded.contains(&b'B'), "no live prefix survived");
-    assert!(recorded.contains(&b'A'), "no durable suffix remained");
-    assert_ne!(recorded, vec![b'A'; 4096]);
-    assert_ne!(recorded, vec![b'B'; 4096]);
-
-    // Flag-free replay reproduces the torn image byte-for-byte from the trace.
-    let mut replay = Context::from_config(RuntimeConfig::replay(&path, "fault-v1")).unwrap();
-    let replayed = drive(&mut replay);
-    replay.finish().unwrap();
-    assert_eq!(
-        replayed, recorded,
-        "flag-free replay did not reproduce the torn image"
-    );
+    let recovered = control
+        .snapshot
+        .into_memfs()
+        .contents("/db")
+        .unwrap()
+        .to_vec();
+    assert!(recovered.contains(&b'B'), "no live prefix survived");
+    assert!(recovered.contains(&b'A'), "no durable suffix remained");
+    assert_ne!(recovered, vec![b'A'; 4096]);
+    assert_ne!(recovered, vec![b'B'; 4096]);
 }
 
 /// Sleep for `duration`, returning the virtual monotonic time afterward.

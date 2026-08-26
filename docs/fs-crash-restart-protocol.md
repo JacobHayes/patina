@@ -1,6 +1,6 @@
 # Filesystem crash-restart protocol
 
-This note pins the Phase 2 protocol surface for turning `--fs-crash-at` into a crash boundary in later runtime work. It does not claim the supervisor relaunch path is wired yet.
+This note pins the crash-restart protocol surface for `--fs-crash-at`. Native seeded runs use this path today; native record/replay lifecycle assembly, WASI restart, and cargo-family restart still refuse by name rather than falling back to rollback-and-continue.
 
 ## Trace contract
 
@@ -38,6 +38,8 @@ Non-crash v1-v4 traces migrate to v5 by adding a linear `Start(0)` / `End(0)` li
 
 The current seal is deliberately exposed as a `seal` / `open` API with a `HandoffSealKey`. It is an integrity check for supervisor-controlled bytes, not an HMAC claim and not a guest-authentication boundary. `open` validates magic, version, declared length, exact trailing bytes, seal, snapshot digest, metadata invariants, and nested `FsSnapshot::decode` before returning a verified handoff.
 
-## Not wired yet
+## Wired surface and remaining boundary
 
-The runtime still needs a later phase to terminate the current guest incarnation, export the handoff from the crash filesystem, launch a fresh process/runtime incarnation with clean descriptor state, and replay/record the lifecycle markers through the supervisor. Until that phase lands, existing CLI crash behavior is intentionally not widened in this protocol-only change.
+For native seeded runs, the runtime turns a reached selector into an internal uncatchable termination control after the selected successful boundary operation. The shim seals the handoff and terminates with `_exit`; the supervisor validates the handoff and starts exactly one fresh incarnation with the snapshot as its base image, clean descriptor state, and the crash selector removed. A selector that is never reached and a corrupt handoff are named nonzero errors.
+
+Record/replay assembly of the v5 lifecycle markers is not wired in this slice. Native `--record`/`replay` with `--fs-crash-at`, WASI `--fs-crash-at`, and cargo-family `--fs-crash-at` refuse explicitly instead of running the old in-process rollback-and-continue model.

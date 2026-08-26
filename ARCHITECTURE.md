@@ -241,7 +241,7 @@ External controls include:
 - liveness oracles (`--liveness-watchdog`, `--converge-within`);
 - simple key/value parameters (`--param`, exposed through `Context::param`).
 
-`--fs-crash-at` has a v5 trace/handoff protocol for crash-boundary restart evidence, but the CLI/runtime relaunch path is not wired in this phase. Until that later runtime work lands, do not cite `--fs-crash-at` CLI runs as restart/crash-recovery evidence. Targeted live I/O failure remains the `--fs-error-permille` fault class and does not roll the image back.
+On native seeded runs, `--fs-crash-at` is a crash boundary: the selected successful open/write/write_at/sync/close call records its ordinary result, the runtime exports a recovered `FsSnapshot`, the shim writes a sealed handoff on a supervisor-owned descriptor and exits via `_exit`, and the native supervisor starts one fresh incarnation with clean descriptors and the crash selector consumed. Cargo-family and WASI runs refuse `--fs-crash-at` until they have equivalent restart semantics. Native record/replay of crash-restart lifecycle traces is still fail-closed by name rather than falling back to rollback-and-continue. Targeted live I/O failure remains the `--fs-error-permille` fault class and does not roll the image back.
 
 Named scenario/profile selection remains a planned experiment-plane convenience.
 

@@ -171,9 +171,9 @@ pub struct CampaignSpec {
     /// WHICH AXES SCALE, AND IN WHICH DIRECTION. This is the interesting half,
     /// because the policy's three fields do not all point the same way:
     ///
-    /// * HOW OFTEN A GENERATION STARVES AT ALL scales, through the same kind of
-    ///   gate as the crash band's — [`starve_band_fires`], on its own claimed
-    ///   band byte so the decision is independent of the policy's shape. It is
+    /// * HOW OFTEN A GENERATION STARVES AT ALL scales, through
+    ///   [`starve_band_fires`], on its own claimed band byte so the decision is
+    ///   independent of the policy's shape. It is
     ///   the dominant lever and the honest one: a generation that does not starve
     ///   is still a full sample of the guest under every other knob the campaign
     ///   is sweeping, which is more than a wedged one gives.
@@ -238,15 +238,14 @@ pub struct CampaignSpec {
     /// arithmetic bit-exact under any rounding mode, and keeps the JSON spec
     /// round-trip exact rather than float-formatted.
     ///
-    /// WHAT IT DOES NOT TOUCH, and why (see [`scale_intensity`] and
-    /// [`crash_band_fires`]): the bands that pick a fault's SHAPE rather than its
-    /// intensity. `--fs-torn-granularity` is a durability MODEL, not a rate;
-    /// `--net-tcp-buffer-bytes` is a capacity where a SMALLER value is the
-    /// harsher one, so scaling it down would do the opposite of what the operator
-    /// asked; and `--buggify`/`--sched-pct`/`--swarm` configure exploration of the
-    /// guest's own cooperative sites rather than injecting an environment fault.
-    /// The crash band has no intensity to scale either — an ordinal is a place,
-    /// not a rate — so the scale governs how OFTEN a generation crashes at all.
+    /// WHAT IT DOES NOT TOUCH, and why (see [`scale_intensity`]): the bands that
+    /// pick a fault's SHAPE rather than its intensity. `--net-tcp-buffer-bytes` is
+    /// a capacity where a SMALLER value is the harsher one, so scaling it down
+    /// would do the opposite of what the operator asked; and
+    /// `--buggify`/`--sched-pct`/`--swarm` configure exploration of the guest's own
+    /// cooperative sites rather than injecting an environment fault. Crash/torn
+    /// generation is currently suspended altogether because campaign record/replay
+    /// cannot yet represent native crash restart lifecycle.
     pub fault_scale_permille: u64,
     /// The DNS host table (`NAME=ADDR` entries) every generation runs with.
     ///
@@ -3667,19 +3666,12 @@ mod gen_byte {
 
     pub(super) const BUGGIFY_ACTIVATION: usize = 8;
     pub(super) const BUGGIFY_FIRE: usize = 9;
-    /// Whether this generation injects a filesystem crash at all. Only ever
-    /// consulted below full `--fault-scale-permille`: at full scale the gate is
-    /// unconditionally open, which is what keeps the default band unchanged.
-    pub(super) const FS_CRASH_FIRE: usize = 10;
     pub(super) const SCHED_PCT_DEPTH: usize = 11;
     pub(super) const NET_DROP: usize = 12;
     pub(super) const SLEEP_JITTER_HI: usize = 13;
     pub(super) const FS_ERROR: usize = 14;
     pub(super) const FS_SHORT: usize = 15;
     pub(super) const FS_LATENCY_HI: usize = 16;
-    pub(super) const FS_CRASH_OP: usize = 17;
-    pub(super) const FS_CRASH_ORDINAL: usize = 18;
-    pub(super) const FS_TORN_GRANULARITY: usize = 19;
     pub(super) const NET_LATENCY: usize = 20;
     pub(super) const DNS_FAIL: usize = 21;
     pub(super) const DNS_LATENCY_HI: usize = 22;
@@ -3747,15 +3739,11 @@ mod gen_byte {
 /// bypassed the table with a literal index.
 fn campaign_band(knob: FaultKnob) -> Option<&'static [usize]> {
     match knob {
-        // The crash band draws three times: whether this generation crashes at
-        // all (the `--fault-scale-permille` gate — always open at full scale), an
-        // op class, and a low ordinal.
-        FaultKnob::FsCrashAt => Some(&[
-            gen_byte::FS_CRASH_OP,
-            gen_byte::FS_CRASH_ORDINAL,
-            gen_byte::FS_CRASH_FIRE,
-        ]),
-        FaultKnob::FsTornGranularity => Some(&[gen_byte::FS_TORN_GRANULARITY]),
+        // Suspended until crash-restart lifecycle record/replay lands. Campaign
+        // generations are recorded and replayed for minimization; emitting native
+        // seeded-only --fs-crash-at here would make those replay artifacts fail by
+        // design, and emitting it on WASI/Cargo would hit their explicit refusal.
+        FaultKnob::FsCrashAt | FaultKnob::FsTornGranularity => None,
         FaultKnob::FsErrorPermille => Some(&[gen_byte::FS_ERROR]),
         FaultKnob::FsShortPermille => Some(&[gen_byte::FS_SHORT]),
         FaultKnob::FsLatencyNanos => Some(&[gen_byte::FS_LATENCY_HI]),
@@ -3797,6 +3785,21 @@ fn campaign_band(knob: FaultKnob) -> Option<&'static [usize]> {
 /// would only catch if someone remembered to update its list by hand.
 #[cfg(test)]
 const BAND_WAIVERS: &[(FaultKnob, &str)] = &[
+    (
+        FaultKnob::FsCrashAt,
+        concat!(
+            "temporarily suspended: campaign generations rely on record/replay, ",
+            "while crash-restart is currently native seeded-only and other ",
+            "families/refined replay modes refuse --fs-crash-at by name"
+        ),
+    ),
+    (
+        FaultKnob::FsTornGranularity,
+        concat!(
+            "paired with --fs-crash-at: torn granularity has no effect without ",
+            "the crash selector, so it stays suspended with crash generation"
+        ),
+    ),
     (
         FaultKnob::NetPartition,
         "topology-shaped: a partition names virtual addresses the guest actually \
@@ -3968,29 +3971,11 @@ fn scale_intensity(value: u64, scale_permille: u64) -> u64 {
     (value * scale_permille + FAULT_SCALE_FULL / 2) / FAULT_SCALE_FULL
 }
 
-/// Whether this generation injects a filesystem crash at all.
-///
-/// The crash band is the one fault the scale cannot dampen by magnitude: an
-/// `open:3` is a PLACE in the guest's I/O sequence, not a rate, and there is no
-/// "milder" crash. Scaling only the rate knobs and leaving this alone would hand
-/// a rare-fault campaign a torn filesystem and an invalidated descriptor table in
-/// EVERY generation — the single harshest fault in the set, at full intensity,
-/// under a flag that says the opposite. So the scale governs the one dimension a
-/// crash has: how often a generation crashes at all.
-///
-/// At `FAULT_SCALE_FULL` the comparison is `byte * 1000 < 256_000`, true for all
-/// 256 byte values, so the gate is unconditionally open and the default band is
-/// unchanged. Its own claimed hash byte, so the decision is independent of the
-/// op-class and ordinal draws rather than correlated with them.
-fn crash_band_fires(hash: &[u8; GEN_BAND_BYTES], scale_permille: u64) -> bool {
-    u64::from(band_byte(hash, FaultKnob::FsCrashAt, 2)) * FAULT_SCALE_FULL < scale_permille * 256
-}
-
 /// Whether this generation runs a starvation policy at all.
 ///
-/// The dominant lever of `--starve-scale-permille`, and the analogue of the
-/// crash band's gate. Dampening the policy's fields alone would still hand every
-/// generation a hold: the guest's exposure to the one exploration policy that
+/// The dominant lever of `--starve-scale-permille`. Dampening the policy's
+/// fields alone would still hand every generation a hold: the guest's exposure
+/// to the one exploration policy that
 /// can WEDGE it would stay at 100% of the sweep under a flag that says the
 /// opposite. Gating the whole policy is what makes a dampened campaign spend its
 /// budget on runs that finish, and it is not a loss of exploration — an
@@ -4061,33 +4046,9 @@ fn derive_flags(spec: &CampaignSpec, hash: &[u8; 32], family: &'static str) -> V
                 hi: fs_latency_hi,
             },
         );
-        // Seed-drawn crash PLACEMENT, the rate-based finder the point-only
-        // `--fs-crash-at` never gave durability testing: the generation hash picks
-        // the op class and a low ordinal, so successive generations tear the
-        // filesystem at different points in the guest's I/O sequence. Ordinals stay
-        // in [1, 8] because a crash that never fires (an ordinal past the guest's
-        // op count) explores nothing.
-        // Gated by the fault scale (`crash_band_fires`): at full scale every
-        // generation crashes, as it always has; below it, proportionally fewer do.
-        if crash_band_fires(hash, scale) {
-            let crash_op = ["open", "write", "sync", "close"]
-                [usize::from(band_byte(hash, FaultKnob::FsCrashAt, 0) % 4)];
-            let crash_ordinal = 1 + u64::from(band_byte(hash, FaultKnob::FsCrashAt, 1) % 8);
-            push_run_flag(
-                &mut flags,
-                "--fs-crash-at",
-                RunValue::Text(format!("{crash_op}:{crash_ordinal}")),
-            );
-        }
-        // Half the generations tear at sub-block byte granularity, the harder
-        // durability model to survive.
-        if band_byte(hash, FaultKnob::FsTornGranularity, 0) % 2 == 0 {
-            push_run_flag(
-                &mut flags,
-                "--fs-torn-granularity",
-                RunValue::Text("byte".to_string()),
-            );
-        }
+        // Crash-restart generation is deliberately suspended until v5 lifecycle
+        // record/replay is wired. Keep explicit native seeded crash coverage in
+        // the e2e suite; campaigns must not auto-draw a flag they cannot replay.
         let drop = scale_intensity(
             u64::from(band_byte(hash, FaultKnob::NetDropPermille, 0)) * 200 / 255, // [0, 200] permille
             scale,
@@ -6893,11 +6854,10 @@ fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
     ));
 
     // (3) IT ACTUALLY DAMPENS. The point of the flag: the summed injected rate
-    // across a sweep must fall by roughly the scale, and the crash band — which
-    // fires in EVERY generation at full scale — must fire in only a few.
-    let rate_of = |spec: &CampaignSpec| -> (u64, usize) {
+    // across a sweep must fall by roughly the scale. Crash-restart is not part of
+    // the campaign band while lifecycle record/replay is unsupported.
+    let rate_of = |spec: &CampaignSpec| -> u64 {
         let mut total = 0;
-        let mut crashes = 0;
         for generation in 0..256u64 {
             let flags = derive_flags(spec, &generation_hash(0, generation), "native");
             for knob in [
@@ -6910,22 +6870,16 @@ fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
                     total += flags[index + 1].parse::<u64>().unwrap_or(0);
                 }
             }
-            if flags.iter().any(|f| f == "--fs-crash-at") {
-                crashes += 1;
-            }
         }
-        (total, crashes)
+        total
     };
-    let (full_rate, full_crashes) = rate_of(&full);
-    let (low_rate, low_crashes) = rate_of(&spec);
-    let dampened = low_rate * 50 < full_rate && full_crashes == 256 && low_crashes < 16;
+    let full_rate = rate_of(&full);
+    let low_rate = rate_of(&spec);
+    let dampened = low_rate * 50 < full_rate;
     out.push((
         "a-low-scale-makes-the-fault-plane-rare",
         dampened,
-        format!(
-            "summed permille {full_rate} -> {low_rate}, crashing generations \
-             {full_crashes} -> {low_crashes} (of 256)"
-        ),
+        format!("summed permille {full_rate} -> {low_rate}; crash-restart band suspended"),
     ));
 
     // (4) RECORDED IN THE OUT-DIR SPEC, and round-tripped losslessly through the
@@ -7637,7 +7591,6 @@ mod tests {
             "--fs-error-permille",
             "--fs-short-permille",
             "--fs-latency-nanos",
-            "--fs-crash-at",
             "--net-drop-permille",
             "--net-latency-nanos",
             "--sleep-jitter-nanos",
@@ -7647,15 +7600,14 @@ mod tests {
         }
     }
 
-    /// The scale dampens INTENSITY and nothing else. The two shape bands are the
-    /// ones that would be actively wrong to scale: `--fs-torn-granularity` is a
-    /// durability model (there is no "10% of a byte tear"), and
-    /// `--net-tcp-buffer-bytes` is a capacity whose SMALL end is the harsh one, so
-    /// multiplying it down would make a rare-fault campaign harsher than the
-    /// default it was asked to be gentler than. Pinned here so a later "scale
-    /// everything uniformly" edit has to argue with a test.
+    /// The scale dampens INTENSITY and nothing else. The TCP buffer shape band is
+    /// actively wrong to scale: `--net-tcp-buffer-bytes` is a capacity whose SMALL
+    /// end is the harsh one, so multiplying it down would make a rare-fault
+    /// campaign harsher than the default it was asked to be gentler than.
+    /// Crash/torn-write generation is separately suspended until lifecycle
+    /// record/replay lands.
     #[test]
-    fn the_fault_scale_leaves_the_shape_bands_alone() {
+    fn the_fault_scale_leaves_the_tcp_buffer_shape_band_alone() {
         let at = |permille: u64, generation: u64| {
             derive_flags(
                 &CampaignSpec {
@@ -7673,7 +7625,6 @@ mod tests {
                 .position(|f| f == name)
                 .map(|index| flags[index + 1].clone())
         };
-        let mut torn_seen = false;
         for generation in 0..64 {
             let full = at(FAULT_SCALE_FULL, generation);
             let low = at(1, generation);
@@ -7683,18 +7634,7 @@ mod tests {
                 "generation {generation}: the TCP buffer capacity must not be scaled — \
                  a smaller buffer is the HARSHER setting"
             );
-            let torn = |flags: &[String]| flags.iter().any(|f| f == "--fs-torn-granularity");
-            assert_eq!(
-                torn(&full),
-                torn(&low),
-                "generation {generation}: torn-write granularity is a model, not an intensity"
-            );
-            torn_seen |= torn(&full);
         }
-        assert!(
-            torn_seen,
-            "the torn-granularity band never fired; nothing was proven"
-        );
     }
 
     /// The direction pin, and the reason this dial needed one where the fault
@@ -7915,44 +7855,22 @@ mod tests {
     }
 
     #[test]
-    fn the_crash_placement_band_varies_the_op_class_and_ordinal_across_generations() {
-        // The fs-durability FINDER: `--fs-crash-at` is point-only, so without a
-        // seed-drawn placement band a campaign tears the filesystem at the same
-        // spot every generation (or, before this band, never). Successive
-        // generations must reach several op classes and several ordinals.
+    fn campaign_fault_bands_do_not_emit_crash_restart_until_lifecycle_replay_lands() {
         let spec = CampaignSpec {
             faults: true,
             ..CampaignSpec::default()
         };
-        let mut placements = BTreeSet::new();
-        let mut ops = BTreeSet::new();
-        for generation in 0..64 {
-            let flags = derive_flags(&spec, &generation_hash(0, generation), "native");
-            let index = flags
-                .iter()
-                .position(|f| f == "--fs-crash-at")
-                .expect("crash placement band");
-            let spec_text = flags[index + 1].clone();
-            let (op, ordinal) = spec_text.split_once(':').expect("op:ordinal");
-            assert!(
-                (1..=8).contains(&ordinal.parse::<u64>().expect("ordinal")),
-                "ordinal {ordinal} outside the firing band"
-            );
-            ops.insert(op.to_string());
-            placements.insert(spec_text);
+        for family in ["native", "wasi", "cargo"] {
+            for generation in 0..64 {
+                let flags = derive_flags(&spec, &generation_hash(0, generation), family);
+                assert!(
+                    !flags
+                        .iter()
+                        .any(|f| f == "--fs-crash-at" || f == "--fs-torn-granularity"),
+                    "{family} generation {generation} unexpectedly emitted crash restart flags: {flags:?}"
+                );
+            }
         }
-        assert_eq!(
-            ops,
-            ["close", "open", "sync", "write"]
-                .into_iter()
-                .map(String::from)
-                .collect::<BTreeSet<_>>(),
-            "the band must reach every crash op class"
-        );
-        assert!(
-            placements.len() > 8,
-            "crash placement barely varied: {placements:?}"
-        );
     }
 
     #[test]
@@ -8574,8 +8492,6 @@ mod tests {
         assert_eq!(
             banded,
             vec![
-                "--fs-crash-at",
-                "--fs-torn-granularity",
                 "--fs-error-permille",
                 "--fs-short-permille",
                 "--fs-latency-nanos",
@@ -8603,7 +8519,15 @@ mod tests {
             .filter(|knob| campaign_band(**knob).is_none())
             .map(|knob| knob.meta().flag)
             .collect();
-        assert_eq!(inert, vec!["--net-partition", "--dns-entry"]);
+        assert_eq!(
+            inert,
+            vec![
+                "--fs-crash-at",
+                "--fs-torn-granularity",
+                "--net-partition",
+                "--dns-entry"
+            ]
+        );
     }
 
     /// The band-or-waiver gate: every `FaultKnob` must have EITHER a real

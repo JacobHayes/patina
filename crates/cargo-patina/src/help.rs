@@ -432,7 +432,7 @@ const FAULT_FLAGS: &[Flag] = &[
         "--fs-crash-at",
         None,
         Value::Required("SPEC", Kind::CrashSpec),
-        "Inject a filesystem crash after the Nth boundary op: open|write|sync|close[:N] (bare = :1).",
+        "Native seeded only: terminate/restart after the Nth successful fs boundary op: open|write|sync|close[:N] (bare = :1).",
         false,
     ),
     f(
@@ -1684,7 +1684,7 @@ refused by name.",
                     "--fault-scale-permille",
                     None,
                     Value::Required("N", Kind::Permille),
-                    "Dampen every --faults intensity band to N per-mille of its default (default 1000 = the tuned aggressive bands; 10 = a hundredfold rarer, the regime where the workload runs to completion and only unusual paths are faulted). Also gates how often a generation injects an fs crash. Shape bands (torn-write granularity, TCP buffer size) and the cooperative-SUT knobs are not intensity and are left alone.",
+                    "Dampen every --faults intensity band to N per-mille of its default (default 1000 = the tuned aggressive bands; 10 = a hundredfold rarer, the regime where the workload runs to completion and only unusual paths are faulted). Crash/torn-write generation is suspended until lifecycle record/replay lands. Shape bands such as TCP buffer size and the cooperative-SUT knobs are not intensity and are left alone.",
                     false,
                 ),
                 f(

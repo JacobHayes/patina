@@ -91,14 +91,14 @@ use patina_dst_abi::{
 use patina_dst_driver_api::{ClockDriver, EntropyDriver, FsDriver, NetDriver, SchedulerDriver};
 use patina_dst_fs_crash::CrashFs;
 pub use patina_dst_fs_crash::TornGranularity;
-use patina_dst_fs_mem::MemFs;
+use patina_dst_fs_mem::{FsSnapshot, MemFs};
 use patina_dst_net_sim::SimNet;
 use patina_dst_rng_seeded::{SeededEntropy, SplitMix64, domain_seed, fault_domain};
 use patina_dst_sched_det::{DetScheduler, PctConfig, SchedulePolicy, StarvationConfig};
 use patina_dst_time_virtual::VirtualClock;
 pub use patina_dst_trace::MAX_TRACE_BYTES;
 use patina_dst_trace::{
-    BranchSession, Recorder, Replayer, RunMetadata, TraceBundle, TraceError,
+    BranchSession, HandoffConsumedState, Recorder, Replayer, RunMetadata, TraceBundle, TraceError,
     abandoned_trace_marker, resource_limit_infra_line,
 };
 use patina_dst_wrapper_fault::FaultFs;
@@ -149,6 +149,18 @@ pub const ENV_DEPTH_REPORT: &str = "PATINA_DEPTH_REPORT";
 /// The image's hash is folded into the run fingerprint, so replay rejects a
 /// different corpus. Off when unset.
 pub const ENV_FS_IMAGE_FD: &str = "PATINA_FS_IMAGE_FD";
+/// Supervisor-owned descriptor the native shim writes a crash-restart handoff to
+/// when `--fs-crash-at` fires. Only the native supervisor sets it; ordinary
+/// guest code never sees it after the startup scrub.
+pub const ENV_HANDOFF_FD: &str = "PATINA_HANDOFF_FD";
+/// Hex-encoded 32-byte supervisor key used by the native shim to seal the
+/// crash-restart handoff written to [`ENV_HANDOFF_FD`].
+pub const ENV_HANDOFF_KEY: &str = "PATINA_HANDOFF_KEY";
+/// Supervisor-owned descriptor containing an encoded [`patina_dst_fs_mem::FsSnapshot`]
+/// used to seed a fresh native incarnation after a modeled crash.
+pub const ENV_RESTART_SNAPSHOT_FD: &str = "PATINA_RESTART_SNAPSHOT_FD";
+/// Zero-based process incarnation identifier for native crash-restart runs.
+pub const ENV_INCARNATION: &str = "PATINA_INCARNATION";
 pub const ENV_FINGERPRINT: &str = "PATINA_FINGERPRINT";
 /// Deferred-initialization flag for the shim-backed harness (see
 /// `patina-dst-harness`, USAGE-MODES.md startup Option B). When present (`=1`)
@@ -616,6 +628,17 @@ pub enum CrashOp {
     Close,
 }
 
+impl fmt::Display for CrashOp {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Open => "open",
+            Self::Write => "write",
+            Self::Sync => "sync",
+            Self::Close => "close",
+        })
+    }
+}
+
 /// Where a filesystem crash is injected: after the `ordinal`-th (1-based)
 /// occurrence of `op`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -943,6 +966,9 @@ pub struct RuntimeConfig {
     /// reaches no recorded byte, is never fingerprinted, and is never reconciled
     /// on replay.
     facts_path: Option<std::path::PathBuf>,
+    /// Native crash-restart incarnation id. Direct/cargo/WASI contexts stay at 0.
+    incarnation: u64,
+    require_crash_selector_reached: bool,
 }
 
 impl RuntimeConfig {
@@ -965,6 +991,8 @@ impl RuntimeConfig {
             sud: None,
             tsc: None,
             facts_path: None,
+            incarnation: 0,
+            require_crash_selector_reached: false,
         }
     }
 
@@ -987,6 +1015,8 @@ impl RuntimeConfig {
             sud: None,
             tsc: None,
             facts_path: None,
+            incarnation: 0,
+            require_crash_selector_reached: false,
         }
     }
 
@@ -1014,6 +1044,8 @@ impl RuntimeConfig {
             sud: None,
             tsc: None,
             facts_path: None,
+            incarnation: 0,
+            require_crash_selector_reached: false,
         }
     }
 
@@ -1042,6 +1074,8 @@ impl RuntimeConfig {
             sud: None,
             tsc: None,
             facts_path: None,
+            incarnation: 0,
+            require_crash_selector_reached: false,
         }
     }
 
@@ -1071,6 +1105,8 @@ impl RuntimeConfig {
             sud: None,
             tsc: None,
             facts_path: None,
+            incarnation: 0,
+            require_crash_selector_reached: false,
         }
     }
 
@@ -1106,6 +1142,8 @@ impl RuntimeConfig {
             sud: None,
             tsc: None,
             facts_path: None,
+            incarnation: 0,
+            require_crash_selector_reached: false,
         }
     }
 
@@ -1936,6 +1974,16 @@ impl RuntimeConfig {
         &self.mode
     }
 
+    pub fn with_incarnation(mut self, incarnation: u64) -> Self {
+        self.incarnation = incarnation;
+        self
+    }
+
+    pub fn require_crash_selector_reached(mut self) -> Self {
+        self.require_crash_selector_reached = true;
+        self
+    }
+
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
     }
@@ -2471,6 +2519,7 @@ impl RuntimeBuilder {
 
         Ok(Context {
             root_seed,
+            compatibility_fingerprint: self.config.fingerprint.clone(),
             step_budget: self.config.step_budget,
             steps: 0,
             params: self.config.params,
@@ -2491,6 +2540,8 @@ impl RuntimeBuilder {
             crash_at: self.config.faults.fs.crash_at,
             crash_counts: CrashCounts::default(),
             crash_fired: false,
+            incarnation: self.config.incarnation,
+            require_crash_selector_reached: self.config.require_crash_selector_reached,
             sleep_jitter_nanos: self.config.faults.clock.sleep_jitter_nanos,
             // Domain-separated seed so sleep-jitter draws do not correlate with
             // the entropy or network-fault streams that also derive from root_seed.
@@ -3118,12 +3169,12 @@ impl ScheduleTracker {
 
 /// Per-operation-kind occurrence counters used to fire a crash at the Nth
 /// boundary op of a chosen kind.
-#[derive(Default)]
-struct CrashCounts {
-    open: u64,
-    write: u64,
-    sync: u64,
-    close: u64,
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CrashCounts {
+    pub open: u64,
+    pub write: u64,
+    pub sync: u64,
+    pub close: u64,
 }
 
 enum Execution {
@@ -3702,6 +3753,7 @@ impl Buggify {
 /// methods — it does not interpose the rest of the process.
 pub struct Context {
     root_seed: u64,
+    compatibility_fingerprint: String,
     step_budget: Option<u64>,
     steps: u64,
     params: BTreeMap<String, String>,
@@ -3737,6 +3789,8 @@ pub struct Context {
     crash_at: Option<CrashPoint>,
     crash_counts: CrashCounts,
     crash_fired: bool,
+    incarnation: u64,
+    require_crash_selector_reached: bool,
     /// Inclusive `[min, max]` nanoseconds of seeded latency added to each guest
     /// sleep, or `None` when latency injection is off.
     sleep_jitter_nanos: Option<(u64, u64)>,
@@ -4904,7 +4958,9 @@ recording was produced by a guest whose result type no longer matches this one"
         };
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
         let decoded = decode_handle(&operation, outcome);
-        self.maybe_inject_crash(CrashOp::Open)?;
+        if decoded.is_ok() {
+            self.maybe_inject_crash(CrashOp::Open)?;
+        }
         decoded
     }
 
@@ -4955,7 +5011,9 @@ recording was produced by a guest whose result type no longer matches this one"
         };
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
         let decoded = decode_usize(&operation, outcome);
-        self.maybe_inject_crash(CrashOp::Write)?;
+        if decoded.is_ok() {
+            self.maybe_inject_crash(CrashOp::Write)?;
+        }
         decoded
     }
 
@@ -5028,7 +5086,9 @@ recording was produced by a guest whose result type no longer matches this one"
         };
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
         let decoded = decode_usize(&operation, outcome);
-        self.maybe_inject_crash(CrashOp::Write)?;
+        if decoded.is_ok() {
+            self.maybe_inject_crash(CrashOp::Write)?;
+        }
         decoded
     }
 
@@ -5052,7 +5112,9 @@ recording was produced by a guest whose result type no longer matches this one"
         };
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
         let decoded = decode_unit(&operation, outcome);
-        self.maybe_inject_crash(CrashOp::Close)?;
+        if decoded.is_ok() {
+            self.maybe_inject_crash(CrashOp::Close)?;
+        }
         decoded
     }
 
@@ -5168,7 +5230,9 @@ recording was produced by a guest whose result type no longer matches this one"
     pub fn fs_sync(&mut self, fd: Fd) -> Result<(), RuntimeError> {
         let result =
             self.filesystem_unit(Operation::FsSync { fd }, |filesystem| filesystem.sync(fd));
-        self.maybe_inject_crash(CrashOp::Sync)?;
+        if result.is_ok() {
+            self.maybe_inject_crash(CrashOp::Sync)?;
+        }
         result
     }
 
@@ -5419,13 +5483,16 @@ recording was produced by a guest whose result type no longer matches this one"
         self.filesystem_unit_undelayed(Operation::FsCrash, |filesystem| filesystem.crash())
     }
 
-    /// Fire the configured filesystem crash if the just-completed boundary
-    /// operation is the selected Nth occurrence. Called after each counted fs op
-    /// completes; the crash is injected exactly once. Because the boundary-op
-    /// sequence is identical on record and replay, the injected `FsCrash` lands
-    /// at the same position and reconciles without the flag being re-supplied
-    /// having any different effect (a mismatched flag fails closed like any other
-    /// operation divergence).
+    fn execution_fingerprint(&self) -> &str {
+        &self.compatibility_fingerprint
+    }
+
+    /// Fire the configured filesystem crash if the just-completed SUCCESSFUL
+    /// boundary operation is the selected Nth occurrence. The triggering guest
+    /// call must never return: reaching the selected point produces an internal
+    /// incarnation-termination control carrying the recovered durable snapshot
+    /// for the native shim/supervisor handoff. Manual [`Context::fs_crash`] keeps
+    /// its explicit rollback-in-place semantics and does not route here.
     fn maybe_inject_crash(&mut self, op: CrashOp) -> Result<(), RuntimeError> {
         if self.crash_fired {
             return Ok(());
@@ -5451,11 +5518,35 @@ recording was produced by a guest whose result type no longer matches this one"
                 self.crash_counts.close
             }
         };
-        if point.op == op && count == point.ordinal {
-            self.crash_fired = true;
-            self.fs_crash()?;
+        if point.op != op || count != point.ordinal {
+            return Ok(());
         }
-        Ok(())
+
+        self.crash_fired = true;
+        let snapshot_bytes = self
+            .filesystem
+            .as_mut()
+            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
+            .crash_and_export_restart_snapshot()?;
+        let snapshot = FsSnapshot::decode(&snapshot_bytes).map_err(|error| {
+            RuntimeError::Config(format!(
+                "filesystem driver exported an invalid crash-restart snapshot: {error}"
+            ))
+        })?;
+        Err(RuntimeError::InjectedFsCrash(Box::new(InjectedFsCrash {
+            compatibility_fingerprint: self.execution_fingerprint().to_string(),
+            from_incarnation: self.incarnation,
+            to_incarnation: self.incarnation.saturating_add(1),
+            selector: patina_dst_trace::CrashPointRecord {
+                op: crash_op_to_record(point.op),
+                ordinal: point.ordinal,
+            },
+            consumed: HandoffConsumedState {
+                operations: self.steps,
+                lifecycle_order: self.steps,
+            },
+            snapshot,
+        })))
     }
 
     pub fn task_spawn(&mut self, label: &str) -> Result<TaskId, RuntimeError> {
@@ -6148,6 +6239,15 @@ a recorded result or a replay fetch",
                 label: pending.label,
             });
         }
+        if self.require_crash_selector_reached
+            && let Some(selector) = self.crash_at
+            && !self.crash_fired
+        {
+            return Err(RuntimeError::CrashSelectorUnreached {
+                selector,
+                counts: self.crash_counts,
+            });
+        }
         // Any runtime diagnostic no embedder drained. The shim and the WASI host
         // drain after each SDK entry point so the lines interleave with guest
         // output; an in-process (cargo-family) guest has no embedder, and this is
@@ -6735,6 +6835,29 @@ e.g. racing reference-count drops against a still-exiting host thread). Underlyi
     }
 }
 
+pub struct InjectedFsCrash {
+    pub compatibility_fingerprint: String,
+    pub from_incarnation: u64,
+    pub to_incarnation: u64,
+    pub selector: patina_dst_trace::CrashPointRecord,
+    pub consumed: HandoffConsumedState,
+    pub snapshot: FsSnapshot,
+}
+
+impl fmt::Debug for InjectedFsCrash {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InjectedFsCrash")
+            .field("compatibility_fingerprint", &self.compatibility_fingerprint)
+            .field("from_incarnation", &self.from_incarnation)
+            .field("to_incarnation", &self.to_incarnation)
+            .field("selector", &self.selector)
+            .field("consumed", &self.consumed)
+            .field("snapshot", &self.snapshot)
+            .finish()
+    }
+}
+
 #[derive(Debug)]
 pub enum RuntimeError {
     Config(String),
@@ -6744,6 +6867,17 @@ pub enum RuntimeError {
     },
     Effect(EffectError),
     Trace(TraceError),
+    /// A configured `--fs-crash-at` boundary fired. This is an internal,
+    /// uncatchable runtime control for the native shim/supervisor: the triggering
+    /// boundary operation has already succeeded and been recorded, the durable
+    /// filesystem image has been recovered, and no value may be returned to guest
+    /// code in this incarnation.
+    InjectedFsCrash(Box<InjectedFsCrash>),
+    /// A run ended without reaching its requested automatic crash boundary.
+    CrashSelectorUnreached {
+        selector: CrashPoint,
+        counts: CrashCounts,
+    },
     StepBudgetExceeded {
         budget: u64,
     },
@@ -6797,6 +6931,20 @@ impl fmt::Display for RuntimeError {
             Self::Io { action, source } => write!(f, "failed to {action}: {source}"),
             Self::Effect(error) => error.fmt(f),
             Self::Trace(error) => error.fmt(f),
+            Self::InjectedFsCrash(control) => write!(
+                f,
+                "Patina injected filesystem crash at {:?}:{} after {} operations; terminate incarnation {} and restart incarnation {}",
+                control.selector.op,
+                control.selector.ordinal,
+                control.consumed.operations,
+                control.from_incarnation,
+                control.to_incarnation
+            ),
+            Self::CrashSelectorUnreached { selector, counts } => write!(
+                f,
+                "PATINA_FS_CRASH_SELECTOR_UNREACHED requested {:?}:{} but only observed open={} write={} sync={} close={} successful boundary operations",
+                selector.op, selector.ordinal, counts.open, counts.write, counts.sync, counts.close
+            ),
             Self::StepBudgetExceeded { budget } => {
                 write!(
                     f,
@@ -10851,6 +10999,27 @@ class=crash|0 class=buggify|0"
             .with_fs_image(MemFs::new())
             .build();
         assert!(matches!(result, Err(RuntimeError::Config(_))));
+    }
+
+    #[test]
+    fn fs_crash_at_counts_only_successful_boundaries() {
+        let mut context = Context::from_config(
+            RuntimeConfig::seeded(1)
+                .with_crash_at(CrashOp::Open, 1)
+                .require_crash_selector_reached(),
+        )
+        .unwrap();
+        let bad = context
+            .fs_open("/missing", OpenFlags::read_only())
+            .expect_err("failed open must not trigger crash");
+        assert!(matches!(bad, RuntimeError::Effect(_)));
+        let error = context.finish().unwrap_err();
+        match error {
+            RuntimeError::CrashSelectorUnreached { counts, .. } => {
+                assert_eq!(counts.open, 0);
+            }
+            other => panic!("expected unreached crash selector, got {other}"),
+        }
     }
 
     // The single choke point builds the crash filesystem from the fault config:

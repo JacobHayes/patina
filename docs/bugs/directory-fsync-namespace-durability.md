@@ -45,6 +45,5 @@ Focused regression coverage:
 - `cargo-patina::native_directory_fsync_guards_namespace_durability_and_replays`
 
 The native e2e is the planted detector: without the parent-directory fsync,
-`--fs-crash-at close:1` loses the renamed file; with the parent-directory fsync,
-`--fs-crash-at sync:2` keeps it, and a dir-fsync-bearing trace replays
-byte-identically.
+`--fs-crash-at close:1` loses the renamed file after a fresh-incarnation restart; with the parent-directory fsync,
+`--fs-crash-at sync:4` keeps it. The same test still records and replays the non-crash dir-fsync path byte-identically.

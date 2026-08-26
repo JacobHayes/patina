@@ -39,7 +39,9 @@ use patina_dst_target::{
     render_inert_weak_imports, render_native_escapes_grouped, render_tsc_managed_note,
     shim_control_plane_symbols,
 };
-use patina_dst_trace::{TraceBundle, TraceError, parse_abandoned_trace_marker};
+use patina_dst_trace::{
+    HandoffSealKey, IncarnationHandoff, TraceBundle, TraceError, parse_abandoned_trace_marker,
+};
 use patina_dst_wasi_host::{
     DEFAULT_WASM_FUEL, MountPolicy, Preview1Host, ResourceLimits, execute_preview1_with_fuel,
 };
@@ -2959,6 +2961,11 @@ fn normalize_cli_preopen_path(path: &str) -> String {
 
 fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
     let mut invocation = invocation;
+    if !invocation.knobs.get(FaultKnob::FsCrashAt).is_empty() {
+        return Err(CliError::usage(
+            "WASI --fs-crash-at crash-restart is not implemented; refusing rather than using the old rollback-and-continue model",
+        ));
+    }
     let resolved = resolve_artifact(invocation.module.clone())?;
     let bytes = fs::read(&resolved.path).map_err(|error| {
         CliError(format!(
@@ -3129,6 +3136,7 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
                     seed,
                     coverage: None,
                     depth: None,
+                    crash_restart: None,
                     facts,
                 },
                 WASI_TRAP_EXIT,
@@ -3161,6 +3169,7 @@ fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliError> {
             seed,
             coverage: None,
             depth: Some(depth),
+            crash_restart: None,
             facts,
         },
         execution.exit_code,
@@ -6894,6 +6903,101 @@ fn native_child_status(status: ExitStatus) -> (i32, Option<i32>) {
     }
 }
 
+const NATIVE_FS_CRASH_RESTART_EXIT: i32 = 112;
+
+#[cfg(unix)]
+fn wait_native_child_once(
+    command: &mut Command,
+    binary: &Path,
+    inherited_fds: &[i32],
+) -> Result<(output::Captured, u32), CliError> {
+    if output::capture_active() {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let (child, inherited_guard) = spawn_native_child(command, binary, inherited_fds)?;
+        let host_pid = child.id();
+        let output = child.wait_with_output().map_err(|error| {
+            CliError(format!(
+                "failed while waiting on native program {}: {error}",
+                binary.display()
+            ))
+        })?;
+        inherited_guard.restore()?;
+        let (exit_code, signal) = native_child_status(output.status);
+        Ok((
+            output::Captured {
+                exit_code,
+                stdout: output.stdout,
+                stderr: output.stderr,
+                captured: true,
+                signal,
+            },
+            host_pid,
+        ))
+    } else {
+        let (mut child, inherited_guard) = spawn_native_child(command, binary, inherited_fds)?;
+        let host_pid = child.id();
+        let status = child.wait().map_err(|error| {
+            CliError(format!(
+                "failed while waiting on native program {}: {error}",
+                binary.display()
+            ))
+        })?;
+        inherited_guard.restore()?;
+        let (exit_code, signal) = native_child_status(status);
+        Ok((
+            output::Captured {
+                exit_code,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                captured: false,
+                signal,
+            },
+            host_pid,
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn crash_handoff_key(seed: u64, selector: &str) -> HandoffSealKey {
+    let mut hasher = Sha256::new();
+    hasher.update(b"patina-native-crash-restart-handoff-key/v1");
+    hasher.update(seed.to_le_bytes());
+    hasher.update(selector.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 32];
+    bytes.copy_from_slice(&digest);
+    HandoffSealKey::from_bytes(bytes)
+}
+
+#[cfg(unix)]
+fn crash_handoff_key_hex(seed: u64, selector: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"patina-native-crash-restart-handoff-key/v1");
+    hasher.update(seed.to_le_bytes());
+    hasher.update(selector.as_bytes());
+    hex_lower(&hasher.finalize())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+#[cfg(unix)]
+fn selector_json(selector: &str) -> serde_json::Value {
+    let (op, ordinal) = selector.split_once(':').unwrap_or((selector, "1"));
+    serde_json::json!({
+        "op": op,
+        "ordinal": ordinal.parse::<u64>().unwrap_or(1),
+        "text": selector,
+    })
+}
+
 #[cfg(unix)]
 fn append_native_infra_marker(
     captured: &mut output::Captured,
@@ -7047,6 +7151,20 @@ liveness-safe."
             invocation.program_args.clone()
         }
     };
+
+    let native_crash_selector = invocation.knobs.get(FaultKnob::FsCrashAt).first().cloned();
+    if let Some(selector) = &native_crash_selector {
+        if !matches!(invocation.mode, NativeRunMode::Seeded { .. }) {
+            return Err(CliError(format!(
+                "native --fs-crash-at crash-restart record/replay is not implemented in this slice; {selector} must not rollback-and-continue. Re-run without --record/replay or omit --fs-crash-at."
+            )));
+        }
+        if invocation.schedule.starve.is_some() {
+            return Err(CliError::usage(
+                "native --fs-crash-at crash-restart with --starve is not implemented; refusing rather than mixing the restart supervisor with the starvation stall backstop",
+            ));
+        }
+    }
 
     let mut command = Command::new(&binary);
     // Stamp a fixed, machine-independent `argv[0]`: the guest is exec'd from an
@@ -7212,6 +7330,32 @@ liveness-safe."
         }
     };
 
+    let mut handoff_file = if native_crash_selector.is_some() {
+        Some(tempfile::tempfile().map_err(|error| {
+            CliError(format!(
+                "failed to create crash-restart handoff channel: {error}"
+            ))
+        })?)
+    } else {
+        None
+    };
+    if let (Some(selector), Some(file), NativeRunMode::Seeded { seed }) = (
+        native_crash_selector.as_ref(),
+        handoff_file.as_ref(),
+        &invocation.mode,
+    ) {
+        command
+            .env(
+                patina_dst_runtime::ENV_HANDOFF_FD,
+                file.as_raw_fd().to_string(),
+            )
+            .env(
+                patina_dst_runtime::ENV_HANDOFF_KEY,
+                crash_handoff_key_hex(*seed, selector),
+            )
+            .env(patina_dst_runtime::ENV_INCARNATION, "0");
+    }
+
     // The shim reads inherited host descriptors named by `PATINA_TRACE_FD` and
     // `PATINA_FS_IMAGE_FD`. Make only those already-open descriptors inheritable
     // for the child, then restore the supervisor's close-on-exec state after the
@@ -7230,6 +7374,9 @@ liveness-safe."
         inherited_fds.push(file.as_raw_fd());
     }
     if let Some(file) = &facts_file {
+        inherited_fds.push(file.as_raw_fd());
+    }
+    if let Some(file) = &handoff_file {
         inherited_fds.push(file.as_raw_fd());
     }
 
@@ -7253,10 +7400,221 @@ liveness-safe."
     // campaign files exit 111 under a class that is NOT counted as a bug found
     // (`CampaignClass::is_finding`), and why the counter is the signal to publish
     // if the two ever need telling apart from the outside.
+    let mut crash_restart = None;
+
     // The kill-able wait loop mirrors `output::execute_command`'s capture
     // semantics (piped when the JSON envelope / render wants guest output,
     // inherited otherwise) so `--starve` composes with `--format json`.
-    let mut captured = if invocation.schedule.starve.is_some() {
+    let mut captured = if let Some(selector) = &native_crash_selector {
+        let seed = match &invocation.mode {
+            NativeRunMode::Seeded { seed } => *seed,
+            _ => unreachable!("non-seeded crash restart was refused above"),
+        };
+        let (mut first, first_host_pid) =
+            wait_native_child_once(&mut command, &binary, &inherited_fds)?;
+        if first.exit_code != NATIVE_FS_CRASH_RESTART_EXIT {
+            if first.exit_code == 0 {
+                let line = format!(
+                    "PATINA_FS_CRASH_SELECTOR_UNREACHED selector={selector:?} — native supervisor expected a crash handoff but incarnation 0 exited cleanly\n"
+                );
+                if first.captured {
+                    first.stderr.extend_from_slice(line.as_bytes());
+                } else {
+                    eprint!("{line}");
+                }
+                first.exit_code = 2;
+                crash_restart = Some(serde_json::json!({
+                    "selector": selector_json(selector),
+                    "reached": false,
+                    "crash_count": 0,
+                    "restart_count": 0,
+                    "incarnations": [{"id": 0, "host_pid": first_host_pid}],
+                    "terminal_outcome": {"kind": "selector_unreached", "exit_code": first.exit_code, "signal": first.signal},
+                }));
+            } else {
+                crash_restart = Some(serde_json::json!({
+                    "selector": selector_json(selector),
+                    "reached": false,
+                    "crash_count": 0,
+                    "restart_count": 0,
+                    "incarnations": [{"id": 0, "host_pid": first_host_pid}],
+                    "terminal_outcome": {"kind": "child_exited_before_crash", "exit_code": first.exit_code, "signal": first.signal},
+                }));
+            }
+            first
+        } else {
+            let Some(mut file) = handoff_file.take() else {
+                return Err(CliError(
+                    "PATINA_FS_CRASH_INVALID_HANDOFF missing supervisor handoff channel".into(),
+                ));
+            };
+            use std::io::{Read, Seek, Write};
+            file.rewind().map_err(|error| {
+                CliError(format!("failed to rewind crash-restart handoff: {error}"))
+            })?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).map_err(|error| {
+                CliError(format!("failed to read crash-restart handoff: {error}"))
+            })?;
+            let handoff_digest = hex_lower(&Sha256::digest(&bytes));
+            let key = crash_handoff_key(seed, selector);
+            let verified = IncarnationHandoff::open(&bytes, &key)
+                .map_err(|error| CliError(format!("PATINA_FS_CRASH_INVALID_HANDOFF {error}")))?;
+            if verified.from_incarnation != 0 || verified.to_incarnation != 1 {
+                return Err(CliError(format!(
+                    "PATINA_FS_CRASH_INVALID_HANDOFF expected 0->1 restart, got {}->{}",
+                    verified.from_incarnation, verified.to_incarnation
+                )));
+            }
+            let expected_selector = selector;
+            let actual_selector = format!(
+                "{}:{}",
+                match verified.selector.op {
+                    patina_dst_trace::FaultCrashOp::Open => "open",
+                    patina_dst_trace::FaultCrashOp::Write => "write",
+                    patina_dst_trace::FaultCrashOp::Sync => "sync",
+                    patina_dst_trace::FaultCrashOp::Close => "close",
+                },
+                verified.selector.ordinal
+            );
+            if &actual_selector != expected_selector {
+                return Err(CliError(format!(
+                    "PATINA_FS_CRASH_INVALID_HANDOFF selector mismatch: expected {expected_selector}, got {actual_selector}"
+                )));
+            }
+
+            let mut snapshot_file = tempfile::tempfile().map_err(|error| {
+                CliError(format!(
+                    "failed to create restart snapshot channel: {error}"
+                ))
+            })?;
+            snapshot_file
+                .write_all(&verified.snapshot_bytes)
+                .map_err(|error| CliError(format!("failed to write restart snapshot: {error}")))?;
+            snapshot_file
+                .rewind()
+                .map_err(|error| CliError(format!("failed to rewind restart snapshot: {error}")))?;
+
+            let mut restart = Command::new(&binary);
+            restart
+                .args(&program_args)
+                .arg0(NATIVE_GUEST_ARGV0)
+                .env_clear();
+            if invocation.harness {
+                restart.env(ENV_DEFER_INIT, "1");
+            }
+            restart
+                .env(ENV_MODE, "seeded")
+                .env(ENV_SEED, seed.to_string())
+                .env(patina_dst_runtime::ENV_INCARNATION, "1")
+                .env(
+                    patina_dst_runtime::ENV_RESTART_SNAPSHOT_FD,
+                    snapshot_file.as_raw_fd().to_string(),
+                );
+            if let Some(file) = &coverage_file {
+                restart.env(ENV_COVERAGE_FD, file.as_raw_fd().to_string());
+            }
+            if let Some(file) = &facts_file {
+                restart.env(
+                    patina_dst_runtime::ENV_FACTS_FD,
+                    file.as_raw_fd().to_string(),
+                );
+            }
+            for report in patina_dst_runtime::Report::ALL {
+                if let Some(value) = env::var_os(report.env()) {
+                    restart.env(report.env(), value);
+                }
+            }
+            if !invocation.environment.is_empty() {
+                let encoded = serde_json::to_string(&invocation.environment).map_err(|error| {
+                    CliError(format!(
+                        "failed to encode native guest environment: {error}"
+                    ))
+                })?;
+                restart.env(ENV_GUEST_ENV, encoded);
+            }
+            if let Some(budget) = invocation.step_budget {
+                restart.env(ENV_STEP_BUDGET, budget.to_string());
+            }
+            for variable in knob_env_vars() {
+                restart.env_remove(variable);
+            }
+            let mut restart_knobs = invocation.knobs.clone();
+            restart_knobs.0.remove(&FaultKnob::FsCrashAt);
+            for (name, value) in knob_env_pairs(&restart_knobs)? {
+                restart.env(name, value);
+            }
+            if let Some(buggify) = &invocation.buggify {
+                restart.env(ENV_BUGGIFY, buggify.fire_permille.as_deref().unwrap_or(""));
+                if let Some(value) = &buggify.activation_permille {
+                    restart.env(ENV_BUGGIFY_ACTIVATION, value);
+                }
+                if let Some(value) = &buggify.cutoff_nanos {
+                    restart.env(ENV_BUGGIFY_CUTOFF, value);
+                }
+                if buggify.after_setup {
+                    restart.env(ENV_BUGGIFY_AFTER_SETUP, "1");
+                }
+            }
+            for (name, value) in schedule_env_pairs(&invocation.schedule) {
+                restart.env(name, value);
+            }
+            for (name, value) in liveness_env_pairs(&invocation.liveness) {
+                restart.env(name, value);
+            }
+            let mut restart_fds: Vec<std::os::unix::io::RawFd> = Vec::new();
+            restart_fds.push(snapshot_file.as_raw_fd());
+            if let Some(file) = &coverage_file {
+                restart_fds.push(file.as_raw_fd());
+            }
+            if let Some(file) = &facts_file {
+                restart_fds.push(file.as_raw_fd());
+            }
+            let (second, second_host_pid) =
+                wait_native_child_once(&mut restart, &binary, &restart_fds)?;
+            let terminal_kind = if second.exit_code == 0 && second.signal.is_none() {
+                "completed_after_restart"
+            } else {
+                "restart_child_failed"
+            };
+            crash_restart = Some(serde_json::json!({
+                "selector": selector_json(selector),
+                "reached": true,
+                "crash_count": 1,
+                "restart_count": 1,
+                "incarnations": [
+                    {"id": verified.from_incarnation, "host_pid": first_host_pid},
+                    {"id": verified.to_incarnation, "host_pid": second_host_pid}
+                ],
+                "handoff_digest": format!("sha256:{handoff_digest}"),
+                "snapshot_digest": format!("sha256:{}", hex_lower(&verified.snapshot_digest)),
+                "consumed": {
+                    "operations": verified.consumed.operations,
+                    "lifecycle_order": verified.consumed.lifecycle_order
+                },
+                "terminal_outcome": {"kind": terminal_kind, "exit_code": second.exit_code, "signal": second.signal},
+            }));
+            if first.captured {
+                first.stdout.extend_from_slice(&second.stdout);
+                first.stderr.extend_from_slice(&second.stderr);
+                first.stderr.extend_from_slice(
+                    format!(
+                        "PATINA_FS_CRASH_RESTART selector={selector} host_pid0={first_host_pid} host_pid1={second_host_pid} incarnation0=0 incarnation1=1 operations={} result=restarted\n",
+                        verified.consumed.operations
+                    )
+                    .as_bytes(),
+                );
+            } else {
+                eprintln!(
+                    "PATINA_FS_CRASH_RESTART selector={selector} host_pid0={first_host_pid} host_pid1={second_host_pid} incarnation0=0 incarnation1=1 operations={} result=restarted",
+                    verified.consumed.operations
+                );
+            }
+            first.exit_code = second.exit_code;
+            first.signal = second.signal;
+            first
+        }
+    } else if invocation.schedule.starve.is_some() {
         let stall_secs: u64 = std::env::var("PATINA_STARVATION_STALL_SECS")
             .ok()
             .and_then(|value| value.trim().parse().ok())
@@ -7412,6 +7770,7 @@ Killed with a nonzero exit."
         channel_unavailable,
     );
     drop(image_file);
+    drop(handoff_file);
     drop(coverage_file);
     // Read the facts document back off the inherited descriptor. The child wrote
     // through the same open file description, so the offset is at the end —
@@ -7465,6 +7824,7 @@ Killed with a nonzero exit."
             seed,
             coverage: coverage.clone(),
             depth: None,
+            crash_restart,
             facts,
         },
         captured,
@@ -7504,6 +7864,11 @@ fn execute_native_run(_invocation: NativeRunInvocation) -> Result<i32, CliError>
 }
 
 fn execute(invocation: Invocation) -> Result<i32, CliError> {
+    if !invocation.knobs.get(FaultKnob::FsCrashAt).is_empty() {
+        return Err(CliError::usage(
+            "cargo-family --fs-crash-at crash-restart is not implemented; refusing rather than running rollback-and-continue semantics",
+        ));
+    }
     let workspace = workspace_root_in(invocation.working_dir.as_deref(), &invocation.cargo_args)?;
 
     // The cargo-family `run` (and its cargo-family `replay`, which reuses the
@@ -7701,6 +8066,7 @@ integrates the Patina runtime, or record under the native runtime: cargo patina 
             seed,
             coverage: None,
             depth: None,
+            crash_restart: None,
             facts,
         },
         captured,
@@ -10475,6 +10841,67 @@ mod tests {
     /// This is a shipped bug pinned as a class: `campaign --report` was
     /// documented and unreachable, because the global `--report OUT.html`
     /// consumed both it and whatever came next.
+    #[test]
+    fn corrupt_crash_restart_handoff_is_refused_by_codec_not_env_hook() {
+        let key = HandoffSealKey::from_bytes([3; 32]);
+        let handoff = IncarnationHandoff {
+            compatibility_fingerprint: "fp".into(),
+            from_incarnation: 0,
+            to_incarnation: 1,
+            selector: patina_dst_trace::CrashPointRecord {
+                op: patina_dst_trace::FaultCrashOp::Write,
+                ordinal: 6,
+            },
+            consumed: patina_dst_trace::HandoffConsumedState {
+                operations: 12,
+                lifecycle_order: 12,
+            },
+            snapshot: patina_dst_fs_mem::MemFs::new().export_snapshot(),
+        };
+        let mut encoded = handoff.seal(&key).unwrap();
+        assert!(IncarnationHandoff::open(&encoded, &key).is_ok());
+        *encoded.last_mut().unwrap() ^= 0xff;
+        let error = IncarnationHandoff::open(&encoded, &key).unwrap_err();
+        assert!(error.to_string().contains("seal mismatch"));
+    }
+
+    #[test]
+    fn cargo_and_wasi_refuse_fs_crash_at_without_restart_semantics() {
+        let mut knobs = KnobValues::default();
+        knobs.0.insert(FaultKnob::FsCrashAt, vec!["write:1".into()]);
+        let cargo = execute(Invocation {
+            cargo_command: "run".into(),
+            cargo_args: Vec::new(),
+            mode: Mode::Seeded { seed: 0 },
+            step_budget: None,
+            params: BTreeMap::new(),
+            knobs: knobs.clone(),
+            buggify: None,
+            working_dir: None,
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(cargo.contains("cargo-family --fs-crash-at crash-restart is not implemented"));
+
+        let wasi = execute_wasi_run(WasiInvocation {
+            module: ArtifactRef::Prebuilt(PathBuf::from("missing.wasm")),
+            mode: Mode::Seeded { seed: 0 },
+            fuel: DEFAULT_WASM_FUEL,
+            arguments: Vec::new(),
+            environment: BTreeMap::new(),
+            sockets: Vec::new(),
+            preopens: Vec::new(),
+            resource_limits: WasiResourceLimitOverrides::default(),
+            step_budget: None,
+            knobs,
+            buggify: None,
+            liveness: NativeLiveness::default(),
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(wasi.contains("WASI --fs-crash-at crash-restart is not implemented"));
+    }
+
     /// A Cargo-family replay refuses a semantic knob by name instead of handing
     /// it to Cargo: the trace is authoritative, and silently forwarding
     /// `--fs-crash-at` would surface as a confusing cargo error rather than the

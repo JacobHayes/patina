@@ -58,12 +58,15 @@ use patina_dst_abi::{
 
 use patina_dst_driver_api::canonicalize_path;
 use patina_dst_fs_crash::CrashFs;
-use patina_dst_fs_mem::{FsImage, MemFs};
+use patina_dst_fs_mem::{FsImage, FsSnapshot, MemFs};
 use patina_dst_runtime::{
     BuggifyKind, Context, CustomOpMode, MAX_TRACE_BYTES, RuntimeBuilder, RuntimeConfig,
     RuntimeError, SiteOutcome, TraceTransport, VerdictKind,
 };
-use patina_dst_trace::{TraceError, abandoned_trace_marker, resource_limit_infra_line};
+use patina_dst_trace::{
+    HandoffSealKey, IncarnationHandoff, TraceError, abandoned_trace_marker,
+    resource_limit_infra_line,
+};
 pub use thread::{
     patina_cond_broadcast, patina_cond_destroy, patina_cond_init, patina_cond_signal,
     patina_cond_timedwait, patina_cond_wait, patina_futex_wait, patina_futex_wait_timed,
@@ -1881,6 +1884,8 @@ fn runtime_errno(error: &RuntimeError) -> c_int {
         // runtime has already emitted the classifiable marker and flushed the
         // truncated trace.
         RuntimeError::FrozenClockChurn { .. } => abort_after_flushing_output(),
+        RuntimeError::InjectedFsCrash(_) => abort_after_flushing_output(),
+        RuntimeError::CrashSelectorUnreached { .. } => EIO,
         RuntimeError::Config(_)
         | RuntimeError::Io { .. }
         | RuntimeError::Trace(_)
@@ -2104,7 +2109,85 @@ fn with_context_raw<T>(
     BOUNDARY_SEEN.store(true, std::sync::atomic::Ordering::Relaxed);
     let mut guard = slot().lock();
     let context = guard.as_mut().ok_or(ENOSYS)?;
-    invoke(context).map_err(|error| runtime_errno(&error))
+    match invoke(context) {
+        Ok(value) => Ok(value),
+        Err(error @ RuntimeError::InjectedFsCrash(_)) => terminate_for_injected_fs_crash(error),
+        Err(error) => Err(runtime_errno(&error)),
+    }
+}
+
+fn handoff_key_from_control() -> Result<HandoffSealKey, String> {
+    let value = control_env(patina_dst_runtime::ENV_HANDOFF_KEY)
+        .ok_or_else(|| format!("{} is required", patina_dst_runtime::ENV_HANDOFF_KEY))?;
+    let value = value.trim();
+    if value.len() != 64 {
+        return Err(format!(
+            "{} must be 64 lowercase hex characters",
+            patina_dst_runtime::ENV_HANDOFF_KEY
+        ));
+    }
+    let mut bytes = [0_u8; 32];
+    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+        let text = std::str::from_utf8(chunk).map_err(|_| {
+            format!(
+                "{} must be 64 lowercase hex characters",
+                patina_dst_runtime::ENV_HANDOFF_KEY
+            )
+        })?;
+        bytes[index] = u8::from_str_radix(text, 16).map_err(|_| {
+            format!(
+                "{} must be 64 lowercase hex characters",
+                patina_dst_runtime::ENV_HANDOFF_KEY
+            )
+        })?;
+    }
+    Ok(HandoffSealKey::from_bytes(bytes))
+}
+
+fn terminate_for_injected_fs_crash(error: RuntimeError) -> ! {
+    let RuntimeError::InjectedFsCrash(control) = error else {
+        unreachable!("caller passes only InjectedFsCrash")
+    };
+    let patina_dst_runtime::InjectedFsCrash {
+        compatibility_fingerprint,
+        from_incarnation,
+        to_incarnation,
+        selector,
+        consumed,
+        snapshot,
+    } = *control;
+    let result = (|| -> Result<(), String> {
+        let fd = control_handoff_fd()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("{} is required", patina_dst_runtime::ENV_HANDOFF_FD))?;
+        let key = handoff_key_from_control()?;
+        let handoff = IncarnationHandoff {
+            compatibility_fingerprint,
+            from_incarnation,
+            to_incarnation,
+            selector,
+            consumed,
+            snapshot,
+        };
+        let bytes = handoff
+            .seal(&key)
+            .map_err(|error| format!("failed to seal crash-restart handoff: {error}"))?;
+        host_write_all(fd, &bytes)
+            .map_err(|error| format!("failed to write crash-restart handoff: {error}"))?;
+        Ok(())
+    })();
+    if let Err(message) = result {
+        let _ = flush_captured_stdio();
+        let line = format!("PATINA_FS_CRASH_HANDOFF_ERROR {message}\n");
+        let _ = host_write_all(2, line.as_bytes());
+        std::process::abort();
+    }
+    let _ = flush_captured_stdio();
+    // SAFETY: `_exit` is the host process termination primitive. It skips guest
+    // atexit handlers and Patina's normal finalization, which is exactly the
+    // modeled power-loss boundary: no code after the triggering call runs in this
+    // incarnation.
+    unsafe { libc_exit_immediately(NATIVE_FS_CRASH_RESTART_EXIT) }
 }
 
 /// Run a scheduler closure against the installed [`Context`], preserving the
@@ -2208,6 +2291,20 @@ fn control_facts_fd() -> Result<Option<i32>, RuntimeError> {
         .transpose()
 }
 
+fn control_handoff_fd() -> Result<Option<i32>, RuntimeError> {
+    control_env(patina_dst_runtime::ENV_HANDOFF_FD)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value.parse().map_err(|_| {
+                RuntimeError::Config(format!(
+                    "{} must be a non-negative descriptor number",
+                    patina_dst_runtime::ENV_HANDOFF_FD
+                ))
+            })
+        })
+        .transpose()
+}
+
 fn control_trace_fd() -> Result<Option<i32>, RuntimeError> {
     control_env(patina_dst_runtime::ENV_TRACE_FD)
         .filter(|value| !value.is_empty())
@@ -2224,6 +2321,20 @@ fn control_trace_fd() -> Result<Option<i32>, RuntimeError> {
 
 /// Parse `PATINA_FS_IMAGE_FD` from the control plane, mirroring `control_trace_fd`.
 /// Present only when `native-run --mount` streamed a captured host directory.
+fn control_restart_snapshot_fd() -> Result<Option<i32>, RuntimeError> {
+    control_env(patina_dst_runtime::ENV_RESTART_SNAPSHOT_FD)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value.parse().map_err(|_| {
+                RuntimeError::Config(format!(
+                    "{} must be a non-negative descriptor number",
+                    patina_dst_runtime::ENV_RESTART_SNAPSHOT_FD
+                ))
+            })
+        })
+        .transpose()
+}
+
 fn control_fs_image_fd() -> Result<Option<i32>, RuntimeError> {
     control_env(patina_dst_runtime::ENV_FS_IMAGE_FD)
         .filter(|value| !value.is_empty())
@@ -2238,9 +2349,16 @@ fn control_fs_image_fd() -> Result<Option<i32>, RuntimeError> {
         .transpose()
 }
 
-/// Read an inherited host descriptor to EOF using the non-interposed host alias,
-/// mirroring `FdTraceTransport::read_bundle`. Used to slurp the filesystem image
-/// the supervisor duplicated onto the child before exec.
+// Process-termination primitive for modeled power loss. This must be `_exit`,
+// not libc `exit`, because crash termination skips guest atexit handlers and
+// Patina's normal finalization.
+unsafe extern "C" {
+    #[link_name = "_exit"]
+    fn libc_exit_immediately(status: c_int) -> !;
+}
+
+const NATIVE_FS_CRASH_RESTART_EXIT: c_int = 112;
+
 fn read_host_fd_to_end(fd: c_int) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     let mut chunk = vec![0_u8; HOST_IO_CHUNK];
@@ -2274,20 +2392,41 @@ fn read_host_fd_to_end(fd: c_int) -> io::Result<Vec<u8>> {
 /// parsed crash knob (`--fs-crash-at`, `--fs-torn-granularity`) can never be
 /// dropped by a filesystem the shim pre-installed outside the fault config.
 fn fs_image_base() -> Result<MemFs, RuntimeError> {
-    let Some(fd) = control_fs_image_fd()? else {
-        return Ok(MemFs::new());
-    };
-    let bytes = read_host_fd_to_end(fd).map_err(|error| {
-        RuntimeError::Config(format!(
-            "failed to read {}: {error}",
+    let restart_fd = control_restart_snapshot_fd()?;
+    let image_fd = control_fs_image_fd()?;
+    match (restart_fd, image_fd) {
+        (Some(_), Some(_)) => Err(RuntimeError::Config(format!(
+            "{} and {} must not both be set",
+            patina_dst_runtime::ENV_RESTART_SNAPSHOT_FD,
             patina_dst_runtime::ENV_FS_IMAGE_FD
-        ))
-    })?;
-    let image = FsImage::decode(&bytes)
-        .map_err(|error| RuntimeError::Config(format!("invalid filesystem image: {error}")))?;
-    image.into_memfs().map_err(|error| {
-        RuntimeError::Config(format!("failed to rebuild filesystem image: {error}"))
-    })
+        ))),
+        (Some(fd), None) => {
+            let bytes = read_host_fd_to_end(fd).map_err(|error| {
+                RuntimeError::Config(format!(
+                    "failed to read {}: {error}",
+                    patina_dst_runtime::ENV_RESTART_SNAPSHOT_FD
+                ))
+            })?;
+            FsSnapshot::decode(&bytes)
+                .map_err(|error| RuntimeError::Config(format!("invalid restart snapshot: {error}")))
+                .map(|snapshot| snapshot.into_memfs())
+        }
+        (None, Some(fd)) => {
+            let bytes = read_host_fd_to_end(fd).map_err(|error| {
+                RuntimeError::Config(format!(
+                    "failed to read {}: {error}",
+                    patina_dst_runtime::ENV_FS_IMAGE_FD
+                ))
+            })?;
+            let image = FsImage::decode(&bytes).map_err(|error| {
+                RuntimeError::Config(format!("invalid filesystem image: {error}"))
+            })?;
+            image.into_memfs().map_err(|error| {
+                RuntimeError::Config(format!("failed to rebuild filesystem image: {error}"))
+            })
+        }
+        (None, None) => Ok(MemFs::new()),
+    }
 }
 
 fn runtime_config_from_control_plane() -> Result<(RuntimeConfig, Option<i32>), RuntimeError> {
@@ -2363,6 +2502,12 @@ fn runtime_config_from_control_plane() -> Result<(RuntimeConfig, Option<i32>), R
     };
     if let Some(budget) = parse_control_u64(patina_dst_runtime::ENV_STEP_BUDGET)? {
         config = config.with_step_budget(budget);
+    }
+    if let Some(incarnation) = parse_control_u64(patina_dst_runtime::ENV_INCARNATION)? {
+        config = config.with_incarnation(incarnation);
+    }
+    if control_handoff_fd()?.is_some() {
+        config = config.require_crash_selector_reached();
     }
     if let Some(value) = control_env(patina_dst_runtime::ENV_PARAMS_JSON) {
         let params: BTreeMap<String, String> = serde_json::from_str(&value).map_err(|error| {

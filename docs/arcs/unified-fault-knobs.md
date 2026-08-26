@@ -394,7 +394,7 @@ fault be replayed flag-free, and is there standalone point injection?*
 
 | Domain | Cargo (explicit/test) | WASI | Native | Notes / gaps |
 |---|---|---|---|---|
-| fs durability (crash, torn writes) | finder: ✓ (Wave C) · repro: ✓ `--fs-crash-at` + replay | same | same | Closed in Wave C by seed-drawn crash placement: `campaign --faults` draws the op class and a low ordinal from the generation hash (and tears at byte granularity half the time), so successive generations crash at different points in the guest's I/O sequence. No new runtime knob was needed. |
+| fs durability (crash, torn writes) | finder: ✗ for crash restart · repro: refused | refused | native seeded `--fs-crash-at`; record/replay refused | Native seeded crash now terminates incarnation 0 and restarts from a recovered snapshot. Cargo/WASI and native crash record/replay remain explicit gaps; `campaign --faults` must not classify fs-crash replay as supported until v5 lifecycle assembly lands. |
 | fs I/O errors / short I/O / latency | finder: ✗ → §2 · repro: replay after §2 | same | same | Point injection (`--fs-error-at op:N`) deliberately deferred; seed+replay covers reproduction. |
 | net delivery (drop/jitter/latency) | finder: ✓ · repro: replay ✓ | same | finder: ✓ full · repro: ✓ | Latency CLI family gap fixed in Wave C (`--net-latency-nanos` moved into the shared `FAULT_FLAGS`); TCP base latency (defect 2) applies on the stream path. No point injection ("drop packet N") — replay suffices. |
 | net partition | finder: ✗ · repro: ✗ | ✗ | ✗ | **Code-only** (`SimNet::partition`, §7). Fix: `--net-partition A,B` (static) + seeded timed partitions with heal windows tied to the liveness converge arm (§8 #1). |

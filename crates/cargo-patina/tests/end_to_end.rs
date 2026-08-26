@@ -225,8 +225,8 @@ fn wasi_replay_restores_guest_argv_and_faults_flag_free() {
             "1",
             "--record",
             trace.to_str().unwrap(),
-            "--fs-crash-at",
-            "close:1",
+            "--fs-latency-nanos",
+            "1..2",
             "--arg",
             "alpha",
             "--arg",
@@ -240,7 +240,7 @@ fn wasi_replay_restores_guest_argv_and_faults_flag_free() {
         String::from_utf8_lossy(&recorded.stderr)
     );
 
-    // Flag-free replay: neither `--arg` nor `--fs-crash-at` is re-passed, yet the
+    // Flag-free replay: neither `--arg` nor `--fs-latency-nanos` is re-passed, yet the
     // run reproduces byte-identically because the trace is authoritative.
     let replayed = invoke_unchecked(
         env!("CARGO_BIN_EXE_cargo-patina"),
@@ -3580,12 +3580,19 @@ fn run_and_audit_infer_target_and_reject_cross_target_flags() {
         "missing --allow-on-wasm diagnostic:\n{allow_stderr}"
     );
 
-    // The filesystem/network fault knobs are now honored on a WASI `run` (they
-    // route through the same seeded runtime drivers), so a knob the no-op guest
-    // never triggers simply runs clean rather than being refused.
-    invoke_in(
+    // Native crash-restart lifecycle is not wired through WASI yet. Refuse the
+    // selector by name instead of preserving the old rollback-and-continue
+    // hybrid, even for a no-op guest that would never reach the selector.
+    let crash_on_wasm = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
         workspace,
         &["run", module.to_str().unwrap(), "--fs-crash-at", "close:1"],
+    );
+    assert!(!crash_on_wasm.status.success());
+    let crash_stderr = String::from_utf8_lossy(&crash_on_wasm.stderr);
+    assert!(
+        crash_stderr.contains("--fs-crash-at") && crash_stderr.contains("WASI"),
+        "missing --fs-crash-at-on-wasm diagnostic:\n{crash_stderr}"
     );
 
     // `--sleep-jitter-nanos` is now honored on a WASI `run`: the wasip1 host
@@ -12930,6 +12937,203 @@ fn strip_guest_argv(source: &Path, dest: &Path) {
     fs::write(dest, serde_json::to_vec(&value).unwrap()).unwrap();
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const NATIVE_CRASH_RESTART_CANARY_SOURCE: &str = r#"
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::process;
+
+extern "C" fn incarnation0_atexit() {
+    println!("CANARY atexit0_should_not_run");
+}
+
+unsafe extern "C" {
+    fn read(fd: i32, buf: *mut core::ffi::c_void, count: usize) -> isize;
+    fn atexit(cb: extern "C" fn()) -> i32;
+}
+
+fn read_file(path: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    File::open(path).unwrap().read_to_end(&mut bytes).unwrap();
+    bytes
+}
+
+fn main() {
+    let pid = process::id();
+    if let Ok(first) = File::open("/pid0") {
+        use std::os::fd::AsRawFd;
+        println!("CANARY restart_first_fd={}", first.as_raw_fd());
+        drop(first);
+        let pid0 = String::from_utf8(read_file("/pid0")).unwrap();
+        println!("CANARY incarnation=1 pid0={pid0} pid1={pid}");
+        println!("CANARY A={:?}", String::from_utf8_lossy(&read_file("/a")));
+        println!("CANARY B={:?}", String::from_utf8_lossy(&read_file("/b")));
+        let mut stale = File::open("/stale").unwrap();
+        let raw: i32 = String::from_utf8(read_file("/fd")).unwrap().parse().unwrap();
+        let mut buf = [0_u8; 1];
+        let stale_result = unsafe { read(raw, buf.as_mut_ptr().cast(), 1) };
+        println!("CANARY stale_fd_result={stale_result}");
+        let fresh = File::open("/a").unwrap();
+        println!("CANARY later_fresh_fd={}", fresh.as_raw_fd());
+        stale.seek(SeekFrom::Start(0)).unwrap();
+        return;
+    }
+
+    unsafe { atexit(incarnation0_atexit); }
+    let mut pid_file = OpenOptions::new().create(true).truncate(true).write(true).open("/pid0").unwrap();
+    write!(pid_file, "{pid}").unwrap();
+    pid_file.sync_all().unwrap();
+    File::open("/").unwrap().sync_all().unwrap();
+
+    let mut a = OpenOptions::new().create(true).truncate(true).read(true).write(true).open("/a").unwrap();
+    a.write_all(b"A-synced").unwrap();
+    a.sync_all().unwrap();
+    File::open("/").unwrap().sync_all().unwrap();
+    use std::os::fd::AsRawFd;
+    let mut fd_file = OpenOptions::new().create(true).truncate(true).write(true).open("/fd").unwrap();
+    write!(fd_file, "{}", a.as_raw_fd()).unwrap();
+    fd_file.sync_all().unwrap();
+    let mut stale = OpenOptions::new().create(true).truncate(true).write(true).open("/stale").unwrap();
+    stale.write_all(b"held").unwrap();
+    stale.sync_all().unwrap();
+    File::open("/").unwrap().sync_all().unwrap();
+
+    let mut b = OpenOptions::new().create(true).truncate(true).write(true).open("/b").unwrap();
+    b.write_all(b"B-stable!!").unwrap();
+    b.sync_all().unwrap();
+    File::open("/").unwrap().sync_all().unwrap();
+    b.seek(SeekFrom::Start(0)).unwrap();
+    println!("CANARY before_trigger pid={pid}");
+    b.write_all(b"B-volatile").unwrap();
+    println!("CANARY after_trigger_should_not_print");
+}
+"#;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_fs_crash_at_restarts_fresh_incarnation() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("crash_restart.rs");
+    fs::write(&source, NATIVE_CRASH_RESTART_CANARY_SOURCE).unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("crash_restart");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let output = invoke_in(
+        workspace,
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "11",
+            "--fs-crash-at",
+            "write:6",
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("CANARY before_trigger"),
+        "{stdout}\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("after_trigger_should_not_print"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("atexit0_should_not_run"), "{stdout}");
+    assert!(
+        stdout.contains("CANARY incarnation=1"),
+        "{stdout}\n{stderr}"
+    );
+    assert!(stdout.contains("CANARY A=\"A-synced\""), "{stdout}");
+    assert!(stdout.contains("CANARY B=\"B-stable!!\""), "{stdout}");
+    assert!(!stdout.contains("B-volatile"), "{stdout}");
+    assert!(stdout.contains("CANARY stale_fd_result=-1"), "{stdout}");
+    assert!(stdout.contains("CANARY restart_first_fd=3"), "{stdout}");
+    assert!(
+        stderr.matches("PATINA_FS_CRASH_RESTART").count() == 1,
+        "{stderr}"
+    );
+    let json = invoke_in(
+        workspace,
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "11",
+            "--fs-crash-at",
+            "write:6",
+            "--format",
+            "json",
+        ],
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap_or_else(|error| {
+        panic!(
+            "native crash-restart --format json did not emit JSON: {error}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&json.stdout),
+            String::from_utf8_lossy(&json.stderr)
+        )
+    });
+    let crash = &envelope["crash_restart"];
+    assert_eq!(crash["selector"]["op"], "write");
+    assert_eq!(crash["selector"]["ordinal"], 6);
+    assert_eq!(crash["reached"], true);
+    assert_eq!(crash["crash_count"], 1);
+    assert_eq!(crash["restart_count"], 1);
+    assert_eq!(crash["incarnations"][0]["id"], 0);
+    assert_eq!(crash["incarnations"][1]["id"], 1);
+    assert_ne!(
+        crash["incarnations"][0]["host_pid"],
+        crash["incarnations"][1]["host_pid"]
+    );
+    assert!(
+        crash["handoff_digest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert!(
+        crash["snapshot_digest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert_eq!(crash["terminal_outcome"]["kind"], "completed_after_restart");
+    let json_guest_stdout = envelope["stdout"].as_str().unwrap();
+    assert!(json_guest_stdout.contains("CANARY incarnation=1"));
+    assert!(!json_guest_stdout.contains("after_trigger_should_not_print"));
+    assert!(!json_guest_stdout.contains("atexit0_should_not_run"));
+
+    let unreached = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "11",
+            "--fs-crash-at",
+            "write:99",
+        ],
+    );
+    assert!(
+        !unreached.status.success(),
+        "unreached selector unexpectedly passed"
+    );
+    assert!(
+        String::from_utf8_lossy(&unreached.stderr).contains("PATINA_FS_CRASH_SELECTOR_UNREACHED"),
+        "{}",
+        String::from_utf8_lossy(&unreached.stderr)
+    );
+}
+
 // A guest that establishes a durable 16-byte baseline, then issues one UNSYNCED
 // positional overwrite. `--fs-crash-at write:2` fires right after that pwrite,
 // so it is the final write eligible for a sub-block (byte-granularity) tear. The
@@ -12945,6 +13149,12 @@ use std::os::unix::fs::FileExt;
 
 fn main() {
     let path = "/f";
+    if let Ok(mut f) = File::open(path) {
+        let mut buf = Vec::new();
+        let _ = f.read_to_end(&mut buf);
+        println!("recovered={buf:?}");
+        return;
+    }
     {
         let f = OpenOptions::new().create(true).write(true).open(path).unwrap();
         f.write_all_at(&[b'A'; 16], 0).unwrap();
@@ -13090,12 +13300,32 @@ use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 
+fn report(final_path: &str) {
+    let mut contents = String::new();
+    match File::open(final_path) {
+        Ok(mut file) => {
+            file.read_to_string(&mut contents).unwrap();
+            println!("NS_RESULT present {contents}");
+        }
+        Err(error) => println!("NS_RESULT missing {:?}", error.kind()),
+    }
+}
+
 fn main() {
     let with_dir_fsync = env::args().any(|arg| arg == "--dir-fsync");
+    let marker = "/tmp/patina-ns.started";
     let tmp = "/tmp/patina-ns.tmp";
     let final_path = "/tmp/patina-ns.final";
+    if File::open(marker).is_ok() {
+        report(final_path);
+        return;
+    }
     let _ = fs::remove_file(tmp);
     let _ = fs::remove_file(final_path);
+    let mut marker_file = OpenOptions::new().create(true).truncate(true).write(true).open(marker).unwrap();
+    marker_file.write_all(b"started").unwrap();
+    marker_file.sync_all().unwrap();
+    File::open("/tmp").unwrap().sync_all().unwrap();
 
     let mut file = OpenOptions::new()
         .create(true)
@@ -13114,14 +13344,7 @@ fn main() {
     }
     drop(file);
 
-    let mut contents = String::new();
-    match File::open(final_path) {
-        Ok(mut file) => {
-            file.read_to_string(&mut contents).unwrap();
-            println!("NS_RESULT present {contents}");
-        }
-        Err(error) => println!("NS_RESULT missing {:?}", error.kind()),
-    }
+    report(final_path);
 }
 "#;
 
@@ -13168,13 +13391,13 @@ fn native_directory_fsync_guards_namespace_durability_and_replays() {
         "--seed",
         "5",
         "--fs-crash-at",
-        "sync:2",
+        "sync:4",
         "--",
         "--dir-fsync",
     ]);
     assert!(
         guarded.contains("dir_is_dir=true"),
-        "fstat did not report a directory:\n{guarded}"
+        "fstat did not report a directory before the modeled crash:\n{guarded}"
     );
     assert!(
         guarded.contains("NS_RESULT present stable"),

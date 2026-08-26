@@ -17,8 +17,9 @@
 #   [2] a recorded run replays with an identical outcome verdict;
 #   [3] net-jitter and net-drop: the queue converges (every acked job terminates
 #       as completed or failed) and NEVER violates an invariant;
-#   [4] fs-crash sweep: a fail-closed abort (exit 2) is allowed, a violation
-#       verdict is not;
+#   [4] native fs-crash restart sweep: every configured crash selector reaches
+#       exactly one fresh-incarnation restart (27 total), and no violation
+#       verdict is allowed;
 #   [5] crash-RECOVERY: the server is killed + restarted in-process on the same
 #       WAL (--crash-at-completed); acked jobs survive, the run converges, and it
 #       is byte-identical across repeats. Plus the in-process fail-closed-recovery
@@ -185,20 +186,31 @@ for d in 100 200 300; do
   done
 done
 
-echo "==> [4] fs-crash sweep: fail-closed abort (exit 2) allowed, violation verdict never"
-crash_abort=0; crash_ok=0
-for spec in write:1 write:5 write:12 write:40 sync:1 sync:4 sync:16 close:1 close:4; do
+echo "==> [4] native fs-crash restart sweep: every configured crash reaches one restart, violation verdict never"
+crash_restarts=0; crash_violations=0
+for spec in write:1 write:5 write:12 write:40 sync:1 sync:4 sync:16 close:1 close:3; do
   for s in 1 2 3; do
-    err="$work/f.err"
-    # set -e safe capture: a fail-closed abort returns exit 2 by design.
+    safe_spec="${spec/:/.}"
+    err="$work/f.$safe_spec.$s.err"
     if run --seed "$s" ${ALLOW[@]+"${ALLOW[@]}"} --fs-crash-at "$spec" -- "${ARGS[@]}" >/dev/null 2>"$err"; then code=0; else code=$?; fi
-    if violated "$err"; then echo "      FAIL: violation verdict fs-crash $spec seed $s"; fail=1; fi
-    if [[ $code -eq 0 ]]; then crash_ok=$((crash_ok+1));
-    elif [[ $code -eq 2 ]]; then crash_abort=$((crash_abort+1));
-    else echo "      note: fs-crash $spec seed $s unexpected exit=$code"; stderr_tail "$err"; fi
+    if [[ $code -ne 0 ]]; then
+      echo "      FAIL: fs-crash $spec seed $s unexpected exit=$code"; fail=1; stderr_tail "$err"; continue
+    fi
+    if violated "$err"; then echo "      FAIL: violation verdict fs-crash $spec seed $s"; fail=1; crash_violations=$((crash_violations+1)); fi
+    if grep -q "PATINA_FS_CRASH_RESTART selector=$spec .*result=restarted" "$err"; then
+      crash_restarts=$((crash_restarts+1))
+    else
+      echo "      FAIL: fs-crash $spec seed $s missing structured restart marker"; fail=1; stderr_tail "$err"
+    fi
   done
 done
-echo "    fs-crash outcomes: clean(exit0)=$crash_ok fail-closed-abort(exit2)=$crash_abort (any violation verdict FAILs above)"
+if [[ $crash_restarts -ne 27 ]]; then
+  echo "    FAIL: expected 27 reached crash restarts, saw $crash_restarts"; fail=1
+fi
+if [[ $crash_violations -ne 0 ]]; then
+  echo "    FAIL: expected zero fs-crash violation verdicts, saw $crash_violations"; fail=1
+fi
+echo "    fs-crash restarts reached=$crash_restarts violations=$crash_violations"
 
 echo "==> [5] crash-RECOVERY: kill+restart in-process on the same WAL, converge, byte-identical"
 echo "    -- (a) crash at completed=10 + restart: 5 seeds x 3 repeats byte-identical, all converge --"
