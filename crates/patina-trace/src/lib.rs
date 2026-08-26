@@ -1139,10 +1139,11 @@ impl TraceBundle {
             .filter(|marker| marker.order < prefix_end_order)
             .collect();
         let mut suffix_lifecycle = timeline.lifecycle.clone();
-        if let (Some(active), Some(first)) = (parent_active, suffix_lifecycle.first())
-            && matches!(first.kind, LifecycleEventKind::Start { incarnation } if incarnation == active)
-        {
-            suffix_lifecycle.remove(0);
+        if let (Some(active), Some(first)) = (parent_active, suffix_lifecycle.first()) {
+            if matches!(first.kind, LifecycleEventKind::Start { incarnation } if incarnation == active)
+            {
+                suffix_lifecycle.remove(0);
+            }
         }
         lifecycle.extend(suffix_lifecycle);
         Ok(lifecycle)
@@ -2394,10 +2395,10 @@ fn value_contains_legacy_fs_crash(value: &serde_json::Value) -> bool {
             == Some("fs_crash")
     }
 
-    if let Some(decisions) = value.get("decisions").and_then(serde_json::Value::as_array)
-        && decisions.iter().any(event_is_fs_crash)
-    {
-        return true;
+    if let Some(decisions) = value.get("decisions").and_then(serde_json::Value::as_array) {
+        if decisions.iter().any(event_is_fs_crash) {
+            return true;
+        }
     }
     value
         .get("timelines")

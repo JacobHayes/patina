@@ -6239,14 +6239,13 @@ a recorded result or a replay fetch",
                 label: pending.label,
             });
         }
-        if self.require_crash_selector_reached
-            && let Some(selector) = self.crash_at
-            && !self.crash_fired
-        {
-            return Err(RuntimeError::CrashSelectorUnreached {
-                selector,
-                counts: self.crash_counts,
-            });
+        if self.require_crash_selector_reached && !self.crash_fired {
+            if let Some(selector) = self.crash_at {
+                return Err(RuntimeError::CrashSelectorUnreached {
+                    selector,
+                    counts: self.crash_counts,
+                });
+            }
         }
         // Any runtime diagnostic no embedder drained. The shim and the WASI host
         // drain after each SDK entry point so the lines interleave with guest
