@@ -26,7 +26,7 @@ fn expected_operations() -> Vec<Operation> {
 
 #[test]
 fn current_format_fixture_parses_validates_and_is_canonically_encoded() {
-    let bundle = TraceBundle::load(fixture("format-6.patina")).unwrap();
+    let bundle = TraceBundle::load(fixture("format-7.patina")).unwrap();
     assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
     bundle.validate().unwrap();
     // A pre-metadata run records no fault configuration; the field is absent
@@ -42,7 +42,7 @@ fn current_format_fixture_parses_validates_and_is_canonically_encoded() {
     // on-disk encoding and guards against the fixture drifting from the writer.
     let reencoded = bundle.to_bytes().unwrap();
     assert_eq!(
-        std::fs::read(fixture("format-6.patina")).unwrap(),
+        std::fs::read(fixture("format-7.patina")).unwrap(),
         reencoded
     );
     let text = String::from_utf8(reencoded).unwrap();
@@ -59,14 +59,14 @@ fn current_format_fixture_parses_validates_and_is_canonically_encoded() {
 
 #[test]
 fn current_crash_restart_fixture_parses_validates_and_is_canonical() {
-    let bundle = TraceBundle::load(fixture("format-6-crash-restart.patina")).unwrap();
+    let bundle = TraceBundle::load(fixture("format-7-crash-restart.patina")).unwrap();
     bundle.validate().unwrap();
     assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
     assert_eq!(bundle.timelines[0].lifecycle.len(), 5);
     assert_eq!(bundle.timelines[0].decisions[0].order, 1);
     assert_eq!(bundle.timelines[0].decisions[1].incarnation, 1);
     assert_eq!(
-        std::fs::read(fixture("format-6-crash-restart.patina")).unwrap(),
+        std::fs::read(fixture("format-7-crash-restart.patina")).unwrap(),
         bundle.to_bytes().unwrap()
     );
 }
@@ -76,13 +76,14 @@ fn every_prior_format_migrates_to_an_equivalent_current_bundle() {
     // Every supported non-crash prior format upgrades to a bundle byte-for-byte
     // equivalent to the hand-written current-format fixture: current version, a single
     // unbranched `main` timeline, and absent branch metadata.
-    let current = TraceBundle::load(fixture("format-6.patina")).unwrap();
+    let current = TraceBundle::load(fixture("format-7.patina")).unwrap();
     for prior in [
         "format-1.patina",
         "format-2.patina",
         "format-3.patina",
         "format-4.patina",
         "format-5.patina",
+        "format-6.patina",
     ] {
         let migrated = TraceBundle::load(fixture(prior)).unwrap();
         assert_eq!(
@@ -145,6 +146,31 @@ fn the_mode_migration_reconstructs_the_request_a_format_5_run_made() {
     assert_eq!(flags.mode, 0, "a non-creating open records no mode");
 }
 
+/// The v6→v7 step gives every recorded open the flag the format-6 recorder
+/// behaved as if it had: format 6 had no `O_PATH` in its vocabulary at all, so
+/// every open it recorded opened the entry. RED without the step: the bundle
+/// fails to deserialize, because `path_only` is a required field of `OpenFlags`.
+#[test]
+fn the_path_only_migration_marks_every_prior_open_as_opening_the_entry() {
+    let bundle = TraceBundle::load(fixture("format-6-path-only.patina")).unwrap();
+    assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
+    bundle.validate().unwrap();
+    let main = bundle.resolved_timeline("main").unwrap();
+    for event in &main[1..] {
+        let Operation::FsOpen { flags, .. } = &event.operation else {
+            panic!("expected an fs_open, got {:?}", event.operation);
+        };
+        assert!(
+            !flags.path_only,
+            "a format-6 open always opened the entry: {flags:?}"
+        );
+        assert!(
+            flags.read || flags.write,
+            "and therefore always carried an access mode: {flags:?}"
+        );
+    }
+}
+
 #[test]
 fn migration_never_rewrites_the_source_file() {
     for prior in [
@@ -153,6 +179,7 @@ fn migration_never_rewrites_the_source_file() {
         "format-3.patina",
         "format-4.patina",
         "format-5.patina",
+        "format-6.patina",
     ] {
         let path = fixture(prior);
         let before = std::fs::read(&path).unwrap();
@@ -266,13 +293,14 @@ fn malformed_fixture_is_rejected_as_a_parse_error() {
 fn migration_is_reachable_through_the_in_memory_transport_path() {
     // The same decode path backs `from_slice`, so transported prior-format
     // bundles migrate identically to file loads.
-    let current = TraceBundle::load(fixture("format-6.patina")).unwrap();
+    let current = TraceBundle::load(fixture("format-7.patina")).unwrap();
     for prior in [
         "format-1.patina",
         "format-2.patina",
         "format-3.patina",
         "format-4.patina",
         "format-5.patina",
+        "format-6.patina",
     ] {
         let bytes = std::fs::read(fixture(prior)).unwrap();
         let migrated = TraceBundle::from_slice(&bytes).unwrap();

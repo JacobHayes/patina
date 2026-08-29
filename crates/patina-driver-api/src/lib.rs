@@ -104,6 +104,21 @@ pub trait FsDriver: Send {
     fn read_directory(&mut self, _path: &str) -> DriverResult<Vec<FsDirectoryEntry>> {
         Err(unsupported_filesystem_operation("read directory"))
     }
+    /// List the directory an open DESCRIPTOR names (`getdents`/`readdir`).
+    ///
+    /// Iteration is a read of the descriptor, not a fresh lookup of a name: the
+    /// `r` it costs was charged when the descriptor was opened, so a `chmod`
+    /// afterwards cannot retroactively break a walk in progress, and a
+    /// descriptor opened `O_PATH` — which charged no access at all — cannot
+    /// list at [`patina_dst_abi::ErrorCode::NotReadable`] however permissive the
+    /// directory's bits are. The path-taking [`FsDriver::read_directory`] is the
+    /// fused `opendir`+`readdir` an in-process guest issues and charges `r`
+    /// itself.
+    fn read_directory_fd(&mut self, _fd: Fd) -> DriverResult<Vec<FsDirectoryEntry>> {
+        Err(unsupported_filesystem_operation(
+            "read directory descriptor",
+        ))
+    }
     fn remove_directory(&mut self, _path: &str) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("remove directory"))
     }
@@ -147,6 +162,29 @@ pub trait FsDriver: Send {
     /// node and a symlink planted at the old name is never followed.
     fn fd_path(&mut self, _fd: Fd) -> DriverResult<String> {
         Err(unsupported_filesystem_operation("descriptor path"))
+    }
+    /// Change the permission bits of the entry an INODE names (`fchmod` through
+    /// the one descriptor class the filesystem does not hold — a FIFO endpoint).
+    /// The mirror of [`FsDriver::inode_metadata`], and it reaches an unlinked
+    /// node for the same reason: the bits belong to the node, not to a name.
+    fn set_inode_mode(&mut self, _ino: u64, _mode: u32) -> DriverResult<()> {
+        Err(unsupported_filesystem_operation("set inode mode"))
+    }
+    /// Take a reference on an inode that no filesystem descriptor holds.
+    ///
+    /// A kernel keeps an inode alive while ANY descriptor references it, and a
+    /// FIFO endpoint is a descriptor this filesystem does not itself hold: the
+    /// bytes belong to the openers' pipe. Its reference therefore has to be
+    /// taken explicitly, or the node would vanish under the endpoint the moment
+    /// its last name was unlinked and `fstat` on a perfectly live descriptor
+    /// would answer `NotFound`. Paired with [`FsDriver::release_inode`].
+    fn retain_inode(&mut self, _ino: u64) -> DriverResult<()> {
+        Err(unsupported_filesystem_operation("retain inode"))
+    }
+    /// Drop a reference taken by [`FsDriver::retain_inode`]. The node is freed
+    /// when its last name and its last reference are both gone.
+    fn release_inode(&mut self, _ino: u64) -> DriverResult<()> {
+        Err(unsupported_filesystem_operation("release inode"))
     }
     fn crash(&mut self) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("crash"))

@@ -12,6 +12,7 @@ use std::fmt;
 use patina_dst_abi::{EffectError, ErrorCode};
 
 use crate::{EntryMetadata, Inode, InodeId, MODE_MASK, MemFs, normalize_entry_path, parent_path};
+use patina_dst_abi::FsEntryKind;
 
 /// Magic prefix identifying an encoded [`FsSnapshot`] stream.
 const MAGIC: &[u8; 8] = b"PATFSSNP";
@@ -55,10 +56,10 @@ impl fmt::Debug for FsSnapshot {
 impl FsSnapshot {
     pub(crate) fn from_memfs(filesystem: &MemFs) -> Self {
         let mut filesystem = filesystem.clone();
-        filesystem.handles.clear();
-        filesystem.descriptions.clear();
-        filesystem.next_fd = 3;
-        filesystem.next_description = 1;
+        // Descriptors do not cross a restart, and neither does a node only a
+        // descriptor was keeping alive: a snapshot is a NAMESPACE, and an
+        // unlinked-but-open entry has no name to write down.
+        filesystem.forget_open_state();
         Self { filesystem }
     }
 
@@ -211,8 +212,13 @@ impl FsSnapshot {
             inodes.insert(
                 inode_id,
                 Inode {
+                    // Provisional: the name tables below say what each node IS,
+                    // and validation refuses a node no name claims — so nothing
+                    // leaves this function still holding the placeholder.
+                    kind: FsEntryKind::File,
                     contents,
                     links,
+                    openers: 0,
                     atime_nanos,
                     mtime_nanos,
                     mode,
@@ -263,6 +269,10 @@ impl FsSnapshot {
                     "fifo references an unknown inode",
                 ));
             }
+            inodes
+                .get_mut(&inode_id)
+                .expect("fifo inode was checked")
+                .kind = FsEntryKind::Fifo;
             fifos.insert(path, inode_id);
         }
 
@@ -698,6 +708,7 @@ mod tests {
             truncate: false,
             append: false,
             exclusive: false,
+            path_only: false,
             mode: patina_dst_abi::CREATE_MODE_UNUSED,
         }
     }

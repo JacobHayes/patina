@@ -326,6 +326,16 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         self.inner.read_directory(path)
     }
 
+    /// The same listing the path form is, addressed by descriptor — so it draws
+    /// from the same fault op rather than becoming a directory read no injected
+    /// failure can ever reach.
+    fn read_directory_fd(&mut self, fd: Fd) -> DriverResult<Vec<FsDirectoryEntry>> {
+        if let Some(error) = self.maybe_error(FsFaultOp::ReadDirectory) {
+            return Err(error);
+        }
+        self.inner.read_directory_fd(fd)
+    }
+
     fn remove_directory(&mut self, path: &str) -> DriverResult<()> {
         if let Some(error) = self.maybe_error(FsFaultOp::RemoveDirectory) {
             return Err(error);
@@ -388,6 +398,26 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
     /// Never fault-eligible: this is the name lookup inside a `*at` call, not a
     /// trip to storage, and no real `openat` fails because the kernel could not
     /// say where a descriptor's inode lives.
+    /// The same `fchmod` the descriptor form is, addressed by node — so it draws
+    /// from the same fault op.
+    fn set_inode_mode(&mut self, ino: u64, mode: u32) -> DriverResult<()> {
+        if let Some(error) = self.maybe_error(FsFaultOp::SetTimes) {
+            return Err(error);
+        }
+        self.inner.set_inode_mode(ino, mode)
+    }
+
+    /// Taking or dropping a node reference is the bookkeeping half of an open
+    /// and a close, not a trip to storage: like `fd_path` it carries no injected
+    /// failure, because a kernel has nowhere to fail it either.
+    fn retain_inode(&mut self, ino: u64) -> DriverResult<()> {
+        self.inner.retain_inode(ino)
+    }
+
+    fn release_inode(&mut self, ino: u64) -> DriverResult<()> {
+        self.inner.release_inode(ino)
+    }
+
     fn fd_path(&mut self, fd: Fd) -> DriverResult<String> {
         self.inner.fd_path(fd)
     }
@@ -905,6 +935,7 @@ mod tests {
                     truncate: true,
                     append: false,
                     exclusive: false,
+                    path_only: false,
                     mode: patina_dst_abi::DEFAULT_FILE_CREATE_MODE,
                 },
             )
@@ -1064,6 +1095,7 @@ mod tests {
                     truncate: true,
                     append: false,
                     exclusive: false,
+                    path_only: false,
                     mode: patina_dst_abi::DEFAULT_FILE_CREATE_MODE,
                 },
             )

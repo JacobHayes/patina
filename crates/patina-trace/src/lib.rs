@@ -62,7 +62,14 @@ pub use handoff::{
 /// the fixed umasked default for its kind, so the upgrade fills in exactly the
 /// request that produced that default — `0o666` for a creating open, `0o777`
 /// for a directory, and `0` (unread) for an open that creates nothing.
-pub const TRACE_FORMAT_VERSION: u32 = 6;
+///
+/// Format 7 adds `O_PATH` to `fs_open`'s flags (`path_only`). A format-6
+/// recorder had no way to say it: every open in its vocabulary opened the file,
+/// so a directory handle a guest asked for as a mere LOCATION was recorded as a
+/// read-only open of the directory and charged accordingly. Nothing a format-6
+/// run recorded was path-only, so the upgrade writes `false` — the flag the
+/// recorder behaved as if it had.
+pub const TRACE_FORMAT_VERSION: u32 = 7;
 /// The oldest trace format version this runtime can read. A bundle at this
 /// version, or any later supported version, is migrated in memory through the
 /// `MIGRATIONS` chain up to [`TRACE_FORMAT_VERSION`] and then validated by
@@ -2148,6 +2155,7 @@ const MIGRATIONS: &[Migration] = &[
     migrate_v3_to_v4,
     migrate_v4_to_v5,
     migrate_v5_to_v6,
+    migrate_v6_to_v7,
 ];
 
 // One migration step must exist for each supported prior version; this keeps
@@ -2458,6 +2466,53 @@ fn migrate_v5_to_v6(mut value: serde_json::Value) -> Result<serde_json::Value, T
         }
     }
     object.insert("format_version".into(), serde_json::Value::from(6u32));
+    Ok(value)
+}
+
+/// Upgrade the `O_PATH`-less format 6 layout to format 7.
+///
+/// Format 6's flag vocabulary had one directory open, so a guest that asked for
+/// a location (`O_PATH`) and a guest that asked to read the directory recorded
+/// the same operation. Every format-6 `fs_open` therefore opened the entry:
+/// `path_only` is `false` for all of them, which is exactly what the recorder
+/// behaved as if it had asked for.
+fn migrate_v6_to_v7(mut value: serde_json::Value) -> Result<serde_json::Value, TraceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| TraceError::Invalid("format 6 trace is not a JSON object".into()))?;
+    let timelines = object
+        .get_mut("timelines")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| TraceError::Invalid("format 6 trace timelines must be an array".into()))?;
+    for timeline in timelines.iter_mut() {
+        let decisions = timeline
+            .get_mut("decisions")
+            .and_then(serde_json::Value::as_array_mut)
+            .ok_or_else(|| {
+                TraceError::Invalid("format 6 timeline decisions must be an array".into())
+            })?;
+        for event in decisions.iter_mut() {
+            let Some(operation) = event
+                .get_mut("operation")
+                .and_then(serde_json::Value::as_object_mut)
+            else {
+                continue;
+            };
+            if operation.get("kind").and_then(serde_json::Value::as_str) != Some("fs_open") {
+                continue;
+            }
+            let Some(flags) = operation
+                .get_mut("flags")
+                .and_then(serde_json::Value::as_object_mut)
+            else {
+                return Err(TraceError::Invalid(
+                    "format 6 fs_open is missing its flags object".into(),
+                ));
+            };
+            flags.insert("path_only".into(), serde_json::Value::from(false));
+        }
+    }
+    object.insert("format_version".into(), serde_json::Value::from(7u32));
     Ok(value)
 }
 

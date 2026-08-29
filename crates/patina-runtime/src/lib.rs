@@ -5349,6 +5349,61 @@ recording was produced by a guest whose result type no longer matches this one"
         decode_directory_entries(&operation, outcome)
     }
 
+    /// `getdents`/`readdir` on a directory DESCRIPTOR. The access was charged
+    /// when the descriptor was opened, so this reads the node the descriptor
+    /// holds — which is also why a descriptor opened `O_PATH` cannot list at
+    /// all, however permissive the directory's bits are.
+    pub fn fs_read_directory_fd(&mut self, fd: Fd) -> Result<Vec<FsDirectoryEntry>, RuntimeError> {
+        if self.filesystem.is_none() {
+            return Err(EffectError::missing_driver("filesystem").into());
+        }
+        self.apply_fs_latency()?;
+        let operation = Operation::FsReadDirectoryFd { fd };
+        let expected = match self.filesystem_expected(&operation)? {
+            FilesystemExpected::Execute(expected) => expected,
+            FilesystemExpected::Captured(outcome) => {
+                return decode_directory_entries(&operation, outcome);
+            }
+        };
+        let result = self
+            .filesystem
+            .as_mut()
+            .expect("driver was checked")
+            .read_directory_fd(fd);
+        let actual = match result {
+            Ok(entries) => Outcome::DirectoryEntries(entries),
+            Err(error) => Outcome::Error(error),
+        };
+        let outcome = self.reconcile(operation.clone(), expected, actual)?;
+        decode_directory_entries(&operation, outcome)
+    }
+
+    /// `fchmod` through a descriptor the filesystem holds no handle for. Latency
+    /// and fault eligibility match [`DeterministicContext::fs_set_fd_mode`],
+    /// because this IS that `fchmod`, named by node instead of by descriptor.
+    pub fn fs_set_inode_mode(&mut self, ino: u64, mode: u32) -> Result<(), RuntimeError> {
+        self.filesystem_unit(Operation::FsSetInodeMode { ino, mode }, |filesystem| {
+            filesystem.set_inode_mode(ino, mode)
+        })
+    }
+
+    /// Take a node reference for a descriptor the filesystem holds no handle
+    /// for — a FIFO endpoint. No modeled latency and no fault eligibility, for
+    /// the same reason [`DeterministicContext::fs_fd_path`] has none: this is
+    /// the reference count inside `open`, not a second trip to storage.
+    pub fn fs_retain_inode(&mut self, ino: u64) -> Result<(), RuntimeError> {
+        self.filesystem_unit_undelayed(Operation::FsRetainInode { ino }, |filesystem| {
+            filesystem.retain_inode(ino)
+        })
+    }
+
+    /// Drop the reference [`DeterministicContext::fs_retain_inode`] took.
+    pub fn fs_release_inode(&mut self, ino: u64) -> Result<(), RuntimeError> {
+        self.filesystem_unit_undelayed(Operation::FsReleaseInode { ino }, |filesystem| {
+            filesystem.release_inode(ino)
+        })
+    }
+
     pub fn fs_remove_directory(&mut self, path: &str) -> Result<(), RuntimeError> {
         self.filesystem_unit(
             Operation::FsRemoveDirectory { path: path.into() },

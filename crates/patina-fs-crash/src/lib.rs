@@ -895,6 +895,25 @@ impl FsDriver for CrashFs {
         self.live.inode_metadata(ino)
     }
 
+    /// A mode is durable metadata wherever it is named from; the crash model
+    /// reads it back off the live image at reconstruction, exactly as it does
+    /// for the path- and descriptor-named spellings.
+    fn set_inode_mode(&mut self, ino: u64, mode: u32) -> DriverResult<()> {
+        self.live.set_inode_mode(ino, mode)
+    }
+
+    /// An inode reference is a descriptor's hold on a node, and a descriptor is
+    /// the process's object: no crash state is touched by taking or dropping
+    /// one. The rebuilt image carries the reference across a restart with the
+    /// descriptor itself (see `MemFs::adopt_handles`).
+    fn retain_inode(&mut self, ino: u64) -> DriverResult<()> {
+        self.live.retain_inode(ino)
+    }
+
+    fn release_inode(&mut self, ino: u64) -> DriverResult<()> {
+        self.live.release_inode(ino)
+    }
+
     fn create_directory(&mut self, path: &str, mode: u32) -> DriverResult<()> {
         self.live.create_directory(path, mode)?;
         let normalized = normalize_entry_path(path).expect("create normalized the path already");
@@ -946,6 +965,10 @@ impl FsDriver for CrashFs {
 
     fn read_directory(&mut self, path: &str) -> DriverResult<Vec<FsDirectoryEntry>> {
         self.live.read_directory(path)
+    }
+
+    fn read_directory_fd(&mut self, fd: Fd) -> DriverResult<Vec<FsDirectoryEntry>> {
+        self.live.read_directory_fd(fd)
     }
 
     fn remove_directory(&mut self, path: &str) -> DriverResult<()> {
@@ -1286,6 +1309,7 @@ mod tests {
             truncate: false,
             append: false,
             exclusive: false,
+            path_only: false,
             mode: patina_dst_abi::CREATE_MODE_UNUSED,
         }
     }
@@ -1358,6 +1382,7 @@ mod tests {
             truncate: true,
             append: false,
             exclusive: false,
+            path_only: false,
             mode: patina_dst_abi::DEFAULT_FILE_CREATE_MODE,
         };
         let fd = fs.open("/db", read_write).unwrap();
@@ -2004,6 +2029,7 @@ mod tests {
             .open(
                 "/d/file",
                 OpenFlags {
+                    path_only: false,
                     mode: 0o604,
                     ..OpenFlags::create_truncate_write()
                 },
@@ -2314,6 +2340,58 @@ mod tests {
         assert_eq!(metadata.len, 0);
         // And it is still writable, so the guest recovers by rewriting.
         assert_eq!(fs.write(fd, b"again").unwrap(), 5);
+    }
+
+    /// A descriptor on an entry whose last NAME is gone crosses a crash like any
+    /// other: a crash reaches the disk, not the process's descriptor table. The
+    /// journal enumerates names and this node has none, so it is re-bound to a
+    /// fresh anonymous node carrying what the descriptor last held — and never
+    /// to a number the rebuilt image gave some unrelated entry.
+    ///
+    /// RED before inode lifetime: `remove_file` refused an open file outright,
+    /// so this state was unreachable; with descriptions still keyed by path, the
+    /// adopted description would have named an entry the rebuilt image does not
+    /// have.
+    #[test]
+    fn a_descriptor_on_an_unlinked_entry_survives_a_crash_without_capturing_another_node() {
+        // Directory durability off, so the unlink itself is not the variable
+        // under test: this is about what a descriptor on a NAMELESS node means.
+        let mut fs = CrashFs::builder()
+            .model_directory_durability(false)
+            .build()
+            .unwrap();
+        let kept = write(&mut fs, "/kept", b"durable");
+        fs.sync(kept).unwrap();
+        let doomed = write(&mut fs, "/doomed", b"anonymous");
+        fs.sync(doomed).unwrap();
+        fs.checkpoint();
+        fs.remove_file("/doomed").unwrap();
+        let anonymous_ino = fs.fd_metadata(doomed).unwrap().ino;
+        let kept_ino = fs.fd_metadata(kept).unwrap().ino;
+        assert_ne!(anonymous_ino, kept_ino);
+
+        fs.crash().unwrap();
+
+        // The named entry comes back at its name; the anonymous one comes back
+        // only behind its descriptor, and the two are still different nodes.
+        assert_eq!(fs.contents("/kept").unwrap(), b"durable");
+        assert_eq!(
+            fs.metadata("/doomed").unwrap_err().code,
+            ErrorCode::NotFound,
+            "an unlinked name is not resurrected by its descriptor"
+        );
+        let after = fs.fd_metadata(doomed).expect("the descriptor stays valid");
+        assert_eq!(after.nlink, 0, "still no name");
+        assert_ne!(
+            after.ino,
+            fs.fd_metadata(kept).unwrap().ino,
+            "the anonymous descriptor must not capture another entry's node"
+        );
+        assert_eq!(after.len, 9, "and still holds what it last wrote");
+        // The descriptor is write-only (it was minted by `File::create`), and it
+        // still is: a crash cannot change what a descriptor was opened for.
+        assert_eq!(fs.write(doomed, b"!").unwrap(), 1);
+        assert_eq!(fs.fd_metadata(doomed).unwrap().len, 10);
     }
 
     /// A post-crash `open` must not reuse a descriptor number the guest still

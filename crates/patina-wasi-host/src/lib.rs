@@ -672,6 +672,9 @@ impl Preview1Host {
             truncate: options.oflags & WASI_OFLAG_TRUNCATE != 0,
             append: options.fdflags & WASI_FDFLAG_APPEND != 0,
             exclusive: options.oflags & WASI_OFLAG_EXCLUSIVE != 0,
+            // Preview 1 has no `O_PATH`: every `path_open` opens the entry, and
+            // a directory handle it hands back is a readable one.
+            path_only: false,
             // WASI Preview 1's `path_open` has no mode argument at all: there is
             // no caller request to carry, so the creation mode is the ordinary
             // `0o666` a POSIX program passes, which the driver's `0o022` umask

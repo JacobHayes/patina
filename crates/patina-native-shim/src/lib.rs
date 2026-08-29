@@ -188,8 +188,22 @@ const O_NOFOLLOW: u32 = 1 << 6;
 /// exactly one modeled entry kind — a FIFO — where it turns the open's
 /// rendezvous with the opposite end into an immediate answer.
 const O_NONBLOCK: u32 = 1 << 7;
-const O_ALL: u32 =
-    O_READ | O_WRITE | O_CREATE | O_TRUNCATE | O_APPEND | O_EXCLUSIVE | O_NOFOLLOW | O_NONBLOCK;
+/// `O_PATH`: name a LOCATION without opening the file behind it. This one IS a
+/// driver flag: it changes what the open costs (the path prefix's `x` walk and
+/// nothing on the entry, where a plain read-only open of a directory pays `r`)
+/// and what the descriptor can then do (`*at` resolution, `fstat`, `readlinkat`,
+/// `dup`, `close` — never a read, a write, or a directory listing). The kernel
+/// ignores the access mode under it, so it never travels with `O_READ`/`O_WRITE`.
+const O_PATH: u32 = 1 << 8;
+const O_ALL: u32 = O_READ
+    | O_WRITE
+    | O_CREATE
+    | O_TRUNCATE
+    | O_APPEND
+    | O_EXCLUSIVE
+    | O_NOFOLLOW
+    | O_NONBLOCK
+    | O_PATH;
 
 /// A minimal spinlock the shim uses instead of `std::sync::Mutex`.
 ///
@@ -3563,14 +3577,18 @@ pub unsafe extern "C" fn patina_open(path: *const c_char, flags: u32, mode: u32)
     };
     let nofollow = flags & O_NOFOLLOW != 0;
     let nonblocking = flags & O_NONBLOCK != 0;
-    let creating = flags & O_CREATE != 0;
+    let path_only = flags & O_PATH != 0;
+    let creating = flags & O_CREATE != 0 && !path_only;
     let flags = OpenFlags {
-        read: flags & O_READ != 0,
-        write: flags & O_WRITE != 0,
+        // Under `O_PATH` the kernel reads no access mode and creates nothing,
+        // so neither does this: a path-only open is exactly one thing.
+        read: flags & O_READ != 0 && !path_only,
+        write: flags & O_WRITE != 0 && !path_only,
         create: creating,
-        truncate: flags & O_TRUNCATE != 0,
-        append: flags & O_APPEND != 0,
-        exclusive: flags & O_EXCLUSIVE != 0,
+        truncate: flags & O_TRUNCATE != 0 && !path_only,
+        append: flags & O_APPEND != 0 && !path_only,
+        exclusive: flags & O_EXCLUSIVE != 0 && !path_only,
+        path_only,
         // POSIX reads `open`'s third argument only when the call can create the
         // entry; recording anything else here would put an argument in the trace
         // the kernel never looked at. Callers pass 0 without `O_CREAT`, and the
@@ -3629,13 +3647,9 @@ pub unsafe extern "C" fn patina_open(path: *const c_char, flags: u32, mode: u32)
                         Err(errno) => fail(errno),
                     }
                 }
-                FsEntryKind::Fifo => thread::fifo_open(
-                    metadata.ino,
-                    metadata.mode,
-                    flags.read,
-                    flags.write,
-                    nonblocking,
-                ),
+                FsEntryKind::Fifo => {
+                    thread::fifo_open(metadata.ino, flags.read, flags.write, nonblocking)
+                }
                 _ => fail(EINVAL),
             }
         }
@@ -4144,34 +4158,25 @@ pub unsafe extern "C" fn patina_fd_metadata_full(
     // exactly as it is through a regular file's descriptor, and what makes a
     // hard-linked FIFO report its real link count.
     //
-    // Once the LAST name for that inode is gone the filesystem has nothing left
-    // to answer with, while the descriptor (and its pipe) is still perfectly
-    // alive. A real kernel keeps the inode itself alive for exactly that case;
-    // here the last state the descriptor saw stands in, which is the closest
-    // honest answer available and strictly better than failing an `fstat` on a
-    // working descriptor.
-    if let Some(identity) = thread::fifo_identity(raw_fd) {
-        let metadata = with_context(|context| context.fs_inode_metadata(identity.ino)).unwrap_or(
-            patina_dst_abi::FsMetadata {
-                kind: FsEntryKind::Fifo,
-                len: 0,
-                ino: identity.ino,
-                nlink: 0,
-                atime_nanos: 0,
-                mtime_nanos: 0,
-                mode: identity.mode,
-            },
-        );
-        return write_metadata_full(
-            metadata,
-            kind,
-            length,
-            ino,
-            nlink,
-            atime_nanos,
-            mtime_nanos,
-            mode,
-        );
+    // Unlinking the last name does not change that: the endpoint HOLDS a
+    // reference on the node, so the filesystem still speaks for it and reports
+    // `nlink` 0 with the live mode — which is exactly what a kernel reports for
+    // an unlinked-but-open entry. There is no open-time copy to fall back to,
+    // because a copy is a stale cache one field over from the cached path.
+    if let Some(node) = thread::fifo_ino(raw_fd) {
+        return match with_context(|context| context.fs_inode_metadata(node)) {
+            Ok(metadata) => write_metadata_full(
+                metadata,
+                kind,
+                length,
+                ino,
+                nlink,
+                atime_nanos,
+                mtime_nanos,
+                mode,
+            ),
+            Err(errno) => fail(errno),
+        };
     }
     let fd = match fd(raw_fd) {
         Ok(fd) => fd,
@@ -4236,6 +4241,18 @@ pub unsafe extern "C" fn patina_chmod(path: *const c_char, mode: u32, follow: c_
 /// A descriptor already names the node, so there is no symlink to resolve.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
+    // A FIFO endpoint is a pipe, not a filesystem descriptor — so the bits it
+    // changes are named by NODE, exactly as its `fstat` reads them by node. That
+    // is what keeps `fchmod` working on an entry whose last name is gone.
+    if let Some(node) = thread::fifo_ino(raw_fd) {
+        return match with_context(|context| context.fs_set_inode_mode(node, mode)) {
+            Ok(()) => {
+                set_errno(0);
+                0
+            }
+            Err(errno) => fail(errno),
+        };
+    }
     let fd = match fd(raw_fd) {
         Ok(fd) => fd,
         Err(errno) => return fail(errno),
@@ -4251,22 +4268,26 @@ pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
 
 /// Capture a deterministic directory snapshot for POSIX readdir iteration.
 ///
+/// Iteration is a read OF A DESCRIPTOR, not a fresh lookup of a name: the `r` it
+/// costs was charged when the directory was opened, so a `chmod` afterwards
+/// cannot break a walk already under way, a rename cannot redirect it, and a
+/// descriptor opened `O_PATH` — which never opened the directory — cannot list
+/// at all. Both doors reach it the same way: the libc `opendir` mints its own
+/// descriptor first (which is also what makes `dirfd()` on one meaningful), and
+/// `fdopendir` and the raw `getdents64` row already hold one.
+///
 /// # Safety
-/// `path` must point to a valid NUL-terminated UTF-8 string and `state_out`
-/// must be writable.
+/// `state_out` must be writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_read_dir(
-    path: *const c_char,
-    state_out: *mut *mut c_void,
-) -> c_int {
+pub unsafe extern "C" fn patina_read_dir(raw_fd: c_int, state_out: *mut *mut c_void) -> c_int {
     if state_out.is_null() {
         return fail(EINVAL);
     }
-    let path = match path_from_c(path) {
-        Ok(path) => path,
+    let fd = match fd(raw_fd) {
+        Ok(fd) => fd,
         Err(errno) => return fail(errno),
     };
-    match with_context(|context| context.fs_read_directory(&path)) {
+    match with_context(|context| context.fs_read_directory_fd(fd)) {
         Ok(entries) => {
             let state = Box::new(ReadDirState {
                 entries,
@@ -8596,20 +8617,12 @@ mod thread {
         write_channel: Option<u64>,
         nonblocking: bool,
         /// Set when this endpoint came from opening a FIFO rather than from
-        /// `pipe`/`socketpair`: what `fstat` on the descriptor answers.
-        fifo: Option<FifoIdentity>,
-    }
-
-    /// What a FIFO descriptor knows about its entry. The inode is the
-    /// descriptor's NODE identity and is what `fstat` asks the filesystem about,
-    /// so a later `chmod` is visible; `mode` is only the value the open was
-    /// judged against, kept as the last-known answer for the window after the
-    /// entry's final name has been unlinked and the filesystem can no longer
-    /// speak for the node at all.
-    #[derive(Clone, Copy)]
-    pub(crate) struct FifoIdentity {
-        pub(crate) ino: u64,
-        pub(crate) mode: u32,
+        /// `pipe`/`socketpair`: the NODE it is open on. It is all the descriptor
+        /// needs, because `fstat` asks the filesystem about that node — the
+        /// node's own reference (taken at the first open, dropped with the last
+        /// endpoint) is what keeps it answerable even after the last name for it
+        /// is unlinked.
+        fifo_ino: Option<u64>,
     }
 
     fn drain_channel_recv_waiters(state: &mut ThreadRuntime, channel: u64) -> Vec<TaskId> {
@@ -8648,10 +8661,22 @@ mod thread {
     /// directory and `fsync` routes to the crash model's namespace-durability
     /// barrier.
     ///
+    /// `path_only` is `O_PATH`, and it is the difference between the two
+    /// directory descriptors a capability guest holds. A path-only handle names
+    /// the location: it costs only the `x` walk the resolution already did, and
+    /// it resolves `*at` paths and answers `fstat` but cannot be iterated. A
+    /// plain `O_RDONLY|O_DIRECTORY` handle opens the directory for reading, so
+    /// it costs `r` — charged once, here, which is what lets a later `chmod` not
+    /// reach back into a `getdents` walk already under way.
+    ///
     /// # Safety
     /// `path` must point to a valid NUL-terminated UTF-8 string.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_diropen(path: *const c_char, follow: c_int) -> c_int {
+    pub unsafe extern "C" fn patina_diropen(
+        path: *const c_char,
+        follow: c_int,
+        path_only: c_int,
+    ) -> c_int {
         let path = match super::path_from_c(path) {
             Ok(path) => path,
             Err(errno) => return super::fail(errno),
@@ -8678,9 +8703,12 @@ mod thread {
         if kind != super::FsEntryKind::Directory {
             return super::fail(super::ENOTDIR);
         }
-        let fd = match super::with_context(|context| {
-            context.fs_open(&path, super::OpenFlags::read_only())
-        }) {
+        let open_flags = if path_only != 0 {
+            super::OpenFlags::path_only()
+        } else {
+            super::OpenFlags::read_only()
+        };
+        let fd = match super::with_context(|context| context.fs_open(&path, open_flags)) {
             Ok(fd) => fd,
             Err(errno) => return super::fail(errno),
         };
@@ -8691,6 +8719,27 @@ mod thread {
         lock_state().net.dir_fds.insert(fd);
         super::set_errno(0);
         fd
+    }
+
+    /// Duplicate a virtual directory descriptor (`dup`, `fcntl(F_DUPFD)`,
+    /// `openat` of a `DIR`'s fd through libc, and the SUD `dup` rows).
+    ///
+    /// POSIX `dup` SHARES the open file description, so this duplicates the
+    /// descriptor and registers the copy as a directory descriptor. Reopening
+    /// the descriptor's current path instead would be a second open: it would
+    /// re-resolve a name (so a rename between the open and the `dup` would
+    /// detach the copy) and re-charge permission (so a `chmod` in that window
+    /// would refuse it) — neither of which a real `dup` does.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn patina_dirdup(raw_fd: c_int) -> c_int {
+        if !lock_state().net.dir_fds.contains(&raw_fd) {
+            return super::fail(super::EBADF);
+        }
+        let duplicate = super::patina_dup(raw_fd);
+        if duplicate >= 0 {
+            lock_state().net.dir_fds.insert(duplicate);
+        }
+        duplicate
     }
 
     /// C dispatch predicate: is `fd` a virtual directory descriptor? Lets the
@@ -8808,7 +8857,7 @@ mod thread {
                 read_channel: Some(channel),
                 write_channel: None,
                 nonblocking: nonblocking != 0,
-                fifo: None,
+                fifo_ino: None,
             },
         );
         state.net.pipe_ends.insert(
@@ -8817,7 +8866,7 @@ mod thread {
                 read_channel: None,
                 write_channel: Some(channel),
                 nonblocking: nonblocking != 0,
-                fifo: None,
+                fifo_ino: None,
             },
         );
         unsafe {
@@ -8867,7 +8916,7 @@ mod thread {
                 read_channel: Some(channel_1to0),
                 write_channel: Some(channel_0to1),
                 nonblocking: nonblocking != 0,
-                fifo: None,
+                fifo_ino: None,
             },
         );
         state.net.pipe_ends.insert(
@@ -8876,7 +8925,7 @@ mod thread {
                 read_channel: Some(channel_0to1),
                 write_channel: Some(channel_1to0),
                 nonblocking: nonblocking != 0,
-                fifo: None,
+                fifo_ino: None,
             },
         );
         unsafe {
@@ -8908,21 +8957,22 @@ mod thread {
     ///
     /// The caller has already asked the filesystem about the entry, so
     /// existence, path resolution, and the permission decision are settled
-    /// before this runs; `mode` is carried only so `fstat` on the descriptor can
-    /// report the bits the open was judged against.
+    /// before this runs.
+    ///
+    /// The first open of a FIFO takes a REFERENCE on its node, and the last
+    /// close of the channel drops it. That reference is the whole of the FIFO's
+    /// inode lifetime: a kernel keeps an inode alive while any descriptor holds
+    /// it, and these descriptors are the ones the filesystem itself has no
+    /// handle for — so without it, unlinking the last name would pull the node
+    /// out from under a perfectly live endpoint and `fstat` would answer for a
+    /// node nobody can name.
     ///
     /// Blocking is a deterministic park through the same baton the pipe reads
     /// and writes use, so under the cooperative scheduler another task's
     /// `open(O_WRONLY)` is what wakes a reader parked here — and a FIFO nobody
     /// ever opens for writing surfaces as the runtime's deadlock report rather
     /// than a hung process.
-    pub(crate) fn fifo_open(
-        ino: u64,
-        mode: u32,
-        read: bool,
-        write: bool,
-        nonblocking: bool,
-    ) -> c_int {
+    pub(crate) fn fifo_open(ino: u64, read: bool, write: bool, nonblocking: bool) -> c_int {
         let me = current_task();
         let mut state = lock_state();
         if let Err(error) = state.ensure_active() {
@@ -8941,6 +8991,7 @@ mod thread {
                 return super::fail(super::ENXIO);
             }
         }
+        let opened_channel = existing.is_none();
         let channel_id = match existing {
             Some(channel) => channel,
             None => {
@@ -8986,10 +9037,20 @@ mod thread {
                 read_channel: read.then_some(channel_id),
                 write_channel: write.then_some(channel_id),
                 nonblocking,
-                fifo: Some(FifoIdentity { ino, mode }),
+                fifo_ino: Some(ino),
             },
         );
         drop(state);
+        // The channel is the node's one reference: taken when it comes into
+        // existence, dropped when it is reclaimed. Outside the state lock, like
+        // every other runtime call from this module.
+        if opened_channel {
+            if let Err(errno) = super::with_context(|context| context.fs_retain_inode(ino)) {
+                patina_pipe_close(fd);
+                wake_all(woken);
+                return super::fail(errno);
+            }
+        }
         wake_all(woken);
 
         if let Some((for_writer, seen)) = wait {
@@ -9036,8 +9097,12 @@ mod thread {
     }
 
     /// What `fstat` should report for `fd` when it is a FIFO descriptor.
-    pub(crate) fn fifo_identity(fd: c_int) -> Option<FifoIdentity> {
-        lock_state().net.pipe_ends.get(&fd).and_then(|end| end.fifo)
+    pub(crate) fn fifo_ino(fd: c_int) -> Option<u64> {
+        lock_state()
+            .net
+            .pipe_ends
+            .get(&fd)
+            .and_then(|end| end.fifo_ino)
     }
 
     /// C dispatch predicate: is `fd` a pipe/socketpair endpoint? Lets the
@@ -9189,7 +9254,7 @@ mod thread {
             read_channel,
             write_channel,
             nonblocking,
-            fifo,
+            fifo_ino,
         }) = state.net.pipe_ends.get(&fd)
         else {
             return super::fail(super::EBADF);
@@ -9218,7 +9283,7 @@ mod thread {
                 read_channel,
                 write_channel,
                 nonblocking,
-                fifo,
+                fifo_ino,
             },
         );
         new_fd
@@ -9234,6 +9299,7 @@ mod thread {
             return super::fail(super::EBADF);
         };
         let mut waiters = Vec::new();
+        let mut released_ino = None;
         // Dropping a READER reference: writers get EPIPE only once the last one
         // goes, and only then are blocked writers woken to observe it.
         if let Some(channel) = end.read_channel {
@@ -9279,10 +9345,19 @@ mod thread {
                 // what a kernel does when a pipe's last reference drops.
                 if let Some(ino) = reclaimed.and_then(|channel| channel.fifo_ino) {
                     state.net.fifo_channels.remove(&ino);
+                    released_ino = Some(ino);
                 }
             }
         }
         drop(state);
+        // The last endpoint on a FIFO's channel drops the node's reference; if
+        // its last name went first, that is where the node is finally freed.
+        if let Some(ino) = released_ino {
+            if let Err(errno) = super::with_context(|context| context.fs_release_inode(ino)) {
+                wake_all(waiters);
+                return super::fail(errno);
+            }
+        }
         wake_all(waiters);
         0
     }

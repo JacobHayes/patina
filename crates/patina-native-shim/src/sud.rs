@@ -88,12 +88,13 @@ unsafe extern "C" {
     // call, so a raw-syscall guest and a libc guest change one mode model.
     fn patina_chmod(path: *const c_char, mode: u32, follow: c_int) -> c_int;
     fn patina_fchmod(fd: c_int, mode: u32) -> c_int;
-    fn patina_read_dir(path: *const c_char, state_out: *mut *mut c_void) -> c_int;
+    fn patina_read_dir(fd: c_int, state_out: *mut *mut c_void) -> c_int;
     // Directory descriptors: the SAME table the C `open/openat(..., O_DIRECTORY)`
     // interposer registers into, so a dir fd opened through libc resolves a raw
     // `openat(dirfd, …)` and vice versa (cap-std does exactly that: it opens the
     // base directory through std/libc and then walks it with raw syscalls).
-    fn patina_diropen(path: *const c_char, follow: c_int) -> c_int;
+    fn patina_diropen(path: *const c_char, follow: c_int, path_only: c_int) -> c_int;
+    fn patina_dirdup(fd: c_int) -> c_int;
     fn patina_dirpath(fd: c_int, buf: *mut c_char, len: usize) -> isize;
     fn patina_dir_is_dirfd(fd: c_int) -> c_int;
     fn patina_dirclose(fd: c_int) -> c_int;
@@ -217,6 +218,7 @@ const PATINA_O_APPEND: u32 = 1 << 4;
 const PATINA_O_EXCLUSIVE: u32 = 1 << 5;
 const PATINA_O_NOFOLLOW: u32 = 1 << 6;
 const PATINA_O_NONBLOCK: u32 = 1 << 7;
+const PATINA_O_PATH: u32 = 1 << 8;
 
 // Kernel `open(2)` flag bits (octal), identical on x86_64 and aarch64 Linux.
 const O_ACCMODE: u64 = 0o3;
@@ -1529,11 +1531,13 @@ const OPENAT_SUPPORTED_FLAGS: u64 = O_ACCMODE
     | O_PATH
     | O_NONBLOCK;
 
-/// The deny an `O_PATH` open of a non-directory gets. Byte-identical to the C
-/// `PATINA_DENY_O_PATH_NONDIR`, so a raw-syscall guest and a libc guest record
-/// the same captured stderr for the same refusal.
-const DENY_O_PATH_NONDIR: &str = "patina: O_PATH on a non-directory is not modeled (the deterministic filesystem's only \
-     path-only descriptor is a directory handle); failing closed\n";
+/// The deny an `O_PATH|O_NOFOLLOW` open of a SYMLINK gets — the one spelling
+/// that names the link entry itself, which the deterministic filesystem has no
+/// descriptor for. Byte-identical to the C `PATINA_DENY_O_PATH_SYMLINK`, so a
+/// raw-syscall guest and a libc guest record the same captured stderr for the
+/// same refusal.
+const DENY_O_PATH_SYMLINK: &str = "patina: O_PATH|O_NOFOLLOW on a symlink is not modeled (the deterministic \
+     filesystem has no descriptor for a link entry); failing closed\n";
 
 /// The deny a `mknodat` of anything but a FIFO gets. Byte-identical to the C
 /// `PATINA_DENY_MKNOD_TYPE`, for the same reason the `O_PATH` pair is.
@@ -1563,9 +1567,12 @@ fn sys_openat(dirfd: i64, path: u64, flags: u64, mode: u64) -> i64 {
             | PATINA_O_APPEND
             | PATINA_O_EXCLUSIVE)
         == 0;
-    // `O_PATH` without `O_DIRECTORY` only has a modeled representation when the
-    // target IS a directory (the deterministic filesystem's one path-only
-    // descriptor); anything else is a named deny, not a quietly more capable fd.
+    // `O_PATH` without `O_DIRECTORY`: the kind decides which descriptor it is.
+    // A directory becomes a path-only directory handle (the one the `*at`
+    // resolver keys off); a file or a FIFO becomes an ordinary path-only fd; a
+    // symlink is the only refusal, because `O_PATH|O_NOFOLLOW` names the LINK
+    // entry and the deterministic filesystem has no descriptor for one. Mirrors
+    // the C interposer's branch exactly.
     if flags & O_PATH != 0 && flags & O_DIRECTORY == 0 {
         let mut kind = 0u32;
         let mut length = 0u64;
@@ -1575,10 +1582,16 @@ fn sys_openat(dirfd: i64, path: u64, flags: u64, mode: u64) -> i64 {
             // SAFETY: plain thread-local read.
             return -(unsafe { patina_errno() } as i64);
         }
-        if kind != PATINA_ENTRY_DIRECTORY {
-            return sud_deny(DENY_O_PATH_NONDIR);
+        if kind == PATINA_ENTRY_SYMLINK && flags & O_NOFOLLOW != 0 {
+            return sud_deny(DENY_O_PATH_SYMLINK);
         }
-        return open_dir_fd(&resolved, flags, read_only);
+        if kind == PATINA_ENTRY_DIRECTORY {
+            return open_dir_fd(&resolved, flags, read_only);
+        }
+        // SAFETY: the resolved path is a valid NUL-terminated string pointer.
+        // A trailing symlink resolves through `patina_open`'s own follow leg,
+        // exactly as it does for every other open.
+        return ret_i32(unsafe { patina_open(resolved.as_ptr(), PATINA_O_PATH, 0) });
     }
     // A directory open yields a directory descriptor: the runtime fd that
     // `getdents64`, `*at` resolution, `fstat` and the fsync durability barrier
@@ -1620,24 +1633,27 @@ fn names_current_directory(path: u64) -> bool {
 /// the SAME entry the C `open/openat(..., O_DIRECTORY)` interposer calls, so the
 /// two paths cannot drift.
 fn open_dir_fd(path: &AtPath, flags: u64, read_only: bool) -> i64 {
-    if !read_only {
+    let path_only = flags & O_PATH != 0;
+    // `O_PATH` opens nothing, so the kernel ignores the access mode under it;
+    // a plain directory open must still be read-only.
+    if !read_only && !path_only {
         return -EISDIR;
     }
     let follow = c_int::from(flags & O_NOFOLLOW == 0);
     // SAFETY: the resolved path is a valid NUL-terminated string pointer.
-    ret_i32(unsafe { patina_diropen(path.as_ptr(), follow) })
+    ret_i32(unsafe { patina_diropen(path.as_ptr(), follow, c_int::from(path_only)) })
 }
 
-/// Duplicate a directory descriptor into a fresh handle on the SAME directory,
-/// so the copy is itself a usable dirfd — a bare `patina_dup` would hand back an
-/// fd the `*at` resolver does not know. Shared by the `dup` and `fcntl(F_DUPFD)`
-/// rows, mirroring the C `patina_dup_dirfd`.
+/// Duplicate a directory descriptor, SHARING its open description as POSIX
+/// `dup` does — a bare `patina_dup` would hand back an fd the `*at` resolver
+/// does not know, and reopening the descriptor's path would be a second open
+/// (re-resolving a name and re-charging permission). Shared by the `dup` and
+/// `fcntl(F_DUPFD)` rows, mirroring the C `patina_dup_dirfd`.
 fn dup_dir_fd(fd: i64) -> i64 {
-    match dir_fd_path(fd) {
-        // SAFETY: an owned, NUL-terminated C string. The bound path is already
-        // resolved, so following a trailing symlink is a no-op here.
-        Ok(base) => ret_i32(unsafe { patina_diropen(base.as_ptr(), 1) }),
-        Err(errno) => errno,
+    match c_int::try_from(fd) {
+        // SAFETY: an ordinary shim entry point taking a descriptor number.
+        Ok(fd) => ret_i32(unsafe { patina_dirdup(fd) }),
+        Err(_) => -EBADF,
     }
 }
 
@@ -2525,13 +2541,15 @@ fn sys_getdents64(fd: i64, dirp: u64, count: u64) -> i64 {
     // `opendir` uses — a second caller, never a second directory model.
     let mut map = DIR_ITERATIONS.lock().unwrap();
     if let std::collections::btree_map::Entry::Vacant(slot) = map.entry(fd as c_int) {
-        let path = match dir_fd_path(fd) {
-            Ok(path) => path,
-            Err(errno) => return errno,
+        let Ok(fd) = c_int::try_from(fd) else {
+            return -EBADF;
         };
         let mut snapshot: *mut c_void = std::ptr::null_mut();
-        // SAFETY: `path` is an owned C string; `snapshot` is writable local.
-        let rc = unsafe { patina_read_dir(path.as_ptr(), &mut snapshot) };
+        // The snapshot is read through the DESCRIPTOR: its `r` was charged at
+        // open, so a later `chmod` cannot break a walk under way and an `O_PATH`
+        // descriptor (which opened nothing) cannot iterate at all.
+        // SAFETY: `snapshot` is writable local storage.
+        let rc = unsafe { patina_read_dir(fd, &mut snapshot) };
         if rc != 0 {
             // SAFETY: plain thread-local read.
             return -(unsafe { patina_errno() } as i64);
@@ -3518,9 +3536,9 @@ mod tests {
         // Adding a deny that BOTH doors can reach means adding a row here.
         for (macro_name, sud_message, refusal) in [
             (
-                "PATINA_DENY_O_PATH_NONDIR",
-                DENY_O_PATH_NONDIR,
-                "an O_PATH open of a non-directory",
+                "PATINA_DENY_O_PATH_SYMLINK",
+                DENY_O_PATH_SYMLINK,
+                "an O_PATH|O_NOFOLLOW open of a symlink",
             ),
             (
                 "PATINA_DENY_MKNOD_TYPE",

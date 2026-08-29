@@ -39,13 +39,54 @@ fn owner_allows(mode: u32, want: u32) -> bool {
     ((mode >> 6) & 0o7) & want == want
 }
 
+/// What an open DECIDED the description may do. Bundled because the decision is
+/// one thing — the flags the open was granted — and every caller passes it whole.
+#[derive(Clone, Copy, Debug)]
+struct Access {
+    readable: bool,
+    writable: bool,
+    append: bool,
+    /// `O_PATH`: the description names a LOCATION and never the file behind it.
+    path_only: bool,
+}
+
+impl Access {
+    /// The `O_PATH` grant: nothing but resolution, `fstat`, `dup` and `close`.
+    const LOCATION: Self = Self {
+        readable: false,
+        writable: false,
+        append: false,
+        path_only: true,
+    };
+
+    fn from_flags(flags: OpenFlags) -> Self {
+        Self {
+            readable: flags.read,
+            writable: flags.write,
+            append: flags.append,
+            path_only: flags.path_only,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Description {
-    path: String,
+    /// The NODE this description is open on, never the name it was opened
+    /// under. A rename moves the descriptor with its node, an unlink cannot
+    /// detach it, and the node outlives its last name for as long as this
+    /// description holds a reference on it. A directory description names the
+    /// directory's `ino`, which is drawn from the same counter and is therefore
+    /// never confusable with a file's.
+    node: InodeId,
     cursor: usize,
     readable: bool,
     writable: bool,
     append: bool,
+    /// `O_PATH`: the description names a LOCATION and never the file behind it,
+    /// so everything that touches the file through the descriptor is refused
+    /// (`read`, `write`, `seek`, `fsync`, `fchmod`, directory iteration) while
+    /// `fstat`, `*at` resolution, `dup` and `close` work.
+    path_only: bool,
     kind: FsEntryKind,
     /// Number of fds referencing this open-file description.
     fds: u32,
@@ -53,8 +94,20 @@ struct Description {
 
 #[derive(Clone, Debug)]
 struct Inode {
+    /// What the node IS. It lives here rather than being read off the name
+    /// tables because a node with no names left is still a node: an `fstat`
+    /// through a descriptor on an unlinked entry has to answer `S_IFIFO` or
+    /// `S_IFREG` with nothing left to look it up by.
+    kind: FsEntryKind,
     contents: Vec<u8>,
+    /// Names referencing this node — POSIX `st_nlink`.
     links: u32,
+    /// Open descriptions (and pipe endpoints) referencing it. A real kernel
+    /// keeps an inode alive while ANY reference exists, so the node is freed
+    /// only when its last name AND its last descriptor are gone; until then an
+    /// unlinked-but-open entry answers `fstat`, reads, writes and `fchmod` from
+    /// the live node rather than from a copy taken when it was opened.
+    openers: u32,
     atime_nanos: u64,
     mtime_nanos: u64,
     /// POSIX permission bits (`0o7777`), without the file-type bits.
@@ -131,7 +184,7 @@ impl MemFs {
     pub fn with_file(mut self, path: &str, contents: impl Into<Vec<u8>>) -> DriverResult<Self> {
         let path = normalize_path(path)?;
         self.insert_parent_directories(&path);
-        let inode = self.allocate_inode(contents.into(), FILE_MODE);
+        let inode = self.allocate_inode(FsEntryKind::File, contents.into(), FILE_MODE);
         self.files.insert(path, inode);
         Ok(self)
     }
@@ -152,10 +205,7 @@ impl MemFs {
     /// a modeled process restart.
     pub fn persistent_snapshot(&self) -> Self {
         let mut snapshot = self.clone();
-        snapshot.handles.clear();
-        snapshot.descriptions.clear();
-        snapshot.next_fd = 3;
-        snapshot.next_description = 1;
+        snapshot.forget_open_state();
         snapshot
     }
 
@@ -176,11 +226,17 @@ impl MemFs {
     ///
     /// A crash model reads this to keep the guest's descriptors meaningful
     /// across a rebuilt image: see [`MemFs::adopt_handles`].
+    /// A node whose last name is already gone contributes nothing: there is no
+    /// name to pin back into a rebuilt namespace, and the node itself crosses
+    /// with the descriptor through [`MemFs::adopt_handles`].
     pub fn open_entries(&self) -> BTreeMap<String, FsEntryKind> {
         self.handles
             .values()
             .filter_map(|id| self.descriptions.get(id))
-            .map(|description| (description.path.clone(), description.kind))
+            .filter_map(|description| {
+                self.node_path(description.node, description.kind)
+                    .map(|path| (path, description.kind))
+            })
             .collect()
     }
 
@@ -249,11 +305,94 @@ impl MemFs {
     /// Descriptor and description IDs advance past the previous image's, so a
     /// post-crash `open` can never hand back a number the guest still believes
     /// is live.
+    /// A description names a NODE, and this image minted its own inode numbers,
+    /// so every description is re-bound to the node its name has HERE. A
+    /// description whose name did not come back — an entry unlinked while open,
+    /// whose node no crash can reach because the journal enumerates names — is
+    /// re-bound to a fresh node carrying the bytes the descriptor last saw: the
+    /// descriptor is the process's object either way, and a number reused by an
+    /// unrelated entry would be far worse than an anonymous one.
     pub fn adopt_handles(&mut self, previous: &Self) {
         self.handles.clone_from(&previous.handles);
         self.descriptions.clone_from(&previous.descriptions);
         self.next_fd = self.next_fd.max(previous.next_fd);
         self.next_description = self.next_description.max(previous.next_description);
+        let mut rebound: BTreeMap<InodeId, InodeId> = BTreeMap::new();
+        // Per DESCRIPTION, not per descriptor: a `dup`ed pair is two fds on one
+        // description, which is one reference on the node.
+        let descriptions: BTreeSet<DescriptionId> = self.handles.values().copied().collect();
+        for id in descriptions {
+            let description = self
+                .descriptions
+                .get(&id)
+                .expect("handle references a description");
+            let (node, kind) = (description.node, description.kind);
+            let carried = match rebound.get(&node).copied() {
+                Some(carried) => carried,
+                None => {
+                    let carried = previous
+                        .node_path(node, kind)
+                        .and_then(|path| self.node_at(&path, kind))
+                        .unwrap_or_else(|| self.carry_anonymous_node(previous, node, kind));
+                    rebound.insert(node, carried);
+                    carried
+                }
+            };
+            self.descriptions
+                .get_mut(&id)
+                .expect("handle references a description")
+                .node = carried;
+            if let Some(inode) = self.inodes.get_mut(&carried) {
+                inode.openers += 1;
+            }
+        }
+    }
+
+    /// The node the entry at `path` has in THIS image, if it has one of `kind`.
+    fn node_at(&self, path: &str, kind: FsEntryKind) -> Option<InodeId> {
+        match kind {
+            FsEntryKind::Directory => self.directories.get(path).map(|metadata| metadata.ino),
+            FsEntryKind::Fifo => self.fifos.get(path).copied(),
+            _ => self.files.get(path).copied(),
+        }
+    }
+
+    /// Mint a nameless node for a descriptor whose entry this image does not
+    /// have, carrying the previous image's contents and metadata. A directory
+    /// has no inode-table entry to carry, so it gets a fresh unused id that
+    /// names nothing — which is the point: a stale descriptor must never be
+    /// captured by an unrelated entry that happens to reuse the number.
+    fn carry_anonymous_node(
+        &mut self,
+        previous: &Self,
+        node: InodeId,
+        kind: FsEntryKind,
+    ) -> InodeId {
+        let fresh = self.next_inode;
+        self.next_inode = self.next_inode.checked_add(1).expect("inode IDs exhausted");
+        if kind != FsEntryKind::Directory {
+            if let Some(inode) = previous.inodes.get(&node) {
+                let mut carried = inode.clone();
+                carried.links = 0;
+                carried.openers = 0;
+                self.inodes.insert(fresh, carried);
+            }
+        }
+        fresh
+    }
+
+    /// Drop every descriptor and every node only a descriptor was holding — the
+    /// image as a fresh incarnation inherits it. An anonymous node is exactly
+    /// what a restart cannot carry: nothing names it.
+    fn forget_open_state(&mut self) {
+        self.handles.clear();
+        self.descriptions.clear();
+        self.next_fd = 3;
+        self.next_description = 1;
+        for inode in self.inodes.values_mut() {
+            inode.openers = 0;
+        }
+        self.inodes.retain(|_, inode| inode.links > 0);
     }
 
     fn allocate_entry_metadata(&mut self, mode: u32) -> EntryMetadata {
@@ -267,14 +406,16 @@ impl MemFs {
         }
     }
 
-    fn allocate_inode(&mut self, contents: Vec<u8>, mode: u32) -> InodeId {
+    fn allocate_inode(&mut self, kind: FsEntryKind, contents: Vec<u8>, mode: u32) -> InodeId {
         let inode = self.next_inode;
         self.next_inode = self.next_inode.checked_add(1).expect("inode IDs exhausted");
         self.inodes.insert(
             inode,
             Inode {
+                kind,
                 contents,
                 links: 1,
+                openers: 0,
                 atime_nanos: 0,
                 mtime_nanos: 0,
                 mode: mode & MODE_MASK,
@@ -377,13 +518,12 @@ impl MemFs {
             .expect("handle references a description"))
     }
 
+    /// Mint a descriptor on `node`, taking the node's open reference with it.
     fn allocate_handle(
         &mut self,
-        path: String,
+        node: InodeId,
         cursor: usize,
-        readable: bool,
-        writable: bool,
-        append: bool,
+        access: Access,
         kind: FsEntryKind,
     ) -> DriverResult<Fd> {
         let fd = Fd(self.next_fd);
@@ -400,16 +540,22 @@ impl MemFs {
         self.descriptions.insert(
             description,
             Description {
-                path,
+                node,
                 cursor,
-                readable,
-                writable,
-                append,
+                readable: access.readable,
+                writable: access.writable,
+                append: access.append,
+                path_only: access.path_only,
                 kind,
                 fds: 1,
             },
         );
         self.handles.insert(fd, description);
+        // A descriptor is a reference on the node (a directory's metadata is not
+        // in the inode table, so it has none to take).
+        if let Some(inode) = self.inodes.get_mut(&node) {
+            inode.openers += 1;
+        }
         Ok(fd)
     }
 
@@ -417,17 +563,79 @@ impl MemFs {
         self.files.get(path).copied().ok_or_else(|| not_found(path))
     }
 
+    /// The node an open descriptor holds. A directory description names an ino
+    /// the inode table does not hold, so it is refused here rather than read as
+    /// a file.
     fn handle_inode(&self, fd: Fd) -> DriverResult<InodeId> {
         let description = self.description(fd)?;
-        self.file_inode(&description.path)
+        if !self.inodes.contains_key(&description.node) {
+            return Err(EffectError::new(
+                ErrorCode::IsDirectory,
+                format!("virtual file handle {} references a directory", fd.0),
+            ));
+        }
+        Ok(description.node)
     }
 
-    fn decrement_inode_link(&mut self, inode: InodeId) {
+    /// Drop one NAME's reference to a node, releasing it if that was its last
+    /// reference of either kind.
+    fn drop_name(&mut self, inode: InodeId) {
         let entry = self.inodes.get_mut(&inode).expect("inode was checked");
         entry.links -= 1;
-        if entry.links == 0 {
+        self.release_if_unreferenced(inode);
+    }
+
+    /// Free a node once NOTHING references it — no name and no descriptor. This
+    /// is the whole of inode lifetime: a kernel drops the on-disk inode when
+    /// `i_nlink` and `i_count` both reach zero, and until then an unlinked entry
+    /// stays fully alive behind every descriptor that holds it.
+    fn release_if_unreferenced(&mut self, inode: InodeId) {
+        let Some(entry) = self.inodes.get(&inode) else {
+            return;
+        };
+        if entry.links == 0 && entry.openers == 0 {
             self.inodes.remove(&inode);
         }
+    }
+
+    /// The path a live node currently has, or `None` when its last name is gone.
+    /// A node with several names (hard links) answers the first in path order,
+    /// deterministically; every name of one node reports identical metadata.
+    fn node_path(&self, node: InodeId, kind: FsEntryKind) -> Option<String> {
+        if kind == FsEntryKind::Directory {
+            return self
+                .directories
+                .iter()
+                .find_map(|(path, metadata)| (metadata.ino == node).then(|| path.clone()));
+        }
+        self.files
+            .iter()
+            .chain(self.fifos.iter())
+            .find_map(|(path, inode)| (*inode == node).then(|| path.clone()))
+    }
+
+    /// Metadata straight off a node, with no name involved — what a descriptor
+    /// on an unlinked entry answers.
+    fn metadata_for_inode(&self, node: InodeId) -> DriverResult<FsMetadata> {
+        let inode = self.inodes.get(&node).ok_or_else(|| {
+            EffectError::new(
+                ErrorCode::NotFound,
+                format!("no virtual filesystem node {node}"),
+            )
+        })?;
+        Ok(FsMetadata {
+            kind: inode.kind,
+            len: if inode.kind == FsEntryKind::Fifo {
+                0
+            } else {
+                inode.contents.len() as u64
+            },
+            ino: node,
+            nlink: inode.links,
+            atime_nanos: inode.atime_nanos,
+            mtime_nanos: inode.mtime_nanos,
+            mode: inode.mode,
+        })
     }
 
     fn path_exists(&self, path: &str) -> bool {
@@ -496,7 +704,23 @@ impl FsDriver for MemFs {
     fn open(&mut self, path: &str, flags: OpenFlags) -> DriverResult<Fd> {
         let path = normalize_entry_path(path)?;
         self.resolve_guard(&path)?;
-        if !flags.read && !flags.write {
+        if flags.path_only {
+            // `O_PATH` names a location. The kernel ignores the access mode and
+            // every creating flag under it, so a caller that sets one is asking
+            // for two different descriptors at once.
+            if flags.read
+                || flags.write
+                || flags.create
+                || flags.truncate
+                || flags.append
+                || flags.exclusive
+            {
+                return Err(EffectError::new(
+                    ErrorCode::InvalidInput,
+                    "a path-only open carries no access mode and creates nothing",
+                ));
+            }
+        } else if !flags.read && !flags.write {
             return Err(EffectError::new(
                 ErrorCode::InvalidInput,
                 "open requires read or write access",
@@ -521,17 +745,40 @@ impl FsDriver for MemFs {
                     format!("virtual filesystem path is a directory: {path}"),
                 ));
             }
-            // A directory descriptor is a handle on the node, so `x` (search) is
-            // what it costs. The `r` a listing needs is charged at
-            // `read_directory`, which is also where a descriptor opened
-            // `O_PATH` — indistinguishable here, since a path-only open is not
-            // part of the driver's flag vocabulary — would pay it.
-            if !owner_allows(metadata.mode, SEARCH) {
-                return Err(denied(&path, "open"));
+            // The two directory opens cost different things, which is the whole
+            // reason `O_PATH` is in this vocabulary. An `O_PATH` open never
+            // opens the entry: Linux charges nothing on it, only the `x` walk of
+            // the prefix that `resolve_guard` has already done, and the
+            // descriptor can resolve and `fstat` but not iterate. A plain
+            // `O_RDONLY|O_DIRECTORY` open DOES open it for reading and costs
+            // `r` — charged here, once, so a later `chmod` cannot retroactively
+            // break a walk already in progress.
+            if !flags.path_only && !owner_allows(metadata.mode, READ) {
+                return Err(denied(&path, "list"));
             }
-            return self.allocate_handle(path, 0, true, false, false, FsEntryKind::Directory);
+            // A plain directory open is a READ of the directory; a path-only
+            // one opens nothing at all.
+            let access = if flags.path_only {
+                Access::LOCATION
+            } else {
+                Access {
+                    readable: true,
+                    writable: false,
+                    append: false,
+                    path_only: false,
+                }
+            };
+            return self.allocate_handle(metadata.ino, 0, access, FsEntryKind::Directory);
         }
         if let Some(inode) = self.fifos.get(&path).copied() {
+            // `O_PATH` is the one FIFO open that never reaches the pipe: it
+            // names the entry without opening it, so there is no rendezvous, no
+            // permission on the entry to charge, and the descriptor IS a
+            // filesystem descriptor — the only kind of FIFO handle this
+            // filesystem can hold itself.
+            if flags.path_only {
+                return self.allocate_handle(inode, 0, Access::LOCATION, FsEntryKind::Fifo);
+            }
             // The permission decision belongs HERE — one enforcement point for
             // every kind — even though the descriptor itself is not a filesystem
             // descriptor. Opening a FIFO for reading needs `r` and for writing
@@ -572,13 +819,14 @@ impl FsDriver for MemFs {
         }
 
         if !self.files.contains_key(&path) {
+            // A path-only open creates nothing, so a missing name is missing.
             if flags.create {
                 self.check_directory_write(parent_path(&path))?;
                 self.insert_parent_directories(&path);
                 // The caller's own creation mode, under the modeled umask —
                 // `open`'s third argument, which the kernel reads only on the
                 // branch that actually creates the entry.
-                let inode = self.allocate_inode(Vec::new(), flags.mode & !UMASK);
+                let inode = self.allocate_inode(FsEntryKind::File, Vec::new(), flags.mode & !UMASK);
                 self.files.insert(path.clone(), inode);
             } else {
                 return Err(not_found(&path));
@@ -588,7 +836,7 @@ impl FsDriver for MemFs {
                 ErrorCode::AlreadyExists,
                 format!("virtual filesystem entry already exists: {path}"),
             ));
-        } else {
+        } else if !flags.path_only {
             let mode = self
                 .entry_mode(&path)
                 .expect("the file was found in this branch");
@@ -608,24 +856,17 @@ impl FsDriver for MemFs {
             }
         }
 
+        let node = self.file_inode(&path)?;
         let cursor = if flags.append {
-            let inode = self.file_inode(&path)?;
             self.inodes
-                .get(&inode)
+                .get(&node)
                 .expect("file path references an inode")
                 .contents
                 .len()
         } else {
             0
         };
-        self.allocate_handle(
-            path,
-            cursor,
-            flags.read,
-            flags.write,
-            flags.append,
-            FsEntryKind::File,
-        )
+        self.allocate_handle(node, cursor, Access::from_flags(flags), FsEntryKind::File)
     }
 
     fn read(&mut self, fd: Fd, max_len: usize) -> DriverResult<Vec<u8>> {
@@ -642,9 +883,8 @@ impl FsDriver for MemFs {
                 format!("virtual file handle {} references a directory", fd.0),
             ));
         }
-        let path = description.path.clone();
         let start = description.cursor;
-        let inode = self.file_inode(&path)?;
+        let inode = self.handle_inode(fd)?;
         let file = &self
             .inodes
             .get(&inode)
@@ -670,10 +910,9 @@ impl FsDriver for MemFs {
                 format!("virtual file handle {} references a directory", fd.0),
             ));
         }
-        let path = description.path.clone();
         let cursor = description.cursor;
         let append = description.append;
-        let inode = self.file_inode(&path)?;
+        let inode = self.handle_inode(fd)?;
         let file = &mut self
             .inodes
             .get_mut(&inode)
@@ -705,7 +944,6 @@ impl FsDriver for MemFs {
                 format!("virtual file handle {} references a directory", fd.0),
             ));
         }
-        let path = description.path.clone();
         let start = usize::try_from(offset).map_err(|_| {
             EffectError::new(
                 ErrorCode::InvalidInput,
@@ -715,7 +953,7 @@ impl FsDriver for MemFs {
         let end = start.checked_add(bytes.len()).ok_or_else(|| {
             EffectError::new(ErrorCode::InvalidInput, "virtual file size overflowed")
         })?;
-        let inode = self.file_inode(&path)?;
+        let inode = self.handle_inode(fd)?;
         let file = &mut self
             .inodes
             .get_mut(&inode)
@@ -736,7 +974,15 @@ impl FsDriver for MemFs {
             .expect("handle references a description");
         description.fds -= 1;
         if description.fds == 0 {
+            // The LAST descriptor on the description drops the description's
+            // reference to the node; if its last name went first, this is where
+            // the node itself is finally freed.
+            let node = description.node;
             self.descriptions.remove(&id);
+            if let Some(inode) = self.inodes.get_mut(&node) {
+                inode.openers -= 1;
+            }
+            self.release_if_unreferenced(node);
         }
         Ok(())
     }
@@ -759,15 +1005,17 @@ impl FsDriver for MemFs {
 
     fn seek(&mut self, fd: Fd, offset: i64, whence: SeekWhence) -> DriverResult<u64> {
         let description = self.description(fd)?;
-        if description.kind == FsEntryKind::Directory {
+        if description.kind == FsEntryKind::Directory || description.path_only {
             return Err(EffectError::new(
                 ErrorCode::InvalidInput,
-                format!("virtual directory handle {} cannot be seeked", fd.0),
+                format!(
+                    "virtual handle {} names a location and cannot be seeked",
+                    fd.0
+                ),
             ));
         }
-        let path = description.path.clone();
         let cursor = description.cursor;
-        let inode = self.file_inode(&path)?;
+        let inode = self.handle_inode(fd)?;
         let base = match whence {
             SeekWhence::Start => 0,
             SeekWhence::Current => cursor,
@@ -800,9 +1048,19 @@ impl FsDriver for MemFs {
         self.metadata_for_path(&path)
     }
 
+    /// `fstat`. A descriptor answers from its NODE, so an entry whose last name
+    /// was unlinked while it stayed open reports its live mode, size and link
+    /// count rather than a copy taken when it was opened.
     fn fd_metadata(&mut self, fd: Fd) -> DriverResult<FsMetadata> {
-        let path = self.description(fd)?.path.clone();
-        self.metadata_for_path(&path)
+        let description = self.description(fd)?;
+        let (node, kind) = (description.node, description.kind);
+        if kind == FsEntryKind::Directory {
+            let path = self
+                .node_path(node, kind)
+                .ok_or_else(|| not_found("<removed directory>"))?;
+            return self.metadata_for_path(&path);
+        }
+        self.metadata_for_inode(node)
     }
 
     /// The LIVE metadata of the entry an inode names — what `fstat` on a FIFO
@@ -812,18 +1070,51 @@ impl FsDriver for MemFs {
     /// order is taken for determinism. A node with no names left is `NotFound`:
     /// the filesystem has nothing to say about an inode only a descriptor holds.
     fn inode_metadata(&mut self, ino: u64) -> DriverResult<FsMetadata> {
-        let path = self
-            .fifos
-            .iter()
-            .chain(self.files.iter())
-            .find_map(|(path, inode)| (*inode == ino).then(|| path.clone()))
-            .ok_or_else(|| {
-                EffectError::new(
-                    ErrorCode::NotFound,
-                    format!("no virtual filesystem name references inode {ino}"),
-                )
-            })?;
-        self.metadata_for_path(&path)
+        self.metadata_for_inode(ino)
+    }
+
+    /// `fchmod` on a node, for the descriptor class the filesystem holds no
+    /// handle for. It reaches an unlinked node exactly as `inode_metadata` does.
+    fn set_inode_mode(&mut self, ino: u64, mode: u32) -> DriverResult<()> {
+        let inode = self.inodes.get_mut(&ino).ok_or_else(|| {
+            EffectError::new(
+                ErrorCode::NotFound,
+                format!("no virtual filesystem node {ino}"),
+            )
+        })?;
+        inode.mode = mode & MODE_MASK;
+        Ok(())
+    }
+
+    /// Take a descriptor's reference on a node the filesystem hands back no
+    /// handle for — the FIFO endpoint whose bytes belong to the openers' pipe.
+    fn retain_inode(&mut self, ino: u64) -> DriverResult<()> {
+        let inode = self.inodes.get_mut(&ino).ok_or_else(|| {
+            EffectError::new(
+                ErrorCode::NotFound,
+                format!("no virtual filesystem node {ino}"),
+            )
+        })?;
+        inode.openers += 1;
+        Ok(())
+    }
+
+    fn release_inode(&mut self, ino: u64) -> DriverResult<()> {
+        let inode = self.inodes.get_mut(&ino).ok_or_else(|| {
+            EffectError::new(
+                ErrorCode::NotFound,
+                format!("no virtual filesystem node {ino}"),
+            )
+        })?;
+        if inode.openers == 0 {
+            return Err(EffectError::new(
+                ErrorCode::InvalidState,
+                format!("virtual filesystem node {ino} holds no descriptor reference"),
+            ));
+        }
+        inode.openers -= 1;
+        self.release_if_unreferenced(ino);
+        Ok(())
     }
 
     fn create_directory(&mut self, path: &str, mode: u32) -> DriverResult<()> {
@@ -869,7 +1160,7 @@ impl FsDriver for MemFs {
         // A FIFO is an inode with no bytes: hard links, the link count, the
         // mode and the identity the openers' pipe channel is keyed by all live
         // there, exactly as they do for a regular file.
-        let inode = self.allocate_inode(Vec::new(), mode & !UMASK);
+        let inode = self.allocate_inode(FsEntryKind::Fifo, Vec::new(), mode & !UMASK);
         self.fifos.insert(path, inode);
         Ok(())
     }
@@ -893,31 +1184,30 @@ impl FsDriver for MemFs {
         // the kernel does not refuse it either. The inode outlives the name only
         // as long as another link names it.
         if let Some(inode) = self.fifos.remove(&path) {
-            self.decrement_inode_link(inode);
+            self.drop_name(inode);
             return Ok(());
         }
         let inode = self.file_inode(&path)?;
-        // MemFs deliberately denies unlink-while-open through any hard-link name
-        // for the same inode instead of modeling POSIX anonymous open files.
-        if self
-            .handles
-            .values()
-            .filter_map(|id| self.descriptions.get(id))
-            .filter_map(|description| self.files.get(&description.path))
-            .any(|open_inode| *open_inode == inode)
-        {
-            return Err(EffectError::new(
-                ErrorCode::InvalidState,
-                format!("cannot remove open virtual file: {path}"),
-            ));
-        }
+        // Unlink removes the NAME, never the node. Whatever still holds the node
+        // — another name, or an open descriptor — keeps it alive, and the last
+        // reference of either kind is what frees it.
         self.files.remove(&path).expect("file was checked");
-        self.decrement_inode_link(inode);
+        self.drop_name(inode);
         Ok(())
     }
 
     fn sync(&mut self, fd: Fd) -> DriverResult<()> {
-        self.description(fd).map(|_| ())
+        let description = self.description(fd)?;
+        if description.path_only {
+            return Err(EffectError::new(
+                ErrorCode::InvalidHandle,
+                format!(
+                    "virtual handle {} names a location and cannot be synced",
+                    fd.0
+                ),
+            ));
+        }
+        Ok(())
     }
 
     fn set_len(&mut self, fd: Fd, len: u64) -> DriverResult<()> {
@@ -1033,49 +1323,46 @@ impl FsDriver for MemFs {
         let Some(metadata) = self.directories.get(&path).copied() else {
             return Err(not_found(&path));
         };
-        // Listing a directory reads it, so `r` is what it costs — separately
-        // from the `x` that resolving a path THROUGH it costs.
+        // The fused path form is `opendir`+`readdir` in one call, so it charges
+        // the `r` the open inside it would have charged. The descriptor form
+        // ([`FsDriver::read_directory_fd`]) charges nothing: its `r` was paid
+        // when the descriptor was opened.
         if !owner_allows(metadata.mode, READ) {
             return Err(denied(&path, "list"));
         }
-        let prefix = if path == "/" {
-            "/".to_owned()
-        } else {
-            format!("{path}/")
-        };
-        let mut entries = BTreeMap::new();
-        for directory in self.directories.keys() {
-            if let Some(relative) = directory.strip_prefix(&prefix) {
-                if !relative.is_empty() && !relative.contains('/') {
-                    entries.insert(relative.to_owned(), FsEntryKind::Directory);
-                }
-            }
+        self.list_directory(&path)
+    }
+
+    fn read_directory_fd(&mut self, fd: Fd) -> DriverResult<Vec<FsDirectoryEntry>> {
+        let description = self.description(fd)?;
+        if description.kind != FsEntryKind::Directory {
+            return Err(EffectError::new(
+                ErrorCode::NotDirectory,
+                format!(
+                    "virtual file handle {} does not reference a directory",
+                    fd.0
+                ),
+            ));
         }
-        for file in self.files.keys() {
-            if let Some(relative) = file.strip_prefix(&prefix) {
-                if !relative.is_empty() && !relative.contains('/') {
-                    entries.insert(relative.to_owned(), FsEntryKind::File);
-                }
-            }
+        if !description.readable {
+            // An `O_PATH` directory descriptor: it names the location and never
+            // opened it, so there is nothing to iterate however permissive the
+            // directory's own bits are.
+            return Err(EffectError::new(
+                ErrorCode::NotReadable,
+                format!(
+                    "virtual directory handle {} was not opened for reading",
+                    fd.0
+                ),
+            ));
         }
-        for symlink in self.symlinks.keys() {
-            if let Some(relative) = symlink.strip_prefix(&prefix) {
-                if !relative.is_empty() && !relative.contains('/') {
-                    entries.insert(relative.to_owned(), FsEntryKind::Symlink);
-                }
-            }
-        }
-        for fifo in self.fifos.keys() {
-            if let Some(relative) = fifo.strip_prefix(&prefix) {
-                if !relative.is_empty() && !relative.contains('/') {
-                    entries.insert(relative.to_owned(), FsEntryKind::Fifo);
-                }
-            }
-        }
-        Ok(entries
-            .into_iter()
-            .map(|(name, kind)| FsDirectoryEntry { name, kind })
-            .collect())
+        let path = self
+            .node_path(description.node, FsEntryKind::Directory)
+            .ok_or_else(|| not_found("<removed directory>"))?;
+        // Reached through the descriptor, the listing itself is unenforced: the
+        // access was charged at open, and a `chmod` afterwards cannot reach back
+        // into a walk already under way.
+        self.list_directory(&path)
     }
 
     fn remove_directory(&mut self, path: &str) -> DriverResult<()> {
@@ -1152,14 +1439,9 @@ impl FsDriver for MemFs {
                 ));
             }
             self.unlink_leaf_at(&to);
-            self.files.insert(to.clone(), inode);
-            for description in self
-                .descriptions
-                .values_mut()
-                .filter(|description| description.path == from)
-            {
-                description.path.clone_from(&to);
-            }
+            self.files.insert(to, inode);
+            // Nothing else to do: a description holds the NODE, so every
+            // descriptor on this entry moved with it by construction.
             return Ok(());
         }
         if let Some(target) = self.symlinks.remove(&from) {
@@ -1256,17 +1538,6 @@ impl FsDriver for MemFs {
             let inode = self.fifos.remove(&path).expect("fifo was enumerated");
             self.fifos
                 .insert(format!("{to}{}", &path[from.len()..]), inode);
-        }
-        for description in self
-            .descriptions
-            .values_mut()
-            .filter(|description| description.path == from || description.path.starts_with(&prefix))
-        {
-            description.path = if description.path == from {
-                to.clone()
-            } else {
-                format!("{to}{}", &description.path[from.len()..])
-            };
         }
         Ok(())
     }
@@ -1373,9 +1644,27 @@ impl FsDriver for MemFs {
         self.apply_mode(&path, mode)
     }
 
+    /// `fchmod`. The bits belong to the NODE, so this reaches an unlinked entry
+    /// through its descriptor exactly as a kernel does — and an `O_PATH`
+    /// descriptor, which never opened the file, cannot change them at all.
     fn set_fd_mode(&mut self, fd: Fd, mode: u32) -> DriverResult<()> {
-        let path = self.description(fd)?.path.clone();
-        self.apply_mode(&path, mode)
+        let description = self.description(fd)?;
+        if description.path_only {
+            return Err(EffectError::new(
+                ErrorCode::InvalidHandle,
+                format!("virtual handle {} names a location and has no mode", fd.0),
+            ));
+        }
+        let (node, kind) = (description.node, description.kind);
+        if kind == FsEntryKind::Directory {
+            let path = self
+                .node_path(node, kind)
+                .ok_or_else(|| not_found("<removed directory>"))?;
+            return self.apply_mode(&path, mode);
+        }
+        let inode = self.inodes.get_mut(&node).ok_or_else(|| invalid_fd(fd))?;
+        inode.mode = mode & MODE_MASK;
+        Ok(())
     }
 
     /// The path this descriptor's NODE currently has — see
@@ -1384,22 +1673,69 @@ impl FsDriver for MemFs {
     /// so this answers where the node IS rather than the name it was opened
     /// under.
     fn fd_path(&mut self, fd: Fd) -> DriverResult<String> {
-        Ok(self.description(fd)?.path.clone())
+        let description = self.description(fd)?;
+        let (node, kind) = (description.node, description.kind);
+        self.node_path(node, kind)
+            .ok_or_else(|| not_found("<unlinked node>"))
     }
 }
 
 impl MemFs {
+    /// Enumerate one directory's immediate children, in path order and without
+    /// enforcement. Both listing entry points share it: the access decision is
+    /// theirs, the enumeration is one implementation.
+    fn list_directory(&self, path: &str) -> DriverResult<Vec<FsDirectoryEntry>> {
+        let prefix = if path == "/" {
+            "/".to_owned()
+        } else {
+            format!("{path}/")
+        };
+        let mut entries = BTreeMap::new();
+        for directory in self.directories.keys() {
+            if let Some(relative) = directory.strip_prefix(&prefix) {
+                if !relative.is_empty() && !relative.contains('/') {
+                    entries.insert(relative.to_owned(), FsEntryKind::Directory);
+                }
+            }
+        }
+        for file in self.files.keys() {
+            if let Some(relative) = file.strip_prefix(&prefix) {
+                if !relative.is_empty() && !relative.contains('/') {
+                    entries.insert(relative.to_owned(), FsEntryKind::File);
+                }
+            }
+        }
+        for symlink in self.symlinks.keys() {
+            if let Some(relative) = symlink.strip_prefix(&prefix) {
+                if !relative.is_empty() && !relative.contains('/') {
+                    entries.insert(relative.to_owned(), FsEntryKind::Symlink);
+                }
+            }
+        }
+        for fifo in self.fifos.keys() {
+            if let Some(relative) = fifo.strip_prefix(&prefix) {
+                if !relative.is_empty() && !relative.contains('/') {
+                    entries.insert(relative.to_owned(), FsEntryKind::Fifo);
+                }
+            }
+        }
+        Ok(entries
+            .into_iter()
+            .map(|(name, kind)| FsDirectoryEntry { name, kind })
+            .collect())
+    }
+
     /// Drop whatever LEAF name sits at `path` — a file, a symlink, or a FIFO —
     /// releasing its inode reference. The one place a rename's destination is
     /// overwritten, so no kind can be dropped without its link count following.
     fn unlink_leaf_at(&mut self, path: &str) {
         if let Some(replaced) = self.files.remove(path) {
-            self.decrement_inode_link(replaced);
+            self.drop_name(replaced);
         }
         self.symlinks.remove(path);
         self.symlink_metadata.remove(path);
         if let Some(replaced) = self.fifos.remove(path) {
-            self.decrement_inode_link(replaced);
+            self.drop_name(replaced);
         }
     }
 
@@ -1604,6 +1940,7 @@ mod tests {
 
         // A creation mode is the caller's, under the modeled umask.
         let read_only_file = OpenFlags {
+            path_only: false,
             mode: 0o400,
             ..OpenFlags::create_truncate_write()
         };
@@ -1629,6 +1966,7 @@ mod tests {
             .open(
                 "/tmp/wide",
                 OpenFlags {
+                    path_only: false,
                     mode: 0o777,
                     ..OpenFlags::create_truncate_write()
                 },
@@ -1659,6 +1997,7 @@ mod tests {
             .open(
                 "/tmp/kept",
                 OpenFlags {
+                    path_only: false,
                     mode: 0o640,
                     ..OpenFlags::create_truncate_write()
                 },
@@ -1672,6 +2011,7 @@ mod tests {
             .open(
                 "/tmp/kept",
                 OpenFlags {
+                    path_only: false,
                     mode: 0o777,
                     ..OpenFlags::create_truncate_write()
                 },
@@ -1931,6 +2271,7 @@ mod tests {
             truncate: false,
             append: false,
             exclusive: false,
+            path_only: false,
             mode: patina_dst_abi::CREATE_MODE_UNUSED,
         }
     }
@@ -2189,6 +2530,7 @@ mod tests {
             truncate: false,
             append: false,
             exclusive: false,
+            path_only: false,
             mode: patina_dst_abi::CREATE_MODE_UNUSED,
         };
         assert_eq!(
@@ -2235,6 +2577,7 @@ mod tests {
                     truncate: false,
                     append: false,
                     exclusive: true,
+                    path_only: false,
                     mode: patina_dst_abi::DEFAULT_FILE_CREATE_MODE,
                 },
             )
@@ -2255,6 +2598,7 @@ mod tests {
                     truncate: false,
                     append: true,
                     exclusive: false,
+                    path_only: false,
                     mode: patina_dst_abi::CREATE_MODE_UNUSED,
                 },
             )
@@ -2314,6 +2658,7 @@ mod tests {
                     truncate: false,
                     append: true,
                     exclusive: false,
+                    path_only: false,
                     mode: patina_dst_abi::CREATE_MODE_UNUSED,
                 },
             )
@@ -2330,6 +2675,7 @@ mod tests {
                     truncate: false,
                     append: false,
                     exclusive: false,
+                    path_only: false,
                     mode: patina_dst_abi::CREATE_MODE_UNUSED,
                 },
             )
@@ -2360,6 +2706,7 @@ mod tests {
                     truncate: false,
                     append: false,
                     exclusive: false,
+                    path_only: false,
                     mode: patina_dst_abi::CREATE_MODE_UNUSED,
                 },
             )
@@ -2395,16 +2742,223 @@ mod tests {
         assert_eq!(error.message, "virtual file handle 99 is not open");
     }
 
+    /// RED before `O_PATH` was in the driver's flag vocabulary: every directory
+    /// open was the same open — it charged `x` on the directory and handed back
+    /// a readable handle, so a `cap-std` component walk paid for a capability it
+    /// never asked for while a real read of the directory paid nothing extra,
+    /// and the `r` a listing costs was charged at `read_directory` where a
+    /// `chmod` after the open could still reach it.
+    /// RED mutations: charge `READ` on the path-only branch (the `0o111` open
+    /// below fails), or drop the `readable` check in `read_directory_fd` (the
+    /// path-only descriptor lists).
     #[test]
-    fn unlink_while_open_through_a_duplicate_is_denied() {
+    fn a_path_only_open_names_a_location_and_a_plain_one_opens_the_entry() {
+        let mut fs = MemFs::new();
+        fs.create_directory("/d", 0o777).unwrap();
+        let fd = fs
+            .open("/d/file", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.close(fd).unwrap();
+
+        // A plain `O_RDONLY|O_DIRECTORY` open opens the directory for reading
+        // and can iterate it.
+        let readable = fs.open("/d", OpenFlags::read_only()).unwrap();
+        assert_eq!(fs.read_directory_fd(readable).unwrap().len(), 1);
+
+        // An `O_PATH` open opens nothing: it resolves and answers `fstat`, and
+        // every operation that touches the entry is refused.
+        let location = fs.open("/d", OpenFlags::path_only()).unwrap();
+        assert_eq!(
+            fs.fd_metadata(location).unwrap().kind,
+            FsEntryKind::Directory
+        );
+        assert_eq!(fs.fd_path(location).unwrap(), "/d");
+        assert_eq!(
+            fs.read_directory_fd(location).unwrap_err().code,
+            ErrorCode::NotReadable
+        );
+        assert_eq!(
+            fs.sync(location).unwrap_err().code,
+            ErrorCode::InvalidHandle
+        );
+        assert_eq!(
+            fs.set_fd_mode(location, 0o700).unwrap_err().code,
+            ErrorCode::InvalidHandle
+        );
+
+        // Search-only bits: a plain open pays `r` and is refused, a path-only
+        // open pays nothing on the entry and succeeds — which is exactly how a
+        // capability guest walks a directory it may traverse but not list.
+        fs.set_mode("/d", 0o111).unwrap();
+        assert_eq!(
+            fs.open("/d", OpenFlags::read_only()).unwrap_err().code,
+            ErrorCode::Denied
+        );
+        let walked = fs.open("/d", OpenFlags::path_only()).unwrap();
+        assert_eq!(fs.fd_path(walked).unwrap(), "/d");
+
+        // The access was charged at open, so the `chmod` cannot reach back into
+        // a descriptor already holding the directory — while the FUSED path form
+        // (`opendir`+`readdir` in one call) charges its own `r` and is refused.
+        assert_eq!(fs.read_directory_fd(readable).unwrap().len(), 1);
+        assert_eq!(fs.read_directory("/d").unwrap_err().code, ErrorCode::Denied);
+        fs.close(readable).unwrap();
+        fs.close(location).unwrap();
+        fs.close(walked).unwrap();
+    }
+
+    /// `O_PATH` is not a directory-only spelling: the kernel gives a path-only
+    /// descriptor for any kind, charging nothing on the entry.
+    #[test]
+    fn a_path_only_open_of_a_file_or_fifo_reads_nothing_and_needs_no_permission() {
+        let mut fs = MemFs::new();
+        let fd = fs
+            .open(
+                "/tmp/locked",
+                OpenFlags {
+                    mode: 0o000,
+                    ..OpenFlags::create_truncate_write()
+                },
+            )
+            .unwrap();
+        fs.write(fd, b"hidden").unwrap();
+        fs.close(fd).unwrap();
+        assert_eq!(
+            fs.open("/tmp/locked", OpenFlags::read_only())
+                .unwrap_err()
+                .code,
+            ErrorCode::Denied
+        );
+
+        let location = fs.open("/tmp/locked", OpenFlags::path_only()).unwrap();
+        let metadata = fs.fd_metadata(location).unwrap();
+        assert_eq!(metadata.kind, FsEntryKind::File);
+        assert_eq!(metadata.len, 6);
+        assert_eq!(metadata.mode, 0o000);
+        assert_eq!(
+            fs.read(location, 8).unwrap_err().code,
+            ErrorCode::NotReadable
+        );
+        assert_eq!(
+            fs.write(location, b"x").unwrap_err().code,
+            ErrorCode::NotWritable
+        );
+        assert_eq!(
+            fs.seek(location, 0, SeekWhence::End).unwrap_err().code,
+            ErrorCode::InvalidInput
+        );
+        fs.close(location).unwrap();
+
+        fs.make_fifo("/tmp/pipe", 0o000).unwrap();
+        let fifo = fs.open("/tmp/pipe", OpenFlags::path_only()).unwrap();
+        assert_eq!(fs.fd_metadata(fifo).unwrap().kind, FsEntryKind::Fifo);
+        fs.close(fifo).unwrap();
+        // A path-only open carries no access mode: asking for both is asking for
+        // two different descriptors at once.
+        assert_eq!(
+            fs.open(
+                "/tmp/pipe",
+                OpenFlags {
+                    read: true,
+                    ..OpenFlags::path_only()
+                }
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::InvalidInput
+        );
+    }
+
+    /// RED before inode lifetime: `remove_file` refused an open file outright
+    /// (`InvalidState`, "cannot remove open virtual file"), because a
+    /// description was keyed by PATH and unlinking the name would have left it
+    /// pointing at nothing. A kernel refuses no such thing — it drops the name
+    /// and keeps the node alive for every descriptor that still holds it.
+    /// RED mutation: free the node in `drop_name` instead of
+    /// `release_if_unreferenced`, and every read below fails.
+    #[test]
+    fn an_unlinked_file_stays_alive_behind_its_descriptors() {
         let mut fs = MemFs::new().with_file("/value", b"abc").unwrap();
         let first = fs.open("/value", OpenFlags::read_only()).unwrap();
         let second = fs.dup(first).unwrap();
+        let before = fs.fd_metadata(first).unwrap();
         fs.close(first).unwrap();
-        let error = fs.remove_file("/value").unwrap_err();
-        assert_eq!(error.code, ErrorCode::InvalidState);
-        assert_eq!(error.message, "cannot remove open virtual file: /value");
+
+        fs.remove_file("/value").unwrap();
+        assert_eq!(fs.metadata("/value").unwrap_err().code, ErrorCode::NotFound);
+
+        // The NAME is gone; the NODE is not. Reads, `fstat` and `fchmod` all
+        // reach it through the descriptor, and the link count reads 0 exactly
+        // as it does on a real unlinked-but-open file.
+        assert_eq!(fs.read(second, 8).unwrap(), b"abc");
+        let after = fs.fd_metadata(second).unwrap();
+        assert_eq!(after.ino, before.ino);
+        assert_eq!(after.nlink, 0);
+        assert_eq!(after.len, 3);
+        fs.set_fd_mode(second, 0o600).unwrap();
+        assert_eq!(fs.fd_metadata(second).unwrap().mode, 0o600);
+        // With no name left there is nothing to answer `fd_path` with.
+        assert_eq!(fs.fd_path(second).unwrap_err().code, ErrorCode::NotFound);
+
+        // The last reference of either kind is what frees it.
+        let ino = after.ino;
         fs.close(second).unwrap();
+        assert_eq!(
+            fs.inode_metadata(ino).unwrap_err().code,
+            ErrorCode::NotFound
+        );
+        // And a fresh entry never inherits a released node's identity.
+        let fd = fs
+            .open("/value", OpenFlags::create_truncate_write())
+            .unwrap();
+        assert_ne!(fs.fd_metadata(fd).unwrap().ino, ino);
+    }
+
+    /// A node with a name left over is released by the NAME, not by the
+    /// descriptor: unlinking one hard link while the other is open is an
+    /// ordinary link-count decrement.
+    #[test]
+    fn a_hard_link_is_removable_while_another_of_its_names_is_open() {
+        let mut fs = MemFs::new().with_file("/a", b"abc").unwrap();
+        fs.link("/a", "/b").unwrap();
+        let fd = fs.open("/a", OpenFlags::read_only()).unwrap();
+        fs.remove_file("/b").unwrap();
+        assert_eq!(fs.fd_metadata(fd).unwrap().nlink, 1);
+        fs.remove_file("/a").unwrap();
+        assert_eq!(fs.fd_metadata(fd).unwrap().nlink, 0);
+        assert_eq!(fs.read(fd, 8).unwrap(), b"abc");
+        fs.close(fd).unwrap();
+    }
+
+    /// A FIFO endpoint is the descriptor the filesystem hands back no handle
+    /// for, so its reference is taken explicitly — and it is what keeps the node
+    /// answerable after the last name is unlinked. RED before inode lifetime:
+    /// `inode_metadata` searched the NAME tables, so the unlinked FIFO answered
+    /// `NotFound` and the shim fell back to a copy taken at open time.
+    #[test]
+    fn an_unlinked_fifo_answers_through_the_reference_its_endpoint_holds() {
+        let mut fs = MemFs::new();
+        fs.make_fifo("/tmp/pipe", 0o660).unwrap();
+        let ino = fs.metadata("/tmp/pipe").unwrap().ino;
+        fs.retain_inode(ino).unwrap();
+
+        fs.remove_file("/tmp/pipe").unwrap();
+        assert_eq!(
+            fs.metadata("/tmp/pipe").unwrap_err().code,
+            ErrorCode::NotFound
+        );
+        let live = fs.inode_metadata(ino).unwrap();
+        assert_eq!(live.kind, FsEntryKind::Fifo);
+        assert_eq!(live.nlink, 0);
+        assert_eq!(live.mode, 0o640);
+
+        fs.release_inode(ino).unwrap();
+        assert_eq!(
+            fs.inode_metadata(ino).unwrap_err().code,
+            ErrorCode::NotFound
+        );
+        // A release with nothing to release is a bug in the caller, not a no-op.
+        assert_eq!(fs.release_inode(ino).unwrap_err().code, ErrorCode::NotFound);
     }
 
     #[test]
@@ -2462,6 +3016,7 @@ mod tests {
                     truncate: false,
                     append: true,
                     exclusive: false,
+                    path_only: false,
                     mode: patina_dst_abi::CREATE_MODE_UNUSED,
                 },
             )
@@ -2476,19 +3031,6 @@ mod tests {
         assert_eq!(survivor.nlink, 1);
         fs.remove_file("/b").unwrap();
         assert_eq!(fs.metadata("/b").unwrap_err().code, ErrorCode::NotFound);
-    }
-
-    #[test]
-    fn hard_link_removal_is_denied_while_any_inode_name_is_open() {
-        let mut fs = MemFs::new().with_file("/a", b"abc").unwrap();
-        fs.link("/a", "/b").unwrap();
-        let fd = fs.open("/a", OpenFlags::read_only()).unwrap();
-        assert_eq!(
-            fs.remove_file("/b").unwrap_err().code,
-            ErrorCode::InvalidState
-        );
-        fs.close(fd).unwrap();
-        fs.remove_file("/b").unwrap();
     }
 
     #[test]

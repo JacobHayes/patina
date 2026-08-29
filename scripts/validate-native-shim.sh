@@ -601,6 +601,61 @@ fn main() {
 }
 RS
 
+cat >"$tmp/at_family_probe.rs" <<'RS'
+// The libc *at family against a real directory descriptor -- the door a guest
+// whose backend is libc (rather than raw syscalls) uses for every path it
+// resolves through a capability. `symlinkat`/`readlinkat` are declared here the
+// way a libc-backend crate declares them, so an uninterposed one would be an
+// unknown import the pre-run audit refuses.
+use std::io::Write;
+
+unsafe extern "C" {
+    fn open(path: *const u8, flags: i32, ...) -> i32;
+    fn close(fd: i32) -> i32;
+    fn symlinkat(target: *const u8, dirfd: i32, link_path: *const u8) -> i32;
+    fn readlinkat(dirfd: i32, path: *const u8, buf: *mut u8, len: usize) -> isize;
+}
+
+// O_RDONLY | O_DIRECTORY (Linux 0o200000, macOS 0x100000).
+#[cfg(target_os = "linux")]
+const O_DIRECTORY: i32 = 0o200000;
+#[cfg(not(target_os = "linux"))]
+const O_DIRECTORY: i32 = 0x0010_0000;
+
+fn main() {
+    std::fs::create_dir("/state").unwrap();
+    std::fs::write("/state/target.txt", b"pointed-at").unwrap();
+    // SAFETY: NUL-terminated literals and a valid descriptor throughout.
+    let dirfd = unsafe { open(c"/state".as_ptr().cast(), O_DIRECTORY) };
+    assert!(dirfd >= 0, "opening the directory failed");
+
+    // symlinkat resolves only the LINK side against the descriptor; the target
+    // is a string the filesystem stores verbatim.
+    let rc = unsafe { symlinkat(c"target.txt".as_ptr().cast(), dirfd, c"link".as_ptr().cast()) };
+    assert_eq!(rc, 0, "symlinkat through a dirfd failed");
+
+    let mut buf = [0u8; 64];
+    let len = unsafe { readlinkat(dirfd, c"link".as_ptr().cast(), buf.as_mut_ptr(), buf.len()) };
+    assert!(len > 0, "readlinkat through a dirfd failed");
+    let target = String::from_utf8_lossy(&buf[..len as usize]).into_owned();
+
+    // The link resolves to the file it names, through the same directory.
+    let contents = std::fs::read_to_string("/state/link").unwrap();
+    assert_eq!(unsafe { close(dirfd) }, 0);
+
+    // AT_FDCWD keeps working through the same interposers.
+    let rc = unsafe {
+        symlinkat(c"/state/target.txt".as_ptr().cast(), -100, c"/state/abs".as_ptr().cast())
+    };
+    assert_eq!(rc, 0, "symlinkat(AT_FDCWD) failed");
+    let len = unsafe { readlinkat(-100, c"/state/abs".as_ptr().cast(), buf.as_mut_ptr(), buf.len()) };
+    let absolute = String::from_utf8_lossy(&buf[..len as usize]).into_owned();
+
+    std::io::stdout().flush().unwrap();
+    println!("NATIVE_LIBC_AT_RESULT link={target} read={contents} abs={absolute}");
+}
+RS
+
 cat >"$tmp/env_probe.rs" <<'RS'
 // The deterministic environment is empty and guest-owned: std::env::vars (the
 // direct environ path) sees nothing, interposed getenv hides every host/control
@@ -1116,6 +1171,31 @@ fi
 cmp "$tmp/udp-record" "$tmp/udp-replay"
 cmp "$tmp/udp-seed-1" "$tmp/udp-replay"
 "$runner" audit "$tmp/udp-probe" "${shim_allow[@]}" >/dev/null
+
+# The libc `*at` family against a directory descriptor. A guest whose backend is
+# libc reaches `symlinkat`/`readlinkat` as ordinary imports; both are interposed,
+# so the probe audits CLEAN and resolves through the SAME dirfd table the
+# raw-syscall rows use. RED before the interposers existed: the two symbols were
+# undefined externals, so the pre-run audit refused the binary by name (and
+# --allow-unsupported-symbols would have let them escape to the host).
+"$runner" build "$tmp/at_family_probe.rs" --output "$tmp/at-family-probe" >/dev/null
+"$runner" audit "$tmp/at-family-probe" "${shim_allow[@]}" >"$tmp/at-family-audit"
+if grep -Eq 'symlinkat|readlinkat' "$tmp/at-family-audit"; then
+  echo 'validate-native-shim: symlinkat/readlinkat still reach the audit as imports' >&2
+  cat "$tmp/at-family-audit" >&2
+  exit 1
+fi
+"$runner" run "$tmp/at-family-probe" --seed 1 >"$tmp/at-family-seed-1"
+"$runner" run "$tmp/at-family-probe" --seed 1 >"$tmp/at-family-seed-2"
+cmp "$tmp/at-family-seed-1" "$tmp/at-family-seed-2"
+grep -qx 'NATIVE_LIBC_AT_RESULT link=target.txt read=pointed-at abs=/state/target.txt' \
+  "$tmp/at-family-seed-1"
+"$runner" run "$tmp/at-family-probe" --seed 1 --record "$tmp/at-family.patina" \
+  --fingerprint native-at-family-v1 >"$tmp/at-family-record"
+"$runner" replay "$tmp/at-family-probe" "$tmp/at-family.patina" \
+  --fingerprint native-at-family-v1 >"$tmp/at-family-replay"
+cmp "$tmp/at-family-record" "$tmp/at-family-replay"
+cmp "$tmp/at-family-seed-1" "$tmp/at-family-replay"
 
 # Deterministic descriptor duplication: File::try_clone routes through
 # fcntl(F_DUPFD_CLOEXEC) to the recorded FsDup operation, and the duplicate
@@ -4541,6 +4621,7 @@ cat "$tmp/pipe-epipe-out"
 cat "$tmp/pipe-nonblock-out"
 cat "$tmp/pipe-dup-1"
 grep -h "FIFO_LEGS_RAN " "$tmp/fifo-mre.out"
+cat "$tmp/at-family-seed-1"
 
 cat "$tmp/replay"
 cat "$tmp/std-replay"

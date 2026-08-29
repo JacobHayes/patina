@@ -86,7 +86,7 @@ for stream in out err; do
     exit 1
   fi
 done
-expected='^FIFO_RESULT kind=fifo mode=0644 dents=pipe:fifo spellings=mkfifo,mkfifoat,mknod nonblock=open\+enxio rendezvous=fifo-bytes eof=0 epipe=1 eagain=1 rdwr=nowait denied=1 fstat=live linked=2names,shared unlinked=alive$'
+expected='^FIFO_RESULT kind=fifo mode=0644 dents=pipe:fifo spellings=mkfifo,mkfifoat,mknod nonblock=open\+enxio rendezvous=fifo-bytes eof=0 epipe=1 eagain=1 rdwr=nowait denied=1 fstat=live linked=2names,shared unlinked=nlink0\+fchmod$'
 if ! grep -Eq "$expected" "$out/run1.out"; then
   echo "fifo-ipc: FAIL [2] unexpected FIFO_RESULT:" >&2
   cat "$out/run1.out" >&2; exit 1

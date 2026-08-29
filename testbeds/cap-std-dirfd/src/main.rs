@@ -159,10 +159,11 @@ fn main() {
 
     let modes = mode_bits_are_modelled_and_enforced();
     let pinned = a_directory_descriptor_pins_its_node();
+    let opath = the_two_directory_opens_cost_different_bits();
 
     println!(
         "CAPSTD_RESULT root={BASE} read=alpha-bytes dents=alpha.txt,sub nested=beta \
-         link=sub/moved.txt modes={modes} pinned={pinned}"
+         link=sub/moved.txt modes={modes} pinned={pinned} opath={opath}"
     );
 }
 
@@ -322,6 +323,95 @@ fn mode_bits_are_modelled_and_enforced() -> &'static str {
     fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("restore the file mode");
     fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).expect("restore the dir mode");
     "enforced+created"
+}
+
+/// The `O_PATH` leg: a directory has two opens, and they cost different bits.
+///
+/// `O_PATH` names a LOCATION — the kernel opens nothing, charges nothing on the
+/// entry, and hands back a descriptor that resolves `*at` paths and answers
+/// `fstat` but cannot be read. A plain `O_RDONLY|O_DIRECTORY` open DOES open the
+/// directory for reading and costs `r`, while traversing THROUGH a directory
+/// costs `x` — different bits, and a capability guest spends most of its opens
+/// on the first kind.
+///
+/// RED before `O_PATH` entered the driver's flag vocabulary: both opens were the
+/// same open, charging `x` on the directory and handing back a readable handle.
+/// So a `0o400` directory (`r--`, listable on any Unix) could not be listed at
+/// all, a `0o111` directory could be opened for reading and then iterated by
+/// asking for the listing separately, and an `O_PATH` handle was a read
+/// capability nobody asked for.
+fn the_two_directory_opens_cost_different_bits() -> &'static str {
+    const ROOT: &str = "/opath-mre";
+    fs::create_dir(ROOT).expect("create the O_PATH root");
+    fs::write(format!("{ROOT}/entry.txt"), "listed").expect("seed one entry");
+
+    // r-- : listing reads the directory, so it works; traversal needs `x`, so
+    // resolving a name through it does not. That is the split.
+    fs::set_permissions(ROOT, fs::Permissions::from_mode(0o400)).expect("chmod r--");
+    assert_eq!(
+        fs::read_dir(ROOT).expect("r-- is listable").count(),
+        1,
+        "listing a directory costs `r`, and this directory has it"
+    );
+    assert_eq!(
+        fs::read(format!("{ROOT}/entry.txt"))
+            .expect_err("traversing r-- must fail: no `x`")
+            .kind(),
+        ErrorKind::PermissionDenied,
+    );
+
+    // --x : traversal works, listing does not.
+    fs::set_permissions(ROOT, fs::Permissions::from_mode(0o100)).expect("chmod --x");
+    assert_eq!(
+        fs::read(format!("{ROOT}/entry.txt")).expect("--x is traversable"),
+        b"listed",
+    );
+    assert_eq!(
+        fs::read_dir(ROOT).expect_err("listing --x must fail: no `r`").kind(),
+        ErrorKind::PermissionDenied,
+    );
+
+    // 0o000: no bit at all. An O_PATH open still succeeds — the kernel checks
+    // nothing on the entry for one — while the plain open is refused, and the
+    // path-only descriptor cannot be read or iterated (EBADF, as on Linux).
+    fs::set_permissions(ROOT, fs::Permissions::from_mode(0o000)).expect("chmod 0o000");
+    let location = open_path_only(ROOT);
+    assert!(location >= 0, "an O_PATH open charges nothing on the entry");
+    let mut byte = [0u8; 1];
+    // SAFETY: a live descriptor and a writable one-byte buffer.
+    let read_rc = unsafe { read(location, byte.as_mut_ptr(), byte.len()) };
+    assert_eq!(read_rc, -1, "a path-only descriptor must not read");
+    // SAFETY: a live descriptor.
+    assert_eq!(unsafe { close(location) }, 0);
+    assert_eq!(
+        fs::read_dir(ROOT)
+            .expect_err("a plain directory open of 0o000 must be denied")
+            .kind(),
+        ErrorKind::PermissionDenied,
+    );
+
+    fs::set_permissions(ROOT, fs::Permissions::from_mode(0o755)).expect("restore");
+    "nocost,list=r,walk=x"
+}
+
+/// `open(path, O_PATH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)` — the exact open
+/// `cap-primitives` performs for every path component it walks, through libc
+/// rather than through cap-std, so the flag itself is what is under test.
+fn open_path_only(path: &str) -> i32 {
+    let c_path = std::ffi::CString::new(path).expect("a NUL-free path");
+    // SAFETY: a NUL-terminated path; the variadic mode is unread without O_CREAT.
+    unsafe { open(c_path.as_ptr(), O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) }
+}
+
+const O_DIRECTORY: i32 = 0o200000;
+const O_NOFOLLOW: i32 = 0o400000;
+const O_CLOEXEC: i32 = 0o2000000;
+const O_PATH: i32 = 0o10000000;
+
+unsafe extern "C" {
+    fn open(path: *const std::ffi::c_char, flags: i32, ...) -> i32;
+    fn read(fd: i32, buf: *mut u8, len: usize) -> isize;
+    fn close(fd: i32) -> i32;
 }
 
 /// The descriptor-identity leg: a directory descriptor names an INODE, so it

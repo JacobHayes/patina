@@ -231,6 +231,19 @@ pub struct OpenFlags {
     pub truncate: bool,
     pub append: bool,
     pub exclusive: bool,
+    /// `O_PATH`: a descriptor that names a LOCATION rather than opening the
+    /// file behind it. It resolves `*at` paths, answers `fstat`/`readlinkat`
+    /// and closes, and refuses every operation that touches the file's
+    /// contents. `cap-std` opens each component of a path this way, so it is
+    /// the flag a capability guest spends most of its opens on.
+    ///
+    /// It carries no access mode: `read`, `write`, and every creating flag must
+    /// be false alongside it, exactly as the kernel ignores them under
+    /// `O_PATH`. Permission is charged on the path PREFIX only — Linux checks
+    /// nothing on the entry itself for an `O_PATH` open — which is what
+    /// distinguishes it from the plain `O_RDONLY|O_DIRECTORY` open that pays
+    /// `r` on the directory.
+    pub path_only: bool,
     /// The creation mode — `open`'s third argument. It is the mode the caller
     /// ASKED for; the driver applies its modeled umask, exactly as the kernel
     /// applies the process umask. It is consulted only when this open CREATES
@@ -261,6 +274,21 @@ impl OpenFlags {
             truncate: false,
             append: false,
             exclusive: false,
+            path_only: false,
+            mode: CREATE_MODE_UNUSED,
+        }
+    }
+
+    /// An `O_PATH` open: no access mode, no creation, no contents.
+    pub const fn path_only() -> Self {
+        Self {
+            read: false,
+            write: false,
+            create: false,
+            truncate: false,
+            append: false,
+            exclusive: false,
+            path_only: true,
             mode: CREATE_MODE_UNUSED,
         }
     }
@@ -273,6 +301,7 @@ impl OpenFlags {
             truncate: true,
             append: false,
             exclusive: false,
+            path_only: false,
             mode: DEFAULT_FILE_CREATE_MODE,
         }
     }
@@ -714,6 +743,23 @@ pub enum Operation {
     FsRemoveFile {
         path: String,
     },
+    /// `fchmod` through a descriptor the filesystem holds no handle for: the
+    /// bits belong to the NODE, so they are named by inode.
+    FsSetInodeMode {
+        ino: u64,
+        mode: u32,
+    },
+    /// A descriptor that the filesystem hands back no handle for — a FIFO
+    /// endpoint — takes its reference on the node explicitly, so the node
+    /// outlives its last name for as long as the endpoint does.
+    FsRetainInode {
+        ino: u64,
+    },
+    /// The matching release. The node is freed when its last name and its last
+    /// reference are both gone.
+    FsReleaseInode {
+        ino: u64,
+    },
     FsSync {
         fd: Fd,
     },
@@ -733,6 +779,13 @@ pub enum Operation {
     },
     FsReadDirectory {
         path: String,
+    },
+    /// `getdents`/`readdir` on an open directory DESCRIPTOR. Separate from
+    /// [`Operation::FsReadDirectory`] because it is a different question: the
+    /// access was charged when the descriptor was opened, so this one asks the
+    /// node the descriptor holds rather than re-resolving a name.
+    FsReadDirectoryFd {
+        fd: Fd,
     },
     FsRemoveDirectory {
         path: String,

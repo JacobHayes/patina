@@ -27,6 +27,14 @@ enum {
      * open waits for the opposite end (blocking) or answers at once — success
      * for a reader, ENXIO for a writer with no reader. */
     PATINA_O_NONBLOCK = 1u << 7,
+    /* O_PATH: name a LOCATION without opening the file behind it. The kernel
+     * ignores the access mode under it, so it never travels with
+     * PATINA_O_READ/PATINA_O_WRITE, and it charges nothing on the entry itself
+     * (only the search walk of the path prefix) where a plain read-only open of
+     * a directory charges `r`. The descriptor resolves *at paths, answers fstat
+     * and readlinkat, dups and closes -- and refuses every read, write, seek,
+     * fsync, fchmod and directory listing. */
+    PATINA_O_PATH = 1u << 8,
 };
 
 enum {
@@ -199,7 +207,14 @@ int32_t patina_fd_metadata_full(int32_t fd, uint32_t *kind, uint64_t *length,
  */
 int32_t patina_chmod(const char *path, uint32_t mode, int32_t follow);
 int32_t patina_fchmod(int32_t fd, uint32_t mode);
-int32_t patina_read_dir(const char *path, void **state);
+/*
+ * Snapshot a directory for readdir/getdents iteration. Takes the open directory
+ * DESCRIPTOR, not a name: the `r` it costs was charged when the descriptor was
+ * opened, so a later chmod cannot break a walk already under way, a rename
+ * cannot redirect it, and an O_PATH descriptor (which opened nothing) cannot
+ * iterate at all.
+ */
+int32_t patina_read_dir(int32_t fd, void **state);
 /*
  * Return 1 after writing the next entry, 0 at end-of-directory, or -1 with
  * patina_errno set. name_buf receives a NUL-terminated entry name.
@@ -239,11 +254,17 @@ int32_t patina_link(const char *from, const char *to);
  * resolution on both the libc and raw-syscall paths, so a renamed directory
  * keeps serving the descriptor and a symlink planted at the vacated name is
  * never followed;
- * patina_dir_is_dirfd tells a dir fd apart from other fds; patina_dirclose
- * releases the mapping and closes the filesystem fd (closedir/close). fdopendir
- * transfers fd ownership into the DIR, so closedir is what calls patina_dirclose.
+ * `path_only` is O_PATH: the descriptor names the location and never opens the
+ * directory, so it costs nothing on the entry and cannot be iterated, where a
+ * plain (path_only == 0) directory open costs `r` and can.
+ * patina_dir_is_dirfd tells a dir fd apart from other fds; patina_dirdup
+ * duplicates one, SHARING the open description as POSIX dup does and
+ * registering the copy as a directory descriptor; patina_dirclose releases the
+ * mapping and closes the filesystem fd (closedir/close). Every DIR owns a
+ * descriptor, so closedir is what calls patina_dirclose.
  */
-int32_t patina_diropen(const char *path, int32_t follow);
+int32_t patina_diropen(const char *path, int32_t follow, int32_t path_only);
+int32_t patina_dirdup(int32_t fd);
 intptr_t patina_dirpath(int32_t fd, char *buf, size_t len);
 int32_t patina_dir_is_dirfd(int32_t fd);
 int32_t patina_dirclose(int32_t fd);

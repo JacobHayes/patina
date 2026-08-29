@@ -468,6 +468,40 @@ pub fn summarize(kind: &str, op: &Value, out: &Value) -> String {
     }
     // A permission mode is only readable in octal: `mode=0o644` says what
     // `mode=420` does not. Rendered separately for that reason alone.
+    //
+    // `fs_open` keeps its mode inside `flags`, where the generic scan above
+    // cannot see it — and an open's creation mode is exactly as load-bearing as
+    // `mkdir`'s, so the flag word is rendered here too: the set flags in POSIX
+    // spelling, then the mode when the open actually creates. A reader who
+    // cannot see `O_PATH` in the trace cannot tell the descriptor that resolves
+    // paths from the one that reads the directory.
+    if let Some(flags) = op.get("flags").and_then(Value::as_object) {
+        let named = [
+            ("read", "read"),
+            ("write", "write"),
+            ("create", "create"),
+            ("truncate", "truncate"),
+            ("append", "append"),
+            ("exclusive", "exclusive"),
+            ("path_only", "path_only"),
+        ]
+        .into_iter()
+        .filter(|(key, _)| flags.get(*key).and_then(Value::as_bool).unwrap_or(false))
+        .map(|(_, label)| label)
+        .collect::<Vec<_>>();
+        if !named.is_empty() {
+            parts.push(format!("flags={}", named.join("|")));
+        }
+        if let Some(mode) = flags.get("mode").and_then(Value::as_u64) {
+            if flags
+                .get("create")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                parts.push(format!("mode=0o{mode:o}"));
+            }
+        }
+    }
     if let Some(mode) = op.get("mode").and_then(Value::as_u64) {
         parts.push(format!("mode=0o{mode:o}"));
     }
@@ -660,11 +694,15 @@ pub const OP_KINDS: &[(&str, Category)] = &[
     ("fs_inode_metadata", Category::Fs),
     ("fs_create_directory", Category::Fs),
     ("fs_remove_file", Category::Fs),
+    ("fs_set_inode_mode", Category::Fs),
+    ("fs_retain_inode", Category::Fs),
+    ("fs_release_inode", Category::Fs),
     ("fs_sync", Category::Fs),
     ("fs_set_length", Category::Fs),
     ("fs_set_times", Category::Fs),
     ("fs_set_times_by_path", Category::Fs),
     ("fs_read_directory", Category::Fs),
+    ("fs_read_directory_fd", Category::Fs),
     ("fs_remove_directory", Category::Fs),
     ("fs_rename", Category::Fs),
     ("fs_link", Category::Fs),
@@ -734,11 +772,15 @@ pub fn operation_kind(operation: &Operation) -> &'static str {
         Operation::FsInodeMetadata { .. } => "fs_inode_metadata",
         Operation::FsCreateDirectory { .. } => "fs_create_directory",
         Operation::FsRemoveFile { .. } => "fs_remove_file",
+        Operation::FsSetInodeMode { .. } => "fs_set_inode_mode",
+        Operation::FsRetainInode { .. } => "fs_retain_inode",
+        Operation::FsReleaseInode { .. } => "fs_release_inode",
         Operation::FsSync { .. } => "fs_sync",
         Operation::FsSetLength { .. } => "fs_set_length",
         Operation::FsSetTimes { .. } => "fs_set_times",
         Operation::FsSetTimesByPath { .. } => "fs_set_times_by_path",
         Operation::FsReadDirectory { .. } => "fs_read_directory",
+        Operation::FsReadDirectoryFd { .. } => "fs_read_directory_fd",
         Operation::FsRemoveDirectory { .. } => "fs_remove_directory",
         Operation::FsRename { .. } => "fs_rename",
         Operation::FsLink { .. } => "fs_link",
@@ -889,6 +931,15 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
             },
             Outcome::Unit,
         ),
+        (
+            Operation::FsSetInodeMode {
+                ino: 7,
+                mode: 0o640,
+            },
+            Outcome::Unit,
+        ),
+        (Operation::FsRetainInode { ino: 7 }, Outcome::Unit),
+        (Operation::FsReleaseInode { ino: 7 }, Outcome::Unit),
         (Operation::FsSync { fd: Fd(3) }, Outcome::Unit),
         (Operation::FsSetLength { fd: Fd(3), len: 9 }, Outcome::Unit),
         (
@@ -909,6 +960,13 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
         ),
         (
             Operation::FsReadDirectory { path: "/d".into() },
+            Outcome::DirectoryEntries(vec![FsDirectoryEntry {
+                name: "file".into(),
+                kind: FsEntryKind::File,
+            }]),
+        ),
+        (
+            Operation::FsReadDirectoryFd { fd: Fd(3) },
             Outcome::DirectoryEntries(vec![FsDirectoryEntry {
                 name: "file".into(),
                 kind: FsEntryKind::File,
@@ -1114,6 +1172,7 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
 #[cfg(test)]
 mod tests {
     use super::*;
+    use patina_dst_abi::{Fd, OpenFlags};
     use patina_dst_trace::{RunMetadata, TraceBundle, TraceEvent};
 
     fn bundle_with(events: Vec<(Operation, Outcome)>) -> TraceBundle {
@@ -1123,6 +1182,53 @@ mod tests {
             .map(|(i, (operation, outcome))| TraceEvent::new(i as u64, operation, outcome))
             .collect();
         TraceBundle::new(RunMetadata::new(7, "fp-test"), decisions)
+    }
+
+    /// An `fs_open` line has to SAY what the open asked for. The flag word and
+    /// the creation mode live inside the nested `flags` object, where the
+    /// generic scalar scan cannot see them, so both are rendered explicitly —
+    /// and a mode is only readable in octal. RED before the nested branch: an
+    /// `fs_open` rendered `path=…` and nothing else, so a reader could not tell
+    /// a path-only directory handle (which charges nothing and cannot be read)
+    /// from a read-only open of the same directory.
+    #[test]
+    fn an_fs_open_renders_its_flag_word_and_its_creation_mode() {
+        let render = |flags: OpenFlags| {
+            let operation = Operation::FsOpen {
+                path: "/d".into(),
+                flags,
+            };
+            summarize(
+                operation_kind(&operation),
+                &serde_json::to_value(&operation).unwrap(),
+                &serde_json::to_value(Outcome::Handle(Fd(3))).unwrap(),
+            )
+        };
+
+        let creating = render(OpenFlags {
+            mode: 0o644,
+            ..OpenFlags::create_truncate_write()
+        });
+        assert!(
+            creating.contains("flags=write|create|truncate"),
+            "the flag word must be rendered: {creating}"
+        );
+        assert!(
+            creating.contains("mode=0o644"),
+            "a creation mode is only readable in octal: {creating}"
+        );
+
+        // A non-creating open reads no third argument, so there is no mode to
+        // show — rendering `mode=0o0` would be an argument the kernel never
+        // looked at.
+        let reading = render(OpenFlags::read_only());
+        assert!(reading.contains("flags=read"), "{reading}");
+        assert!(!reading.contains("mode="), "{reading}");
+
+        // The two directory opens are distinguishable in the trace.
+        let location = render(OpenFlags::path_only());
+        assert!(location.contains("flags=path_only"), "{location}");
+        assert!(!location.contains("read"), "{location}");
     }
 
     fn registry_coverage(registry: &[(&str, Category)]) -> Result<(), String> {

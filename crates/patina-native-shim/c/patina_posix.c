@@ -227,9 +227,9 @@ static int patina_posix_deny(const char *message) {
 /* Deny strings shared with the SUD dispatcher (crates/patina-native-shim/src/sud.rs).
  * A raw-syscall guest and a libc guest that hit the same refusal must record the
  * SAME captured-stderr bytes, or their traces diverge on the refusal alone. */
-#define PATINA_DENY_O_PATH_NONDIR \
-    "patina: O_PATH on a non-directory is not modeled (the deterministic filesystem's only " \
-    "path-only descriptor is a directory handle); failing closed\n"
+#define PATINA_DENY_O_PATH_SYMLINK \
+    "patina: O_PATH|O_NOFOLLOW on a symlink is not modeled (the deterministic " \
+    "filesystem has no descriptor for a link entry); failing closed\n"
 #define PATINA_DENY_MKNOD_TYPE \
     "patina: mknod models only S_IFIFO (a named pipe); no other special file has a " \
     "deterministic representation here; failing closed\n"
@@ -840,10 +840,12 @@ void *__wrap_dlsym(void *handle, const char *symbol) {
 
 struct patina_dir {
     void *state;
-    char *path;
     uint64_t index;
-    /* fdopendir transfers a virtual directory descriptor into the DIR, which
-     * closedir then releases; -1 for an opendir DIR that owns no descriptor. */
+    /* Every DIR owns a virtual directory descriptor, which closedir releases:
+     * opendir mints one (as a real opendir does, which is what makes dirfd()
+     * meaningful on it), fdopendir takes ownership of the caller's (POSIX). The
+     * snapshot is read THROUGH it, so iteration is a read of the descriptor and
+     * not a second lookup of a name. */
     int owned_fd;
     struct dirent entry;
 #ifdef __linux__
@@ -871,29 +873,34 @@ static void patina_fill_dirent_common(struct dirent *entry, uint64_t index, uint
     entry->d_type = patina_dirent_type(kind);
 }
 
+/*
+ * opendir: open the directory, THEN read it through that descriptor -- what a
+ * real opendir does (open(path, O_RDONLY|O_DIRECTORY) followed by getdents). It
+ * costs the `r` the driver charges at open, dirfd() on the result is a real
+ * descriptor, and a rename under the iteration cannot redirect it.
+ */
 DIR *opendir(const char *path) {
-    void *state = NULL;
-    if (patina_read_dir(path, &state) != 0) {
+    int fd = patina_diropen(path, 1, 0);
+    if (fd < 0) {
         errno = patina_errno();
+        return NULL;
+    }
+    void *state = NULL;
+    if (patina_read_dir(fd, &state) != 0) {
+        int saved = patina_errno();
+        patina_dirclose(fd);
+        errno = saved;
         return NULL;
     }
     struct patina_dir *directory = calloc(1, sizeof *directory);
     if (directory == NULL) {
         patina_read_dir_free(state);
+        patina_dirclose(fd);
         errno = ENOMEM;
         return NULL;
     }
-    size_t path_size = strlen(path) + 1;
-    directory->path = malloc(path_size);
-    if (directory->path == NULL) {
-        free(directory);
-        patina_read_dir_free(state);
-        errno = ENOMEM;
-        return NULL;
-    }
-    memcpy(directory->path, path, path_size);
     directory->state = state;
-    directory->owned_fd = -1;
+    directory->owned_fd = fd;
     return (DIR *)(void *)directory;
 }
 
@@ -906,18 +913,8 @@ DIR *opendir(const char *path) {
  * is taken now, exactly like opendir, so iteration is stable across the removals.
  */
 DIR *fdopendir(int fd) {
-    char path[PATH_MAX];
-    intptr_t length = patina_dirpath(fd, path, sizeof path);
-    if (length < 0) {
-        errno = patina_errno();
-        return NULL;
-    }
-    if ((size_t)length >= sizeof path) {
-        errno = ENAMETOOLONG;
-        return NULL;
-    }
     void *state = NULL;
-    if (patina_read_dir(path, &state) != 0) {
+    if (patina_read_dir(fd, &state) != 0) {
         errno = patina_errno();
         return NULL;
     }
@@ -927,15 +924,6 @@ DIR *fdopendir(int fd) {
         errno = ENOMEM;
         return NULL;
     }
-    size_t path_size = (size_t)length + 1;
-    directory->path = malloc(path_size);
-    if (directory->path == NULL) {
-        free(directory);
-        patina_read_dir_free(state);
-        errno = ENOMEM;
-        return NULL;
-    }
-    memcpy(directory->path, path, path_size);
     directory->state = state;
     directory->owned_fd = fd;
     return (DIR *)(void *)directory;
@@ -994,10 +982,9 @@ struct dirent64 *readdir64(DIR *dirp) {
 int closedir(DIR *dirp) {
     struct patina_dir *directory = (struct patina_dir *)(void *)dirp;
     patina_read_dir_free(directory->state);
-    /* Release the transferred descriptor for an fdopendir DIR (POSIX: closedir
-     * closes the fd fdopendir took ownership of). An opendir DIR owns none. */
-    if (directory->owned_fd >= 0) patina_dirclose(directory->owned_fd);
-    free(directory->path);
+    /* POSIX: closedir releases the descriptor the DIR owns -- the one opendir
+     * minted or the one fdopendir took ownership of. */
+    patina_dirclose(directory->owned_fd);
     free(directory);
     return 0;
 }
@@ -1005,7 +992,7 @@ int closedir(DIR *dirp) {
 void rewinddir(DIR *dirp) {
     struct patina_dir *directory = (struct patina_dir *)(void *)dirp;
     void *state = NULL;
-    if (patina_read_dir(directory->path, &state) != 0) {
+    if (patina_read_dir(directory->owned_fd, &state) != 0) {
         errno = patina_errno();
         return;
     }
@@ -1016,11 +1003,7 @@ void rewinddir(DIR *dirp) {
 
 int dirfd(DIR *dirp) {
     struct patina_dir *directory = (struct patina_dir *)(void *)dirp;
-    /* An fdopendir DIR exposes the descriptor it took ownership of; an opendir
-     * DIR owns no descriptor, so it stays fail-closed as before. */
-    if (directory->owned_fd >= 0) return directory->owned_fd;
-    errno = ENOTSUP;
-    return -1;
+    return directory->owned_fd;
 }
 
 int symlink(const char *target, const char *link_path) {
@@ -1076,12 +1059,15 @@ static int patina_posix_open(const char *path, int flags, mode_t mode) {
         return -1;
     }
     /* O_PATH names a descriptor that resolves paths and answers metadata but
-     * cannot read or write. The deterministic filesystem models exactly one such
-     * descriptor: the directory handle. cap-std's `Dir` walks a path component at
+     * cannot read, write or iterate. cap-std's `Dir` walks a path a component at
      * a time with openat(dirfd, name, O_PATH|O_DIRECTORY|O_NOFOLLOW), which is
-     * why this is modeled at all; an O_PATH open of a NON-directory has no
-     * modeled representation and is a named deny rather than a read/write fd
-     * that would silently be more capable than the guest asked for. */
+     * why it is modeled; a directory handle is the interesting one, but the
+     * kernel gives an O_PATH descriptor for any kind, so a file or a FIFO gets
+     * an ordinary path-only fd. Only a symlink is refused: the deterministic
+     * filesystem has no descriptor for a link entry, so O_PATH|O_NOFOLLOW on one
+     * -- the single spelling that names the link ITSELF -- is a named deny
+     * rather than a descriptor silently bound to the target instead. Without
+     * O_NOFOLLOW the link resolves, exactly as every other open does. */
 #ifdef O_PATH
     if ((flags & O_PATH) != 0 && (flags & O_DIRECTORY) == 0) {
         uint32_t probe_kind = 0;
@@ -1090,10 +1076,33 @@ static int patina_posix_open(const char *path, int flags, mode_t mode) {
             errno = patina_errno();
             return -1;
         }
-        if (probe_kind != PATINA_ENTRY_DIRECTORY) {
-            return patina_posix_deny(PATINA_DENY_O_PATH_NONDIR);
+        if (probe_kind == PATINA_ENTRY_SYMLINK) {
+#ifdef O_NOFOLLOW
+            if (flags & O_NOFOLLOW) return patina_posix_deny(PATINA_DENY_O_PATH_SYMLINK);
+#endif
+            char canonical[PATH_MAX];
+            intptr_t canonical_len = patina_canonicalize(path, canonical, sizeof canonical);
+            if (canonical_len < 0) {
+                errno = patina_errno();
+                return -1;
+            }
+            if ((size_t)canonical_len >= sizeof canonical) {
+                errno = ENAMETOOLONG;
+                return -1;
+            }
+            if (patina_metadata(canonical, &probe_kind, &probe_length) != 0) {
+                errno = patina_errno();
+                return -1;
+            }
+            if (probe_kind == PATINA_ENTRY_DIRECTORY) {
+                return patina_open_directory(canonical, flags);
+            }
+            return fail_int(patina_open(canonical, PATINA_O_PATH, 0));
         }
-        return patina_open_directory(path, flags);
+        if (probe_kind == PATINA_ENTRY_DIRECTORY) {
+            return patina_open_directory(path, flags);
+        }
+        return fail_int(patina_open(path, PATINA_O_PATH, 0));
     }
 #endif
 #ifdef O_DIRECTORY
@@ -1143,24 +1152,16 @@ int open(const char *path, int flags, ...) {
 }
 
 /*
- * Duplicate a virtual directory descriptor: a fresh handle on the SAME
- * directory. A bare patina_dup would hand back an fd the *at resolver does not
- * know, so `dup` and fcntl(F_DUPFD) both route here. (dup2/dup3 to a CHOSEN
- * number stay fail-closed for every fd class alike.) Mirrors the SUD
- * dispatcher's dir-fd dup rows.
+ * Duplicate a virtual directory descriptor. POSIX `dup` SHARES the open file
+ * description, so patina_dirdup duplicates the descriptor itself and registers
+ * the copy with the *at resolver -- it re-resolves no name (a rename cannot
+ * detach the copy) and re-charges no permission (a chmod between the open and
+ * the dup cannot refuse it), which reopening the path would do both of.
+ * (dup2/dup3 to a CHOSEN number stay fail-closed for every fd class alike.)
+ * Mirrors the SUD dispatcher's dir-fd dup rows.
  */
 static int patina_dup_dirfd(int fd) {
-    char base[PATH_MAX];
-    intptr_t base_len = patina_dirpath(fd, base, sizeof base);
-    if (base_len < 0) {
-        errno = patina_errno();
-        return -1;
-    }
-    if ((size_t)base_len >= sizeof base) {
-        errno = ENAMETOOLONG;
-        return -1;
-    }
-    return fail_int(patina_diropen(base, 1));
+    return fail_int(patina_dirdup(fd));
 }
 
 /*
@@ -1220,8 +1221,14 @@ static int patina_resolve_at(int dirfd, const char *path, char *out, size_t out_
  * parent-directory durability barrier.
  */
 static int patina_open_directory(const char *path, int flags) {
-    if ((flags & O_ACCMODE) != O_RDONLY ||
-        (flags & (O_CREAT | O_TRUNC | O_APPEND | O_EXCL)) != 0) {
+    int path_only = 0;
+#ifdef O_PATH
+    /* O_PATH ignores the access mode entirely -- it opens nothing, so there is
+     * nothing to ask for -- while a plain directory open must be read-only. */
+    if (flags & O_PATH) path_only = 1;
+#endif
+    if (!path_only && ((flags & O_ACCMODE) != O_RDONLY ||
+                       (flags & (O_CREAT | O_TRUNC | O_APPEND | O_EXCL)) != 0)) {
         errno = EISDIR;
         return -1;
     }
@@ -1229,7 +1236,7 @@ static int patina_open_directory(const char *path, int flags) {
 #ifdef O_NOFOLLOW
     if (flags & O_NOFOLLOW) follow = 0;
 #endif
-    return fail_int(patina_diropen(path, follow));
+    return fail_int(patina_diropen(path, follow, path_only));
 }
 
 /*
@@ -2819,6 +2826,32 @@ int unlinkat(int dirfd, const char *path, int flags) {
 }
 
 /*
+ * symlinkat/readlinkat: the dirfd-relative spellings of symlink and readlink.
+ * The raw-syscall rows were modeled from the start; without these a libc-backend
+ * guest that works through a directory descriptor (cap-std with the libc
+ * backend, or any std program on a platform without syscall-user-dispatch) had
+ * no path to them at all and failed closed at the audit.
+ *
+ * symlinkat resolves only the LINK side: a symlink's target is a string the
+ * filesystem stores verbatim, never a path this call resolves -- which is why
+ * the syscall takes one dirfd and not two.
+ */
+int symlinkat(const char *target, int dirfd, const char *link_path) {
+    if (dirfd == AT_FDCWD) return symlink(target, link_path);
+    char resolved[PATH_MAX];
+    if (patina_resolve_at(dirfd, link_path, resolved, sizeof resolved) != 0) return -1;
+    return fail_int(patina_symlink(target, resolved));
+}
+
+ssize_t readlinkat(int dirfd, const char *restrict path, char *restrict destination,
+                   size_t length) {
+    if (dirfd == AT_FDCWD) return readlink(path, destination, length);
+    char resolved[PATH_MAX];
+    if (patina_resolve_at(dirfd, path, resolved, sizeof resolved) != 0) return -1;
+    return fail_size(patina_read_link(resolved, destination, length));
+}
+
+/*
  * link/linkat: create a hard link. std::fs::hard_link lowers to
  * linkat(AT_FDCWD, original, AT_FDCWD, link, 0) on Linux and macOS. AT_FDCWD and
  * absolute paths pass straight through; a virtual directory descriptor resolves
@@ -3162,8 +3195,13 @@ static int patina_sud_discover_regions(void) {
         if (path != NULL) {
             const char *slash = strrchr(path, '/');
             const char *base = slash ? slash + 1 : path;
+            /* `libc-` is the legacy glibc spelling (libc-2.31.so), so it must be
+             * followed by the VERSION digit: a guest binary that happens to be
+             * named `libc-something` is not glibc, and counting it as a second
+             * libc segment refuses the whole run (it fails closed, but on a
+             * name). */
             if (strncmp(base, "libc.so.6", 9) == 0 ||
-                strncmp(base, "libc-", 5) == 0) {
+                (strncmp(base, "libc-", 5) == 0 && base[5] >= '0' && base[5] <= '9')) {
                 libc_exec_segments++;
                 patina_sud_libc_off = (unsigned long)start;
                 patina_sud_libc_len = (unsigned long)(end - start);

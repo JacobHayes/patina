@@ -70,9 +70,27 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   filesystem does not hold a handle for — asks the driver about the endpoint's
   INODE, so a `chmod` after the open is visible and a hard-linked FIFO reports
   its real link count. A snapshot beside the descriptor is the same stale-cache
-  bug as a cached path, one field over. (The single window where the copy still
-  answers is the one the filesystem genuinely cannot: after the last NAME for
-  the node is unlinked, with the descriptor and its pipe still alive.)
+  bug as a cached path, one field over. There is no window where a copy answers
+  instead: a descriptor is a REFERENCE on the node, so unlinking the last name
+  leaves the node fully alive behind it (link count 0, live mode) and `fchmod`
+  through the endpoint still reaches it. A reference the filesystem cannot see
+  has to be handed to it — `fs_retain_inode` when the pipe channel behind a FIFO
+  comes into existence, `fs_release_inode` when it is reclaimed — because "the
+  filesystem forgot the node while the guest was still holding it" is
+  indistinguishable, from the guest's side, from corruption.
+- A FLAG the guest supplied is not free to conflate either. `O_PATH` and
+  `O_RDONLY|O_DIRECTORY` are two different opens: the first opens nothing (the
+  kernel charges nothing on the entry, and the descriptor resolves `*at` paths
+  and answers `fstat` but can never be read), the second opens the directory for
+  reading and costs `r`. Collapsing them charged the wrong bit on the hot path of
+  every capability guest — `cap-primitives` spends most of its opens on `O_PATH`
+  — and pushed the `r` check onto the LISTING, where a `chmod` after the open
+  could still reach a walk already under way. Access is charged where the kernel
+  charges it: once, at open. That is also why directory iteration takes a
+  DESCRIPTOR (`patina_read_dir(fd, …)`) rather than a path, and why the libc
+  `opendir` mints its own descriptor first instead of reading a name — the fd is
+  what the permission decision was made about, and `dirfd()` on the result is
+  then a real descriptor rather than a refusal.
 - An entry whose NAME is filesystem state and whose BYTES are not gets ONE model
   for each half, and they stay apart. A FIFO's name lives in the deterministic
   filesystem (created, stat-ed, listed, chmod-ed, renamed, hard-linked, unlinked
@@ -149,7 +167,10 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
 
 - Keep C and Rust ABI signatures in lockstep. Variadic libc functions must be
   declared variadically on the host side; do not hand-declare a fixed argument
-  form for a variadic function.
+  form for a variadic function. A `patina_*` entry point has THREE declarations
+  — the Rust definition, `include/patina_native.h`, and the SUD dispatcher's
+  `extern` block — and changing an argument list means changing all three; the
+  compiler catches two of them and the third is a link-time surprise.
 - After editing `c/patina_posix.c` or related embedded C sources, rebuild
   `cargo-patina`; validating with a stale runner is an accidental false green.
 - Guest binaries pick a shim change up on their own: the flags `cargo patina
@@ -163,3 +184,11 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
 - OS- or architecture-specific paths must be executed on that OS/arch before
   being described as working; cross-clippy/cross-builds are useful, but not
   execution evidence.
+- The shim reads the guest's own environment — `/proc/self/maps` for the SUD
+  region, the binary's mapped NAME — so a probe's FILE NAME is part of its
+  input. One was named `libc-at-probe` and the legacy-glibc basename match
+  (`libc-`) counted it as a second libc segment, which refused the run at
+  arming time with a diagnostic about glibc's segments. The match now requires
+  the version digit, but when a fresh probe fails in a way its source cannot
+  explain, suspect the ambient facts (name, path, size, layout) before the
+  code.

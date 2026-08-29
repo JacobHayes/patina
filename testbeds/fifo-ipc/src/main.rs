@@ -29,6 +29,10 @@
 //! 12. `unlink` removes a name while open descriptors keep the pipe alive; the
 //!     surviving link keeps the node, and the last unlink leaves the descriptor
 //!     working.
+//! 13. An unlinked-but-open FIFO is still a live INODE: with its last name gone
+//!     `fstat` through the descriptor reports link count 0 and the entry's real
+//!     mode, and `fchmod` through that descriptor changes the mode the next
+//!     `fstat` reads back — nothing answers from a copy taken at open time.
 
 use std::fs::{self, OpenOptions, Permissions};
 use std::io::{ErrorKind, Read, Write};
@@ -287,12 +291,32 @@ fn main() {
     both.read_exact(&mut tail)
         .expect("and still carries bytes");
     assert_eq!(&tail, b"after-unlink");
+
+    // ---- [13] the unlinked node is still LIVE, not a copy taken at open ----
+    // Every name is gone and the descriptor is the only reference left. A
+    // kernel keeps the inode alive for exactly that case, so `fstat` still
+    // answers from the node — link count 0, the real mode — and `fchmod`
+    // through the descriptor still changes it. RED before inode lifetime: the
+    // filesystem dropped the node with its last name and the shim answered
+    // from the identity captured at open, so the link count read back as the
+    // stale open-time value and the `fchmod` below failed outright.
+    let unlinked = both.metadata().expect("fstat an unlinked-but-open FIFO");
+    assert_eq!(unlinked.ino(), ino, "the node identity is unchanged");
+    assert_eq!(unlinked.nlink(), 0, "no names left");
+    assert_eq!(unlinked.permissions().mode() & 0o7777, 0o644);
+    both.set_permissions(Permissions::from_mode(0o606))
+        .expect("fchmod through the descriptor of an unlinked FIFO");
+    assert_eq!(
+        handle_mode(&both),
+        0o606,
+        "fchmod on an unlinked FIFO must change the LIVE node"
+    );
     drop(both);
 
     println!(
         "FIFO_RESULT kind=fifo mode=0644 dents=pipe:fifo spellings=mkfifo,mkfifoat,mknod \
          nonblock=open+enxio rendezvous={} eof=0 epipe=1 eagain=1 rdwr=nowait denied=1 \
-         fstat=live linked=2names,shared unlinked=alive",
+         fstat=live linked=2names,shared unlinked=nlink0+fchmod",
         String::from_utf8_lossy(&received)
     );
 }
