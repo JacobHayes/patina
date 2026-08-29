@@ -5220,6 +5220,20 @@ recording was produced by a guest whose result type no longer matches this one"
         )
     }
 
+    /// `mkfifo`: create a named pipe. The NAME is filesystem state and is
+    /// recorded like every other namespace mutation; the bytes that later flow
+    /// through the FIFO are not filesystem state at all, so nothing about them
+    /// crosses this boundary.
+    pub fn fs_make_fifo(&mut self, path: &str, mode: u32) -> Result<(), RuntimeError> {
+        self.filesystem_unit(
+            Operation::FsMakeFifo {
+                path: path.into(),
+                mode,
+            },
+            |filesystem| filesystem.make_fifo(path, mode),
+        )
+    }
+
     pub fn fs_remove_file(&mut self, path: &str) -> Result<(), RuntimeError> {
         self.filesystem_unit(
             Operation::FsRemoveFile { path: path.into() },

@@ -54,6 +54,25 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   fabricated constant is not a neutral default — it is an answer the guest will
   act on. The remaining synthesized fields (owner, device numbers) are the same
   hazard waiting for the guest that reads them.
+- An entry whose NAME is filesystem state and whose BYTES are not gets ONE model
+  for each half, and they stay apart. A FIFO's name lives in the deterministic
+  filesystem (created, stat-ed, listed, chmod-ed, renamed, unlinked like any
+  other) while its transfer reuses the SAME in-process pipe channel an anonymous
+  `pipe`/`socketpair` uses — keyed by the entry's INODE, so two openers of one
+  named pipe meet and a rename cannot split them. A second pipe implementation
+  behind a filesystem descriptor would have to re-derive blocking, EOF and
+  `EPIPE`, and the two would drift; conversely, letting the driver hold the bytes
+  would make a crash model responsible for data no real FIFO ever persists. The
+  seam is the one branch in `patina_open`: the driver judges existence,
+  resolution and permissions and then declines to hand back a descriptor, and the
+  caller reads the refused entry's kind on the failure path only.
+- Model a rendezvous the way the kernel models it, counters and all. A blocking
+  FIFO open waits for the PARTNER'S OPEN COUNTER to move, not for a partner to
+  still be there (`fs/pipe.c:fifo_open`); waiting on presence loses the writer
+  that opens and closes again before the reader is scheduled, which is precisely
+  the interleaving a cooperative scheduler makes reachable. The park is the
+  ordinary baton park, so the wake is another task's call and a FIFO nobody opens
+  for writing is a deadlock report rather than a hang.
 - When a syscall has an old and a new form the ecosystem probes in sequence
   (`faccessat`/`faccessat2`, `stat`/`statx`), model BOTH. Denying the newer one
   is technically fail-closed but the deny diagnostic then prints on every call in

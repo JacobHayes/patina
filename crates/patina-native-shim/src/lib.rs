@@ -140,6 +140,9 @@ const ENOTCONN: c_int = 57;
 #[cfg(not(target_os = "macos"))]
 const ENOTCONN: c_int = 107;
 const EPIPE: c_int = 32;
+/// `ENXIO` — the answer a non-blocking `open(fifo, O_WRONLY)` gets with no
+/// reader. Same value on macOS and Linux.
+const ENXIO: c_int = 6;
 #[cfg(target_os = "macos")]
 const ECONNRESET: c_int = 54;
 #[cfg(not(target_os = "macos"))]
@@ -180,7 +183,13 @@ const O_EXCLUSIVE: u32 = 1 << 5;
 /// choice [`patina_open`] makes when the path turns out to name one: `ELOOP`
 /// with this bit, resolve-and-retry without it.
 const O_NOFOLLOW: u32 = 1 << 6;
-const O_ALL: u32 = O_READ | O_WRITE | O_CREATE | O_TRUNCATE | O_APPEND | O_EXCLUSIVE | O_NOFOLLOW;
+/// `O_NONBLOCK`: on a regular file or a directory this changes nothing (it is a
+/// no-op on every Unix), so it is not a driver flag either. It matters for
+/// exactly one modeled entry kind — a FIFO — where it turns the open's
+/// rendezvous with the opposite end into an immediate answer.
+const O_NONBLOCK: u32 = 1 << 7;
+const O_ALL: u32 =
+    O_READ | O_WRITE | O_CREATE | O_TRUNCATE | O_APPEND | O_EXCLUSIVE | O_NOFOLLOW | O_NONBLOCK;
 
 /// A minimal spinlock the shim uses instead of `std::sync::Mutex`.
 ///
@@ -3553,6 +3562,7 @@ pub unsafe extern "C" fn patina_open(path: *const c_char, flags: u32) -> c_int {
         Err(errno) => return fail(errno),
     };
     let nofollow = flags & O_NOFOLLOW != 0;
+    let nonblocking = flags & O_NONBLOCK != 0;
     let flags = OpenFlags {
         read: flags & O_READ != 0,
         write: flags & O_WRITE != 0,
@@ -3589,31 +3599,64 @@ pub unsafe extern "C" fn patina_open(path: *const c_char, flags: u32) -> c_int {
         // directory"), and without it the link is resolved and the TARGET is
         // opened. The probe only runs on the failure path, so an ordinary open
         // still costs exactly one driver operation.
-        Err(EINVAL) if path_is_symlink(&path) => {
-            if nofollow {
-                return fail(ELOOP);
-            }
-            let resolved = match canonicalize_virtual_path(&path) {
-                Ok(resolved) => resolved,
-                Err(errno) => return fail(errno),
+        // A FIFO refuses the same way and for a related reason: it has no
+        // filesystem descriptor either, because its bytes are not filesystem
+        // state. The driver has already judged existence, resolution AND
+        // permissions by the time it says so, so all that is left here is the
+        // pipe rendezvous — which is why the probe's mode is carried only for
+        // `fstat` and never re-checked.
+        Err(EINVAL) => {
+            let Ok(metadata) = with_context(|context| context.fs_metadata(&path)) else {
+                return fail(EINVAL);
             };
-            match with_context(|context| context.fs_open(&resolved, flags)) {
-                Ok(fd) => i32::try_from(fd.0).unwrap_or_else(|_| fail(EOVERFLOW)),
-                Err(errno) => fail(errno),
+            match metadata.kind {
+                FsEntryKind::Symlink => {
+                    if nofollow {
+                        return fail(ELOOP);
+                    }
+                    let resolved = match canonicalize_virtual_path(&path) {
+                        Ok(resolved) => resolved,
+                        Err(errno) => return fail(errno),
+                    };
+                    match with_context(|context| context.fs_open(&resolved, flags)) {
+                        Ok(fd) => i32::try_from(fd.0).unwrap_or_else(|_| fail(EOVERFLOW)),
+                        Err(errno) => fail(errno),
+                    }
+                }
+                FsEntryKind::Fifo => thread::fifo_open(
+                    metadata.ino,
+                    metadata.mode,
+                    flags.read,
+                    flags.write,
+                    nonblocking,
+                ),
+                _ => fail(EINVAL),
             }
         }
         Err(errno) => fail(errno),
     }
 }
 
-/// Does `path` name a symlink ENTRY (no trailing follow, like `lstat`)? Used
-/// only to disambiguate an `open` the driver refused; a path that no longer
-/// resolves is simply "not a symlink" and the original error stands.
-fn path_is_symlink(path: &str) -> bool {
-    matches!(
-        with_context(|context| context.fs_metadata(path)),
-        Ok(metadata) if metadata.kind == FsEntryKind::Symlink
-    )
+/// Create a named pipe (`mkfifo`/`mkfifoat`, and `mknod`/`mknodat` with
+/// `S_IFIFO`). Only the NAME is filesystem state, so this is one recorded
+/// boundary operation and nothing else: the pipe behind the name comes into
+/// existence when the first descriptor opens it, and vanishes with the last.
+///
+/// # Safety
+/// `path` must point to a valid NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_mkfifo(path: *const c_char, mode: u32) -> c_int {
+    let path = match path_from_c(path) {
+        Ok(path) => path,
+        Err(errno) => return fail(errno),
+    };
+    match with_context(|context| context.fs_make_fifo(&path, mode)) {
+        Ok(()) => {
+            set_errno(0);
+            0
+        }
+        Err(errno) => fail(errno),
+    }
 }
 
 /// Read bytes into caller-owned memory.
@@ -3938,11 +3981,14 @@ struct ReadDirState {
     position: usize,
 }
 
+/// The `PATINA_ENTRY_*` wire values (`include/patina_native.h`). The C side ORs
+/// the corresponding `S_IF*` bit onto the entry's permission bits.
 fn metadata_kind(kind: FsEntryKind) -> u32 {
     match kind {
         FsEntryKind::File => 1,
         FsEntryKind::Directory => 2,
         FsEntryKind::Symlink => 3,
+        FsEntryKind::Fifo => 4,
     }
 }
 
@@ -4085,6 +4131,31 @@ pub unsafe extern "C" fn patina_fd_metadata_full(
     mtime_nanos: *mut u64,
     mode: *mut u32,
 ) -> c_int {
+    // A FIFO descriptor is a pipe endpoint, not a filesystem descriptor: the
+    // filesystem knows the ENTRY but holds no handle to ask about. The identity
+    // the open bound to the descriptor answers instead — which is also the one
+    // place this descriptor class diverges from a kernel's, since a `chmod` of
+    // the FIFO after the open is not reflected here.
+    if let Some(identity) = thread::fifo_identity(raw_fd) {
+        return write_metadata_full(
+            patina_dst_abi::FsMetadata {
+                kind: FsEntryKind::Fifo,
+                len: 0,
+                ino: identity.ino,
+                nlink: 1,
+                atime_nanos: 0,
+                mtime_nanos: 0,
+                mode: identity.mode,
+            },
+            kind,
+            length,
+            ino,
+            nlink,
+            atime_nanos,
+            mtime_nanos,
+            mode,
+        );
+    }
     let fd = match fd(raw_fd) {
         Ok(fd) => fd,
         Err(errno) => return fail(errno),
@@ -4229,11 +4300,7 @@ pub unsafe extern "C" fn patina_read_dir_next(
         let destination = slice::from_raw_parts_mut(name_buf.cast::<u8>(), buf_len);
         destination[..bytes.len()].copy_from_slice(bytes);
         destination[bytes.len()] = 0;
-        kind.write(match entry.kind {
-            FsEntryKind::File => 1,
-            FsEntryKind::Directory => 2,
-            FsEntryKind::Symlink => 3,
-        });
+        kind.write(metadata_kind(entry.kind));
     }
     state.position += 1;
     set_errno(0);
@@ -7253,6 +7320,13 @@ mod thread {
         // reads from / writes to; see the "in-process pipe / socketpair" section.
         pipe_ends: BTreeMap<c_int, PipeEnd>,
         pipe_channels: BTreeMap<u64, PipeChannel>,
+        /// The channel currently backing each open FIFO, keyed by the
+        /// deterministic filesystem INODE of the FIFO entry — the identity two
+        /// openers of the same named pipe must agree on. A name would be the
+        /// wrong key: renaming the FIFO must not split its openers, and a fresh
+        /// FIFO created at a vacated name must not inherit them. The binding
+        /// exists only while some descriptor is open on the FIFO.
+        fifo_channels: BTreeMap<u64, u64>,
         next_channel: u64,
         // Virtual kqueue readiness reactors. A kqueue fd (drawn from the shared
         // `next_fd` space, so a virtual fd is a socket XOR a pipe endpoint XOR a
@@ -7307,6 +7381,7 @@ mod thread {
                 tcp_streams: BTreeMap::new(),
                 pipe_ends: BTreeMap::new(),
                 pipe_channels: BTreeMap::new(),
+                fifo_channels: BTreeMap::new(),
                 next_channel: 0,
                 #[cfg(target_os = "macos")]
                 kqueues: BTreeMap::new(),
@@ -8340,14 +8415,28 @@ mod thread {
         /// Number of live fds referencing the WRITE side. The writer side is
         /// "closed" — `write_closed`, drained reads return EOF — only at 0.
         write_refs: usize,
-        /// Every reader fd of this side has closed: further writes get `EPIPE`.
-        read_closed: bool,
-        /// Every writer fd of this side has closed: reads return EOF once drained.
-        write_closed: bool,
         /// Tasks parked in a blocking read, waiting for bytes to arrive.
         recv_waiters: VecDeque<TaskId>,
         /// Tasks parked in a blocking write, waiting for buffer space.
         send_waiters: VecDeque<TaskId>,
+        /// Tasks parked in a blocking FIFO `open`, waiting for the opposite-end
+        /// opener to arrive. One queue for both directions, as the kernel keeps
+        /// one wait queue per pipe: a woken task re-checks its own condition.
+        /// Always empty for an anonymous pipe, whose two ends exist at birth.
+        open_waiters: VecDeque<TaskId>,
+        /// How many times this channel has been opened for reading / for
+        /// writing — Linux's `r_counter`/`w_counter`. A blocking open waits for
+        /// the PARTNER COUNTER to move, not for the partner to still be there,
+        /// so a writer that opens and closes again still releases a reader
+        /// parked in `open(O_RDONLY)`.
+        read_opens: u64,
+        write_opens: u64,
+        /// The deterministic-filesystem inode this channel belongs to when it
+        /// backs a FIFO, so the last close can drop the inode → channel binding
+        /// (a later `open` of the same FIFO then starts from an empty pipe,
+        /// exactly as it does on a kernel that frees the pipe with its last fd).
+        /// `None` for an anonymous `pipe`/`socketpair` channel.
+        fifo_ino: Option<u64>,
         /// Read-direction arrival sequence: bumped on every event that could
         /// newly satisfy a reader (bytes written, writer close). The epoll
         /// frontend's EPOLLET latch compares sequences so an edge re-fires per
@@ -8389,15 +8478,44 @@ mod thread {
                 // one writer endpoint; `dup` raises the matching side later.
                 read_refs: 1,
                 write_refs: 1,
-                read_closed: false,
-                write_closed: false,
                 recv_waiters: VecDeque::new(),
                 send_waiters: VecDeque::new(),
+                open_waiters: VecDeque::new(),
+                read_opens: 1,
+                write_opens: 1,
+                fifo_ino: None,
                 #[cfg(target_os = "linux")]
                 read_events: 0,
                 #[cfg(target_os = "linux")]
                 write_events: 0,
             }
+        }
+
+        /// The channel behind a FIFO inode. Unlike an anonymous pipe it is born
+        /// with NO ends: every `open` of the FIFO adds one, and the rendezvous
+        /// rules below decide when an open may proceed.
+        fn new_fifo(capacity: usize, ino: u64) -> Self {
+            Self {
+                read_refs: 0,
+                write_refs: 0,
+                read_opens: 0,
+                write_opens: 0,
+                fifo_ino: Some(ino),
+                ..Self::new(capacity)
+            }
+        }
+
+        /// Every reader fd of this channel has closed: further writes get
+        /// `EPIPE`. Derived from the reference count rather than latched,
+        /// because a FIFO's reader side comes BACK when it is opened again.
+        fn read_closed(&self) -> bool {
+            self.read_refs == 0
+        }
+
+        /// Every writer fd has closed: drained reads return EOF. Derived for the
+        /// same reason.
+        fn write_closed(&self) -> bool {
+            self.write_refs == 0
         }
 
         /// Pull up to `dst.len()` bytes. `WouldBlock` only when the buffer is empty
@@ -8413,7 +8531,7 @@ mod thread {
                     self.write_events = self.write_events.wrapping_add(1);
                 }
                 PipeRead::Read(count)
-            } else if self.write_closed {
+            } else if self.write_closed() {
                 PipeRead::Eof
             } else {
                 PipeRead::WouldBlock
@@ -8424,7 +8542,7 @@ mod thread {
         /// full and the reader is open (the caller parks); a closed reader is
         /// `BrokenPipe` (the caller returns `EPIPE`, never a signal).
         fn try_write(&mut self, src: &[u8]) -> PipeWrite {
-            if self.read_closed {
+            if self.read_closed() {
                 return PipeWrite::BrokenPipe;
             }
             let space = self.capacity - self.buffer.len();
@@ -8448,6 +8566,18 @@ mod thread {
         read_channel: Option<u64>,
         write_channel: Option<u64>,
         nonblocking: bool,
+        /// Set when this endpoint came from opening a FIFO rather than from
+        /// `pipe`/`socketpair`: what `fstat` on the descriptor answers.
+        fifo: Option<FifoIdentity>,
+    }
+
+    /// What a FIFO descriptor reports about its entry. Captured at `open`: the
+    /// inode is the descriptor's node identity, and the permission bits are the
+    /// ones the open was judged against.
+    #[derive(Clone, Copy)]
+    pub(crate) struct FifoIdentity {
+        pub(crate) ino: u64,
+        pub(crate) mode: u32,
     }
 
     fn drain_channel_recv_waiters(state: &mut ThreadRuntime, channel: u64) -> Vec<TaskId> {
@@ -8646,6 +8776,7 @@ mod thread {
                 read_channel: Some(channel),
                 write_channel: None,
                 nonblocking: nonblocking != 0,
+                fifo: None,
             },
         );
         state.net.pipe_ends.insert(
@@ -8654,6 +8785,7 @@ mod thread {
                 read_channel: None,
                 write_channel: Some(channel),
                 nonblocking: nonblocking != 0,
+                fifo: None,
             },
         );
         unsafe {
@@ -8703,6 +8835,7 @@ mod thread {
                 read_channel: Some(channel_1to0),
                 write_channel: Some(channel_0to1),
                 nonblocking: nonblocking != 0,
+                fifo: None,
             },
         );
         state.net.pipe_ends.insert(
@@ -8711,6 +8844,7 @@ mod thread {
                 read_channel: Some(channel_0to1),
                 write_channel: Some(channel_1to0),
                 nonblocking: nonblocking != 0,
+                fifo: None,
             },
         );
         unsafe {
@@ -8718,6 +8852,160 @@ mod thread {
             fd1_out.write(fd1);
         }
         0
+    }
+
+    // ------------------------------------------------------------------
+    // Named pipes (FIFOs). A FIFO is a filesystem NAME (created by `mkfifo`,
+    // stat-able, renameable, unlinkable — all of that is deterministic
+    // filesystem state) whose BYTES are not filesystem state at all: they live
+    // in a pipe, exactly like an anonymous one's. So the entry lives in the
+    // driver and the transfer reuses the machinery above — one `PipeChannel`
+    // per open FIFO inode, the same waiter deques, the same `try_read`/
+    // `try_write`, the same EOF/`EPIPE` rules — instead of a second pipe model.
+    //
+    // What a FIFO adds is the rendezvous at OPEN, and it is modeled the way the
+    // kernel models it (`fs/pipe.c:fifo_open`): an open registers its end and
+    // bumps that side's open counter, wakes anything parked on the pipe, and
+    // then — unless it is `O_NONBLOCK` or `O_RDWR` — waits for the PARTNER
+    // counter to move. Waiting on the counter rather than on "a partner is
+    // currently there" is what makes a writer that opens and closes again still
+    // release a reader parked in `open(O_RDONLY)`.
+
+    /// Open the FIFO whose deterministic-filesystem inode is `ino`, returning a
+    /// virtual pipe-endpoint fd or -1 with `patina_errno` set.
+    ///
+    /// The caller has already asked the filesystem about the entry, so
+    /// existence, path resolution, and the permission decision are settled
+    /// before this runs; `mode` is carried only so `fstat` on the descriptor can
+    /// report the bits the open was judged against.
+    ///
+    /// Blocking is a deterministic park through the same baton the pipe reads
+    /// and writes use, so under the cooperative scheduler another task's
+    /// `open(O_WRONLY)` is what wakes a reader parked here — and a FIFO nobody
+    /// ever opens for writing surfaces as the runtime's deadlock report rather
+    /// than a hung process.
+    pub(crate) fn fifo_open(
+        ino: u64,
+        mode: u32,
+        read: bool,
+        write: bool,
+        nonblocking: bool,
+    ) -> c_int {
+        let me = current_task();
+        let mut state = lock_state();
+        if let Err(error) = state.ensure_active() {
+            return super::fail(error.into_posix());
+        }
+        let existing = state.net.fifo_channels.get(&ino).copied();
+        // `O_WRONLY|O_NONBLOCK` with no reader is `ENXIO`, and it is decided
+        // BEFORE any bookkeeping: the call never becomes a writer, so it must
+        // not leave a channel or an open count behind. No channel at all is the
+        // same answer as a channel with no readers.
+        if write && !read && nonblocking {
+            let has_reader = existing
+                .and_then(|channel| state.net.pipe_channels.get(&channel))
+                .is_some_and(|channel| channel.read_refs > 0);
+            if !has_reader {
+                return super::fail(super::ENXIO);
+            }
+        }
+        let channel_id = match existing {
+            Some(channel) => channel,
+            None => {
+                let channel = state.net.next_channel;
+                state.net.next_channel = state.net.next_channel.wrapping_add(1);
+                state
+                    .net
+                    .pipe_channels
+                    .insert(channel, PipeChannel::new_fifo(PIPE_CAPACITY, ino));
+                state.net.fifo_channels.insert(ino, channel);
+                channel
+            }
+        };
+        let channel = state
+            .net
+            .pipe_channels
+            .get_mut(&channel_id)
+            .expect("the channel was just resolved or created");
+        if read {
+            channel.read_refs += 1;
+            channel.read_opens = channel.read_opens.wrapping_add(1);
+        }
+        if write {
+            channel.write_refs += 1;
+            channel.write_opens = channel.write_opens.wrapping_add(1);
+        }
+        // `O_RDWR` on a FIFO is its own partner, so it never waits — Linux
+        // leaves this undefined and implements it exactly this way.
+        let wait = if read && write {
+            None
+        } else if read {
+            (channel.write_refs == 0 && !nonblocking).then_some((true, channel.write_opens))
+        } else {
+            // The non-blocking case already returned `ENXIO` above.
+            (channel.read_refs == 0).then_some((false, channel.read_opens))
+        };
+        let woken: Vec<TaskId> = channel.open_waiters.drain(..).collect();
+        let fd = state.net.next_fd;
+        state.net.next_fd = state.net.next_fd.wrapping_add(1);
+        state.net.pipe_ends.insert(
+            fd,
+            PipeEnd {
+                read_channel: read.then_some(channel_id),
+                write_channel: write.then_some(channel_id),
+                nonblocking,
+                fifo: Some(FifoIdentity { ino, mode }),
+            },
+        );
+        drop(state);
+        wake_all(woken);
+
+        if let Some((for_writer, seen)) = wait {
+            loop {
+                let mut state = lock_state();
+                let Some(channel) = state.net.pipe_channels.get_mut(&channel_id) else {
+                    // Unreachable: this open holds a reference on the channel.
+                    break;
+                };
+                let satisfied = if for_writer {
+                    channel.write_refs > 0 || channel.write_opens != seen
+                } else {
+                    channel.read_refs > 0 || channel.read_opens != seen
+                };
+                if satisfied {
+                    break;
+                }
+                channel.open_waiters.push_back(me);
+                let reason = if for_writer {
+                    "fifo-open-read"
+                } else {
+                    "fifo-open-write"
+                };
+                let step = state.block(me, reason);
+                match step {
+                    Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
+                    Ok(Step::Continue) => drop(state),
+                    Err(error) => {
+                        let errno = error.into_posix();
+                        drop(state);
+                        // The descriptor never came into existence, so release
+                        // the end this open registered — through the ordinary
+                        // close path, so the partner's EOF/`EPIPE` bookkeeping
+                        // and the channel reclamation are the usual ones.
+                        patina_pipe_close(fd);
+                        return super::fail(errno);
+                    }
+                }
+                lock_state().timed_out.remove(&me);
+            }
+        }
+        super::set_errno(0);
+        fd
+    }
+
+    /// What `fstat` should report for `fd` when it is a FIFO descriptor.
+    pub(crate) fn fifo_identity(fd: c_int) -> Option<FifoIdentity> {
+        lock_state().net.pipe_ends.get(&fd).and_then(|end| end.fifo)
     }
 
     /// C dispatch predicate: is `fd` a pipe/socketpair endpoint? Lets the
@@ -8869,6 +9157,7 @@ mod thread {
             read_channel,
             write_channel,
             nonblocking,
+            fifo,
         }) = state.net.pipe_ends.get(&fd)
         else {
             return super::fail(super::EBADF);
@@ -8897,6 +9186,7 @@ mod thread {
                 read_channel,
                 write_channel,
                 nonblocking,
+                fifo,
             },
         );
         new_fd
@@ -8918,7 +9208,6 @@ mod thread {
             if let Some(channel) = state.net.pipe_channels.get_mut(&channel) {
                 channel.read_refs -= 1;
                 if channel.read_refs == 0 {
-                    channel.read_closed = true;
                     #[cfg(target_os = "linux")]
                     {
                         channel.write_events = channel.write_events.wrapping_add(1);
@@ -8933,7 +9222,6 @@ mod thread {
             if let Some(channel) = state.net.pipe_channels.get_mut(&channel) {
                 channel.write_refs -= 1;
                 if channel.write_refs == 0 {
-                    channel.write_closed = true;
                     #[cfg(target_os = "linux")]
                     {
                         channel.read_events = channel.read_events.wrapping_add(1);
@@ -8952,7 +9240,14 @@ mod thread {
                 .get(&channel)
                 .is_some_and(|channel| channel.read_refs == 0 && channel.write_refs == 0);
             if drained {
-                state.net.pipe_channels.remove(&channel);
+                let reclaimed = state.net.pipe_channels.remove(&channel);
+                // A FIFO channel is the pipe BEHIND a name, not the name: with
+                // its last fd gone the buffered bytes go too, and the next
+                // `open` of the same FIFO mints a fresh empty channel. Exactly
+                // what a kernel does when a pipe's last reference drops.
+                if let Some(ino) = reclaimed.and_then(|channel| channel.fifo_ino) {
+                    state.net.fifo_channels.remove(&ino);
+                }
             }
         }
         drop(state);
@@ -9242,14 +9537,14 @@ mod thread {
                 .read_channel
                 .and_then(|id| state.net.pipe_channels.get(&id))
             {
-                readiness.read_eof = channel.write_closed && channel.buffer.is_empty();
+                readiness.read_eof = channel.write_closed() && channel.buffer.is_empty();
                 readiness.readable = !channel.buffer.is_empty() || readiness.read_eof;
             }
             if let Some(channel) = end
                 .write_channel
                 .and_then(|id| state.net.pipe_channels.get(&id))
             {
-                readiness.write_eof = channel.read_closed;
+                readiness.write_eof = channel.read_closed();
                 readiness.writable = readiness.write_eof || channel.buffer.len() < channel.capacity;
             }
             return readiness;
@@ -10943,10 +11238,44 @@ mod thread {
             assert_eq!(channel.try_read(&mut dst), PipeRead::WouldBlock);
             // Buffered bytes are delivered before EOF even after the writer closes.
             channel.try_write(b"hi");
-            channel.write_closed = true;
+            channel.write_refs = 0;
             assert_eq!(channel.try_read(&mut dst), PipeRead::Read(2));
             assert_eq!(&dst[..2], b"hi");
             assert_eq!(channel.try_read(&mut dst), PipeRead::Eof);
+        }
+
+        // A FIFO channel is born with NO ends, and every "closed" answer is
+        // derived from the reference counts rather than latched — which is what
+        // lets a FIFO's reader or writer side come BACK when it is opened again.
+        // RED before FIFOs were modeled: `PipeChannel` had no such constructor
+        // and the two closed flags were one-way latches.
+        #[test]
+        fn fifo_channel_starts_endless_and_derives_closedness_from_its_refs() {
+            let mut channel = PipeChannel::new_fifo(4, 7);
+            assert_eq!(channel.fifo_ino, Some(7));
+            assert_eq!((channel.read_refs, channel.write_refs), (0, 0));
+            assert_eq!((channel.read_opens, channel.write_opens), (0, 0));
+            // No writer: a read is end-of-file, not a park.
+            let mut dst = [0u8; 8];
+            assert!(channel.read_closed() && channel.write_closed());
+            assert_eq!(channel.try_read(&mut dst), PipeRead::Eof);
+            // No reader: a write is a broken pipe.
+            assert_eq!(channel.try_write(b"x"), PipeWrite::BrokenPipe);
+
+            // One opener of each side, as `fifo_open` registers them.
+            channel.read_refs += 1;
+            channel.write_refs += 1;
+            assert!(!channel.read_closed() && !channel.write_closed());
+            assert_eq!(channel.try_write(b"hi"), PipeWrite::Wrote(2));
+            // Drained with a live writer is a park, not end-of-file.
+            assert_eq!(channel.try_read(&mut dst), PipeRead::Read(2));
+            assert_eq!(channel.try_read(&mut dst), PipeRead::WouldBlock);
+            // The last writer leaves: end-of-file. A NEW writer revives the
+            // channel, which a latched flag could not express.
+            channel.write_refs -= 1;
+            assert_eq!(channel.try_read(&mut dst), PipeRead::Eof);
+            channel.write_refs += 1;
+            assert_eq!(channel.try_read(&mut dst), PipeRead::WouldBlock);
         }
 
         // Writing to a channel whose reader closed is a broken pipe surfaced as an
@@ -10954,7 +11283,7 @@ mod thread {
         #[test]
         fn pipe_channel_write_to_closed_reader_is_broken_pipe() {
             let mut channel = PipeChannel::new(4);
-            channel.read_closed = true;
+            channel.read_refs = 0;
             assert_eq!(channel.try_write(b"x"), PipeWrite::BrokenPipe);
         }
 

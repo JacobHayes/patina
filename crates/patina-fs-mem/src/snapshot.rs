@@ -16,7 +16,7 @@ use crate::{EntryMetadata, Inode, InodeId, MODE_MASK, MemFs, normalize_entry_pat
 /// Magic prefix identifying an encoded [`FsSnapshot`] stream.
 const MAGIC: &[u8; 8] = b"PATFSSNP";
 /// Wire-format version. Bump on any incompatible layout change.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 /// Deliberately conservative structural bounds for a restart handoff. The
 /// decoder checks them before allocating from untrusted bytes, so corrupt
@@ -41,6 +41,7 @@ impl fmt::Debug for FsSnapshot {
             .field("files", &self.filesystem.files.len())
             .field("inodes", &self.filesystem.inodes.len())
             .field("symlinks", &self.filesystem.symlinks.len())
+            .field("fifos", &self.filesystem.fifos.len())
             .field("next_inode", &self.filesystem.next_inode)
             .finish()
     }
@@ -72,6 +73,7 @@ impl FsSnapshot {
         bytes.extend_from_slice(&(self.filesystem.inodes.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&(self.filesystem.files.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&(self.filesystem.symlinks.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&(self.filesystem.fifos.len() as u64).to_le_bytes());
 
         for (path, metadata) in &self.filesystem.directories {
             encode_path(&mut bytes, path);
@@ -99,6 +101,10 @@ impl FsSnapshot {
                 .expect("symlink has metadata");
             encode_metadata(&mut bytes, metadata);
         }
+        for (path, metadata) in &self.filesystem.fifos {
+            encode_path(&mut bytes, path);
+            encode_metadata(&mut bytes, metadata);
+        }
         debug_assert_eq!(bytes.len(), encoded_len);
         Ok(bytes)
     }
@@ -111,14 +117,16 @@ impl FsSnapshot {
             &self.filesystem.files,
             &self.filesystem.symlinks,
             &self.filesystem.symlink_metadata,
+            &self.filesystem.fifos,
         )?;
 
         preflight_count(self.filesystem.directories.len(), "directory count")?;
         preflight_count(self.filesystem.inodes.len(), "inode count")?;
         preflight_count(self.filesystem.files.len(), "file count")?;
         preflight_count(self.filesystem.symlinks.len(), "symlink count")?;
+        preflight_count(self.filesystem.fifos.len(), "fifo count")?;
 
-        let mut total = MAGIC.len() + 4 + 8 + 8 + 8 + 8 + 8;
+        let mut total = MAGIC.len() + 4 + 8 + 8 + 8 + 8 + 8 + 8;
         for path in self.filesystem.directories.keys() {
             add_path_len(&mut total, path)?;
             add_len(&mut total, METADATA_BYTES)?;
@@ -134,6 +142,10 @@ impl FsSnapshot {
         for (path, target) in &self.filesystem.symlinks {
             add_path_len(&mut total, path)?;
             add_field_len(&mut total, target.len(), "field length")?;
+            add_len(&mut total, METADATA_BYTES)?;
+        }
+        for path in self.filesystem.fifos.keys() {
+            add_path_len(&mut total, path)?;
             add_len(&mut total, METADATA_BYTES)?;
         }
         Ok(total)
@@ -159,6 +171,7 @@ impl FsSnapshot {
         let inode_count = reader.take_count("inode count")?;
         let file_count = reader.take_count("file count")?;
         let symlink_count = reader.take_count("symlink count")?;
+        let fifo_count = reader.take_count("fifo count")?;
 
         let mut directories = BTreeMap::new();
         let mut previous_path = None;
@@ -233,6 +246,16 @@ impl FsSnapshot {
             symlink_metadata.insert(path, metadata);
         }
 
+        let mut fifos = BTreeMap::new();
+        previous_path = None;
+        for _ in 0..fifo_count {
+            let path = reader.take_path(false)?;
+            require_strict_path_order(previous_path.as_deref(), &path)?;
+            previous_path = Some(path.clone());
+            let metadata = reader.take_metadata()?;
+            fifos.insert(path, metadata);
+        }
+
         if !reader.is_empty() {
             return Err(FsSnapshotError::Malformed("trailing bytes after snapshot"));
         }
@@ -244,6 +267,7 @@ impl FsSnapshot {
             &files,
             &symlinks,
             &symlink_metadata,
+            &fifos,
         )?;
 
         Ok(Self {
@@ -252,6 +276,7 @@ impl FsSnapshot {
                 inodes,
                 symlinks,
                 symlink_metadata,
+                fifos,
                 directories,
                 handles: BTreeMap::new(),
                 descriptions: BTreeMap::new(),
@@ -275,6 +300,7 @@ fn validate_snapshot_state(
     files: &BTreeMap<String, InodeId>,
     symlinks: &BTreeMap<String, String>,
     symlink_metadata: &BTreeMap<String, EntryMetadata>,
+    fifos: &BTreeMap<String, EntryMetadata>,
 ) -> Result<(), FsSnapshotError> {
     if !directories.contains_key("/") {
         return Err(FsSnapshotError::Malformed("root directory is missing"));
@@ -317,6 +343,13 @@ fn validate_snapshot_state(
     }
     if symlink_metadata.len() != symlinks.len() {
         return Err(FsSnapshotError::Malformed("orphan symlink metadata entry"));
+    }
+    for (path, metadata) in fifos {
+        validate_entry_path(path, false)?;
+        insert_unique_path(&mut paths, path)?;
+        require_parent_directory(path, directories)?;
+        insert_unique_inode(&mut metadata_ids, metadata.ino)?;
+        max_inode = max_inode.max(metadata.ino);
     }
 
     let mut actual_links: BTreeMap<InodeId, u32> = BTreeMap::new();
@@ -643,6 +676,7 @@ mod tests {
     fn fixture() -> MemFs {
         let mut fs = MemFs::new();
         fs.create_directory("/state").unwrap();
+        fs.make_fifo("/state/pipe", 0o666).unwrap();
         fs.create_directory("/state/empty").unwrap();
         fs.set_times_by_path("/state", Some(10), Some(20)).unwrap();
         let fd = fs
@@ -673,6 +707,10 @@ mod tests {
         bytes.extend_from_slice(&(inodes.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&(files.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&(symlinks.len() as u64).to_le_bytes());
+        // Every hand-encoded case below probes namespace structure, so none of
+        // them plants a FIFO; the section is still written (empty) because the
+        // decoder reads its count unconditionally.
+        bytes.extend_from_slice(&0u64.to_le_bytes());
         // Modes are not part of the hand-encoded tuples: every case below
         // probes structure (ordering, identity, bounds), so each entry carries
         // its ordinary creation mode.

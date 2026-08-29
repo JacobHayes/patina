@@ -3469,12 +3469,21 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "chmod",
         "fchmod",
         "fchmodat",
+        // Named pipes ARE modeled (a FIFO entry in the deterministic
+        // filesystem, opened onto the same in-process pipe machinery an
+        // anonymous `pipe` uses), so the mkfifo/mknod family is shim-defined
+        // too. `mknod` is interposed for its FIFO type only; every other type
+        // it can name is refused there, not here.
+        "mkfifo",
+        "mkfifoat",
+        "mknod",
+        "mknodat",
         // Not interposed: the deterministic filesystem has no owner /
-        // timestamp-by-path / device-node model, so a reference to one of these
-        // is a host filesystem escape and is LABELED here, never modeled.
-        // `truncate` is the planted filesystem representative of the gate-level
-        // e2e (`native_run_prerun_gate_refuses_every_escape_class`) now that
-        // every symbol above it is shim-defined.
+        // timestamp-by-path model, so a reference to one of these is a host
+        // filesystem escape and is LABELED here, never modeled. `truncate` is
+        // the planted filesystem representative of the gate-level e2e
+        // (`native_run_prerun_gate_refuses_every_escape_class`) now that every
+        // symbol above it is shim-defined.
         "truncate",
         "truncate64",
         "chown",
@@ -3484,9 +3493,6 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "utimes",
         "utimensat",
         "futimens",
-        "mkfifo",
-        "mknod",
-        "mknodat",
     ];
     // (f) Network: BSD sockets. Modeled over SimNet when interposed.
     const NETWORK: &[&str] = &[

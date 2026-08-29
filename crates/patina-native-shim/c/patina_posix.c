@@ -230,6 +230,9 @@ static int patina_posix_deny(const char *message) {
 #define PATINA_DENY_O_PATH_NONDIR \
     "patina: O_PATH on a non-directory is not modeled (the deterministic filesystem's only " \
     "path-only descriptor is a directory handle); failing closed\n"
+#define PATINA_DENY_MKNOD_TYPE \
+    "patina: mknod models only S_IFIFO (a named pipe); no other special file has a " \
+    "deterministic representation here; failing closed\n"
 
 int clock_gettime(clockid_t clock_id, struct timespec *time) {
     patina_note_boundary_symbol("clock_gettime");
@@ -852,6 +855,7 @@ static unsigned char patina_dirent_type(uint32_t kind) {
     switch (kind) {
         case PATINA_ENTRY_DIRECTORY: return DT_DIR;
         case PATINA_ENTRY_SYMLINK: return DT_LNK;
+        case PATINA_ENTRY_FIFO: return DT_FIFO;
         case PATINA_ENTRY_FILE:
         default: return DT_REG;
     }
@@ -1051,10 +1055,10 @@ static int patina_posix_open(const char *path, int flags) {
 #ifdef O_PATH
     supported |= O_PATH;
 #endif
-    /* O_NONBLOCK is accepted and ignored: it only changes the open of a FIFO,
-     * socket or device, and the deterministic filesystem models none of those --
-     * a guest sets it precisely so an open of one would not block, and callers
-     * add it defensively on ordinary files where it is a no-op on every Unix. */
+    /* O_NONBLOCK changes the open of exactly one modeled kind -- a FIFO, where
+     * it turns the rendezvous with the opposite end into an immediate answer.
+     * On a regular file or a directory it is the no-op it is on every Unix, and
+     * callers add it defensively there. */
 #ifdef O_NONBLOCK
     supported |= O_NONBLOCK;
 #endif
@@ -1099,6 +1103,9 @@ static int patina_posix_open(const char *path, int flags) {
     if (flags & O_EXCL) patina_flags |= PATINA_O_EXCLUSIVE;
 #ifdef O_NOFOLLOW
     if (flags & O_NOFOLLOW) patina_flags |= PATINA_O_NOFOLLOW;
+#endif
+#ifdef O_NONBLOCK
+    if (flags & O_NONBLOCK) patina_flags |= PATINA_O_NONBLOCK;
 #endif
     return fail_int(patina_open(path, patina_flags));
 }
@@ -2229,6 +2236,7 @@ static mode_t patina_stat_mode(const struct patina_stat_values *values) {
     switch (values->kind) {
         case PATINA_ENTRY_DIRECTORY: type = S_IFDIR; break;
         case PATINA_ENTRY_SYMLINK: type = S_IFLNK; break;
+        case PATINA_ENTRY_FIFO: type = S_IFIFO; break;
         case PATINA_ENTRY_FILE:
         default: type = S_IFREG; break;
     }
@@ -2485,6 +2493,58 @@ int fchmodat(int directory, const char *path, mode_t mode, int flags) {
     char resolved[PATH_MAX];
     if (patina_resolve_at(directory, path, resolved, sizeof resolved) != 0) return -1;
     return fail_int(patina_chmod(resolved, (uint32_t)mode, follow));
+}
+
+/*
+ * mkfifo/mkfifoat, and the mknod pair that glibc's mkfifo is sometimes a thin
+ * wrapper over. A FIFO is the one special file the deterministic filesystem
+ * models, so these are real interposers rather than a host escape.
+ *
+ * mknod's other types are NOT modeled and must not look modeled: a device node
+ * is a host escape by construction, and the single non-root identity this
+ * runtime models could not create one on a real kernel either, so S_IFCHR /
+ * S_IFBLK answer the EPERM an unprivileged process gets. Every remaining type
+ * (regular file, socket, directory, or an unknown bit pattern) is a loud named
+ * deny.
+ */
+int mkfifo(const char *path, mode_t mode) {
+    return fail_int(patina_mkfifo(path, (uint32_t)mode));
+}
+
+int mkfifoat(int directory, const char *path, mode_t mode) {
+    if (directory == AT_FDCWD) return fail_int(patina_mkfifo(path, (uint32_t)mode));
+    char resolved[PATH_MAX];
+    if (patina_resolve_at(directory, path, resolved, sizeof resolved) != 0) return -1;
+    return fail_int(patina_mkfifo(resolved, (uint32_t)mode));
+}
+
+static int patina_mknod_impl(const char *path, mode_t mode, dev_t device) {
+    mode_t type = mode & S_IFMT;
+    if (type == S_IFIFO) {
+        /* A FIFO has no device number; a caller passing one is confused about
+         * what it is creating, and honoring it would be inventing a field. */
+        if (device != 0) {
+            errno = EINVAL;
+            return -1;
+        }
+        return fail_int(patina_mkfifo(path, (uint32_t)(mode & 07777)));
+    }
+    if (type == S_IFCHR || type == S_IFBLK) {
+        errno = EPERM;
+        return -1;
+    }
+    return patina_posix_deny(PATINA_DENY_MKNOD_TYPE);
+}
+
+int mknod(const char *path, mode_t mode, dev_t device) {
+    return patina_mknod_impl(path, mode, device);
+}
+
+int mknodat(int directory, const char *path, mode_t mode, dev_t device) {
+    if (directory == AT_FDCWD) return patina_mknod_impl(path, mode, device);
+    char resolved[PATH_MAX];
+    if (patina_resolve_at(directory, path, resolved, sizeof resolved) != 0) return -1;
+    return patina_mknod_impl(resolved, mode, device);
 }
 
 int access(const char *path, int mode) { return patina_access_impl(path, mode); }

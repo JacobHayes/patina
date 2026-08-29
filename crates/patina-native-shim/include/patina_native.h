@@ -23,6 +23,10 @@ enum {
     /* O_NOFOLLOW: when the final component turns out to be a symlink, refuse
      * with ELOOP instead of resolving it and opening the target. */
     PATINA_O_NOFOLLOW = 1u << 6,
+    /* O_NONBLOCK: a no-op on every kind but a FIFO, where it decides whether the
+     * open waits for the opposite end (blocking) or answers at once — success
+     * for a reader, ENXIO for a writer with no reader. */
+    PATINA_O_NONBLOCK = 1u << 7,
 };
 
 enum {
@@ -130,6 +134,13 @@ int32_t patina_sleep_until(uint32_t clock, uint64_t deadline_nanos);
  * state: identical across same-seed runs, monotonic within a run.
  */
 int32_t patina_cpu_time_nanos(uint64_t *nanos);
+/*
+ * Open a path in the deterministic filesystem. A FIFO answers with a fd from the
+ * virtual pipe-endpoint space (>= PATINA_SOCKET_FD_BASE), because a named pipe's
+ * bytes are not filesystem state: the interposed read/write/close/dup/fcntl and
+ * the readiness reactors route it to the pipe class by table membership, exactly
+ * as they route a pipe(2) endpoint.
+ */
 int32_t patina_open(const char *path, uint32_t flags);
 intptr_t patina_read(int32_t fd, void *destination, size_t length);
 intptr_t patina_write(int32_t fd, const void *source, size_t length);
@@ -153,6 +164,10 @@ enum {
     PATINA_ENTRY_FILE = 1,
     PATINA_ENTRY_DIRECTORY = 2,
     PATINA_ENTRY_SYMLINK = 3,
+    /* A named pipe. The ENTRY is filesystem state (it stats, renames, unlinks
+     * like any other name); the bytes flowing through it are not, so one always
+     * reports length 0. */
+    PATINA_ENTRY_FIFO = 4,
 };
 
 int32_t patina_metadata(const char *path, uint32_t *kind, uint64_t *length);
@@ -186,6 +201,14 @@ int32_t patina_read_dir(const char *path, void **state);
  */
 int32_t patina_read_dir_next(void *state, char *name_buf, size_t buf_len, uint32_t *kind);
 void patina_read_dir_free(void *state);
+/*
+ * Create a named pipe (mkfifo/mkfifoat, and mknod/mknodat with S_IFIFO). Only
+ * the NAME is created: the pipe behind it comes into existence when the first
+ * descriptor opens the FIFO and is released with the last. `mode` is the
+ * caller's requested mode and the deterministic filesystem applies its modeled
+ * umask, exactly as the kernel applies the process umask.
+ */
+int32_t patina_mkfifo(const char *path, uint32_t mode);
 int32_t patina_symlink(const char *target, const char *link_path);
 /*
  * Create a hard link. Mirrors patina_symlink: the driver shares one inode

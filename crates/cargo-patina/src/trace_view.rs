@@ -662,6 +662,7 @@ pub const OP_KINDS: &[(&str, Category)] = &[
     ("fs_link", Category::Fs),
     ("fs_symlink", Category::Fs),
     ("fs_read_link", Category::Fs),
+    ("fs_make_fifo", Category::Fs),
     ("fs_set_mode", Category::Fs),
     ("fs_set_fd_mode", Category::Fs),
     ("fs_fd_path", Category::Fs),
@@ -734,6 +735,7 @@ pub fn operation_kind(operation: &Operation) -> &'static str {
         Operation::FsLink { .. } => "fs_link",
         Operation::FsSymlink { .. } => "fs_symlink",
         Operation::FsReadLink { .. } => "fs_read_link",
+        Operation::FsMakeFifo { .. } => "fs_make_fifo",
         Operation::FsSetMode { .. } => "fs_set_mode",
         Operation::FsSetFdMode { .. } => "fs_set_fd_mode",
         Operation::FsFdPath { .. } => "fs_fd_path",
@@ -926,6 +928,13 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
                 path: "/link".into(),
             },
             Outcome::Bytes(b"/target".to_vec()),
+        ),
+        (
+            Operation::FsMakeFifo {
+                path: "/pipe".into(),
+                mode: 0o644,
+            },
+            Outcome::Unit,
         ),
         (
             Operation::FsSetMode {

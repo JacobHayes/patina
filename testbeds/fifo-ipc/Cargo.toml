@@ -1,0 +1,32 @@
+# Standalone package: its own empty [workspace] table keeps it OUT of the root
+# Patina workspace so `cargo` here never touches crates/ or the root manifest.
+#
+# The acceptance MRE for NAMED PIPES. A FIFO is the one special file POSIX lets
+# an unprivileged program create portably, and it is the one entry kind whose
+# NAME is filesystem state while its BYTES are not: the entry stats, lists,
+# renames and unlinks like any other, and the transfer happens over the same
+# in-process pipe machinery an anonymous `pipe(2)` uses. The guest drives the
+# whole surface through libc (`mkfifo`/`mkfifoat`/`mknod`) and std
+# (`OpenOptions` with `O_NONBLOCK`, `File::metadata`, `read_dir`,
+# `set_permissions`, `remove_file`), so it is portable to every platform the
+# native shim supports; the raw-syscall `mknodat` row is proved separately by
+# the SUD battery in `scripts/validate-native-shim.sh`.
+[workspace]
+
+[package]
+name = "fifo-ipc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "fifo-ipc"
+path = "src/main.rs"
+
+[dependencies]
+# Pinned exactly, per testbeds convention. Only for `mkfifo`/`mkfifoat`/`mknod`,
+# which std does not expose — every other call here is std.
+libc = "=0.2.189"
+
+[profile.release]
+panic = "unwind"

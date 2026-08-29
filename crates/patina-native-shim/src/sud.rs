@@ -105,6 +105,7 @@ unsafe extern "C" {
     ) -> c_int;
     fn patina_read_dir_free(state: *mut c_void);
     fn patina_mkdir(path: *const c_char) -> c_int;
+    fn patina_mkfifo(path: *const c_char, mode: u32) -> c_int;
     fn patina_unlink(path: *const c_char) -> c_int;
     fn patina_rmdir(path: *const c_char) -> c_int;
     fn patina_rename(from: *const c_char, to: *const c_char) -> c_int;
@@ -174,6 +175,7 @@ unsafe extern "C" {
 
 // Linux errno values used to shape raw-syscall returns (`-errno`). Fixed across
 // the Linux ABIs Patina targets.
+const EPERM: i64 = 1;
 const EBADF: i64 = 9;
 const ENOENT: i64 = 2;
 const EACCES: i64 = 13;
@@ -214,6 +216,7 @@ const PATINA_O_TRUNCATE: u32 = 1 << 3;
 const PATINA_O_APPEND: u32 = 1 << 4;
 const PATINA_O_EXCLUSIVE: u32 = 1 << 5;
 const PATINA_O_NOFOLLOW: u32 = 1 << 6;
+const PATINA_O_NONBLOCK: u32 = 1 << 7;
 
 // Kernel `open(2)` flag bits (octal), identical on x86_64 and aarch64 Linux.
 const O_ACCMODE: u64 = 0o3;
@@ -255,17 +258,24 @@ const NANOS_PER_SEC: u64 = 1_000_000_000;
 // Patina FS entry kinds returned by the metadata / read-dir entries.
 const PATINA_ENTRY_DIRECTORY: u32 = 2;
 const PATINA_ENTRY_SYMLINK: u32 = 3;
+const PATINA_ENTRY_FIFO: u32 = 4;
 
 // getdents64 `d_type` values (linux_dirent64).
+const DT_FIFO: u8 = 1;
 const DT_DIR: u8 = 4;
 const DT_REG: u8 = 8;
 const DT_LNK: u8 = 10;
 
 // File-mode bits for the kernel `struct stat`/`struct statx` (mirrors the C
 // `patina_mode_for_kind`).
+const S_IFIFO: u32 = 0o010000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
 const S_IFLNK: u32 = 0o120000;
+/// `S_IFMT`: the file-type field of a `mode_t`, which `mknodat` carries.
+const S_IFMT: u64 = 0o170000;
+const S_IFCHR: u64 = 0o020000;
+const S_IFBLK: u64 = 0o060000;
 
 // `*at` flag bits.
 const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
@@ -697,6 +707,7 @@ mod nr {
     pub const FTRUNCATE: i64 = 77;
     pub const GETDENTS64: i64 = 217;
     pub const MKDIRAT: i64 = 258;
+    pub const MKNODAT: i64 = 259;
     pub const NEWFSTATAT: i64 = 262;
     pub const UNLINKAT: i64 = 263;
     pub const RENAMEAT: i64 = 264;
@@ -768,6 +779,7 @@ mod nr {
     pub const DUP2: i64 = 33;
     pub const RENAME: i64 = 82;
     pub const MKDIR: i64 = 83;
+    pub const MKNOD: i64 = 133;
     pub const RMDIR: i64 = 84;
     pub const CREAT: i64 = 85;
     pub const LINK: i64 = 86;
@@ -827,6 +839,7 @@ mod nr {
     pub const FTRUNCATE: i64 = 46;
     pub const GETDENTS64: i64 = 61;
     pub const MKDIRAT: i64 = 34;
+    pub const MKNODAT: i64 = 33;
     pub const NEWFSTATAT: i64 = 79;
     pub const UNLINKAT: i64 = 35;
     pub const LINKAT: i64 = 37;
@@ -1018,6 +1031,7 @@ fn dispatch(nr: i64, args: [u64; 6]) -> i64 {
         nr::STATX => sys_statx(arg_fd(args[0]), args[1], args[2], args[4]),
         nr::GETDENTS64 => sys_getdents64(arg_fd(args[0]), args[1], args[2]),
         nr::MKDIRAT => sys_mkdirat(arg_fd(args[0]), args[1]),
+        nr::MKNODAT => sys_mknodat(arg_fd(args[0]), args[1], args[2], args[3]),
         nr::UNLINKAT => sys_unlinkat(arg_fd(args[0]), args[1], args[2]),
         nr::SYMLINKAT => sys_symlinkat(args[0], arg_fd(args[1]), args[2]),
         nr::READLINKAT => sys_readlinkat(arg_fd(args[0]), args[1], args[2], args[3]),
@@ -1124,6 +1138,8 @@ fn dispatch(nr: i64, args: [u64; 6]) -> i64 {
         nr::RMDIR => sys_unlinkat(AT_FDCWD, args[0], AT_REMOVEDIR),
         #[cfg(target_arch = "x86_64")]
         nr::MKDIR => sys_mkdirat(AT_FDCWD, args[0]),
+        #[cfg(target_arch = "x86_64")]
+        nr::MKNOD => sys_mknodat(AT_FDCWD, args[0], args[1], args[2]),
         #[cfg(target_arch = "x86_64")]
         nr::RENAME => sys_renameat(AT_FDCWD, args[0], AT_FDCWD, args[1], 0),
         #[cfg(target_arch = "x86_64")]
@@ -1486,6 +1502,9 @@ fn openat_patina_flags(flags: u64) -> u32 {
     if flags & O_NOFOLLOW != 0 {
         patina_flags |= PATINA_O_NOFOLLOW;
     }
+    if flags & O_NONBLOCK != 0 {
+        patina_flags |= PATINA_O_NONBLOCK;
+    }
     patina_flags
 }
 
@@ -1493,10 +1512,9 @@ fn openat_patina_flags(flags: u64) -> u32 {
 /// the C `patina_posix_open`'s `supported` mask exactly: a bit outside it names
 /// a behavior nothing here implements (`O_TMPFILE`, `O_DIRECT`, `O_SYNC`, …), so
 /// it fails closed rather than being silently dropped.
-/// (`O_NONBLOCK` is accepted and ignored: it only changes the open of a FIFO,
-/// socket or device, and the deterministic filesystem models none of those — a
-/// guest sets it precisely so an open of one would not block. Callers add it
-/// defensively on ordinary files, where it is a no-op on every Unix.)
+/// (`O_NONBLOCK` changes the open of exactly one modeled kind — a FIFO, where it
+/// turns the rendezvous with the opposite end into an immediate answer. On a
+/// regular file or a directory it is the no-op it is on every Unix.)
 const OPENAT_SUPPORTED_FLAGS: u64 = O_ACCMODE
     | O_CREAT
     | O_TRUNC
@@ -1514,6 +1532,11 @@ const OPENAT_SUPPORTED_FLAGS: u64 = O_ACCMODE
 /// the same captured stderr for the same refusal.
 const DENY_O_PATH_NONDIR: &str = "patina: O_PATH on a non-directory is not modeled (the deterministic filesystem's only \
      path-only descriptor is a directory handle); failing closed\n";
+
+/// The deny a `mknodat` of anything but a FIFO gets. Byte-identical to the C
+/// `PATINA_DENY_MKNOD_TYPE`, for the same reason the `O_PATH` pair is.
+const DENY_MKNOD_TYPE: &str = "patina: mknod models only S_IFIFO (a named pipe); no other special file has a \
+     deterministic representation here; failing closed\n";
 
 /// The deny `openat2` gets. It has no C counterpart (glibc exports no `openat2`
 /// wrapper, so no interposer can be reached), which is exactly why the raw row
@@ -2157,6 +2180,7 @@ fn stat_mode(values: &StatValues) -> u32 {
     let kind = match values.kind {
         PATINA_ENTRY_DIRECTORY => S_IFDIR,
         PATINA_ENTRY_SYMLINK => S_IFLNK,
+        PATINA_ENTRY_FIFO => S_IFIFO,
         _ => S_IFREG,
     };
     kind | (values.mode & 0o7777)
@@ -2473,6 +2497,7 @@ fn dt_for_kind(kind: u32) -> u8 {
     match kind {
         PATINA_ENTRY_DIRECTORY => DT_DIR,
         PATINA_ENTRY_SYMLINK => DT_LNK,
+        PATINA_ENTRY_FIFO => DT_FIFO,
         _ => DT_REG,
     }
 }
@@ -2586,6 +2611,31 @@ fn sys_mkdirat(dirfd: i64, path: u64) -> i64 {
     };
     // SAFETY: the resolved path is a valid NUL-terminated string pointer.
     ret_i32(unsafe { patina_mkdir(resolved.as_ptr()) })
+}
+
+/// `mknodat(2)`, the only door a raw-syscall guest has to a FIFO: glibc's
+/// `mkfifo`/`mkfifoat` are library wrappers over this number, and rustix lowers
+/// its own onto it. Only `S_IFIFO` is modeled — see the C `patina_mknod_impl`,
+/// whose type dispatch and deny string this mirrors byte for byte.
+fn sys_mknodat(dirfd: i64, path: u64, mode: u64, device: u64) -> i64 {
+    let kind = mode & S_IFMT;
+    if kind == S_IFCHR || kind == S_IFBLK {
+        // What the single non-root identity this runtime models would get on a
+        // real kernel; a device node is a host escape by construction.
+        return -EPERM;
+    }
+    if kind != S_IFIFO as u64 {
+        return sud_deny(DENY_MKNOD_TYPE);
+    }
+    if device != 0 {
+        return -EINVAL;
+    }
+    let resolved = match resolve_at(dirfd, path) {
+        Ok(resolved) => resolved,
+        Err(errno) => return errno,
+    };
+    // SAFETY: the resolved path is a valid NUL-terminated string pointer.
+    ret_i32(unsafe { patina_mkfifo(resolved.as_ptr(), (mode & 0o7777) as u32) })
 }
 
 fn sys_unlinkat(dirfd: i64, path: u64, flags: u64) -> i64 {
@@ -3458,22 +3508,45 @@ mod tests {
     /// refusal alone. `sud_deny`'s doc comment states the rule; this makes it a
     /// gate. RED: change either spelling and the assertion names both.
     #[test]
-    fn the_o_path_deny_matches_the_c_interposer_byte_for_byte() {
+    fn every_shared_deny_matches_the_c_interposer_byte_for_byte() {
+        // Each row is (C macro name, the SUD constant, what the refusal is).
+        // Adding a deny that BOTH doors can reach means adding a row here.
+        for (macro_name, sud_message, refusal) in [
+            (
+                "PATINA_DENY_O_PATH_NONDIR",
+                DENY_O_PATH_NONDIR,
+                "an O_PATH open of a non-directory",
+            ),
+            (
+                "PATINA_DENY_MKNOD_TYPE",
+                DENY_MKNOD_TYPE,
+                "a mknod of a special file that is not a FIFO",
+            ),
+        ] {
+            assert_eq!(
+                c_deny_macro(macro_name),
+                sud_message,
+                "the SUD and C deny strings for {refusal} differ; a raw-syscall guest \
+                 and a libc guest would record different stderr"
+            );
+        }
+    }
+
+    /// Expand a `#define`d C deny string from `patina_posix.c`, concatenating its
+    /// continuation lines' string literals exactly as the preprocessor does.
+    fn c_deny_macro(macro_name: &str) -> String {
         const C_SOURCE: &str = include_str!("../c/patina_posix.c");
-        let macro_name = "PATINA_DENY_O_PATH_NONDIR";
         let define = format!("#define {macro_name}");
         let start = C_SOURCE
             .find(&define)
             .unwrap_or_else(|| panic!("{macro_name} is not defined in patina_posix.c"));
-        // Collect the macro's continuation lines and concatenate their string
-        // literals, exactly as the C preprocessor does.
-        let mut c_message = String::new();
+        let mut message = String::new();
         for line in C_SOURCE[start..].lines() {
             let mut rest = line;
             while let Some(open) = rest.find('"') {
                 let tail = &rest[open + 1..];
                 let close = tail.find('"').expect("unterminated C string literal");
-                c_message.push_str(&tail[..close]);
+                message.push_str(&tail[..close]);
                 rest = &tail[close + 1..];
             }
             if !line.trim_end().ends_with('\\') {
@@ -3481,12 +3554,7 @@ mod tests {
             }
         }
         // The only escape either spelling uses is the trailing newline.
-        let c_message = c_message.replace("\\n", "\n");
-        assert_eq!(
-            c_message, DENY_O_PATH_NONDIR,
-            "the SUD and C deny strings for an O_PATH open of a non-directory differ; \
-             a raw-syscall guest and a libc guest would record different stderr"
-        );
+        message.replace("\\n", "\n")
     }
 
     #[test]

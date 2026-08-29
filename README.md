@@ -309,8 +309,8 @@ then `run` the resulting artifact.
 
 ## Supported today
 
-- **Seeded determinism** for ordinary `std`: filesystem (including directories
-  and symlinks), virtual clocks (`SystemTime`/`Instant`/sleeps), entropy,
+- **Seeded determinism** for ordinary `std`: filesystem (including directories,
+  symlinks, permission bits, and named pipes), virtual clocks (`SystemTime`/`Instant`/sleeps), entropy,
   UDP datagrams and TCP over a simulated network (both honor the configured
   base link latency), threads with
   mutex/condvar/parking gated one-at-a-time through a deterministic scheduler,

@@ -37,9 +37,11 @@
 //!   `directory_loss_probability` — the classic "you must fsync the directory"
 //!   bug class.
 //!
-//! Files, directories, and symlinks are all carried through the durable
-//! baseline and recomputed on crash with the same namespace-durability rules,
-//! so a symlink is never silently dropped. Per-entry timestamps captured at the
+//! Files, directories, symlinks, and named pipes are all carried through the
+//! durable baseline and recomputed on crash with the same namespace-durability
+//! rules, so a symlink is never silently dropped. A FIFO's NAME is durable
+//! namespace state; the bytes in flight through one are process state, so a
+//! crash drops them exactly as a real one does. Per-entry timestamps captured at the
 //! last durability point are restored on reconstruction. Hard-link groups are
 //! reconstructed as one inode per surviving source inode, so shared `nlink`
 //! identity survives crash recovery.
@@ -66,6 +68,11 @@ use patina_dst_abi::{
 use patina_dst_driver_api::{DriverResult, FsDriver};
 use patina_dst_fs_mem::{FsSnapshot, MemFs};
 use patina_dst_rng_seeded::SplitMix64;
+
+/// The mode a reconstructed FIFO falls back to when neither the live image nor
+/// the durable baseline can say what it was — the same `0o666 & !0o022` a plain
+/// `mkfifo(path, 0o666)` produces.
+const FIFO_RECONSTRUCTION_MODE: u32 = 0o644;
 
 /// Granularity at which a torn write reverts on crash.
 ///
@@ -157,6 +164,11 @@ struct Baseline {
     dirs: BTreeSet<String>,
     files: BTreeMap<String, BaselineFile>,
     symlinks: BTreeMap<String, String>,
+    /// Named pipes, by path, with their permission bits. A FIFO's NAME is
+    /// durable namespace state like any other; the bytes in flight through it
+    /// are process state, so nothing here holds them and a crash simply drops
+    /// them, exactly as a real one does.
+    fifos: BTreeMap<String, u32>,
     times: BTreeMap<String, (u64, u64)>,
 }
 
@@ -500,12 +512,13 @@ impl CrashFs {
         let mut dirs = self.durable.dirs.clone();
         let mut files: BTreeSet<String> = self.durable.files.keys().cloned().collect();
         let mut symlinks: BTreeSet<String> = self.durable.symlinks.keys().cloned().collect();
+        let mut fifos: BTreeSet<String> = self.durable.fifos.keys().cloned().collect();
 
         for op in &pending {
             match &op.kind {
                 PendingKind::Create { path, kind } => {
                     let survive = self.entry_survives(op.committed);
-                    let set = survival_set(*kind, &mut dirs, &mut files, &mut symlinks);
+                    let set = survival_set(*kind, &mut dirs, &mut files, &mut symlinks, &mut fifos);
                     if survive {
                         set.insert(path.clone());
                     } else {
@@ -516,7 +529,7 @@ impl CrashFs {
                     // A surviving unlink persists the removal; a lost unlink
                     // resurrects the durable entry.
                     let persist = self.entry_survives(op.committed);
-                    let set = survival_set(*kind, &mut dirs, &mut files, &mut symlinks);
+                    let set = survival_set(*kind, &mut dirs, &mut files, &mut symlinks, &mut fifos);
                     if persist {
                         set.remove(path);
                     } else {
@@ -532,6 +545,7 @@ impl CrashFs {
                             rewrite_prefix(&mut dirs, from, to);
                             rewrite_prefix(&mut files, from, to);
                             rewrite_prefix(&mut symlinks, from, to);
+                            rewrite_prefix(&mut fifos, from, to);
                         }
                     } else {
                         // Non-atomic: the destination link and the source unlink
@@ -541,7 +555,8 @@ impl CrashFs {
                         // side, for a stable decision order.
                         let link_new = self.entry_survives(op.committed);
                         let unlink_old = self.entry_survives(op.source_committed);
-                        let set = survival_set(*kind, &mut dirs, &mut files, &mut symlinks);
+                        let set =
+                            survival_set(*kind, &mut dirs, &mut files, &mut symlinks, &mut fifos);
                         if unlink_old {
                             set.remove(from);
                         }
@@ -562,13 +577,13 @@ impl CrashFs {
         // child fit.
         let mut resurrected: BTreeSet<String> = BTreeSet::new();
         for (path, kind) in self.live.open_entries() {
-            let fresh =
-                survival_set(kind, &mut dirs, &mut files, &mut symlinks).insert(path.clone());
+            let fresh = survival_set(kind, &mut dirs, &mut files, &mut symlinks, &mut fifos)
+                .insert(path.clone());
             if fresh && kind == FsEntryKind::File {
                 resurrected.insert(path);
             }
         }
-        prune_to_surviving_parents(&mut dirs, &mut files, &mut symlinks);
+        prune_to_surviving_parents(&mut dirs, &mut files, &mut symlinks, &mut fifos);
 
         let mut durable_content_by_inode: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
         for file in self.durable.files.values() {
@@ -672,6 +687,20 @@ impl CrashFs {
         }
         for (path, target) in &symlink_targets {
             next.symlink(target, path)?;
+        }
+        for path in &fifos {
+            // A FIFO's name is what survives; its buffered bytes never were
+            // durable. The mode is metadata like a symlink's target: the live
+            // value if the entry is still there, else the durable baseline.
+            let mode = self
+                .live
+                .metadata(path)
+                .ok()
+                .map(|metadata| metadata.mode)
+                .or_else(|| self.durable.fifos.get(path).copied())
+                .unwrap_or(FIFO_RECONSTRUCTION_MODE);
+            next.make_fifo(path, mode)?;
+            next.set_mode(path, mode)?;
         }
         // Restore durable timestamps for the surviving baseline entries so
         // crash reconstruction does not silently reset metadata to zero.
@@ -845,7 +874,9 @@ impl FsDriver for CrashFs {
                     }
                 }
                 FsEntryKind::Directory => self.sync_directory(&path)?,
-                FsEntryKind::Symlink => {}
+                // Neither a symlink's target nor a FIFO's buffer is file data
+                // this model stages: there is nothing to make durable.
+                FsEntryKind::Symlink | FsEntryKind::Fifo => {}
             }
         }
         Ok(())
@@ -904,7 +935,7 @@ impl FsDriver for CrashFs {
                     self.staged_content.insert(to.clone(), bytes);
                 }
             }
-            FsEntryKind::Symlink => {}
+            FsEntryKind::Symlink | FsEntryKind::Fifo => {}
         }
 
         let prefix = format!("{from}/");
@@ -951,6 +982,19 @@ impl FsDriver for CrashFs {
         self.journal(PendingKind::Create {
             path: to_norm,
             kind,
+        });
+        Ok(())
+    }
+
+    /// A FIFO creation is a NAME appearing, exactly like a symlink's: the
+    /// namespace-durability journal holds it, and a crash before the parent
+    /// directory is fsynced can lose it.
+    fn make_fifo(&mut self, path: &str, mode: u32) -> DriverResult<()> {
+        self.live.make_fifo(path, mode)?;
+        let normalized = normalize_entry_path(path).expect("make_fifo normalized the path already");
+        self.journal(PendingKind::Create {
+            path: normalized,
+            kind: FsEntryKind::Fifo,
         });
         Ok(())
     }
@@ -1013,18 +1057,21 @@ fn copy_range(result: &mut [u8], source: &[u8], start: usize, end: usize) {
     }
 }
 
-/// Select the survival set matching an entry kind, so files, directories, and
-/// symlinks each apply their namespace decisions to the right table.
+/// Select the survival set matching an entry kind, so files, directories,
+/// symlinks, and named pipes each apply their namespace decisions to the right
+/// table.
 fn survival_set<'a>(
     kind: FsEntryKind,
     dirs: &'a mut BTreeSet<String>,
     files: &'a mut BTreeSet<String>,
     symlinks: &'a mut BTreeSet<String>,
+    fifos: &'a mut BTreeSet<String>,
 ) -> &'a mut BTreeSet<String> {
     match kind {
         FsEntryKind::Directory => dirs,
         FsEntryKind::File => files,
         FsEntryKind::Symlink => symlinks,
+        FsEntryKind::Fifo => fifos,
     }
 }
 
@@ -1036,11 +1083,13 @@ fn prune_to_surviving_parents(
     dirs: &mut BTreeSet<String>,
     files: &mut BTreeSet<String>,
     symlinks: &mut BTreeSet<String>,
+    fifos: &mut BTreeSet<String>,
 ) {
     let selected_dirs = dirs.clone();
     dirs.retain(|path| path == "/" || full_parent_chain_survives(path, &selected_dirs));
     files.retain(|path| full_parent_chain_survives(path, dirs));
     symlinks.retain(|path| full_parent_chain_survives(path, dirs));
+    fifos.retain(|path| full_parent_chain_survives(path, dirs));
 }
 
 fn full_parent_chain_survives(path: &str, dirs: &BTreeSet<String>) -> bool {
@@ -1115,6 +1164,12 @@ fn enumerate(fs: &mut MemFs) -> Baseline {
                 FsEntryKind::Symlink => {
                     let target = fs.read_link(&child).unwrap_or_default();
                     baseline.symlinks.insert(child, target);
+                }
+                FsEntryKind::Fifo => {
+                    let mode = metadata
+                        .map(|metadata| metadata.mode)
+                        .unwrap_or(FIFO_RECONSTRUCTION_MODE);
+                    baseline.fifos.insert(child, mode);
                 }
             }
         }
@@ -1864,6 +1919,54 @@ mod tests {
         fs.crash().unwrap();
         assert_eq!(fs.read_link("/d/link").unwrap(), "/target");
         assert_eq!(fs.metadata("/d/link").unwrap().kind, FsEntryKind::Symlink);
+    }
+
+    // --- Named pipes: the NAME is durable namespace state, the bytes are not. ---
+
+    #[test]
+    fn fifo_name_and_mode_survive_a_crash_once_the_parent_is_fsynced() {
+        let mut base = MemFs::new();
+        base.create_directory("/d").unwrap();
+        let mut fs = CrashFs::builder().filesystem(base).build().unwrap();
+        fs.make_fifo("/d/pipe", 0o666).unwrap();
+        assert_eq!(fs.metadata("/d/pipe").unwrap().kind, FsEntryKind::Fifo);
+        fs.set_mode("/d/pipe", 0o640).unwrap();
+
+        // Fsyncing the parent commits the name; reconstruction must rebuild it
+        // as a FIFO with the mode it had, not as a regular file.
+        fs.sync_directory("/d").unwrap();
+        fs.crash().unwrap();
+        let metadata = fs.metadata("/d/pipe").unwrap();
+        assert_eq!(metadata.kind, FsEntryKind::Fifo);
+        assert_eq!(metadata.mode, 0o640);
+        // And it is still listed as a FIFO by its parent.
+        assert_eq!(
+            fs.read_directory("/d").unwrap(),
+            vec![patina_dst_abi::FsDirectoryEntry {
+                name: "pipe".into(),
+                kind: FsEntryKind::Fifo,
+            }]
+        );
+    }
+
+    #[test]
+    fn an_unsynced_fifo_creation_is_lost_like_any_other_name() {
+        let mut base = MemFs::new();
+        base.create_directory("/d").unwrap();
+        let mut fs = CrashFs::builder()
+            .filesystem(base)
+            .seed(7)
+            .model_directory_durability(true)
+            .directory_loss_probability(1.0)
+            .build()
+            .unwrap();
+        fs.make_fifo("/d/pipe", 0o666).unwrap();
+        fs.crash().unwrap();
+        assert_eq!(
+            fs.metadata("/d/pipe").unwrap_err().code,
+            ErrorCode::NotFound,
+            "an uncommitted FIFO creation is namespace state a crash can lose"
+        );
     }
 
     #[test]

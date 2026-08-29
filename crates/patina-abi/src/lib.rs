@@ -354,6 +354,11 @@ pub enum FsEntryKind {
     File,
     Directory,
     Symlink,
+    /// A named pipe (`mkfifo`). The entry is a NAME in the filesystem; the bytes
+    /// that flow through it are not filesystem state at all — they live in the
+    /// pipe channel the openers share, exactly as a kernel FIFO's do — so an
+    /// entry of this kind never carries contents and reports length 0.
+    Fifo,
 }
 
 /// Deterministic filesystem metadata exposed at the effect boundary.
@@ -721,6 +726,15 @@ pub enum Operation {
     FsReadLink {
         path: String,
     },
+    /// Create a named pipe (`mkfifo`/`mkfifoat`/`mknod` with `S_IFIFO`). Unlike
+    /// `FsOpen`/`FsCreateDirectory`, whose creation-mode arguments are dropped,
+    /// this one CARRIES the requested mode: the operation is new, so the mode
+    /// crosses the boundary rather than being reconstructed from a per-kind
+    /// constant. The driver applies the modeled umask.
+    FsMakeFifo {
+        path: String,
+        mode: u32,
+    },
     /// Change the permission bits of the entry `path` NAMES. Trailing-symlink
     /// resolution — the only difference between `chmod` and
     /// `fchmodat(…, AT_SYMLINK_NOFOLLOW)` — happens above this boundary, in the
@@ -1023,6 +1037,10 @@ mod tests {
             Operation::FsReadLink {
                 path: "/state/link".into(),
             },
+            Operation::FsMakeFifo {
+                path: "/state/pipe".into(),
+                mode: 0o644,
+            },
         ];
         for operation in operations {
             let json = serde_json::to_string(&operation).unwrap();
@@ -1108,6 +1126,29 @@ mod tests {
         let json = serde_json::to_string(&metadata).unwrap();
         assert!(json.contains("\"kind\":\"symlink\""));
         assert_eq!(serde_json::from_str::<FsMetadata>(&json).unwrap(), metadata);
+
+        let fifo = FsMetadata {
+            kind: FsEntryKind::Fifo,
+            len: 0,
+            ino: 43,
+            nlink: 1,
+            atime_nanos: 0,
+            mtime_nanos: 0,
+            mode: 0o644,
+        };
+        let json = serde_json::to_string(&fifo).unwrap();
+        assert!(json.contains("\"kind\":\"fifo\""));
+        assert_eq!(serde_json::from_str::<FsMetadata>(&json).unwrap(), fifo);
+        let entry = FsDirectoryEntry {
+            name: "pipe".into(),
+            kind: FsEntryKind::Fifo,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"kind\":\"fifo\""));
+        assert_eq!(
+            serde_json::from_str::<FsDirectoryEntry>(&json).unwrap(),
+            entry
+        );
     }
 
     #[test]

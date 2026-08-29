@@ -1174,6 +1174,9 @@ const WASI_ERRNO_NOTCAPABLE: i32 = 76;
 const WASI_ERRNO_NAMETOOLONG: i32 = 37;
 const WASI_ERRNO_ROFS: i32 = 69;
 
+/// `filetype::unknown` — the Preview 1 value for a kind its enumeration does
+/// not name (there is no FIFO filetype).
+const WASI_FILETYPE_UNKNOWN: u8 = 0;
 const WASI_FILETYPE_CHARACTER_DEVICE: u8 = 2;
 const WASI_FILETYPE_DIRECTORY: u8 = 3;
 const WASI_FILETYPE_REGULAR_FILE: u8 = 4;
@@ -3317,6 +3320,13 @@ fn wasi_filetype(kind: FsEntryKind) -> u8 {
         FsEntryKind::File => WASI_FILETYPE_REGULAR_FILE,
         FsEntryKind::Directory => WASI_FILETYPE_DIRECTORY,
         FsEntryKind::Symlink => WASI_FILETYPE_SYMBOLIC_LINK,
+        // Preview 1 has no FIFO filetype: its enumeration stops at the two
+        // socket kinds. `UNKNOWN` is the honest answer — it says "this is not a
+        // regular file, a directory, or a symlink" without claiming to be a
+        // kind it is not. (A `wasip1` guest cannot create one either: no
+        // Preview 1 call makes a FIFO, so one can only arrive through a
+        // pre-seeded image.)
+        FsEntryKind::Fifo => WASI_FILETYPE_UNKNOWN,
     }
 }
 

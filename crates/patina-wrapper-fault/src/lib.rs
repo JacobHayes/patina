@@ -337,6 +337,16 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         self.inner.link(from, to)
     }
 
+    /// Shares the namespace-creation fault kind with `create_directory`: both
+    /// are "a new name appears in a directory", which is the failure the
+    /// injector is modeling.
+    fn make_fifo(&mut self, path: &str, mode: u32) -> DriverResult<()> {
+        if let Some(error) = self.maybe_error(FsFaultOp::CreateDirectory) {
+            return Err(error);
+        }
+        self.inner.make_fifo(path, mode)
+    }
+
     fn symlink(&mut self, target: &str, link_path: &str) -> DriverResult<()> {
         if let Some(error) = self.maybe_error(FsFaultOp::Symlink) {
             return Err(error);

@@ -2906,6 +2906,31 @@ RS
 fi
 
 # -----------------------------------------------------------------------------
+# Named pipes (FIFOs): the committed `testbeds/fifo-ipc/` MRE. A FIFO is the one
+# entry kind whose NAME is filesystem state while its BYTES are not, so it only
+# works when both halves are modeled — the entry in the deterministic filesystem
+# (mkfifo/mkfifoat/mknod, stat/lstat, getdents, chmod, rename, unlink) and the
+# transfer over the SAME in-process pipe machinery an anonymous `pipe(2)` uses
+# (blocking opens that park and wake through the scheduler, EOF, EPIPE, EAGAIN).
+# The guest reaches everything through libc, so this leg is NOT SUD-gated and
+# runs on every platform; the raw-syscall `mknodat` row has its own probe in the
+# SUD battery above. Its run-patina.sh asserts a CLEAN audit (the mkfifo family
+# is interposed now, so no --allow-unsupported-symbols is needed and the family
+# must appear nowhere in the audit), the expected FIFO_RESULT, seed-stable
+# stdout AND captured stderr, record/replay identity, and the same result across
+# four seeds, then prints FIFO_LEGS_RAN. RED: without the mkfifo interposer the
+# guest cannot even be audited.
+# -----------------------------------------------------------------------------
+if bash "$root/testbeds/fifo-ipc/run-patina.sh" >"$tmp/fifo-mre.out" 2>&1; then
+  grep -q 'FIFO_LEGS_RAN ' "$tmp/fifo-mre.out" || {
+    echo 'validate-native-shim: fifo-ipc MRE did not run its battery' >&2
+    cat "$tmp/fifo-mre.out" >&2; exit 1; }
+else
+  echo 'validate-native-shim: fifo-ipc MRE run-patina.sh failed' >&2
+  cat "$tmp/fifo-mre.out" >&2; exit 1
+fi
+
+# -----------------------------------------------------------------------------
 # The cross-platform acceptance workload: a real tokio current-thread runtime
 # driving an async socketpair ping-pong entirely through the deterministic
 # readiness reactor — mio's kqueue selector + EVFILT_USER Waker on macOS, mio's
@@ -3916,6 +3941,125 @@ RS
       "$runner" run "$tmp/raw-legacy-fs" --seed 1 >"$tmp/raw-legacy-fs-out"
       grep -qx 'LEGACY_ALIASES open+creat+unlink+getdents ok' "$tmp/raw-legacy-fs-out"
 
+      # (f2) raw mknodat/mknod: the ONLY door a raw-syscall guest has to a FIFO
+      # (glibc's mkfifo/mkfifoat are library wrappers over this number, and
+      # rustix lowers its own onto it). Creates a FIFO through modern mknodat and
+      # through the x86_64 legacy mknod, checks that raw newfstatat/fstat report
+      # S_IFIFO and getdents64 reports DT_FIFO, that a non-blocking read-open
+      # answers at once while a non-blocking write-open with no reader is ENXIO,
+      # that bytes flow through raw write/read on the returned endpoint, and that
+      # a device node is EPERM rather than a host escape. RED mutations: drop the
+      # nr::MKNODAT arm → unmapped abort; drop PATINA_ENTRY_FIFO from stat_mode /
+      # dt_for_kind → the S_IFIFO / DT_FIFO asserts fail; drop PATINA_O_NONBLOCK
+      # from openat_patina_flags → the write-open blocks instead of ENXIO.
+      cat >"$tmp/raw_fifo.rs" <<'RS'
+use std::arch::asm;
+unsafe fn sc(nr: i64, a0: i64, a1: i64, a2: i64, a3: i64) -> i64 {
+    let r: i64;
+    unsafe { asm!("syscall", inlateout("rax") nr => r, in("rdi") a0, in("rsi") a1,
+        in("rdx") a2, in("r10") a3, out("rcx") _, out("r11") _, options(nostack)); }
+    r
+}
+fn main() {
+    const READ: i64 = 0; const WRITE: i64 = 1; const CLOSE: i64 = 3;
+    const FSTAT: i64 = 5; const MKDIR: i64 = 83; const MKNOD: i64 = 133;
+    const OPENAT: i64 = 257; const MKNODAT: i64 = 259; const NEWFSTATAT: i64 = 262;
+    const GETDENTS64: i64 = 217;
+    const AT_FDCWD: i64 = -100;
+    const O_WRONLY: i64 = 0o1; const O_NONBLOCK: i64 = 0o4000;
+    const O_DIRECTORY: i64 = 0o200000;
+    const S_IFMT: u32 = 0o170000; const S_IFIFO: u32 = 0o010000;
+    const DT_FIFO: u8 = 1;
+    const ENXIO: i64 = -6; const EPERM: i64 = -1;
+
+    let dir = b"/raw-fifo\0";
+    assert_eq!(unsafe { sc(MKDIR, dir.as_ptr() as i64, 0o755, 0, 0) }, 0, "mkdir");
+
+    // Modern mknodat, and the x86_64 legacy mknod alias, both make a FIFO.
+    let at_path = b"/raw-fifo/at\0";
+    let rc = unsafe { sc(MKNODAT, AT_FDCWD, at_path.as_ptr() as i64,
+                         (S_IFIFO | 0o644) as i64, 0) };
+    assert_eq!(rc, 0, "mknodat(S_IFIFO) {rc}");
+    let legacy_path = b"/raw-fifo/legacy\0";
+    let rc = unsafe { sc(MKNOD, legacy_path.as_ptr() as i64, (S_IFIFO | 0o600) as i64, 0, 0) };
+    assert_eq!(rc, 0, "legacy mknod(S_IFIFO) {rc}");
+    // A device node has no deterministic representation: EPERM, never a host call.
+    let dev_path = b"/raw-fifo/dev\0";
+    let rc = unsafe { sc(MKNODAT, AT_FDCWD, dev_path.as_ptr() as i64,
+                         (0o020000u32 | 0o666) as i64, 0x103) };
+    assert_eq!(rc, EPERM, "mknodat of a character device must be EPERM, got {rc}");
+
+    // raw newfstatat by PATH reports S_IFIFO with the umasked mode.
+    let mut st = [0u8; 144];
+    let rc = unsafe { sc(NEWFSTATAT, AT_FDCWD, at_path.as_ptr() as i64,
+                         st.as_mut_ptr() as i64, 0) };
+    assert_eq!(rc, 0, "newfstatat {rc}");
+    let mode = u32::from_ne_bytes([st[24], st[25], st[26], st[27]]);
+    assert_eq!(mode & S_IFMT, S_IFIFO, "newfstatat st_mode {mode:o}");
+    assert_eq!(mode & 0o7777, 0o644, "mknodat mode under the modeled umask {mode:o}");
+
+    // A non-blocking read-open answers at once with no writer, and raw fstat on
+    // the DESCRIPTOR reports a FIFO too (the check a sandbox makes after the
+    // open, because the path check above can be raced).
+    let rfd = unsafe { sc(OPENAT, AT_FDCWD, at_path.as_ptr() as i64, O_NONBLOCK, 0) };
+    assert!(rfd >= 0, "non-blocking read-open of a FIFO {rfd}");
+    let mut fst = [0u8; 144];
+    assert_eq!(unsafe { sc(FSTAT, rfd, fst.as_mut_ptr() as i64, 0, 0) }, 0, "fstat");
+    let fmode = u32::from_ne_bytes([fst[24], fst[25], fst[26], fst[27]]);
+    assert_eq!(fmode & S_IFMT, S_IFIFO, "fstat st_mode {fmode:o}");
+
+    // With a reader present a blocking write-open returns immediately, and raw
+    // write/read carry bytes across the endpoint pair.
+    let wfd = unsafe { sc(OPENAT, AT_FDCWD, at_path.as_ptr() as i64, O_WRONLY, 0) };
+    assert!(wfd >= 0, "write-open with a reader present {wfd}");
+    let msg = b"raw-fifo";
+    let w = unsafe { sc(WRITE, wfd, msg.as_ptr() as i64, msg.len() as i64, 0) };
+    assert_eq!(w, msg.len() as i64, "raw write into a FIFO {w}");
+    let mut buf = [0u8; 16];
+    let n = unsafe { sc(READ, rfd, buf.as_mut_ptr() as i64, buf.len() as i64, 0) };
+    assert_eq!(&buf[..n as usize], msg, "raw read from a FIFO");
+    let _ = unsafe { sc(CLOSE, wfd, 0, 0, 0) };
+    // The last writer is gone: the next read is end-of-file, not another park.
+    assert_eq!(unsafe { sc(READ, rfd, buf.as_mut_ptr() as i64, buf.len() as i64, 0) }, 0,
+               "read after the last writer closed must be EOF");
+    let _ = unsafe { sc(CLOSE, rfd, 0, 0, 0) };
+
+    // No reader at all: a non-blocking write-open is ENXIO.
+    let rc = unsafe { sc(OPENAT, AT_FDCWD, at_path.as_ptr() as i64,
+                         O_WRONLY | O_NONBLOCK, 0) };
+    assert_eq!(rc, ENXIO, "non-blocking write-open with no reader must be ENXIO, got {rc}");
+
+    // getdents64 reports DT_FIFO for both names.
+    let dfd = unsafe { sc(OPENAT, AT_FDCWD, dir.as_ptr() as i64, O_DIRECTORY, 0) };
+    assert!(dfd >= 0, "open(dir) {dfd}");
+    let mut dbuf = [0u8; 1024];
+    let mut seen: Vec<(String, u8)> = Vec::new();
+    loop {
+        let g = unsafe { sc(GETDENTS64, dfd, dbuf.as_mut_ptr() as i64, dbuf.len() as i64, 0) };
+        assert!(g >= 0, "getdents64 {g}");
+        if g == 0 { break; }
+        let mut off = 0usize;
+        while off < g as usize {
+            let reclen = u16::from_ne_bytes([dbuf[off + 16], dbuf[off + 17]]) as usize;
+            let kind = dbuf[off + 18];
+            let nb = &dbuf[off + 19..off + reclen];
+            let end = nb.iter().position(|&b| b == 0).unwrap_or(nb.len());
+            let name = String::from_utf8_lossy(&nb[..end]).into_owned();
+            if name != "." && name != ".." { seen.push((name, kind)); }
+            off += reclen;
+        }
+    }
+    seen.sort();
+    assert_eq!(seen, vec![("at".to_string(), DT_FIFO), ("legacy".to_string(), DT_FIFO)],
+               "getdents64 d_type for FIFOs {seen:?}");
+    let _ = unsafe { sc(CLOSE, dfd, 0, 0, 0) };
+    println!("RAW_FIFO mknodat+stat+nonblock+enxio+transfer+dents ok");
+}
+RS
+      "$runner" build "$tmp/raw_fifo.rs" --output "$tmp/raw-fifo" >/dev/null
+      "$runner" run "$tmp/raw-fifo" --seed 1 >"$tmp/raw-fifo-out"
+      grep -qx 'RAW_FIFO mknodat+stat+nonblock+enxio+transfer+dents ok' "$tmp/raw-fifo-out"
+
       # (g) raw socketpair: interposed socketpair works but raw aborted before the
       # row existed (the strongest raw-vs-interposed asymmetry). Create an AF_UNIX
       # STREAM pair, write one end, read the other, assert the bytes, close both.
@@ -4089,7 +4233,7 @@ RS
     # Loud execution proof for CI-log grepping: this line prints only after every
     # positive leg above passed, so a skipped-but-green SUD section is impossible
     # to mistake for an executed one.
-    echo 'SUD_LEGS_RAN branch=positive legs=audit-sud-managed,seed-stable,record-replay,thread-arming,seed-varying-entropy,unmapped-abort,auxv-canary,sigsys-hijack,marker-gating,at-random,vsyscall-audit,rustix-mre,capstd-dirfd-mre,procstate-constants,epoll-rows,sendmsg-recvmsg,prctl-get-auxv,legacy-fs-aliases,socketpair-row,ppoll-row,fcntl-getfl-parity,fcntl-record-lock-parity'
+    echo 'SUD_LEGS_RAN branch=positive legs=audit-sud-managed,seed-stable,record-replay,thread-arming,seed-varying-entropy,unmapped-abort,auxv-canary,sigsys-hijack,marker-gating,at-random,vsyscall-audit,rustix-mre,capstd-dirfd-mre,procstate-constants,epoll-rows,sendmsg-recvmsg,prctl-get-auxv,legacy-fs-aliases,raw-fifo-rows,socketpair-row,ppoll-row,fcntl-getfl-parity,fcntl-record-lock-parity'
   else
     echo "sud: SKIPPED (kernel lacks syscall-user-dispatch) — running the refusal + kernel-independent legs"
 
@@ -4316,6 +4460,7 @@ cat "$tmp/socketpair-seed-1-1"
 cat "$tmp/pipe-epipe-out"
 cat "$tmp/pipe-nonblock-out"
 cat "$tmp/pipe-dup-1"
+grep -h "FIFO_LEGS_RAN " "$tmp/fifo-mre.out"
 
 cat "$tmp/replay"
 cat "$tmp/std-replay"

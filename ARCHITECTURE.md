@@ -298,7 +298,7 @@ flowchart LR
 
 Concrete drivers implement capabilities:
 
-- `MemFs`: deterministic in-memory filesystem. Entries carry POSIX permission bits — files `0o644`, directories `0o755` (the creation modes under the fixed `0o022` umask this filesystem models), symlink leaves the conventional `0o777` — and those bits are enforced against the single non-root identity the runtime models (uid/gid 1000, what the shim's `getuid` reports), which owns every entry: read needs `r`, write needs `w`, resolving a path through a directory needs `x` on it, listing needs `r`, and creating/removing/renaming a name inside one needs `w` and `x`. A search check runs before existence, so an unsearchable directory answers the same refusal for a name that is there and one that is not. An open descriptor is bound to the NODE, not to the name it was opened under: a rename moves the descriptor with its inode, which is what makes a directory descriptor a capability rather than a path prefix.
+- `MemFs`: deterministic in-memory filesystem. It models regular files, hard links, inert symlink leaves, directories, and named pipes. A FIFO is the one entry kind whose NAME is filesystem state while its BYTES are not: `mkfifo` creates a name with a mode (the caller's, under the modeled umask) that stats, lists, chmods, renames and unlinks like any other, reports `S_IFIFO`/`DT_FIFO`, and carries no contents — the transfer belongs to the pipe its openers share, above this boundary. Entries carry POSIX permission bits — files `0o644`, directories `0o755` (the creation modes under the fixed `0o022` umask this filesystem models), symlink leaves the conventional `0o777` — and those bits are enforced against the single non-root identity the runtime models (uid/gid 1000, what the shim's `getuid` reports), which owns every entry: read needs `r`, write needs `w`, resolving a path through a directory needs `x` on it, listing needs `r`, and creating/removing/renaming a name inside one needs `w` and `x`. A search check runs before existence, so an unsearchable directory answers the same refusal for a name that is there and one that is not. An open descriptor is bound to the NODE, not to the name it was opened under: a rename moves the descriptor with its inode, which is what makes a directory descriptor a capability rather than a path prefix.
 - `CrashFs`: filesystem model with crash-consistency behavior (checkpoints, seeded torn writes, rename atomicity, and directory-fd `fsync` as the namespace-durability barrier).
 - `SimNet`: deterministic virtual network (datagrams and TCP streams, partitions, seeded stream faults).
 - `VirtualClock`: controlled time source and timer queue.
@@ -433,6 +433,7 @@ The native ABI shim provides compatibility symbols such as:
 ```text
 open (including read-only directories), read, write, close, fsync
 chmod, fchmod, fchmodat (permission bits, modeled and enforced)
+mkfifo, mkfifoat, mknod/mknodat with S_IFIFO (named pipes)
 socket, bind, connect, send, recv
 clock_gettime, gettimeofday, nanosleep
 getrandom, getentropy, /dev/urandom reads (and `dlsym`-resolved getrandom on Linux)

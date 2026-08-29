@@ -105,6 +105,14 @@ pub trait FsDriver: Send {
     fn read_link(&mut self, _path: &str) -> DriverResult<String> {
         Err(unsupported_filesystem_operation("read link"))
     }
+    /// Create a named pipe (`mkfifo`). Creates only the NAME: a FIFO's bytes are
+    /// never filesystem state, so nothing here holds them — the openers share a
+    /// pipe channel above this boundary, exactly as they share a kernel pipe.
+    /// `mode` is the caller's requested mode; the driver applies its modeled
+    /// umask, as the kernel does.
+    fn make_fifo(&mut self, _path: &str, _mode: u32) -> DriverResult<()> {
+        Err(unsupported_filesystem_operation("make fifo"))
+    }
     /// Change the permission bits of the entry `path` names (`chmod` /
     /// `fchmodat`). Like every other path entry point here, this acts on the
     /// entry the caller named: a trailing symlink is resolved by the caller, not
