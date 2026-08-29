@@ -3446,6 +3446,7 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "renameat",
         "renameat2",
         "mkdir",
+        "mkdirat",
         "rmdir",
         "stat",
         "stat64",

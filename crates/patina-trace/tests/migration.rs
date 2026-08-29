@@ -26,7 +26,7 @@ fn expected_operations() -> Vec<Operation> {
 
 #[test]
 fn current_format_fixture_parses_validates_and_is_canonically_encoded() {
-    let bundle = TraceBundle::load(fixture("format-5.patina")).unwrap();
+    let bundle = TraceBundle::load(fixture("format-6.patina")).unwrap();
     assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
     bundle.validate().unwrap();
     // A pre-metadata run records no fault configuration; the field is absent
@@ -42,7 +42,7 @@ fn current_format_fixture_parses_validates_and_is_canonically_encoded() {
     // on-disk encoding and guards against the fixture drifting from the writer.
     let reencoded = bundle.to_bytes().unwrap();
     assert_eq!(
-        std::fs::read(fixture("format-5.patina")).unwrap(),
+        std::fs::read(fixture("format-6.patina")).unwrap(),
         reencoded
     );
     let text = String::from_utf8(reencoded).unwrap();
@@ -59,14 +59,14 @@ fn current_format_fixture_parses_validates_and_is_canonically_encoded() {
 
 #[test]
 fn current_crash_restart_fixture_parses_validates_and_is_canonical() {
-    let bundle = TraceBundle::load(fixture("format-5-crash-restart.patina")).unwrap();
+    let bundle = TraceBundle::load(fixture("format-6-crash-restart.patina")).unwrap();
     bundle.validate().unwrap();
     assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
     assert_eq!(bundle.timelines[0].lifecycle.len(), 5);
     assert_eq!(bundle.timelines[0].decisions[0].order, 1);
     assert_eq!(bundle.timelines[0].decisions[1].incarnation, 1);
     assert_eq!(
-        std::fs::read(fixture("format-5-crash-restart.patina")).unwrap(),
+        std::fs::read(fixture("format-6-crash-restart.patina")).unwrap(),
         bundle.to_bytes().unwrap()
     );
 }
@@ -76,12 +76,13 @@ fn every_prior_format_migrates_to_an_equivalent_current_bundle() {
     // Every supported non-crash prior format upgrades to a bundle byte-for-byte
     // equivalent to the hand-written current-format fixture: current version, a single
     // unbranched `main` timeline, and absent branch metadata.
-    let current = TraceBundle::load(fixture("format-5.patina")).unwrap();
+    let current = TraceBundle::load(fixture("format-6.patina")).unwrap();
     for prior in [
         "format-1.patina",
         "format-2.patina",
         "format-3.patina",
         "format-4.patina",
+        "format-5.patina",
     ] {
         let migrated = TraceBundle::load(fixture(prior)).unwrap();
         assert_eq!(
@@ -112,6 +113,38 @@ fn every_prior_format_migrates_to_an_equivalent_current_bundle() {
     }
 }
 
+/// The v5→v6 step writes in the creation mode the recorded run behaved as if it
+/// had asked for: a format-5 recorder dropped the caller's argument and the
+/// driver minted every new entry at the fixed umasked default for its kind, and
+/// `0o666`/`0o777` are exactly the requests those defaults come from. A
+/// non-creating `open` gets `0` — the argument POSIX says the kernel never
+/// reads. RED without the step: the bundle fails to deserialize at all, because
+/// `mode` is a required field of both operations.
+#[test]
+fn the_mode_migration_reconstructs_the_request_a_format_5_run_made() {
+    let bundle = TraceBundle::load(fixture("format-5-modes.patina")).unwrap();
+    assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
+    bundle.validate().unwrap();
+    let main = bundle.resolved_timeline("main").unwrap();
+    assert_eq!(
+        main[0].operation,
+        Operation::FsCreateDirectory {
+            path: "/state".into(),
+            mode: 0o777,
+        }
+    );
+    let Operation::FsOpen { flags, .. } = &main[1].operation else {
+        panic!("expected a creating fs_open, got {:?}", main[1].operation);
+    };
+    assert!(flags.create);
+    assert_eq!(flags.mode, 0o666);
+    let Operation::FsOpen { flags, .. } = &main[2].operation else {
+        panic!("expected a read-only fs_open, got {:?}", main[2].operation);
+    };
+    assert!(!flags.create);
+    assert_eq!(flags.mode, 0, "a non-creating open records no mode");
+}
+
 #[test]
 fn migration_never_rewrites_the_source_file() {
     for prior in [
@@ -119,6 +152,7 @@ fn migration_never_rewrites_the_source_file() {
         "format-2.patina",
         "format-3.patina",
         "format-4.patina",
+        "format-5.patina",
     ] {
         let path = fixture(prior);
         let before = std::fs::read(&path).unwrap();
@@ -232,12 +266,13 @@ fn malformed_fixture_is_rejected_as_a_parse_error() {
 fn migration_is_reachable_through_the_in_memory_transport_path() {
     // The same decode path backs `from_slice`, so transported prior-format
     // bundles migrate identically to file loads.
-    let current = TraceBundle::load(fixture("format-5.patina")).unwrap();
+    let current = TraceBundle::load(fixture("format-6.patina")).unwrap();
     for prior in [
         "format-1.patina",
         "format-2.patina",
         "format-3.patina",
         "format-4.patina",
+        "format-5.patina",
     ] {
         let bytes = std::fs::read(fixture(prior)).unwrap();
         let migrated = TraceBundle::from_slice(&bytes).unwrap();

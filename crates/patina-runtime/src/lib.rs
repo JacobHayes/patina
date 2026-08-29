@@ -5213,10 +5213,46 @@ recording was produced by a guest whose result type no longer matches this one"
         decode_metadata(&operation, outcome)
     }
 
-    pub fn fs_create_directory(&mut self, path: &str) -> Result<(), RuntimeError> {
+    /// `mkdir`: create a directory at the caller's requested mode. The driver
+    /// applies the modeled umask, exactly as the kernel applies the process
+    /// umask.
+    /// `fstat` on a descriptor the filesystem does not hold: a FIFO endpoint is
+    /// a pipe, and its node identity is all the deterministic filesystem gave
+    /// it. Reading the LIVE entry through the inode is what makes a `chmod`
+    /// after the open visible here, exactly as it is through a regular file's
+    /// descriptor. Latency and fault eligibility match
+    /// [`DeterministicContext::fs_fd_metadata`] because this IS that `fstat`,
+    /// not an extra lookup beside it.
+    pub fn fs_inode_metadata(&mut self, ino: u64) -> Result<FsMetadata, RuntimeError> {
+        if self.filesystem.is_none() {
+            return Err(EffectError::missing_driver("filesystem").into());
+        }
+        self.apply_fs_latency()?;
+        let operation = Operation::FsInodeMetadata { ino };
+        let expected = match self.filesystem_expected(&operation)? {
+            FilesystemExpected::Execute(expected) => expected,
+            FilesystemExpected::Captured(outcome) => return decode_metadata(&operation, outcome),
+        };
+        let result = self
+            .filesystem
+            .as_mut()
+            .expect("driver was checked")
+            .inode_metadata(ino);
+        let actual = match result {
+            Ok(metadata) => Outcome::Metadata(metadata),
+            Err(error) => Outcome::Error(error),
+        };
+        let outcome = self.reconcile(operation.clone(), expected, actual)?;
+        decode_metadata(&operation, outcome)
+    }
+
+    pub fn fs_create_directory(&mut self, path: &str, mode: u32) -> Result<(), RuntimeError> {
         self.filesystem_unit(
-            Operation::FsCreateDirectory { path: path.into() },
-            |filesystem| filesystem.create_directory(path),
+            Operation::FsCreateDirectory {
+                path: path.into(),
+                mode,
+            },
+            |filesystem| filesystem.create_directory(path, mode),
         )
     }
 
@@ -11153,7 +11189,7 @@ class=crash|0 class=buggify|0"
     fn context_from_config_filesystem_is_rooted_and_crashable() {
         let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
         // (a) Rooted: create a directory and a file under `/`, write, sync.
-        context.fs_create_directory("/state").unwrap();
+        context.fs_create_directory("/state", 0o777).unwrap();
         let root = context.fs_open("/", OpenFlags::read_only()).unwrap();
         context.fs_sync(root).unwrap();
         context.fs_close(root).unwrap();

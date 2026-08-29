@@ -13842,7 +13842,7 @@ fn native_run_json_envelope_has_stable_shape() {
     assert_eq!(value["result"], "ok");
     assert_eq!(value["exit_code"], 0);
     assert_eq!(value["seed"], 7);
-    assert_eq!(value["trace"]["format_version"], 5);
+    assert_eq!(value["trace"]["format_version"], 6);
     assert!(value["trace"]["event_count"].as_u64().unwrap() > 0);
     // The guest's PATINA_RESULT line is captured and surfaced as a marker.
     assert!(

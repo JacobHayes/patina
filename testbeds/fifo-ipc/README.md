@@ -22,7 +22,9 @@ modeling both halves and keeping them apart:
 | `read` / `write` | the same in-process pipe channel an anonymous `pipe(2)` uses |
 | `read` with no writer left | end-of-file |
 | `write` with no reader left | `EPIPE`, an errno and never a signal |
-| `unlink` | drops the name; open descriptors keep the pipe alive |
+| `fstat` on the descriptor | the entry's LIVE bits, read by inode — a `chmod` after the open shows through |
+| `link` / `linkat` | a second NAME for the same inode, so the two names are one pipe |
+| `unlink` | drops the name; a surviving link keeps the node, and open descriptors keep the pipe alive |
 
 ## Why it is the MRE
 

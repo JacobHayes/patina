@@ -5,10 +5,12 @@
 # The guest (src/main.rs) is a plain std program plus libc's `mkfifo`,
 # `mkfifoat` and `mknod`. A FIFO is the one entry kind whose NAME is filesystem
 # state while its BYTES are not, so it only works when both halves are modeled:
-# the entry lives in the deterministic filesystem (stat/lstat/getdents/rename/
-# unlink/chmod), and the transfer runs over the same in-process pipe machinery
-# an anonymous `pipe(2)` uses (blocking opens that park and wake through the
-# scheduler, EOF, EPIPE, EAGAIN).
+# the entry lives in the deterministic filesystem (stat/lstat/getdents/link/
+# rename/unlink/chmod, with `fstat` on a descriptor reading the LIVE entry by
+# inode), and the transfer runs over the same in-process pipe machinery an
+# anonymous `pipe(2)` uses (blocking opens that park and wake through the
+# scheduler, EOF, EPIPE, EAGAIN) — keyed by that same inode, so a hard link to a
+# FIFO is a second name for one pipe.
 #
 # Unlike the rustix-default and cap-std-dirfd MREs this one is NOT SUD-only: it
 # reaches every call through libc, so it runs on every platform the native shim
@@ -23,6 +25,11 @@
 #   [4] a recorded run replays byte-identically;
 #   [5] four different seeds all reach the same result (the FIFO model is a
 #       function of the program, not of the schedule the seed picks).
+#
+# The guest's own legs are listed in src/main.rs; two of them pin divergences
+# that slice 23 named and left: `fstat` on a FIFO descriptor reads the LIVE
+# entry (a `chmod` after the open shows through), and a hard link to a FIFO is a
+# second name for the same node and therefore the same pipe.
 #
 # RED demonstration: before `mkfifo` was interposed the guest could not even be
 # audited — `mkfifo` was an unsupported-symbol refusal (escape class
@@ -79,7 +86,7 @@ for stream in out err; do
     exit 1
   fi
 done
-expected='^FIFO_RESULT kind=fifo mode=0644 dents=pipe:fifo spellings=mkfifo,mkfifoat,mknod nonblock=open\+enxio rendezvous=fifo-bytes eof=0 epipe=1 eagain=1 rdwr=nowait denied=1 unlinked=alive$'
+expected='^FIFO_RESULT kind=fifo mode=0644 dents=pipe:fifo spellings=mkfifo,mkfifoat,mknod nonblock=open\+enxio rendezvous=fifo-bytes eof=0 epipe=1 eagain=1 rdwr=nowait denied=1 fstat=live linked=2names,shared unlinked=alive$'
 if ! grep -Eq "$expected" "$out/run1.out"; then
   echo "fifo-ipc: FAIL [2] unexpected FIFO_RESULT:" >&2
   cat "$out/run1.out" >&2; exit 1

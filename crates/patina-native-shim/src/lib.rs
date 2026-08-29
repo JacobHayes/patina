@@ -3553,7 +3553,7 @@ pub unsafe extern "C" fn patina_cpu_time_nanos(nanos: *mut u64) -> c_int {
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_open(path: *const c_char, flags: u32) -> c_int {
+pub unsafe extern "C" fn patina_open(path: *const c_char, flags: u32, mode: u32) -> c_int {
     if flags & !O_ALL != 0 {
         return fail(EINVAL);
     }
@@ -3563,13 +3563,19 @@ pub unsafe extern "C" fn patina_open(path: *const c_char, flags: u32) -> c_int {
     };
     let nofollow = flags & O_NOFOLLOW != 0;
     let nonblocking = flags & O_NONBLOCK != 0;
+    let creating = flags & O_CREATE != 0;
     let flags = OpenFlags {
         read: flags & O_READ != 0,
         write: flags & O_WRITE != 0,
-        create: flags & O_CREATE != 0,
+        create: creating,
         truncate: flags & O_TRUNCATE != 0,
         append: flags & O_APPEND != 0,
         exclusive: flags & O_EXCLUSIVE != 0,
+        // POSIX reads `open`'s third argument only when the call can create the
+        // entry; recording anything else here would put an argument in the trace
+        // the kernel never looked at. Callers pass 0 without `O_CREAT`, and the
+        // masking keeps a stray file-type bit out of the permission field.
+        mode: if creating { mode & 0o7777 } else { 0 },
     };
     if path == "/dev/urandom" {
         if flags.read
@@ -4132,21 +4138,32 @@ pub unsafe extern "C" fn patina_fd_metadata_full(
     mode: *mut u32,
 ) -> c_int {
     // A FIFO descriptor is a pipe endpoint, not a filesystem descriptor: the
-    // filesystem knows the ENTRY but holds no handle to ask about. The identity
-    // the open bound to the descriptor answers instead — which is also the one
-    // place this descriptor class diverges from a kernel's, since a `chmod` of
-    // the FIFO after the open is not reflected here.
+    // filesystem knows the ENTRY but holds no handle to ask about. What the
+    // descriptor holds is the NODE, so the filesystem is asked about the inode —
+    // which is what makes a `chmod` of the FIFO after the open visible here,
+    // exactly as it is through a regular file's descriptor, and what makes a
+    // hard-linked FIFO report its real link count.
+    //
+    // Once the LAST name for that inode is gone the filesystem has nothing left
+    // to answer with, while the descriptor (and its pipe) is still perfectly
+    // alive. A real kernel keeps the inode itself alive for exactly that case;
+    // here the last state the descriptor saw stands in, which is the closest
+    // honest answer available and strictly better than failing an `fstat` on a
+    // working descriptor.
     if let Some(identity) = thread::fifo_identity(raw_fd) {
-        return write_metadata_full(
+        let metadata = with_context(|context| context.fs_inode_metadata(identity.ino)).unwrap_or(
             patina_dst_abi::FsMetadata {
                 kind: FsEntryKind::Fifo,
                 len: 0,
                 ino: identity.ino,
-                nlink: 1,
+                nlink: 0,
                 atime_nanos: 0,
                 mtime_nanos: 0,
                 mode: identity.mode,
             },
+        );
+        return write_metadata_full(
+            metadata,
             kind,
             length,
             ino,
@@ -4334,14 +4351,26 @@ unsafe fn path_unit(
     }
 }
 
-/// Create a deterministic directory.
+/// Create a deterministic directory at the caller's requested `mode`.
+///
+/// The driver applies the modeled umask, exactly as the kernel applies the
+/// process umask to `mkdir(2)`.
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_mkdir(path: *const c_char) -> c_int {
-    // SAFETY: Forwarded from this function's C ABI contract.
-    unsafe { path_unit(path, Context::fs_create_directory) }
+pub unsafe extern "C" fn patina_mkdir(path: *const c_char, mode: u32) -> c_int {
+    let path = match path_from_c(path) {
+        Ok(path) => path,
+        Err(errno) => return fail(errno),
+    };
+    match with_context(|context| context.fs_create_directory(&path, mode)) {
+        Ok(()) => {
+            set_errno(0);
+            0
+        }
+        Err(errno) => fail(errno),
+    }
 }
 
 /// Remove a deterministic regular file.
@@ -8571,9 +8600,12 @@ mod thread {
         fifo: Option<FifoIdentity>,
     }
 
-    /// What a FIFO descriptor reports about its entry. Captured at `open`: the
-    /// inode is the descriptor's node identity, and the permission bits are the
-    /// ones the open was judged against.
+    /// What a FIFO descriptor knows about its entry. The inode is the
+    /// descriptor's NODE identity and is what `fstat` asks the filesystem about,
+    /// so a later `chmod` is visible; `mode` is only the value the open was
+    /// judged against, kept as the last-known answer for the window after the
+    /// entry's final name has been unlinked and the filesystem can no longer
+    /// speak for the node at all.
     #[derive(Clone, Copy)]
     pub(crate) struct FifoIdentity {
         pub(crate) ino: u64,

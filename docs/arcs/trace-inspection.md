@@ -207,7 +207,7 @@ Human output (one fact per line; absent optional records omitted):
 
 ```
 trace: out/gen-0042.patina
-format_version: 5
+format_version: 6
 fingerprint: patina-native+yieldpoints
 root_seed: 42
 decision_policy: splitmix64-v1

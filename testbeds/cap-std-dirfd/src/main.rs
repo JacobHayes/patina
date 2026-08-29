@@ -28,7 +28,7 @@ use cap_std::ambient_authority;
 use cap_std::fs::Dir;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
 /// The base directory the capability is rooted at. Created through std (so the
 /// libc interposer mints the entry), then opened as a capability.
@@ -179,10 +179,75 @@ fn mode_bits_are_modelled_and_enforced() -> &'static str {
     let file = format!("{ROOT}/data.txt");
     fs::write(&file, "visible").expect("create a file to change the mode of");
 
-    // Creation modes: 0o666/0o777 under the fixed 0o022 umask.
+    // Creation modes: the ordinary 0o666/0o777 requests, under the fixed 0o022
+    // umask.
     let mode_of = |path: &str| fs::metadata(path).expect("stat").permissions().mode() & 0o7777;
     assert_eq!(mode_of(&file), 0o644, "a new file must be 0o644");
     assert_eq!(mode_of(ROOT), 0o755, "a new directory must be 0o755");
+
+    // ---- the caller's OWN creation mode, and enforcement of it on reopen ----
+    // RED before creating calls carried a mode: `open(path, O_CREAT, mode)` and
+    // `mkdir(path, mode)` dropped the argument, so this file came back 0o644
+    // (writable) and this directory 0o755 (creatable in).
+    let strict = format!("{ROOT}/strict.txt");
+    let mut created = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o400)
+        .open(&strict)
+        .expect("create a file at mode 0o400");
+    created.write_all(b"once").expect("the creating handle is writable");
+    drop(created);
+    assert_eq!(mode_of(&strict), 0o400, "a creation mode must be the caller's");
+    // The mode the entry was CREATED with is what a later open is judged
+    // against: `r--` reads, and never writes.
+    assert_eq!(fs::read(&strict).expect("0o400 is readable"), b"once");
+    assert_eq!(
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&strict)
+            .expect_err("a file created 0o400 must not reopen for writing")
+            .kind(),
+        ErrorKind::PermissionDenied,
+    );
+    // An open of an EXISTING file never touches its mode, whatever third
+    // argument it carries: POSIX reads `open`'s mode only when it creates.
+    let kept = format!("{ROOT}/kept.txt");
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&kept)
+        .expect("create at mode 0o600");
+    assert_eq!(mode_of(&kept), 0o600);
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .mode(0o777)
+        .open(&kept)
+        .expect("reopen an existing file with O_CREAT");
+    assert_eq!(mode_of(&kept), 0o600, "an existing file's mode is not rewritten");
+    fs::File::open(&kept).expect("plain reopen");
+    assert_eq!(mode_of(&kept), 0o600);
+
+    let locked = format!("{ROOT}/locked");
+    fs::DirBuilder::new()
+        .mode(0o500)
+        .create(&locked)
+        .expect("mkdir at mode 0o500");
+    assert_eq!(mode_of(&locked), 0o500, "a directory's creation mode is the caller's");
+    assert_eq!(
+        fs::write(format!("{locked}/nope"), "x")
+            .expect_err("a directory created 0o500 has no `w`, so no new names")
+            .kind(),
+        ErrorKind::PermissionDenied,
+    );
+    // The umask is applied to the request, exactly as the kernel applies it.
+    fs::DirBuilder::new()
+        .mode(0o777)
+        .create(format!("{ROOT}/wide"))
+        .expect("mkdir 0o777");
+    assert_eq!(mode_of(&format!("{ROOT}/wide")), 0o755, "0o777 & ~0o022 is 0o755");
 
     // chmod 0o000: neither read nor write, and the refusal is PermissionDenied —
     // distinguishable from NotFound, which is the whole point of modeling it.
@@ -256,7 +321,7 @@ fn mode_bits_are_modelled_and_enforced() -> &'static str {
     );
     fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("restore the file mode");
     fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).expect("restore the dir mode");
-    "enforced"
+    "enforced+created"
 }
 
 /// The descriptor-identity leg: a directory descriptor names an INODE, so it

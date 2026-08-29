@@ -69,10 +69,12 @@ use patina_dst_driver_api::{DriverResult, FsDriver};
 use patina_dst_fs_mem::{FsSnapshot, MemFs};
 use patina_dst_rng_seeded::SplitMix64;
 
-/// The mode a reconstructed FIFO falls back to when neither the live image nor
-/// the durable baseline can say what it was — the same `0o666 & !0o022` a plain
-/// `mkfifo(path, 0o666)` produces.
-const FIFO_RECONSTRUCTION_MODE: u32 = 0o644;
+/// The creation modes crash reconstruction rebuilds entries at before restoring
+/// their recorded permission bits. Nothing is judged against them: every
+/// surviving entry's real mode is written back from the live image or the
+/// durable baseline immediately afterwards.
+const RECONSTRUCTION_FILE_MODE: u32 = 0o666;
+const RECONSTRUCTION_DIRECTORY_MODE: u32 = 0o777;
 
 /// Granularity at which a torn write reverts on crash.
 ///
@@ -164,12 +166,18 @@ struct Baseline {
     dirs: BTreeSet<String>,
     files: BTreeMap<String, BaselineFile>,
     symlinks: BTreeMap<String, String>,
-    /// Named pipes, by path, with their permission bits. A FIFO's NAME is
-    /// durable namespace state like any other; the bytes in flight through it
-    /// are process state, so nothing here holds them and a crash simply drops
-    /// them, exactly as a real one does.
-    fifos: BTreeMap<String, u32>,
+    /// Named pipes, by path, with their inode identity. A FIFO's NAME is
+    /// durable namespace state like any other, and its INODE is what a second
+    /// hard link names, so the two names come back as one node; the bytes in
+    /// flight through it are process state, so nothing here holds them and a
+    /// crash simply drops them, exactly as a real one does.
+    fifos: BTreeMap<String, u64>,
     times: BTreeMap<String, (u64, u64)>,
+    /// Permission bits, by path, for every entry that owns a mode (files,
+    /// directories and FIFOs; a symlink leaf has none). A mode is durable
+    /// metadata like a symlink's target — a crash reverts a lost entry, never a
+    /// surviving entry's bits to a per-kind constant.
+    modes: BTreeMap<String, u32>,
 }
 
 /// A configurable crash-consistency filesystem model.
@@ -313,8 +321,8 @@ impl CrashFs {
         CrashFsBuilder::new()
     }
 
-    fn with_policy(mut filesystem: MemFs, policy: CrashPolicy, seed: u64) -> Self {
-        let durable = enumerate(&mut filesystem);
+    fn with_policy(filesystem: MemFs, policy: CrashPolicy, seed: u64) -> Self {
+        let durable = enumerate(&filesystem);
         Self {
             live: filesystem,
             durable,
@@ -330,7 +338,7 @@ impl CrashFs {
 
     /// Make the entire live image durable as one deterministic checkpoint.
     pub fn checkpoint(&mut self) {
-        self.durable = enumerate(&mut self.live);
+        self.durable = enumerate(&self.live);
         self.staged_content.clear();
         self.pending.clear();
         self.last_write = None;
@@ -661,8 +669,8 @@ impl CrashFs {
             // target if still present, else the durable baseline target.
             let target = self
                 .live
-                .read_link(path)
-                .ok()
+                .symlink_target(path)
+                .map(str::to_owned)
                 .or_else(|| self.durable.symlinks.get(path).cloned())
                 .unwrap_or_default();
             symlink_targets.insert(path.clone(), target);
@@ -671,7 +679,7 @@ impl CrashFs {
         let mut next = MemFs::new();
         for dir in &dirs {
             if dir != "/" && next.metadata(dir).is_err() {
-                next.create_directory(dir)?;
+                next.create_directory(dir, RECONSTRUCTION_DIRECTORY_MODE)?;
             }
         }
         for (source_inode, paths) in &file_paths_by_inode {
@@ -688,19 +696,28 @@ impl CrashFs {
         for (path, target) in &symlink_targets {
             next.symlink(target, path)?;
         }
+        // A FIFO's name is what survives; its buffered bytes never were durable.
+        // Names that share an inode are ONE node — a hard link to a FIFO is the
+        // same pipe — so they are grouped exactly as a file's links are.
+        let mut fifo_paths_by_inode: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
         for path in &fifos {
-            // A FIFO's name is what survives; its buffered bytes never were
-            // durable. The mode is metadata like a symlink's target: the live
-            // value if the entry is still there, else the durable baseline.
-            let mode = self
-                .live
-                .metadata(path)
-                .ok()
-                .map(|metadata| metadata.mode)
-                .or_else(|| self.durable.fifos.get(path).copied())
-                .unwrap_or(FIFO_RECONSTRUCTION_MODE);
-            next.make_fifo(path, mode)?;
-            next.set_mode(path, mode)?;
+            let source_inode = self.fifo_source_inode(path).ok_or_else(|| {
+                EffectError::new(
+                    ErrorCode::InvalidState,
+                    format!("surviving fifo has no source inode: {path}"),
+                )
+            })?;
+            fifo_paths_by_inode
+                .entry(source_inode)
+                .or_default()
+                .insert(path.clone());
+        }
+        for paths in fifo_paths_by_inode.values() {
+            let first = paths.iter().next().expect("fifo group is non-empty");
+            next.make_fifo(first, RECONSTRUCTION_FILE_MODE)?;
+            for path in paths.iter().skip(1) {
+                next.link(first, path)?;
+            }
         }
         // Restore durable timestamps for the surviving baseline entries so
         // crash reconstruction does not silently reset metadata to zero.
@@ -709,8 +726,30 @@ impl CrashFs {
                 next.set_times_by_path(path, Some(*atime), Some(*mtime))?;
             }
         }
+        // Permission bits last, and deepest name first. A mode is metadata like
+        // a symlink's target — the live value if the entry is still there, else
+        // the durable baseline — and rebuilding at a per-kind constant would
+        // silently revert a `chmod`, or a `0o400` creation mode, that a real
+        // crash has no way to undo. Restrictive modes are written from the
+        // leaves up so a directory clamped to `0o500` cannot lock the walk out
+        // of the names beneath it.
+        let mut restored_modes: BTreeMap<String, u32> = BTreeMap::new();
+        for path in next.paths_with_modes() {
+            let mode = self
+                .live
+                .entry_metadata(&path)
+                .ok()
+                .map(|metadata| metadata.mode)
+                .or_else(|| self.durable.modes.get(&path).copied());
+            if let Some(mode) = mode {
+                restored_modes.insert(path, mode);
+            }
+        }
+        for (path, mode) in restored_modes.iter().rev() {
+            next.set_mode(path, *mode)?;
+        }
 
-        self.durable = enumerate(&mut next);
+        self.durable = enumerate(&next);
         // Descriptors survive the crash (see the pinning comment above), so the
         // handle table and the descriptor-to-path map both move across: a `sync`
         // on an fd opened before the crash must still be attributed to its file.
@@ -732,9 +771,22 @@ impl CrashFs {
         !self.decide(self.policy.directory_loss_probability)
     }
 
+    /// The inode a surviving FIFO name belongs to: the live one if the entry is
+    /// still there, else the durable baseline's. The mirror of
+    /// [`CrashFs::file_source_inode`], and for the same reason — two names of
+    /// one node must come back as one node.
+    fn fifo_source_inode(&mut self, path: &str) -> Option<u64> {
+        self.live
+            .entry_metadata(path)
+            .ok()
+            .filter(|metadata| metadata.kind == FsEntryKind::Fifo)
+            .map(|metadata| metadata.ino)
+            .or_else(|| self.durable.fifos.get(path).copied())
+    }
+
     fn file_source_inode(&mut self, path: &str) -> Option<u64> {
         self.live
-            .metadata(path)
+            .entry_metadata(path)
             .ok()
             .filter(|metadata| metadata.kind == FsEntryKind::File)
             .map(|metadata| metadata.ino)
@@ -837,8 +889,14 @@ impl FsDriver for CrashFs {
         self.live.fd_metadata(fd)
     }
 
-    fn create_directory(&mut self, path: &str) -> DriverResult<()> {
-        self.live.create_directory(path)?;
+    /// Reading an inode's live metadata touches no crash state: it is the same
+    /// query `fd_metadata` is, addressed by node instead of by descriptor.
+    fn inode_metadata(&mut self, ino: u64) -> DriverResult<FsMetadata> {
+        self.live.inode_metadata(ino)
+    }
+
+    fn create_directory(&mut self, path: &str, mode: u32) -> DriverResult<()> {
+        self.live.create_directory(path, mode)?;
         let normalized = normalize_entry_path(path).expect("create normalized the path already");
         self.journal(PendingKind::Create {
             path: normalized,
@@ -1123,66 +1181,48 @@ fn rewrite_prefix(set: &mut BTreeSet<String>, from: &str, to: &str) {
 }
 
 /// Snapshot a filesystem into a durable baseline: directories, file contents,
-/// symlink targets, and per-entry timestamps. Every entry kind is captured so
-/// none is silently lost across a crash.
-fn enumerate(fs: &mut MemFs) -> Baseline {
+/// symlink targets, permission bits, and per-entry timestamps. Every entry kind
+/// is captured so none is silently lost across a crash.
+///
+/// The image is read through [`MemFs::inventory`], the storage layer's own
+/// unenforced view. A crash journal is not a process: it must see a `0o000`
+/// directory's children, or a mode change would quietly delete data on the next
+/// crash.
+fn enumerate(fs: &MemFs) -> Baseline {
     let mut baseline = Baseline::default();
     baseline.dirs.insert("/".to_owned());
-    if let Ok(metadata) = fs.metadata("/") {
+    for (path, metadata) in fs.inventory() {
         baseline
             .times
-            .insert("/".to_owned(), (metadata.atime_nanos, metadata.mtime_nanos));
-    }
-    let mut stack = vec!["/".to_owned()];
-    while let Some(dir) = stack.pop() {
-        let entries = fs.read_directory(&dir).unwrap_or_default();
-        for entry in entries {
-            let child = child_path(&dir, &entry.name);
-            let metadata = fs.metadata(&child).ok();
-            if let Some(metadata) = metadata {
-                baseline
-                    .times
-                    .insert(child.clone(), (metadata.atime_nanos, metadata.mtime_nanos));
+            .insert(path.clone(), (metadata.atime_nanos, metadata.mtime_nanos));
+        // A symlink leaf has no mode of its own; every other kind does.
+        if metadata.kind != FsEntryKind::Symlink {
+            baseline.modes.insert(path.clone(), metadata.mode);
+        }
+        match metadata.kind {
+            FsEntryKind::Directory => {
+                baseline.dirs.insert(path);
             }
-            match entry.kind {
-                FsEntryKind::Directory => {
-                    baseline.dirs.insert(child.clone());
-                    stack.push(child);
-                }
-                FsEntryKind::File => {
-                    if let Some(metadata) = metadata {
-                        let contents = fs.contents(&child).map(<[u8]>::to_vec).unwrap_or_default();
-                        baseline.files.insert(
-                            child,
-                            BaselineFile {
-                                inode: metadata.ino,
-                                contents,
-                            },
-                        );
-                    }
-                }
-                FsEntryKind::Symlink => {
-                    let target = fs.read_link(&child).unwrap_or_default();
-                    baseline.symlinks.insert(child, target);
-                }
-                FsEntryKind::Fifo => {
-                    let mode = metadata
-                        .map(|metadata| metadata.mode)
-                        .unwrap_or(FIFO_RECONSTRUCTION_MODE);
-                    baseline.fifos.insert(child, mode);
-                }
+            FsEntryKind::File => {
+                let contents = fs.contents(&path).map(<[u8]>::to_vec).unwrap_or_default();
+                baseline.files.insert(
+                    path,
+                    BaselineFile {
+                        inode: metadata.ino,
+                        contents,
+                    },
+                );
+            }
+            FsEntryKind::Symlink => {
+                let target = fs.symlink_target(&path).unwrap_or_default().to_owned();
+                baseline.symlinks.insert(path, target);
+            }
+            FsEntryKind::Fifo => {
+                baseline.fifos.insert(path, metadata.ino);
             }
         }
     }
     baseline
-}
-
-fn child_path(dir: &str, name: &str) -> String {
-    if dir == "/" {
-        format!("/{name}")
-    } else {
-        format!("{dir}/{name}")
-    }
 }
 
 fn parent_path(path: &str) -> &str {
@@ -1246,6 +1286,7 @@ mod tests {
             truncate: false,
             append: false,
             exclusive: false,
+            mode: patina_dst_abi::CREATE_MODE_UNUSED,
         }
     }
 
@@ -1317,6 +1358,7 @@ mod tests {
             truncate: true,
             append: false,
             exclusive: false,
+            mode: patina_dst_abi::DEFAULT_FILE_CREATE_MODE,
         };
         let fd = fs.open("/db", read_write).unwrap();
         fs.set_len(fd, 4096).unwrap();
@@ -1450,8 +1492,8 @@ mod tests {
             .directory_loss_probability(1.0)
             .build()
             .unwrap();
-        fs.create_directory("/parent").unwrap();
-        fs.create_directory("/parent/child").unwrap();
+        fs.create_directory("/parent", 0o777).unwrap();
+        fs.create_directory("/parent/child", 0o777).unwrap();
         let fd = write(&mut fs, "/parent/child/file", b"data");
         fs.close(fd).unwrap();
         fs.symlink("file", "/parent/child/link").unwrap();
@@ -1783,7 +1825,7 @@ mod tests {
     #[test]
     fn directory_fd_sync_commits_namespace_operations() {
         let mut base = MemFs::new();
-        base.create_directory("/d").unwrap();
+        base.create_directory("/d", 0o777).unwrap();
         let mut fs = CrashFs::builder()
             .filesystem(base)
             .model_directory_durability(true)
@@ -1804,7 +1846,7 @@ mod tests {
     #[test]
     fn directory_entry_loss_requires_a_directory_fsync() {
         let mut base = MemFs::new();
-        base.create_directory("/d").unwrap();
+        base.create_directory("/d", 0o777).unwrap();
 
         // Without a directory fsync the created entry can be lost on crash.
         let mut fs = CrashFs::builder()
@@ -1907,7 +1949,7 @@ mod tests {
     #[test]
     fn symlink_and_read_link_work_through_crashfs_before_and_after_crash() {
         let mut base = MemFs::new();
-        base.create_directory("/d").unwrap();
+        base.create_directory("/d", 0o777).unwrap();
         let mut fs = CrashFs::builder().filesystem(base).build().unwrap();
         fs.symlink("/target", "/d/link").unwrap();
         assert_eq!(fs.read_link("/d/link").unwrap(), "/target");
@@ -1926,7 +1968,7 @@ mod tests {
     #[test]
     fn fifo_name_and_mode_survive_a_crash_once_the_parent_is_fsynced() {
         let mut base = MemFs::new();
-        base.create_directory("/d").unwrap();
+        base.create_directory("/d", 0o777).unwrap();
         let mut fs = CrashFs::builder().filesystem(base).build().unwrap();
         fs.make_fifo("/d/pipe", 0o666).unwrap();
         assert_eq!(fs.metadata("/d/pipe").unwrap().kind, FsEntryKind::Fifo);
@@ -1949,10 +1991,95 @@ mod tests {
         );
     }
 
+    /// A mode is durable metadata like a symlink's target. RED before crash
+    /// reconstruction restored permission bits: the rebuilt image created every
+    /// file at `0o644` and every directory at `0o755`, so a `chmod` — or a
+    /// creation mode a real crash has no way to undo — silently reverted.
+    #[test]
+    fn modes_survive_a_crash_for_every_kind_that_owns_one() {
+        let mut base = MemFs::new();
+        base.create_directory("/d", 0o777).unwrap();
+        let mut fs = CrashFs::builder().filesystem(base).build().unwrap();
+        let fd = fs
+            .open(
+                "/d/file",
+                OpenFlags {
+                    mode: 0o604,
+                    ..OpenFlags::create_truncate_write()
+                },
+            )
+            .unwrap();
+        fs.write(fd, b"bytes").unwrap();
+        fs.sync(fd).unwrap();
+        fs.close(fd).unwrap();
+        fs.create_directory("/d/sub", 0o700).unwrap();
+        fs.make_fifo("/d/pipe", 0o660).unwrap();
+        fs.sync_directory("/d").unwrap();
+        fs.sync_directory("/d/sub").unwrap();
+
+        fs.crash().unwrap();
+        assert_eq!(fs.metadata("/d/file").unwrap().mode, 0o604);
+        assert_eq!(fs.metadata("/d/sub").unwrap().mode, 0o700);
+        assert_eq!(fs.metadata("/d/pipe").unwrap().mode, 0o640);
+        assert_eq!(fs.metadata("/d").unwrap().mode, 0o755);
+    }
+
+    /// A directory clamped so tightly that the reconstruction walk could not
+    /// see inside it still comes back with every child intact: permission bits
+    /// are written from the leaves up, after the namespace is rebuilt.
+    #[test]
+    fn a_restrictive_directory_mode_survives_without_hiding_its_children() {
+        let mut base = MemFs::new();
+        base.create_directory("/d", 0o777).unwrap();
+        let mut fs = CrashFs::builder().filesystem(base).build().unwrap();
+        fs.create_directory("/d/vault", 0o777).unwrap();
+        let fd = fs
+            .open("/d/vault/secret", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.write(fd, b"inner").unwrap();
+        fs.sync(fd).unwrap();
+        fs.close(fd).unwrap();
+        fs.sync_directory("/d").unwrap();
+        fs.sync_directory("/d/vault").unwrap();
+        fs.set_mode("/d/vault", 0o000).unwrap();
+
+        fs.crash().unwrap();
+        assert_eq!(fs.metadata("/d/vault").unwrap().mode, 0o000);
+        // The child is there; only the mode keeps the guest out of it, which is
+        // an `EACCES` and never a `NotFound`.
+        assert_eq!(
+            fs.metadata("/d/vault/secret").unwrap_err().code,
+            ErrorCode::Denied
+        );
+        fs.set_mode("/d/vault", 0o755).unwrap();
+        assert_eq!(fs.contents("/d/vault/secret").unwrap(), b"inner");
+    }
+
+    /// Two names for one FIFO are one node, and a crash must not split them
+    /// into two pipes. The file path already grouped by inode; the FIFO path
+    /// now does too.
+    #[test]
+    fn hard_linked_fifos_come_back_from_a_crash_as_one_node() {
+        let mut base = MemFs::new();
+        base.create_directory("/d", 0o777).unwrap();
+        let mut fs = CrashFs::builder().filesystem(base).build().unwrap();
+        fs.make_fifo("/d/pipe", 0o666).unwrap();
+        fs.link("/d/pipe", "/d/alias").unwrap();
+        fs.sync_directory("/d").unwrap();
+
+        fs.crash().unwrap();
+        let first = fs.metadata("/d/pipe").unwrap();
+        let second = fs.metadata("/d/alias").unwrap();
+        assert_eq!(first.kind, FsEntryKind::Fifo);
+        assert_eq!(second.kind, FsEntryKind::Fifo);
+        assert_eq!(first.ino, second.ino);
+        assert_eq!(first.nlink, 2);
+    }
+
     #[test]
     fn an_unsynced_fifo_creation_is_lost_like_any_other_name() {
         let mut base = MemFs::new();
-        base.create_directory("/d").unwrap();
+        base.create_directory("/d", 0o777).unwrap();
         let mut fs = CrashFs::builder()
             .filesystem(base)
             .seed(7)
@@ -1981,7 +2108,7 @@ mod tests {
 
     fn symlink_after_crash(sync_dir: bool, probability: f64, seed: u64) -> Option<String> {
         let mut base = MemFs::new();
-        base.create_directory("/d").unwrap();
+        base.create_directory("/d", 0o777).unwrap();
         let mut fs = CrashFs::builder()
             .filesystem(base)
             .seed(seed)
@@ -2040,8 +2167,8 @@ mod tests {
         seed: u64,
     ) -> (bool, bool) {
         let mut base = MemFs::new();
-        base.create_directory("/src").unwrap();
-        base.create_directory("/dst").unwrap();
+        base.create_directory("/src", 0o777).unwrap();
+        base.create_directory("/dst", 0o777).unwrap();
         let mut fs = CrashFs::builder()
             .filesystem(base)
             .seed(seed)

@@ -141,7 +141,12 @@ int32_t patina_cpu_time_nanos(uint64_t *nanos);
  * the readiness reactors route it to the pipe class by table membership, exactly
  * as they route a pipe(2) endpoint.
  */
-int32_t patina_open(const char *path, uint32_t flags);
+/*
+ * `mode` is POSIX open(2)'s third argument: the creation mode, read only when
+ * the flags can create the entry. A caller without PATINA_O_CREATE passes 0, so
+ * the recorded operation carries no argument the kernel would not have read.
+ */
+int32_t patina_open(const char *path, uint32_t flags, uint32_t mode);
 intptr_t patina_read(int32_t fd, void *destination, size_t length);
 intptr_t patina_write(int32_t fd, const void *source, size_t length);
 intptr_t patina_pread(int32_t fd, void *destination, size_t length, int64_t offset);
@@ -258,7 +263,8 @@ int32_t patina_sched_yield(void);
  * carrying the instrumented guest site for divergence diagnostics.
  */
 void patina_yield_point(const void *site);
-int32_t patina_mkdir(const char *path);
+/* `mode` is mkdir(2)'s creation mode; the driver applies the modeled umask. */
+int32_t patina_mkdir(const char *path, uint32_t mode);
 int32_t patina_unlink(const char *path);
 int32_t patina_rmdir(const char *path);
 int32_t patina_rename(const char *from, const char *to);

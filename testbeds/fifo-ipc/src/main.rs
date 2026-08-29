@@ -21,7 +21,14 @@
 //!  7. A non-blocking read with no data and a live writer is `EAGAIN`.
 //!  8. `O_RDWR` never waits (Linux's behavior for a FIFO).
 //!  9. A `0o000` FIFO is `PermissionDenied`, distinguishably from `NotFound`.
-//! 10. `unlink` removes the name while open descriptors keep the pipe alive.
+//! 10. `fstat` on an open FIFO descriptor reads the LIVE entry, so a `chmod`
+//!     after the open is visible through it (as on Linux).
+//! 11. A hard link to a FIFO is a second NAME for the same node — same inode,
+//!     link count 2 — and therefore the same pipe: bytes written through one
+//!     name are read through the other.
+//! 12. `unlink` removes a name while open descriptors keep the pipe alive; the
+//!     surviving link keeps the node, and the last unlink leaves the descriptor
+//!     working.
 
 use std::fs::{self, OpenOptions, Permissions};
 use std::io::{ErrorKind, Read, Write};
@@ -67,11 +74,12 @@ fn main() {
     // ---- [2] the other two creation spellings, and a refused device node ----
     let at_pipe = PathBuf::from(ROOT).join("at-pipe");
     make_fifo_at(&at_pipe, 0o600);
-    assert!(
-        fs::symlink_metadata(&at_pipe)
-            .expect("stat the mkfifoat FIFO")
-            .file_type()
-            .is_fifo()
+    let at_metadata = fs::symlink_metadata(&at_pipe).expect("stat the mkfifoat FIFO");
+    assert!(at_metadata.file_type().is_fifo());
+    assert_eq!(
+        at_metadata.permissions().mode() & 0o7777,
+        0o600,
+        "mkfifoat's mode is the caller's, under the modeled umask"
     );
     let node_pipe = PathBuf::from(ROOT).join("node-pipe");
     make_node_fifo(&node_pipe, 0o644);
@@ -219,7 +227,47 @@ fn main() {
         0o644
     );
 
-    // ---- [10] unlink drops the NAME; open descriptors keep the pipe ----
+    // ---- [10] fstat on the DESCRIPTOR reads the live entry, not a snapshot ----
+    // A descriptor names a NODE. `chmod` changes the node, so the change shows
+    // through the descriptor exactly as it does for a regular file's fd.
+    // RED before this: the identity captured at open answered, so the mode read
+    // back as whatever it was when the descriptor was created.
+    let opened_mode = handle_mode(&both);
+    assert_eq!(opened_mode, 0o644, "the FIFO descriptor reports the entry mode");
+    fs::set_permissions(&pipe, Permissions::from_mode(0o600)).expect("chmod after the open");
+    let live_mode = handle_mode(&both);
+    assert_eq!(
+        live_mode, 0o600,
+        "fstat on a FIFO descriptor must read the LIVE entry mode, got {live_mode:o}"
+    );
+    fs::set_permissions(&pipe, Permissions::from_mode(0o644)).expect("restore the mode");
+
+    // ---- [11] a hard link to a FIFO is a second name for the SAME pipe ----
+    // RED before FIFOs were inode-backed: the driver's link table is
+    // inode-keyed and a FIFO had no inode in it, so this was NotFound.
+    let alias = PathBuf::from(ROOT).join("alias");
+    fs::hard_link(&pipe, &alias).expect("hard-link a FIFO");
+    let alias_metadata = fs::symlink_metadata(&alias).expect("stat the linked name");
+    assert!(alias_metadata.file_type().is_fifo(), "a link to a FIFO is a FIFO");
+    assert_eq!(alias_metadata.ino(), ino, "a hard link is the same inode");
+    assert_eq!(alias_metadata.nlink(), 2, "two names, one node");
+    // Same inode, same pipe: `both` is still an open reader, so a writer on the
+    // OTHER name meets it on one channel.
+    let mut aliased_writer = OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&alias)
+        .expect("a writer on the linked name meets the reader on the original");
+    aliased_writer
+        .write_all(b"linked")
+        .expect("write through the linked name");
+    drop(aliased_writer);
+    let mut through_link = [0u8; 6];
+    both.read_exact(&mut through_link)
+        .expect("the original name reads what the link wrote");
+    assert_eq!(&through_link, b"linked", "a hard link must share the channel");
+
+    // ---- [12] unlink drops a NAME; the node lives while any name or fd holds it ----
     fs::remove_file(&pipe).expect("unlink a FIFO with an open descriptor");
     assert_eq!(
         fs::symlink_metadata(&pipe)
@@ -227,8 +275,14 @@ fn main() {
             .kind(),
         ErrorKind::NotFound
     );
+    let surviving = fs::symlink_metadata(&alias).expect("the other name still names the node");
+    assert_eq!(surviving.ino(), ino, "unlinking one name keeps the node");
+    assert_eq!(surviving.nlink(), 1, "one name left");
+    assert_eq!(handle_mode(&both), 0o644, "the descriptor still reads the entry");
+
+    fs::remove_file(&alias).expect("unlink the last name");
     both.write_all(b"after-unlink")
-        .expect("an open FIFO descriptor outlives its name");
+        .expect("an open FIFO descriptor outlives its names");
     let mut tail = [0u8; 12];
     both.read_exact(&mut tail)
         .expect("and still carries bytes");
@@ -238,9 +292,18 @@ fn main() {
     println!(
         "FIFO_RESULT kind=fifo mode=0644 dents=pipe:fifo spellings=mkfifo,mkfifoat,mknod \
          nonblock=open+enxio rendezvous={} eof=0 epipe=1 eagain=1 rdwr=nowait denied=1 \
-         unlinked=alive",
+         fstat=live linked=2names,shared unlinked=alive",
         String::from_utf8_lossy(&received)
     );
+}
+
+/// The permission bits `fstat` reports for an open descriptor.
+fn handle_mode(file: &fs::File) -> u32 {
+    file.metadata()
+        .expect("fstat the FIFO descriptor")
+        .permissions()
+        .mode()
+        & 0o7777
 }
 
 /// `mkfifo(3)`. std has no wrapper, so this is the one place libc is needed.

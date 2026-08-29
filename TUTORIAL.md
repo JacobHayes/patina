@@ -332,7 +332,7 @@ Any verb accepts `--format json`. Most emit one result envelope on stdout (schem
 ```
 $ cargo patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina --format json
 {"schema":"patina.result/v1","verb":"run","family":"native","result":"violation",
- "exit_code":1,"seed":5,"trace":{"path":"./bug.patina","format_version":5,
+ "exit_code":1,"seed":5,"trace":{"path":"./bug.patina","format_version":6,
  "event_count":...,"metadata":{...}},"markers":["..."],
  "result_line":"BUG_CAUGHT reordered ledger=[0, 1, 3, 2, 4, 6, 5, 7]", ...}
 ```

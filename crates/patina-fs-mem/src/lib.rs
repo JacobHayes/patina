@@ -6,7 +6,7 @@ pub mod snapshot;
 pub use image::{FsImage, FsImageEntry, FsImageError};
 pub use snapshot::{FsSnapshot, FsSnapshotError};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use patina_dst_abi::{
     EffectError, ErrorCode, Fd, FsDirectoryEntry, FsEntryKind, FsMetadata, OpenFlags, SeekWhence,
@@ -73,7 +73,7 @@ struct EntryMetadata {
 /// A deterministic in-memory filesystem keyed by normalized absolute paths.
 ///
 /// It models regular files, hard links, inert symlink leaves, named pipes
-/// (`mkfifo` — the NAME and its mode; the bytes belong to the openers' pipe
+/// (`mkfifo` — the NAME and its inode; the bytes belong to the openers' pipe
 /// channel, not to the filesystem), directories, cursors, basic metadata, and
 /// POSIX permission bits. MemFs has no clock, so
 /// access and modification times are not auto-updated by reads or writes;
@@ -81,10 +81,13 @@ struct EntryMetadata {
 ///
 /// # Permissions
 ///
-/// Every entry carries a mode. New files are `0o644` and new directories
-/// `0o755` — the POSIX creation modes `0o666`/`0o777` under the fixed `0o022`
-/// umask this filesystem models — and symlink leaves are the conventional
-/// `0o777`. The guest is a single non-root identity (uid/gid 1000, the value the
+/// Every entry carries a mode. A creating call brings its own: `open`'s third
+/// argument, `mkdir`'s, and `mkfifo`'s all cross this boundary and are stored
+/// under the fixed `0o022` umask this filesystem models, exactly as the kernel
+/// applies the process umask — so the ordinary `0o666`/`0o777` requests produce
+/// the familiar `0o644`/`0o755` while a caller asking for `0o400` gets `0o400`.
+/// An `open` of an EXISTING entry never touches its mode. Symlink leaves are
+/// the conventional `0o777`. The guest is a single non-root identity (uid/gid 1000, the value the
 /// native shim's `getuid` reports) and owns every entry, so enforcement reads
 /// the OWNER triad: read needs `r`, write needs `w`, resolving a path through a
 /// directory needs `x` on that directory, listing one needs `r`, and creating,
@@ -96,10 +99,12 @@ pub struct MemFs {
     inodes: BTreeMap<InodeId, Inode>,
     symlinks: BTreeMap<String, String>,
     symlink_metadata: BTreeMap<String, EntryMetadata>,
-    /// Named pipes, by path. A FIFO is a NAME and a mode and nothing else: the
-    /// bytes that flow through it are not filesystem state, so no inode and no
-    /// contents hang off one here.
-    fifos: BTreeMap<String, EntryMetadata>,
+    /// Named pipes, by path, each naming an [`Inode`] exactly as a file name
+    /// does. A FIFO holds no bytes — those live in the openers' pipe channel,
+    /// not in the filesystem — but it IS an inode: that is what a second hard
+    /// link to one names, what its mode and link count belong to, and what the
+    /// pipe channel is keyed by, so two names for one FIFO meet on one pipe.
+    fifos: BTreeMap<String, InodeId>,
     directories: BTreeMap<String, EntryMetadata>,
     handles: BTreeMap<Fd, DescriptionId>,
     descriptions: BTreeMap<DescriptionId, Description>,
@@ -179,6 +184,57 @@ impl MemFs {
             .collect()
     }
 
+    /// Every entry in the image with its metadata, in path order, WITHOUT
+    /// permission enforcement.
+    ///
+    /// A crash model is the storage layer, not the guest. Permission bits gate a
+    /// PROCESS's access; a power cut does not consult them, and neither does the
+    /// journal that decides what survived one. Walking the enforced
+    /// `read_directory`/`metadata` here would make a `0o000` directory look
+    /// EMPTY and silently drop every child beneath it on the next crash — a
+    /// mode change quietly deleting data.
+    pub fn inventory(&self) -> Vec<(String, FsMetadata)> {
+        let mut paths: BTreeSet<&String> = self.directories.keys().collect();
+        paths.extend(self.files.keys());
+        paths.extend(self.symlinks.keys());
+        paths.extend(self.fifos.keys());
+        paths
+            .into_iter()
+            .map(|path| {
+                let metadata = self
+                    .metadata_for_path(path)
+                    .expect("an enumerated path has metadata");
+                (path.clone(), metadata)
+            })
+            .collect()
+    }
+
+    /// The metadata of one entry WITHOUT permission enforcement — the storage
+    /// layer's own view, for the same reason [`MemFs::inventory`] has one.
+    pub fn entry_metadata(&self, path: &str) -> DriverResult<FsMetadata> {
+        let path = normalize_entry_path(path)?;
+        self.metadata_for_path(&path)
+    }
+
+    /// A symlink's stored target WITHOUT permission enforcement.
+    pub fn symlink_target(&self, path: &str) -> Option<&str> {
+        let path = normalize_entry_path(path).ok()?;
+        self.symlinks.get(&path).map(String::as_str)
+    }
+
+    /// Every path that OWNS a mode — directories, files and FIFOs — in path
+    /// order. A symlink leaf is excluded: Linux ignores a link's own mode and
+    /// this filesystem has none to set.
+    ///
+    /// A crash model reads this to write permission bits back onto a
+    /// reconstructed image without inventing a per-kind constant.
+    pub fn paths_with_modes(&self) -> Vec<String> {
+        let mut paths: BTreeSet<&String> = self.directories.keys().collect();
+        paths.extend(self.files.keys());
+        paths.extend(self.fifos.keys());
+        paths.into_iter().cloned().collect()
+    }
+
     /// Carry `previous`'s open descriptor table onto this image.
     ///
     /// A crash model rebuilds the post-crash filesystem as a fresh [`MemFs`];
@@ -242,8 +298,13 @@ impl MemFs {
         if let Some(metadata) = self.directories.get(path) {
             return Some(metadata.mode);
         }
-        if let Some(metadata) = self.fifos.get(path) {
-            return Some(metadata.mode);
+        if let Some(inode) = self.fifos.get(path) {
+            return Some(
+                self.inodes
+                    .get(inode)
+                    .expect("fifo references an inode")
+                    .mode,
+            );
         }
         self.symlinks.get(path).map(|_| SYMLINK_MODE)
     }
@@ -470,7 +531,7 @@ impl FsDriver for MemFs {
             }
             return self.allocate_handle(path, 0, true, false, false, FsEntryKind::Directory);
         }
-        if let Some(metadata) = self.fifos.get(&path).copied() {
+        if let Some(inode) = self.fifos.get(&path).copied() {
             // The permission decision belongs HERE — one enforcement point for
             // every kind — even though the descriptor itself is not a filesystem
             // descriptor. Opening a FIFO for reading needs `r` and for writing
@@ -481,10 +542,15 @@ impl FsDriver for MemFs {
                     format!("virtual filesystem entry already exists: {path}"),
                 ));
             }
-            if flags.read && !owner_allows(metadata.mode, READ) {
+            let mode = self
+                .inodes
+                .get(&inode)
+                .expect("fifo references an inode")
+                .mode;
+            if flags.read && !owner_allows(mode, READ) {
                 return Err(denied(&path, "read"));
             }
-            if flags.write && !owner_allows(metadata.mode, WRITE) {
+            if flags.write && !owner_allows(mode, WRITE) {
                 return Err(denied(&path, "write"));
             }
             // A FIFO carries no filesystem bytes, so there is no filesystem
@@ -509,7 +575,10 @@ impl FsDriver for MemFs {
             if flags.create {
                 self.check_directory_write(parent_path(&path))?;
                 self.insert_parent_directories(&path);
-                let inode = self.allocate_inode(Vec::new(), FILE_MODE);
+                // The caller's own creation mode, under the modeled umask —
+                // `open`'s third argument, which the kernel reads only on the
+                // branch that actually creates the entry.
+                let inode = self.allocate_inode(Vec::new(), flags.mode & !UMASK);
                 self.files.insert(path.clone(), inode);
             } else {
                 return Err(not_found(&path));
@@ -736,7 +805,28 @@ impl FsDriver for MemFs {
         self.metadata_for_path(&path)
     }
 
-    fn create_directory(&mut self, path: &str) -> DriverResult<()> {
+    /// The LIVE metadata of the entry an inode names — what `fstat` on a FIFO
+    /// descriptor reads, since the pipe endpoint holds a node and no filesystem
+    /// handle. Any of the node's names answers identically (a mode, a link count
+    /// and a timestamp belong to the inode, not to a name), so the first in path
+    /// order is taken for determinism. A node with no names left is `NotFound`:
+    /// the filesystem has nothing to say about an inode only a descriptor holds.
+    fn inode_metadata(&mut self, ino: u64) -> DriverResult<FsMetadata> {
+        let path = self
+            .fifos
+            .iter()
+            .chain(self.files.iter())
+            .find_map(|(path, inode)| (*inode == ino).then(|| path.clone()))
+            .ok_or_else(|| {
+                EffectError::new(
+                    ErrorCode::NotFound,
+                    format!("no virtual filesystem name references inode {ino}"),
+                )
+            })?;
+        self.metadata_for_path(&path)
+    }
+
+    fn create_directory(&mut self, path: &str, mode: u32) -> DriverResult<()> {
         let path = normalize_entry_path(path)?;
         self.resolve_guard(&path)?;
         self.check_directory_write(parent_path(&path))?;
@@ -753,7 +843,8 @@ impl FsDriver for MemFs {
                 format!("virtual parent directory does not exist: {parent}"),
             ));
         }
-        let metadata = self.allocate_entry_metadata(DIRECTORY_MODE);
+        // `mkdir`'s mode argument, under the modeled umask.
+        let metadata = self.allocate_entry_metadata(mode & !UMASK);
         self.directories.insert(path, metadata);
         Ok(())
     }
@@ -775,11 +866,11 @@ impl FsDriver for MemFs {
                 format!("virtual parent directory does not exist: {parent}"),
             ));
         }
-        // The caller's mode IS honored here (unlike `open`'s and `mkdir`'s,
-        // which this boundary does not carry) with the modeled umask applied,
-        // exactly as the kernel applies the process umask to `mkfifo`.
-        let metadata = self.allocate_entry_metadata(mode & !UMASK);
-        self.fifos.insert(path, metadata);
+        // A FIFO is an inode with no bytes: hard links, the link count, the
+        // mode and the identity the openers' pipe channel is keyed by all live
+        // there, exactly as they do for a regular file.
+        let inode = self.allocate_inode(Vec::new(), mode & !UMASK);
+        self.fifos.insert(path, inode);
         Ok(())
     }
 
@@ -799,8 +890,10 @@ impl FsDriver for MemFs {
         }
         // A FIFO name goes away on unlink whatever is open on it: the openers
         // hold the pipe, not the name, so nothing is lost by unlinking one and
-        // the kernel does not refuse it either.
-        if self.fifos.remove(&path).is_some() {
+        // the kernel does not refuse it either. The inode outlives the name only
+        // as long as another link names it.
+        if let Some(inode) = self.fifos.remove(&path) {
+            self.decrement_inode_link(inode);
             return Ok(());
         }
         let inode = self.file_inode(&path)?;
@@ -909,10 +1002,14 @@ impl FsDriver for MemFs {
             );
             return Ok(());
         }
-        if let Some(metadata) = self.fifos.get_mut(&path) {
+        if let Some(inode) = self.fifos.get(&path).copied() {
+            let inode = self
+                .inodes
+                .get_mut(&inode)
+                .expect("fifo references an inode");
             Self::set_times_on_metadata(
-                &mut metadata.atime_nanos,
-                &mut metadata.mtime_nanos,
+                &mut inode.atime_nanos,
+                &mut inode.mtime_nanos,
                 atime_nanos,
                 mtime_nanos,
             );
@@ -1054,12 +1151,7 @@ impl FsDriver for MemFs {
                     format!("virtual rename destination is a directory: {to}"),
                 ));
             }
-            if let Some(replaced) = self.files.remove(&to) {
-                self.decrement_inode_link(replaced);
-            }
-            self.symlinks.remove(&to);
-            self.symlink_metadata.remove(&to);
-            self.fifos.remove(&to);
+            self.unlink_leaf_at(&to);
             self.files.insert(to.clone(), inode);
             for description in self
                 .descriptions
@@ -1083,12 +1175,7 @@ impl FsDriver for MemFs {
                     format!("virtual rename destination is a directory: {to}"),
                 ));
             }
-            if let Some(replaced) = self.files.remove(&to) {
-                self.decrement_inode_link(replaced);
-            }
-            self.symlinks.remove(&to);
-            self.symlink_metadata.remove(&to);
-            self.fifos.remove(&to);
+            self.unlink_leaf_at(&to);
             self.symlinks.insert(to.clone(), target);
             self.symlink_metadata.insert(to, metadata);
             return Ok(());
@@ -1096,21 +1183,16 @@ impl FsDriver for MemFs {
         // A FIFO renames like any other leaf: the NAME moves and the entry keeps
         // its inode identity and mode. Anything already open on it holds the
         // pipe, not the name, so nothing about the transfer changes.
-        if let Some(metadata) = self.fifos.remove(&from) {
+        if let Some(inode) = self.fifos.remove(&from) {
             if self.directories.contains_key(&to) {
-                self.fifos.insert(from, metadata);
+                self.fifos.insert(from, inode);
                 return Err(EffectError::new(
                     ErrorCode::IsDirectory,
                     format!("virtual rename destination is a directory: {to}"),
                 ));
             }
-            if let Some(replaced) = self.files.remove(&to) {
-                self.decrement_inode_link(replaced);
-            }
-            self.symlinks.remove(&to);
-            self.symlink_metadata.remove(&to);
-            self.fifos.remove(&to);
-            self.fifos.insert(to, metadata);
+            self.unlink_leaf_at(&to);
+            self.fifos.insert(to, inode);
             return Ok(());
         }
         if !self.directories.contains_key(&from) {
@@ -1141,6 +1223,12 @@ impl FsDriver for MemFs {
             .filter(|path| path.starts_with(&prefix))
             .cloned()
             .collect::<Vec<_>>();
+        let moved_fifos = self
+            .fifos
+            .keys()
+            .filter(|path| path.starts_with(&prefix))
+            .cloned()
+            .collect::<Vec<_>>();
         for path in moved_directories {
             let times = self
                 .directories
@@ -1163,6 +1251,11 @@ impl FsDriver for MemFs {
             let moved = format!("{to}{}", &path[from.len()..]);
             self.symlinks.insert(moved.clone(), target);
             self.symlink_metadata.insert(moved, metadata);
+        }
+        for path in moved_fifos {
+            let inode = self.fifos.remove(&path).expect("fifo was enumerated");
+            self.fifos
+                .insert(format!("{to}{}", &path[from.len()..]), inode);
         }
         for description in self
             .descriptions
@@ -1203,6 +1296,18 @@ impl FsDriver for MemFs {
             self.symlinks.insert(to.clone(), target);
             let metadata = self.allocate_entry_metadata(SYMLINK_MODE);
             self.symlink_metadata.insert(to, metadata);
+            return Ok(());
+        }
+        // A hard link to a FIFO is a second NAME for the same inode, and the
+        // inode is what the openers' pipe channel is keyed by — so the two names
+        // are one pipe, as they are on a real kernel. Nothing else differs from
+        // a file's link: the count lives on the inode either way.
+        if let Some(inode) = self.fifos.get(&from).copied() {
+            self.inodes
+                .get_mut(&inode)
+                .expect("fifo references an inode")
+                .links += 1;
+            self.fifos.insert(to, inode);
             return Ok(());
         }
         let inode = self.file_inode(&from)?;
@@ -1284,6 +1389,20 @@ impl FsDriver for MemFs {
 }
 
 impl MemFs {
+    /// Drop whatever LEAF name sits at `path` — a file, a symlink, or a FIFO —
+    /// releasing its inode reference. The one place a rename's destination is
+    /// overwritten, so no kind can be dropped without its link count following.
+    fn unlink_leaf_at(&mut self, path: &str) {
+        if let Some(replaced) = self.files.remove(path) {
+            self.decrement_inode_link(replaced);
+        }
+        self.symlinks.remove(path);
+        self.symlink_metadata.remove(path);
+        if let Some(replaced) = self.fifos.remove(path) {
+            self.decrement_inode_link(replaced);
+        }
+    }
+
     /// Write `mode`'s permission bits onto the entry `path` names.
     fn apply_mode(&mut self, path: &str, mode: u32) -> DriverResult<()> {
         let mode = mode & MODE_MASK;
@@ -1298,8 +1417,11 @@ impl MemFs {
             metadata.mode = mode;
             return Ok(());
         }
-        if let Some(metadata) = self.fifos.get_mut(path) {
-            metadata.mode = mode;
+        if let Some(inode) = self.fifos.get(path).copied() {
+            self.inodes
+                .get_mut(&inode)
+                .expect("fifo references an inode")
+                .mode = mode;
             return Ok(());
         }
         Err(not_found(path))
@@ -1332,15 +1454,16 @@ impl MemFs {
                 mode: metadata.mode,
             });
         }
-        if let Some(metadata) = self.fifos.get(path) {
+        if let Some(inode_id) = self.fifos.get(path) {
+            let inode = self.inodes.get(inode_id).expect("fifo references an inode");
             return Ok(FsMetadata {
                 kind: FsEntryKind::Fifo,
                 len: 0,
-                ino: metadata.ino,
-                nlink: 1,
-                atime_nanos: metadata.atime_nanos,
-                mtime_nanos: metadata.mtime_nanos,
-                mode: metadata.mode,
+                ino: *inode_id,
+                nlink: inode.links,
+                atime_nanos: inode.atime_nanos,
+                mtime_nanos: inode.mtime_nanos,
+                mode: inode.mode,
             });
         }
         if let Some(target) = self.symlinks.get(path) {
@@ -1446,7 +1569,7 @@ mod tests {
     #[test]
     fn modes_default_to_the_umasked_creation_modes_and_chmod_changes_them() {
         let mut fs = MemFs::new();
-        fs.create_directory("/perm").unwrap();
+        fs.create_directory("/perm", 0o777).unwrap();
         let fd = fs
             .open("/perm/file", OpenFlags::create_truncate_write())
             .unwrap();
@@ -1469,6 +1592,208 @@ mod tests {
         // Only the permission bits are stored; file-type bits are the kind's.
         fs.set_mode("/perm/file", 0o100_644).unwrap();
         assert_eq!(fs.metadata("/perm/file").unwrap().mode, 0o644);
+    }
+
+    /// RED before creating calls carried a mode: `open(path, O_CREAT, mode)`
+    /// and `mkdir(path, mode)` dropped the argument and every new entry got the
+    /// fixed umasked default for its kind, so a file asked for at `0o400` came
+    /// back writable and a directory asked for at `0o500` accepted new names.
+    #[test]
+    fn a_creating_call_gets_the_mode_it_asked_for_and_the_bits_are_enforced() {
+        let mut fs = MemFs::new();
+
+        // A creation mode is the caller's, under the modeled umask.
+        let read_only_file = OpenFlags {
+            mode: 0o400,
+            ..OpenFlags::create_truncate_write()
+        };
+        let fd = fs.open("/tmp/strict", read_only_file).unwrap();
+        fs.close(fd).unwrap();
+        assert_eq!(fs.metadata("/tmp/strict").unwrap().mode, 0o400);
+
+        // And it is JUDGED on a later open: `r--` is readable, never writable.
+        let opened = fs.open("/tmp/strict", OpenFlags::read_only()).unwrap();
+        fs.close(opened).unwrap();
+        assert_eq!(
+            fs.open("/tmp/strict", write_only()).unwrap_err().code,
+            ErrorCode::Denied
+        );
+
+        // The umask bites the group/other triads exactly as the kernel's does.
+        let fd = fs
+            .open("/tmp/plain", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.close(fd).unwrap();
+        assert_eq!(fs.metadata("/tmp/plain").unwrap().mode, 0o644);
+        let fd = fs
+            .open(
+                "/tmp/wide",
+                OpenFlags {
+                    mode: 0o777,
+                    ..OpenFlags::create_truncate_write()
+                },
+            )
+            .unwrap();
+        fs.close(fd).unwrap();
+        assert_eq!(fs.metadata("/tmp/wide").unwrap().mode, 0o755);
+
+        // A directory's mode is the caller's too, and `0o500` refuses creation
+        // inside it while still resolving through and listing.
+        fs.create_directory("/tmp/locked", 0o500).unwrap();
+        assert_eq!(fs.metadata("/tmp/locked").unwrap().mode, 0o500);
+        assert_eq!(
+            fs.open("/tmp/locked/new", OpenFlags::create_truncate_write())
+                .unwrap_err()
+                .code,
+            ErrorCode::Denied
+        );
+        assert!(fs.read_directory("/tmp/locked").unwrap().is_empty());
+    }
+
+    /// An `open` of an EXISTING entry must never touch its mode, whatever third
+    /// argument the caller passes — POSIX does not read one on that branch.
+    #[test]
+    fn opening_an_existing_file_leaves_its_mode_alone() {
+        let mut fs = MemFs::new();
+        let fd = fs
+            .open(
+                "/tmp/kept",
+                OpenFlags {
+                    mode: 0o640,
+                    ..OpenFlags::create_truncate_write()
+                },
+            )
+            .unwrap();
+        fs.close(fd).unwrap();
+        assert_eq!(fs.metadata("/tmp/kept").unwrap().mode, 0o640);
+
+        // `O_CREAT` on a name that is already there is not a creation.
+        let fd = fs
+            .open(
+                "/tmp/kept",
+                OpenFlags {
+                    mode: 0o777,
+                    ..OpenFlags::create_truncate_write()
+                },
+            )
+            .unwrap();
+        fs.close(fd).unwrap();
+        assert_eq!(fs.metadata("/tmp/kept").unwrap().mode, 0o640);
+
+        // Neither does an ordinary non-creating open.
+        let fd = fs.open("/tmp/kept", OpenFlags::read_only()).unwrap();
+        fs.close(fd).unwrap();
+        assert_eq!(fs.metadata("/tmp/kept").unwrap().mode, 0o640);
+    }
+
+    /// RED before a FIFO was inode-backed: the link table is inode-keyed and a
+    /// FIFO had no inode in it, so `link` to one answered `NotFound`.
+    #[test]
+    fn a_hard_link_to_a_fifo_is_a_second_name_for_the_same_node() {
+        let mut fs = MemFs::new();
+        fs.make_fifo("/tmp/pipe", 0o660).unwrap();
+        fs.link("/tmp/pipe", "/tmp/also-pipe").unwrap();
+
+        let first = fs.metadata("/tmp/pipe").unwrap();
+        let second = fs.metadata("/tmp/also-pipe").unwrap();
+        assert_eq!(second.kind, FsEntryKind::Fifo);
+        // ONE node: the identity the shim keys the pipe channel by, so both
+        // names open onto the same pipe.
+        assert_eq!(first.ino, second.ino);
+        assert_eq!(first.nlink, 2);
+        assert_eq!(second.nlink, 2);
+        // One node, one mode: a chmod through either name is visible through
+        // both.
+        fs.set_mode("/tmp/also-pipe", 0o600).unwrap();
+        assert_eq!(fs.metadata("/tmp/pipe").unwrap().mode, 0o600);
+
+        // Dropping one name leaves the node; dropping the last releases it.
+        fs.remove_file("/tmp/pipe").unwrap();
+        let remaining = fs.metadata("/tmp/also-pipe").unwrap();
+        assert_eq!(remaining.nlink, 1);
+        assert_eq!(remaining.ino, first.ino);
+        assert_eq!(
+            fs.inode_metadata(first.ino).unwrap().kind,
+            FsEntryKind::Fifo
+        );
+        fs.remove_file("/tmp/also-pipe").unwrap();
+        assert_eq!(
+            fs.inode_metadata(first.ino).unwrap_err().code,
+            ErrorCode::NotFound
+        );
+    }
+
+    /// What `fstat` on a FIFO descriptor reads: the LIVE entry, by inode, so a
+    /// `chmod` after the open is visible exactly as it is through a regular
+    /// file's descriptor.
+    #[test]
+    fn inode_metadata_reads_the_live_entry() {
+        let mut fs = MemFs::new();
+        fs.make_fifo("/tmp/pipe", 0o666).unwrap();
+        let ino = fs.metadata("/tmp/pipe").unwrap().ino;
+        assert_eq!(fs.inode_metadata(ino).unwrap().mode, 0o644);
+
+        fs.set_mode("/tmp/pipe", 0o400).unwrap();
+        assert_eq!(fs.inode_metadata(ino).unwrap().mode, 0o400);
+
+        // A rename moves the name, never the node, so the inode still answers.
+        fs.rename("/tmp/pipe", "/tmp/moved").unwrap();
+        let after = fs.inode_metadata(ino).unwrap();
+        assert_eq!(after.ino, ino);
+        assert_eq!(after.mode, 0o400);
+
+        // A regular file's inode answers here too (the same node identity the
+        // link table uses), and an unknown inode is `NotFound`, never a guess.
+        let fd = fs
+            .open("/tmp/file", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.close(fd).unwrap();
+        let file_ino = fs.metadata("/tmp/file").unwrap().ino;
+        assert_eq!(fs.inode_metadata(file_ino).unwrap().kind, FsEntryKind::File);
+        assert_eq!(
+            fs.inode_metadata(u64::MAX).unwrap_err().code,
+            ErrorCode::NotFound
+        );
+    }
+
+    /// Renaming a directory has to carry every kind of leaf beneath it. RED
+    /// before this: FIFOs were left behind at the old prefix while the
+    /// directory that held them moved.
+    #[test]
+    fn renaming_a_directory_carries_the_fifos_beneath_it() {
+        let mut fs = MemFs::new();
+        fs.create_directory("/tmp/box", 0o777).unwrap();
+        fs.make_fifo("/tmp/box/pipe", 0o666).unwrap();
+        let ino = fs.metadata("/tmp/box/pipe").unwrap().ino;
+
+        fs.rename("/tmp/box", "/tmp/crate").unwrap();
+        assert_eq!(
+            fs.metadata("/tmp/box/pipe").unwrap_err().code,
+            ErrorCode::NotFound
+        );
+        let moved = fs.metadata("/tmp/crate/pipe").unwrap();
+        assert_eq!(moved.kind, FsEntryKind::Fifo);
+        assert_eq!(moved.ino, ino);
+    }
+
+    /// Overwriting a name by rename must release whatever node was there, so a
+    /// FIFO's link count cannot leak an inode that no name references.
+    #[test]
+    fn renaming_over_a_fifo_releases_its_node() {
+        let mut fs = MemFs::new();
+        fs.make_fifo("/tmp/victim", 0o666).unwrap();
+        let victim = fs.metadata("/tmp/victim").unwrap().ino;
+        let fd = fs
+            .open("/tmp/winner", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.close(fd).unwrap();
+
+        fs.rename("/tmp/winner", "/tmp/victim").unwrap();
+        assert_eq!(fs.metadata("/tmp/victim").unwrap().kind, FsEntryKind::File);
+        assert_eq!(
+            fs.inode_metadata(victim).unwrap_err().code,
+            ErrorCode::NotFound
+        );
     }
 
     #[test]
@@ -1517,7 +1842,7 @@ mod tests {
     #[test]
     fn directory_modes_gate_search_listing_and_name_creation() {
         let mut fs = MemFs::new();
-        fs.create_directory("/gate").unwrap();
+        fs.create_directory("/gate", 0o777).unwrap();
         let fd = fs
             .open("/gate/inner", OpenFlags::create_truncate_write())
             .unwrap();
@@ -1561,7 +1886,7 @@ mod tests {
             ErrorCode::Denied
         );
         assert_eq!(
-            fs.create_directory("/gate/sub").unwrap_err().code,
+            fs.create_directory("/gate/sub", 0o777).unwrap_err().code,
             ErrorCode::Denied
         );
         assert_eq!(
@@ -1606,6 +1931,7 @@ mod tests {
             truncate: false,
             append: false,
             exclusive: false,
+            mode: patina_dst_abi::CREATE_MODE_UNUSED,
         }
     }
 
@@ -1633,7 +1959,7 @@ mod tests {
             ErrorCode::AlreadyExists
         );
         // Creating a name needs `w` and `x` on the directory, as for any kind.
-        fs.create_directory("/tmp/locked").unwrap();
+        fs.create_directory("/tmp/locked", 0o777).unwrap();
         fs.set_mode("/tmp/locked", 0o500).unwrap();
         assert_eq!(
             fs.make_fifo("/tmp/locked/pipe", 0o666).unwrap_err().code,
@@ -1686,7 +2012,7 @@ mod tests {
             "a read-only FIFO must not be openable for writing"
         );
         // An unsearchable parent hides it exactly as it hides a file.
-        fs.create_directory("/tmp/gate").unwrap();
+        fs.create_directory("/tmp/gate", 0o777).unwrap();
         fs.make_fifo("/tmp/gate/pipe", 0o666).unwrap();
         fs.set_mode("/tmp/gate", 0o000).unwrap();
         assert_eq!(
@@ -1764,10 +2090,31 @@ mod tests {
         assert_eq!(restored.export_snapshot().encode().unwrap(), encoded);
     }
 
+    /// A hard-linked FIFO is ONE node, and a restart snapshot has to say so:
+    /// two names, one inode, link count 2 — otherwise the shim would key two
+    /// pipe channels off what used to be one pipe.
+    #[test]
+    fn linked_fifos_survive_a_restart_snapshot_as_one_node() {
+        let mut fs = MemFs::new();
+        fs.make_fifo("/tmp/pipe", 0o600).unwrap();
+        fs.link("/tmp/pipe", "/tmp/alias").unwrap();
+        let before = fs.metadata("/tmp/pipe").unwrap();
+
+        let encoded = fs.export_snapshot().encode().unwrap();
+        let mut restored = MemFs::import_snapshot(&crate::FsSnapshot::decode(&encoded).unwrap());
+        let first = restored.metadata("/tmp/pipe").unwrap();
+        let second = restored.metadata("/tmp/alias").unwrap();
+        assert_eq!(first.ino, before.ino);
+        assert_eq!(second.ino, before.ino);
+        assert_eq!(first.nlink, 2);
+        assert_eq!(first.mode, 0o600);
+        assert_eq!(restored.export_snapshot().encode().unwrap(), encoded);
+    }
+
     #[test]
     fn a_descriptor_follows_its_node_through_a_rename() {
         let mut fs = MemFs::new();
-        fs.create_directory("/pinned").unwrap();
+        fs.create_directory("/pinned", 0o777).unwrap();
         let fd = fs
             .open("/pinned/file", OpenFlags::create_truncate_write())
             .unwrap();
@@ -1788,7 +2135,7 @@ mod tests {
         assert_eq!(fs.fd_path(dir).unwrap(), "/moved");
 
         // An ancestor rename moves it too.
-        fs.create_directory("/outer").unwrap();
+        fs.create_directory("/outer", 0o777).unwrap();
         fs.rename("/moved", "/outer/inner").unwrap();
         assert_eq!(fs.fd_path(dir).unwrap(), "/outer/inner");
         fs.rename("/outer", "/renamed-outer").unwrap();
@@ -1798,7 +2145,7 @@ mod tests {
     #[test]
     fn modes_survive_a_restart_snapshot() {
         let mut fs = MemFs::new();
-        fs.create_directory("/state").unwrap();
+        fs.create_directory("/state", 0o777).unwrap();
         let fd = fs
             .open("/state/file", OpenFlags::create_truncate_write())
             .unwrap();
@@ -1823,7 +2170,7 @@ mod tests {
     #[test]
     fn read_only_directory_open_supports_fstat_fsync_and_close_only() {
         let mut fs = MemFs::new();
-        fs.create_directory("/state").unwrap();
+        fs.create_directory("/state", 0o777).unwrap();
         let fd = fs.open("/state", OpenFlags::read_only()).unwrap();
         assert_eq!(fs.fd_metadata(fd).unwrap().kind, FsEntryKind::Directory);
         fs.sync(fd).unwrap();
@@ -1842,6 +2189,7 @@ mod tests {
             truncate: false,
             append: false,
             exclusive: false,
+            mode: patina_dst_abi::CREATE_MODE_UNUSED,
         };
         assert_eq!(
             fs.open("/state", write_dir).unwrap_err().code,
@@ -1875,7 +2223,7 @@ mod tests {
     #[test]
     fn directories_metadata_seek_append_and_remove_are_deterministic() {
         let mut fs = MemFs::new();
-        fs.create_directory("/state").unwrap();
+        fs.create_directory("/state", 0o777).unwrap();
         assert_eq!(fs.metadata("/state").unwrap().kind, FsEntryKind::Directory);
         let fd = fs
             .open(
@@ -1887,6 +2235,7 @@ mod tests {
                     truncate: false,
                     append: false,
                     exclusive: true,
+                    mode: patina_dst_abi::DEFAULT_FILE_CREATE_MODE,
                 },
             )
             .unwrap();
@@ -1906,6 +2255,7 @@ mod tests {
                     truncate: false,
                     append: true,
                     exclusive: false,
+                    mode: patina_dst_abi::CREATE_MODE_UNUSED,
                 },
             )
             .unwrap();
@@ -1964,6 +2314,7 @@ mod tests {
                     truncate: false,
                     append: true,
                     exclusive: false,
+                    mode: patina_dst_abi::CREATE_MODE_UNUSED,
                 },
             )
             .unwrap();
@@ -1979,6 +2330,7 @@ mod tests {
                     truncate: false,
                     append: false,
                     exclusive: false,
+                    mode: patina_dst_abi::CREATE_MODE_UNUSED,
                 },
             )
             .unwrap();
@@ -2008,6 +2360,7 @@ mod tests {
                     truncate: false,
                     append: false,
                     exclusive: false,
+                    mode: patina_dst_abi::CREATE_MODE_UNUSED,
                 },
             )
             .unwrap();
@@ -2109,6 +2462,7 @@ mod tests {
                     truncate: false,
                     append: true,
                     exclusive: false,
+                    mode: patina_dst_abi::CREATE_MODE_UNUSED,
                 },
             )
             .unwrap();
@@ -2140,7 +2494,7 @@ mod tests {
     #[test]
     fn symlinks_store_verbatim_targets_and_are_listed() {
         let mut fs = MemFs::new();
-        fs.create_directory("/state").unwrap();
+        fs.create_directory("/state", 0o777).unwrap();
         fs.symlink("../missing", "/state/link").unwrap();
         assert_eq!(fs.read_link("/state/link").unwrap(), "../missing");
         let metadata = fs.metadata("/state/link").unwrap();
@@ -2174,7 +2528,7 @@ mod tests {
         assert_eq!(fs.fd_metadata(fd).unwrap().atime_nanos, 10);
         assert_eq!(fs.metadata("/value").unwrap().mtime_nanos, 20);
         fs.close(fd).unwrap();
-        fs.create_directory("/state").unwrap();
+        fs.create_directory("/state", 0o777).unwrap();
         let state_ino = fs.metadata("/state").unwrap().ino;
         fs.symlink("missing", "/state/link").unwrap();
         let link_metadata = fs.metadata("/state/link").unwrap();

@@ -103,7 +103,7 @@ for stream in out err; do
     exit 1
   fi
 done
-expected='^CAPSTD_RESULT root=/capstd-mre read=alpha-bytes dents=alpha.txt,sub nested=beta link=sub/moved.txt modes=enforced pinned=node$'
+expected='^CAPSTD_RESULT root=/capstd-mre read=alpha-bytes dents=alpha.txt,sub nested=beta link=sub/moved.txt modes=enforced\+created pinned=node$'
 if ! grep -Eq "$expected" "$here/target/patina/run1.out"; then
   echo "cap-std-dirfd: FAIL [2] unexpected CAPSTD_RESULT:" >&2
   cat "$here/target/patina/run1.out" >&2; exit 1

@@ -15,7 +15,7 @@ issues a path-only call — everything is `*at`:
 | `Dir::metadata` / `symlink_metadata` | `statx(dirfd, name, …)`, `statx(fd, "", AT_EMPTY_PATH)` |
 | resolving a symlink component | `readlinkat(dirfd, name, …)` |
 | stepping through `..` | `faccessat2(dirfd, ".", X_OK, AT_EACCESS)` |
-| `create_dir` / `remove_file` / `remove_dir` | `mkdirat`, `unlinkat`, `unlinkat(…, AT_REMOVEDIR)` |
+| `create_dir` / `remove_file` / `remove_dir` | `mkdirat(dirfd, name, mode)`, `unlinkat`, `unlinkat(…, AT_REMOVEDIR)` |
 | `rename` / `symlink` | `renameat(dirfd, …, dirfd, …)`, `symlinkat(target, dirfd, link)` |
 | `entries` / `read_dir` | `fcntl(dirfd, F_GETFL)` → `openat(dirfd, ".")` → `getdents64` |
 | probing the fast path | `openat2(…, RESOLVE_BENEATH)`, expected to `ENOSYS` |
@@ -55,14 +55,24 @@ audits as `direct-syscall (SUD-managed)`, runs with the expected
 `CAPSTD_RESULT`, is byte-identical across same-seed repeats **on stdout and the
 captured stderr**, and records/replays byte-identically, then prints
 `CAPSTD_LEGS_RAN branch=sud …`. The expected result line includes
-`modes=enforced pinned=node`, so a regression in either of the two legs above
-fails the run rather than passing quietly.
+`modes=enforced+created pinned=node`, so a regression in either of the two legs
+above fails the run rather than passing quietly.
 
-Both legs are RED-proven by mutation rather than assumed: neutering the
-owner-triad permission check fails the mode leg (`a 0o000 file must not be
-readable`), and dropping the bookkeeping that moves an open description with its
-node through a rename fails the pinning leg (`the descriptor must survive the
-rename: PermissionDenied`).
+The mode leg covers both halves of the model: the bits are ENFORCED (`0o000` is
+`PermissionDenied` and not `NotFound`, a directory with no `x` cannot be resolved
+through, one with no `r` cannot be listed), and a CREATION mode is the caller's
+own — a file created `0o400` reads back `0o400` and refuses a later write-open, a
+directory created `0o500` refuses a new name inside it, an `open` of an EXISTING
+file leaves that file's mode alone whatever third argument it carries, and the
+ordinary `0o666`/`0o777` requests still land at `0o644`/`0o755` under the modeled
+umask.
+
+The legs are RED-proven by mutation rather than assumed: neutering the
+owner-triad permission check fails the enforcement half (`a 0o000 file must not
+be readable`), dropping the caller's mode on the driver side fails the creation
+half (`a creation mode must be the caller's`), and dropping the bookkeeping that
+moves an open description with its node through a rename fails the pinning leg
+(`the descriptor must survive the rename: PermissionDenied`).
 
 ## What stays fail-closed
 

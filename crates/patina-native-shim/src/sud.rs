@@ -35,7 +35,7 @@ unsafe extern "C" {
     fn patina_errno() -> c_int;
     fn patina_clock_now(clock: u32, nanos: *mut u64) -> c_int;
     fn patina_sleep_until(clock: u32, deadline_nanos: u64) -> c_int;
-    fn patina_open(path: *const c_char, flags: u32) -> c_int;
+    fn patina_open(path: *const c_char, flags: u32, mode: u32) -> c_int;
     fn patina_read(fd: c_int, destination: *mut c_void, length: usize) -> isize;
     fn patina_write(fd: c_int, source: *const c_void, length: usize) -> isize;
     fn patina_pread(fd: c_int, destination: *mut c_void, length: usize, offset: i64) -> isize;
@@ -104,7 +104,7 @@ unsafe extern "C" {
         kind: *mut u32,
     ) -> c_int;
     fn patina_read_dir_free(state: *mut c_void);
-    fn patina_mkdir(path: *const c_char) -> c_int;
+    fn patina_mkdir(path: *const c_char, mode: u32) -> c_int;
     fn patina_mkfifo(path: *const c_char, mode: u32) -> c_int;
     fn patina_unlink(path: *const c_char) -> c_int;
     fn patina_rmdir(path: *const c_char) -> c_int;
@@ -976,7 +976,7 @@ fn dispatch(nr: i64, args: [u64; 6]) -> i64 {
         nr::FUTEX => sys_futex(args),
         nr::READ => sys_read(arg_fd(args[0]), args[1], args[2]),
         nr::WRITE => sys_write(arg_fd(args[0]), args[1], args[2]),
-        nr::OPENAT => sys_openat(arg_fd(args[0]), args[1], args[2]),
+        nr::OPENAT => sys_openat(arg_fd(args[0]), args[1], args[2], args[3]),
         nr::CLOSE => sys_close(arg_fd(args[0])),
         nr::LSEEK => sys_lseek(arg_fd(args[0]), args[1] as i64, args[2]),
         nr::GETRANDOM => sys_getrandom(args[0], args[1], args[2]),
@@ -1030,7 +1030,7 @@ fn dispatch(nr: i64, args: [u64; 6]) -> i64 {
         nr::NEWFSTATAT => sys_newfstatat(arg_fd(args[0]), args[1], args[2], args[3]),
         nr::STATX => sys_statx(arg_fd(args[0]), args[1], args[2], args[4]),
         nr::GETDENTS64 => sys_getdents64(arg_fd(args[0]), args[1], args[2]),
-        nr::MKDIRAT => sys_mkdirat(arg_fd(args[0]), args[1]),
+        nr::MKDIRAT => sys_mkdirat(arg_fd(args[0]), args[1], args[2]),
         nr::MKNODAT => sys_mknodat(arg_fd(args[0]), args[1], args[2], args[3]),
         nr::UNLINKAT => sys_unlinkat(arg_fd(args[0]), args[1], args[2]),
         nr::SYMLINKAT => sys_symlinkat(args[0], arg_fd(args[1]), args[2]),
@@ -1125,9 +1125,11 @@ fn dispatch(nr: i64, args: [u64; 6]) -> i64 {
         // AT_FDCWD (and, for `creat`, synthesized flags). aarch64 lacks these
         // numbers entirely, so the arms are `#[cfg(target_arch = "x86_64")]`.
         #[cfg(target_arch = "x86_64")]
-        nr::OPEN => sys_openat(AT_FDCWD, args[0], args[1]),
+        nr::OPEN => sys_openat(AT_FDCWD, args[0], args[1], args[2]),
         #[cfg(target_arch = "x86_64")]
-        nr::CREAT => sys_openat(AT_FDCWD, args[0], O_CREAT | O_WRONLY | O_TRUNC),
+        // `creat(path, mode)` is `open(path, O_CREAT|O_WRONLY|O_TRUNC, mode)`:
+        // the mode is the SECOND argument here, not the third.
+        nr::CREAT => sys_openat(AT_FDCWD, args[0], O_CREAT | O_WRONLY | O_TRUNC, args[1]),
         #[cfg(target_arch = "x86_64")]
         nr::STAT => sys_newfstatat(AT_FDCWD, args[0], args[1], 0),
         #[cfg(target_arch = "x86_64")]
@@ -1137,7 +1139,7 @@ fn dispatch(nr: i64, args: [u64; 6]) -> i64 {
         #[cfg(target_arch = "x86_64")]
         nr::RMDIR => sys_unlinkat(AT_FDCWD, args[0], AT_REMOVEDIR),
         #[cfg(target_arch = "x86_64")]
-        nr::MKDIR => sys_mkdirat(AT_FDCWD, args[0]),
+        nr::MKDIR => sys_mkdirat(AT_FDCWD, args[0], args[1]),
         #[cfg(target_arch = "x86_64")]
         nr::MKNOD => sys_mknodat(AT_FDCWD, args[0], args[1], args[2]),
         #[cfg(target_arch = "x86_64")]
@@ -1545,7 +1547,7 @@ const DENY_OPENAT2: &str = "patina: openat2 is not modeled (its RESOLVE_* resolu
      sandbox the deterministic filesystem does not implement); failing closed so callers take \
      their component-wise openat fallback\n";
 
-fn sys_openat(dirfd: i64, path: u64, flags: u64) -> i64 {
+fn sys_openat(dirfd: i64, path: u64, flags: u64, mode: u64) -> i64 {
     if flags & !OPENAT_SUPPORTED_FLAGS != 0 {
         return -ENOSYS;
     }
@@ -1586,8 +1588,11 @@ fn sys_openat(dirfd: i64, path: u64, flags: u64) -> i64 {
     if flags & O_DIRECTORY != 0 || (is_dir_fd(dirfd) && names_current_directory(path)) {
         return open_dir_fd(&resolved, flags, read_only);
     }
+    // The creation mode is the raw syscall's fourth argument. The kernel reads
+    // it only when the flags can create the entry, and `patina_open` applies the
+    // same rule, so an open of an existing file carries no mode at all.
     // SAFETY: the resolved path is a valid NUL-terminated string pointer.
-    let fd = unsafe { patina_open(resolved.as_ptr(), patina_flags) };
+    let fd = unsafe { patina_open(resolved.as_ptr(), patina_flags, (mode & 0o7777) as u32) };
     if fd >= 0 {
         return fd as i64;
     }
@@ -2604,13 +2609,13 @@ fn sys_getdents64(fd: i64, dirp: u64, count: u64) -> i64 {
 
 // ---- Directory namespace ops ----
 
-fn sys_mkdirat(dirfd: i64, path: u64) -> i64 {
+fn sys_mkdirat(dirfd: i64, path: u64, mode: u64) -> i64 {
     let resolved = match resolve_at(dirfd, path) {
         Ok(resolved) => resolved,
         Err(errno) => return errno,
     };
     // SAFETY: the resolved path is a valid NUL-terminated string pointer.
-    ret_i32(unsafe { patina_mkdir(resolved.as_ptr()) })
+    ret_i32(unsafe { patina_mkdir(resolved.as_ptr(), (mode & 0o7777) as u32) })
 }
 
 /// `mknodat(2)`, the only door a raw-syscall guest has to a FIFO: glibc's

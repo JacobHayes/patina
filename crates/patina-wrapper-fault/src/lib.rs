@@ -257,11 +257,21 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         self.inner.fd_metadata(fd)
     }
 
-    fn create_directory(&mut self, path: &str) -> DriverResult<()> {
+    /// The same `fstat` the descriptor form is, addressed by node — so it draws
+    /// from the same fault op rather than becoming a metadata read no injected
+    /// failure can ever reach.
+    fn inode_metadata(&mut self, ino: u64) -> DriverResult<FsMetadata> {
+        if let Some(error) = self.maybe_error(FsFaultOp::FdMetadata) {
+            return Err(error);
+        }
+        self.inner.inode_metadata(ino)
+    }
+
+    fn create_directory(&mut self, path: &str, mode: u32) -> DriverResult<()> {
         if let Some(error) = self.maybe_error(FsFaultOp::CreateDirectory) {
             return Err(error);
         }
-        self.inner.create_directory(path)
+        self.inner.create_directory(path, mode)
     }
 
     fn remove_file(&mut self, path: &str) -> DriverResult<()> {
@@ -895,6 +905,7 @@ mod tests {
                     truncate: true,
                     append: false,
                     exclusive: false,
+                    mode: patina_dst_abi::DEFAULT_FILE_CREATE_MODE,
                 },
             )
             .unwrap();
@@ -948,7 +959,7 @@ mod tests {
             FsFaultOpKind::WriteAt => fs.write_at(fd, 0, b"abcdef").err(),
             FsFaultOpKind::Metadata => fs.metadata("/f").err(),
             FsFaultOpKind::FdMetadata => fs.fd_metadata(fd).err(),
-            FsFaultOpKind::CreateDirectory => fs.create_directory("/d").err(),
+            FsFaultOpKind::CreateDirectory => fs.create_directory("/d", 0o777).err(),
             FsFaultOpKind::RemoveFile => fs.remove_file("/f").err(),
             FsFaultOpKind::Sync => fs.sync(fd).err(),
             FsFaultOpKind::SetLen => fs.set_len(fd, 1).err(),
@@ -1053,6 +1064,7 @@ mod tests {
                     truncate: true,
                     append: false,
                     exclusive: false,
+                    mode: patina_dst_abi::DEFAULT_FILE_CREATE_MODE,
                 },
             )
             .unwrap();

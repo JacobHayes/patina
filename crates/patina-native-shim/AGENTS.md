@@ -54,12 +54,36 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   fabricated constant is not a neutral default — it is an answer the guest will
   act on. The remaining synthesized fields (owner, device numbers) are the same
   hazard waiting for the guest that reads them.
+- An ARGUMENT the guest supplied is not a synthesized field's smaller cousin —
+  dropping it is the same bug. Every creating call carries its mode across the
+  boundary (`open`'s third argument, `openat`'s, `creat`'s, `mkdir`/`mkdirat`'s,
+  `mkfifo`'s), and the driver applies the modeled umask exactly where a kernel
+  applies the process umask. Reconstructing a "typical" mode on the far side
+  looks right for the `0o666`/`0o777` callers and silently wrong for the caller
+  who asked for `0o400` — and permission enforcement then judges every later
+  open against the invented value. Read the variadic mode only when the flags
+  say the kernel would: `open`'s third argument is UNDEFINED without `O_CREAT`,
+  so a non-creating open must record no mode at all rather than whatever
+  happened to be in the register.
+- A descriptor answers metadata from the FILESYSTEM, not from a copy taken when
+  it was opened. `fstat` on a FIFO endpoint — the one descriptor class the
+  filesystem does not hold a handle for — asks the driver about the endpoint's
+  INODE, so a `chmod` after the open is visible and a hard-linked FIFO reports
+  its real link count. A snapshot beside the descriptor is the same stale-cache
+  bug as a cached path, one field over. (The single window where the copy still
+  answers is the one the filesystem genuinely cannot: after the last NAME for
+  the node is unlinked, with the descriptor and its pipe still alive.)
 - An entry whose NAME is filesystem state and whose BYTES are not gets ONE model
   for each half, and they stay apart. A FIFO's name lives in the deterministic
-  filesystem (created, stat-ed, listed, chmod-ed, renamed, unlinked like any
-  other) while its transfer reuses the SAME in-process pipe channel an anonymous
-  `pipe`/`socketpair` uses — keyed by the entry's INODE, so two openers of one
-  named pipe meet and a rename cannot split them. A second pipe implementation
+  filesystem (created, stat-ed, listed, chmod-ed, renamed, hard-linked, unlinked
+  like any other) while its transfer reuses the SAME in-process pipe channel an
+  anonymous `pipe`/`socketpair` uses — keyed by the entry's INODE, so two openers
+  of one named pipe meet, a rename cannot split them, and a second hard link is
+  a second name for the same pipe rather than a second pipe. That last property
+  is why the FIFO table is inode-backed like the file table rather than holding
+  its own private metadata: an identity two subsystems agree on has to be ONE
+  identity, and a link table that cannot see a kind is a link table that refuses
+  it. A second pipe implementation
   behind a filesystem descriptor would have to re-derive blocking, EOF and
   `EPIPE`, and the two would drift; conversely, letting the driver hold the bytes
   would make a crash model responsible for data no real FIFO ever persists. The

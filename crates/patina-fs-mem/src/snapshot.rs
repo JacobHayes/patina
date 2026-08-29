@@ -16,7 +16,12 @@ use crate::{EntryMetadata, Inode, InodeId, MODE_MASK, MemFs, normalize_entry_pat
 /// Magic prefix identifying an encoded [`FsSnapshot`] stream.
 const MAGIC: &[u8; 8] = b"PATFSSNP";
 /// Wire-format version. Bump on any incompatible layout change.
-const VERSION: u32 = 3;
+///
+/// Version 4 makes a FIFO an inode-backed name like a regular file's: the fifo
+/// section carries an inode id instead of a private metadata record, so a hard
+/// link to a FIFO is a second name for the same node across a restart, and the
+/// mode, timestamps and link count live where every other inode's do.
+const VERSION: u32 = 4;
 
 /// Deliberately conservative structural bounds for a restart handoff. The
 /// decoder checks them before allocating from untrusted bytes, so corrupt
@@ -101,9 +106,9 @@ impl FsSnapshot {
                 .expect("symlink has metadata");
             encode_metadata(&mut bytes, metadata);
         }
-        for (path, metadata) in &self.filesystem.fifos {
+        for (path, inode_id) in &self.filesystem.fifos {
             encode_path(&mut bytes, path);
-            encode_metadata(&mut bytes, metadata);
+            bytes.extend_from_slice(&inode_id.to_le_bytes());
         }
         debug_assert_eq!(bytes.len(), encoded_len);
         Ok(bytes)
@@ -146,7 +151,7 @@ impl FsSnapshot {
         }
         for path in self.filesystem.fifos.keys() {
             add_path_len(&mut total, path)?;
-            add_len(&mut total, METADATA_BYTES)?;
+            add_len(&mut total, 8)?;
         }
         Ok(total)
     }
@@ -252,8 +257,13 @@ impl FsSnapshot {
             let path = reader.take_path(false)?;
             require_strict_path_order(previous_path.as_deref(), &path)?;
             previous_path = Some(path.clone());
-            let metadata = reader.take_metadata()?;
-            fifos.insert(path, metadata);
+            let inode_id = reader.take_u64()?;
+            if !inodes.contains_key(&inode_id) {
+                return Err(FsSnapshotError::Malformed(
+                    "fifo references an unknown inode",
+                ));
+            }
+            fifos.insert(path, inode_id);
         }
 
         if !reader.is_empty() {
@@ -300,7 +310,7 @@ fn validate_snapshot_state(
     files: &BTreeMap<String, InodeId>,
     symlinks: &BTreeMap<String, String>,
     symlink_metadata: &BTreeMap<String, EntryMetadata>,
-    fifos: &BTreeMap<String, EntryMetadata>,
+    fifos: &BTreeMap<String, InodeId>,
 ) -> Result<(), FsSnapshotError> {
     if !directories.contains_key("/") {
         return Err(FsSnapshotError::Malformed("root directory is missing"));
@@ -344,16 +354,34 @@ fn validate_snapshot_state(
     if symlink_metadata.len() != symlinks.len() {
         return Err(FsSnapshotError::Malformed("orphan symlink metadata entry"));
     }
-    for (path, metadata) in fifos {
+    for path in fifos.keys() {
         validate_entry_path(path, false)?;
         insert_unique_path(&mut paths, path)?;
         require_parent_directory(path, directories)?;
-        insert_unique_inode(&mut metadata_ids, metadata.ino)?;
-        max_inode = max_inode.max(metadata.ino);
+    }
+    // An inode is one KIND. A node named by both a file and a fifo would make
+    // `metadata_for_path` answer two different kinds for one identity, so the
+    // decoder refuses it rather than letting the name tables disagree.
+    for inode_id in fifos.values() {
+        if files.values().any(|file| file == inode_id) {
+            return Err(FsSnapshotError::Malformed(
+                "inode is named as both a file and a fifo",
+            ));
+        }
+    }
+    // A FIFO holds no filesystem bytes: its inode exists for identity, the link
+    // count and the mode. Contents there would be state no reader can ever see.
+    for inode_id in fifos.values() {
+        if inodes
+            .get(inode_id)
+            .is_some_and(|inode| !inode.contents.is_empty())
+        {
+            return Err(FsSnapshotError::Malformed("fifo inode carries contents"));
+        }
     }
 
     let mut actual_links: BTreeMap<InodeId, u32> = BTreeMap::new();
-    for inode_id in files.values().copied() {
+    for inode_id in files.values().chain(fifos.values()).copied() {
         *actual_links.entry(inode_id).or_default() += 1;
     }
     for (inode_id, inode) in inodes {
@@ -670,14 +698,15 @@ mod tests {
             truncate: false,
             append: false,
             exclusive: false,
+            mode: patina_dst_abi::CREATE_MODE_UNUSED,
         }
     }
 
     fn fixture() -> MemFs {
         let mut fs = MemFs::new();
-        fs.create_directory("/state").unwrap();
+        fs.create_directory("/state", 0o777).unwrap();
         fs.make_fifo("/state/pipe", 0o666).unwrap();
-        fs.create_directory("/state/empty").unwrap();
+        fs.create_directory("/state/empty", 0o777).unwrap();
         fs.set_times_by_path("/state", Some(10), Some(20)).unwrap();
         let fd = fs
             .open("/state/log", OpenFlags::create_truncate_write())
@@ -851,7 +880,7 @@ mod tests {
 
         let mut fs = MemFs::new();
         let path = format!("/{}", "a".repeat(MAX_PATH_BYTES as usize + 1));
-        fs.create_directory(&path).unwrap();
+        fs.create_directory(&path, 0o777).unwrap();
         assert_eq!(
             fs.export_snapshot().encode().unwrap_err(),
             FsSnapshotError::LimitExceeded("path length")

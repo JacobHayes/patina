@@ -672,6 +672,11 @@ impl Preview1Host {
             truncate: options.oflags & WASI_OFLAG_TRUNCATE != 0,
             append: options.fdflags & WASI_FDFLAG_APPEND != 0,
             exclusive: options.oflags & WASI_OFLAG_EXCLUSIVE != 0,
+            // WASI Preview 1's `path_open` has no mode argument at all: there is
+            // no caller request to carry, so the creation mode is the ordinary
+            // `0o666` a POSIX program passes, which the driver's `0o022` umask
+            // turns into the familiar `0o644`.
+            mode: patina_dst_abi::DEFAULT_FILE_CREATE_MODE,
         };
         let handle = self.context.fs_open(&path, flags)?;
         self.allocate_descriptor(WasiDescriptor::File {
@@ -2279,7 +2284,9 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
                 caller
                     .data_mut()
                     .context
-                    .fs_create_directory(&path)
+                    // `path_create_directory` carries no mode either; `0o777`
+                    // under the modeled umask is the familiar `0o755`.
+                    .fs_create_directory(&path, patina_dst_abi::DEFAULT_DIRECTORY_CREATE_MODE)
                     .map_err(Into::into),
             )? {
                 Ok(()) => Ok(WASI_ERRNO_SUCCESS),

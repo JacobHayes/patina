@@ -457,12 +457,19 @@ pub fn summarize(kind: &str, op: &Value, out: &Value) -> String {
         "now_nanos",
         "backlog",
         "how",
+        // The inode a FIFO `fstat` names.
+        "ino",
     ] {
         if let Some(v) = op.get(key) {
             if let Some(text) = scalar(v) {
                 parts.push(format!("{key}={text}"));
             }
         }
+    }
+    // A permission mode is only readable in octal: `mode=0o644` says what
+    // `mode=420` does not. Rendered separately for that reason alone.
+    if let Some(mode) = op.get("mode").and_then(Value::as_u64) {
+        parts.push(format!("mode=0o{mode:o}"));
     }
     for key in ["bytes"] {
         if let Some(Value::String(s)) = op.get(key) {
@@ -650,6 +657,7 @@ pub const OP_KINDS: &[(&str, Category)] = &[
     ("fs_seek", Category::Fs),
     ("fs_metadata", Category::Fs),
     ("fs_fd_metadata", Category::Fs),
+    ("fs_inode_metadata", Category::Fs),
     ("fs_create_directory", Category::Fs),
     ("fs_remove_file", Category::Fs),
     ("fs_sync", Category::Fs),
@@ -723,6 +731,7 @@ pub fn operation_kind(operation: &Operation) -> &'static str {
         Operation::FsSeek { .. } => "fs_seek",
         Operation::FsMetadata { .. } => "fs_metadata",
         Operation::FsFdMetadata { .. } => "fs_fd_metadata",
+        Operation::FsInodeMetadata { .. } => "fs_inode_metadata",
         Operation::FsCreateDirectory { .. } => "fs_create_directory",
         Operation::FsRemoveFile { .. } => "fs_remove_file",
         Operation::FsSync { .. } => "fs_sync",
@@ -864,7 +873,14 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
             Outcome::Metadata(metadata),
         ),
         (
-            Operation::FsCreateDirectory { path: "/d".into() },
+            Operation::FsInodeMetadata { ino: 7 },
+            Outcome::Metadata(metadata),
+        ),
+        (
+            Operation::FsCreateDirectory {
+                path: "/d".into(),
+                mode: 0o755,
+            },
             Outcome::Unit,
         ),
         (

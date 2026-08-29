@@ -59,7 +59,21 @@ pub trait FsDriver: Send {
     fn fd_metadata(&mut self, _fd: Fd) -> DriverResult<FsMetadata> {
         Err(unsupported_filesystem_operation("descriptor metadata"))
     }
-    fn create_directory(&mut self, _path: &str) -> DriverResult<()> {
+    /// Metadata of the entry a bare INODE names.
+    ///
+    /// This exists for the one descriptor class the filesystem does not hold: a
+    /// FIFO endpoint is a pipe, and the only thing the deterministic filesystem
+    /// gave it is the node identity. `fstat` on such a descriptor reads the LIVE
+    /// entry through here, so a `chmod` after the open is visible exactly as it
+    /// is through a regular file's descriptor. An inode with no name left is
+    /// [`patina_dst_abi::ErrorCode::NotFound`]: the filesystem has nothing to say
+    /// about a node only a descriptor still holds.
+    fn inode_metadata(&mut self, _ino: u64) -> DriverResult<FsMetadata> {
+        Err(unsupported_filesystem_operation("inode metadata"))
+    }
+    /// `mkdir`. `mode` is the caller's requested mode; the driver applies its
+    /// modeled umask, as the kernel does.
+    fn create_directory(&mut self, _path: &str, _mode: u32) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("create directory"))
     }
     fn remove_file(&mut self, _path: &str) -> DriverResult<()> {

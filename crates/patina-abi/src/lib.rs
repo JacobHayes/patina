@@ -221,7 +221,8 @@ pub enum ClockKind {
     Realtime,
 }
 
-/// Flags accepted by the minimal filesystem `open` operation.
+/// Arguments accepted by the minimal filesystem `open` operation: POSIX
+/// `open(path, flags, mode)` minus the path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenFlags {
     pub read: bool,
@@ -230,7 +231,26 @@ pub struct OpenFlags {
     pub truncate: bool,
     pub append: bool,
     pub exclusive: bool,
+    /// The creation mode — `open`'s third argument. It is the mode the caller
+    /// ASKED for; the driver applies its modeled umask, exactly as the kernel
+    /// applies the process umask. It is consulted only when this open CREATES
+    /// the entry: POSIX leaves it unread otherwise, and an `open` of an
+    /// existing file must not touch that file's mode. A caller with no
+    /// `create` flag passes [`CREATE_MODE_UNUSED`] so the recorded operation
+    /// carries no argument the kernel would not have read.
+    pub mode: u32,
 }
+
+/// The creation mode a non-creating `open` records: the kernel reads no third
+/// argument at all, so there is nothing honest to put here but zero.
+pub const CREATE_MODE_UNUSED: u32 = 0;
+/// The mode `File::create`/`fopen("w")` and every other ordinary "make me a
+/// file" caller passes (`0o666`); under the modeled `0o022` umask it is the
+/// familiar `0o644`.
+pub const DEFAULT_FILE_CREATE_MODE: u32 = 0o666;
+/// The mode `mkdir(2)`'s ordinary callers pass (`0o777`); under the modeled
+/// `0o022` umask it is the familiar `0o755`.
+pub const DEFAULT_DIRECTORY_CREATE_MODE: u32 = 0o777;
 
 impl OpenFlags {
     pub const fn read_only() -> Self {
@@ -241,6 +261,7 @@ impl OpenFlags {
             truncate: false,
             append: false,
             exclusive: false,
+            mode: CREATE_MODE_UNUSED,
         }
     }
 
@@ -252,6 +273,7 @@ impl OpenFlags {
             truncate: true,
             append: false,
             exclusive: false,
+            mode: DEFAULT_FILE_CREATE_MODE,
         }
     }
 }
@@ -682,8 +704,12 @@ pub enum Operation {
     FsFdMetadata {
         fd: Fd,
     },
+    /// `mkdir`/`mkdirat`. Carries the caller's requested mode, like
+    /// [`Operation::FsOpen`] and [`Operation::FsMakeFifo`]; the driver applies
+    /// the modeled umask.
     FsCreateDirectory {
         path: String,
+        mode: u32,
     },
     FsRemoveFile {
         path: String,
@@ -726,11 +752,9 @@ pub enum Operation {
     FsReadLink {
         path: String,
     },
-    /// Create a named pipe (`mkfifo`/`mkfifoat`/`mknod` with `S_IFIFO`). Unlike
-    /// `FsOpen`/`FsCreateDirectory`, whose creation-mode arguments are dropped,
-    /// this one CARRIES the requested mode: the operation is new, so the mode
-    /// crosses the boundary rather than being reconstructed from a per-kind
-    /// constant. The driver applies the modeled umask.
+    /// Create a named pipe (`mkfifo`/`mkfifoat`/`mknod` with `S_IFIFO`).
+    /// Carries the requested mode, like every other creating operation; the
+    /// driver applies the modeled umask.
     FsMakeFifo {
         path: String,
         mode: u32,
@@ -749,6 +773,16 @@ pub enum Operation {
     FsSetFdMode {
         fd: Fd,
         mode: u32,
+    },
+    /// Metadata of the entry a bare INODE names, for the one descriptor class
+    /// the filesystem itself does not hold: a FIFO endpoint is a pipe, and all
+    /// the deterministic filesystem gave it is the node identity. `fstat` on
+    /// such a descriptor must read the LIVE entry — a `chmod` after the open is
+    /// visible through it on Linux, exactly as it is through a regular file's
+    /// descriptor — so the inode is what crosses the boundary, never a copy of
+    /// the metadata taken at open time.
+    FsInodeMetadata {
+        ino: u64,
     },
     /// The path an open descriptor's filesystem NODE currently has. A
     /// descriptor names an inode, not a name: a rename moves the node and the

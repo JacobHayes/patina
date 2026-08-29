@@ -1037,7 +1037,16 @@ ssize_t readlink(const char *restrict path, char *restrict destination, size_t l
 
 static int patina_open_directory(const char *path, int flags);
 
-static int patina_posix_open(const char *path, int flags) {
+/*
+ * `mode` is the caller's creation mode -- open(2)'s third argument. POSIX says
+ * the kernel reads it only when the flags can create the entry, and the
+ * variadic argument is UNDEFINED otherwise, so every caller here passes 0
+ * unless it saw O_CREAT and read a real `mode_t`. An open of an EXISTING file
+ * must not touch that file's mode, which is the driver's rule, not a rule this
+ * layer can enforce -- so the honest thing to hand it is the caller's request
+ * and nothing invented.
+ */
+static int patina_posix_open(const char *path, int flags, mode_t mode) {
     patina_note_boundary_symbol("open");
     int supported = O_ACCMODE | O_CREAT | O_TRUNC | O_APPEND | O_EXCL;
 #ifdef O_CLOEXEC
@@ -1107,11 +1116,30 @@ static int patina_posix_open(const char *path, int flags) {
 #ifdef O_NONBLOCK
     if (flags & O_NONBLOCK) patina_flags |= PATINA_O_NONBLOCK;
 #endif
-    return fail_int(patina_open(path, patina_flags));
+    return fail_int(patina_open(path, patina_flags, (uint32_t)(mode & 07777)));
+}
+
+/*
+ * Read open(2)'s variadic creation mode. Only ever called when the flags say
+ * the kernel would read it: a variadic argument that was never passed is
+ * undefined behavior to fetch, so the O_CREAT test guards every call site.
+ */
+static mode_t patina_open_mode(va_list *ap) {
+    return (mode_t)va_arg(*ap, unsigned int);
+}
+
+static int patina_open_variadic(const char *path, int flags, va_list *ap) {
+    mode_t mode = 0;
+    if (flags & O_CREAT) mode = patina_open_mode(ap);
+    return patina_posix_open(path, flags, mode);
 }
 
 int open(const char *path, int flags, ...) {
-    return patina_posix_open(path, flags);
+    va_list ap;
+    va_start(ap, flags);
+    int result = patina_open_variadic(path, flags, &ap);
+    va_end(ap);
+    return result;
 }
 
 /*
@@ -1216,7 +1244,7 @@ static int patina_open_directory(const char *path, int flags) {
  * lowers its `fs` calls onto these on both platforms, so they are strong defs in
  * the common section rather than Apple-only.
  */
-static int patina_openat_impl(int dirfd, const char *path, int flags) {
+static int patina_openat_impl(int dirfd, const char *path, int flags, mode_t mode) {
     char resolved[PATH_MAX];
     const char *effective = path;
     if (dirfd != AT_FDCWD) {
@@ -1228,28 +1256,31 @@ static int patina_openat_impl(int dirfd, const char *path, int flags) {
         return patina_open_directory(effective, flags);
     }
 #endif
-    return patina_posix_open(effective, flags);
+    return patina_posix_open(effective, flags, mode);
+}
+
+static int patina_openat_variadic(int dirfd, const char *path, int flags, va_list *ap) {
+    mode_t mode = 0;
+    if (flags & O_CREAT) mode = patina_open_mode(ap);
+    return patina_openat_impl(dirfd, path, flags, mode);
 }
 
 int openat(int dirfd, const char *path, int flags, ...) {
-    return patina_openat_impl(dirfd, path, flags);
+    va_list ap;
+    va_start(ap, flags);
+    int result = patina_openat_variadic(dirfd, path, flags, &ap);
+    va_end(ap);
+    return result;
 }
 
 /*
  * `creat(path, mode)` is exactly `open(path, O_WRONLY|O_CREAT|O_TRUNC, mode)`, so
- * route it through the deterministic filesystem like `open`. A raw host `creat`
- * would write the real filesystem; interposing keeps it in the deterministic FS.
- * Being a strong def it also drops off the guest import table.
- *
- * The creation MODE is dropped, matching `open`/`openat`: the deterministic
- * filesystem creates every regular file at its fixed umasked creation mode
- * (0644), the value the overwhelmingly common `0666 & ~0022` request produces.
- * A caller that needs another mode reaches it with a following `chmod`, which is
- * modeled and enforced. This is the one named divergence in the mode model.
+ * route it through the deterministic filesystem like `open`, mode and all. A raw
+ * host `creat` would write the real filesystem; interposing keeps it in the
+ * deterministic FS. Being a strong def it also drops off the guest import table.
  */
 int creat(const char *path, mode_t mode) {
-    (void)mode;
-    return patina_posix_open(path, O_WRONLY | O_CREAT | O_TRUNC);
+    return patina_posix_open(path, O_WRONLY | O_CREAT | O_TRUNC, mode);
 }
 
 static int patina_fcntl_record_lock(int fd, int command, struct flock *lock);
@@ -1440,13 +1471,21 @@ int fcntl64(int fd, int command, ...) {
 }
 
 int open64(const char *path, int flags, ...) {
-    return patina_posix_open(path, flags);
+    va_list ap;
+    va_start(ap, flags);
+    int result = patina_open_variadic(path, flags, &ap);
+    va_end(ap);
+    return result;
 }
 
 /* glibc's LFS alias of openat (rustix's libc backend lowers its fs calls onto
  * the *64 names on 64-bit Linux). Shares openat's directory-descriptor handling. */
 int openat64(int dirfd, const char *path, int flags, ...) {
-    return patina_openat_impl(dirfd, path, flags);
+    va_list ap;
+    va_start(ap, flags);
+    int result = patina_openat_variadic(dirfd, path, flags, &ap);
+    va_end(ap);
+    return result;
 }
 #endif
 
@@ -2724,13 +2763,23 @@ int statx(int directory, const char *restrict path, int flags, unsigned int mask
 #endif
 
 /*
- * The creation mode is dropped for the same reason `creat`'s is: the
- * deterministic filesystem creates every directory at its fixed umasked creation
- * mode (0755), and a caller wanting another reaches it with `chmod`.
+ * mkdir/mkdirat. The creation mode crosses the boundary; the driver applies the
+ * modeled umask, exactly as the kernel applies the process umask.
+ *
+ * mkdirat is here because cap-std and every other dirfd-relative caller reaches
+ * for it, and a libc-backend rustix lowers `Dir::create_dir` straight onto it --
+ * without this def the symbol is an uninterposed import the pre-run audit
+ * refuses.
  */
 int mkdir(const char *path, mode_t mode) {
-    (void)mode;
-    return fail_int(patina_mkdir(path));
+    return fail_int(patina_mkdir(path, (uint32_t)(mode & 07777)));
+}
+
+int mkdirat(int directory, const char *path, mode_t mode) {
+    if (directory == AT_FDCWD) return mkdir(path, mode);
+    char resolved[PATH_MAX];
+    if (patina_resolve_at(directory, path, resolved, sizeof resolved) != 0) return -1;
+    return fail_int(patina_mkdir(resolved, (uint32_t)(mode & 07777)));
 }
 
 int unlink(const char *path) {

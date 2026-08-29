@@ -54,7 +54,15 @@ pub use handoff::{
 /// Start(1), and final End(1). Legacy v1-v4 traces that contain `Operation::FsCrash`
 /// are refused as [`TraceError::LegacyCrashSemantics`] rather than migrated with
 /// silently changed crash meaning.
-pub const TRACE_FORMAT_VERSION: u32 = 5;
+///
+/// Format 6 carries the CREATION MODE on every creating filesystem operation:
+/// `fs_open`'s flags gain `mode` (POSIX `open`'s third argument) and
+/// `fs_create_directory` gains one, joining `fs_make_fifo`, which already had
+/// one. A format-5 recorder dropped the caller's mode and every new entry got
+/// the fixed umasked default for its kind, so the upgrade fills in exactly the
+/// request that produced that default — `0o666` for a creating open, `0o777`
+/// for a directory, and `0` (unread) for an open that creates nothing.
+pub const TRACE_FORMAT_VERSION: u32 = 6;
 /// The oldest trace format version this runtime can read. A bundle at this
 /// version, or any later supported version, is migrated in memory through the
 /// `MIGRATIONS` chain up to [`TRACE_FORMAT_VERSION`] and then validated by
@@ -2139,6 +2147,7 @@ const MIGRATIONS: &[Migration] = &[
     migrate_v2_to_v3,
     migrate_v3_to_v4,
     migrate_v4_to_v5,
+    migrate_v5_to_v6,
 ];
 
 // One migration step must exist for each supported prior version; this keeps
@@ -2384,6 +2393,72 @@ fn resolved_migrated_decision_orders(
         resolved.push((sequence, order));
     }
     Ok(resolved)
+}
+
+/// Upgrade the mode-less format 5 layout to format 6.
+///
+/// Format 5 recorded no creation mode: `open(path, O_CREAT, mode)` and
+/// `mkdir(path, mode)` dropped the caller's argument and the driver minted every
+/// new entry at the fixed umasked default for its kind. That default is exactly
+/// what `0o666` (file) and `0o777` (directory) produce under the modeled `0o022`
+/// umask, so writing those requests in is not a fabricated value: it is the
+/// request the recorded run behaved as if it had made. A non-creating `open`
+/// gets `0`, the argument POSIX says the kernel never reads.
+fn migrate_v5_to_v6(mut value: serde_json::Value) -> Result<serde_json::Value, TraceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| TraceError::Invalid("format 5 trace is not a JSON object".into()))?;
+    let timelines = object
+        .get_mut("timelines")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| TraceError::Invalid("format 5 trace timelines must be an array".into()))?;
+    for timeline in timelines.iter_mut() {
+        let decisions = timeline
+            .get_mut("decisions")
+            .and_then(serde_json::Value::as_array_mut)
+            .ok_or_else(|| {
+                TraceError::Invalid("format 5 timeline decisions must be an array".into())
+            })?;
+        for event in decisions.iter_mut() {
+            let Some(operation) = event
+                .get_mut("operation")
+                .and_then(serde_json::Value::as_object_mut)
+            else {
+                continue;
+            };
+            match operation.get("kind").and_then(serde_json::Value::as_str) {
+                Some("fs_open") => {
+                    let Some(flags) = operation
+                        .get_mut("flags")
+                        .and_then(serde_json::Value::as_object_mut)
+                    else {
+                        return Err(TraceError::Invalid(
+                            "format 5 fs_open is missing its flags object".into(),
+                        ));
+                    };
+                    let creates = flags
+                        .get("create")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    let mode = if creates {
+                        patina_dst_abi::DEFAULT_FILE_CREATE_MODE
+                    } else {
+                        patina_dst_abi::CREATE_MODE_UNUSED
+                    };
+                    flags.insert("mode".into(), serde_json::Value::from(mode));
+                }
+                Some("fs_create_directory") => {
+                    operation.insert(
+                        "mode".into(),
+                        serde_json::Value::from(patina_dst_abi::DEFAULT_DIRECTORY_CREATE_MODE),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    object.insert("format_version".into(), serde_json::Value::from(6u32));
+    Ok(value)
 }
 
 fn value_contains_legacy_fs_crash(value: &serde_json::Value) -> bool {
