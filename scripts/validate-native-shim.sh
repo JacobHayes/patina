@@ -3573,7 +3573,7 @@ RS
     # ---- Slice 2 rows ----
     # (a) The committed rustix-default MRE testbed: a std+rustix program on the
     # DEFAULT (linux_raw) backend exercising raw clocks, fs (openat/write/read/
-    # fstat=statx), directory iteration (getdents64 over a SUD directory fd),
+    # fstat=statx), directory iteration (getdents64 over a directory fd),
     # getrandom, sleep, and SimNet (socket/bind/sendto/recvfrom/getsockname +
     # TCP socket lifecycle). Its own run-patina.sh asserts audit→SUD-managed,
     # seed-stable, and record/replay byte-identical, then prints RUSTIX_LEGS_RAN.
@@ -3585,6 +3585,25 @@ RS
     else
       echo 'validate-native-shim: rustix-default MRE run-patina.sh failed' >&2
       cat "$tmp/rustix-mre.out" >&2; exit 1
+    fi
+
+    # (a2) The committed cap-std-dirfd MRE testbed: the `*at` / directory-
+    # descriptor acceptance guest. cap-std opens ONE directory through std
+    # (libc -> the C interposer) and then resolves every path component itself
+    # against that descriptor with raw openat/statx/readlinkat/faccessat2/
+    # mkdirat/unlinkat/renameat/symlinkat/getdents64 — so it only works if both
+    # entry paths share one directory-descriptor table. Its own run-patina.sh
+    # asserts audit->SUD-managed, seed-stable on stdout AND captured stderr, and
+    # record/replay byte-identical, then prints CAPSTD_LEGS_RAN. RED: with the
+    # `*at` rows AT_FDCWD-only (and the libc `open` refusing O_PATH), the guest
+    # dies on Dir::open_ambient_dir with ENOSYS.
+    if bash "$root/testbeds/cap-std-dirfd/run-patina.sh" >"$tmp/capstd-mre.out" 2>&1; then
+      grep -q 'CAPSTD_LEGS_RAN branch=sud' "$tmp/capstd-mre.out" || {
+        echo 'validate-native-shim: cap-std-dirfd MRE did not run its SUD battery' >&2
+        cat "$tmp/capstd-mre.out" >&2; exit 1; }
+    else
+      echo 'validate-native-shim: cap-std-dirfd MRE run-patina.sh failed' >&2
+      cat "$tmp/capstd-mre.out" >&2; exit 1
     fi
 
     # The remaining raw-syscall probes are x86_64 asm (the positive SUD battery
@@ -3806,7 +3825,7 @@ RS
       # SYNTHESIZED), remove via legacy unlink, then a legacy open of the removed
       # path fails. It THEN reproduces rustix `Dir::read_from` in raw asm — legacy
       # open(2) of a DIRECTORY, fcntl(F_GETFL), openat(dir_fd, "."), getdents64 —
-      # which is the round-6 failure: a SUD directory fd must accept fcntl(F_GETFL)
+      # which is the round-6 failure: a directory fd must accept fcntl(F_GETFL)
       # and openat(".") (before the fix, fcntl returned EBADF as a "virtual socket"
       # and Dir::read_from failed). RED mutations: drop the nr::OPEN/CREAT/UNLINK
       # arms → unmapped abort; mis-synthesize creat's flags → creat fails; drop the
@@ -3859,12 +3878,12 @@ fn main() {
         assert!(cfd >= 0, "create-in-dir {cfd}");
         let _ = unsafe { sc(CLOSE, cfd, 0, 0) };
     }
-    // legacy open(2) of the DIRECTORY yields a SUD directory fd.
+    // legacy open(2) of the DIRECTORY yields a directory fd.
     let dfd = unsafe { sc(OPEN, dir.as_ptr() as i64, O_DIRECTORY, 0) };
     assert!(dfd >= 0, "legacy open(dir) {dfd}");
     // rustix Dir::read_from: fcntl(F_GETFL) then openat(dir_fd, ".", flags).
     let fl = unsafe { sc(FCNTL, dfd, F_GETFL, 0) };
-    assert!(fl >= 0, "fcntl(F_GETFL) on SUD dir fd was EBADF before the fix, got {fl}");
+    assert!(fl >= 0, "fcntl(F_GETFL) on a dir fd was EBADF before the fix, got {fl}");
     let dot = b".\0";
     let dfd2 = unsafe { sc(OPENAT, dfd, dot.as_ptr() as i64, fl) };
     assert!(dfd2 >= 0, "openat(dir_fd, \".\") {dfd2}");
@@ -4070,7 +4089,7 @@ RS
     # Loud execution proof for CI-log grepping: this line prints only after every
     # positive leg above passed, so a skipped-but-green SUD section is impossible
     # to mistake for an executed one.
-    echo 'SUD_LEGS_RAN branch=positive legs=audit-sud-managed,seed-stable,record-replay,thread-arming,seed-varying-entropy,unmapped-abort,auxv-canary,sigsys-hijack,marker-gating,at-random,vsyscall-audit,rustix-mre,procstate-constants,epoll-rows,sendmsg-recvmsg,prctl-get-auxv,legacy-fs-aliases,socketpair-row,ppoll-row,fcntl-getfl-parity,fcntl-record-lock-parity'
+    echo 'SUD_LEGS_RAN branch=positive legs=audit-sud-managed,seed-stable,record-replay,thread-arming,seed-varying-entropy,unmapped-abort,auxv-canary,sigsys-hijack,marker-gating,at-random,vsyscall-audit,rustix-mre,capstd-dirfd-mre,procstate-constants,epoll-rows,sendmsg-recvmsg,prctl-get-auxv,legacy-fs-aliases,socketpair-row,ppoll-row,fcntl-getfl-parity,fcntl-record-lock-parity'
   else
     echo "sud: SKIPPED (kernel lacks syscall-user-dispatch) — running the refusal + kernel-independent legs"
 

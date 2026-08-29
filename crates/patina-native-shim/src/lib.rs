@@ -118,6 +118,10 @@ const ENOSYS: c_int = 78;
 const ENOSYS: c_int = 38;
 const ENOTDIR: c_int = 20;
 #[cfg(target_os = "macos")]
+const ELOOP: c_int = 62;
+#[cfg(not(target_os = "macos"))]
+const ELOOP: c_int = 40;
+#[cfg(target_os = "macos")]
 const ENOTEMPTY: c_int = 66;
 #[cfg(not(target_os = "macos"))]
 const ENOTEMPTY: c_int = 39;
@@ -171,7 +175,12 @@ const O_CREATE: u32 = 1 << 2;
 const O_TRUNCATE: u32 = 1 << 3;
 const O_APPEND: u32 = 1 << 4;
 const O_EXCLUSIVE: u32 = 1 << 5;
-const O_ALL: u32 = O_READ | O_WRITE | O_CREATE | O_TRUNCATE | O_APPEND | O_EXCLUSIVE;
+/// `O_NOFOLLOW`: refuse a trailing symlink instead of resolving it. Not a driver
+/// flag — the deterministic filesystem never opens a symlink entry — but the
+/// choice [`patina_open`] makes when the path turns out to name one: `ELOOP`
+/// with this bit, resolve-and-retry without it.
+const O_NOFOLLOW: u32 = 1 << 6;
+const O_ALL: u32 = O_READ | O_WRITE | O_CREATE | O_TRUNCATE | O_APPEND | O_EXCLUSIVE | O_NOFOLLOW;
 
 /// A minimal spinlock the shim uses instead of `std::sync::Mutex`.
 ///
@@ -3543,6 +3552,7 @@ pub unsafe extern "C" fn patina_open(path: *const c_char, flags: u32) -> c_int {
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };
+    let nofollow = flags & O_NOFOLLOW != 0;
     let flags = OpenFlags {
         read: flags & O_READ != 0,
         write: flags & O_WRITE != 0,
@@ -3571,8 +3581,39 @@ pub unsafe extern "C" fn patina_open(path: *const c_char, flags: u32) -> c_int {
     }
     match with_context(|context| context.fs_open(&path, flags)) {
         Ok(fd) => i32::try_from(fd.0).unwrap_or_else(|_| fail(EOVERFLOW)),
+        // The deterministic filesystem has no descriptor for a symlink ENTRY, so
+        // an open whose final component is one is refused by the driver. POSIX
+        // splits that case in two, and both halves matter: with `O_NOFOLLOW` the
+        // answer is `ELOOP` (which is what `cap-primitives` keys its manual
+        // symlink resolution off, and what std's `remove_dir_all` reads as "not a
+        // directory"), and without it the link is resolved and the TARGET is
+        // opened. The probe only runs on the failure path, so an ordinary open
+        // still costs exactly one driver operation.
+        Err(EINVAL) if path_is_symlink(&path) => {
+            if nofollow {
+                return fail(ELOOP);
+            }
+            let resolved = match canonicalize_virtual_path(&path) {
+                Ok(resolved) => resolved,
+                Err(errno) => return fail(errno),
+            };
+            match with_context(|context| context.fs_open(&resolved, flags)) {
+                Ok(fd) => i32::try_from(fd.0).unwrap_or_else(|_| fail(EOVERFLOW)),
+                Err(errno) => fail(errno),
+            }
+        }
         Err(errno) => fail(errno),
     }
+}
+
+/// Does `path` name a symlink ENTRY (no trailing follow, like `lstat`)? Used
+/// only to disambiguate an `open` the driver refused; a path that no longer
+/// resolves is simply "not a symlink" and the original error stands.
+fn path_is_symlink(path: &str) -> bool {
+    matches!(
+        with_context(|context| context.fs_metadata(path)),
+        Ok(metadata) if metadata.kind == FsEntryKind::Symlink
+    )
 }
 
 /// Read bytes into caller-owned memory.
@@ -4294,6 +4335,41 @@ pub unsafe extern "C" fn patina_read_link(
     }
 }
 
+/// The one virtual-`realpath` resolution: lexical `.`/`..`/`//` normalization
+/// (shared with the drivers via [`canonicalize_path`]), an existence check
+/// through the driver, and trailing-symlink resolution through the driver's
+/// `read_link`. Shared by [`patina_canonicalize`] and [`net::patina_diropen`] so
+/// a directory open and a `realpath` resolve a symlinked directory through the
+/// SAME effect sequence rather than two hand-kept-in-sync ones.
+fn canonicalize_virtual_path(path: &str) -> Result<String, c_int> {
+    // fs-mem rejects intermediate-symlink traversal, so only a genuinely
+    // trailing symlink is ever resolved here; the cap fails a symlink cycle
+    // closed rather than looping.
+    const SYMLINK_RESOLUTION_LIMIT: usize = 40;
+    with_context(|context| {
+        let mut current = canonicalize_path(path)?;
+        for _ in 0..SYMLINK_RESOLUTION_LIMIT {
+            let metadata = context.fs_metadata(&current)?;
+            if metadata.kind != FsEntryKind::Symlink {
+                return Ok(current);
+            }
+            let target = context.fs_read_link(&current)?;
+            let base = if target.starts_with('/') {
+                target
+            } else {
+                let parent = current.rsplit_once('/').map_or("/", |(parent, _)| parent);
+                let parent = if parent.is_empty() { "/" } else { parent };
+                format!("{parent}/{target}")
+            };
+            current = canonicalize_path(&base)?;
+        }
+        Err(RuntimeError::from(EffectError::new(
+            ErrorCode::InvalidInput,
+            format!("too many levels of symbolic links: {path:?}"),
+        )))
+    })
+}
+
 /// Canonicalize a guest path to its deterministic absolute form (`realpath`).
 ///
 /// Writes the NUL-terminated canonical path into `buf` when it fits and returns
@@ -4324,33 +4400,7 @@ pub unsafe extern "C" fn patina_canonicalize(
         Ok(path) => path,
         Err(errno) => return fail(errno) as isize,
     };
-    // fs-mem rejects intermediate-symlink traversal, so only a genuinely
-    // trailing symlink is ever resolved here; the cap fails a symlink cycle
-    // closed rather than looping.
-    const SYMLINK_RESOLUTION_LIMIT: usize = 40;
-    let canonical = with_context(|context| {
-        let mut current = canonicalize_path(&path)?;
-        for _ in 0..SYMLINK_RESOLUTION_LIMIT {
-            let metadata = context.fs_metadata(&current)?;
-            if metadata.kind != FsEntryKind::Symlink {
-                return Ok(current);
-            }
-            let target = context.fs_read_link(&current)?;
-            let base = if target.starts_with('/') {
-                target
-            } else {
-                let parent = current.rsplit_once('/').map_or("/", |(parent, _)| parent);
-                let parent = if parent.is_empty() { "/" } else { parent };
-                format!("{parent}/{target}")
-            };
-            current = canonicalize_path(&base)?;
-        }
-        Err(RuntimeError::from(EffectError::new(
-            ErrorCode::InvalidInput,
-            format!("too many levels of symbolic links: {path:?}"),
-        )))
-    });
-    let canonical = match canonical {
+    let canonical = match canonicalize_virtual_path(&path) {
         Ok(canonical) => canonical,
         Err(errno) => return fail(errno) as isize,
     };
@@ -8334,22 +8384,54 @@ mod thread {
             .unwrap_or_default()
     }
 
-    /// Open a deterministic read-only directory fd bound to `path`, and register
-    /// that fd as a directory handle for the `fdopendir`/`unlinkat`/`openat`
-    /// interposers. The caller (the C `open/openat(..., O_DIRECTORY)` interposer)
-    /// has already validated that `path` names a directory and resolved any
-    /// trailing symlink. Because the returned fd is also a real filesystem fd,
-    /// `fstat` reports a directory and `fsync` routes to the crash model's
-    /// namespace-durability barrier.
+    /// Validate that `path` names a directory and open a deterministic read-only
+    /// directory fd bound to it, registering that fd as a directory handle for
+    /// the `fdopendir` / `*at` resolvers (the C interposers and the SUD
+    /// dispatcher both land here, so a directory descriptor opened through libc
+    /// resolves a raw `openat(dirfd, …)` and vice versa).
+    ///
+    /// Validation is the whole reason this is one entry rather than a bare open:
+    /// the entry's OWN kind is read first (no trailing-symlink follow, like
+    /// `lstat`), so `O_NOFOLLOW` on a symlink is `ELOOP` — exactly what
+    /// `cap-primitives` and std's `remove_dir_all` read as "not a directory,
+    /// unlink it". Without `O_NOFOLLOW` a trailing symlink is resolved through
+    /// the shared virtual `realpath` and re-checked, so a symlink-to-directory
+    /// opens honestly; a non-directory is `ENOTDIR`.
+    ///
+    /// Because the returned fd is also a real filesystem fd, `fstat` reports a
+    /// directory and `fsync` routes to the crash model's namespace-durability
+    /// barrier.
     ///
     /// # Safety
     /// `path` must point to a valid NUL-terminated UTF-8 string.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_diropen(path: *const c_char) -> c_int {
+    pub unsafe extern "C" fn patina_diropen(path: *const c_char, follow: c_int) -> c_int {
         let path = match super::path_from_c(path) {
             Ok(path) => path,
             Err(errno) => return super::fail(errno),
         };
+        let metadata = match super::with_context(|context| context.fs_metadata(&path)) {
+            Ok(metadata) => metadata,
+            Err(errno) => return super::fail(errno),
+        };
+        let (path, kind) = if metadata.kind == super::FsEntryKind::Symlink {
+            if follow == 0 {
+                return super::fail(super::ELOOP);
+            }
+            let resolved = match super::canonicalize_virtual_path(&path) {
+                Ok(resolved) => resolved,
+                Err(errno) => return super::fail(errno),
+            };
+            match super::with_context(|context| context.fs_metadata(&resolved)) {
+                Ok(metadata) => (resolved, metadata.kind),
+                Err(errno) => return super::fail(errno),
+            }
+        } else {
+            (path, metadata.kind)
+        };
+        if kind != super::FsEntryKind::Directory {
+            return super::fail(super::ENOTDIR);
+        }
         let fd = match super::with_context(|context| {
             context.fs_open(&path, super::OpenFlags::read_only())
         }) {
@@ -8411,6 +8493,12 @@ mod thread {
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_dirclose(fd: c_int) -> c_int {
         if lock_state().net.dir_fds.remove(&fd).is_some() {
+            // The Linux SUD dispatcher may hold a `getdents64` snapshot for this
+            // descriptor (a guest can open and iterate it with raw syscalls and
+            // then close it through libc — cap-std mixes the two doors freely),
+            // so teardown is shared exactly as the descriptor itself is.
+            #[cfg(target_os = "linux")]
+            crate::sud::release_dir_iteration(fd);
             super::patina_close(fd)
         } else {
             super::fail(super::EBADF)

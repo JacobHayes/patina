@@ -224,6 +224,13 @@ static int patina_posix_deny(const char *message) {
     return -1;
 }
 
+/* Deny strings shared with the SUD dispatcher (crates/patina-native-shim/src/sud.rs).
+ * A raw-syscall guest and a libc guest that hit the same refusal must record the
+ * SAME captured-stderr bytes, or their traces diverge on the refusal alone. */
+#define PATINA_DENY_O_PATH_NONDIR \
+    "patina: O_PATH on a non-directory is not modeled (the deterministic filesystem's only " \
+    "path-only descriptor is a directory handle); failing closed\n"
+
 int clock_gettime(clockid_t clock_id, struct timespec *time) {
     patina_note_boundary_symbol("clock_gettime");
     uint32_t patina_clock;
@@ -1041,10 +1048,41 @@ static int patina_posix_open(const char *path, int flags) {
 #ifdef O_DIRECTORY
     supported |= O_DIRECTORY;
 #endif
+#ifdef O_PATH
+    supported |= O_PATH;
+#endif
+    /* O_NONBLOCK is accepted and ignored: it only changes the open of a FIFO,
+     * socket or device, and the deterministic filesystem models none of those --
+     * a guest sets it precisely so an open of one would not block, and callers
+     * add it defensively on ordinary files where it is a no-op on every Unix. */
+#ifdef O_NONBLOCK
+    supported |= O_NONBLOCK;
+#endif
     if ((flags & ~supported) != 0) {
         errno = ENOSYS;
         return -1;
     }
+    /* O_PATH names a descriptor that resolves paths and answers metadata but
+     * cannot read or write. The deterministic filesystem models exactly one such
+     * descriptor: the directory handle. cap-std's `Dir` walks a path component at
+     * a time with openat(dirfd, name, O_PATH|O_DIRECTORY|O_NOFOLLOW), which is
+     * why this is modeled at all; an O_PATH open of a NON-directory has no
+     * modeled representation and is a named deny rather than a read/write fd
+     * that would silently be more capable than the guest asked for. */
+#ifdef O_PATH
+    if ((flags & O_PATH) != 0 && (flags & O_DIRECTORY) == 0) {
+        uint32_t probe_kind = 0;
+        uint64_t probe_length = 0;
+        if (patina_metadata(path, &probe_kind, &probe_length) != 0) {
+            errno = patina_errno();
+            return -1;
+        }
+        if (probe_kind != PATINA_ENTRY_DIRECTORY) {
+            return patina_posix_deny(PATINA_DENY_O_PATH_NONDIR);
+        }
+        return patina_open_directory(path, flags);
+    }
+#endif
 #ifdef O_DIRECTORY
     if (flags & O_DIRECTORY) return patina_open_directory(path, flags);
 #endif
@@ -1059,11 +1097,35 @@ static int patina_posix_open(const char *path, int flags) {
     if (flags & O_TRUNC) patina_flags |= PATINA_O_TRUNCATE;
     if (flags & O_APPEND) patina_flags |= PATINA_O_APPEND;
     if (flags & O_EXCL) patina_flags |= PATINA_O_EXCLUSIVE;
+#ifdef O_NOFOLLOW
+    if (flags & O_NOFOLLOW) patina_flags |= PATINA_O_NOFOLLOW;
+#endif
     return fail_int(patina_open(path, patina_flags));
 }
 
 int open(const char *path, int flags, ...) {
     return patina_posix_open(path, flags);
+}
+
+/*
+ * Duplicate a virtual directory descriptor: a fresh handle on the SAME
+ * directory. A bare patina_dup would hand back an fd the *at resolver does not
+ * know, so `dup` and fcntl(F_DUPFD) both route here. (dup2/dup3 to a CHOSEN
+ * number stay fail-closed for every fd class alike.) Mirrors the SUD
+ * dispatcher's dir-fd dup rows.
+ */
+static int patina_dup_dirfd(int fd) {
+    char base[PATH_MAX];
+    intptr_t base_len = patina_dirpath(fd, base, sizeof base);
+    if (base_len < 0) {
+        errno = patina_errno();
+        return -1;
+    }
+    if ((size_t)base_len >= sizeof base) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return fail_int(patina_diropen(base, 1));
 }
 
 /*
@@ -1114,66 +1176,25 @@ static int patina_resolve_at(int dirfd, const char *path, char *out, size_t out_
 }
 
 /*
- * open/openat(..., O_DIRECTORY): validate that `path` names a directory, open a
- * read-only deterministic filesystem descriptor for it, and register the fd as a
- * directory handle for fdopendir/openat/unlinkat resolution. patina_metadata
- * reports the entry's own kind (no trailing-symlink follow, like lstat), so
- * O_NOFOLLOW on a symlink fails with ELOOP -- exactly what std's remove_dir_all
- * treats as "not a directory, unlink it". Without O_NOFOLLOW a trailing symlink
- * is resolved through realpath and re-checked, so a symlink-to-directory opens
- * honestly. A non-directory is ENOTDIR. The fd is a real deterministic-FS fd, so
- * fstat reports a directory and fsync is the parent-directory durability barrier.
+ * open/openat(..., O_DIRECTORY|O_PATH): decode the flags and hand the directory
+ * open to patina_diropen, which owns the validation (entry kind, O_NOFOLLOW ->
+ * ELOOP on a symlink, trailing-symlink resolution, ENOTDIR) for BOTH this
+ * interposer and the SUD dispatcher. Only a read-only open can name a directory;
+ * a write/create/truncate/append/exclusive one is EISDIR. The fd is a real
+ * deterministic-FS fd, so fstat reports a directory and fsync is the
+ * parent-directory durability barrier.
  */
 static int patina_open_directory(const char *path, int flags) {
-    (void)flags;
-    uint32_t kind = 0;
-    uint64_t length = 0;
-    if (patina_metadata(path, &kind, &length) != 0) {
-        errno = patina_errno();
-        return -1;
-    }
-    if (kind == PATINA_ENTRY_SYMLINK) {
-#ifdef O_NOFOLLOW
-        if (flags & O_NOFOLLOW) {
-            errno = ELOOP;
-            return -1;
-        }
-#endif
-        char resolved[PATH_MAX];
-        intptr_t resolved_len = patina_canonicalize(path, resolved, sizeof resolved);
-        if (resolved_len < 0) {
-            errno = patina_errno();
-            return -1;
-        }
-        if ((size_t)resolved_len >= sizeof resolved) {
-            errno = ENAMETOOLONG;
-            return -1;
-        }
-        if (patina_metadata(resolved, &kind, &length) != 0) {
-            errno = patina_errno();
-            return -1;
-        }
-        if (kind != PATINA_ENTRY_DIRECTORY) {
-            errno = ENOTDIR;
-            return -1;
-        }
-        if ((flags & O_ACCMODE) != O_RDONLY ||
-            (flags & (O_CREAT | O_TRUNC | O_APPEND | O_EXCL)) != 0) {
-            errno = EISDIR;
-            return -1;
-        }
-        return fail_int(patina_diropen(resolved));
-    }
-    if (kind != PATINA_ENTRY_DIRECTORY) {
-        errno = ENOTDIR;
-        return -1;
-    }
     if ((flags & O_ACCMODE) != O_RDONLY ||
         (flags & (O_CREAT | O_TRUNC | O_APPEND | O_EXCL)) != 0) {
         errno = EISDIR;
         return -1;
     }
-    return fail_int(patina_diropen(path));
+    int follow = 1;
+#ifdef O_NOFOLLOW
+    if (flags & O_NOFOLLOW) follow = 0;
+#endif
+    return fail_int(patina_diropen(path, follow));
 }
 
 /*
@@ -1318,6 +1339,26 @@ int fcntl(int fd, int command, ...) {
 #endif
         )
             return patina_posix_deny("patina: duplicating a virtual socket descriptor is not modeled; failing closed\n");
+        errno = EINVAL;
+        return -1;
+    }
+    /* Virtual directory descriptors. A directory handle was opened read-only, so
+     * F_GETFL reports O_RDONLY (O_DIRECTORY/O_CLOEXEC/O_PATH are not file-status
+     * flags); the flag setters are no-ops and F_DUPFD yields a fresh handle to
+     * the same directory. rustix's `Dir::read_from` does exactly
+     * fcntl(dirfd, F_GETFL) -> openat(dirfd, ".", flags) before iterating, so a
+     * dir fd that fell through to the regular-fd tail's ENOSYS could not be
+     * listed at all. Mirrors the SUD dispatcher's dir-fd fcntl rows. */
+    if (patina_dir_is_dirfd(fd)) {
+        if (command == F_GETFL) return 0; /* O_RDONLY */
+        if (command == F_GETFD) return FD_CLOEXEC;
+        if (command == F_SETFD || command == F_SETFL) return 0;
+        if (command == F_DUPFD
+#ifdef F_DUPFD_CLOEXEC
+            || command == F_DUPFD_CLOEXEC
+#endif
+        )
+            return patina_dup_dirfd(fd);
         errno = EINVAL;
         return -1;
     }
@@ -2003,6 +2044,7 @@ int dup(int fd) {
         if (patina_pipe_is_endpoint(fd)) return fail_int(patina_pipe_dup(fd));
         return patina_posix_deny("patina: duplicating a virtual socket descriptor is not modeled; failing closed\n");
     }
+    if (patina_dir_is_dirfd(fd)) return patina_dup_dirfd(fd);
     return fail_int(patina_dup(fd));
 }
 
@@ -2587,8 +2629,9 @@ int rename(const char *from, const char *to) {
  * plain path; a virtual directory descriptor joins its bound path with a relative
  * `path` (std's remove_dir_all removes children with unlinkat(dirfd, name, ...)).
  * unlinkat routes to rmdir when AT_REMOVEDIR is set, otherwise unlink; unknown
- * flags fail closed. renameat still requires both dirfds be AT_FDCWD (no ecosystem
- * path exercises a dir-fd-relative rename; adding it would be speculative surface).
+ * flags fail closed. renameat resolves both dirfds the same way (cap-std's
+ * `Dir::rename` is dir-fd-relative on both sides); renameat2 models only flags==0
+ * and otherwise fails closed, then routes through renameat.
  */
 int unlinkat(int dirfd, const char *path, int flags) {
     if ((flags & ~AT_REMOVEDIR) != 0) {
@@ -2650,11 +2693,19 @@ int linkat(int fromfd, const char *from, int tofd, const char *to, int flags) {
 }
 
 int renameat(int olddirfd, const char *old_path, int newdirfd, const char *new_path) {
-    if (olddirfd != AT_FDCWD || newdirfd != AT_FDCWD) {
-        errno = ENOSYS;
-        return -1;
+    char old_resolved[PATH_MAX];
+    char new_resolved[PATH_MAX];
+    const char *old_effective = old_path;
+    const char *new_effective = new_path;
+    if (olddirfd != AT_FDCWD) {
+        if (patina_resolve_at(olddirfd, old_path, old_resolved, sizeof old_resolved) != 0) return -1;
+        old_effective = old_resolved;
     }
-    return fail_int(patina_rename(old_path, new_path));
+    if (newdirfd != AT_FDCWD) {
+        if (patina_resolve_at(newdirfd, new_path, new_resolved, sizeof new_resolved) != 0) return -1;
+        new_effective = new_resolved;
+    }
+    return fail_int(patina_rename(old_effective, new_effective));
 }
 
 #ifdef __linux__
@@ -2665,11 +2716,11 @@ int renameat(int olddirfd, const char *old_path, int newdirfd, const char *new_p
  */
 int renameat2(int olddirfd, const char *old_path, int newdirfd, const char *new_path,
               unsigned int flags) {
-    if (olddirfd != AT_FDCWD || newdirfd != AT_FDCWD || flags != 0) {
+    if (flags != 0) {
         errno = ENOSYS;
         return -1;
     }
-    return fail_int(patina_rename(old_path, new_path));
+    return renameat(olddirfd, old_path, newdirfd, new_path);
 }
 #endif
 

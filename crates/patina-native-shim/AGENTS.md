@@ -25,6 +25,26 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
 - Interposer semantics should match the public path they replace. Raw-syscall
   dispatch, SUD handling, and C ABI entry points should route through the same
   runtime behavior as the corresponding POSIX interposer whenever possible.
+- Descriptor tables are shared, never per-entry-path. A real guest mixes the two
+  doors in one object's lifetime: `cap-std` opens its base directory through std
+  (libc → the C interposer) and then does every later operation on it with raw
+  syscalls (→ SUD). Anything a descriptor means — its bound path, its class, its
+  iteration state — therefore lives in ONE runtime table both doors consult
+  (`patina_dir_is_dirfd`/`patina_dirpath` for directories), and the validation
+  that mints it lives in the shared `patina_*` entry, not in either caller. A
+  private fd space on one side is a descriptor the other side cannot resolve.
+- `*at` resolution is a path spelling, not a filesystem model. `(dirfd, path)`
+  resolves to an absolute path that is handed to the SAME entry the `AT_FDCWD`
+  form uses; normalization (`.`, `//`, and the refusal of `..`) stays in the
+  driver's one normalizer so a dirfd-relative spelling and an `AT_FDCWD`
+  spelling of the same path get the same judgement.
+- When a syscall has an old and a new form the ecosystem probes in sequence
+  (`faccessat`/`faccessat2`, `stat`/`statx`), model BOTH. Denying the newer one
+  is technically fail-closed but the deny diagnostic then prints on every call in
+  a hot loop, which is its own kind of nondeterminism-shaped noise. Reserve the
+  named deny for a form with no modeled fallback (`openat2`, whose `RESOLVE_*`
+  guarantees nothing here implements — and whose callers probe for exactly that
+  `ENOSYS` before taking their component-wise path).
 - Bootstrap and reentrancy paths are load-bearing. Avoid allocations, locks, or
   formatting in early-init/fatal paths unless the path is proven safe under the
   custom allocator and host-collection rules.

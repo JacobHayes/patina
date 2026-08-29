@@ -20,6 +20,9 @@ enum {
     PATINA_O_TRUNCATE = 1u << 3,
     PATINA_O_APPEND = 1u << 4,
     PATINA_O_EXCLUSIVE = 1u << 5,
+    /* O_NOFOLLOW: when the final component turns out to be a symlink, refuse
+     * with ELOOP instead of resolving it and opening the target. */
+    PATINA_O_NOFOLLOW = 1u << 6,
 };
 
 enum {
@@ -176,17 +179,21 @@ int32_t patina_symlink(const char *target, const char *link_path);
  */
 int32_t patina_link(const char *from, const char *to);
 /*
- * Directory descriptors backing the openat/fdopendir/unlinkat family.
- * patina_diropen opens a read-only deterministic filesystem fd, records its
- * fd->path handle (the caller validates that `path` names a directory and
- * resolves any trailing symlink first), and returns that fd; patina_dirpath
- * recovers the bound path (buf gets a NUL-terminated copy when it fits; returns
- * the length, or -1/EBADF for an unknown fd); patina_dir_is_dirfd tells a dir fd
- * apart from other virtual fds; patina_dirclose releases the mapping and closes
- * the filesystem fd (closedir/close). fdopendir transfers fd ownership into the
- * DIR, so closedir is what calls patina_dirclose.
+ * Directory descriptors backing the openat/fdopendir/unlinkat/getdents64 family.
+ * patina_diropen VALIDATES that `path` names a directory, opens a read-only
+ * deterministic filesystem fd, records its fd->path binding and returns that fd.
+ * `follow` selects the trailing-symlink behavior (0 == O_NOFOLLOW): a symlink
+ * with follow==0 is ELOOP, with follow!=0 it is resolved through the virtual
+ * realpath and re-checked; a non-directory is ENOTDIR. Validation lives here so
+ * the C interposers and the SUD dispatcher cannot drift.
+ * patina_dirpath recovers the bound path (buf gets a NUL-terminated copy when it
+ * fits; returns the length, or -1/EBADF for an unknown fd) -- it is the
+ * dirfd->path half of *at resolution on both the libc and raw-syscall paths;
+ * patina_dir_is_dirfd tells a dir fd apart from other fds; patina_dirclose
+ * releases the mapping and closes the filesystem fd (closedir/close). fdopendir
+ * transfers fd ownership into the DIR, so closedir is what calls patina_dirclose.
  */
-int32_t patina_diropen(const char *path);
+int32_t patina_diropen(const char *path, int32_t follow);
 intptr_t patina_dirpath(int32_t fd, char *buf, size_t len);
 int32_t patina_dir_is_dirfd(int32_t fd);
 int32_t patina_dirclose(int32_t fd);

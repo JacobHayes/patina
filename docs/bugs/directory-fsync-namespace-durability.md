@@ -28,10 +28,12 @@ protocol from a missing-directory-fsync bug.
   creates, links, unlinks, symlinks, and rename sides governed by that directory
   become crash-durable. The default crash model now loses un-fsynced namespace
   changes, matching the conservative unsynced-data behavior.
-- The native shim routes read-only `open`/`openat(..., O_DIRECTORY)` directory
-  descriptors through the deterministic filesystem, so `fstat` and `fsync` work
-  on the same fd. `fdopendir`/`unlinkat` keep using the Patina-issued directory
-  mapping. Linux SUD directory fds mirror the same fsync behavior.
+- The native shim routes read-only `open`/`openat(..., O_DIRECTORY|O_PATH)`
+  directory descriptors through the deterministic filesystem, so `fstat` and
+  `fsync` work on the same fd. `fdopendir` and the whole `*at` family resolve
+  through the Patina-issued directory mapping. The Linux SUD dispatcher issues
+  and resolves the SAME descriptors, so a raw `fsync(dirfd)` is the identical
+  barrier.
 - The WASI host now backs opened directory descriptors with deterministic fs
   handles, so `fd_sync`/`fd_datasync` on a directory fd hit the same barrier.
 

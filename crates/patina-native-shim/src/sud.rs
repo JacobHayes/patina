@@ -63,6 +63,7 @@ unsafe extern "C" {
 
     // Filesystem metadata / directory iteration (the same records the C
     // stat/statx/getdents interposers normalize).
+    fn patina_metadata(path: *const c_char, kind: *mut u32, length: *mut u64) -> c_int;
     fn patina_metadata_full(
         path: *const c_char,
         kind: *mut u32,
@@ -82,6 +83,14 @@ unsafe extern "C" {
         mtime_nanos: *mut u64,
     ) -> c_int;
     fn patina_read_dir(path: *const c_char, state_out: *mut *mut c_void) -> c_int;
+    // Directory descriptors: the SAME table the C `open/openat(..., O_DIRECTORY)`
+    // interposer registers into, so a dir fd opened through libc resolves a raw
+    // `openat(dirfd, …)` and vice versa (cap-std does exactly that: it opens the
+    // base directory through std/libc and then walks it with raw syscalls).
+    fn patina_diropen(path: *const c_char, follow: c_int) -> c_int;
+    fn patina_dirpath(fd: c_int, buf: *mut c_char, len: usize) -> isize;
+    fn patina_dir_is_dirfd(fd: c_int) -> c_int;
+    fn patina_dirclose(fd: c_int) -> c_int;
     fn patina_read_dir_next(
         state: *mut c_void,
         name_buf: *mut c_char,
@@ -160,6 +169,8 @@ unsafe extern "C" {
 // Linux errno values used to shape raw-syscall returns (`-errno`). Fixed across
 // the Linux ABIs Patina targets.
 const EBADF: i64 = 9;
+const ENOENT: i64 = 2;
+const EACCES: i64 = 13;
 const EFAULT: i64 = 14;
 const ENOTDIR: i64 = 20;
 const EISDIR: i64 = 21;
@@ -196,6 +207,7 @@ const PATINA_O_CREATE: u32 = 1 << 2;
 const PATINA_O_TRUNCATE: u32 = 1 << 3;
 const PATINA_O_APPEND: u32 = 1 << 4;
 const PATINA_O_EXCLUSIVE: u32 = 1 << 5;
+const PATINA_O_NOFOLLOW: u32 = 1 << 6;
 
 // Kernel `open(2)` flag bits (octal), identical on x86_64 and aarch64 Linux.
 const O_ACCMODE: u64 = 0o3;
@@ -206,6 +218,14 @@ const O_EXCL: u64 = 0o200;
 const O_TRUNC: u64 = 0o1000;
 const O_APPEND: u64 = 0o2000;
 const O_DIRECTORY: u64 = 0o200000;
+const O_NOFOLLOW: u64 = 0o400000;
+const O_CLOEXEC: u64 = 0o2000000;
+const O_LARGEFILE: u64 = 0o100000;
+/// `O_PATH`: a descriptor that resolves paths and answers metadata but cannot
+/// read or write. `cap-primitives` walks a path one component at a time with
+/// `openat(dirfd, name, O_PATH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)`, so this bit is
+/// on the hot path of every capability-based filesystem guest.
+const O_PATH: u64 = 0o10000000;
 
 const AT_FDCWD: i64 = -100;
 
@@ -246,6 +266,16 @@ const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 const AT_REMOVEDIR: u64 = 0x200;
 const AT_SYMLINK_FOLLOW: u64 = 0x400;
 const AT_EMPTY_PATH: u64 = 0x1000;
+const AT_EACCESS: u64 = 0x200;
+const AT_NO_AUTOMOUNT: u64 = 0x800;
+// `statx(2)` sync-mode bits. They only choose how fresh a network filesystem's
+// answer must be; a virtual filesystem is always exact, so they are accepted and
+// ignored rather than failing closed (mirrors the C `statx` interposer).
+const AT_STATX_SYNC_AS_STAT: u64 = 0x0000;
+const AT_STATX_FORCE_SYNC: u64 = 0x2000;
+const AT_STATX_DONT_SYNC: u64 = 0x4000;
+// `access(2)` mode bits.
+const X_OK: u64 = 1;
 
 // `fcntl(2)` commands (identical on x86_64 and aarch64 Linux).
 const F_DUPFD: u64 = 0;
@@ -378,40 +408,41 @@ fn with_dispatch_guard<F: FnOnce() -> i64>(nr: i64, body: F) -> i64 {
 }
 
 // ===========================================================================
-// SUD directory-fd model (getdents64).
+// Directory descriptors and `*at` resolution.
 //
-// The deterministic filesystem now hands out read-only directory descriptors so
-// `fstat` and `fsync` on ordinary directory opens route through the same runtime
-// fd as files. Raw callers that ask for `openat(..., O_DIRECTORY) →
-// getdents64(fd)` additionally need a Linux directory-iteration fd. The SUD
-// layer models that iteration-only surface with a private snapshot descriptor:
-// the open path validates the directory through the runtime, snapshots it
-// through the SAME `patina_read_dir` entry the interposed `opendir` uses, and
-// hands back a SUD-private descriptor. `getdents64` walks that snapshot into
-// `linux_dirent64` records, `lseek(…,0,SEEK_SET)` rewinds it (re-snapshot), and
-// `close`/`fstat` recognize it. Entries come from the one runtime entry — this
-// is a second *caller*, never a second directory model.
+// A directory fd is ONE object across both entry paths: `patina_diropen` opens a
+// read-only deterministic-filesystem fd and records its fd→path binding, and the
+// C `open/openat(..., O_DIRECTORY)` interposer and this dispatcher both go
+// through it. That shared table is what makes a capability-style guest work at
+// all: `cap-std` opens its base directory through std (libc → the C interposer)
+// and then does EVERYTHING relative to that fd with raw syscalls (→ here). A
+// dispatcher-private fd space would leave the second half unresolvable.
+//
+// `*at` resolution is therefore purely `patina_dirpath(dirfd) + "/" + path`, and
+// the resolved absolute path is handed to the SAME `patina_*` entry the
+// `AT_FDCWD` form uses — there is no second filesystem model, only a second
+// spelling of the path. Normalization (`.`, `//`, and the refusal of `..`) stays
+// where it already lives, in the driver's one path normalizer, so a
+// dirfd-relative path and an `AT_FDCWD` path with the same spelling are treated
+// identically.
+//
+// Linux directory ITERATION (`getdents64`) is the one thing a plain filesystem
+// fd cannot answer, so this layer keeps a per-dir-fd entry snapshot on the side,
+// taken through the SAME `patina_read_dir` entry the interposed `opendir` uses.
+// The snapshot is created by the first `getdents64` on the fd, dropped by
+// `lseek(…, 0, SEEK_SET)` (rustix `Dir::rewind`) and by `close`.
 // ===========================================================================
 
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// SUD-private directory descriptors are drawn from a high, distinct range so
-/// they never collide with the runtime's regular fds (small, from 3) or the
-/// virtual socket/pipe/eventfd/epoll space (`>= PATINA_SOCKET_FD_BASE`,
-/// 0x4000_0000). The counter is bumped once per directory open; the schedule is
-/// deterministic, so the fd numbers are a deterministic function of it.
-const PATINA_SUD_DIR_FD_BASE: i32 = 0x6000_0000;
-static NEXT_DIR_FD: AtomicI32 = AtomicI32::new(PATINA_SUD_DIR_FD_BASE);
-
-/// A directory-iteration snapshot behind a SUD directory fd. The snapshot
-/// pointer is a `Box<ReadDirState>` owned by `patina_read_dir`; it is only ever
-/// touched under [`DIR_FDS`]'s lock, so passing it across threads is sound (the
+/// The directory-iteration snapshot behind a directory fd. The snapshot pointer
+/// is a `Box<ReadDirState>` owned by `patina_read_dir`; it is only ever touched
+/// under [`DIR_ITERATIONS`]'s lock, so passing it across threads is sound (the
 /// raw pointer is stored as `usize` to keep the map `Send`).
-struct DirFd {
-    path: CString,
+struct DirIteration {
     snapshot: usize,
     /// An entry read from the snapshot that did not fit the previous
     /// `getdents64` buffer, held so the next call emits it first (the kernel
@@ -420,10 +451,126 @@ struct DirFd {
     pending: Option<(Vec<u8>, u32)>,
 }
 
-static DIR_FDS: Mutex<BTreeMap<i32, DirFd>> = Mutex::new(BTreeMap::new());
+/// Live `getdents64` snapshots, keyed by the runtime directory fd. Only fds the
+/// runtime's own directory table already knows ever appear here.
+static DIR_ITERATIONS: Mutex<BTreeMap<i32, DirIteration>> = Mutex::new(BTreeMap::new());
 
-fn is_sud_dir_fd(fd: i64) -> bool {
-    fd >= PATINA_SUD_DIR_FD_BASE as i64 && DIR_FDS.lock().unwrap().contains_key(&(fd as i32))
+/// Is `fd` a directory descriptor the deterministic filesystem issued? The
+/// runtime's table is the single source of truth, shared with the C interposers.
+fn is_dir_fd(fd: i64) -> bool {
+    if fd < 0 || fd > c_int::MAX as i64 {
+        return false;
+    }
+    // SAFETY: a plain runtime table lookup; no pointers.
+    unsafe { patina_dir_is_dirfd(fd as c_int) != 0 }
+}
+
+/// The path a directory descriptor is bound to, or `-errno`.
+fn dir_fd_path(fd: i64) -> Result<CString, i64> {
+    let mut buf = [0u8; PATH_MAX];
+    // SAFETY: `buf` is local storage writable for its length.
+    let length = unsafe { patina_dirpath(fd as c_int, buf.as_mut_ptr() as *mut c_char, buf.len()) };
+    if length < 0 {
+        // SAFETY: plain thread-local read.
+        return Err(-(unsafe { patina_errno() } as i64));
+    }
+    let length = length as usize;
+    if length >= buf.len() {
+        return Err(-ENAMETOOLONG);
+    }
+    CString::new(&buf[..length]).map_err(|_| -EINVAL)
+}
+
+/// The buffer size every path assembly here uses — Linux's `PATH_MAX`, the same
+/// bound the C `*at` resolver allocates.
+const PATH_MAX: usize = 4096;
+
+/// A `*at` path after `dirfd` resolution: either the guest's own pointer (the
+/// `AT_FDCWD` and absolute-path forms, which need no copy) or an owned join of
+/// the directory's bound path with the relative one.
+enum AtPath {
+    Guest(*const c_char),
+    Owned(CString),
+}
+
+impl AtPath {
+    fn as_ptr(&self) -> *const c_char {
+        match self {
+            AtPath::Guest(ptr) => *ptr,
+            AtPath::Owned(owned) => owned.as_ptr(),
+        }
+    }
+}
+
+/// Resolve `(dirfd, path)` to an absolute deterministic-filesystem path.
+///
+/// - `AT_FDCWD` is the path verbatim (the deterministic filesystem has no
+///   working directory; every path it accepts is already absolute).
+/// - An absolute `path` ignores `dirfd` entirely, as POSIX requires — but only
+///   after `dirfd` is validated, so an arbitrary bogus descriptor is never
+///   honored even then. This mirrors the C `patina_resolve_at`.
+/// - A relative `path` is joined onto the descriptor's bound directory path.
+///
+/// A descriptor the deterministic filesystem never issued as a DIRECTORY (a real
+/// kernel fd, a file fd, a socket) fails closed with `ENOSYS`, byte-identically
+/// to the C resolver — a raw guest and a libc guest must see the same refusal.
+fn resolve_at(dirfd: i64, path: u64) -> Result<AtPath, i64> {
+    if path == 0 {
+        return Err(-EFAULT);
+    }
+    let guest = path as *const c_char;
+    if dirfd == AT_FDCWD {
+        return Ok(AtPath::Guest(guest));
+    }
+    if !is_dir_fd(dirfd) {
+        return Err(-ENOSYS);
+    }
+    // SAFETY: `path` is the guest's NUL-terminated string pointer.
+    let relative = unsafe { std::ffi::CStr::from_ptr(guest) }.to_bytes();
+    if relative.first() == Some(&b'/') {
+        return Ok(AtPath::Guest(guest));
+    }
+    if relative.is_empty() {
+        // An empty path without `AT_EMPTY_PATH` is `ENOENT` (POSIX); the callers
+        // that DO accept `AT_EMPTY_PATH` handle it before reaching here.
+        return Err(-ENOENT);
+    }
+    let base = dir_fd_path(dirfd)?;
+    join_at(base.to_bytes(), relative).map(AtPath::Owned)
+}
+
+/// Splice a relative `*at` path onto a directory's bound path. Pure, so the
+/// separator/length rules are unit-testable; mirrors the C `patina_resolve_at`'s
+/// join byte for byte.
+///
+/// `.`, `//` and `..` are deliberately NOT normalized here: the deterministic
+/// filesystem has exactly ONE path normalizer (the driver's), and it treats a
+/// dirfd-relative spelling and an `AT_FDCWD` spelling identically — dropping `.`
+/// and empty components and refusing parent traversal for both. Normalizing here
+/// would make `openat(dirfd, "../x")` succeed where `open("/dir/../x")` is
+/// refused, which is a divergence, not a feature.
+fn join_at(base: &[u8], relative: &[u8]) -> Result<CString, i64> {
+    let mut joined = Vec::with_capacity(base.len() + 1 + relative.len());
+    joined.extend_from_slice(base);
+    if base.last() != Some(&b'/') {
+        joined.push(b'/');
+    }
+    joined.extend_from_slice(relative);
+    if joined.len() >= PATH_MAX {
+        return Err(-ENAMETOOLONG);
+    }
+    CString::new(joined).map_err(|_| -EINVAL)
+}
+
+/// Does this `*at` call name the descriptor itself (`AT_EMPTY_PATH` with an
+/// empty or null path)? The `fstat`-through-`newfstatat`/`statx` form every
+/// modern std uses.
+fn is_empty_path(path: u64, flags: u64) -> bool {
+    if flags & AT_EMPTY_PATH == 0 {
+        return false;
+    }
+    // SAFETY: `path`, when non-null, is a guest NUL-terminated string pointer.
+    path == 0 || unsafe { (path as *const u8).read() } == 0
 }
 
 /// Shape a raw-syscall return from a `patina_*` `int` result: on error the raw
@@ -552,6 +699,9 @@ mod nr {
     pub const PIPE2: i64 = 293;
     pub const RENAMEAT2: i64 = 316;
     pub const STATX: i64 = 332;
+    pub const FACCESSAT: i64 = 269;
+    pub const FACCESSAT2: i64 = 439;
+    pub const OPENAT2: i64 = 437;
 
     // Slice 2 — network.
     pub const SOCKET: i64 = 41;
@@ -613,6 +763,7 @@ mod nr {
     pub const UNLINK: i64 = 87;
     pub const SYMLINK: i64 = 88;
     pub const READLINK: i64 = 89;
+    pub const ACCESS: i64 = 21;
     pub const EPOLL_CREATE: i64 = 213;
     pub const EVENTFD: i64 = 284;
     pub const POLL: i64 = 7;
@@ -674,6 +825,9 @@ mod nr {
     pub const PIPE2: i64 = 59;
     pub const RENAMEAT2: i64 = 276;
     pub const STATX: i64 = 291;
+    pub const FACCESSAT: i64 = 48;
+    pub const FACCESSAT2: i64 = 439;
+    pub const OPENAT2: i64 = 437;
 
     // Slice 2 — network.
     pub const SOCKET: i64 = 198;
@@ -855,6 +1009,18 @@ fn dispatch(nr: i64, args: [u64; 6]) -> i64 {
         nr::LINKAT => sys_linkat(arg_fd(args[0]), args[1], arg_fd(args[2]), args[3], args[4]),
         nr::RENAMEAT => sys_renameat(arg_fd(args[0]), args[1], arg_fd(args[2]), args[3], 0),
         nr::RENAMEAT2 => sys_renameat(arg_fd(args[0]), args[1], arg_fd(args[2]), args[3], args[4]),
+        // `faccessat` carries no flags in the kernel ABI; `faccessat2` adds them.
+        // rustix tries `faccessat2` first and falls back to `faccessat` on ENOSYS,
+        // so BOTH are routed — a soft deny on `faccessat2` would print its
+        // diagnostic on every `..` component a capability-based guest walks.
+        nr::FACCESSAT => sys_faccessat(arg_fd(args[0]), args[1], args[2], 0),
+        nr::FACCESSAT2 => sys_faccessat(arg_fd(args[0]), args[1], args[2], args[3]),
+        // `openat2` is the RESOLVE_BENEATH open. Its resolution guarantees are a
+        // kernel-side sandbox the deterministic filesystem does not model, so it
+        // is a NAMED soft deny rather than a silent success — and ENOSYS is
+        // precisely what its callers (cap-primitives, io_uring shims) probe for
+        // before falling back to component-wise `openat`, which IS modeled.
+        nr::OPENAT2 => sud_deny(DENY_OPENAT2),
 
         // ---- Slice 2: network ----
         nr::SOCKET => sys_socket(args[0], args[1], args[2]),
@@ -943,6 +1109,8 @@ fn dispatch(nr: i64, args: [u64; 6]) -> i64 {
         nr::SYMLINK => sys_symlinkat(args[0], AT_FDCWD, args[1]),
         #[cfg(target_arch = "x86_64")]
         nr::READLINK => sys_readlinkat(AT_FDCWD, args[0], args[1], args[2]),
+        #[cfg(target_arch = "x86_64")]
+        nr::ACCESS => sys_faccessat(AT_FDCWD, args[0], args[1], 0),
         #[cfg(target_arch = "x86_64")]
         nr::DUP2 => sys_dup2(arg_fd(args[0]), arg_fd(args[1])),
         #[cfg(target_arch = "x86_64")]
@@ -1201,13 +1369,12 @@ fn sys_close(fd: i64) -> i64 {
         return err;
     }
     let cfd = fd as c_int;
-    // A SUD directory fd: free its snapshot and drop the registration.
-    if fd >= PATINA_SUD_DIR_FD_BASE as i64 {
-        if let Some(dir) = DIR_FDS.lock().unwrap().remove(&cfd) {
-            // SAFETY: `snapshot` is the live `patina_read_dir` box for this fd.
-            unsafe { patina_read_dir_free(dir.snapshot as *mut c_void) };
-            return 0;
-        }
+    // A directory fd goes through the SAME entry the C `close` interposer uses,
+    // which releases the fd→path binding, this layer's iteration snapshot, and
+    // the underlying filesystem fd together.
+    if is_dir_fd(fd) {
+        // SAFETY: no pointers.
+        return ret_i32(unsafe { patina_dirclose(cfd) });
     }
     if fd >= PATINA_SOCKET_FD_BASE {
         // SAFETY: no dereferenced pointers.
@@ -1234,12 +1401,16 @@ fn sys_lseek(fd: i64, offset: i64, whence: u64) -> i64 {
     if let Some(err) = fd_out_of_range(fd) {
         return err;
     }
-    // A SUD directory fd: `lseek(fd, 0, SEEK_SET)` is rustix `Dir::rewind` — drop
-    // the current snapshot and re-snapshot from the start. Any other seek on a
+    // A directory fd: `lseek(fd, 0, SEEK_SET)` is rustix `Dir::rewind` — drop the
+    // current snapshot so the next `getdents64` takes a fresh one from the start.
+    // It does NOT route to `patina_seek`: the driver refuses to seek a directory
+    // handle (a directory has no byte offset), and the libc path never lseeks one
+    // either — `rewinddir` re-snapshots exactly like this. Any other seek on a
     // directory fd is meaningless (ESPIPE, matching a directory stream).
-    if fd >= PATINA_SUD_DIR_FD_BASE as i64 && is_sud_dir_fd(fd) {
+    if is_dir_fd(fd) {
         if whence == SEEK_SET && offset == 0 {
-            return rewind_dir_fd(fd as c_int);
+            release_dir_iteration(fd as c_int);
+            return 0;
         }
         return -ESPIPE;
     }
@@ -1287,25 +1458,53 @@ fn openat_patina_flags(flags: u64) -> u32 {
     if flags & O_EXCL != 0 {
         patina_flags |= PATINA_O_EXCLUSIVE;
     }
+    if flags & O_NOFOLLOW != 0 {
+        patina_flags |= PATINA_O_NOFOLLOW;
+    }
     patina_flags
 }
 
+/// The kernel `open(2)` flag bits the deterministic filesystem models. Mirrors
+/// the C `patina_posix_open`'s `supported` mask exactly: a bit outside it names
+/// a behavior nothing here implements (`O_TMPFILE`, `O_DIRECT`, `O_SYNC`, …), so
+/// it fails closed rather than being silently dropped.
+/// (`O_NONBLOCK` is accepted and ignored: it only changes the open of a FIFO,
+/// socket or device, and the deterministic filesystem models none of those — a
+/// guest sets it precisely so an open of one would not block. Callers add it
+/// defensively on ordinary files, where it is a no-op on every Unix.)
+const OPENAT_SUPPORTED_FLAGS: u64 = O_ACCMODE
+    | O_CREAT
+    | O_TRUNC
+    | O_APPEND
+    | O_EXCL
+    | O_CLOEXEC
+    | O_LARGEFILE
+    | O_NOFOLLOW
+    | O_DIRECTORY
+    | O_PATH
+    | O_NONBLOCK;
+
+/// The deny an `O_PATH` open of a non-directory gets. Byte-identical to the C
+/// `PATINA_DENY_O_PATH_NONDIR`, so a raw-syscall guest and a libc guest record
+/// the same captured stderr for the same refusal.
+const DENY_O_PATH_NONDIR: &str = "patina: O_PATH on a non-directory is not modeled (the deterministic filesystem's only \
+     path-only descriptor is a directory handle); failing closed\n";
+
+/// The deny `openat2` gets. It has no C counterpart (glibc exports no `openat2`
+/// wrapper, so no interposer can be reached), which is exactly why the raw row
+/// must name it: otherwise the only signal would be an unexplained `ENOSYS`.
+const DENY_OPENAT2: &str = "patina: openat2 is not modeled (its RESOLVE_* resolution guarantees are a kernel-side \
+     sandbox the deterministic filesystem does not implement); failing closed so callers take \
+     their component-wise openat fallback\n";
+
 fn sys_openat(dirfd: i64, path: u64, flags: u64) -> i64 {
-    // A dirfd-relative open where `dirfd` is a SUD directory fd. rustix's
-    // `Dir::read_from` derives its iteration handle with `openat(dir_fd, ".", …)`,
-    // so this path IS reached for every raw directory listing (not slice 2 general
-    // resolution). Re-snapshot the same directory into a fresh SUD dir fd; only
-    // "." (the directory itself) is modeled.
-    if is_sud_dir_fd(dirfd) {
-        return openat_sud_dir(dirfd, path);
+    if flags & !OPENAT_SUPPORTED_FLAGS != 0 {
+        return -ENOSYS;
     }
-    // Otherwise: AT_FDCWD only. A real (non-SUD) dirfd is slice 2.
-    if dirfd != AT_FDCWD {
-        return -EINVAL;
-    }
-    if path == 0 {
-        return -EINVAL;
-    }
+    let resolved = match resolve_at(dirfd, path) {
+        Ok(resolved) => resolved,
+        Err(errno) => return errno,
+    };
     let patina_flags = openat_patina_flags(flags);
     let read_only = patina_flags
         & (PATINA_O_WRITE
@@ -1314,18 +1513,33 @@ fn sys_openat(dirfd: i64, path: u64, flags: u64) -> i64 {
             | PATINA_O_APPEND
             | PATINA_O_EXCLUSIVE)
         == 0;
-    // A raw O_DIRECTORY open wants a getdents64-capable SUD directory fd, not the
-    // ordinary deterministic-FS directory fd used by fsync-only callers. Validate
-    // and snapshot it through the same `patina_read_dir` path as `opendir`.
-    if flags & O_DIRECTORY != 0 {
-        return if read_only {
-            open_dir_fd(path as *const c_char)
-        } else {
-            -EISDIR
-        };
+    // `O_PATH` without `O_DIRECTORY` only has a modeled representation when the
+    // target IS a directory (the deterministic filesystem's one path-only
+    // descriptor); anything else is a named deny, not a quietly more capable fd.
+    if flags & O_PATH != 0 && flags & O_DIRECTORY == 0 {
+        let mut kind = 0u32;
+        let mut length = 0u64;
+        // SAFETY: the path is a valid C string; both out-params are local storage.
+        let rc = unsafe { patina_metadata(resolved.as_ptr(), &mut kind, &mut length) };
+        if rc != 0 {
+            // SAFETY: plain thread-local read.
+            return -(unsafe { patina_errno() } as i64);
+        }
+        if kind != PATINA_ENTRY_DIRECTORY {
+            return sud_deny(DENY_O_PATH_NONDIR);
+        }
+        return open_dir_fd(&resolved, flags, read_only);
     }
-    // SAFETY: `path` is a guest NUL-terminated string pointer.
-    let fd = unsafe { patina_open(path as *const c_char, patina_flags) };
+    // A directory open yields a directory descriptor: the runtime fd that
+    // `getdents64`, `*at` resolution, `fstat` and the fsync durability barrier
+    // all key off. rustix's `Dir::read_from` reaches it as
+    // `openat(dirfd, ".", <F_GETFL flags>)` — no `O_DIRECTORY` in sight — so a
+    // dirfd-relative open of the directory itself takes the same route.
+    if flags & O_DIRECTORY != 0 || (is_dir_fd(dirfd) && names_current_directory(path)) {
+        return open_dir_fd(&resolved, flags, read_only);
+    }
+    // SAFETY: the resolved path is a valid NUL-terminated string pointer.
+    let fd = unsafe { patina_open(resolved.as_ptr(), patina_flags) };
     if fd >= 0 {
         return fd as i64;
     }
@@ -1334,98 +1548,44 @@ fn sys_openat(dirfd: i64, path: u64, flags: u64) -> i64 {
     -errno
 }
 
-/// Snapshot the directory at `path` via `patina_read_dir` and register a
-/// SUD-private directory fd over it. Returns the fd or `-errno`.
-fn open_dir_fd(path: *const c_char) -> i64 {
-    // Copy the path into an owned CString for re-snapshot on rewind.
-    // SAFETY: `path` is the guest's NUL-terminated string pointer.
-    let owned = match copy_c_path(path) {
-        Some(owned) => owned,
-        None => return -EINVAL,
-    };
-    let mut snapshot: *mut c_void = std::ptr::null_mut();
-    // SAFETY: `path` is a valid guest C string; `snapshot` is writable local.
-    let rc = unsafe { patina_read_dir(path, &mut snapshot) };
-    if rc != 0 {
-        // SAFETY: plain thread-local read.
-        return -(unsafe { patina_errno() } as i64);
-    }
-    let fd = NEXT_DIR_FD.fetch_add(1, Ordering::Relaxed);
-    DIR_FDS.lock().unwrap().insert(
-        fd,
-        DirFd {
-            path: owned,
-            snapshot: snapshot as usize,
-            pending: None,
-        },
-    );
-    fd as i64
-}
-
-/// `openat(dir_fd, path, …)` where `dir_fd` is a SUD directory fd. rustix's
-/// `Dir::_read_from` opens `"."` relative to a directory fd to obtain a fresh
-/// iteration handle (`backend/linux_raw/fs/dir.rs`), so a raw `getdents64`
-/// listing always lands here. Model it by re-snapshotting the SAME directory
-/// (by its stored path) into a new SUD dir fd. Only `"."` — the directory
-/// itself — is modeled; a sub-name would be general dirfd-relative resolution,
-/// which the deterministic FS does not do, so it fails closed with `-EINVAL`.
-fn openat_sud_dir(dir_fd: i64, path: u64) -> i64 {
+/// Does the guest's `*at` path name the directory descriptor itself (`"."`)?
+/// rustix `Dir::read_from` derives its iteration handle with
+/// `openat(dir_fd, ".", …)` passing the flags `F_GETFL` reported — `O_RDONLY`,
+/// with no `O_DIRECTORY` in sight — so the `"."` spelling is the only thing that
+/// marks that open as a directory open.
+fn names_current_directory(path: u64) -> bool {
     if path == 0 {
-        return -EINVAL;
+        return false;
     }
     // SAFETY: `path` is the guest's NUL-terminated string pointer.
-    let bytes = unsafe { std::ffi::CStr::from_ptr(path as *const c_char) }.to_bytes();
-    if bytes != b"." {
-        return -EINVAL;
-    }
-    reopen_sud_dir(dir_fd)
+    unsafe { std::ffi::CStr::from_ptr(path as *const c_char) }.to_bytes() == b"."
 }
 
-/// Re-snapshot the directory behind an existing SUD dir fd into a NEW SUD dir fd
-/// (shared by `openat(dir_fd, ".")` and `fcntl(dir_fd, F_DUPFD)`). Clones the
-/// stored path out from under the lock, then reopens it (open_dir_fd re-locks to
-/// register the fresh fd).
-fn reopen_sud_dir(dir_fd: i64) -> i64 {
-    let stored = {
-        let map = DIR_FDS.lock().unwrap();
-        match map.get(&(dir_fd as c_int)) {
-            Some(dir) => dir.path.clone(),
-            None => return -EBADF,
-        }
-    };
-    open_dir_fd(stored.as_ptr())
+/// Open (and register) a deterministic directory descriptor for an already
+/// resolved path. Validation — the entry's own kind, `O_NOFOLLOW` → `ELOOP` on a
+/// symlink, trailing-symlink resolution, `ENOTDIR` — lives in `patina_diropen`,
+/// the SAME entry the C `open/openat(..., O_DIRECTORY)` interposer calls, so the
+/// two paths cannot drift.
+fn open_dir_fd(path: &AtPath, flags: u64, read_only: bool) -> i64 {
+    if !read_only {
+        return -EISDIR;
+    }
+    let follow = c_int::from(flags & O_NOFOLLOW == 0);
+    // SAFETY: the resolved path is a valid NUL-terminated string pointer.
+    ret_i32(unsafe { patina_diropen(path.as_ptr(), follow) })
 }
 
-/// Fsync a SUD-private directory descriptor by transiently opening the same path
-/// as an ordinary deterministic-FS directory fd, syncing it, and closing it. The
-/// SUD fd itself is a getdents64 snapshot, not a runtime filesystem handle.
-fn sync_sud_dir_fd(fd: c_int) -> i64 {
-    let stored = {
-        let map = DIR_FDS.lock().unwrap();
-        match map.get(&fd) {
-            Some(dir) => dir.path.clone(),
-            None => return -EBADF,
-        }
-    };
-    // SAFETY: `stored` is an owned, NUL-terminated C string.
-    let opened = unsafe { patina_open(stored.as_ptr(), PATINA_O_READ) };
-    if opened < 0 {
-        // SAFETY: plain thread-local read.
-        return -(unsafe { patina_errno() } as i64);
+/// Duplicate a directory descriptor into a fresh handle on the SAME directory,
+/// so the copy is itself a usable dirfd — a bare `patina_dup` would hand back an
+/// fd the `*at` resolver does not know. Shared by the `dup` and `fcntl(F_DUPFD)`
+/// rows, mirroring the C `patina_dup_dirfd`.
+fn dup_dir_fd(fd: i64) -> i64 {
+    match dir_fd_path(fd) {
+        // SAFETY: an owned, NUL-terminated C string. The bound path is already
+        // resolved, so following a trailing symlink is a no-op here.
+        Ok(base) => ret_i32(unsafe { patina_diropen(base.as_ptr(), 1) }),
+        Err(errno) => errno,
     }
-    // SAFETY: no pointers.
-    let sync = unsafe { patina_fsync(opened) };
-    let sync_errno = if sync < 0 {
-        // SAFETY: plain thread-local read.
-        (unsafe { patina_errno() }) as i64
-    } else {
-        0
-    };
-    // If the fsync injected a crash, all ordinary filesystem fds were invalidated;
-    // the close may then fail with EBADF. The fsync result remains authoritative.
-    // SAFETY: no pointers.
-    let _ = unsafe { patina_close(opened) };
-    if sync < 0 { -sync_errno } else { 0 }
 }
 
 /// Copy a guest NUL-terminated C string into an owned [`CString`], or `None` on
@@ -1510,24 +1670,19 @@ fn mem_passthrough(nr: i64, args: [u64; 6]) -> i64 {
     }
 }
 
-/// Re-snapshot a SUD directory fd from its start (rustix `Dir::rewind`).
-fn rewind_dir_fd(fd: c_int) -> i64 {
-    let mut map = DIR_FDS.lock().unwrap();
-    let Some(dir) = map.get_mut(&fd) else {
-        return -EBADF;
-    };
-    let mut fresh: *mut c_void = std::ptr::null_mut();
-    // SAFETY: `dir.path` is an owned, valid C string; `fresh` is writable local.
-    let rc = unsafe { patina_read_dir(dir.path.as_ptr(), &mut fresh) };
-    if rc != 0 {
-        // SAFETY: plain thread-local read.
-        return -(unsafe { patina_errno() } as i64);
+/// Drop any live `getdents64` snapshot for `fd` (rustix `Dir::rewind`, and every
+/// close of the descriptor). The next `getdents64` takes a fresh one from the
+/// start.
+///
+/// `patina_dirclose` calls this too, so a descriptor opened with a raw
+/// `openat` and iterated with a raw `getdents64` but closed through *libc*
+/// still releases its snapshot — the two entry paths share the descriptor, so
+/// they must share its teardown.
+pub(crate) fn release_dir_iteration(fd: c_int) {
+    if let Some(iteration) = DIR_ITERATIONS.lock().unwrap().remove(&fd) {
+        // SAFETY: `snapshot` is the live `patina_read_dir` box for this fd.
+        unsafe { patina_read_dir_free(iteration.snapshot as *mut c_void) };
     }
-    // SAFETY: the old snapshot is the live box for this fd; replace it.
-    unsafe { patina_read_dir_free(dir.snapshot as *mut c_void) };
-    dir.snapshot = fresh as usize;
-    dir.pending = None;
-    0
 }
 
 // ---- Positional & vectored I/O ----
@@ -1598,9 +1753,8 @@ fn sys_fsync(fd: i64) -> i64 {
     if let Some(err) = fd_out_of_range(fd) {
         return err;
     }
-    if is_sud_dir_fd(fd) {
-        return sync_sud_dir_fd(fd as c_int);
-    }
+    // A directory fd IS an ordinary deterministic-filesystem fd, so `fsync` on it
+    // is the crash model's namespace-durability barrier with no special case.
     // SAFETY: no pointers.
     ret_i32(unsafe { patina_fsync(fd as c_int) })
 }
@@ -1643,10 +1797,8 @@ fn sys_dup(fd: i64) -> i64 {
             "patina: duplicating a captured stdio descriptor is not modeled; failing closed\n",
         );
     }
-    // A SUD directory fd is SUD-only (no C counterpart): re-snapshot it, matching
-    // the fcntl(F_DUPFD) handling for the same fd.
-    if is_sud_dir_fd(fd) {
-        return reopen_sud_dir(fd);
+    if is_dir_fd(fd) {
+        return dup_dir_fd(fd);
     }
     let cfd = fd as c_int;
     if fd >= PATINA_SOCKET_FD_BASE {
@@ -1705,9 +1857,6 @@ fn sys_dup2(oldfd: i64, newfd: i64) -> i64 {
     if (0..=2).contains(&oldfd) {
         return newfd; // captured stdio is always valid
     }
-    if is_sud_dir_fd(oldfd) {
-        return newfd; // a live SUD directory fd (SUD-only; no C counterpart)
-    }
     let cfd = oldfd as c_int;
     if oldfd >= PATINA_SOCKET_FD_BASE {
         // Mirror the C dup2 validity EXACTLY (patina_posix.c:1110): a virtual fd is
@@ -1746,22 +1895,6 @@ fn sys_fcntl(fd: i64, command: u64, arg: u64) -> i64 {
         return err;
     }
     let cfd = fd as c_int;
-    // A SUD directory fd (>= PATINA_SUD_DIR_FD_BASE, which is itself above
-    // PATINA_SOCKET_FD_BASE) must be recognized BEFORE the virtual-socket branch,
-    // or `patina_net_is_nonblocking` on it returns EBADF — which is exactly what
-    // broke rustix `Dir::read_from`'s `fcntl(dir_fd, F_GETFL)`. The directory was
-    // opened read-only; F_GETFL reports O_RDONLY (O_DIRECTORY/O_CLOEXEC are not
-    // file-status flags), the CLOEXEC/flag setters are no-ops, and F_DUPFD yields
-    // a fresh handle to the same directory.
-    if is_sud_dir_fd(fd) {
-        return match command {
-            F_GETFL => 0, // O_RDONLY
-            F_GETFD => FD_CLOEXEC,
-            F_SETFD | F_SETFL => 0,
-            F_DUPFD | F_DUPFD_CLOEXEC => reopen_sud_dir(fd),
-            _ => -EINVAL,
-        };
-    }
     if fd >= PATINA_SOCKET_FD_BASE {
         // Virtual epoll descriptors.
         // SAFETY: no dereferenced pointers below unless noted.
@@ -1821,6 +1954,21 @@ fn sys_fcntl(fd: i64, command: u64, arg: u64) -> i64 {
                 _ => -EINVAL,
             };
         }
+    }
+    // A directory fd must be recognized BEFORE the regular-fd tail, whose F_GETFL
+    // is a soft ENOSYS — which is exactly what breaks rustix `Dir::read_from`,
+    // whose first act is `fcntl(dir_fd, F_GETFL)`. The directory was opened
+    // read-only, so F_GETFL reports O_RDONLY (O_DIRECTORY/O_CLOEXEC/O_PATH are
+    // not file-status flags), the CLOEXEC/flag setters are no-ops, and F_DUPFD
+    // yields a fresh handle to the same directory. Mirrors the C fcntl dir rows.
+    if is_dir_fd(fd) {
+        return match command {
+            F_GETFL => 0, // O_RDONLY
+            F_GETFD => FD_CLOEXEC,
+            F_SETFD | F_SETFL => 0,
+            F_DUPFD | F_DUPFD_CLOEXEC => dup_dir_fd(fd),
+            _ => -EINVAL,
+        };
     }
     // Regular fds (and captured stdio): mirror the C fcntl regular-fd tail EXACTLY
     // (patina_posix.c). Only F_GETFD/F_SETFD/F_DUPFD are modeled; F_GETFL, F_SETFL,
@@ -2163,39 +2311,47 @@ fn sys_fstat(fd: i64, statbuf: u64) -> i64 {
     if let Some(err) = fd_out_of_range(fd) {
         return err;
     }
-    // A SUD directory fd reports as a directory (rustix `Dir` fstat-checks it).
-    if fd >= PATINA_SUD_DIR_FD_BASE as i64 {
-        let dir_values = {
-            let map = DIR_FDS.lock().unwrap();
-            map.get(&(fd as c_int)).map(|dir| dir.path.clone())
-        };
-        if let Some(path) = dir_values {
-            return match stat_metadata(path.as_ptr(), true) {
-                Ok(values) => write_kernel_stat(&values, statbuf),
-                Err(errno) => errno,
-            };
-        }
-    }
+    // A directory fd is an ordinary deterministic-filesystem fd, so the shared
+    // descriptor-metadata entry already reports it as a directory.
     match fd_stat_values(fd as c_int) {
         Ok(values) => write_kernel_stat(&values, statbuf),
         Err(errno) => errno,
     }
 }
 
+/// The `*at` metadata flag set both `newfstatat` and `statx` accept, mirroring
+/// the C `PATINA_STAT_AT_FLAGS`.
+const STAT_AT_FLAGS: u64 = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT;
+
+/// Resolve the three addressing forms the `*at` metadata rows accept onto the
+/// same virtual metadata `stat` answers from, mirroring the C
+/// `patina_stat_at_values`:
+///
+/// - `AT_EMPTY_PATH` with an empty path — the DESCRIPTOR's own metadata
+///   (`File::metadata()` on Linux is exactly this);
+/// - `AT_FDCWD` — the path, verbatim;
+/// - a directory descriptor — its bound path joined with `path`.
+fn stat_at_values(dirfd: i64, path: u64, flags: u64, allowed: u64) -> Result<StatValues, i64> {
+    if flags & !allowed != 0 {
+        return Err(-ENOSYS);
+    }
+    if is_empty_path(path, flags) {
+        // `AT_FDCWD` with an empty path names the working directory, which is not
+        // a modeled virtual entry.
+        if dirfd == AT_FDCWD {
+            return Err(-ENOSYS);
+        }
+        return fd_stat_values(dirfd as c_int);
+    }
+    let resolved = resolve_at(dirfd, path)?;
+    stat_metadata(resolved.as_ptr(), flags & AT_SYMLINK_NOFOLLOW == 0)
+}
+
 fn sys_newfstatat(dirfd: i64, path: u64, statbuf: u64, flags: u64) -> i64 {
-    // AT_EMPTY_PATH with an empty path is an fstat on the dirfd; otherwise only
-    // AT_FDCWD-relative resolution is modeled (mirrors the C fstatat contract).
-    if flags & AT_EMPTY_PATH != 0 && (path == 0 || unsafe { (path as *const u8).read() } == 0) {
-        return sys_fstat(dirfd, statbuf);
+    if let Some(err) = fd_out_of_range(dirfd).filter(|_| dirfd != AT_FDCWD) {
+        return err;
     }
-    if dirfd != AT_FDCWD {
-        return -ENOSYS;
-    }
-    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
-        return -ENOSYS;
-    }
-    let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
-    match stat_metadata(path as *const c_char, follow) {
+    match stat_at_values(dirfd, path, flags, STAT_AT_FLAGS) {
         Ok(values) => write_kernel_stat(&values, statbuf),
         Err(errno) => errno,
     }
@@ -2241,14 +2397,14 @@ struct Statx {
 }
 
 fn sys_statx(dirfd: i64, path: u64, flags: u64, statxbuf: u64) -> i64 {
-    if dirfd != AT_FDCWD {
-        return -ENOSYS;
-    }
     if statxbuf == 0 {
         return -EFAULT;
     }
-    let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
-    let values = match stat_metadata(path as *const c_char, follow) {
+    if let Some(err) = fd_out_of_range(dirfd).filter(|_| dirfd != AT_FDCWD) {
+        return err;
+    }
+    let allowed = STAT_AT_FLAGS | AT_STATX_SYNC_AS_STAT | AT_STATX_FORCE_SYNC | AT_STATX_DONT_SYNC;
+    let values = match stat_at_values(dirfd, path, flags, allowed) {
         Ok(values) => values,
         Err(errno) => return errno,
     };
@@ -2291,20 +2447,37 @@ fn dt_for_kind(kind: u32) -> u8 {
 /// advancing `patina_read_dir_next` past every entry that fits. Returns the
 /// number of bytes written (0 at end-of-directory) or `-errno`.
 fn sys_getdents64(fd: i64, dirp: u64, count: u64) -> i64 {
-    if !is_sud_dir_fd(fd) {
-        // A getdents64 on anything but a SUD snapshot directory fd is not
-        // supported; ordinary deterministic-FS directory fds are for fstat/fsync,
-        // not Linux directory iteration.
+    if !is_dir_fd(fd) {
+        // Linux directory iteration needs a directory descriptor; anything else
+        // (a file fd, a socket, a real kernel fd) is ENOTDIR.
         return -ENOTDIR;
     }
     if dirp == 0 {
         return -EFAULT;
     }
     let cap = count as usize;
-    let mut map = DIR_FDS.lock().unwrap();
-    let Some(dir) = map.get_mut(&(fd as c_int)) else {
-        return -EBADF;
-    };
+    // The snapshot is taken by the FIRST getdents64 on the descriptor (and after
+    // a rewind), through the same `patina_read_dir` entry the interposed
+    // `opendir` uses — a second caller, never a second directory model.
+    let mut map = DIR_ITERATIONS.lock().unwrap();
+    if let std::collections::btree_map::Entry::Vacant(slot) = map.entry(fd as c_int) {
+        let path = match dir_fd_path(fd) {
+            Ok(path) => path,
+            Err(errno) => return errno,
+        };
+        let mut snapshot: *mut c_void = std::ptr::null_mut();
+        // SAFETY: `path` is an owned C string; `snapshot` is writable local.
+        let rc = unsafe { patina_read_dir(path.as_ptr(), &mut snapshot) };
+        if rc != 0 {
+            // SAFETY: plain thread-local read.
+            return -(unsafe { patina_errno() } as i64);
+        }
+        slot.insert(DirIteration {
+            snapshot: snapshot as usize,
+            pending: None,
+        });
+    }
+    let dir = map.get_mut(&(fd as c_int)).expect("snapshot just inserted");
     let snapshot = dir.snapshot as *mut c_void;
     let mut written = 0usize;
     // linux_dirent64 header: d_ino(8) d_off(8) d_reclen(2) d_type(1) then name.
@@ -2373,35 +2546,73 @@ fn sys_getdents64(fd: i64, dirp: u64, count: u64) -> i64 {
 // ---- Directory namespace ops ----
 
 fn sys_mkdirat(dirfd: i64, path: u64) -> i64 {
-    if dirfd != AT_FDCWD {
-        return -ENOSYS;
-    }
-    // SAFETY: `path` is a guest C string.
-    ret_i32(unsafe { patina_mkdir(path as *const c_char) })
+    let resolved = match resolve_at(dirfd, path) {
+        Ok(resolved) => resolved,
+        Err(errno) => return errno,
+    };
+    // SAFETY: the resolved path is a valid NUL-terminated string pointer.
+    ret_i32(unsafe { patina_mkdir(resolved.as_ptr()) })
 }
 
 fn sys_unlinkat(dirfd: i64, path: u64, flags: u64) -> i64 {
-    if dirfd != AT_FDCWD {
-        return -ENOSYS;
-    }
     // AT_REMOVEDIR selects rmdir; no flag selects unlink; unknown flags fail.
     if flags & !AT_REMOVEDIR != 0 {
         return -EINVAL;
     }
-    // SAFETY: `path` is a guest C string.
+    let resolved = match resolve_at(dirfd, path) {
+        Ok(resolved) => resolved,
+        Err(errno) => return errno,
+    };
+    // SAFETY: the resolved path is a valid NUL-terminated string pointer.
     if flags & AT_REMOVEDIR != 0 {
-        ret_i32(unsafe { patina_rmdir(path as *const c_char) })
+        ret_i32(unsafe { patina_rmdir(resolved.as_ptr()) })
     } else {
-        ret_i32(unsafe { patina_unlink(path as *const c_char) })
+        ret_i32(unsafe { patina_unlink(resolved.as_ptr()) })
     }
 }
 
+/// `symlinkat(target, newdirfd, linkpath)`. Only the LINK path is dirfd-relative
+/// — `target` is the link's literal contents and is never resolved here.
 fn sys_symlinkat(target: u64, newdirfd: i64, linkpath: u64) -> i64 {
-    if newdirfd != AT_FDCWD {
+    if target == 0 {
+        return -EFAULT;
+    }
+    let resolved = match resolve_at(newdirfd, linkpath) {
+        Ok(resolved) => resolved,
+        Err(errno) => return errno,
+    };
+    // SAFETY: both are valid NUL-terminated string pointers.
+    ret_i32(unsafe { patina_symlink(target as *const c_char, resolved.as_ptr()) })
+}
+
+/// Existence / permission probe (`faccessat`, `faccessat2`, and the x86_64
+/// legacy `access`). A run is one process owning the whole virtual filesystem,
+/// so every modeled entry is readable, writable and (for directories)
+/// searchable; the only question `access` can answer is whether the entry
+/// exists. `X_OK` on a non-directory is refused, matching a non-executable file
+/// rather than pretending a virtual entry could be run. Mirrors the C
+/// `faccessat`/`patina_access_impl` exactly, including its accepted flag set:
+/// `AT_EACCESS` only chooses effective vs real ids, which are one identity here.
+///
+/// `cap-primitives` calls this on every `..` component
+/// (`accessat(base, ".", X_OK, AT_EACCESS)`), so without it a capability-style
+/// guest cannot walk out of a subdirectory at all.
+fn sys_faccessat(dirfd: i64, path: u64, mode: u64, flags: u64) -> i64 {
+    if flags & !(AT_EACCESS | AT_SYMLINK_NOFOLLOW) != 0 {
         return -ENOSYS;
     }
-    // SAFETY: both are guest C strings.
-    ret_i32(unsafe { patina_symlink(target as *const c_char, linkpath as *const c_char) })
+    let resolved = match resolve_at(dirfd, path) {
+        Ok(resolved) => resolved,
+        Err(errno) => return errno,
+    };
+    let values = match stat_metadata(resolved.as_ptr(), true) {
+        Ok(values) => values,
+        Err(errno) => return errno,
+    };
+    if mode & X_OK != 0 && values.kind != PATINA_ENTRY_DIRECTORY {
+        return -EACCES;
+    }
+    0
 }
 
 /// Raw `linkat`/`link` -> the same deterministic hard link the `patina_link`
@@ -2412,18 +2623,23 @@ fn sys_symlinkat(target: u64, newdirfd: i64, linkpath: u64) -> i64 {
 /// linking, so a raw caller sees the identical follow/no-follow behavior as the C
 /// `linkat` interposer; any other flag bit is EINVAL rather than silently ignored.
 fn sys_linkat(olddirfd: i64, oldpath: u64, newdirfd: i64, newpath: u64, flags: u64) -> i64 {
-    if olddirfd != AT_FDCWD || newdirfd != AT_FDCWD {
-        return -ENOSYS;
-    }
     if flags & !AT_SYMLINK_FOLLOW != 0 {
         return -EINVAL;
     }
+    let old_resolved = match resolve_at(olddirfd, oldpath) {
+        Ok(resolved) => resolved,
+        Err(errno) => return errno,
+    };
+    let new_resolved = match resolve_at(newdirfd, newpath) {
+        Ok(resolved) => resolved,
+        Err(errno) => return errno,
+    };
     if flags & AT_SYMLINK_FOLLOW != 0 {
-        let mut canonical = [0u8; 4096];
-        // SAFETY: `oldpath` is a guest C string; the buffer is writable for its len.
+        let mut canonical = [0u8; PATH_MAX];
+        // SAFETY: the resolved path is valid; the buffer is writable for its len.
         let length = unsafe {
             patina_canonicalize(
-                oldpath as *const c_char,
+                old_resolved.as_ptr(),
                 canonical.as_mut_ptr() as *mut c_char,
                 canonical.len(),
             )
@@ -2435,40 +2651,56 @@ fn sys_linkat(olddirfd: i64, oldpath: u64, newdirfd: i64, newpath: u64, flags: u
         if length as usize >= canonical.len() {
             return -ENAMETOOLONG;
         }
-        // SAFETY: `canonical` is NUL-terminated (length < buffer size) and `newpath`
-        // is a guest C string.
+        // SAFETY: `canonical` is NUL-terminated (length < buffer size) and the
+        // resolved new path is a valid string pointer.
         return ret_i32(unsafe {
-            patina_link(
-                canonical.as_ptr() as *const c_char,
-                newpath as *const c_char,
-            )
+            patina_link(canonical.as_ptr() as *const c_char, new_resolved.as_ptr())
         });
     }
-    // SAFETY: both are guest C strings.
-    ret_i32(unsafe { patina_link(oldpath as *const c_char, newpath as *const c_char) })
+    // SAFETY: both are valid NUL-terminated string pointers.
+    ret_i32(unsafe { patina_link(old_resolved.as_ptr(), new_resolved.as_ptr()) })
 }
 
 fn sys_readlinkat(dirfd: i64, path: u64, buf: u64, bufsize: u64) -> i64 {
-    if dirfd != AT_FDCWD {
-        return -ENOSYS;
+    // `readlinkat(fd, "", …)` asks for the link the DESCRIPTOR itself names —
+    // the `O_PATH` trick `cap-primitives` uses to test whether a component it
+    // just opened is a symlink. Every descriptor the deterministic filesystem
+    // hands out names a resolved entry, never a symlink, so the honest answer is
+    // the kernel's own for a non-symlink target: ENOENT.
+    if dirfd != AT_FDCWD && path != 0 && names_current_directory_empty(path) {
+        return if is_dir_fd(dirfd) { -ENOENT } else { -ENOSYS };
     }
-    // SAFETY: `path` is a guest C string; `buf` is writable for `bufsize`.
-    ret_isize(unsafe {
-        patina_read_link(path as *const c_char, buf as *mut c_char, bufsize as usize)
-    })
+    let resolved = match resolve_at(dirfd, path) {
+        Ok(resolved) => resolved,
+        Err(errno) => return errno,
+    };
+    // SAFETY: the resolved path is valid; `buf` is writable for `bufsize`.
+    ret_isize(unsafe { patina_read_link(resolved.as_ptr(), buf as *mut c_char, bufsize as usize) })
+}
+
+/// Is the guest's `*at` path the EMPTY string? (Distinct from
+/// [`names_current_directory`], which also accepts `"."`.)
+fn names_current_directory_empty(path: u64) -> bool {
+    // SAFETY: `path` is a non-null guest NUL-terminated string pointer.
+    unsafe { (path as *const u8).read() == 0 }
 }
 
 fn sys_renameat(olddirfd: i64, oldpath: u64, newdirfd: i64, newpath: u64, flags: u64) -> i64 {
-    if olddirfd != AT_FDCWD || newdirfd != AT_FDCWD {
-        return -ENOSYS;
-    }
     // The deterministic rename models no flags (RENAME_NOREPLACE/EXCHANGE/…);
     // a nonzero renameat2 flag fails closed, mirroring the C interposer.
     if flags != 0 {
         return -EINVAL;
     }
-    // SAFETY: both are guest C strings.
-    ret_i32(unsafe { patina_rename(oldpath as *const c_char, newpath as *const c_char) })
+    let old_resolved = match resolve_at(olddirfd, oldpath) {
+        Ok(resolved) => resolved,
+        Err(errno) => return errno,
+    };
+    let new_resolved = match resolve_at(newdirfd, newpath) {
+        Ok(resolved) => resolved,
+        Err(errno) => return errno,
+    };
+    // SAFETY: both are valid NUL-terminated string pointers.
+    ret_i32(unsafe { patina_rename(old_resolved.as_ptr(), new_resolved.as_ptr()) })
 }
 
 // ---- Network (SimNet) ----
@@ -3137,10 +3369,82 @@ mod tests {
             arg_fd(PATINA_SOCKET_FD_BASE as u64 + 5),
             PATINA_SOCKET_FD_BASE + 5
         );
+    }
+
+    /// The deny strings SUD and the C interposers emit for the same refusal must
+    /// be byte-identical, or a raw-syscall guest and a libc guest record
+    /// different stderr for the same event and their traces diverge on the
+    /// refusal alone. `sud_deny`'s doc comment states the rule; this makes it a
+    /// gate. RED: change either spelling and the assertion names both.
+    #[test]
+    fn the_o_path_deny_matches_the_c_interposer_byte_for_byte() {
+        const C_SOURCE: &str = include_str!("../c/patina_posix.c");
+        let macro_name = "PATINA_DENY_O_PATH_NONDIR";
+        let define = format!("#define {macro_name}");
+        let start = C_SOURCE
+            .find(&define)
+            .unwrap_or_else(|| panic!("{macro_name} is not defined in patina_posix.c"));
+        // Collect the macro's continuation lines and concatenate their string
+        // literals, exactly as the C preprocessor does.
+        let mut c_message = String::new();
+        for line in C_SOURCE[start..].lines() {
+            let mut rest = line;
+            while let Some(open) = rest.find('"') {
+                let tail = &rest[open + 1..];
+                let close = tail.find('"').expect("unterminated C string literal");
+                c_message.push_str(&tail[..close]);
+                rest = &tail[close + 1..];
+            }
+            if !line.trim_end().ends_with('\\') {
+                break;
+            }
+        }
+        // The only escape either spelling uses is the trailing newline.
+        let c_message = c_message.replace("\\n", "\n");
         assert_eq!(
-            arg_fd(PATINA_SUD_DIR_FD_BASE as u64),
-            PATINA_SUD_DIR_FD_BASE as i64
+            c_message, DENY_O_PATH_NONDIR,
+            "the SUD and C deny strings for an O_PATH open of a non-directory differ; \
+             a raw-syscall guest and a libc guest would record different stderr"
         );
+    }
+
+    #[test]
+    fn join_at_splices_a_relative_component_onto_the_directory_path() {
+        // RED before dirfd-relative resolution existed: every `*at` row refused a
+        // non-AT_FDCWD descriptor outright, so no join was ever performed.
+        let join = |base: &str, rel: &str| {
+            join_at(base.as_bytes(), rel.as_bytes())
+                .map(|joined| String::from_utf8(joined.into_bytes()).unwrap())
+        };
+        assert_eq!(join("/base", "child").unwrap(), "/base/child");
+        // The root is the one base that already ends in a separator.
+        assert_eq!(join("/", "child").unwrap(), "/child");
+        // Multi-component relative paths splice whole.
+        assert_eq!(join("/base", "a/b/c").unwrap(), "/base/a/b/c");
+        // `.` and `..` are passed through for the FS driver's one normalizer to
+        // judge — the same judgement an AT_FDCWD path of the same spelling gets.
+        assert_eq!(join("/base", ".").unwrap(), "/base/.");
+        assert_eq!(join("/base", "../x").unwrap(), "/base/../x");
+        // A NUL in the guest's bytes is EINVAL, never a truncated path.
+        assert_eq!(join_at(b"/base", b"a\0b"), Err(-EINVAL));
+        // Overlong joins fail closed rather than silently truncating.
+        let long = "x".repeat(PATH_MAX);
+        assert_eq!(join_at(b"/base", long.as_bytes()), Err(-ENAMETOOLONG));
+    }
+
+    #[test]
+    fn resolve_at_keeps_absolute_paths_and_refuses_an_unknown_dirfd() {
+        // AT_FDCWD hands the guest pointer straight through (no copy, no join).
+        let path = CString::new("/absolute/path").unwrap();
+        let raw = path.as_ptr() as u64;
+        let resolved = resolve_at(AT_FDCWD, raw).expect("AT_FDCWD is the path verbatim");
+        assert_eq!(resolved.as_ptr(), path.as_ptr());
+        // A descriptor the deterministic filesystem never issued as a DIRECTORY
+        // fails closed — even for an absolute path, so a bogus fd is never
+        // honored (byte-identical to the C `patina_resolve_at`).
+        assert_eq!(resolve_at(7, raw).err(), Some(-ENOSYS));
+        // A null path is EFAULT, never a dereference.
+        assert_eq!(resolve_at(AT_FDCWD, 0).err(), Some(-EFAULT));
     }
 
     #[test]
@@ -3346,20 +3650,17 @@ mod tests {
         // adds O_DIRECTORY|O_CLOEXEC. The legacy `open`/`creat` aliases and the
         // direct `openat` share ONE decode (`openat_patina_flags`), so they are
         // bit-for-bit identical — the round-6 EBADF was NOT a flag defect (it was
-        // the SUD dir-fd fcntl/openat gap). This pins that: the noise bits never
+        // the dir-fd fcntl/openat gap). This pins that: the noise bits never
         // perturb the decode. RED: folding O_LARGEFILE into the access-mode
         // compare, or reacting to O_DIRECTORY, would diverge open from openat.
-        const O_LARGEFILE: u64 = 0o100000; // 0x8000 (rustix's signature bit)
-        const O_DIRECTORY: u64 = 0o200000; // x86_64 value
-        const O_CLOEXEC: u64 = 0o2000000;
         let noise = O_LARGEFILE | O_DIRECTORY | O_CLOEXEC;
         // The EXACT round-5 flag word (O_WRONLY|O_CREAT|O_TRUNC|O_LARGEFILE).
         assert_eq!(
             openat_patina_flags(0x8241),
             PATINA_O_WRITE | PATINA_O_CREATE | PATINA_O_TRUNCATE
         );
-        // A directory open decodes read-only; the O_DIRECTORY bit is handled by
-        // the caller that creates a SUD getdents-capable directory snapshot.
+        // A directory open decodes read-only; the O_DIRECTORY/O_PATH bits are
+        // handled by the caller, which mints a directory descriptor instead.
         assert_eq!(
             openat_patina_flags(O_DIRECTORY | O_LARGEFILE),
             PATINA_O_READ

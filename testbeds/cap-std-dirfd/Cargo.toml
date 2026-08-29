@@ -1,0 +1,33 @@
+# Standalone package: its own empty [workspace] table keeps it OUT of the root
+# Patina workspace so `cargo` here never touches crates/ or the root manifest.
+#
+# The acceptance MRE for DIRECTORY-DESCRIPTOR-RELATIVE resolution. `cap-std` is
+# the capability-based filesystem API: it opens ONE directory and then performs
+# every later operation relative to that descriptor, resolving each path
+# component itself with `openat(dirfd, name, O_PATH|O_DIRECTORY|O_NOFOLLOW)`,
+# `readlinkat(dirfd, name)`, `statx(dirfd, name)`, `faccessat(dirfd, ".")`,
+# `mkdirat`/`unlinkat`/`renameat`/`symlinkat(dirfd, …)` and `getdents64`. Under
+# `cap-primitives` those calls go through rustix's DEFAULT backend, so on x86_64
+# they are raw inline `syscall` instructions trapped by syscall-user-dispatch —
+# while the base directory itself is opened through std (libc → the C
+# interposer). One guest therefore exercises BOTH halves of the `*at` surface and
+# proves they share one directory-descriptor table.
+[workspace]
+
+[package]
+name = "cap-std-dirfd"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "cap-std-dirfd"
+path = "src/main.rs"
+
+[dependencies]
+# Pinned exactly, per testbeds convention. cap-std pulls rustix on its default
+# (linux_raw) backend, which is the point.
+cap-std = "=4.0.2"
+
+[profile.release]
+panic = "unwind"
