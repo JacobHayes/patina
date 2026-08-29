@@ -375,6 +375,12 @@ pub struct FsMetadata {
     /// Drivers without a clock do not auto-update this field. For example,
     /// `patina-dst-fs-mem` changes timestamps only via explicit set-times calls.
     pub mtime_nanos: u64,
+    /// POSIX permission bits (`0o7777`) — the mode WITHOUT the file-type bits,
+    /// which [`FsMetadata::kind`] already carries. A deterministic filesystem
+    /// creates files `0o644` and directories `0o755` (mode `0o666`/`0o777` under
+    /// a fixed `0o022` umask) and changes this only through an explicit
+    /// set-mode call.
+    pub mode: u32,
 }
 
 /// One immediate child returned by a deterministic directory listing.
@@ -714,6 +720,29 @@ pub enum Operation {
     },
     FsReadLink {
         path: String,
+    },
+    /// Change the permission bits of the entry `path` NAMES. Trailing-symlink
+    /// resolution — the only difference between `chmod` and
+    /// `fchmodat(…, AT_SYMLINK_NOFOLLOW)` — happens above this boundary, in the
+    /// same place every other path operation resolves one, so the driver never
+    /// needs a second resolver.
+    FsSetMode {
+        path: String,
+        mode: u32,
+    },
+    /// Change the permission bits of the entry an open descriptor names
+    /// (`fchmod`).
+    FsSetFdMode {
+        fd: Fd,
+        mode: u32,
+    },
+    /// The path an open descriptor's filesystem NODE currently has. A
+    /// descriptor names an inode, not a name: a rename moves the node and the
+    /// descriptor follows it, so `*at` resolution asks the filesystem where the
+    /// node is now instead of replaying the name it was opened under. The
+    /// outcome carries the path as [`Outcome::Bytes`], like `FsReadLink`.
+    FsFdPath {
+        fd: Fd,
     },
     /// Resolve a host name to a virtual IPv4 address. The outcome carries the
     /// dotted-quad address as [`Outcome::Bytes`], exactly like `FsReadLink`
@@ -1074,6 +1103,7 @@ mod tests {
             nlink: 1,
             atime_nanos: 1,
             mtime_nanos: 2,
+            mode: 0o777,
         };
         let json = serde_json::to_string(&metadata).unwrap();
         assert!(json.contains("\"kind\":\"symlink\""));

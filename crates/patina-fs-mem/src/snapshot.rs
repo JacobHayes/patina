@@ -11,12 +11,12 @@ use std::fmt;
 
 use patina_dst_abi::{EffectError, ErrorCode};
 
-use crate::{EntryMetadata, Inode, InodeId, MemFs, normalize_entry_path, parent_path};
+use crate::{EntryMetadata, Inode, InodeId, MODE_MASK, MemFs, normalize_entry_path, parent_path};
 
 /// Magic prefix identifying an encoded [`FsSnapshot`] stream.
 const MAGIC: &[u8; 8] = b"PATFSSNP";
 /// Wire-format version. Bump on any incompatible layout change.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// Deliberately conservative structural bounds for a restart handoff. The
 /// decoder checks them before allocating from untrusted bytes, so corrupt
@@ -82,6 +82,7 @@ impl FsSnapshot {
             bytes.extend_from_slice(&(inode.links as u64).to_le_bytes());
             bytes.extend_from_slice(&inode.atime_nanos.to_le_bytes());
             bytes.extend_from_slice(&inode.mtime_nanos.to_le_bytes());
+            bytes.extend_from_slice(&inode.mode.to_le_bytes());
             encode_field(&mut bytes, &inode.contents);
         }
         for (path, inode_id) in &self.filesystem.files {
@@ -120,10 +121,10 @@ impl FsSnapshot {
         let mut total = MAGIC.len() + 4 + 8 + 8 + 8 + 8 + 8;
         for path in self.filesystem.directories.keys() {
             add_path_len(&mut total, path)?;
-            add_len(&mut total, 24)?;
+            add_len(&mut total, METADATA_BYTES)?;
         }
         for inode in self.filesystem.inodes.values() {
-            add_len(&mut total, 8 + 8 + 8 + 8)?;
+            add_len(&mut total, 8 + 8 + 8 + 8 + 4)?;
             add_field_len(&mut total, inode.contents.len(), "field length")?;
         }
         for path in self.filesystem.files.keys() {
@@ -133,7 +134,7 @@ impl FsSnapshot {
         for (path, target) in &self.filesystem.symlinks {
             add_path_len(&mut total, path)?;
             add_field_len(&mut total, target.len(), "field length")?;
-            add_len(&mut total, 24)?;
+            add_len(&mut total, METADATA_BYTES)?;
         }
         Ok(total)
     }
@@ -187,6 +188,7 @@ impl FsSnapshot {
             }
             let atime_nanos = reader.take_u64()?;
             let mtime_nanos = reader.take_u64()?;
+            let mode = reader.take_mode()?;
             let contents = reader.take_field()?;
             inodes.insert(
                 inode_id,
@@ -195,6 +197,7 @@ impl FsSnapshot {
                     links,
                     atime_nanos,
                     mtime_nanos,
+                    mode,
                 },
             );
         }
@@ -468,7 +471,11 @@ fn encode_metadata(bytes: &mut Vec<u8>, metadata: &EntryMetadata) {
     bytes.extend_from_slice(&metadata.ino.to_le_bytes());
     bytes.extend_from_slice(&metadata.atime_nanos.to_le_bytes());
     bytes.extend_from_slice(&metadata.mtime_nanos.to_le_bytes());
+    bytes.extend_from_slice(&metadata.mode.to_le_bytes());
 }
+
+/// The encoded size of one [`EntryMetadata`]: inode id, both timestamps, mode.
+const METADATA_BYTES: usize = 8 + 8 + 8 + 4;
 
 fn encode_path(bytes: &mut Vec<u8>, path: &str) {
     encode_field(bytes, path.as_bytes());
@@ -556,7 +563,21 @@ impl<'a> Reader<'a> {
             ino: self.take_u64()?,
             atime_nanos: self.take_u64()?,
             mtime_nanos: self.take_u64()?,
+            mode: self.take_mode()?,
         })
+    }
+
+    /// Permission bits, rejected rather than masked when they carry anything
+    /// outside `0o7777`: a snapshot that disagrees with the model about what a
+    /// mode IS must not be silently reinterpreted.
+    fn take_mode(&mut self) -> Result<u32, FsSnapshotError> {
+        let mode = self.take_u32()?;
+        if mode & !MODE_MASK != 0 {
+            return Err(FsSnapshotError::Malformed(
+                "mode carries bits outside the permission mask",
+            ));
+        }
+        Ok(mode)
     }
 }
 
@@ -652,17 +673,22 @@ mod tests {
         bytes.extend_from_slice(&(inodes.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&(files.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&(symlinks.len() as u64).to_le_bytes());
+        // Modes are not part of the hand-encoded tuples: every case below
+        // probes structure (ordering, identity, bounds), so each entry carries
+        // its ordinary creation mode.
         for (path, ino, atime, mtime) in directories {
             encode_path(&mut bytes, path);
             bytes.extend_from_slice(&ino.to_le_bytes());
             bytes.extend_from_slice(&atime.to_le_bytes());
             bytes.extend_from_slice(&mtime.to_le_bytes());
+            bytes.extend_from_slice(&crate::DIRECTORY_MODE.to_le_bytes());
         }
         for (ino, links, atime, mtime, contents) in inodes {
             bytes.extend_from_slice(&ino.to_le_bytes());
             bytes.extend_from_slice(&links.to_le_bytes());
             bytes.extend_from_slice(&atime.to_le_bytes());
             bytes.extend_from_slice(&mtime.to_le_bytes());
+            bytes.extend_from_slice(&crate::FILE_MODE.to_le_bytes());
             encode_field(&mut bytes, contents);
         }
         for (path, ino) in files {
@@ -675,6 +701,7 @@ mod tests {
             bytes.extend_from_slice(&ino.to_le_bytes());
             bytes.extend_from_slice(&atime.to_le_bytes());
             bytes.extend_from_slice(&mtime.to_le_bytes());
+            bytes.extend_from_slice(&crate::SYMLINK_MODE.to_le_bytes());
         }
         bytes
     }

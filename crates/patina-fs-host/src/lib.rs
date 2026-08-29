@@ -234,6 +234,17 @@ fn metadata_from_host(metadata: &fs::Metadata) -> DriverResult<FsMetadata> {
         nlink: 1,
         atime_nanos: 0,
         mtime_nanos: 0,
+        // Normalized like `ino`/`nlink`/the timestamps above: a captured host
+        // file's real mode varies with the checkout that produced it (umask,
+        // VCS, archive extraction), so reporting it would make a capture-backed
+        // run depend on how the corpus reached the disk. Every captured entry
+        // therefore reads as the deterministic creation mode for its kind, and
+        // this driver is read-only, so nothing can change one.
+        mode: if kind == FsEntryKind::Directory {
+            0o755
+        } else {
+            0o644
+        },
     })
 }
 

@@ -157,12 +157,28 @@ enum {
 
 int32_t patina_metadata(const char *path, uint32_t *kind, uint64_t *length);
 int32_t patina_fd_metadata(int32_t fd, uint32_t *kind, uint64_t *length);
+/*
+ * `mode` receives the POSIX permission bits (0o7777) WITHOUT the file-type bits,
+ * which `kind` already carries: a caller assembling a struct stat ORs the two.
+ */
 int32_t patina_metadata_full(const char *path, uint32_t *kind, uint64_t *length,
                              uint64_t *ino, uint32_t *nlink,
-                             uint64_t *atime_nanos, uint64_t *mtime_nanos);
+                             uint64_t *atime_nanos, uint64_t *mtime_nanos,
+                             uint32_t *mode);
 int32_t patina_fd_metadata_full(int32_t fd, uint32_t *kind, uint64_t *length,
                                 uint64_t *ino, uint32_t *nlink,
-                                uint64_t *atime_nanos, uint64_t *mtime_nanos);
+                                uint64_t *atime_nanos, uint64_t *mtime_nanos,
+                                uint32_t *mode);
+/*
+ * Change an entry's permission bits (chmod/fchmod/fchmodat). `follow` selects
+ * the trailing-symlink behavior exactly as patina_diropen's does: follow != 0
+ * resolves a trailing symlink and changes its TARGET (chmod, fchmodat with no
+ * flags), follow == 0 names the link itself and is EOPNOTSUPP on one, because
+ * Linux has no way to change a symlink's mode. Only the permission bits of
+ * `mode` are stored.
+ */
+int32_t patina_chmod(const char *path, uint32_t mode, int32_t follow);
+int32_t patina_fchmod(int32_t fd, uint32_t mode);
 int32_t patina_read_dir(const char *path, void **state);
 /*
  * Return 1 after writing the next entry, 0 at end-of-directory, or -1 with
@@ -181,14 +197,20 @@ int32_t patina_link(const char *from, const char *to);
 /*
  * Directory descriptors backing the openat/fdopendir/unlinkat/getdents64 family.
  * patina_diropen VALIDATES that `path` names a directory, opens a read-only
- * deterministic filesystem fd, records its fd->path binding and returns that fd.
+ * deterministic filesystem fd, records the fd as a directory descriptor and
+ * returns it.
  * `follow` selects the trailing-symlink behavior (0 == O_NOFOLLOW): a symlink
  * with follow==0 is ELOOP, with follow!=0 it is resolved through the virtual
  * realpath and re-checked; a non-directory is ENOTDIR. Validation lives here so
  * the C interposers and the SUD dispatcher cannot drift.
- * patina_dirpath recovers the bound path (buf gets a NUL-terminated copy when it
- * fits; returns the length, or -1/EBADF for an unknown fd) -- it is the
- * dirfd->path half of *at resolution on both the libc and raw-syscall paths;
+ * patina_dirpath answers where the descriptor's NODE is NOW: it asks the
+ * deterministic filesystem, which moves an open description with its inode
+ * through every rename, rather than replaying the name the descriptor was
+ * opened under (buf gets a NUL-terminated copy when it fits; returns the
+ * length, or -1/EBADF for an unknown fd). It is the dirfd->path half of *at
+ * resolution on both the libc and raw-syscall paths, so a renamed directory
+ * keeps serving the descriptor and a symlink planted at the vacated name is
+ * never followed;
  * patina_dir_is_dirfd tells a dir fd apart from other fds; patina_dirclose
  * releases the mapping and closes the filesystem fd (closedir/close). fdopendir
  * transfers fd ownership into the DIR, so closedir is what calls patina_dirclose.

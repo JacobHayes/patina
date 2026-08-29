@@ -16,6 +16,29 @@ use patina_dst_driver_api::{DriverResult, FsDriver};
 type InodeId = u64;
 type DescriptionId = u64;
 
+/// The permission mask a mode is stored under (`setuid`/`setgid`/sticky plus
+/// the three triads); the file-type bits live in [`FsEntryKind`].
+pub const MODE_MASK: u32 = 0o7777;
+/// The fixed umask this filesystem models, applied to the POSIX creation modes.
+pub const UMASK: u32 = 0o022;
+/// A newly created regular file: `0o666 & !UMASK`.
+pub const FILE_MODE: u32 = 0o666 & !UMASK;
+/// A newly created directory: `0o777 & !UMASK`.
+pub const DIRECTORY_MODE: u32 = 0o777 & !UMASK;
+/// A symlink leaf. Linux ignores a symlink's own mode entirely and reports the
+/// conventional `0o777`; nothing here consults it.
+pub const SYMLINK_MODE: u32 = 0o777;
+
+/// Owner-triad permission bits, as POSIX spells them.
+const READ: u32 = 0o4;
+const WRITE: u32 = 0o2;
+const SEARCH: u32 = 0o1;
+
+/// Does the single modeled (owning, non-root) identity hold every bit in `want`?
+fn owner_allows(mode: u32, want: u32) -> bool {
+    ((mode >> 6) & 0o7) & want == want
+}
+
 #[derive(Clone, Debug)]
 struct Description {
     path: String,
@@ -34,6 +57,8 @@ struct Inode {
     links: u32,
     atime_nanos: u64,
     mtime_nanos: u64,
+    /// POSIX permission bits (`0o7777`), without the file-type bits.
+    mode: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -41,14 +66,28 @@ struct EntryMetadata {
     ino: InodeId,
     atime_nanos: u64,
     mtime_nanos: u64,
+    /// POSIX permission bits (`0o7777`), without the file-type bits.
+    mode: u32,
 }
 
 /// A deterministic in-memory filesystem keyed by normalized absolute paths.
 ///
 /// It models regular files, hard links, inert symlink leaves, directories,
-/// cursors, and basic metadata. MemFs has no clock, so access and modification
-/// times are not auto-updated by reads or writes; timestamps change only through
-/// explicit `set_times` calls.
+/// cursors, basic metadata, and POSIX permission bits. MemFs has no clock, so
+/// access and modification times are not auto-updated by reads or writes;
+/// timestamps change only through explicit `set_times` calls.
+///
+/// # Permissions
+///
+/// Every entry carries a mode. New files are `0o644` and new directories
+/// `0o755` — the POSIX creation modes `0o666`/`0o777` under the fixed `0o022`
+/// umask this filesystem models — and symlink leaves are the conventional
+/// `0o777`. The guest is a single non-root identity (uid/gid 1000, the value the
+/// native shim's `getuid` reports) and owns every entry, so enforcement reads
+/// the OWNER triad: read needs `r`, write needs `w`, resolving a path through a
+/// directory needs `x` on that directory, listing one needs `r`, and creating,
+/// removing, or renaming a name inside one needs `w` and `x`. There is no
+/// root-bypass identity, so a mode change is always enforced.
 #[derive(Clone, Default)]
 pub struct MemFs {
     files: BTreeMap<String, InodeId>,
@@ -71,9 +110,9 @@ impl MemFs {
             next_inode: 1,
             ..Self::default()
         };
-        let root = filesystem.allocate_entry_metadata();
+        let root = filesystem.allocate_entry_metadata(DIRECTORY_MODE);
         filesystem.directories.insert("/".into(), root);
-        let tmp = filesystem.allocate_entry_metadata();
+        let tmp = filesystem.allocate_entry_metadata(DIRECTORY_MODE);
         filesystem.directories.insert("/tmp".into(), tmp);
         filesystem
     }
@@ -81,7 +120,7 @@ impl MemFs {
     pub fn with_file(mut self, path: &str, contents: impl Into<Vec<u8>>) -> DriverResult<Self> {
         let path = normalize_path(path)?;
         self.insert_parent_directories(&path);
-        let inode = self.allocate_inode(contents.into());
+        let inode = self.allocate_inode(contents.into(), FILE_MODE);
         self.files.insert(path, inode);
         Ok(self)
     }
@@ -155,17 +194,18 @@ impl MemFs {
         self.next_description = self.next_description.max(previous.next_description);
     }
 
-    fn allocate_entry_metadata(&mut self) -> EntryMetadata {
+    fn allocate_entry_metadata(&mut self, mode: u32) -> EntryMetadata {
         let ino = self.next_inode;
         self.next_inode = self.next_inode.checked_add(1).expect("inode IDs exhausted");
         EntryMetadata {
             ino,
             atime_nanos: 0,
             mtime_nanos: 0,
+            mode: mode & MODE_MASK,
         }
     }
 
-    fn allocate_inode(&mut self, contents: Vec<u8>) -> InodeId {
+    fn allocate_inode(&mut self, contents: Vec<u8>, mode: u32) -> InodeId {
         let inode = self.next_inode;
         self.next_inode = self.next_inode.checked_add(1).expect("inode IDs exhausted");
         self.inodes.insert(
@@ -175,9 +215,80 @@ impl MemFs {
                 links: 1,
                 atime_nanos: 0,
                 mtime_nanos: 0,
+                mode: mode & MODE_MASK,
             },
         );
         inode
+    }
+
+    /// The permission bits of an existing entry, or `None` when nothing is
+    /// there. Symlink leaves answer [`SYMLINK_MODE`]: Linux never consults a
+    /// link's own mode.
+    fn entry_mode(&self, path: &str) -> Option<u32> {
+        if let Some(inode) = self.files.get(path) {
+            return Some(
+                self.inodes
+                    .get(inode)
+                    .expect("file references an inode")
+                    .mode,
+            );
+        }
+        if let Some(metadata) = self.directories.get(path) {
+            return Some(metadata.mode);
+        }
+        self.symlinks.get(path).map(|_| SYMLINK_MODE)
+    }
+
+    /// Resolving a path walks every directory ABOVE the final component, and
+    /// each of those needs `x`. Checked before existence, as the kernel does:
+    /// an unsearchable directory answers `EACCES`, never "not found", so the
+    /// names behind it cannot be probed through the error code.
+    fn check_search_path(&self, path: &str) -> DriverResult<()> {
+        if path != "/" {
+            if let Some(root) = self.directories.get("/") {
+                if !owner_allows(root.mode, SEARCH) {
+                    return Err(denied("/", "search"));
+                }
+            }
+        }
+        let mut current = String::new();
+        for component in path
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|component| !component.is_empty())
+        {
+            current.push('/');
+            current.push_str(component);
+            if current.len() >= path.len() {
+                // The final component is the entry itself, not a directory the
+                // resolution passes THROUGH.
+                break;
+            }
+            if let Some(metadata) = self.directories.get(&current) {
+                if !owner_allows(metadata.mode, SEARCH) {
+                    return Err(denied(&current, "search"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Creating, removing, or renaming a NAME inside a directory is a write to
+    /// that directory: `w` and `x` both.
+    fn check_directory_write(&self, directory: &str) -> DriverResult<()> {
+        if let Some(metadata) = self.directories.get(directory) {
+            if !owner_allows(metadata.mode, WRITE | SEARCH) {
+                return Err(denied(directory, "modify"));
+            }
+        }
+        Ok(())
+    }
+
+    /// The guard every path-taking entry point runs first: no symlink in the
+    /// interior, then `x` on every directory above the final component.
+    fn resolve_guard(&self, path: &str) -> DriverResult<()> {
+        self.ensure_no_intermediate_symlink(path)?;
+        self.check_search_path(path)
     }
 
     fn description_mut(&mut self, fd: Fd) -> DriverResult<&mut Description> {
@@ -286,11 +397,11 @@ impl MemFs {
             parent = parent_path(parent);
         }
         for parent in parents.into_iter().rev() {
-            let metadata = self.allocate_entry_metadata();
+            let metadata = self.allocate_entry_metadata(DIRECTORY_MODE);
             self.directories.insert(parent, metadata);
         }
         if !self.directories.contains_key("/") {
-            let metadata = self.allocate_entry_metadata();
+            let metadata = self.allocate_entry_metadata(DIRECTORY_MODE);
             self.directories.insert("/".into(), metadata);
         }
     }
@@ -313,7 +424,7 @@ impl MemFs {
 impl FsDriver for MemFs {
     fn open(&mut self, path: &str, flags: OpenFlags) -> DriverResult<Fd> {
         let path = normalize_entry_path(path)?;
-        self.ensure_no_intermediate_symlink(&path)?;
+        self.resolve_guard(&path)?;
         if !flags.read && !flags.write {
             return Err(EffectError::new(
                 ErrorCode::InvalidInput,
@@ -332,12 +443,20 @@ impl FsDriver for MemFs {
                 "exclusive open requires create",
             ));
         }
-        if self.directories.contains_key(&path) {
+        if let Some(metadata) = self.directories.get(&path).copied() {
             if flags.write || flags.create || flags.truncate || flags.append || flags.exclusive {
                 return Err(EffectError::new(
                     ErrorCode::IsDirectory,
                     format!("virtual filesystem path is a directory: {path}"),
                 ));
+            }
+            // A directory descriptor is a handle on the node, so `x` (search) is
+            // what it costs. The `r` a listing needs is charged at
+            // `read_directory`, which is also where a descriptor opened
+            // `O_PATH` — indistinguishable here, since a path-only open is not
+            // part of the driver's flag vocabulary — would pay it.
+            if !owner_allows(metadata.mode, SEARCH) {
+                return Err(denied(&path, "open"));
             }
             return self.allocate_handle(path, 0, true, false, false, FsEntryKind::Directory);
         }
@@ -350,8 +469,9 @@ impl FsDriver for MemFs {
 
         if !self.files.contains_key(&path) {
             if flags.create {
+                self.check_directory_write(parent_path(&path))?;
                 self.insert_parent_directories(&path);
-                let inode = self.allocate_inode(Vec::new());
+                let inode = self.allocate_inode(Vec::new(), FILE_MODE);
                 self.files.insert(path.clone(), inode);
             } else {
                 return Err(not_found(&path));
@@ -361,13 +481,24 @@ impl FsDriver for MemFs {
                 ErrorCode::AlreadyExists,
                 format!("virtual filesystem entry already exists: {path}"),
             ));
-        } else if flags.truncate {
-            let inode = self.file_inode(&path)?;
-            self.inodes
-                .get_mut(&inode)
-                .expect("file path references an inode")
-                .contents
-                .clear();
+        } else {
+            let mode = self
+                .entry_mode(&path)
+                .expect("the file was found in this branch");
+            if flags.read && !owner_allows(mode, READ) {
+                return Err(denied(&path, "read"));
+            }
+            if flags.write && !owner_allows(mode, WRITE) {
+                return Err(denied(&path, "write"));
+            }
+            if flags.truncate {
+                let inode = self.file_inode(&path)?;
+                self.inodes
+                    .get_mut(&inode)
+                    .expect("file path references an inode")
+                    .contents
+                    .clear();
+            }
         }
 
         let cursor = if flags.append {
@@ -558,7 +689,7 @@ impl FsDriver for MemFs {
 
     fn metadata(&mut self, path: &str) -> DriverResult<FsMetadata> {
         let path = normalize_entry_path(path)?;
-        self.ensure_no_intermediate_symlink(&path)?;
+        self.resolve_guard(&path)?;
         self.metadata_for_path(&path)
     }
 
@@ -569,7 +700,8 @@ impl FsDriver for MemFs {
 
     fn create_directory(&mut self, path: &str) -> DriverResult<()> {
         let path = normalize_entry_path(path)?;
-        self.ensure_no_intermediate_symlink(&path)?;
+        self.resolve_guard(&path)?;
+        self.check_directory_write(parent_path(&path))?;
         if self.path_exists(&path) {
             return Err(EffectError::new(
                 ErrorCode::AlreadyExists,
@@ -583,14 +715,15 @@ impl FsDriver for MemFs {
                 format!("virtual parent directory does not exist: {parent}"),
             ));
         }
-        let metadata = self.allocate_entry_metadata();
+        let metadata = self.allocate_entry_metadata(DIRECTORY_MODE);
         self.directories.insert(path, metadata);
         Ok(())
     }
 
     fn remove_file(&mut self, path: &str) -> DriverResult<()> {
         let path = normalize_entry_path(path)?;
-        self.ensure_no_intermediate_symlink(&path)?;
+        self.resolve_guard(&path)?;
+        self.check_directory_write(parent_path(&path))?;
         if self.directories.contains_key(&path) {
             return Err(EffectError::new(
                 ErrorCode::IsDirectory,
@@ -675,7 +808,7 @@ impl FsDriver for MemFs {
         mtime_nanos: Option<u64>,
     ) -> DriverResult<()> {
         let path = normalize_entry_path(path)?;
-        self.ensure_no_intermediate_symlink(&path)?;
+        self.resolve_guard(&path)?;
         if let Some(inode) = self.files.get(&path).copied() {
             let inode = self
                 .inodes
@@ -712,15 +845,20 @@ impl FsDriver for MemFs {
 
     fn read_directory(&mut self, path: &str) -> DriverResult<Vec<FsDirectoryEntry>> {
         let path = normalize_entry_path(path)?;
-        self.ensure_no_intermediate_symlink(&path)?;
+        self.resolve_guard(&path)?;
         if self.files.contains_key(&path) || self.symlinks.contains_key(&path) {
             return Err(EffectError::new(
                 ErrorCode::NotDirectory,
                 format!("virtual filesystem path is not a directory: {path}"),
             ));
         }
-        if !self.directories.contains_key(&path) {
+        let Some(metadata) = self.directories.get(&path).copied() else {
             return Err(not_found(&path));
+        };
+        // Listing a directory reads it, so `r` is what it costs — separately
+        // from the `x` that resolving a path THROUGH it costs.
+        if !owner_allows(metadata.mode, READ) {
+            return Err(denied(&path, "list"));
         }
         let prefix = if path == "/" {
             "/".to_owned()
@@ -757,7 +895,8 @@ impl FsDriver for MemFs {
 
     fn remove_directory(&mut self, path: &str) -> DriverResult<()> {
         let path = normalize_entry_path(path)?;
-        self.ensure_no_intermediate_symlink(&path)?;
+        self.resolve_guard(&path)?;
+        self.check_directory_write(parent_path(&path))?;
         if path == "/" {
             return Err(EffectError::new(
                 ErrorCode::Denied,
@@ -799,8 +938,10 @@ impl FsDriver for MemFs {
     fn rename(&mut self, from: &str, to: &str) -> DriverResult<()> {
         let from = normalize_entry_path(from)?;
         let to = normalize_entry_path(to)?;
-        self.ensure_no_intermediate_symlink(&from)?;
-        self.ensure_no_intermediate_symlink(&to)?;
+        self.resolve_guard(&from)?;
+        self.resolve_guard(&to)?;
+        self.check_directory_write(parent_path(&from))?;
+        self.check_directory_write(parent_path(&to))?;
         if from == "/" || to == "/" || to.starts_with(&format!("{from}/")) {
             return Err(EffectError::new(
                 ErrorCode::InvalidInput,
@@ -923,8 +1064,9 @@ impl FsDriver for MemFs {
     fn link(&mut self, from: &str, to: &str) -> DriverResult<()> {
         let from = normalize_entry_path(from)?;
         let to = normalize_entry_path(to)?;
-        self.ensure_no_intermediate_symlink(&from)?;
-        self.ensure_no_intermediate_symlink(&to)?;
+        self.resolve_guard(&from)?;
+        self.resolve_guard(&to)?;
+        self.check_directory_write(parent_path(&to))?;
         if self.path_exists(&to) {
             return Err(EffectError::new(
                 ErrorCode::AlreadyExists,
@@ -942,7 +1084,7 @@ impl FsDriver for MemFs {
         }
         if let Some(target) = self.symlinks.get(&from).cloned() {
             self.symlinks.insert(to.clone(), target);
-            let metadata = self.allocate_entry_metadata();
+            let metadata = self.allocate_entry_metadata(SYMLINK_MODE);
             self.symlink_metadata.insert(to, metadata);
             return Ok(());
         }
@@ -963,7 +1105,8 @@ impl FsDriver for MemFs {
             ));
         }
         let link_path = normalize_entry_path(link_path)?;
-        self.ensure_no_intermediate_symlink(&link_path)?;
+        self.resolve_guard(&link_path)?;
+        self.check_directory_write(parent_path(&link_path))?;
         if self.path_exists(&link_path) {
             return Err(EffectError::new(
                 ErrorCode::AlreadyExists,
@@ -974,22 +1117,73 @@ impl FsDriver for MemFs {
             return Err(not_found(parent_path(&link_path)));
         }
         self.symlinks.insert(link_path.clone(), target.into());
-        let metadata = self.allocate_entry_metadata();
+        let metadata = self.allocate_entry_metadata(SYMLINK_MODE);
         self.symlink_metadata.insert(link_path, metadata);
         Ok(())
     }
 
     fn read_link(&mut self, path: &str) -> DriverResult<String> {
         let path = normalize_entry_path(path)?;
-        self.ensure_no_intermediate_symlink(&path)?;
+        self.resolve_guard(&path)?;
         self.symlinks
             .get(&path)
             .cloned()
             .ok_or_else(|| not_found(&path))
     }
+
+    /// `chmod` / `fchmodat`. Changing a mode is an OWNER right, not a
+    /// permission-bit right, and the single modeled identity owns every entry —
+    /// so only REACHING the entry is checked, never the entry's own bits.
+    ///
+    /// A symlink leaf has no mode of its own here (Linux ignores one too), so
+    /// naming a link fails closed rather than silently recording a mode nothing
+    /// will ever read. `chmod`'s follow-the-link spelling resolves above this
+    /// boundary and arrives naming the target.
+    fn set_mode(&mut self, path: &str, mode: u32) -> DriverResult<()> {
+        let path = normalize_entry_path(path)?;
+        self.resolve_guard(&path)?;
+        if self.symlinks.contains_key(&path) {
+            return Err(EffectError::new(
+                ErrorCode::Denied,
+                format!("virtual symlink has no mode of its own: {path}"),
+            ));
+        }
+        self.apply_mode(&path, mode)
+    }
+
+    fn set_fd_mode(&mut self, fd: Fd, mode: u32) -> DriverResult<()> {
+        let path = self.description(fd)?.path.clone();
+        self.apply_mode(&path, mode)
+    }
+
+    /// The path this descriptor's NODE currently has — see
+    /// [`FsDriver::fd_path`]. A description is bound to the node, and every
+    /// rename that moves the node rewrites the descriptions that reference it,
+    /// so this answers where the node IS rather than the name it was opened
+    /// under.
+    fn fd_path(&mut self, fd: Fd) -> DriverResult<String> {
+        Ok(self.description(fd)?.path.clone())
+    }
 }
 
 impl MemFs {
+    /// Write `mode`'s permission bits onto the entry `path` names.
+    fn apply_mode(&mut self, path: &str, mode: u32) -> DriverResult<()> {
+        let mode = mode & MODE_MASK;
+        if let Some(inode) = self.files.get(path).copied() {
+            self.inodes
+                .get_mut(&inode)
+                .expect("file path references an inode")
+                .mode = mode;
+            return Ok(());
+        }
+        if let Some(metadata) = self.directories.get_mut(path) {
+            metadata.mode = mode;
+            return Ok(());
+        }
+        Err(not_found(path))
+    }
+
     fn metadata_for_path(&self, path: &str) -> DriverResult<FsMetadata> {
         if let Some(inode_id) = self.files.get(path) {
             let inode = self
@@ -1003,6 +1197,7 @@ impl MemFs {
                 nlink: inode.links,
                 atime_nanos: inode.atime_nanos,
                 mtime_nanos: inode.mtime_nanos,
+                mode: inode.mode,
             });
         }
         if let Some(metadata) = self.directories.get(path) {
@@ -1013,6 +1208,7 @@ impl MemFs {
                 nlink: 1,
                 atime_nanos: metadata.atime_nanos,
                 mtime_nanos: metadata.mtime_nanos,
+                mode: metadata.mode,
             });
         }
         if let Some(target) = self.symlinks.get(path) {
@@ -1028,6 +1224,7 @@ impl MemFs {
                 nlink: 1,
                 atime_nanos: metadata.atime_nanos,
                 mtime_nanos: metadata.mtime_nanos,
+                mode: SYMLINK_MODE,
             });
         }
         Err(not_found(path))
@@ -1096,9 +1293,226 @@ fn not_found(path: &str) -> EffectError {
     )
 }
 
+/// A permission refusal. [`ErrorCode::Denied`] is the code the POSIX boundary
+/// renders as `EACCES`, so a guest reads it as `PermissionDenied` — the answer
+/// that has to stay distinguishable from "not found" and from a sandbox's own
+/// confinement refusal.
+fn denied(path: &str, action: &str) -> EffectError {
+    EffectError::new(
+        ErrorCode::Denied,
+        format!("virtual filesystem permissions do not allow {action}: {path}"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED before the mode model: every entry reported one fabricated constant,
+    /// `set_mode` did not exist, and nothing was ever refused for permissions —
+    /// so a guest could not tell a genuine `EACCES` from "missing".
+    #[test]
+    fn modes_default_to_the_umasked_creation_modes_and_chmod_changes_them() {
+        let mut fs = MemFs::new();
+        fs.create_directory("/perm").unwrap();
+        let fd = fs
+            .open("/perm/file", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.close(fd).unwrap();
+        fs.symlink("/perm/file", "/perm/link").unwrap();
+
+        assert_eq!(fs.metadata("/perm").unwrap().mode, 0o755);
+        assert_eq!(fs.metadata("/perm/file").unwrap().mode, 0o644);
+        assert_eq!(fs.metadata("/").unwrap().mode, 0o755);
+        // Linux gives a symlink no mode of its own; it always reads 0o777 and
+        // cannot be changed.
+        assert_eq!(fs.metadata("/perm/link").unwrap().mode, 0o777);
+        assert_eq!(
+            fs.set_mode("/perm/link", 0o600).unwrap_err().code,
+            ErrorCode::Denied
+        );
+
+        fs.set_mode("/perm/file", 0o600).unwrap();
+        assert_eq!(fs.metadata("/perm/file").unwrap().mode, 0o600);
+        // Only the permission bits are stored; file-type bits are the kind's.
+        fs.set_mode("/perm/file", 0o100_644).unwrap();
+        assert_eq!(fs.metadata("/perm/file").unwrap().mode, 0o644);
+    }
+
+    #[test]
+    fn file_modes_are_enforced_for_read_and_write() {
+        let mut fs = MemFs::new();
+        let fd = fs
+            .open("/tmp/data", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.write(fd, b"bytes").unwrap();
+        fs.close(fd).unwrap();
+
+        fs.set_mode("/tmp/data", 0o000).unwrap();
+        assert_eq!(
+            fs.open("/tmp/data", OpenFlags::read_only())
+                .unwrap_err()
+                .code,
+            ErrorCode::Denied,
+            "a 0o000 file must be denied, not reported missing"
+        );
+        assert_eq!(
+            fs.open("/tmp/data", OpenFlags::create_truncate_write())
+                .unwrap_err()
+                .code,
+            ErrorCode::Denied
+        );
+
+        fs.set_mode("/tmp/data", 0o400).unwrap();
+        let fd = fs.open("/tmp/data", OpenFlags::read_only()).unwrap();
+        assert_eq!(fs.read(fd, 8).unwrap(), b"bytes");
+        fs.close(fd).unwrap();
+        assert_eq!(
+            fs.open("/tmp/data", OpenFlags::create_truncate_write())
+                .unwrap_err()
+                .code,
+            ErrorCode::Denied,
+            "a read-only mode must not be openable for write"
+        );
+        // A descriptor opened while the mode allowed it keeps working: the
+        // check belongs to `open`, not to every later read (POSIX).
+        let fd = fs.open("/tmp/data", OpenFlags::read_only()).unwrap();
+        fs.set_mode("/tmp/data", 0o000).unwrap();
+        assert_eq!(fs.read(fd, 8).unwrap(), b"bytes");
+        fs.close(fd).unwrap();
+    }
+
+    #[test]
+    fn directory_modes_gate_search_listing_and_name_creation() {
+        let mut fs = MemFs::new();
+        fs.create_directory("/gate").unwrap();
+        let fd = fs
+            .open("/gate/inner", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.close(fd).unwrap();
+
+        // No `x`: nothing resolves THROUGH it, and the refusal is a permission
+        // one even though the name behind it exists.
+        fs.set_mode("/gate", 0o000).unwrap();
+        assert_eq!(
+            fs.open("/gate/inner", OpenFlags::read_only())
+                .unwrap_err()
+                .code,
+            ErrorCode::Denied
+        );
+        assert_eq!(
+            fs.metadata("/gate/inner").unwrap_err().code,
+            ErrorCode::Denied
+        );
+        assert_eq!(
+            fs.read_directory("/gate").unwrap_err().code,
+            ErrorCode::Denied
+        );
+        // Same refusal for a name that does NOT exist, so the error cannot be
+        // used to probe what is behind an unsearchable directory.
+        assert_eq!(
+            fs.metadata("/gate/absent").unwrap_err().code,
+            ErrorCode::Denied
+        );
+
+        // `r-x`: listing and traversal work, creating a name does not.
+        fs.set_mode("/gate", 0o500).unwrap();
+        assert_eq!(fs.read_directory("/gate").unwrap().len(), 1);
+        let opened = fs
+            .open("/gate/inner", OpenFlags::read_only())
+            .expect("search + read bits allow the open");
+        fs.close(opened).unwrap();
+        assert_eq!(
+            fs.open("/gate/new", OpenFlags::create_truncate_write())
+                .unwrap_err()
+                .code,
+            ErrorCode::Denied
+        );
+        assert_eq!(
+            fs.create_directory("/gate/sub").unwrap_err().code,
+            ErrorCode::Denied
+        );
+        assert_eq!(
+            fs.remove_file("/gate/inner").unwrap_err().code,
+            ErrorCode::Denied
+        );
+        assert_eq!(
+            fs.rename("/gate/inner", "/gate/moved").unwrap_err().code,
+            ErrorCode::Denied
+        );
+        assert_eq!(
+            fs.symlink("/gate/inner", "/gate/link").unwrap_err().code,
+            ErrorCode::Denied
+        );
+
+        // `--x`: traversal only. The entry behind it is reachable, the listing
+        // is not — the distinction a search-only directory exists to make.
+        fs.set_mode("/gate", 0o100).unwrap();
+        let opened = fs
+            .open("/gate/inner", OpenFlags::read_only())
+            .expect("search alone is enough to resolve through");
+        fs.close(opened).unwrap();
+        assert_eq!(
+            fs.read_directory("/gate").unwrap_err().code,
+            ErrorCode::Denied
+        );
+
+        fs.set_mode("/gate", 0o755).unwrap();
+        fs.remove_file("/gate/inner").unwrap();
+    }
+
+    /// RED before node-identity resolution: `*at` resolution replayed the name a
+    /// descriptor was opened under, so a renamed directory detached its
+    /// descriptor and a symlink planted at the vacated name captured every later
+    /// resolution through it.
+    #[test]
+    fn a_descriptor_follows_its_node_through_a_rename() {
+        let mut fs = MemFs::new();
+        fs.create_directory("/pinned").unwrap();
+        let fd = fs
+            .open("/pinned/file", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.close(fd).unwrap();
+
+        let dir = fs.open("/pinned", OpenFlags::read_only()).unwrap();
+        assert_eq!(fs.fd_path(dir).unwrap(), "/pinned");
+
+        fs.rename("/pinned", "/moved").unwrap();
+        assert_eq!(
+            fs.fd_path(dir).unwrap(),
+            "/moved",
+            "the descriptor names an inode, so it moved with the directory"
+        );
+
+        // Planting a symlink at the vacated name must not recapture it.
+        fs.symlink("/elsewhere", "/pinned").unwrap();
+        assert_eq!(fs.fd_path(dir).unwrap(), "/moved");
+
+        // An ancestor rename moves it too.
+        fs.create_directory("/outer").unwrap();
+        fs.rename("/moved", "/outer/inner").unwrap();
+        assert_eq!(fs.fd_path(dir).unwrap(), "/outer/inner");
+        fs.rename("/outer", "/renamed-outer").unwrap();
+        assert_eq!(fs.fd_path(dir).unwrap(), "/renamed-outer/inner");
+    }
+
+    #[test]
+    fn modes_survive_a_restart_snapshot() {
+        let mut fs = MemFs::new();
+        fs.create_directory("/state").unwrap();
+        let fd = fs
+            .open("/state/file", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.close(fd).unwrap();
+        fs.set_mode("/state/file", 0o600).unwrap();
+        fs.set_mode("/state", 0o700).unwrap();
+
+        let encoded = fs.export_snapshot().encode().unwrap();
+        let mut restarted =
+            MemFs::import_snapshot(&FsSnapshot::decode(&encoded).expect("snapshot decodes"));
+        assert_eq!(restarted.metadata("/state/file").unwrap().mode, 0o600);
+        assert_eq!(restarted.metadata("/state").unwrap().mode, 0o700);
+    }
 
     #[test]
     fn new_seeds_root_and_tmp_directories() {

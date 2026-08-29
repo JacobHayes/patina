@@ -351,6 +351,27 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         self.inner.read_link(path)
     }
 
+    fn set_mode(&mut self, path: &str, mode: u32) -> DriverResult<()> {
+        if let Some(error) = self.maybe_error(FsFaultOp::SetTimesByPath) {
+            return Err(error);
+        }
+        self.inner.set_mode(path, mode)
+    }
+
+    fn set_fd_mode(&mut self, fd: Fd, mode: u32) -> DriverResult<()> {
+        if let Some(error) = self.maybe_error(FsFaultOp::SetTimes) {
+            return Err(error);
+        }
+        self.inner.set_fd_mode(fd, mode)
+    }
+
+    /// Never fault-eligible: this is the name lookup inside a `*at` call, not a
+    /// trip to storage, and no real `openat` fails because the kernel could not
+    /// say where a descriptor's inode lives.
+    fn fd_path(&mut self, fd: Fd) -> DriverResult<String> {
+        self.inner.fd_path(fd)
+    }
+
     fn crash(&mut self) -> DriverResult<()> {
         self.inner.crash()
     }

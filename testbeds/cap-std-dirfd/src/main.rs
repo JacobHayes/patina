@@ -26,7 +26,9 @@
 
 use cap_std::ambient_authority;
 use cap_std::fs::Dir;
-use std::io::{Read, Write};
+use std::fs;
+use std::io::{ErrorKind, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 
 /// The base directory the capability is rooted at. Created through std (so the
 /// libc interposer mints the entry), then opened as a capability.
@@ -155,5 +157,172 @@ fn main() {
     assert!(dir.open("../etc/passwd").is_err(), "cap-std must refuse an escape");
     assert!(dir.open("/etc/passwd").is_err(), "cap-std must refuse an absolute path");
 
-    println!("CAPSTD_RESULT root={BASE} read=alpha-bytes dents=alpha.txt,sub nested=beta link=sub/moved.txt");
+    let modes = mode_bits_are_modelled_and_enforced();
+    let pinned = a_directory_descriptor_pins_its_node();
+
+    println!(
+        "CAPSTD_RESULT root={BASE} read=alpha-bytes dents=alpha.txt,sub nested=beta \
+         link=sub/moved.txt modes={modes} pinned={pinned}"
+    );
+}
+
+/// The permission-bit leg: modes exist, `chmod` changes them, and they are
+/// ENFORCED against the guest's single non-root identity.
+///
+/// RED before the mode model: `chmod` was not interposed at all, so
+/// `set_permissions` escaped to the host and failed `NotFound` on a path that
+/// only exists in the deterministic filesystem — and every mode read back as a
+/// fabricated constant.
+fn mode_bits_are_modelled_and_enforced() -> &'static str {
+    const ROOT: &str = "/modes-mre";
+    fs::create_dir(ROOT).expect("create the mode-model root");
+    let file = format!("{ROOT}/data.txt");
+    fs::write(&file, "visible").expect("create a file to change the mode of");
+
+    // Creation modes: 0o666/0o777 under the fixed 0o022 umask.
+    let mode_of = |path: &str| fs::metadata(path).expect("stat").permissions().mode() & 0o7777;
+    assert_eq!(mode_of(&file), 0o644, "a new file must be 0o644");
+    assert_eq!(mode_of(ROOT), 0o755, "a new directory must be 0o755");
+
+    // chmod 0o000: neither read nor write, and the refusal is PermissionDenied —
+    // distinguishable from NotFound, which is the whole point of modeling it.
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).expect("chmod 0o000");
+    assert_eq!(mode_of(&file), 0o000, "chmod must be readable back through stat");
+    assert_eq!(
+        fs::read(&file).expect_err("a 0o000 file must not be readable").kind(),
+        ErrorKind::PermissionDenied,
+        "reading a 0o000 file must be denied, not missing"
+    );
+    assert_eq!(
+        fs::write(&file, "clobber")
+            .expect_err("a 0o000 file must not be writable")
+            .kind(),
+        ErrorKind::PermissionDenied,
+    );
+
+    // r-------- : readable, still not writable.
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o400)).expect("chmod 0o400");
+    assert_eq!(fs::read(&file).expect("0o400 is readable"), b"visible");
+    assert_eq!(
+        fs::write(&file, "clobber").expect_err("0o400 is not writable").kind(),
+        ErrorKind::PermissionDenied,
+    );
+
+    // fchmod through an open descriptor reaches the same mode.
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).expect("chmod 0o600");
+    let handle = fs::File::open(&file).expect("open the file to fchmod it");
+    handle
+        .set_permissions(fs::Permissions::from_mode(0o640))
+        .expect("fchmod through a descriptor");
+    drop(handle);
+    assert_eq!(mode_of(&file), 0o640, "fchmod must reach the same mode");
+
+    // A directory with no `x` cannot be resolved THROUGH; with no `r` it cannot
+    // be listed. Both are the errors a sandbox has to tell apart from its own
+    // confinement refusals.
+    let sub = format!("{ROOT}/sub");
+    fs::create_dir(&sub).expect("create the search/list subject");
+    fs::write(format!("{sub}/inner.txt"), "inner").expect("seed the subject");
+    fs::set_permissions(&sub, fs::Permissions::from_mode(0o000)).expect("chmod the directory");
+    assert_eq!(
+        fs::read(format!("{sub}/inner.txt"))
+            .expect_err("no `x` means no traversal")
+            .kind(),
+        ErrorKind::PermissionDenied,
+    );
+    assert_eq!(
+        fs::read_dir(&sub).expect_err("no `r` means no listing").kind(),
+        ErrorKind::PermissionDenied,
+    );
+    // r-x: listing works again, creating a name inside does not (no `w`).
+    fs::set_permissions(&sub, fs::Permissions::from_mode(0o500)).expect("chmod r-x");
+    assert_eq!(
+        fs::read_dir(&sub).expect("r-x is listable").count(),
+        1,
+        "the listing must show the seeded entry"
+    );
+    assert_eq!(
+        fs::write(format!("{sub}/new.txt"), "x")
+            .expect_err("no `w` on the directory means no new name")
+            .kind(),
+        ErrorKind::PermissionDenied,
+    );
+
+    // `access(2)` answers from the same bits rather than from existence alone.
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).expect("chmod back to 0o000");
+    assert!(
+        fs::File::open(&file).is_err(),
+        "a 0o000 file must not open for read"
+    );
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("restore the file mode");
+    fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).expect("restore the dir mode");
+    "enforced"
+}
+
+/// The descriptor-identity leg: a directory descriptor names an INODE, so it
+/// follows its directory through a rename and never follows a symlink planted
+/// at the name it was opened under.
+///
+/// RED before node-identity resolution: the descriptor's path was cached beside
+/// it at open time, so the rename detached it (`ENOENT`) and, once a symlink sat
+/// at the old name, every `openat` on it resolved through that link instead —
+/// the exact redirect a capability handle exists to prevent.
+fn a_directory_descriptor_pins_its_node() -> &'static str {
+    const PINNED: &str = "/pinned-mre";
+    const MOVED: &str = "/pinned-mre-moved";
+    const DECOY: &str = "/decoy-mre";
+    fs::create_dir(PINNED).expect("create the pinned directory");
+    fs::create_dir(DECOY).expect("create the decoy directory");
+    fs::write(format!("{PINNED}/file.txt"), "pinned-bytes").expect("seed the pinned directory");
+    fs::write(format!("{DECOY}/file.txt"), "DECOY-CONTENT").expect("seed the decoy");
+
+    let dir = Dir::open_ambient_dir(PINNED, ambient_authority()).expect("open the capability");
+
+    // Move the directory out from under its name, then plant a symlink to the
+    // decoy at the vacated name.
+    fs::rename(PINNED, MOVED).expect("rename the open directory");
+    std::os::unix::fs::symlink(DECOY, PINNED).expect("plant the symlink at the old name");
+    assert_eq!(
+        fs::read_link(PINNED).expect("the planted link must be there"),
+        std::path::Path::new(DECOY),
+        "the old name must now be a symlink to the decoy"
+    );
+
+    // The descriptor still serves the node it was opened on, at its new name.
+    assert_eq!(
+        dir.read("file.txt").expect("the descriptor must survive the rename"),
+        b"pinned-bytes",
+        "the descriptor followed a name instead of its inode"
+    );
+    assert_eq!(
+        fs::read(format!("{MOVED}/file.txt")).expect("the node is reachable at its new name"),
+        b"pinned-bytes",
+    );
+
+    // Writing through the descriptor lands in the ORIGINAL directory too.
+    dir.write("written.txt", b"through-the-descriptor")
+        .expect("write through the pinned descriptor");
+    assert_eq!(
+        fs::read(format!("{MOVED}/written.txt")).expect("the write landed at the node"),
+        b"through-the-descriptor",
+    );
+    assert!(
+        fs::metadata(format!("{DECOY}/written.txt")).is_err(),
+        "DECOY DISCLOSURE: the write followed the planted symlink"
+    );
+
+    // Renaming a symlink moves the LINK, never its target (POSIX).
+    fs::write("/rename-target.txt", "target-bytes").expect("seed a link target");
+    std::os::unix::fs::symlink("/rename-target.txt", "/rename-link").expect("create the link");
+    fs::rename("/rename-link", "/rename-link-moved").expect("rename the symlink itself");
+    assert_eq!(
+        fs::read_link("/rename-link-moved").expect("the moved entry is still a link"),
+        std::path::Path::new("/rename-target.txt"),
+        "renaming a symlink must move the link, not resolve it"
+    );
+    assert_eq!(
+        fs::read("/rename-target.txt").expect("the target is untouched"),
+        b"target-bytes",
+    );
+    "node"
 }

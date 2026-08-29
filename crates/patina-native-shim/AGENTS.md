@@ -28,16 +28,32 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
 - Descriptor tables are shared, never per-entry-path. A real guest mixes the two
   doors in one object's lifetime: `cap-std` opens its base directory through std
   (libc → the C interposer) and then does every later operation on it with raw
-  syscalls (→ SUD). Anything a descriptor means — its bound path, its class, its
-  iteration state — therefore lives in ONE runtime table both doors consult
+  syscalls (→ SUD). Anything a descriptor means — its class, its iteration state,
+  where it points — therefore lives in ONE runtime table both doors consult
   (`patina_dir_is_dirfd`/`patina_dirpath` for directories), and the validation
   that mints it lives in the shared `patina_*` entry, not in either caller. A
   private fd space on one side is a descriptor the other side cannot resolve.
+- A descriptor names a NODE, not a name. The shim keeps only what the filesystem
+  cannot answer — which fds are directory descriptors — and asks the filesystem
+  where a descriptor's node is now (`patina_dirpath` → `fs_fd_path`). A name
+  cached beside a descriptor goes stale exactly where it matters: a rename
+  detaches the descriptor, and a symlink planted at the vacated name silently
+  captures every later resolution through it, which is the redirect a capability
+  handle exists to prevent. Shim-side bookkeeping that shadows namespace state
+  is a second filesystem model, and the two will disagree.
 - `*at` resolution is a path spelling, not a filesystem model. `(dirfd, path)`
   resolves to an absolute path that is handed to the SAME entry the `AT_FDCWD`
   form uses; normalization (`.`, `//`, and the refusal of `..`) stays in the
   driver's one normalizer so a dirfd-relative spelling and an `AT_FDCWD`
   spelling of the same path get the same judgement.
+- Metadata a guest can CHANGE has to be modeled, not synthesized. `st_mode` was a
+  per-kind constant until a sandbox's own test suite needed `EACCES` to be
+  distinguishable from `NotFound`; permission bits now live on the entry, change
+  through interposed `chmod`/`fchmod`/`fchmodat` as recorded boundary operations,
+  and are ENFORCED against the one non-root identity the runtime models. A
+  fabricated constant is not a neutral default — it is an answer the guest will
+  act on. The remaining synthesized fields (owner, device numbers) are the same
+  hazard waiting for the guest that reads them.
 - When a syscall has an old and a new form the ecosystem probes in sequence
   (`faccessat`/`faccessat2`, `stat`/`statx`), model BOTH. Denying the newer one
   is technically fail-closed but the deny diagnostic then prints on every call in

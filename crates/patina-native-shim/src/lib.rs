@@ -3959,6 +3959,7 @@ fn write_metadata(metadata: patina_dst_abi::FsMetadata, kind: *mut u32, length: 
     0
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_metadata_full(
     metadata: patina_dst_abi::FsMetadata,
     kind: *mut u32,
@@ -3967,6 +3968,7 @@ fn write_metadata_full(
     nlink: *mut u32,
     atime_nanos: *mut u64,
     mtime_nanos: *mut u64,
+    mode: *mut u32,
 ) -> c_int {
     if kind.is_null()
         || length.is_null()
@@ -3974,6 +3976,7 @@ fn write_metadata_full(
         || nlink.is_null()
         || atime_nanos.is_null()
         || mtime_nanos.is_null()
+        || mode.is_null()
     {
         return fail(EINVAL);
     }
@@ -3986,6 +3989,7 @@ fn write_metadata_full(
         nlink.write(metadata.nlink);
         atime_nanos.write(metadata.atime_nanos);
         mtime_nanos.write(metadata.mtime_nanos);
+        mode.write(metadata.mode);
     }
     0
 }
@@ -4035,6 +4039,7 @@ pub unsafe extern "C" fn patina_fd_metadata(
 /// # Safety
 /// All pointers must reference valid storage of their documented types.
 #[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn patina_metadata_full(
     path: *const c_char,
     kind: *mut u32,
@@ -4043,15 +4048,23 @@ pub unsafe extern "C" fn patina_metadata_full(
     nlink: *mut u32,
     atime_nanos: *mut u64,
     mtime_nanos: *mut u64,
+    mode: *mut u32,
 ) -> c_int {
     let path = match path_from_c(path) {
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };
     match with_context(|context| context.fs_metadata(&path)) {
-        Ok(metadata) => {
-            write_metadata_full(metadata, kind, length, ino, nlink, atime_nanos, mtime_nanos)
-        }
+        Ok(metadata) => write_metadata_full(
+            metadata,
+            kind,
+            length,
+            ino,
+            nlink,
+            atime_nanos,
+            mtime_nanos,
+            mode,
+        ),
         Err(errno) => fail(errno),
     }
 }
@@ -4061,6 +4074,7 @@ pub unsafe extern "C" fn patina_metadata_full(
 /// # Safety
 /// All pointers must reference valid storage of their documented types.
 #[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn patina_fd_metadata_full(
     raw_fd: c_int,
     kind: *mut u32,
@@ -4069,14 +4083,79 @@ pub unsafe extern "C" fn patina_fd_metadata_full(
     nlink: *mut u32,
     atime_nanos: *mut u64,
     mtime_nanos: *mut u64,
+    mode: *mut u32,
 ) -> c_int {
     let fd = match fd(raw_fd) {
         Ok(fd) => fd,
         Err(errno) => return fail(errno),
     };
     match with_context(|context| context.fs_fd_metadata(fd)) {
-        Ok(metadata) => {
-            write_metadata_full(metadata, kind, length, ino, nlink, atime_nanos, mtime_nanos)
+        Ok(metadata) => write_metadata_full(
+            metadata,
+            kind,
+            length,
+            ino,
+            nlink,
+            atime_nanos,
+            mtime_nanos,
+            mode,
+        ),
+        Err(errno) => fail(errno),
+    }
+}
+
+/// Change the permission bits of the entry `path` names (`chmod` / `fchmodat`).
+///
+/// `follow` selects the trailing-symlink behavior the way [`patina_diropen`]'s
+/// does: nonzero resolves a trailing symlink through the shared virtual
+/// `realpath` and changes its TARGET (the `chmod` and flagless `fchmodat`
+/// spellings), zero names the link itself — which is `EOPNOTSUPP`, because
+/// Linux gives a symlink no mode of its own to change.
+///
+/// # Safety
+/// `path` must point to a valid NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_chmod(path: *const c_char, mode: u32, follow: c_int) -> c_int {
+    let path = match path_from_c(path) {
+        Ok(path) => path,
+        Err(errno) => return fail(errno),
+    };
+    let metadata = match with_context(|context| context.fs_metadata(&path)) {
+        Ok(metadata) => metadata,
+        Err(errno) => return fail(errno),
+    };
+    let path = if metadata.kind == FsEntryKind::Symlink {
+        if follow == 0 {
+            return fail(EOPNOTSUPP);
+        }
+        match canonicalize_virtual_path(&path) {
+            Ok(resolved) => resolved,
+            Err(errno) => return fail(errno),
+        }
+    } else {
+        path
+    };
+    match with_context(|context| context.fs_set_mode(&path, mode)) {
+        Ok(()) => {
+            set_errno(0);
+            0
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
+/// Change the permission bits of the entry an open descriptor names (`fchmod`).
+/// A descriptor already names the node, so there is no symlink to resolve.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
+    let fd = match fd(raw_fd) {
+        Ok(fd) => fd,
+        Err(errno) => return fail(errno),
+    };
+    match with_context(|context| context.fs_set_fd_mode(fd, mode)) {
+        Ok(()) => {
+            set_errno(0);
+            0
         }
         Err(errno) => fail(errno),
     }
@@ -5026,7 +5105,7 @@ pub unsafe extern "C" fn patina_lifecycle_event(label: *const u8, label_len: usi
 /// primitives only provide the vehicle and the blocking.
 mod thread {
     use std::cell::Cell;
-    use std::collections::{BTreeMap, VecDeque};
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::ffi::c_char;
     use std::ffi::{c_int, c_void};
     use std::sync::{Arc, OnceLock};
@@ -7205,11 +7284,16 @@ mod thread {
         // (std's `remove_dir_all` opens each directory with `openat(...,
         // O_DIRECTORY)`, hands the fd to `fdopendir`, and removes children with
         // `unlinkat(dirfd, name, ...)`). A dir fd is an ordinary deterministic-FS
-        // descriptor plus a path handle: fstat/fsync/close route through the FS,
-        // while the *at interposers consult the canonical path to join child names.
-        // FS fds live below the virtual socket/pipe/reactor range, so table
-        // membership keeps the classes distinct.
-        dir_fds: BTreeMap<c_int, String>,
+        // descriptor: fstat/fsync/close route through the FS, and so does the
+        // path the *at interposers join child names onto — the filesystem is
+        // asked where the descriptor's NODE is now (`patina_dirpath`), never a
+        // name cached here, so a rename moves the descriptor with its inode and
+        // a symlink planted at the old name is not followed. This table
+        // therefore records only WHICH fds are directory descriptors, which is
+        // the one thing the filesystem cannot answer: FS fds live below the
+        // virtual socket/pipe/reactor range, so membership is what keeps a dir
+        // fd distinct from a socket/pipe/reactor endpoint.
+        dir_fds: BTreeSet<c_int>,
         next_fd: c_int,
         next_ephemeral: u16,
     }
@@ -7238,7 +7322,7 @@ mod thread {
                 next_epoll: 0,
                 #[cfg(target_os = "linux")]
                 eventfds: BTreeMap::new(),
-                dir_fds: BTreeMap::new(),
+                dir_fds: BTreeSet::new(),
                 next_fd: SOCKET_FD_BASE,
                 next_ephemeral: 49152,
             }
@@ -8442,7 +8526,7 @@ mod thread {
             Ok(fd) => fd,
             Err(_) => return super::fail(super::EOVERFLOW),
         };
-        lock_state().net.dir_fds.insert(fd, path);
+        lock_state().net.dir_fds.insert(fd);
         super::set_errno(0);
         fd
     }
@@ -8452,13 +8536,22 @@ mod thread {
     /// socket/pipe/kqueue endpoint in the shared virtual-fd space.
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_dir_is_dirfd(fd: c_int) -> c_int {
-        c_int::from(lock_state().net.dir_fds.contains_key(&fd))
+        c_int::from(lock_state().net.dir_fds.contains(&fd))
     }
 
-    /// Copy the canonical path a directory descriptor is bound to into `buf`,
+    /// Copy the path a directory descriptor's NODE currently has into `buf`,
     /// NUL-terminated when it fits, returning the path length in bytes (excluding
     /// the terminator). A negative return sets `patina_errno` to `EBADF` for an
     /// unknown fd. Mirrors [`patina_canonicalize`]'s length/terminator contract.
+    ///
+    /// A descriptor names an inode, not a name — so the answer comes from the
+    /// filesystem (`fs_fd_path`), which moves an open description with the node
+    /// through every rename. Caching the name the descriptor was opened under
+    /// would go stale exactly where it matters: renaming the directory would
+    /// detach the descriptor, and a symlink planted at the vacated name would
+    /// silently redirect every later `openat` through it. `..` stays refused by
+    /// the driver's one normalizer regardless, so a dirfd-relative spelling and
+    /// an `AT_FDCWD` spelling of the same path still get the same judgement.
     ///
     /// # Safety
     /// `buf` must be writable for `len` bytes when `len` is nonzero.
@@ -8467,9 +8560,20 @@ mod thread {
         if len != 0 && buf.is_null() {
             return super::fail(super::EINVAL) as isize;
         }
-        let state = lock_state();
-        let Some(path) = state.net.dir_fds.get(&fd) else {
+        // Take and release the table lock BEFORE the runtime call: the
+        // filesystem boundary can park this thread, and holding a shim spinlock
+        // across a scheduling point is how a reentrant interposer deadlocks.
+        let known = lock_state().net.dir_fds.contains(&fd);
+        if !known {
             return super::fail(super::EBADF) as isize;
+        }
+        let fd = match super::fd(fd) {
+            Ok(fd) => fd,
+            Err(errno) => return super::fail(errno) as isize,
+        };
+        let path = match super::with_context(|context| context.fs_fd_path(fd)) {
+            Ok(path) => path,
+            Err(errno) => return super::fail(errno) as isize,
         };
         let bytes = path.as_bytes();
         let needed = bytes.len();
@@ -8492,7 +8596,7 @@ mod thread {
     /// `closedir` requires. Returns `EBADF` for an unknown fd.
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_dirclose(fd: c_int) -> c_int {
-        if lock_state().net.dir_fds.remove(&fd).is_some() {
+        if lock_state().net.dir_fds.remove(&fd) {
             // The Linux SUD dispatcher may hold a `getdents64` snapshot for this
             // descriptor (a guest can open and iterate it with raw syscalls and
             // then close it through libc — cap-std mixes the two doors freely),

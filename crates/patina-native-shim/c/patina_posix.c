@@ -1230,10 +1230,15 @@ int openat(int dirfd, const char *path, int flags, ...) {
 
 /*
  * `creat(path, mode)` is exactly `open(path, O_WRONLY|O_CREAT|O_TRUNC, mode)`, so
- * route it through the deterministic filesystem like `open`. The mode is dropped
- * (the deterministic FS is path-based with no permission bits), matching `open`.
- * A raw host `creat` would write the real filesystem; interposing keeps it in the
- * deterministic FS. Being a strong def it also drops off the guest import table.
+ * route it through the deterministic filesystem like `open`. A raw host `creat`
+ * would write the real filesystem; interposing keeps it in the deterministic FS.
+ * Being a strong def it also drops off the guest import table.
+ *
+ * The creation MODE is dropped, matching `open`/`openat`: the deterministic
+ * filesystem creates every regular file at its fixed umasked creation mode
+ * (0644), the value the overwhelmingly common `0666 & ~0022` request produces.
+ * A caller that needs another mode reaches it with a following `chmod`, which is
+ * modeled and enforced. This is the one named divergence in the mode model.
  */
 int creat(const char *path, mode_t mode) {
     (void)mode;
@@ -1782,7 +1787,9 @@ static void *patina_mmap_impl(void *hint, size_t length, int protection, int fla
     uint32_t nlink = 0;
     uint64_t atime = 0;
     uint64_t mtime = 0;
-    if (patina_fd_metadata_full(fd, &kind, &file_length, &inode, &nlink, &atime, &mtime) < 0) {
+    uint32_t entry_mode = 0;
+    if (patina_fd_metadata_full(fd, &kind, &file_length, &inode, &nlink, &atime, &mtime,
+                                &entry_mode) < 0) {
         errno = patina_errno();
         return MAP_FAILED;
     }
@@ -2061,8 +2068,9 @@ int dup2(int oldfd, int newfd) {
         }
         uint32_t kind;
         uint64_t length, ino_v, atime_v, mtime_v;
-        uint32_t nlink_v;
-        if (patina_fd_metadata_full(oldfd, &kind, &length, &ino_v, &nlink_v, &atime_v, &mtime_v) != 0) {
+        uint32_t nlink_v, mode_v;
+        if (patina_fd_metadata_full(oldfd, &kind, &length, &ino_v, &nlink_v, &atime_v, &mtime_v,
+                                    &mode_v) != 0) {
             errno = patina_errno();
             return -1;
         }
@@ -2207,15 +2215,24 @@ struct patina_stat_values {
     uint32_t nlink;
     uint64_t atime_nanos;
     uint64_t mtime_nanos;
+    uint32_t mode;
 };
 
-static mode_t patina_mode_for_kind(uint32_t kind) {
-    switch (kind) {
-        case PATINA_ENTRY_DIRECTORY: return S_IFDIR | 0700;
-        case PATINA_ENTRY_SYMLINK: return S_IFLNK | 0777;
+/*
+ * st_mode is the entry's file-type bits ORed with its permission bits. The two
+ * arrive separately from the deterministic filesystem (`kind` and `mode`)
+ * because they are separate facts there: the kind is structural, the mode is
+ * mutable state chmod changes.
+ */
+static mode_t patina_stat_mode(const struct patina_stat_values *values) {
+    mode_t type;
+    switch (values->kind) {
+        case PATINA_ENTRY_DIRECTORY: type = S_IFDIR; break;
+        case PATINA_ENTRY_SYMLINK: type = S_IFLNK; break;
         case PATINA_ENTRY_FILE:
-        default: return S_IFREG | 0700;
+        default: type = S_IFREG; break;
     }
+    return type | (mode_t)(values->mode & 07777);
 }
 
 static void patina_split_nanos(uint64_t nanos, time_t *seconds, long *subseconds) {
@@ -2225,12 +2242,14 @@ static void patina_split_nanos(uint64_t nanos, time_t *seconds, long *subseconds
 
 static int patina_metadata_values(const char *path, struct patina_stat_values *values) {
     return patina_metadata_full(path, &values->kind, &values->length, &values->ino,
-                                &values->nlink, &values->atime_nanos, &values->mtime_nanos);
+                                &values->nlink, &values->atime_nanos, &values->mtime_nanos,
+                                &values->mode);
 }
 
 static int patina_fd_metadata_values(int fd, struct patina_stat_values *values) {
     return patina_fd_metadata_full(fd, &values->kind, &values->length, &values->ino,
-                                   &values->nlink, &values->atime_nanos, &values->mtime_nanos);
+                                   &values->nlink, &values->atime_nanos, &values->mtime_nanos,
+                                   &values->mode);
 }
 
 /* POSIX record locks (F_GETLK/F_SETLK/F_SETLKW) and the Linux open-file-
@@ -2340,7 +2359,7 @@ static int fill_stat(int result, const struct patina_stat_values *values, struct
         return -1;
     }
     memset(status, 0, sizeof *status);
-    status->st_mode = patina_mode_for_kind(values->kind);
+    status->st_mode = patina_stat_mode(values);
     status->st_nlink = (nlink_t)values->nlink;
     status->st_ino = (ino_t)values->ino;
     status->st_size = (off_t)values->length;
@@ -2415,11 +2434,11 @@ static int patina_stat_at_values(int directory, const char *path, int flags, int
 #define PATINA_STAT_AT_FLAGS (AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT)
 
 /*
- * Existence and permission probe. A run is one process owning the whole virtual
- * filesystem, so every modeled entry is readable, writable and (for directories)
- * searchable; the only question `access` can actually answer is whether the
- * entry exists. X_OK on a regular file is refused, matching a non-executable
- * file rather than pretending the virtual entry could be run.
+ * Existence and permission probe. The guest is one non-root identity (uid 1000,
+ * what getuid reports) owning every modeled entry, so the answer reads the
+ * OWNER triad of the entry's modeled permission bits. X_OK on a regular file is
+ * refused whatever its mode: nothing here can be executed, so reporting a file
+ * as runnable would be a fabricated answer, not a permission one.
  */
 static int patina_access_impl(const char *path, int mode) {
     struct patina_stat_values values;
@@ -2428,7 +2447,44 @@ static int patina_access_impl(const char *path, int mode) {
         errno = EACCES;
         return -1;
     }
+    unsigned owner = (values.mode >> 6) & 07;
+    unsigned wanted = 0;
+    if ((mode & R_OK) != 0) wanted |= 04;
+    if ((mode & W_OK) != 0) wanted |= 02;
+    if ((mode & X_OK) != 0) wanted |= 01;
+    if ((owner & wanted) != wanted) {
+        errno = EACCES;
+        return -1;
+    }
     return 0;
+}
+
+/*
+ * chmod/fchmod/fchmodat. The deterministic filesystem owns the mode, so these
+ * are real interposers rather than a host escape: patina_chmod applies the
+ * trailing-symlink rule (follow != 0 changes the link's TARGET, follow == 0 is
+ * EOPNOTSUPP on a link, exactly as Linux answers) and patina_fchmod names the
+ * node a descriptor already holds. The variadic-free signatures match POSIX, so
+ * all three drop off a shim-linked guest's import table.
+ */
+int chmod(const char *path, mode_t mode) {
+    return fail_int(patina_chmod(path, (uint32_t)mode, 1));
+}
+
+int fchmod(int fd, mode_t mode) {
+    return fail_int(patina_fchmod(fd, (uint32_t)mode));
+}
+
+int fchmodat(int directory, const char *path, mode_t mode, int flags) {
+    if ((flags & ~AT_SYMLINK_NOFOLLOW) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    int follow = (flags & AT_SYMLINK_NOFOLLOW) == 0;
+    if (directory == AT_FDCWD) return fail_int(patina_chmod(path, (uint32_t)mode, follow));
+    char resolved[PATH_MAX];
+    if (patina_resolve_at(directory, path, resolved, sizeof resolved) != 0) return -1;
+    return fail_int(patina_chmod(resolved, (uint32_t)mode, follow));
 }
 
 int access(const char *path, int mode) { return patina_access_impl(path, mode); }
@@ -2544,7 +2600,7 @@ static int fill_stat64(int result, const struct patina_stat_values *values, stru
         return -1;
     }
     memset(status, 0, sizeof *status);
-    status->st_mode = patina_mode_for_kind(values->kind);
+    status->st_mode = patina_stat_mode(values);
     status->st_nlink = (nlink_t)values->nlink;
     status->st_ino = (ino64_t)values->ino;
     status->st_size = (off64_t)values->length;
@@ -2594,7 +2650,7 @@ int statx(int directory, const char *restrict path, int flags, unsigned int mask
     memset(status, 0, sizeof *status);
     status->stx_mask = STATX_TYPE | STATX_MODE | STATX_NLINK | STATX_INO | STATX_SIZE |
                        STATX_ATIME | STATX_MTIME | STATX_CTIME;
-    status->stx_mode = (uint16_t)patina_mode_for_kind(values.kind);
+    status->stx_mode = (uint16_t)patina_stat_mode(&values);
     status->stx_nlink = values.nlink;
     status->stx_ino = values.ino;
     status->stx_size = values.length;
@@ -2607,6 +2663,11 @@ int statx(int directory, const char *restrict path, int flags, unsigned int mask
 }
 #endif
 
+/*
+ * The creation mode is dropped for the same reason `creat`'s is: the
+ * deterministic filesystem creates every directory at its fixed umasked creation
+ * mode (0755), and a caller wanting another reaches it with `chmod`.
+ */
 int mkdir(const char *path, mode_t mode) {
     (void)mode;
     return fail_int(patina_mkdir(path));

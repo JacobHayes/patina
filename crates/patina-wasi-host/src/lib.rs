@@ -950,6 +950,7 @@ impl Preview1Host {
                                 nlink: 1,
                                 atime_nanos: 0,
                                 mtime_nanos: 0,
+                                mode: 0o755,
                             }
                         }
                         Err(error) => return Err(error.into()),
@@ -1973,6 +1974,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
                         nlink: 1,
                         atime_nanos: 0,
                         mtime_nanos: 0,
+                        mode: 0o644,
                     },
                     WASI_FILETYPE_CHARACTER_DEVICE,
                 ),
@@ -1989,6 +1991,7 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
                             nlink: 1,
                             atime_nanos: 0,
                             mtime_nanos: 0,
+                            mode: 0o644,
                         },
                         WASI_FILETYPE_SOCKET_DGRAM,
                     )

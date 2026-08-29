@@ -72,6 +72,7 @@ unsafe extern "C" {
         nlink: *mut u32,
         atime_nanos: *mut u64,
         mtime_nanos: *mut u64,
+        mode: *mut u32,
     ) -> c_int;
     fn patina_fd_metadata_full(
         fd: c_int,
@@ -81,7 +82,12 @@ unsafe extern "C" {
         nlink: *mut u32,
         atime_nanos: *mut u64,
         mtime_nanos: *mut u64,
+        mode: *mut u32,
     ) -> c_int;
+    // Permission bits: the same entries the C chmod/fchmod/fchmodat interposers
+    // call, so a raw-syscall guest and a libc guest change one mode model.
+    fn patina_chmod(path: *const c_char, mode: u32, follow: c_int) -> c_int;
+    fn patina_fchmod(fd: c_int, mode: u32) -> c_int;
     fn patina_read_dir(path: *const c_char, state_out: *mut *mut c_void) -> c_int;
     // Directory descriptors: the SAME table the C `open/openat(..., O_DIRECTORY)`
     // interposer registers into, so a dir fd opened through libc resolves a raw
@@ -276,6 +282,8 @@ const AT_STATX_FORCE_SYNC: u64 = 0x2000;
 const AT_STATX_DONT_SYNC: u64 = 0x4000;
 // `access(2)` mode bits.
 const X_OK: u64 = 1;
+const W_OK: u64 = 2;
+const R_OK: u64 = 4;
 
 // `fcntl(2)` commands (identical on x86_64 and aarch64 Linux).
 const F_DUPFD: u64 = 0;
@@ -702,6 +710,9 @@ mod nr {
     pub const FACCESSAT: i64 = 269;
     pub const FACCESSAT2: i64 = 439;
     pub const OPENAT2: i64 = 437;
+    pub const FCHMOD: i64 = 91;
+    pub const FCHMODAT: i64 = 268;
+    pub const FCHMODAT2: i64 = 452;
 
     // Slice 2 — network.
     pub const SOCKET: i64 = 41;
@@ -764,6 +775,7 @@ mod nr {
     pub const SYMLINK: i64 = 88;
     pub const READLINK: i64 = 89;
     pub const ACCESS: i64 = 21;
+    pub const CHMOD: i64 = 90;
     pub const EPOLL_CREATE: i64 = 213;
     pub const EVENTFD: i64 = 284;
     pub const POLL: i64 = 7;
@@ -828,6 +840,9 @@ mod nr {
     pub const FACCESSAT: i64 = 48;
     pub const FACCESSAT2: i64 = 439;
     pub const OPENAT2: i64 = 437;
+    pub const FCHMOD: i64 = 52;
+    pub const FCHMODAT: i64 = 53;
+    pub const FCHMODAT2: i64 = 452;
 
     // Slice 2 — network.
     pub const SOCKET: i64 = 198;
@@ -1015,6 +1030,14 @@ fn dispatch(nr: i64, args: [u64; 6]) -> i64 {
         // diagnostic on every `..` component a capability-based guest walks.
         nr::FACCESSAT => sys_faccessat(arg_fd(args[0]), args[1], args[2], 0),
         nr::FACCESSAT2 => sys_faccessat(arg_fd(args[0]), args[1], args[2], args[3]),
+        // Permission bits. `fchmodat` carries no flags in the kernel ABI (glibc
+        // emulates `AT_SYMLINK_NOFOLLOW` on top of it); `fchmodat2` adds them,
+        // and a caller probes it first exactly as it does `faccessat2`, so BOTH
+        // are routed rather than leaving the newer one to print a deny
+        // diagnostic on every call.
+        nr::FCHMOD => sys_fchmod(arg_fd(args[0]), args[1]),
+        nr::FCHMODAT => sys_fchmodat(arg_fd(args[0]), args[1], args[2], 0),
+        nr::FCHMODAT2 => sys_fchmodat(arg_fd(args[0]), args[1], args[2], args[3]),
         // `openat2` is the RESOLVE_BENEATH open. Its resolution guarantees are a
         // kernel-side sandbox the deterministic filesystem does not model, so it
         // is a NAMED soft deny rather than a silent success — and ENOSYS is
@@ -1111,6 +1134,8 @@ fn dispatch(nr: i64, args: [u64; 6]) -> i64 {
         nr::READLINK => sys_readlinkat(AT_FDCWD, args[0], args[1], args[2]),
         #[cfg(target_arch = "x86_64")]
         nr::ACCESS => sys_faccessat(AT_FDCWD, args[0], args[1], 0),
+        #[cfg(target_arch = "x86_64")]
+        nr::CHMOD => sys_fchmodat(AT_FDCWD, args[0], args[1], 0),
         #[cfg(target_arch = "x86_64")]
         nr::DUP2 => sys_dup2(arg_fd(args[0]), arg_fd(args[1])),
         #[cfg(target_arch = "x86_64")]
@@ -1870,7 +1895,7 @@ fn sys_dup2(oldfd: i64, newfd: i64) -> i64 {
     }
     // A regular fd: validate through the SAME metadata entry the C dup2 uses.
     let (mut kind, mut length, mut ino, mut atime, mut mtime) = (0u32, 0u64, 0u64, 0u64, 0u64);
-    let mut nlink = 0u32;
+    let (mut nlink, mut mode) = (0u32, 0u32);
     // SAFETY: every out-param is local writable storage.
     let rc = unsafe {
         patina_fd_metadata_full(
@@ -1881,6 +1906,7 @@ fn sys_dup2(oldfd: i64, newfd: i64) -> i64 {
             &mut nlink,
             &mut atime,
             &mut mtime,
+            &mut mode,
         )
     };
     if rc != 0 {
@@ -2106,14 +2132,34 @@ struct StatValues {
     nlink: u32,
     atime_nanos: u64,
     mtime_nanos: u64,
+    /// Permission bits (`0o7777`) WITHOUT the file-type bits; `kind` carries
+    /// those. `st_mode` is the two ORed together — see [`stat_mode`].
+    mode: u32,
 }
 
-fn mode_for_kind(kind: u32) -> u32 {
-    match kind {
-        PATINA_ENTRY_DIRECTORY => S_IFDIR | 0o700,
-        PATINA_ENTRY_SYMLINK => S_IFLNK | 0o777,
-        _ => S_IFREG | 0o700,
+impl StatValues {
+    const fn empty() -> Self {
+        Self {
+            kind: 0,
+            length: 0,
+            ino: 0,
+            nlink: 0,
+            atime_nanos: 0,
+            mtime_nanos: 0,
+            mode: 0,
+        }
     }
+}
+
+/// `st_mode`: the entry's file-type bits ORed with its permission bits, byte
+/// for byte with the C `patina_stat_mode`.
+fn stat_mode(values: &StatValues) -> u32 {
+    let kind = match values.kind {
+        PATINA_ENTRY_DIRECTORY => S_IFDIR,
+        PATINA_ENTRY_SYMLINK => S_IFLNK,
+        _ => S_IFREG,
+    };
+    kind | (values.mode & 0o7777)
 }
 
 /// The kernel `struct stat` for the `fstat`/`newfstatat` syscalls. The layout is
@@ -2171,7 +2217,7 @@ struct KernelStat {
 impl KernelStat {
     fn from_values(values: &StatValues) -> Self {
         let mut stat = Self::default();
-        stat.st_mode = mode_for_kind(values.kind);
+        stat.st_mode = stat_mode(values);
         stat.st_nlink = values.nlink as _;
         stat.st_ino = values.ino;
         stat.st_size = values.length as i64;
@@ -2186,14 +2232,7 @@ impl KernelStat {
 }
 
 fn fd_stat_values(fd: c_int) -> Result<StatValues, i64> {
-    let mut v = StatValues {
-        kind: 0,
-        length: 0,
-        ino: 0,
-        nlink: 0,
-        atime_nanos: 0,
-        mtime_nanos: 0,
-    };
+    let mut v = StatValues::empty();
     // SAFETY: all out-pointers are writable local storage.
     let rc = unsafe {
         patina_fd_metadata_full(
@@ -2204,6 +2243,7 @@ fn fd_stat_values(fd: c_int) -> Result<StatValues, i64> {
             &mut v.nlink,
             &mut v.atime_nanos,
             &mut v.mtime_nanos,
+            &mut v.mode,
         )
     };
     if rc != 0 {
@@ -2214,14 +2254,7 @@ fn fd_stat_values(fd: c_int) -> Result<StatValues, i64> {
 }
 
 fn path_stat_values(path: *const c_char) -> Result<StatValues, i64> {
-    let mut v = StatValues {
-        kind: 0,
-        length: 0,
-        ino: 0,
-        nlink: 0,
-        atime_nanos: 0,
-        mtime_nanos: 0,
-    };
+    let mut v = StatValues::empty();
     // SAFETY: `path` is a valid guest C string; out-pointers are local storage.
     let rc = unsafe {
         patina_metadata_full(
@@ -2232,6 +2265,7 @@ fn path_stat_values(path: *const c_char) -> Result<StatValues, i64> {
             &mut v.nlink,
             &mut v.atime_nanos,
             &mut v.mtime_nanos,
+            &mut v.mode,
         )
     };
     if rc != 0 {
@@ -2413,7 +2447,7 @@ fn sys_statx(dirfd: i64, path: u64, flags: u64, statxbuf: u64) -> i64 {
     const STATX_MASK: u32 = 0x0001 | 0x0002 | 0x0004 | 0x0100 | 0x0200 | 0x0020 | 0x0040 | 0x0080;
     let mut stx = Statx::default();
     stx.stx_mask = STATX_MASK;
-    stx.stx_mode = mode_for_kind(values.kind) as u16;
+    stx.stx_mode = stat_mode(&values) as u16;
     stx.stx_nlink = values.nlink;
     stx.stx_ino = values.ino;
     stx.stx_size = values.length;
@@ -2586,11 +2620,11 @@ fn sys_symlinkat(target: u64, newdirfd: i64, linkpath: u64) -> i64 {
 }
 
 /// Existence / permission probe (`faccessat`, `faccessat2`, and the x86_64
-/// legacy `access`). A run is one process owning the whole virtual filesystem,
-/// so every modeled entry is readable, writable and (for directories)
-/// searchable; the only question `access` can answer is whether the entry
-/// exists. `X_OK` on a non-directory is refused, matching a non-executable file
-/// rather than pretending a virtual entry could be run. Mirrors the C
+/// legacy `access`). The guest is one non-root identity (uid 1000) owning every
+/// modeled entry, so the answer reads the OWNER triad of the entry's modeled
+/// permission bits. `X_OK` on a non-directory is refused whatever its mode:
+/// nothing here can be executed, so reporting a file as runnable would be a
+/// fabricated answer rather than a permission one. Mirrors the C
 /// `faccessat`/`patina_access_impl` exactly, including its accepted flag set:
 /// `AT_EACCESS` only chooses effective vs real ids, which are one identity here.
 ///
@@ -2612,7 +2646,54 @@ fn sys_faccessat(dirfd: i64, path: u64, mode: u64, flags: u64) -> i64 {
     if mode & X_OK != 0 && values.kind != PATINA_ENTRY_DIRECTORY {
         return -EACCES;
     }
+    // The guest is one non-root identity owning every entry, so the OWNER triad
+    // is the answer — the same arithmetic the C `patina_access_impl` does.
+    let owner = (values.mode >> 6) & 0o7;
+    let mut wanted = 0;
+    if mode & R_OK != 0 {
+        wanted |= 0o4;
+    }
+    if mode & W_OK != 0 {
+        wanted |= 0o2;
+    }
+    if mode & X_OK != 0 {
+        wanted |= 0o1;
+    }
+    if owner & wanted != wanted {
+        return -EACCES;
+    }
     0
+}
+
+/// Raw `fchmodat`/`fchmodat2`, and the x86_64 legacy `chmod`. Routes to the
+/// same `patina_chmod` the C interposers call, so one mode model answers both
+/// doors.
+///
+/// The kernel's `fchmodat` takes no flag argument at all — glibc's four-argument
+/// wrapper emulates `AT_SYMLINK_NOFOLLOW` above it — so the flags here are
+/// always `fchmodat2`'s. `AT_SYMLINK_NOFOLLOW` is the only defined one;
+/// anything else is `EINVAL` rather than silently ignored.
+fn sys_fchmodat(dirfd: i64, path: u64, mode: u64, flags: u64) -> i64 {
+    if flags & !AT_SYMLINK_NOFOLLOW != 0 {
+        return -EINVAL;
+    }
+    let resolved = match resolve_at(dirfd, path) {
+        Ok(resolved) => resolved,
+        Err(errno) => return errno,
+    };
+    let follow = c_int::from(flags & AT_SYMLINK_NOFOLLOW == 0);
+    // SAFETY: `resolved` is a valid NUL-terminated string pointer.
+    ret_i32(unsafe { patina_chmod(resolved.as_ptr(), mode as u32, follow) })
+}
+
+/// Raw `fchmod` -> `patina_fchmod`. A descriptor already names the node, so
+/// there is no symlink to resolve.
+fn sys_fchmod(fd: i64, mode: u64) -> i64 {
+    if let Some(err) = fd_out_of_range(fd) {
+        return err;
+    }
+    // SAFETY: a plain runtime call with no pointers.
+    ret_i32(unsafe { patina_fchmod(fd as c_int, mode as u32) })
 }
 
 /// Raw `linkat`/`link` -> the same deterministic hard link the `patina_link`

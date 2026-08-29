@@ -105,6 +105,27 @@ pub trait FsDriver: Send {
     fn read_link(&mut self, _path: &str) -> DriverResult<String> {
         Err(unsupported_filesystem_operation("read link"))
     }
+    /// Change the permission bits of the entry `path` names (`chmod` /
+    /// `fchmodat`). Like every other path entry point here, this acts on the
+    /// entry the caller named: a trailing symlink is resolved by the caller, not
+    /// by the driver.
+    fn set_mode(&mut self, _path: &str, _mode: u32) -> DriverResult<()> {
+        Err(unsupported_filesystem_operation("set mode"))
+    }
+    /// Change the permission bits of the entry an open descriptor names
+    /// (`fchmod`).
+    fn set_fd_mode(&mut self, _fd: Fd, _mode: u32) -> DriverResult<()> {
+        Err(unsupported_filesystem_operation("set descriptor mode"))
+    }
+    /// The path the descriptor's filesystem NODE currently has.
+    ///
+    /// A descriptor names an inode, not a name. `*at` resolution therefore asks
+    /// the filesystem where the node is *now* rather than replaying the name the
+    /// descriptor was opened under, so a rename moves the descriptor with the
+    /// node and a symlink planted at the old name is never followed.
+    fn fd_path(&mut self, _fd: Fd) -> DriverResult<String> {
+        Err(unsupported_filesystem_operation("descriptor path"))
+    }
     fn crash(&mut self) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("crash"))
     }

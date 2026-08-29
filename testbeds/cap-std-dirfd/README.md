@@ -54,7 +54,15 @@ exits 0 — never a silent pass. Where SUD is present it asserts: the binary
 audits as `direct-syscall (SUD-managed)`, runs with the expected
 `CAPSTD_RESULT`, is byte-identical across same-seed repeats **on stdout and the
 captured stderr**, and records/replays byte-identically, then prints
-`CAPSTD_LEGS_RAN branch=sud …`.
+`CAPSTD_LEGS_RAN branch=sud …`. The expected result line includes
+`modes=enforced pinned=node`, so a regression in either of the two legs above
+fails the run rather than passing quietly.
+
+Both legs are RED-proven by mutation rather than assumed: neutering the
+owner-triad permission check fails the mode leg (`a 0o000 file must not be
+readable`), and dropping the bookkeeping that moves an open description with its
+node through a rename fails the pinning leg (`the descriptor must survive the
+rename: PermissionDenied`).
 
 ## What stays fail-closed
 

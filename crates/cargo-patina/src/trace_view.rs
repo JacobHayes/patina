@@ -662,6 +662,9 @@ pub const OP_KINDS: &[(&str, Category)] = &[
     ("fs_link", Category::Fs),
     ("fs_symlink", Category::Fs),
     ("fs_read_link", Category::Fs),
+    ("fs_set_mode", Category::Fs),
+    ("fs_set_fd_mode", Category::Fs),
+    ("fs_fd_path", Category::Fs),
     ("dns_resolve", Category::Net),
     ("fs_crash", Category::Crash),
     ("task_spawn", Category::Schedule),
@@ -731,6 +734,9 @@ pub fn operation_kind(operation: &Operation) -> &'static str {
         Operation::FsLink { .. } => "fs_link",
         Operation::FsSymlink { .. } => "fs_symlink",
         Operation::FsReadLink { .. } => "fs_read_link",
+        Operation::FsSetMode { .. } => "fs_set_mode",
+        Operation::FsSetFdMode { .. } => "fs_set_fd_mode",
+        Operation::FsFdPath { .. } => "fs_fd_path",
         Operation::DnsResolve { .. } => "dns_resolve",
         Operation::FsCrash => "fs_crash",
         Operation::TaskSpawn { .. } => "task_spawn",
@@ -771,6 +777,7 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
         nlink: 1,
         atime_nanos: 0,
         mtime_nanos: 0,
+        mode: 0o644,
     };
     let datagram = Datagram {
         packet_id: 1,
@@ -919,6 +926,24 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
                 path: "/link".into(),
             },
             Outcome::Bytes(b"/target".to_vec()),
+        ),
+        (
+            Operation::FsSetMode {
+                path: "/file".into(),
+                mode: 0o600,
+            },
+            Outcome::Unit,
+        ),
+        (
+            Operation::FsSetFdMode {
+                fd: Fd(3),
+                mode: 0o600,
+            },
+            Outcome::Unit,
+        ),
+        (
+            Operation::FsFdPath { fd: Fd(3) },
+            Outcome::Bytes(b"/dir".to_vec()),
         ),
         (
             Operation::DnsResolve {

@@ -5336,6 +5336,61 @@ recording was produced by a guest whose result type no longer matches this one"
         )
     }
 
+    /// `chmod`: change the permission bits of the entry `path` names. A mode
+    /// change is durable state, so it is a recorded boundary operation like
+    /// every other namespace mutation.
+    pub fn fs_set_mode(&mut self, path: &str, mode: u32) -> Result<(), RuntimeError> {
+        self.filesystem_unit(
+            Operation::FsSetMode {
+                path: path.into(),
+                mode,
+            },
+            |filesystem| filesystem.set_mode(path, mode),
+        )
+    }
+
+    /// `fchmod`: the same change, named by an open descriptor.
+    pub fn fs_set_fd_mode(&mut self, fd: Fd, mode: u32) -> Result<(), RuntimeError> {
+        self.filesystem_unit(Operation::FsSetFdMode { fd, mode }, |filesystem| {
+            filesystem.set_fd_mode(fd, mode)
+        })
+    }
+
+    /// Where an open descriptor's filesystem NODE is now.
+    ///
+    /// `*at` resolution needs a spelling for the directory a descriptor names,
+    /// and the honest answer is the node's CURRENT path: a descriptor pins an
+    /// inode, so a rename moves the descriptor with it and a symlink planted at
+    /// the name it was opened under is never followed. Asking the filesystem is
+    /// what makes that true — a name cached beside the descriptor would go
+    /// stale exactly when it matters.
+    ///
+    /// No modeled I/O latency and no fault eligibility: this is the name lookup
+    /// the kernel does inside the `*at` call itself, not a second trip to
+    /// storage. Charging latency would bill every `*at` twice, and an injected
+    /// `EIO` here would be a failure mode no real `openat` has.
+    pub fn fs_fd_path(&mut self, fd: Fd) -> Result<String, RuntimeError> {
+        if self.filesystem.is_none() {
+            return Err(EffectError::missing_driver("filesystem").into());
+        }
+        let operation = Operation::FsFdPath { fd };
+        let expected = match self.filesystem_expected(&operation)? {
+            FilesystemExpected::Execute(expected) => expected,
+            FilesystemExpected::Captured(outcome) => return decode_string(&operation, outcome),
+        };
+        let result = self
+            .filesystem
+            .as_mut()
+            .expect("driver was checked")
+            .fd_path(fd);
+        let actual = match result {
+            Ok(path) => Outcome::Bytes(path.into_bytes()),
+            Err(error) => Outcome::Error(error),
+        };
+        let outcome = self.reconcile(operation.clone(), expected, actual)?;
+        decode_string(&operation, outcome)
+    }
+
     pub fn fs_read_link(&mut self, path: &str) -> Result<String, RuntimeError> {
         if self.filesystem.is_none() {
             return Err(EffectError::missing_driver("filesystem").into());

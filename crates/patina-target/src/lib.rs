@@ -3462,17 +3462,21 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "link",
         "linkat",
         "fdopendir",
-        // Not interposed: the deterministic filesystem has no mode / owner /
-        // timestamp / device-node model, so a reference to one of these is a
-        // host filesystem escape and is LABELED here, never modeled. `truncate`
-        // is the planted filesystem representative of the gate-level e2e
-        // (`native_run_prerun_gate_refuses_every_escape_class`) now that every
-        // symbol above it is shim-defined.
-        "truncate",
-        "truncate64",
+        // Permission bits ARE modeled (a mode per entry, enforced against the
+        // one non-root guest identity), so the chmod family is shim-defined
+        // like everything above it; the names stay classified for the
+        // defense-in-depth reason at the top of this function.
         "chmod",
         "fchmod",
         "fchmodat",
+        // Not interposed: the deterministic filesystem has no owner /
+        // timestamp-by-path / device-node model, so a reference to one of these
+        // is a host filesystem escape and is LABELED here, never modeled.
+        // `truncate` is the planted filesystem representative of the gate-level
+        // e2e (`native_run_prerun_gate_refuses_every_escape_class`) now that
+        // every symbol above it is shim-defined.
+        "truncate",
+        "truncate64",
         "chown",
         "fchown",
         "lchown",

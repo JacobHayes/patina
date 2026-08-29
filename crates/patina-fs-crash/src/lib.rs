@@ -970,6 +970,21 @@ impl FsDriver for CrashFs {
         self.live.read_link(path)
     }
 
+    /// A mode change is metadata on an existing entry, like `set_times`: the
+    /// live image takes it and no name appears or disappears, so there is
+    /// nothing for the namespace-durability journal to hold.
+    fn set_mode(&mut self, path: &str, mode: u32) -> DriverResult<()> {
+        self.live.set_mode(path, mode)
+    }
+
+    fn set_fd_mode(&mut self, fd: Fd, mode: u32) -> DriverResult<()> {
+        self.live.set_fd_mode(fd, mode)
+    }
+
+    fn fd_path(&mut self, fd: Fd) -> DriverResult<String> {
+        self.live.fd_path(fd)
+    }
+
     fn crash(&mut self) -> DriverResult<()> {
         let crashes = self.crashes.checked_add(1).ok_or_else(|| {
             EffectError::new(
