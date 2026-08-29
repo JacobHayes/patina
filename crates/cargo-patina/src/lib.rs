@@ -425,6 +425,9 @@ struct NativeHarnessInvocation {
     exact: String,
     seeds: HarnessSeeds,
     release: bool,
+    /// Cargo feature selection forwarded verbatim to the harness build
+    /// (`--features`, `--all-features`, `--no-default-features`).
+    features: HarnessFeatures,
     /// How the native libtest harness is instrumented (see
     /// [`GuestInstrumentation`]). Off by default.
     instrumentation: GuestInstrumentation,
@@ -436,6 +439,32 @@ struct NativeHarnessInvocation {
     buggify: Option<NativeBuggify>,
     schedule: NativeSchedule,
     liveness: NativeLiveness,
+}
+
+/// Cargo feature selection for a native libtest harness build.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct HarnessFeatures {
+    features: Option<String>,
+    all_features: bool,
+    no_default_features: bool,
+}
+
+impl HarnessFeatures {
+    /// The `cargo rustc` arguments that reproduce this selection.
+    fn cargo_args(&self) -> Vec<OsString> {
+        let mut args = Vec::new();
+        if let Some(features) = &self.features {
+            args.push(OsString::from("--features"));
+            args.push(OsString::from(features));
+        }
+        if self.all_features {
+            args.push(OsString::from("--all-features"));
+        }
+        if self.no_default_features {
+            args.push(OsString::from("--no-default-features"));
+        }
+        args
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1651,6 +1680,11 @@ fn parse_native_harness_from(
             .map(HarnessSeeds::One)
             .unwrap_or_else(|| HarnessSeeds::Range(seeds.unwrap_or(20))),
         release: args.flag("--release"),
+        features: HarnessFeatures {
+            features: args.string("--features"),
+            all_features: args.flag("--all-features"),
+            no_default_features: args.flag("--no-default-features"),
+        },
         instrumentation: instrumentation_of(&args)?,
         step_budget: args.u64("--budget"),
         knobs: knobs_of(&args)?,
@@ -3718,6 +3752,7 @@ fn build_native_harness(
         .stderr(Stdio::inherit());
     apply_rustc_env(&mut command, &rustc);
     command.args(selected.kind.select_args(&invocation.harness_target));
+    command.args(invocation.features.cargo_args());
     // `cargo rustc` builds a lib/bin target in test mode only under the `test` or
     // `bench` profile, and `--release` is rejected alongside `--profile`. `bench`
     // inherits `release`, so `--release` here means the same codegen settings a
@@ -4242,6 +4277,7 @@ fn native_harness_repro(invocation: &NativeHarnessInvocation, seed: u64) -> Stri
     if invocation.release {
         args.push(OsString::from("--release"));
     }
+    args.extend(invocation.features.cargo_args());
     match invocation.instrumentation {
         GuestInstrumentation::None => {}
         GuestInstrumentation::YieldPoints => args.push(OsString::from("--yield-points")),
@@ -11202,6 +11238,7 @@ mod tests {
             exact: "m::t".into(),
             seeds: HarnessSeeds::One(0),
             release: false,
+            features: HarnessFeatures::default(),
             instrumentation: GuestInstrumentation::None,
             step_budget: Some(9),
             knobs: knobs_of(&args).expect("harness knob parse"),
