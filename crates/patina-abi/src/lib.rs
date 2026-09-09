@@ -244,13 +244,14 @@ pub struct OpenFlags {
     /// distinguishes it from the plain `O_RDONLY|O_DIRECTORY` open that pays
     /// `r` on the directory.
     pub path_only: bool,
-    /// The creation mode — `open`'s third argument. It is the mode the caller
-    /// ASKED for; the driver applies its modeled umask, exactly as the kernel
-    /// applies the process umask. It is consulted only when this open CREATES
-    /// the entry: POSIX leaves it unread otherwise, and an `open` of an
-    /// existing file must not touch that file's mode. A caller with no
-    /// `create` flag passes [`CREATE_MODE_UNUSED`] so the recorded operation
-    /// carries no argument the kernel would not have read.
+    /// The creation mode — `open`'s third argument AFTER the process umask:
+    /// the bits the kernel stores, which is what the umask-owning layer above
+    /// the driver (the native shim's `umask` state, the WASI host's fixed
+    /// `0o022`) hands down. It is consulted only when this open CREATES the
+    /// entry: POSIX leaves it unread otherwise, and an `open` of an existing
+    /// file must not touch that file's mode. A caller with no `create` flag
+    /// passes [`CREATE_MODE_UNUSED`] so the recorded operation carries no
+    /// argument the kernel would not have read.
     pub mode: u32,
 }
 
@@ -258,12 +259,15 @@ pub struct OpenFlags {
 /// argument at all, so there is nothing honest to put here but zero.
 pub const CREATE_MODE_UNUSED: u32 = 0;
 /// The mode `File::create`/`fopen("w")` and every other ordinary "make me a
-/// file" caller passes (`0o666`); under the modeled `0o022` umask it is the
+/// file" caller passes (`0o666`); under the default `0o022` umask it is the
 /// familiar `0o644`.
 pub const DEFAULT_FILE_CREATE_MODE: u32 = 0o666;
-/// The mode `mkdir(2)`'s ordinary callers pass (`0o777`); under the modeled
+/// The mode `mkdir(2)`'s ordinary callers pass (`0o777`); under the default
 /// `0o022` umask it is the familiar `0o755`.
 pub const DEFAULT_DIRECTORY_CREATE_MODE: u32 = 0o777;
+/// The umask every POSIX process starts with, and the one a layer without a
+/// `umask(2)` of its own (the WASI host) applies to every creating call.
+pub const DEFAULT_UMASK: u32 = 0o022;
 
 impl OpenFlags {
     pub const fn read_only() -> Self {
@@ -333,6 +337,25 @@ pub enum ErrorCode {
     ConnectionReset,
     BrokenPipe,
     NotConnected,
+    /// The operation is not permitted for the calling identity (`EPERM`): a
+    /// hard link to a directory, a device node, an owner change to someone else.
+    NotPermitted,
+    /// The named attribute does not exist (`ENODATA`).
+    NoData,
+    /// A result does not fit the caller's buffer (`ERANGE`: `getcwd`, an xattr
+    /// value larger than the buffer offered).
+    Range,
+    /// An argument is larger than the kernel accepts (`E2BIG`).
+    TooBig,
+    /// The operation is not supported by this object or filesystem
+    /// (`EOPNOTSUPP`): a mode change on a symlink, an unknown xattr namespace.
+    Unsupported,
+    /// The object is in use (`EBUSY`): removing the root, a mount point.
+    Busy,
+    /// A positional operation on an object with no position (`ESPIPE`).
+    IllegalSeek,
+    /// A link or rename across filesystems (`EXDEV`).
+    CrossDevice,
 }
 
 /// A typed effect failure suitable for traces and user-facing diagnostics.
@@ -393,6 +416,14 @@ impl fmt::Display for ErrorCodeDisplay {
             ErrorCode::ConnectionReset => "connection_reset",
             ErrorCode::BrokenPipe => "broken_pipe",
             ErrorCode::NotConnected => "not_connected",
+            ErrorCode::NotPermitted => "not_permitted",
+            ErrorCode::NoData => "no_data",
+            ErrorCode::Range => "range",
+            ErrorCode::TooBig => "too_big",
+            ErrorCode::Unsupported => "unsupported",
+            ErrorCode::Busy => "busy",
+            ErrorCode::IllegalSeek => "illegal_seek",
+            ErrorCode::CrossDevice => "cross_device",
         };
         f.write_str(value)
     }
@@ -432,9 +463,11 @@ pub struct FsMetadata {
     /// `patina-dst-fs-mem` changes timestamps only via explicit set-times calls.
     pub mtime_nanos: u64,
     /// POSIX permission bits (`0o7777`) — the mode WITHOUT the file-type bits,
-    /// which [`FsMetadata::kind`] already carries. A deterministic filesystem
-    /// creates files `0o644` and directories `0o755` (mode `0o666`/`0o777` under
-    /// a fixed `0o022` umask) and changes this only through an explicit
+    /// which [`FsMetadata::kind`] already carries. A creating call stores the
+    /// mode it is handed verbatim: the umask is process state the caller above
+    /// the driver applies (the native shim's `umask`, the WASI host's fixed
+    /// `0o022`), so the ordinary `0o666`/`0o777` requests arrive as
+    /// `0o644`/`0o755`. The driver changes this only through an explicit
     /// set-mode call.
     pub mode: u32,
 }

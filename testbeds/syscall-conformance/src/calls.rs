@@ -1308,6 +1308,77 @@ impl Probe {
         result
     }
 
+    // ---- the working directory and the umask --------------------------------
+
+    /// `getcwd` into a `size`-byte buffer. Success is recorded as `ret` 0 on
+    /// every vehicle (glibc answers a pointer, the kernel a length) with the
+    /// directory in `fields.path`; `size` is an argument so ERANGE is legible.
+    pub fn getcwd(&self, size: usize) -> (i64, String) {
+        let mut buf = vec![0u8; size.max(1)];
+        let result = self.call(
+            Sys::Getcwd,
+            [buf.as_mut_ptr() as i64, size as i64, 0, 0, 0, 0],
+        );
+        let path = if result >= 0 {
+            let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            String::from_utf8_lossy(&buf[..end]).into_owned()
+        } else {
+            String::new()
+        };
+        let normalized = if result >= 0 { 0 } else { result };
+        let builder = self.event(Sys::Getcwd, normalized).arg("size", size);
+        let builder = if result >= 0 {
+            builder.field("path", path.as_str())
+        } else {
+            builder
+        };
+        builder.emit();
+        (normalized, path)
+    }
+
+    pub fn chdir(&self, path: &str) -> i64 {
+        let c = cstr(path);
+        let result = self.call(Sys::Chdir, [c.as_ptr() as i64, 0, 0, 0, 0, 0]);
+        self.event(Sys::Chdir, result).arg("path", path).emit();
+        result
+    }
+
+    pub fn fchdir(&self, fd: i32) -> i64 {
+        let result = self.call(Sys::Fchdir, [fd as i64, 0, 0, 0, 0, 0]);
+        let builder = self.event(Sys::Fchdir, result);
+        self.fd_arg(builder, "fd", fd).emit();
+        result
+    }
+
+    /// `umask`: the previous mask is the result (never an errno).
+    pub fn umask(&self, mask: u32) -> i64 {
+        let result = self.call(Sys::Umask, [mask as i64, 0, 0, 0, 0, 0]);
+        self.event(Sys::Umask, result).arg("mask", mask).emit();
+        result
+    }
+
+    pub fn mknodat(&self, dirfd: i32, path: &str, mode: u32, dev: u64) -> i64 {
+        let c = cstr(path);
+        let result = self.call(
+            Sys::Mknodat,
+            [
+                dirfd as i64,
+                c.as_ptr() as i64,
+                mode as i64,
+                dev as i64,
+                0,
+                0,
+            ],
+        );
+        let builder = self.event(Sys::Mknodat, result);
+        self.fd_arg(builder, "dirfd", dirfd)
+            .arg("path", path)
+            .arg("mode", mode)
+            .arg("dev", dev)
+            .emit();
+        result
+    }
+
     // ---- the virtual ABI level ----------------------------------------------
 
     /// A number the vendored table lists but the virtual ABI level lacks

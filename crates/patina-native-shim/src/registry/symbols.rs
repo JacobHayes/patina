@@ -364,8 +364,23 @@ pub const SYMBOLS: &[SymbolRow] = &[
         "getcwd",
         Platform::Both,
         Serves::Syscalls(&["getcwd"]),
-        SymbolStatus::Partial,
-    ),
+        SymbolStatus::Modeled,
+    )
+    .probe("fs/paths"),
+    s(
+        "fchdir",
+        Platform::Both,
+        Serves::Syscalls(&["fchdir"]),
+        SymbolStatus::Modeled,
+    )
+    .probe("fs/paths"),
+    s(
+        "umask",
+        Platform::Both,
+        Serves::Syscalls(&["umask"]),
+        SymbolStatus::Modeled,
+    )
+    .probe("fs/paths"),
     s(
         "stat",
         Platform::Both,
@@ -1074,8 +1089,9 @@ pub const SYMBOLS: &[SymbolRow] = &[
         "chdir",
         Platform::Both,
         Serves::Syscalls(&["chdir"]),
-        SymbolStatus::Deny("process"),
-    ),
+        SymbolStatus::Modeled,
+    )
+    .probe("fs/paths"),
     s(
         "chroot",
         Platform::Both,
@@ -2104,12 +2120,6 @@ pub const SYMBOLS: &[SymbolRow] = &[
         "futimens",
         Platform::Linux,
         Serves::Syscalls(&["utimensat"]),
-        SymbolStatus::Absent,
-    ),
-    s(
-        "umask",
-        Platform::Linux,
-        Serves::Syscalls(&["umask"]),
         SymbolStatus::Absent,
     ),
     s(

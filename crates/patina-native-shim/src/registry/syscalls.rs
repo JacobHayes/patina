@@ -775,28 +775,31 @@ pub const SYSCALLS: &[SyscallRow] = &[
         79,
         Some(17),
         Family::Fs,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Path resolution state (cwd, umask) is modeled by the F3 foundation, one Rust resolver shared by the C and SUD doors. The C `chdir` interposer is a process-class deny-trap and `getcwd`/`umask` exist in C only, so the raw and libc doors diverge today.",
-        Some("F3 (path resolver + cwd)"),
-    ),
+        Disposition::Modeled,
+        "The working directory is a NODE the shim holds (a path-only driver handle) and names through the filesystem at every read, so a renamed ancestor moves it and an unlinked one answers ENOENT; ERANGE for a short buffer. Routed into the same `patina_getcwd` the C interposer calls.",
+        None,
+    )
+    .probe("fs/paths"),
     r(
         "chdir",
         80,
         Some(49),
         Family::Fs,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Path resolution state (cwd, umask) is modeled by the F3 foundation, one Rust resolver shared by the C and SUD doors. The C `chdir` interposer is a process-class deny-trap and `getcwd`/`umask` exist in C only, so the raw and libc doors diverge today.",
-        Some("F3 (path resolver + cwd)"),
-    ),
+        Disposition::Modeled,
+        "Resolved through the one path resolver (symlinks followed; ENOENT/ENOTDIR/EACCES as the kernel answers) and held as a path-only driver handle; guest-driven and unrecorded like `setenv`. Routed into the same `patina_chdir` the C interposer calls.",
+        None,
+    )
+    .probe("fs/paths"),
     r(
         "fchdir",
         81,
         Some(50),
         Family::Fs,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Path resolution state (cwd, umask) is modeled by the F3 foundation, one Rust resolver shared by the C and SUD doors. The C `chdir` interposer is a process-class deny-trap and `getcwd`/`umask` exist in C only, so the raw and libc doors diverge today.",
-        Some("F3 (path resolver + cwd)"),
-    ),
+        Disposition::Modeled,
+        "A directory descriptor (plain or O_PATH) becomes the working directory through a shim-held dup of its driver handle; EBADF/ENOTDIR as the kernel answers. Routed into the same `patina_fchdir` the C interposer calls.",
+        None,
+    )
+    .probe("fs/paths"),
     r(
         "rename",
         82,
@@ -919,10 +922,11 @@ pub const SYSCALLS: &[SyscallRow] = &[
         95,
         Some(166),
         Family::Fs,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Path resolution state (cwd, umask) is modeled by the F3 foundation, one Rust resolver shared by the C and SUD doors. The C `chdir` interposer is a process-class deny-trap and `getcwd`/`umask` exist in C only, so the raw and libc doors diverge today.",
-        Some("F3 (path resolver + cwd)"),
-    ),
+        Disposition::Modeled,
+        "Process state the shim keeps and applies to every creating call (open, mkdir, mknod) before the driver, so the driver stores what the kernel would; answers the previous mask. Routed into the same `patina_umask` the C interposer calls.",
+        None,
+    )
+    .probe("fs/paths"),
     r(
         "gettimeofday",
         96,
@@ -2387,7 +2391,7 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Some(56),
         Family::Fs,
         Disposition::Modeled,
-        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_open` / `patina_diropen`): `*at` paths resolve through the shared directory-descriptor table; O_PATH and O_DIRECTORY are distinct opens; O_PATH|O_NOFOLLOW on a symlink prints the shared deny and answers ENOSYS.",
+        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_openat`): `(dirfd, path)` resolves through the one path resolver (working directory, `..`, symlinks to the 40-hop ELOOP limit) and the entry's kind decides the descriptor; O_PATH and O_DIRECTORY are distinct opens; O_PATH|O_NOFOLLOW on a symlink prints the shared deny and answers ENOSYS.",
         None,
     )
     .probe("fs/open_rw")
@@ -2436,7 +2440,7 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Some(79),
         Family::Fs,
         Disposition::Modeled,
-        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_metadata_full`); AT_SYMLINK_NOFOLLOW/AT_EMPTY_PATH/AT_NO_AUTOMOUNT honored, other flags EINVAL.",
+        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_metadata_at`, through the one path resolver); AT_SYMLINK_NOFOLLOW/AT_EMPTY_PATH/AT_NO_AUTOMOUNT honored, other flags EINVAL.",
         None,
     )
     .probe("fs/metadata")
@@ -3091,7 +3095,7 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Some(291),
         Family::Fs,
         Disposition::Modeled,
-        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_metadata_full`), filling the `struct statx` fields the model has; synthesized fields (owner, device) are the fs arc.",
+        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_metadata_at`, through the one path resolver), filling the `struct statx` fields the model has; synthesized fields (owner, device) are the fs arc.",
         Some("fs"),
     )
     .probe("fs/metadata")

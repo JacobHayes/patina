@@ -108,6 +108,13 @@ static ssize_t fail_size(intptr_t result) {
     return (ssize_t)result;
 }
 
+/* The platform's AT_FDCWD on the wire: the runtime's path resolver takes the
+ * Linux value (PATINA_AT_FDCWD) whatever this libc spells it as, so every *at
+ * interposer maps its dirfd through here. */
+static int32_t patina_at(int dirfd) {
+    return dirfd == AT_FDCWD ? PATINA_AT_FDCWD : dirfd;
+}
+
 /* Loud fail-closed: one deterministic diagnostic line on captured stderr,
  * then a recoverable ENOSYS. Never falls through to the host. The line goes
  * to the captured-stderr SINK directly (not through the interposed write on
@@ -119,12 +126,11 @@ static int patina_posix_deny(const char *message) {
     return -1;
 }
 
-/* Deny strings shared with the SUD dispatcher (crates/patina-native-shim/src/sud.rs).
+/* Deny strings shared with the SUD dispatcher (crates/patina-native-shim/src/sud/).
  * A raw-syscall guest and a libc guest that hit the same refusal must record the
- * SAME captured-stderr bytes, or their traces diverge on the refusal alone. */
-#define PATINA_DENY_O_PATH_SYMLINK \
-    "patina: O_PATH|O_NOFOLLOW on a symlink is not modeled (the deterministic " \
-    "filesystem has no descriptor for a link entry); failing closed\n"
+ * SAME captured-stderr bytes, or their traces diverge on the refusal alone. (The
+ * O_PATH|O_NOFOLLOW-on-a-symlink deny is emitted by the one Rust open entry both
+ * doors call, so it has no C spelling.) */
 #define PATINA_DENY_MKNOD_TYPE \
     "patina: mknod models only S_IFIFO (a named pipe); no other special file has a " \
     "deterministic representation here; failing closed\n"

@@ -8328,6 +8328,137 @@ tempfile = "3"
     );
 }
 
+// The working directory is modeled process state: `run --cwd` sets the starting
+// point (recorded into trace metadata and restored flag-free on replay), a
+// relative path resolves against it, `set_current_dir` moves it, and
+// `current_dir` reports the directory's CURRENT name. RED before F3: `chdir`
+// was a process-class deny-trap and `getcwd` a constant "/".
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_cwd_flag_records_replays_and_relative_paths_resolve_against_it() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("cwd_guest.rs");
+    fs::write(
+        &source,
+        r#"fn main() {
+    let start = std::env::current_dir().unwrap();
+    std::fs::write("relative.txt", b"from the cwd").unwrap();
+    let absolute = start.join("relative.txt");
+    let read_back = std::fs::read_to_string(&absolute).unwrap();
+    std::fs::create_dir("nested").unwrap();
+    std::env::set_current_dir("nested").unwrap();
+    let moved = std::env::current_dir().unwrap();
+    let parent_file = std::fs::read_to_string("../relative.txt").unwrap();
+    std::env::set_current_dir("/").unwrap();
+    let root = std::env::current_dir().unwrap();
+    println!(
+        "NATIVE_CWD start={} read={} moved={} parent={} root={}",
+        start.display(),
+        read_back,
+        moved.display(),
+        parent_file,
+        root.display()
+    );
+}
+"#,
+    )
+    .unwrap();
+
+    let workspace = native_workspace();
+    let bin = directory.path().join("cwd-bin");
+    invoke_in(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let bin = bin.to_str().unwrap();
+
+    // The default working directory is the root of the deterministic image.
+    let at_root = invoke_in(workspace, &["run", bin, "--seed", "3"]);
+    let at_root_stdout = String::from_utf8_lossy(&at_root.stdout);
+    assert!(
+        at_root_stdout.contains(
+            "NATIVE_CWD start=/ read=from the cwd moved=/nested parent=from the cwd root=/"
+        ),
+        "{at_root_stdout}"
+    );
+
+    let trace = directory.path().join("cwd.patina");
+    let recorded = invoke_in(
+        workspace,
+        &[
+            "run",
+            bin,
+            "--seed",
+            "3",
+            "--cwd",
+            "/tmp",
+            "--record",
+            trace.to_str().unwrap(),
+        ],
+    );
+    let recorded_stdout = String::from_utf8_lossy(&recorded.stdout);
+    assert!(
+        recorded_stdout.contains(
+            "NATIVE_CWD start=/tmp read=from the cwd moved=/tmp/nested parent=from the cwd root=/"
+        ),
+        "{recorded_stdout}"
+    );
+    let replayed = invoke_in(workspace, &["replay", bin, trace.to_str().unwrap()]);
+    assert_eq!(
+        recorded.stdout, replayed.stdout,
+        "native replay must restore --cwd flag-free"
+    );
+    let trace_text = fs::read_to_string(&trace).unwrap();
+    assert!(
+        trace_text.contains("\"guest_cwd\":\"/tmp\""),
+        "{trace_text}"
+    );
+
+    // Replay refuses a re-supplied --cwd: the trace is authoritative.
+    let conflict = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["replay", bin, trace.to_str().unwrap(), "--cwd", "/"],
+    );
+    assert!(!conflict.status.success());
+    let conflict_stderr = String::from_utf8_lossy(&conflict.stderr);
+    assert!(
+        conflict_stderr.contains("does not accept --cwd")
+            && conflict_stderr.contains("trace is authoritative"),
+        "native replay conflict should refuse re-supplied --cwd:\n{conflict_stderr}"
+    );
+
+    // A --cwd that is not a directory in the image refuses the run by name
+    // rather than answering ENOENT to every relative path.
+    let missing = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["run", bin, "--seed", "3", "--cwd", "/no/such/dir"],
+    );
+    assert!(!missing.status.success());
+    let missing_stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        missing_stderr.contains("--cwd \"/no/such/dir\" is not a directory"),
+        "a missing --cwd must be refused by name:\n{missing_stderr}"
+    );
+    let relative = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["run", bin, "--seed", "3", "--cwd", "relative/dir"],
+    );
+    assert!(!relative.status.success());
+    let relative_stderr = String::from_utf8_lossy(&relative.stderr);
+    assert!(
+        relative_stderr.contains("must be an absolute virtual path"),
+        "a relative --cwd must be refused:\n{relative_stderr}"
+    );
+}
+
 // Guest-driven environment mutation is a deterministic in-process operation, so
 // `setenv`/`unsetenv` succeed and every reader agrees: the `getenv` interposer,
 // the `environ` array std::env::vars walks, and the seeded `--env` map share one
@@ -8693,12 +8824,16 @@ fn native_fs_fault_errors_and_shorts_are_deterministic_replayable_and_reported()
 
     let trace1 = directory.path().join("eio1.patina");
     let trace2 = directory.path().join("eio2.patina");
+    // The seeds pick a fault schedule whose first injected error lands on the
+    // operation under test (the read / the write), not on the setup write or
+    // the open before it; the schedule is a function of the whole operation
+    // stream, which the resolver's per-path metadata lookups are part of.
     let eio_args = |trace: &Path| {
         vec![
             "run".to_string(),
             bin.clone(),
             "--seed".to_string(),
-            "70".to_string(),
+            "58".to_string(),
             "--record".to_string(),
             trace.to_str().unwrap().to_string(),
             "--fs-error-permille".to_string(),
@@ -8748,7 +8883,7 @@ fn native_fs_fault_errors_and_shorts_are_deterministic_replayable_and_reported()
             "run",
             &bin,
             "--seed",
-            "29",
+            "60",
             "--fs-error-permille",
             "100",
             "--",

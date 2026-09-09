@@ -39,11 +39,15 @@ enum {
      * nor a status flag: it lives on the descriptor-table slot, so a dup of the
      * descriptor does not carry it and F_GETFD/F_SETFD read and write it. */
     PATINA_O_CLOEXEC = 1u << 9,
-    /* Reported by patina_fd_getfl, never accepted by patina_open: the description
+    /* Reported by patina_fd_getfl, never accepted by patina_openat: the description
      * was minted by open(2). A 64-bit Linux kernel forces O_LARGEFILE into such a
      * description's F_GETFL (and into no pipe's, socket's or O_PATH handle's), so
      * the C and SUD F_GETFL translate this bit to O_LARGEFILE there. */
     PATINA_O_OPENED = 1u << 10,
+    /* The entry must be a directory (ENOTDIR otherwise). Not a driver flag: the
+     * resolver already knows the entry's kind, and a directory is opened as a
+     * directory descriptor whether or not the caller asked. */
+    PATINA_O_DIRECTORY = 1u << 11,
 };
 
 /*
@@ -178,17 +182,63 @@ int32_t patina_sleep_until(uint32_t clock, uint64_t deadline_nanos);
  */
 int32_t patina_cpu_time_nanos(uint64_t *nanos);
 /*
- * Open a path in the deterministic filesystem, returning a fresh guest
- * descriptor number. A FIFO answers with a PATINA_FD_PIPE descriptor, because a
- * named pipe's bytes are not filesystem state; /dev/urandom with a
- * PATINA_FD_URANDOM one. PATINA_O_CLOEXEC sets FD_CLOEXEC on the number.
+ * Path resolution. Every entry below that takes a (dirfd, path) pair resolves
+ * it through ONE resolver in the runtime: the working directory for
+ * PATINA_AT_FDCWD (the Linux AT_FDCWD value; the C layer maps its platform's
+ * spelling onto it), a directory descriptor's NODE for any other dirfd (EBADF
+ * for a number that names nothing, ENOTDIR for a non-directory), `.`/`..`
+ * applied to the resolved directory after symlink expansion, symlinks walked
+ * to the kernel's 40-hop ELOOP limit, ENAMETOOLONG past PATH_MAX/NAME_MAX,
+ * ENOTDIR for a component resolved through a non-directory, and the
+ * trailing-slash rule. PATINA_RESOLVE_NOFOLLOW names a trailing symlink
+ * itself; PATINA_RESOLVE_EMPTY_PATH lets an empty path name the base (the
+ * AT_EMPTY_PATH form), where it is otherwise ENOENT.
  */
+#define PATINA_AT_FDCWD (-100)
+enum {
+    PATINA_RESOLVE_NOFOLLOW = 1u << 0,
+    PATINA_RESOLVE_EMPTY_PATH = 1u << 1,
+};
 /*
- * `mode` is POSIX open(2)'s third argument: the creation mode, read only when
- * the flags can create the entry. A caller without PATINA_O_CREATE passes 0, so
- * the recorded operation carries no argument the kernel would not have read.
+ * The resolver itself, for the callers that want the canonical NAME
+ * (realpath). Writes the NUL-terminated canonical path into buf when it fits
+ * and returns its length (excluding the terminator; ERANGE when len is nonzero
+ * and too small); *kind receives the final entry's PATINA_ENTRY_* kind, or 0
+ * when the final component does not exist.
  */
-int32_t patina_open(const char *path, uint32_t flags, uint32_t mode);
+intptr_t patina_resolve_path(int32_t dirfd, const char *path, uint32_t flags, char *buf,
+                             size_t len, uint32_t *kind);
+/*
+ * The working directory and the umask: process state the shim keeps, like the
+ * environment map. patina_getcwd copies the directory's CURRENT name (it is a
+ * node, so a rename of an ancestor moves it) NUL-terminated into buf when it
+ * fits and returns the length (ERANGE otherwise; len == 0 reports the length
+ * alone; ENOENT once the directory is unlinked). patina_chdir resolves
+ * (dirfd, path) with symlinks followed (ENOENT/ENOTDIR/EACCES as chdir(2));
+ * patina_fchdir takes a directory descriptor (EBADF/ENOTDIR). patina_umask
+ * installs a new mask and returns the previous one; every creating entry
+ * applies it before the driver call, so the driver stores what the kernel
+ * would store.
+ */
+intptr_t patina_getcwd(char *buf, size_t len);
+int32_t patina_chdir(int32_t dirfd, const char *path);
+int32_t patina_fchdir(int32_t fd);
+uint32_t patina_umask(uint32_t mask);
+/*
+ * openat(2): open what (dirfd, path) resolves to, returning a fresh guest
+ * descriptor number. The entry's KIND decides the description: a regular file,
+ * a directory (with or without PATINA_O_DIRECTORY, and PATINA_FD_DIR either
+ * way), an O_PATH location, /dev/urandom (PATINA_FD_URANDOM), or a FIFO's pipe
+ * endpoint (PATINA_FD_PIPE, because a named pipe's bytes are not filesystem
+ * state). PATINA_O_NOFOLLOW leaves a trailing symlink unresolved, which is
+ * ELOOP (PATINA_O_PATH|PATINA_O_NOFOLLOW on one is a named deny: no descriptor
+ * names a link entry). PATINA_O_CLOEXEC sets FD_CLOEXEC on the number.
+ * `mode` is POSIX open(2)'s third argument: the creation mode, read only when
+ * the flags can create the entry and applied under the process umask. A caller
+ * without PATINA_O_CREATE passes 0, so the recorded operation carries no
+ * argument the kernel would not have read.
+ */
+int32_t patina_openat(int32_t dirfd, const char *path, uint32_t flags, uint32_t mode);
 /*
  * The universal descriptor operations: each resolves the guest number once and
  * dispatches on what it names, answering what the kernel answers for a kind
@@ -269,29 +319,28 @@ enum {
     PATINA_ENTRY_FIFO = 4,
 };
 
-int32_t patina_metadata(const char *path, uint32_t *kind, uint64_t *length);
-int32_t patina_fd_metadata(int32_t fd, uint32_t *kind, uint64_t *length);
 /*
- * `mode` receives the POSIX permission bits (0o7777) WITHOUT the file-type bits,
- * which `kind` already carries: a caller assembling a struct stat ORs the two.
+ * The metadata of what (dirfd, path) resolves to — the one entry behind the
+ * stat family, access and statfs on both doors (`flags` are PATINA_RESOLVE_*;
+ * a missing entry is ENOENT) — and of an open descriptor. `mode` receives the
+ * POSIX permission bits (0o7777) WITHOUT the file-type bits, which `kind`
+ * already carries: a caller assembling a struct stat ORs the two.
  */
-int32_t patina_metadata_full(const char *path, uint32_t *kind, uint64_t *length,
-                             uint64_t *ino, uint32_t *nlink,
-                             uint64_t *atime_nanos, uint64_t *mtime_nanos,
-                             uint32_t *mode);
+int32_t patina_metadata_at(int32_t dirfd, const char *path, uint32_t flags, uint32_t *kind,
+                           uint64_t *length, uint64_t *ino, uint32_t *nlink,
+                           uint64_t *atime_nanos, uint64_t *mtime_nanos, uint32_t *mode);
 int32_t patina_fd_metadata_full(int32_t fd, uint32_t *kind, uint64_t *length,
                                 uint64_t *ino, uint32_t *nlink,
                                 uint64_t *atime_nanos, uint64_t *mtime_nanos,
                                 uint32_t *mode);
 /*
- * Change an entry's permission bits (chmod/fchmod/fchmodat). `follow` selects
- * the trailing-symlink behavior exactly as patina_diropen's does: follow != 0
- * resolves a trailing symlink and changes its TARGET (chmod, fchmodat with no
- * flags), follow == 0 names the link itself and is EOPNOTSUPP on one, because
- * Linux has no way to change a symlink's mode. Only the permission bits of
- * `mode` are stored.
+ * Change an entry's permission bits (chmod/fchmod/fchmodat). Without
+ * PATINA_RESOLVE_NOFOLLOW a trailing symlink resolves and its TARGET changes
+ * (chmod, fchmodat with no flags); with it the link itself is named, which is
+ * EOPNOTSUPP because Linux has no way to change a symlink's mode. Only the
+ * permission bits of `mode` are stored.
  */
-int32_t patina_chmod(const char *path, uint32_t mode, int32_t follow);
+int32_t patina_chmod(int32_t dirfd, const char *path, uint32_t mode, uint32_t flags);
 int32_t patina_fchmod(int32_t fd, uint32_t mode);
 /*
  * Snapshot a directory for readdir/getdents iteration. Takes the open directory
@@ -308,56 +357,29 @@ int32_t patina_read_dir(int32_t fd, void **state);
 int32_t patina_read_dir_next(void *state, char *name_buf, size_t buf_len, uint32_t *kind);
 void patina_read_dir_free(void *state);
 /*
- * Create a named pipe (mkfifo/mkfifoat, and mknod/mknodat with S_IFIFO). Only
- * the NAME is created: the pipe behind it comes into existence when the first
- * descriptor opens the FIFO and is released with the last. `mode` is the
- * caller's requested mode and the deterministic filesystem applies its modeled
- * umask, exactly as the kernel applies the process umask.
+ * The namespace operations, each on a resolved (dirfd, path). A trailing
+ * symlink is never followed by these: the kernel creates, removes and renames
+ * link ENTRIES as entries. Creating calls take the caller's mode and apply the
+ * process umask, exactly as the kernel does. patina_mkfifo (mkfifo/mkfifoat,
+ * mknod/mknodat with S_IFIFO) creates only the NAME: the pipe behind it comes
+ * into existence when the first descriptor opens the FIFO and is released with
+ * the last. patina_symlink stores `target` verbatim (an empty one is ENOENT).
+ * patina_link shares one inode between `from` and `to`, or duplicates the
+ * symlink entry when `from` is itself a symlink (linkat's no-AT_SYMLINK_FOLLOW
+ * behavior); `follow` != 0 resolves `from`'s trailing symlink first.
+ * patina_read_link copies a link's target bytes (no trailing NUL) and returns
+ * the count; an empty path names the descriptor itself, a non-symlink is
+ * EINVAL, a zero-length buffer is EINVAL.
  */
-int32_t patina_mkfifo(const char *path, uint32_t mode);
-int32_t patina_symlink(const char *target, const char *link_path);
-/*
- * Create a hard link. Mirrors patina_symlink: the driver shares one inode
- * between `from` and `to`, or duplicates the symlink entry when `from` is itself
- * a symlink (linkat's no-AT_SYMLINK_FOLLOW behavior). The C linkat interposer
- * canonicalizes `from` before calling this when AT_SYMLINK_FOLLOW is set.
- */
-int32_t patina_link(const char *from, const char *to);
-/*
- * Directory descriptors backing the openat/fdopendir/unlinkat/getdents64 family.
- * patina_diropen VALIDATES that `path` names a directory, opens a read-only
- * deterministic filesystem handle, binds it to a fresh guest number of kind
- * PATINA_FD_DIR and returns the number (`cloexec` sets FD_CLOEXEC on it).
- * `follow` selects the trailing-symlink behavior (0 == O_NOFOLLOW): a symlink
- * with follow==0 is ELOOP, with follow!=0 it is resolved through the virtual
- * realpath and re-checked; a non-directory is ENOTDIR. Validation lives here so
- * the C interposers and the SUD dispatcher cannot drift.
- * patina_dirpath answers where the descriptor's NODE is NOW: it asks the
- * deterministic filesystem, which moves an open description with its inode
- * through every rename, rather than replaying the name the descriptor was
- * opened under (buf gets a NUL-terminated copy when it fits; returns the
- * length, or -1/EBADF for an unknown fd). It is the dirfd->path half of *at
- * resolution on both the libc and raw-syscall paths, so a renamed directory
- * keeps serving the descriptor and a symlink planted at the vacated name is
- * never followed;
- * `path_only` is O_PATH: the descriptor names the location and never opens the
- * directory, so it costs nothing on the entry and cannot be iterated, where a
- * plain (path_only == 0) directory open costs `r` and can (the description's
- * PATINA_O_PATH status bit tells the two apart). A directory descriptor dups
- * and closes through the universal entries like any other; every DIR owns a
- * number, so closedir is a patina_close.
- */
-int32_t patina_diropen(const char *path, int32_t follow, int32_t path_only, int32_t cloexec);
-intptr_t patina_dirpath(int32_t fd, char *buf, size_t len);
-intptr_t patina_read_link(const char *path, char *buf, size_t len);
-/*
- * Canonicalize a guest path to its deterministic absolute form (realpath). On
- * success writes the NUL-terminated canonical path into buf when it fits and
- * returns its length in bytes (excluding the terminator); a negative return sets
- * patina_errno. Resolution is driven entirely by the deterministic filesystem,
- * so both realpath calling conventions receive byte-identical results.
- */
-intptr_t patina_canonicalize(const char *path, char *buf, size_t len);
+int32_t patina_mkdir(int32_t dirfd, const char *path, uint32_t mode);
+int32_t patina_mkfifo(int32_t dirfd, const char *path, uint32_t mode);
+int32_t patina_unlink(int32_t dirfd, const char *path);
+int32_t patina_rmdir(int32_t dirfd, const char *path);
+int32_t patina_rename(int32_t fromfd, const char *from, int32_t tofd, const char *to);
+int32_t patina_symlink(const char *target, int32_t dirfd, const char *link_path);
+int32_t patina_link(int32_t fromfd, const char *from, int32_t tofd, const char *to,
+                    int32_t follow);
+intptr_t patina_read_link(int32_t dirfd, const char *path, char *buf, size_t len);
 int32_t patina_thread_id(void);
 int32_t patina_sched_yield(void);
 /*
@@ -365,11 +387,6 @@ int32_t patina_sched_yield(void);
  * carrying the instrumented guest site for divergence diagnostics.
  */
 void patina_yield_point(const void *site);
-/* `mode` is mkdir(2)'s creation mode; the driver applies the modeled umask. */
-int32_t patina_mkdir(const char *path, uint32_t mode);
-int32_t patina_unlink(const char *path);
-int32_t patina_rmdir(const char *path);
-int32_t patina_rename(const char *from, const char *to);
 int32_t patina_crash(void);
 /*
  * Append to the captured stdout (`sink` 1) or stderr (`sink` 2) STREAM -- the

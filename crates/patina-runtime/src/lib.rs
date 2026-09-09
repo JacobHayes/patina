@@ -190,6 +190,12 @@ pub const ENV_GUEST_ARGV: &str = "PATINA_GUEST_ARGV";
 /// on replay so environment-dependent native guests reproduce without re-supplying
 /// flags. Malformed JSON, empty keys, keys containing `=`, or NUL bytes fail closed.
 pub const ENV_GUEST_ENV: &str = "PATINA_GUEST_ENV_JSON";
+/// The guest's initial working directory as an absolute virtual path. Set by
+/// native `run --cwd PATH`; recorded into trace metadata and restored on replay
+/// so relative-path guests reproduce without re-supplying the flag. Absent means
+/// `/`. A relative path, an empty one, a NUL byte, or a `..` component fails
+/// closed; the value is canonicalized lexically (`.` and `//` dropped).
+pub const ENV_GUEST_CWD: &str = "PATINA_GUEST_CWD";
 /// Base link latency in nanoseconds applied to the default `SimNet` network
 /// (datagrams and TCP segments). Blocking receives under a non-zero value park
 /// on the virtual-clock timer queue until delivery. Invalid values are rejected fail-closed.
@@ -932,6 +938,11 @@ pub struct RuntimeConfig {
     /// default; recorded into trace metadata when non-empty and restored on
     /// replay. Not a fingerprint input.
     guest_env: BTreeMap<String, String>,
+    /// The guest's initial working directory (a canonical absolute virtual
+    /// path), or `None` for `/`. Recorded into trace metadata when supplied and
+    /// restored on replay. Not a fingerprint input. The live cwd (`chdir`) is
+    /// process state the native shim keeps; only the starting point is here.
+    guest_cwd: Option<String>,
     /// The DNS host table: the names this run resolves, and the virtual IPv4
     /// address each resolves to. Semantic configuration rather than a fault knob
     /// (like `params`): an undefined name is NXDOMAIN deterministically, and the
@@ -985,6 +996,7 @@ impl RuntimeConfig {
             swarm: false,
             guest_argv: None,
             guest_env: BTreeMap::new(),
+            guest_cwd: None,
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
@@ -1009,6 +1021,7 @@ impl RuntimeConfig {
             swarm: false,
             guest_argv: None,
             guest_env: BTreeMap::new(),
+            guest_cwd: None,
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
@@ -1038,6 +1051,7 @@ impl RuntimeConfig {
             swarm: false,
             guest_argv: None,
             guest_env: BTreeMap::new(),
+            guest_cwd: None,
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
@@ -1068,6 +1082,7 @@ impl RuntimeConfig {
             swarm: false,
             guest_argv: None,
             guest_env: BTreeMap::new(),
+            guest_cwd: None,
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
@@ -1099,6 +1114,7 @@ impl RuntimeConfig {
             swarm: false,
             guest_argv: None,
             guest_env: BTreeMap::new(),
+            guest_cwd: None,
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
@@ -1136,6 +1152,7 @@ impl RuntimeConfig {
             swarm: false,
             guest_argv: None,
             guest_env: BTreeMap::new(),
+            guest_cwd: None,
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
@@ -1534,6 +1551,32 @@ impl RuntimeConfig {
     pub fn with_guest_env(mut self, guest_env: BTreeMap<String, String>) -> Self {
         self.guest_env = guest_env;
         self
+    }
+
+    /// The guest's initial working directory, or `None` for `/`.
+    pub fn guest_cwd(&self) -> Option<&str> {
+        self.guest_cwd.as_deref()
+    }
+
+    /// Set the guest's initial working directory directly (tests and
+    /// embedders). Validated and canonicalized exactly as [`ENV_GUEST_CWD`] is.
+    pub fn with_guest_cwd(mut self, guest_cwd: Option<&str>) -> Result<Self, RuntimeError> {
+        self.guest_cwd = guest_cwd.map(validate_guest_cwd).transpose()?;
+        Ok(self)
+    }
+
+    /// Apply the guest's initial working directory from a control-plane
+    /// accessor. Presence of [`ENV_GUEST_CWD`] sets it (validated and
+    /// canonicalized); absence leaves it unset (`/`). Shared by
+    /// [`RuntimeConfig::from_env`] and the native shim.
+    pub fn apply_guest_cwd_env<F>(mut self, get: F) -> Result<Self, RuntimeError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        if let Some(value) = get(ENV_GUEST_CWD) {
+            self.guest_cwd = Some(validate_guest_cwd(&value)?);
+        }
+        Ok(self)
     }
 
     /// Whether syscall-user-dispatch was armed for this run, or `None` when SUD
@@ -1948,6 +1991,7 @@ impl RuntimeConfig {
         let config = config.apply_liveness_env(|name| env::var(name).ok())?;
         let config = config.apply_guest_argv_env(|name| env::var(name).ok())?;
         let config = config.apply_guest_env_env(|name| env::var(name).ok())?;
+        let config = config.apply_guest_cwd_env(|name| env::var(name).ok())?;
         // The report-suppression knobs are resolved HERE, with every other knob,
         // and never again: finalization must not reach for the process
         // environment (see `ReportConfig`).
@@ -2211,6 +2255,8 @@ impl RuntimeBuilder {
         let mut replay_buggify_override: Option<BuggifyConfig> = None;
         // Same contract for deterministic guest environment values.
         let mut replay_guest_env_override: Option<BTreeMap<String, String>> = None;
+        // Same contract for the guest's initial working directory.
+        let mut replay_guest_cwd_override: Option<String> = None;
         let mut replay_dns_override: Option<BTreeMap<String, String>> = None;
         // Same contract for the exploration scheduling policy.
         let mut replay_schedule_override: Option<SchedulePolicy> = None;
@@ -2227,6 +2273,7 @@ impl RuntimeBuilder {
                             .with_watchdog(watchdog_record(&self.config))
                             .with_guest_argv(self.config.guest_argv.clone())
                             .with_guest_env(guest_env_record(&self.config))
+                            .with_guest_cwd(self.config.guest_cwd.clone())
                             .with_dns(dns_record(&self.config))
                             .with_sud(self.config.sud)
                             .with_tsc(self.config.tsc),
@@ -2249,6 +2296,7 @@ impl RuntimeBuilder {
                             .with_watchdog(watchdog_record(&self.config))
                             .with_guest_argv(self.config.guest_argv.clone())
                             .with_guest_env(guest_env_record(&self.config))
+                            .with_guest_cwd(self.config.guest_cwd.clone())
                             .with_dns(dns_record(&self.config))
                             .with_sud(self.config.sud)
                             .with_tsc(self.config.tsc),
@@ -2269,6 +2317,8 @@ impl RuntimeBuilder {
                     reconcile_replay_buggify(&self.config, replayer.buggify_config())?;
                 replay_guest_env_override =
                     reconcile_replay_guest_env(&self.config, replayer.guest_env())?;
+                replay_guest_cwd_override =
+                    reconcile_replay_guest_cwd(&self.config, replayer.guest_cwd())?;
                 replay_dns_override = reconcile_replay_dns(&self.config, replayer.dns_config())?;
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
@@ -2296,6 +2346,8 @@ impl RuntimeBuilder {
                     reconcile_replay_buggify(&self.config, replayer.buggify_config())?;
                 replay_guest_env_override =
                     reconcile_replay_guest_env(&self.config, replayer.guest_env())?;
+                replay_guest_cwd_override =
+                    reconcile_replay_guest_cwd(&self.config, replayer.guest_cwd())?;
                 replay_dns_override = reconcile_replay_dns(&self.config, replayer.dns_config())?;
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
@@ -2328,6 +2380,8 @@ impl RuntimeBuilder {
                     reconcile_replay_buggify(&self.config, session.buggify_config())?;
                 replay_guest_env_override =
                     reconcile_replay_guest_env(&self.config, session.guest_env())?;
+                replay_guest_cwd_override =
+                    reconcile_replay_guest_cwd(&self.config, session.guest_cwd())?;
                 replay_dns_override = reconcile_replay_dns(&self.config, session.dns_config())?;
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, session.schedule_policy())?;
@@ -2359,6 +2413,11 @@ impl RuntimeBuilder {
         // replay reproduces environment-dependent guest behavior.
         if let Some(guest_env) = replay_guest_env_override {
             self.config.guest_env = guest_env;
+        }
+        // Likewise the initial working directory, so a flag-free replay
+        // resolves the recording's relative paths against the same directory.
+        if let Some(guest_cwd) = replay_guest_cwd_override {
+            self.config.guest_cwd = Some(guest_cwd);
         }
         // Likewise the trace's authoritative DNS host table, so a flag-free
         // replay resolves exactly the names the recording could.
@@ -2524,6 +2583,7 @@ impl RuntimeBuilder {
             steps: 0,
             params: self.config.params,
             guest_env: self.config.guest_env,
+            guest_cwd: self.config.guest_cwd,
             execution,
             filesystem: self.filesystem,
             filesystem_is_capture: self.filesystem_is_capture,
@@ -3758,6 +3818,7 @@ pub struct Context {
     steps: u64,
     params: BTreeMap<String, String>,
     guest_env: BTreeMap<String, String>,
+    guest_cwd: Option<String>,
     execution: Execution,
     filesystem: Option<Box<dyn FsDriver>>,
     filesystem_is_capture: bool,
@@ -3993,6 +4054,14 @@ impl Context {
         let changed = !self.guest_env.is_empty();
         self.guest_env.clear();
         changed
+    }
+
+    /// The guest's initial working directory as configured (`None` for `/`).
+    /// The LIVE working directory is process state the native shim keeps —
+    /// `chdir` is guest-driven and unrecorded, like `setenv` — so this is only
+    /// the starting point the run was configured with.
+    pub fn guest_cwd(&self) -> Option<&str> {
+        self.guest_cwd.as_deref()
     }
 
     // ---- Cooperative-SUT (buggify) surface -----------------------------------
@@ -7489,6 +7558,32 @@ fn reconcile_replay_buggify(
     Ok(Some(stored))
 }
 
+/// Reconcile a recorded trace's authoritative initial working directory with
+/// any value supplied to the replaying process. The trace is authoritative: with
+/// no value supplied the stored one is adopted; a supplied value must match
+/// exactly or replay fails closed. A pre-cwd trace (`None`) keeps the supplied
+/// value for embedders.
+fn reconcile_replay_guest_cwd(
+    config: &RuntimeConfig,
+    recorded: Option<&str>,
+) -> Result<Option<String>, RuntimeError> {
+    let Some(stored) = recorded else {
+        return Ok(None);
+    };
+    if config
+        .guest_cwd
+        .as_deref()
+        .is_some_and(|supplied| supplied != stored)
+    {
+        return Err(RuntimeError::Config(
+            "replay --cwd conflicts with the trace's recorded guest working directory; \
+             the trace is authoritative, so omit the flag (or supply the matching value)"
+                .into(),
+        ));
+    }
+    Ok(Some(stored.to_owned()))
+}
+
 /// The deterministic guest environment recorded into a trace. `None` when no
 /// values were supplied, so env-free runs keep compact old-shape metadata.
 fn guest_env_record(config: &RuntimeConfig) -> Option<BTreeMap<String, String>> {
@@ -8373,6 +8468,30 @@ fn parse_nanos_range(name: &str, value: &str) -> Result<(u64, u64), RuntimeError
         )));
     }
     Ok((min, max))
+}
+
+/// The initial working directory's invariant: absolute, NUL-free, no `..`
+/// (a starting point is a NAME, and a name with parent traversal is a spelling
+/// the resolver would have to walk symlinks to decide), canonicalized lexically
+/// so `/work/` and `/work//./` name the same recorded value.
+fn validate_guest_cwd(path: &str) -> Result<String, RuntimeError> {
+    if !path.starts_with('/') {
+        return Err(RuntimeError::Config(format!(
+            "{ENV_GUEST_CWD} must be an absolute virtual path, got {path:?}"
+        )));
+    }
+    if path.contains('\0') {
+        return Err(RuntimeError::Config(format!(
+            "{ENV_GUEST_CWD} must not contain NUL bytes"
+        )));
+    }
+    if path.split('/').any(|component| component == "..") {
+        return Err(RuntimeError::Config(format!(
+            "{ENV_GUEST_CWD} must not contain a `..` component, got {path:?}"
+        )));
+    }
+    patina_dst_driver_api::canonicalize_path(path)
+        .map_err(|error| RuntimeError::Config(format!("{ENV_GUEST_CWD}: {error}")))
 }
 
 fn validate_guest_env(env: &BTreeMap<String, String>) -> Result<(), RuntimeError> {
@@ -10772,6 +10891,57 @@ class=crash|0 class=buggify|0"
             .apply_guest_argv_env(map("not json"))
             .unwrap_err();
         assert!(matches!(error, RuntimeError::Config(_)), "{error:?}");
+    }
+
+    #[test]
+    fn guest_cwd_env_validates_canonicalizes_and_reconciles_trace_metadata() {
+        fn map(value: &'static str) -> impl Fn(&str) -> Option<String> {
+            move |name: &str| (name == ENV_GUEST_CWD).then(|| value.to_string())
+        }
+        let config = RuntimeConfig::record(0, "/trace", "fp")
+            .apply_guest_cwd_env(map("/work//sub/./"))
+            .unwrap();
+        assert_eq!(config.guest_cwd(), Some("/work/sub"));
+        let unset = RuntimeConfig::record(0, "/trace", "fp")
+            .apply_guest_cwd_env(|_| None)
+            .unwrap();
+        assert_eq!(unset.guest_cwd(), None);
+        for invalid in ["relative/dir", "", "/a/../b", "/nul\0"] {
+            let error = RuntimeConfig::record(0, "/trace", "fp")
+                .apply_guest_cwd_env(move |name| {
+                    (name == ENV_GUEST_CWD).then(|| invalid.to_string())
+                })
+                .unwrap_err();
+            assert!(
+                matches!(error, RuntimeError::Config(_)),
+                "{invalid:?}: {error:?}"
+            );
+        }
+
+        // The trace is authoritative: adopted flag-free, matched when supplied,
+        // refused when the supplied value differs; a pre-cwd trace adopts nothing.
+        let adopted = reconcile_replay_guest_cwd(&RuntimeConfig::seeded(0), Some("/work")).unwrap();
+        assert_eq!(adopted.as_deref(), Some("/work"));
+        let matching = RuntimeConfig::seeded(0)
+            .with_guest_cwd(Some("/work"))
+            .unwrap();
+        assert_eq!(
+            reconcile_replay_guest_cwd(&matching, Some("/work"))
+                .unwrap()
+                .as_deref(),
+            Some("/work")
+        );
+        let conflicting = RuntimeConfig::seeded(0)
+            .with_guest_cwd(Some("/other"))
+            .unwrap();
+        assert!(matches!(
+            reconcile_replay_guest_cwd(&conflicting, Some("/work")),
+            Err(RuntimeError::Config(_))
+        ));
+        assert_eq!(
+            reconcile_replay_guest_cwd(&conflicting, None).unwrap(),
+            None
+        );
     }
 
     #[test]

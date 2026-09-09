@@ -1,7 +1,15 @@
 /*
- * Filesystem: directory iteration, open/openat and the shared directory
- * descriptor table, metadata (stat/statx/statfs), permissions, and the
- * namespace operations (mkdir/unlink/link/rename/...).
+ * Filesystem: the working directory and umask, directory iteration, open/openat
+ * and the directory descriptors, metadata (stat/statx/statfs), permissions, and
+ * the namespace operations (mkdir/unlink/link/rename/...).
+ *
+ * Every path here is a (dirfd, path) pair handed to the runtime, whose ONE
+ * resolver (`patina_resolve_path` and the entries built on it) applies the
+ * working directory, `..`, symlink walking, ENAMETOOLONG/ENOTDIR/ELOOP and the
+ * trailing-slash rule identically for this door and the raw-syscall one. This
+ * slice only translates the libc spelling: AT_FDCWD onto PATINA_AT_FDCWD, flag
+ * words onto the PATINA_O_ and PATINA_RESOLVE_ vocabularies, and struct stat
+ * onto the metadata.
  *
  * This file is one family slice of the native shim's single C translation unit:
  * `c/patina_posix.c` #includes every slice under `c/posix/` in a fixed order, so the
@@ -11,25 +19,70 @@
  * serves; a new interposer needs a symbol row (the object scan fails otherwise).
  */
 
+/*
+ * getcwd(3): glibc semantics over the runtime's working directory. A NULL
+ * buffer allocates with the guest allocator (size 0: exactly the length, the
+ * GNU extension std relies on; otherwise `size` bytes); a non-NULL buffer of
+ * size 0 is EINVAL; a buffer too small is ERANGE. The directory's current name
+ * is read once into a PATH_MAX buffer so both conventions cost one lookup.
+ */
 char *getcwd(char *destination, size_t length) {
-    if (destination == NULL || length < 2) {
-        errno = destination == NULL ? ENOSYS : ERANGE;
+    if (destination != NULL && length == 0) {
+        errno = EINVAL;
         return NULL;
     }
-    destination[0] = '/';
-    destination[1] = '\0';
+    char current[PATH_MAX];
+    intptr_t needed = patina_getcwd(current, sizeof current);
+    if (needed < 0) {
+        errno = patina_errno();
+        return NULL;
+    }
+    if (destination == NULL) {
+        size_t allocate = length == 0 ? (size_t)needed + 1 : length;
+        if (allocate < (size_t)needed + 1) {
+            errno = ERANGE;
+            return NULL;
+        }
+        char *owned = malloc(allocate);
+        if (owned == NULL) {
+            errno = ENOMEM;
+            return NULL;
+        }
+        memcpy(owned, current, (size_t)needed + 1);
+        return owned;
+    }
+    if (length < (size_t)needed + 1) {
+        errno = ERANGE;
+        return NULL;
+    }
+    memcpy(destination, current, (size_t)needed + 1);
     return destination;
+}
+
+int chdir(const char *path) {
+    return fail_int(patina_chdir(PATINA_AT_FDCWD, path));
+}
+
+int fchdir(int fd) {
+    return fail_int(patina_fchdir(fd));
+}
+
+mode_t umask(mode_t mask) {
+    return (mode_t)patina_umask((uint32_t)mask);
 }
 
 char *realpath(const char *restrict path, char *restrict destination) {
     char resolved[PATH_MAX];
-    intptr_t length = patina_canonicalize(path, resolved, sizeof resolved);
+    uint32_t kind = 0;
+    intptr_t length = patina_resolve_path(PATINA_AT_FDCWD, path, 0, resolved, sizeof resolved, &kind);
     if (length < 0) {
         errno = patina_errno();
         return NULL;
     }
-    if ((size_t)length >= PATH_MAX) {
-        errno = ENAMETOOLONG;
+    /* realpath names an EXISTING entry: a resolvable spelling whose final
+     * component is missing is ENOENT, as glibc answers. */
+    if (kind == 0) {
+        errno = ENOENT;
         return NULL;
     }
     // `resolved` now holds the NUL-terminated canonical path. When the caller
@@ -91,7 +144,8 @@ static void patina_fill_dirent_common(struct dirent *entry, uint64_t index, uint
  */
 DIR *opendir(const char *path) {
     /* glibc opens the directory O_CLOEXEC, and so does this. */
-    int fd = patina_diropen(path, 1, 0, 1);
+    int fd = patina_openat(PATINA_AT_FDCWD, path,
+                           PATINA_O_READ | PATINA_O_DIRECTORY | PATINA_O_CLOEXEC, 0);
     if (fd < 0) {
         errno = patina_errno();
         return NULL;
@@ -218,33 +272,62 @@ int dirfd(DIR *dirp) {
     return directory->owned_fd;
 }
 
+/*
+ * symlinkat/readlinkat and their AT_FDCWD spellings. symlinkat resolves only
+ * the LINK side: a symlink's target is a string the filesystem stores verbatim,
+ * never a path this call resolves -- which is why the syscall takes one dirfd
+ * and not two. The raw-syscall rows were modeled from the start; without these
+ * a libc-backend guest that works through a directory descriptor (cap-std with
+ * the libc backend, or any std program on a platform without
+ * syscall-user-dispatch) had no path to them at all and failed closed at the
+ * audit.
+ */
 int symlink(const char *target, const char *link_path) {
-    return fail_int(patina_symlink(target, link_path));
+    return fail_int(patina_symlink(target, PATINA_AT_FDCWD, link_path));
 }
 
-int link(const char *from, const char *to) {
-    return fail_int(patina_link(from, to));
+int symlinkat(const char *target, int dirfd, const char *link_path) {
+    return fail_int(patina_symlink(target, patina_at(dirfd), link_path));
 }
 
 ssize_t readlink(const char *restrict path, char *restrict destination, size_t length) {
-    return fail_size(patina_read_link(path, destination, length));
+    return fail_size(patina_read_link(PATINA_AT_FDCWD, path, destination, length));
 }
 
-static int patina_open_directory(const char *path, int flags);
-
-/* The PATINA_O_* flags of an O_PATH open on a non-directory: the location bit,
- * plus FD_CLOEXEC on the number when asked. */
-static uint32_t patina_path_only_flags(int flags) {
-    uint32_t patina_flags = PATINA_O_PATH;
-#ifdef O_CLOEXEC
-    if (flags & O_CLOEXEC) patina_flags |= PATINA_O_CLOEXEC;
-#else
-    (void)flags;
-#endif
-    return patina_flags;
+ssize_t readlinkat(int dirfd, const char *restrict path, char *restrict destination,
+                   size_t length) {
+    return fail_size(patina_read_link(patina_at(dirfd), path, destination, length));
 }
 
 /*
+ * link/linkat: create a hard link. std::fs::hard_link lowers to
+ * linkat(AT_FDCWD, original, AT_FDCWD, link, 0) on Linux and macOS.
+ * AT_SYMLINK_FOLLOW is the only defined flag: when set, `from`'s trailing
+ * symlink is resolved before linking, so the link targets the resolved file
+ * rather than duplicating the symlink -- the runtime's link duplicates a
+ * symlink entry as-is, which is precisely the no-AT_SYMLINK_FOLLOW behavior.
+ * Any other flag bit is EINVAL rather than silently ignored.
+ */
+int link(const char *from, const char *to) {
+    return fail_int(patina_link(PATINA_AT_FDCWD, from, PATINA_AT_FDCWD, to, 0));
+}
+
+int linkat(int fromfd, const char *from, int tofd, const char *to, int flags) {
+    if ((flags & ~AT_SYMLINK_FOLLOW) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    return fail_int(patina_link(patina_at(fromfd), from, patina_at(tofd), to,
+                                (flags & AT_SYMLINK_FOLLOW) != 0));
+}
+
+/*
+ * open/openat/creat and the LFS aliases: decode the libc flag word onto the
+ * runtime's PATINA_O_* vocabulary and hand the (dirfd, path) pair to the one
+ * openat entry, which resolves it, decides the descriptor's kind from the
+ * entry's, and applies the umask to a creating mode. A flag outside the modeled
+ * set fails closed (ENOSYS) rather than being silently dropped.
+ *
  * `mode` is the caller's creation mode -- open(2)'s third argument. POSIX says
  * the kernel reads it only when the flags can create the entry, and the
  * variadic argument is UNDEFINED otherwise, so every caller here passes 0
@@ -253,7 +336,7 @@ static uint32_t patina_path_only_flags(int flags) {
  * layer can enforce -- so the honest thing to hand it is the caller's request
  * and nothing invented.
  */
-static int patina_posix_open(const char *path, int flags, mode_t mode) {
+static int patina_openat_impl(int dirfd, const char *path, int flags, mode_t mode) {
     patina_note_boundary_symbol("open");
     int supported = O_ACCMODE | O_CREAT | O_TRUNC | O_APPEND | O_EXCL;
 #ifdef O_CLOEXEC
@@ -282,67 +365,28 @@ static int patina_posix_open(const char *path, int flags, mode_t mode) {
         errno = ENOSYS;
         return -1;
     }
-    /* O_PATH names a descriptor that resolves paths and answers metadata but
-     * cannot read, write or iterate. cap-std's `Dir` walks a path a component at
-     * a time with openat(dirfd, name, O_PATH|O_DIRECTORY|O_NOFOLLOW), which is
-     * why it is modeled; a directory handle is the interesting one, but the
-     * kernel gives an O_PATH descriptor for any kind, so a file or a FIFO gets
-     * an ordinary path-only fd. Only a symlink is refused: the deterministic
-     * filesystem has no descriptor for a link entry, so O_PATH|O_NOFOLLOW on one
-     * -- the single spelling that names the link ITSELF -- is a named deny
-     * rather than a descriptor silently bound to the target instead. Without
-     * O_NOFOLLOW the link resolves, exactly as every other open does. */
-#ifdef O_PATH
-    if ((flags & O_PATH) != 0 && (flags & O_DIRECTORY) == 0) {
-        uint32_t probe_kind = 0;
-        uint64_t probe_length = 0;
-        if (patina_metadata(path, &probe_kind, &probe_length) != 0) {
-            errno = patina_errno();
-            return -1;
-        }
-        if (probe_kind == PATINA_ENTRY_SYMLINK) {
-#ifdef O_NOFOLLOW
-            if (flags & O_NOFOLLOW) return patina_posix_deny(PATINA_DENY_O_PATH_SYMLINK);
-#endif
-            char canonical[PATH_MAX];
-            intptr_t canonical_len = patina_canonicalize(path, canonical, sizeof canonical);
-            if (canonical_len < 0) {
-                errno = patina_errno();
-                return -1;
-            }
-            if ((size_t)canonical_len >= sizeof canonical) {
-                errno = ENAMETOOLONG;
-                return -1;
-            }
-            if (patina_metadata(canonical, &probe_kind, &probe_length) != 0) {
-                errno = patina_errno();
-                return -1;
-            }
-            if (probe_kind == PATINA_ENTRY_DIRECTORY) {
-                return patina_open_directory(canonical, flags);
-            }
-            return fail_int(patina_open(canonical, patina_path_only_flags(flags), 0));
-        }
-        if (probe_kind == PATINA_ENTRY_DIRECTORY) {
-            return patina_open_directory(path, flags);
-        }
-        return fail_int(patina_open(path, patina_path_only_flags(flags), 0));
-    }
-#endif
-#ifdef O_DIRECTORY
-    if (flags & O_DIRECTORY) return patina_open_directory(path, flags);
-#endif
     uint32_t patina_flags = 0;
-    switch (flags & O_ACCMODE) {
-        case O_RDONLY: patina_flags |= PATINA_O_READ; break;
-        case O_WRONLY: patina_flags |= PATINA_O_WRITE; break;
-        case O_RDWR: patina_flags |= PATINA_O_READ | PATINA_O_WRITE; break;
-        default: errno = EINVAL; return -1;
+    int path_only = 0;
+#ifdef O_PATH
+    /* O_PATH ignores the access mode entirely -- it opens nothing, so there is
+     * nothing to ask for. */
+    if (flags & O_PATH) {
+        path_only = 1;
+        patina_flags |= PATINA_O_PATH;
     }
-    if (flags & O_CREAT) patina_flags |= PATINA_O_CREATE;
-    if (flags & O_TRUNC) patina_flags |= PATINA_O_TRUNCATE;
-    if (flags & O_APPEND) patina_flags |= PATINA_O_APPEND;
-    if (flags & O_EXCL) patina_flags |= PATINA_O_EXCLUSIVE;
+#endif
+    if (!path_only) {
+        switch (flags & O_ACCMODE) {
+            case O_RDONLY: patina_flags |= PATINA_O_READ; break;
+            case O_WRONLY: patina_flags |= PATINA_O_WRITE; break;
+            case O_RDWR: patina_flags |= PATINA_O_READ | PATINA_O_WRITE; break;
+            default: errno = EINVAL; return -1;
+        }
+        if (flags & O_CREAT) patina_flags |= PATINA_O_CREATE;
+        if (flags & O_TRUNC) patina_flags |= PATINA_O_TRUNCATE;
+        if (flags & O_APPEND) patina_flags |= PATINA_O_APPEND;
+        if (flags & O_EXCL) patina_flags |= PATINA_O_EXCLUSIVE;
+    }
 #ifdef O_NOFOLLOW
     if (flags & O_NOFOLLOW) patina_flags |= PATINA_O_NOFOLLOW;
 #endif
@@ -352,7 +396,10 @@ static int patina_posix_open(const char *path, int flags, mode_t mode) {
 #ifdef O_CLOEXEC
     if (flags & O_CLOEXEC) patina_flags |= PATINA_O_CLOEXEC;
 #endif
-    return fail_int(patina_open(path, patina_flags, (uint32_t)(mode & 07777)));
+#ifdef O_DIRECTORY
+    if (flags & O_DIRECTORY) patina_flags |= PATINA_O_DIRECTORY;
+#endif
+    return fail_int(patina_openat(patina_at(dirfd), path, patina_flags, (uint32_t)(mode & 07777)));
 }
 
 /*
@@ -364,135 +411,25 @@ static mode_t patina_open_mode(va_list *ap) {
     return (mode_t)va_arg(*ap, unsigned int);
 }
 
-static int patina_open_variadic(const char *path, int flags, va_list *ap) {
-    mode_t mode = 0;
-    if (flags & O_CREAT) mode = patina_open_mode(ap);
-    return patina_posix_open(path, flags, mode);
-}
-
-int open(const char *path, int flags, ...) {
-    va_list ap;
-    va_start(ap, flags);
-    int result = patina_open_variadic(path, flags, &ap);
-    va_end(ap);
-    return result;
-}
-
-/*
- * Resolve `path` for the *at family against a directory descriptor. Called only
- * when `dirfd != AT_FDCWD`. The descriptor is validated FIRST, as the kernel
- * validates it, even for an absolute path: a number that names nothing is
- * EBADF, and one that names anything but a directory is ENOTDIR. Given a
- * directory descriptor, an absolute `path` ignores it (POSIX) and a relative
- * `path` is joined onto its bound directory path.
- */
-static int patina_resolve_at(int dirfd, const char *path, char *out, size_t out_len) {
-    int kind = patina_fd_kind(dirfd);
-    if (kind < 0) {
-        errno = EBADF;
-        return -1;
-    }
-    if (kind != PATINA_FD_DIR) {
-        errno = ENOTDIR;
-        return -1;
-    }
-    if (path[0] == '/') {
-        size_t path_len = strlen(path);
-        if (path_len + 1 > out_len) {
-            errno = ENAMETOOLONG;
-            return -1;
-        }
-        memcpy(out, path, path_len + 1);
-        return 0;
-    }
-    char base[PATH_MAX];
-    intptr_t base_len = patina_dirpath(dirfd, base, sizeof base);
-    if (base_len < 0) {
-        errno = patina_errno();
-        return -1;
-    }
-    if ((size_t)base_len >= sizeof base) {
-        errno = ENAMETOOLONG;
-        return -1;
-    }
-    size_t path_len = strlen(path);
-    int separator = ((size_t)base_len > 0 && base[base_len - 1] == '/') ? 0 : 1;
-    if ((size_t)base_len + (size_t)separator + path_len + 1 > out_len) {
-        errno = ENAMETOOLONG;
-        return -1;
-    }
-    memcpy(out, base, (size_t)base_len);
-    size_t offset = (size_t)base_len;
-    if (separator) out[offset++] = '/';
-    memcpy(out + offset, path, path_len + 1);
-    return 0;
-}
-
-/*
- * open/openat(..., O_DIRECTORY|O_PATH): decode the flags and hand the directory
- * open to patina_diropen, which owns the validation (entry kind, O_NOFOLLOW ->
- * ELOOP on a symlink, trailing-symlink resolution, ENOTDIR) for BOTH this
- * interposer and the SUD dispatcher. Only a read-only open can name a directory;
- * a write/create/truncate/append/exclusive one is EISDIR. The fd is a real
- * deterministic-FS fd, so fstat reports a directory and fsync is the
- * parent-directory durability barrier.
- */
-static int patina_open_directory(const char *path, int flags) {
-    int path_only = 0;
-#ifdef O_PATH
-    /* O_PATH ignores the access mode entirely -- it opens nothing, so there is
-     * nothing to ask for -- while a plain directory open must be read-only. */
-    if (flags & O_PATH) path_only = 1;
-#endif
-    if (!path_only && ((flags & O_ACCMODE) != O_RDONLY ||
-                       (flags & (O_CREAT | O_TRUNC | O_APPEND | O_EXCL)) != 0)) {
-        errno = EISDIR;
-        return -1;
-    }
-    int follow = 1;
-#ifdef O_NOFOLLOW
-    if (flags & O_NOFOLLOW) follow = 0;
-#endif
-    int cloexec = 0;
-#ifdef O_CLOEXEC
-    if (flags & O_CLOEXEC) cloexec = 1;
-#endif
-    return fail_int(patina_diropen(path, follow, path_only, cloexec));
-}
-
-/*
- * openat over the path-based deterministic filesystem. AT_FDCWD is a plain path;
- * a virtual directory descriptor (from a prior openat(..., O_DIRECTORY)) joins
- * its bound path with a relative `path` -- the resolution std's remove_dir_all
- * needs to recurse and remove children. O_DIRECTORY yields a virtual directory
- * descriptor; everything else routes to the ordinary file open. A real kernel
- * dirfd the deterministic filesystem never issued still fails closed (ENOSYS,
- * matching the rest of the *at family).
- * The variadic mode is dropped just as `open` drops it. rustix's libc backend
- * lowers its `fs` calls onto these on both platforms, so they are strong defs in
- * the common section rather than Apple-only.
- */
-static int patina_openat_impl(int dirfd, const char *path, int flags, mode_t mode) {
-    char resolved[PATH_MAX];
-    const char *effective = path;
-    if (dirfd != AT_FDCWD) {
-        if (patina_resolve_at(dirfd, path, resolved, sizeof resolved) != 0) return -1;
-        effective = resolved;
-    }
-#ifdef O_DIRECTORY
-    if (flags & O_DIRECTORY) {
-        return patina_open_directory(effective, flags);
-    }
-#endif
-    return patina_posix_open(effective, flags, mode);
-}
-
 static int patina_openat_variadic(int dirfd, const char *path, int flags, va_list *ap) {
     mode_t mode = 0;
     if (flags & O_CREAT) mode = patina_open_mode(ap);
     return patina_openat_impl(dirfd, path, flags, mode);
 }
 
+int open(const char *path, int flags, ...) {
+    va_list ap;
+    va_start(ap, flags);
+    int result = patina_openat_variadic(AT_FDCWD, path, flags, &ap);
+    va_end(ap);
+    return result;
+}
+
+/*
+ * openat: the dirfd-relative spelling. rustix's libc backend lowers its `fs`
+ * calls onto these on both platforms, so they are strong defs in the common
+ * section rather than Apple-only.
+ */
 int openat(int dirfd, const char *path, int flags, ...) {
     va_list ap;
     va_start(ap, flags);
@@ -508,20 +445,20 @@ int openat(int dirfd, const char *path, int flags, ...) {
  * deterministic FS. Being a strong def it also drops off the guest import table.
  */
 int creat(const char *path, mode_t mode) {
-    return patina_posix_open(path, O_WRONLY | O_CREAT | O_TRUNC, mode);
+    return patina_openat_impl(AT_FDCWD, path, O_WRONLY | O_CREAT | O_TRUNC, mode);
 }
 
 #ifdef __linux__
 int open64(const char *path, int flags, ...) {
     va_list ap;
     va_start(ap, flags);
-    int result = patina_open_variadic(path, flags, &ap);
+    int result = patina_openat_variadic(AT_FDCWD, path, flags, &ap);
     va_end(ap);
     return result;
 }
 
 /* glibc's LFS alias of openat (rustix's libc backend lowers its fs calls onto
- * the *64 names on 64-bit Linux). Shares openat's directory-descriptor handling. */
+ * the *64 names on 64-bit Linux). */
 int openat64(int dirfd, const char *path, int flags, ...) {
     va_list ap;
     va_start(ap, flags);
@@ -565,74 +502,26 @@ static void patina_split_nanos(uint64_t nanos, time_t *seconds, long *subseconds
     *subseconds = (long)(nanos % UINT64_C(1000000000));
 }
 
-static int patina_metadata_values(const char *path, struct patina_stat_values *values) {
-    return patina_metadata_full(path, &values->kind, &values->length, &values->ino,
-                                &values->nlink, &values->atime_nanos, &values->mtime_nanos,
-                                &values->mode);
+/*
+ * The by-path metadata read every stat-family interposer shares: (dirfd, path)
+ * resolved by the runtime with `resolve_flags` (PATINA_RESOLVE_NOFOLLOW for the
+ * lstat spellings). Sets errno on failure.
+ */
+static int patina_metadata_values(int dirfd, const char *path, uint32_t resolve_flags,
+                                  struct patina_stat_values *values) {
+    int result = patina_metadata_at(dirfd, path, resolve_flags, &values->kind, &values->length,
+                                    &values->ino, &values->nlink, &values->atime_nanos,
+                                    &values->mtime_nanos, &values->mode);
+    if (result < 0) errno = patina_errno();
+    return result;
 }
 
 static int patina_fd_metadata_values(int fd, struct patina_stat_values *values) {
-    return patina_fd_metadata_full(fd, &values->kind, &values->length, &values->ino,
-                                   &values->nlink, &values->atime_nanos, &values->mtime_nanos,
-                                   &values->mode);
-}
-
-static int patina_resolve_symlink_target(const char *link_path, const char *target,
-                                         char *resolved, size_t resolved_len) {
-    if (target[0] == '/') {
-        size_t target_len = strlen(target);
-        if (target_len >= resolved_len) {
-            errno = ENAMETOOLONG;
-            return -1;
-        }
-        memcpy(resolved, target, target_len + 1);
-        return 0;
-    }
-    const char *slash = strrchr(link_path, '/');
-    size_t parent_len = 0;
-    if (slash != NULL) parent_len = slash == link_path ? 1 : (size_t)(slash - link_path);
-    size_t target_len = strlen(target);
-    size_t separator = parent_len == 0 || (parent_len == 1 && link_path[0] == '/') ? 0 : 1;
-    if (parent_len + separator + target_len + 1 > resolved_len) {
-        errno = ENAMETOOLONG;
-        return -1;
-    }
-    if (parent_len == 0) {
-        memcpy(resolved, target, target_len + 1);
-    } else {
-        memcpy(resolved, link_path, parent_len);
-        size_t offset = parent_len;
-        if (separator) resolved[offset++] = '/';
-        memcpy(resolved + offset, target, target_len + 1);
-    }
-    return 0;
-}
-
-static int patina_stat_metadata(const char *path, int follow_terminal_symlink,
-                                struct patina_stat_values *values) {
-    int result = patina_metadata_values(path, values);
-    if (result < 0) {
-        errno = patina_errno();
-        return -1;
-    }
-    if (!follow_terminal_symlink || values->kind != PATINA_ENTRY_SYMLINK) return 0;
-
-    char target[PATH_MAX];
-    ssize_t target_len = readlink(path, target, sizeof target - 1);
-    if (target_len < 0) return -1;
-    target[target_len] = '\0';
-    char resolved[PATH_MAX];
-    if (patina_resolve_symlink_target(path, target, resolved, sizeof resolved) != 0) return -1;
-    result = patina_metadata_values(resolved, values);
-    if (result < 0) {
-        errno = patina_errno();
-        return -1;
-    }
-    if (values->kind == PATINA_ENTRY_SYMLINK) {
-        errno = ELOOP;
-        return -1;
-    }
-    return 0;
+    int result = patina_fd_metadata_full(fd, &values->kind, &values->length, &values->ino,
+                                         &values->nlink, &values->atime_nanos,
+                                         &values->mtime_nanos, &values->mode);
+    if (result < 0) errno = patina_errno();
+    return result;
 }
 
 static int fill_stat(int result, const struct patina_stat_values *values, struct stat *status) {
@@ -671,20 +560,19 @@ static int fill_stat(int result, const struct patina_stat_values *values, struct
 #endif
 
 /*
- * Resolve the three addressing forms the *at* metadata entries accept onto the
- * same virtual metadata the `stat` family answers from, so one helper serves
+ * Resolve the addressing forms the *at* metadata entries accept onto the same
+ * virtual metadata the `stat` family answers from, so one helper serves
  * `fstatat`, `fstatat64` and `statx`:
  *
- *   AT_EMPTY_PATH with an empty path -> the DESCRIPTOR's own metadata
- *   AT_FDCWD                         -> the path, verbatim
- *   a virtual directory descriptor   -> the descriptor's path joined with `path`
+ *   AT_EMPTY_PATH with an empty path on a descriptor -> the DESCRIPTOR's own
+ *   metadata (Rust's `File::metadata()` on Linux is exactly
+ *   `statx(fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT, ...)`, so refusing it
+ *   refused the most common metadata call in the ecosystem);
+ *   AT_EMPTY_PATH with an empty path on AT_FDCWD -> the working directory;
+ *   everything else -> the resolved path, with AT_SYMLINK_NOFOLLOW naming a
+ *   trailing symlink itself.
  *
- * The first form is why this exists: Rust's `File::metadata()` on Linux is
- * `statx(fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT, ...)`, so refusing a
- * non-AT_FDCWD dirfd outright refused the most common metadata call in the
- * ecosystem — and refused it with ENOSYS, which std surfaces verbatim as
- * `ErrorKind::Unsupported` instead of falling back to `fstat`. Flags outside
- * `allowed` still fail closed.
+ * Flags outside `allowed` still fail closed.
  */
 static int patina_stat_at_values(int directory, const char *path, int flags, int allowed,
                                  struct patina_stat_values *values) {
@@ -692,26 +580,15 @@ static int patina_stat_at_values(int directory, const char *path, int flags, int
         errno = ENOSYS;
         return -1;
     }
-    if ((flags & AT_EMPTY_PATH) != 0 && (path == NULL || path[0] == '\0')) {
-        /* AT_FDCWD with an empty path names the working directory, which is not
-         * a modeled virtual entry. */
-        if (directory == AT_FDCWD) {
-            errno = ENOSYS;
-            return -1;
+    uint32_t resolve_flags = 0;
+    if ((flags & AT_SYMLINK_NOFOLLOW) != 0) resolve_flags |= PATINA_RESOLVE_NOFOLLOW;
+    if ((flags & AT_EMPTY_PATH) != 0) {
+        resolve_flags |= PATINA_RESOLVE_EMPTY_PATH;
+        if (directory != AT_FDCWD && (path == NULL || path[0] == '\0')) {
+            return patina_fd_metadata_values(directory, values);
         }
-        if (patina_fd_metadata_values(directory, values) < 0) {
-            errno = patina_errno();
-            return -1;
-        }
-        return 0;
     }
-    int follow = (flags & AT_SYMLINK_NOFOLLOW) == 0;
-    if (directory == AT_FDCWD) {
-        return patina_stat_metadata(path, follow, values);
-    }
-    char resolved[PATH_MAX];
-    if (patina_resolve_at(directory, path, resolved, sizeof resolved) != 0) return -1;
-    return patina_stat_metadata(resolved, follow, values);
+    return patina_metadata_values(patina_at(directory), path, resolve_flags, values);
 }
 
 #define PATINA_STAT_AT_FLAGS (AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT)
@@ -723,9 +600,9 @@ static int patina_stat_at_values(int directory, const char *path, int flags, int
  * refused whatever its mode: nothing here can be executed, so reporting a file
  * as runnable would be a fabricated answer, not a permission one.
  */
-static int patina_access_impl(const char *path, int mode) {
+static int patina_access_impl(int dirfd, const char *path, int mode) {
     struct patina_stat_values values;
-    if (patina_stat_metadata(path, 1, &values) < 0) return -1;
+    if (patina_metadata_values(dirfd, path, 0, &values) < 0) return -1;
     if ((mode & X_OK) != 0 && values.kind != PATINA_ENTRY_DIRECTORY) {
         errno = EACCES;
         return -1;
@@ -745,13 +622,13 @@ static int patina_access_impl(const char *path, int mode) {
 /*
  * chmod/fchmod/fchmodat. The deterministic filesystem owns the mode, so these
  * are real interposers rather than a host escape: patina_chmod applies the
- * trailing-symlink rule (follow != 0 changes the link's TARGET, follow == 0 is
- * EOPNOTSUPP on a link, exactly as Linux answers) and patina_fchmod names the
+ * trailing-symlink rule (without NOFOLLOW the link's TARGET changes, with it a
+ * link is EOPNOTSUPP, exactly as Linux answers) and patina_fchmod names the
  * node a descriptor already holds. The variadic-free signatures match POSIX, so
  * all three drop off a shim-linked guest's import table.
  */
 int chmod(const char *path, mode_t mode) {
-    return fail_int(patina_chmod(path, (uint32_t)mode, 1));
+    return fail_int(patina_chmod(PATINA_AT_FDCWD, path, (uint32_t)mode, 0));
 }
 
 int fchmod(int fd, mode_t mode) {
@@ -763,11 +640,8 @@ int fchmodat(int directory, const char *path, mode_t mode, int flags) {
         errno = EINVAL;
         return -1;
     }
-    int follow = (flags & AT_SYMLINK_NOFOLLOW) == 0;
-    if (directory == AT_FDCWD) return fail_int(patina_chmod(path, (uint32_t)mode, follow));
-    char resolved[PATH_MAX];
-    if (patina_resolve_at(directory, path, resolved, sizeof resolved) != 0) return -1;
-    return fail_int(patina_chmod(resolved, (uint32_t)mode, follow));
+    uint32_t resolve_flags = (flags & AT_SYMLINK_NOFOLLOW) != 0 ? PATINA_RESOLVE_NOFOLLOW : 0;
+    return fail_int(patina_chmod(patina_at(directory), path, (uint32_t)mode, resolve_flags));
 }
 
 /*
@@ -783,17 +657,14 @@ int fchmodat(int directory, const char *path, mode_t mode, int flags) {
  * deny.
  */
 int mkfifo(const char *path, mode_t mode) {
-    return fail_int(patina_mkfifo(path, (uint32_t)mode));
+    return fail_int(patina_mkfifo(PATINA_AT_FDCWD, path, (uint32_t)mode));
 }
 
 int mkfifoat(int directory, const char *path, mode_t mode) {
-    if (directory == AT_FDCWD) return fail_int(patina_mkfifo(path, (uint32_t)mode));
-    char resolved[PATH_MAX];
-    if (patina_resolve_at(directory, path, resolved, sizeof resolved) != 0) return -1;
-    return fail_int(patina_mkfifo(resolved, (uint32_t)mode));
+    return fail_int(patina_mkfifo(patina_at(directory), path, (uint32_t)mode));
 }
 
-static int patina_mknod_impl(const char *path, mode_t mode, dev_t device) {
+static int patina_mknod_impl(int dirfd, const char *path, mode_t mode, dev_t device) {
     mode_t type = mode & S_IFMT;
     if (type == S_IFIFO) {
         /* A FIFO has no device number; a caller passing one is confused about
@@ -802,7 +673,7 @@ static int patina_mknod_impl(const char *path, mode_t mode, dev_t device) {
             errno = EINVAL;
             return -1;
         }
-        return fail_int(patina_mkfifo(path, (uint32_t)(mode & 07777)));
+        return fail_int(patina_mkfifo(dirfd, path, (uint32_t)(mode & 07777)));
     }
     if (type == S_IFCHR || type == S_IFBLK) {
         errno = EPERM;
@@ -812,17 +683,16 @@ static int patina_mknod_impl(const char *path, mode_t mode, dev_t device) {
 }
 
 int mknod(const char *path, mode_t mode, dev_t device) {
-    return patina_mknod_impl(path, mode, device);
+    return patina_mknod_impl(PATINA_AT_FDCWD, path, mode, device);
 }
 
 int mknodat(int directory, const char *path, mode_t mode, dev_t device) {
-    if (directory == AT_FDCWD) return patina_mknod_impl(path, mode, device);
-    char resolved[PATH_MAX];
-    if (patina_resolve_at(directory, path, resolved, sizeof resolved) != 0) return -1;
-    return patina_mknod_impl(resolved, mode, device);
+    return patina_mknod_impl(patina_at(directory), path, mode, device);
 }
 
-int access(const char *path, int mode) { return patina_access_impl(path, mode); }
+int access(const char *path, int mode) {
+    return patina_access_impl(PATINA_AT_FDCWD, path, mode);
+}
 
 int faccessat(int directory, const char *path, int mode, int flags) {
     /* AT_EACCESS only chooses effective vs real ids, which are the same single
@@ -837,28 +707,24 @@ int faccessat(int directory, const char *path, int mode, int flags) {
         errno = ENOSYS;
         return -1;
     }
-    if (directory == AT_FDCWD) return patina_access_impl(path, mode);
-    char resolved[PATH_MAX];
-    if (patina_resolve_at(directory, path, resolved, sizeof resolved) != 0) return -1;
-    return patina_access_impl(resolved, mode);
+    return patina_access_impl(patina_at(directory), path, mode);
 }
 
 int stat(const char *path, struct stat *status) {
     struct patina_stat_values values;
-    int result = patina_stat_metadata(path, 1, &values);
+    int result = patina_metadata_values(PATINA_AT_FDCWD, path, 0, &values);
     return fill_stat(result, &values, status);
 }
 
 int lstat(const char *path, struct stat *status) {
     struct patina_stat_values values;
-    int result = patina_stat_metadata(path, 0, &values);
+    int result = patina_metadata_values(PATINA_AT_FDCWD, path, PATINA_RESOLVE_NOFOLLOW, &values);
     return fill_stat(result, &values, status);
 }
 
 int fstat(int fd, struct stat *status) {
     struct patina_stat_values values;
     int result = patina_fd_metadata_values(fd, &values);
-    if (result < 0) errno = patina_errno();
     return fill_stat(result, &values, status);
 }
 
@@ -903,25 +769,25 @@ static void patina_fill_statfs64_profile(struct statfs64 *out) {
 }
 int statfs(const char *path, struct statfs *out) {
     struct patina_stat_values values;
-    if (patina_stat_metadata(path, 1, &values) < 0) return -1;
+    if (patina_metadata_values(PATINA_AT_FDCWD, path, 0, &values) < 0) return -1;
     patina_fill_statfs_profile(out);
     return 0;
 }
 int statfs64(const char *path, struct statfs64 *out) {
     struct patina_stat_values values;
-    if (patina_stat_metadata(path, 1, &values) < 0) return -1;
+    if (patina_metadata_values(PATINA_AT_FDCWD, path, 0, &values) < 0) return -1;
     patina_fill_statfs64_profile(out);
     return 0;
 }
 int fstatfs(int fd, struct statfs *out) {
     struct patina_stat_values values;
-    if (patina_fd_metadata_values(fd, &values) < 0) { errno = patina_errno(); return -1; }
+    if (patina_fd_metadata_values(fd, &values) < 0) return -1;
     patina_fill_statfs_profile(out);
     return 0;
 }
 int fstatfs64(int fd, struct statfs64 *out) {
     struct patina_stat_values values;
-    if (patina_fd_metadata_values(fd, &values) < 0) { errno = patina_errno(); return -1; }
+    if (patina_fd_metadata_values(fd, &values) < 0) return -1;
     patina_fill_statfs64_profile(out);
     return 0;
 }
@@ -945,20 +811,19 @@ static int fill_stat64(int result, const struct patina_stat_values *values, stru
 
 int stat64(const char *path, struct stat64 *status) {
     struct patina_stat_values values;
-    int result = patina_stat_metadata(path, 1, &values);
+    int result = patina_metadata_values(PATINA_AT_FDCWD, path, 0, &values);
     return fill_stat64(result, &values, status);
 }
 
 int lstat64(const char *path, struct stat64 *status) {
     struct patina_stat_values values;
-    int result = patina_stat_metadata(path, 0, &values);
+    int result = patina_metadata_values(PATINA_AT_FDCWD, path, PATINA_RESOLVE_NOFOLLOW, &values);
     return fill_stat64(result, &values, status);
 }
 
 int fstat64(int fd, struct stat64 *status) {
     struct patina_stat_values values;
     int result = patina_fd_metadata_values(fd, &values);
-    if (result < 0) errno = patina_errno();
     return fill_stat64(result, &values, status);
 }
 
@@ -998,8 +863,8 @@ int statx(int directory, const char *restrict path, int flags, unsigned int mask
 #endif
 
 /*
- * mkdir/mkdirat. The creation mode crosses the boundary; the driver applies the
- * modeled umask, exactly as the kernel applies the process umask.
+ * mkdir/mkdirat. The creation mode crosses the boundary; the runtime applies
+ * the process umask, exactly as the kernel does.
  *
  * mkdirat is here because cap-std and every other dirfd-relative caller reaches
  * for it, and a libc-backend rustix lowers `Dir::create_dir` straight onto it --
@@ -1007,136 +872,42 @@ int statx(int directory, const char *restrict path, int flags, unsigned int mask
  * refuses.
  */
 int mkdir(const char *path, mode_t mode) {
-    return fail_int(patina_mkdir(path, (uint32_t)(mode & 07777)));
+    return fail_int(patina_mkdir(PATINA_AT_FDCWD, path, (uint32_t)(mode & 07777)));
 }
 
 int mkdirat(int directory, const char *path, mode_t mode) {
-    if (directory == AT_FDCWD) return mkdir(path, mode);
-    char resolved[PATH_MAX];
-    if (patina_resolve_at(directory, path, resolved, sizeof resolved) != 0) return -1;
-    return fail_int(patina_mkdir(resolved, (uint32_t)(mode & 07777)));
+    return fail_int(patina_mkdir(patina_at(directory), path, (uint32_t)(mode & 07777)));
 }
 
 int unlink(const char *path) {
-    return fail_int(patina_unlink(path));
+    return fail_int(patina_unlink(PATINA_AT_FDCWD, path));
 }
 
 int rmdir(const char *path) {
-    return fail_int(patina_rmdir(path));
+    return fail_int(patina_rmdir(PATINA_AT_FDCWD, path));
 }
 
 int rename(const char *from, const char *to) {
-    return fail_int(patina_rename(from, to));
+    return fail_int(patina_rename(PATINA_AT_FDCWD, from, PATINA_AT_FDCWD, to));
 }
 
 /*
- * *at removal/rename over the path-based deterministic filesystem. AT_FDCWD is a
- * plain path; a virtual directory descriptor joins its bound path with a relative
- * `path` (std's remove_dir_all removes children with unlinkat(dirfd, name, ...)).
- * unlinkat routes to rmdir when AT_REMOVEDIR is set, otherwise unlink; unknown
- * flags fail closed. renameat resolves both dirfds the same way (cap-std's
- * `Dir::rename` is dir-fd-relative on both sides); renameat2 models only flags==0
- * and otherwise fails closed, then routes through renameat.
+ * *at removal/rename. unlinkat routes to rmdir when AT_REMOVEDIR is set,
+ * otherwise unlink; unknown flags fail closed. renameat resolves both dirfds
+ * (cap-std's `Dir::rename` is dir-fd-relative on both sides); renameat2 models
+ * only flags==0 and otherwise fails closed, then routes through renameat.
  */
 int unlinkat(int dirfd, const char *path, int flags) {
     if ((flags & ~AT_REMOVEDIR) != 0) {
         errno = ENOSYS;
         return -1;
     }
-    char resolved[PATH_MAX];
-    const char *effective = path;
-    if (dirfd != AT_FDCWD) {
-        if (patina_resolve_at(dirfd, path, resolved, sizeof resolved) != 0) return -1;
-        effective = resolved;
-    }
-    if (flags & AT_REMOVEDIR) return fail_int(patina_rmdir(effective));
-    return fail_int(patina_unlink(effective));
-}
-
-/*
- * symlinkat/readlinkat: the dirfd-relative spellings of symlink and readlink.
- * The raw-syscall rows were modeled from the start; without these a libc-backend
- * guest that works through a directory descriptor (cap-std with the libc
- * backend, or any std program on a platform without syscall-user-dispatch) had
- * no path to them at all and failed closed at the audit.
- *
- * symlinkat resolves only the LINK side: a symlink's target is a string the
- * filesystem stores verbatim, never a path this call resolves -- which is why
- * the syscall takes one dirfd and not two.
- */
-int symlinkat(const char *target, int dirfd, const char *link_path) {
-    if (dirfd == AT_FDCWD) return symlink(target, link_path);
-    char resolved[PATH_MAX];
-    if (patina_resolve_at(dirfd, link_path, resolved, sizeof resolved) != 0) return -1;
-    return fail_int(patina_symlink(target, resolved));
-}
-
-ssize_t readlinkat(int dirfd, const char *restrict path, char *restrict destination,
-                   size_t length) {
-    if (dirfd == AT_FDCWD) return readlink(path, destination, length);
-    char resolved[PATH_MAX];
-    if (patina_resolve_at(dirfd, path, resolved, sizeof resolved) != 0) return -1;
-    return fail_size(patina_read_link(resolved, destination, length));
-}
-
-/*
- * link/linkat: create a hard link. std::fs::hard_link lowers to
- * linkat(AT_FDCWD, original, AT_FDCWD, link, 0) on Linux and macOS. AT_FDCWD and
- * absolute paths pass straight through; a virtual directory descriptor resolves
- * its bound path for symmetry with the openat/unlinkat family. AT_SYMLINK_FOLLOW
- * is the only defined flag: when set, `from` is canonicalized (its trailing
- * symlink resolved) before linking, so the link targets the resolved file rather
- * than duplicating the symlink -- the driver's link duplicates a symlink entry
- * as-is, which is precisely the no-AT_SYMLINK_FOLLOW behavior. Any other flag bit
- * is EINVAL rather than silently ignored.
- */
-int linkat(int fromfd, const char *from, int tofd, const char *to, int flags) {
-    if ((flags & ~AT_SYMLINK_FOLLOW) != 0) {
-        errno = EINVAL;
-        return -1;
-    }
-    char from_resolved[PATH_MAX];
-    char to_resolved[PATH_MAX];
-    const char *from_effective = from;
-    const char *to_effective = to;
-    if (fromfd != AT_FDCWD) {
-        if (patina_resolve_at(fromfd, from, from_resolved, sizeof from_resolved) != 0) return -1;
-        from_effective = from_resolved;
-    }
-    if (tofd != AT_FDCWD) {
-        if (patina_resolve_at(tofd, to, to_resolved, sizeof to_resolved) != 0) return -1;
-        to_effective = to_resolved;
-    }
-    if (flags & AT_SYMLINK_FOLLOW) {
-        char canonical[PATH_MAX];
-        intptr_t canonical_len = patina_canonicalize(from_effective, canonical, sizeof canonical);
-        if (canonical_len < 0) {
-            errno = patina_errno();
-            return -1;
-        }
-        if ((size_t)canonical_len >= sizeof canonical) {
-            errno = ENAMETOOLONG;
-            return -1;
-        }
-        return fail_int(patina_link(canonical, to_effective));
-    }
-    return fail_int(patina_link(from_effective, to_effective));
+    if (flags & AT_REMOVEDIR) return fail_int(patina_rmdir(patina_at(dirfd), path));
+    return fail_int(patina_unlink(patina_at(dirfd), path));
 }
 
 int renameat(int olddirfd, const char *old_path, int newdirfd, const char *new_path) {
-    char old_resolved[PATH_MAX];
-    char new_resolved[PATH_MAX];
-    const char *old_effective = old_path;
-    const char *new_effective = new_path;
-    if (olddirfd != AT_FDCWD) {
-        if (patina_resolve_at(olddirfd, old_path, old_resolved, sizeof old_resolved) != 0) return -1;
-        old_effective = old_resolved;
-    }
-    if (newdirfd != AT_FDCWD) {
-        if (patina_resolve_at(newdirfd, new_path, new_resolved, sizeof new_resolved) != 0) return -1;
-        new_effective = new_resolved;
-    }
-    return fail_int(patina_rename(old_effective, new_effective));
+    return fail_int(patina_rename(patina_at(olddirfd), old_path, patina_at(newdirfd), new_path));
 }
 
 #ifdef __linux__

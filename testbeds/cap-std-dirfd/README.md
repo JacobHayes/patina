@@ -25,7 +25,7 @@ x86_64 they are raw inline `syscall` instructions handled by syscall-user-dispat
 (SUD) — while the base descriptor is minted by the **C interposer**. One guest
 therefore exercises both halves of the `*at` surface at once, and it can only work
 because they share one directory-descriptor table in the runtime
-(`patina_diropen` / `patina_dirpath`).
+(`patina_openat` / the resolver in `src/paths.rs`).
 
 ## Why it is the MRE
 

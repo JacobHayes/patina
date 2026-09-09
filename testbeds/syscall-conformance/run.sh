@@ -59,13 +59,16 @@ usage: testbeds/syscall-conformance/run.sh [--mode M[,M...]] [--vehicle V[,V...]
 EOF
 }
 
-# Two host properties a probe may observe are pinned here so the native oracle
+# Three host properties a probe may observe are pinned here so the native oracle
 # and the virtual kernel start from the same process state: standard input is
 # /dev/null (a probe reading fd 0 sees EOF on both sides and never blocks on a
-# terminal), and RLIMIT_NOFILE is the virtual kernel's own 1024 (the shim's
-# `patina_fd_limit`), so EMFILE and the F_DUPFD/dup2 bounds fall at one number.
+# terminal), RLIMIT_NOFILE is the virtual kernel's own 1024 (the shim's
+# `patina_fd_limit`), so EMFILE and the F_DUPFD/dup2 bounds fall at one number,
+# and the umask is the 022 every virtual process starts with, so the first
+# `umask(2)` answers the same previous mask on both sides.
 exec </dev/null
 ulimit -S -n 1024 || { echo "syscall-conformance: FATAL: cannot pin RLIMIT_NOFILE to 1024" >&2; exit 3; }
+umask 022
 
 modes=(native patina replay leak)
 vehicles=(libc syscall raw)

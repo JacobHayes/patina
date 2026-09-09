@@ -44,17 +44,30 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   matches without a wildcard, so the compiler lists what the new kind must do.
 - A descriptor names a NODE, not a name. The shim keeps only what the filesystem
   cannot answer — which descriptors are directories — and asks the filesystem
-  where a descriptor's node is now (`patina_dirpath` → `fs_fd_path`). A name
-  cached beside a descriptor goes stale exactly where it matters: a rename
-  detaches the descriptor, and a symlink planted at the vacated name silently
-  captures every later resolution through it, which is the redirect a capability
-  handle exists to prevent. Shim-side bookkeeping that shadows namespace state
-  is a second filesystem model, and the two will disagree.
-- `*at` resolution is a path spelling, not a filesystem model. `(dirfd, path)`
-  resolves to an absolute path that is handed to the SAME entry the `AT_FDCWD`
-  form uses; normalization (`.`, `//`, and the refusal of `..`) stays in the
-  driver's one normalizer so a dirfd-relative spelling and an `AT_FDCWD`
-  spelling of the same path get the same judgement.
+  where a descriptor's node is now (`fs_fd_path`). A name cached beside a
+  descriptor goes stale exactly where it matters: a rename detaches the
+  descriptor, and a symlink planted at the vacated name silently captures every
+  later resolution through it, which is the redirect a capability handle exists
+  to prevent. Shim-side bookkeeping that shadows namespace state is a second
+  filesystem model, and the two will disagree. The working directory is held
+  the same way — a path-only driver handle, never a string — so `getcwd` asks
+  the filesystem for its current name and answers `ENOENT` once it is unlinked.
+- There is ONE path resolver (`src/paths.rs`), and every `patina_*` entry that
+  takes a `(dirfd, path)` pair goes through it, so the C interposers and the
+  SUD rows are two spellings of one resolution: the working directory for
+  `AT_FDCWD`, a directory descriptor's node otherwise, `.`/`..` applied to the
+  resolved directory AFTER symlink expansion (never lexically across a link),
+  symlinks walked to the kernel's 40-hop `ELOOP`, `ENAMETOOLONG` at
+  `PATH_MAX`/`NAME_MAX`, `ENOTDIR` for a component through a non-directory, and
+  the trailing-slash rule. The driver keeps its strict canonical-only contract
+  underneath (it refuses `..` and an intermediate symlink), which is defense in
+  depth, not a second resolver. Resolution costs one driver `metadata` on the
+  common path and walks component by component only when that lookup cannot
+  decide (a missing name, a refusal, a `..`); the resolved entry's KIND is what
+  the open entry routes on, so a directory opened without `O_DIRECTORY` is still
+  a directory descriptor. The umask is process state applied by the creating
+  entries before the driver call, so the driver stores — and the trace records
+  — the mode the kernel would.
 - Metadata a guest can CHANGE has to be modeled, not synthesized. `st_mode` was a
   per-kind constant until a sandbox's own test suite needed `EACCES` to be
   distinguishable from `NotFound`; permission bits now live on the entry, change
@@ -114,7 +127,7 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   behind a filesystem descriptor would have to re-derive blocking, EOF and
   `EPIPE`, and the two would drift; conversely, letting the driver hold the bytes
   would make a crash model responsible for data no real FIFO ever persists. The
-  seam is the one branch in `patina_open`: the driver judges existence,
+  seam is the one branch in `patina_openat`: the driver judges existence,
   resolution and permissions and then declines to hand back a descriptor, and the
   caller reads the refused entry's kind on the failure path only.
 - Model a rendezvous the way the kernel models it, counters and all. A blocking

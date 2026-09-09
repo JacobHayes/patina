@@ -34,6 +34,10 @@ symbols = ["getdents64", "openat", "close", "lseek", "mkdirat", "symlinkat", "un
 syscalls = ["symlinkat", "readlinkat", "linkat", "newfstatat", "openat", "write", "close", "mkdirat", "unlinkat"]
 symbols = ["symlinkat", "readlinkat", "linkat", "fstatat", "openat", "write", "close", "mkdirat", "unlinkat"]
 
+[probe."fs/paths"]
+syscalls = ["getcwd", "chdir", "fchdir", "umask", "openat", "newfstatat", "fstat", "mkdirat", "symlinkat", "unlinkat", "mknodat", "close"]
+symbols = ["getcwd", "chdir", "fchdir", "umask", "openat", "fstatat", "fstat", "mkdirat", "symlinkat", "unlinkat", "mknodat", "close"]
+
 [probe."fd/pipes"]
 syscalls = ["pipe2", "dup", "fcntl", "flock", "read", "write", "close", "openat"]
 symbols = ["pipe2", "dup", "fcntl", "flock", "read", "write", "close", "openat"]

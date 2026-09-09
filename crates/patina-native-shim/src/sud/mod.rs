@@ -63,7 +63,9 @@ unsafe extern "C" {
     fn patina_errno() -> c_int;
     fn patina_clock_now(clock: u32, nanos: *mut u64) -> c_int;
     fn patina_sleep_until(clock: u32, deadline_nanos: u64) -> c_int;
-    fn patina_open(path: *const c_char, flags: u32, mode: u32) -> c_int;
+    // The one open entry (`openat(2)` shape): resolves `(dirfd, path)` through
+    // the runtime's resolver and decides the descriptor's kind from the entry's.
+    fn patina_openat(dirfd: c_int, path: *const c_char, flags: u32, mode: u32) -> c_int;
     fn patina_read(fd: c_int, destination: *mut c_void, length: usize) -> isize;
     fn patina_write(fd: c_int, source: *const c_void, length: usize) -> isize;
     fn patina_pread(fd: c_int, destination: *mut c_void, length: usize, offset: i64) -> isize;
@@ -91,9 +93,10 @@ unsafe extern "C" {
 
     // Filesystem metadata / directory iteration (the same records the C
     // stat/statx/getdents interposers normalize).
-    fn patina_metadata(path: *const c_char, kind: *mut u32, length: *mut u64) -> c_int;
-    fn patina_metadata_full(
+    fn patina_metadata_at(
+        dirfd: c_int,
         path: *const c_char,
+        flags: u32,
         kind: *mut u32,
         length: *mut u64,
         ino: *mut u64,
@@ -114,21 +117,9 @@ unsafe extern "C" {
     ) -> c_int;
     // Permission bits: the same entries the C chmod/fchmod/fchmodat interposers
     // call, so a raw-syscall guest and a libc guest change one mode model.
-    fn patina_chmod(path: *const c_char, mode: u32, follow: c_int) -> c_int;
+    fn patina_chmod(dirfd: c_int, path: *const c_char, mode: u32, flags: u32) -> c_int;
     fn patina_fchmod(fd: c_int, mode: u32) -> c_int;
     fn patina_read_dir(fd: c_int, state_out: *mut *mut c_void) -> c_int;
-    // Directory descriptors: the SAME descriptor table the C `open/openat(...,
-    // O_DIRECTORY)` interposer mints into, so a dir fd opened through libc
-    // resolves a raw `openat(dirfd, …)` and vice versa (cap-std does exactly
-    // that: it opens the base directory through std/libc and then walks it with
-    // raw syscalls).
-    fn patina_diropen(
-        path: *const c_char,
-        follow: c_int,
-        path_only: c_int,
-        cloexec: c_int,
-    ) -> c_int;
-    fn patina_dirpath(fd: c_int, buf: *mut c_char, len: usize) -> isize;
     // The descriptor table's face: the kind oracle and the per-number /
     // per-description state (`include/patina_native.h`).
     fn patina_fd_kind(fd: c_int) -> c_int;
@@ -150,15 +141,33 @@ unsafe extern "C" {
         kind: *mut u32,
     ) -> c_int;
     fn patina_read_dir_free(state: *mut c_void);
-    fn patina_mkdir(path: *const c_char, mode: u32) -> c_int;
-    fn patina_mkfifo(path: *const c_char, mode: u32) -> c_int;
-    fn patina_unlink(path: *const c_char) -> c_int;
-    fn patina_rmdir(path: *const c_char) -> c_int;
-    fn patina_rename(from: *const c_char, to: *const c_char) -> c_int;
-    fn patina_symlink(target: *const c_char, link_path: *const c_char) -> c_int;
-    fn patina_link(from: *const c_char, to: *const c_char) -> c_int;
-    fn patina_canonicalize(path: *const c_char, buf: *mut c_char, len: usize) -> isize;
-    fn patina_read_link(path: *const c_char, buf: *mut c_char, buf_len: usize) -> isize;
+    // The namespace operations, each on a `(dirfd, path)` the runtime resolves
+    // — the same entries the C interposers of the same names call.
+    fn patina_mkdir(dirfd: c_int, path: *const c_char, mode: u32) -> c_int;
+    fn patina_mkfifo(dirfd: c_int, path: *const c_char, mode: u32) -> c_int;
+    fn patina_unlink(dirfd: c_int, path: *const c_char) -> c_int;
+    fn patina_rmdir(dirfd: c_int, path: *const c_char) -> c_int;
+    fn patina_rename(fromfd: c_int, from: *const c_char, tofd: c_int, to: *const c_char) -> c_int;
+    fn patina_symlink(target: *const c_char, dirfd: c_int, link_path: *const c_char) -> c_int;
+    fn patina_link(
+        fromfd: c_int,
+        from: *const c_char,
+        tofd: c_int,
+        to: *const c_char,
+        follow: c_int,
+    ) -> c_int;
+    fn patina_read_link(
+        dirfd: c_int,
+        path: *const c_char,
+        buf: *mut c_char,
+        buf_len: usize,
+    ) -> isize;
+    // The working directory and the umask: the process state the C
+    // getcwd/chdir/fchdir/umask interposers read and write.
+    fn patina_getcwd(buf: *mut c_char, len: usize) -> isize;
+    fn patina_chdir(dirfd: c_int, path: *const c_char) -> c_int;
+    fn patina_fchdir(fd: c_int) -> c_int;
+    fn patina_umask(mask: u32) -> u32;
     fn patina_pipe(
         read_fd_out: *mut c_int,
         write_fd_out: *mut c_int,
@@ -224,17 +233,15 @@ unsafe extern "C" {
 // the Linux ABIs Patina targets.
 const EPERM: i64 = 1;
 
-const EBADF: i64 = 9;
+const ERANGE: i64 = 34;
 
-const ENOENT: i64 = 2;
+const EBADF: i64 = 9;
 
 const EACCES: i64 = 13;
 
 const EFAULT: i64 = 14;
 
 const ENOTDIR: i64 = 20;
-
-const EISDIR: i64 = 21;
 
 const EINVAL: i64 = 22;
 
@@ -257,10 +264,6 @@ const EISCONN: i64 = 106;
 const EPROTONOSUPPORT: i64 = 93;
 
 const EPROTOTYPE: i64 = 91;
-
-const ELOOP: i64 = 40;
-
-const ENAMETOOLONG: i64 = 36;
 
 const EIO: i64 = 5;
 
@@ -301,6 +304,13 @@ const PATINA_O_PATH: u32 = 1 << 8;
 const PATINA_O_CLOEXEC: u32 = 1 << 9;
 
 const PATINA_O_OPENED: u32 = 1 << 10;
+
+const PATINA_O_DIRECTORY: u32 = 1 << 11;
+
+// Patina path-resolution flags (see `patina_native.h`).
+const PATINA_RESOLVE_NOFOLLOW: u32 = 1 << 0;
+
+const PATINA_RESOLVE_EMPTY_PATH: u32 = 1 << 1;
 
 // Kernel `open(2)` flag bits (octal), identical on x86_64 and aarch64 Linux.
 const O_ACCMODE: u64 = 0o3;
@@ -595,8 +605,6 @@ fn with_dispatch_guard<F: FnOnce() -> i64>(nr: i64, body: F) -> i64 {
 
 use std::collections::BTreeMap;
 
-use std::ffi::CString;
-
 use std::sync::Mutex;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -834,6 +842,12 @@ const BINDINGS: &[(&str, Handler)] = &[
     ("faccessat2", |_, a| {
         sys_faccessat(arg_fd(a[0]), a[1], a[2], a[3])
     }),
+    // The working directory and the umask: process state the shim keeps, the
+    // same state the C getcwd/chdir/fchdir/umask interposers use.
+    ("getcwd", |_, a| sys_getcwd(a[0], a[1])),
+    ("chdir", |_, a| sys_chdir(a[0])),
+    ("fchdir", |_, a| sys_fchdir(arg_fd(a[0]))),
+    ("umask", |_, a| sys_umask(a[0])),
     // Same shape for `fchmodat`/`fchmodat2`.
     ("fchmod", |_, a| sys_fchmod(arg_fd(a[0]), a[1])),
     ("fchmodat", |_, a| sys_fchmodat(arg_fd(a[0]), a[1], a[2], 0)),
@@ -1165,27 +1179,16 @@ mod tests {
     /// gate. RED: change either spelling and the assertion names both.
     #[test]
     fn every_shared_deny_matches_the_c_interposer_byte_for_byte() {
-        // Each row is (C macro name, the SUD constant, what the refusal is).
-        // Adding a deny that BOTH doors can reach means adding a row here.
-        for (macro_name, sud_message, refusal) in [
-            (
-                "PATINA_DENY_O_PATH_SYMLINK",
-                DENY_O_PATH_SYMLINK,
-                "an O_PATH|O_NOFOLLOW open of a symlink",
-            ),
-            (
-                "PATINA_DENY_MKNOD_TYPE",
-                DENY_MKNOD_TYPE,
-                "a mknod of a special file that is not a FIFO",
-            ),
-        ] {
-            assert_eq!(
-                c_deny_macro(macro_name),
-                sud_message,
-                "the SUD and C deny strings for {refusal} differ; a raw-syscall guest \
-                 and a libc guest would record different stderr"
-            );
-        }
+        // (The O_PATH|O_NOFOLLOW-on-a-symlink deny has no row: it is emitted
+        // by the one Rust open entry both doors call, so there is no second
+        // spelling to keep in step.) Adding a deny that BOTH doors can reach
+        // means adding an assertion here.
+        assert_eq!(
+            c_deny_macro("PATINA_DENY_MKNOD_TYPE"),
+            DENY_MKNOD_TYPE,
+            "the SUD and C deny strings for a mknod of a special file that is not a FIFO \
+             differ; a raw-syscall guest and a libc guest would record different stderr"
+        );
     }
 
     /// Expand a `#define`d C deny string from the shim's C (the shared deny
@@ -1212,48 +1215,6 @@ mod tests {
         }
         // The only escape either spelling uses is the trailing newline.
         message.replace("\\n", "\n")
-    }
-
-    #[test]
-    fn join_at_splices_a_relative_component_onto_the_directory_path() {
-        // RED before dirfd-relative resolution existed: every `*at` row refused a
-        // non-AT_FDCWD descriptor outright, so no join was ever performed.
-        let join = |base: &str, rel: &str| {
-            join_at(base.as_bytes(), rel.as_bytes())
-                .map(|joined| String::from_utf8(joined.into_bytes()).unwrap())
-        };
-        assert_eq!(join("/base", "child").unwrap(), "/base/child");
-        // The root is the one base that already ends in a separator.
-        assert_eq!(join("/", "child").unwrap(), "/child");
-        // Multi-component relative paths splice whole.
-        assert_eq!(join("/base", "a/b/c").unwrap(), "/base/a/b/c");
-        // `.` and `..` are passed through for the FS driver's one normalizer to
-        // judge — the same judgement an AT_FDCWD path of the same spelling gets.
-        assert_eq!(join("/base", ".").unwrap(), "/base/.");
-        assert_eq!(join("/base", "../x").unwrap(), "/base/../x");
-        // A NUL in the guest's bytes is EINVAL, never a truncated path.
-        assert_eq!(join_at(b"/base", b"a\0b"), Err(-EINVAL));
-        // Overlong joins fail closed rather than silently truncating.
-        let long = "x".repeat(PATH_MAX);
-        assert_eq!(join_at(b"/base", long.as_bytes()), Err(-ENAMETOOLONG));
-    }
-
-    #[test]
-    fn resolve_at_keeps_absolute_paths_and_refuses_an_unknown_dirfd() {
-        // AT_FDCWD hands the guest pointer straight through (no copy, no join).
-        let path = CString::new("/absolute/path").unwrap();
-        let raw = path.as_ptr() as u64;
-        let resolved = resolve_at(AT_FDCWD, raw).expect("AT_FDCWD is the path verbatim");
-        assert_eq!(resolved.as_ptr(), path.as_ptr());
-        // The descriptor is validated first, as the kernel validates it — even
-        // for an absolute path, so a bogus fd is never honored (byte-identical
-        // to the C `patina_resolve_at`): a number that names nothing is EBADF,
-        // and standard input, which names something that is not a directory,
-        // is ENOTDIR.
-        assert_eq!(resolve_at(7, raw).err(), Some(-EBADF));
-        assert_eq!(resolve_at(0, raw).err(), Some(-ENOTDIR));
-        // A null path is EFAULT, never a dereference.
-        assert_eq!(resolve_at(AT_FDCWD, 0).err(), Some(-EFAULT));
     }
 
     #[test]
@@ -1496,11 +1457,18 @@ mod tests {
             openat_patina_flags(0x8241),
             PATINA_O_WRITE | PATINA_O_CREATE | PATINA_O_TRUNCATE
         );
-        // A directory open decodes read-only; the O_DIRECTORY/O_PATH bits are
-        // handled by the caller, which mints a directory descriptor instead.
+        // A directory open decodes read-only plus the directory requirement;
+        // the ONE open entry decides the descriptor's kind from the entry's,
+        // so the bit travels rather than routing here.
         assert_eq!(
             openat_patina_flags(O_DIRECTORY | O_LARGEFILE),
-            PATINA_O_READ
+            PATINA_O_READ | PATINA_O_DIRECTORY
+        );
+        // `O_PATH` opens nothing: the access mode and every creating bit are
+        // dropped under it, exactly as the kernel ignores them.
+        assert_eq!(
+            openat_patina_flags(O_PATH | O_RDWR | O_CREAT | O_CLOEXEC),
+            PATINA_O_PATH | PATINA_O_CLOEXEC
         );
         // The noise bits are inert atop any base access/creation flag word.
         for base in [
@@ -1510,7 +1478,10 @@ mod tests {
             O_CREAT | O_WRONLY | O_TRUNC,
             O_APPEND | O_WRONLY,
         ] {
-            assert_eq!(openat_patina_flags(base), openat_patina_flags(base | noise));
+            assert_eq!(
+                openat_patina_flags(base) | PATINA_O_DIRECTORY,
+                openat_patina_flags(base | noise)
+            );
         }
     }
 

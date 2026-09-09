@@ -97,21 +97,21 @@ int main(int argc, char **argv) {
         !check(patina_clock_now(PATINA_CLOCK_MONOTONIC, &before) == 0, "clock before") ||
         !check(patina_sleep_until(PATINA_CLOCK_MONOTONIC, 5000000) == 0, "sleep") ||
         !check(patina_clock_now(PATINA_CLOCK_MONOTONIC, &after) == 0, "clock after") ||
-        !check(patina_mkdir("/state", 0777) == 0, "mkdir")) return 1;
+        !check(patina_mkdir(PATINA_AT_FDCWD, "/state", 0777) == 0, "mkdir")) return 1;
 
-    int root = patina_open("/", PATINA_O_READ, 0);
+    int root = patina_openat(PATINA_AT_FDCWD, "/", PATINA_O_READ, 0);
     if (!check(root >= 0, "open root") ||
         !check(patina_fsync(root) == 0, "fsync root") ||
         !check(patina_close(root) == 0, "close root")) return 1;
 
-    int fd = patina_open("/state/value", PATINA_O_READ | PATINA_O_WRITE |
+    int fd = patina_openat(PATINA_AT_FDCWD, "/state/value", PATINA_O_READ | PATINA_O_WRITE |
         PATINA_O_CREATE | PATINA_O_TRUNCATE, 0666);
     if (!check(fd >= 0, "open") ||
         !check(patina_write(fd, "stable", 6) == 6, "stable write") ||
         !check(patina_fsync(fd) == 0, "fsync") ||
         !check(patina_write(fd, "-volatile", 9) == 9, "volatile write")) return 1;
 
-    int dir = patina_open("/state", PATINA_O_READ, 0);
+    int dir = patina_openat(PATINA_AT_FDCWD, "/state", PATINA_O_READ, 0);
     if (!check(dir >= 0, "open dir") ||
         !check(patina_fsync(dir) == 0, "fsync dir") ||
         !check(patina_close(dir) == 0, "close dir") ||
@@ -122,13 +122,13 @@ int main(int argc, char **argv) {
         !check(patina_close(fd) == 0, "pre-crash descriptor survives")) return 1;
 
     memset(contents, 0, sizeof contents);
-    fd = patina_open("/state/value", PATINA_O_READ, 0);
+    fd = patina_openat(PATINA_AT_FDCWD, "/state/value", PATINA_O_READ, 0);
     if (!check(fd >= 0, "reopen") ||
         !check(patina_read(fd, contents, sizeof contents) == 6, "read checkpoint") ||
         !check(patina_close(fd) == 0, "close") ||
-        !check(patina_rename("/state/value", "/state/renamed") == 0, "rename") ||
-        !check(patina_unlink("/state/renamed") == 0, "unlink") ||
-        !check(patina_rmdir("/state") == 0, "rmdir") ||
+        !check(patina_rename(PATINA_AT_FDCWD, "/state/value", PATINA_AT_FDCWD, "/state/renamed") == 0, "rename") ||
+        !check(patina_unlink(PATINA_AT_FDCWD, "/state/renamed") == 0, "unlink") ||
+        !check(patina_rmdir(PATINA_AT_FDCWD, "/state") == 0, "rmdir") ||
         !check(patina_shutdown() == 0, "shutdown")) return 1;
 
     printf("NATIVE_SHIM_RESULT seed=%" PRIu64 " random=", seed);
@@ -150,7 +150,7 @@ cat >"$tmp/posix_probe.c" <<'C'
 int main(void) {
     char contents[8] = {0};
     if (patina_init_crash(7) != 0) return 10;
-    if (patina_mkdir("/state", 0777) != 0) return 11;
+    if (patina_mkdir(PATINA_AT_FDCWD, "/state", 0777) != 0) return 11;
     int fd = open("/state/value", O_CREAT | O_TRUNC | O_RDWR, 0600);
     if (fd < 0) return 12;
     if (write(fd, "posix", 5) != 5) return 13;
@@ -271,7 +271,7 @@ cat >"$tmp/openat_probe.c" <<'C'
 int main(int argc, char **argv) {
     uint64_t seed = argc == 2 ? (uint64_t)strtoull(argv[1], NULL, 10) : 1;
     if (patina_init_crash(seed) != 0) return 10;
-    if (patina_mkdir("/state", 0777) != 0) return 11;
+    if (patina_mkdir(PATINA_AT_FDCWD, "/state", 0777) != 0) return 11;
 
     int fd = openat(AT_FDCWD, "/state/at", O_CREAT | O_TRUNC | O_RDWR, 0600);
     if (fd < 0) return 12;
@@ -282,21 +282,24 @@ int main(int argc, char **argv) {
     if (memcmp(contents, "openat", 6) != 0) return 16;
     if (close(fd) != 0) return 17;
 
-    /* A dirfd that names nothing is EBADF, as the kernel answers, even for an
-     * absolute path: the descriptor table is consulted before the path. */
+    /* A dirfd that names nothing is EBADF for a RELATIVE path, as the kernel
+     * answers; an absolute path ignores the dirfd entirely (also the kernel's
+     * rule), so the same bogus number with an absolute path resolves. */
     errno = 0;
-    if (openat(99, "/state/at", O_RDONLY) != -1 || errno != EBADF) return 18;
+    if (openat(99, "at", O_RDONLY) != -1 || errno != EBADF) return 18;
+    fd = openat(99, "/state/at", O_RDONLY);
+    if (fd < 0 || close(fd) != 0) return 18;
 
     /* renameat(AT_FDCWD, AT_FDCWD) routes to the deterministic rename. */
     if (renameat(AT_FDCWD, "/state/at", AT_FDCWD, "/state/at-renamed") != 0) return 19;
     errno = 0;
-    if (renameat(99, "/state/at-renamed", AT_FDCWD, "/x") != -1 || errno != EBADF) return 20;
+    if (renameat(99, "at-renamed", AT_FDCWD, "/x") != -1 || errno != EBADF) return 20;
 
     /* unlinkat with AT_REMOVEDIR removes a directory; without it, a file. */
-    if (patina_mkdir("/state/at-dir", 0777) != 0) return 21;
+    if (patina_mkdir(PATINA_AT_FDCWD, "/state/at-dir", 0777) != 0) return 21;
     if (unlinkat(AT_FDCWD, "/state/at-dir", AT_REMOVEDIR) != 0) return 22;
     if (unlinkat(AT_FDCWD, "/state/at-renamed", 0) != 0) return 23;
-    if (patina_rmdir("/state") != 0) return 24;
+    if (patina_rmdir(PATINA_AT_FDCWD, "/state") != 0) return 24;
 
     /* printf is the shim's captured stdio now, not host stdio: print while the
      * context is live, then drain the capture to the real descriptors so the
@@ -335,13 +338,13 @@ cat >"$tmp/realpath_probe.c" <<'C'
  * buf) on Linux. Both must resolve an existing guest path -- including a
  * `..`/`.`/`//`-laden spelling of the same directory -- to the same canonical
  * absolute path, and the result must be byte-identical across two same-seed
- * runs. Before patina_canonicalize the NULL convention returned ENOSYS.
+ * runs. Before the runtime resolved paths itself the NULL convention returned ENOSYS.
  */
 int main(int argc, char **argv) {
     uint64_t seed = argc == 2 ? (uint64_t)strtoull(argv[1], NULL, 10) : 1;
     if (patina_init_crash(seed) != 0) return 10;
-    if (patina_mkdir("/root", 0777) != 0) return 11;
-    if (patina_mkdir("/root/fragments", 0777) != 0) return 12;
+    if (patina_mkdir(PATINA_AT_FDCWD, "/root", 0777) != 0) return 11;
+    if (patina_mkdir(PATINA_AT_FDCWD, "/root/fragments", 0777) != 0) return 12;
 
     char *allocated = realpath("/root/fragments", NULL);
     if (allocated == NULL) return 13;
@@ -354,8 +357,8 @@ int main(int argc, char **argv) {
     if (strcmp(allocated, filled) != 0) return 16;
 
     free(allocated);
-    if (patina_rmdir("/root/fragments") != 0) return 17;
-    if (patina_rmdir("/root") != 0) return 18;
+    if (patina_rmdir(PATINA_AT_FDCWD, "/root/fragments") != 0) return 17;
+    if (patina_rmdir(PATINA_AT_FDCWD, "/root") != 0) return 18;
 
     /* printf is the shim's captured stdio now, not host stdio: print while the
      * context is live, then drain the capture to the real descriptors so the

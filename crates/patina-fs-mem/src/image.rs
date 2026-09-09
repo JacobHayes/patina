@@ -15,7 +15,7 @@
 
 use std::fmt;
 
-use patina_dst_abi::DEFAULT_DIRECTORY_CREATE_MODE;
+use patina_dst_abi::{DEFAULT_DIRECTORY_CREATE_MODE, DEFAULT_UMASK};
 use patina_dst_driver_api::{DriverResult, FsDriver};
 
 use crate::MemFs;
@@ -235,8 +235,8 @@ fn ensure_directory(fs: &mut MemFs, path: &str) -> DriverResult<()> {
         ensure_directory(fs, parent)?;
     }
     // A mount image's directories are the ordinary `mkdir(0o777)` an image
-    // builder would have run, so they land at the modeled umask's `0o755`.
-    match fs.create_directory(path, DEFAULT_DIRECTORY_CREATE_MODE) {
+    // builder would have run under the default umask: `0o755`.
+    match fs.create_directory(path, DEFAULT_DIRECTORY_CREATE_MODE & !DEFAULT_UMASK) {
         Ok(()) => Ok(()),
         // An entry that already exists as a directory is the desired state; a
         // repeated create in a full tree walk is expected.

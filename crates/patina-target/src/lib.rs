@@ -640,7 +640,6 @@ pub type NativeDenyTrapSymbol = (&'static str, &'static str);
 /// move all three in lockstep or the gate fails closed.
 const NATIVE_DENY_TRAP_SYMBOLS: &[NativeDenyTrapSymbol] = &[
     // process (patina_process_trap): spawn/exec/wait/identity mutation.
-    ("chdir", "process"),
     ("chroot", "process"),
     ("execvp", "process"),
     ("fork", "process"),
@@ -3458,7 +3457,14 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "fstat",
         "fstat64",
         "fcntl",
+        // The working directory and the umask are modeled process state in
+        // the shim (one resolver serves every path row), so these are
+        // shim-defined like the rest; classified for the same defense-in-depth
+        // reason.
         "getcwd",
+        "chdir",
+        "fchdir",
+        "umask",
         "realpath",
         "readlink",
         "readlinkat",

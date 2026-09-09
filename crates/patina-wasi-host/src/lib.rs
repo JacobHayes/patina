@@ -675,11 +675,13 @@ impl Preview1Host {
             // Preview 1 has no `O_PATH`: every `path_open` opens the entry, and
             // a directory handle it hands back is a readable one.
             path_only: false,
-            // WASI Preview 1's `path_open` has no mode argument at all: there is
-            // no caller request to carry, so the creation mode is the ordinary
-            // `0o666` a POSIX program passes, which the driver's `0o022` umask
-            // turns into the familiar `0o644`.
-            mode: patina_dst_abi::DEFAULT_FILE_CREATE_MODE,
+            // WASI Preview 1's `path_open` has no mode argument and no umask:
+            // there is no caller request to carry, so the creation mode is the
+            // ordinary `0o666` a POSIX program passes under the default `0o022`
+            // umask — the familiar `0o644`. The umask is applied HERE, where a
+            // kernel applies the process umask; the driver stores what it is
+            // handed.
+            mode: patina_dst_abi::DEFAULT_FILE_CREATE_MODE & !patina_dst_abi::DEFAULT_UMASK,
         };
         let handle = self.context.fs_open(&path, flags)?;
         self.allocate_descriptor(WasiDescriptor::File {
@@ -1181,6 +1183,13 @@ const WASI_ERRNO_OVERFLOW: i32 = 61;
 const WASI_ERRNO_NOTCAPABLE: i32 = 76;
 const WASI_ERRNO_NAMETOOLONG: i32 = 37;
 const WASI_ERRNO_ROFS: i32 = 69;
+const WASI_ERRNO_2BIG: i32 = 1;
+const WASI_ERRNO_BUSY: i32 = 10;
+const WASI_ERRNO_NOTSUP: i32 = 58;
+const WASI_ERRNO_PERM: i32 = 63;
+const WASI_ERRNO_RANGE: i32 = 68;
+const WASI_ERRNO_SPIPE: i32 = 70;
+const WASI_ERRNO_XDEV: i32 = 75;
 
 /// `filetype::unknown` — the Preview 1 value for a kind its enumeration does
 /// not name (there is no FIFO filetype).
@@ -2288,8 +2297,13 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
                     .data_mut()
                     .context
                     // `path_create_directory` carries no mode either; `0o777`
-                    // under the modeled umask is the familiar `0o755`.
-                    .fs_create_directory(&path, patina_dst_abi::DEFAULT_DIRECTORY_CREATE_MODE)
+                    // under the default umask, applied here, is the familiar
+                    // `0o755`.
+                    .fs_create_directory(
+                        &path,
+                        patina_dst_abi::DEFAULT_DIRECTORY_CREATE_MODE
+                            & !patina_dst_abi::DEFAULT_UMASK,
+                    )
                     .map_err(Into::into),
             )? {
                 Ok(()) => Ok(WASI_ERRNO_SUCCESS),
@@ -3378,6 +3392,15 @@ fn effect_errno(code: ErrorCode) -> i32 {
         ErrorCode::ConnectionReset => WASI_ERRNO_CONNRESET,
         ErrorCode::BrokenPipe => WASI_ERRNO_PIPE,
         ErrorCode::NotConnected => WASI_ERRNO_NOTCONN,
+        ErrorCode::NotPermitted => WASI_ERRNO_PERM,
+        // Preview 1 has no ENODATA: a missing attribute is a missing entry.
+        ErrorCode::NoData => WASI_ERRNO_NOENT,
+        ErrorCode::Range => WASI_ERRNO_RANGE,
+        ErrorCode::TooBig => WASI_ERRNO_2BIG,
+        ErrorCode::Unsupported => WASI_ERRNO_NOTSUP,
+        ErrorCode::Busy => WASI_ERRNO_BUSY,
+        ErrorCode::IllegalSeek => WASI_ERRNO_SPIPE,
+        ErrorCode::CrossDevice => WASI_ERRNO_XDEV,
     }
 }
 

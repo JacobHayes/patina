@@ -25,7 +25,7 @@ use patina_dst_fs_mem::{FsImage, FsImageEntry};
 use patina_dst_runtime::{
     Context, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION,
     ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN, ENV_COVERAGE_FD,
-    ENV_DEFER_INIT, ENV_FINGERPRINT, ENV_FS_IMAGE_FD, ENV_GUEST_ARGV, ENV_GUEST_ENV,
+    ENV_DEFER_INIT, ENV_FINGERPRINT, ENV_FS_IMAGE_FD, ENV_GUEST_ARGV, ENV_GUEST_CWD, ENV_GUEST_ENV,
     ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG, ENV_MODE, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE,
     ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS, ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN,
     ENV_SCHED_STARVE_WINDOW, ENV_SEED, ENV_STEP_BUDGET, ENV_SWARM, ENV_TIMELINE, ENV_TRACE,
@@ -600,6 +600,10 @@ struct NativeRunInvocation {
     /// Deterministic guest environment values injected by native `run --env`.
     /// Recorded into trace metadata on `--record` and restored by replay.
     environment: BTreeMap<String, String>,
+    /// The guest's initial working directory (`run --cwd`), an absolute path in
+    /// the deterministic filesystem; `None` is `/`. Recorded into trace
+    /// metadata on `--record` and restored by replay like the environment.
+    cwd: Option<String>,
     /// Maximum boundary operations before the run fails explicitly (`--budget`),
     /// forwarded over the control plane. Family-neutral: the same
     /// `RuntimeConfig::step_budget` the Cargo and WASI families set.
@@ -2626,6 +2630,7 @@ fn parse_native_run_from(
         },
         program_args,
         environment: key_values(&args, "--env")?,
+        cwd: args.string("--cwd"),
         step_budget: args.u64("--budget"),
         knobs: knobs_of(&args)?,
         buggify: buggify_of(&args),
@@ -2749,6 +2754,8 @@ fn parse_native_replay(
         },
         program_args,
         environment: BTreeMap::new(),
+        // `replay` registers no --cwd either: the trace is authoritative.
+        cwd: None,
         // `replay` registers no --budget: it re-executes a recorded operation
         // stream whose length is already fixed by the trace.
         step_budget: None,
@@ -7412,6 +7419,9 @@ liveness-safe."
         })?;
         command.env(ENV_GUEST_ENV, encoded);
     }
+    if let Some(cwd) = &invocation.cwd {
+        command.env(ENV_GUEST_CWD, cwd);
+    }
     // The boundary-operation budget is a supervisor-side bound, not recorded run
     // semantics, so it is supplied per invocation on every family alike.
     if let Some(budget) = invocation.step_budget {
@@ -7730,6 +7740,9 @@ liveness-safe."
                     ))
                 })?;
                 restart.env(ENV_GUEST_ENV, encoded);
+            }
+            if let Some(cwd) = &invocation.cwd {
+                restart.env(ENV_GUEST_CWD, cwd);
             }
             if let Some(budget) = invocation.step_budget {
                 restart.env(ENV_STEP_BUDGET, budget.to_string());

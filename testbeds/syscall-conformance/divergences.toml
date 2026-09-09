@@ -2,8 +2,7 @@
 # code. `run.sh --mode patina` fails on an undeclared divergence AND on a
 # declared one that no longer diverges (stale), so this file is always exactly
 # the current gap. Reasons are `pending: <family>` naming the arc family
-# (docs/arcs/syscall-conformance.md §6) that closes them; F0/F2/F3 name the
-# foundations.
+# (docs/arcs/syscall-conformance.md §6) that closes them.
 #
 # [[divergence]]
 # probe   = "fs/open_rw"        # probe id (required)
@@ -55,97 +54,6 @@ vehicle = "syscall"
 kind = "abort"
 seq = 19
 reason = "(syscall(2) forwards into the same SUD row) pending: network — recvfrom(MSG_DONTWAIT) on a blocking datagram socket ignores the flag and parks the only task (sud/net.rs sys_recvfrom → patina-sched-det lib.rs:574 deadlock fatal)"
-
-[[divergence]]
-probe = "fs/open_rw"
-op = "openat"
-field = "errno"
-seq = 55
-reason = "pending: F3 — a path component through a regular file answers ENOENT, not ENOTDIR (crates/patina-fs-mem/src/lib.rs:500 resolve_guard)"
-
-[[divergence]]
-probe = "fs/open_rw"
-op = "check"
-field = "ret"
-label = "a component through a file is ENOTDIR"
-reason = "pending: F3 — see openat seq 55"
-
-[[divergence]]
-probe = "fs/open_rw"
-op = "openat"
-field = "errno"
-seq = 57
-reason = "pending: F3 — a trailing slash on a regular file opens it instead of ENOTDIR (fs-mem resolver, lib.rs:500)"
-
-[[divergence]]
-probe = "fs/open_rw"
-op = "openat"
-field = "ret"
-seq = 57
-reason = "pending: F3 — see openat seq 57 (the open succeeds and hands back a descriptor)"
-
-[[divergence]]
-probe = "fs/open_rw"
-op = "check"
-field = "ret"
-label = "a trailing slash on a file is ENOTDIR"
-reason = "pending: F3 — see openat seq 57"
-
-[[divergence]]
-probe = "fs/open_rw"
-op = "openat"
-field = "ret"
-seq = 59
-reason = "pending: F3 — a consequence of openat seq 57: the descriptor patina hands back there (natively the open is ENOTDIR) is closed unobserved by the probe, and the descriptor table's lowest-free allocation hands its number out again here, so the identity label reads as the seq-57 descriptor until F3 refuses that open"
-
-[[divergence]]
-probe = "fs/open_rw"
-op = "read"
-field = "args.fd"
-seq = 60
-reason = "pending: F3 — see openat seq 59"
-
-[[divergence]]
-probe = "fs/open_rw"
-op = "write"
-field = "args.fd"
-seq = 62
-reason = "pending: F3 — see openat seq 59"
-
-[[divergence]]
-probe = "fs/open_rw"
-op = "openat"
-field = "args.dirfd"
-seq = 64
-reason = "pending: F3 — see openat seq 59"
-
-[[divergence]]
-probe = "fs/open_rw"
-op = "close"
-field = "args.fd"
-seq = 90
-reason = "pending: F3 — see openat seq 59"
-
-[[divergence]]
-probe = "fs/open_rw"
-op = "openat"
-field = "errno"
-seq = 72
-reason = "pending: F3 — an empty path opens something instead of ENOENT (fs-mem resolver, lib.rs:500)"
-
-[[divergence]]
-probe = "fs/open_rw"
-op = "openat"
-field = "ret"
-seq = 72
-reason = "pending: F3 — see openat seq 72 (the open succeeds and hands back a descriptor)"
-
-[[divergence]]
-probe = "fs/open_rw"
-op = "check"
-field = "ret"
-label = "an empty path is ENOENT"
-reason = "pending: F3 — see openat seq 72"
 
 [[divergence]]
 probe = "fs/metadata"
@@ -285,20 +193,6 @@ reason = "pending: fs — see statx seq 53"
 
 [[divergence]]
 probe = "fs/dirs"
-op = "mkdirat"
-field = "errno"
-seq = 8
-reason = "pending: F3 — a path component through a regular file answers ENOENT, not ENOTDIR (fs-mem resolver, lib.rs:500)"
-
-[[divergence]]
-probe = "fs/dirs"
-op = "check"
-field = "ret"
-label = "mkdirat under a file is ENOTDIR"
-reason = "pending: F3 — see mkdirat seq 8"
-
-[[divergence]]
-probe = "fs/dirs"
 op = "newfstatat"
 field = "fields.nlink"
 seq = 15
@@ -338,69 +232,6 @@ reason = "pending: fs — see unlinkat seq 53"
 
 [[divergence]]
 probe = "fs/links"
-op = "readlinkat"
-field = "errno"
-seq = 12
-reason = "pending: fs — readlinkat with bufsize 0 answers 0 instead of EINVAL (patina_posix.c:2846)"
-
-[[divergence]]
-probe = "fs/links"
-op = "readlinkat"
-field = "ret"
-seq = 12
-reason = "pending: fs — see readlinkat seq 12"
-
-[[divergence]]
-probe = "fs/links"
-op = "readlinkat"
-field = "fields.target"
-seq = 12
-reason = "pending: fs — see readlinkat seq 12 (an empty target is reported on the success)"
-
-[[divergence]]
-probe = "fs/links"
-op = "check"
-field = "ret"
-label = "readlinkat with bufsize 0 is EINVAL"
-reason = "pending: fs — see readlinkat seq 12"
-
-[[divergence]]
-probe = "fs/links"
-op = "readlinkat"
-field = "errno"
-seq = 14
-reason = "pending: fs — readlinkat on a regular file answers ENOENT instead of EINVAL (patina_posix.c:2846 → fs-mem read_link)"
-
-[[divergence]]
-probe = "fs/links"
-op = "check"
-field = "ret"
-label = "readlinkat on a regular file is EINVAL"
-reason = "pending: fs — see readlinkat seq 14"
-
-[[divergence]]
-probe = "fs/links"
-op = "symlinkat"
-field = "errno"
-seq = 25
-reason = "pending: fs — symlinkat with an empty target succeeds instead of ENOENT (patina_posix.c:2839)"
-
-[[divergence]]
-probe = "fs/links"
-op = "symlinkat"
-field = "ret"
-seq = 25
-reason = "pending: fs — see symlinkat seq 25"
-
-[[divergence]]
-probe = "fs/links"
-op = "check"
-field = "ret"
-label = "symlinkat with an empty target is ENOENT"
-reason = "pending: fs — see symlinkat seq 25"
-
-[[divergence]]
-probe = "fs/links"
 op = "linkat"
 field = "errno"
 seq = 43
@@ -419,6 +250,22 @@ op = "newfstatat"
 field = "fields.nlink"
 seq = 47
 reason = "pending: fs — linkat of a symlink without AT_SYMLINK_FOLLOW copies the link instead of hard-linking it: the new name's nlink is 1, not 2 (patina_posix.c:2865)"
+
+# ---- fs/paths ------------------------------------------------------------------
+
+[[divergence]]
+probe = "fs/paths"
+op = "newfstatat"
+field = "fields.nlink"
+seqs = [23, 24, 101, 103, 123]
+reason = "pending: fs — a directory's st_nlink is 1: fs-mem counts names, not `.`/`..`/subdirectory back-links (crates/patina-fs-mem/src/lib.rs:103)"
+
+[[divergence]]
+probe = "fs/paths"
+op = "fstat"
+field = "fields.nlink"
+seq = 27
+reason = "pending: fs — a directory's st_nlink is 1 (crates/patina-fs-mem/src/lib.rs:103)"
 
 # ---- fd/pipes ------------------------------------------------------------------
 

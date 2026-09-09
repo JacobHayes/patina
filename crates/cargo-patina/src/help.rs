@@ -964,6 +964,13 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
                     "Set a deterministic native guest environment variable (recorded and restored on replay).",
                     true,
                 ),
+                f(
+                    "--cwd",
+                    None,
+                    Value::Required("PATH", Kind::Str),
+                    "The guest's initial working directory: an absolute path in the deterministic filesystem that must exist as a directory (default `/`; recorded and restored on replay).",
+                    false,
+                ),
                 // The label a RECORDING carries: the supervisor composes it (base
                 // label plus the `+buggify`/`+pct`/`+swarm` components the run
                 // really armed), the runtime writes it into the trace, and replay
@@ -1462,7 +1469,7 @@ only --fingerprint, --mount, --coverage-out, --harness, and the \
         Refusal {
             families: &[Family::Cargo, Family::Wasi, Family::Native],
             flags: &[FAULT_FLAGS, DNS_FLAGS, BUGGIFY_FLAGS, NATIVE_SCHEDULE_FLAGS],
-            names: &["--seed", "--record", "--env"],
+            names: &["--seed", "--record", "--env", "--cwd"],
             message: "replay restores run semantics from the trace and does not accept {flag}; the trace is authoritative",
         },
         // Native traces are single-timeline and a native run cannot branch.
@@ -2382,6 +2389,11 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         name: "PATINA_GUEST_ENV_JSON",
         scope: "protocol",
         doc: "Recorded native guest environment map from run --env, restored on replay.",
+    },
+    EnvVar {
+        name: "PATINA_GUEST_CWD",
+        scope: "protocol",
+        doc: "Recorded native guest initial working directory from run --cwd, restored on replay.",
     },
     EnvVar {
         name: "PATINA_FS_CRASH_AT / PATINA_FS_TORN_GRANULARITY / PATINA_FS_ERROR_PERMILLE / PATINA_FS_SHORT_PERMILLE",

@@ -45,6 +45,10 @@ name = "fs-links"
 path = "probes/fs/links.rs"
 
 [[bin]]
+name = "fs-paths"
+path = "probes/fs/paths.rs"
+
+[[bin]]
 name = "fd-pipes"
 path = "probes/fd/pipes.rs"
 

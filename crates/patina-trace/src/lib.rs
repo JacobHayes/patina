@@ -514,6 +514,14 @@ pub struct RunMetadata {
     /// replay reproduces environment-dependent guest behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_env: Option<BTreeMap<String, String>>,
+    /// The guest's initial working directory (native `run --cwd PATH`), the
+    /// canonical absolute virtual path the run's `getcwd` starts at. Additive
+    /// exactly like [`guest_env`](RunMetadata::guest_env): absent (`None`) when
+    /// the run started at `/` (the default) or predates cwd capture; present
+    /// values are authoritative on replay so a flag-free replay resolves the
+    /// same relative paths. `chdir` is guest-driven and unrecorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_cwd: Option<String>,
     /// The run's exploration scheduling policy (PCT / starvation), authoritative
     /// on replay. Additive exactly like [`faults`](RunMetadata::faults): absent
     /// (`None`) in traces recorded under the default uniform policy, which the
@@ -566,6 +574,7 @@ impl RunMetadata {
             dns: None,
             guest_argv: None,
             guest_env: None,
+            guest_cwd: None,
             schedule_policy: None,
             swarm: None,
             watchdog: None,
@@ -610,6 +619,14 @@ impl RunMetadata {
 
     pub fn with_guest_env(mut self, guest_env: Option<BTreeMap<String, String>>) -> Self {
         self.guest_env = guest_env;
+        self
+    }
+
+    /// Attach the guest's initial working directory recorded into the trace.
+    /// `None` records nothing (the run started at `/`).
+    #[must_use]
+    pub fn with_guest_cwd(mut self, guest_cwd: Option<String>) -> Self {
+        self.guest_cwd = guest_cwd;
         self
     }
 
@@ -1676,6 +1693,12 @@ impl Replayer {
         self.metadata.guest_env.as_ref()
     }
 
+    /// The guest's initial working directory recorded into the trace. `None`
+    /// for a run that started at `/` or a trace recorded before cwd capture.
+    pub fn guest_cwd(&self) -> Option<&str> {
+        self.metadata.guest_cwd.as_deref()
+    }
+
     /// The DNS host table recorded into the trace, authoritative on replay.
     /// `None` for a trace recorded without one.
     pub const fn dns_config(&self) -> Option<&DnsConfigRecord> {
@@ -1870,6 +1893,11 @@ impl BranchSession {
     /// `None` for a trace recorded before env capture or with no supplied values.
     pub fn guest_env(&self) -> Option<&BTreeMap<String, String>> {
         self.bundle.metadata.guest_env.as_ref()
+    }
+
+    /// The guest's initial working directory inherited from the parent trace.
+    pub fn guest_cwd(&self) -> Option<&str> {
+        self.bundle.metadata.guest_cwd.as_deref()
     }
 
     /// The DNS host table inherited from the parent trace.
@@ -3152,6 +3180,22 @@ mod tests {
         assert!(!text.contains("guest_argv"), "{text}");
         let reloaded_plain = TraceBundle::from_slice(plain.to_bytes().unwrap().as_slice()).unwrap();
         assert_eq!(reloaded_plain.metadata.guest_argv, None);
+    }
+
+    #[test]
+    fn guest_cwd_metadata_round_trips_and_is_additive() {
+        let metadata = RunMetadata::new(7, "fingerprint").with_guest_cwd(Some("/work".into()));
+        let bundle = TraceBundle::new(metadata, Vec::new());
+        let text = String::from_utf8(bundle.to_bytes().unwrap()).unwrap();
+        assert!(text.contains("\"guest_cwd\":\"/work\""), "{text}");
+        let reloaded = TraceBundle::from_slice(bundle.to_bytes().unwrap().as_slice()).unwrap();
+        assert_eq!(reloaded.metadata.guest_cwd.as_deref(), Some("/work"));
+
+        let plain = TraceBundle::new(RunMetadata::new(7, "fingerprint"), Vec::new());
+        let text = String::from_utf8(plain.to_bytes().unwrap()).unwrap();
+        assert!(!text.contains("guest_cwd"), "{text}");
+        let reloaded_plain = TraceBundle::from_slice(plain.to_bytes().unwrap().as_slice()).unwrap();
+        assert_eq!(reloaded_plain.metadata.guest_cwd, None);
     }
 
     #[test]

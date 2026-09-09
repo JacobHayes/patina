@@ -1,0 +1,151 @@
+{"header":{"schema":"patina.conformance/v1","probe":"fs/paths","os":"linux","arch":"x86_64","kernel":"6.8.0-139-generic","glibc":"2.39","virtual_abi":"6.8"}}
+{"seq":0,"op":"chdir","args":{"path":"/tmp/syscall-conformance/fs-paths"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":1,"op":"check","args":{"label":"chdir into the scratch root"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":2,"op":"getcwd","args":{"size":4096},"ret":0,"errno":null,"fields":{"path":"/tmp/syscall-conformance/fs-paths"},"norm":{}}
+{"seq":3,"op":"check","args":{"label":"getcwd reports the directory chdir set"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":4,"op":"getcwd","args":{"size":4},"ret":-1,"errno":"ERANGE","fields":{},"norm":{}}
+{"seq":5,"op":"check","args":{"label":"getcwd into a short buffer is ERANGE"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":6,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":194,"mode":420,"path":"rel.txt"},"ret":"fd@6","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":7,"op":"close","args":{"fd":"fd@6"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":8,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":0,"path":"/tmp/syscall-conformance/fs-paths/rel.txt"},"ret":0,"errno":null,"fields":{"gid":"id@8","ino":"ino@8","kind":"reg","nlink":1,"perm":420,"size":0,"uid":"id@8"},"norm":{"fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":9,"op":"check","args":{"label":"the relative name is visible by absolute path"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":10,"op":"mkdirat","args":{"dirfd":"AT_FDCWD","mode":493,"path":"sub"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":11,"op":"check","args":{"label":"mkdirat relative to the cwd"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":12,"op":"chdir","args":{"path":"sub"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":13,"op":"check","args":{"label":"chdir into a relative subdirectory"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":14,"op":"getcwd","args":{"size":4096},"ret":0,"errno":null,"fields":{"path":"/tmp/syscall-conformance/fs-paths/sub"},"norm":{}}
+{"seq":15,"op":"check","args":{"label":"getcwd follows the relative chdir"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":16,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":0,"mode":0,"path":"../rel.txt"},"ret":"fd@16","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":17,"op":"check","args":{"label":"`..` from the cwd reaches the parent's file"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":18,"op":"close","args":{"fd":"fd@16"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":19,"op":"chdir","args":{"path":".."},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":20,"op":"check","args":{"label":"chdir `..`"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":21,"op":"getcwd","args":{"size":4096},"ret":0,"errno":null,"fields":{"path":"/tmp/syscall-conformance/fs-paths"},"norm":{}}
+{"seq":22,"op":"check","args":{"label":"getcwd after `..` is the root again"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":23,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":0,"path":"/tmp/syscall-conformance/fs-paths"},"ret":0,"errno":null,"fields":{"gid":"id@8","ino":"ino@23","kind":"dir","nlink":3,"perm":493,"uid":"id@8"},"norm":{"fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":24,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":4096,"path":""},"ret":0,"errno":null,"fields":{"gid":"id@8","ino":"ino@23","kind":"dir","nlink":3,"perm":493,"uid":"id@8"},"norm":{"fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":25,"op":"check","args":{"label":"AT_EMPTY_PATH on AT_FDCWD is the working directory"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":26,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":0,"mode":0,"path":"."},"ret":"fd@26","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":27,"op":"fstat","args":{"fd":"fd@26"},"ret":0,"errno":null,"fields":{"gid":"id@8","ino":"ino@23","kind":"dir","nlink":3,"perm":493,"uid":"id@8"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":28,"op":"check","args":{"label":"`.` opened read-only is the cwd's directory node"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":29,"op":"chdir","args":{"path":"rel.txt"},"ret":-1,"errno":"ENOTDIR","fields":{},"norm":{}}
+{"seq":30,"op":"check","args":{"label":"chdir into a file is ENOTDIR"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":31,"op":"chdir","args":{"path":"missing"},"ret":-1,"errno":"ENOENT","fields":{},"norm":{}}
+{"seq":32,"op":"check","args":{"label":"chdir into a missing name is ENOENT"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":33,"op":"mkdirat","args":{"dirfd":"AT_FDCWD","mode":493,"path":"a"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":34,"op":"check","args":{"label":"mkdirat a"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":35,"op":"mkdirat","args":{"dirfd":"AT_FDCWD","mode":493,"path":"a/b"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":36,"op":"check","args":{"label":"mkdirat a/b"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":37,"op":"symlinkat","args":{"dirfd":"AT_FDCWD","path":"link","target":"a/b"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":38,"op":"check","args":{"label":"symlinkat link -> a/b"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":39,"op":"chdir","args":{"path":"link"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":40,"op":"check","args":{"label":"chdir through a symlink"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":41,"op":"getcwd","args":{"size":4096},"ret":0,"errno":null,"fields":{"path":"/tmp/syscall-conformance/fs-paths/a/b"},"norm":{}}
+{"seq":42,"op":"check","args":{"label":"getcwd is the physical directory behind the symlink"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":43,"op":"chdir","args":{"path":"/tmp/syscall-conformance/fs-paths"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":44,"op":"check","args":{"label":"chdir back to the root"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":45,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":2686976,"mode":0,"path":"a"},"ret":"fd@45","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":46,"op":"fchdir","args":{"fd":"fd@45"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":47,"op":"check","args":{"label":"fchdir on an O_PATH directory fd"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":48,"op":"getcwd","args":{"size":4096},"ret":0,"errno":null,"fields":{"path":"/tmp/syscall-conformance/fs-paths/a"},"norm":{}}
+{"seq":49,"op":"check","args":{"label":"getcwd after fchdir"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":50,"op":"fchdir","args":{"fd":"fd@26"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":51,"op":"check","args":{"label":"fchdir on `.` (opened read-only)"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":52,"op":"getcwd","args":{"size":4096},"ret":0,"errno":null,"fields":{"path":"/tmp/syscall-conformance/fs-paths"},"norm":{}}
+{"seq":53,"op":"check","args":{"label":"getcwd after fchdir to the root descriptor"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":54,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":0,"mode":0,"path":"rel.txt"},"ret":"fd@54","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":55,"op":"fchdir","args":{"fd":"fd@54"},"ret":-1,"errno":"ENOTDIR","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":56,"op":"check","args":{"label":"fchdir on a file descriptor is ENOTDIR"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":57,"op":"fchdir","args":{"fd":"fd@57"},"ret":-1,"errno":"EBADF","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":58,"op":"check","args":{"label":"fchdir on a closed number is EBADF"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":59,"op":"close","args":{"fd":"fd@45"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":60,"op":"close","args":{"fd":"fd@26"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":61,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":193,"mode":420,"path":"a/x"},"ret":"fd@61","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":62,"op":"close","args":{"fd":"fd@61"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":63,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":0,"path":"link/../x"},"ret":0,"errno":null,"fields":{"gid":"id@8","ino":"ino@63","kind":"reg","nlink":1,"perm":420,"size":0,"uid":"id@8"},"norm":{"fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":64,"op":"check","args":{"label":"link/../x resolves through the link's target, not the link's name"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":65,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":0,"path":"x"},"ret":-1,"errno":"ENOENT","fields":{},"norm":{}}
+{"seq":66,"op":"check","args":{"label":"the lexical reading of link/../x names nothing"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":67,"op":"openat","args":{"dirfd":"fd@57","flags":0,"mode":0,"path":"/tmp/syscall-conformance/fs-paths/rel.txt"},"ret":"fd@67","errno":null,"fields":{},"norm":{"args.dirfd":"relative:fd","ret":"relative:fd"}}
+{"seq":68,"op":"close","args":{"fd":"fd@67"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":69,"op":"check","args":{"label":"openat with a bogus dirfd and an absolute path ignores the dirfd"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":70,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":193,"mode":420,"path":"t"},"ret":"fd@70","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":71,"op":"close","args":{"fd":"fd@70"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":72,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":0,"mode":0,"path":"c1"},"ret":"fd@72","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":73,"op":"check","args":{"label":"a chain of 40 symlinks resolves"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":74,"op":"close","args":{"fd":"fd@72"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":75,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":0,"mode":0,"path":"c0"},"ret":-1,"errno":"ELOOP","fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":76,"op":"check","args":{"label":"a chain of 41 symlinks is ELOOP"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":77,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":0,"mode":0,"path":"loop"},"ret":-1,"errno":"ELOOP","fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":78,"op":"check","args":{"label":"a self-referential symlink is ELOOP"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":79,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":0,"path":"c0"},"ret":-1,"errno":"ELOOP","fields":{},"norm":{}}
+{"seq":80,"op":"check","args":{"label":"newfstatat through the 41-hop chain is ELOOP"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":81,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":256,"path":"c0"},"ret":0,"errno":null,"fields":{"gid":"id@8","ino":"ino@81","kind":"lnk","nlink":1,"perm":511,"size":2,"uid":"id@8"},"norm":{"fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":82,"op":"check","args":{"label":"AT_SYMLINK_NOFOLLOW names the first link itself"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":83,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":0,"mode":0,"path":"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"},"ret":-1,"errno":"ENAMETOOLONG","fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":84,"op":"check","args":{"label":"a 256-byte component is ENAMETOOLONG"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":85,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":0,"mode":0,"path":"mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm"},"ret":-1,"errno":"ENOENT","fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":86,"op":"check","args":{"label":"a 255-byte component is a legal (missing) name"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":87,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":0,"mode":0,"path":"d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/"},"ret":-1,"errno":"ENAMETOOLONG","fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":88,"op":"check","args":{"label":"a 4096-byte path is ENAMETOOLONG"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":89,"op":"mkdirat","args":{"dirfd":"AT_FDCWD","mode":493,"path":"d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/"},"ret":-1,"errno":"ENAMETOOLONG","fields":{},"norm":{}}
+{"seq":90,"op":"check","args":{"label":"mkdirat of a 4096-byte path is ENAMETOOLONG"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":91,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":0,"mode":0,"path":"rel.txt/x"},"ret":-1,"errno":"ENOTDIR","fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":92,"op":"check","args":{"label":"a component through a file is ENOTDIR"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":93,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":0,"path":"rel.txt/x"},"ret":-1,"errno":"ENOTDIR","fields":{},"norm":{}}
+{"seq":94,"op":"check","args":{"label":"newfstatat through a file is ENOTDIR"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":95,"op":"mkdirat","args":{"dirfd":"AT_FDCWD","mode":493,"path":"rel.txt/x"},"ret":-1,"errno":"ENOTDIR","fields":{},"norm":{}}
+{"seq":96,"op":"check","args":{"label":"mkdirat under a file is ENOTDIR"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":97,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":0,"mode":0,"path":"rel.txt/"},"ret":-1,"errno":"ENOTDIR","fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":98,"op":"check","args":{"label":"a trailing slash on a file is ENOTDIR"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":99,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":0,"path":"rel.txt/"},"ret":-1,"errno":"ENOTDIR","fields":{},"norm":{}}
+{"seq":100,"op":"check","args":{"label":"newfstatat with a trailing slash on a file is ENOTDIR"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":101,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":0,"path":"a/"},"ret":0,"errno":null,"fields":{"gid":"id@8","ino":"ino@101","kind":"dir","nlink":3,"perm":493,"uid":"id@8"},"norm":{"fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":102,"op":"check","args":{"label":"a trailing slash on a directory resolves"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":103,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":256,"path":"link/"},"ret":0,"errno":null,"fields":{"gid":"id@8","ino":"ino@103","kind":"dir","nlink":2,"perm":493,"uid":"id@8"},"norm":{"fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":104,"op":"check","args":{"label":"a trailing slash on a symlink to a directory follows it"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":105,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":576,"mode":420,"path":"a"},"ret":-1,"errno":"EISDIR","fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":106,"op":"check","args":{"label":"a creating open of a directory is EISDIR"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":107,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":65536,"mode":0,"path":"rel.txt"},"ret":-1,"errno":"ENOTDIR","fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":108,"op":"check","args":{"label":"O_DIRECTORY on a file is ENOTDIR"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":109,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":65536,"mode":0,"path":"missing"},"ret":-1,"errno":"ENOENT","fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":110,"op":"check","args":{"label":"O_DIRECTORY on a missing name is ENOENT"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":111,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":131072,"mode":0,"path":"link"},"ret":-1,"errno":"ELOOP","fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":112,"op":"check","args":{"label":"O_NOFOLLOW on a symlink is ELOOP"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":113,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":0,"mode":0,"path":""},"ret":-1,"errno":"ENOENT","fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":114,"op":"check","args":{"label":"an empty path is ENOENT"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":115,"op":"umask","args":{"mask":63},"ret":18,"errno":null,"fields":{},"norm":{}}
+{"seq":116,"op":"check","args":{"label":"the initial umask is 022"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":117,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":193,"mode":438,"path":"masked"},"ret":"fd@117","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":118,"op":"fstat","args":{"fd":"fd@117"},"ret":0,"errno":null,"fields":{"gid":"id@8","ino":"ino@118","kind":"reg","nlink":1,"perm":384,"size":0,"uid":"id@8"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":119,"op":"check","args":{"label":"open applies the umask: 0666 & ~077 is 0600"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":120,"op":"close","args":{"fd":"fd@117"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":121,"op":"mkdirat","args":{"dirfd":"AT_FDCWD","mode":511,"path":"maskdir"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":122,"op":"check","args":{"label":"mkdirat under umask 077"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":123,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":0,"path":"maskdir"},"ret":0,"errno":null,"fields":{"gid":"id@8","ino":"ino@123","kind":"dir","nlink":2,"perm":448,"uid":"id@8"},"norm":{"fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":124,"op":"check","args":{"label":"mkdir applies the umask: 0777 & ~077 is 0700"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":125,"op":"mknodat","args":{"dev":0,"dirfd":"AT_FDCWD","mode":4534,"path":"maskfifo"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":126,"op":"check","args":{"label":"mknodat a FIFO under umask 077"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":127,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":0,"path":"maskfifo"},"ret":0,"errno":null,"fields":{"gid":"id@8","ino":"ino@127","kind":"fifo","nlink":1,"perm":384,"size":0,"uid":"id@8"},"norm":{"fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":128,"op":"check","args":{"label":"mknod applies the umask: the FIFO is 0600"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":129,"op":"umask","args":{"mask":18},"ret":63,"errno":null,"fields":{},"norm":{}}
+{"seq":130,"op":"check","args":{"label":"umask returns the previous mask"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":131,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":193,"mode":438,"path":"unmasked"},"ret":"fd@131","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":132,"op":"fstat","args":{"fd":"fd@131"},"ret":0,"errno":null,"fields":{"gid":"id@8","ino":"ino@132","kind":"reg","nlink":1,"perm":420,"size":0,"uid":"id@8"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":133,"op":"check","args":{"label":"the restored umask applies: 0666 & ~022 is 0644"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":134,"op":"close","args":{"fd":"fd@131"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":135,"op":"mkdirat","args":{"dirfd":"AT_FDCWD","mode":493,"path":"gone"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":136,"op":"check","args":{"label":"mkdirat gone"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":137,"op":"chdir","args":{"path":"gone"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":138,"op":"check","args":{"label":"chdir into gone"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":139,"op":"unlinkat","args":{"dirfd":"AT_FDCWD","flags":512,"path":"/tmp/syscall-conformance/fs-paths/gone"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":140,"op":"check","args":{"label":"unlinkat the working directory by absolute path"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":141,"op":"getcwd","args":{"size":4096},"ret":-1,"errno":"ENOENT","fields":{},"norm":{}}
+{"seq":142,"op":"check","args":{"label":"getcwd in an unlinked directory is ENOENT"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":143,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":64,"mode":420,"path":"anything"},"ret":-1,"errno":"ENOENT","fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":144,"op":"check","args":{"label":"a relative create in an unlinked directory is ENOENT"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":145,"op":"chdir","args":{"path":"/tmp/syscall-conformance/fs-paths"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":146,"op":"check","args":{"label":"chdir out by absolute path"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":147,"op":"getcwd","args":{"size":4096},"ret":0,"errno":null,"fields":{"path":"/tmp/syscall-conformance/fs-paths"},"norm":{}}
+{"seq":148,"op":"check","args":{"label":"getcwd recovers"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":149,"op":"close","args":{"fd":"fd@54"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}

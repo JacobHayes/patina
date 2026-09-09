@@ -89,6 +89,7 @@ mod tsc;
 // `patina_read`/`patina_close`/`patina_dup*` entries); the data structure and
 // its allocation/refcount rules are the module's own. See `fdtable.rs`.
 mod fdtable;
+mod paths;
 
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::BTreeMap;
@@ -106,7 +107,6 @@ use patina_dst_abi::{
     TaskId,
 };
 
-use patina_dst_driver_api::canonicalize_path;
 use patina_dst_fs_crash::CrashFs;
 use patina_dst_fs_mem::{FsImage, FsSnapshot, MemFs};
 use patina_dst_runtime::{
@@ -218,6 +218,17 @@ const ENOTSOCK: c_int = 38;
 #[cfg(target_os = "linux")]
 const ENOTSOCK: c_int = 88;
 const EFBIG: c_int = 27;
+const ERANGE: c_int = 34;
+const E2BIG: c_int = 7;
+const EXDEV: c_int = 18;
+#[cfg(target_os = "macos")]
+const ENAMETOOLONG: c_int = 63;
+#[cfg(not(target_os = "macos"))]
+const ENAMETOOLONG: c_int = 36;
+#[cfg(target_os = "macos")]
+const ENODATA: c_int = 96;
+#[cfg(not(target_os = "macos"))]
+const ENODATA: c_int = 61;
 const ESPIPE: c_int = 29;
 const MAX_CAPTURED_STDIO_BYTES: usize = 64 * 1024 * 1024;
 const HOST_IO_CHUNK: usize = 64 * 1024;
@@ -230,7 +241,7 @@ const O_APPEND: u32 = 1 << 4;
 const O_EXCLUSIVE: u32 = 1 << 5;
 /// `O_NOFOLLOW`: refuse a trailing symlink instead of resolving it. Not a driver
 /// flag — the deterministic filesystem never opens a symlink entry — but the
-/// choice [`patina_open`] makes when the path turns out to name one: `ELOOP`
+/// choice [`patina_openat`] makes when the path turns out to name one: `ELOOP`
 /// with this bit, resolve-and-retry without it.
 const O_NOFOLLOW: u32 = 1 << 6;
 /// `O_NONBLOCK`: on a regular file or a directory this changes nothing (it is a
@@ -249,6 +260,10 @@ const O_PATH: u32 = 1 << 8;
 /// per-NUMBER `FD_CLOEXEC` bit of the descriptor the open mints, so it lives on
 /// the table slot, never on the description.
 const O_CLOEXEC: u32 = 1 << 9;
+/// `O_DIRECTORY`: the entry must be a directory (`ENOTDIR` otherwise). Not a
+/// driver flag — the resolver already knows the entry's kind, and a directory
+/// is opened as one whether or not the caller asked.
+const O_DIRECTORY: u32 = 1 << 11;
 /// A status bit the table sets on every description `open(2)` mints (a file, a
 /// directory opened for reading, the entropy device, a FIFO endpoint) and on
 /// nothing else: a 64-bit Linux kernel forces `O_LARGEFILE` into those
@@ -264,7 +279,8 @@ const O_ALL: u32 = O_READ
     | O_NOFOLLOW
     | O_NONBLOCK
     | O_PATH
-    | O_CLOEXEC;
+    | O_CLOEXEC
+    | O_DIRECTORY;
 /// The status bits `F_SETFL` may change (the kernel ignores every other bit in
 /// the argument, including the access mode).
 const O_SETFL_MASK: u32 = O_APPEND | O_NONBLOCK;
@@ -2070,6 +2086,14 @@ fn effect_errno(error: &EffectError) -> c_int {
         ErrorCode::ConnectionReset => ECONNRESET,
         ErrorCode::BrokenPipe => EPIPE,
         ErrorCode::NotConnected => ENOTCONN,
+        ErrorCode::NotPermitted => EPERM,
+        ErrorCode::NoData => ENODATA,
+        ErrorCode::Range => ERANGE,
+        ErrorCode::TooBig => E2BIG,
+        ErrorCode::Unsupported => EOPNOTSUPP,
+        ErrorCode::Busy => EBUSY,
+        ErrorCode::IllegalSeek => ESPIPE,
+        ErrorCode::CrossDevice => EXDEV,
     }
 }
 
@@ -2705,6 +2729,9 @@ fn runtime_config_from_control_plane() -> Result<(RuntimeConfig, Option<i32>), R
     // Deterministic guest environment values travel the same control plane and
     // are recorded into trace metadata so replay restores them flag-free.
     config = config.apply_guest_env_env(control_env)?;
+    // The guest's initial working directory travels the same control plane and
+    // is recorded the same way; `install` opens it before the run starts.
+    config = config.apply_guest_cwd_env(control_env)?;
     // End-of-run report suppression comes from the SAME pre-scrub snapshot, once,
     // and is carried in the config: by finalization the context is out of the slot
     // and the interposed `getenv` returns NULL for everything, so a knob read then
@@ -2792,6 +2819,13 @@ fn install(context: Result<Context, RuntimeError>) -> c_int {
         Err(error) => return fail(runtime_errno(&error)),
     };
     if let Err(error) = declare_link_time_sites(&mut context) {
+        record_init_error(error.to_string());
+        return fail(runtime_errno(&error));
+    }
+    // A configured `--cwd` is opened now, on the context directly: a path that
+    // is not a directory refuses the run by name here rather than answering
+    // ENOENT to every relative path later.
+    if let Err(error) = paths::install_cwd(&mut context) {
         record_init_error(error.to_string());
         return fail(runtime_errno(&error));
     }
@@ -3687,15 +3721,47 @@ fn bind_fs_handle(fd: Fd, kind: FdKind, status: u32, cloexec: bool) -> c_int {
     }
 }
 
-/// Open a path in the deterministic filesystem, or one of the two things that
-/// are reached by path but are not filesystem descriptions: the `/dev/urandom`
-/// device and a FIFO's pipe endpoint. Every success is a fresh guest number
-/// from the descriptor table (lowest free, `EMFILE` past `RLIMIT_NOFILE`).
+/// The deny an `O_PATH|O_NOFOLLOW` open of a SYMLINK gets — the one spelling
+/// that names the link entry itself, which the deterministic filesystem has no
+/// descriptor for. One string, emitted from the one open entry both doors call,
+/// so a raw-syscall guest and a libc guest record the same captured stderr.
+pub(crate) const DENY_O_PATH_SYMLINK: &str = "patina: O_PATH|O_NOFOLLOW on a symlink is not modeled (the deterministic \
+     filesystem has no descriptor for a link entry); failing closed\n";
+
+/// A soft, diagnostic deny: the line goes to the CAPTURED stderr (the recorded
+/// stream) and the call answers `ENOSYS`, exactly as the C `patina_posix_deny`
+/// and the SUD `sud_deny` do.
+fn deny(message: &str) -> c_int {
+    // SAFETY: a byte slice handed to the captured-stderr entry.
+    let _ = unsafe { patina_stdio_write(2, message.as_ptr().cast(), message.len()) };
+    fail(ENOSYS)
+}
+
+/// `openat(2)` over the deterministic filesystem: resolve `(dirfd, path)`
+/// through the one resolver, then open what it names. Every success is a fresh
+/// guest number from the descriptor table (lowest free, `EMFILE` past
+/// `RLIMIT_NOFILE`), and the entry's KIND decides the description: a regular
+/// file, a directory (whether or not `O_DIRECTORY` asked for one — the kernel
+/// hands back a directory descriptor for `open(dir, O_RDONLY)` too, and it is
+/// what `fchdir`, `*at` resolution and `getdents` key off), an `O_PATH`
+/// location, the `/dev/urandom` device, or a FIFO's pipe endpoint.
+///
+/// `O_NOFOLLOW` leaves a trailing symlink unresolved, which is then `ELOOP`
+/// (`cap-primitives` keys its manual symlink walk off it, and std's
+/// `remove_dir_all` reads it as "not a directory"); the one exception is
+/// `O_PATH|O_NOFOLLOW`, the spelling that names the link ENTRY, which has no
+/// descriptor here and is a named deny. `O_DIRECTORY` on anything but a
+/// directory is `ENOTDIR`; a write-mode open of a directory is `EISDIR`.
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_open(path: *const c_char, flags: u32, mode: u32) -> c_int {
+pub unsafe extern "C" fn patina_openat(
+    dirfd: c_int,
+    path: *const c_char,
+    flags: u32,
+    mode: u32,
+) -> c_int {
     if flags & !O_ALL != 0 {
         return fail(EINVAL);
     }
@@ -3707,7 +3773,16 @@ pub unsafe extern "C" fn patina_open(path: *const c_char, flags: u32, mode: u32)
     let nonblocking = flags & O_NONBLOCK != 0;
     let path_only = flags & O_PATH != 0;
     let cloexec = flags & O_CLOEXEC != 0;
+    let directory = flags & O_DIRECTORY != 0;
     let creating = flags & O_CREATE != 0 && !path_only;
+    let resolved = match paths::resolve(
+        dirfd,
+        &path,
+        if nofollow { paths::RESOLVE_NOFOLLOW } else { 0 },
+    ) {
+        Ok(resolved) => resolved,
+        Err(errno) => return fail(errno),
+    };
     // The description's status flags as `F_GETFL` reports them: the access
     // mode, `O_APPEND`, `O_NONBLOCK`; an `O_PATH` description carries only
     // `O_PATH` (the kernel reads no access mode under it).
@@ -3721,7 +3796,7 @@ pub unsafe extern "C" fn patina_open(path: *const c_char, flags: u32, mode: u32)
     } else {
         FdKind::File
     };
-    let flags = OpenFlags {
+    let open_flags = OpenFlags {
         // Under `O_PATH` the kernel reads no access mode and creates nothing,
         // so neither does this: a path-only open is exactly one thing.
         read: flags & O_READ != 0 && !path_only,
@@ -3733,17 +3808,22 @@ pub unsafe extern "C" fn patina_open(path: *const c_char, flags: u32, mode: u32)
         path_only,
         // POSIX reads `open`'s third argument only when the call can create the
         // entry; recording anything else here would put an argument in the trace
-        // the kernel never looked at. Callers pass 0 without `O_CREAT`, and the
-        // masking keeps a stray file-type bit out of the permission field.
-        mode: if creating { mode & 0o7777 } else { 0 },
+        // the kernel never looked at. Callers pass 0 without `O_CREAT`. The
+        // process umask is applied HERE, where a kernel applies it, so the
+        // driver stores — and the trace records — the mode the kernel would.
+        mode: if creating {
+            (mode & 0o7777) & !paths::umask()
+        } else {
+            0
+        },
     };
-    if path == "/dev/urandom" {
-        if flags.read
-            && !flags.write
-            && !flags.create
-            && !flags.truncate
-            && !flags.append
-            && !flags.exclusive
+    if resolved.path == "/dev/urandom" {
+        if open_flags.read
+            && !open_flags.write
+            && !open_flags.create
+            && !open_flags.truncate
+            && !open_flags.append
+            && !open_flags.exclusive
         {
             return match install_fd(FdKind::Urandom, 0, O_READ | O_OPENED, cloexec) {
                 Ok(number) => {
@@ -3755,74 +3835,65 @@ pub unsafe extern "C" fn patina_open(path: *const c_char, flags: u32, mode: u32)
         }
         return fail(EACCES);
     }
-    match with_context(|context| context.fs_open(&path, flags)) {
-        Ok(fd) => bind_fs_handle(fd, kind, status, cloexec),
-        // The deterministic filesystem has no descriptor for a symlink ENTRY, so
-        // an open whose final component is one is refused by the driver. POSIX
-        // splits that case in two, and both halves matter: with `O_NOFOLLOW` the
-        // answer is `ELOOP` (which is what `cap-primitives` keys its manual
-        // symlink resolution off, and what std's `remove_dir_all` reads as "not a
-        // directory"), and without it the link is resolved and the TARGET is
-        // opened. The probe only runs on the failure path, so an ordinary open
-        // still costs exactly one driver operation.
-        // A FIFO refuses the same way and for a related reason: it has no
-        // filesystem descriptor either, because its bytes are not filesystem
-        // state. The driver has already judged existence, resolution AND
-        // permissions by the time it says so, so all that is left here is the
-        // pipe rendezvous — which is why the probe's mode is carried only for
-        // `fstat` and never re-checked.
-        Err(EINVAL) => {
-            let Ok(metadata) = with_context(|context| context.fs_metadata(&path)) else {
-                return fail(EINVAL);
+    let writes = open_flags.write
+        || open_flags.create
+        || open_flags.truncate
+        || open_flags.append
+        || open_flags.exclusive;
+    let entry = resolved.metadata.map(|metadata| metadata.kind);
+    match entry {
+        // Reachable only under `O_NOFOLLOW` (the resolver followed otherwise).
+        Some(FsEntryKind::Symlink) => {
+            if path_only {
+                return deny(DENY_O_PATH_SYMLINK);
+            }
+            fail(ELOOP)
+        }
+        Some(FsEntryKind::Directory) => {
+            // `O_PATH` opens nothing, so the kernel ignores the access mode
+            // under it; a plain directory open must be read-only. The two cost
+            // different things (nothing vs `r`), which is why they are two
+            // driver opens.
+            if !path_only && writes {
+                return fail(EISDIR);
+            }
+            let (dir_flags, dir_status) = if path_only {
+                (OpenFlags::path_only(), O_PATH)
+            } else {
+                (OpenFlags::read_only(), O_READ | O_OPENED)
             };
-            match metadata.kind {
-                FsEntryKind::Symlink => {
-                    if nofollow {
-                        return fail(ELOOP);
-                    }
-                    let resolved = match canonicalize_virtual_path(&path) {
-                        Ok(resolved) => resolved,
-                        Err(errno) => return fail(errno),
-                    };
-                    match with_context(|context| context.fs_open(&resolved, flags)) {
-                        Ok(fd) => bind_fs_handle(fd, kind, status, cloexec),
-                        Err(errno) => fail(errno),
-                    }
-                }
-                FsEntryKind::Fifo => thread::fifo_open(
-                    metadata.ino,
-                    flags.read,
-                    flags.write,
+            match with_context(|context| context.fs_open(&resolved.path, dir_flags)) {
+                Ok(fd) => bind_fs_handle(fd, FdKind::Dir, dir_status, cloexec),
+                Err(errno) => fail(errno),
+            }
+        }
+        Some(FsEntryKind::File | FsEntryKind::Fifo) if directory => fail(ENOTDIR),
+        None if directory => fail(ENOENT),
+        Some(FsEntryKind::Fifo) => {
+            // A FIFO has no filesystem descriptor, because its bytes are not
+            // filesystem state. The driver still judges existence, resolution
+            // AND permissions — and then declines to hand back a descriptor
+            // (`EINVAL`), which is the seam where the pipe rendezvous begins.
+            // Only an `O_PATH` open of a FIFO is a filesystem descriptor.
+            match with_context(|context| context.fs_open(&resolved.path, open_flags)) {
+                Ok(fd) => bind_fs_handle(fd, kind, status, cloexec),
+                Err(errno) if errno == EINVAL && !path_only => thread::fifo_open(
+                    resolved.metadata.expect("a FIFO entry has metadata").ino,
+                    open_flags.read,
+                    open_flags.write,
                     nonblocking,
                     status,
                     cloexec,
                 ),
-                _ => fail(EINVAL),
+                Err(errno) => fail(errno),
             }
         }
-        Err(errno) => fail(errno),
-    }
-}
-
-/// Create a named pipe (`mkfifo`/`mkfifoat`, and `mknod`/`mknodat` with
-/// `S_IFIFO`). Only the NAME is filesystem state, so this is one recorded
-/// boundary operation and nothing else: the pipe behind the name comes into
-/// existence when the first descriptor opens it, and vanishes with the last.
-///
-/// # Safety
-/// `path` must point to a valid NUL-terminated UTF-8 string.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_mkfifo(path: *const c_char, mode: u32) -> c_int {
-    let path = match path_from_c(path) {
-        Ok(path) => path,
-        Err(errno) => return fail(errno),
-    };
-    match with_context(|context| context.fs_make_fifo(&path, mode)) {
-        Ok(()) => {
-            set_errno(0);
-            0
+        Some(FsEntryKind::File) | None => {
+            match with_context(|context| context.fs_open(&resolved.path, open_flags)) {
+                Ok(fd) => bind_fs_handle(fd, kind, status, cloexec),
+                Err(errno) => fail(errno),
+            }
         }
-        Err(errno) => fail(errno),
     }
 }
 
@@ -4464,19 +4535,6 @@ fn metadata_kind(kind: FsEntryKind) -> u32 {
     }
 }
 
-fn write_metadata(metadata: patina_dst_abi::FsMetadata, kind: *mut u32, length: *mut u64) -> c_int {
-    if kind.is_null() || length.is_null() {
-        return fail(EINVAL);
-    }
-    // SAFETY: Both pointers were checked and are required to be writable by
-    // the C ABI contract.
-    unsafe {
-        kind.write(metadata_kind(metadata.kind));
-        length.write(metadata.len);
-    }
-    0
-}
-
 #[allow(clippy::too_many_arguments)]
 fn write_metadata_full(
     metadata: patina_dst_abi::FsMetadata,
@@ -4512,54 +4570,23 @@ fn write_metadata_full(
     0
 }
 
-/// Read metadata for a deterministic path.
+/// Read the metadata of the entry `(dirfd, path)` resolves to: the one entry
+/// behind `stat`, `lstat`, `fstatat`, `statx`, `access`, `statfs` and every
+/// other by-path metadata read on both doors. `flags` are `PATINA_RESOLVE_*`:
+/// `NOFOLLOW` names a trailing symlink itself (`lstat`, `AT_SYMLINK_NOFOLLOW`),
+/// `EMPTY_PATH` lets an empty path name the base (`AT_EMPTY_PATH` on
+/// `AT_FDCWD` is the working directory). Symlinks are walked to the kernel's
+/// 40-hop limit. A missing entry is `ENOENT`.
 ///
 /// # Safety
-/// All pointers must reference valid storage of their documented types.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_metadata(
-    path: *const c_char,
-    kind: *mut u32,
-    length: *mut u64,
-) -> c_int {
-    let path = match path_from_c(path) {
-        Ok(path) => path,
-        Err(errno) => return fail(errno),
-    };
-    match with_context(|context| context.fs_metadata(&path)) {
-        Ok(metadata) => write_metadata(metadata, kind, length),
-        Err(errno) => fail(errno),
-    }
-}
-
-/// Read metadata for a deterministic descriptor.
-///
-/// # Safety
-/// `kind` and `length` must point to writable storage.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_fd_metadata(
-    raw_fd: c_int,
-    kind: *mut u32,
-    length: *mut u64,
-) -> c_int {
-    let fd = match fs_handle(raw_fd) {
-        Ok(fd) => fd,
-        Err(errno) => return fail(errno),
-    };
-    match with_context(|context| context.fs_fd_metadata(fd)) {
-        Ok(metadata) => write_metadata(metadata, kind, length),
-        Err(errno) => fail(errno),
-    }
-}
-
-/// Read full metadata for a deterministic path.
-///
-/// # Safety
-/// All pointers must reference valid storage of their documented types.
+/// `path` must point to a valid NUL-terminated UTF-8 string and every out
+/// pointer to writable storage of its documented type.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn patina_metadata_full(
+pub unsafe extern "C" fn patina_metadata_at(
+    dirfd: c_int,
     path: *const c_char,
+    flags: u32,
     kind: *mut u32,
     length: *mut u64,
     ino: *mut u64,
@@ -4568,23 +4595,30 @@ pub unsafe extern "C" fn patina_metadata_full(
     mtime_nanos: *mut u64,
     mode: *mut u32,
 ) -> c_int {
+    if flags & !paths::RESOLVE_ALL != 0 {
+        return fail(EINVAL);
+    }
     let path = match path_from_c(path) {
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };
-    match with_context(|context| context.fs_metadata(&path)) {
-        Ok(metadata) => write_metadata_full(
-            metadata,
-            kind,
-            length,
-            ino,
-            nlink,
-            atime_nanos,
-            mtime_nanos,
-            mode,
-        ),
-        Err(errno) => fail(errno),
-    }
+    let resolved = match paths::resolve(dirfd, &path, flags) {
+        Ok(resolved) => resolved,
+        Err(errno) => return fail(errno),
+    };
+    let Some(metadata) = resolved.metadata else {
+        return fail(ENOENT);
+    };
+    write_metadata_full(
+        metadata,
+        kind,
+        length,
+        ino,
+        nlink,
+        atime_nanos,
+        mtime_nanos,
+        mode,
+    )
 }
 
 /// Read full metadata for a deterministic descriptor.
@@ -4649,38 +4683,38 @@ pub unsafe extern "C" fn patina_fd_metadata_full(
     }
 }
 
-/// Change the permission bits of the entry `path` names (`chmod` / `fchmodat`).
-///
-/// `follow` selects the trailing-symlink behavior the way [`patina_diropen`]'s
-/// does: nonzero resolves a trailing symlink through the shared virtual
-/// `realpath` and changes its TARGET (the `chmod` and flagless `fchmodat`
-/// spellings), zero names the link itself — which is `EOPNOTSUPP`, because
-/// Linux gives a symlink no mode of its own to change.
+/// Change the permission bits of the entry `(dirfd, path)` names (`chmod` /
+/// `fchmodat`). `flags` are `PATINA_RESOLVE_*`: without `NOFOLLOW` a trailing
+/// symlink resolves and its TARGET changes (the `chmod` and flagless `fchmodat`
+/// spellings); with it the link itself is named, which is `EOPNOTSUPP`
+/// because Linux gives a symlink no mode of its own to change.
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_chmod(path: *const c_char, mode: u32, follow: c_int) -> c_int {
+pub unsafe extern "C" fn patina_chmod(
+    dirfd: c_int,
+    path: *const c_char,
+    mode: u32,
+    flags: u32,
+) -> c_int {
+    if flags & !paths::RESOLVE_ALL != 0 {
+        return fail(EINVAL);
+    }
     let path = match path_from_c(path) {
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };
-    let metadata = match with_context(|context| context.fs_metadata(&path)) {
-        Ok(metadata) => metadata,
+    let resolved = match paths::resolve(dirfd, &path, flags) {
+        Ok(resolved) => resolved,
         Err(errno) => return fail(errno),
     };
-    let path = if metadata.kind == FsEntryKind::Symlink {
-        if follow == 0 {
-            return fail(EOPNOTSUPP);
-        }
-        match canonicalize_virtual_path(&path) {
-            Ok(resolved) => resolved,
-            Err(errno) => return fail(errno),
-        }
-    } else {
-        path
-    };
-    match with_context(|context| context.fs_set_mode(&path, mode)) {
+    match resolved.metadata.map(|metadata| metadata.kind) {
+        None => return fail(ENOENT),
+        Some(FsEntryKind::Symlink) => return fail(EOPNOTSUPP),
+        Some(FsEntryKind::File | FsEntryKind::Directory | FsEntryKind::Fifo) => {}
+    }
+    match with_context(|context| context.fs_set_mode(&resolved.path, mode)) {
         Ok(()) => {
             set_errno(0);
             0
@@ -4810,34 +4844,25 @@ pub unsafe extern "C" fn patina_read_dir_free(state: *mut c_void) {
     }
 }
 
+/// Resolve `(dirfd, path)` once and run `invoke` on the canonical path.
+///
+/// # Safety
+/// `path` must point to a valid NUL-terminated UTF-8 string.
 unsafe fn path_unit(
+    dirfd: c_int,
     path: *const c_char,
+    flags: u32,
     invoke: impl FnOnce(&mut Context, &str) -> Result<(), RuntimeError>,
 ) -> c_int {
     let path = match path_from_c(path) {
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };
-    match with_context(|context| invoke(context, &path)) {
-        Ok(()) => 0,
-        Err(errno) => fail(errno),
-    }
-}
-
-/// Create a deterministic directory at the caller's requested `mode`.
-///
-/// The driver applies the modeled umask, exactly as the kernel applies the
-/// process umask to `mkdir(2)`.
-///
-/// # Safety
-/// `path` must point to a valid NUL-terminated UTF-8 string.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_mkdir(path: *const c_char, mode: u32) -> c_int {
-    let path = match path_from_c(path) {
-        Ok(path) => path,
+    let resolved = match paths::resolve(dirfd, &path, flags) {
+        Ok(resolved) => resolved,
         Err(errno) => return fail(errno),
     };
-    match with_context(|context| context.fs_create_directory(&path, mode)) {
+    match with_context(|context| invoke(context, &resolved.path)) {
         Ok(()) => {
             set_errno(0);
             0
@@ -4846,32 +4871,90 @@ pub unsafe extern "C" fn patina_mkdir(path: *const c_char, mode: u32) -> c_int {
     }
 }
 
-/// Remove a deterministic regular file.
+/// Create a deterministic directory (`mkdir`/`mkdirat`) at the caller's
+/// requested `mode` under the process umask, exactly as the kernel applies it
+/// to `mkdir(2)`. A trailing symlink is not followed: the name must be free.
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_unlink(path: *const c_char) -> c_int {
+pub unsafe extern "C" fn patina_mkdir(dirfd: c_int, path: *const c_char, mode: u32) -> c_int {
+    let mode = (mode & 0o7777) & !paths::umask();
     // SAFETY: Forwarded from this function's C ABI contract.
-    unsafe { path_unit(path, Context::fs_remove_file) }
+    unsafe {
+        path_unit(dirfd, path, paths::RESOLVE_NOFOLLOW, |context, path| {
+            context.fs_create_directory(path, mode)
+        })
+    }
 }
 
-/// Remove an empty deterministic directory.
+/// Create a named pipe (`mkfifo`/`mkfifoat`, and `mknod`/`mknodat` with
+/// `S_IFIFO`) at the caller's requested `mode` under the process umask. Only
+/// the NAME is filesystem state, so this is one recorded boundary operation
+/// and nothing else: the pipe behind the name comes into existence when the
+/// first descriptor opens it, and vanishes with the last.
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_rmdir(path: *const c_char) -> c_int {
+pub unsafe extern "C" fn patina_mkfifo(dirfd: c_int, path: *const c_char, mode: u32) -> c_int {
+    let mode = (mode & 0o7777) & !paths::umask();
     // SAFETY: Forwarded from this function's C ABI contract.
-    unsafe { path_unit(path, Context::fs_remove_directory) }
+    unsafe {
+        path_unit(dirfd, path, paths::RESOLVE_NOFOLLOW, |context, path| {
+            context.fs_make_fifo(path, mode)
+        })
+    }
 }
 
-/// Rename a deterministic filesystem entry.
+/// Remove a name (`unlink`/`unlinkat`). Never follows a trailing symlink: the
+/// link entry itself is what goes.
+///
+/// # Safety
+/// `path` must point to a valid NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_unlink(dirfd: c_int, path: *const c_char) -> c_int {
+    // SAFETY: Forwarded from this function's C ABI contract.
+    unsafe {
+        path_unit(
+            dirfd,
+            path,
+            paths::RESOLVE_NOFOLLOW,
+            Context::fs_remove_file,
+        )
+    }
+}
+
+/// Remove an empty deterministic directory (`rmdir`/`unlinkat(AT_REMOVEDIR)`).
+///
+/// # Safety
+/// `path` must point to a valid NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_rmdir(dirfd: c_int, path: *const c_char) -> c_int {
+    // SAFETY: Forwarded from this function's C ABI contract.
+    unsafe {
+        path_unit(
+            dirfd,
+            path,
+            paths::RESOLVE_NOFOLLOW,
+            Context::fs_remove_directory,
+        )
+    }
+}
+
+/// Rename a deterministic filesystem entry (`rename`/`renameat`). Neither
+/// side follows a trailing symlink: the kernel renames link entries as
+/// entries.
 ///
 /// # Safety
 /// `from` and `to` must point to valid NUL-terminated UTF-8 strings.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_rename(from: *const c_char, to: *const c_char) -> c_int {
+pub unsafe extern "C" fn patina_rename(
+    fromfd: c_int,
+    from: *const c_char,
+    tofd: c_int,
+    to: *const c_char,
+) -> c_int {
     let from = match path_from_c(from) {
         Ok(path) => path,
         Err(errno) => return fail(errno),
@@ -4880,45 +4963,69 @@ pub unsafe extern "C" fn patina_rename(from: *const c_char, to: *const c_char) -
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };
+    let from = match paths::resolve(fromfd, &from, paths::RESOLVE_NOFOLLOW) {
+        Ok(resolved) => resolved.path,
+        Err(errno) => return fail(errno),
+    };
+    let to = match paths::resolve(tofd, &to, paths::RESOLVE_NOFOLLOW) {
+        Ok(resolved) => resolved.path,
+        Err(errno) => return fail(errno),
+    };
     match with_context(|context| context.fs_rename(&from, &to)) {
-        Ok(()) => 0,
+        Ok(()) => {
+            set_errno(0);
+            0
+        }
         Err(errno) => fail(errno),
     }
 }
 
-/// Create a deterministic symbolic link.
+/// Create a deterministic symbolic link (`symlink`/`symlinkat`). Only the LINK
+/// side resolves — `target` is the link's literal contents, stored verbatim —
+/// and an empty target is `ENOENT`, as `symlink(2)` answers.
 ///
 /// # Safety
 /// `target` and `link_path` must point to valid NUL-terminated UTF-8 strings.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_symlink(target: *const c_char, link_path: *const c_char) -> c_int {
+pub unsafe extern "C" fn patina_symlink(
+    target: *const c_char,
+    dirfd: c_int,
+    link_path: *const c_char,
+) -> c_int {
     let target = match path_from_c(target) {
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };
-    let link_path = match path_from_c(link_path) {
-        Ok(path) => path,
-        Err(errno) => return fail(errno),
-    };
-    match with_context(|context| context.fs_symlink(&target, &link_path)) {
-        Ok(()) => 0,
-        Err(errno) => fail(errno),
+    if target.is_empty() {
+        return fail(ENOENT);
+    }
+    // SAFETY: Forwarded from this function's C ABI contract.
+    unsafe {
+        path_unit(
+            dirfd,
+            link_path,
+            paths::RESOLVE_NOFOLLOW,
+            |context, link_path| context.fs_symlink(&target, link_path),
+        )
     }
 }
 
-/// Create a deterministic hard link (`link`/`linkat`).
-///
-/// Mirrors [`patina_symlink`]: both paths route through the driver, which shares
-/// one inode between `from` and `to` (or, when `from` is itself a symlink,
-/// duplicates the symlink entry -- the POSIX "hard link the symlink itself"
-/// behavior of `linkat` without `AT_SYMLINK_FOLLOW`). The C `linkat` interposer
-/// canonicalizes `from` before calling this when `AT_SYMLINK_FOLLOW` is set, so
-/// the follow/no-follow distinction is resolved above this boundary.
+/// Create a deterministic hard link (`link`/`linkat`). The driver shares one
+/// inode between `from` and `to`, or duplicates the symlink entry when `from`
+/// is itself a symlink — the POSIX "hard link the symlink itself" behavior of
+/// `linkat` without `AT_SYMLINK_FOLLOW`. With `follow` nonzero `from`'s
+/// trailing symlink is resolved first, so the link targets the resolved file.
 ///
 /// # Safety
 /// `from` and `to` must point to valid NUL-terminated UTF-8 strings.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_link(from: *const c_char, to: *const c_char) -> c_int {
+pub unsafe extern "C" fn patina_link(
+    fromfd: c_int,
+    from: *const c_char,
+    tofd: c_int,
+    to: *const c_char,
+    follow: c_int,
+) -> c_int {
     let from = match path_from_c(from) {
         Ok(path) => path,
         Err(errno) => return fail(errno),
@@ -4927,28 +5034,43 @@ pub unsafe extern "C" fn patina_link(from: *const c_char, to: *const c_char) -> 
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };
+    let from_flags = if follow != 0 {
+        0
+    } else {
+        paths::RESOLVE_NOFOLLOW
+    };
+    let from = match paths::resolve(fromfd, &from, from_flags) {
+        Ok(resolved) => resolved.path,
+        Err(errno) => return fail(errno),
+    };
+    let to = match paths::resolve(tofd, &to, paths::RESOLVE_NOFOLLOW) {
+        Ok(resolved) => resolved.path,
+        Err(errno) => return fail(errno),
+    };
     match with_context(|context| context.fs_link(&from, &to)) {
-        Ok(()) => 0,
+        Ok(()) => {
+            set_errno(0);
+            0
+        }
         Err(errno) => fail(errno),
     }
 }
 
-/// Read a deterministic symbolic link's target bytes.
-///
-/// Returns the byte count copied, with no trailing NUL added.
+/// Read a deterministic symbolic link's target bytes (`readlink`/
+/// `readlinkat`). An empty path names the descriptor itself, as the kernel's
+/// `readlinkat` allows; a name that is not a symlink is `EINVAL`, a zero-length
+/// buffer is `EINVAL`. Returns the byte count copied, with no trailing NUL.
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string and `buf` must be
-/// writable for `len` bytes when `len` is nonzero.
+/// writable for `len` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_read_link(
+    dirfd: c_int,
     path: *const c_char,
     buf: *mut c_char,
     len: usize,
 ) -> isize {
-    if len != 0 && buf.is_null() {
-        return fail(EINVAL) as isize;
-    }
     // Bootstrap window (see `SHIM_BOOTSTRAP`): this is an allocator's init-time
     // config probe — tikv-jemallocator's `obtain_malloc_conf` does
     // `readlink("/etc/malloc.conf")` while holding its init lock. The deterministic
@@ -4960,21 +5082,37 @@ pub unsafe extern "C" fn patina_read_link(
     if in_shim_bootstrap() {
         return fail(ENOENT) as isize;
     }
+    if len == 0 || buf.is_null() {
+        return fail(EINVAL) as isize;
+    }
     let path = match path_from_c(path) {
         Ok(path) => path,
         Err(errno) => return fail(errno) as isize,
     };
-    match with_context(|context| context.fs_read_link(&path)) {
+    let resolved = match paths::resolve(
+        dirfd,
+        &path,
+        paths::RESOLVE_NOFOLLOW | paths::RESOLVE_EMPTY_PATH,
+    ) {
+        Ok(resolved) => resolved,
+        Err(errno) => return fail(errno) as isize,
+    };
+    match resolved.metadata.map(|metadata| metadata.kind) {
+        None => return fail(ENOENT) as isize,
+        Some(FsEntryKind::Symlink) => {}
+        Some(FsEntryKind::File | FsEntryKind::Directory | FsEntryKind::Fifo) => {
+            return fail(EINVAL) as isize;
+        }
+    }
+    match with_context(|context| context.fs_read_link(&resolved.path)) {
         Ok(target) => {
             let bytes = target.as_bytes();
             let copied = bytes.len().min(len);
-            if copied != 0 {
-                // SAFETY: The destination buffer was checked and is required to
-                // be writable for `len` bytes by this function's C ABI.
-                unsafe {
-                    slice::from_raw_parts_mut(buf.cast::<u8>(), len)[..copied]
-                        .copy_from_slice(&bytes[..copied]);
-                }
+            // SAFETY: The destination buffer was checked and is required to be
+            // writable for `len` bytes by this function's C ABI.
+            unsafe {
+                slice::from_raw_parts_mut(buf.cast::<u8>(), len)[..copied]
+                    .copy_from_slice(&bytes[..copied]);
             }
             set_errno(0);
             isize::try_from(copied).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
@@ -4983,89 +5121,132 @@ pub unsafe extern "C" fn patina_read_link(
     }
 }
 
-/// The one virtual-`realpath` resolution: lexical `.`/`..`/`//` normalization
-/// (shared with the drivers via [`canonicalize_path`]), an existence check
-/// through the driver, and trailing-symlink resolution through the driver's
-/// `read_link`. Shared by [`patina_canonicalize`] and [`net::patina_diropen`] so
-/// a directory open and a `realpath` resolve a symlinked directory through the
-/// SAME effect sequence rather than two hand-kept-in-sync ones.
-fn canonicalize_virtual_path(path: &str) -> Result<String, c_int> {
-    // fs-mem rejects intermediate-symlink traversal, so only a genuinely
-    // trailing symlink is ever resolved here; the cap fails a symlink cycle
-    // closed rather than looping.
-    const SYMLINK_RESOLUTION_LIMIT: usize = 40;
-    with_context(|context| {
-        let mut current = canonicalize_path(path)?;
-        for _ in 0..SYMLINK_RESOLUTION_LIMIT {
-            let metadata = context.fs_metadata(&current)?;
-            if metadata.kind != FsEntryKind::Symlink {
-                return Ok(current);
-            }
-            let target = context.fs_read_link(&current)?;
-            let base = if target.starts_with('/') {
-                target
-            } else {
-                let parent = current.rsplit_once('/').map_or("/", |(parent, _)| parent);
-                let parent = if parent.is_empty() { "/" } else { parent };
-                format!("{parent}/{target}")
-            };
-            current = canonicalize_path(&base)?;
+/// Copy a NUL-terminated `path` into `buf` when it fits, returning its length
+/// in bytes (excluding the terminator); `ERANGE` when `len` is nonzero and too
+/// small. With `len == 0` only the length is reported.
+fn copy_path_out(path: &str, buf: *mut c_char, len: usize) -> isize {
+    let bytes = path.as_bytes();
+    if len != 0 {
+        if buf.is_null() {
+            return fail(EINVAL) as isize;
         }
-        Err(RuntimeError::from(EffectError::new(
-            ErrorCode::InvalidInput,
-            format!("too many levels of symbolic links: {path:?}"),
-        )))
-    })
+        if bytes.len() >= len {
+            return fail(ERANGE) as isize;
+        }
+        // SAFETY: The destination is writable for `len` bytes by the C ABI
+        // contract, and `bytes.len() < len` leaves room for the terminator.
+        unsafe {
+            let destination = slice::from_raw_parts_mut(buf.cast::<u8>(), len);
+            destination[..bytes.len()].copy_from_slice(bytes);
+            destination[bytes.len()] = 0;
+        }
+    }
+    set_errno(0);
+    isize::try_from(bytes.len()).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
 }
 
-/// Canonicalize a guest path to its deterministic absolute form (`realpath`).
-///
-/// Writes the NUL-terminated canonical path into `buf` when it fits and returns
-/// the canonical length in bytes (excluding the terminator); a `-1` return sets
-/// `patina_errno`. The result is produced entirely from the virtual filesystem
-/// -- lexical `.`/`..`/`//` normalization (shared with the drivers via
-/// [`canonicalize_path`]), an existence check through the driver, and
-/// trailing-symlink resolution through the driver's `read_link` -- so it never
-/// consults host state and both `realpath` calling conventions receive the same
-/// bytes. Unlike [`patina_read_link`] this takes no bootstrap guard: `realpath`
-/// is not part of any allocator-init probe (the guarded case is
-/// tikv-jemallocator's `readlink("/etc/malloc.conf")`), so it only ever runs
-/// against a live runtime, and a guard would merely mask a legitimate early call.
+/// The one path resolver, exported for the caller that wants the canonical
+/// NAME rather than an operation on it (`realpath`). Resolves `(dirfd, path)` — the
+/// working directory for `PATINA_AT_FDCWD`, a directory descriptor's node
+/// otherwise — applying `.`/`..` to the resolved directory, walking symlinks to
+/// the kernel's 40-hop `ELOOP` limit, and answering `ENAMETOOLONG`, `ENOTDIR`
+/// for a component through a non-directory, and the trailing-slash rule.
+/// `flags` are `PATINA_RESOLVE_*`. Writes the NUL-terminated canonical path
+/// into `buf` when it fits and returns its length; `*kind` receives the final
+/// entry's `PATINA_ENTRY_*` kind, or 0 when the final component does not
+/// exist.
 ///
 /// # Safety
-/// `path` must point to a valid NUL-terminated string and `buf` must be writable
-/// for `len` bytes when `len` is nonzero.
+/// `path` must point to a valid NUL-terminated UTF-8 string, `buf` must be
+/// writable for `len` bytes when `len` is nonzero, and `kind` must be writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn patina_canonicalize(
+pub unsafe extern "C" fn patina_resolve_path(
+    dirfd: c_int,
     path: *const c_char,
+    flags: u32,
     buf: *mut c_char,
     len: usize,
+    kind: *mut u32,
 ) -> isize {
-    if len != 0 && buf.is_null() {
+    if flags & !paths::RESOLVE_ALL != 0 || kind.is_null() {
         return fail(EINVAL) as isize;
     }
     let path = match path_from_c(path) {
         Ok(path) => path,
         Err(errno) => return fail(errno) as isize,
     };
-    let canonical = match canonicalize_virtual_path(&path) {
-        Ok(canonical) => canonical,
+    let resolved = match paths::resolve(dirfd, &path, flags) {
+        Ok(resolved) => resolved,
         Err(errno) => return fail(errno) as isize,
     };
-    let bytes = canonical.as_bytes();
-    let needed = bytes.len();
-    if len != 0 && needed < len {
-        // SAFETY: The destination buffer is required to be writable for `len`
-        // bytes by this function's C ABI, and `needed < len` leaves room for the
-        // trailing NUL.
-        unsafe {
-            let destination = slice::from_raw_parts_mut(buf.cast::<u8>(), len);
-            destination[..needed].copy_from_slice(bytes);
-            destination[needed] = 0;
-        }
+    // SAFETY: `kind` was checked non-null and is writable per the C ABI.
+    unsafe {
+        kind.write(
+            resolved
+                .metadata
+                .map_or(0, |metadata| metadata_kind(metadata.kind)),
+        );
     }
+    copy_path_out(&resolved.path, buf, len)
+}
+
+/// `getcwd(2)`: where the working directory's NODE is now, NUL-terminated in
+/// `buf` when it fits (`ERANGE` otherwise; `len == 0` reports the length
+/// alone), returning the length. `ENOENT` once the directory has been
+/// unlinked, exactly as Linux answers.
+///
+/// # Safety
+/// `buf` must be writable for `len` bytes when `len` is nonzero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_getcwd(buf: *mut c_char, len: usize) -> isize {
+    match paths::cwd_path() {
+        Ok(path) => copy_path_out(&path, buf, len),
+        Err(errno) => fail(errno) as isize,
+    }
+}
+
+/// `chdir(2)`: resolve `(dirfd, path)` (symlinks followed) and make the
+/// directory it names the working directory. `ENOENT` for a missing name,
+/// `ENOTDIR` for anything but a directory, `EACCES` for one the modeled
+/// identity cannot search.
+///
+/// # Safety
+/// `path` must point to a valid NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_chdir(dirfd: c_int, path: *const c_char) -> c_int {
+    let path = match path_from_c(path) {
+        Ok(path) => path,
+        Err(errno) => return fail(errno),
+    };
+    match paths::chdir(dirfd, &path) {
+        Ok(()) => {
+            set_errno(0);
+            0
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
+/// `fchdir(2)`: a directory descriptor — opened plainly or `O_PATH` — becomes
+/// the working directory. `EBADF` for a number that names nothing, `ENOTDIR`
+/// for any other kind.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_fchdir(raw_fd: c_int) -> c_int {
+    match paths::fchdir(raw_fd) {
+        Ok(()) => {
+            set_errno(0);
+            0
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
+/// `umask(2)`: install `mask` (its permission bits) as the process umask every
+/// creating entry applies, and return the previous one. Never fails.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_umask(mask: u32) -> u32 {
     set_errno(0);
-    isize::try_from(needed).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
+    paths::set_umask(mask)
 }
 
 #[unsafe(no_mangle)]
@@ -9387,136 +9568,6 @@ mod thread {
             .get_mut(&channel)
             .map(|channel| channel.send_waiters.drain(..).collect())
             .unwrap_or_default()
-    }
-
-    /// Validate that `path` names a directory and open a deterministic read-only
-    /// directory fd bound to it, registering that fd as a directory handle for
-    /// the `fdopendir` / `*at` resolvers (the C interposers and the SUD
-    /// dispatcher both land here, so a directory descriptor opened through libc
-    /// resolves a raw `openat(dirfd, …)` and vice versa).
-    ///
-    /// Validation is the whole reason this is one entry rather than a bare open:
-    /// the entry's OWN kind is read first (no trailing-symlink follow, like
-    /// `lstat`), so `O_NOFOLLOW` on a symlink is `ELOOP` — exactly what
-    /// `cap-primitives` and std's `remove_dir_all` read as "not a directory,
-    /// unlink it". Without `O_NOFOLLOW` a trailing symlink is resolved through
-    /// the shared virtual `realpath` and re-checked, so a symlink-to-directory
-    /// opens honestly; a non-directory is `ENOTDIR`.
-    ///
-    /// Because the returned fd is also a real filesystem fd, `fstat` reports a
-    /// directory and `fsync` routes to the crash model's namespace-durability
-    /// barrier.
-    ///
-    /// `path_only` is `O_PATH`, and it is the difference between the two
-    /// directory descriptors a capability guest holds. A path-only handle names
-    /// the location: it costs only the `x` walk the resolution already did, and
-    /// it resolves `*at` paths and answers `fstat` but cannot be iterated. A
-    /// plain `O_RDONLY|O_DIRECTORY` handle opens the directory for reading, so
-    /// it costs `r` — charged once, here, which is what lets a later `chmod` not
-    /// reach back into a `getdents` walk already under way.
-    ///
-    /// # Safety
-    /// `path` must point to a valid NUL-terminated UTF-8 string.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_diropen(
-        path: *const c_char,
-        follow: c_int,
-        path_only: c_int,
-        cloexec: c_int,
-    ) -> c_int {
-        let path = match super::path_from_c(path) {
-            Ok(path) => path,
-            Err(errno) => return super::fail(errno),
-        };
-        let metadata = match super::with_context(|context| context.fs_metadata(&path)) {
-            Ok(metadata) => metadata,
-            Err(errno) => return super::fail(errno),
-        };
-        let (path, kind) = if metadata.kind == super::FsEntryKind::Symlink {
-            if follow == 0 {
-                return super::fail(super::ELOOP);
-            }
-            let resolved = match super::canonicalize_virtual_path(&path) {
-                Ok(resolved) => resolved,
-                Err(errno) => return super::fail(errno),
-            };
-            match super::with_context(|context| context.fs_metadata(&resolved)) {
-                Ok(metadata) => (resolved, metadata.kind),
-                Err(errno) => return super::fail(errno),
-            }
-        } else {
-            (path, metadata.kind)
-        };
-        if kind != super::FsEntryKind::Directory {
-            return super::fail(super::ENOTDIR);
-        }
-        let open_flags = if path_only != 0 {
-            super::OpenFlags::path_only()
-        } else {
-            super::OpenFlags::read_only()
-        };
-        let fd = match super::with_context(|context| context.fs_open(&path, open_flags)) {
-            Ok(fd) => fd,
-            Err(errno) => return super::fail(errno),
-        };
-        // A directory description, path-only or not: `F_GETFL` reports
-        // `O_RDONLY` for a directory opened for reading and `O_PATH` for a
-        // location handle, and the `O_PATH` bit is what tells the two apart
-        // for `getdents`.
-        let status = if path_only != 0 {
-            super::O_PATH
-        } else {
-            O_READ | super::O_OPENED
-        };
-        super::bind_fs_handle(fd, FdKind::Dir, status, cloexec != 0)
-    }
-
-    /// Copy the path a directory descriptor's NODE currently has into `buf`,
-    /// NUL-terminated when it fits, returning the path length in bytes (excluding
-    /// the terminator). A negative return sets `patina_errno` to `EBADF` for an
-    /// unknown fd. Mirrors [`patina_canonicalize`]'s length/terminator contract.
-    ///
-    /// A descriptor names an inode, not a name — so the answer comes from the
-    /// filesystem (`fs_fd_path`), which moves an open description with the node
-    /// through every rename. Caching the name the descriptor was opened under
-    /// would go stale exactly where it matters: renaming the directory would
-    /// detach the descriptor, and a symlink planted at the vacated name would
-    /// silently redirect every later `openat` through it. `..` stays refused by
-    /// the driver's one normalizer regardless, so a dirfd-relative spelling and
-    /// an `AT_FDCWD` spelling of the same path still get the same judgement.
-    ///
-    /// # Safety
-    /// `buf` must be writable for `len` bytes when `len` is nonzero.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_dirpath(fd: c_int, buf: *mut c_char, len: usize) -> isize {
-        if len != 0 && buf.is_null() {
-            return super::fail(super::EINVAL) as isize;
-        }
-        // Resolve and release the table lock BEFORE the runtime call: the
-        // filesystem boundary can park this thread, and holding a shim spinlock
-        // across a scheduling point is how a reentrant interposer deadlocks.
-        let fd = match class_entry(fd) {
-            Ok(resolved) if resolved.kind == FdKind::Dir => super::Fd(resolved.handle),
-            Ok(_) => return super::fail(super::EBADF) as isize,
-            Err(errno) => return super::fail(errno) as isize,
-        };
-        let path = match super::with_context(|context| context.fs_fd_path(fd)) {
-            Ok(path) => path,
-            Err(errno) => return super::fail(errno) as isize,
-        };
-        let bytes = path.as_bytes();
-        let needed = bytes.len();
-        if len != 0 && needed < len {
-            // SAFETY: `buf` is writable for `len` bytes and `needed < len` leaves
-            // room for the trailing NUL.
-            unsafe {
-                let destination = std::slice::from_raw_parts_mut(buf.cast::<u8>(), len);
-                destination[..needed].copy_from_slice(bytes);
-                destination[needed] = 0;
-            }
-        }
-        super::set_errno(0);
-        isize::try_from(needed).unwrap_or_else(|_| super::fail(super::EOVERFLOW) as isize)
     }
 
     /// Create a simplex pipe: `read_fd_out` is the read end, `write_fd_out` the

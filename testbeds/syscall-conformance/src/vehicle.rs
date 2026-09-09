@@ -144,6 +144,11 @@ pub enum Sys {
     Getpid,
     Getuid,
     Getgid,
+    Getcwd,
+    Chdir,
+    Fchdir,
+    Umask,
+    Mknodat,
     /// A number past the virtual ABI level (registry `since` 7.3 > 6.8): the
     /// probe asserts its absence, not its semantics.
     Fchroot,
@@ -200,6 +205,11 @@ impl Sys {
             Sys::Getpid => "getpid",
             Sys::Getuid => "getuid",
             Sys::Getgid => "getgid",
+            Sys::Getcwd => "getcwd",
+            Sys::Chdir => "chdir",
+            Sys::Fchdir => "fchdir",
+            Sys::Umask => "umask",
+            Sys::Mknodat => "mknodat",
             Sys::Fchroot => "fchroot",
         }
     }
@@ -282,6 +292,11 @@ impl Sys {
             Sys::Getpid => libc::SYS_getpid,
             Sys::Getuid => libc::SYS_getuid,
             Sys::Getgid => libc::SYS_getgid,
+            Sys::Getcwd => libc::SYS_getcwd,
+            Sys::Chdir => libc::SYS_chdir,
+            Sys::Fchdir => libc::SYS_fchdir,
+            Sys::Umask => libc::SYS_umask,
+            Sys::Mknodat => libc::SYS_mknodat,
             // libc 0.2.189 predates the number; it is 472 in the vendored
             // x86_64 table and the generic (arm64) table alike.
             Sys::Fchroot => 472,
@@ -463,6 +478,27 @@ fn libc_symbol(sys: Sys, a: Args) -> i64 {
             Sys::Getpid => getpid() as i64,
             Sys::Getuid => getuid() as i64,
             Sys::Getgid => getgid() as i64,
+            // getcwd(3) answers a pointer; the kernel row answers a length. The
+            // probe API records success as 0 on every vehicle, so the libc
+            // spelling folds the pointer to 0 here.
+            Sys::Getcwd => {
+                if getcwd(a[0] as *mut c_char, a[1] as size_t).is_null() {
+                    -1
+                } else {
+                    0
+                }
+            }
+            Sys::Chdir => chdir(a[0] as *const c_char) as i64,
+            Sys::Fchdir => fchdir(a[0] as c_int) as i64,
+            // umask(2) never fails and its result is the previous mask; no
+            // errno fold applies (a mask of 0o777 - 1 is never -1 as i64).
+            Sys::Umask => return i64::from(umask(a[0] as mode_t)),
+            Sys::Mknodat => mknodat(
+                a[0] as c_int,
+                a[1] as *const c_char,
+                a[2] as mode_t,
+                a[3] as dev_t,
+            ) as i64,
             // No glibc wrapper exists for a number this new; the libc spelling
             // is syscall(2), the same door glibc itself would use.
             Sys::Fchroot => syscall(

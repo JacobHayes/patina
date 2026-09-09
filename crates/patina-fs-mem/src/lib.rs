@@ -19,12 +19,14 @@ type DescriptionId = u64;
 /// The permission mask a mode is stored under (`setuid`/`setgid`/sticky plus
 /// the three triads); the file-type bits live in [`FsEntryKind`].
 pub const MODE_MASK: u32 = 0o7777;
-/// The fixed umask this filesystem models, applied to the POSIX creation modes.
-pub const UMASK: u32 = 0o022;
-/// A newly created regular file: `0o666 & !UMASK`.
-pub const FILE_MODE: u32 = 0o666 & !UMASK;
-/// A newly created directory: `0o777 & !UMASK`.
-pub const DIRECTORY_MODE: u32 = 0o777 & !UMASK;
+/// The mode a regular file in the initial image carries (`0o666` under the
+/// default `0o022` umask), and the mode a legacy snapshot without per-entry
+/// modes reloads a file at. Not applied to any creating call: the umask is
+/// process state the layer above the driver applies.
+pub const FILE_MODE: u32 = 0o644;
+/// The mode the initial image's directories carry (`0o777` under the default
+/// `0o022` umask); see [`FILE_MODE`].
+pub const DIRECTORY_MODE: u32 = 0o755;
 /// A symlink leaf. Linux ignores a symlink's own mode entirely and reports the
 /// conventional `0o777`; nothing here consults it.
 pub const SYMLINK_MODE: u32 = 0o777;
@@ -136,9 +138,10 @@ struct EntryMetadata {
 ///
 /// Every entry carries a mode. A creating call brings its own: `open`'s third
 /// argument, `mkdir`'s, and `mkfifo`'s all cross this boundary and are stored
-/// under the fixed `0o022` umask this filesystem models, exactly as the kernel
-/// applies the process umask — so the ordinary `0o666`/`0o777` requests produce
-/// the familiar `0o644`/`0o755` while a caller asking for `0o400` gets `0o400`.
+/// VERBATIM (masked to the permission bits). The process umask is applied
+/// above this boundary, where a kernel applies it — by the native shim's
+/// `umask` state or the WASI host's fixed `0o022` — so what arrives here is
+/// what the kernel would store, and a caller asking for `0o400` gets `0o400`.
 /// An `open` of an EXISTING entry never touches its mode. Symlink leaves are
 /// the conventional `0o777`. The guest is a single non-root identity (uid/gid 1000, the value the
 /// native shim's `getuid` reports) and owns every entry, so enforcement reads
@@ -479,6 +482,15 @@ impl MemFs {
                 if !owner_allows(metadata.mode, SEARCH) {
                     return Err(denied(&current, "search"));
                 }
+            } else if self.files.contains_key(&current) || self.fifos.contains_key(&current) {
+                // A component resolved THROUGH a non-directory is `ENOTDIR`,
+                // never "not found": the name is there, it just cannot be
+                // walked into. (An intermediate symlink is refused before this
+                // walk; a missing component is the entry lookup's `NotFound`.)
+                return Err(EffectError::new(
+                    ErrorCode::NotDirectory,
+                    format!("virtual filesystem path component is not a directory: {current}"),
+                ));
             }
         }
         Ok(())
@@ -823,10 +835,10 @@ impl FsDriver for MemFs {
             if flags.create {
                 self.check_directory_write(parent_path(&path))?;
                 self.insert_parent_directories(&path);
-                // The caller's own creation mode, under the modeled umask —
-                // `open`'s third argument, which the kernel reads only on the
-                // branch that actually creates the entry.
-                let inode = self.allocate_inode(FsEntryKind::File, Vec::new(), flags.mode & !UMASK);
+                // The caller's own creation mode — `open`'s third argument, which
+                // the kernel reads only on the branch that actually creates the
+                // entry, already under the caller's umask.
+                let inode = self.allocate_inode(FsEntryKind::File, Vec::new(), flags.mode);
                 self.files.insert(path.clone(), inode);
             } else {
                 return Err(not_found(&path));
@@ -1134,8 +1146,8 @@ impl FsDriver for MemFs {
                 format!("virtual parent directory does not exist: {parent}"),
             ));
         }
-        // `mkdir`'s mode argument, under the modeled umask.
-        let metadata = self.allocate_entry_metadata(mode & !UMASK);
+        // `mkdir`'s mode argument, already under the caller's umask.
+        let metadata = self.allocate_entry_metadata(mode);
         self.directories.insert(path, metadata);
         Ok(())
     }
@@ -1160,7 +1172,7 @@ impl FsDriver for MemFs {
         // A FIFO is an inode with no bytes: hard links, the link count, the
         // mode and the identity the openers' pipe channel is keyed by all live
         // there, exactly as they do for a regular file.
-        let inode = self.allocate_inode(FsEntryKind::Fifo, Vec::new(), mode & !UMASK);
+        let inode = self.allocate_inode(FsEntryKind::Fifo, Vec::new(), mode);
         self.fifos.insert(path, inode);
         Ok(())
     }
@@ -1618,10 +1630,18 @@ impl FsDriver for MemFs {
     fn read_link(&mut self, path: &str) -> DriverResult<String> {
         let path = normalize_entry_path(path)?;
         self.resolve_guard(&path)?;
-        self.symlinks
-            .get(&path)
-            .cloned()
-            .ok_or_else(|| not_found(&path))
+        if let Some(target) = self.symlinks.get(&path) {
+            return Ok(target.clone());
+        }
+        // An entry that exists but is not a symlink is `EINVAL` (readlink(2)),
+        // distinguishable from a name that is not there at all.
+        if self.path_exists(&path) {
+            return Err(EffectError::new(
+                ErrorCode::InvalidInput,
+                format!("virtual filesystem entry is not a symbolic link: {path}"),
+            ));
+        }
+        Err(not_found(&path))
     }
 
     /// `chmod` / `fchmodat`. Changing a mode is an OWNER right, not a
@@ -1903,17 +1923,25 @@ mod tests {
     /// `set_mode` did not exist, and nothing was ever refused for permissions —
     /// so a guest could not tell a genuine `EACCES` from "missing".
     #[test]
-    fn modes_default_to_the_umasked_creation_modes_and_chmod_changes_them() {
+    fn modes_are_the_creation_modes_handed_down_and_chmod_changes_them() {
         let mut fs = MemFs::new();
-        fs.create_directory("/perm", 0o777).unwrap();
+        fs.create_directory("/perm", 0o755).unwrap();
         let fd = fs
-            .open("/perm/file", OpenFlags::create_truncate_write())
+            .open(
+                "/perm/file",
+                OpenFlags {
+                    path_only: false,
+                    mode: 0o644,
+                    ..OpenFlags::create_truncate_write()
+                },
+            )
             .unwrap();
         fs.close(fd).unwrap();
         fs.symlink("/perm/file", "/perm/link").unwrap();
 
         assert_eq!(fs.metadata("/perm").unwrap().mode, 0o755);
         assert_eq!(fs.metadata("/perm/file").unwrap().mode, 0o644);
+        // The initial image's root and /tmp carry the conventional 0o755.
         assert_eq!(fs.metadata("/").unwrap().mode, 0o755);
         // Linux gives a symlink no mode of its own; it always reads 0o777 and
         // cannot be changed.
@@ -1931,14 +1959,14 @@ mod tests {
     }
 
     /// RED before creating calls carried a mode: `open(path, O_CREAT, mode)`
-    /// and `mkdir(path, mode)` dropped the argument and every new entry got the
-    /// fixed umasked default for its kind, so a file asked for at `0o400` came
+    /// and `mkdir(path, mode)` dropped the argument and every new entry got a
+    /// fixed default for its kind, so a file asked for at `0o400` came
     /// back writable and a directory asked for at `0o500` accepted new names.
     #[test]
     fn a_creating_call_gets_the_mode_it_asked_for_and_the_bits_are_enforced() {
         let mut fs = MemFs::new();
 
-        // A creation mode is the caller's, under the modeled umask.
+        // A creation mode is the caller's, verbatim.
         let read_only_file = OpenFlags {
             path_only: false,
             mode: 0o400,
@@ -1956,12 +1984,14 @@ mod tests {
             ErrorCode::Denied
         );
 
-        // The umask bites the group/other triads exactly as the kernel's does.
+        // No umask is applied here: the group/other triads arrive as the layer
+        // above (the process umask's owner) already masked them, so `0o666`
+        // handed down is `0o666` stored — the umask is the caller's business.
         let fd = fs
             .open("/tmp/plain", OpenFlags::create_truncate_write())
             .unwrap();
         fs.close(fd).unwrap();
-        assert_eq!(fs.metadata("/tmp/plain").unwrap().mode, 0o644);
+        assert_eq!(fs.metadata("/tmp/plain").unwrap().mode, 0o666);
         let fd = fs
             .open(
                 "/tmp/wide",
@@ -1973,7 +2003,7 @@ mod tests {
             )
             .unwrap();
         fs.close(fd).unwrap();
-        assert_eq!(fs.metadata("/tmp/wide").unwrap().mode, 0o755);
+        assert_eq!(fs.metadata("/tmp/wide").unwrap().mode, 0o777);
 
         // A directory's mode is the caller's too, and `0o500` refuses creation
         // inside it while still resolving through and listing.
@@ -2069,7 +2099,7 @@ mod tests {
     #[test]
     fn inode_metadata_reads_the_live_entry() {
         let mut fs = MemFs::new();
-        fs.make_fifo("/tmp/pipe", 0o666).unwrap();
+        fs.make_fifo("/tmp/pipe", 0o644).unwrap();
         let ino = fs.metadata("/tmp/pipe").unwrap().ino;
         assert_eq!(fs.inode_metadata(ino).unwrap().mode, 0o644);
 
@@ -2277,19 +2307,19 @@ mod tests {
     }
 
     #[test]
-    fn fifos_carry_the_umasked_creation_mode_and_report_their_own_kind() {
+    fn fifos_carry_the_creation_mode_and_report_their_own_kind() {
         let mut fs = MemFs::new();
-        fs.make_fifo("/tmp/pipe", 0o666).unwrap();
+        fs.make_fifo("/tmp/pipe", 0o644).unwrap();
         let metadata = fs.metadata("/tmp/pipe").unwrap();
         assert_eq!(metadata.kind, FsEntryKind::Fifo);
-        // The caller's mode IS honored here, under the modeled umask.
+        // The caller's mode IS honored here, verbatim.
         assert_eq!(metadata.mode, 0o644);
         // A FIFO's bytes are never filesystem state, so it has no length.
         assert_eq!(metadata.len, 0);
         assert_eq!(metadata.nlink, 1);
         assert_ne!(metadata.ino, 0);
 
-        fs.make_fifo("/tmp/strict", 0o777).unwrap();
+        fs.make_fifo("/tmp/strict", 0o755).unwrap();
         assert_eq!(fs.metadata("/tmp/strict").unwrap().mode, 0o755);
         // A mode change reaches a FIFO like any other entry.
         fs.set_mode("/tmp/strict", 0o600).unwrap();
@@ -2938,7 +2968,7 @@ mod tests {
     #[test]
     fn an_unlinked_fifo_answers_through_the_reference_its_endpoint_holds() {
         let mut fs = MemFs::new();
-        fs.make_fifo("/tmp/pipe", 0o660).unwrap();
+        fs.make_fifo("/tmp/pipe", 0o640).unwrap();
         let ino = fs.metadata("/tmp/pipe").unwrap().ino;
         fs.retain_inode(ino).unwrap();
 

@@ -2023,7 +2023,7 @@ mod tests {
     #[test]
     fn modes_survive_a_crash_for_every_kind_that_owns_one() {
         let mut base = MemFs::new();
-        base.create_directory("/d", 0o777).unwrap();
+        base.create_directory("/d", 0o755).unwrap();
         let mut fs = CrashFs::builder().filesystem(base).build().unwrap();
         let fd = fs
             .open(
@@ -2039,7 +2039,7 @@ mod tests {
         fs.sync(fd).unwrap();
         fs.close(fd).unwrap();
         fs.create_directory("/d/sub", 0o700).unwrap();
-        fs.make_fifo("/d/pipe", 0o660).unwrap();
+        fs.make_fifo("/d/pipe", 0o640).unwrap();
         fs.sync_directory("/d").unwrap();
         fs.sync_directory("/d/sub").unwrap();
 

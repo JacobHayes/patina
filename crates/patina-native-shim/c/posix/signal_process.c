@@ -210,10 +210,6 @@ int setgroups(size_t count, const gid_t *groups) {
     (void)groups;
     patina_process_trap("setgroups");
 }
-int chdir(const char *path) {
-    (void)path;
-    patina_process_trap("chdir");
-}
 int chroot(const char *path) {
     (void)path;
     patina_process_trap("chroot");
