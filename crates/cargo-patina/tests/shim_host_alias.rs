@@ -22,83 +22,22 @@
 //! table it passes with `dlsym` as the only escape-surface residue. The
 //! `planted_leak_is_caught` test keeps the scan non-vacuous.
 
+mod common;
+
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use object::read::archive::ArchiveFile;
 use object::{Object, ObjectSymbol};
 use patina_dst_target::{shim_control_plane_symbols, shim_host_alias_violation};
 
-/// The profile directory (`.../target/debug` or `.../release`) that holds the
-/// test binary and, alongside it, the shim staticlib.
-fn profile_dir() -> PathBuf {
-    Path::new(env!("CARGO_BIN_EXE_cargo-patina"))
-        .parent()
-        .expect("cargo-patina bin has a parent profile directory")
-        .to_path_buf()
-}
-
-fn workspace_manifest() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("crate is two levels below the workspace root")
-        .join("Cargo.toml")
-}
-
-/// Build (idempotently) and locate `libpatina_dst_native_shim.a`.
-fn shim_archive() -> PathBuf {
-    let profile = profile_dir();
-    let target_dir = profile
-        .parent()
-        .expect("profile dir has a target parent")
-        .to_path_buf();
-    let mut build = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
-    build
-        .arg("build")
-        .arg("--locked")
-        .arg("--manifest-path")
-        .arg(workspace_manifest())
-        .arg("-p")
-        .arg("patina-dst-native-shim")
-        .arg("--target-dir")
-        .arg(&target_dir);
-    if profile.file_name().and_then(|n| n.to_str()) == Some("release") {
-        build.arg("--release");
-    }
-    let status = build
-        .status()
-        .expect("cargo build -p patina-dst-native-shim runs");
-    assert!(
-        status.success(),
-        "failed to build the native shim staticlib"
-    );
-    let archive = profile.join("libpatina_dst_native_shim.a");
-    assert!(
-        archive.exists(),
-        "shim staticlib not found at {}",
-        archive.display()
-    );
-    archive
-}
+use common::{for_each_shim_member, shim_archive};
 
 /// Collect the undefined external symbol names of the shim's *own* object
 /// members (named `patina_dst_native_shim-*`), excluding the bundled std/dep
 /// members whose imports the shim's strong definitions satisfy at final link.
 fn shim_undefined_externals(archive_bytes: &[u8]) -> BTreeSet<String> {
-    let archive = ArchiveFile::parse(archive_bytes).expect("parse shim staticlib");
     let mut undefined = BTreeSet::new();
-    let mut saw_shim_member = false;
-    for member in archive.members() {
-        let member = member.expect("archive member");
-        let name = String::from_utf8_lossy(member.name());
-        if !name.starts_with("patina_dst_native_shim-") {
-            continue;
-        }
-        saw_shim_member = true;
-        let data = member.data(archive_bytes).expect("member data");
-        let object = object::File::parse(data).expect("parse shim object member");
+    for_each_shim_member(archive_bytes, |object| {
         for symbol in object.symbols() {
             if symbol.is_undefined() {
                 if let Ok(name) = symbol.name() {
@@ -106,11 +45,7 @@ fn shim_undefined_externals(archive_bytes: &[u8]) -> BTreeSet<String> {
                 }
             }
         }
-    }
-    assert!(
-        saw_shim_member,
-        "no patina_dst_native_shim-* members found in the staticlib"
-    );
+    });
     undefined
 }
 

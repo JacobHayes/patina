@@ -3,9 +3,10 @@
 //! Internal crate: the native interposition layer that `cargo patina build`
 //! links below a guest binary. The Rust side here exposes prefixed
 //! `patina_*` C ABI entry points over the deterministic runtime; the bundled C
-//! interposer (`c/patina_posix.c`, exported as [`POSIX_C_SOURCE`])
-//! provides the libc-compatible symbols (file, socket, clock, thread, entropy)
-//! that route a guest's ordinary `std` calls into it. The prefixed Rust surface
+//! interposer (`c/patina_posix.c` and its per-family slices under `c/posix/`,
+//! exported as [`POSIX_C_SOURCE`] and [`POSIX_C_FAMILY_SOURCES`]) provides the
+//! libc-compatible symbols (file, socket, clock, thread, entropy) that route a
+//! guest's ordinary `std` calls into it. The prefixed Rust surface
 //! deliberately does not export ambient `open`/`read`/pthread symbols, so
 //! linking this crate alone cannot silently alter unrelated host operations.
 //! Adopters never depend on this crate; see [ARCHITECTURE.md] for the shim
@@ -13,15 +14,55 @@
 //!
 //! [ARCHITECTURE.md]: https://github.com/JacobHayes/patina/blob/main/ARCHITECTURE.md
 
-/// The POSIX interposer C source, exposed as text so out-of-tree tooling
-/// (`cargo patina build`) can reproduce the native link recipe from the
+/// The POSIX interposer C translation unit, exposed as text so out-of-tree
+/// tooling (`cargo patina build`) can reproduce the native link recipe from the
 /// installed crate without the workspace source tree. It lives here — the crate
 /// that owns `c/patina_posix.c` — so the shim's C and any embedded copy can
 /// never drift, and so both this crate and `cargo-patina` package cleanly for
 /// publish (each is self-contained; neither reaches across crate boundaries).
+///
+/// The unit is an umbrella: it `#include`s the per-family slices in
+/// [`POSIX_C_FAMILY_SOURCES`], which must be staged beside it (at their
+/// relative paths) before it is compiled.
 pub const POSIX_C_SOURCE: &str = include_str!("../c/patina_posix.c");
+/// The per-family slices `c/patina_posix.c` includes, as `(path relative to the
+/// umbrella, source)`. One entry per file under `c/posix/`; the umbrella names
+/// each by that relative path, so a slice added there must be added here (the
+/// `posix_umbrella_includes_every_family_slice` test pins the two together).
+pub const POSIX_C_FAMILY_SOURCES: &[(&str, &str)] = &[
+    ("posix/core.c", include_str!("../c/posix/core.c")),
+    ("posix/env.c", include_str!("../c/posix/env.c")),
+    ("posix/init.c", include_str!("../c/posix/init.c")),
+    ("posix/time.c", include_str!("../c/posix/time.c")),
+    (
+        "posix/sched_identity.c",
+        include_str!("../c/posix/sched_identity.c"),
+    ),
+    ("posix/entropy.c", include_str!("../c/posix/entropy.c")),
+    ("posix/fs.c", include_str!("../c/posix/fs.c")),
+    ("posix/fd_io.c", include_str!("../c/posix/fd_io.c")),
+    ("posix/mem.c", include_str!("../c/posix/mem.c")),
+    (
+        "posix/thread_sync.c",
+        include_str!("../c/posix/thread_sync.c"),
+    ),
+    (
+        "posix/signal_process.c",
+        include_str!("../c/posix/signal_process.c"),
+    ),
+    ("posix/net.c", include_str!("../c/posix/net.c")),
+    ("posix/readiness.c", include_str!("../c/posix/readiness.c")),
+    ("posix/stdio.c", include_str!("../c/posix/stdio.c")),
+    ("posix/darwin.c", include_str!("../c/posix/darwin.c")),
+];
 /// The companion C header for [`POSIX_C_SOURCE`] (`include/patina_native.h`).
 pub const NATIVE_HEADER: &str = include_str!("../include/patina_native.h");
+
+// The syscall registry: every kernel number with its disposition, the symbol
+// layer mapped onto it, and the vendored-table gates. Platform-independent
+// data; `cargo patina syscalls` reads it and the Linux SUD dispatcher is
+// generated from it. See `registry/mod.rs`.
+pub mod registry;
 
 // Syscall-user-dispatch (SUD) dispatch table — Linux only. The C layer arms SUD
 // and installs the SIGSYS handler; this module owns the per-arch decode and the
@@ -11913,5 +11954,51 @@ mod source_lints {
             "an isize-returning interposer path returns a positive errno as a \
              byte count; wrap it in fail(..) so the guest sees -1 with errno"
         );
+    }
+}
+
+/// Source lints over the C translation unit's shape: the umbrella
+/// `c/patina_posix.c` must `#include` exactly the slices [`POSIX_C_FAMILY_SOURCES`]
+/// exports, in that order, and those must be exactly the files under `c/posix/`.
+/// A slice added on disk but not exported would compile in-tree (the umbrella
+/// resolves the include locally) and fail only in an installed `cargo-patina`,
+/// whose staged sandbox carries only the exported slices.
+#[cfg(test)]
+mod posix_source_lints {
+    use super::{POSIX_C_FAMILY_SOURCES, POSIX_C_SOURCE};
+
+    #[test]
+    fn posix_umbrella_includes_every_family_slice() {
+        let included: Vec<&str> = POSIX_C_SOURCE
+            .lines()
+            .filter_map(|line| line.strip_prefix("#include \""))
+            .map(|rest| rest.trim_end_matches('"'))
+            .collect();
+        let exported: Vec<&str> = POSIX_C_FAMILY_SOURCES
+            .iter()
+            .map(|(relative, _)| *relative)
+            .collect();
+        assert_eq!(
+            included, exported,
+            "c/patina_posix.c's #include list and POSIX_C_FAMILY_SOURCES must agree, in order"
+        );
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("c/posix");
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .expect("c/posix exists")
+            .map(|entry| format!("posix/{}", entry.unwrap().file_name().to_string_lossy()))
+            .collect();
+        on_disk.sort();
+        let mut exported_sorted: Vec<String> = exported.iter().map(|s| s.to_string()).collect();
+        exported_sorted.sort();
+        assert_eq!(
+            on_disk, exported_sorted,
+            "every file under c/posix/ must be exported by POSIX_C_FAMILY_SOURCES and vice versa"
+        );
+        for (relative, source) in POSIX_C_FAMILY_SOURCES {
+            assert!(
+                *relative == "posix/core.c" || !source.contains("#include <"),
+                "{relative}: system headers belong in posix/core.c, which every slice shares"
+            );
+        }
     }
 }

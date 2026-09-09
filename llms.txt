@@ -165,6 +165,16 @@ unknown option.
   inverted is refused rather than obeyed. An external oracle is serial unless
   `--jobs N` opts in, because only a patina-owned oracle is hermetic by
   construction.
+- `cargo patina syscalls [--os linux] [--arch x86_64|aarch64]`
+  Print the native shim's syscall registry — the code the SUD dispatcher is
+  generated from: one row per number in the vendored kernel table (default:
+  this host's OS/arch) with family, disposition (`modeled`, `passthrough`,
+  `constant(v)`, `soft-deny(errno)`, `trap(class)`, `absent`), reasoning, the
+  arc that changes it, and the libc symbols that serve it; then the symbol
+  inventory, including known ABI spellings the shim does NOT define (`absent`).
+  Linux only today (`--os darwin` is refused by name). JSON output is schema
+  `patina.syscalls/v1`. Consult this, not a doc, for what a raw syscall or a
+  libc call does under patina.
 
 ## Fault + buggify knobs (seed-driven, default off)
 

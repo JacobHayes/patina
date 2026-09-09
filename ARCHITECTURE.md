@@ -413,7 +413,9 @@ Runtime checks catch effects that cannot be rejected statically:
 - deny-trap interposers (e.g. the process-spawn family) that abort
   deterministically if a dormant escape path is actually reached;
 - dynamic library loading (`dlopen` refused; on Linux `dlsym` resolves only the shim's own deterministic entropy implementations, and NULL for every other name);
-- SUD-trapped syscalls outside the dispatch table (a named, deterministic abort);
+- SUD-trapped syscalls whose registry row is a `Trap` (a named, deterministic
+  abort carrying the row's class and reasoning), and numbers the vendored
+  kernel table does not list at all (a distinct abort);
 - trace fingerprint or operation mismatch on replay.
 
 The full per-class taxonomy — what each escape class is, how it is detected,
@@ -444,6 +446,8 @@ pthread_create, pthread_mutex_*, pthread_cond_*
 ```
 
 These symbols delegate to Patina drivers and scheduler operations. Direct syscalls, dynamic loading, and platform-specific APIs are denied unless explicitly supported.
+
+**The syscall registry.** Every kernel syscall number the shim's Linux targets can dispatch has a row in `crates/patina-native-shim/src/registry/` (`syscalls.rs`: one row per number in the vendored x86_64 table, arm64 numbers carried by name; `symbols.rs`: every public symbol the C layer defines, mapped onto the rows it serves, plus the known ABI spellings it deliberately does not define). A row's disposition — `Modeled`, `Passthrough`, `Constant`, `SoftDeny`, `Trap(class)`, `Absent` — is what the runtime does today, with its reasoning and the arc that changes it. The syscall-user-dispatch dispatcher is generated from the rows at compile time (a routed row without a handler, or a trap row with one, does not compile); the libc `syscall(2)` interposer forwards every number into that same dispatcher, so the libc wrapper, `syscall(2)`, and a raw instruction cannot answer one number differently; and `cargo patina syscalls` prints the live rows (`patina.syscalls/v1`). The rows are gated against verbatim copies of the upstream kernel tables under `crates/patina-native-shim/abi/` (`scripts/refresh-syscall-tables.sh` re-fetches and diffs them): every table number has exactly one row, every row's numbers are in the table, every symbol row is defined by the compiled shim objects (and every `Absent` row is not), every defined public symbol has a row, and `patina-target`'s deny-trap list is exactly the registry's `Deny` rows. The C layer is one translation unit, `c/patina_posix.c`, assembled from per-family slices under `c/posix/`; the Rust dispatcher's handlers live in per-family modules under `src/sud/`.
 
 This layer improves compatibility with crates that use `libc` or native libraries, but it does not weaken the deterministic boundary. Unsupported native behavior remains an error.
 

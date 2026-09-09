@@ -110,7 +110,11 @@ interleavings were never actually explored.
 binary under a default-deny allowlist. Any un-interposed effect symbol is a
 finding. This is the gate that keeps "deterministic" honest — and it runs before
 every native run, so a guest reaching an unmodeled effect is refused rather than
-quietly escaping.
+quietly escaping. What the native shim does with each kernel syscall number and
+each libc symbol — modeled, passed through, constant, soft-denied, trapped, or
+absent — is code, not a doc: `cargo patina syscalls` prints the live registry
+(`--format json` gives schema `patina.syscalls/v1`), so ask it rather than
+guessing whether a call is supported.
 
 ## Which loop are you in
 

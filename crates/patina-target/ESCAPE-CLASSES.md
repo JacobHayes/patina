@@ -315,6 +315,17 @@ is stated plainly:
    primitive should be supported, not silently pass the gate and then fail at
    runtime. A member stays fail-closed only when the semantics genuinely cannot be
    modeled — `putenv` keeps its entry aliased to caller-owned memory.
+   The symbol registry (`crates/patina-native-shim/src/registry/symbols.rs`)
+   enumerates this surface: every public symbol the shim defines carries a
+   status — `Modeled`, `Partial` (a subset modeled, the rest refuses loudly),
+   `Deny(class)` (the deny-traps), `ControlPlane` — and the known ABI spellings
+   the shim does NOT define at all carry `Absent` (the fortified
+   `__open64_2`/`__read_chk` aliases, `getrlimit64`, `statvfs`, `clock_getres`,
+   `copy_file_range`, …), which a guest importing them reaches the host through
+   or is audit-refused on. `cargo patina syscalls` prints it, and an object-scan
+   gate fails when a symbol is defined without a row or an `Absent` row gains a
+   definition — so the pre-run gate's blind spot is at least enumerated and
+   cannot grow silently.
 
 6. **Host-identity reads on aarch64.** The x86-64 half is covered — `cpuid` is
    decoded and reported under the host-identity row above — but the arm64

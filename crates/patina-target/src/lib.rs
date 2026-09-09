@@ -632,10 +632,12 @@ pub type NativeDenyTrapSymbol = (&'static str, &'static str);
 /// `mach_task_self_`, ...) are deliberately absent: reading a data symbol does not
 /// abort, so it is not deny-trap armed.
 ///
-/// SINGLE SOURCE OF TRUTH: the `deny_trap_symbols_track_the_shim_c_source` test
-/// parses `patina_posix.c` and asserts this list equals exactly its trap-calling
-/// definitions, so when a trap is converted to a real model (or a new one is
-/// added) in the C, this list must move in lockstep or the test fails closed.
+/// SINGLE SOURCE OF TRUTH: the native shim's symbol registry
+/// (`patina_dst_native_shim::registry::SYMBOLS`) carries one `Deny(class)` row
+/// per trap, and `cargo-patina/tests/syscall_registry.rs` asserts three-way
+/// agreement — this list, those rows, and the trap-calling definitions parsed
+/// from the shim's C — so a trap converted to a real model (or a new one) must
+/// move all three in lockstep or the gate fails closed.
 const NATIVE_DENY_TRAP_SYMBOLS: &[NativeDenyTrapSymbol] = &[
     // process (patina_process_trap): spawn/exec/wait/identity mutation.
     ("chdir", "process"),
@@ -5161,103 +5163,6 @@ mod tests {
         bytes.push(import.len() as u8);
         bytes.extend(import);
         bytes
-    }
-
-    /// Read the first double-quoted string literal at the start of `after` (which
-    /// must begin at the opening quote), returning `(contents, rest_after_quote)`.
-    /// `None` when `after` does not begin with a `"` (e.g. a `#name` macro
-    /// stringization), which is exactly how the parser skips the `patina_native_trap`
-    /// macro *definition* while catching its literal call sites.
-    fn read_quoted(after: &str) -> Option<(&str, &str)> {
-        let rest = after.strip_prefix('"')?;
-        let end = rest.find('"')?;
-        Some((&rest[..end], &rest[end + 1..]))
-    }
-
-    /// The single string-literal argument of the first `prefix("…")` call on
-    /// `line`, if any (`patina_process_trap("fork")` → `fork`).
-    fn one_literal_arg(line: &str, prefix: &str) -> Option<String> {
-        let idx = line.find(prefix)?;
-        let (arg, _) = read_quoted(&line[idx + prefix.len()..])?;
-        Some(arg.to_owned())
-    }
-
-    /// The `(class, symbol)` of the first `patina_native_trap("class", "symbol")`
-    /// call on `line`. Returns `None` when either argument is not a string literal,
-    /// which skips the macro definition `patina_native_trap("…", #name)`.
-    fn native_trap_args(line: &str) -> Option<(String, String)> {
-        let idx = line.find("patina_native_trap(")?;
-        let after = &line[idx + "patina_native_trap(".len()..];
-        let (class, rest) = read_quoted(after)?;
-        let rest = rest.trim_start().strip_prefix(',')?.trim_start();
-        let (symbol, _) = read_quoted(rest)?;
-        Some((class.to_owned(), symbol.to_owned()))
-    }
-
-    /// The identifier argument of a `MACRO(Ident)` invocation at the start of a
-    /// trimmed `line`, e.g. `PATINA_FRAMEWORK_TRAP(CFArrayCreate)` → `CFArrayCreate`.
-    fn macro_invocation_arg(line: &str, macro_name: &str) -> Option<String> {
-        let rest = line.strip_prefix(macro_name)?.strip_prefix('(')?;
-        let end = rest.find(')')?;
-        let ident = &rest[..end];
-        (!ident.is_empty() && ident.chars().all(|c| c.is_alphanumeric() || c == '_'))
-            .then(|| ident.to_owned())
-    }
-
-    /// Parse every deny-trap-calling definition out of the shim C source into a
-    /// `(symbol, class)` set: the two trap macros' invocations, the explicit
-    /// `patina_native_trap` sites, and the `patina_process_trap` sites. The macro
-    /// class is fixed by the macro (its body calls `patina_native_trap` with that
-    /// literal class), so it is attached here.
-    fn parse_c_deny_traps(source: &str) -> BTreeSet<(String, String)> {
-        let mut set = BTreeSet::new();
-        for raw in source.lines() {
-            let line = raw.trim_start();
-            // Skip preprocessor lines so the macro `#define`/`#undef` are ignored;
-            // real invocations sit at column 0 with no leading `#`.
-            if !line.starts_with('#') {
-                if let Some(symbol) = macro_invocation_arg(line, "PATINA_FRAMEWORK_TRAP") {
-                    set.insert((symbol, "macos-framework".to_owned()));
-                    continue;
-                }
-                if let Some(symbol) = macro_invocation_arg(line, "PATINA_INTROSPECTION_TRAP") {
-                    set.insert((symbol, "host-introspection".to_owned()));
-                    continue;
-                }
-            }
-            if let Some(symbol) = one_literal_arg(line, "patina_process_trap(") {
-                set.insert((symbol, "process".to_owned()));
-            }
-            if let Some((class, symbol)) = native_trap_args(line) {
-                set.insert((symbol, class));
-            }
-        }
-        set
-    }
-
-    // SINGLE SOURCE OF TRUTH guard: `NATIVE_DENY_TRAP_SYMBOLS` must equal exactly
-    // the set of trap-calling definitions in `c/patina_posix.c`. Reading the C via
-    // an include_str! keeps the guard hermetic without a dependency edge onto the
-    // shim crate. When a concurrent change converts a trap to a real model (the
-    // symbol's trap body is removed) or adds a new trap, this fails until the
-    // constant is updated in lockstep — so the "fails later" note can never quietly
-    // drift from what the shim actually arms.
-    #[test]
-    fn deny_trap_symbols_track_the_shim_c_source() {
-        const C_SOURCE: &str = include_str!("../../patina-native-shim/c/patina_posix.c");
-        let parsed = parse_c_deny_traps(C_SOURCE);
-        let declared: BTreeSet<(String, String)> = NATIVE_DENY_TRAP_SYMBOLS
-            .iter()
-            .map(|(symbol, class)| ((*symbol).to_owned(), (*class).to_owned()))
-            .collect();
-        let missing: Vec<_> = parsed.difference(&declared).collect();
-        let extra: Vec<_> = declared.difference(&parsed).collect();
-        assert!(
-            missing.is_empty() && extra.is_empty(),
-            "NATIVE_DENY_TRAP_SYMBOLS drifted from c/patina_posix.c.\n  \
-             in the C but NOT in the constant (add them): {missing:?}\n  \
-             in the constant but NOT in the C (a trap became a real model? remove them): {extra:?}",
-        );
     }
 
     #[test]

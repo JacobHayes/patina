@@ -51,12 +51,17 @@ audit. And no gate compares patina's answers with the host kernel's, so a
 ## 3. The registry (`crates/patina-native-shim/src/registry/`)
 
 ```text
-abi/linux/syscall_64.tbl      vendored upstream x86_64 table (mainline snapshot; refresh script)
-abi/linux/syscall.tbl         vendored generic table (arm64 uses it since 6.11)
-abi/darwin/syscalls.master    vendored xnu table (parsed by a later arc; present so the
+crates/patina-native-shim/
+  abi/linux/syscall_64.tbl    vendored upstream x86_64 table (mainline snapshot;
+                              scripts/refresh-syscall-tables.sh diffs/refreshes)
+  abi/linux/syscall.tbl       vendored generic table (arm64 uses it since 6.11)
+  abi/darwin/syscalls.master  vendored xnu table (parsed by a later arc; present so the
                               (os, arch) keying is real from day one)
-registry/syscalls.rs          const SYSCALLS: &[SyscallRow]
-registry/symbols.rs           const SYMBOLS: &[SymbolRow]
+  src/registry/table.rs       the table parser and the per-arch ABI-column rule
+  src/registry/syscalls.rs    const SYSCALLS: &[SyscallRow]
+  src/registry/symbols.rs     const SYMBOLS: &[SymbolRow]
+  src/sud/mod.rs              BINDINGS (row name → handler) and the dispatch index
+                              generated from the rows at compile time
 ```
 
 `SyscallRow { name, nr: Nr { x86_64: Option<u32>, aarch64: Option<u32> }, family,

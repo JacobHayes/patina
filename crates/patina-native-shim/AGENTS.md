@@ -163,6 +163,54 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   becomes a silent one. Arming failures abort loudly rather than continuing
   unarmed.
 
+## Layout: families, the registry, and the vendored tables
+
+- `c/patina_posix.c` is ONE translation unit assembled from per-family slices
+  under `c/posix/` (`core`, `env`, `init`, `time`, `sched_identity`,
+  `entropy`, `fs`, `fd_io`, `mem`, `thread_sync`, `signal_process`, `net`,
+  `readiness`, `stdio`, `darwin`), `#include`d in a fixed order so the slices
+  share one set of headers and static helpers and produce one object. A slice
+  is not compiled on its own; system headers go in `posix/core.c`; a new slice
+  is added to the umbrella AND to `POSIX_C_FAMILY_SOURCES` in `src/lib.rs`
+  (the installed `cargo-patina` stages only the exported slices — a lint pins
+  the three lists together).
+- `src/sud/` is the SUD dispatcher: `mod.rs` holds the shared constants, the
+  `patina_*` externs, the handler BINDINGS, and the dispatch index generated
+  from the registry; the `sys_*` handlers live in per-family modules
+  (`time`, `sched_identity`, `fd_io`, `fs`, `mem`, `signal_process`, `net`,
+  `readiness`).
+- `src/registry/` is the syscall registry: `syscalls.rs` (one row per number
+  in the vendored x86_64 table, arm64 numbers by name; disposition, reasoning,
+  the arc that closes it, a probe id), `symbols.rs` (every public symbol the C
+  slices define with the rows it serves and a status, plus `Absent` rows for
+  known ABI spellings the shim does not define), `table.rs` (the parser for
+  the vendored tables under `abi/`, with the per-arch ABI-column rule). Rows
+  are data; dispatch, `cargo patina syscalls`, and the gates read them.
+- `abi/` holds verbatim upstream tables (`linux/syscall_64.tbl`,
+  `linux/syscall.tbl`, `darwin/syscalls.master`). Refresh only through
+  `scripts/refresh-syscall-tables.sh` (it diffs and exits non-zero on change;
+  `--apply` overwrites), then add rows for any new numbers — the completeness
+  gate names them.
+
+Rules that follow:
+
+- Routing a number = flipping its row's disposition AND adding a `BINDINGS`
+  entry in `src/sud/mod.rs` in the same change. A `Modeled`/`Passthrough` row
+  without a binding, a `Trap`/`Absent` row with one, or a binding that names no
+  row is a compile error (`build_dispatch`); the by-name twin is
+  `sud::tests::bindings_match_the_registry_rows`.
+- A new C interposer needs a `SymbolRow` (platform, the rows it serves, a
+  status); the object-scan gate (`cargo-patina/tests/syscall_registry.rs`)
+  fails on an unlisted definition, a stale row, or an `Absent` row that gained
+  a definition. A deny-trap needs a `Deny(class)` row AND its entry in
+  `patina-target`'s deny-trap list; the gate holds the C sites, the rows, and
+  that list in three-way agreement.
+- The libc `syscall(2)` interposer (`posix/init.c`) forwards EVERY number into
+  `patina_sud_dispatch`: never add a number-specific branch there; add the row
+  and binding instead, so the three vehicles cannot disagree.
+- Reasoning strings are the diagnostic a guest sees on a trap; keep them
+  one-line, present-tense, and honest about what is modeled today.
+
 ## Source bundle and `links`
 
 `cargo-patina` does not build this crate from a source checkout: it embeds the
@@ -208,8 +256,9 @@ ARCHITECTURE.md "Native (linked shim)" and `crates/cargo-patina/build.rs`).
   — the Rust definition, `include/patina_native.h`, and the SUD dispatcher's
   `extern` block — and changing an argument list means changing all three; the
   compiler catches two of them and the third is a link-time surprise.
-- After editing `c/patina_posix.c` or related embedded C sources, rebuild
-  `cargo-patina`; validating with a stale runner is an accidental false green.
+- After editing `c/patina_posix.c`, a slice under `c/posix/`, or related
+  embedded C sources, rebuild `cargo-patina`; validating with a stale runner is
+  an accidental false green.
 - Guest binaries pick a shim change up on their own: the flags `cargo patina
   build` injects carry a hash of the shim link inputs' bytes, so Cargo relinks
   the guest whenever this crate (or the runtime beneath it) is rebuilt. A guest

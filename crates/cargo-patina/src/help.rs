@@ -2247,9 +2247,48 @@ PATINA_SEED/PATINA_PARAMS_JSON protocol.",
     refusals: NO_REFUSALS,
 };
 
+const SYSCALLS: Verb = Verb {
+    name: "syscalls",
+    summary: "Print the native shim's syscall registry: every kernel number, its disposition, and the symbols that serve it.",
+    synopsis: &["cargo patina syscalls [--os linux] [--arch x86_64|aarch64]"],
+    prose: "\
+`syscalls` prints the live registry the native shim's syscall-user-dispatch table is \
+generated from: one row per number in the vendored kernel table for the selected OS and \
+architecture (default: this host), with its family, disposition (modeled, passthrough, \
+constant, soft-deny, trap(class), absent), the reasoning, the arc that changes it, and the \
+libc/pthread symbols that serve it; then the symbol inventory for that OS, including the \
+known ABI spellings the shim does NOT define. The registry is code, gated against the \
+vendored tables, so this output is the truth about what a raw syscall or a libc call does \
+under patina — never a doc that could drift. Only Linux has rows today; `--os darwin` is \
+refused by name until the xnu table gets rows. The JSON form emits schema patina.syscalls/v1.",
+    families: &[fam(Family::Sole, "`syscalls`", None)],
+    groups: &[Group {
+        title: "Registry selection",
+        families: SOLE,
+        flags: &[
+            f(
+                "--os",
+                None,
+                Value::Required("OS", Kind::Enum(&["linux", "darwin"])),
+                "Operating system whose table to print (default: this host).",
+                false,
+            ),
+            f(
+                "--arch",
+                None,
+                Value::Required("ARCH", Kind::Enum(&["x86_64", "aarch64"])),
+                "Architecture whose numbers to print (default: this host).",
+                false,
+            ),
+        ],
+    }],
+    refusals: NO_REFUSALS,
+};
+
 /// Every verb, in overview order.
 pub const VERBS: &[&Verb] = &[
-    &RUN, &TEST, &BUILD, &AUDIT, &REPLAY, &EXPLORE, &CAMPAIGN, &COVERAGE, &SITES, &TRACE, &MINIMIZE,
+    &RUN, &TEST, &BUILD, &AUDIT, &REPLAY, &EXPLORE, &CAMPAIGN, &COVERAGE, &SITES, &TRACE,
+    &MINIMIZE, &SYSCALLS,
 ];
 
 /// The `PATINA_*` environment protocol and honored tool variables.
