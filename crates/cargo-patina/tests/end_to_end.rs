@@ -1278,36 +1278,36 @@ fn append_relink_probe(scratch: &Path, staticlib: &Path, generation: u32) {
     );
 }
 
-// A native build links the shim staticlib, always built in the Patina source
-// workspace, into a guest built in the caller's working directory. Under rustup
+// A native build links the shim staticlib, always built in the unpacked shim
+// source cache, into a guest built in the caller's working directory. Under rustup
 // those two directories can resolve DIFFERENT toolchains, and then two Rust
 // standard libraries meet at the guest link: a `duplicate symbol:
 // rust_eh_personality` error on Linux and — as this fixture showed before the
 // detector — a SILENT success on macOS, producing a guest carrying two libstds.
 // The split is staged hermetically here (a `rustc` that reports a distinct
-// identity when probed from the workspace), so the gate holds with or without
+// identity when probed from the shim source cache), so the gate holds with or without
 // rustup installed; `a_rust_toolchain_pin_is_refused_when_it_splits_the_build`
 // covers the real rustup mechanism.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn a_split_shim_guest_toolchain_is_refused_before_the_link() {
     let directory = tempdir().unwrap();
-    let workspace = native_workspace();
+    let shim_sources = shim_source_cache();
 
-    // A `rustc` that reports a distinct identity when it runs in the Patina
-    // source workspace and the host identity everywhere else — the same
-    // per-directory resolution rustup's proxy performs, without needing rustup.
-    // The stub compares against the PHYSICAL workspace path: `pwd -P` resolves
-    // symlinks, and a temp or checkout path can sit behind one (macOS `/var` is a
-    // symlink to `/private/var`).
+    // A `rustc` that reports a distinct identity when it runs inside the shim
+    // source cache (where cargo-patina builds the shim) and the host identity
+    // everywhere else — the same per-directory resolution rustup's proxy
+    // performs, without needing rustup. The stub compares against the PHYSICAL
+    // cache path: `pwd -P` resolves symlinks, and a home or temp path can sit
+    // behind one (macOS `/var` is a symlink to `/private/var`).
     let stub = directory.path().join("rustc-split.sh");
     fs::write(
         &stub,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = \"-vV\" ] && [ \"$(pwd -P)\" = \"{}\" ]; then\n  rustc -vV \
-             | sed '1s/.*/rustc 9.9.9-patina-split-stub (0000000 2000-01-01)/'\n  exit 0\nfi\
-             \nexec rustc \"$@\"\n",
-            fs::canonicalize(workspace).unwrap().display()
+            "#!/bin/sh\ncase \"$1:$(pwd -P)\" in\n  \"-vV:{}\"/*)\n    rustc -vV \
+             | sed '1s/.*/rustc 9.9.9-patina-split-stub (0000000 2000-01-01)/'\n    exit 0;;\n\
+             esac\nexec rustc \"$@\"\n",
+            fs::canonicalize(&shim_sources).unwrap().display()
         ),
     )
     .unwrap();
@@ -1360,16 +1360,17 @@ fn a_split_shim_guest_toolchain_is_refused_before_the_link() {
             "refusal did not mention {expected:?}:\n{stderr}"
         );
     }
-    // The refusal names the shim directory as the CLI holds it (from
-    // `CARGO_MANIFEST_DIR`, which `native_workspace` reproduces) and the guest
-    // directory as `current_dir` reports it — physical, so symlinks are already
-    // resolved there.
+    // The refusal names the shim directory as the CLI holds it (the bundle
+    // directory under the shim source cache, built from HOME/XDG_CACHE_HOME the
+    // way `shim_source_cache` reproduces) and the guest directory as
+    // `current_dir` reports it — physical, so symlinks are already resolved
+    // there.
     let package_physical = fs::canonicalize(&package).unwrap();
     assert!(
-        stderr.contains(&workspace.display().to_string())
+        stderr.contains(&shim_sources.display().to_string())
             && stderr.contains(&package_physical.display().to_string()),
         "refusal did not name both directories ({} and {}):\n{stderr}",
-        workspace.display(),
+        shim_sources.display(),
         package_physical.display()
     );
     assert!(
@@ -1415,7 +1416,7 @@ fn a_split_shim_guest_toolchain_is_refused_before_the_link() {
 // binary invoked DIRECTLY. Invoked as `cargo patina`, rustup's cargo proxy
 // exports `RUSTUP_TOOLCHAIN` and pins both halves; invoked directly there is no
 // such variable, and rustup's `rustc` proxy resolves each half from the
-// directory it runs in — the shim in the Patina workspace, the guest under its
+// directory it runs in — the shim in its source cache, the guest under its
 // pin. Skipped (loudly) without rustup or without the MSRV toolchain the check
 // ladder already requires; the hermetic test above never skips.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1436,13 +1437,13 @@ fn a_rust_toolchain_pin_is_refused_when_it_splits_the_build() {
         );
         return;
     }
-    // With RUSTUP_TOOLCHAIN cleared, the workspace half resolves the default
-    // toolchain. If that IS the pin, the two halves agree and there is nothing
-    // to detect.
-    let workspace = native_workspace();
+    // With RUSTUP_TOOLCHAIN cleared, the shim half (built in the shim source
+    // cache, which carries no pin of its own) resolves the default toolchain. If
+    // that IS the pin, the two halves agree and there is nothing to detect.
+    let shim_sources = shim_source_cache();
     let default = Command::new("rustup")
         .args(["show", "active-toolchain"])
-        .current_dir(workspace)
+        .current_dir(&shim_sources)
         .env_remove("RUSTUP_TOOLCHAIN")
         .output()
         .unwrap();
@@ -1548,7 +1549,7 @@ fn active_toolchain_binary(name: &str) -> PathBuf {
 #[test]
 fn a_non_rustup_rustc_proxy_gets_proxy_agnostic_toolchain_guidance() {
     let directory = tempdir().unwrap();
-    let workspace = native_workspace();
+    let shim_sources = shim_source_cache();
     let real_rustc = active_toolchain_binary("rustc");
     let real_cargo = active_toolchain_binary("cargo");
 
@@ -1558,10 +1559,10 @@ fn a_non_rustup_rustc_proxy_gets_proxy_agnostic_toolchain_guidance() {
     fs::write(
         &rustc_proxy,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = \"-vV\" ] && [ \"$(pwd -P)\" = \"{}\" ]; then\n  \
+            "#!/bin/sh\ncase \"$1:$(pwd -P)\" in\n  \"-vV:{}\"/*)\n    \
              \"{}\" -vV | sed '1s/.*/rustc 9.9.9-patina-mise-like-proxy \
-             (0000000 2000-01-01)/'\n  exit 0\nfi\nexec \"{}\" \"$@\"\n",
-            fs::canonicalize(workspace).unwrap().display(),
+             (0000000 2000-01-01)/'\n    exit 0;;\nesac\nexec \"{}\" \"$@\"\n",
+            fs::canonicalize(&shim_sources).unwrap().display(),
             real_rustc.display(),
             real_rustc.display()
         ),
@@ -1896,8 +1897,8 @@ fn write_plain_package(root: &Path, name: &str, main: &str) {
 // ran the CWD's package with the directory passed through as an argument. Here
 // the run is issued FROM A DIFFERENT package's directory (a decoy that would have
 // been run instead): the built guest's own marker must appear and the decoy's
-// must not. This also proves the shim-staticlib build is pinned to the Patina
-// source workspace (not the caller's CWD): building the positional package from a
+// must not. This also proves the shim-staticlib build runs in the unpacked shim
+// source cache (not the caller's CWD): building the positional package from a
 // foreign CWD previously failed to locate `patina-dst-native-shim`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
@@ -6577,6 +6578,29 @@ fn native_workspace() -> &'static Path {
         .unwrap()
         .parent()
         .unwrap()
+}
+
+/// Where the CLI unpacks its embedded shim source bundle and builds the shim:
+/// `<cache root>/patina/shim-src`, with the cache root resolved exactly as the
+/// CLI resolves it (`XDG_CACHE_HOME`, else the platform's per-user cache under
+/// `HOME`). Created here so a caller can canonicalize it before the CLI's first
+/// unpack.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn shim_source_cache() -> PathBuf {
+    let root = match env::var_os("XDG_CACHE_HOME").filter(|value| !value.is_empty()) {
+        Some(xdg) => PathBuf::from(xdg),
+        None => {
+            let home = PathBuf::from(env::var_os("HOME").expect("HOME is set"));
+            if cfg!(target_os = "macos") {
+                home.join("Library").join("Caches")
+            } else {
+                home.join(".cache")
+            }
+        }
+    };
+    let dir = root.join("patina").join("shim-src");
+    fs::create_dir_all(&dir).unwrap();
+    dir
 }
 
 // Two threads communicating over `std::sync::mpsc` with `recv_timeout`: on macOS

@@ -52,6 +52,10 @@ jobs:
             .
             testbeds/workq
             testbeds/pubsub
+          # cargo-patina unpacks and builds the native shim under the per-user
+          # cache (not the workspace target dir); keep that build warm too.
+          cache-directories: |
+            ~/.cache/patina
       # strace is the Linux whole-run syscall-containment class detector invoked
       # by validate-native-shim.sh. Install it and require it (PATINA_REQUIRE_STRACE=1
       # below) so a runner image without strace hard-fails instead of silently
@@ -128,6 +132,9 @@ jobs:
             .
             testbeds/workq
             testbeds/pubsub
+          # The native shim's per-user build cache (macOS location).
+          cache-directories: |
+            ~/Library/Caches/patina
       - run: cargo test --workspace --locked
       - run: scripts/validate-wasi.sh
       # macOS has no sound whole-run syscall tracing gate; the native script
@@ -180,11 +187,14 @@ jobs:
           targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
         with:
-          # Cache the root workspace (cargo-patina + shim) and the workq testbed
+          # Cache the root workspace (cargo-patina) and the workq testbed
           # so the campaign's per-generation builds reuse warm artifacts.
           workspaces: |
             .
             testbeds/workq
+          # The native shim's per-user build cache.
+          cache-directories: |
+            ~/.cache/patina
       # A 200-generation randomized fault-combination campaign over the flagship
       # workq testbed, including its schedule-fuzz tier.
       - run: testbeds/workq/fuzz-sweep.sh 1 200

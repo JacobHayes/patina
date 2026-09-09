@@ -17,6 +17,21 @@ patina-dst-runtime.workspace = true
 patina-dst-target.workspace = true
 patina-dst-trace.workspace = true
 patina-dst-wasi-host.workspace = true
+# The native-shim source bundle. `cargo-patina` carries the shim's full source
+# closure embedded (build.rs packs it) so an installed binary can build a guest's
+# linked shim without the Patina checkout present. build.rs learns each crate's
+# source directory over cargo's `links`/`DEP_<pkg>_SRC_DIR` channel, which cargo
+# exposes only to a DIRECT dependent — so `cargo-patina` must depend directly on
+# all 12 crates in the closure, not merely reach them transitively. These seven
+# are direct deps purely for that reason (the closure's other five appear above
+# already for their own APIs); see crates/patina-native-shim/AGENTS.md.
+patina-dst-driver-api.workspace = true
+patina-dst-fs-crash.workspace = true
+patina-dst-net-sim.workspace = true
+patina-dst-rng-seeded.workspace = true
+patina-dst-sched-det.workspace = true
+patina-dst-time-virtual.workspace = true
+patina-dst-wrapper-fault.workspace = true
 clap.workspace = true
 object.workspace = true
 proc-macro2.workspace = true
@@ -26,6 +41,13 @@ serde_json.workspace = true
 sha2.workspace = true
 syn.workspace = true
 tempfile.workspace = true
+toml.workspace = true
+
+[build-dependencies]
+# build.rs packs the shim source bundle: `toml` normalizes each embedded
+# manifest (resolving workspace inheritance so a crates.io/git checkout is a
+# no-op path) and `sha2` content-addresses the bundle for the runtime cache.
+sha2.workspace = true
 toml.workspace = true
 
 [dev-dependencies]

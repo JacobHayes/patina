@@ -163,6 +163,43 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   becomes a silent one. Arming failures abort loudly rather than continuing
   unarmed.
 
+## Source bundle and `links`
+
+`cargo-patina` does not build this crate from a source checkout: it embeds the
+shim's whole workspace dependency closure (this crate and the eleven runtime
+crates beneath it) at its own build time and unpacks it into a per-user cache
+when a guest is built, so an installed binary is self-sufficient (see
+ARCHITECTURE.md "Native (linked shim)" and `crates/cargo-patina/build.rs`).
+
+- Every closure crate declares `links = "<package-name>"` and carries a build
+  script whose only job is `cargo:src_dir=$CARGO_MANIFEST_DIR`. Cargo exposes
+  that to the build script of every DIRECT dependent as `DEP_<PKG>_SRC_DIR`,
+  which is how `cargo-patina`'s build script learns where each crate's source
+  is — the one documented channel for that, and it works the same in-tree, from
+  the crates.io registry checkout, and from a git checkout. `cargo-patina`
+  depends directly on all twelve crates for this reason alone; do not "clean
+  up" the ones it does not otherwise use.
+- `links` has a side effect: cargo refuses two versions of a `links` crate in
+  one dependency graph. For a runtime with one global context that is the
+  desired outcome — two runtimes in one process would be two contexts — so keep
+  the declaration; the value is a name, not a native library.
+- A crate added to or removed from the closure (`cargo metadata` on
+  `patina-dst-native-shim`) must be added to or removed from the `links` set,
+  `cargo-patina`'s direct dependencies, and the `SHIM_PACKAGES` table in its
+  build script together; the build script fails loudly on a missing
+  `DEP_*_SRC_DIR`.
+- The embedded manifests are normalized (workspace inheritance resolved,
+  closure deps repointed to sibling paths, dev-deps dropped). A new kind of
+  workspace-inherited key (`[lints] workspace = true`, say) is refused at build
+  time rather than shipped broken; extend the normalizer deliberately.
+- The unpacked bundle carries no toolchain pin and no version-manager config,
+  so the shim half of a native build resolves the AMBIENT toolchain. A `rustc`
+  proxy that resolves per directory and has no default (a mise shim outside the
+  tree it is configured for; rustup with no default toolchain) fails the
+  identity probe there, and the CLI says so with the remedies. Run the runtime
+  batteries through the activated environment (`mise run ...`, `mise exec --
+  scripts/validate-native-shim.sh`), not with bare shims on `PATH`.
+
 ## Change checklist
 
 - Keep C and Rust ABI signatures in lockstep. Variadic libc functions must be
