@@ -5,8 +5,9 @@
 
 use std::process::exit;
 use syscall_conformance::expect::{
-    declared_failing, diff, host_gate, load_divergences, load_manifest, normalize,
-    parse_expectation, render_expectation, selftest, Header, HostGate, Mode, SCHEMA,
+    declared_failing, diff, host_gate, load_divergences, load_manifest, load_registry, normalize,
+    parse_expectation, render_expectation, selftest, validate_manifest, Header, HostGate, Mode,
+    REGISTRY_SCHEMA, SCHEMA,
 };
 use syscall_conformance::observe::parse_stream;
 
@@ -17,23 +18,27 @@ fn usage() -> String {
     format!(
         "usage: conform <subcommand> ARGS…\n\
          \n\
-         abi        PROBES_TOML                                   print the virtual ABI level\n\
+         abi        REGISTRY_JSON                                 print the registry's virtual ABI level\n\
          list       PROBES_TOML                                   print every probe id\n\
-         bless      PROBE RAW_JSONL OUT_JSONL OS ARCH KERNEL GLIBC PROBES_TOML\n\
+         check-manifest PROBES_TOML REGISTRY_JSON                 every row/symbol the manifest names is a registry\n\
+                                                                  row of the right kind (exit 1 otherwise)\n\
+         bless      PROBE RAW_JSONL OUT_JSONL OS ARCH KERNEL GLIBC PROBES_TOML REGISTRY_JSON\n\
                                                                   normalize RAW and write OUT with a blessing header\n\
          header     EXPECTED_JSONL                                print the blessing header as key=value lines\n\
          diff       native|patina PROBE VEHICLE EXPECTED_JSONL ACTUAL_JSONL DIVERGENCES_TOML ok|failed\n\
                                                                   compare ACTUAL (raw) with EXPECTED; exit 1 on any\n\
                                                                   undeclared or stale divergence, count drift, or a\n\
                                                                   failed probe\n\
-         host-check PROBE PROBES_TOML EXPECTED_JSONL HOST_KERNEL   exit 0 usable, {EXIT_HOST_UNAVAILABLE} host-unavailable, 1 host older\n\
-                                                                  than the blessing kernel\n\
+         host-check PROBE PROBES_TOML REGISTRY_JSON EXPECTED_JSONL HOST_KERNEL\n\
+                                                                  exit 0 usable, {EXIT_HOST_UNAVAILABLE} host-unavailable (the host\n\
+                                                                  lacks an exercised row or implements an absent one),\n\
+                                                                  1 host older than the blessing kernel\n\
          selftest                                                 prove every differ/host gate can fail (exit 1 if any\n\
                                                                   planted failure is not refused)\n\
          declared-failing PROBE VEHICLE DIVERGENCES_TOML          exit 0 (and print the reason) when the probe is declared\n\
                                                                   failing under patina for that vehicle, {EXIT_NOT_DECLARED} otherwise\n\
          \n\
-         Schema {SCHEMA}."
+         Schema {SCHEMA}; REGISTRY_JSON is `cargo patina syscalls --format json` ({REGISTRY_SCHEMA})."
     )
 }
 
@@ -68,6 +73,16 @@ fn manifest_from(path: &str) -> syscall_conformance::expect::Manifest {
     }
 }
 
+fn registry_from(path: &str) -> syscall_conformance::expect::Registry {
+    match load_registry(&read(path)) {
+        Ok(registry) => registry,
+        Err(error) => {
+            eprintln!("conform: {path}: {error}");
+            exit(1)
+        }
+    }
+}
+
 fn expectation_from(path: &str) -> syscall_conformance::expect::Expectation {
     match parse_expectation(&read(path)) {
         Ok(expectation) => expectation,
@@ -91,7 +106,21 @@ fn main() {
         "--help" | "-h" | "help" => println!("{}", usage()),
         "abi" => {
             need(rest, 1, "abi");
-            println!("{}", manifest_from(&rest[0]).abi.virtual_level);
+            println!("{}", registry_from(&rest[0]).virtual_abi);
+        }
+        "check-manifest" => {
+            need(rest, 2, "check-manifest");
+            let manifest = manifest_from(&rest[0]);
+            let registry = registry_from(&rest[1]);
+            if let Err(error) = validate_manifest(&manifest, &registry) {
+                eprintln!("conform check-manifest: {error}");
+                exit(1);
+            }
+            println!(
+                "ok: {} probes, every name a registry row (virtual ABI {})",
+                manifest.probe.len(),
+                registry.virtual_abi
+            );
         }
         "list" => {
             need(rest, 1, "list");
@@ -100,8 +129,9 @@ fn main() {
             }
         }
         "bless" => {
-            need(rest, 8, "bless");
+            need(rest, 9, "bless");
             let manifest = manifest_from(&rest[7]);
+            let registry = registry_from(&rest[8]);
             if !manifest.probe.contains_key(&rest[0]) {
                 eprintln!("conform bless: probe {:?} is not in probes.toml", rest[0]);
                 exit(1);
@@ -127,7 +157,7 @@ fn main() {
                 arch: rest[4].clone(),
                 kernel: rest[5].clone(),
                 glibc: rest[6].clone(),
-                virtual_abi: manifest.abi.virtual_level,
+                virtual_abi: registry.virtual_abi,
             };
             let rendered = render_expectation(&header, &normalize(raw));
             if let Some(parent) = std::path::Path::new(&rest[2]).parent() {
@@ -205,10 +235,11 @@ fn main() {
             }
         }
         "host-check" => {
-            need(rest, 4, "host-check");
+            need(rest, 5, "host-check");
             let manifest = manifest_from(&rest[1]);
-            let expected = expectation_from(&rest[2]);
-            match host_gate(&manifest, &rest[0], &expected.header, &rest[3]) {
+            let registry = registry_from(&rest[2]);
+            let expected = expectation_from(&rest[3]);
+            match host_gate(&manifest, &registry, &rest[0], &expected.header, &rest[4]) {
                 HostGate::Ok => println!("ok"),
                 HostGate::Unavailable(reason) => {
                     println!("host-unavailable: {reason}");

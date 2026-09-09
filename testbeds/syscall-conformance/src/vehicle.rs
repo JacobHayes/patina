@@ -141,6 +141,9 @@ pub enum Sys {
     Getpid,
     Getuid,
     Getgid,
+    /// A number past the virtual ABI level (registry `since` 7.3 > 6.8): the
+    /// probe asserts its absence, not its semantics.
+    Fchroot,
 }
 
 impl Sys {
@@ -191,6 +194,7 @@ impl Sys {
             Sys::Getpid => "getpid",
             Sys::Getuid => "getuid",
             Sys::Getgid => "getgid",
+            Sys::Fchroot => "fchroot",
         }
     }
 
@@ -257,6 +261,9 @@ impl Sys {
             Sys::Getpid => libc::SYS_getpid,
             Sys::Getuid => libc::SYS_getuid,
             Sys::Getgid => libc::SYS_getgid,
+            // libc 0.2.189 predates the number; it is 472 in the vendored
+            // x86_64 table and the generic (arm64) table alike.
+            Sys::Fchroot => 472,
         };
         (nr, args)
     }
@@ -432,6 +439,17 @@ fn libc_symbol(sys: Sys, a: Args) -> i64 {
             Sys::Getpid => getpid() as i64,
             Sys::Getuid => getuid() as i64,
             Sys::Getgid => getgid() as i64,
+            // No glibc wrapper exists for a number this new; the libc spelling
+            // is syscall(2), the same door glibc itself would use.
+            Sys::Fchroot => syscall(
+                472,
+                a[0] as c_long,
+                a[1] as c_long,
+                a[2] as c_long,
+                a[3] as c_long,
+                a[4] as c_long,
+                a[5] as c_long,
+            ) as i64,
         }
     };
     if result == -1 {

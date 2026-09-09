@@ -30,6 +30,7 @@ const fn r(
         reasoning,
         closes_in,
         probe: None,
+        since: None,
     }
 }
 
@@ -44,7 +45,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_read`, by descriptor class: file, pipe/socketpair, eventfd, socket).",
         None,
-    ),
+    )
+    .probe("fs/open_rw"),
     r(
         "write",
         1,
@@ -53,7 +55,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_write`; fds 1/2 go to captured stdio).",
         None,
-    ),
+    )
+    .probe("fs/open_rw"),
     r(
         "open",
         2,
@@ -71,7 +74,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_close`, by descriptor class); drops any `getdents64` snapshot.",
         None,
-    ),
+    )
+    .probe("fs/open_rw"),
     r(
         "stat",
         4,
@@ -89,7 +93,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_fd_metadata_full`); the kernel `struct stat` layout is filled per arch.",
         None,
-    ),
+    )
+    .probe("fs/metadata"),
     r(
         "lstat",
         6,
@@ -116,7 +121,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_seek`); `SEEK_SET 0` on a directory fd rewinds its `getdents64` snapshot.",
         None,
-    ),
+    )
+    .probe("fs/open_rw"),
     r(
         "mmap",
         9,
@@ -332,7 +338,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_dup` / `patina_pipe_dup` / `patina_epoll_dup` / `patina_dirdup` by class).",
         None,
-    ),
+    )
+    .probe("fd/pipes"),
     r(
         "dup2",
         33,
@@ -359,7 +366,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "A relative sleep on the virtual clock (`patina_sleep_until`).",
         None,
-    ),
+    )
+    .probe("time/clocks"),
     r(
         "getitimer",
         36,
@@ -395,7 +403,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Constant(1),
         "The one modeled process is pid 1, the same value the C `getpid` interposer returns.",
         Some("time+identity"),
-    ),
+    )
+    .probe("fs/metadata"),
     r(
         "sendfile",
         40,
@@ -413,7 +422,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_socket`): AF_INET stream/datagram over SimNet; AF_UNIX and IPv6 answer EAFNOSUPPORT.",
         None,
-    ),
+    )
+    .probe("net/udp"),
     r(
         "connect",
         42,
@@ -422,7 +432,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_connect` / `patina_net_tcp_connect`).",
         None,
-    ),
+    )
+    .probe("net/udp"),
     r(
         "accept",
         43,
@@ -440,7 +451,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_sendto` / `patina_net_stream_send`); MSG_NOSIGNAL is the one accepted flag.",
         None,
-    ),
+    )
+    .probe("net/udp"),
     r(
         "recvfrom",
         45,
@@ -449,7 +461,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_recvfrom` / `patina_net_stream_recv`).",
         None,
-    ),
+    )
+    .probe("net/udp"),
     r(
         "sendmsg",
         46,
@@ -476,7 +489,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_shutdown`).",
         None,
-    ),
+    )
+    .probe("net/udp"),
     r(
         "bind",
         49,
@@ -485,7 +499,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_bind`).",
         None,
-    ),
+    )
+    .probe("net/udp"),
     r(
         "listen",
         50,
@@ -494,7 +509,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_listen`).",
         None,
-    ),
+    )
+    .probe("net/tcp"),
     r(
         "getsockname",
         51,
@@ -503,7 +519,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_getsockname`).",
         None,
-    ),
+    )
+    .probe("net/udp"),
     r(
         "getpeername",
         52,
@@ -512,7 +529,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_getpeername`).",
         None,
-    ),
+    )
+    .probe("net/udp"),
     r(
         "socketpair",
         53,
@@ -530,7 +548,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "The bookkeeping subset the C interposer accepts (SO_REUSEADDR/KEEPALIVE/BROADCAST/REUSEPORT, zero timeouts, linger off, TCP_NODELAY); everything else is ENOPROTOOPT.",
         None,
-    ),
+    )
+    .probe("net/udp"),
     r(
         "getsockopt",
         55,
@@ -539,7 +558,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Mirrors the C interposer: zero-fills the caller's buffer and succeeds (SO_ERROR reads 0).",
         None,
-    ),
+    )
+    .probe("net/udp"),
     r(
         "clone",
         56,
@@ -692,7 +712,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "F_GETFD/F_SETFD/F_DUPFD/F_DUPFD_CLOEXEC, F_GETFL/F_SETFL (O_NONBLOCK by class), and the record-lock family are modeled; other commands answer EINVAL like the C interposer.",
         None,
-    ),
+    )
+    .probe("fd/pipes"),
     r(
         "flock",
         73,
@@ -701,7 +722,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_flock`).",
         None,
-    ),
+    )
+    .probe("fd/pipes"),
     r(
         "fsync",
         74,
@@ -908,7 +930,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "The virtual CLOCK_REALTIME split into seconds/microseconds (`patina_clock_now`); the timezone argument is ignored as glibc does.",
         None,
-    ),
+    )
+    .probe("time/clocks"),
     r(
         "getrlimit",
         97,
@@ -962,7 +985,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Constant(1000),
         "The one modeled non-root identity (uid 1000), the same value the C interposer returns; the identity arc makes it a `--host-*` knob.",
         Some("time+identity"),
-    ),
+    )
+    .probe("fs/metadata"),
     r(
         "syslog",
         103,
@@ -980,7 +1004,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Constant(1000),
         "The one modeled non-root identity (gid 1000), the same value the C interposer returns.",
         Some("time+identity"),
-    ),
+    )
+    .probe("fs/metadata"),
     r(
         "setuid",
         105,
@@ -1862,7 +1887,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "FUTEX_WAIT/WAKE and their BITSET forms park and wake on the deterministic scheduler (the same decode as the libc `syscall(2)` interposer, timeouts on the virtual clock); other ops answer ENOSYS.",
         None,
-    ),
+    )
+    .probe("thread/futex"),
     r(
         "sched_setaffinity",
         203,
@@ -1997,7 +2023,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Serves a per-directory-fd snapshot taken through `patina_read_dir`, the entry the C `readdir` uses; `.`/`..` and real `d_ino` are the fs arc.",
         Some("fs"),
-    ),
+    )
+    .probe("fs/getdents"),
     r(
         "set_tid_address",
         218,
@@ -2096,7 +2123,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "CLOCK_REALTIME/CLOCK_MONOTONIC from the virtual clock (`patina_clock_now`); other clocks answer EINVAL.",
         None,
-    ),
+    )
+    .probe("time/clocks"),
     r(
         "clock_getres",
         229,
@@ -2114,7 +2142,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Relative and TIMER_ABSTIME sleeps on the virtual clock (`patina_sleep_until`); other flags answer EINVAL.",
         None,
-    ),
+    )
+    .probe("time/clocks"),
     r(
         "exit_group",
         231,
@@ -2132,7 +2161,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_epoll_wait`), a second caller of the readiness reactor, never a second reactor.",
         None,
-    ),
+    )
+    .probe("readiness/epoll"),
     r(
         "epoll_ctl",
         233,
@@ -2141,7 +2171,8 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_epoll_ctl`).",
         None,
-    ),
+    )
+    .probe("readiness/epoll"),
     r(
         "tgkill",
         234,
@@ -2357,7 +2388,9 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_open` / `patina_diropen`): `*at` paths resolve through the shared directory-descriptor table; O_PATH and O_DIRECTORY are distinct opens; O_PATH|O_NOFOLLOW on a symlink prints the shared deny and answers ENOSYS.",
         None,
-    ),
+    )
+    .probe("fs/open_rw")
+    .since("2.6.16"),
     r(
         "mkdirat",
         258,
@@ -2366,7 +2399,9 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_mkdir`), the creation mode carried and the umask applied by the driver.",
         None,
-    ),
+    )
+    .probe("fs/dirs")
+    .since("2.6.16"),
     r(
         "mknodat",
         259,
@@ -2402,7 +2437,9 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_metadata_full`); AT_SYMLINK_NOFOLLOW/AT_EMPTY_PATH/AT_NO_AUTOMOUNT honored, other flags EINVAL.",
         None,
-    ),
+    )
+    .probe("fs/metadata")
+    .since("2.6.16"),
     r(
         "unlinkat",
         263,
@@ -2411,7 +2448,9 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_unlink` / `patina_rmdir` by AT_REMOVEDIR).",
         None,
-    ),
+    )
+    .probe("fs/dirs")
+    .since("2.6.16"),
     r(
         "renameat",
         264,
@@ -2420,7 +2459,9 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_rename`).",
         None,
-    ),
+    )
+    .probe("fs/dirs")
+    .since("2.6.16"),
     r(
         "linkat",
         265,
@@ -2429,7 +2470,9 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_link`); AT_SYMLINK_FOLLOW/AT_EMPTY_PATH honored.",
         None,
-    ),
+    )
+    .probe("fs/links")
+    .since("2.6.16"),
     r(
         "symlinkat",
         266,
@@ -2438,7 +2481,9 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_symlink`).",
         None,
-    ),
+    )
+    .probe("fs/links")
+    .since("2.6.16"),
     r(
         "readlinkat",
         267,
@@ -2447,7 +2492,9 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_read_link`).",
         None,
-    ),
+    )
+    .probe("fs/links")
+    .since("2.6.16"),
     r(
         "fchmodat",
         268,
@@ -2483,7 +2530,9 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "The readiness core the C `poll` uses, with a timespec timeout on the virtual clock; the sigmask is ignored (no ambient signals).",
         None,
-    ),
+    )
+    .probe("readiness/ppoll")
+    .since("2.6.16"),
     r(
         "unshare",
         272,
@@ -2636,7 +2685,9 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_net_accept`); SOCK_NONBLOCK/SOCK_CLOEXEC honored.",
         None,
-    ),
+    )
+    .probe("net/tcp")
+    .since("2.6.28"),
     r(
         "signalfd4",
         289,
@@ -2654,7 +2705,9 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_eventfd`).",
         None,
-    ),
+    )
+    .probe("readiness/epoll")
+    .since("2.6.27"),
     r(
         "epoll_create1",
         291,
@@ -2663,7 +2716,9 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_epoll_create1`).",
         None,
-    ),
+    )
+    .probe("readiness/epoll")
+    .since("2.6.27"),
     r(
         "dup3",
         292,
@@ -2681,7 +2736,9 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_pipe`): an in-process pipe channel; O_NONBLOCK honored.",
         None,
-    ),
+    )
+    .probe("fd/pipes")
+    .since("2.6.27"),
     r(
         "inotify_init1",
         294,
@@ -2906,7 +2963,9 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_entropy`): seeded bytes; GRND_* flags are irrelevant to a source that never blocks.",
         None,
-    ),
+    )
+    .probe("entropy/getrandom")
+    .since("3.17"),
     r(
         "memfd_create",
         319,
@@ -3032,7 +3091,9 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Disposition::Modeled,
         "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_metadata_full`), filling the `struct statx` fields the model has; synthesized fields (owner, device) are the fs arc.",
         Some("fs"),
-    ),
+    )
+    .probe("fs/metadata")
+    .since("4.11"),
     r(
         "io_pgetevents",
         333,
@@ -3056,19 +3117,21 @@ pub const SYSCALLS: &[SyscallRow] = &[
         335,
         None,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Absent,
+        "Absent: the number first appears in Linux 6.11, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.11 or later returns it to the privileged trap (§7): a kernel probe trampoline entry, not a user-callable operation.",
         None,
-    ),
+    )
+    .since("6.11"),
     r(
         "uprobe",
         336,
         None,
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Absent,
+        "Absent: the number first appears in Linux 6.18, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.18 or later returns it to the privileged trap (§7): a kernel probe entry, not a user-callable operation.",
         None,
-    ),
+    )
+    .since("6.18"),
     r(
         "pidfd_send_signal",
         424,
@@ -3416,98 +3479,110 @@ pub const SYSCALLS: &[SyscallRow] = &[
         462,
         Some(462),
         Family::Mem,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Not modeled yet: a raw emitter aborts by name. The memory arc gives it single-process semantics (§6).",
+        Disposition::Absent,
+        "Absent: the number first appears in Linux 6.10, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.10 or later returns it to the memory arc (single-process sealing semantics, §6).",
         Some("memory+ipc"),
-    ),
+    )
+    .since("6.10"),
     r(
         "setxattrat",
         463,
         Some(463),
         Family::Fs,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
+        Disposition::Absent,
+        "Absent: the number first appears in Linux 6.13, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.13 or later returns it to the fs arc (dirfd/flags xattrs over the deterministic filesystem, §6).",
         Some("fs"),
-    ),
+    )
+    .since("6.13"),
     r(
         "getxattrat",
         464,
         Some(464),
         Family::Fs,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
+        Disposition::Absent,
+        "Absent: the number first appears in Linux 6.13, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.13 or later returns it to the fs arc (dirfd/flags xattrs over the deterministic filesystem, §6).",
         Some("fs"),
-    ),
+    )
+    .since("6.13"),
     r(
         "listxattrat",
         465,
         Some(465),
         Family::Fs,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
+        Disposition::Absent,
+        "Absent: the number first appears in Linux 6.13, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.13 or later returns it to the fs arc (dirfd/flags xattrs over the deterministic filesystem, §6).",
         Some("fs"),
-    ),
+    )
+    .since("6.13"),
     r(
         "removexattrat",
         466,
         Some(466),
         Family::Fs,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
+        Disposition::Absent,
+        "Absent: the number first appears in Linux 6.13, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.13 or later returns it to the fs arc (dirfd/flags xattrs over the deterministic filesystem, §6).",
         Some("fs"),
-    ),
+    )
+    .since("6.13"),
     r(
         "open_tree_attr",
         467,
         Some(467),
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Absent,
+        "Absent: the number first appears in Linux 6.15, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.15 or later returns it to the privileged trap (§7): mount-tree configuration.",
         None,
-    ),
+    )
+    .since("6.15"),
     r(
         "file_getattr",
         468,
         Some(468),
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Absent,
+        "Absent: the number first appears in Linux 6.17, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.17 or later returns it to the privileged trap (§7): inode attribute flags previously behind ioctls.",
         None,
-    ),
+    )
+    .since("6.17"),
     r(
         "file_setattr",
         469,
         Some(469),
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Absent,
+        "Absent: the number first appears in Linux 6.17, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.17 or later returns it to the privileged trap (§7): inode attribute flags previously behind ioctls.",
         None,
-    ),
+    )
+    .since("6.17"),
     r(
         "listns",
         470,
         Some(470),
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Absent,
+        "Absent: the number first appears in Linux 6.19, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 6.19 or later returns it to the privileged trap (§7): namespace enumeration.",
         None,
-    ),
+    )
+    .since("6.19"),
     r(
         "rseq_slice_yield",
         471,
         Some(471),
         Family::Sync,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Not modeled yet: a raw emitter aborts by name. The signals+threads arc models it on the scheduler.",
+        Disposition::Absent,
+        "Absent: the number first appears in Linux 7.0, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 7.0 or later returns it to the signals+threads arc (the rseq time-slice extension protocol on the scheduler).",
         Some("signals+threads+process"),
-    ),
+    )
+    .since("7.0"),
     r(
         "fchroot",
         472,
         Some(472),
         Family::Privileged,
-        Disposition::Trap(TRAP_PRIVILEGED),
-        "Privileged / kernel-config stays a named fatal trap: it changes kernel state or needs CAP_*, nothing a DST guest legitimately needs (§7).",
+        Disposition::Absent,
+        "Absent: the number first appears in Linux 7.3, newer than the virtual ABI level (`registry::VIRTUAL_ABI`), so the virtual kernel answers ENOSYS exactly as a kernel of that level does. A VIRTUAL_ABI of 7.3 or later returns it to the privileged trap (§7): an fd-based root change.",
         None,
-    ),
+    )
+    .probe("abi/newer-than-virtual")
+    .since("7.3"),
 ];

@@ -19,8 +19,13 @@
 //!   (or, for `Absent`, provably do not) and every defined public symbol has a
 //!   row; (e) `patina-target`'s classification lists agree with the symbol
 //!   rows (`cargo-patina/tests/syscall_registry.rs`);
-//! * (c) every `Modeled` row names a probe in the conformance testbed — the
-//!   `probe` field exists for it; the gate lands with the testbed.
+//! * (c) every `probe` a row names is a probe in the conformance testbed's
+//!   `probes.toml`, every row that manifest names exists here, and a `Modeled`
+//!   row without a probe is reported — a failure under
+//!   `PATINA_CONFORMANCE_STRICT=1` (`cargo-patina/tests/syscall_registry.rs`);
+//! * a row whose `since` is newer than [`VIRTUAL_ABI`] is `Absent`
+//!   (`syscalls::tests`): the virtual kernel answers `ENOSYS` exactly as a
+//!   kernel of that release does.
 
 pub mod symbols;
 pub mod syscalls;
@@ -30,6 +35,38 @@ mod tests;
 
 pub use symbols::SYMBOLS;
 pub use syscalls::SYSCALLS;
+
+/// The Linux kernel release whose ABI the virtual kernel declares. A number the
+/// vendored table lists but that first appeared in a newer release is
+/// [`Disposition::Absent`] — `ENOSYS`, byte-identical to what a kernel of this
+/// release answers — and a probe's blessing header records it. Raising it moves
+/// every row whose `since` it passes back to its family's arc (the rule test
+/// names them).
+pub const VIRTUAL_ABI: &str = "6.8";
+
+/// `6.8.0-139-generic` → `(6, 8, 0)`; `6.10` → `(6, 10, 0)`. `None` when the
+/// text does not start with a dotted release number.
+pub fn parse_release(text: &str) -> Option<(u64, u64, u64)> {
+    let numeric: String = text
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let mut parts = numeric.split('.').filter(|part| !part.is_empty());
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().map_or(Some(0), |part| part.parse().ok())?;
+    let patch = parts.next().map_or(Some(0), |part| part.parse().ok())?;
+    Some((major, minor, patch))
+}
+
+/// Whether a row first appearing in kernel `since` is outside the virtual ABI
+/// level: `since` is newer than [`VIRTUAL_ABI`]. An unparsable `since` is
+/// treated as newer (fail closed: a row nobody can date is not claimed).
+pub fn newer_than_virtual_abi(since: &str) -> bool {
+    match (parse_release(since), parse_release(VIRTUAL_ABI)) {
+        (Some(since), Some(virtual_abi)) => since > virtual_abi,
+        _ => true,
+    }
+}
 
 /// An operating system whose syscall table the registry keys rows by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -197,8 +234,10 @@ pub enum Disposition {
     SoftDeny(i32),
     /// A named, deterministic abort. The class is one of [`TRAP_CLASSES`].
     Trap(&'static str),
-    /// Not in this kernel ABI: `ENOSYS`, byte-identical to the host. No row
-    /// carries this yet — the signals arc flips the `Removed` rows to it.
+    /// Not in this kernel ABI: `ENOSYS`, byte-identical to what a
+    /// [`VIRTUAL_ABI`] kernel answers. Today exactly the rows whose `since` is
+    /// newer than the virtual ABI level; the signals arc flips the `Removed`
+    /// rows to it too.
     Absent,
 }
 
@@ -283,9 +322,37 @@ pub struct SyscallRow {
     /// The arc (docs/arcs/syscall-conformance.md §6) that changes this row's
     /// disposition, or `None` when the disposition is final.
     pub closes_in: Option<&'static str>,
-    /// The conformance probe id that host-checks a `Modeled` row. `None` until
-    /// the testbed lands; the "Modeled rows need a probe" gate arrives with it.
+    /// The primary conformance probe (`testbeds/syscall-conformance/probes.toml`
+    /// id) that host-checks this row. Gated both ways against the manifest; a
+    /// `Modeled` row with `None` is reported by `cargo patina syscalls` and by
+    /// the cross-gate (a failure under `PATINA_CONFORMANCE_STRICT=1`).
     pub probe: Option<&'static str>,
+    /// The first mainline kernel release carrying this number, when it is
+    /// newer than the table's baseline (docs/arcs/syscall-conformance.md; the
+    /// prior-art drift table). `None` means the number predates every host the
+    /// harness runs on. A `since` newer than [`VIRTUAL_ABI`] makes the row
+    /// `Absent`.
+    pub since: Option<&'static str>,
+}
+
+impl SyscallRow {
+    /// Name the primary conformance probe for this row.
+    pub const fn probe(mut self, id: &'static str) -> Self {
+        self.probe = Some(id);
+        self
+    }
+
+    /// Record the first kernel release carrying this number.
+    pub const fn since(mut self, release: &'static str) -> Self {
+        self.since = Some(release);
+        self
+    }
+
+    /// Whether the row's `since` places it outside the virtual ABI level, in
+    /// which case its disposition must be `Absent` (the rule test pins it).
+    pub fn absent_by_abi(&self) -> bool {
+        self.since.is_some_and(newer_than_virtual_abi)
+    }
 }
 
 /// Which platform's shim objects define a symbol.
@@ -381,6 +448,18 @@ pub struct SymbolRow {
     pub platform: Platform,
     pub serves: Serves,
     pub status: SymbolStatus,
+    /// The primary conformance probe that exercises this symbol through the
+    /// `libc` vehicle (`probes.toml` `symbols`), gated both ways against the
+    /// manifest like [`SyscallRow::probe`].
+    pub probe: Option<&'static str>,
+}
+
+impl SymbolRow {
+    /// Name the primary conformance probe for this symbol.
+    pub const fn probe(mut self, id: &'static str) -> Self {
+        self.probe = Some(id);
+        self
+    }
 }
 
 /// The row for a syscall name, if any.
@@ -396,6 +475,17 @@ pub fn rows_for(arch: Arch) -> Vec<(u32, &'static SyscallRow)> {
         .collect();
     rows.sort_by_key(|(nr, _)| *nr);
     rows
+}
+
+/// The `Modeled` syscall rows no conformance probe covers yet, by name in
+/// x86_64 number order — the set `cargo patina syscalls` reports and the
+/// cross-gate counts (and refuses under `PATINA_CONFORMANCE_STRICT=1`).
+pub fn modeled_rows_without_probe() -> Vec<&'static str> {
+    SYSCALLS
+        .iter()
+        .filter(|row| row.disposition == Disposition::Modeled && row.probe.is_none())
+        .map(|row| row.name)
+        .collect()
 }
 
 /// The symbol rows that serve a syscall name.

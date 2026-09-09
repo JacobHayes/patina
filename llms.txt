@@ -172,9 +172,13 @@ unknown option.
   `constant(v)`, `soft-deny(errno)`, `trap(class)`, `absent`), reasoning, the
   arc that changes it, and the libc symbols that serve it; then the symbol
   inventory, including known ABI spellings the shim does NOT define (`absent`).
-  Linux only today (`--os darwin` is refused by name). JSON output is schema
-  `patina.syscalls/v1`. Consult this, not a doc, for what a raw syscall or a
-  libc call does under patina.
+  Linux only today (`--os darwin` is refused by name). The header carries the
+  virtual kernel ABI level (`virtual_abi`; a row whose `since` is newer is
+  `absent` = ENOSYS) and the summary counts and names the modeled rows no
+  conformance probe covers yet (`modeled rows without a probe: N (...)`;
+  `summary.modeled_without_probe`). JSON output is schema `patina.syscalls/v1`
+  (per row: `probe`, `since`). Consult this, not a doc, for what a raw syscall
+  or a libc call does under patina.
 
 ## Fault + buggify knobs (seed-driven, default off)
 

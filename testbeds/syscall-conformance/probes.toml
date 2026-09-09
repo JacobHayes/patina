@@ -1,61 +1,18 @@
 # The probe manifest: which kernel rows and which libc symbols each probe
 # covers. The registry (crates/patina-native-shim/src/registry/) names a probe
-# id per Modeled row; the cross-gate checks both directions against this file.
+# id per row; the cross-gate (crates/cargo-patina/tests/syscall_registry.rs)
+# checks both directions against this file, and `conform check-manifest`
+# refuses a name that is not a registry row before any leg runs.
 #
-# [abi].virtual is the kernel ABI level patina's virtual kernel claims and is
-# stamped into every expectation header. [since] is the first mainline kernel
-# carrying each number; the native leg marks a probe host-unavailable (not
-# failed) when the host kernel predates one of its rows.
-
-[abi]
-virtual = "6.8"
-
-[since]
-read = "2.6.0"
-write = "2.6.0"
-close = "2.6.0"
-lseek = "2.6.0"
-fstat = "2.6.0"
-dup = "2.6.0"
-fcntl = "2.6.0"
-flock = "2.6.0"
-clock_gettime = "2.6.0"
-gettimeofday = "2.6.0"
-nanosleep = "2.6.0"
-clock_nanosleep = "2.6.0"
-socket = "2.6.0"
-bind = "2.6.0"
-listen = "2.6.0"
-connect = "2.6.0"
-sendto = "2.6.0"
-recvfrom = "2.6.0"
-getsockname = "2.6.0"
-getpeername = "2.6.0"
-shutdown = "2.6.0"
-setsockopt = "2.6.0"
-getsockopt = "2.6.0"
-epoll_ctl = "2.6.0"
-epoll_wait = "2.6.0"
-futex = "2.6.0"
-getpid = "2.6.0"
-getuid = "2.6.0"
-getgid = "2.6.0"
-getdents64 = "2.6.0"
-openat = "2.6.16"
-newfstatat = "2.6.16"
-mkdirat = "2.6.16"
-unlinkat = "2.6.16"
-renameat = "2.6.16"
-symlinkat = "2.6.16"
-readlinkat = "2.6.16"
-linkat = "2.6.16"
-ppoll = "2.6.16"
-pipe2 = "2.6.27"
-eventfd2 = "2.6.27"
-epoll_create1 = "2.6.27"
-accept4 = "2.6.28"
-getrandom = "3.17"
-statx = "4.11"
+# The virtual ABI level and each row's first kernel (`since`) live in the
+# registry (`registry::VIRTUAL_ABI`, `SyscallRow::since`) and reach the harness
+# through `cargo patina syscalls --format json`, never a constant here.
+#
+# Per probe: `syscalls` are the rows it exercises (the native leg is
+# host-unavailable when the host kernel predates one), `absent` the rows it
+# asserts ENOSYS for because their `since` is past the virtual ABI level (the
+# native leg is host-unavailable when the host kernel IMPLEMENTS one), and
+# `symbols` the libc spellings the `libc` vehicle goes through.
 
 [probe."fs/open_rw"]
 syscalls = ["openat", "read", "write", "lseek", "close"]
@@ -108,3 +65,7 @@ symbols = ["ppoll", "pipe2", "eventfd", "read", "write", "close", "clock_gettime
 [probe."thread/futex"]
 syscalls = ["futex", "clock_gettime"]
 symbols = ["syscall", "clock_gettime"]
+
+[probe."abi/newer-than-virtual"]
+absent = ["fchroot"]
+symbols = ["syscall"]

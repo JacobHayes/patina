@@ -17,6 +17,19 @@ testbeds/syscall-conformance/run.sh --bless         # re-record expected/ on THI
 testbeds/syscall-conformance/run.sh --help
 ```
 
+## The registry and the manifest
+
+`probes.toml` says which rows and symbols each probe covers; the registry
+(`crates/patina-native-shim/src/registry/`) says which probe covers each row.
+The two are gated against each other both ways, and the prelude refuses a
+manifest naming a non-row (`conform check-manifest`). The virtual kernel ABI
+level (`registry::VIRTUAL_ABI`) and each row's first kernel (`since`) reach the
+harness through `cargo patina syscalls --format json` (dumped to
+`target/conformance/registry.json`), so an expectation header and the host
+gate can never disagree with the registry. `abi/newer-than-virtual` is the
+probe for the rule: a number past the level (`fchroot`, 472, Linux 7.3) is
+`ENOSYS` through every vehicle, and natively the host must lack it too.
+
 ## Vehicles
 
 | `--vehicle` | how the call is issued | what it exercises under patina |
@@ -35,7 +48,7 @@ just that probe rather than every binary.
 
 | `--mode` | leg | what must hold |
 |---|---|---|
-| `native` | the plain binary with `--strict` | exits 0; normalized stream equals `expected/<probe>.<os>-<arch>.jsonl` exactly; host kernel ≥ the blessing kernel; a host lacking a row's number is `HOST-UNAVAILABLE` (counted, not failed) |
+| `native` | the plain binary with `--strict` | exits 0; normalized stream equals `expected/<probe>.<os>-<arch>.jsonl` exactly; host kernel ≥ the blessing kernel; a host lacking an exercised row's number, or implementing a row the probe asserts `absent`, is `HOST-UNAVAILABLE` (counted, not failed) |
 | `patina` | `cargo patina run … --seed 1 -- --vehicle V` | every field difference from the blessing is declared in `divergences.toml`, and every declaration still diverges (a stale one fails) |
 | `replay` | `run --record` then `replay` | the two streams are byte-identical and the recorded one passes the patina diff |
 | `leak` | the shim-linked binary directly under `strace` | zero host syscalls outside the loader prelude (the `validate-native-shim.sh` default-deny filter, trace set widened to `%process,%signal,%ipc`) |
@@ -81,7 +94,8 @@ a scenario cannot continue without.
 ```
 
 `virtual_abi` is the kernel ABI level patina's virtual kernel claims
-(`probes.toml [abi]`). Re-record with `--bless` on a host whose kernel is at
+(`registry::VIRTUAL_ABI`, read from `cargo patina syscalls --format json` in
+the prelude along with each row's `since`; the manifest carries neither). Re-record with `--bless` on a host whose kernel is at
 least what the other blessings name; the other two vehicles must then agree
 natively (the runner checks). A platform with no expectation file is skipped
 loudly (`UNBLESSED`); `linux-aarch64` needs a bless on an aarch64 host.
@@ -110,8 +124,10 @@ gap. `vehicle = "…"` scopes a declaration to one vehicle.
 same differ the legs use (`conform selftest`): a planted divergence (native and
 patina), a planted stale divergence, planted event-count drift in both
 directions, a failed check, a probe that dies, planted stale probe-level and
-abort-level declarations, the host gate's host-unavailable and too-old refusals,
-plus the controls that must pass; and the strace leak gate against a planted
+abort-level declarations, the host gate's refusals (host-unavailable in both
+directions — a kernel lacking an exercised row, a kernel implementing an
+`absent` one — and too-old), a manifest naming a non-row or a row of the wrong
+kind, plus the controls that must pass; and the strace leak gate against a planted
 `openat("/etc/hostname")` (`probes/selftest/leak.rs`) under the leg's exact
 `strace` invocation and filter.
 
@@ -119,8 +135,13 @@ plus the controls that must pass; and the strace leak gate against a planted
 
 1. Add `probes/<family>/<name>.rs` (see any existing one) and its `[[bin]]`
    (`name = "<family>-<name>"`) to `Cargo.toml`.
-2. Add `[probe."<family>/<name>"]` to `probes.toml` with the kernel rows and
-   libc symbols it covers (every row needs a `[since]` kernel).
+2. Add `[probe."<family>/<name>"]` to `probes.toml` with the kernel rows it
+   exercises (`syscalls`), the rows it asserts `ENOSYS` for because their
+   `since` is past the virtual ABI level (`absent`), and the libc symbols the
+   `libc` vehicle goes through (`symbols`); every name must be a registry row,
+   and the row's `probe` field must name this probe back
+   (`crates/patina-native-shim/src/registry/`, gated by
+   `cargo test -p cargo-patina --test syscall_registry`).
 3. `run.sh --bless --probe <family>/<name>`, then `run.sh --mode patina --probe …`
    and declare what it finds in `divergences.toml` with a `pending: <family>`
    reason and the responsible shim code.

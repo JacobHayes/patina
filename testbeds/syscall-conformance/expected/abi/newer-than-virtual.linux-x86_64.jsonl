@@ -1,0 +1,5 @@
+{"header":{"schema":"patina.conformance/v1","probe":"abi/newer-than-virtual","os":"linux","arch":"x86_64","kernel":"6.8.0-139-generic","glibc":"2.39","virtual_abi":"6.8"}}
+{"seq":0,"op":"fchroot","args":{"fd":-100,"flags":0},"ret":-1,"errno":"ENOSYS","fields":{},"norm":{}}
+{"seq":1,"op":"check","args":{"label":"a number past the virtual ABI level is ENOSYS"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":2,"op":"fchroot","args":{"fd":-1,"flags":0},"ret":-1,"errno":"ENOSYS","fields":{},"norm":{}}
+{"seq":3,"op":"check","args":{"label":"ENOSYS regardless of the arguments"},"ret":1,"errno":null,"fields":{},"norm":{}}

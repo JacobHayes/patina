@@ -65,7 +65,10 @@ crates/patina-native-shim/
 ```
 
 `SyscallRow { name, nr: Nr { x86_64: Option<u32>, aarch64: Option<u32> }, family,
-disposition, handler, reasoning, closes_in: Option<&str> }`. Dispositions:
+disposition, reasoning, closes_in: Option<&str>, probe: Option<&str>, since:
+Option<&str> }` (the handler binding lives in `sud`, by row name). `VIRTUAL_ABI`
+is the kernel release the virtual kernel declares; a row whose `since` is newer
+is `Absent`. Dispositions:
 
 | disposition | meaning | gate |
 |---|---|---|
@@ -80,8 +83,10 @@ The dispatch function is generated from the rows (a match built by macro or a
 sorted array + binary search — the builder chooses; the requirement is that a
 row without a handler cannot compile as `Modeled`). Tests: (a) every number in
 the vendored table for the arch has exactly one row; (b) every row's number
-exists in the table; (c) every `Modeled` row names a probe id that exists in
-the conformance testbed; (d) every `SymbolRow` names a symbol the compiled shim
+exists in the table; (c) every probe id a row names exists in the conformance testbed and covers
+that row, every row the testbed's manifest names exists with the matching
+disposition, and a `Modeled` row without a probe is reported (a failure under
+`PATINA_CONFORMANCE_STRICT=1`); (d) every `SymbolRow` names a symbol the compiled shim
 objects define (scanned with the `object` crate as `shim_host_alias.rs` does)
 and every defined public symbol has a row; (e) the audit classification lists
 in `patina-target` agree with the registry (an interposed symbol is never in a

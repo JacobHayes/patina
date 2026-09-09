@@ -181,7 +181,9 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   `readiness`).
 - `src/registry/` is the syscall registry: `syscalls.rs` (one row per number
   in the vendored x86_64 table, arm64 numbers by name; disposition, reasoning,
-  the arc that closes it, a probe id), `symbols.rs` (every public symbol the C
+  the arc that closes it, the conformance probe id, and `since` for numbers
+  newer than the table's baseline — a `since` past `VIRTUAL_ABI` makes the
+  row `Absent`), `symbols.rs` (every public symbol the C
   slices define with the rows it serves and a status, plus `Absent` rows for
   known ABI spellings the shim does not define), `table.rs` (the parser for
   the vendored tables under `abi/`, with the per-arch ABI-column rule). Rows

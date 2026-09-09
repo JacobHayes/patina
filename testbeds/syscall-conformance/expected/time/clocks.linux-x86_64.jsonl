@@ -3,19 +3,19 @@
 {"seq":1,"op":"check","args":{"label":"CLOCK_MONOTONIC reads"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":2,"op":"clock_gettime","args":{"clock":1},"ret":0,"errno":null,"fields":{"ns":"mono:>="},"norm":{"fields.ns":"monotonic"}}
 {"seq":3,"op":"check","args":{"label":"CLOCK_MONOTONIC never goes backwards"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":4,"op":"clock_gettime","args":{"clock":0},"ret":0,"errno":null,"fields":{"ns":"mono:>="},"norm":{"fields.ns":"monotonic"}}
+{"seq":4,"op":"clock_gettime","args":{"clock":0},"ret":0,"errno":null,"fields":{"ns":"mono:first"},"norm":{"fields.ns":"monotonic"}}
 {"seq":5,"op":"check","args":{"label":"CLOCK_REALTIME reads"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":6,"op":"clock_gettime","args":{"clock":7},"ret":0,"errno":null,"fields":{"ns":"mono:-"},"norm":{"fields.ns":"monotonic"}}
+{"seq":6,"op":"clock_gettime","args":{"clock":7},"ret":0,"errno":null,"fields":{"ns":"mono:first"},"norm":{"fields.ns":"monotonic"}}
 {"seq":7,"op":"check","args":{"label":"every standard clock id reads"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":8,"op":"clock_gettime","args":{"clock":4},"ret":0,"errno":null,"fields":{"ns":"mono:-"},"norm":{"fields.ns":"monotonic"}}
+{"seq":8,"op":"clock_gettime","args":{"clock":4},"ret":0,"errno":null,"fields":{"ns":"mono:first"},"norm":{"fields.ns":"monotonic"}}
 {"seq":9,"op":"check","args":{"label":"every standard clock id reads"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":10,"op":"clock_gettime","args":{"clock":6},"ret":0,"errno":null,"fields":{"ns":"mono:>="},"norm":{"fields.ns":"monotonic"}}
+{"seq":10,"op":"clock_gettime","args":{"clock":6},"ret":0,"errno":null,"fields":{"ns":"mono:first"},"norm":{"fields.ns":"monotonic"}}
 {"seq":11,"op":"check","args":{"label":"every standard clock id reads"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":12,"op":"clock_gettime","args":{"clock":5},"ret":0,"errno":null,"fields":{"ns":"mono:>="},"norm":{"fields.ns":"monotonic"}}
+{"seq":12,"op":"clock_gettime","args":{"clock":5},"ret":0,"errno":null,"fields":{"ns":"mono:first"},"norm":{"fields.ns":"monotonic"}}
 {"seq":13,"op":"check","args":{"label":"every standard clock id reads"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":14,"op":"clock_gettime","args":{"clock":2},"ret":0,"errno":null,"fields":{"ns":"mono:-"},"norm":{"fields.ns":"monotonic"}}
+{"seq":14,"op":"clock_gettime","args":{"clock":2},"ret":0,"errno":null,"fields":{"ns":"mono:first"},"norm":{"fields.ns":"monotonic"}}
 {"seq":15,"op":"check","args":{"label":"every standard clock id reads"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":16,"op":"clock_gettime","args":{"clock":3},"ret":0,"errno":null,"fields":{"ns":"mono:>="},"norm":{"fields.ns":"monotonic"}}
+{"seq":16,"op":"clock_gettime","args":{"clock":3},"ret":0,"errno":null,"fields":{"ns":"mono:first"},"norm":{"fields.ns":"monotonic"}}
 {"seq":17,"op":"check","args":{"label":"every standard clock id reads"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":18,"op":"clock_gettime","args":{"clock":1234},"ret":-1,"errno":"EINVAL","fields":{},"norm":{}}
 {"seq":19,"op":"check","args":{"label":"an unknown clock id is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}

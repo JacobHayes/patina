@@ -5,7 +5,7 @@
 use crate::observe::{parse_stream, Event, Norm, ParsedNorm};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub const SCHEMA: &str = "patina.conformance/v1";
 
@@ -22,7 +22,8 @@ pub struct Header {
     pub kernel: String,
     /// glibc version on the blessing host.
     pub glibc: String,
-    /// The kernel ABI level patina's virtual kernel claims (`probes.toml [abi]`).
+    /// The kernel ABI level patina's virtual kernel claims
+    /// (`registry::VIRTUAL_ABI`, read from `cargo patina syscalls --format json`).
     pub virtual_abi: String,
 }
 
@@ -120,7 +121,13 @@ impl Normalizer {
             let Some(norm) = Norm::parse(&tag) else {
                 continue;
             };
-            let key = format!("{}.{path}", event.op);
+            // Monotonic relations are per clock: consecutive reads of different
+            // clock ids have unrelated epochs, so the key carries `args.clock`
+            // when the event has one (clock_gettime, clock_nanosleep, ...).
+            let key = match event.args.get("clock") {
+                Some(clock) => format!("{}.{path}.clock={clock}", event.op),
+                None => format!("{}.{path}", event.op),
+            };
             let slot: Option<&mut Value> = if path == "ret" {
                 Some(&mut event.ret)
             } else if let Some(name) = path.strip_prefix("args.") {
@@ -323,27 +330,32 @@ pub fn declared_failing<'a>(
         .find(|d| d.kind == "probe" && d.applies_to(probe, vehicle))
 }
 
-// ---- probes.toml ------------------------------------------------------------
+// ---- probes.toml and the registry -------------------------------------------
 
-#[derive(Deserialize, Clone, Debug)]
-pub struct Abi {
-    /// The kernel ABI level the virtual kernel claims.
-    #[serde(rename = "virtual")]
-    pub virtual_level: String,
-}
-
-#[derive(Deserialize, Clone, Debug)]
+/// One probe's coverage. Unknown keys are refused so a stale table cannot sit
+/// in the manifest unread.
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ProbeSpec {
+    /// Rows the probe exercises: the native leg is host-unavailable when the
+    /// host kernel predates one.
+    #[serde(default)]
     pub syscalls: Vec<String>,
+    /// Rows the probe asserts `ENOSYS` for (their `since` is past the virtual
+    /// ABI level): the native leg is host-unavailable when the host kernel
+    /// IMPLEMENTS one, since it then cannot be the oracle for absence.
+    #[serde(default)]
+    pub absent: Vec<String>,
+    /// The libc spellings the `libc` vehicle goes through.
+    #[serde(default)]
     pub symbols: Vec<String>,
 }
 
+/// `probes.toml`: probe id → coverage. The virtual ABI level and each row's
+/// first kernel are the registry's ([`Registry`]), not the manifest's.
 #[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
-    pub abi: Abi,
-    /// syscall name → first mainline kernel carrying the number.
-    #[serde(default)]
-    pub since: BTreeMap<String, String>,
     pub probe: BTreeMap<String, ProbeSpec>,
 }
 
@@ -354,18 +366,133 @@ pub fn load_manifest(text: &str) -> Result<Manifest, String> {
         return Err("probes.toml: no [probe.\"…\"] tables".to_string());
     }
     for (id, spec) in &manifest.probe {
-        if spec.syscalls.is_empty() {
-            return Err(format!("probes.toml: probe {id:?} lists no syscalls"));
-        }
-        for syscall in &spec.syscalls {
-            if !manifest.since.contains_key(syscall) {
-                return Err(format!(
-                    "probes.toml: probe {id:?} names syscall {syscall:?} with no [since] entry"
-                ));
-            }
+        if spec.syscalls.is_empty() && spec.absent.is_empty() {
+            return Err(format!(
+                "probes.toml: probe {id:?} lists no syscalls and no absent rows"
+            ));
         }
     }
     Ok(manifest)
+}
+
+/// The registry as `cargo patina syscalls --format json` (schema
+/// `patina.syscalls/v1`) reports it for the host arch: the virtual ABI level,
+/// every row's disposition kind and `since`, and the symbol rows.
+#[derive(Clone, Debug, Default)]
+pub struct Registry {
+    pub virtual_abi: String,
+    /// row name → disposition kind (`modeled`, `absent`, …).
+    pub dispositions: BTreeMap<String, String>,
+    /// row name → first mainline kernel carrying the number (rows past the
+    /// table's baseline only).
+    pub since: BTreeMap<String, String>,
+    pub symbols: BTreeSet<String>,
+}
+
+pub const REGISTRY_SCHEMA: &str = "patina.syscalls/v1";
+
+pub fn load_registry(text: &str) -> Result<Registry, String> {
+    let json: Value =
+        serde_json::from_str(text).map_err(|error| format!("registry json: {error}"))?;
+    if json["schema"] != REGISTRY_SCHEMA {
+        return Err(format!(
+            "registry json: schema {} is not {REGISTRY_SCHEMA:?}",
+            json["schema"]
+        ));
+    }
+    let virtual_abi = json["virtual_abi"]
+        .as_str()
+        .ok_or("registry json: no virtual_abi")?
+        .to_string();
+    if kernel_version(&virtual_abi).is_none() {
+        return Err(format!(
+            "registry json: virtual_abi {virtual_abi:?} is not a kernel release"
+        ));
+    }
+    let mut registry = Registry {
+        virtual_abi,
+        ..Registry::default()
+    };
+    for row in json["rows"].as_array().ok_or("registry json: no rows")? {
+        let name = row["name"]
+            .as_str()
+            .ok_or("registry json: a row has no name")?
+            .to_string();
+        let kind = row["disposition"]["kind"]
+            .as_str()
+            .ok_or_else(|| format!("registry json: row {name} has no disposition kind"))?
+            .to_string();
+        if let Some(since) = row["since"].as_str() {
+            if kernel_version(since).is_none() {
+                return Err(format!(
+                    "registry json: row {name} since {since:?} is not a kernel release"
+                ));
+            }
+            registry.since.insert(name.clone(), since.to_string());
+        }
+        registry.dispositions.insert(name, kind);
+    }
+    for symbol in json["symbols"]
+        .as_array()
+        .ok_or("registry json: no symbols")?
+    {
+        let name = symbol["name"]
+            .as_str()
+            .ok_or("registry json: a symbol has no name")?;
+        registry.symbols.insert(name.to_string());
+    }
+    if registry.dispositions.is_empty() {
+        return Err("registry json: no rows".to_string());
+    }
+    Ok(registry)
+}
+
+/// Every name the manifest uses is a registry row of the right kind: an
+/// exercised row exists and is not `absent`, an `absent` row is `absent` and
+/// dated, a symbol is a symbol row. Fails closed before any leg runs; the
+/// cargo cross-gate (`cargo-patina/tests/syscall_registry.rs`) holds the other
+/// direction (every registry `probe` id is a probe here).
+pub fn validate_manifest(manifest: &Manifest, registry: &Registry) -> Result<(), String> {
+    let mut problems = Vec::new();
+    for (id, spec) in &manifest.probe {
+        for name in &spec.syscalls {
+            match registry.dispositions.get(name).map(String::as_str) {
+                None => problems.push(format!("{id}: {name} is not a registry row")),
+                Some("absent") => problems.push(format!(
+                    "{id}: exercises {name}, which the registry dispositions absent (list it under `absent`)"
+                )),
+                Some(_) => {}
+            }
+        }
+        for name in &spec.absent {
+            match registry.dispositions.get(name).map(String::as_str) {
+                None => problems.push(format!("{id}: {name} is not a registry row")),
+                Some("absent") => {
+                    if !registry.since.contains_key(name) {
+                        problems.push(format!(
+                            "{id}: absent row {name} has no `since` in the registry; the host gate cannot date it"
+                        ));
+                    }
+                }
+                Some(kind) => problems.push(format!(
+                    "{id}: asserts {name} absent, which the registry dispositions {kind}"
+                )),
+            }
+        }
+        for name in &spec.symbols {
+            if !registry.symbols.contains(name) {
+                problems.push(format!("{id}: {name} is not a symbol row"));
+            }
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "probes.toml disagrees with the registry:\n  {}",
+            problems.join("\n  ")
+        ))
+    }
 }
 
 // ---- the differ -------------------------------------------------------------
@@ -647,7 +774,9 @@ pub fn kernel_version(text: &str) -> Option<(u64, u64, u64)> {
 #[derive(Debug, PartialEq, Eq)]
 pub enum HostGate {
     Ok,
-    /// The host kernel lacks a number the virtual ABI level has: not a failure.
+    /// The host kernel cannot be the oracle for this probe: it lacks a number
+    /// the probe exercises, or implements a number the probe asserts absent.
+    /// Not a failure.
     Unavailable(String),
     /// The host kernel is older than the one that blessed the expectation: the
     /// oracle cannot be trusted to agree; fail.
@@ -657,6 +786,7 @@ pub enum HostGate {
 
 pub fn host_gate(
     manifest: &Manifest,
+    registry: &Registry,
     probe: &str,
     blessed: &Header,
     host_kernel: &str,
@@ -673,16 +803,34 @@ pub fn host_gate(
     let Some(spec) = manifest.probe.get(probe) else {
         return HostGate::Error(format!("probe {probe:?} is not in probes.toml"));
     };
-    for syscall in &spec.syscalls {
-        let since = manifest
+    // An undated row predates every host the harness runs on.
+    let since_of = |name: &str| {
+        registry
             .since
-            .get(syscall)
+            .get(name)
             .and_then(|s| kernel_version(s))
-            .unwrap_or((0, 0, 0));
+            .unwrap_or((0, 0, 0))
+    };
+    for syscall in &spec.syscalls {
+        let since = since_of(syscall);
         if host < since {
             return HostGate::Unavailable(format!(
                 "host kernel {host_kernel} lacks {syscall} (since {}.{})",
                 since.0, since.1
+            ));
+        }
+    }
+    for syscall in &spec.absent {
+        let Some(since) = registry.since.get(syscall).and_then(|s| kernel_version(s)) else {
+            return HostGate::Error(format!(
+                "absent row {syscall} has no `since` in the registry; the host gate cannot date it"
+            ));
+        };
+        if host >= since {
+            return HostGate::Unavailable(format!(
+                "host kernel {host_kernel} implements {syscall} (since {}.{}); it cannot be the \
+                 oracle for a number the virtual ABI {} lacks",
+                since.0, since.1, registry.virtual_abi
             ));
         }
     }
@@ -1195,24 +1343,47 @@ pub fn selftest() -> Outcome {
     );
 
     // The host gate.
+    let absent_probe = "selftest/absent";
     let manifest = Manifest {
-        abi: Abi {
-            virtual_level: "6.8".to_string(),
-        },
-        since: BTreeMap::from([
-            ("openat".to_string(), "2.6.16".to_string()),
-            ("statx".to_string(), "4.11".to_string()),
+        probe: BTreeMap::from([
+            (
+                probe.to_string(),
+                ProbeSpec {
+                    syscalls: vec!["openat".to_string(), "statx".to_string()],
+                    ..ProbeSpec::default()
+                },
+            ),
+            (
+                absent_probe.to_string(),
+                ProbeSpec {
+                    absent: vec!["fchroot".to_string()],
+                    ..ProbeSpec::default()
+                },
+            ),
         ]),
-        probe: BTreeMap::from([(
-            probe.to_string(),
-            ProbeSpec {
-                syscalls: vec!["openat".to_string(), "statx".to_string()],
-                symbols: vec![],
-            },
-        )]),
+    };
+    let registry = Registry {
+        virtual_abi: "6.8".to_string(),
+        dispositions: BTreeMap::from([
+            ("openat".to_string(), "modeled".to_string()),
+            ("statx".to_string(), "modeled".to_string()),
+            ("fchroot".to_string(), "absent".to_string()),
+        ]),
+        since: BTreeMap::from([
+            ("statx".to_string(), "4.11".to_string()),
+            ("fchroot".to_string(), "7.3".to_string()),
+        ]),
+        symbols: BTreeSet::new(),
     };
     let gate_case = |host: &str, want: fn(&HostGate) -> bool| -> Outcome {
-        let gate = host_gate(&manifest, probe, &header, host);
+        let gate = host_gate(&manifest, &registry, probe, &header, host);
+        Outcome {
+            ok: want(&gate),
+            lines: vec![format!("{gate:?}")],
+        }
+    };
+    let absent_case = |host: &str, want: fn(&HostGate) -> bool| -> Outcome {
+        let gate = host_gate(&manifest, &registry, absent_probe, &header, host);
         Outcome {
             ok: want(&gate),
             lines: vec![format!("{gate:?}")],
@@ -1234,6 +1405,49 @@ pub fn selftest() -> Outcome {
         "host gate: a kernel older than the blessing is refused",
         true,
         gate_case("5.15.0", |g| matches!(g, HostGate::TooOld(_))),
+        "",
+    );
+    case(
+        "host gate: an absent-row probe runs on a kernel that lacks the number",
+        true,
+        absent_case("6.8.0-139-generic", |g| *g == HostGate::Ok),
+        "",
+    );
+    case(
+        "host gate: an absent-row probe is host-unavailable on a kernel that implements the number",
+        true,
+        absent_case("7.3.0", |g| matches!(g, HostGate::Unavailable(_))),
+        "",
+    );
+    let planted = validate_manifest(
+        &Manifest {
+            probe: BTreeMap::from([(
+                "selftest/bad".to_string(),
+                ProbeSpec {
+                    syscalls: vec!["nonesuch".to_string(), "fchroot".to_string()],
+                    absent: vec!["openat".to_string()],
+                    symbols: vec!["nonesuch".to_string()],
+                },
+            )]),
+        },
+        &registry,
+    );
+    case(
+        "manifest check: an unknown row, an exercised absent row, an absent modeled row, and an unknown symbol are refused",
+        true,
+        Outcome {
+            ok: matches!(&planted, Err(text) if text.matches("selftest/bad").count() == 4),
+            lines: vec![format!("{planted:?}")],
+        },
+        "",
+    );
+    case(
+        "manifest check: the control passes",
+        true,
+        Outcome {
+            ok: validate_manifest(&manifest, &registry).is_ok(),
+            lines: vec![],
+        },
         "",
     );
 

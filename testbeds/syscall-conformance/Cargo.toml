@@ -77,6 +77,10 @@ name = "thread-futex"
 path = "probes/thread/futex.rs"
 
 [[bin]]
+name = "abi-newer-than-virtual"
+path = "probes/abi/newer_than_virtual.rs"
+
+[[bin]]
 name = "selftest-leak"
 path = "probes/selftest/leak.rs"
 

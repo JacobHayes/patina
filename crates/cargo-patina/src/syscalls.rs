@@ -10,7 +10,7 @@ use std::ffi::OsString;
 
 use patina_dst_native_shim::registry::table::{linux_source, linux_table};
 use patina_dst_native_shim::registry::{
-    self, Arch, Disposition, Os, Serves, SymbolRow, SymbolStatus, SyscallRow,
+    self, Arch, Disposition, Os, Serves, SymbolRow, SymbolStatus, SyscallRow, VIRTUAL_ABI,
 };
 use serde_json::{Value, json};
 
@@ -163,6 +163,7 @@ impl Report {
                     "reasoning": row.reasoning,
                     "closes_in": row.closes_in,
                     "probe": row.probe,
+                    "since": row.since,
                     "symbols": self
                         .symbols_for(row)
                         .iter()
@@ -182,6 +183,7 @@ impl Report {
                     "name": symbol.name,
                     "platform": symbol.platform.name(),
                     "status": symbol.status.render(),
+                    "probe": symbol.probe,
                     "serves": match symbol.serves {
                         Serves::Syscalls(names) | Serves::Darwin(names) => {
                             Value::Array(names.iter().map(|name| json!(name)).collect())
@@ -192,10 +194,12 @@ impl Report {
                 })
             })
             .collect();
+        let unprobed = registry::modeled_rows_without_probe();
         json!({
             "schema": SYSCALLS_SCHEMA,
             "os": self.os.name(),
             "arch": self.arch.name(),
+            "virtual_abi": VIRTUAL_ABI,
             "table": {
                 "path": format!("crates/patina-native-shim/{}", self.table_path),
                 "url": self.table_url,
@@ -206,6 +210,10 @@ impl Report {
                 "rows": self.rows.len(),
                 "dispositions": self.disposition_counts(),
                 "symbols": self.status_counts(),
+                "modeled_without_probe": {
+                    "count": unprobed.len(),
+                    "names": unprobed,
+                },
             },
             "vehicles": self
                 .symbols
@@ -221,7 +229,7 @@ impl Report {
     fn render(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!(
-            "syscall registry: {} {} — {} numbers in crates/patina-native-shim/{} (abi columns {})\n",
+            "syscall registry: {} {} — {} numbers in crates/patina-native-shim/{} (abi columns {}); virtual ABI {VIRTUAL_ABI}\n",
             self.os.name(),
             self.arch.name(),
             self.table_numbers,
@@ -233,9 +241,19 @@ impl Report {
             out.push_str(&format!(" {disposition} {count}"));
         }
         out.push('\n');
+        let unprobed = registry::modeled_rows_without_probe();
         out.push_str(&format!(
-            "{:>4}  {:<24} {:<11} {:<19} {:<30} symbols\n",
-            "nr", "name", "family", "disposition", "closes-in"
+            "modeled rows without a probe: {}{}\n",
+            unprobed.len(),
+            if unprobed.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", unprobed.join(" "))
+            }
+        ));
+        out.push_str(&format!(
+            "{:>4}  {:<24} {:<11} {:<19} {:<30} {:<24} symbols\n",
+            "nr", "name", "family", "disposition", "closes-in", "probe"
         ));
         for (nr, row) in &self.rows {
             let symbols: Vec<&str> = self
@@ -244,11 +262,12 @@ impl Report {
                 .map(|symbol| symbol.name)
                 .collect();
             out.push_str(&format!(
-                "{nr:>4}  {:<24} {:<11} {:<19} {:<30} {}\n",
+                "{nr:>4}  {:<24} {:<11} {:<19} {:<30} {:<24} {}\n",
                 row.name,
                 row.family.name(),
                 row.disposition.render(),
                 row.closes_in.unwrap_or("-"),
+                row.probe.unwrap_or("-"),
                 if symbols.is_empty() {
                     "-".to_string()
                 } else {
@@ -349,6 +368,38 @@ mod tests {
             .collect();
         assert!(absent.iter().any(|symbol| symbol["name"] == "__read_chk"));
         assert_eq!(report["vehicles"], json!(["syscall"]));
+        assert_eq!(report["virtual_abi"], VIRTUAL_ABI);
+        assert_eq!(read["probe"], "fs/open_rw");
+        assert_eq!(read["since"], Value::Null);
+        let fchroot = report["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == "fchroot")
+            .unwrap();
+        assert_eq!(fchroot["disposition"], json!({ "kind": "absent" }));
+        assert_eq!(fchroot["since"], "7.3");
+        assert_eq!(fchroot["probe"], "abi/newer-than-virtual");
+        let unprobed = &report["summary"]["modeled_without_probe"];
+        assert_eq!(
+            unprobed["count"].as_u64().unwrap() as usize,
+            unprobed["names"].as_array().unwrap().len()
+        );
+        assert!(
+            unprobed["names"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|name| name == "readv"),
+            "readv is modeled with no probe yet: {unprobed}"
+        );
+        assert!(
+            !unprobed["names"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|name| name == "read")
+        );
         // The aarch64 view is the generic table's 328 numbers.
         assert_eq!(
             Report::linux(Arch::Aarch64).to_json()["rows"]
@@ -363,7 +414,15 @@ mod tests {
     fn human_report_lists_rows_and_absent_symbols() {
         let text = Report::linux(Arch::X86_64).render();
         assert!(text.contains("386 numbers"));
+        assert!(text.contains(&format!("virtual ABI {VIRTUAL_ABI}")));
+        assert!(text.contains("modeled rows without a probe: "));
+        assert!(
+            text.contains(" readv "),
+            "the unprobed names are listed: {text}"
+        );
         assert!(text.contains("   0  read"));
+        assert!(text.contains("fs/open_rw"));
+        assert!(text.contains(" 472  fchroot                  privileged  absent"));
         assert!(text.contains("trap(process)"));
         assert!(text.contains("absent — known ABI spellings"));
         assert!(text.contains("__open64_2"));

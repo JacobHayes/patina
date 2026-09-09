@@ -96,8 +96,9 @@ fn removed_rows_are_exactly_the_tables_unimplemented_numbers() {
 }
 
 /// Names are unique, every trap class is a known one, every routed row and
-/// every trap that is not final names the arc that changes it, and no row
-/// claims `Absent` yet (that flip belongs to the signals arc).
+/// every trap that is not final names the arc that changes it, and `Absent`
+/// is exactly the rows `since` places past [`VIRTUAL_ABI`] (the `Removed`
+/// flip belongs to the signals arc).
 #[test]
 fn rows_are_well_formed() {
     let mut names = BTreeSet::new();
@@ -127,18 +128,103 @@ fn rows_are_well_formed() {
                     row.name
                 );
             }
-            Disposition::Absent => panic!(
-                "{}: no row is Absent yet (docs/arcs/syscall-conformance.md §3)",
-                row.name
+            Disposition::Absent => assert!(
+                row.absent_by_abi(),
+                "{}: Absent needs a `since` newer than VIRTUAL_ABI {VIRTUAL_ABI} (got {:?}); \
+                 the Removed-family flip belongs to the signals arc",
+                row.name,
+                row.since
             ),
             _ => {}
         }
-        assert!(
-            row.probe.is_none(),
-            "{}: probes land with the conformance testbed",
-            row.name
-        );
+        if let Some(since) = row.since {
+            assert!(
+                parse_release(since).is_some(),
+                "{}: since {since:?} is not a kernel release",
+                row.name
+            );
+        }
     }
+}
+
+/// The virtual ABI rule, pinned: a row whose `since` is newer than
+/// [`VIRTUAL_ABI`] is `Absent` and nothing else is, so a raw emitter of such a
+/// number gets `ENOSYS` — exactly what a kernel of the declared level answers —
+/// rather than a trap. The rule is a pure predicate over one row, and a planted
+/// row proves the predicate fires in both directions.
+#[test]
+fn since_newer_than_virtual_abi_is_exactly_the_absent_rows() {
+    assert!(
+        parse_release(VIRTUAL_ABI).is_some(),
+        "VIRTUAL_ABI {VIRTUAL_ABI:?} must be a kernel release"
+    );
+    let disagree: Vec<String> = SYSCALLS
+        .iter()
+        .filter(|row| row.absent_by_abi() != (row.disposition == Disposition::Absent))
+        .map(|row| {
+            format!(
+                "{} (since {:?}, {})",
+                row.name,
+                row.since,
+                row.disposition.render()
+            )
+        })
+        .collect();
+    assert!(
+        disagree.is_empty(),
+        "rows whose `since` and disposition disagree with VIRTUAL_ABI {VIRTUAL_ABI}: \
+         a since newer than the level must be Absent, an Absent row must be newer:\n  {}",
+        disagree.join("\n  ")
+    );
+    let absent: Vec<&str> = SYSCALLS
+        .iter()
+        .filter(|row| row.disposition == Disposition::Absent)
+        .map(|row| row.name)
+        .collect();
+    assert_eq!(
+        absent,
+        [
+            "uretprobe",
+            "uprobe",
+            "mseal",
+            "setxattrat",
+            "getxattrat",
+            "listxattrat",
+            "removexattrat",
+            "open_tree_attr",
+            "file_getattr",
+            "file_setattr",
+            "listns",
+            "rseq_slice_yield",
+            "fchroot",
+        ],
+        "the rows past the virtual ABI level (raise VIRTUAL_ABI deliberately, then re-disposition)"
+    );
+
+    // Planted: the predicate on doctored rows.
+    let planted = |since: Option<&'static str>| SyscallRow {
+        since,
+        ..*syscall("mseal").unwrap()
+    };
+    assert!(planted(Some("6.10")).absent_by_abi(), "6.10 is past 6.8");
+    assert!(planted(Some("7.3")).absent_by_abi());
+    assert!(
+        !planted(Some("6.8")).absent_by_abi(),
+        "the level itself is in the ABI"
+    );
+    assert!(!planted(Some("4.11")).absent_by_abi());
+    assert!(
+        !planted(None).absent_by_abi(),
+        "undated rows are the baseline ABI"
+    );
+    assert!(
+        planted(Some("nonsense")).absent_by_abi(),
+        "an undatable row is not claimed"
+    );
+    assert_eq!(parse_release("6.8.0-139-generic"), Some((6, 8, 0)));
+    assert_eq!(parse_release("2.6.16"), Some((2, 6, 16)));
+    assert_eq!(parse_release("7.3-rc2"), Some((7, 3, 0)));
+    assert_eq!(parse_release("linux"), None);
 }
 
 /// Every symbol row that names syscall rows names existing ones; Darwin-only
