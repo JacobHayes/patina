@@ -129,6 +129,13 @@ ALLOWED_FLAGS='
 --max
 --seeds
 --patina
+--no-verify
+--allow-dirty
+--list
+--porcelain
+--points-at
+--no-graph
+--execute
 '
 # -- cargo / rustc / rustup / linker tool flags --
 # --all/--all-targets/--check/--no-deps/--workspace/--locked: cargo fmt/clippy/
@@ -149,10 +156,17 @@ ALLOWED_FLAGS='
 #   workq/pubsub guest binaries' own workload arguments.
 # -- sweep/corpus scripts' own CLI options --
 # --update: audit-corpus run.sh's re-record mode.
-# --dry-run: the fuzz-sweep/wasi-buggify-sweep scripts' no-run mode.
+# --dry-run: the fuzz-sweep/wasi-buggify-sweep scripts' no-run mode, and cargo
+#   publish's (publish.sh's default mode).
 # --gen: fuzz-sweep.sh's single-generation selector.
 # --block/--max/--seeds/--patina: guided-efficacy run.sh's own probe options
 #   (generation step, per-seed budget, seed-base count, binary override).
+# -- release script (scripts/publish.sh) --
+# --no-verify/--allow-dirty/--list: cargo package/publish flags (publish.sh and
+#   check.sh's packaging rung).
+# --porcelain/--points-at: git status/tag flags; --no-graph: jj log's flag
+#   (publish.sh's clean-tree and release-tag preconditions).
+# --execute: publish.sh's own real-upload switch.
 # (--selftest and --seed are REAL registry flags — not allowlisted here.)
 
 tmpdir=$(mktemp -d)

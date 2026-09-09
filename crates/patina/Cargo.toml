@@ -1,6 +1,7 @@
 [package]
 name = "patina-dst"
 description = "Patina cooperative-SUT SDK and public deterministic-execution facade"
+readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

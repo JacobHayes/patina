@@ -62,6 +62,22 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   once; if the next commit will not be ready soon, push the current one and watch
   it.
 
+### Publishing
+
+- `scripts/publish.sh` is the release path. Its default is a dry run: it prints
+  every publishable crate's packaged file list, asserts each package carries
+  both license texts (the root `LICENSE-MIT`/`LICENSE-APACHE` reach a package
+  through per-crate symlinks, so a new crate needs both), and runs
+  `cargo publish --workspace --dry-run`. Nothing is uploaded.
+- `scripts/publish.sh --execute` uploads, and refuses — naming everything that
+  is missing — unless the working tree is clean and the commit carries the git
+  tag `v<workspace version>`. Tag deliberately (`git tag -a v0.1.0`) before
+  publishing; the script never creates the tag. Published names are
+  `patina-dst-*` plus `cargo-patina`; `patina-dst-bench` is `publish = false`.
+- `cargo package --workspace` is a cheap rung of the full check tier. It catches
+  manifest, readme, and include/exclude breakage, not a missing license symlink;
+  the dry run does.
+
 ## Delegation, scouting, and review
 
 - Keep one writer for a given checkout or file set. Use read-only reviewers and

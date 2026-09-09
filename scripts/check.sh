@@ -150,6 +150,10 @@ run_full() {
   run_rung 'Linux-cfg clippy' cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu -- -D warnings || return $?
   run_rung 'documentation' cargo doc --workspace --no-deps --locked || return $?
   run_rung 'CLI flag drift' scripts/check-flag-drift.sh || return $?
+  # Every workspace member packages cleanly (manifest metadata, readme paths,
+  # include/exclude). --no-verify skips the per-crate verify build; the release
+  # dry run (scripts/publish.sh) covers that and the license-text audit. 2.5s warm.
+  run_rung 'crate packaging' cargo package --workspace --no-verify --locked --allow-dirty || return $?
   run_rung 'workq classifier selftest' testbeds/workq/fuzz-sweep.sh --selftest || return $?
   run_rung 'campaign classifier selftest' cargo run -q -p cargo-patina -- patina campaign --selftest || return $?
 
