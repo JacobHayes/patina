@@ -83,6 +83,13 @@ mod sud;
 #[cfg(any(target_os = "linux", test))]
 mod tsc;
 
+// The guest descriptor table: guest fd numbers → open file descriptions, for
+// every class the shim models. The single global instance and every entry that
+// consults it live below (`fd_table`, `patina_fd_kind`, the universal
+// `patina_read`/`patina_close`/`patina_dup*` entries); the data structure and
+// its allocation/refcount rules are the module's own. See `fdtable.rs`.
+mod fdtable;
+
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
@@ -91,6 +98,8 @@ use std::ops::{Deref, DerefMut};
 use std::slice;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+
+use fdtable::{DescId, FdKind, GuestFdTable, Release, Resolved};
 
 use patina_dst_abi::{
     ClockKind, EffectError, ErrorCode, Fd, FsDirectoryEntry, FsEntryKind, OpenFlags, SeekWhence,
@@ -113,9 +122,8 @@ pub use thread::{
     patina_cond_timedwait, patina_cond_wait, patina_futex_wait, patina_futex_wait_timed,
     patina_futex_wake, patina_mutex_destroy, patina_mutex_init, patina_mutex_lock,
     patina_mutex_trylock, patina_mutex_unlock, patina_net_accept, patina_net_bind,
-    patina_net_close, patina_net_connect, patina_net_getpeername, patina_net_getsockname,
-    patina_net_is_nonblocking, patina_net_kind, patina_net_listen, patina_net_recv,
-    patina_net_recvfrom, patina_net_send, patina_net_sendto, patina_net_set_nonblocking,
+    patina_net_connect, patina_net_getpeername, patina_net_getsockname, patina_net_kind,
+    patina_net_listen, patina_net_recv, patina_net_recvfrom, patina_net_send, patina_net_sendto,
     patina_net_set_read_timeout, patina_net_shutdown, patina_net_socket, patina_net_stream_recv,
     patina_net_stream_send, patina_net_tcp_connect, patina_rwlock_destroy, patina_rwlock_init,
     patina_rwlock_rdlock, patina_rwlock_tryrdlock, patina_rwlock_trywrlock, patina_rwlock_unlock,
@@ -205,13 +213,14 @@ const ETIMEDOUT: c_int = 60;
 #[cfg(target_os = "linux")]
 const ETIMEDOUT: c_int = 110;
 
+#[cfg(target_os = "macos")]
+const ENOTSOCK: c_int = 38;
+#[cfg(target_os = "linux")]
+const ENOTSOCK: c_int = 88;
 const EFBIG: c_int = 27;
-const EMFILE: c_int = 24;
 const ESPIPE: c_int = 29;
 const MAX_CAPTURED_STDIO_BYTES: usize = 64 * 1024 * 1024;
 const HOST_IO_CHUNK: usize = 64 * 1024;
-const URANDOM_FD_BASE: c_int = 0x3fff_ff00;
-const URANDOM_FD_SLOTS: usize = 64;
 
 const O_READ: u32 = 1 << 0;
 const O_WRITE: u32 = 1 << 1;
@@ -236,6 +245,16 @@ const O_NONBLOCK: u32 = 1 << 7;
 /// `dup`, `close` — never a read, a write, or a directory listing). The kernel
 /// ignores the access mode under it, so it never travels with `O_READ`/`O_WRITE`.
 const O_PATH: u32 = 1 << 8;
+/// `O_CLOEXEC`: not a driver flag and not a status flag either — it is the
+/// per-NUMBER `FD_CLOEXEC` bit of the descriptor the open mints, so it lives on
+/// the table slot, never on the description.
+const O_CLOEXEC: u32 = 1 << 9;
+/// A status bit the table sets on every description `open(2)` mints (a file, a
+/// directory opened for reading, the entropy device, a FIFO endpoint) and on
+/// nothing else: a 64-bit Linux kernel forces `O_LARGEFILE` into those
+/// descriptions' `F_GETFL`, and a pipe, socket or `O_PATH` handle never carries
+/// it. Never accepted from a caller (`O_ALL` excludes it).
+const O_OPENED: u32 = 1 << 10;
 const O_ALL: u32 = O_READ
     | O_WRITE
     | O_CREATE
@@ -244,7 +263,11 @@ const O_ALL: u32 = O_READ
     | O_EXCLUSIVE
     | O_NOFOLLOW
     | O_NONBLOCK
-    | O_PATH;
+    | O_PATH
+    | O_CLOEXEC;
+/// The status bits `F_SETFL` may change (the kernel ignores every other bit in
+/// the argument, including the access mode).
+const O_SETFL_MASK: u32 = O_APPEND | O_NONBLOCK;
 
 /// A minimal spinlock the shim uses instead of `std::sync::Mutex`.
 ///
@@ -319,49 +342,79 @@ impl<T> Drop for SpinGuard<'_, T> {
 
 static CONTEXT: OnceLock<SpinMutex<Option<Context>>> = OnceLock::new();
 static STDIO: OnceLock<SpinMutex<StdioCapture>> = OnceLock::new();
-static URANDOM_FDS: SpinMutex<UrandomFds> = SpinMutex::new(UrandomFds {
-    open: [false; URANDOM_FD_SLOTS],
-});
+static FD_TABLE: OnceLock<SpinMutex<GuestFdTable>> = OnceLock::new();
 
-struct UrandomFds {
-    open: [bool; URANDOM_FD_SLOTS],
+/// The guest descriptor table (see `fdtable.rs`). Lock order: the thread
+/// runtime's state lock first, this lock second — `fd_readiness` and the
+/// waiter registration resolve descriptors while holding the runtime state —
+/// and this lock is never held across a runtime call or a scheduling point.
+fn fd_table() -> &'static SpinMutex<GuestFdTable> {
+    FD_TABLE.get_or_init(|| {
+        SpinMutex::new(GuestFdTable::new(
+            fdtable::RLIMIT_NOFILE,
+            O_READ,
+            O_WRITE,
+            O_WRITE,
+        ))
+    })
 }
 
-fn urandom_open() -> Result<c_int, c_int> {
-    let mut fds = URANDOM_FDS.lock();
-    for (index, open) in fds.open.iter_mut().enumerate() {
-        if !*open {
-            *open = true;
-            let index = c_int::try_from(index).expect("urandom slot index fits");
-            return Ok(URANDOM_FD_BASE + index);
+/// What a guest number names right now, or `EBADF`.
+fn resolve_fd(raw_fd: c_int) -> Result<Resolved, c_int> {
+    fd_table().lock().resolve(raw_fd).ok_or(EBADF)
+}
+
+/// The driver handle behind a deterministic-filesystem descriptor. Any other
+/// kind — and an empty slot — is `EBADF`, which is what every filesystem-only
+/// entry (`fstat`, `fchmod`, `getdents`, the record locks) answers for a
+/// descriptor that is not a file.
+fn fs_handle(raw_fd: c_int) -> Result<Fd, c_int> {
+    let resolved = resolve_fd(raw_fd)?;
+    if resolved.kind.is_fs() {
+        Ok(Fd(resolved.handle))
+    } else {
+        Err(EBADF)
+    }
+}
+
+/// Bind a fresh description to the lowest free guest number, or `EMFILE`.
+fn install_fd(kind: FdKind, handle: u64, status: u32, cloexec: bool) -> Result<c_int, c_int> {
+    fd_table().lock().install(kind, handle, status, cloexec)
+}
+
+/// Free the class object a description named, once its last reference is
+/// gone. Runs OUTSIDE the table lock: a driver close is a recorded boundary
+/// operation, a pipe close wakes parked peers, and a readiness registry drop
+/// wakes parked waiters.
+fn release_description(release: Release) -> Result<(), c_int> {
+    flock_release(release.desc);
+    // An epoll interest is on the FILE (the kernel's `(fd, struct file)` key
+    // drops with the file's last reference), whatever kind it was.
+    #[cfg(target_os = "linux")]
+    thread::forget_description(release.desc);
+    match release.kind {
+        FdKind::Stdin | FdKind::Stdout | FdKind::Stderr | FdKind::Urandom => Ok(()),
+        FdKind::File | FdKind::Dir | FdKind::OPath => {
+            with_context(|context| context.fs_close(Fd(release.handle)))
+        }
+        FdKind::Socket => thread::socket_close(release.handle),
+        FdKind::Pipe => thread::pipe_close(release.handle),
+        #[cfg(target_os = "linux")]
+        FdKind::EventFd => {
+            thread::eventfd_close(release.handle);
+            Ok(())
+        }
+        #[cfg(target_os = "linux")]
+        FdKind::Epoll => {
+            thread::epoll_close(release.handle);
+            Ok(())
+        }
+        #[cfg(target_os = "macos")]
+        FdKind::Kqueue => {
+            thread::kqueue_close(release.handle);
+            Ok(())
         }
     }
-    Err(EMFILE)
-}
-
-fn urandom_index(raw_fd: c_int) -> Option<usize> {
-    let relative = raw_fd.checked_sub(URANDOM_FD_BASE)?;
-    let index = usize::try_from(relative).ok()?;
-    (index < URANDOM_FD_SLOTS).then_some(index)
-}
-
-fn urandom_is_open(raw_fd: c_int) -> bool {
-    let Some(index) = urandom_index(raw_fd) else {
-        return false;
-    };
-    URANDOM_FDS.lock().open[index]
-}
-
-fn urandom_close(raw_fd: c_int) -> Result<(), c_int> {
-    let Some(index) = urandom_index(raw_fd) else {
-        return Err(EBADF);
-    };
-    let mut fds = URANDOM_FDS.lock();
-    if !fds.open[index] {
-        return Err(EBADF);
-    }
-    fds.open[index] = false;
-    Ok(())
 }
 
 /// True from process start until the shim constructor finishes installing the
@@ -1812,31 +1865,45 @@ fn abort_if_init_failed() {
     }
 }
 
-/// The mode a descriptor holds an advisory `flock` in.
+/// The mode a description holds an advisory `flock` in.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FlockMode {
     Shared,
     Exclusive,
 }
 
-/// Advisory `flock` state, keyed by the guest descriptor that holds the lock and
-/// recording the deterministic-fs inode the descriptor is open on. Conflicts are
-/// resolved against the *inode*, so two independent opens of the same path
-/// contend exactly as a real per-file-identity `flock` would (a single-opener
-/// database's "already open" error), while a lone opener always acquires. Cleared on
-/// `LOCK_UN` and on `close`. This is shim-side state, never a trace record: the
-/// inode it keys on is read through the recorded metadata path, so the table
-/// rebuilds identically under replay from the same deterministic open sequence.
-static FLOCK_TABLE: OnceLock<SpinMutex<BTreeMap<c_int, (u64, FlockMode)>>> = OnceLock::new();
+/// What an advisory lock is taken ON: the kernel keys `flock` by inode, so two
+/// descriptions open on one deterministic-fs inode contend, while every other
+/// kind of description is its own inode (a socket, an eventfd) — modeled as the
+/// description itself. (The two ends of one anonymous pipe share an inode on
+/// Linux and do not here; no supported guest locks a pipe.)
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LockIdentity {
+    Inode(u64),
+    Description(DescId),
+}
 
-fn flock_table() -> &'static SpinMutex<BTreeMap<c_int, (u64, FlockMode)>> {
+/// Advisory `flock` state, keyed by the open file DESCRIPTION that holds the
+/// lock (so a `dup` of the holder can release it, and closing one number of a
+/// dup'd pair keeps it) and recording the identity the lock is on. Conflicts are
+/// resolved against that identity, so two independent opens of the same path
+/// contend exactly as a real per-file `flock` would (a single-opener database's
+/// "already open" error), while a lone opener always acquires. Cleared on
+/// `LOCK_UN` and when the description's last reference goes. This is shim-side
+/// state, never a trace record: the inode it keys on is read through the
+/// recorded metadata path, so the table rebuilds identically under replay from
+/// the same deterministic open sequence.
+static FLOCK_TABLE: OnceLock<SpinMutex<BTreeMap<DescId, (LockIdentity, FlockMode)>>> =
+    OnceLock::new();
+
+fn flock_table() -> &'static SpinMutex<BTreeMap<DescId, (LockIdentity, FlockMode)>> {
     FLOCK_TABLE.get_or_init(|| SpinMutex::new(BTreeMap::new()))
 }
 
-/// Release any advisory lock a descriptor holds. Called by `LOCK_UN` and on
-/// `close`; a descriptor holding no lock is a no-op.
-fn flock_release(raw_fd: c_int) {
-    flock_table().lock().remove(&raw_fd);
+/// Release any advisory lock a description holds. Called by `LOCK_UN` and when
+/// the description is freed; a description holding no lock is a no-op.
+fn flock_release(desc: DescId) {
+    flock_table().lock().remove(&desc);
 }
 
 fn set_errno(errno: c_int) {
@@ -1855,6 +1922,11 @@ fn fail(errno: c_int) -> c_int {
 /// containment-invariant violations of both (§4.4, §7.4).
 #[cfg(any(target_os = "linux", test))]
 pub(crate) fn trap_fatal(message: &str) -> ! {
+    // `abort()` skips the atexit-driven shutdown flush, so the guest's captured
+    // output would be lost with the diagnostic: flush it first, exactly as the
+    // C layer's process-class traps do, so a probe that dies here still leaves
+    // its event stream behind for the conformance differ.
+    let _ = flush_captured_stdio();
     let text = format!("patina: {message}\n");
     let _ = host_write_all(2, text.as_bytes());
     std::process::abort();
@@ -2760,10 +2832,6 @@ fn path_from_c(path: *const c_char) -> Result<String, c_int> {
         .map_err(|_| EINVAL)
 }
 
-fn fd(value: c_int) -> Result<Fd, c_int> {
-    u64::try_from(value).map(Fd).map_err(|_| EBADF)
-}
-
 fn clock(value: u32) -> Result<ClockKind, c_int> {
     match value {
         0 => Ok(ClockKind::Realtime),
@@ -3603,7 +3671,26 @@ pub unsafe extern "C" fn patina_cpu_time_nanos(nanos: *mut u64) -> c_int {
     0
 }
 
-/// Open a path in the deterministic filesystem.
+/// Bind a driver handle the filesystem just opened to a guest number. A table
+/// full (`EMFILE`) closes the handle again — through the recorded close, as the
+/// kernel's `fd_install` failure path releases the file — so nothing leaks.
+fn bind_fs_handle(fd: Fd, kind: FdKind, status: u32, cloexec: bool) -> c_int {
+    match install_fd(kind, fd.0, status, cloexec) {
+        Ok(number) => {
+            set_errno(0);
+            number
+        }
+        Err(errno) => {
+            let _ = with_context(|context| context.fs_close(fd));
+            fail(errno)
+        }
+    }
+}
+
+/// Open a path in the deterministic filesystem, or one of the two things that
+/// are reached by path but are not filesystem descriptions: the `/dev/urandom`
+/// device and a FIFO's pipe endpoint. Every success is a fresh guest number
+/// from the descriptor table (lowest free, `EMFILE` past `RLIMIT_NOFILE`).
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
@@ -3619,7 +3706,21 @@ pub unsafe extern "C" fn patina_open(path: *const c_char, flags: u32, mode: u32)
     let nofollow = flags & O_NOFOLLOW != 0;
     let nonblocking = flags & O_NONBLOCK != 0;
     let path_only = flags & O_PATH != 0;
+    let cloexec = flags & O_CLOEXEC != 0;
     let creating = flags & O_CREATE != 0 && !path_only;
+    // The description's status flags as `F_GETFL` reports them: the access
+    // mode, `O_APPEND`, `O_NONBLOCK`; an `O_PATH` description carries only
+    // `O_PATH` (the kernel reads no access mode under it).
+    let status = if path_only {
+        O_PATH
+    } else {
+        (flags & (O_READ | O_WRITE | O_APPEND | O_NONBLOCK)) | O_OPENED
+    };
+    let kind = if path_only {
+        FdKind::OPath
+    } else {
+        FdKind::File
+    };
     let flags = OpenFlags {
         // Under `O_PATH` the kernel reads no access mode and creates nothing,
         // so neither does this: a path-only open is exactly one thing.
@@ -3644,10 +3745,10 @@ pub unsafe extern "C" fn patina_open(path: *const c_char, flags: u32, mode: u32)
             && !flags.append
             && !flags.exclusive
         {
-            return match urandom_open() {
-                Ok(fd) => {
+            return match install_fd(FdKind::Urandom, 0, O_READ | O_OPENED, cloexec) {
+                Ok(number) => {
                     set_errno(0);
-                    fd
+                    number
                 }
                 Err(errno) => fail(errno),
             };
@@ -3655,7 +3756,7 @@ pub unsafe extern "C" fn patina_open(path: *const c_char, flags: u32, mode: u32)
         return fail(EACCES);
     }
     match with_context(|context| context.fs_open(&path, flags)) {
-        Ok(fd) => i32::try_from(fd.0).unwrap_or_else(|_| fail(EOVERFLOW)),
+        Ok(fd) => bind_fs_handle(fd, kind, status, cloexec),
         // The deterministic filesystem has no descriptor for a symlink ENTRY, so
         // an open whose final component is one is refused by the driver. POSIX
         // splits that case in two, and both halves matter: with `O_NOFOLLOW` the
@@ -3684,13 +3785,18 @@ pub unsafe extern "C" fn patina_open(path: *const c_char, flags: u32, mode: u32)
                         Err(errno) => return fail(errno),
                     };
                     match with_context(|context| context.fs_open(&resolved, flags)) {
-                        Ok(fd) => i32::try_from(fd.0).unwrap_or_else(|_| fail(EOVERFLOW)),
+                        Ok(fd) => bind_fs_handle(fd, kind, status, cloexec),
                         Err(errno) => fail(errno),
                     }
                 }
-                FsEntryKind::Fifo => {
-                    thread::fifo_open(metadata.ino, flags.read, flags.write, nonblocking)
-                }
+                FsEntryKind::Fifo => thread::fifo_open(
+                    metadata.ino,
+                    flags.read,
+                    flags.write,
+                    nonblocking,
+                    status,
+                    cloexec,
+                ),
                 _ => fail(EINVAL),
             }
         }
@@ -3720,6 +3826,309 @@ pub unsafe extern "C" fn patina_mkfifo(path: *const c_char, mode: u32) -> c_int 
     }
 }
 
+// ---------------------------------------------------------------------------
+// The descriptor table's C face. `patina_fd_kind` is the ONE kind oracle the C
+// interposers and the SUD rows consult when an answer depends on what a number
+// names (a socket op on a file is ENOTSOCK, a `*at` dirfd must be a directory,
+// mmap of a pipe is ENODEV); everything else about a descriptor — its
+// FD_CLOEXEC bit, its status flags, duplication, closing — is answered here so
+// the two doors cannot drift.
+
+/// The `PATINA_FD_*` kind of a guest descriptor, or -1 with `EBADF` for a
+/// number that names nothing.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_fd_kind(raw_fd: c_int) -> c_int {
+    match fd_table().lock().kind(raw_fd) {
+        Some(kind) => {
+            set_errno(0);
+            kind.wire()
+        }
+        None => fail(EBADF),
+    }
+}
+
+/// `RLIMIT_NOFILE` as the table enforces it — the one number `getrlimit`,
+/// `sysconf(_SC_OPEN_MAX)` and the `EMFILE` bound must agree on.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_fd_limit() -> c_int {
+    c_int::try_from(fdtable::RLIMIT_NOFILE).expect("the descriptor limit fits an int")
+}
+
+/// `F_GETFD`: 1 when the number carries `FD_CLOEXEC`, 0 when not, -1/`EBADF`.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_fd_getfd(raw_fd: c_int) -> c_int {
+    match fd_table().lock().cloexec(raw_fd) {
+        Ok(cloexec) => {
+            set_errno(0);
+            c_int::from(cloexec)
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
+/// `F_SETFD`: set (nonzero) or clear the number's `FD_CLOEXEC` bit.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_fd_setfd(raw_fd: c_int, cloexec: c_int) -> c_int {
+    match fd_table().lock().set_cloexec(raw_fd, cloexec != 0) {
+        Ok(()) => {
+            set_errno(0);
+            0
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
+/// `F_GETFL`: the description's status flags in the `PATINA_O_*` vocabulary
+/// (access mode, `O_APPEND`, `O_NONBLOCK`, `O_PATH`), or -1/`EBADF`.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_fd_getfl(raw_fd: c_int) -> c_int {
+    match resolve_fd(raw_fd) {
+        Ok(resolved) => {
+            set_errno(0);
+            c_int::try_from(resolved.status).unwrap_or_else(|_| fail(EOVERFLOW))
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
+/// `F_SETFL`: replace the description's `O_APPEND`/`O_NONBLOCK` with the bits
+/// in `flags` (`PATINA_O_*`); every other bit is ignored, as the kernel ignores
+/// the access mode and creation flags in an `F_SETFL` argument.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_fd_setfl(raw_fd: c_int, flags: u32) -> c_int {
+    match fd_table().lock().set_status(raw_fd, O_SETFL_MASK, flags) {
+        Ok(()) => {
+            set_errno(0);
+            0
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
+/// `ioctl(FIONBIO)` / `SOCK_NONBLOCK` on accept: set or clear `O_NONBLOCK`
+/// alone, leaving the other status flags as they are.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_fd_set_nonblocking(raw_fd: c_int, nonblocking: c_int) -> c_int {
+    let bits = if nonblocking != 0 { O_NONBLOCK } else { 0 };
+    match fd_table().lock().set_status(raw_fd, O_NONBLOCK, bits) {
+        Ok(()) => {
+            set_errno(0);
+            0
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
+/// `dup(2)`: the lowest free number, sharing `fd`'s description, without
+/// `FD_CLOEXEC`.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_dup(raw_fd: c_int) -> c_int {
+    patina_dupfd(raw_fd, 0, 0)
+}
+
+/// `fcntl(F_DUPFD)` / `F_DUPFD_CLOEXEC`: the lowest free number at or above
+/// `minimum`. `EINVAL` for a minimum outside the table, `EMFILE` when nothing
+/// at or above it is free.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_dupfd(raw_fd: c_int, minimum: c_int, cloexec: c_int) -> c_int {
+    match fd_table().lock().dup(raw_fd, minimum, cloexec != 0) {
+        Ok(number) => {
+            set_errno(0);
+            number
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
+/// `dup2(2)`: `dup3(old, new, 0)`, except that equal numbers validate `old`
+/// and return it unchanged (where `dup3` is `EINVAL`).
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_dup2(oldfd: c_int, newfd: c_int) -> c_int {
+    if oldfd == newfd {
+        return match resolve_fd(oldfd) {
+            Ok(_) => {
+                set_errno(0);
+                newfd
+            }
+            Err(errno) => fail(errno),
+        };
+    }
+    patina_dup3(oldfd, newfd, 0)
+}
+
+/// `dup3(2)`: bind `newfd` to `oldfd`'s description, closing whatever `newfd`
+/// named first. Equal numbers are `EINVAL`; a target outside the table is
+/// `EBADF`. An error from closing the old target is not reported, as the kernel
+/// does not report it.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_dup3(oldfd: c_int, newfd: c_int, cloexec: c_int) -> c_int {
+    let released = match fd_table().lock().dup3(oldfd, newfd, cloexec != 0) {
+        Ok(released) => released,
+        Err(errno) => return fail(errno),
+    };
+    retire_number(newfd);
+    if let Some(release) = released {
+        let _ = release_description(release);
+    }
+    set_errno(0);
+    newfd
+}
+
+/// Per-NUMBER teardown when a slot is vacated (close, dup2/dup3 over it,
+/// close_range): the state the two doors key by guest number rather than by
+/// description — the SUD `getdents64` snapshot on Linux, the kqueue knotes
+/// (which BSD drops when the NUMBER closes, whatever the file's other
+/// references) on macOS.
+fn retire_number(raw_fd: c_int) {
+    #[cfg(target_os = "linux")]
+    crate::sud::release_dir_iteration(raw_fd);
+    #[cfg(target_os = "macos")]
+    thread::kqueue_forget_number(raw_fd);
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = raw_fd;
+}
+
+/// `close(2)`: free the number; the description is freed with its last number.
+/// `EBADF` for a number that names nothing.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_close(raw_fd: c_int) -> c_int {
+    let released = match fd_table().lock().close(raw_fd) {
+        Ok(released) => released,
+        Err(errno) => return fail(errno),
+    };
+    retire_number(raw_fd);
+    let result = match released {
+        Some(release) => release_description(release),
+        None => Ok(()),
+    };
+    match result {
+        Ok(()) => {
+            set_errno(0);
+            0
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
+/// `close_range(2)`: close every number in `[first, last]`, or with
+/// `CLOSE_RANGE_CLOEXEC` mark them close-on-exec instead. `first > last` or an
+/// unknown flag is `EINVAL`; the range is clamped to the table.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_close_range(first: u32, last: u32, flags: u32) -> c_int {
+    let closed = match fd_table().lock().close_range(first, last, flags) {
+        Ok(closed) => closed,
+        Err(errno) => return fail(errno),
+    };
+    for (number, release) in closed {
+        retire_number(number);
+        if let Some(release) = release {
+            let _ = release_description(release);
+        }
+    }
+    set_errno(0);
+    0
+}
+
+/// A hidden reference on `fd`'s description — a file-backed mapping takes one
+/// so its writeback survives the guest closing the number (the kernel's mapping
+/// holds the `struct file` the same way). Returns the description id, or -1
+/// with `EBADF`. Released with [`patina_desc_release`].
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_fd_retain(raw_fd: c_int) -> i64 {
+    match fd_table().lock().retain(raw_fd) {
+        Ok(desc) => {
+            set_errno(0);
+            i64::try_from(desc).unwrap_or_else(|_| i64::from(fail(EOVERFLOW)))
+        }
+        Err(errno) => i64::from(fail(errno)),
+    }
+}
+
+/// Positional write through a retained description (a mapping's writeback):
+/// the file is still writable after every guest number for it has closed.
+///
+/// # Safety
+/// `source` must be readable for `length` bytes when nonzero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_desc_pwrite(
+    desc: i64,
+    source: *const c_void,
+    length: usize,
+    offset: i64,
+) -> isize {
+    let Ok(desc) = DescId::try_from(desc) else {
+        return fail(EBADF) as isize;
+    };
+    let handle = {
+        let table = fd_table().lock();
+        match table.description(desc) {
+            Some(description) if description.kind.is_fs() => Fd(description.handle),
+            Some(_) => return fail(EINVAL) as isize,
+            None => return fail(EBADF) as isize,
+        }
+    };
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { fs_pwrite(handle, source, length, offset) }
+}
+
+/// Drop a hidden reference taken by [`patina_fd_retain`]; the last reference
+/// frees the description exactly as the last `close` would.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_desc_release(desc: i64) -> c_int {
+    let Ok(desc) = DescId::try_from(desc) else {
+        return fail(EBADF);
+    };
+    let released = match fd_table().lock().release(desc) {
+        Ok(released) => released,
+        Err(errno) => return fail(errno),
+    };
+    let result = match released {
+        Some(release) => release_description(release),
+        None => Ok(()),
+    };
+    match result {
+        Ok(()) => {
+            set_errno(0);
+            0
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The universal descriptor operations. Each resolves the guest number ONCE and
+// dispatches on what it names; a kind that has no such operation answers what
+// the kernel answers for it. These are the entries the C `read`/`write`/... and
+// the SUD rows call, so the two doors share one decode.
+
+fn fs_read(fd: Fd, destination: *mut c_void, length: usize) -> isize {
+    match with_context(|context| context.fs_read(fd, length)) {
+        Ok(bytes) => {
+            if !bytes.is_empty() {
+                // SAFETY: the caller's C ABI contract makes `destination`
+                // writable for `length` bytes, and `bytes.len() <= length`.
+                unsafe {
+                    slice::from_raw_parts_mut(destination.cast::<u8>(), length)[..bytes.len()]
+                        .copy_from_slice(&bytes);
+                }
+            }
+            isize::try_from(bytes.len()).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
+        }
+        Err(errno) => fail(errno) as isize,
+    }
+}
+
+/// The guest's standard input: EOF, deterministically. Still a boundary call
+/// (a scheduling point), as a captured-stdio write is. A `--stdin` knob feeding
+/// bytes here is a later slice; the registry row's reasoning names it.
+fn stdin_read() -> isize {
+    if let Err(errno) = thread::sched_point() {
+        return fail(errno) as isize;
+    }
+    set_errno(0);
+    0
+}
+
 /// Read bytes into caller-owned memory.
 ///
 /// # Safety
@@ -3731,31 +4140,60 @@ pub unsafe extern "C" fn patina_read(
     length: usize,
 ) -> isize {
     if length != 0 && destination.is_null() {
-        return isize::try_from(fail(EINVAL)).expect("-1 fits in isize");
+        return fail(EINVAL) as isize;
     }
-    if urandom_is_open(raw_fd) {
-        let result = unsafe { patina_entropy(destination, length) };
-        return if result == 0 {
-            isize::try_from(length).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
-        } else {
-            fail(patina_errno()) as isize
-        };
-    }
-    let fd = match fd(raw_fd) {
-        Ok(fd) => fd,
-        Err(errno) => return isize::try_from(fail(errno)).expect("-1 fits in isize"),
+    let resolved = match resolve_fd(raw_fd) {
+        Ok(resolved) => resolved,
+        Err(errno) => return fail(errno) as isize,
     };
-    match with_context(|context| context.fs_read(fd, length)) {
-        Ok(bytes) => {
-            if !bytes.is_empty() {
-                // SAFETY: Guaranteed by this function's C ABI contract.
-                unsafe {
-                    slice::from_raw_parts_mut(destination.cast::<u8>(), length)[..bytes.len()]
-                        .copy_from_slice(&bytes);
-                }
-            }
-            isize::try_from(bytes.len()).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
+    let nonblocking = resolved.status & O_NONBLOCK != 0;
+    match resolved.kind {
+        FdKind::Stdin => stdin_read(),
+        // The captured streams are write-only, like the pipe a supervisor
+        // hands a child.
+        FdKind::Stdout | FdKind::Stderr => fail(EBADF) as isize,
+        FdKind::File | FdKind::Dir | FdKind::OPath => {
+            fs_read(Fd(resolved.handle), destination, length)
         }
+        FdKind::Urandom => {
+            // SAFETY: forwarded from this function's own contract.
+            let result = unsafe { patina_entropy(destination, length) };
+            if result == 0 {
+                isize::try_from(length).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
+            } else {
+                fail(patina_errno()) as isize
+            }
+        }
+        // SAFETY: forwarded from this function's own contract.
+        FdKind::Socket => unsafe {
+            thread::socket_read(resolved.handle, nonblocking, destination, length)
+        },
+        // SAFETY: as above.
+        FdKind::Pipe => unsafe {
+            thread::pipe_read(resolved.handle, nonblocking, destination, length)
+        },
+        // SAFETY: as above.
+        #[cfg(target_os = "linux")]
+        FdKind::EventFd => unsafe {
+            thread::eventfd_read(resolved.handle, nonblocking, destination, length)
+        },
+        #[cfg(target_os = "linux")]
+        FdKind::Epoll => fail(EINVAL) as isize,
+        #[cfg(target_os = "macos")]
+        FdKind::Kqueue => fail(EINVAL) as isize,
+    }
+}
+
+fn fs_write(fd: Fd, source: *const c_void, length: usize) -> isize {
+    let bytes = if length == 0 {
+        &[]
+    } else {
+        // SAFETY: the caller's C ABI contract makes `source` readable for
+        // `length` bytes.
+        unsafe { slice::from_raw_parts(source.cast::<u8>(), length) }
+    };
+    match with_context(|context| context.fs_write(fd, bytes)) {
+        Ok(written) => isize::try_from(written).unwrap_or_else(|_| fail(EOVERFLOW) as isize),
         Err(errno) => fail(errno) as isize,
     }
 }
@@ -3773,27 +4211,38 @@ pub unsafe extern "C" fn patina_write(
     if length != 0 && source.is_null() {
         return fail(EINVAL) as isize;
     }
-    if urandom_is_open(raw_fd) {
-        return fail(EBADF) as isize;
-    }
-    let fd = match fd(raw_fd) {
-        Ok(fd) => fd,
+    let resolved = match resolve_fd(raw_fd) {
+        Ok(resolved) => resolved,
         Err(errno) => return fail(errno) as isize,
     };
-    let bytes = if length == 0 {
-        &[]
-    } else {
-        // SAFETY: Guaranteed by this function's C ABI contract.
-        unsafe { slice::from_raw_parts(source.cast::<u8>(), length) }
-    };
-    match with_context(|context| context.fs_write(fd, bytes)) {
-        Ok(written) => isize::try_from(written).unwrap_or_else(|_| fail(EOVERFLOW) as isize),
-        Err(errno) => fail(errno) as isize,
+    let nonblocking = resolved.status & O_NONBLOCK != 0;
+    match resolved.kind {
+        FdKind::Stdin | FdKind::Urandom => fail(EBADF) as isize,
+        // SAFETY: forwarded from this function's own contract.
+        FdKind::Stdout | FdKind::Stderr => unsafe {
+            patina_stdio_write(resolved.handle as c_int, source, length)
+        },
+        FdKind::File | FdKind::Dir | FdKind::OPath => fs_write(Fd(resolved.handle), source, length),
+        // SAFETY: forwarded from this function's own contract.
+        FdKind::Socket => unsafe {
+            thread::socket_write(resolved.handle, nonblocking, source, length)
+        },
+        // SAFETY: as above.
+        FdKind::Pipe => unsafe { thread::pipe_write(resolved.handle, nonblocking, source, length) },
+        // SAFETY: as above.
+        #[cfg(target_os = "linux")]
+        FdKind::EventFd => unsafe { thread::eventfd_write(resolved.handle, source, length) },
+        #[cfg(target_os = "linux")]
+        FdKind::Epoll => fail(EINVAL) as isize,
+        #[cfg(target_os = "macos")]
+        FdKind::Kqueue => fail(EINVAL) as isize,
     }
 }
 
 /// Positional read (`pread`): read at `offset` without moving the file cursor.
-/// A negative offset is rejected, matching the kernel `pread` contract.
+/// A negative offset is rejected, matching the kernel `pread` contract; a
+/// description without offset addressing (a pipe, a socket, the captured
+/// streams) is `ESPIPE`.
 ///
 /// # Safety
 /// `destination` must be writable for `length` bytes when nonzero.
@@ -3805,20 +4254,18 @@ pub unsafe extern "C" fn patina_pread(
     offset: i64,
 ) -> isize {
     if length != 0 && destination.is_null() {
-        return isize::try_from(fail(EINVAL)).expect("-1 fits in isize");
+        return fail(EINVAL) as isize;
     }
-    if urandom_is_open(raw_fd) {
-        return fail(ESPIPE) as isize;
-    }
+    let handle = match resolve_fd(raw_fd) {
+        Ok(resolved) if resolved.kind.is_fs() => Fd(resolved.handle),
+        Ok(_) => return fail(ESPIPE) as isize,
+        Err(errno) => return fail(errno) as isize,
+    };
     let offset = match u64::try_from(offset) {
         Ok(offset) => offset,
-        Err(_) => return isize::try_from(fail(EINVAL)).expect("-1 fits in isize"),
+        Err(_) => return fail(EINVAL) as isize,
     };
-    let fd = match fd(raw_fd) {
-        Ok(fd) => fd,
-        Err(errno) => return isize::try_from(fail(errno)).expect("-1 fits in isize"),
-    };
-    match with_context(|context| context.fs_read_at(fd, offset, length)) {
+    match with_context(|context| context.fs_read_at(handle, offset, length)) {
         Ok(bytes) => {
             if !bytes.is_empty() {
                 // SAFETY: Guaranteed by this function's C ABI contract.
@@ -3833,8 +4280,28 @@ pub unsafe extern "C" fn patina_pread(
     }
 }
 
+/// # Safety
+/// `source` must be readable for `length` bytes when nonzero.
+unsafe fn fs_pwrite(handle: Fd, source: *const c_void, length: usize, offset: i64) -> isize {
+    let offset = match u64::try_from(offset) {
+        Ok(offset) => offset,
+        Err(_) => return fail(EINVAL) as isize,
+    };
+    let bytes = if length == 0 {
+        &[]
+    } else {
+        // SAFETY: Guaranteed by this function's contract.
+        unsafe { slice::from_raw_parts(source.cast::<u8>(), length) }
+    };
+    match with_context(|context| context.fs_write_at(handle, offset, bytes)) {
+        Ok(written) => isize::try_from(written).unwrap_or_else(|_| fail(EOVERFLOW) as isize),
+        Err(errno) => fail(errno) as isize,
+    }
+}
+
 /// Positional write (`pwrite`): write at `offset` without moving the file
-/// cursor. A negative offset is rejected, matching the kernel `pwrite` contract.
+/// cursor. A negative offset is rejected, matching the kernel `pwrite`
+/// contract; a description without offset addressing is `ESPIPE`.
 ///
 /// # Safety
 /// `source` must be readable for `length` bytes when nonzero.
@@ -3848,53 +4315,13 @@ pub unsafe extern "C" fn patina_pwrite(
     if length != 0 && source.is_null() {
         return fail(EINVAL) as isize;
     }
-    if urandom_is_open(raw_fd) {
-        return fail(EBADF) as isize;
-    }
-    let offset = match u64::try_from(offset) {
-        Ok(offset) => offset,
-        Err(_) => return fail(EINVAL) as isize,
-    };
-    let fd = match fd(raw_fd) {
-        Ok(fd) => fd,
+    let handle = match resolve_fd(raw_fd) {
+        Ok(resolved) if resolved.kind.is_fs() => Fd(resolved.handle),
+        Ok(_) => return fail(ESPIPE) as isize,
         Err(errno) => return fail(errno) as isize,
     };
-    let bytes = if length == 0 {
-        &[]
-    } else {
-        // SAFETY: Guaranteed by this function's C ABI contract.
-        unsafe { slice::from_raw_parts(source.cast::<u8>(), length) }
-    };
-    match with_context(|context| context.fs_write_at(fd, offset, bytes)) {
-        Ok(written) => isize::try_from(written).unwrap_or_else(|_| fail(EOVERFLOW) as isize),
-        Err(errno) => fail(errno) as isize,
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_close(raw_fd: c_int) -> c_int {
-    if urandom_index(raw_fd).is_some() {
-        return match urandom_close(raw_fd) {
-            Ok(()) => {
-                set_errno(0);
-                0
-            }
-            Err(errno) => fail(errno),
-        };
-    }
-    let fd = match fd(raw_fd) {
-        Ok(fd) => fd,
-        Err(errno) => return fail(errno),
-    };
-    let result = match with_context(|context| context.fs_close(fd)) {
-        Ok(()) => 0,
-        Err(errno) => fail(errno),
-    };
-    // flock(2): a descriptor's advisory lock is released when the descriptor is
-    // closed. (Deterministic fd numbers are never reused, so no later open can
-    // inherit a stale entry.)
-    flock_release(raw_fd);
-    result
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { fs_pwrite(handle, source, length, offset) }
 }
 
 /// `LOCK_SH`/`LOCK_EX`/`LOCK_NB`/`LOCK_UN` from `<sys/file.h>` — identical values
@@ -3904,33 +4331,35 @@ const LOCK_EX: c_int = 2;
 const LOCK_NB: c_int = 4;
 const LOCK_UN: c_int = 8;
 
-/// Advisory whole-file lock over the deterministic filesystem — the interposed
-/// `flock` in `c/patina_posix.c`. A single-opener database (via std
-/// `File::try_lock`) takes one `LOCK_EX | LOCK_NB` on open; a lone opener always
-/// acquires it.
+/// Advisory whole-file lock — the interposed `flock` in `c/patina_posix.c` and
+/// the SUD `flock` row. A single-opener database (via std `File::try_lock`)
+/// takes one `LOCK_EX | LOCK_NB` on open; a lone opener always acquires it.
 ///
-/// The lock is keyed on the descriptor's deterministic-fs inode, so two
-/// independent opens of the *same* path contend faithfully: a non-blocking
-/// request that would collide with an incompatible lock held on another
-/// descriptor reports `EWOULDBLOCK` (a single-opener database surfaces this as
-/// an "already open" error). `LOCK_SH` conflicts only with a held
-/// `LOCK_EX`; `LOCK_EX` conflicts with any held lock. Re-locking or upgrading on
-/// the *same* descriptor is always allowed (it replaces that descriptor's entry
-/// and never self-conflicts). The lock clears on `LOCK_UN` and on `close`.
+/// The lock belongs to the open file DESCRIPTION and is keyed on the
+/// deterministic-fs inode it is open on, so two independent opens of the *same*
+/// path contend faithfully: a non-blocking request that would collide with an
+/// incompatible lock held on another description reports `EWOULDBLOCK` (a
+/// single-opener database surfaces this as an "already open" error), while a
+/// `dup` of the holder shares the lock and can release it. `LOCK_SH` conflicts
+/// only with a held `LOCK_EX`; `LOCK_EX` conflicts with any held lock.
+/// Re-locking or upgrading on the *same* description is always allowed (it
+/// replaces that description's entry and never self-conflicts). The lock clears
+/// on `LOCK_UN` and when the description's last number closes.
 ///
-/// Simplifications, sound for the supported surface: a *blocking* request that
-/// would contend fails closed with `EDEADLK` rather than parking a real thread —
-/// the single-baton scheduler does not model advisory-lock waiting, and no
-/// supported guest blocks on a contended `flock` (std's `File::try_lock*` is
-/// always `LOCK_NB`). Dup'd descriptors are tracked independently rather than
-/// sharing one open-file-description lock, so closing one dup releases only its
-/// own entry; no supported guest dups a locked descriptor.
+/// A *blocking* request that would contend fails closed with `EDEADLK` rather
+/// than parking a real thread — the single-baton scheduler does not model
+/// advisory-lock waiting, and no supported guest blocks on a contended `flock`
+/// (std's `File::try_lock*` is always `LOCK_NB`).
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_flock(raw_fd: c_int, operation: c_int) -> c_int {
+    let resolved = match resolve_fd(raw_fd) {
+        Ok(resolved) => resolved,
+        Err(errno) => return fail(errno),
+    };
     let non_blocking = operation & LOCK_NB != 0;
     let request = operation & !LOCK_NB;
     if request == LOCK_UN {
-        flock_release(raw_fd);
+        flock_release(resolved.desc);
         set_errno(0);
         return 0;
     }
@@ -3939,20 +4368,20 @@ pub extern "C" fn patina_flock(raw_fd: c_int, operation: c_int) -> c_int {
         LOCK_EX => FlockMode::Exclusive,
         _ => return fail(EINVAL),
     };
-    let fd = match fd(raw_fd) {
-        Ok(fd) => fd,
-        Err(errno) => return fail(errno),
-    };
-    // Resolve the descriptor's inode through the recorded metadata path so the
-    // conflict decision keys on the same file identity under record and replay.
-    let ino = match with_context(|context| context.fs_fd_metadata(fd)) {
-        Ok(metadata) => metadata.ino,
-        Err(errno) => return fail(errno),
+    // Resolve a file's inode through the recorded metadata path so the conflict
+    // decision keys on the same file identity under record and replay.
+    let identity = if resolved.kind.is_fs() {
+        match with_context(|context| context.fs_fd_metadata(Fd(resolved.handle))) {
+            Ok(metadata) => LockIdentity::Inode(metadata.ino),
+            Err(errno) => return fail(errno),
+        }
+    } else {
+        LockIdentity::Description(resolved.desc)
     };
     let mut table = flock_table().lock();
-    let conflict = table.iter().any(|(&holder, &(held_ino, held_mode))| {
-        holder != raw_fd
-            && held_ino == ino
+    let conflict = table.iter().any(|(&holder, &(held_identity, held_mode))| {
+        holder != resolved.desc
+            && held_identity == identity
             && (mode == FlockMode::Exclusive || held_mode == FlockMode::Exclusive)
     });
     if conflict {
@@ -3963,36 +4392,18 @@ pub extern "C" fn patina_flock(raw_fd: c_int, operation: c_int) -> c_int {
             fail(EDEADLK)
         };
     }
-    table.insert(raw_fd, (ino, mode));
+    table.insert(resolved.desc, (identity, mode));
     set_errno(0);
     0
 }
 
-/// Duplicate an open deterministic file descriptor; the duplicate shares the
-/// open-file description (cursor, flags) per POSIX. Deterministic numbering:
-/// the driver's next fd, not the lowest free number.
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_dup(raw_fd: c_int) -> c_int {
-    if urandom_is_open(raw_fd) {
-        return fail(ENOSYS);
-    }
-    let fd = match fd(raw_fd) {
-        Ok(fd) => fd,
-        Err(errno) => return fail(errno),
-    };
-    match with_context(|context| context.fs_dup(fd)) {
-        Ok(fd) => i32::try_from(fd.0).unwrap_or_else(|_| fail(EOVERFLOW)),
-        Err(errno) => fail(errno),
-    }
-}
-
+/// `lseek(2)`: a file's cursor; a description without offset addressing is
+/// `ESPIPE`.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
-    if urandom_is_open(raw_fd) {
-        return i64::from(fail(ESPIPE));
-    }
-    let fd = match fd(raw_fd) {
-        Ok(fd) => fd,
+    let handle = match resolve_fd(raw_fd) {
+        Ok(resolved) if resolved.kind.is_fs() => Fd(resolved.handle),
+        Ok(_) => return i64::from(fail(ESPIPE)),
         Err(errno) => return i64::from(fail(errno)),
     };
     let whence = match whence {
@@ -4001,37 +4412,37 @@ pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
         2 => SeekWhence::End,
         _ => return i64::from(fail(EINVAL)),
     };
-    match with_context(|context| context.fs_seek(fd, offset, whence)) {
+    match with_context(|context| context.fs_seek(handle, offset, whence)) {
         Ok(position) => i64::try_from(position).unwrap_or_else(|_| i64::from(fail(EOVERFLOW))),
         Err(errno) => i64::from(fail(errno)),
     }
 }
 
+/// `fsync(2)`: durability for a file (or a directory: the crash model's
+/// namespace barrier); every other kind is `EINVAL`, as the kernel answers for
+/// a pipe or a socket.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_fsync(raw_fd: c_int) -> c_int {
-    if urandom_is_open(raw_fd) {
-        return fail(EINVAL);
-    }
-    let fd = match fd(raw_fd) {
-        Ok(fd) => fd,
+    let handle = match resolve_fd(raw_fd) {
+        Ok(resolved) if resolved.kind.is_fs() => Fd(resolved.handle),
+        Ok(_) => return fail(EINVAL),
         Err(errno) => return fail(errno),
     };
-    match with_context(|context| context.fs_sync(fd)) {
+    match with_context(|context| context.fs_sync(handle)) {
         Ok(()) => 0,
         Err(errno) => fail(errno),
     }
 }
 
+/// `ftruncate(2)`: a file's length; every other kind is `EINVAL`.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_set_len(raw_fd: c_int, length: u64) -> c_int {
-    if urandom_is_open(raw_fd) {
-        return fail(EBADF);
-    }
-    let fd = match fd(raw_fd) {
-        Ok(fd) => fd,
+    let handle = match resolve_fd(raw_fd) {
+        Ok(resolved) if resolved.kind.is_fs() => Fd(resolved.handle),
+        Ok(_) => return fail(EINVAL),
         Err(errno) => return fail(errno),
     };
-    match with_context(|context| context.fs_set_len(fd, length)) {
+    match with_context(|context| context.fs_set_len(handle, length)) {
         Ok(()) => 0,
         Err(errno) => fail(errno),
     }
@@ -4131,7 +4542,7 @@ pub unsafe extern "C" fn patina_fd_metadata(
     kind: *mut u32,
     length: *mut u64,
 ) -> c_int {
-    let fd = match fd(raw_fd) {
+    let fd = match fs_handle(raw_fd) {
         Ok(fd) => fd,
         Err(errno) => return fail(errno),
     };
@@ -4219,7 +4630,7 @@ pub unsafe extern "C" fn patina_fd_metadata_full(
             Err(errno) => fail(errno),
         };
     }
-    let fd = match fd(raw_fd) {
+    let fd = match fs_handle(raw_fd) {
         Ok(fd) => fd,
         Err(errno) => return fail(errno),
     };
@@ -4294,7 +4705,7 @@ pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
             Err(errno) => fail(errno),
         };
     }
-    let fd = match fd(raw_fd) {
+    let fd = match fs_handle(raw_fd) {
         Ok(fd) => fd,
         Err(errno) => return fail(errno),
     };
@@ -4324,7 +4735,7 @@ pub unsafe extern "C" fn patina_read_dir(raw_fd: c_int, state_out: *mut *mut c_v
     if state_out.is_null() {
         return fail(EINVAL);
     }
-    let fd = match fd(raw_fd) {
+    let fd = match fs_handle(raw_fd) {
         Ok(fd) => fd,
         Err(errno) => return fail(errno),
     };
@@ -5263,19 +5674,84 @@ pub unsafe extern "C" fn patina_lifecycle_event(label: *const u8, label_len: usi
 /// primitives only provide the vehicle and the blocking.
 mod thread {
     use std::cell::Cell;
-    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+    use std::collections::{BTreeMap, VecDeque};
     use std::ffi::c_char;
     use std::ffi::{c_int, c_void};
     use std::sync::{Arc, OnceLock};
 
     use patina_dst_abi::{ClockKind, Datagram, ShutdownHow, SocketId};
 
+    use super::fdtable::{DescId, FdKind};
     use super::hostcoll::{HostDeque, HostMap};
     use super::{
         EBUSY, EDEADLK, EINVAL, EISCONN, ENOTCONN, EOPNOTSUPP, EOVERFLOW, EPERM, ESRCH, ETIMEDOUT,
-        EWOULDBLOCK, SpinGuard, SpinMutex, TaskId, host_write_all, with_context_msg,
-        with_context_raw,
+        EWOULDBLOCK, O_NONBLOCK, O_READ, O_WRITE, SpinGuard, SpinMutex, TaskId, host_write_all,
+        with_context_msg, with_context_raw,
     };
+
+    /// Where a guest number lands in this module's class tables. Every extern
+    /// entry below resolves its guest number ONCE through the descriptor table
+    /// and works on the handle from then on; the class tables never see a guest
+    /// number. `EBADF` for an empty slot.
+    fn class_entry(guest_fd: c_int) -> Result<super::fdtable::Resolved, c_int> {
+        super::resolve_fd(guest_fd)
+    }
+
+    /// A guest number's socket handle and its `O_NONBLOCK`: `ENOTSOCK` for any
+    /// other kind of description.
+    fn socket_entry(guest_fd: c_int) -> Result<(c_int, bool), c_int> {
+        let resolved = class_entry(guest_fd)?;
+        match resolved.kind {
+            FdKind::Socket => Ok((resolved.handle as c_int, resolved.status & O_NONBLOCK != 0)),
+            FdKind::Stdin
+            | FdKind::Stdout
+            | FdKind::Stderr
+            | FdKind::File
+            | FdKind::Dir
+            | FdKind::OPath
+            | FdKind::Urandom
+            | FdKind::Pipe => Err(super::ENOTSOCK),
+            #[cfg(target_os = "linux")]
+            FdKind::EventFd | FdKind::Epoll => Err(super::ENOTSOCK),
+            #[cfg(target_os = "macos")]
+            FdKind::Kqueue => Err(super::ENOTSOCK),
+        }
+    }
+
+    fn socket_handle(guest_fd: c_int) -> Result<c_int, c_int> {
+        socket_entry(guest_fd).map(|(handle, _)| handle)
+    }
+
+    /// A guest number's pipe-endpoint handle and its `O_NONBLOCK`: `EBADF` for
+    /// anything that is not a pipe/socketpair/FIFO endpoint.
+    fn pipe_entry(guest_fd: c_int) -> Result<(c_int, bool), c_int> {
+        let resolved = class_entry(guest_fd)?;
+        match resolved.kind {
+            FdKind::Pipe => Ok((resolved.handle as c_int, resolved.status & O_NONBLOCK != 0)),
+            FdKind::Stdin
+            | FdKind::Stdout
+            | FdKind::Stderr
+            | FdKind::File
+            | FdKind::Dir
+            | FdKind::OPath
+            | FdKind::Urandom
+            | FdKind::Socket => Err(super::EBADF),
+            #[cfg(target_os = "linux")]
+            FdKind::EventFd | FdKind::Epoll => Err(super::EBADF),
+            #[cfg(target_os = "macos")]
+            FdKind::Kqueue => Err(super::EBADF),
+        }
+    }
+
+    /// Mint the next class handle. Handles are internal identities (never a
+    /// guest number) shared by every class table in this module, so a handle
+    /// is a socket XOR a pipe end XOR an eventfd; the descriptor table's kind
+    /// says which.
+    fn next_handle(state: &mut ThreadRuntime) -> c_int {
+        let handle = state.net.next_handle;
+        state.net.next_handle = state.net.next_handle.wrapping_add(1);
+        handle
+    }
 
     /// A guest thread body: `void *start_routine(void *arg)`.
     type StartRoutine = extern "C" fn(*mut c_void) -> *mut c_void;
@@ -5425,6 +5901,12 @@ mod thread {
     }
 
     fn fatal(message: &str) -> ! {
+        // Like `trap_fatal`: `abort()` skips the shutdown flush, so the guest's
+        // captured output goes out first — a probe that dies here (a deadlock,
+        // an unmodeled flag) still leaves its event stream for the conformance
+        // differ, which is what lets the testbed declare the death at an exact
+        // event instead of writing the whole probe off.
+        let _ = super::flush_captured_stdio();
         let text = format!("patina native shim fatal: {message}\n");
         let _ = host_write_all(2, text.as_bytes());
         std::process::abort();
@@ -7321,10 +7803,6 @@ mod thread {
     // latency deterministically later. All sockets are fully virtual — no host
     // network symbols are imported.
 
-    /// Guest socket descriptors are numbered from here so they never collide
-    /// with the deterministic filesystem's small descriptors.
-    pub(crate) const SOCKET_FD_BASE: c_int = 0x4000_0000;
-
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum SocketKind {
         Datagram,
@@ -7340,7 +7818,6 @@ mod thread {
         address: Option<String>,
         bound: Option<(u32, u16)>,
         peer: Option<(u32, u16)>,
-        nonblocking: bool,
         /// Deterministic `SO_RCVTIMEO`: `Some(nanos)` bounds a blocking receive by
         /// this many virtual nanoseconds from entry; `None` (or a zero timeval,
         /// which POSIX treats as no timeout) blocks until data or a genuine wake.
@@ -7353,14 +7830,13 @@ mod thread {
     }
 
     impl NetSocket {
-        fn new(kind: SocketKind, nonblocking: bool) -> Self {
+        fn new(kind: SocketKind) -> Self {
             Self {
                 kind,
                 socket_id: None,
                 address: None,
                 bound: None,
                 peer: None,
-                nonblocking,
                 read_timeout_nanos: None,
                 stream_key: None,
                 recv_waiters: VecDeque::new(),
@@ -7404,11 +7880,12 @@ mod thread {
         /// `0.0.0.0:PORT` while the client's peer is the specific IP it dialed,
         /// and neither side can derive the other's spelling.
         tcp_streams: BTreeMap<String, TcpPair>,
-        // In-process pipe/socketpair channels. Endpoints share the socket
-        // virtual-fd space (`next_fd`) so a virtual fd is a socket XOR a pipe
-        // endpoint, never both — the C dispatch tells them apart by table
-        // membership. `pipe_channels` are the directed byte buffers each endpoint
-        // reads from / writes to; see the "in-process pipe / socketpair" section.
+        // In-process pipe/socketpair channels. Endpoints are keyed by class
+        // handle (`next_handle`, shared with the sockets, so a handle is a socket
+        // XOR a pipe end); the descriptor table maps guest numbers onto them and
+        // says which kind a number names. `pipe_channels` are the directed byte
+        // buffers each endpoint reads from / writes to; see the "in-process pipe
+        // / socketpair" section.
         pipe_ends: BTreeMap<c_int, PipeEnd>,
         pipe_channels: BTreeMap<u64, PipeChannel>,
         /// The channel currently backing each open FIFO, keyed by the
@@ -7419,47 +7896,32 @@ mod thread {
         /// exists only while some descriptor is open on the FIFO.
         fifo_channels: BTreeMap<u64, u64>,
         next_channel: u64,
-        // Virtual kqueue readiness reactors. A kqueue fd (drawn from the shared
-        // `next_fd` space, so a virtual fd is a socket XOR a pipe endpoint XOR a
-        // kqueue fd) maps through `kq_fds` to a reference-counted registry in
-        // `kqueues`: a `dup`/`F_DUPFD` of a kqueue fd (tokio's IO driver clones
-        // its selector this way) yields a second fd sharing the SAME registry, so
-        // the registry outlives any one fd and drops only when the last closes.
-        // macOS-only: kqueue/kevent have no Linux counterpart.
+        // Virtual kqueue readiness reactors, keyed by registry id. The
+        // descriptor table holds the description (a `dup`/`F_DUPFD` of a kqueue
+        // fd — tokio's IO driver clones its selector this way — is a second
+        // number on the same description), so the registry outlives any one
+        // number and drops only when the last closes. macOS-only: kqueue/kevent
+        // have no Linux counterpart.
         #[cfg(target_os = "macos")]
         kqueues: BTreeMap<u64, KqueueSlot>,
         #[cfg(target_os = "macos")]
-        kq_fds: BTreeMap<c_int, u64>,
-        #[cfg(target_os = "macos")]
         next_kq: u64,
         // Virtual epoll readiness reactors — the Linux mirror of the kqueue
-        // tables above, with the same refcounted-dup shape (mio clones its
-        // selector through `F_DUPFD_CLOEXEC` on Linux exactly as on macOS).
+        // table above, keyed by registry id the same way (mio clones its
+        // selector through `F_DUPFD_CLOEXEC` on Linux exactly as on macOS: a
+        // second number on one description in the descriptor table).
         #[cfg(target_os = "linux")]
         epolls: BTreeMap<u64, EpollSlot>,
         #[cfg(target_os = "linux")]
-        epoll_fds: BTreeMap<c_int, u64>,
-        #[cfg(target_os = "linux")]
         next_epoll: u64,
         // Deterministic in-process eventfd counters (Linux; mio's `Waker`
-        // vehicle, the EVFILT_USER analogue), sharing the virtual-fd space.
+        // vehicle, the EVFILT_USER analogue), keyed by class handle.
         #[cfg(target_os = "linux")]
         eventfds: BTreeMap<c_int, EventFd>,
-        // Directory descriptors for the openat/fdopendir/unlinkat family
-        // (std's `remove_dir_all` opens each directory with `openat(...,
-        // O_DIRECTORY)`, hands the fd to `fdopendir`, and removes children with
-        // `unlinkat(dirfd, name, ...)`). A dir fd is an ordinary deterministic-FS
-        // descriptor: fstat/fsync/close route through the FS, and so does the
-        // path the *at interposers join child names onto — the filesystem is
-        // asked where the descriptor's NODE is now (`patina_dirpath`), never a
-        // name cached here, so a rename moves the descriptor with its inode and
-        // a symlink planted at the old name is not followed. This table
-        // therefore records only WHICH fds are directory descriptors, which is
-        // the one thing the filesystem cannot answer: FS fds live below the
-        // virtual socket/pipe/reactor range, so membership is what keeps a dir
-        // fd distinct from a socket/pipe/reactor endpoint.
-        dir_fds: BTreeSet<c_int>,
-        next_fd: c_int,
+        /// The class-handle allocator shared by `sockets`, `pipe_ends` and
+        /// `eventfds`: an internal identity the descriptor table maps guest
+        /// numbers onto, never a number the guest sees (see `next_handle`).
+        next_handle: c_int,
         next_ephemeral: u16,
     }
 
@@ -7477,19 +7939,14 @@ mod thread {
                 #[cfg(target_os = "macos")]
                 kqueues: BTreeMap::new(),
                 #[cfg(target_os = "macos")]
-                kq_fds: BTreeMap::new(),
-                #[cfg(target_os = "macos")]
                 next_kq: 0,
                 #[cfg(target_os = "linux")]
                 epolls: BTreeMap::new(),
                 #[cfg(target_os = "linux")]
-                epoll_fds: BTreeMap::new(),
-                #[cfg(target_os = "linux")]
                 next_epoll: 0,
                 #[cfg(target_os = "linux")]
                 eventfds: BTreeMap::new(),
-                dir_fds: BTreeSet::new(),
-                next_fd: SOCKET_FD_BASE,
+                next_handle: 0,
                 next_ephemeral: 49152,
             }
         }
@@ -7595,23 +8052,45 @@ mod thread {
     /// # Safety
     /// C ABI entry point.
     #[unsafe(no_mangle)]
-    pub extern "C" fn patina_net_socket(stream: c_int, nonblocking: c_int) -> c_int {
+    pub extern "C" fn patina_net_socket(
+        stream: c_int,
+        nonblocking: c_int,
+        cloexec: c_int,
+    ) -> c_int {
         let mut state = lock_state();
         if let Err(error) = state.ensure_active() {
             return super::fail(error.into_posix());
         }
-        let fd = state.net.next_fd;
-        state.net.next_fd = state.net.next_fd.wrapping_add(1);
+        let handle = next_handle(&mut state);
         let kind = if stream != 0 {
             SocketKind::StreamUnbound
         } else {
             SocketKind::Datagram
         };
-        state
-            .net
-            .sockets
-            .insert(fd, NetSocket::new(kind, nonblocking != 0));
-        fd
+        state.net.sockets.insert(handle, NetSocket::new(kind));
+        bind_socket_handle(&mut state, handle, nonblocking != 0, cloexec != 0)
+    }
+
+    /// Bind a freshly minted socket handle to a guest number (`socket`,
+    /// `accept`). A full table (`EMFILE`) drops the socket again, so the
+    /// failure creates nothing — the kernel's `sock_map_fd` failure shape.
+    fn bind_socket_handle(
+        state: &mut ThreadRuntime,
+        handle: c_int,
+        nonblocking: bool,
+        cloexec: bool,
+    ) -> c_int {
+        let status = O_READ | O_WRITE | if nonblocking { O_NONBLOCK } else { 0 };
+        match super::install_fd(FdKind::Socket, handle as u64, status, cloexec) {
+            Ok(fd) => {
+                super::set_errno(0);
+                fd
+            }
+            Err(errno) => {
+                state.net.sockets.remove(&handle);
+                super::fail(errno)
+            }
+        }
     }
 
     /// Return the managed socket kind: -1 unknown, 0 datagram, 1 unbound stream,
@@ -7620,7 +8099,10 @@ mod thread {
     /// # Safety
     /// C ABI entry point.
     #[unsafe(no_mangle)]
-    pub extern "C" fn patina_net_kind(fd: c_int) -> c_int {
+    pub extern "C" fn patina_net_kind(guest_fd: c_int) -> c_int {
+        let Ok(fd) = socket_handle(guest_fd) else {
+            return -1;
+        };
         let state = lock_state();
         match state.net.sockets.get(&fd).map(|socket| socket.kind) {
             Some(SocketKind::Datagram) => 0,
@@ -7632,9 +8114,16 @@ mod thread {
     }
 
     /// # Safety
-    /// C ABI entry point; `fd` is a socket from [`patina_net_socket`].
+    /// C ABI entry point; `guest_fd` names a socket from [`patina_net_socket`].
     #[unsafe(no_mangle)]
-    pub extern "C" fn patina_net_bind(fd: c_int, ip: u32, port: u16) -> c_int {
+    pub extern "C" fn patina_net_bind(guest_fd: c_int, ip: u32, port: u16) -> c_int {
+        match socket_handle(guest_fd) {
+            Ok(fd) => net_bind(fd, ip, port),
+            Err(errno) => super::fail(errno),
+        }
+    }
+
+    fn net_bind(fd: c_int, ip: u32, port: u16) -> c_int {
         if let Err(errno) = sched_point() {
             return super::fail(errno);
         }
@@ -7694,10 +8183,19 @@ mod thread {
         }
     }
 
+    /// Datagram `connect`: pin the peer address.
+    ///
     /// # Safety
-    /// C ABI entry point; datagram connect records only the peer address locally.
+    /// C ABI entry point.
     #[unsafe(no_mangle)]
-    pub extern "C" fn patina_net_connect(fd: c_int, ip: u32, port: u16) -> c_int {
+    pub extern "C" fn patina_net_connect(guest_fd: c_int, ip: u32, port: u16) -> c_int {
+        match socket_handle(guest_fd) {
+            Ok(fd) => net_connect(fd, ip, port),
+            Err(errno) => super::fail(errno),
+        }
+    }
+
+    fn net_connect(fd: c_int, ip: u32, port: u16) -> c_int {
         if let Err(errno) = sched_point() {
             return super::fail(errno);
         }
@@ -7712,10 +8210,19 @@ mod thread {
         }
     }
 
+    /// `listen`: turn an unbound/bound stream socket into a listener.
+    ///
     /// # Safety
     /// C ABI entry point.
     #[unsafe(no_mangle)]
-    pub extern "C" fn patina_net_listen(fd: c_int, backlog: c_int) -> c_int {
+    pub extern "C" fn patina_net_listen(guest_fd: c_int, backlog: c_int) -> c_int {
+        match socket_handle(guest_fd) {
+            Ok(fd) => net_listen(fd, backlog),
+            Err(errno) => super::fail(errno),
+        }
+    }
+
+    fn net_listen(fd: c_int, backlog: c_int) -> c_int {
         if let Err(errno) = sched_point() {
             return super::fail(errno);
         }
@@ -7747,13 +8254,46 @@ mod thread {
         0
     }
 
+    /// `accept`/`accept4`: the accepted stream's guest number. `nonblocking`
+    /// and `cloexec` are the `SOCK_NONBLOCK`/`SOCK_CLOEXEC` bits for the NEW
+    /// descriptor; whether the listener itself blocks is its own `O_NONBLOCK`.
+    ///
     /// # Safety
     /// `ip_out`/`port_out` are writable when non-null.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_net_accept(
-        fd: c_int,
+        guest_fd: c_int,
         ip_out: *mut u32,
         port_out: *mut u16,
+        nonblocking: c_int,
+        cloexec: c_int,
+    ) -> c_int {
+        let (fd, listener_nonblocking) = match socket_entry(guest_fd) {
+            Ok(entry) => entry,
+            Err(errno) => return super::fail(errno),
+        };
+        // SAFETY: forwarded from this function's own contract.
+        unsafe {
+            net_accept(
+                fd,
+                listener_nonblocking,
+                ip_out,
+                port_out,
+                nonblocking != 0,
+                cloexec != 0,
+            )
+        }
+    }
+
+    /// # Safety
+    /// `ip_out`/`port_out` are writable when non-null.
+    unsafe fn net_accept(
+        fd: c_int,
+        nonblocking: bool,
+        ip_out: *mut u32,
+        port_out: *mut u16,
+        accepted_nonblocking: bool,
+        accepted_cloexec: bool,
     ) -> c_int {
         if let Err(errno) = sched_point() {
             return super::fail(errno);
@@ -7761,12 +8301,11 @@ mod thread {
         let me = current_task();
         loop {
             let mut state = lock_state();
-            let (listener_id, local, bound, nonblocking) = match state.net.sockets.get(&fd) {
+            let (listener_id, local, bound) = match state.net.sockets.get(&fd) {
                 Some(socket) if socket.kind == SocketKind::StreamListener => (
                     socket.socket_id.expect("listener has runtime socket id"),
                     socket.address.clone().expect("listener has address"),
                     socket.bound.expect("listener is bound"),
-                    socket.nonblocking,
                 ),
                 Some(socket) if socket.kind == SocketKind::Datagram => {
                     return super::fail(EOPNOTSUPP);
@@ -7779,8 +8318,7 @@ mod thread {
                     let Some(peer) = parse_addr(&accepted.peer) else {
                         fatal("network driver returned malformed TCP peer address");
                     };
-                    let new_fd = state.net.next_fd;
-                    state.net.next_fd = state.net.next_fd.wrapping_add(1);
+                    let new_fd = next_handle(&mut state);
                     state.net.sockets.insert(
                         new_fd,
                         NetSocket {
@@ -7789,7 +8327,6 @@ mod thread {
                             address: Some(local.clone()),
                             bound: Some(bound),
                             peer: Some(peer),
-                            nonblocking: false,
                             read_timeout_nanos: None,
                             stream_key: Some(accepted.peer.clone()),
                             recv_waiters: VecDeque::new(),
@@ -7808,7 +8345,12 @@ mod thread {
                     if !port_out.is_null() {
                         unsafe { port_out.write(peer.1) };
                     }
-                    return new_fd;
+                    return bind_socket_handle(
+                        &mut state,
+                        new_fd,
+                        accepted_nonblocking,
+                        accepted_cloexec,
+                    );
                 }
                 Ok(None) => {
                     if nonblocking {
@@ -7834,10 +8376,19 @@ mod thread {
         }
     }
 
+    /// Stream `connect`: dial a listener over SimNet.
+    ///
     /// # Safety
     /// C ABI entry point.
     #[unsafe(no_mangle)]
-    pub extern "C" fn patina_net_tcp_connect(fd: c_int, ip: u32, port: u16) -> c_int {
+    pub extern "C" fn patina_net_tcp_connect(guest_fd: c_int, ip: u32, port: u16) -> c_int {
+        match socket_handle(guest_fd) {
+            Ok(fd) => net_tcp_connect(fd, ip, port),
+            Err(errno) => super::fail(errno),
+        }
+    }
+
+    fn net_tcp_connect(fd: c_int, ip: u32, port: u16) -> c_int {
         if let Err(errno) = sched_point() {
             return super::fail(errno);
         }
@@ -7917,16 +8468,28 @@ mod thread {
         isize::try_from(report.written).unwrap_or(isize::MAX)
     }
 
+    /// Addressed datagram send.
+    ///
     /// # Safety
     /// `buf` must be readable for `len` bytes when nonzero.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_net_sendto(
-        fd: c_int,
+        guest_fd: c_int,
         buf: *const c_void,
         len: usize,
         ip: u32,
         port: u16,
     ) -> isize {
+        match socket_handle(guest_fd) {
+            // SAFETY: forwarded from this function's own contract.
+            Ok(fd) => unsafe { net_sendto(fd, buf, len, ip, port) },
+            Err(errno) => super::fail(errno) as isize,
+        }
+    }
+
+    /// # Safety
+    /// `buf` must be readable for `len` bytes when nonzero.
+    unsafe fn net_sendto(fd: c_int, buf: *const c_void, len: usize, ip: u32, port: u16) -> isize {
         if let Err(errno) = sched_point() {
             return super::fail(errno) as isize;
         }
@@ -7941,10 +8504,26 @@ mod thread {
         net_send_to(fd, bytes, &format_addr(ip, port))
     }
 
+    /// Connected datagram send.
+    ///
     /// # Safety
     /// `buf` must be readable for `len` bytes when nonzero.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_net_send(fd: c_int, buf: *const c_void, len: usize) -> isize {
+    pub unsafe extern "C" fn patina_net_send(
+        guest_fd: c_int,
+        buf: *const c_void,
+        len: usize,
+    ) -> isize {
+        match socket_handle(guest_fd) {
+            // SAFETY: forwarded from this function's own contract.
+            Ok(fd) => unsafe { net_send(fd, buf, len) },
+            Err(errno) => super::fail(errno) as isize,
+        }
+    }
+
+    /// # Safety
+    /// `buf` must be readable for `len` bytes when nonzero.
+    unsafe fn net_send(fd: c_int, buf: *const c_void, len: usize) -> isize {
         if let Err(errno) = sched_point() {
             return super::fail(errno) as isize;
         }
@@ -7970,11 +8549,28 @@ mod thread {
         net_send_to(fd, bytes, &format_addr(ip, port))
     }
 
+    /// Stream send.
+    ///
     /// # Safety
     /// `buf` must be readable for `len` bytes when nonzero.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_net_stream_send(
+        guest_fd: c_int,
+        buf: *const c_void,
+        len: usize,
+    ) -> isize {
+        match socket_entry(guest_fd) {
+            // SAFETY: forwarded from this function's own contract.
+            Ok((fd, nonblocking)) => unsafe { net_stream_send(fd, nonblocking, buf, len) },
+            Err(errno) => super::fail(errno) as isize,
+        }
+    }
+
+    /// # Safety
+    /// `buf` must be readable for `len` bytes when nonzero.
+    unsafe fn net_stream_send(
         fd: c_int,
+        nonblocking: bool,
         buf: *const c_void,
         len: usize,
     ) -> isize {
@@ -7991,11 +8587,10 @@ mod thread {
         let me = current_task();
         loop {
             let mut state = lock_state();
-            let (socket_id, nonblocking) = match state.net.sockets.get(&fd) {
-                Some(socket) if socket.kind == SocketKind::Stream => (
-                    socket.socket_id.expect("stream has runtime socket id"),
-                    socket.nonblocking,
-                ),
+            let socket_id = match state.net.sockets.get(&fd) {
+                Some(socket) if socket.kind == SocketKind::Stream => {
+                    socket.socket_id.expect("stream has runtime socket id")
+                }
                 Some(_) => return super::fail(ENOTCONN) as isize,
                 None => return super::fail(super::EBADF) as isize,
             };
@@ -8061,13 +8656,32 @@ mod thread {
         isize::try_from(count).unwrap_or(isize::MAX)
     }
 
-    /// Blocking datagram receive.
+    /// Datagram receive, reporting the sender when asked.
     ///
     /// # Safety
     /// `buf` must be writable for `len` bytes; `ip_out`/`port_out` writable or null.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_net_recvfrom(
+        guest_fd: c_int,
+        buf: *mut c_void,
+        len: usize,
+        ip_out: *mut u32,
+        port_out: *mut u16,
+    ) -> isize {
+        match socket_entry(guest_fd) {
+            // SAFETY: forwarded from this function's own contract.
+            Ok((fd, nonblocking)) => unsafe {
+                net_recvfrom(fd, nonblocking, buf, len, ip_out, port_out)
+            },
+            Err(errno) => super::fail(errno) as isize,
+        }
+    }
+
+    /// # Safety
+    /// `buf` must be writable for `len` bytes; `ip_out`/`port_out` writable or null.
+    unsafe fn net_recvfrom(
         fd: c_int,
+        nonblocking: bool,
         buf: *mut c_void,
         len: usize,
         ip_out: *mut u32,
@@ -8082,9 +8696,9 @@ mod thread {
         let mut timeout_deadline: Option<u64> = None;
         loop {
             let mut state = lock_state();
-            let (socket_id, nonblocking, read_timeout) = match state.net.sockets.get(&fd) {
+            let (socket_id, read_timeout) = match state.net.sockets.get(&fd) {
                 Some(socket) if socket.kind == SocketKind::Datagram => match socket.socket_id {
-                    Some(socket_id) => (socket_id, socket.nonblocking, socket.read_timeout_nanos),
+                    Some(socket_id) => (socket_id, socket.read_timeout_nanos),
                     None => return super::fail(super::EBADF) as isize,
                 },
                 Some(_) => return super::fail(EOPNOTSUPP) as isize,
@@ -8151,21 +8765,107 @@ mod thread {
         }
     }
 
+    /// Datagram receive without the sender.
+    ///
     /// # Safety
     /// `buf` must be writable for `len` bytes.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_net_recv(fd: c_int, buf: *mut c_void, len: usize) -> isize {
-        unsafe { patina_net_recvfrom(fd, buf, len, std::ptr::null_mut(), std::ptr::null_mut()) }
+    pub unsafe extern "C" fn patina_net_recv(
+        guest_fd: c_int,
+        buf: *mut c_void,
+        len: usize,
+    ) -> isize {
+        match socket_entry(guest_fd) {
+            // SAFETY: forwarded from this function's own contract.
+            Ok((fd, nonblocking)) => unsafe { net_recv(fd, nonblocking, buf, len) },
+            Err(errno) => super::fail(errno) as isize,
+        }
     }
 
     /// # Safety
     /// `buf` must be writable for `len` bytes.
+    unsafe fn net_recv(fd: c_int, nonblocking: bool, buf: *mut c_void, len: usize) -> isize {
+        // SAFETY: forwarded from this function's own contract.
+        unsafe {
+            net_recvfrom(
+                fd,
+                nonblocking,
+                buf,
+                len,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }
+    }
+
+    /// Stream receive.
+    ///
+    /// # Safety
+    /// `buf` must be writable for `len` bytes.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_net_stream_recv(
-        fd: c_int,
+        guest_fd: c_int,
         buf: *mut c_void,
         len: usize,
     ) -> isize {
+        match socket_entry(guest_fd) {
+            // SAFETY: forwarded from this function's own contract.
+            Ok((fd, nonblocking)) => unsafe { net_stream_recv(fd, nonblocking, buf, len) },
+            Err(errno) => super::fail(errno) as isize,
+        }
+    }
+
+    /// The `read(2)`/`write(2)` face of a socket description: a stream is its
+    /// stream transfer, a datagram its connected transfer, anything else is
+    /// `ENOTCONN`.
+    ///
+    /// # Safety
+    /// `buf` must be writable for `len` bytes when nonzero.
+    pub(crate) unsafe fn socket_read(
+        handle: u64,
+        nonblocking: bool,
+        buf: *mut c_void,
+        len: usize,
+    ) -> isize {
+        let fd = handle as c_int;
+        let kind = lock_state().net.sockets.get(&fd).map(|socket| socket.kind);
+        match kind {
+            // SAFETY: forwarded from this function's own contract.
+            Some(SocketKind::Stream) => unsafe { net_stream_recv(fd, nonblocking, buf, len) },
+            // SAFETY: as above.
+            Some(SocketKind::Datagram) => unsafe { net_recv(fd, nonblocking, buf, len) },
+            Some(SocketKind::StreamUnbound | SocketKind::StreamListener) => {
+                super::fail(ENOTCONN) as isize
+            }
+            None => super::fail(super::EBADF) as isize,
+        }
+    }
+
+    /// # Safety
+    /// `buf` must be readable for `len` bytes when nonzero.
+    pub(crate) unsafe fn socket_write(
+        handle: u64,
+        nonblocking: bool,
+        buf: *const c_void,
+        len: usize,
+    ) -> isize {
+        let fd = handle as c_int;
+        let kind = lock_state().net.sockets.get(&fd).map(|socket| socket.kind);
+        match kind {
+            // SAFETY: forwarded from this function's own contract.
+            Some(SocketKind::Stream) => unsafe { net_stream_send(fd, nonblocking, buf, len) },
+            // SAFETY: as above.
+            Some(SocketKind::Datagram) => unsafe { net_send(fd, buf, len) },
+            Some(SocketKind::StreamUnbound | SocketKind::StreamListener) => {
+                super::fail(ENOTCONN) as isize
+            }
+            None => super::fail(super::EBADF) as isize,
+        }
+    }
+
+    /// # Safety
+    /// `buf` must be writable for `len` bytes.
+    unsafe fn net_stream_recv(fd: c_int, nonblocking: bool, buf: *mut c_void, len: usize) -> isize {
         if let Err(errno) = sched_point() {
             return super::fail(errno) as isize;
         }
@@ -8178,11 +8878,10 @@ mod thread {
         let me = current_task();
         loop {
             let mut state = lock_state();
-            let (socket_id, nonblocking) = match state.net.sockets.get(&fd) {
-                Some(socket) if socket.kind == SocketKind::Stream => (
-                    socket.socket_id.expect("stream has runtime socket id"),
-                    socket.nonblocking,
-                ),
+            let socket_id = match state.net.sockets.get(&fd) {
+                Some(socket) if socket.kind == SocketKind::Stream => {
+                    socket.socket_id.expect("stream has runtime socket id")
+                }
                 Some(_) => return super::fail(ENOTCONN) as isize,
                 None => return super::fail(super::EBADF) as isize,
             };
@@ -8241,10 +8940,19 @@ mod thread {
         }
     }
 
+    /// `shutdown(2)` on a stream.
+    ///
     /// # Safety
     /// C ABI entry point.
     #[unsafe(no_mangle)]
-    pub extern "C" fn patina_net_shutdown(fd: c_int, how: c_int) -> c_int {
+    pub extern "C" fn patina_net_shutdown(guest_fd: c_int, how: c_int) -> c_int {
+        match socket_handle(guest_fd) {
+            Ok(fd) => net_shutdown(fd, how),
+            Err(errno) => super::fail(errno),
+        }
+    }
+
+    fn net_shutdown(fd: c_int, how: c_int) -> c_int {
         if let Err(errno) = sched_point() {
             return super::fail(errno);
         }
@@ -8286,14 +8994,26 @@ mod thread {
         0
     }
 
+    /// The socket's own address.
+    ///
     /// # Safety
     /// `ip_out`/`port_out` must be writable.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_net_getsockname(
-        fd: c_int,
+        guest_fd: c_int,
         ip_out: *mut u32,
         port_out: *mut u16,
     ) -> c_int {
+        match socket_handle(guest_fd) {
+            // SAFETY: forwarded from this function's own contract.
+            Ok(fd) => unsafe { net_getsockname(fd, ip_out, port_out) },
+            Err(errno) => super::fail(errno),
+        }
+    }
+
+    /// # Safety
+    /// `ip_out`/`port_out` must be writable.
+    unsafe fn net_getsockname(fd: c_int, ip_out: *mut u32, port_out: *mut u16) -> c_int {
         if ip_out.is_null() || port_out.is_null() {
             return super::fail(EINVAL);
         }
@@ -8309,14 +9029,26 @@ mod thread {
         0
     }
 
+    /// The connected peer's address.
+    ///
     /// # Safety
     /// `ip_out`/`port_out` must be writable.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_net_getpeername(
-        fd: c_int,
+        guest_fd: c_int,
         ip_out: *mut u32,
         port_out: *mut u16,
     ) -> c_int {
+        match socket_handle(guest_fd) {
+            // SAFETY: forwarded from this function's own contract.
+            Ok(fd) => unsafe { net_getpeername(fd, ip_out, port_out) },
+            Err(errno) => super::fail(errno),
+        }
+    }
+
+    /// # Safety
+    /// `ip_out`/`port_out` must be writable.
+    unsafe fn net_getpeername(fd: c_int, ip_out: *mut u32, port_out: *mut u16) -> c_int {
         if ip_out.is_null() || port_out.is_null() {
             return super::fail(EINVAL);
         }
@@ -8334,27 +9066,15 @@ mod thread {
         0
     }
 
-    /// Mark a socket blocking (0) or non-blocking (nonzero).
-    ///
-    /// # Safety
-    /// C ABI entry point.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn patina_net_set_nonblocking(fd: c_int, nonblocking: c_int) -> c_int {
-        let mut state = lock_state();
-        match state.net.sockets.get_mut(&fd) {
-            Some(socket) => {
-                socket.nonblocking = nonblocking != 0;
-                0
-            }
-            None => super::fail(super::EBADF),
-        }
-    }
-
     /// Set a socket's `SO_RCVTIMEO` in virtual nanoseconds. A zero clears the
     /// timeout (POSIX: block indefinitely); any nonzero value bounds a later
     /// blocking receive by that many nanoseconds of virtual time from entry.
     #[unsafe(no_mangle)]
-    pub extern "C" fn patina_net_set_read_timeout(fd: c_int, nanos: u64) -> c_int {
+    pub extern "C" fn patina_net_set_read_timeout(guest_fd: c_int, nanos: u64) -> c_int {
+        let fd = match socket_handle(guest_fd) {
+            Ok(fd) => fd,
+            Err(errno) => return super::fail(errno),
+        };
         let mut state = lock_state();
         match state.net.sockets.get_mut(&fd) {
             Some(socket) => {
@@ -8362,17 +9082,6 @@ mod thread {
                 0
             }
             None => super::fail(super::EBADF),
-        }
-    }
-
-    /// Report whether a socket is non-blocking (1), blocking (0), or not a
-    /// managed socket (-1).
-    #[unsafe(no_mangle)]
-    pub extern "C" fn patina_net_is_nonblocking(fd: c_int) -> c_int {
-        let state = lock_state();
-        match state.net.sockets.get(&fd) {
-            Some(socket) => c_int::from(socket.nonblocking),
-            None => -1,
         }
     }
 
@@ -8412,15 +9121,14 @@ mod thread {
         0
     }
 
-    /// Close a virtual socket.
-    ///
-    /// # Safety
-    /// C ABI entry point.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn patina_net_close(fd: c_int) -> c_int {
+    /// Free a socket whose description's last reference went (the universal
+    /// `patina_close` path): drop it from the address tables, tell the peer,
+    /// wake whoever was parked on it, and close the runtime socket.
+    pub(crate) fn socket_close(handle: u64) -> Result<(), c_int> {
+        let fd = handle as c_int;
         let mut state = lock_state();
         let Some(socket) = state.net.sockets.remove(&fd) else {
-            return super::fail(super::EBADF);
+            return Err(super::EBADF);
         };
         let mut waiters = Vec::new();
         match socket.kind {
@@ -8471,13 +9179,11 @@ mod thread {
             }
         }
         if let Some(socket_id) = socket.socket_id {
-            if let Err(errno) = with_context_raw(|context| context.net_close(socket_id)) {
-                return super::fail(errno);
-            }
+            with_context_raw(|context| context.net_close(socket_id))?;
         }
         drop(state);
         wake_all(waiters);
-        0
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -8656,7 +9362,6 @@ mod thread {
     struct PipeEnd {
         read_channel: Option<u64>,
         write_channel: Option<u64>,
-        nonblocking: bool,
         /// Set when this endpoint came from opening a FIFO rather than from
         /// `pipe`/`socketpair`: the NODE it is open on. It is all the descriptor
         /// needs, because `fstat` asks the filesystem about that node — the
@@ -8717,6 +9422,7 @@ mod thread {
         path: *const c_char,
         follow: c_int,
         path_only: c_int,
+        cloexec: c_int,
     ) -> c_int {
         let path = match super::path_from_c(path) {
             Ok(path) => path,
@@ -8753,42 +9459,16 @@ mod thread {
             Ok(fd) => fd,
             Err(errno) => return super::fail(errno),
         };
-        let fd = match c_int::try_from(fd.0) {
-            Ok(fd) => fd,
-            Err(_) => return super::fail(super::EOVERFLOW),
+        // A directory description, path-only or not: `F_GETFL` reports
+        // `O_RDONLY` for a directory opened for reading and `O_PATH` for a
+        // location handle, and the `O_PATH` bit is what tells the two apart
+        // for `getdents`.
+        let status = if path_only != 0 {
+            super::O_PATH
+        } else {
+            O_READ | super::O_OPENED
         };
-        lock_state().net.dir_fds.insert(fd);
-        super::set_errno(0);
-        fd
-    }
-
-    /// Duplicate a virtual directory descriptor (`dup`, `fcntl(F_DUPFD)`,
-    /// `openat` of a `DIR`'s fd through libc, and the SUD `dup` rows).
-    ///
-    /// POSIX `dup` SHARES the open file description, so this duplicates the
-    /// descriptor and registers the copy as a directory descriptor. Reopening
-    /// the descriptor's current path instead would be a second open: it would
-    /// re-resolve a name (so a rename between the open and the `dup` would
-    /// detach the copy) and re-charge permission (so a `chmod` in that window
-    /// would refuse it) — neither of which a real `dup` does.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn patina_dirdup(raw_fd: c_int) -> c_int {
-        if !lock_state().net.dir_fds.contains(&raw_fd) {
-            return super::fail(super::EBADF);
-        }
-        let duplicate = super::patina_dup(raw_fd);
-        if duplicate >= 0 {
-            lock_state().net.dir_fds.insert(duplicate);
-        }
-        duplicate
-    }
-
-    /// C dispatch predicate: is `fd` a virtual directory descriptor? Lets the
-    /// interposed `close` (and the *at resolver) tell a dir fd apart from a
-    /// socket/pipe/kqueue endpoint in the shared virtual-fd space.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn patina_dir_is_dirfd(fd: c_int) -> c_int {
-        c_int::from(lock_state().net.dir_fds.contains(&fd))
+        super::bind_fs_handle(fd, FdKind::Dir, status, cloexec != 0)
     }
 
     /// Copy the path a directory descriptor's NODE currently has into `buf`,
@@ -8812,15 +9492,12 @@ mod thread {
         if len != 0 && buf.is_null() {
             return super::fail(super::EINVAL) as isize;
         }
-        // Take and release the table lock BEFORE the runtime call: the
+        // Resolve and release the table lock BEFORE the runtime call: the
         // filesystem boundary can park this thread, and holding a shim spinlock
         // across a scheduling point is how a reentrant interposer deadlocks.
-        let known = lock_state().net.dir_fds.contains(&fd);
-        if !known {
-            return super::fail(super::EBADF) as isize;
-        }
-        let fd = match super::fd(fd) {
-            Ok(fd) => fd,
+        let fd = match class_entry(fd) {
+            Ok(resolved) if resolved.kind == FdKind::Dir => super::Fd(resolved.handle),
+            Ok(_) => return super::fail(super::EBADF) as isize,
             Err(errno) => return super::fail(errno) as isize,
         };
         let path = match super::with_context(|context| context.fs_fd_path(fd)) {
@@ -8842,29 +9519,11 @@ mod thread {
         isize::try_from(needed).unwrap_or_else(|_| super::fail(super::EOVERFLOW) as isize)
     }
 
-    /// Release a virtual directory descriptor (the `closedir`/`close` owner).
-    /// The fd is also an open deterministic filesystem descriptor, so closing the
-    /// directory handle closes the underlying filesystem handle as POSIX
-    /// `closedir` requires. Returns `EBADF` for an unknown fd.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn patina_dirclose(fd: c_int) -> c_int {
-        if lock_state().net.dir_fds.remove(&fd) {
-            // The Linux SUD dispatcher may hold a `getdents64` snapshot for this
-            // descriptor (a guest can open and iterate it with raw syscalls and
-            // then close it through libc — cap-std mixes the two doors freely),
-            // so teardown is shared exactly as the descriptor itself is.
-            #[cfg(target_os = "linux")]
-            crate::sud::release_dir_iteration(fd);
-            super::patina_close(fd)
-        } else {
-            super::fail(super::EBADF)
-        }
-    }
-
     /// Create a simplex pipe: `read_fd_out` is the read end, `write_fd_out` the
-    /// write end, both non-blocking when `nonblocking != 0`. Endpoints and the
-    /// backing channel are allocated from the shared virtual-fd / channel
-    /// counters, so their numbering is a pure function of the schedule. Activates
+    /// write end, both non-blocking when `nonblocking != 0` and close-on-exec
+    /// when `cloexec != 0`. The ends and the backing channel come from the class
+    /// handle / channel counters and the two guest numbers from the descriptor
+    /// table, so their numbering is a pure function of the schedule. Activates
     /// the thread subsystem so a later blocking read/write can park via the baton.
     ///
     /// # Safety
@@ -8874,6 +9533,7 @@ mod thread {
         read_fd_out: *mut c_int,
         write_fd_out: *mut c_int,
         nonblocking: c_int,
+        cloexec: c_int,
     ) -> c_int {
         if read_fd_out.is_null() || write_fd_out.is_null() {
             return super::fail(EINVAL);
@@ -8888,33 +9548,77 @@ mod thread {
             .net
             .pipe_channels
             .insert(channel, PipeChannel::new(PIPE_CAPACITY));
-        let read_fd = state.net.next_fd;
-        state.net.next_fd = state.net.next_fd.wrapping_add(1);
-        let write_fd = state.net.next_fd;
-        state.net.next_fd = state.net.next_fd.wrapping_add(1);
+        let read_end = next_handle(&mut state);
+        let write_end = next_handle(&mut state);
         state.net.pipe_ends.insert(
-            read_fd,
+            read_end,
             PipeEnd {
                 read_channel: Some(channel),
                 write_channel: None,
-                nonblocking: nonblocking != 0,
                 fifo_ino: None,
             },
         );
         state.net.pipe_ends.insert(
-            write_fd,
+            write_end,
             PipeEnd {
                 read_channel: None,
                 write_channel: Some(channel),
-                nonblocking: nonblocking != 0,
                 fifo_ino: None,
             },
         );
+        let nonblock = if nonblocking != 0 { O_NONBLOCK } else { 0 };
+        // SAFETY: the out-pointers were checked non-null above.
         unsafe {
-            read_fd_out.write(read_fd);
-            write_fd_out.write(write_fd);
+            bind_pipe_pair(
+                &mut state,
+                (read_end, O_READ | nonblock),
+                (write_end, O_WRITE | nonblock),
+                cloexec != 0,
+                read_fd_out,
+                write_fd_out,
+            )
         }
-        0
+    }
+
+    /// Bind two freshly minted pipe ends to guest numbers, atomically. A full
+    /// table (`EMFILE`) releases both ends — through the ordinary close path,
+    /// so the channel is reclaimed — and creates nothing.
+    ///
+    /// # Safety
+    /// `first_out`/`second_out` must be writable.
+    unsafe fn bind_pipe_pair(
+        state: &mut ThreadRuntime,
+        first: (c_int, u32),
+        second: (c_int, u32),
+        cloexec: bool,
+        first_out: *mut c_int,
+        second_out: *mut c_int,
+    ) -> c_int {
+        let bound = super::fd_table().lock().install_pair(
+            FdKind::Pipe,
+            (first.0 as u64, first.1),
+            (second.0 as u64, second.1),
+            cloexec,
+        );
+        match bound {
+            Ok((a, b)) => {
+                // SAFETY: per this function's contract.
+                unsafe {
+                    first_out.write(a);
+                    second_out.write(b);
+                }
+                super::set_errno(0);
+                0
+            }
+            Err(errno) => {
+                let _ = state;
+                // The ends are unreachable from any guest number, so their
+                // release wakes nobody; drop them through the shared path.
+                let _ = pipe_close_locked(first.0 as u64);
+                let _ = pipe_close_locked(second.0 as u64);
+                super::fail(errno)
+            }
+        }
     }
 
     /// Create a duplex AF_UNIX/SOCK_STREAM pair: `fd0_out` and `fd1_out` are
@@ -8928,6 +9632,7 @@ mod thread {
         fd0_out: *mut c_int,
         fd1_out: *mut c_int,
         nonblocking: c_int,
+        cloexec: c_int,
     ) -> c_int {
         if fd0_out.is_null() || fd1_out.is_null() {
             return super::fail(EINVAL);
@@ -8947,33 +9652,36 @@ mod thread {
             .net
             .pipe_channels
             .insert(channel_1to0, PipeChannel::new(PIPE_CAPACITY));
-        let fd0 = state.net.next_fd;
-        state.net.next_fd = state.net.next_fd.wrapping_add(1);
-        let fd1 = state.net.next_fd;
-        state.net.next_fd = state.net.next_fd.wrapping_add(1);
+        let end0 = next_handle(&mut state);
+        let end1 = next_handle(&mut state);
         state.net.pipe_ends.insert(
-            fd0,
+            end0,
             PipeEnd {
                 read_channel: Some(channel_1to0),
                 write_channel: Some(channel_0to1),
-                nonblocking: nonblocking != 0,
                 fifo_ino: None,
             },
         );
         state.net.pipe_ends.insert(
-            fd1,
+            end1,
             PipeEnd {
                 read_channel: Some(channel_0to1),
                 write_channel: Some(channel_1to0),
-                nonblocking: nonblocking != 0,
                 fifo_ino: None,
             },
         );
+        let status = O_READ | O_WRITE | if nonblocking != 0 { O_NONBLOCK } else { 0 };
+        // SAFETY: the out-pointers were checked non-null above.
         unsafe {
-            fd0_out.write(fd0);
-            fd1_out.write(fd1);
+            bind_pipe_pair(
+                &mut state,
+                (end0, status),
+                (end1, status),
+                cloexec != 0,
+                fd0_out,
+                fd1_out,
+            )
         }
-        0
     }
 
     // ------------------------------------------------------------------
@@ -9013,7 +9721,14 @@ mod thread {
     /// `open(O_WRONLY)` is what wakes a reader parked here — and a FIFO nobody
     /// ever opens for writing surfaces as the runtime's deadlock report rather
     /// than a hung process.
-    pub(crate) fn fifo_open(ino: u64, read: bool, write: bool, nonblocking: bool) -> c_int {
+    pub(crate) fn fifo_open(
+        ino: u64,
+        read: bool,
+        write: bool,
+        nonblocking: bool,
+        status: u32,
+        cloexec: bool,
+    ) -> c_int {
         let me = current_task();
         let mut state = lock_state();
         if let Err(error) = state.ensure_active() {
@@ -9070,24 +9785,34 @@ mod thread {
             (channel.read_refs == 0).then_some((false, channel.read_opens))
         };
         let woken: Vec<TaskId> = channel.open_waiters.drain(..).collect();
-        let fd = state.net.next_fd;
-        state.net.next_fd = state.net.next_fd.wrapping_add(1);
+        let end = next_handle(&mut state);
         state.net.pipe_ends.insert(
-            fd,
+            end,
             PipeEnd {
                 read_channel: read.then_some(channel_id),
                 write_channel: write.then_some(channel_id),
-                nonblocking,
                 fifo_ino: Some(ino),
             },
         );
+        // The guest number is reserved BEFORE the rendezvous, as the kernel's
+        // `do_sys_openat2` takes its slot before the blocking `fifo_open` — so a
+        // second open on another thread while this one waits numbers after it.
+        let fd = match super::install_fd(FdKind::Pipe, end as u64, status, cloexec) {
+            Ok(fd) => fd,
+            Err(errno) => {
+                drop(state);
+                let _ = pipe_close_locked(end as u64);
+                wake_all(woken);
+                return super::fail(errno);
+            }
+        };
         drop(state);
         // The channel is the node's one reference: taken when it comes into
         // existence, dropped when it is reclaimed. Outside the state lock, like
         // every other runtime call from this module.
         if opened_channel {
             if let Err(errno) = super::with_context(|context| context.fs_retain_inode(ino)) {
-                patina_pipe_close(fd);
+                super::patina_close(fd);
                 wake_all(woken);
                 return super::fail(errno);
             }
@@ -9123,10 +9848,11 @@ mod thread {
                         let errno = error.into_posix();
                         drop(state);
                         // The descriptor never came into existence, so release
-                        // the end this open registered — through the ordinary
-                        // close path, so the partner's EOF/`EPIPE` bookkeeping
-                        // and the channel reclamation are the usual ones.
-                        patina_pipe_close(fd);
+                        // the number and the end this open registered — through
+                        // the ordinary close path, so the partner's EOF/`EPIPE`
+                        // bookkeeping and the channel reclamation are the usual
+                        // ones.
+                        super::patina_close(fd);
                         return super::fail(errno);
                     }
                 }
@@ -9139,27 +9865,42 @@ mod thread {
 
     /// What `fstat` should report for `fd` when it is a FIFO descriptor.
     pub(crate) fn fifo_ino(fd: c_int) -> Option<u64> {
+        let (end, _) = pipe_entry(fd).ok()?;
         lock_state()
             .net
             .pipe_ends
-            .get(&fd)
+            .get(&end)
             .and_then(|end| end.fifo_ino)
     }
 
-    /// C dispatch predicate: is `fd` a pipe/socketpair endpoint? Lets the
-    /// interposed read/write/close/fcntl route the shared virtual-fd space to the
-    /// pipe class versus the socket class.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn patina_pipe_is_endpoint(fd: c_int) -> c_int {
-        c_int::from(lock_state().net.pipe_ends.contains_key(&fd))
-    }
-
-    /// Blocking (or `O_NONBLOCK`) read from a pipe/socketpair endpoint.
+    /// Blocking (or `O_NONBLOCK`) read from a pipe/socketpair endpoint (the
+    /// `recv`/`recvfrom` face of a socketpair end; `read` reaches the same
+    /// transfer through the universal `patina_read`).
     ///
     /// # Safety
     /// `buf` must be writable for `len` bytes when nonzero.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_pipe_read(fd: c_int, buf: *mut c_void, len: usize) -> isize {
+    pub unsafe extern "C" fn patina_pipe_read(
+        guest_fd: c_int,
+        buf: *mut c_void,
+        len: usize,
+    ) -> isize {
+        match pipe_entry(guest_fd) {
+            // SAFETY: forwarded from this function's own contract.
+            Ok((end, nonblocking)) => unsafe { pipe_read(end as u64, nonblocking, buf, len) },
+            Err(errno) => super::fail(errno) as isize,
+        }
+    }
+
+    /// # Safety
+    /// `buf` must be writable for `len` bytes when nonzero.
+    pub(crate) unsafe fn pipe_read(
+        handle: u64,
+        nonblocking: bool,
+        buf: *mut c_void,
+        len: usize,
+    ) -> isize {
+        let fd = handle as c_int;
         if let Err(errno) = sched_point() {
             return super::fail(errno) as isize;
         }
@@ -9172,11 +9913,11 @@ mod thread {
         let me = current_task();
         loop {
             let mut state = lock_state();
-            let (channel, nonblocking) = match state.net.pipe_ends.get(&fd) {
+            let channel = match state.net.pipe_ends.get(&fd) {
                 // A read on the write-only end of a simplex pipe is EBADF (the end
                 // is O_WRONLY), matching the kernel.
                 Some(end) => match end.read_channel {
-                    Some(channel) => (channel, end.nonblocking),
+                    Some(channel) => channel,
                     None => return super::fail(super::EBADF) as isize,
                 },
                 None => return super::fail(super::EBADF) as isize,
@@ -9218,12 +9959,33 @@ mod thread {
         }
     }
 
-    /// Blocking (or `O_NONBLOCK`) write to a pipe/socketpair endpoint.
+    /// Blocking (or `O_NONBLOCK`) write to a pipe/socketpair endpoint (the
+    /// `send`/`sendto` face of a socketpair end).
     ///
     /// # Safety
     /// `buf` must be readable for `len` bytes when nonzero.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_pipe_write(fd: c_int, buf: *const c_void, len: usize) -> isize {
+    pub unsafe extern "C" fn patina_pipe_write(
+        guest_fd: c_int,
+        buf: *const c_void,
+        len: usize,
+    ) -> isize {
+        match pipe_entry(guest_fd) {
+            // SAFETY: forwarded from this function's own contract.
+            Ok((end, nonblocking)) => unsafe { pipe_write(end as u64, nonblocking, buf, len) },
+            Err(errno) => super::fail(errno) as isize,
+        }
+    }
+
+    /// # Safety
+    /// `buf` must be readable for `len` bytes when nonzero.
+    pub(crate) unsafe fn pipe_write(
+        handle: u64,
+        nonblocking: bool,
+        buf: *const c_void,
+        len: usize,
+    ) -> isize {
+        let fd = handle as c_int;
         if let Err(errno) = sched_point() {
             return super::fail(errno) as isize;
         }
@@ -9237,10 +9999,10 @@ mod thread {
         let me = current_task();
         loop {
             let mut state = lock_state();
-            let (channel, nonblocking) = match state.net.pipe_ends.get(&fd) {
+            let channel = match state.net.pipe_ends.get(&fd) {
                 // A write on the read-only end of a simplex pipe is EBADF.
                 Some(end) => match end.write_channel {
-                    Some(channel) => (channel, end.nonblocking),
+                    Some(channel) => channel,
                     None => return super::fail(super::EBADF) as isize,
                 },
                 None => return super::fail(super::EBADF) as isize,
@@ -9281,63 +10043,20 @@ mod thread {
         }
     }
 
-    /// Duplicate a pipe/socketpair endpoint: the new fd aliases the SAME channel
-    /// side(s), raising the per-side reference count so the peer sees EOF/EPIPE
-    /// only once EVERY aliasing fd of that side has closed. `std`'s `try_clone`
-    /// (reached via `fcntl(F_DUPFD_CLOEXEC)`) drives this — tokio's signal driver
-    /// clones a socketpair endpoint at runtime build. The clone inherits the
-    /// blocking flag, matching a real `F_DUPFD_CLOEXEC` (which copies the file
-    /// description, so `O_NONBLOCK` is shared). Returns the new fd or -1/EBADF.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn patina_pipe_dup(fd: c_int) -> c_int {
-        let mut state = lock_state();
-        let Some(&PipeEnd {
-            read_channel,
-            write_channel,
-            nonblocking,
-            fifo_ino,
-        }) = state.net.pipe_ends.get(&fd)
-        else {
-            return super::fail(super::EBADF);
-        };
-        if let Some(channel) = read_channel {
-            state
-                .net
-                .pipe_channels
-                .get_mut(&channel)
-                .expect("live endpoint references a live channel")
-                .read_refs += 1;
-        }
-        if let Some(channel) = write_channel {
-            state
-                .net
-                .pipe_channels
-                .get_mut(&channel)
-                .expect("live endpoint references a live channel")
-                .write_refs += 1;
-        }
-        let new_fd = state.net.next_fd;
-        state.net.next_fd = state.net.next_fd.wrapping_add(1);
-        state.net.pipe_ends.insert(
-            new_fd,
-            PipeEnd {
-                read_channel,
-                write_channel,
-                nonblocking,
-                fifo_ino,
-            },
-        );
-        new_fd
+    /// Free a pipe/socketpair endpoint whose description's last reference went
+    /// (the universal `patina_close` path). A channel SIDE closes — waking the
+    /// peer with EPIPE (readers gone) or EOF (writers gone) — only on the LAST
+    /// endpoint of that side; a dup'd number never reaches here until it is the
+    /// last one.
+    pub(crate) fn pipe_close(handle: u64) -> Result<(), c_int> {
+        pipe_close_locked(handle)
     }
 
-    /// Close a pipe/socketpair endpoint. A channel SIDE closes — waking the peer
-    /// with EPIPE (readers gone) or EOF (writers gone) — only on the LAST fd of
-    /// that side; a surviving `dup` keeps it open.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn patina_pipe_close(fd: c_int) -> c_int {
+    fn pipe_close_locked(handle: u64) -> Result<(), c_int> {
+        let fd = handle as c_int;
         let mut state = lock_state();
         let Some(end) = state.net.pipe_ends.remove(&fd) else {
-            return super::fail(super::EBADF);
+            return Err(super::EBADF);
         };
         let mut waiters = Vec::new();
         let mut released_ino = None;
@@ -9396,44 +10115,90 @@ mod thread {
         if let Some(ino) = released_ino {
             if let Err(errno) = super::with_context(|context| context.fs_release_inode(ino)) {
                 wake_all(waiters);
-                return super::fail(errno);
+                return Err(errno);
             }
         }
         wake_all(waiters);
-        0
+        Ok(())
     }
 
-    /// Report whether a pipe/socketpair endpoint is non-blocking (1), blocking
-    /// (0), or not a pipe endpoint (-1).
+    /// The largest pipe buffer an unprivileged `F_SETPIPE_SZ` may ask for
+    /// (`/proc/sys/fs/pipe-max-size` default).
+    const PIPE_MAX_SIZE: usize = 1 << 20;
+    const PIPE_PAGE: usize = 4096;
+
+    /// The channel a pipe endpoint's `F_GETPIPE_SZ`/`F_SETPIPE_SZ` act on: a
+    /// simplex end's one channel, a socketpair end's write side (the kernel
+    /// answers `EINVAL` for a socket; a socketpair end here is a pipe pair, and
+    /// its size is the buffer it writes into).
+    fn pipe_size_channel(state: &ThreadRuntime, fd: c_int) -> Option<u64> {
+        let end = state.net.pipe_ends.get(&fd)?;
+        end.write_channel.or(end.read_channel)
+    }
+
+    /// `fcntl(F_GETPIPE_SZ)`: the endpoint's buffer capacity; `EINVAL` for a
+    /// description that is not a pipe end.
     #[unsafe(no_mangle)]
-    pub extern "C" fn patina_pipe_is_nonblocking(fd: c_int) -> c_int {
+    pub extern "C" fn patina_pipe_size(guest_fd: c_int) -> c_int {
+        let end = match class_entry(guest_fd) {
+            Ok(resolved) if resolved.kind == FdKind::Pipe => resolved.handle as c_int,
+            Ok(_) => return super::fail(EINVAL),
+            Err(errno) => return super::fail(errno),
+        };
         let state = lock_state();
-        match state.net.pipe_ends.get(&fd) {
-            Some(end) => c_int::from(end.nonblocking),
-            None => -1,
-        }
-    }
-
-    /// Set a pipe/socketpair endpoint blocking (0) or non-blocking (nonzero), the
-    /// `fcntl(F_SETFL, O_NONBLOCK)` path.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn patina_pipe_set_nonblocking(fd: c_int, nonblocking: c_int) -> c_int {
-        let mut state = lock_state();
-        match state.net.pipe_ends.get_mut(&fd) {
-            Some(end) => {
-                end.nonblocking = nonblocking != 0;
-                0
+        let capacity = pipe_size_channel(&state, end)
+            .and_then(|channel| state.net.pipe_channels.get(&channel))
+            .map(|channel| channel.capacity);
+        match capacity {
+            Some(capacity) => {
+                super::set_errno(0);
+                c_int::try_from(capacity).unwrap_or_else(|_| super::fail(super::EOVERFLOW))
             }
             None => super::fail(super::EBADF),
         }
     }
 
+    /// `fcntl(F_SETPIPE_SZ)`: resize the buffer the way `fs/pipe.c:round_pipe_size`
+    /// does — at least one page, rounded up to a power of two, at most the
+    /// unprivileged maximum (`EPERM` above it) — and refuse (`EBUSY`) to shrink
+    /// below the bytes currently buffered. Returns the new capacity.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn patina_pipe_set_size(guest_fd: c_int, size: c_int) -> c_int {
+        let end = match class_entry(guest_fd) {
+            Ok(resolved) if resolved.kind == FdKind::Pipe => resolved.handle as c_int,
+            Ok(_) => return super::fail(EINVAL),
+            Err(errno) => return super::fail(errno),
+        };
+        let Ok(requested) = usize::try_from(size) else {
+            return super::fail(EINVAL);
+        };
+        if requested == 0 {
+            return super::fail(EINVAL);
+        }
+        let rounded = requested.max(PIPE_PAGE).next_power_of_two();
+        if rounded > PIPE_MAX_SIZE {
+            return super::fail(EPERM);
+        }
+        let mut state = lock_state();
+        let Some(channel) = pipe_size_channel(&state, end)
+            .and_then(|channel| state.net.pipe_channels.get_mut(&channel))
+        else {
+            return super::fail(super::EBADF);
+        };
+        if channel.buffer.len() > rounded {
+            return super::fail(EBUSY);
+        }
+        channel.capacity = rounded;
+        super::set_errno(0);
+        c_int::try_from(rounded).unwrap_or_else(|_| super::fail(super::EOVERFLOW))
+    }
+
     // ------------------------------------------------------------------
     // eventfd (Linux). A deterministic in-process model of the kernel's 64-bit
     // event counter — mio's `Waker` vehicle on Linux, the EVFILT_USER analogue.
-    // The fd shares the virtual-fd space (a virtual fd is a socket XOR a pipe
-    // endpoint XOR an eventfd XOR an epoll fd); the C read/write/close route it
-    // here by table membership. Like the pipe channels, the counter is
+    // The counter is keyed by class handle; the descriptor table maps the guest
+    // number onto it and the universal read/write/close route here by kind.
+    // Like the pipe channels, the counter is
     // deterministic given the recorded schedule and carries NO trace events;
     // only the scheduler parks/wakes are recorded.
 
@@ -9446,7 +10211,6 @@ mod thread {
         /// EFD_SEMAPHORE: reads return 1 and decrement, instead of
         /// return-and-reset.
         semaphore: bool,
-        nonblocking: bool,
         /// Arrival sequence, bumped once per value-adding write so the epoll
         /// EPOLLET latch re-fires per wake even when the counter never drains —
         /// mio's `Waker` writes without reading back, relying on the kernel's
@@ -9474,38 +10238,53 @@ mod thread {
         if let Err(error) = state.ensure_active() {
             return super::fail(error.into_posix());
         }
-        let fd = state.net.next_fd;
-        state.net.next_fd = state.net.next_fd.wrapping_add(1);
+        let handle = next_handle(&mut state);
         state.net.eventfds.insert(
-            fd,
+            handle,
             EventFd {
                 value: u64::from(initval),
                 semaphore: flags & EFD_SEMAPHORE != 0,
-                nonblocking: flags & EFD_NONBLOCK != 0,
                 write_events: 0,
                 read_waiters: VecDeque::new(),
             },
         );
-        fd
-    }
-
-    /// C dispatch predicate: is `fd` a virtual eventfd?
-    #[cfg(target_os = "linux")]
-    #[unsafe(no_mangle)]
-    pub extern "C" fn patina_eventfd_is(fd: c_int) -> c_int {
-        c_int::from(lock_state().net.eventfds.contains_key(&fd))
+        let nonblock = if flags & EFD_NONBLOCK != 0 {
+            O_NONBLOCK
+        } else {
+            0
+        };
+        match super::install_fd(
+            FdKind::EventFd,
+            handle as u64,
+            O_READ | O_WRITE | nonblock,
+            flags & EFD_CLOEXEC != 0,
+        ) {
+            Ok(fd) => {
+                super::set_errno(0);
+                fd
+            }
+            Err(errno) => {
+                state.net.eventfds.remove(&handle);
+                super::fail(errno)
+            }
+        }
     }
 
     /// Read a virtual eventfd: 8 bytes, returns-and-resets the counter (or
     /// returns 1 and decrements under EFD_SEMAPHORE). A zero counter is
-    /// `EWOULDBLOCK` under EFD_NONBLOCK, otherwise the caller parks until a
+    /// `EWOULDBLOCK` under `O_NONBLOCK`, otherwise the caller parks until a
     /// write arrives.
     ///
     /// # Safety
     /// `buf` must be writable for `len` bytes.
     #[cfg(target_os = "linux")]
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_eventfd_read(fd: c_int, buf: *mut c_void, len: usize) -> isize {
+    pub(crate) unsafe fn eventfd_read(
+        handle: u64,
+        nonblocking: bool,
+        buf: *mut c_void,
+        len: usize,
+    ) -> isize {
+        let fd = handle as c_int;
         if let Err(errno) = sched_point() {
             return super::fail(errno) as isize;
         }
@@ -9533,7 +10312,7 @@ mod thread {
                 };
                 return 8;
             }
-            if efd.nonblocking {
+            if nonblocking {
                 return super::fail(EWOULDBLOCK) as isize;
             }
             efd.read_waiters.push_back(me);
@@ -9556,12 +10335,8 @@ mod thread {
     /// # Safety
     /// `buf` must be readable for `len` bytes.
     #[cfg(target_os = "linux")]
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn patina_eventfd_write(
-        fd: c_int,
-        buf: *const c_void,
-        len: usize,
-    ) -> isize {
+    pub(crate) unsafe fn eventfd_write(handle: u64, buf: *const c_void, len: usize) -> isize {
+        let fd = handle as c_int;
         if let Err(errno) = sched_point() {
             return super::fail(errno) as isize;
         }
@@ -9602,26 +10377,25 @@ mod thread {
         8
     }
 
-    /// Close a virtual eventfd, waking any parked readers (they observe EBADF —
-    /// loud, deterministic — rather than parking forever on a dead counter).
+    /// Free an eventfd whose description's last reference went, waking any
+    /// parked readers (they observe EBADF — loud, deterministic — rather than
+    /// parking forever on a dead counter).
     #[cfg(target_os = "linux")]
-    #[unsafe(no_mangle)]
-    pub extern "C" fn patina_eventfd_close(fd: c_int) -> c_int {
+    pub(crate) fn eventfd_close(handle: u64) {
         let mut state = lock_state();
-        let Some(efd) = state.net.eventfds.remove(&fd) else {
-            return super::fail(super::EBADF);
+        let Some(efd) = state.net.eventfds.remove(&(handle as c_int)) else {
+            return;
         };
         let waiters: Vec<TaskId> = efd.read_waiters.into_iter().collect();
         drop(state);
         wake_all(waiters);
-        0
     }
 
     // ------------------------------------------------------------------
     // kqueue / kevent readiness reactor (macOS). A deterministic in-process
     // model of the BSD readiness multiplexer that mio (and therefore tokio)
-    // builds its IO driver on. A `kqueue` fd is drawn from the shared virtual-fd
-    // space; `kevent`/`kevent64` register EVFILT_READ/WRITE interest over the
+    // builds its IO driver on. A `kqueue` is a description in the descriptor
+    // table; `kevent`/`kevent64` register EVFILT_READ/WRITE interest over the
     // virtual pipe/socketpair and SimNet socket fds, an EVFILT_USER self-wakeup
     // (mio's `Waker`), and EVFILT_TIMER against the virtual clock, then gather
     // ready events — parking on the scheduler baton with multi-fd fan-in when
@@ -9666,14 +10440,94 @@ mod thread {
         write_eof: bool,
     }
 
-    /// Compute the readiness of virtual descriptor `fd` without consuming any
-    /// bytes or recording a boundary op. A descriptor that no longer exists (it
-    /// was closed after registration) reports ready-with-EOF so the reactor wakes
-    /// and the subsequent operation surfaces the error, and the knote drops out.
+    /// A descriptor that no longer exists (closed after registration, or its
+    /// number reused by another description): ready-with-EOF so the reactor
+    /// wakes, the subsequent operation surfaces the error, and the knote drops
+    /// out.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn fd_readiness(state: &ThreadRuntime, fd: c_int) -> FdReadiness {
-        // Pipe/socketpair endpoint: readiness is pure in-shim channel state, so
-        // it needs no runtime op and emits no trace event.
+    const GONE: FdReadiness = FdReadiness {
+        readable: true,
+        writable: true,
+        read_eof: true,
+        write_eof: true,
+    };
+
+    /// Compute the readiness of guest descriptor `fd` without consuming any
+    /// bytes or recording a boundary op. `desc`, when given, is the description
+    /// the interest was registered against: a number that now names another
+    /// description is [`GONE`], never the newcomer's readiness.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn fd_readiness(state: &ThreadRuntime, fd: c_int, desc: Option<DescId>) -> FdReadiness {
+        let Some(resolved) = super::fd_table().lock().resolve(fd) else {
+            return GONE;
+        };
+        if desc.is_some_and(|desc| desc != resolved.desc) {
+            return GONE;
+        }
+        let handle = resolved.handle as c_int;
+        match resolved.kind {
+            FdKind::Pipe => pipe_readiness(state, handle),
+            FdKind::Socket => socket_readiness(state, handle),
+            #[cfg(target_os = "linux")]
+            FdKind::EventFd => {
+                // Deterministic eventfd counter: readable iff nonzero; always
+                // writable (a write that would overflow fails closed loudly
+                // instead of parking, so writability never drops).
+                let readable = state
+                    .net
+                    .eventfds
+                    .get(&handle)
+                    .is_some_and(|efd| efd.value > 0);
+                FdReadiness {
+                    readable,
+                    writable: true,
+                    read_eof: false,
+                    write_eof: false,
+                }
+            }
+            // Standard input is at EOF: readable, hung up on the read side.
+            FdKind::Stdin => FdReadiness {
+                readable: true,
+                writable: false,
+                read_eof: true,
+                write_eof: false,
+            },
+            // The captured streams always accept bytes.
+            FdKind::Stdout | FdKind::Stderr => FdReadiness {
+                readable: false,
+                writable: true,
+                read_eof: false,
+                write_eof: false,
+            },
+            // Regular files and devices are always ready (and cannot be
+            // registered with epoll at all: `EPERM` at `epoll_ctl`).
+            FdKind::File | FdKind::Dir | FdKind::OPath | FdKind::Urandom => FdReadiness {
+                readable: true,
+                writable: true,
+                read_eof: false,
+                write_eof: false,
+            },
+            #[cfg(target_os = "linux")]
+            FdKind::Epoll => FdReadiness {
+                readable: false,
+                writable: false,
+                read_eof: false,
+                write_eof: false,
+            },
+            #[cfg(target_os = "macos")]
+            FdKind::Kqueue => FdReadiness {
+                readable: false,
+                writable: false,
+                read_eof: false,
+                write_eof: false,
+            },
+        }
+    }
+
+    /// Pipe/socketpair endpoint readiness: pure in-shim channel state, so it
+    /// needs no runtime op and emits no trace event.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn pipe_readiness(state: &ThreadRuntime, fd: c_int) -> FdReadiness {
         if let Some(end) = state.net.pipe_ends.get(&fd) {
             let mut readiness = FdReadiness {
                 readable: false,
@@ -9697,9 +10551,14 @@ mod thread {
             }
             return readiness;
         }
-        // Virtual SimNet socket: readiness lives in the runtime network driver.
-        // `net_readiness` reads it plus the virtual clock WITHOUT recording, so it
-        // is deterministic given the recorded schedule and emits no trace event.
+        GONE
+    }
+
+    /// Virtual SimNet socket readiness: it lives in the runtime network driver.
+    /// `net_readiness` reads it plus the virtual clock WITHOUT recording, so it
+    /// is deterministic given the recorded schedule and emits no trace event.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn socket_readiness(state: &ThreadRuntime, fd: c_int) -> FdReadiness {
         if let Some(socket) = state.net.sockets.get(&fd) {
             let Some(socket_id) = socket.socket_id else {
                 // An unbound/unconnected stream has no buffers yet: nothing ready.
@@ -9717,33 +10576,10 @@ mod thread {
                     read_eof: bits & (1 << 2) != 0,
                     write_eof: bits & (1 << 3) != 0,
                 },
-                Err(_) => FdReadiness {
-                    readable: true,
-                    writable: true,
-                    read_eof: true,
-                    write_eof: true,
-                },
+                Err(_) => GONE,
             };
         }
-        // Deterministic eventfd counter (Linux): readable iff nonzero; always
-        // writable (a write that would overflow fails closed loudly instead of
-        // parking, so writability never drops).
-        #[cfg(target_os = "linux")]
-        if let Some(efd) = state.net.eventfds.get(&fd) {
-            return FdReadiness {
-                readable: efd.value > 0,
-                writable: true,
-                read_eof: false,
-                write_eof: false,
-            };
-        }
-        // The descriptor was closed after registration: report EV_EOF once.
-        FdReadiness {
-            readable: true,
-            writable: true,
-            read_eof: true,
-            write_eof: true,
-        }
+        GONE
     }
 
     /// A readiness direction to watch on a virtual descriptor. Deliberately
@@ -9774,10 +10610,13 @@ mod thread {
     /// Register `me` on the waiter queue of every watched `(direction, fd)`
     /// source, returning the locations to unlink on resume. This is the reusable
     /// multi-fd fan-in primitive a readiness reactor parks on: the frontend
-    /// supplies the watched set from its OWN registry, so no reactor-specific
-    /// keying (kqueue `(ident, filter)`, epoll interest masks) leaks into the
-    /// shared core. The readiness sources — pipe channels and SimNet socket
-    /// queues — and the readiness predicate [`fd_readiness`] are equally neutral.
+    /// supplies the watched set (guest numbers) from its OWN registry, so no
+    /// reactor-specific keying (kqueue `(ident, filter)`, epoll interest masks)
+    /// leaks into the shared core. The readiness sources — pipe channels and
+    /// SimNet socket queues — and the readiness predicate [`fd_readiness`] are
+    /// equally neutral. A number that names nothing waitable (closed, or a
+    /// kind that is always ready) registers no waiter: its readiness is
+    /// already decided.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn register_readiness_waiters(
         state: &mut ThreadRuntime,
@@ -9785,18 +10624,27 @@ mod thread {
         watched: &[(ReadyDir, c_int)],
     ) -> Vec<WaiterLoc> {
         let mut locs = Vec::new();
-        for &(dir, fd) in watched {
+        for &(dir, guest_fd) in watched {
+            let Some(resolved) = super::fd_table().lock().resolve(guest_fd) else {
+                continue;
+            };
+            let fd = resolved.handle as c_int;
             // Eventfd (Linux): only the readable direction has a queue; a write
             // watch needs no waiter because an eventfd is always writable.
             #[cfg(target_os = "linux")]
-            if dir == ReadyDir::Read {
-                if let Some(efd) = state.net.eventfds.get_mut(&fd) {
-                    efd.read_waiters.push_back(me);
-                    locs.push(WaiterLoc::EventFdRecv(fd));
-                    continue;
+            if resolved.kind == FdKind::EventFd {
+                if dir == ReadyDir::Read {
+                    if let Some(efd) = state.net.eventfds.get_mut(&fd) {
+                        efd.read_waiters.push_back(me);
+                        locs.push(WaiterLoc::EventFdRecv(fd));
+                    }
                 }
+                continue;
             }
-            if let Some(end) = state.net.pipe_ends.get(&fd) {
+            if resolved.kind == FdKind::Pipe {
+                let Some(end) = state.net.pipe_ends.get(&fd) else {
+                    continue;
+                };
                 let channel = match dir {
                     ReadyDir::Read => end.read_channel,
                     ReadyDir::Write => end.write_channel,
@@ -9815,7 +10663,10 @@ mod thread {
                         }
                     }
                 }
-            } else if let Some(socket) = state.net.sockets.get_mut(&fd) {
+            } else if resolved.kind == FdKind::Socket {
+                let Some(socket) = state.net.sockets.get_mut(&fd) else {
+                    continue;
+                };
                 match dir {
                     ReadyDir::Read => {
                         socket.recv_waiters.push_back(me);
@@ -9874,6 +10725,8 @@ mod thread {
 
     #[cfg(target_os = "macos")]
     use kqueue::KqueueSlot;
+    #[cfg(target_os = "macos")]
+    pub(crate) use kqueue::{kqueue_close, kqueue_forget_number};
 
     #[cfg(target_os = "macos")]
     mod kqueue {
@@ -9883,9 +10736,9 @@ mod thread {
         use patina_dst_abi::ClockKind;
 
         use super::{
-            PatinaKevent, ReadyDir, Step, TaskId, ThreadRuntime, current_task, fatal, fd_readiness,
-            lock_state, register_readiness_waiters, sched_point, switch_and_park,
-            unregister_readiness_waiters, wake_all, with_context_raw,
+            FdKind, O_READ, O_WRITE, PatinaKevent, ReadyDir, Step, TaskId, ThreadRuntime,
+            current_task, fatal, fd_readiness, lock_state, register_readiness_waiters, sched_point,
+            switch_and_park, unregister_readiness_waiters, wake_all, with_context_raw,
         };
 
         // macOS <sys/event.h> filter identifiers (the reactor is macOS-only).
@@ -9947,18 +10800,20 @@ mod thread {
             waiters: VecDeque<TaskId>,
         }
 
-        /// A reference-counted kqueue registry: `refs` is the number of live fds
-        /// aliasing it (one per `kqueue()`, plus one per `dup`/`F_DUPFD`), and the
-        /// registry drops when the last fd closes.
+        /// A kqueue registry. The descriptor table refcounts the description
+        /// (one per `kqueue()`, shared by every `dup`/`F_DUPFD` of it) and frees
+        /// the registry through [`kqueue_close`] when the last number closes.
         pub(super) struct KqueueSlot {
             kq: Kqueue,
-            refs: usize,
         }
 
-        /// Resolve a kqueue fd to its registry id, or `None` if `fd` is not a live
-        /// kqueue descriptor.
-        fn kq_id(state: &ThreadRuntime, fd: c_int) -> Option<u64> {
-            state.net.kq_fds.get(&fd).copied()
+        /// Resolve a guest number to its kqueue registry id, or `None` if it is
+        /// not a live kqueue descriptor.
+        fn kq_id(_state: &ThreadRuntime, fd: c_int) -> Option<u64> {
+            match super::super::fd_table().lock().resolve(fd) {
+                Some(resolved) if resolved.kind == FdKind::Kqueue => Some(resolved.handle),
+                _ => None,
+            }
         }
 
         fn fatal_filter(filter: i16, fd: c_int, direction: &str) -> ! {
@@ -9986,66 +10841,45 @@ mod thread {
                 id,
                 KqueueSlot {
                     kq: Kqueue::default(),
-                    refs: 1,
                 },
             );
-            let fd = state.net.next_fd;
-            state.net.next_fd = state.net.next_fd.wrapping_add(1);
-            state.net.kq_fds.insert(fd, id);
-            fd
-        }
-
-        /// C dispatch predicate: is `fd` a virtual kqueue? Lets the interposed
-        /// `close`/`dup`/`fcntl` route the shared virtual-fd space to the kqueue
-        /// class.
-        #[unsafe(no_mangle)]
-        pub extern "C" fn patina_kqueue_is_kq(fd: c_int) -> c_int {
-            c_int::from(lock_state().net.kq_fds.contains_key(&fd))
-        }
-
-        /// Duplicate a kqueue fd: the new fd aliases the SAME registry (tokio's IO
-        /// driver clones its selector through `F_DUPFD_CLOEXEC`). Returns the new
-        /// fd or -1 with `patina_errno` EBADF if `fd` is not a live kqueue.
-        #[unsafe(no_mangle)]
-        pub extern "C" fn patina_kqueue_dup(fd: c_int) -> c_int {
-            let mut state = lock_state();
-            let Some(id) = kq_id(&state, fd) else {
-                return super::super::fail(super::super::EBADF);
-            };
-            state
-                .net
-                .kqueues
-                .get_mut(&id)
-                .expect("kq fd maps to a live registry")
-                .refs += 1;
-            let new_fd = state.net.next_fd;
-            state.net.next_fd = state.net.next_fd.wrapping_add(1);
-            state.net.kq_fds.insert(new_fd, id);
-            new_fd
-        }
-
-        /// Close a kqueue fd. The registry drops (waking any task parked in
-        /// `kevent` on it) only when the last aliasing fd closes.
-        #[unsafe(no_mangle)]
-        pub extern "C" fn patina_kqueue_close(fd: c_int) -> c_int {
-            let mut state = lock_state();
-            let Some(id) = state.net.kq_fds.remove(&fd) else {
-                return super::super::fail(super::super::EBADF);
-            };
-            let slot = state
-                .net
-                .kqueues
-                .get_mut(&id)
-                .expect("kq fd maps to a live registry");
-            slot.refs -= 1;
-            if slot.refs > 0 {
-                return 0;
+            // A kqueue descriptor is close-on-exec from birth (xnu sets
+            // FD_CLOEXEC on it) and reports O_RDWR.
+            match super::super::install_fd(FdKind::Kqueue, id, O_READ | O_WRITE, true) {
+                Ok(fd) => {
+                    super::super::set_errno(0);
+                    fd
+                }
+                Err(errno) => {
+                    state.net.kqueues.remove(&id);
+                    super::super::fail(errno)
+                }
             }
-            let slot = state.net.kqueues.remove(&id).expect("registry was present");
+        }
+
+        /// Free a kqueue registry whose description's last reference went,
+        /// waking any task parked in `kevent` on it.
+        pub(crate) fn kqueue_close(handle: u64) {
+            let mut state = lock_state();
+            let Some(slot) = state.net.kqueues.remove(&handle) else {
+                return;
+            };
             let waiters: Vec<TaskId> = slot.kq.waiters.into_iter().collect();
             drop(state);
             wake_all(waiters);
-            0
+        }
+
+        /// BSD drops the knotes registered on a NUMBER when that number closes
+        /// (`knote_fdclose`), whatever other references the file keeps — so a
+        /// reused number can never observe a stale knote.
+        pub(crate) fn kqueue_forget_number(fd: c_int) {
+            let ident = fd as u64;
+            let mut state = lock_state();
+            for slot in state.net.kqueues.values_mut() {
+                slot.kq.filters.retain(|key, _| {
+                    !(key.ident == ident && matches!(key.filter, EVFILT_READ | EVFILT_WRITE))
+                });
+            }
         }
 
         /// Apply one changelist entry to a kqueue. Returns 0 on success or a
@@ -10111,8 +10945,10 @@ mod thread {
                     // descriptor fails closed loudly here.
                     if matches!(filter, EVFILT_READ | EVFILT_WRITE) {
                         let fd = c_int::try_from(ident).unwrap_or(-1);
-                        let known = state.net.pipe_ends.contains_key(&fd)
-                            || state.net.sockets.contains_key(&fd);
+                        let known = matches!(
+                            super::super::fd_table().lock().kind(fd),
+                            Some(FdKind::Pipe | FdKind::Socket)
+                        );
                         if !known {
                             let direction = if filter == EVFILT_READ {
                                 "READ"
@@ -10253,7 +11089,7 @@ mod thread {
                 match key.filter {
                     EVFILT_READ | EVFILT_WRITE => {
                         let fd = c_int::try_from(key.ident).unwrap_or(-1);
-                        let r = fd_readiness(state, fd);
+                        let r = fd_readiness(state, fd, None);
                         let (ready_now, eof) = if key.filter == EVFILT_READ {
                             (r.readable, r.read_eof)
                         } else {
@@ -10535,12 +11371,14 @@ mod thread {
 
     #[cfg(target_os = "linux")]
     use epoll::EpollSlot;
+    #[cfg(target_os = "linux")]
+    pub(crate) use epoll::{epoll_close, forget_description};
 
     // ------------------------------------------------------------------
     // epoll readiness reactor (Linux) — the mirror of `mod kqueue` above over
     // the same OS-agnostic readiness core (`fd_readiness`,
-    // `register_readiness_waiters`). An epoll fd is drawn from the shared
-    // virtual-fd space; `epoll_ctl` keeps one interest per watched fd (epoll
+    // `register_readiness_waiters`). An epoll instance is a description in the
+    // descriptor table; `epoll_ctl` keeps one interest per watched fd (epoll
     // semantics) over the virtual pipe/socketpair, eventfd, and SimNet socket
     // fds; `epoll_wait` gathers ready events — parking on the scheduler baton
     // with multi-fd fan-in when nothing is ready, bounded by the millisecond
@@ -10569,9 +11407,9 @@ mod thread {
         use patina_dst_abi::ClockKind;
 
         use super::{
-            ReadyDir, Step, ThreadRuntime, current_task, fatal, fd_readiness, lock_state,
-            register_readiness_waiters, sched_point, switch_and_park, unregister_readiness_waiters,
-            with_context_raw,
+            DescId, EPERM, FdKind, O_READ, O_WRITE, ReadyDir, Step, ThreadRuntime, current_task,
+            fatal, fd_readiness, lock_state, register_readiness_waiters, sched_point,
+            switch_and_park, unregister_readiness_waiters, with_context_raw,
         };
 
         // <sys/epoll.h> control ops and event bits (the reactor is Linux-only).
@@ -10585,7 +11423,11 @@ mod thread {
         const EPOLLHUP: u32 = 0x010;
         const EPOLLRDHUP: u32 = 0x2000;
         const EPOLLET: u32 = 1 << 31;
-        /// EPOLL_CLOEXEC == O_CLOEXEC; accepted no-op (no exec under the runtime).
+        /// One delivery, then the interest is disarmed until `EPOLL_CTL_MOD`
+        /// re-arms it (the kernel clears the requested directions and keeps
+        /// this bit; a MOD replaces the whole mask).
+        const EPOLLONESHOT: u32 = 1 << 30;
+        /// EPOLL_CLOEXEC == O_CLOEXEC: FD_CLOEXEC on the new number.
         const EPOLL_CLOEXEC: c_int = 0o2000000;
 
         /// The kernel's `struct epoll_event`, written directly into the guest's
@@ -10602,10 +11444,16 @@ mod thread {
 
         /// One watched fd's interest (epoll semantics: at most one per fd).
         struct Interest {
-            /// Requested EPOLLIN/EPOLLOUT/EPOLLRDHUP plus the EPOLLET mode bit.
+            /// Requested EPOLLIN/EPOLLOUT/EPOLLRDHUP plus the EPOLLET/EPOLLONESHOT
+            /// mode bits.
             events: u32,
             /// The caller's `epoll_data`, returned verbatim in delivered events.
             data: u64,
+            /// The open file description the number named at registration — the
+            /// kernel's `(fd, struct file)` key. A number reused for another
+            /// description reads as closed, and the interest drops with the
+            /// description's last reference.
+            desc: DescId,
             /// EPOLLET per-direction latch: `Some(seq)` after a delivery at
             /// arrival sequence `seq` — silent until readiness drops (re-arm to
             /// `None`) or the sequence advances (a new arrival re-fires).
@@ -10619,19 +11467,42 @@ mod thread {
             interests: BTreeMap<c_int, Interest>,
         }
 
-        /// A reference-counted epoll registry: `refs` is the number of live fds
-        /// aliasing it (one per `epoll_create1`, plus one per `dup`/`F_DUPFD` —
-        /// mio clones its selector through `F_DUPFD_CLOEXEC` on Linux exactly as
-        /// it does the kqueue fd), and the registry drops when the last closes.
+        /// An epoll registry. The descriptor table refcounts the description
+        /// (one per `epoll_create1`, shared by every `dup`/`F_DUPFD` of it — mio
+        /// clones its selector through `F_DUPFD_CLOEXEC`) and frees the registry
+        /// through [`epoll_close`] when the last number closes.
         pub(super) struct EpollSlot {
             ep: Epoll,
-            refs: usize,
         }
 
-        /// Resolve an epoll fd to its registry id, or `None` if `fd` is not a
-        /// live epoll descriptor.
-        fn ep_id(state: &ThreadRuntime, fd: c_int) -> Option<u64> {
-            state.net.epoll_fds.get(&fd).copied()
+        /// Resolve a guest number to its epoll registry id: `EBADF` for a number
+        /// that names nothing, `EINVAL` for one that is not an epoll instance.
+        fn ep_id(_state: &ThreadRuntime, fd: c_int) -> Result<u64, c_int> {
+            match super::super::fd_table().lock().resolve(fd) {
+                Some(resolved) if resolved.kind == FdKind::Epoll => Ok(resolved.handle),
+                Some(_) => Err(super::EINVAL),
+                None => Err(super::super::EBADF),
+            }
+        }
+
+        /// Free an epoll registry whose description's last reference went. A
+        /// task parked in `epoll_wait` is NOT woken — the kernel's wait holds
+        /// its own file reference and keeps blocking, and mio's single-threaded
+        /// driver never closes underneath a wait.
+        pub(crate) fn epoll_close(handle: u64) {
+            lock_state().net.epolls.remove(&handle);
+        }
+
+        /// Drop every interest registered against a description whose last
+        /// reference went: the kernel's `eventpoll_release` on the file's final
+        /// `fput`.
+        pub(crate) fn forget_description(desc: DescId) {
+            let mut state = lock_state();
+            for slot in state.net.epolls.values_mut() {
+                slot.ep
+                    .interests
+                    .retain(|_, interest| interest.desc != desc);
+            }
         }
 
         /// Allocate a virtual epoll instance. Syscall-shaped
@@ -10657,70 +11528,34 @@ mod thread {
                 id,
                 EpollSlot {
                     ep: Epoll::default(),
-                    refs: 1,
                 },
             );
-            let fd = state.net.next_fd;
-            state.net.next_fd = state.net.next_fd.wrapping_add(1);
-            state.net.epoll_fds.insert(fd, id);
-            fd
-        }
-
-        /// C dispatch predicate: is `fd` a virtual epoll descriptor? Lets the
-        /// interposed `close`/`dup`/`fcntl` route the shared virtual-fd space to
-        /// the epoll class.
-        #[unsafe(no_mangle)]
-        pub extern "C" fn patina_epoll_is_epoll(fd: c_int) -> c_int {
-            c_int::from(lock_state().net.epoll_fds.contains_key(&fd))
-        }
-
-        /// Duplicate an epoll fd: the new fd aliases the SAME registry (mio's
-        /// selector clone). Returns the new fd or -1 with `patina_errno` EBADF.
-        #[unsafe(no_mangle)]
-        pub extern "C" fn patina_epoll_dup(fd: c_int) -> c_int {
-            let mut state = lock_state();
-            let Some(id) = ep_id(&state, fd) else {
-                return super::super::fail(super::super::EBADF);
-            };
-            state
-                .net
-                .epolls
-                .get_mut(&id)
-                .expect("epoll fd maps to a live registry")
-                .refs += 1;
-            let new_fd = state.net.next_fd;
-            state.net.next_fd = state.net.next_fd.wrapping_add(1);
-            state.net.epoll_fds.insert(new_fd, id);
-            new_fd
-        }
-
-        /// Close an epoll fd; the registry drops when the last aliasing fd
-        /// closes. A task parked in `epoll_wait` is NOT woken — the kernel's
-        /// wait holds its own file reference and keeps blocking, and mio's
-        /// single-threaded driver never closes underneath a wait.
-        #[unsafe(no_mangle)]
-        pub extern "C" fn patina_epoll_close(fd: c_int) -> c_int {
-            let mut state = lock_state();
-            let Some(id) = state.net.epoll_fds.remove(&fd) else {
-                return super::super::fail(super::super::EBADF);
-            };
-            let slot = state
-                .net
-                .epolls
-                .get_mut(&id)
-                .expect("epoll fd maps to a live registry");
-            slot.refs -= 1;
-            if slot.refs == 0 {
-                state.net.epolls.remove(&id);
+            // An epoll instance reports O_RDWR through F_GETFL.
+            match super::super::install_fd(
+                FdKind::Epoll,
+                id,
+                O_READ | O_WRITE,
+                flags & EPOLL_CLOEXEC != 0,
+            ) {
+                Ok(fd) => {
+                    super::super::set_errno(0);
+                    fd
+                }
+                Err(errno) => {
+                    state.net.epolls.remove(&id);
+                    super::super::fail(errno)
+                }
             }
-            0
         }
 
         /// Apply one `epoll_ctl` op. Syscall-shaped (`epoll_ctl(epfd, op, fd,
-        /// event)`) for the future SIGSYS dispatcher. Registry mutation only —
-        /// no scheduling point, no trace event. Kernel-faithful errno: EEXIST on
-        /// a double ADD, ENOENT on MOD/DEL of an unregistered fd. Unmodeled
-        /// event flags and non-virtual descriptors fail closed loudly.
+        /// event)`) for the SUD dispatcher. Registry mutation only — no
+        /// scheduling point, no trace event. Kernel-faithful errno: EBADF for a
+        /// number that names nothing (either argument), EINVAL for an `epfd`
+        /// that is not an epoll instance or a target that is `epfd` itself,
+        /// EPERM for a target that cannot be polled (a file, a directory, a
+        /// device), EEXIST on a double ADD, ENOENT on MOD/DEL of an unregistered
+        /// fd. Unmodeled event flags fail closed loudly.
         ///
         /// # Safety
         /// `event` must point to a live `struct epoll_event` for ADD/MOD.
@@ -10732,12 +11567,49 @@ mod thread {
             event: *const EpollEvent,
         ) -> c_int {
             let mut state = lock_state();
-            let Some(id) = ep_id(&state, epfd) else {
+            // The kernel's `do_epoll_ctl` order: both numbers must name
+            // something (EBADF, `epfd` first), the target must be pollable
+            // (EPERM: a file, a directory, a device), and only then must `epfd`
+            // be an epoll instance other than the target (EINVAL). Every op,
+            // DEL included, goes through the same checks.
+            let id = match ep_id(&state, epfd) {
+                Ok(id) => Ok(id),
+                Err(errno) if errno == super::super::EBADF => {
+                    return super::super::fail(errno);
+                }
+                Err(errno) => Err(errno),
+            };
+            let Some(target) = super::super::fd_table().lock().resolve(fd) else {
                 return super::super::fail(super::super::EBADF);
             };
+            // Readiness is defined over pipe/socketpair, eventfd, SimNet socket
+            // and captured-stdio descriptions; another epoll instance (nested
+            // epoll) is not modeled and fails closed loudly.
+            match target.kind {
+                FdKind::Pipe
+                | FdKind::Socket
+                | FdKind::EventFd
+                | FdKind::Stdin
+                | FdKind::Stdout
+                | FdKind::Stderr => {}
+                FdKind::File | FdKind::Dir | FdKind::OPath | FdKind::Urandom => {
+                    return super::super::fail(EPERM);
+                }
+                // An epoll file is pollable, so the instance-on-itself case and
+                // a non-epoll `epfd` reach the kernel's EINVAL below; an epoll
+                // instance registered on ANOTHER instance is the unmodeled
+                // nesting.
+                FdKind::Epoll if fd != epfd && id.is_ok() => fatal(&format!(
+                    "epoll_ctl registered epoll descriptor {fd} on another epoll instance: \
+                     nested epoll is not modeled; failing closed"
+                )),
+                FdKind::Epoll => {}
+            }
+            let id = match id {
+                Ok(id) if fd != epfd => id,
+                _ => return super::super::fail(super::EINVAL),
+            };
             if op == EPOLL_CTL_DEL {
-                // Removal validates nothing else about `fd`: the descriptor may
-                // already be closed (mio deregisters around close).
                 return match state
                     .net
                     .epolls
@@ -10761,28 +11633,17 @@ mod thread {
             // function's contract; fields are copied out by value.
             let (events, data) = unsafe { ((*event).events, (*event).data) };
             // Fail closed LOUDLY on interest flags the reactor does not model
-            // (EPOLLONESHOT, EPOLLEXCLUSIVE, EPOLLWAKEUP, EPOLLPRI, ...): a
-            // silent EINVAL a caller swallowed would be an invisible escape.
-            // EPOLLHUP/EPOLLERR are always-monitored no-ops in a request mask,
-            // accepted exactly as the kernel accepts them.
-            const MODELED: u32 = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLERR | EPOLLHUP | EPOLLET;
+            // (EPOLLEXCLUSIVE, EPOLLWAKEUP, EPOLLPRI, ...): a silent EINVAL a
+            // caller swallowed would be an invisible escape. EPOLLHUP/EPOLLERR
+            // are always-monitored no-ops in a request mask, accepted exactly as
+            // the kernel accepts them.
+            const MODELED: u32 =
+                EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLERR | EPOLLHUP | EPOLLET | EPOLLONESHOT;
             if events & !MODELED != 0 {
                 fatal(&format!(
                     "epoll_ctl events {events:#x} carry unmodeled flags (only EPOLLIN/EPOLLOUT/\
-                     EPOLLRDHUP/EPOLLERR/EPOLLHUP/EPOLLET are modeled); failing closed"
-                ));
-            }
-            // Registration-time fd validation: readiness is defined only over
-            // virtual pipe/socketpair, eventfd, and SimNet socket descriptors.
-            // A real file, stdio, another epoll instance, or an otherwise
-            // unknown descriptor fails closed loudly here.
-            let known = state.net.pipe_ends.contains_key(&fd)
-                || state.net.sockets.contains_key(&fd)
-                || state.net.eventfds.contains_key(&fd);
-            if !known {
-                fatal(&format!(
-                    "epoll_ctl registered non-virtual descriptor {fd}: readiness for real host \
-                     descriptors is not modeled; failing closed"
+                     EPOLLRDHUP/EPOLLERR/EPOLLHUP/EPOLLET/EPOLLONESHOT are modeled); failing \
+                     closed"
                 ));
             }
             let interests = &mut state
@@ -10795,6 +11656,7 @@ mod thread {
             let armed = Interest {
                 events,
                 data,
+                desc: target.desc,
                 delivered_read: None,
                 delivered_write: None,
             };
@@ -10817,9 +11679,17 @@ mod thread {
             0
         }
 
-        /// Monotonic per-direction arrival sequences for `fd` (see the section
-        /// comment). SimNet sockets and closed descriptors report constant 0.
+        /// Monotonic per-direction arrival sequences for guest number `fd` (see
+        /// the section comment). SimNet sockets and closed descriptors report
+        /// constant 0.
         fn fd_event_seqs(state: &ThreadRuntime, fd: c_int) -> (u64, u64) {
+            let Some(resolved) = super::super::fd_table().lock().resolve(fd) else {
+                return (0, 0);
+            };
+            let fd = resolved.handle as c_int;
+            if resolved.kind != FdKind::Pipe && resolved.kind != FdKind::EventFd {
+                return (0, 0);
+            }
             if let Some(end) = state.net.pipe_ends.get(&fd) {
                 let read_seq = end
                     .read_channel
@@ -10861,7 +11731,7 @@ mod thread {
             let mut ready = Vec::new();
             let mut rearms = Vec::new();
             for (&fd, interest) in &ep.interests {
-                let r = fd_readiness(state, fd);
+                let r = fd_readiness(state, fd, Some(interest.desc));
                 let (read_seq, write_seq) = fd_event_seqs(state, fd);
                 let watch_read = interest.events & (EPOLLIN | EPOLLRDHUP) != 0;
                 let watch_write = interest.events & EPOLLOUT != 0;
@@ -10937,7 +11807,10 @@ mod thread {
             watched
         }
 
-        /// Apply the latch edits for the events actually delivered this gather.
+        /// Apply the latch edits for the events actually delivered this gather,
+        /// and disarm every EPOLLONESHOT interest that fired: the kernel clears
+        /// its requested directions (keeping the mode bits) until a MOD re-arms
+        /// it.
         fn commit_delivered(state: &mut ThreadRuntime, id: u64, delivered: &[ReadyEvent]) {
             let ep = &mut state.net.epolls.get_mut(&id).expect("epoll exists").ep;
             for event in delivered {
@@ -10947,6 +11820,9 @@ mod thread {
                     }
                     if event.latch_write.is_some() {
                         interest.delivered_write = event.latch_write;
+                    }
+                    if interest.events & EPOLLONESHOT != 0 {
+                        interest.events &= !(EPOLLIN | EPOLLOUT | EPOLLRDHUP);
                     }
                 }
             }
@@ -10995,8 +11871,9 @@ mod thread {
             let mut timeout_deadline: Option<u64> = None;
             loop {
                 let mut state = lock_state();
-                let Some(id) = ep_id(&state, epfd) else {
-                    return super::super::fail(super::super::EBADF);
+                let id = match ep_id(&state, epfd) {
+                    Ok(id) => id,
+                    Err(errno) => return super::super::fail(errno),
                 };
                 let now = match with_context_raw(|c| c.monotonic_now_unrecorded()) {
                     Ok(now) => now,

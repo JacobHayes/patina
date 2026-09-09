@@ -109,9 +109,12 @@ static ssize_t fail_size(intptr_t result) {
 }
 
 /* Loud fail-closed: one deterministic diagnostic line on captured stderr,
- * then a recoverable ENOSYS. Never falls through to the host. */
+ * then a recoverable ENOSYS. Never falls through to the host. The line goes
+ * to the captured-stderr SINK directly (not through the interposed write on
+ * guest number 2): a runtime diagnostic must reach the supervisor even after
+ * the guest dup2'd a file over its stderr. */
 static int patina_posix_deny(const char *message) {
-    write(2, message, strlen(message));
+    (void)patina_stdio_write(2, message, strlen(message));
     errno = ENOSYS;
     return -1;
 }

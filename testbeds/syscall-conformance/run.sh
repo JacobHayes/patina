@@ -59,6 +59,14 @@ usage: testbeds/syscall-conformance/run.sh [--mode M[,M...]] [--vehicle V[,V...]
 EOF
 }
 
+# Two host properties a probe may observe are pinned here so the native oracle
+# and the virtual kernel start from the same process state: standard input is
+# /dev/null (a probe reading fd 0 sees EOF on both sides and never blocks on a
+# terminal), and RLIMIT_NOFILE is the virtual kernel's own 1024 (the shim's
+# `patina_fd_limit`), so EMFILE and the F_DUPFD/dup2 bounds fall at one number.
+exec </dev/null
+ulimit -S -n 1024 || { echo "syscall-conformance: FATAL: cannot pin RLIMIT_NOFILE to 1024" >&2; exit 3; }
+
 modes=(native patina replay leak)
 vehicles=(libc syscall raw)
 probes=()
@@ -352,8 +360,9 @@ for probe in "${probes[@]}"; do
           ;;
         replay)
           if reason="$("$conform" declared-failing "$probe" "$vehicle" "$divergences")"; then
-            # A probe the supervisor refuses or that dies before its first
-            # recorded event leaves no trace to replay; the patina leg already
+            # A probe the supervisor refuses, or that dies at a declared event,
+            # leaves no trace to replay (an abort is not a runtime-initiated
+            # stop, so the recording is incomplete); the patina leg already
             # holds it to its declaration.
             skip_leg "$leg" "declared failing under patina; nothing to replay ($reason)"; continue
           fi

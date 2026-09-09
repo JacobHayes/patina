@@ -108,7 +108,7 @@ long sysconf(int name) {
     if (name == _SC_CLK_TCK) return 100;
 #endif
 #ifdef _SC_OPEN_MAX
-    if (name == _SC_OPEN_MAX) return 1024;
+    if (name == _SC_OPEN_MAX) return patina_fd_limit();
 #endif
 #ifdef _SC_NGROUPS_MAX
     if (name == _SC_NGROUPS_MAX) return 16;
@@ -247,9 +247,10 @@ int prctl(int option, ...) {
 
 /*
  * getrlimit/setrlimit (the sysinfo crate reads limits). getrlimit reports a
- * fixed generous limit — RLIM_INFINITY, except RLIMIT_NOFILE which reports 1024
- * to match sysconf(_SC_OPEN_MAX) so fd-counting code stays sane — as a
- * deterministic constant independent of the host's real ulimits. setrlimit
+ * fixed generous limit — RLIM_INFINITY, except RLIMIT_NOFILE which reports the
+ * descriptor table's own bound (patina_fd_limit: the number EMFILE enforces
+ * and sysconf(_SC_OPEN_MAX) reports) — as a deterministic constant independent
+ * of the host's real ulimits. setrlimit
  * refuses with EPERM: a truthful "cannot mutate host resource limits" rather
  * than a lying success (a guest cannot change limits the runtime does not model).
  */
@@ -258,7 +259,7 @@ int getrlimit(__rlimit_resource_t resource, struct rlimit *rlim) {
     rlim_t value = RLIM_INFINITY;
 #ifdef RLIMIT_NOFILE
     if (resource == RLIMIT_NOFILE) {
-        value = 1024;
+        value = (rlim_t)patina_fd_limit();
     }
 #endif
     rlim->rlim_cur = value;

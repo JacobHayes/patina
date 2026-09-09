@@ -113,6 +113,9 @@ pub enum Sys {
     Linkat,
     Pipe2,
     Dup,
+    Dup2,
+    Dup3,
+    CloseRange,
     Fcntl,
     Flock,
     ClockGettime,
@@ -166,6 +169,9 @@ impl Sys {
             Sys::Linkat => "linkat",
             Sys::Pipe2 => "pipe2",
             Sys::Dup => "dup",
+            Sys::Dup2 => "dup2",
+            Sys::Dup3 => "dup3",
+            Sys::CloseRange => "close_range",
             Sys::Fcntl => "fcntl",
             Sys::Flock => "flock",
             Sys::ClockGettime => "clock_gettime",
@@ -219,6 +225,21 @@ impl Sys {
             Sys::Linkat => libc::SYS_linkat,
             Sys::Pipe2 => libc::SYS_pipe2,
             Sys::Dup => libc::SYS_dup,
+            Sys::Dup2 => {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    libc::SYS_dup2
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    // Generic-table arches carry only dup3; dup2's distinct
+                    // equal-number semantics are asserted by the probe on
+                    // x86_64 alone, so the shape here is dup3(old, new, 0).
+                    return (libc::SYS_dup3, [args[0], args[1], 0, 0, 0, 0]);
+                }
+            }
+            Sys::Dup3 => libc::SYS_dup3,
+            Sys::CloseRange => libc::SYS_close_range,
             Sys::Fcntl => libc::SYS_fcntl,
             Sys::Flock => libc::SYS_flock,
             Sys::ClockGettime => libc::SYS_clock_gettime,
@@ -346,6 +367,9 @@ fn libc_symbol(sys: Sys, a: Args) -> i64 {
             ) as i64,
             Sys::Pipe2 => pipe2(a[0] as *mut c_int, a[1] as c_int) as i64,
             Sys::Dup => dup(a[0] as c_int) as i64,
+            Sys::Dup2 => dup2(a[0] as c_int, a[1] as c_int) as i64,
+            Sys::Dup3 => dup3(a[0] as c_int, a[1] as c_int, a[2] as c_int) as i64,
+            Sys::CloseRange => close_range(a[0] as c_uint, a[1] as c_uint, a[2] as c_int) as i64,
             Sys::Fcntl => fcntl(a[0] as c_int, a[1] as c_int, a[2] as c_long) as i64,
             Sys::Flock => flock(a[0] as c_int, a[1] as c_int) as i64,
             Sys::ClockGettime => clock_gettime(a[0] as clockid_t, a[1] as *mut timespec) as i64,

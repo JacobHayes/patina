@@ -588,6 +588,50 @@ impl Probe {
         result
     }
 
+    /// `dup2(oldfd, newfd)`. The result IS `newfd` on success (a number the
+    /// probe chose, not one the kernel allocated), so it is recorded raw; both
+    /// arguments are descriptors and normalized as such — `newfd` when it names
+    /// something at the time of the call.
+    pub fn dup2(&self, oldfd: i32, newfd: i32) -> i64 {
+        let result = self.call(Sys::Dup2, [oldfd as i64, newfd as i64, 0, 0, 0, 0]);
+        let builder = self.event(Sys::Dup2, result);
+        self.fd_arg(builder, "oldfd", oldfd)
+            .arg("newfd", newfd)
+            .emit();
+        result
+    }
+
+    /// `dup3(oldfd, newfd, flags)`; recorded like `dup2`.
+    pub fn dup3(&self, oldfd: i32, newfd: i32, flags: i32) -> i64 {
+        let result = self.call(
+            Sys::Dup3,
+            [oldfd as i64, newfd as i64, flags as i64, 0, 0, 0],
+        );
+        let builder = self.event(Sys::Dup3, result);
+        self.fd_arg(builder, "oldfd", oldfd)
+            .arg("newfd", newfd)
+            .arg("flags", flags)
+            .emit();
+        result
+    }
+
+    /// `close_range(first, last, flags)`: the bounds are numbers the probe
+    /// chose, recorded raw. The differ's `fd` namespace retires nothing here
+    /// (it retires on `close` events), so a probe closes the range's members
+    /// through `close_range` only when it never reuses them observably.
+    pub fn close_range(&self, first: u32, last: u32, flags: u32) -> i64 {
+        let result = self.call(
+            Sys::CloseRange,
+            [first as i64, last as i64, flags as i64, 0, 0, 0],
+        );
+        self.event(Sys::CloseRange, result)
+            .arg("first", first)
+            .arg("last", last)
+            .arg("flags", flags)
+            .emit();
+        result
+    }
+
     /// `fcntl` with an integer argument. `F_DUPFD*` results are descriptors and
     /// normalized as such; every other result is recorded raw.
     pub fn fcntl(&self, fd: i32, cmd: i32, arg: i64) -> i64 {

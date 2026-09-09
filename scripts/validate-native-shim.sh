@@ -161,19 +161,21 @@ int main(void) {
     if (ftruncate(fd, 3) != 0) return 18;
     if (close(fd) != 0) return 19;
 
+    /* The descriptor table: lowest-free numbering, dup/dup2 sharing one open
+     * file description, F_DUPFD bounded by RLIMIT_NOFILE, and the captured
+     * streams being ordinary dup-able descriptors. */
     int base = open("/state/dup", O_CREAT | O_TRUNC | O_RDWR, 0600);
     if (base < 0) return 30;
     int duplicate = dup(base);
     if (duplicate != base + 1) return 32;
     if (write(base, "posix", 5) != 5) return 33;
     if (lseek(duplicate, 0, SEEK_CUR) != 5) return 34;
-    errno = 0;
-    if (dup2(base, 99) != -1 || errno != ENOSYS) return 35;
+    if (dup2(base, 99) != 99 || lseek(99, 0, SEEK_CUR) != 5 || close(99) != 0) return 35;
     if (dup2(base, base) != base) return 36;
     errno = 0;
-    if (fcntl(base, F_DUPFD, 1000000) != -1 || errno != ENOSYS) return 37;
-    errno = 0;
-    if (dup(1) != -1 || errno != ENOSYS) return 38;
+    if (fcntl(base, F_DUPFD, 1000000) != -1 || errno != EINVAL) return 37;
+    int stdout_copy = dup(1);
+    if (stdout_copy < 0 || close(stdout_copy) != 0) return 38;
     if (close(duplicate) != 0) return 39;
     if (write(base, "-more", 5) != 5) return 40;
     if (close(base) != 0) return 41;
@@ -280,14 +282,15 @@ int main(int argc, char **argv) {
     if (memcmp(contents, "openat", 6) != 0) return 16;
     if (close(fd) != 0) return 17;
 
-    /* A real dirfd is not modeled and fails closed. */
+    /* A dirfd that names nothing is EBADF, as the kernel answers, even for an
+     * absolute path: the descriptor table is consulted before the path. */
     errno = 0;
-    if (openat(99, "/state/at", O_RDONLY) != -1 || errno != ENOSYS) return 18;
+    if (openat(99, "/state/at", O_RDONLY) != -1 || errno != EBADF) return 18;
 
     /* renameat(AT_FDCWD, AT_FDCWD) routes to the deterministic rename. */
     if (renameat(AT_FDCWD, "/state/at", AT_FDCWD, "/state/at-renamed") != 0) return 19;
     errno = 0;
-    if (renameat(99, "/state/at-renamed", AT_FDCWD, "/x") != -1 || errno != ENOSYS) return 20;
+    if (renameat(99, "/state/at-renamed", AT_FDCWD, "/x") != -1 || errno != EBADF) return 20;
 
     /* unlinkat with AT_REMOVEDIR removes a directory; without it, a file. */
     if (patina_mkdir("/state/at-dir", 0777) != 0) return 21;
@@ -574,7 +577,8 @@ RS
 
 cat >"$tmp/dup_probe.rs" <<'RS'
 // std::fs::File::try_clone routes through the interposed fcntl(F_DUPFD_CLOEXEC)
-// into the recorded FsDup operation; the clone shares the open-file cursor.
+// into the shim's descriptor table; the clone shares the open file description
+// (and so the cursor) without a second driver handle.
 use std::io::{Read, Seek, SeekFrom};
 
 fn main() {
@@ -1198,8 +1202,9 @@ cmp "$tmp/at-family-record" "$tmp/at-family-replay"
 cmp "$tmp/at-family-seed-1" "$tmp/at-family-replay"
 
 # Deterministic descriptor duplication: File::try_clone routes through
-# fcntl(F_DUPFD_CLOEXEC) to the recorded FsDup operation, and the duplicate
-# shares the open-file cursor.
+# fcntl(F_DUPFD_CLOEXEC) into the shim's descriptor table (a second number on
+# one open file description, no driver operation), and the duplicate shares
+# the open-file cursor.
 "$runner" build "$tmp/dup_probe.rs" --output "$tmp/dup-probe" >/dev/null
 "$runner" audit "$tmp/dup-probe" "${shim_allow[@]}" >/dev/null
 "$runner" run "$tmp/dup-probe" --seed 3 >"$tmp/dup-seed-1"
@@ -4223,9 +4228,10 @@ RS
       # (g) raw socketpair: interposed socketpair works but raw aborted before the
       # row existed (the strongest raw-vs-interposed asymmetry). Create an AF_UNIX
       # STREAM pair, write one end, read the other, assert the bytes, close both.
-      # Then dup2(eventfd, eventfd) must be EBADF — the C dup2 validity accepts
-      # only net/pipe fds, NOT epoll/eventfd. RED: drop nr::SOCKETPAIR → abort;
-      # re-widen dup2 validity to accept eventfd → the EBADF assert fails.
+      # Then dup2 over an eventfd: equal numbers validate and return the number,
+      # and a chosen number binds a second descriptor to the same counter (the
+      # descriptor table, not a per-class validity list). RED: drop
+      # nr::SOCKETPAIR → abort; refuse eventfd in dup2 → the asserts fail.
       cat >"$tmp/raw_socketpair.rs" <<'RS'
 use std::arch::asm;
 unsafe fn sc(nr: i64, a0: i64, a1: i64, a2: i64, a3: i64) -> i64 {
@@ -4251,19 +4257,27 @@ fn main() {
     assert_eq!(&buf[..n as usize], msg, "socketpair payload mismatch");
     let _ = unsafe { sc(CLOSE, a, 0, 0, 0) };
     let _ = unsafe { sc(CLOSE, b, 0, 0, 0) };
-    // dup2(eventfd, eventfd): the equal-fd validity must reject an eventfd (EBADF),
-    // mirroring the C dup2 interposer exactly.
-    let efd = unsafe { sc(EVENTFD2, 0, 0, 0, 0) };
+    // dup2(eventfd, eventfd) validates the number and returns it; dup2 onto a
+    // chosen number binds a second descriptor to the SAME counter, so a read
+    // through it drains what was written through the original.
+    let efd = unsafe { sc(EVENTFD2, 7, 0, 0, 0) };
     assert!(efd >= 0, "eventfd2 {efd}");
     let d = unsafe { sc(DUP2, efd, efd, 0, 0) };
-    assert_eq!(d, -9, "dup2(eventfd,eventfd) must be EBADF(-9), got {d}");
+    assert_eq!(d, efd, "dup2(eventfd,eventfd) must return the number, got {d}");
+    let d2 = unsafe { sc(DUP2, efd, 40, 0, 0) };
+    assert_eq!(d2, 40, "dup2(eventfd, 40) must bind 40, got {d2}");
+    let mut counter = [0u8; 8];
+    let n = unsafe { sc(READ, 40, counter.as_mut_ptr() as i64, 8, 0) };
+    assert_eq!(n, 8, "read through the dup {n}");
+    assert_eq!(u64::from_ne_bytes(counter), 7, "the dup reads the same counter");
+    let _ = unsafe { sc(CLOSE, 40, 0, 0, 0) };
     let _ = unsafe { sc(CLOSE, efd, 0, 0, 0) };
-    println!("SOCKETPAIR_ROW pair+dup2ebadf ok");
+    println!("SOCKETPAIR_ROW pair+dup2eventfd ok");
 }
 RS
       "$runner" build "$tmp/raw_socketpair.rs" --output "$tmp/raw-socketpair" >/dev/null
       "$runner" run "$tmp/raw-socketpair" --seed 1 >"$tmp/raw-socketpair-out"
-      grep -qx 'SOCKETPAIR_ROW pair+dup2ebadf ok' "$tmp/raw-socketpair-out"
+      grep -qx 'SOCKETPAIR_ROW pair+dup2eventfd ok' "$tmp/raw-socketpair-out"
 
       # (h) raw ppoll: an empty descriptor set with a 5ms timeout returns 0 after
       # advancing VIRTUAL time by >= 5ms (deterministic — a second same-seed run is
@@ -4308,9 +4322,11 @@ RS
       grep -q '^PPOLL_ROW empty_sleep=' "$tmp/raw-ppoll-1"
 
       # (i) fcntl(F_GETFL) parity: the SAME op via TWO vehicles — a raw syscall and
-      # the interposed libc symbol — must give the SAME result on a regular file:
-      # a soft ENOSYS (raw returns -38; libc returns -1 with errno 38). This pins
-      # the round-8 fcntl-tail alignment: neither vehicle returns 0 or aborts.
+      # the interposed libc symbol — must give the SAME answer on a regular file,
+      # and the answer is the description's status flags from the shim's one
+      # descriptor table: File::create opens O_WRONLY, and a 64-bit kernel forces
+      # O_LARGEFILE (0100000) into every open(2)-minted description, so both
+      # doors report 0100001 (32769). Neither vehicle refuses or aborts.
       cat >"$tmp/raw_fcntl_parity.rs" <<'RS'
 use std::arch::asm;
 use std::os::fd::AsRawFd;
@@ -4322,18 +4338,16 @@ fn main() {
     unsafe { asm!("syscall", inlateout("rax") FCNTL => raw, in("rdi") fd as i64,
         in("rsi") F_GETFL, in("rdx") 0i64, in("r10") 0i64,
         out("rcx") _, out("r11") _, options(nostack)); }
-    assert_eq!(raw, -38, "raw fcntl(F_GETFL) must be -ENOSYS(-38), got {raw}");
+    assert_eq!(raw, 0o100001, "raw fcntl(F_GETFL) must be O_WRONLY|O_LARGEFILE, got {raw}");
     unsafe extern "C" { fn fcntl(fd: i32, cmd: i32, ...) -> i32; }
     let lib = unsafe { fcntl(fd, 3) };
-    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-    assert_eq!(lib, -1, "libc fcntl(F_GETFL) must fail, got {lib}");
-    assert_eq!(errno, 38, "libc fcntl(F_GETFL) errno must be ENOSYS(38), got {errno}");
-    println!("FCNTL_PARITY raw={raw} libc_errno={errno}");
+    assert_eq!(lib as i64, raw, "libc fcntl(F_GETFL) must agree with the raw syscall, got {lib}");
+    println!("FCNTL_PARITY raw={raw} libc={lib}");
 }
 RS
       "$runner" build "$tmp/raw_fcntl_parity.rs" --output "$tmp/raw-fcntl-parity" >/dev/null
       "$runner" run "$tmp/raw-fcntl-parity" --seed 1 >"$tmp/raw-fcntl-parity-out"
-      grep -qx 'FCNTL_PARITY raw=-38 libc_errno=38' "$tmp/raw-fcntl-parity-out"
+      grep -qx 'FCNTL_PARITY raw=32769 libc=32769' "$tmp/raw-fcntl-parity-out"
 
       # (j) fcntl record-lock parity: F_SETLK / F_GETLK via the raw syscall and
       # via the interposed libc symbol agree on a regular file — the lone

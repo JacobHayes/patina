@@ -25,16 +25,25 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
 - Interposer semantics should match the public path they replace. Raw-syscall
   dispatch, SUD handling, and C ABI entry points should route through the same
   runtime behavior as the corresponding POSIX interposer whenever possible.
-- Descriptor tables are shared, never per-entry-path. A real guest mixes the two
-  doors in one object's lifetime: `cap-std` opens its base directory through std
-  (libc → the C interposer) and then does every later operation on it with raw
-  syscalls (→ SUD). Anything a descriptor means — its class, its iteration state,
-  where it points — therefore lives in ONE runtime table both doors consult
-  (`patina_dir_is_dirfd`/`patina_dirpath` for directories), and the validation
-  that mints it lives in the shared `patina_*` entry, not in either caller. A
-  private fd space on one side is a descriptor the other side cannot resolve.
+- There is ONE descriptor table (`src/fdtable.rs`), and every guest number goes
+  through it. A real guest mixes the two doors in one object's lifetime:
+  `cap-std` opens its base directory through std (libc → the C interposer) and
+  then does every later operation on it with raw syscalls (→ SUD). Anything a
+  descriptor means — its kind, its open file description, its `FD_CLOEXEC`
+  bit, where it points — therefore lives in that table, and the universal
+  `patina_*` entries (`patina_read`/`patina_close`/`patina_dup3`/…) resolve the
+  number and dispatch on its kind, so neither the C layer nor a SUD row decides
+  anything by descriptor class: `patina_fd_kind` is the one oracle for the few
+  calls whose meaning depends on the kind. A number-range scheme, a per-class
+  fd counter, or a class-membership probe is a descriptor one door cannot
+  resolve; `close(2)`-then-`open` giving number 2 to a file, `dup2` over a
+  standard stream, and lowest-free reuse are the kernel's behavior and the
+  table's. Class tables (sockets, pipe ends, eventfds, reactor registries) are
+  keyed by an internal handle the guest never sees; guest numbers are never
+  recorded. Add a kind by adding an `FdKind` variant: every dispatch site
+  matches without a wildcard, so the compiler lists what the new kind must do.
 - A descriptor names a NODE, not a name. The shim keeps only what the filesystem
-  cannot answer — which fds are directory descriptors — and asks the filesystem
+  cannot answer — which descriptors are directories — and asks the filesystem
   where a descriptor's node is now (`patina_dirpath` → `fs_fd_path`). A name
   cached beside a descriptor goes stale exactly where it matters: a rename
   detaches the descriptor, and a symlink planted at the vacated name silently

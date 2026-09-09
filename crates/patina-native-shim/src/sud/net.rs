@@ -56,6 +56,7 @@ pub(super) fn sys_socket(domain: u64, ty: u64, protocol: u64) -> i64 {
         nonblocking = 1;
         base &= !SOCK_NONBLOCK;
     }
+    let cloexec = c_int::from(base & SOCK_CLOEXEC != 0);
     base &= !SOCK_CLOEXEC;
     let stream = if base == SOCK_DGRAM {
         if protocol != 0 && protocol != IPPROTO_UDP {
@@ -71,7 +72,21 @@ pub(super) fn sys_socket(domain: u64, ty: u64, protocol: u64) -> i64 {
         return -EPROTOTYPE;
     };
     // SAFETY: no pointers.
-    ret_i32(unsafe { patina_net_socket(stream, nonblocking) })
+    ret_i32(unsafe { patina_net_socket(stream, nonblocking, cloexec) })
+}
+
+/// The kind checks the socket family needs before the class entries, mirroring
+/// the C `patina_socket_or_pair`: a number that names nothing is `EBADF`, one
+/// that names anything but a socket or a socketpair endpoint is `ENOTSOCK`.
+/// `Ok(true)` is a pipe/socketpair endpoint (whose send/recv are the pipe
+/// transfer), `Ok(false)` a socket.
+pub(super) fn socket_or_pair(fd: i64) -> Result<bool, i64> {
+    match fd_kind(fd) {
+        None => Err(-EBADF),
+        Some(PATINA_FD_PIPE) => Ok(true),
+        Some(PATINA_FD_SOCKET) => Ok(false),
+        Some(_) => Err(-ENOTSOCK),
+    }
 }
 
 pub(super) fn sys_bind(fd: i64, addr: u64, len: u32) -> i64 {
@@ -83,9 +98,6 @@ pub(super) fn sys_bind(fd: i64, addr: u64, len: u32) -> i64 {
 }
 
 pub(super) fn sys_listen(fd: i64, backlog: i64) -> i64 {
-    if fd < PATINA_SOCKET_FD_BASE {
-        return -ENOTSOCK;
-    }
     // SAFETY: no pointers.
     ret_i32(unsafe { patina_net_listen(fd as c_int, backlog as c_int) })
 }
@@ -95,47 +107,42 @@ pub(super) fn sys_connect(fd: i64, addr: u64, len: u32) -> i64 {
         return -EAFNOSUPPORT;
     };
     let cfd = fd as c_int;
-    if fd >= PATINA_SOCKET_FD_BASE {
-        // SAFETY: no pointers.
-        return unsafe {
-            match patina_net_kind(cfd) {
-                3 => -EISCONN,
-                1 => ret_i32(patina_net_tcp_connect(cfd, ip, port)),
-                0 => ret_i32(patina_net_connect(cfd, ip, port)),
-                2 => -EOPNOTSUPP,
-                _ => -EBADF,
-            }
-        };
-    }
     // SAFETY: no pointers.
-    ret_i32(unsafe { patina_net_connect(cfd, ip, port) })
+    unsafe {
+        match patina_net_kind(cfd) {
+            3 => -EISCONN,
+            1 => ret_i32(patina_net_tcp_connect(cfd, ip, port)),
+            2 => -EOPNOTSUPP,
+            // A datagram socket, or not a socket at all: the entry answers
+            // EBADF/ENOTSOCK from the descriptor table.
+            _ => ret_i32(patina_net_connect(cfd, ip, port)),
+        }
+    }
 }
 
 pub(super) fn sys_accept(fd: i64, addr: u64, len_ptr: u64, flags: u64) -> i64 {
-    if fd < PATINA_SOCKET_FD_BASE {
-        return -ENOTSOCK;
-    }
-    // accept4 flags: only SOCK_CLOEXEC / SOCK_NONBLOCK are meaningful.
+    // accept4 flags: only SOCK_CLOEXEC / SOCK_NONBLOCK are meaningful, and they
+    // describe the NEW descriptor.
     if flags & !(SOCK_CLOEXEC | SOCK_NONBLOCK) != 0 {
         return -EINVAL;
     }
     let mut ip: u32 = 0;
     let mut port: u16 = 0;
     // SAFETY: writable local storage.
-    let accepted = unsafe { patina_net_accept(fd as c_int, &mut ip, &mut port) };
+    let accepted = unsafe {
+        patina_net_accept(
+            fd as c_int,
+            &mut ip,
+            &mut port,
+            c_int::from(flags & SOCK_NONBLOCK != 0),
+            c_int::from(flags & SOCK_CLOEXEC != 0),
+        )
+    };
     if accepted < 0 {
         // SAFETY: plain thread-local read.
         return -(unsafe { patina_errno() } as i64);
     }
     fill_sockaddr(addr, len_ptr, ip, port);
-    if flags & SOCK_NONBLOCK != 0 {
-        // SAFETY: no pointers.
-        let rc = unsafe { patina_net_set_nonblocking(accepted, 1) };
-        if rc != 0 {
-            // SAFETY: plain thread-local read.
-            return -(unsafe { patina_errno() } as i64);
-        }
-    }
     accepted as i64
 }
 
@@ -149,7 +156,11 @@ pub(super) fn sys_sendto(fd: i64, buf: u64, len: u64, flags: u64, addr: u64, ale
     let cfd = fd as c_int;
     let src = buf as *const c_void;
     let n = len as usize;
-    if fd >= PATINA_SOCKET_FD_BASE && unsafe { patina_pipe_is_endpoint(cfd) } != 0 {
+    let pair = match socket_or_pair(fd) {
+        Ok(pair) => pair,
+        Err(errno) => return errno,
+    };
+    if pair {
         if addr != 0 {
             return -EISCONN;
         }
@@ -159,11 +170,8 @@ pub(super) fn sys_sendto(fd: i64, buf: u64, len: u64, flags: u64, addr: u64, ale
         // SAFETY: `buf`/`len` describe a guest buffer.
         return ret_isize(unsafe { patina_pipe_write(cfd, src, n) });
     }
-    let kind = if fd >= PATINA_SOCKET_FD_BASE {
-        unsafe { patina_net_kind(cfd) }
-    } else {
-        -1
-    };
+    // SAFETY: no pointers.
+    let kind = unsafe { patina_net_kind(cfd) };
     if kind == 3 {
         if addr != 0 {
             return -EISCONN;
@@ -189,18 +197,19 @@ pub(super) fn sys_recvfrom(fd: i64, buf: u64, len: u64, flags: u64, addr: u64, a
     let cfd = fd as c_int;
     let dst = buf as *mut c_void;
     let n = len as usize;
-    if fd >= PATINA_SOCKET_FD_BASE && unsafe { patina_pipe_is_endpoint(cfd) } != 0 {
+    let pair = match socket_or_pair(fd) {
+        Ok(pair) => pair,
+        Err(errno) => return errno,
+    };
+    if pair {
         if !stream_flags_supported(flags) {
             return -EOPNOTSUPP;
         }
         // SAFETY: `buf`/`len` describe a guest buffer.
         return ret_isize(unsafe { patina_pipe_read(cfd, dst, n) });
     }
-    let kind = if fd >= PATINA_SOCKET_FD_BASE {
-        unsafe { patina_net_kind(cfd) }
-    } else {
-        -1
-    };
+    // SAFETY: no pointers.
+    let kind = unsafe { patina_net_kind(cfd) };
     if kind == 3 {
         if addr != 0 {
             return -EISCONN;
@@ -240,9 +249,6 @@ pub(super) fn sys_recvmsg(_fd: i64, _msg: u64, _flags: u64) -> i64 {
 }
 
 pub(super) fn sys_shutdown(fd: i64, how: u64) -> i64 {
-    if fd < PATINA_SOCKET_FD_BASE {
-        return -ENOTSOCK;
-    }
     let patina_how = match how {
         SHUT_RD => 0,
         SHUT_WR => 1,
@@ -291,8 +297,10 @@ pub(super) fn timeval_is_zero(value: u64, len: u32) -> bool {
 }
 
 pub(super) fn sys_setsockopt(fd: i64, level: u64, optname: u64, value: u64, len: u32) -> i64 {
-    if fd < PATINA_SOCKET_FD_BASE {
-        return -ENOTSOCK;
+    // A socketpair endpoint is a socket for the option calls: the same
+    // deterministic no-op answers (mirrors the C interposer).
+    if let Err(errno) = socket_or_pair(fd) {
+        return errno;
     }
     if level == SOL_SOCKET {
         match optname {
@@ -332,8 +340,8 @@ pub(super) fn sys_setsockopt(fd: i64, level: u64, optname: u64, value: u64, len:
 }
 
 pub(super) fn sys_getsockopt(fd: i64, value: u64, len_ptr: u64) -> i64 {
-    if fd < PATINA_SOCKET_FD_BASE {
-        return -ENOTSOCK;
+    if let Err(errno) = socket_or_pair(fd) {
+        return errno;
     }
     // Mirror the C getsockopt: zero the caller's buffer, report success.
     if value != 0 && len_ptr != 0 {
@@ -349,7 +357,7 @@ pub(super) fn sys_getsockopt(fd: i64, value: u64, len_ptr: u64) -> i64 {
 /// `socketpair(2)`. Mirrors the C `socketpair` interposer (patina_posix.c) field
 /// for field: only an `AF_UNIX` `SOCK_STREAM` pair (protocol 0) is a
 /// deterministic in-process duplex; `SOCK_NONBLOCK`/`SOCK_CLOEXEC` are stripped
-/// before the base-type check. The two descriptors are written into the guest's
+/// before the base-type check and carried to the two new descriptors. The two descriptors are written into the guest's
 /// `int sv[2]` on success.
 pub(super) fn sys_socketpair(domain: u64, sock_type: u64, protocol: u64, sv: u64) -> i64 {
     if sv == 0 {
@@ -360,6 +368,7 @@ pub(super) fn sys_socketpair(domain: u64, sock_type: u64, protocol: u64, sv: u64
     }
     let type_bits = sock_type as i32 as i64;
     let nonblocking = (type_bits & SOCK_NONBLOCK as i64 != 0) as c_int;
+    let cloexec = (type_bits & SOCK_CLOEXEC as i64 != 0) as c_int;
     let base = type_bits & !((SOCK_NONBLOCK | SOCK_CLOEXEC) as i64);
     if base != SOCK_STREAM as i64 {
         return -EOPNOTSUPP;
@@ -370,7 +379,7 @@ pub(super) fn sys_socketpair(domain: u64, sock_type: u64, protocol: u64, sv: u64
     let mut fd0: c_int = 0;
     let mut fd1: c_int = 0;
     // SAFETY: local writable storage for the pair.
-    let rc = unsafe { patina_socketpair(&mut fd0, &mut fd1, nonblocking) };
+    let rc = unsafe { patina_socketpair(&mut fd0, &mut fd1, nonblocking, cloexec) };
     if rc != 0 {
         // SAFETY: plain thread-local read.
         return -(unsafe { patina_errno() } as i64);

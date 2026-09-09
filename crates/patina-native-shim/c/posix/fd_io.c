@@ -1,6 +1,6 @@
 /*
  * Descriptor I/O: read/write and their positional/vectored forms, close/dup,
- * lseek/fsync/ftruncate/flock, fcntl/ioctl, isatty, and pipes.
+ * lseek/fsync/ftruncate/flock, fcntl/ioctl, isatty, pipes, and close_range.
  *
  * This file is one family slice of the native shim's single C translation unit:
  * `c/patina_posix.c` #includes every slice under `c/posix/` in a fixed order, so the
@@ -8,6 +8,14 @@
  * (`patina_posix.o`). It is not compiled on its own. The registry in
  * `src/registry/` maps every public symbol defined here to the syscall rows it
  * serves; a new interposer needs a symbol row (the object scan fails otherwise).
+ *
+ * Every interposer here is thin marshaling over a universal `patina_*` entry:
+ * the guest descriptor number is resolved ONCE, in Rust, against the shim's
+ * descriptor table, and the entry dispatches on what the number names. Nothing
+ * in this file asks what kind of descriptor it holds -- the SUD rows call the
+ * same entries, which is what keeps the libc door and the raw-syscall door
+ * byte-identical. The only kind question left to C is the one the platform
+ * vocabulary forces: which `fcntl` commands carry a pointer.
  */
 
 /*
@@ -15,142 +23,62 @@
  * how the run was launched (pipe vs file vs tty), and programs branch on it —
  * search tools, for instance, derive heading/color/line-number defaults from it. A
  * fully interposed guest must never observe host terminal state, so report a
- * deterministic "not a terminal" for every descriptor: captured guest stdio is
- * never a tty under the runtime. Interposing here (rather than allow-listing the
- * import) makes guest output provably independent of host tty state instead of
- * merely "neutral given the flags". This is a strong definition, so the guest's
- * isatty reference binds here and the libc symbol drops off the import table.
+ * deterministic "not a terminal" for every open descriptor: captured guest stdio
+ * is never a tty under the runtime, and standard input is a stream at EOF. A
+ * number that names nothing is EBADF, as the kernel answers. Interposing here
+ * (rather than allow-listing the import) makes guest output provably
+ * independent of host tty state instead of merely "neutral given the flags".
+ * This is a strong definition, so the guest's isatty reference binds here and
+ * the libc symbol drops off the import table.
  */
 int isatty(int fd) {
-    (void)fd;
+    if (patina_fd_kind(fd) < 0) {
+        errno = EBADF;
+        return 0;
+    }
     errno = ENOTTY;
     return 0;
+}
+
+/* The platform's file-status flags <-> the shim's PATINA_O_* status vocabulary,
+ * for F_GETFL/F_SETFL. Only the bits the kernel reports through F_GETFL are
+ * translated: the access mode, O_APPEND, O_NONBLOCK, and O_PATH. */
+static int patina_getfl_to_posix(uint32_t status) {
+    int flags;
+    int readable = (status & PATINA_O_READ) != 0;
+    int writable = (status & PATINA_O_WRITE) != 0;
+    if (readable && writable) flags = O_RDWR;
+    else if (writable) flags = O_WRONLY;
+    else flags = O_RDONLY;
+    if (status & PATINA_O_APPEND) flags |= O_APPEND;
+    if (status & PATINA_O_NONBLOCK) flags |= O_NONBLOCK;
+#ifdef O_PATH
+    if (status & PATINA_O_PATH) flags |= O_PATH;
+#endif
+#ifdef __linux__
+    /* A 64-bit kernel forces O_LARGEFILE into every open(2)-minted description
+     * (fs/open.c build_open_how) and F_GETFL reports it; the shim's table
+     * remembers which those are. The KERNEL value (0100000) is spelled out
+     * because glibc defines the O_LARGEFILE macro as 0 on 64-bit targets. */
+    if (status & PATINA_O_OPENED) flags |= 0100000;
+#endif
+    return flags;
+}
+
+static uint32_t patina_setfl_from_posix(int flags) {
+    uint32_t status = 0;
+    if (flags & O_APPEND) status |= PATINA_O_APPEND;
+    if (flags & O_NONBLOCK) status |= PATINA_O_NONBLOCK;
+    return status;
 }
 
 static int patina_fcntl_record_lock(int fd, int command, struct flock *lock);
 
 int fcntl(int fd, int command, ...) {
-#ifdef __APPLE__
-    /* Virtual kqueue descriptors. F_DUPFD/F_DUPFD_CLOEXEC clone into a second fd
-     * sharing the SAME registry (tokio's IO driver clones its selector through
-     * F_DUPFD_CLOEXEC); the requested minimum is honored implicitly because the
-     * deterministic fd counter always allocates above it. cloexec and the
-     * blocking flag are no-ops on a kqueue. */
-    if (fd >= PATINA_SOCKET_FD_BASE && patina_kqueue_is_kq(fd)) {
-        if (command == F_DUPFD
-#ifdef F_DUPFD_CLOEXEC
-            || command == F_DUPFD_CLOEXEC
-#endif
-        )
-            return fail_int(patina_kqueue_dup(fd));
-        if (command == F_GETFD) return FD_CLOEXEC;
-        if (command == F_SETFD) return 0;
-        if (command == F_SETFL) return 0;
-        if (command == F_GETFL) return 0;
-        errno = EINVAL;
-        return -1;
-    }
-#endif
-#ifdef __linux__
-    /* Virtual epoll descriptors: the Linux mirror of the kqueue branch above.
-     * F_DUPFD/F_DUPFD_CLOEXEC clone into a second fd sharing the SAME registry
-     * (mio clones its selector this way); the requested minimum is honored
-     * implicitly because the deterministic fd counter always allocates above
-     * it. cloexec and the blocking flag are no-ops on an epoll fd. */
-    if (fd >= PATINA_SOCKET_FD_BASE && patina_epoll_is_epoll(fd)) {
-        if (command == F_DUPFD || command == F_DUPFD_CLOEXEC)
-            return fail_int(patina_epoll_dup(fd));
-        if (command == F_GETFD) return FD_CLOEXEC;
-        if (command == F_SETFD) return 0;
-        if (command == F_SETFL) return 0;
-        if (command == F_GETFL) return 0;
-        errno = EINVAL;
-        return -1;
-    }
-#endif
-    /* Virtual pipe/socketpair endpoints: same blocking-flag surface as sockets,
-     * routed to the pipe table (cloexec is a no-op). F_DUPFD/F_DUPFD_CLOEXEC
-     * alias the endpoint's channel side(s) refcounted (std's try_clone — tokio's
-     * signal driver clones a socketpair end this way); as with kqueue fds the
-     * requested minimum is honored implicitly because the deterministic fd
-     * counter always allocates above it. */
-    if (fd >= PATINA_SOCKET_FD_BASE && patina_pipe_is_endpoint(fd)) {
-        if (command == F_GETFL) {
-            int nonblocking = patina_pipe_is_nonblocking(fd);
-            if (nonblocking < 0) {
-                errno = EBADF;
-                return -1;
-            }
-            return nonblocking ? O_NONBLOCK : 0;
-        }
-        if (command == F_SETFL) {
-            va_list ap;
-            va_start(ap, command);
-            int flags = va_arg(ap, int);
-            va_end(ap);
-            return patina_pipe_set_nonblocking(fd, (flags & O_NONBLOCK) ? 1 : 0);
-        }
-        if (command == F_GETFD) return FD_CLOEXEC;
-        if (command == F_SETFD) return 0;
-        if (command == F_DUPFD
-#ifdef F_DUPFD_CLOEXEC
-            || command == F_DUPFD_CLOEXEC
-#endif
-        )
-            return fail_int(patina_pipe_dup(fd));
-        errno = EINVAL;
-        return -1;
-    }
-    /* Virtual sockets: report/adjust the blocking flag; cloexec is a no-op. */
-    if (fd >= PATINA_SOCKET_FD_BASE) {
-        if (command == F_GETFL) {
-            int nonblocking = patina_net_is_nonblocking(fd);
-            if (nonblocking < 0) {
-                errno = EBADF;
-                return -1;
-            }
-            return nonblocking ? O_NONBLOCK : 0;
-        }
-        if (command == F_SETFL) {
-            va_list ap;
-            va_start(ap, command);
-            int flags = va_arg(ap, int);
-            va_end(ap);
-            return patina_net_set_nonblocking(fd, (flags & O_NONBLOCK) ? 1 : 0);
-        }
-        if (command == F_GETFD) return FD_CLOEXEC;
-        if (command == F_SETFD) return 0;
-        if (command == F_DUPFD
-#ifdef F_DUPFD_CLOEXEC
-            || command == F_DUPFD_CLOEXEC
-#endif
-        )
-            return patina_posix_deny("patina: duplicating a virtual socket descriptor is not modeled; failing closed\n");
-        errno = EINVAL;
-        return -1;
-    }
-    /* Virtual directory descriptors. A directory handle was opened read-only, so
-     * F_GETFL reports O_RDONLY (O_DIRECTORY/O_CLOEXEC/O_PATH are not file-status
-     * flags); the flag setters are no-ops and F_DUPFD yields a fresh handle to
-     * the same directory. rustix's `Dir::read_from` does exactly
-     * fcntl(dirfd, F_GETFL) -> openat(dirfd, ".", flags) before iterating, so a
-     * dir fd that fell through to the regular-fd tail's ENOSYS could not be
-     * listed at all. Mirrors the SUD dispatcher's dir-fd fcntl rows. */
-    if (patina_dir_is_dirfd(fd)) {
-        if (command == F_GETFL) return 0; /* O_RDONLY */
-        if (command == F_GETFD) return FD_CLOEXEC;
-        if (command == F_SETFD || command == F_SETFL) return 0;
-        if (command == F_DUPFD
-#ifdef F_DUPFD_CLOEXEC
-            || command == F_DUPFD_CLOEXEC
-#endif
-        )
-            return patina_dup_dirfd(fd);
-        errno = EINVAL;
-        return -1;
-    }
     /* POSIX record locks (F_GETLK/F_SETLK/F_SETLKW) and the Linux open-file-
-     * description variants (F_OFD_*): see patina_fcntl_record_lock below. */
+     * description variants (F_OFD_*) carry a pointer: see
+     * patina_fcntl_record_lock below. Every other modeled command carries an int
+     * (or nothing), so the variadic argument is read exactly once, by type. */
     if (command == F_GETLK || command == F_SETLK || command == F_SETLKW
 #ifdef F_OFD_SETLK
         || command == F_OFD_GETLK || command == F_OFD_SETLK || command == F_OFD_SETLKW
@@ -162,37 +90,52 @@ int fcntl(int fd, int command, ...) {
         va_end(ap);
         return patina_fcntl_record_lock(fd, command, lock);
     }
-#ifdef __APPLE__
-    /* Rust std maps File::sync_all to F_FULLFSYNC on Darwin. */
-    if (command == F_FULLFSYNC) return fail_int(patina_fsync(fd));
-#endif
-    if (command == F_GETFD) return FD_CLOEXEC;
-    if (command == F_SETFD) return 0;
-    if (command == F_DUPFD
+    va_list ap;
+    va_start(ap, command);
+    int argument = va_arg(ap, int);
+    va_end(ap);
+    switch (command) {
+        case F_GETFD: {
+            int cloexec = patina_fd_getfd(fd);
+            if (cloexec < 0) return fail_int(cloexec);
+            return cloexec ? FD_CLOEXEC : 0;
+        }
+        case F_SETFD:
+            return fail_int(patina_fd_setfd(fd, (argument & FD_CLOEXEC) != 0));
+        case F_GETFL: {
+            int status = patina_fd_getfl(fd);
+            if (status < 0) return fail_int(status);
+            return patina_getfl_to_posix((uint32_t)status);
+        }
+        case F_SETFL:
+            return fail_int(patina_fd_setfl(fd, patina_setfl_from_posix(argument)));
+        case F_DUPFD:
+            return fail_int(patina_dupfd(fd, argument, 0));
 #ifdef F_DUPFD_CLOEXEC
-        || command == F_DUPFD_CLOEXEC
+        case F_DUPFD_CLOEXEC:
+            return fail_int(patina_dupfd(fd, argument, 1));
 #endif
-    ) {
-        if (fd >= 0 && fd <= 2)
-            return patina_posix_deny("patina: duplicating a captured stdio descriptor is not modeled; failing closed\n");
-        va_list ap;
-        va_start(ap, command);
-        int minimum = va_arg(ap, int);
-        va_end(ap);
-        int duplicate = patina_dup(fd);
-        if (duplicate < 0) {
-            errno = patina_errno();
-            return -1;
-        }
-        if (duplicate < minimum) {
-            /* Deterministic numbering is monotonic from 3; a minimum above the
-             * counter cannot be honored without modeling sparse fd placement. */
-            patina_close(duplicate);
-            return patina_posix_deny("patina: F_DUPFD minimum above the deterministic descriptor counter is not modeled; failing closed\n");
-        }
-        return duplicate; /* CLOEXEC is a no-op: no exec under the runtime. */
+#ifdef F_GETPIPE_SZ
+        case F_GETPIPE_SZ:
+            return fail_int(patina_pipe_size(fd));
+        case F_SETPIPE_SZ:
+            return fail_int(patina_pipe_set_size(fd, argument));
+#endif
+#ifdef __APPLE__
+        /* Rust std maps File::sync_all to F_FULLFSYNC on Darwin. */
+        case F_FULLFSYNC:
+            return fail_int(patina_fsync(fd));
+#endif
+        default:
+            break;
     }
-    errno = ENOSYS;
+    /* An unknown command on an open descriptor is EINVAL; on a closed one the
+     * kernel answers EBADF first. */
+    if (patina_fd_kind(fd) < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    errno = EINVAL;
     return -1;
 }
 
@@ -217,33 +160,10 @@ int fcntl64(int fd, int command, ...) {
 #endif
 
 ssize_t read(int fd, void *destination, size_t length) {
-    if (fd >= PATINA_SOCKET_FD_BASE) {
-        int kind = patina_net_kind(fd);
-        if (kind == 3) return fail_size(patina_net_stream_recv(fd, destination, length));
-        if (kind == 0) return fail_size(patina_net_recv(fd, destination, length));
-        if (patina_pipe_is_endpoint(fd)) return fail_size(patina_pipe_read(fd, destination, length));
-#ifdef __linux__
-        if (patina_eventfd_is(fd)) return fail_size(patina_eventfd_read(fd, destination, length));
-#endif
-        errno = kind < 0 ? EBADF : ENOTCONN;
-        return -1;
-    }
     return fail_size(patina_read(fd, destination, length));
 }
 
 ssize_t write(int fd, const void *source, size_t length) {
-    if (fd == 1 || fd == 2) return fail_size(patina_stdio_write(fd, source, length));
-    if (fd >= PATINA_SOCKET_FD_BASE) {
-        int kind = patina_net_kind(fd);
-        if (kind == 3) return fail_size(patina_net_stream_send(fd, source, length));
-        if (kind == 0) return fail_size(patina_net_send(fd, source, length));
-        if (patina_pipe_is_endpoint(fd)) return fail_size(patina_pipe_write(fd, source, length));
-#ifdef __linux__
-        if (patina_eventfd_is(fd)) return fail_size(patina_eventfd_write(fd, source, length));
-#endif
-        errno = kind < 0 ? EBADF : ENOTCONN;
-        return -1;
-    }
     return fail_size(patina_write(fd, source, length));
 }
 
@@ -253,15 +173,13 @@ ssize_t write(int fd, const void *source, size_t length) {
  * model entirely. They route to patina_p{read,write}, which the runtime
  * services as ONE positional operation (atomic w.r.t. the scheduler and cursor-
  * independent), NOT a caller-side seek+read that could interleave under
- * concurrency. Virtual sockets have no offset addressing, so a positional call
- * on a socket fd is ESPIPE, matching the kernel. */
+ * concurrency. A description without offset addressing (a pipe, a socket, the
+ * captured streams) is ESPIPE, matching the kernel. */
 ssize_t pread(int fd, void *destination, size_t length, off_t offset) {
-    if (fd >= PATINA_SOCKET_FD_BASE) { errno = ESPIPE; return -1; }
     return fail_size(patina_pread(fd, destination, length, (int64_t)offset));
 }
 
 ssize_t pwrite(int fd, const void *source, size_t length, off_t offset) {
-    if (fd == 1 || fd == 2 || fd >= PATINA_SOCKET_FD_BASE) { errno = ESPIPE; return -1; }
     return fail_size(patina_pwrite(fd, source, length, (int64_t)offset));
 }
 
@@ -271,103 +189,50 @@ ssize_t pwrite(int fd, const void *source, size_t length, off_t offset) {
  * they must reach the same deterministic positional I/O as pread/pwrite rather
  * than be denied. off64_t is always 64-bit, so the full offset is preserved. */
 ssize_t pread64(int fd, void *destination, size_t length, off64_t offset) {
-    if (fd >= PATINA_SOCKET_FD_BASE) { errno = ESPIPE; return -1; }
     return fail_size(patina_pread(fd, destination, length, (int64_t)offset));
 }
 ssize_t pwrite64(int fd, const void *source, size_t length, off64_t offset) {
-    if (fd == 1 || fd == 2 || fd >= PATINA_SOCKET_FD_BASE) { errno = ESPIPE; return -1; }
     return fail_size(patina_pwrite(fd, source, length, (int64_t)offset));
 }
 
 #endif
 
 /* Whole-file advisory lock (a single-opener database takes one via File::try_lock on open).
- * Routed to the runtime's per-inode lock table (patina_flock): a lone opener
- * always acquires, but two independent opens of the same file contend exactly
- * as a real flock would (LOCK_EX|LOCK_NB on the second → EWOULDBLOCK, i.e.
- * a database's already-open error). See the "Advisory file lock" row in
- * crates/patina-target/ESCAPE-CLASSES.md. Virtual sockets have no advisory-lock
- * model, so a flock on one fails closed. */
+ * Routed to the runtime's per-description lock table (patina_flock): a lone
+ * opener always acquires, but two independent opens of the same file contend
+ * exactly as a real flock would (LOCK_EX|LOCK_NB on the second → EWOULDBLOCK,
+ * i.e. a database's already-open error), and a dup of the holder can release
+ * it. See the "Advisory file lock" row in crates/patina-target/ESCAPE-CLASSES.md. */
 int flock(int fd, int operation) {
-    if (fd >= PATINA_SOCKET_FD_BASE)
-        return patina_posix_deny("patina: advisory locks on virtual sockets are not modeled; failing closed\n");
     return fail_int(patina_flock(fd, operation));
 }
 
 int close(int fd) {
-    /* A virtual directory descriptor is released here as well as by closedir, so
-     * a guest that close()s the raw fd (rather than the DIR) still frees it.
-     * Directory fds are ordinary deterministic-FS fds now (small numbers), so
-     * check the directory table before the socket-space dispatch. */
-    if (patina_dir_is_dirfd(fd)) return fail_int(patina_dirclose(fd));
-    if (fd >= PATINA_SOCKET_FD_BASE) {
-#ifdef __APPLE__
-        if (patina_kqueue_is_kq(fd)) return fail_int(patina_kqueue_close(fd));
-#endif
-#ifdef __linux__
-        if (patina_epoll_is_epoll(fd)) return fail_int(patina_epoll_close(fd));
-        if (patina_eventfd_is(fd)) return fail_int(patina_eventfd_close(fd));
-#endif
-        if (patina_pipe_is_endpoint(fd)) return fail_int(patina_pipe_close(fd));
-        return fail_int(patina_net_close(fd));
-    }
     return fail_int(patina_close(fd));
 }
 
 int dup(int fd) {
-    if (fd >= 0 && fd <= 2)
-        return patina_posix_deny("patina: duplicating a captured stdio descriptor is not modeled; failing closed\n");
-    if (fd >= PATINA_SOCKET_FD_BASE) {
-#ifdef __APPLE__
-        /* A kqueue fd duplicates into a second fd sharing the SAME registry
-         * (tokio's IO driver clones its selector this way). */
-        if (patina_kqueue_is_kq(fd)) return fail_int(patina_kqueue_dup(fd));
-#endif
-#ifdef __linux__
-        /* Same registry-aliasing dup for an epoll fd (mio's selector clone). */
-        if (patina_epoll_is_epoll(fd)) return fail_int(patina_epoll_dup(fd));
-        if (patina_eventfd_is(fd))
-            return patina_posix_deny("patina: duplicating a virtual eventfd descriptor is not modeled; failing closed\n");
-#endif
-        /* A pipe/socketpair endpoint duplicates into a refcounted alias of the
-         * same channel side(s); virtual sockets still fail closed. */
-        if (patina_pipe_is_endpoint(fd)) return fail_int(patina_pipe_dup(fd));
-        return patina_posix_deny("patina: duplicating a virtual socket descriptor is not modeled; failing closed\n");
-    }
-    if (patina_dir_is_dirfd(fd)) return patina_dup_dirfd(fd);
     return fail_int(patina_dup(fd));
 }
 
 int dup2(int oldfd, int newfd) {
-    if (oldfd == newfd) {
-        /* POSIX: equal descriptors validate oldfd and return newfd unchanged. */
-        if (oldfd >= 0 && oldfd <= 2) return newfd;
-        if (oldfd >= PATINA_SOCKET_FD_BASE) {
-            if (patina_net_is_nonblocking(oldfd) < 0 && patina_pipe_is_endpoint(oldfd) == 0) {
-                errno = EBADF;
-                return -1;
-            }
-            return newfd;
-        }
-        uint32_t kind;
-        uint64_t length, ino_v, atime_v, mtime_v;
-        uint32_t nlink_v, mode_v;
-        if (patina_fd_metadata_full(oldfd, &kind, &length, &ino_v, &nlink_v, &atime_v, &mtime_v,
-                                    &mode_v) != 0) {
-            errno = patina_errno();
-            return -1;
-        }
-        return newfd;
-    }
-    return patina_posix_deny("patina: dup2 to a chosen descriptor number is not modeled; failing closed\n");
+    return fail_int(patina_dup2(oldfd, newfd));
 }
 
 #ifdef __linux__
 int dup3(int oldfd, int newfd, int flags) {
-    (void)oldfd;
-    (void)flags;
-    if (oldfd == newfd) { errno = EINVAL; return -1; } /* POSIX dup3 */
-    return patina_posix_deny("patina: dup3 to a chosen descriptor number is not modeled; failing closed\n");
+    if ((flags & ~O_CLOEXEC) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    return fail_int(patina_dup3(oldfd, newfd, (flags & O_CLOEXEC) != 0));
+}
+
+/* close_range(2), glibc 2.34+. The flags are the kernel's: CLOSE_RANGE_UNSHARE
+ * (a no-op with one process) and CLOSE_RANGE_CLOEXEC. Unknown flags and
+ * first > last are EINVAL; the range is clamped to the descriptor table. */
+int close_range(unsigned int first, unsigned int last, int flags) {
+    return fail_int(patina_close_range(first, last, (uint32_t)flags));
 }
 
 #endif
@@ -393,10 +258,10 @@ ssize_t writev(int fd, const struct iovec *vectors, int count) {
  * than be denied. Each vector is one positional runtime op at an advancing
  * offset; like writev/readv, stop at the first short or failed transfer and
  * return the running total (a short transfer here is how an injected short
- * write surfaces to a vectored caller). Sockets have no offset: ESPIPE. */
+ * write surfaces to a vectored caller). A description without offset
+ * addressing answers ESPIPE from the first vector. */
 ssize_t preadv(int fd, const struct iovec *vectors, int count, off_t offset) {
     if (count < 0 || (count > 0 && vectors == NULL)) { errno = EINVAL; return -1; }
-    if (fd >= PATINA_SOCKET_FD_BASE) { errno = ESPIPE; return -1; }
     ssize_t total = 0;
     for (int index = 0; index < count; ++index) {
         ssize_t consumed = fail_size(patina_pread(
@@ -410,7 +275,6 @@ ssize_t preadv(int fd, const struct iovec *vectors, int count, off_t offset) {
 
 ssize_t pwritev(int fd, const struct iovec *vectors, int count, off_t offset) {
     if (count < 0 || (count > 0 && vectors == NULL)) { errno = EINVAL; return -1; }
-    if (fd == 1 || fd == 2 || fd >= PATINA_SOCKET_FD_BASE) { errno = ESPIPE; return -1; }
     ssize_t total = 0;
     for (int index = 0; index < count; ++index) {
         ssize_t written = fail_size(patina_pwrite(
@@ -499,26 +363,39 @@ int ftruncate64(int fd, off64_t length) {
  * description variants (F_OFD_*). A run is ONE process, and process-scoped
  * record locks never conflict with locks the same process already holds
  * (POSIX: they are merged, and any close releases them all), so on an open
- * regular fd F_SETLK/F_SETLKW succeed and F_GETLK reports the range as
+ * descriptor F_SETLK/F_SETLKW succeed and F_GETLK reports the range as
  * unlocked — exactly what the lone opener sees on the host. Storage engines
  * take such a whole-file lock on every open (turso via rustix fcntl_lock is
  * the live example); left unmodeled, the lock reports ENOSYS and the engine
  * aborts at unlock. OFD locks DO conflict across descriptions inside one
- * process: a whole-file OFD lock routes to the per-inode flock table
+ * process: a whole-file OFD lock routes to the per-description flock table
  * (shared/exclusive/unlock; non-blocking for F_OFD_SETLK); a byte-range OFD
  * lock and F_OFD_GETLK stay a soft ENOSYS rather than a fabricated answer. */
 static int patina_fcntl_record_lock(int fd, int command, struct flock *lock) {
     if (lock == NULL) { errno = EINVAL; return -1; }
-    /* Descriptor validity is a RANGE check only (virtual sockets and pipes are
-     * rejected above; captured stdio by the range): a record lock is pure
+    /* Descriptor validity is a TABLE check only: a record lock is pure
      * bookkeeping that does no I/O, so it must not consult the filesystem
      * driver, whose descriptor lookup is fault-eligible (an injected EIO on
      * fcntl(F_UNLCK) would be a fabricated failure mode — real fcntl locks
-     * cannot fail that way). */
-    if (fd < 3) { errno = EBADF; return -1; }
+     * cannot fail that way). The kernel's fcntl_setlk then checks the lock
+     * type against the description's access mode: a read lock needs a readable
+     * description and a write lock a writable one, else EBADF. */
+    int status = patina_fd_getfl(fd);
+    if (status < 0) { errno = EBADF; return -1; }
     if (lock->l_type != F_RDLCK && lock->l_type != F_WRLCK && lock->l_type != F_UNLCK) {
         errno = EINVAL;
         return -1;
+    }
+    if (command != F_GETLK
+#ifdef F_OFD_GETLK
+        && command != F_OFD_GETLK
+#endif
+    ) {
+        if ((lock->l_type == F_RDLCK && !(status & PATINA_O_READ)) ||
+            (lock->l_type == F_WRLCK && !(status & PATINA_O_WRITE))) {
+            errno = EBADF;
+            return -1;
+        }
     }
     if (command == F_GETLK) { lock->l_type = F_UNLCK; return 0; }
     if (command == F_SETLK || command == F_SETLKW) return 0;
@@ -543,18 +420,21 @@ int ioctl(int fd, unsigned long request, ...) {
     void *arg = va_arg(ap, void *);
     va_end(ap);
 #ifdef FIONBIO
-    if (request == (unsigned long)FIONBIO && fd >= PATINA_SOCKET_FD_BASE) {
+    if (request == (unsigned long)FIONBIO) {
         int on = arg != NULL ? *(int *)arg : 0;
-        return patina_net_set_nonblocking(fd, on ? 1 : 0);
+        return fail_int(patina_fd_set_nonblocking(fd, on ? 1 : 0));
     }
 #endif
 #ifdef FIOCLEX
-    if (request == (unsigned long)FIOCLEX) return 0;
+    if (request == (unsigned long)FIOCLEX) return fail_int(patina_fd_setfd(fd, 1));
 #endif
 #ifdef FIONCLEX
-    if (request == (unsigned long)FIONCLEX) return 0;
+    if (request == (unsigned long)FIONCLEX) return fail_int(patina_fd_setfd(fd, 0));
 #endif
-    (void)fd;
+    if (patina_fd_kind(fd) < 0) {
+        errno = EBADF;
+        return -1;
+    }
     errno = ENOTTY;
     return -1;
 }
@@ -565,29 +445,28 @@ int ioctl(int fd, unsigned long request, ...) {
  * IO-driver / signal self-pipe wakeup — so there is NO cross-address-space
  * escape: they are modeled as deterministic in-memory byte channels wired to the
  * scheduler's wakeup path (see the "in-process pipe / socketpair" section in the
- * Rust shim). Descriptors come from the shared virtual-fd space above, so the
- * interposed read/write/close/fcntl route them to the pipe class via
- * patina_pipe_is_endpoint. eventfd (Linux) is likewise in-process — a single
- * 64-bit counter inside this guest, mio's Waker vehicle — and is interposed as
- * a deterministic counter (see the eventfd section in the Rust shim and the
- * Linux reactor block below). The truly cross-process class-g members
- * (shm_open, the mach_msg / mach_port / mq families) stay refused.
+ * Rust shim). The two numbers come from the descriptor table like every other,
+ * so the interposed read/write/close/fcntl reach the pipe class through the
+ * universal entries. eventfd (Linux) is likewise in-process — a single 64-bit
+ * counter inside this guest, mio's Waker vehicle — and is interposed as a
+ * deterministic counter (see the eventfd section in the Rust shim and the Linux
+ * reactor block below). The truly cross-process class-g members (shm_open, the
+ * mach_msg / mach_port / mq families) stay refused.
  */
 int pipe(int fildes[2]) {
     if (fildes == NULL) {
         errno = EFAULT;
         return -1;
     }
-    return fail_int(patina_pipe(&fildes[0], &fildes[1], 0));
+    return fail_int(patina_pipe(&fildes[0], &fildes[1], 0, 0));
 }
 
 #ifdef __linux__
 /*
  * pipe2 is the Linux flag-taking pipe (macOS has no such symbol). Same
- * deterministic in-process channel as pipe() above, honoring O_NONBLOCK at
- * creation; O_CLOEXEC is accepted-and-ignored (no exec under the runtime),
- * O_DIRECT (packet-mode pipes) is not modeled and fails ENOSYS, and any other
- * flag fails EINVAL.
+ * deterministic in-process channel as pipe() above, honoring O_NONBLOCK and
+ * O_CLOEXEC at creation; O_DIRECT (packet-mode pipes) is not modeled and fails
+ * ENOSYS, and any other flag fails EINVAL.
  */
 int pipe2(int pipefd[2], int flags) {
     if (pipefd == NULL) {
@@ -595,10 +474,8 @@ int pipe2(int pipefd[2], int flags) {
         return -1;
     }
     int nonblocking = (flags & O_NONBLOCK) ? 1 : 0;
-    int remaining = flags & ~O_NONBLOCK;
-#ifdef O_CLOEXEC
-    remaining &= ~O_CLOEXEC;
-#endif
+    int cloexec = (flags & O_CLOEXEC) ? 1 : 0;
+    int remaining = flags & ~(O_NONBLOCK | O_CLOEXEC);
 #ifdef O_DIRECT
     if (remaining & O_DIRECT) {
         errno = ENOSYS;
@@ -610,6 +487,6 @@ int pipe2(int pipefd[2], int flags) {
         errno = EINVAL;
         return -1;
     }
-    return fail_int(patina_pipe(&pipefd[0], &pipefd[1], nonblocking));
+    return fail_int(patina_pipe(&pipefd[0], &pipefd[1], nonblocking, cloexec));
 }
 #endif

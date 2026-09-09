@@ -117,15 +117,32 @@ unsafe extern "C" {
     fn patina_chmod(path: *const c_char, mode: u32, follow: c_int) -> c_int;
     fn patina_fchmod(fd: c_int, mode: u32) -> c_int;
     fn patina_read_dir(fd: c_int, state_out: *mut *mut c_void) -> c_int;
-    // Directory descriptors: the SAME table the C `open/openat(..., O_DIRECTORY)`
-    // interposer registers into, so a dir fd opened through libc resolves a raw
-    // `openat(dirfd, …)` and vice versa (cap-std does exactly that: it opens the
-    // base directory through std/libc and then walks it with raw syscalls).
-    fn patina_diropen(path: *const c_char, follow: c_int, path_only: c_int) -> c_int;
-    fn patina_dirdup(fd: c_int) -> c_int;
+    // Directory descriptors: the SAME descriptor table the C `open/openat(...,
+    // O_DIRECTORY)` interposer mints into, so a dir fd opened through libc
+    // resolves a raw `openat(dirfd, …)` and vice versa (cap-std does exactly
+    // that: it opens the base directory through std/libc and then walks it with
+    // raw syscalls).
+    fn patina_diropen(
+        path: *const c_char,
+        follow: c_int,
+        path_only: c_int,
+        cloexec: c_int,
+    ) -> c_int;
     fn patina_dirpath(fd: c_int, buf: *mut c_char, len: usize) -> isize;
-    fn patina_dir_is_dirfd(fd: c_int) -> c_int;
-    fn patina_dirclose(fd: c_int) -> c_int;
+    // The descriptor table's face: the kind oracle and the per-number /
+    // per-description state (`include/patina_native.h`).
+    fn patina_fd_kind(fd: c_int) -> c_int;
+    fn patina_fd_getfd(fd: c_int) -> c_int;
+    fn patina_fd_setfd(fd: c_int, cloexec: c_int) -> c_int;
+    fn patina_fd_getfl(fd: c_int) -> c_int;
+    fn patina_fd_setfl(fd: c_int, flags: u32) -> c_int;
+    fn patina_fd_set_nonblocking(fd: c_int, nonblocking: c_int) -> c_int;
+    fn patina_dupfd(fd: c_int, minimum: c_int, cloexec: c_int) -> c_int;
+    fn patina_dup2(oldfd: c_int, newfd: c_int) -> c_int;
+    fn patina_dup3(oldfd: c_int, newfd: c_int, cloexec: c_int) -> c_int;
+    fn patina_close_range(first: u32, last: u32, flags: u32) -> c_int;
+    fn patina_pipe_size(fd: c_int) -> c_int;
+    fn patina_pipe_set_size(fd: c_int, size: c_int) -> c_int;
     fn patina_read_dir_next(
         state: *mut c_void,
         name_buf: *mut c_char,
@@ -142,16 +159,27 @@ unsafe extern "C" {
     fn patina_link(from: *const c_char, to: *const c_char) -> c_int;
     fn patina_canonicalize(path: *const c_char, buf: *mut c_char, len: usize) -> isize;
     fn patina_read_link(path: *const c_char, buf: *mut c_char, buf_len: usize) -> isize;
-    fn patina_pipe(read_fd_out: *mut c_int, write_fd_out: *mut c_int, nonblocking: c_int) -> c_int;
+    fn patina_pipe(
+        read_fd_out: *mut c_int,
+        write_fd_out: *mut c_int,
+        nonblocking: c_int,
+        cloexec: c_int,
+    ) -> c_int;
 
     // Network (SimNet) — the exact entries the C socket interposers call.
-    fn patina_net_socket(stream: c_int, nonblocking: c_int) -> c_int;
+    fn patina_net_socket(stream: c_int, nonblocking: c_int, cloexec: c_int) -> c_int;
     fn patina_net_kind(fd: c_int) -> c_int;
     fn patina_net_bind(fd: c_int, ip: u32, port: u16) -> c_int;
     fn patina_net_connect(fd: c_int, ip: u32, port: u16) -> c_int;
     fn patina_net_tcp_connect(fd: c_int, ip: u32, port: u16) -> c_int;
     fn patina_net_listen(fd: c_int, backlog: c_int) -> c_int;
-    fn patina_net_accept(fd: c_int, ip_out: *mut u32, port_out: *mut u16) -> c_int;
+    fn patina_net_accept(
+        fd: c_int,
+        ip_out: *mut u32,
+        port_out: *mut u16,
+        nonblocking: c_int,
+        cloexec: c_int,
+    ) -> c_int;
     fn patina_net_sendto(fd: c_int, buf: *const c_void, len: usize, ip: u32, port: u16) -> isize;
     fn patina_net_send(fd: c_int, buf: *const c_void, len: usize) -> isize;
     fn patina_net_stream_send(fd: c_int, buf: *const c_void, len: usize) -> isize;
@@ -162,30 +190,23 @@ unsafe extern "C" {
         ip_out: *mut u32,
         port_out: *mut u16,
     ) -> isize;
-    fn patina_net_recv(fd: c_int, buf: *mut c_void, len: usize) -> isize;
     fn patina_net_stream_recv(fd: c_int, buf: *mut c_void, len: usize) -> isize;
     fn patina_net_shutdown(fd: c_int, how: c_int) -> c_int;
     fn patina_net_getsockname(fd: c_int, ip_out: *mut u32, port_out: *mut u16) -> c_int;
     fn patina_net_getpeername(fd: c_int, ip_out: *mut u32, port_out: *mut u16) -> c_int;
-    fn patina_net_set_nonblocking(fd: c_int, nonblocking: c_int) -> c_int;
     fn patina_net_set_read_timeout(fd: c_int, nanos: u64) -> c_int;
-    fn patina_net_is_nonblocking(fd: c_int) -> c_int;
-    fn patina_net_close(fd: c_int) -> c_int;
-    fn patina_socketpair(fd0_out: *mut c_int, fd1_out: *mut c_int, nonblocking: c_int) -> c_int;
+    fn patina_socketpair(
+        fd0_out: *mut c_int,
+        fd1_out: *mut c_int,
+        nonblocking: c_int,
+        cloexec: c_int,
+    ) -> c_int;
 
-    // In-process pipe / socketpair endpoints and eventfds.
-    fn patina_pipe_is_endpoint(fd: c_int) -> c_int;
+    // In-process pipe / socketpair endpoints (the send/recv face of a
+    // socketpair end) and eventfds.
     fn patina_pipe_read(fd: c_int, buf: *mut c_void, len: usize) -> isize;
     fn patina_pipe_write(fd: c_int, buf: *const c_void, len: usize) -> isize;
-    fn patina_pipe_dup(fd: c_int) -> c_int;
-    fn patina_pipe_close(fd: c_int) -> c_int;
-    fn patina_pipe_is_nonblocking(fd: c_int) -> c_int;
-    fn patina_pipe_set_nonblocking(fd: c_int, nonblocking: c_int) -> c_int;
     fn patina_eventfd(initval: u32, flags: c_int) -> c_int;
-    fn patina_eventfd_is(fd: c_int) -> c_int;
-    fn patina_eventfd_read(fd: c_int, buf: *mut c_void, len: usize) -> isize;
-    fn patina_eventfd_write(fd: c_int, buf: *const c_void, len: usize) -> isize;
-    fn patina_eventfd_close(fd: c_int) -> c_int;
 
     // Readiness reactor (Linux epoll frontend over the OS-agnostic core). The SUD
     // rows are a SECOND caller of these exact entries, never a second reactor.
@@ -197,9 +218,6 @@ unsafe extern "C" {
         maxevents: c_int,
         timeout_ms: c_int,
     ) -> c_int;
-    fn patina_epoll_is_epoll(fd: c_int) -> c_int;
-    fn patina_epoll_dup(fd: c_int) -> c_int;
-    fn patina_epoll_close(fd: c_int) -> c_int;
 }
 
 // Linux errno values used to shape raw-syscall returns (`-errno`). Fixed across
@@ -236,8 +254,6 @@ const ENOPROTOOPT: i64 = 92;
 
 const EISCONN: i64 = 106;
 
-const ENOTCONN: i64 = 107;
-
 const EPROTONOSUPPORT: i64 = 93;
 
 const EPROTOTYPE: i64 = 91;
@@ -248,11 +264,15 @@ const ENAMETOOLONG: i64 = 36;
 
 const EIO: i64 = 5;
 
-/// The virtual-descriptor base: any fd at or above this is a Patina socket /
-/// pipe / eventfd / epoll descriptor (mirrors `PATINA_SOCKET_FD_BASE` in
-/// `patina_native.h`). A raw read/write/close on such an fd must route through
-/// the same fd-class dispatch the C `read`/`write`/`close` interposers use.
-const PATINA_SOCKET_FD_BASE: i64 = 0x4000_0000;
+// The descriptor kinds `patina_fd_kind` answers (`PATINA_FD_*` in
+// `patina_native.h`): the one oracle a row consults when its meaning depends
+// on what a number names. Everything else about a descriptor is answered by
+// the universal `patina_*` entries, which resolve the number themselves.
+const PATINA_FD_DIR: c_int = 4;
+
+const PATINA_FD_SOCKET: c_int = 7;
+
+const PATINA_FD_PIPE: c_int = 8;
 
 // Patina clock ids (see `patina_native.h`).
 const PATINA_CLOCK_REALTIME: u32 = 0;
@@ -277,6 +297,10 @@ const PATINA_O_NOFOLLOW: u32 = 1 << 6;
 const PATINA_O_NONBLOCK: u32 = 1 << 7;
 
 const PATINA_O_PATH: u32 = 1 << 8;
+
+const PATINA_O_CLOEXEC: u32 = 1 << 9;
+
+const PATINA_O_OPENED: u32 = 1 << 10;
 
 // Kernel `open(2)` flag bits (octal), identical on x86_64 and aarch64 Linux.
 const O_ACCMODE: u64 = 0o3;
@@ -406,6 +430,10 @@ const F_SETFL: u64 = 4;
 
 const F_DUPFD_CLOEXEC: u64 = 1030;
 
+const F_SETPIPE_SZ: u64 = 1031;
+
+const F_GETPIPE_SZ: u64 = 1032;
+
 const F_GETLK: u64 = 5;
 
 const F_SETLK: u64 = 6;
@@ -447,6 +475,9 @@ struct KernelFlock {
 const FD_CLOEXEC: i64 = 1;
 
 const O_NONBLOCK: u64 = 0o4000;
+
+/// `O_DIRECT` on a pipe asks for packet mode, which is not modeled.
+const O_DIRECT: u64 = 0o40000;
 
 // `ioctl(2)` request numbers used by nonblocking-flag toggling on virtual fds.
 // (No FIONREAD row: the C ioctl models none, so a raw FIONREAD must fall to the
@@ -760,9 +791,8 @@ const BINDINGS: &[(&str, Handler)] = &[
     ("ftruncate", |_, a| sys_ftruncate(arg_fd(a[0]), a[1] as i64)),
     ("flock", |_, a| sys_flock(arg_fd(a[0]), a[1] as i64)),
     ("dup", |_, a| sys_dup(arg_fd(a[0]))),
-    ("dup3", |_, a| {
-        sys_dup3(arg_fd(a[0]), arg_fd(a[1]), a[2] as i64)
-    }),
+    ("dup3", |_, a| sys_dup3(arg_fd(a[0]), arg_fd(a[1]), a[2])),
+    ("close_range", |_, a| sys_close_range(a[0], a[1], a[2])),
     ("fcntl", |_, a| sys_fcntl(arg_fd(a[0]), a[1], a[2])),
     ("ioctl", |_, a| sys_ioctl(arg_fd(a[0]), a[1], a[2])),
     ("pipe2", |_, a| sys_pipe2(a[0], a[1])),
@@ -1125,10 +1155,7 @@ mod tests {
         assert_eq!(arg_fd(0x0000_0000_FFFF_FFFF), -1); // zero-extended -1
         assert_eq!(arg_fd(0), 0);
         assert_eq!(arg_fd(5), 5);
-        assert_eq!(
-            arg_fd(PATINA_SOCKET_FD_BASE as u64 + 5),
-            PATINA_SOCKET_FD_BASE + 5
-        );
+        assert_eq!(arg_fd(0x4000_0005), 0x4000_0005);
     }
 
     /// The deny strings SUD and the C interposers emit for the same refusal must
@@ -1218,10 +1245,13 @@ mod tests {
         let raw = path.as_ptr() as u64;
         let resolved = resolve_at(AT_FDCWD, raw).expect("AT_FDCWD is the path verbatim");
         assert_eq!(resolved.as_ptr(), path.as_ptr());
-        // A descriptor the deterministic filesystem never issued as a DIRECTORY
-        // fails closed — even for an absolute path, so a bogus fd is never
-        // honored (byte-identical to the C `patina_resolve_at`).
-        assert_eq!(resolve_at(7, raw).err(), Some(-ENOSYS));
+        // The descriptor is validated first, as the kernel validates it — even
+        // for an absolute path, so a bogus fd is never honored (byte-identical
+        // to the C `patina_resolve_at`): a number that names nothing is EBADF,
+        // and standard input, which names something that is not a directory,
+        // is ENOTDIR.
+        assert_eq!(resolve_at(7, raw).err(), Some(-EBADF));
+        assert_eq!(resolve_at(0, raw).err(), Some(-ENOTDIR));
         // A null path is EFAULT, never a dereference.
         assert_eq!(resolve_at(AT_FDCWD, 0).err(), Some(-EFAULT));
     }
@@ -1331,7 +1361,8 @@ mod tests {
         // returns fd, whereas dup3(fd, fd, 0) is -EINVAL. RED: routing legacy
         // `dup2` straight through the dup3 handler (or vice versa) would turn a
         // valid stdio dup2(1,1) into -EINVAL, breaking any raw dup2-based fd
-        // shuffle.
+        // shuffle. The descriptor table alone answers these (no runtime is
+        // installed here): the three standard numbers exist from birth.
         assert_eq!(sys_dup2(0, 0), 0);
         assert_eq!(sys_dup2(1, 1), 1);
         assert_eq!(sys_dup2(2, 2), 2);
@@ -1339,11 +1370,13 @@ mod tests {
         assert_eq!(sys_dup3(1, 1, 0), -EINVAL);
         // An out-of-range equal fd is EBADF (a bad descriptor), NOT EINVAL.
         assert_eq!(sys_dup2(-1, -1), -EBADF);
-        // A distinct-target dup2/dup3 both fail closed with -ENOSYS (chosen-number
-        // dup unmodeled). They emit DIFFERENT deny diagnostics ("dup2" vs "dup3"),
-        // but the errno the guest observes is identical.
-        assert_eq!(sys_dup2(3, 7), -ENOSYS);
-        assert_eq!(sys_dup3(3, 7, 0), -ENOSYS);
+        // A source that names nothing is EBADF before the target is looked at.
+        assert_eq!(sys_dup2(900, 901), -EBADF);
+        assert_eq!(sys_dup3(900, 901, 0), -EBADF);
+        // dup3 refuses a flag other than O_CLOEXEC before touching the table.
+        assert_eq!(sys_dup3(0, 901, 0o4000), -EINVAL);
+        // A chosen number well above the table is EBADF.
+        assert_eq!(sys_dup3(0, 1 << 20, 0), -EBADF);
     }
 
     #[test]
@@ -1406,21 +1439,41 @@ mod tests {
     }
 
     #[test]
-    fn fcntl_regular_tail_and_ioctl_mirror_c_soft_errors() {
-        // Regular-fd fcntl tail: only F_GETFD/F_SETFD are modeled; F_GETFL, F_SETFL,
-        // and any unknown command are a SOFT -ENOSYS (C parity), never 0/fatal.
-        assert_eq!(sys_fcntl(5, F_GETFD, 0), FD_CLOEXEC);
-        assert_eq!(sys_fcntl(5, F_SETFD, 0), 0);
-        assert_eq!(sys_fcntl(5, F_GETFL, 0), -ENOSYS);
-        assert_eq!(sys_fcntl(5, F_SETFL, 0), -ENOSYS);
-        assert_eq!(sys_fcntl(5, 0x9999, 0), -ENOSYS);
-        // ioctl: FIOCLEX/FIONCLEX are no-ops; an unknown request and FIONBIO on a
-        // NON-virtual fd are both a soft -ENOTTY (never fatal, never a fake
-        // FIONREAD=0).
-        assert_eq!(sys_ioctl(5, FIOCLEX, 0), 0);
-        assert_eq!(sys_ioctl(5, FIONCLEX, 0), 0);
-        assert_eq!(sys_ioctl(5, 0x1234, 0), -ENOTTY);
-        assert_eq!(sys_ioctl(5, FIONBIO, 0), -ENOTTY); // non-virtual fd
+    fn fcntl_and_ioctl_answer_from_the_descriptor_table() {
+        // No runtime is installed here: the descriptor table alone answers, and
+        // it holds exactly the three standard numbers. A number that names
+        // nothing is EBADF for every command (the kernel checks the number
+        // before the command), an unknown command on an open number is EINVAL,
+        // and FD_CLOEXEC is per number while F_GETFL/F_SETFL are per
+        // description (C parity through the SAME entries).
+        assert_eq!(sys_fcntl(5, F_GETFD, 0), -EBADF);
+        assert_eq!(sys_fcntl(5, F_SETFD, 0), -EBADF);
+        assert_eq!(sys_fcntl(5, F_GETFL, 0), -EBADF);
+        assert_eq!(sys_fcntl(5, F_SETFL, 0), -EBADF);
+        assert_eq!(sys_fcntl(5, 0x9999, 0), -EBADF);
+        assert_eq!(sys_fcntl(2, 0x9999, 0), -EINVAL);
+        assert_eq!(sys_fcntl(0, F_GETFL, 0), 0); // O_RDONLY
+        assert_eq!(sys_fcntl(2, F_GETFL, 0), O_WRONLY as i64);
+        assert_eq!(sys_fcntl(2, F_GETFD, 0), 0);
+        assert_eq!(sys_fcntl(2, F_SETFD, FD_CLOEXEC as u64), 0);
+        assert_eq!(sys_fcntl(2, F_GETFD, 0), FD_CLOEXEC);
+        assert_eq!(sys_fcntl(2, F_SETFD, 0), 0);
+        assert_eq!(sys_fcntl(2, F_GETFD, 0), 0);
+        // F_SETFL changes O_APPEND/O_NONBLOCK and nothing else.
+        assert_eq!(sys_fcntl(2, F_SETFL, O_NONBLOCK | O_RDWR), 0);
+        assert_eq!(sys_fcntl(2, F_GETFL, 0), (O_WRONLY | O_NONBLOCK) as i64);
+        assert_eq!(sys_fcntl(2, F_SETFL, 0), 0);
+        assert_eq!(sys_fcntl(2, F_GETFL, 0), O_WRONLY as i64);
+        // ioctl: FIOCLEX/FIONCLEX are the FD_CLOEXEC bit; an unknown request is
+        // a soft -ENOTTY on an open number (never fatal, never a fake
+        // FIONREAD=0) and -EBADF on a closed one.
+        assert_eq!(sys_ioctl(2, FIOCLEX, 0), 0);
+        assert_eq!(sys_fcntl(2, F_GETFD, 0), FD_CLOEXEC);
+        assert_eq!(sys_ioctl(2, FIONCLEX, 0), 0);
+        assert_eq!(sys_fcntl(2, F_GETFD, 0), 0);
+        assert_eq!(sys_ioctl(2, 0x1234, 0), -ENOTTY);
+        assert_eq!(sys_ioctl(5, 0x1234, 0), -EBADF);
+        assert_eq!(sys_ioctl(5, FIOCLEX, 0), -EBADF);
     }
 
     #[test]
@@ -1432,7 +1485,12 @@ mod tests {
         // the dir-fd fcntl/openat gap). This pins that: the noise bits never
         // perturb the decode. RED: folding O_LARGEFILE into the access-mode
         // compare, or reacting to O_DIRECTORY, would diverge open from openat.
-        let noise = O_LARGEFILE | O_DIRECTORY | O_CLOEXEC;
+        // O_CLOEXEC is NOT noise: it is the new number's FD_CLOEXEC bit.
+        let noise = O_LARGEFILE | O_DIRECTORY;
+        assert_eq!(
+            openat_patina_flags(O_RDWR | O_CLOEXEC),
+            PATINA_O_READ | PATINA_O_WRITE | PATINA_O_CLOEXEC
+        );
         // The EXACT round-5 flag word (O_WRONLY|O_CREAT|O_TRUNC|O_LARGEFILE).
         assert_eq!(
             openat_patina_flags(0x8241),

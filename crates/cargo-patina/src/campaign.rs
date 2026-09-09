@@ -6384,7 +6384,7 @@ into the deterministic runtime via syscall-user-dispatch.",
         // Fail-closed refusals: patina's own lines, but they ARE the cause of
         // death, and `output.rs`'s `REFUSAL_CLASSES` structures only some of
         // them — the rest reach a signature only through this fallback.
-        "patina: dup2 to a chosen descriptor number is not modeled; failing closed",
+        "patina: epoll_pwait with a signal mask is not modeled; failing closed",
         "patina: always! invariant violated: label=page_should_be_loaded",
         "patina: step budget of 100 boundary operations was exhausted",
         "patina: the deterministic runtime failed to initialize: fingerprint mismatch",

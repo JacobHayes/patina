@@ -35,6 +35,41 @@ enum {
      * and readlinkat, dups and closes -- and refuses every read, write, seek,
      * fsync, fchmod and directory listing. */
     PATINA_O_PATH = 1u << 8,
+    /* O_CLOEXEC: FD_CLOEXEC on the NUMBER the open mints. Neither a driver flag
+     * nor a status flag: it lives on the descriptor-table slot, so a dup of the
+     * descriptor does not carry it and F_GETFD/F_SETFD read and write it. */
+    PATINA_O_CLOEXEC = 1u << 9,
+    /* Reported by patina_fd_getfl, never accepted by patina_open: the description
+     * was minted by open(2). A 64-bit Linux kernel forces O_LARGEFILE into such a
+     * description's F_GETFL (and into no pipe's, socket's or O_PATH handle's), so
+     * the C and SUD F_GETFL translate this bit to O_LARGEFILE there. */
+    PATINA_O_OPENED = 1u << 10,
+};
+
+/*
+ * What a guest descriptor NAMES: the answer of patina_fd_kind, the one oracle
+ * the C interposers and the SUD rows consult when a call's meaning depends on
+ * the kind of object behind a number (a socket op on a file is ENOTSOCK, a *at
+ * dirfd must be PATINA_FD_DIR, mmap of a pipe is ENODEV). Every other question
+ * about a descriptor -- its FD_CLOEXEC bit, its status flags, duplication,
+ * closing, reading, writing -- is answered by the universal patina_* entries
+ * below, which resolve the number themselves. The shim owns ONE table for all
+ * of these: guest numbers are allocated lowest-free with holes, as a kernel
+ * allocates them, refcount an open file description, and are never recorded.
+ */
+enum {
+    PATINA_FD_STDIN = 0,   /* the guest's standard input: EOF, not a terminal */
+    PATINA_FD_STDOUT = 1,  /* captured standard output */
+    PATINA_FD_STDERR = 2,  /* captured standard error */
+    PATINA_FD_FILE = 3,    /* a deterministic-filesystem file */
+    PATINA_FD_DIR = 4,     /* a directory descriptor (O_DIRECTORY, with or without O_PATH) */
+    PATINA_FD_OPATH = 5,   /* an O_PATH descriptor on a non-directory */
+    PATINA_FD_URANDOM = 6, /* the /dev/urandom device */
+    PATINA_FD_SOCKET = 7,  /* a virtual AF_INET socket */
+    PATINA_FD_PIPE = 8,    /* a pipe / socketpair / FIFO endpoint */
+    PATINA_FD_EVENTFD = 9, /* an eventfd counter (Linux) */
+    PATINA_FD_EPOLL = 10,  /* an epoll instance (Linux) */
+    PATINA_FD_KQUEUE = 11, /* a kqueue (Darwin) */
 };
 
 enum {
@@ -143,11 +178,10 @@ int32_t patina_sleep_until(uint32_t clock, uint64_t deadline_nanos);
  */
 int32_t patina_cpu_time_nanos(uint64_t *nanos);
 /*
- * Open a path in the deterministic filesystem. A FIFO answers with a fd from the
- * virtual pipe-endpoint space (>= PATINA_SOCKET_FD_BASE), because a named pipe's
- * bytes are not filesystem state: the interposed read/write/close/dup/fcntl and
- * the readiness reactors route it to the pipe class by table membership, exactly
- * as they route a pipe(2) endpoint.
+ * Open a path in the deterministic filesystem, returning a fresh guest
+ * descriptor number. A FIFO answers with a PATINA_FD_PIPE descriptor, because a
+ * named pipe's bytes are not filesystem state; /dev/urandom with a
+ * PATINA_FD_URANDOM one. PATINA_O_CLOEXEC sets FD_CLOEXEC on the number.
  */
 /*
  * `mode` is POSIX open(2)'s third argument: the creation mode, read only when
@@ -155,24 +189,76 @@ int32_t patina_cpu_time_nanos(uint64_t *nanos);
  * the recorded operation carries no argument the kernel would not have read.
  */
 int32_t patina_open(const char *path, uint32_t flags, uint32_t mode);
+/*
+ * The universal descriptor operations: each resolves the guest number once and
+ * dispatches on what it names, answering what the kernel answers for a kind
+ * that has no such operation (ESPIPE for a positional op or lseek on a pipe,
+ * EINVAL for fsync/ftruncate on one, EBADF for an empty slot). The C read/
+ * write/close/... interposers and the SUD rows call these and nothing else, so
+ * the two doors share one decode.
+ */
 intptr_t patina_read(int32_t fd, void *destination, size_t length);
 intptr_t patina_write(int32_t fd, const void *source, size_t length);
 intptr_t patina_pread(int32_t fd, void *destination, size_t length, int64_t offset);
 intptr_t patina_pwrite(int32_t fd, const void *source, size_t length, int64_t offset);
 int32_t patina_close(int32_t fd);
-int32_t patina_dup(int32_t fd);
 int64_t patina_seek(int32_t fd, int64_t offset, uint32_t whence);
 int32_t patina_fsync(int32_t fd);
 int32_t patina_set_len(int32_t fd, uint64_t length);
 /*
  * Advisory whole-file lock (flock(2)). `operation` is LOCK_SH/LOCK_EX/LOCK_UN
- * optionally OR'd with LOCK_NB. Keyed on the descriptor's deterministic-fs
- * inode: a lone opener always acquires, while an incompatible lock held on a
- * different descriptor of the same file yields EWOULDBLOCK (LOCK_NB) so a guest
- * that opens the same file twice contends as it would on a real kernel. The
- * lock clears on LOCK_UN and on close.
+ * optionally OR'd with LOCK_NB. The lock belongs to the open file DESCRIPTION
+ * (a dup of the holder shares and can release it) and is keyed on the
+ * deterministic-fs inode: a lone opener always acquires, while an incompatible
+ * lock held on a different description of the same file yields EWOULDBLOCK
+ * (LOCK_NB) so a guest that opens the same file twice contends as it would on
+ * a real kernel. The lock clears on LOCK_UN and with the description.
  */
 int32_t patina_flock(int32_t fd, int32_t operation);
+/*
+ * The descriptor table itself. patina_fd_kind answers PATINA_FD_* or -1/EBADF.
+ * patina_fd_limit is RLIMIT_NOFILE as the table enforces it (EMFILE at and
+ * above it), the number getrlimit and sysconf(_SC_OPEN_MAX) must report.
+ * F_GETFD/F_SETFD read and write the number's FD_CLOEXEC bit; F_GETFL/F_SETFL
+ * read and write the description's status flags in the PATINA_O_* vocabulary
+ * (access mode, PATINA_O_APPEND, PATINA_O_NONBLOCK, PATINA_O_PATH; only the
+ * first two are settable, as the kernel ignores the rest of an F_SETFL
+ * argument); patina_fd_set_nonblocking flips PATINA_O_NONBLOCK alone (FIONBIO,
+ * SOCK_NONBLOCK on accept).
+ */
+int32_t patina_fd_kind(int32_t fd);
+int32_t patina_fd_limit(void);
+int32_t patina_fd_getfd(int32_t fd);
+int32_t patina_fd_setfd(int32_t fd, int32_t cloexec);
+int32_t patina_fd_getfl(int32_t fd);
+int32_t patina_fd_setfl(int32_t fd, uint32_t flags);
+int32_t patina_fd_set_nonblocking(int32_t fd, int32_t nonblocking);
+/*
+ * Duplication and closing, kernel semantics: dup binds the lowest free number;
+ * F_DUPFD[_CLOEXEC] the lowest free at or above `minimum` (EINVAL outside the
+ * table, EMFILE when none is free); dup2/dup3 bind a CHOSEN number, closing
+ * what it named (dup2 of equal numbers validates and returns it, dup3 of equal
+ * numbers is EINVAL; a target outside the table is EBADF). close frees the
+ * number and, with its last number, the description; close_range covers
+ * [first, last] (clamped to the table), or with CLOSE_RANGE_CLOEXEC marks the
+ * range close-on-exec instead.
+ */
+int32_t patina_dup(int32_t fd);
+int32_t patina_dupfd(int32_t fd, int32_t minimum, int32_t cloexec);
+int32_t patina_dup2(int32_t oldfd, int32_t newfd);
+int32_t patina_dup3(int32_t oldfd, int32_t newfd, int32_t cloexec);
+int32_t patina_close_range(uint32_t first, uint32_t last, uint32_t flags);
+/*
+ * A hidden reference on a descriptor's description -- what a file-backed
+ * mapping holds so its writeback survives the guest closing the number, as the
+ * kernel's mapping holds the struct file. patina_fd_retain returns the
+ * description id (or -1/EBADF); patina_desc_pwrite is pwrite through it;
+ * patina_desc_release drops it, freeing the description with its last
+ * reference exactly as the last close would.
+ */
+int64_t patina_fd_retain(int32_t fd);
+intptr_t patina_desc_pwrite(int64_t desc, const void *source, size_t length, int64_t offset);
+int32_t patina_desc_release(int64_t desc);
 enum {
     PATINA_ENTRY_FILE = 1,
     PATINA_ENTRY_DIRECTORY = 2,
@@ -240,8 +326,8 @@ int32_t patina_link(const char *from, const char *to);
 /*
  * Directory descriptors backing the openat/fdopendir/unlinkat/getdents64 family.
  * patina_diropen VALIDATES that `path` names a directory, opens a read-only
- * deterministic filesystem fd, records the fd as a directory descriptor and
- * returns it.
+ * deterministic filesystem handle, binds it to a fresh guest number of kind
+ * PATINA_FD_DIR and returns the number (`cloexec` sets FD_CLOEXEC on it).
  * `follow` selects the trailing-symlink behavior (0 == O_NOFOLLOW): a symlink
  * with follow==0 is ELOOP, with follow!=0 it is resolved through the virtual
  * realpath and re-checked; a non-directory is ENOTDIR. Validation lives here so
@@ -256,18 +342,13 @@ int32_t patina_link(const char *from, const char *to);
  * never followed;
  * `path_only` is O_PATH: the descriptor names the location and never opens the
  * directory, so it costs nothing on the entry and cannot be iterated, where a
- * plain (path_only == 0) directory open costs `r` and can.
- * patina_dir_is_dirfd tells a dir fd apart from other fds; patina_dirdup
- * duplicates one, SHARING the open description as POSIX dup does and
- * registering the copy as a directory descriptor; patina_dirclose releases the
- * mapping and closes the filesystem fd (closedir/close). Every DIR owns a
- * descriptor, so closedir is what calls patina_dirclose.
+ * plain (path_only == 0) directory open costs `r` and can (the description's
+ * PATINA_O_PATH status bit tells the two apart). A directory descriptor dups
+ * and closes through the universal entries like any other; every DIR owns a
+ * number, so closedir is a patina_close.
  */
-int32_t patina_diropen(const char *path, int32_t follow, int32_t path_only);
-int32_t patina_dirdup(int32_t fd);
+int32_t patina_diropen(const char *path, int32_t follow, int32_t path_only, int32_t cloexec);
 intptr_t patina_dirpath(int32_t fd, char *buf, size_t len);
-int32_t patina_dir_is_dirfd(int32_t fd);
-int32_t patina_dirclose(int32_t fd);
 intptr_t patina_read_link(const char *path, char *buf, size_t len);
 /*
  * Canonicalize a guest path to its deterministic absolute form (realpath). On
@@ -291,10 +372,13 @@ int32_t patina_rmdir(const char *path);
 int32_t patina_rename(const char *from, const char *to);
 int32_t patina_crash(void);
 /*
- * Capture deterministic stdout (fd 1) or stderr (fd 2) bytes. Captured bytes
- * are flushed to the real host descriptors at patina_shutdown.
+ * Append to the captured stdout (`sink` 1) or stderr (`sink` 2) STREAM -- the
+ * runtime's own diagnostics use this directly so a guest's dup2 over number 1
+ * or 2 never redirects them. A guest write to number 1 or 2 goes through
+ * patina_write, which reaches the same sink while the number still names it.
+ * Captured bytes are flushed to the real host descriptors at patina_shutdown.
  */
-intptr_t patina_stdio_write(int32_t fd, const void *source, size_t length);
+intptr_t patina_stdio_write(int32_t sink, const void *source, size_t length);
 
 /*
  * Cooperative-SUT (buggify) surface. Labels and call-site identities are
@@ -409,17 +493,19 @@ int32_t patina_rwlock_unlock(void *lock);
 int32_t patina_rwlock_destroy(void *lock);
 
 /*
- * Virtual AF_INET sockets over the runtime's SimNet. Descriptors are numbered
- * from PATINA_SOCKET_FD_BASE so the interposed close can route them here;
+ * Virtual AF_INET sockets over the runtime's SimNet. Every entry takes a guest
+ * descriptor number and answers ENOTSOCK for one that is not PATINA_FD_SOCKET;
  * addresses are passed as host-order IPv4 + port. Blocking calls park the
- * calling managed task through the scheduler baton.
+ * calling managed task through the scheduler baton. patina_net_accept's
+ * `nonblocking`/`cloexec` are accept4's SOCK_NONBLOCK/SOCK_CLOEXEC for the NEW
+ * descriptor.
  */
-#define PATINA_SOCKET_FD_BASE 0x40000000
-int32_t patina_net_socket(int32_t stream, int32_t nonblocking);
+int32_t patina_net_socket(int32_t stream, int32_t nonblocking, int32_t cloexec);
 int32_t patina_net_bind(int32_t fd, uint32_t ip, uint16_t port);
 int32_t patina_net_connect(int32_t fd, uint32_t ip, uint16_t port);
 int32_t patina_net_listen(int32_t fd, int32_t backlog);
-int32_t patina_net_accept(int32_t fd, uint32_t *ip, uint16_t *port);
+int32_t patina_net_accept(int32_t fd, uint32_t *ip, uint16_t *port, int32_t nonblocking,
+                          int32_t cloexec);
 int32_t patina_net_tcp_connect(int32_t fd, uint32_t ip, uint16_t port);
 intptr_t patina_net_sendto(int32_t fd, const void *buf, size_t len, uint32_t ip, uint16_t port);
 intptr_t patina_net_send(int32_t fd, const void *buf, size_t len);
@@ -430,12 +516,9 @@ intptr_t patina_net_stream_recv(int32_t fd, void *buf, size_t len);
 int32_t patina_net_shutdown(int32_t fd, int32_t how);
 int32_t patina_net_getsockname(int32_t fd, uint32_t *ip, uint16_t *port);
 int32_t patina_net_getpeername(int32_t fd, uint32_t *ip, uint16_t *port);
-int32_t patina_net_kind(int32_t fd); /* -1 unknown, 0 datagram, 1 unbound stream, 2 listener, 3 stream */
-int32_t patina_net_set_nonblocking(int32_t fd, int32_t nonblocking);
+int32_t patina_net_kind(int32_t fd); /* -1 not a socket, 0 datagram, 1 unbound stream, 2 listener, 3 stream */
 /* Set SO_RCVTIMEO in virtual nanoseconds; 0 clears (no timeout). */
 int32_t patina_net_set_read_timeout(int32_t fd, uint64_t nanos);
-int32_t patina_net_is_nonblocking(int32_t fd);
-int32_t patina_net_close(int32_t fd);
 /*
  * Resolve a host name to a virtual IPv4 address (host byte order) through the
  * run's deterministic DNS host table. Returns 0 and writes *ip on success; on
@@ -448,22 +531,24 @@ int32_t patina_dns_resolve(const char *name, uint32_t *ip);
 /*
  * In-process pipe / socketpair. Both endpoints live inside this one guest
  * process (an async runtime's IO-driver / signal self-pipe), so they are modeled
- * as deterministic in-memory byte channels sharing the virtual-fd space above
- * (numbered from PATINA_SOCKET_FD_BASE) and the same baton/waiter machinery. The
- * interposed read/write/close/dup/fcntl route these fds via
- * patina_pipe_is_endpoint. patina_pipe_dup aliases an endpoint (dup /
- * F_DUPFD[_CLOEXEC]): a channel side reports EOF/EPIPE only once its LAST
- * aliasing fd has closed.
+ * as deterministic in-memory byte channels, PATINA_FD_PIPE descriptions on the
+ * same baton/waiter machinery the sockets use. The two numbers are allocated
+ * atomically (one free slot is EMFILE and creates nothing). A dup of an endpoint
+ * shares its description: a channel side reports EOF/EPIPE only once its LAST
+ * number has closed. patina_pipe_read/write are the recv/send face of a
+ * socketpair end (read/write reach the same transfer through patina_read/
+ * patina_write); patina_pipe_size / patina_pipe_set_size are F_GETPIPE_SZ /
+ * F_SETPIPE_SZ (page-rounded to a power of two, 64 KiB by default, EBUSY below
+ * the bytes buffered, EPERM above the unprivileged maximum).
  */
-int32_t patina_pipe(int32_t *read_fd_out, int32_t *write_fd_out, int32_t nonblocking);
-int32_t patina_socketpair(int32_t *fd0_out, int32_t *fd1_out, int32_t nonblocking);
-int32_t patina_pipe_is_endpoint(int32_t fd);
+int32_t patina_pipe(int32_t *read_fd_out, int32_t *write_fd_out, int32_t nonblocking,
+                    int32_t cloexec);
+int32_t patina_socketpair(int32_t *fd0_out, int32_t *fd1_out, int32_t nonblocking,
+                          int32_t cloexec);
 intptr_t patina_pipe_read(int32_t fd, void *buf, size_t len);
 intptr_t patina_pipe_write(int32_t fd, const void *buf, size_t len);
-int32_t patina_pipe_dup(int32_t fd);
-int32_t patina_pipe_close(int32_t fd);
-int32_t patina_pipe_is_nonblocking(int32_t fd);
-int32_t patina_pipe_set_nonblocking(int32_t fd, int32_t nonblocking);
+int32_t patina_pipe_size(int32_t fd);
+int32_t patina_pipe_set_size(int32_t fd, int32_t size);
 
 /*
  * Linux SYS_futex routing. Rust std on Linux implements Mutex/Condvar/thread
@@ -485,23 +570,21 @@ int32_t patina_futex_wake(uintptr_t addr, int32_t count);
 
 /*
  * epoll / eventfd readiness reactor (Linux). The Linux mirror of the macOS
- * kqueue reactor below, over the same shared readiness core. A virtual epoll or
- * eventfd descriptor is drawn from the shared virtual-fd space (numbered from
- * PATINA_SOCKET_FD_BASE); the interposed read/write/close/dup/fcntl route them
- * via patina_epoll_is_epoll / patina_eventfd_is. patina_epoll_create1,
- * patina_epoll_ctl, patina_epoll_wait, and patina_eventfd are SYSCALL-SHAPED —
- * they take the raw epoll_create1/epoll_ctl/epoll_wait/eventfd2 argument forms —
- * so a future syscall-user-dispatch SIGSYS dispatcher can call them with
+ * kqueue reactor below, over the same shared readiness core. An epoll instance
+ * is a PATINA_FD_EPOLL description, an eventfd a PATINA_FD_EVENTFD one; read/
+ * write/close/dup/fcntl reach them through the universal entries.
+ * patina_epoll_create1, patina_epoll_ctl, patina_epoll_wait, and patina_eventfd
+ * are SYSCALL-SHAPED — they take the raw epoll_create1/epoll_ctl/epoll_wait/
+ * eventfd2 argument forms — so the syscall-user-dispatch rows call them with
  * register arguments directly; the C interposers are thin marshaling over them.
- * epoll_ctl/epoll_wait take the platform `struct epoll_event` pointers
- * directly: the Rust side reads/writes the kernel ABI layout (packed on x86_64,
- * natural elsewhere), pinned by _Static_asserts in the C layer.
+ * epoll_ctl answers the kernel's errnos (EBADF/EINVAL/EPERM/EEXIST/ENOENT) and
+ * models EPOLLET and EPOLLONESHOT. epoll_ctl/epoll_wait take the platform
+ * `struct epoll_event` pointers directly: the Rust side reads/writes the kernel
+ * ABI layout (packed on x86_64, natural elsewhere), pinned by _Static_asserts
+ * in the C layer.
  */
 #ifdef __linux__
 int32_t patina_epoll_create1(int32_t flags);
-int32_t patina_epoll_is_epoll(int32_t fd);
-int32_t patina_epoll_dup(int32_t fd);
-int32_t patina_epoll_close(int32_t fd);
 int32_t patina_epoll_ctl(int32_t epfd, int32_t op, int32_t fd, const void *event);
 /* timeout_ms: -1 blocks until ready, 0 polls, > 0 is a relative virtual-clock
  * deadline in milliseconds. */
@@ -513,10 +596,6 @@ int32_t patina_epoll_wait(int32_t epfd, void *events, int32_t maxevents, int32_t
  * instead of modeling a blocked-writer queue.
  */
 int32_t patina_eventfd(uint32_t initval, int32_t flags);
-int32_t patina_eventfd_is(int32_t fd);
-intptr_t patina_eventfd_read(int32_t fd, void *buf, size_t len);
-intptr_t patina_eventfd_write(int32_t fd, const void *buf, size_t len);
-int32_t patina_eventfd_close(int32_t fd);
 #endif
 
 /*
@@ -546,10 +625,9 @@ int32_t patina_os_unfair_lock_trylock(void *lock);
 void patina_os_unfair_lock_unlock(void *lock);
 
 /*
- * kqueue / kevent readiness reactor (macOS). A virtual kqueue descriptor is
- * drawn from the shared virtual-fd space (numbered from PATINA_SOCKET_FD_BASE),
- * so the interposed close routes it here via patina_kqueue_is_kq. The C kevent
- * interposers marshal the platform struct kevent/kevent64_s changelists and
+ * kqueue / kevent readiness reactor (macOS). A kqueue is a PATINA_FD_KQUEUE
+ * description (close-on-exec from birth, as xnu makes it); close/dup/fcntl
+ * reach it through the universal entries. The C kevent interposers marshal the platform struct kevent/kevent64_s changelists and
  * eventlists to and from this platform-neutral projection; the Rust reactor owns
  * the knote registry, readiness, deterministic event ordering, and the multi-fd
  * fan-in park. `struct patina_kevent` is laid out to match the macOS `struct
@@ -566,14 +644,6 @@ struct patina_kevent {
 };
 
 int32_t patina_kqueue(void);
-int32_t patina_kqueue_is_kq(int32_t fd);
-/*
- * Duplicate a kqueue fd: the new fd aliases the SAME registry (tokio's IO driver
- * clones its selector through F_DUPFD_CLOEXEC), which drops only when the last
- * aliasing fd closes.
- */
-int32_t patina_kqueue_dup(int32_t fd);
-int32_t patina_kqueue_close(int32_t fd);
 /*
  * Apply one changelist entry. Returns 0 on success or a POSIX errno the caller
  * places in an EV_ERROR receipt. An EVFILT_USER NOTE_TRIGGER wakes the kq's

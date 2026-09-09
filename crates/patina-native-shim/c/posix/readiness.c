@@ -85,7 +85,7 @@ static int patina_kevent_mode(const struct timespec *timeout, uint64_t *nanos) {
 
 int kevent(int kq, const struct kevent *changelist, int nchanges, struct kevent *eventlist,
            int nevents, const struct timespec *timeout) {
-    if (patina_kqueue_is_kq(kq) == 0) {
+    if (patina_fd_kind(kq) != PATINA_FD_KQUEUE) {
         errno = EBADF;
         return -1;
     }
@@ -139,7 +139,7 @@ int kevent64(int kq, const struct kevent64_s *changelist, int nchanges,
              struct kevent64_s *eventlist, int nevents, unsigned int flags,
              const struct timespec *timeout) {
     (void)flags; /* KEVENT_FLAG_* immediacy is governed by `timeout` here. */
-    if (patina_kqueue_is_kq(kq) == 0) {
+    if (patina_fd_kind(kq) != PATINA_FD_KQUEUE) {
         errno = EBADF;
         return -1;
     }

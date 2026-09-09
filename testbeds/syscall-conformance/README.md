@@ -59,6 +59,13 @@ stderr), or a counted `SKIP`; the script exits 1 on any failure and prints
 unblessed platform, or without SUD for the raw vehicle it prints a counted
 `SKIPPED`/`SKIP` line — never a silent green.
 
+Two host properties a probe can observe are pinned by `run.sh` so the native
+oracle and the virtual kernel start from the same process state: standard
+input is `/dev/null` (a probe reading fd 0 sees EOF on both sides, and never
+blocks on a terminal) and `RLIMIT_NOFILE` is 1024 (`ulimit -S -n`), the
+virtual kernel's own limit (`patina_fd_limit`), so `EMFILE` and the
+`F_DUPFD`/`dup2` bounds fall at one number natively and under patina.
+
 ## Events, normalization, checks
 
 ```json
@@ -112,9 +119,11 @@ reason = "pending: F3 — a component through a regular file answers ENOENT, not
 ```
 
 `kind = "abort"` (with `seq`) declares a probe that dies inside patina at that
-event — the recorded prefix is still compared; `kind = "probe"` declares a
-probe that cannot be compared at all (an audit refusal, or a fatal whose
-stdout is lost). Every kind is self-cleaning: a declaration the stream no
+event — the recorded prefix is still compared (both fatal paths flush the
+captured streams first), and the replay leg is skipped as for a probe-level
+declaration, since the death leaves no trace; `kind = "probe"` declares a
+probe that cannot be compared at all (an audit refusal, or a probe that dies
+before its first event). Every kind is self-cleaning: a declaration the stream no
 longer needs fails the leg as STALE, so the file is always exactly the current
 gap. `vehicle = "…"` scopes a declaration to one vehicle.
 

@@ -1,0 +1,141 @@
+{"header":{"schema":"patina.conformance/v1","probe":"fd/table","os":"linux","arch":"x86_64","kernel":"6.8.0-139-generic","glibc":"2.39","virtual_abi":"6.8"}}
+{"seq":0,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":524354,"mode":416,"path":"/tmp/syscall-conformance/fd-table/a"},"ret":"fd@0","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":1,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":524354,"mode":416,"path":"/tmp/syscall-conformance/fd-table/b"},"ret":"fd@1","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":2,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":524354,"mode":416,"path":"/tmp/syscall-conformance/fd-table/c"},"ret":"fd@2","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":3,"op":"check","args":{"label":"numbers are allocated lowest-free, consecutively"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":4,"op":"close","args":{"fd":"fd@1"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":5,"op":"check","args":{"label":"close the middle one"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":6,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":524354,"mode":416,"path":"/tmp/syscall-conformance/fd-table/d"},"ret":"fd@6","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":7,"op":"check","args":{"label":"the closed number is reused (lowest free)"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":8,"op":"read","args":{"fd":"fd@8","len":8},"ret":0,"errno":null,"fields":{"data":""},"norm":{"args.fd":"relative:fd"}}
+{"seq":9,"op":"check","args":{"label":"standard input is at EOF"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":10,"op":"dup","args":{"fd":"fd@0"},"ret":"fd@10","errno":null,"fields":{},"norm":{"args.fd":"relative:fd","ret":"relative:fd"}}
+{"seq":11,"op":"check","args":{"label":"dup takes the lowest free number"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":12,"op":"write","args":{"fd":"fd@0","len":5},"ret":5,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":13,"op":"check","args":{"label":"write through the original"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":14,"op":"lseek","args":{"fd":"fd@10","offset":0,"whence":1},"ret":5,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":15,"op":"check","args":{"label":"a dup shares the file offset (one open file description)"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":16,"op":"fcntl","args":{"arg":0,"cmd":1,"fd":"fd@0"},"ret":1,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":17,"op":"fcntl","args":{"arg":0,"cmd":1,"fd":"fd@10"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":18,"op":"check","args":{"label":"O_CLOEXEC shows on the original's number only"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":19,"op":"fcntl","args":{"arg":0,"cmd":3,"fd":"fd@0"},"ret":32770,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":20,"op":"check","args":{"label":"F_GETFL on a file reports its access mode"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":21,"op":"fcntl","args":{"arg":1024,"cmd":4,"fd":"fd@10"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":22,"op":"fcntl","args":{"arg":0,"cmd":3,"fd":"fd@0"},"ret":33794,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":23,"op":"check","args":{"label":"F_SETFL O_APPEND is shared through the dup (description flag)"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":24,"op":"fcntl","args":{"arg":0,"cmd":4,"fd":"fd@0"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":25,"op":"fcntl","args":{"arg":0,"cmd":3,"fd":"fd@0"},"ret":32770,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":26,"op":"check","args":{"label":"F_SETFL cannot change the access mode"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":27,"op":"dup2","args":{"newfd":5,"oldfd":"fd@0"},"ret":5,"errno":null,"fields":{},"norm":{"args.oldfd":"relative:fd"}}
+{"seq":28,"op":"lseek","args":{"fd":"fd@2","offset":0,"whence":1},"ret":5,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":29,"op":"check","args":{"label":"dup2 onto an open number closes it and binds the description"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":30,"op":"dup2","args":{"newfd":3,"oldfd":"fd@0"},"ret":3,"errno":null,"fields":{},"norm":{"args.oldfd":"relative:fd"}}
+{"seq":31,"op":"check","args":{"label":"dup2 of equal numbers validates and returns it"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":32,"op":"dup2","args":{"newfd":5,"oldfd":"fd@32"},"ret":-1,"errno":"EBADF","fields":{},"norm":{"args.oldfd":"relative:fd"}}
+{"seq":33,"op":"check","args":{"label":"dup2 from a closed number is EBADF"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":34,"op":"dup3","args":{"flags":0,"newfd":3,"oldfd":"fd@0"},"ret":-1,"errno":"EINVAL","fields":{},"norm":{"args.oldfd":"relative:fd"}}
+{"seq":35,"op":"check","args":{"label":"dup3 of equal numbers is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":36,"op":"dup3","args":{"flags":1,"newfd":50,"oldfd":"fd@0"},"ret":-1,"errno":"EINVAL","fields":{},"norm":{"args.oldfd":"relative:fd"}}
+{"seq":37,"op":"check","args":{"label":"dup3 with a flag other than O_CLOEXEC is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":38,"op":"dup3","args":{"flags":524288,"newfd":50,"oldfd":"fd@0"},"ret":50,"errno":null,"fields":{},"norm":{"args.oldfd":"relative:fd"}}
+{"seq":39,"op":"fcntl","args":{"arg":0,"cmd":1,"fd":"fd@39"},"ret":1,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":40,"op":"fcntl","args":{"arg":0,"cmd":1,"fd":"fd@10"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":41,"op":"check","args":{"label":"dup3 O_CLOEXEC lands on the new number only"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":42,"op":"dup2","args":{"newfd":1024,"oldfd":"fd@0"},"ret":-1,"errno":"EBADF","fields":{},"norm":{"args.oldfd":"relative:fd"}}
+{"seq":43,"op":"check","args":{"label":"dup2 to a number past RLIMIT_NOFILE is EBADF"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":44,"op":"close","args":{"fd":"fd@39"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":45,"op":"fcntl","args":{"arg":0,"cmd":1,"fd":"fd@45"},"ret":-1,"errno":"EBADF","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":46,"op":"check","args":{"label":"a closed number gets a fresh description, not the old one"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":47,"op":"fcntl","args":{"arg":1024,"cmd":0,"fd":"fd@0"},"ret":-1,"errno":"EINVAL","fields":{},"norm":{"args.fd":"relative:fd","ret":"relative:fd"}}
+{"seq":48,"op":"check","args":{"label":"F_DUPFD with a minimum at RLIMIT_NOFILE is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":49,"op":"fcntl","args":{"arg":1023,"cmd":0,"fd":"fd@0"},"ret":"fd@49","errno":null,"fields":{},"norm":{"args.fd":"relative:fd","ret":"relative:fd"}}
+{"seq":50,"op":"check","args":{"label":"F_DUPFD binds the last number of the table"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":51,"op":"fcntl","args":{"arg":1023,"cmd":0,"fd":"fd@0"},"ret":-1,"errno":"EMFILE","fields":{},"norm":{"args.fd":"relative:fd","ret":"relative:fd"}}
+{"seq":52,"op":"check","args":{"label":"with the last number taken, F_DUPFD above it is EMFILE"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":53,"op":"close","args":{"fd":"fd@49"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":54,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":524354,"mode":416,"path":"/tmp/syscall-conformance/fd-table/x"},"ret":"fd@54","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":55,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":524354,"mode":416,"path":"/tmp/syscall-conformance/fd-table/y"},"ret":"fd@55","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":56,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":524354,"mode":416,"path":"/tmp/syscall-conformance/fd-table/z"},"ret":"fd@56","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":57,"op":"close_range","args":{"first":9,"flags":0,"last":7},"ret":-1,"errno":"EINVAL","fields":{},"norm":{}}
+{"seq":58,"op":"check","args":{"label":"close_range with first > last is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":59,"op":"close_range","args":{"first":7,"flags":8,"last":9},"ret":-1,"errno":"EINVAL","fields":{},"norm":{}}
+{"seq":60,"op":"check","args":{"label":"close_range with an unknown flag is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":61,"op":"close_range","args":{"first":7,"flags":0,"last":9},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":62,"op":"fcntl","args":{"arg":0,"cmd":1,"fd":"fd@54"},"ret":-1,"errno":"EBADF","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":63,"op":"fcntl","args":{"arg":0,"cmd":1,"fd":"fd@55"},"ret":-1,"errno":"EBADF","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":64,"op":"fcntl","args":{"arg":0,"cmd":1,"fd":"fd@56"},"ret":-1,"errno":"EBADF","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":65,"op":"check","args":{"label":"close_range closes every number in the range"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":66,"op":"close_range","args":{"first":7,"flags":0,"last":9},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":67,"op":"check","args":{"label":"close_range over an empty range succeeds"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":68,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":524354,"mode":416,"path":"/tmp/syscall-conformance/fd-table/x2"},"ret":"fd@54","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":69,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":524354,"mode":416,"path":"/tmp/syscall-conformance/fd-table/y2"},"ret":"fd@55","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":70,"op":"check","args":{"label":"the range's numbers are free again"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":71,"op":"fcntl","args":{"arg":0,"cmd":2,"fd":"fd@54"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":72,"op":"check","args":{"label":"clear FD_CLOEXEC first"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":73,"op":"close_range","args":{"first":7,"flags":4,"last":8},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":74,"op":"fcntl","args":{"arg":0,"cmd":1,"fd":"fd@54"},"ret":1,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":75,"op":"fcntl","args":{"arg":0,"cmd":1,"fd":"fd@55"},"ret":1,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":76,"op":"check","args":{"label":"CLOSE_RANGE_CLOEXEC marks the range close-on-exec instead of closing it"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":77,"op":"close","args":{"fd":"fd@54"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":78,"op":"check","args":{"label":"close x2"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":79,"op":"close","args":{"fd":"fd@55"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":80,"op":"check","args":{"label":"close y2"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":81,"op":"pipe2","args":{"flags":524288},"ret":0,"errno":null,"fields":{"read_end":"fd@81","write_end":"fd@81.1"},"norm":{"fields.read_end":"relative:fd","fields.write_end":"relative:fd"}}
+{"seq":82,"op":"lseek","args":{"fd":"fd@81","offset":0,"whence":1},"ret":-1,"errno":"ESPIPE","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":83,"op":"check","args":{"label":"lseek on a pipe is ESPIPE"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":84,"op":"dup2","args":{"newfd":60,"oldfd":"fd@81.1"},"ret":60,"errno":null,"fields":{},"norm":{"args.oldfd":"relative:fd"}}
+{"seq":85,"op":"check","args":{"label":"dup2 of a pipe end to a chosen number"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":86,"op":"write","args":{"fd":"fd@86","len":2},"ret":2,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":87,"op":"check","args":{"label":"write through the chosen number"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":88,"op":"close","args":{"fd":"fd@81.1"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":89,"op":"check","args":{"label":"close the original write end"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":90,"op":"read","args":{"fd":"fd@81","len":8},"ret":2,"errno":null,"fields":{"data":"ab"},"norm":{"args.fd":"relative:fd"}}
+{"seq":91,"op":"check","args":{"label":"the dup keeps the write side open: the reader sees the bytes, not EOF"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":92,"op":"close","args":{"fd":"fd@86"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":93,"op":"check","args":{"label":"close the dup"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":94,"op":"read","args":{"fd":"fd@81","len":8},"ret":0,"errno":null,"fields":{"data":""},"norm":{"args.fd":"relative:fd"}}
+{"seq":95,"op":"check","args":{"label":"with the last write end closed, the reader sees EOF"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":96,"op":"close","args":{"fd":"fd@81"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":97,"op":"eventfd2","args":{"flags":524288,"initval":1},"ret":"fd@97","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":98,"op":"dup","args":{"fd":"fd@97"},"ret":"fd@98","errno":null,"fields":{},"norm":{"args.fd":"relative:fd","ret":"relative:fd"}}
+{"seq":99,"op":"read","args":{"fd":"fd@98","len":8},"ret":8,"errno":null,"fields":{"data":"\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000"},"norm":{"args.fd":"relative:fd"}}
+{"seq":100,"op":"check","args":{"label":"a dup of an eventfd reads the same counter"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":101,"op":"close","args":{"fd":"fd@98"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":102,"op":"close","args":{"fd":"fd@97"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":103,"op":"dup","args":{"fd":"fd@103"},"ret":"fd@103.1","errno":null,"fields":{},"norm":{"args.fd":"relative:fd","ret":"relative:fd"}}
+{"seq":104,"op":"check","args":{"label":"dup of standard error"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":105,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":524354,"mode":416,"path":"/tmp/syscall-conformance/fd-table/stderr"},"ret":"fd@105","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":106,"op":"dup2","args":{"newfd":2,"oldfd":"fd@105"},"ret":2,"errno":null,"fields":{},"norm":{"args.oldfd":"relative:fd"}}
+{"seq":107,"op":"check","args":{"label":"dup2 a file over standard error"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":108,"op":"write","args":{"fd":"fd@103","len":10},"ret":10,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":109,"op":"check","args":{"label":"a write to number 2 lands in the file"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":110,"op":"dup2","args":{"newfd":2,"oldfd":"fd@103.1"},"ret":2,"errno":null,"fields":{},"norm":{"args.oldfd":"relative:fd"}}
+{"seq":111,"op":"check","args":{"label":"restore standard error"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":112,"op":"lseek","args":{"fd":"fd@105","offset":0,"whence":0},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":113,"op":"check","args":{"label":"rewind the file"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":114,"op":"read","args":{"fd":"fd@105","len":16},"ret":10,"errno":null,"fields":{"data":"redirected"},"norm":{"args.fd":"relative:fd"}}
+{"seq":115,"op":"check","args":{"label":"the file holds the redirected bytes"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":116,"op":"close","args":{"fd":"fd@105"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":117,"op":"check","args":{"label":"close the file"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":118,"op":"close","args":{"fd":"fd@103"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":119,"op":"check","args":{"label":"close standard error"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":120,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":524354,"mode":416,"path":"/tmp/syscall-conformance/fd-table/two"},"ret":"fd@120","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":121,"op":"check","args":{"label":"the next open takes number 2"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":122,"op":"write","args":{"fd":"fd@120","len":1},"ret":1,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":123,"op":"check","args":{"label":"number 2 is now an ordinary file"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":124,"op":"close","args":{"fd":"fd@120"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":125,"op":"check","args":{"label":"close it"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":126,"op":"dup2","args":{"newfd":2,"oldfd":"fd@103.1"},"ret":2,"errno":null,"fields":{},"norm":{"args.oldfd":"relative:fd"}}
+{"seq":127,"op":"check","args":{"label":"put standard error back"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":128,"op":"close","args":{"fd":"fd@103.1"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":129,"op":"check","args":{"label":"close the saved copy"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":130,"op":"close","args":{"fd":"fd@32"},"ret":-1,"errno":"EBADF","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":131,"op":"check","args":{"label":"close of a closed number is EBADF"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":132,"op":"close","args":{"fd":-1},"ret":-1,"errno":"EBADF","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":133,"op":"check","args":{"label":"close of a negative number is EBADF"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":134,"op":"fcntl","args":{"arg":0,"cmd":3,"fd":"fd@134"},"ret":-1,"errno":"EBADF","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":135,"op":"check","args":{"label":"F_GETFL on a closed number is EBADF"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":136,"op":"close","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":137,"op":"close","args":{"fd":"fd@2"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":138,"op":"close","args":{"fd":"fd@6"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":139,"op":"close","args":{"fd":"fd@10"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}

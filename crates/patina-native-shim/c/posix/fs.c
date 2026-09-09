@@ -90,7 +90,8 @@ static void patina_fill_dirent_common(struct dirent *entry, uint64_t index, uint
  * descriptor, and a rename under the iteration cannot redirect it.
  */
 DIR *opendir(const char *path) {
-    int fd = patina_diropen(path, 1, 0);
+    /* glibc opens the directory O_CLOEXEC, and so does this. */
+    int fd = patina_diropen(path, 1, 0, 1);
     if (fd < 0) {
         errno = patina_errno();
         return NULL;
@@ -98,14 +99,14 @@ DIR *opendir(const char *path) {
     void *state = NULL;
     if (patina_read_dir(fd, &state) != 0) {
         int saved = patina_errno();
-        patina_dirclose(fd);
+        patina_close(fd);
         errno = saved;
         return NULL;
     }
     struct patina_dir *directory = calloc(1, sizeof *directory);
     if (directory == NULL) {
         patina_read_dir_free(state);
-        patina_dirclose(fd);
+        patina_close(fd);
         errno = ENOMEM;
         return NULL;
     }
@@ -195,7 +196,7 @@ int closedir(DIR *dirp) {
     patina_read_dir_free(directory->state);
     /* POSIX: closedir releases the descriptor the DIR owns -- the one opendir
      * minted or the one fdopendir took ownership of. */
-    patina_dirclose(directory->owned_fd);
+    patina_close(directory->owned_fd);
     free(directory);
     return 0;
 }
@@ -230,6 +231,18 @@ ssize_t readlink(const char *restrict path, char *restrict destination, size_t l
 }
 
 static int patina_open_directory(const char *path, int flags);
+
+/* The PATINA_O_* flags of an O_PATH open on a non-directory: the location bit,
+ * plus FD_CLOEXEC on the number when asked. */
+static uint32_t patina_path_only_flags(int flags) {
+    uint32_t patina_flags = PATINA_O_PATH;
+#ifdef O_CLOEXEC
+    if (flags & O_CLOEXEC) patina_flags |= PATINA_O_CLOEXEC;
+#else
+    (void)flags;
+#endif
+    return patina_flags;
+}
 
 /*
  * `mode` is the caller's creation mode -- open(2)'s third argument. POSIX says
@@ -308,12 +321,12 @@ static int patina_posix_open(const char *path, int flags, mode_t mode) {
             if (probe_kind == PATINA_ENTRY_DIRECTORY) {
                 return patina_open_directory(canonical, flags);
             }
-            return fail_int(patina_open(canonical, PATINA_O_PATH, 0));
+            return fail_int(patina_open(canonical, patina_path_only_flags(flags), 0));
         }
         if (probe_kind == PATINA_ENTRY_DIRECTORY) {
             return patina_open_directory(path, flags);
         }
-        return fail_int(patina_open(path, PATINA_O_PATH, 0));
+        return fail_int(patina_open(path, patina_path_only_flags(flags), 0));
     }
 #endif
 #ifdef O_DIRECTORY
@@ -335,6 +348,9 @@ static int patina_posix_open(const char *path, int flags, mode_t mode) {
 #endif
 #ifdef O_NONBLOCK
     if (flags & O_NONBLOCK) patina_flags |= PATINA_O_NONBLOCK;
+#endif
+#ifdef O_CLOEXEC
+    if (flags & O_CLOEXEC) patina_flags |= PATINA_O_CLOEXEC;
 #endif
     return fail_int(patina_open(path, patina_flags, (uint32_t)(mode & 07777)));
 }
@@ -363,31 +379,21 @@ int open(const char *path, int flags, ...) {
 }
 
 /*
- * Duplicate a virtual directory descriptor. POSIX `dup` SHARES the open file
- * description, so patina_dirdup duplicates the descriptor itself and registers
- * the copy with the *at resolver -- it re-resolves no name (a rename cannot
- * detach the copy) and re-charges no permission (a chmod between the open and
- * the dup cannot refuse it), which reopening the path would do both of.
- * (dup2/dup3 to a CHOSEN number stay fail-closed for every fd class alike.)
- * Mirrors the SUD dispatcher's dir-fd dup rows.
- */
-static int patina_dup_dirfd(int fd) {
-    return fail_int(patina_dirdup(fd));
-}
-
-/*
  * Resolve `path` for the *at family against a directory descriptor. Called only
- * when `dirfd != AT_FDCWD`. The descriptor must be a virtual directory descriptor
- * (issued by openat(..., O_DIRECTORY)); a real/unknown kernel descriptor the
- * deterministic filesystem never issued fails closed with ENOSYS (matching the
- * rest of the *at family) rather than silently escaping to the host -- even for
- * an absolute path, so an arbitrary bogus fd is never honored. Given a valid
- * descriptor, an absolute `path` ignores it (POSIX) and a relative `path` is
- * joined onto its bound directory path.
+ * when `dirfd != AT_FDCWD`. The descriptor is validated FIRST, as the kernel
+ * validates it, even for an absolute path: a number that names nothing is
+ * EBADF, and one that names anything but a directory is ENOTDIR. Given a
+ * directory descriptor, an absolute `path` ignores it (POSIX) and a relative
+ * `path` is joined onto its bound directory path.
  */
 static int patina_resolve_at(int dirfd, const char *path, char *out, size_t out_len) {
-    if (!patina_dir_is_dirfd(dirfd)) {
-        errno = ENOSYS;
+    int kind = patina_fd_kind(dirfd);
+    if (kind < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    if (kind != PATINA_FD_DIR) {
+        errno = ENOTDIR;
         return -1;
     }
     if (path[0] == '/') {
@@ -447,7 +453,11 @@ static int patina_open_directory(const char *path, int flags) {
 #ifdef O_NOFOLLOW
     if (flags & O_NOFOLLOW) follow = 0;
 #endif
-    return fail_int(patina_diropen(path, follow, path_only));
+    int cloexec = 0;
+#ifdef O_CLOEXEC
+    if (flags & O_CLOEXEC) cloexec = 1;
+#endif
+    return fail_int(patina_diropen(path, follow, path_only, cloexec));
 }
 
 /*

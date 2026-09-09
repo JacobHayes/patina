@@ -30,51 +30,31 @@ probe = "readiness/ppoll"
 kind = "probe"
 reason = "pending: network+readiness — the libc symbol ppoll is not interposed (no definition in patina_posix.c; only the SUD ppoll row exists), so the pre-run audit refuses the probe binary as wait-multiplex for every vehicle"
 
-# ---- fatal traps that lose the stream ---------------------------------------
-# These probes die inside the runtime and the fatal path (crates/patina-native-
-# shim/src/lib.rs:1816 trap_fatal) does not flush the captured stdout, so no
-# prefix survives to compare; they become `kind = "abort"` declarations once
-# it does.
+# ---- fatal traps -----------------------------------------------------------
+# These probes die inside the runtime at a known event. Both fatal paths
+# (`trap_fatal` and the thread module's `fatal`) flush the captured stdout
+# before aborting, so the recorded prefix is compared exactly up to `seq`.
 
 [[divergence]]
 probe = "net/udp"
 vehicle = "libc"
-kind = "probe"
-reason = "pending: network — recvfrom(MSG_DONTWAIT) on a blocking datagram socket ignores the flag and parks the only task (patina_posix.c:4153 → patina-sched-det lib.rs:574 deadlock fatal); trap_fatal (lib.rs:1816) drops the captured stdout"
+kind = "abort"
+seq = 19
+reason = "pending: network — recvfrom(MSG_DONTWAIT) on a blocking datagram socket ignores the flag and parks the only task (c/posix/net.c recvfrom → patina-sched-det lib.rs:574 deadlock fatal)"
 
 [[divergence]]
 probe = "net/udp"
 vehicle = "raw"
-kind = "probe"
-reason = "pending: network — recvfrom(MSG_DONTWAIT) on a blocking datagram socket ignores the flag and parks the only task (sud.rs recvfrom → patina-sched-det lib.rs:574 deadlock fatal); trap_fatal (lib.rs:1816) drops the captured stdout"
+kind = "abort"
+seq = 19
+reason = "pending: network — recvfrom(MSG_DONTWAIT) on a blocking datagram socket ignores the flag and parks the only task (sud/net.rs sys_recvfrom → patina-sched-det lib.rs:574 deadlock fatal)"
 
 [[divergence]]
 probe = "net/udp"
 vehicle = "syscall"
-kind = "probe"
-reason = "(syscall(2) forwards into the same SUD row) pending: network — recvfrom(MSG_DONTWAIT) on a blocking datagram socket ignores the flag and parks the only task (sud.rs recvfrom → patina-sched-det lib.rs:574 deadlock fatal); trap_fatal (lib.rs:1816) drops the captured stdout"
-
-[[divergence]]
-probe = "readiness/epoll"
-vehicle = "libc"
-kind = "probe"
-reason = "pending: network+readiness — epoll_ctl on a regular-file descriptor is a fatal trap (lib.rs:10743) instead of EPERM, and EPOLLONESHOT is a fatal trap (lib.rs:10730); trap_fatal (lib.rs:1816) drops the captured stdout"
-
-[[divergence]]
-probe = "readiness/epoll"
-vehicle = "raw"
-kind = "probe"
-reason = "pending: network+readiness — epoll_ctl on a regular-file descriptor is a fatal trap (lib.rs:10743) instead of EPERM, and EPOLLONESHOT is a fatal trap (lib.rs:10730); trap_fatal (lib.rs:1816) drops the captured stdout"
-
-# ---- fs/open_rw ----------------------------------------------------------------
-
-[[divergence]]
-probe = "readiness/epoll"
-vehicle = "syscall"
-kind = "probe"
-reason = "(syscall(2) forwards into the same SUD row) pending: network+readiness — epoll_ctl on a regular-file descriptor is a fatal trap (lib.rs:10743) instead of EPERM, and EPOLLONESHOT is a fatal trap (lib.rs:10730); trap_fatal (lib.rs:1816) drops the captured stdout"
-
-# ---- fs/open_rw ----------------------------------------------------------------
+kind = "abort"
+seq = 19
+reason = "(syscall(2) forwards into the same SUD row) pending: network — recvfrom(MSG_DONTWAIT) on a blocking datagram socket ignores the flag and parks the only task (sud/net.rs sys_recvfrom → patina-sched-det lib.rs:574 deadlock fatal)"
 
 [[divergence]]
 probe = "fs/open_rw"
@@ -114,30 +94,37 @@ reason = "pending: F3 — see openat seq 57"
 [[divergence]]
 probe = "fs/open_rw"
 op = "openat"
-field = "errno"
-seq = 68
-reason = "pending: F2 — a dirfd that is a regular-file descriptor is refused ENOSYS instead of ENOTDIR (patina_posix.c:1248: only virtual directory descriptors resolve *at)"
+field = "ret"
+seq = 59
+reason = "pending: F3 — a consequence of openat seq 57: the descriptor patina hands back there (natively the open is ENOTDIR) is closed unobserved by the probe, and the descriptor table's lowest-free allocation hands its number out again here, so the identity label reads as the seq-57 descriptor until F3 refuses that open"
 
 [[divergence]]
 probe = "fs/open_rw"
-op = "check"
-field = "ret"
-label = "a dirfd that is a file is ENOTDIR"
-reason = "pending: F2 — see openat seq 68"
+op = "read"
+field = "args.fd"
+seq = 60
+reason = "pending: F3 — see openat seq 59"
+
+[[divergence]]
+probe = "fs/open_rw"
+op = "write"
+field = "args.fd"
+seq = 62
+reason = "pending: F3 — see openat seq 59"
 
 [[divergence]]
 probe = "fs/open_rw"
 op = "openat"
-field = "errno"
-seq = 70
-reason = "pending: F2 — a dirfd that is not open is refused ENOSYS instead of EBADF (patina_posix.c:1248)"
+field = "args.dirfd"
+seq = 64
+reason = "pending: F3 — see openat seq 59"
 
 [[divergence]]
 probe = "fs/open_rw"
-op = "check"
-field = "ret"
-label = "a dirfd that is not open is EBADF"
-reason = "pending: F2 — see openat seq 70"
+op = "close"
+field = "args.fd"
+seq = 90
+reason = "pending: F3 — see openat seq 59"
 
 [[divergence]]
 probe = "fs/open_rw"
@@ -159,29 +146,6 @@ op = "check"
 field = "ret"
 label = "an empty path is ENOENT"
 reason = "pending: F3 — see openat seq 72"
-
-[[divergence]]
-probe = "fs/open_rw"
-op = "openat"
-field = "ret"
-seq = 84
-reason = "pending: F2 — a closed descriptor number is never reused; the shim hands out the driver's next number (lib.rs:3932, SOCKET_FD_BASE next_fd lib.rs:7451) instead of the lowest free one"
-
-[[divergence]]
-probe = "fs/open_rw"
-op = "close"
-field = "args.fd"
-seq = 93
-reason = "pending: F2 — the descriptor closed here is the non-reused one from openat seq 84"
-
-[[divergence]]
-probe = "fs/open_rw"
-op = "check"
-field = "ret"
-label = "the lowest free descriptor number is reused"
-reason = "pending: F2 — see openat seq 84"
-
-# ---- fs/metadata ---------------------------------------------------------------
 
 [[divergence]]
 probe = "fs/metadata"
@@ -460,111 +424,6 @@ reason = "pending: fs — linkat of a symlink without AT_SYMLINK_FOLLOW copies t
 
 [[divergence]]
 probe = "fd/pipes"
-op = "fcntl"
-field = "ret"
-seq = 7
-reason = "pending: F2 — F_GETFL on a pipe's write end reports O_RDONLY (patina_posix.c:1295 fcntl on virtual pipe descriptors carries no access mode)"
-
-[[divergence]]
-probe = "fd/pipes"
-op = "check"
-field = "ret"
-label = "the write end is O_WRONLY"
-reason = "pending: F2 — see fcntl seq 7"
-
-[[divergence]]
-probe = "fd/pipes"
-op = "fcntl"
-field = "ret"
-seqs = [12, 30, 36]
-reason = "pending: F2 — FD_CLOEXEC is not per-descriptor state: F_SETFD is a no-op and F_GETFD always reports FD_CLOEXEC, on the original, on a dup, and on an F_DUPFD result (patina_posix.c:1309-1310)"
-
-[[divergence]]
-probe = "fd/pipes"
-op = "check"
-field = "ret"
-label = "F_SETFD clears it"
-reason = "pending: F2 — see fcntl seq 12"
-
-[[divergence]]
-probe = "fd/pipes"
-op = "check"
-field = "ret"
-label = "dup does not copy FD_CLOEXEC (descriptor flag)"
-reason = "pending: F2 — see fcntl seq 30"
-
-[[divergence]]
-probe = "fd/pipes"
-op = "check"
-field = "ret"
-label = "F_DUPFD_CLOEXEC sets FD_CLOEXEC on the new descriptor only"
-reason = "pending: F2 — see fcntl seq 36"
-
-[[divergence]]
-probe = "fd/pipes"
-op = "fcntl"
-field = "ret"
-seqs = [38, 40]
-reason = "pending: F2 — F_GETPIPE_SZ / F_SETPIPE_SZ answer EINVAL (patina_posix.c:1295 fcntl has no pipe-size commands; the kernel default is 65536)"
-
-[[divergence]]
-probe = "fd/pipes"
-op = "fcntl"
-field = "errno"
-seqs = [38, 40]
-reason = "pending: F2 — see fcntl seqs 38/40"
-
-[[divergence]]
-probe = "fd/pipes"
-op = "check"
-field = "ret"
-label = "F_GETPIPE_SZ is a page multiple"
-reason = "pending: F2 — see fcntl seq 38"
-
-[[divergence]]
-probe = "fd/pipes"
-op = "check"
-field = "ret"
-label = "F_SETPIPE_SZ to one page"
-reason = "pending: F2 — see fcntl seq 40"
-
-[[divergence]]
-probe = "fd/pipes"
-op = "fcntl"
-field = "errno"
-seq = 44
-reason = "pending: F2 — fcntl on a descriptor that is not open answers ENOSYS instead of EBADF (patina_posix.c:1295: an unknown number is a soft deny, not a table miss)"
-
-[[divergence]]
-probe = "fd/pipes"
-op = "check"
-field = "ret"
-label = "fcntl on a closed descriptor is EBADF"
-reason = "pending: F2 — see fcntl seq 44"
-
-[[divergence]]
-probe = "fd/pipes"
-op = "flock"
-field = "errno"
-seq = 86
-reason = "pending: fs — LOCK_UN through a dup of the holder does not release the lock (patina_posix.c:2061 flock → lib.rs:3888 patina_flock keys the lock by descriptor number, not by open file description)"
-
-[[divergence]]
-probe = "fd/pipes"
-op = "flock"
-field = "ret"
-seq = 86
-reason = "pending: fs — see flock seq 86"
-
-[[divergence]]
-probe = "fd/pipes"
-op = "check"
-field = "ret"
-label = "the lock is released"
-reason = "pending: fs — see flock seq 86"
-
-[[divergence]]
-probe = "fd/pipes"
 op = "flock"
 field = "errno"
 seq = 88
@@ -576,90 +435,6 @@ op = "flock"
 field = "ret"
 seq = 88
 reason = "pending: fs — see flock seq 88"
-
-[[divergence]]
-probe = "fd/pipes"
-vehicle = "raw"
-op = "pipe2"
-field = "errno"
-seq = 67
-reason = "pending: F2 — the SUD pipe2 row does not validate flags: an unknown flag creates a pipe instead of EINVAL (sud.rs:2148 sys_pipe2 reads only O_NONBLOCK); the C pipe2 refuses it"
-
-[[divergence]]
-probe = "fd/pipes"
-vehicle = "syscall"
-op = "pipe2"
-field = "errno"
-seq = 67
-reason = "(syscall(2) forwards into the same SUD row) pending: F2 — the SUD pipe2 row does not validate flags: an unknown flag creates a pipe instead of EINVAL (sud.rs:2148 sys_pipe2 reads only O_NONBLOCK); the C pipe2 refuses it"
-
-[[divergence]]
-probe = "fd/pipes"
-vehicle = "raw"
-op = "pipe2"
-field = "ret"
-seq = 67
-reason = "pending: F2 — see pipe2 seq 67"
-
-[[divergence]]
-probe = "fd/pipes"
-vehicle = "syscall"
-op = "pipe2"
-field = "ret"
-seq = 67
-reason = "(syscall(2) forwards into the same SUD row) pending: F2 — see pipe2 seq 67"
-
-[[divergence]]
-probe = "fd/pipes"
-vehicle = "raw"
-op = "pipe2"
-field = "fields.read_end"
-seq = 67
-reason = "pending: F2 — see pipe2 seq 67"
-
-[[divergence]]
-probe = "fd/pipes"
-vehicle = "syscall"
-op = "pipe2"
-field = "fields.read_end"
-seq = 67
-reason = "(syscall(2) forwards into the same SUD row) pending: F2 — see pipe2 seq 67"
-
-[[divergence]]
-probe = "fd/pipes"
-vehicle = "raw"
-op = "pipe2"
-field = "fields.write_end"
-seq = 67
-reason = "pending: F2 — see pipe2 seq 67"
-
-[[divergence]]
-probe = "fd/pipes"
-vehicle = "syscall"
-op = "pipe2"
-field = "fields.write_end"
-seq = 67
-reason = "(syscall(2) forwards into the same SUD row) pending: F2 — see pipe2 seq 67"
-
-[[divergence]]
-probe = "fd/pipes"
-vehicle = "raw"
-op = "check"
-field = "ret"
-label = "pipe2 with an unknown flag is EINVAL"
-reason = "pending: F2 — see pipe2 seq 67"
-
-# ---- time/clocks ---------------------------------------------------------------
-
-[[divergence]]
-probe = "fd/pipes"
-vehicle = "syscall"
-op = "check"
-field = "ret"
-label = "pipe2 with an unknown flag is EINVAL"
-reason = "(syscall(2) forwards into the same SUD row) pending: F2 — see pipe2 seq 67"
-
-# ---- time/clocks ---------------------------------------------------------------
 
 [[divergence]]
 probe = "time/clocks"
@@ -688,6 +463,36 @@ op = "check"
 field = "ret"
 label = "every standard clock id reads"
 reason = "pending: time+identity — see clock_gettime errno"
+
+# ---- readiness/epoll -----------------------------------------------------------
+
+[[divergence]]
+probe = "readiness/epoll"
+op = "epoll_wait"
+field = "fields.events"
+seq = 91
+reason = "pending: network+readiness — with maxevents below the ready count the reactor delivers events in descriptor order (lib.rs epoll `scan` walks the interest BTreeMap), where the kernel delivers them in ready-list order: FIFO by readiness arrival, a level-triggered item re-queued at the tail after each delivery (fs/eventpoll.c ep_send_events), so the writer registered first comes before the reader that became ready later"
+
+[[divergence]]
+probe = "readiness/epoll"
+op = "epoll_wait"
+field = "fields.events"
+seqs = [95, 98]
+reason = "pending: network+readiness — a pipe read end whose last writer closed reports EPOLLIN alone (lib.rs epoll `scan`: EPOLLHUP needs read_eof AND write_eof, and `pipe_readiness` keeps `readable` true at EOF), where the kernel reports EPOLLIN|EPOLLHUP while data remains and EPOLLHUP alone once drained (fs/pipe.c pipe_poll: EPOLLHUP when `!pipe->writers`, EPOLLIN only when the buffer is non-empty)"
+
+[[divergence]]
+probe = "readiness/epoll"
+op = "check"
+field = "ret"
+label = "closing the writer removes its interest and hangs up the reader"
+reason = "pending: network+readiness — see epoll_wait seqs 95/98"
+
+[[divergence]]
+probe = "readiness/epoll"
+op = "check"
+field = "ret"
+label = "a drained hung-up pipe still reports EPOLLHUP"
+reason = "pending: network+readiness — see epoll_wait seqs 95/98"
 
 # ---- thread/futex --------------------------------------------------------------
 

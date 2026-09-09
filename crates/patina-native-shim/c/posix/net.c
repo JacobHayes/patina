@@ -45,6 +45,7 @@ int socket(int domain, int type, int protocol) {
         return -1;
     }
     int nonblocking = 0;
+    int cloexec = 0;
     int base = type;
 #ifdef SOCK_NONBLOCK
     if (base & SOCK_NONBLOCK) {
@@ -53,7 +54,10 @@ int socket(int domain, int type, int protocol) {
     }
 #endif
 #ifdef SOCK_CLOEXEC
-    base &= ~SOCK_CLOEXEC;
+    if (base & SOCK_CLOEXEC) {
+        cloexec = 1;
+        base &= ~SOCK_CLOEXEC;
+    }
 #endif
     int stream = 0;
     if (base == SOCK_DGRAM) {
@@ -72,9 +76,27 @@ int socket(int domain, int type, int protocol) {
         errno = EPROTOTYPE;
         return -1;
     }
-    int fd = patina_net_socket(stream, nonblocking);
+    int fd = patina_net_socket(stream, nonblocking, cloexec);
     if (fd < 0) errno = patina_errno();
     return fd;
+}
+
+/* The kind checks the socket family needs before the class entries: a number
+ * that names nothing is EBADF, one that names anything but a socket or a
+ * socketpair endpoint is ENOTSOCK. Returns 1 for a pipe/socketpair endpoint
+ * (whose send/recv are the pipe transfer), 0 for a socket, -1 with errno. */
+static int patina_socket_or_pair(int fd) {
+    int kind = patina_fd_kind(fd);
+    if (kind < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    if (kind == PATINA_FD_PIPE) return 1;
+    if (kind != PATINA_FD_SOCKET) {
+        errno = ENOTSOCK;
+        return -1;
+    }
+    return 0;
 }
 
 int bind(int fd, const struct sockaddr *addr, socklen_t len) {
@@ -94,21 +116,18 @@ int connect(int fd, const struct sockaddr *addr, socklen_t len) {
         errno = EAFNOSUPPORT;
         return -1;
     }
-    if (fd >= PATINA_SOCKET_FD_BASE) {
-        int kind = patina_net_kind(fd);
-        if (kind == 3) {
-            errno = EISCONN;
-            return -1;
-        }
-        if (kind == 1) return fail_int(patina_net_tcp_connect(fd, ip, port));
-        if (kind == 0) return fail_int(patina_net_connect(fd, ip, port));
-        if (kind == 2) {
-            errno = EOPNOTSUPP;
-            return -1;
-        }
-        errno = EBADF;
+    int kind = patina_net_kind(fd);
+    if (kind == 3) {
+        errno = EISCONN;
         return -1;
     }
+    if (kind == 1) return fail_int(patina_net_tcp_connect(fd, ip, port));
+    if (kind == 2) {
+        errno = EOPNOTSUPP;
+        return -1;
+    }
+    /* A datagram socket, or not a socket at all: the entry answers
+     * EBADF/ENOTSOCK from the descriptor table. */
     return fail_int(patina_net_connect(fd, ip, port));
 }
 
@@ -125,7 +144,9 @@ static int patina_stream_flags_supported(int flags) {
  * write/read. An addressed sendto/recvfrom on a connected pair is EISCONN. */
 ssize_t sendto(int fd, const void *buf, size_t len, int flags,
                const struct sockaddr *addr, socklen_t alen) {
-    if (fd >= PATINA_SOCKET_FD_BASE && patina_pipe_is_endpoint(fd)) {
+    int pair = patina_socket_or_pair(fd);
+    if (pair < 0) return -1;
+    if (pair) {
         if (addr != NULL) {
             errno = EISCONN;
             return -1;
@@ -136,7 +157,7 @@ ssize_t sendto(int fd, const void *buf, size_t len, int flags,
         }
         return fail_size(patina_pipe_write(fd, buf, len));
     }
-    int kind = fd >= PATINA_SOCKET_FD_BASE ? patina_net_kind(fd) : -1;
+    int kind = patina_net_kind(fd);
     if (kind == 3) {
         if (addr != NULL) {
             errno = EISCONN;
@@ -161,14 +182,16 @@ ssize_t sendto(int fd, const void *buf, size_t len, int flags,
 }
 
 ssize_t send(int fd, const void *buf, size_t len, int flags) {
-    if (fd >= PATINA_SOCKET_FD_BASE && patina_pipe_is_endpoint(fd)) {
+    int pair = patina_socket_or_pair(fd);
+    if (pair < 0) return -1;
+    if (pair) {
         if (!patina_stream_flags_supported(flags)) {
             errno = EOPNOTSUPP;
             return -1;
         }
         return fail_size(patina_pipe_write(fd, buf, len));
     }
-    int kind = fd >= PATINA_SOCKET_FD_BASE ? patina_net_kind(fd) : -1;
+    int kind = patina_net_kind(fd);
     if (kind == 3) {
         if (!patina_stream_flags_supported(flags)) {
             errno = EOPNOTSUPP;
@@ -181,7 +204,9 @@ ssize_t send(int fd, const void *buf, size_t len, int flags) {
 
 ssize_t recvfrom(int fd, void *buf, size_t len, int flags,
                  struct sockaddr *addr, socklen_t *alen) {
-    if (fd >= PATINA_SOCKET_FD_BASE && patina_pipe_is_endpoint(fd)) {
+    int pair = patina_socket_or_pair(fd);
+    if (pair < 0) return -1;
+    if (pair) {
         if (!patina_stream_flags_supported(flags)) {
             errno = EOPNOTSUPP;
             return -1;
@@ -190,7 +215,7 @@ ssize_t recvfrom(int fd, void *buf, size_t len, int flags,
         (void)alen;
         return fail_size(patina_pipe_read(fd, buf, len));
     }
-    int kind = fd >= PATINA_SOCKET_FD_BASE ? patina_net_kind(fd) : -1;
+    int kind = patina_net_kind(fd);
     if (kind == 3) {
         if (addr != NULL) {
             errno = EISCONN;
@@ -210,14 +235,16 @@ ssize_t recvfrom(int fd, void *buf, size_t len, int flags,
 }
 
 ssize_t recv(int fd, void *buf, size_t len, int flags) {
-    if (fd >= PATINA_SOCKET_FD_BASE && patina_pipe_is_endpoint(fd)) {
+    int pair = patina_socket_or_pair(fd);
+    if (pair < 0) return -1;
+    if (pair) {
         if (!patina_stream_flags_supported(flags)) {
             errno = EOPNOTSUPP;
             return -1;
         }
         return fail_size(patina_pipe_read(fd, buf, len));
     }
-    int kind = fd >= PATINA_SOCKET_FD_BASE ? patina_net_kind(fd) : -1;
+    int kind = patina_net_kind(fd);
     if (kind == 3) {
         if (!patina_stream_flags_supported(flags)) {
             errno = EOPNOTSUPP;
@@ -253,10 +280,9 @@ static int patina_linger_off(const void *value, socklen_t len) {
 
 /* Virtual sockets allow only deterministic no-op option writes. */
 int setsockopt(int fd, int level, int optname, const void *value, socklen_t len) {
-    if (fd < PATINA_SOCKET_FD_BASE) {
-        errno = ENOTSOCK;
-        return -1;
-    }
+    /* A socketpair endpoint is a socket for the option calls: the same
+     * deterministic no-op answers. */
+    if (patina_socket_or_pair(fd) < 0) return -1;
     if (level == SOL_SOCKET) {
         switch (optname) {
             case SO_REUSEADDR:
@@ -305,36 +331,30 @@ int setsockopt(int fd, int level, int optname, const void *value, socklen_t len)
 int getsockopt(int fd, int level, int optname, void *value, socklen_t *len) {
     (void)level;
     (void)optname;
-    if (fd < PATINA_SOCKET_FD_BASE) {
-        errno = ENOTSOCK;
-        return -1;
-    }
+    if (patina_socket_or_pair(fd) < 0) return -1;
     if (value != NULL && len != NULL) memset(value, 0, *len);
     return 0;
 }
 
 int listen(int fd, int backlog) {
-    if (fd < PATINA_SOCKET_FD_BASE) {
-        errno = ENOTSOCK;
-        return -1;
-    }
     return fail_int(patina_net_listen(fd, backlog));
 }
 
-int accept(int fd, struct sockaddr *addr, socklen_t *len) {
-    if (fd < PATINA_SOCKET_FD_BASE) {
-        errno = ENOTSOCK;
-        return -1;
-    }
+static int patina_accept_impl(int fd, struct sockaddr *addr, socklen_t *len, int nonblocking,
+                              int cloexec) {
     uint32_t ip = 0;
     uint16_t port = 0;
-    int accepted = patina_net_accept(fd, &ip, &port);
+    int accepted = patina_net_accept(fd, &ip, &port, nonblocking, cloexec);
     if (accepted < 0) {
         errno = patina_errno();
         return -1;
     }
     patina_fill_sockaddr(addr, len, ip, port);
     return accepted;
+}
+
+int accept(int fd, struct sockaddr *addr, socklen_t *len) {
+    return patina_accept_impl(fd, addr, len, 0, 0);
 }
 
 #ifdef __linux__
@@ -347,26 +367,16 @@ int accept4(int fd, struct sockaddr *addr, socklen_t *len, int flags) {
         errno = EINVAL;
         return -1;
     }
-    int accepted = accept(fd, addr, len);
-    if (accepted < 0) return -1;
+    int nonblocking = 0;
 #ifdef SOCK_NONBLOCK
-    if ((flags & SOCK_NONBLOCK) != 0) {
-        if (patina_net_set_nonblocking(accepted, 1) != 0) {
-            errno = patina_errno();
-            return -1;
-        }
-    }
+    nonblocking = (flags & SOCK_NONBLOCK) != 0;
 #endif
-    return accepted;
+    return patina_accept_impl(fd, addr, len, nonblocking, (flags & SOCK_CLOEXEC) != 0);
 }
 
 #endif
 
 int shutdown(int fd, int how) {
-    if (fd < PATINA_SOCKET_FD_BASE) {
-        errno = ENOTSOCK;
-        return -1;
-    }
     int patina_how;
     if (how == SHUT_RD) patina_how = 0;
     else if (how == SHUT_WR) patina_how = 1;
@@ -481,6 +491,7 @@ int socketpair(int domain, int type, int protocol, int sv[2]) {
         return -1;
     }
     int nonblocking = 0;
+    int cloexec = 0;
     int base = type;
 #ifdef SOCK_NONBLOCK
     if (base & SOCK_NONBLOCK) {
@@ -489,7 +500,10 @@ int socketpair(int domain, int type, int protocol, int sv[2]) {
     }
 #endif
 #ifdef SOCK_CLOEXEC
-    base &= ~SOCK_CLOEXEC; /* no exec under the runtime: accept and ignore */
+    if (base & SOCK_CLOEXEC) {
+        cloexec = 1;
+        base &= ~SOCK_CLOEXEC;
+    }
 #endif
     if (base != SOCK_STREAM) {
         errno = EOPNOTSUPP;
@@ -500,7 +514,7 @@ int socketpair(int domain, int type, int protocol, int sv[2]) {
         return -1;
     }
     {
-        int rc = patina_socketpair(&sv[0], &sv[1], nonblocking);
+        int rc = patina_socketpair(&sv[0], &sv[1], nonblocking, cloexec);
         return fail_int(rc);
     }
 }

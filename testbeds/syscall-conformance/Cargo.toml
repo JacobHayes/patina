@@ -49,6 +49,10 @@ name = "fd-pipes"
 path = "probes/fd/pipes.rs"
 
 [[bin]]
+name = "fd-table"
+path = "probes/fd/table.rs"
+
+[[bin]]
 name = "time-clocks"
 path = "probes/time/clocks.rs"
 

@@ -164,11 +164,11 @@ int pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset) {
  */
 __attribute__((noreturn)) static void patina_process_trap(const char *symbol) {
     static const char prefix[] = "patina: process spawn reached under patina: ";
-    write(2, prefix, sizeof prefix - 1);
-    write(2, symbol, strlen(symbol));
+    (void)patina_stdio_write(2, prefix, sizeof prefix - 1);
+    (void)patina_stdio_write(2, symbol, strlen(symbol));
     static const char suffix[] =
         "; the process class is a deterministic-runtime non-goal; failing closed\n";
-    write(2, suffix, sizeof suffix - 1);
+    (void)patina_stdio_write(2, suffix, sizeof suffix - 1);
     /* abort() skips the atexit shutdown flush, so push the captured guest output
      * and this diagnostic to the real descriptors before terminating. */
     patina_flush_captured_stdio();

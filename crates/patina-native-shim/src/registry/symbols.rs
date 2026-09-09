@@ -684,13 +684,22 @@ pub const SYMBOLS: &[SymbolRow] = &[
         Platform::Both,
         Serves::Syscalls(&["dup2", "dup3"]),
         SymbolStatus::Modeled,
-    ),
+    )
+    .probe("fd/table"),
     s(
         "dup3",
         Platform::Linux,
         Serves::Syscalls(&["dup3"]),
         SymbolStatus::Modeled,
-    ),
+    )
+    .probe("fd/table"),
+    s(
+        "close_range",
+        Platform::Linux,
+        Serves::Syscalls(&["close_range"]),
+        SymbolStatus::Modeled,
+    )
+    .probe("fd/table"),
     s(
         "lseek",
         Platform::Both,

@@ -130,7 +130,7 @@ typedef void *(*patina_host_mremap_fn)(void *, size_t, size_t, int, void *);
 struct patina_mapping {
     void *address;       /* backing region base; NULL means the slot is free */
     size_t length;       /* bytes of the mapping, as the caller asked for them */
-    int fd;              /* virtual descriptor the region mirrors */
+    int64_t desc;        /* the retained open file description the region mirrors */
     int64_t offset;      /* byte offset of the region within that file */
     uint64_t inode;      /* deterministic-fs inode: the identity a second map keys on */
     int protection;      /* PROT_* the caller asked for */
@@ -206,8 +206,11 @@ static int patina_mapping_flush(const struct patina_mapping *entry, const char *
     size_t skip = (size_t)((uintptr_t)start - (uintptr_t)entry->address);
     size_t done = 0;
     while (done < length) {
-        intptr_t wrote = patina_pwrite(entry->fd, start + done, length - done,
-                                       entry->offset + (int64_t)(skip + done));
+        /* Through the RETAINED description, not a guest number: the guest may
+         * have closed (or reused) its number since the map, and the kernel's
+         * mapping keeps the file alive regardless. */
+        intptr_t wrote = patina_desc_pwrite(entry->desc, start + done, length - done,
+                                            entry->offset + (int64_t)(skip + done));
         if (wrote < 0) {
             errno = patina_errno();
             return -1;
@@ -274,10 +277,18 @@ static void *patina_mmap_impl(void *hint, size_t length, int protection, int fla
      * the model always picks its own address — which is exactly the latitude
      * the kernel also has. */
     (void)hint;
-    if (fd >= PATINA_SOCKET_FD_BASE || patina_dir_is_dirfd(fd) == 1) {
-        /* Sockets, pipes and directories have no byte-addressable contents. */
-        errno = ENODEV;
-        return MAP_FAILED;
+    {
+        int kind = patina_fd_kind(fd);
+        if (kind < 0) {
+            errno = EBADF;
+            return MAP_FAILED;
+        }
+        if (kind != PATINA_FD_FILE) {
+            /* Sockets, pipes, directories, the streams and the entropy device
+             * have no byte-addressable contents. */
+            errno = ENODEV;
+            return MAP_FAILED;
+        }
     }
 
     /* The inode is the identity a second mapping of the same bytes is matched
@@ -322,6 +333,16 @@ static void *patina_mmap_impl(void *hint, size_t length, int protection, int fla
         errno = saved;
         return MAP_FAILED;
     }
+    /* The mapping holds the file's DESCRIPTION, as the kernel's does: the
+     * writeback at munmap/msync must not depend on the guest keeping its
+     * number open. Released when the region retires. */
+    int64_t desc = patina_fd_retain(fd);
+    if (desc < 0) {
+        int saved = patina_errno();
+        host_munmap(region, length);
+        errno = saved;
+        return MAP_FAILED;
+    }
     if ((protection & PROT_WRITE) == 0) {
         patina_host_mprotect_fn host_mprotect =
             (patina_host_mprotect_fn)patina_host_vm(PATINA_HOST_MPROTECT, "mprotect");
@@ -347,26 +368,30 @@ static void *patina_mmap_impl(void *hint, size_t length, int protection, int fla
         if (entry->offset == offset && entry->length == length && entry->shared == shared &&
             entry->protection == protection) {
             /* The identical range, already mapped: hand back the one backing
-             * region so both mappings genuinely share their bytes. */
+             * region so both mappings genuinely share their bytes. The region
+             * already holds its own description reference. */
             __atomic_fetch_add(&entry->references, 1, __ATOMIC_ACQ_REL);
             host_munmap(region, length);
+            (void)patina_desc_release(desc);
             return entry->address;
         }
         if (!shared && !entry->shared) continue; /* two private copies never alias */
         if ((uint64_t)offset < (uint64_t)entry->offset + entry->length &&
             (uint64_t)entry->offset < (uint64_t)offset + length) {
             host_munmap(region, length);
+            (void)patina_desc_release(desc);
             return patina_mmap_deny(
                 "patina: a second, differently-shaped shared mapping of a file range that is already mapped is not modeled (there is no page cache to keep the two views coherent); failing closed\n");
         }
     }
     if (free_slot == NULL) {
         host_munmap(region, length);
+        (void)patina_desc_release(desc);
         return patina_mmap_deny(
             "patina: more live file-backed mappings than the shim's mapping table holds; failing closed\n");
     }
     free_slot->length = length;
-    free_slot->fd = fd;
+    free_slot->desc = desc;
     free_slot->offset = offset;
     free_slot->inode = inode;
     free_slot->protection = protection;
@@ -424,6 +449,13 @@ int munmap(void *address, size_t length) {
     int result = 0;
     if (retired.writeback &&
         patina_mapping_flush(&retired, (const char *)retired.address, retired.length) != 0) {
+        result = -1;
+    }
+    /* The region's description reference goes with it: if the guest already
+     * closed its number, this is where the file's last reference (and its
+     * recorded close) lands. */
+    if (patina_desc_release(retired.desc) != 0 && result == 0) {
+        errno = patina_errno();
         result = -1;
     }
     int saved = errno;

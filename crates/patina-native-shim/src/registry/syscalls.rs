@@ -336,7 +336,7 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Some(23),
         Family::FdIo,
         Disposition::Modeled,
-        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_dup` / `patina_pipe_dup` / `patina_epoll_dup` / `patina_dirdup` by class).",
+        "Routed by the SUD dispatcher into the same universal entry the C interposer calls (`patina_dup`): the lowest free number in the shim's descriptor table, sharing the open file description, for every kind of descriptor.",
         None,
     )
     .probe("fd/pipes"),
@@ -346,9 +346,10 @@ pub const SYSCALLS: &[SyscallRow] = &[
         None,
         Family::FdIo,
         Disposition::Modeled,
-        "x86_64 legacy alias of `dup3(old, new, 0)`, except `old == new` succeeds without closing (kernel semantics).",
+        "x86_64 legacy alias of `dup3(old, new, 0)`, except `old == new` validates and returns the number without closing (kernel semantics). Binds a CHOSEN number in the shim's descriptor table (`patina_dup2`), closing what it named; `dup2(fd, 1)` redirects captured stdout.",
         None,
-    ),
+    )
+    .probe("fd/table"),
     r(
         "pause",
         34,
@@ -710,7 +711,7 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Some(25),
         Family::FdIo,
         Disposition::Modeled,
-        "F_GETFD/F_SETFD/F_DUPFD/F_DUPFD_CLOEXEC, F_GETFL/F_SETFL (O_NONBLOCK by class), and the record-lock family are modeled; other commands answer EINVAL like the C interposer.",
+        "F_GETFD/F_SETFD (per number), F_GETFL/F_SETFL (per open file description: access mode, O_APPEND, O_NONBLOCK), F_DUPFD/F_DUPFD_CLOEXEC (lowest free number at or above the minimum; EINVAL past RLIMIT_NOFILE), F_GETPIPE_SZ/F_SETPIPE_SZ, and the record-lock family are modeled through the shim's descriptor table; an unknown command answers EINVAL on an open number and EBADF on a closed one, like the C interposer.",
         None,
     )
     .probe("fd/pipes"),
@@ -2725,9 +2726,10 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Some(24),
         Family::FdIo,
         Disposition::Modeled,
-        "Routed like `dup` into a fresh descriptor, then placed at `newfd` by the same table the C `dup3` uses.",
+        "Binds a chosen number to `oldfd`'s open file description in the shim's descriptor table (`patina_dup3`), closing what it named; equal numbers are EINVAL, a target past RLIMIT_NOFILE is EBADF, O_CLOEXEC lands on the new number only.",
         None,
-    ),
+    )
+    .probe("fd/table"),
     r(
         "pipe2",
         293,
@@ -3245,10 +3247,12 @@ pub const SYSCALLS: &[SyscallRow] = &[
         436,
         Some(436),
         Family::FdIo,
-        Disposition::Trap(TRAP_UNMODELED),
-        "A range close over the descriptor table; the F2 unified fd table (lowest-free, holes, cloexec per entry) is what makes it meaningful.",
-        Some("F2 (unified fd table)"),
-    ),
+        Disposition::Modeled,
+        "A range close over the shim's descriptor table (`patina_close_range`): every open number in [first, last] (clamped to the table) is closed, or marked close-on-exec under CLOSE_RANGE_CLOEXEC; CLOSE_RANGE_UNSHARE is a no-op with one process; first > last or an unknown flag is EINVAL.",
+        None,
+    )
+    .probe("fd/table")
+    .since("5.9"),
     r(
         "openat2",
         437,

@@ -319,7 +319,9 @@ impl Divergence {
     }
 }
 
-/// The probe-level declaration covering `(probe, vehicle)`, if any.
+/// The declaration under which `(probe, vehicle)` does not run to completion
+/// under patina — a probe-level one (refused, or its stream lost) or an abort
+/// at a known event — if any. Either way the run leaves no trace to replay.
 pub fn declared_failing<'a>(
     divergences: &'a [Divergence],
     probe: &str,
@@ -327,7 +329,7 @@ pub fn declared_failing<'a>(
 ) -> Option<&'a Divergence> {
     divergences
         .iter()
-        .find(|d| d.kind == "probe" && d.applies_to(probe, vehicle))
+        .find(|d| (d.kind == "probe" || d.kind == "abort") && d.applies_to(probe, vehicle))
 }
 
 // ---- probes.toml and the registry -------------------------------------------

@@ -38,6 +38,10 @@ symbols = ["symlinkat", "readlinkat", "linkat", "fstatat", "openat", "write", "c
 syscalls = ["pipe2", "dup", "fcntl", "flock", "read", "write", "close", "openat"]
 symbols = ["pipe2", "dup", "fcntl", "flock", "read", "write", "close", "openat"]
 
+[probe."fd/table"]
+syscalls = ["dup", "dup2", "dup3", "close_range", "fcntl", "openat", "close", "read", "write", "lseek", "pipe2", "eventfd2"]
+symbols = ["dup", "dup2", "dup3", "close_range", "fcntl", "openat", "close", "read", "write", "lseek", "pipe2", "eventfd"]
+
 [probe."time/clocks"]
 syscalls = ["clock_gettime", "gettimeofday", "nanosleep", "clock_nanosleep"]
 symbols = ["clock_gettime", "gettimeofday", "nanosleep", "clock_nanosleep"]

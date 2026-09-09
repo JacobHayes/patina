@@ -7814,7 +7814,9 @@ fn main() {
     let mut bogus = whole(7);
     let bad_type = unsafe { fcntl(fd, F_SETLK, &mut bogus as *mut Flock) };
     let bad_type_errno = errno();
-    let mut stdio = whole(F_WRLCK);
+    // A READ lock on the write-only standard output is EBADF: fcntl_setlk
+    // checks the lock type against the description's access mode.
+    let mut stdio = whole(F_RDLCK);
     let on_stdio = unsafe { fcntl(1, F_SETLK, &mut stdio as *mut Flock) };
     let stdio_errno = errno();
     println!(
@@ -7829,10 +7831,16 @@ fn main() {
         // open's whole-file F_OFD_SETLK meets the first's (the same per-inode
         // table flock uses) and reports EAGAIN; a byte-range OFD lock and
         // F_OFD_GETLK are a soft ENOSYS rather than a fabricated answer; the
-        // first description's release lets the second acquire.
+        // first description's release lets the second acquire. The second
+        // opener is read-write: a write lock needs a writable description
+        // (fcntl_setlk's access-mode check answers EBADF otherwise).
         let mut first = whole(F_WRLCK);
         let ofd_first = unsafe { fcntl(fd, F_OFD_SETLK, &mut first as *mut Flock) };
-        let second = std::fs::File::open("/locked.db").unwrap();
+        let second = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/locked.db")
+            .unwrap();
         let mut contend = whole(F_WRLCK);
         let ofd_second =
             unsafe { fcntl(second.as_raw_fd(), F_OFD_SETLK, &mut contend as *mut Flock) };

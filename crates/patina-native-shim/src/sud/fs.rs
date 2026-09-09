@@ -48,14 +48,22 @@ pub(super) struct DirIteration {
 /// runtime's own directory table already knows ever appear here.
 pub(super) static DIR_ITERATIONS: Mutex<BTreeMap<i32, DirIteration>> = Mutex::new(BTreeMap::new());
 
-/// Is `fd` a directory descriptor the deterministic filesystem issued? The
-/// runtime's table is the single source of truth, shared with the C interposers.
-pub(super) fn is_dir_fd(fd: i64) -> bool {
+/// What `fd` names, per the descriptor table shared with the C interposers:
+/// `None` for a number that names nothing (or cannot be a number at all).
+pub(super) fn fd_kind(fd: i64) -> Option<c_int> {
     if fd < 0 || fd > c_int::MAX as i64 {
-        return false;
+        return None;
     }
-    // SAFETY: a plain runtime table lookup; no pointers.
-    unsafe { patina_dir_is_dirfd(fd as c_int) != 0 }
+    // SAFETY: a plain table lookup; no pointers.
+    let kind = unsafe { patina_fd_kind(fd as c_int) };
+    (kind >= 0).then_some(kind)
+}
+
+/// Is `fd` a directory descriptor the deterministic filesystem issued? The
+/// descriptor table is the single source of truth, shared with the C
+/// interposers.
+pub(super) fn is_dir_fd(fd: i64) -> bool {
+    fd_kind(fd) == Some(PATINA_FD_DIR)
 }
 
 /// The path a directory descriptor is bound to, or `-errno`.
@@ -104,9 +112,9 @@ impl AtPath {
 ///   honored even then. This mirrors the C `patina_resolve_at`.
 /// - A relative `path` is joined onto the descriptor's bound directory path.
 ///
-/// A descriptor the deterministic filesystem never issued as a DIRECTORY (a real
-/// kernel fd, a file fd, a socket) fails closed with `ENOSYS`, byte-identically
-/// to the C resolver — a raw guest and a libc guest must see the same refusal.
+/// The descriptor is validated as the kernel validates it, byte-identically to
+/// the C resolver: a number that names nothing is `EBADF`, one that names
+/// anything but a directory is `ENOTDIR`.
 pub(super) fn resolve_at(dirfd: i64, path: u64) -> Result<AtPath, i64> {
     if path == 0 {
         return Err(-EFAULT);
@@ -115,8 +123,10 @@ pub(super) fn resolve_at(dirfd: i64, path: u64) -> Result<AtPath, i64> {
     if dirfd == AT_FDCWD {
         return Ok(AtPath::Guest(guest));
     }
-    if !is_dir_fd(dirfd) {
-        return Err(-ENOSYS);
+    match fd_kind(dirfd) {
+        None => return Err(-EBADF),
+        Some(PATINA_FD_DIR) => {}
+        Some(_) => return Err(-ENOTDIR),
     }
     // SAFETY: `path` is the guest's NUL-terminated string pointer.
     let relative = unsafe { std::ffi::CStr::from_ptr(guest) }.to_bytes();
@@ -194,6 +204,9 @@ pub(super) fn openat_patina_flags(flags: u64) -> u32 {
     }
     if flags & O_NONBLOCK != 0 {
         patina_flags |= PATINA_O_NONBLOCK;
+    }
+    if flags & O_CLOEXEC != 0 {
+        patina_flags |= PATINA_O_CLOEXEC;
     }
     patina_flags
 }
@@ -326,21 +339,9 @@ pub(super) fn open_dir_fd(path: &AtPath, flags: u64, read_only: bool) -> i64 {
         return -EISDIR;
     }
     let follow = c_int::from(flags & O_NOFOLLOW == 0);
+    let cloexec = c_int::from(flags & O_CLOEXEC != 0);
     // SAFETY: the resolved path is a valid NUL-terminated string pointer.
-    ret_i32(unsafe { patina_diropen(path.as_ptr(), follow, c_int::from(path_only)) })
-}
-
-/// Duplicate a directory descriptor, SHARING its open description as POSIX
-/// `dup` does — a bare `patina_dup` would hand back an fd the `*at` resolver
-/// does not know, and reopening the descriptor's path would be a second open
-/// (re-resolving a name and re-charging permission). Shared by the `dup` and
-/// `fcntl(F_DUPFD)` rows, mirroring the C `patina_dup_dirfd`.
-pub(super) fn dup_dir_fd(fd: i64) -> i64 {
-    match c_int::try_from(fd) {
-        // SAFETY: an ordinary shim entry point taking a descriptor number.
-        Ok(fd) => ret_i32(unsafe { patina_dirdup(fd) }),
-        Err(_) => -EBADF,
-    }
+    ret_i32(unsafe { patina_diropen(path.as_ptr(), follow, c_int::from(path_only), cloexec) })
 }
 
 /// Copy a guest NUL-terminated C string into an owned [`CString`], or `None` on
@@ -358,10 +359,10 @@ pub(super) fn copy_c_path(path: *const c_char) -> Option<CString> {
 /// close of the descriptor). The next `getdents64` takes a fresh one from the
 /// start.
 ///
-/// `patina_dirclose` calls this too, so a descriptor opened with a raw
-/// `openat` and iterated with a raw `getdents64` but closed through *libc*
-/// still releases its snapshot — the two entry paths share the descriptor, so
-/// they must share its teardown.
+/// The universal `patina_close` calls this for every vacated number, so a
+/// descriptor opened with a raw `openat` and iterated with a raw `getdents64`
+/// but closed through *libc* still releases its snapshot — the two entry paths
+/// share the descriptor, so they must share its teardown.
 pub(crate) fn release_dir_iteration(fd: c_int) {
     if let Some(iteration) = DIR_ITERATIONS.lock().unwrap().remove(&fd) {
         // SAFETY: `snapshot` is the live `patina_read_dir` box for this fd.
@@ -734,10 +735,12 @@ pub(super) fn dt_for_kind(kind: u32) -> u8 {
 /// advancing `patina_read_dir_next` past every entry that fits. Returns the
 /// number of bytes written (0 at end-of-directory) or `-errno`.
 pub(super) fn sys_getdents64(fd: i64, dirp: u64, count: u64) -> i64 {
-    if !is_dir_fd(fd) {
-        // Linux directory iteration needs a directory descriptor; anything else
-        // (a file fd, a socket, a real kernel fd) is ENOTDIR.
-        return -ENOTDIR;
+    // Linux directory iteration needs a directory descriptor: a number that
+    // names nothing is EBADF, anything else (a file, a socket) is ENOTDIR.
+    match fd_kind(fd) {
+        None => return -EBADF,
+        Some(PATINA_FD_DIR) => {}
+        Some(_) => return -ENOTDIR,
     }
     if dirp == 0 {
         return -EFAULT;
@@ -1035,7 +1038,11 @@ pub(super) fn sys_readlinkat(dirfd: i64, path: u64, buf: u64, bufsize: u64) -> i
     // hands out names a resolved entry, never a symlink, so the honest answer is
     // the kernel's own for a non-symlink target: ENOENT.
     if dirfd != AT_FDCWD && path != 0 && names_current_directory_empty(path) {
-        return if is_dir_fd(dirfd) { -ENOENT } else { -ENOSYS };
+        return if fd_kind(dirfd).is_some() {
+            -ENOENT
+        } else {
+            -EBADF
+        };
     }
     let resolved = match resolve_at(dirfd, path) {
         Ok(resolved) => resolved,
