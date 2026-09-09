@@ -1,0 +1,130 @@
+{"header":{"schema":"patina.conformance/v1","probe":"readiness/epoll","os":"linux","arch":"x86_64","kernel":"6.8.0-139-generic","glibc":"2.39","virtual_abi":"6.8"}}
+{"seq":0,"op":"epoll_create1","args":{"flags":524288},"ret":"fd@0","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":1,"op":"epoll_create1","args":{"flags":4660},"ret":-1,"errno":"EINVAL","fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":2,"op":"check","args":{"label":"epoll_create1 with an unknown flag is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":3,"op":"eventfd2","args":{"flags":526336,"initval":0},"ret":"fd@3","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":4,"op":"eventfd2","args":{"flags":4660,"initval":0},"ret":-1,"errno":"EINVAL","fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":5,"op":"check","args":{"label":"eventfd2 with an unknown flag is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":6,"op":"epoll_ctl","args":{"data":7,"epfd":"fd@0","events":1,"fd":"fd@3","op":1},"ret":0,"errno":null,"fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":7,"op":"check","args":{"label":"EPOLL_CTL_ADD"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":8,"op":"epoll_ctl","args":{"data":7,"epfd":"fd@0","events":1,"fd":"fd@3","op":1},"ret":-1,"errno":"EEXIST","fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":9,"op":"check","args":{"label":"adding twice is EEXIST"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":10,"op":"epoll_ctl","args":{"data":8,"epfd":"fd@0","events":5,"fd":"fd@3","op":3},"ret":0,"errno":null,"fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":11,"op":"check","args":{"label":"EPOLL_CTL_MOD"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":12,"op":"epoll_wait","args":{"epfd":"fd@0","maxevents":8,"timeout_ms":0},"ret":1,"errno":null,"fields":{"events":["8:0x4"]},"norm":{"args.epfd":"relative:fd"}}
+{"seq":13,"op":"check","args":{"label":"a fresh counter eventfd is writable, not readable"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":14,"op":"epoll_ctl","args":{"data":7,"epfd":"fd@0","events":1,"fd":"fd@3","op":3},"ret":0,"errno":null,"fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":15,"op":"check","args":{"label":"MOD back to EPOLLIN"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":16,"op":"epoll_wait","args":{"epfd":"fd@0","maxevents":8,"timeout_ms":0},"ret":0,"errno":null,"fields":{"events":[]},"norm":{"args.epfd":"relative:fd"}}
+{"seq":17,"op":"check","args":{"label":"nothing ready: timeout 0 returns 0"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":18,"op":"write","args":{"fd":"fd@3","len":8},"ret":8,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":19,"op":"check","args":{"label":"write 1 to the eventfd"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":20,"op":"epoll_wait","args":{"epfd":"fd@0","maxevents":8,"timeout_ms":0},"ret":1,"errno":null,"fields":{"events":["7:0x1"]},"norm":{"args.epfd":"relative:fd"}}
+{"seq":21,"op":"check","args":{"label":"the eventfd is readable with its data"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":22,"op":"epoll_wait","args":{"epfd":"fd@0","maxevents":8,"timeout_ms":0},"ret":1,"errno":null,"fields":{"events":["7:0x1"]},"norm":{"args.epfd":"relative:fd"}}
+{"seq":23,"op":"check","args":{"label":"level-triggered: reported again"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":24,"op":"read","args":{"fd":"fd@3","len":8},"ret":8,"errno":null,"fields":{"data":"\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000"},"norm":{"args.fd":"relative:fd"}}
+{"seq":25,"op":"check","args":{"label":"read returns the counter and resets it"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":26,"op":"epoll_wait","args":{"epfd":"fd@0","maxevents":8,"timeout_ms":0},"ret":0,"errno":null,"fields":{"events":[]},"norm":{"args.epfd":"relative:fd"}}
+{"seq":27,"op":"check","args":{"label":"drained: not reported"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":28,"op":"read","args":{"fd":"fd@3","len":8},"ret":-1,"errno":"EAGAIN","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":29,"op":"check","args":{"label":"a non-blocking read of an empty eventfd is EAGAIN"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":30,"op":"read","args":{"fd":"fd@3","len":4},"ret":-1,"errno":"EINVAL","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":31,"op":"check","args":{"label":"a short eventfd read is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":32,"op":"write","args":{"fd":"fd@3","len":8},"ret":-1,"errno":"EINVAL","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":33,"op":"check","args":{"label":"writing u64::MAX is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":34,"op":"write","args":{"fd":"fd@3","len":8},"ret":8,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":35,"op":"write","args":{"fd":"fd@3","len":8},"ret":8,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":36,"op":"read","args":{"fd":"fd@3","len":8},"ret":8,"errno":null,"fields":{"data":"\u0005\u0000\u0000\u0000\u0000\u0000\u0000\u0000"},"norm":{"args.fd":"relative:fd"}}
+{"seq":37,"op":"check","args":{"label":"writes accumulate into the counter"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":38,"op":"epoll_ctl","args":{"data":7,"epfd":"fd@0","events":2147483649,"fd":"fd@3","op":3},"ret":0,"errno":null,"fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":39,"op":"check","args":{"label":"MOD to edge-triggered"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":40,"op":"write","args":{"fd":"fd@3","len":8},"ret":8,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":41,"op":"epoll_wait","args":{"epfd":"fd@0","maxevents":8,"timeout_ms":0},"ret":1,"errno":null,"fields":{"events":["7:0x1"]},"norm":{"args.epfd":"relative:fd"}}
+{"seq":42,"op":"check","args":{"label":"edge-triggered: reported once"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":43,"op":"epoll_wait","args":{"epfd":"fd@0","maxevents":8,"timeout_ms":0},"ret":0,"errno":null,"fields":{"events":[]},"norm":{"args.epfd":"relative:fd"}}
+{"seq":44,"op":"check","args":{"label":"edge-triggered: not reported again without a new edge"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":45,"op":"write","args":{"fd":"fd@3","len":8},"ret":8,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":46,"op":"epoll_wait","args":{"epfd":"fd@0","maxevents":8,"timeout_ms":0},"ret":1,"errno":null,"fields":{"events":["7:0x1"]},"norm":{"args.epfd":"relative:fd"}}
+{"seq":47,"op":"check","args":{"label":"edge-triggered: a new write without draining is a new edge"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":48,"op":"read","args":{"fd":"fd@3","len":8},"ret":8,"errno":null,"fields":{"data":"\u0002\u0000\u0000\u0000\u0000\u0000\u0000\u0000"},"norm":{"args.fd":"relative:fd"}}
+{"seq":49,"op":"epoll_ctl","args":{"data":7,"epfd":"fd@0","events":1,"fd":"fd@3","op":3},"ret":0,"errno":null,"fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":50,"op":"check","args":{"label":"MOD back to level-triggered"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":51,"op":"epoll_ctl","args":{"data":0,"epfd":"fd@0","events":0,"fd":"fd@3","op":2},"ret":0,"errno":null,"fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":52,"op":"check","args":{"label":"EPOLL_CTL_DEL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":53,"op":"epoll_ctl","args":{"data":0,"epfd":"fd@0","events":0,"fd":"fd@3","op":2},"ret":-1,"errno":"ENOENT","fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":54,"op":"check","args":{"label":"deleting twice is ENOENT"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":55,"op":"epoll_ctl","args":{"data":7,"epfd":"fd@0","events":1,"fd":"fd@3","op":3},"ret":-1,"errno":"ENOENT","fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":56,"op":"check","args":{"label":"MOD of an unregistered descriptor is ENOENT"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":57,"op":"epoll_ctl","args":{"data":7,"epfd":"fd@0","events":1,"fd":"fd@3","op":99},"ret":-1,"errno":"EINVAL","fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":58,"op":"check","args":{"label":"an unknown op is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":59,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":66,"mode":416,"path":"/tmp/syscall-conformance/readiness-epoll/file"},"ret":"fd@59","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":60,"op":"epoll_ctl","args":{"data":1,"epfd":"fd@0","events":1,"fd":"fd@0","op":1},"ret":-1,"errno":"EINVAL","fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":61,"op":"check","args":{"label":"adding the epoll descriptor to itself is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":62,"op":"epoll_ctl","args":{"data":1,"epfd":"fd@0","events":1,"fd":"fd@62","op":1},"ret":-1,"errno":"EBADF","fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":63,"op":"check","args":{"label":"adding a closed descriptor is EBADF"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":64,"op":"epoll_ctl","args":{"data":1,"epfd":"fd@3","events":1,"fd":"fd@0","op":1},"ret":-1,"errno":"EINVAL","fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":65,"op":"check","args":{"label":"epoll_ctl on a non-epoll descriptor is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":66,"op":"epoll_ctl","args":{"data":1,"epfd":"fd@3","events":1,"fd":"fd@59","op":1},"ret":-1,"errno":"EPERM","fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":67,"op":"check","args":{"label":"a non-epoll descriptor with an unpollable target is EPERM"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":68,"op":"epoll_wait","args":{"epfd":"fd@0","maxevents":0,"timeout_ms":0},"ret":-1,"errno":"EINVAL","fields":{},"norm":{"args.epfd":"relative:fd"}}
+{"seq":69,"op":"check","args":{"label":"epoll_wait with maxevents 0 is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":70,"op":"epoll_wait","args":{"epfd":"fd@62","maxevents":8,"timeout_ms":0},"ret":-1,"errno":"EBADF","fields":{},"norm":{"args.epfd":"relative:fd"}}
+{"seq":71,"op":"check","args":{"label":"epoll_wait on a closed descriptor is EBADF"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":72,"op":"epoll_wait","args":{"epfd":"fd@3","maxevents":8,"timeout_ms":0},"ret":-1,"errno":"EINVAL","fields":{},"norm":{"args.epfd":"relative:fd"}}
+{"seq":73,"op":"check","args":{"label":"epoll_wait on a non-epoll descriptor is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":74,"op":"eventfd2","args":{"flags":2049,"initval":3},"ret":"fd@74","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":75,"op":"read","args":{"fd":"fd@74","len":8},"ret":8,"errno":null,"fields":{"data":"\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000"},"norm":{"args.fd":"relative:fd"}}
+{"seq":76,"op":"read","args":{"fd":"fd@74","len":8},"ret":8,"errno":null,"fields":{"data":"\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000"},"norm":{"args.fd":"relative:fd"}}
+{"seq":77,"op":"read","args":{"fd":"fd@74","len":8},"ret":8,"errno":null,"fields":{"data":"\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000"},"norm":{"args.fd":"relative:fd"}}
+{"seq":78,"op":"check","args":{"label":"EFD_SEMAPHORE hands out one unit per read"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":79,"op":"read","args":{"fd":"fd@74","len":8},"ret":-1,"errno":"EAGAIN","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":80,"op":"check","args":{"label":"the semaphore is empty afterwards"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":81,"op":"pipe2","args":{"flags":524288},"ret":0,"errno":null,"fields":{"read_end":"fd@81","write_end":"fd@81.1"},"norm":{"fields.read_end":"relative:fd","fields.write_end":"relative:fd"}}
+{"seq":82,"op":"epoll_ctl","args":{"data":1,"epfd":"fd@0","events":1,"fd":"fd@81","op":1},"ret":0,"errno":null,"fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":83,"op":"check","args":{"label":"ADD the pipe read end"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":84,"op":"epoll_ctl","args":{"data":2,"epfd":"fd@0","events":4,"fd":"fd@81.1","op":1},"ret":0,"errno":null,"fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":85,"op":"check","args":{"label":"ADD the pipe write end"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":86,"op":"epoll_wait","args":{"epfd":"fd@0","maxevents":8,"timeout_ms":0},"ret":1,"errno":null,"fields":{"events":["2:0x4"]},"norm":{"args.epfd":"relative:fd"}}
+{"seq":87,"op":"check","args":{"label":"an empty pipe: only the writer is ready"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":88,"op":"write","args":{"fd":"fd@81.1","len":1},"ret":1,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":89,"op":"epoll_wait","args":{"epfd":"fd@0","maxevents":8,"timeout_ms":0},"ret":2,"errno":null,"fields":{"events":["1:0x1","2:0x4"]},"norm":{"args.epfd":"relative:fd"}}
+{"seq":90,"op":"check","args":{"label":"after a write both ends are ready"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":91,"op":"epoll_wait","args":{"epfd":"fd@0","maxevents":1,"timeout_ms":0},"ret":1,"errno":null,"fields":{"events":["2:0x4"]},"norm":{"args.epfd":"relative:fd"}}
+{"seq":92,"op":"check","args":{"label":"maxevents caps the delivery"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":93,"op":"close","args":{"fd":"fd@81.1"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":94,"op":"check","args":{"label":"close the writer"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":95,"op":"epoll_wait","args":{"epfd":"fd@0","maxevents":8,"timeout_ms":0},"ret":1,"errno":null,"fields":{"events":["1:0x11"]},"norm":{"args.epfd":"relative:fd"}}
+{"seq":96,"op":"check","args":{"label":"closing the writer removes its interest and hangs up the reader"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":97,"op":"read","args":{"fd":"fd@81","len":8},"ret":1,"errno":null,"fields":{"data":"x"},"norm":{"args.fd":"relative:fd"}}
+{"seq":98,"op":"epoll_wait","args":{"epfd":"fd@0","maxevents":8,"timeout_ms":0},"ret":1,"errno":null,"fields":{"events":["1:0x10"]},"norm":{"args.epfd":"relative:fd"}}
+{"seq":99,"op":"check","args":{"label":"a drained hung-up pipe still reports EPOLLHUP"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":100,"op":"epoll_ctl","args":{"data":0,"epfd":"fd@0","events":0,"fd":"fd@81","op":2},"ret":0,"errno":null,"fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":101,"op":"check","args":{"label":"DEL the reader"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":102,"op":"clock_gettime","args":{"clock":1},"ret":0,"errno":null,"fields":{"ns":"mono:first"},"norm":{"fields.ns":"monotonic"}}
+{"seq":103,"op":"epoll_wait","args":{"epfd":"fd@0","maxevents":8,"timeout_ms":2},"ret":0,"errno":null,"fields":{"events":[]},"norm":{"args.epfd":"relative:fd"}}
+{"seq":104,"op":"check","args":{"label":"a timed wait with nothing ready returns 0"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":105,"op":"clock_gettime","args":{"clock":1},"ret":0,"errno":null,"fields":{"ns":"mono:>="},"norm":{"fields.ns":"monotonic"}}
+{"seq":106,"op":"check","args":{"label":"the timed wait advanced the clock by at least the timeout"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":107,"op":"close","args":{"fd":"fd@74"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":108,"op":"close","args":{"fd":"fd@81"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":109,"op":"epoll_ctl","args":{"data":1,"epfd":"fd@0","events":1,"fd":"fd@59","op":1},"ret":-1,"errno":"EPERM","fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":110,"op":"check","args":{"label":"adding a regular file is EPERM"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":111,"op":"epoll_ctl","args":{"data":7,"epfd":"fd@0","events":1,"fd":"fd@3","op":1},"ret":0,"errno":null,"fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":112,"op":"check","args":{"label":"ADD the eventfd back"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":113,"op":"epoll_ctl","args":{"data":7,"epfd":"fd@0","events":1073741825,"fd":"fd@3","op":3},"ret":0,"errno":null,"fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":114,"op":"check","args":{"label":"MOD to EPOLLONESHOT"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":115,"op":"write","args":{"fd":"fd@3","len":8},"ret":8,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":116,"op":"epoll_wait","args":{"epfd":"fd@0","maxevents":8,"timeout_ms":0},"ret":1,"errno":null,"fields":{"events":["7:0x1"]},"norm":{"args.epfd":"relative:fd"}}
+{"seq":117,"op":"check","args":{"label":"oneshot: reported once"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":118,"op":"epoll_wait","args":{"epfd":"fd@0","maxevents":8,"timeout_ms":0},"ret":0,"errno":null,"fields":{"events":[]},"norm":{"args.epfd":"relative:fd"}}
+{"seq":119,"op":"check","args":{"label":"oneshot: disarmed until re-armed"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":120,"op":"epoll_ctl","args":{"data":7,"epfd":"fd@0","events":1,"fd":"fd@3","op":3},"ret":0,"errno":null,"fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":121,"op":"check","args":{"label":"re-arm with MOD"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":122,"op":"epoll_wait","args":{"epfd":"fd@0","maxevents":8,"timeout_ms":0},"ret":1,"errno":null,"fields":{"events":["7:0x1"]},"norm":{"args.epfd":"relative:fd"}}
+{"seq":123,"op":"check","args":{"label":"re-armed: reported"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":124,"op":"close","args":{"fd":"fd@59"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":125,"op":"close","args":{"fd":"fd@3"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":126,"op":"close","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":127,"op":"epoll_wait","args":{"epfd":"fd@127","maxevents":8,"timeout_ms":0},"ret":-1,"errno":"EBADF","fields":{},"norm":{"args.epfd":"relative:fd"}}
+{"seq":128,"op":"check","args":{"label":"epoll_wait on the closed epoll descriptor is EBADF"},"ret":1,"errno":null,"fields":{},"norm":{}}

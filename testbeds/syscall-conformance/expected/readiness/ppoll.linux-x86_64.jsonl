@@ -1,0 +1,33 @@
+{"header":{"schema":"patina.conformance/v1","probe":"readiness/ppoll","os":"linux","arch":"x86_64","kernel":"6.8.0-139-generic","glibc":"2.39","virtual_abi":"6.8"}}
+{"seq":0,"op":"pipe2","args":{"flags":524288},"ret":0,"errno":null,"fields":{"read_end":"fd@0","write_end":"fd@0.1"},"norm":{"fields.read_end":"relative:fd","fields.write_end":"relative:fd"}}
+{"seq":1,"op":"ppoll","args":{"events0":1,"fd0":"fd@0","nfds":1,"timeout_ns":0},"ret":0,"errno":null,"fields":{"revents0":0},"norm":{"args.fd0":"relative:fd"}}
+{"seq":2,"op":"check","args":{"label":"an empty pipe is not readable"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":3,"op":"write","args":{"fd":"fd@0.1","len":1},"ret":1,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":4,"op":"ppoll","args":{"events0":1,"fd0":"fd@0","nfds":1,"timeout_ns":0},"ret":1,"errno":null,"fields":{"revents0":1},"norm":{"args.fd0":"relative:fd"}}
+{"seq":5,"op":"check","args":{"label":"after a write it is readable"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":6,"op":"ppoll","args":{"events0":1,"events1":4,"fd0":"fd@0","fd1":"fd@0.1","nfds":2,"timeout_ns":0},"ret":2,"errno":null,"fields":{"revents0":1,"revents1":4},"norm":{"args.fd0":"relative:fd","args.fd1":"relative:fd"}}
+{"seq":7,"op":"check","args":{"label":"both ends report"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":8,"op":"read","args":{"fd":"fd@0","len":8},"ret":1,"errno":null,"fields":{"data":"x"},"norm":{"args.fd":"relative:fd"}}
+{"seq":9,"op":"clock_gettime","args":{"clock":1},"ret":0,"errno":null,"fields":{"ns":"mono:first"},"norm":{"fields.ns":"monotonic"}}
+{"seq":10,"op":"ppoll","args":{"events0":1,"fd0":"fd@0","nfds":1,"timeout_ns":2000000},"ret":0,"errno":null,"fields":{"revents0":0},"norm":{"args.fd0":"relative:fd"}}
+{"seq":11,"op":"check","args":{"label":"a timed wait with nothing ready returns 0"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":12,"op":"clock_gettime","args":{"clock":1},"ret":0,"errno":null,"fields":{"ns":"mono:>="},"norm":{"fields.ns":"monotonic"}}
+{"seq":13,"op":"check","args":{"label":"the timed wait advanced the clock by at least the timeout"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":14,"op":"ppoll","args":{"events0":1,"fd0":"fd@14","nfds":1,"timeout_ns":0},"ret":1,"errno":null,"fields":{"revents0":32},"norm":{"args.fd0":"relative:fd"}}
+{"seq":15,"op":"check","args":{"label":"a closed descriptor reports POLLNVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":16,"op":"ppoll","args":{"events0":1,"fd0":-1,"nfds":1,"timeout_ns":0},"ret":0,"errno":null,"fields":{"revents0":0},"norm":{"args.fd0":"relative:fd"}}
+{"seq":17,"op":"check","args":{"label":"a negative descriptor is ignored"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":18,"op":"ppoll","args":{"nfds":0,"timeout_ns":1000000},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":19,"op":"check","args":{"label":"ppoll with no descriptors is a sleep"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":20,"op":"close","args":{"fd":"fd@0.1"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":21,"op":"check","args":{"label":"close the writer"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":22,"op":"ppoll","args":{"events0":1,"fd0":"fd@0","nfds":1,"timeout_ns":0},"ret":1,"errno":null,"fields":{"revents0":16},"norm":{"args.fd0":"relative:fd"}}
+{"seq":23,"op":"check","args":{"label":"a pipe with no writer reports POLLHUP"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":24,"op":"eventfd2","args":{"flags":2048,"initval":0},"ret":"fd@24","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":25,"op":"ppoll","args":{"events0":5,"fd0":"fd@24","nfds":1,"timeout_ns":0},"ret":1,"errno":null,"fields":{"revents0":4},"norm":{"args.fd0":"relative:fd"}}
+{"seq":26,"op":"check","args":{"label":"a fresh eventfd is writable only"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":27,"op":"write","args":{"fd":"fd@24","len":8},"ret":8,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":28,"op":"ppoll","args":{"events0":5,"fd0":"fd@24","nfds":1,"timeout_ns":0},"ret":1,"errno":null,"fields":{"revents0":5},"norm":{"args.fd0":"relative:fd"}}
+{"seq":29,"op":"check","args":{"label":"a written eventfd is readable and writable"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":30,"op":"close","args":{"fd":"fd@24"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":31,"op":"close","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}

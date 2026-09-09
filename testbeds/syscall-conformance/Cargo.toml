@@ -1,0 +1,91 @@
+# Standalone package: its own empty [workspace] table keeps it OUT of the root
+# Patina workspace so `cargo` here never touches crates/ or the root manifest.
+#
+# The syscall-conformance testbed (docs/arcs/syscall-conformance.md §4). Every
+# `probes/<family>/<name>.rs` binary is a self-checking scenario that issues its
+# calls through one of three vehicles (`--vehicle libc|syscall|raw`) and writes
+# typed observation events as JSONL on stdout. The same binary runs natively
+# (the host kernel is the oracle), under `cargo patina run`, and under
+# `cargo patina replay`; `run.sh` diffs the streams against the blessed
+# `expected/` files modulo the declared `divergences.toml`. `conform` is the
+# harness half: normalizer, differ, host gate, and the planted-failure selftest.
+[workspace]
+
+[package]
+name = "syscall-conformance"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "conform"
+path = "src/bin/conform.rs"
+
+[[bin]]
+name = "fs-open_rw"
+path = "probes/fs/open_rw.rs"
+
+[[bin]]
+name = "fs-metadata"
+path = "probes/fs/metadata.rs"
+
+[[bin]]
+name = "fs-dirs"
+path = "probes/fs/dirs.rs"
+
+[[bin]]
+name = "fs-getdents"
+path = "probes/fs/getdents.rs"
+
+[[bin]]
+name = "fs-links"
+path = "probes/fs/links.rs"
+
+[[bin]]
+name = "fd-pipes"
+path = "probes/fd/pipes.rs"
+
+[[bin]]
+name = "time-clocks"
+path = "probes/time/clocks.rs"
+
+[[bin]]
+name = "entropy-getrandom"
+path = "probes/entropy/getrandom.rs"
+
+[[bin]]
+name = "net-udp"
+path = "probes/net/udp.rs"
+
+[[bin]]
+name = "net-tcp"
+path = "probes/net/tcp.rs"
+
+[[bin]]
+name = "readiness-epoll"
+path = "probes/readiness/epoll.rs"
+
+[[bin]]
+name = "readiness-ppoll"
+path = "probes/readiness/ppoll.rs"
+
+[[bin]]
+name = "thread-futex"
+path = "probes/thread/futex.rs"
+
+[[bin]]
+name = "selftest-leak"
+path = "probes/selftest/leak.rs"
+
+[dependencies]
+# Pinned exactly, per testbeds convention (the versions the root lockfile pins).
+libc = "=0.2.189"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+toml = "=0.8.23"
+
+[profile.release]
+panic = "unwind"

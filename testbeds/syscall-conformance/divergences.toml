@@ -1,0 +1,954 @@
+# Every declared host≠patina divergence, with its reason and the responsible
+# code. `run.sh --mode patina` fails on an undeclared divergence AND on a
+# declared one that no longer diverges (stale), so this file is always exactly
+# the current gap. Reasons are `pending: <family>` naming the arc family
+# (docs/arcs/syscall-conformance.md §6) that closes them; F0/F2/F3 name the
+# foundations.
+#
+# [[divergence]]
+# probe   = "fs/open_rw"        # probe id (required)
+# vehicle = "syscall"           # optional: only this vehicle (absent = every vehicle)
+# kind    = "field"             # "field" (default), "abort" (dies at `seq`; the
+#                               # prefix is compared), or "probe" (the whole probe
+#                               # fails under patina)
+# op      = "openat"            # field kind: the event op, or "*"
+# field   = "errno"             # field kind: op | ret | errno | args.<k> | fields.<k>
+# seq     = 12                  # optional: one event index
+# seqs    = [12, 14]            # optional: a set of event indices
+# label   = "…"                 # optional: only `check` events with this label
+# reason  = "pending: fs — …"   # required
+#
+# Event indices refer to the blessed expected/<probe>.linux-x86_64.jsonl.
+
+# ---- the syscall(2) vehicle: F0 --------------------------------------------
+# The shim's `syscall` interposer forwards only SYS_futex and SYS_getrandom
+# (crates/patina-native-shim/c/patina_posix.c:742) and answers ENOSYS to every
+# other number, so a probe whose first row is anything else dies on its first
+# call. F0 routes `syscall(2)` into the registry dispatcher.
+
+[[divergence]]
+probe = "fs/open_rw"
+vehicle = "syscall"
+kind = "probe"
+reason = "pending: F0 — syscall(2) answers ENOSYS to every number but futex/getrandom (patina_posix.c:742)"
+
+[[divergence]]
+probe = "fs/metadata"
+vehicle = "syscall"
+kind = "probe"
+reason = "pending: F0 — syscall(2) answers ENOSYS to every number but futex/getrandom (patina_posix.c:742)"
+
+[[divergence]]
+probe = "fs/dirs"
+vehicle = "syscall"
+kind = "probe"
+reason = "pending: F0 — syscall(2) answers ENOSYS to every number but futex/getrandom (patina_posix.c:742)"
+
+[[divergence]]
+probe = "fs/links"
+vehicle = "syscall"
+kind = "probe"
+reason = "pending: F0 — syscall(2) answers ENOSYS to every number but futex/getrandom (patina_posix.c:742)"
+
+[[divergence]]
+probe = "fd/pipes"
+vehicle = "syscall"
+kind = "probe"
+reason = "pending: F0 — syscall(2) answers ENOSYS to every number but futex/getrandom (patina_posix.c:742)"
+
+[[divergence]]
+probe = "time/clocks"
+vehicle = "syscall"
+kind = "probe"
+reason = "pending: F0 — syscall(2) answers ENOSYS to clock_gettime/gettimeofday/nanosleep/clock_nanosleep (patina_posix.c:742)"
+
+[[divergence]]
+probe = "thread/futex"
+vehicle = "syscall"
+kind = "probe"
+reason = "pending: F0 — futex forwards but the probe's clock_gettime reads answer ENOSYS (patina_posix.c:742)"
+
+[[divergence]]
+probe = "net/udp"
+vehicle = "syscall"
+kind = "probe"
+reason = "pending: F0 — syscall(2) answers ENOSYS to socket (patina_posix.c:742)"
+
+[[divergence]]
+probe = "net/tcp"
+vehicle = "syscall"
+kind = "probe"
+reason = "pending: F0 — syscall(2) answers ENOSYS to socket (patina_posix.c:742)"
+
+[[divergence]]
+probe = "readiness/epoll"
+vehicle = "syscall"
+kind = "probe"
+reason = "pending: F0 — syscall(2) answers ENOSYS to epoll_create1 (patina_posix.c:742)"
+
+# ---- libc symbols the shim does not interpose (audit refusal) ---------------
+
+[[divergence]]
+probe = "fs/getdents"
+kind = "probe"
+reason = "pending: fs — the libc symbol getdents64 is not interposed (no definition in patina_posix.c; C readdir is the only door), so the pre-run audit refuses the probe binary as unknown-import for every vehicle"
+
+[[divergence]]
+probe = "readiness/ppoll"
+kind = "probe"
+reason = "pending: network+readiness — the libc symbol ppoll is not interposed (no definition in patina_posix.c; only the SUD ppoll row exists), so the pre-run audit refuses the probe binary as wait-multiplex for every vehicle"
+
+# ---- fatal traps that lose the stream ---------------------------------------
+# These probes die inside the runtime and the fatal path (crates/patina-native-
+# shim/src/lib.rs:1816 trap_fatal) does not flush the captured stdout, so no
+# prefix survives to compare; they become `kind = "abort"` declarations once
+# it does.
+
+[[divergence]]
+probe = "net/udp"
+vehicle = "libc"
+kind = "probe"
+reason = "pending: network — recvfrom(MSG_DONTWAIT) on a blocking datagram socket ignores the flag and parks the only task (patina_posix.c:4153 → patina-sched-det lib.rs:574 deadlock fatal); trap_fatal (lib.rs:1816) drops the captured stdout"
+
+[[divergence]]
+probe = "net/udp"
+vehicle = "raw"
+kind = "probe"
+reason = "pending: network — recvfrom(MSG_DONTWAIT) on a blocking datagram socket ignores the flag and parks the only task (sud.rs recvfrom → patina-sched-det lib.rs:574 deadlock fatal); trap_fatal (lib.rs:1816) drops the captured stdout"
+
+[[divergence]]
+probe = "readiness/epoll"
+vehicle = "libc"
+kind = "probe"
+reason = "pending: network+readiness — epoll_ctl on a regular-file descriptor is a fatal trap (lib.rs:10743) instead of EPERM, and EPOLLONESHOT is a fatal trap (lib.rs:10730); trap_fatal (lib.rs:1816) drops the captured stdout"
+
+[[divergence]]
+probe = "readiness/epoll"
+vehicle = "raw"
+kind = "probe"
+reason = "pending: network+readiness — epoll_ctl on a regular-file descriptor is a fatal trap (lib.rs:10743) instead of EPERM, and EPOLLONESHOT is a fatal trap (lib.rs:10730); trap_fatal (lib.rs:1816) drops the captured stdout"
+
+# ---- fs/open_rw ----------------------------------------------------------------
+
+[[divergence]]
+probe = "fs/open_rw"
+op = "openat"
+field = "errno"
+seq = 55
+reason = "pending: F3 — a path component through a regular file answers ENOENT, not ENOTDIR (crates/patina-fs-mem/src/lib.rs:500 resolve_guard)"
+
+[[divergence]]
+probe = "fs/open_rw"
+op = "check"
+field = "ret"
+label = "a component through a file is ENOTDIR"
+reason = "pending: F3 — see openat seq 55"
+
+[[divergence]]
+probe = "fs/open_rw"
+op = "openat"
+field = "errno"
+seq = 57
+reason = "pending: F3 — a trailing slash on a regular file opens it instead of ENOTDIR (fs-mem resolver, lib.rs:500)"
+
+[[divergence]]
+probe = "fs/open_rw"
+op = "openat"
+field = "ret"
+seq = 57
+reason = "pending: F3 — see openat seq 57 (the open succeeds and hands back a descriptor)"
+
+[[divergence]]
+probe = "fs/open_rw"
+op = "check"
+field = "ret"
+label = "a trailing slash on a file is ENOTDIR"
+reason = "pending: F3 — see openat seq 57"
+
+[[divergence]]
+probe = "fs/open_rw"
+op = "openat"
+field = "errno"
+seq = 68
+reason = "pending: F2 — a dirfd that is a regular-file descriptor is refused ENOSYS instead of ENOTDIR (patina_posix.c:1248: only virtual directory descriptors resolve *at)"
+
+[[divergence]]
+probe = "fs/open_rw"
+op = "check"
+field = "ret"
+label = "a dirfd that is a file is ENOTDIR"
+reason = "pending: F2 — see openat seq 68"
+
+[[divergence]]
+probe = "fs/open_rw"
+op = "openat"
+field = "errno"
+seq = 70
+reason = "pending: F2 — a dirfd that is not open is refused ENOSYS instead of EBADF (patina_posix.c:1248)"
+
+[[divergence]]
+probe = "fs/open_rw"
+op = "check"
+field = "ret"
+label = "a dirfd that is not open is EBADF"
+reason = "pending: F2 — see openat seq 70"
+
+[[divergence]]
+probe = "fs/open_rw"
+op = "openat"
+field = "errno"
+seq = 72
+reason = "pending: F3 — an empty path opens something instead of ENOENT (fs-mem resolver, lib.rs:500)"
+
+[[divergence]]
+probe = "fs/open_rw"
+op = "openat"
+field = "ret"
+seq = 72
+reason = "pending: F3 — see openat seq 72 (the open succeeds and hands back a descriptor)"
+
+[[divergence]]
+probe = "fs/open_rw"
+op = "check"
+field = "ret"
+label = "an empty path is ENOENT"
+reason = "pending: F3 — see openat seq 72"
+
+[[divergence]]
+probe = "fs/open_rw"
+op = "openat"
+field = "ret"
+seq = 84
+reason = "pending: F2 — a closed descriptor number is never reused; the shim hands out the driver's next number (lib.rs:3932, SOCKET_FD_BASE next_fd lib.rs:7451) instead of the lowest free one"
+
+[[divergence]]
+probe = "fs/open_rw"
+op = "close"
+field = "args.fd"
+seq = 93
+reason = "pending: F2 — the descriptor closed here is the non-reused one from openat seq 84"
+
+[[divergence]]
+probe = "fs/open_rw"
+op = "check"
+field = "ret"
+label = "the lowest free descriptor number is reused"
+reason = "pending: F2 — see openat seq 84"
+
+# ---- fs/metadata ---------------------------------------------------------------
+
+[[divergence]]
+probe = "fs/metadata"
+op = "fstat"
+field = "fields.uid"
+reason = "pending: identity — st_uid is 0 while getuid() is 1000 (patina_posix.c:2417 fills from fs-mem values that carry no owner)"
+
+[[divergence]]
+probe = "fs/metadata"
+op = "fstat"
+field = "fields.gid"
+reason = "pending: identity — st_gid is 0 while getgid() is 1000 (patina_posix.c:2417)"
+
+[[divergence]]
+probe = "fs/metadata"
+op = "newfstatat"
+field = "fields.uid"
+reason = "pending: identity — st_uid is 0 while getuid() is 1000 (patina_posix.c:2710)"
+
+[[divergence]]
+probe = "fs/metadata"
+op = "newfstatat"
+field = "fields.gid"
+reason = "pending: identity — st_gid is 0 while getgid() is 1000 (patina_posix.c:2710)"
+
+[[divergence]]
+probe = "fs/metadata"
+op = "statx"
+field = "fields.uid"
+reason = "pending: identity — stx_uid is 0 while getuid() is 1000 (patina_posix.c:2744 statx)"
+
+[[divergence]]
+probe = "fs/metadata"
+op = "statx"
+field = "fields.gid"
+reason = "pending: identity — stx_gid is 0 while getgid() is 1000 (patina_posix.c:2744 statx)"
+
+[[divergence]]
+probe = "fs/metadata"
+op = "check"
+field = "ret"
+label = "fstat: owned by the caller"
+reason = "pending: identity — see fstat fields.uid/gid"
+
+[[divergence]]
+probe = "fs/metadata"
+op = "newfstatat"
+field = "errno"
+seq = 22
+reason = "pending: fs — an unknown fstatat flag is refused ENOSYS instead of EINVAL (patina_posix.c:2636 patina_stat_at_values / PATINA_STAT_AT_FLAGS)"
+
+[[divergence]]
+probe = "fs/metadata"
+op = "check"
+field = "ret"
+label = "an unknown flag is EINVAL"
+reason = "pending: fs — see newfstatat seq 22"
+
+[[divergence]]
+probe = "fs/metadata"
+op = "newfstatat"
+field = "fields.nlink"
+seqs = [28, 35, 37]
+reason = "pending: fs — a directory's st_nlink is 1: fs-mem counts names, not `.`/`..`/subdirectory back-links (crates/patina-fs-mem/src/lib.rs:103)"
+
+[[divergence]]
+probe = "fs/metadata"
+op = "fstat"
+field = "fields.nlink"
+seq = 31
+reason = "pending: fs — a directory's st_nlink is 1 (crates/patina-fs-mem/src/lib.rs:103)"
+
+[[divergence]]
+probe = "fs/metadata"
+op = "check"
+field = "ret"
+label = "a directory: kind dir, mode 0750, two links"
+reason = "pending: fs — see newfstatat seq 28"
+
+[[divergence]]
+probe = "fs/metadata"
+op = "check"
+field = "ret"
+label = "a subdirectory bumps the parent link count to 3"
+reason = "pending: fs — see newfstatat seq 35"
+
+[[divergence]]
+probe = "fs/metadata"
+op = "statx"
+field = "fields.mask"
+seqs = [50, 53, 55, 57, 63]
+reason = "pending: fs — statx answers a fixed mask (patina_posix.c:2757) without STATX_UID/GID/ATIME/BTIME/MNT_ID bits the kernel fills"
+
+[[divergence]]
+probe = "fs/metadata"
+op = "check"
+field = "ret"
+label = "statx fills every basic field"
+reason = "pending: fs — see statx seq 50"
+
+[[divergence]]
+probe = "fs/metadata"
+op = "statx"
+field = "fields.btime_present"
+seqs = [53, 55]
+reason = "pending: fs — no birth time in fs-mem (patina_posix.c:2757 never sets STATX_BTIME)"
+
+[[divergence]]
+probe = "fs/metadata"
+op = "statx"
+field = "errno"
+seq = 61
+reason = "pending: fs — an unknown statx flag is refused ENOSYS instead of EINVAL (patina_posix.c:2744 statx → patina_stat_at_values)"
+
+[[divergence]]
+probe = "fs/metadata"
+op = "check"
+field = "ret"
+label = "statx with an unknown flag is EINVAL"
+reason = "pending: fs — see statx seq 61"
+
+[[divergence]]
+probe = "fs/metadata"
+op = "statx"
+field = "fields.nlink"
+seq = 63
+reason = "pending: fs — a directory's stx_nlink is 1 (crates/patina-fs-mem/src/lib.rs:103)"
+
+[[divergence]]
+probe = "fs/metadata"
+op = "check"
+field = "ret"
+label = "statx can report a birth time"
+reason = "pending: fs — see statx seq 53"
+
+# ---- fs/dirs -------------------------------------------------------------------
+
+[[divergence]]
+probe = "fs/dirs"
+op = "mkdirat"
+field = "errno"
+seq = 8
+reason = "pending: F3 — a path component through a regular file answers ENOENT, not ENOTDIR (fs-mem resolver, lib.rs:500)"
+
+[[divergence]]
+probe = "fs/dirs"
+op = "check"
+field = "ret"
+label = "mkdirat under a file is ENOTDIR"
+reason = "pending: F3 — see mkdirat seq 8"
+
+[[divergence]]
+probe = "fs/dirs"
+op = "newfstatat"
+field = "fields.nlink"
+seq = 15
+reason = "pending: fs — a directory's st_nlink is 1 (crates/patina-fs-mem/src/lib.rs:103)"
+
+[[divergence]]
+probe = "fs/dirs"
+op = "renameat"
+field = "errno"
+seq = 27
+reason = "pending: fs — renaming a directory onto a regular file answers EEXIST, not ENOTDIR (patina_posix.c:2898 renameat → fs-mem rename)"
+
+[[divergence]]
+probe = "fs/dirs"
+op = "check"
+field = "ret"
+label = "renameat directory onto a file is ENOTDIR"
+reason = "pending: fs — see renameat seq 27"
+
+[[divergence]]
+probe = "fs/dirs"
+vehicle = "libc"
+op = "unlinkat"
+field = "errno"
+seq = 53
+reason = "pending: fs — the C unlinkat refuses an unknown flag with ENOSYS (patina_posix.c:2814) while the SUD row and the kernel answer EINVAL"
+
+[[divergence]]
+probe = "fs/dirs"
+vehicle = "libc"
+op = "check"
+field = "ret"
+label = "unlinkat with an unknown flag is EINVAL"
+reason = "pending: fs — see unlinkat seq 53"
+
+# ---- fs/links ------------------------------------------------------------------
+
+[[divergence]]
+probe = "fs/links"
+op = "readlinkat"
+field = "errno"
+seq = 12
+reason = "pending: fs — readlinkat with bufsize 0 answers 0 instead of EINVAL (patina_posix.c:2846)"
+
+[[divergence]]
+probe = "fs/links"
+op = "readlinkat"
+field = "ret"
+seq = 12
+reason = "pending: fs — see readlinkat seq 12"
+
+[[divergence]]
+probe = "fs/links"
+op = "readlinkat"
+field = "fields.target"
+seq = 12
+reason = "pending: fs — see readlinkat seq 12 (an empty target is reported on the success)"
+
+[[divergence]]
+probe = "fs/links"
+op = "check"
+field = "ret"
+label = "readlinkat with bufsize 0 is EINVAL"
+reason = "pending: fs — see readlinkat seq 12"
+
+[[divergence]]
+probe = "fs/links"
+op = "readlinkat"
+field = "errno"
+seq = 14
+reason = "pending: fs — readlinkat on a regular file answers ENOENT instead of EINVAL (patina_posix.c:2846 → fs-mem read_link)"
+
+[[divergence]]
+probe = "fs/links"
+op = "check"
+field = "ret"
+label = "readlinkat on a regular file is EINVAL"
+reason = "pending: fs — see readlinkat seq 14"
+
+[[divergence]]
+probe = "fs/links"
+op = "symlinkat"
+field = "errno"
+seq = 25
+reason = "pending: fs — symlinkat with an empty target succeeds instead of ENOENT (patina_posix.c:2839)"
+
+[[divergence]]
+probe = "fs/links"
+op = "symlinkat"
+field = "ret"
+seq = 25
+reason = "pending: fs — see symlinkat seq 25"
+
+[[divergence]]
+probe = "fs/links"
+op = "check"
+field = "ret"
+label = "symlinkat with an empty target is ENOENT"
+reason = "pending: fs — see symlinkat seq 25"
+
+[[divergence]]
+probe = "fs/links"
+op = "linkat"
+field = "errno"
+seq = 43
+reason = "pending: fs — linkat of a directory answers EACCES instead of EPERM (patina_posix.c:2865 → fs-mem link)"
+
+[[divergence]]
+probe = "fs/links"
+op = "check"
+field = "ret"
+label = "linkat of a directory is EPERM"
+reason = "pending: fs — see linkat seq 43"
+
+[[divergence]]
+probe = "fs/links"
+op = "newfstatat"
+field = "fields.nlink"
+seq = 47
+reason = "pending: fs — linkat of a symlink without AT_SYMLINK_FOLLOW copies the link instead of hard-linking it: the new name's nlink is 1, not 2 (patina_posix.c:2865)"
+
+# ---- fd/pipes ------------------------------------------------------------------
+
+[[divergence]]
+probe = "fd/pipes"
+op = "fcntl"
+field = "ret"
+seq = 7
+reason = "pending: F2 — F_GETFL on a pipe's write end reports O_RDONLY (patina_posix.c:1295 fcntl on virtual pipe descriptors carries no access mode)"
+
+[[divergence]]
+probe = "fd/pipes"
+op = "check"
+field = "ret"
+label = "the write end is O_WRONLY"
+reason = "pending: F2 — see fcntl seq 7"
+
+[[divergence]]
+probe = "fd/pipes"
+op = "fcntl"
+field = "ret"
+seqs = [12, 30, 36]
+reason = "pending: F2 — FD_CLOEXEC is not per-descriptor state: F_SETFD is a no-op and F_GETFD always reports FD_CLOEXEC, on the original, on a dup, and on an F_DUPFD result (patina_posix.c:1309-1310)"
+
+[[divergence]]
+probe = "fd/pipes"
+op = "check"
+field = "ret"
+label = "F_SETFD clears it"
+reason = "pending: F2 — see fcntl seq 12"
+
+[[divergence]]
+probe = "fd/pipes"
+op = "check"
+field = "ret"
+label = "dup does not copy FD_CLOEXEC (descriptor flag)"
+reason = "pending: F2 — see fcntl seq 30"
+
+[[divergence]]
+probe = "fd/pipes"
+op = "check"
+field = "ret"
+label = "F_DUPFD_CLOEXEC sets FD_CLOEXEC on the new descriptor only"
+reason = "pending: F2 — see fcntl seq 36"
+
+[[divergence]]
+probe = "fd/pipes"
+op = "fcntl"
+field = "ret"
+seqs = [38, 40]
+reason = "pending: F2 — F_GETPIPE_SZ / F_SETPIPE_SZ answer EINVAL (patina_posix.c:1295 fcntl has no pipe-size commands; the kernel default is 65536)"
+
+[[divergence]]
+probe = "fd/pipes"
+op = "fcntl"
+field = "errno"
+seqs = [38, 40]
+reason = "pending: F2 — see fcntl seqs 38/40"
+
+[[divergence]]
+probe = "fd/pipes"
+op = "check"
+field = "ret"
+label = "F_GETPIPE_SZ is a page multiple"
+reason = "pending: F2 — see fcntl seq 38"
+
+[[divergence]]
+probe = "fd/pipes"
+op = "check"
+field = "ret"
+label = "F_SETPIPE_SZ to one page"
+reason = "pending: F2 — see fcntl seq 40"
+
+[[divergence]]
+probe = "fd/pipes"
+op = "fcntl"
+field = "errno"
+seq = 44
+reason = "pending: F2 — fcntl on a descriptor that is not open answers ENOSYS instead of EBADF (patina_posix.c:1295: an unknown number is a soft deny, not a table miss)"
+
+[[divergence]]
+probe = "fd/pipes"
+op = "check"
+field = "ret"
+label = "fcntl on a closed descriptor is EBADF"
+reason = "pending: F2 — see fcntl seq 44"
+
+[[divergence]]
+probe = "fd/pipes"
+op = "flock"
+field = "errno"
+seq = 86
+reason = "pending: fs — LOCK_UN through a dup of the holder does not release the lock (patina_posix.c:2061 flock → lib.rs:3888 patina_flock keys the lock by descriptor number, not by open file description)"
+
+[[divergence]]
+probe = "fd/pipes"
+op = "flock"
+field = "ret"
+seq = 86
+reason = "pending: fs — see flock seq 86"
+
+[[divergence]]
+probe = "fd/pipes"
+op = "check"
+field = "ret"
+label = "the lock is released"
+reason = "pending: fs — see flock seq 86"
+
+[[divergence]]
+probe = "fd/pipes"
+op = "flock"
+field = "errno"
+seq = 88
+reason = "pending: fs — flock with an operation outside LOCK_SH|LOCK_EX|LOCK_UN answers EINVAL; Linux 6.8 answers 0 (lib.rs:3888 patina_flock)"
+
+[[divergence]]
+probe = "fd/pipes"
+op = "flock"
+field = "ret"
+seq = 88
+reason = "pending: fs — see flock seq 88"
+
+[[divergence]]
+probe = "fd/pipes"
+vehicle = "raw"
+op = "pipe2"
+field = "errno"
+seq = 67
+reason = "pending: F2 — the SUD pipe2 row does not validate flags: an unknown flag creates a pipe instead of EINVAL (sud.rs:2148 sys_pipe2 reads only O_NONBLOCK); the C pipe2 refuses it"
+
+[[divergence]]
+probe = "fd/pipes"
+vehicle = "raw"
+op = "pipe2"
+field = "ret"
+seq = 67
+reason = "pending: F2 — see pipe2 seq 67"
+
+[[divergence]]
+probe = "fd/pipes"
+vehicle = "raw"
+op = "pipe2"
+field = "fields.read_end"
+seq = 67
+reason = "pending: F2 — see pipe2 seq 67"
+
+[[divergence]]
+probe = "fd/pipes"
+vehicle = "raw"
+op = "pipe2"
+field = "fields.write_end"
+seq = 67
+reason = "pending: F2 — see pipe2 seq 67"
+
+[[divergence]]
+probe = "fd/pipes"
+vehicle = "raw"
+op = "check"
+field = "ret"
+label = "pipe2 with an unknown flag is EINVAL"
+reason = "pending: F2 — see pipe2 seq 67"
+
+# ---- time/clocks ---------------------------------------------------------------
+
+[[divergence]]
+probe = "time/clocks"
+op = "clock_gettime"
+field = "errno"
+seqs = [6, 8, 10, 12, 14, 16]
+reason = "pending: time+identity — CLOCK_BOOTTIME, CLOCK_MONOTONIC_RAW, CLOCK_MONOTONIC_COARSE, CLOCK_REALTIME_COARSE, CLOCK_PROCESS_CPUTIME_ID and CLOCK_THREAD_CPUTIME_ID answer EINVAL (patina_posix.c:237 clock_gettime routes only REALTIME/MONOTONIC via :105)"
+
+[[divergence]]
+probe = "time/clocks"
+op = "clock_gettime"
+field = "ret"
+seqs = [6, 8, 10, 12, 14, 16]
+reason = "pending: time+identity — see clock_gettime errno"
+
+[[divergence]]
+probe = "time/clocks"
+op = "clock_gettime"
+field = "fields.ns"
+seqs = [6, 8, 10, 12, 14, 16]
+reason = "pending: time+identity — see clock_gettime errno (no reading on the failure)"
+
+[[divergence]]
+probe = "time/clocks"
+op = "check"
+field = "ret"
+label = "every standard clock id reads"
+reason = "pending: time+identity — see clock_gettime errno"
+
+# ---- thread/futex --------------------------------------------------------------
+
+[[divergence]]
+probe = "thread/futex"
+op = "futex"
+field = "errno"
+seq = 5
+reason = "pending: signals+threads — a timed FUTEX_WAIT with nobody to wake answers EAGAIN immediately instead of ETIMEDOUT after the virtual timeout (lib.rs:11115 patina_futex_wait_timed on a single-task run)"
+
+[[divergence]]
+probe = "thread/futex"
+op = "check"
+field = "ret"
+label = "a timed FUTEX_WAIT nobody wakes is ETIMEDOUT"
+reason = "pending: signals+threads — see futex seq 5"
+
+[[divergence]]
+probe = "thread/futex"
+op = "check"
+field = "ret"
+label = "the timed wait advanced the clock by at least the timeout"
+reason = "pending: signals+threads — see futex seq 5 (the wait returns without advancing virtual time)"
+
+# ---- entropy/getrandom ---------------------------------------------------------
+
+[[divergence]]
+probe = "entropy/getrandom"
+vehicle = "syscall"
+op = "getrandom"
+field = "errno"
+seq = 12
+reason = "pending: F0 — the syscall(2) SYS_getrandom route ignores flags (patina_posix.c:742 onwards) so an unknown flag fills the buffer instead of EINVAL; the C getrandom validates against PATINA_GRND_KNOWN (patina_posix.c:648)"
+
+[[divergence]]
+probe = "entropy/getrandom"
+vehicle = "syscall"
+op = "getrandom"
+field = "ret"
+seq = 12
+reason = "pending: F0 — see getrandom seq 12"
+
+[[divergence]]
+probe = "entropy/getrandom"
+vehicle = "syscall"
+op = "getrandom"
+field = "fields.nonzero"
+seq = 12
+reason = "pending: F0 — see getrandom seq 12"
+
+[[divergence]]
+probe = "entropy/getrandom"
+vehicle = "syscall"
+op = "check"
+field = "ret"
+label = "an unknown flag is EINVAL"
+reason = "pending: F0 — see getrandom seq 12"
+
+[[divergence]]
+probe = "entropy/getrandom"
+vehicle = "raw"
+op = "getrandom"
+field = "errno"
+seq = 12
+reason = "pending: fs — the SUD getrandom row ignores flags (sud.rs:1671 sys_getrandom) so an unknown flag fills the buffer instead of EINVAL; the C getrandom validates against PATINA_GRND_KNOWN (patina_posix.c:648)"
+
+[[divergence]]
+probe = "entropy/getrandom"
+vehicle = "raw"
+op = "getrandom"
+field = "ret"
+seq = 12
+reason = "pending: fs — see getrandom seq 12"
+
+[[divergence]]
+probe = "entropy/getrandom"
+vehicle = "raw"
+op = "getrandom"
+field = "fields.nonzero"
+seq = 12
+reason = "pending: fs — see getrandom seq 12"
+
+[[divergence]]
+probe = "entropy/getrandom"
+vehicle = "raw"
+op = "check"
+field = "ret"
+label = "an unknown flag is EINVAL"
+reason = "pending: fs — see getrandom seq 12"
+
+# ---- net/tcp -------------------------------------------------------------------
+
+[[divergence]]
+probe = "net/tcp"
+op = "getsockopt"
+field = "fields.value"
+seqs = [7, 41, 43]
+reason = "pending: network — getsockopt answers 0 for SO_ACCEPTCONN, TCP_NODELAY and SO_TYPE (patina_posix.c:4276 has no option store)"
+
+[[divergence]]
+probe = "net/tcp"
+op = "check"
+field = "ret"
+label = "SO_ACCEPTCONN is set on a listener"
+reason = "pending: network — see getsockopt seq 7"
+
+[[divergence]]
+probe = "net/tcp"
+op = "check"
+field = "ret"
+label = "TCP_NODELAY reads back"
+reason = "pending: network — see getsockopt seq 41"
+
+[[divergence]]
+probe = "net/tcp"
+op = "check"
+field = "ret"
+label = "SO_TYPE is SOCK_STREAM"
+reason = "pending: network — see getsockopt seq 43"
+
+[[divergence]]
+probe = "net/tcp"
+op = "listen"
+field = "errno"
+seq = 9
+reason = "pending: network — listen on an already-listening socket answers EINVAL; the kernel accepts a second listen (patina_posix.c:4309)"
+
+[[divergence]]
+probe = "net/tcp"
+op = "listen"
+field = "ret"
+seq = 9
+reason = "pending: network — see listen seq 9"
+
+[[divergence]]
+probe = "net/tcp"
+op = "check"
+field = "ret"
+label = "listen twice is allowed"
+reason = "pending: network — see listen seq 9"
+
+[[divergence]]
+probe = "net/tcp"
+op = "recvfrom"
+field = "errno"
+seq = 37
+reason = "pending: network — MSG_DONTWAIT on a blocking stream socket answers EOPNOTSUPP instead of EAGAIN (patina_posix.c:4153 recvfrom refuses non-zero flags on TCP)"
+
+[[divergence]]
+probe = "net/tcp"
+op = "check"
+field = "ret"
+label = "MSG_DONTWAIT on an empty stream is EAGAIN"
+reason = "pending: network — see recvfrom seq 37"
+
+[[divergence]]
+probe = "net/tcp"
+op = "sendto"
+field = "errno"
+seqs = [66, 73]
+reason = "pending: network — send on a never-connected stream socket answers EOPNOTSUPP instead of EPIPE (patina_posix.c:4097 sendto on an unconnected TCP socket)"
+
+[[divergence]]
+probe = "net/tcp"
+op = "check"
+field = "ret"
+label = "send on a never-connected stream socket is EPIPE"
+reason = "pending: network — see sendto seq 66"
+
+[[divergence]]
+probe = "net/tcp"
+op = "check"
+field = "ret"
+label = "send after the refused shutdown is EPIPE"
+reason = "pending: network — see sendto seq 73"
+
+[[divergence]]
+probe = "net/tcp"
+op = "listen"
+field = "errno"
+seq = 68
+reason = "pending: network — listen on an unbound socket answers EINVAL instead of autobinding an ephemeral port (patina_posix.c:4309)"
+
+[[divergence]]
+probe = "net/tcp"
+op = "listen"
+field = "ret"
+seq = 68
+reason = "pending: network — see listen seq 68"
+
+[[divergence]]
+probe = "net/tcp"
+op = "check"
+field = "ret"
+label = "listen without bind autobinds"
+reason = "pending: network — see listen seq 68"
+
+[[divergence]]
+probe = "net/tcp"
+op = "getsockname"
+field = "fields.addr_port"
+seq = 75
+reason = "pending: network — the socket stays unbound after the refused listen (seq 68), so getsockname reports port 0"
+
+[[divergence]]
+probe = "net/tcp"
+op = "check"
+field = "ret"
+label = "the autobound listener has a port"
+reason = "pending: network — see listen seq 68"
+
+[[divergence]]
+probe = "net/tcp"
+op = "bind"
+field = "errno"
+seq = 78
+reason = "pending: network — bind to a port a listener holds succeeds instead of EADDRINUSE (patina_posix.c:4051 bind does not check the SimNet listener table)"
+
+[[divergence]]
+probe = "net/tcp"
+op = "bind"
+field = "ret"
+seq = 78
+reason = "pending: network — see bind seq 78"
+
+[[divergence]]
+probe = "net/tcp"
+op = "check"
+field = "ret"
+label = "bind to the listener's port is EADDRINUSE"
+reason = "pending: network — see bind seq 78"
+
+[[divergence]]
+probe = "net/tcp"
+op = "connect"
+field = "errno"
+seq = 88
+reason = "pending: network — a non-blocking connect completes synchronously (0) instead of EINPROGRESS (patina_posix.c:4061 connect is synchronous on SimNet)"
+
+[[divergence]]
+probe = "net/tcp"
+op = "connect"
+field = "ret"
+seq = 88
+reason = "pending: network — see connect seq 88"
+
+[[divergence]]
+probe = "net/tcp"
+op = "check"
+field = "ret"
+label = "a non-blocking connect is EINPROGRESS"
+reason = "pending: network — see connect seq 88"

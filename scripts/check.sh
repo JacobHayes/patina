@@ -175,6 +175,10 @@ run_full() {
   start_rung 'workq testbed' testbeds/workq/run-patina.sh
   start_rung 'WASI validation' scripts/validate-wasi.sh
   start_rung 'cross-target smoke' scripts/smoke-cross-target.sh
+  # The syscall-conformance testbed's full tier: every probe through all three
+  # vehicles natively (host oracle) and under patina, plus record/replay identity
+  # and the strace leak leg. Linux-only; loud counted skip elsewhere.
+  start_rung 'syscall conformance' testbeds/syscall-conformance/run.sh
   wait_rungs || return $?
 
   printf 'PASS  full landing gate (%ss total)\n' "$(( $(date +%s) - total_start ))"
@@ -192,6 +196,8 @@ run_fast() {
     --skip native_proptest_case_generation
   start_rung 'WASI validation' scripts/validate-wasi.sh
   start_rung 'cross-target smoke' scripts/smoke-cross-target.sh
+  # The syscall-conformance fast tier: native + patina legs, libc vehicle only.
+  start_rung 'syscall conformance (fast tier)' testbeds/syscall-conformance/run.sh --fast
   wait_rungs || return $?
   printf 'PASS  fast check (%ss total)\n' "$(( $(date +%s) - total_start ))"
 }

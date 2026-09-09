@@ -77,6 +77,7 @@ DOCS=(README.md TUTORIAL.md USAGE-MODES.md ARCHITECTURE.md IMPLEMENTATION.md
       testbeds/AGENTS.md testbeds/README.md testbeds/workq/README.md testbeds/pubsub/README.md
       testbeds/audit-corpus/README.md testbeds/rustix-default/README.md
       testbeds/cap-std-dirfd/README.md testbeds/fifo-ipc/README.md
+      testbeds/syscall-conformance/README.md
       testbeds/buggify-wasi/README.md testbeds/checkout-retry-idempotency/README.md
       testbeds/patina-macro-adopter/README.md)
 
@@ -136,6 +137,12 @@ ALLOWED_FLAGS='
 --points-at
 --no-graph
 --execute
+--mode
+--vehicle
+--probe
+--bless
+--fast
+--strict
 '
 # -- cargo / rustc / rustup / linker tool flags --
 # --all/--all-targets/--check/--no-deps/--workspace/--locked: cargo fmt/clippy/
@@ -167,6 +174,11 @@ ALLOWED_FLAGS='
 # --porcelain/--points-at: git status/tag flags; --no-graph: jj log's flag
 #   (publish.sh's clean-tree and release-tag preconditions).
 # --execute: publish.sh's own real-upload switch.
+# -- syscall-conformance testbed (testbeds/syscall-conformance/run.sh + probes) --
+# --mode/--vehicle/--probe/--bless/--fast: run.sh's own options (legs, vehicle,
+#   probe selection, re-recording expectations, the check:fast tier).
+# --strict: the probe binaries' own switch (a failed semantic check panics on
+#   the native oracle leg; under patina it is recorded as a divergence).
 # (--selftest and --seed are REAL registry flags — not allowlisted here.)
 
 tmpdir=$(mktemp -d)

@@ -2,6 +2,9 @@
 *.patina
 *.patina.lock
 target/
+# mbx manages `target` as a symlink into its cache; a bare-name rule covers it
+# (`target/` matches directories only).
+target
 
 # Trace-format migration fixtures are hand-built test inputs, not run outputs.
 !crates/patina-trace/tests/fixtures/*.patina

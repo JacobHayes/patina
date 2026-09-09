@@ -52,6 +52,7 @@ jobs:
             .
             testbeds/workq
             testbeds/pubsub
+            testbeds/syscall-conformance
           # cargo-patina unpacks and builds the native shim under the per-user
           # cache (not the workspace target dir); keep that build warm too.
           cache-directories: |
@@ -108,6 +109,16 @@ jobs:
       # via the rust-cache workspaces above.
       - if: matrix.toolchain == 'stable'
         run: testbeds/pubsub/run-patina.sh
+      # The syscall-conformance testbed: every probe natively (the host kernel
+      # is the oracle; the blessing kernel must not be newer than the runner's)
+      # and under patina through all three vehicles, plus record/replay identity
+      # and the strace leak leg. x86_64 runs the raw vehicle under SUD; arm64
+      # skips it by cfg (counted) and its expectations are recorded separately
+      # (`run.sh --bless` on an aarch64 host; unblessed platforms skip loudly).
+      - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
+        run: testbeds/syscall-conformance/run.sh
+        env:
+          PATINA_REQUIRE_STRACE: '1'
       # The ecosystem symbol-audit corpus: 20 per-crate MREs built + audited,
       # each compared strictly (both directions) to a committed platform
       # expectation file. Stable Linux x86_64 runs it here; the daily/manual
@@ -166,7 +177,7 @@ jobs:
         run: |
           # Testbeds are standalone workspaces (publish=false) with their own
           # lockfiles. Every one is strict — no advisory is ignored anywhere.
-          for tb in buggify-wasi liveness-campaign pubsub workq; do
+          for tb in buggify-wasi liveness-campaign pubsub syscall-conformance workq; do
             echo "== audit testbeds/$tb =="
             cargo audit --file "testbeds/$tb/Cargo.lock"
           done
