@@ -20,74 +20,6 @@
 #
 # Event indices refer to the blessed expected/<probe>.linux-x86_64.jsonl.
 
-# ---- the syscall(2) vehicle: F0 --------------------------------------------
-# The shim's `syscall` interposer forwards only SYS_futex and SYS_getrandom
-# (crates/patina-native-shim/c/patina_posix.c:742) and answers ENOSYS to every
-# other number, so a probe whose first row is anything else dies on its first
-# call. F0 routes `syscall(2)` into the registry dispatcher.
-
-[[divergence]]
-probe = "fs/open_rw"
-vehicle = "syscall"
-kind = "probe"
-reason = "pending: F0 — syscall(2) answers ENOSYS to every number but futex/getrandom (patina_posix.c:742)"
-
-[[divergence]]
-probe = "fs/metadata"
-vehicle = "syscall"
-kind = "probe"
-reason = "pending: F0 — syscall(2) answers ENOSYS to every number but futex/getrandom (patina_posix.c:742)"
-
-[[divergence]]
-probe = "fs/dirs"
-vehicle = "syscall"
-kind = "probe"
-reason = "pending: F0 — syscall(2) answers ENOSYS to every number but futex/getrandom (patina_posix.c:742)"
-
-[[divergence]]
-probe = "fs/links"
-vehicle = "syscall"
-kind = "probe"
-reason = "pending: F0 — syscall(2) answers ENOSYS to every number but futex/getrandom (patina_posix.c:742)"
-
-[[divergence]]
-probe = "fd/pipes"
-vehicle = "syscall"
-kind = "probe"
-reason = "pending: F0 — syscall(2) answers ENOSYS to every number but futex/getrandom (patina_posix.c:742)"
-
-[[divergence]]
-probe = "time/clocks"
-vehicle = "syscall"
-kind = "probe"
-reason = "pending: F0 — syscall(2) answers ENOSYS to clock_gettime/gettimeofday/nanosleep/clock_nanosleep (patina_posix.c:742)"
-
-[[divergence]]
-probe = "thread/futex"
-vehicle = "syscall"
-kind = "probe"
-reason = "pending: F0 — futex forwards but the probe's clock_gettime reads answer ENOSYS (patina_posix.c:742)"
-
-[[divergence]]
-probe = "net/udp"
-vehicle = "syscall"
-kind = "probe"
-reason = "pending: F0 — syscall(2) answers ENOSYS to socket (patina_posix.c:742)"
-
-[[divergence]]
-probe = "net/tcp"
-vehicle = "syscall"
-kind = "probe"
-reason = "pending: F0 — syscall(2) answers ENOSYS to socket (patina_posix.c:742)"
-
-[[divergence]]
-probe = "readiness/epoll"
-vehicle = "syscall"
-kind = "probe"
-reason = "pending: F0 — syscall(2) answers ENOSYS to epoll_create1 (patina_posix.c:742)"
-
-# ---- libc symbols the shim does not interpose (audit refusal) ---------------
-
 [[divergence]]
 probe = "fs/getdents"
 kind = "probe"
@@ -117,6 +49,12 @@ kind = "probe"
 reason = "pending: network — recvfrom(MSG_DONTWAIT) on a blocking datagram socket ignores the flag and parks the only task (sud.rs recvfrom → patina-sched-det lib.rs:574 deadlock fatal); trap_fatal (lib.rs:1816) drops the captured stdout"
 
 [[divergence]]
+probe = "net/udp"
+vehicle = "syscall"
+kind = "probe"
+reason = "(syscall(2) forwards into the same SUD row) pending: network — recvfrom(MSG_DONTWAIT) on a blocking datagram socket ignores the flag and parks the only task (sud.rs recvfrom → patina-sched-det lib.rs:574 deadlock fatal); trap_fatal (lib.rs:1816) drops the captured stdout"
+
+[[divergence]]
 probe = "readiness/epoll"
 vehicle = "libc"
 kind = "probe"
@@ -127,6 +65,14 @@ probe = "readiness/epoll"
 vehicle = "raw"
 kind = "probe"
 reason = "pending: network+readiness — epoll_ctl on a regular-file descriptor is a fatal trap (lib.rs:10743) instead of EPERM, and EPOLLONESHOT is a fatal trap (lib.rs:10730); trap_fatal (lib.rs:1816) drops the captured stdout"
+
+# ---- fs/open_rw ----------------------------------------------------------------
+
+[[divergence]]
+probe = "readiness/epoll"
+vehicle = "syscall"
+kind = "probe"
+reason = "(syscall(2) forwards into the same SUD row) pending: network+readiness — epoll_ctl on a regular-file descriptor is a fatal trap (lib.rs:10743) instead of EPERM, and EPOLLONESHOT is a fatal trap (lib.rs:10730); trap_fatal (lib.rs:1816) drops the captured stdout"
 
 # ---- fs/open_rw ----------------------------------------------------------------
 
@@ -641,11 +587,27 @@ reason = "pending: F2 — the SUD pipe2 row does not validate flags: an unknown 
 
 [[divergence]]
 probe = "fd/pipes"
+vehicle = "syscall"
+op = "pipe2"
+field = "errno"
+seq = 67
+reason = "(syscall(2) forwards into the same SUD row) pending: F2 — the SUD pipe2 row does not validate flags: an unknown flag creates a pipe instead of EINVAL (sud.rs:2148 sys_pipe2 reads only O_NONBLOCK); the C pipe2 refuses it"
+
+[[divergence]]
+probe = "fd/pipes"
 vehicle = "raw"
 op = "pipe2"
 field = "ret"
 seq = 67
 reason = "pending: F2 — see pipe2 seq 67"
+
+[[divergence]]
+probe = "fd/pipes"
+vehicle = "syscall"
+op = "pipe2"
+field = "ret"
+seq = 67
+reason = "(syscall(2) forwards into the same SUD row) pending: F2 — see pipe2 seq 67"
 
 [[divergence]]
 probe = "fd/pipes"
@@ -657,6 +619,14 @@ reason = "pending: F2 — see pipe2 seq 67"
 
 [[divergence]]
 probe = "fd/pipes"
+vehicle = "syscall"
+op = "pipe2"
+field = "fields.read_end"
+seq = 67
+reason = "(syscall(2) forwards into the same SUD row) pending: F2 — see pipe2 seq 67"
+
+[[divergence]]
+probe = "fd/pipes"
 vehicle = "raw"
 op = "pipe2"
 field = "fields.write_end"
@@ -665,11 +635,29 @@ reason = "pending: F2 — see pipe2 seq 67"
 
 [[divergence]]
 probe = "fd/pipes"
+vehicle = "syscall"
+op = "pipe2"
+field = "fields.write_end"
+seq = 67
+reason = "(syscall(2) forwards into the same SUD row) pending: F2 — see pipe2 seq 67"
+
+[[divergence]]
+probe = "fd/pipes"
 vehicle = "raw"
 op = "check"
 field = "ret"
 label = "pipe2 with an unknown flag is EINVAL"
 reason = "pending: F2 — see pipe2 seq 67"
+
+# ---- time/clocks ---------------------------------------------------------------
+
+[[divergence]]
+probe = "fd/pipes"
+vehicle = "syscall"
+op = "check"
+field = "ret"
+label = "pipe2 with an unknown flag is EINVAL"
+reason = "(syscall(2) forwards into the same SUD row) pending: F2 — see pipe2 seq 67"
 
 # ---- time/clocks ---------------------------------------------------------------
 
@@ -728,38 +716,6 @@ reason = "pending: signals+threads — see futex seq 5 (the wait returns without
 
 [[divergence]]
 probe = "entropy/getrandom"
-vehicle = "syscall"
-op = "getrandom"
-field = "errno"
-seq = 12
-reason = "pending: F0 — the syscall(2) SYS_getrandom route ignores flags (patina_posix.c:742 onwards) so an unknown flag fills the buffer instead of EINVAL; the C getrandom validates against PATINA_GRND_KNOWN (patina_posix.c:648)"
-
-[[divergence]]
-probe = "entropy/getrandom"
-vehicle = "syscall"
-op = "getrandom"
-field = "ret"
-seq = 12
-reason = "pending: F0 — see getrandom seq 12"
-
-[[divergence]]
-probe = "entropy/getrandom"
-vehicle = "syscall"
-op = "getrandom"
-field = "fields.nonzero"
-seq = 12
-reason = "pending: F0 — see getrandom seq 12"
-
-[[divergence]]
-probe = "entropy/getrandom"
-vehicle = "syscall"
-op = "check"
-field = "ret"
-label = "an unknown flag is EINVAL"
-reason = "pending: F0 — see getrandom seq 12"
-
-[[divergence]]
-probe = "entropy/getrandom"
 vehicle = "raw"
 op = "getrandom"
 field = "errno"
@@ -768,11 +724,27 @@ reason = "pending: fs — the SUD getrandom row ignores flags (sud.rs:1671 sys_g
 
 [[divergence]]
 probe = "entropy/getrandom"
+vehicle = "syscall"
+op = "getrandom"
+field = "errno"
+seq = 12
+reason = "(syscall(2) forwards into the same SUD row) pending: fs — the SUD getrandom row ignores flags (sud.rs:1671 sys_getrandom) so an unknown flag fills the buffer instead of EINVAL; the C getrandom validates against PATINA_GRND_KNOWN (patina_posix.c:648)"
+
+[[divergence]]
+probe = "entropy/getrandom"
 vehicle = "raw"
 op = "getrandom"
 field = "ret"
 seq = 12
 reason = "pending: fs — see getrandom seq 12"
+
+[[divergence]]
+probe = "entropy/getrandom"
+vehicle = "syscall"
+op = "getrandom"
+field = "ret"
+seq = 12
+reason = "(syscall(2) forwards into the same SUD row) pending: fs — see getrandom seq 12"
 
 [[divergence]]
 probe = "entropy/getrandom"
@@ -784,11 +756,29 @@ reason = "pending: fs — see getrandom seq 12"
 
 [[divergence]]
 probe = "entropy/getrandom"
+vehicle = "syscall"
+op = "getrandom"
+field = "fields.nonzero"
+seq = 12
+reason = "(syscall(2) forwards into the same SUD row) pending: fs — see getrandom seq 12"
+
+[[divergence]]
+probe = "entropy/getrandom"
 vehicle = "raw"
 op = "check"
 field = "ret"
 label = "an unknown flag is EINVAL"
 reason = "pending: fs — see getrandom seq 12"
+
+# ---- net/tcp -------------------------------------------------------------------
+
+[[divergence]]
+probe = "entropy/getrandom"
+vehicle = "syscall"
+op = "check"
+field = "ret"
+label = "an unknown flag is EINVAL"
+reason = "(syscall(2) forwards into the same SUD row) pending: fs — see getrandom seq 12"
 
 # ---- net/tcp -------------------------------------------------------------------
 

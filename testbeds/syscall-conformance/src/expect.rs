@@ -448,12 +448,17 @@ pub fn diff(
 
     if mode == Mode::Patina {
         if let Some(declared) = applicable.iter().find(|d| d.kind == "probe") {
-            let identical = probe_ok && actual == expected.events;
-            if identical {
+            // A probe-kind declaration covers a probe that DIES (or loses events)
+            // under patina. Once it runs to completion with the blessed event
+            // shape, the declaration is stale even if individual fields still
+            // diverge: those are field-kind declarations of their own, and the
+            // ordinary diff below must judge them.
+            let completed = probe_ok && actual.len() == expected.events.len();
+            if completed {
                 fail(
                     &mut lines,
                     format!(
-                        "STALE: the probe is declared failing under patina but now passes byte-for-byte; delete the declaration: {}",
+                        "STALE: the probe is declared failing under patina but now runs to completion with the blessed event count; delete the declaration (field divergences need their own): {}",
                         declared.describe()
                     ),
                 );
