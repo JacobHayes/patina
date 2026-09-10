@@ -11,6 +11,7 @@ use std::fmt;
 
 use patina_dst_abi::{EffectError, ErrorCode};
 
+use crate::Times;
 use crate::{EntryMetadata, Inode, InodeId, MODE_MASK, MemFs, normalize_entry_path, parent_path};
 use patina_dst_abi::FsEntryKind;
 
@@ -22,7 +23,12 @@ const MAGIC: &[u8; 8] = b"PATFSSNP";
 /// section carries an inode id instead of a private metadata record, so a hard
 /// link to a FIFO is a second name for the same node across a restart, and the
 /// mode, timestamps and link count live where every other inode's do.
-const VERSION: u32 = 4;
+///
+/// Version 5 carries all four timestamps (`atime`, `mtime`, `ctime`, `btime`)
+/// on every inode and entry-metadata record, in that order, where version 4
+/// carried the first two: a restart must not reset a change or birth time to
+/// zero any more than it may reset a modification time.
+const VERSION: u32 = 5;
 
 /// Deliberately conservative structural bounds for a restart handoff. The
 /// decoder checks them before allocating from untrusted bytes, so corrupt
@@ -88,8 +94,7 @@ impl FsSnapshot {
         for (inode_id, inode) in &self.filesystem.inodes {
             bytes.extend_from_slice(&inode_id.to_le_bytes());
             bytes.extend_from_slice(&(inode.links as u64).to_le_bytes());
-            bytes.extend_from_slice(&inode.atime_nanos.to_le_bytes());
-            bytes.extend_from_slice(&inode.mtime_nanos.to_le_bytes());
+            encode_times(&mut bytes, &inode.times);
             bytes.extend_from_slice(&inode.mode.to_le_bytes());
             encode_field(&mut bytes, &inode.contents);
         }
@@ -138,7 +143,7 @@ impl FsSnapshot {
             add_len(&mut total, METADATA_BYTES)?;
         }
         for inode in self.filesystem.inodes.values() {
-            add_len(&mut total, 8 + 8 + 8 + 8 + 4)?;
+            add_len(&mut total, 8 + 8 + TIMES_BYTES + 4)?;
             add_field_len(&mut total, inode.contents.len(), "field length")?;
         }
         for path in self.filesystem.files.keys() {
@@ -205,8 +210,7 @@ impl FsSnapshot {
             if links == 0 {
                 return Err(FsSnapshotError::Malformed("inode has zero links"));
             }
-            let atime_nanos = reader.take_u64()?;
-            let mtime_nanos = reader.take_u64()?;
+            let times = reader.take_times()?;
             let mode = reader.take_mode()?;
             let contents = reader.take_field()?;
             inodes.insert(
@@ -219,8 +223,7 @@ impl FsSnapshot {
                     contents,
                     links,
                     openers: 0,
-                    atime_nanos,
-                    mtime_nanos,
+                    times,
                     mode,
                 },
             );
@@ -538,15 +541,23 @@ fn add_path_len(total: &mut usize, path: &str) -> Result<(), FsSnapshotError> {
     add_len(total, path.len())
 }
 
+fn encode_times(bytes: &mut Vec<u8>, times: &Times) {
+    bytes.extend_from_slice(&times.atime_nanos.to_le_bytes());
+    bytes.extend_from_slice(&times.mtime_nanos.to_le_bytes());
+    bytes.extend_from_slice(&times.ctime_nanos.to_le_bytes());
+    bytes.extend_from_slice(&times.btime_nanos.to_le_bytes());
+}
+
 fn encode_metadata(bytes: &mut Vec<u8>, metadata: &EntryMetadata) {
     bytes.extend_from_slice(&metadata.ino.to_le_bytes());
-    bytes.extend_from_slice(&metadata.atime_nanos.to_le_bytes());
-    bytes.extend_from_slice(&metadata.mtime_nanos.to_le_bytes());
+    encode_times(bytes, &metadata.times);
     bytes.extend_from_slice(&metadata.mode.to_le_bytes());
 }
 
-/// The encoded size of one [`EntryMetadata`]: inode id, both timestamps, mode.
-const METADATA_BYTES: usize = 8 + 8 + 8 + 4;
+/// The encoded size of the four timestamps.
+const TIMES_BYTES: usize = 4 * 8;
+/// The encoded size of one [`EntryMetadata`]: inode id, four timestamps, mode.
+const METADATA_BYTES: usize = 8 + TIMES_BYTES + 4;
 
 fn encode_path(bytes: &mut Vec<u8>, path: &str) {
     encode_field(bytes, path.as_bytes());
@@ -629,11 +640,19 @@ impl<'a> Reader<'a> {
         Ok(path)
     }
 
+    fn take_times(&mut self) -> Result<Times, FsSnapshotError> {
+        Ok(Times {
+            atime_nanos: self.take_u64()?,
+            mtime_nanos: self.take_u64()?,
+            ctime_nanos: self.take_u64()?,
+            btime_nanos: self.take_u64()?,
+        })
+    }
+
     fn take_metadata(&mut self) -> Result<EntryMetadata, FsSnapshotError> {
         Ok(EntryMetadata {
             ino: self.take_u64()?,
-            atime_nanos: self.take_u64()?,
-            mtime_nanos: self.take_u64()?,
+            times: self.take_times()?,
             mode: self.take_mode()?,
         })
     }
@@ -695,7 +714,7 @@ impl From<FsSnapshotError> for EffectError {
 
 #[cfg(test)]
 mod tests {
-    use patina_dst_abi::{Fd, FsEntryKind, OpenFlags, SeekWhence};
+    use patina_dst_abi::{Fd, FsClock, FsEntryKind, OpenFlags, SeekWhence};
     use patina_dst_driver_api::FsDriver;
 
     use super::*;
@@ -715,19 +734,30 @@ mod tests {
 
     fn fixture() -> MemFs {
         let mut fs = MemFs::new();
-        fs.create_directory("/state", 0o777).unwrap();
-        fs.make_fifo("/state/pipe", 0o666).unwrap();
-        fs.create_directory("/state/empty", 0o777).unwrap();
-        fs.set_times_by_path("/state", Some(10), Some(20)).unwrap();
-        let fd = fs
-            .open("/state/log", OpenFlags::create_truncate_write())
+        fs.create_directory(FsClock::EPOCH, "/state", 0o777)
             .unwrap();
-        fs.write(fd, b"stable").unwrap();
-        fs.set_times(fd, Some(30), Some(40)).unwrap();
+        fs.make_fifo(FsClock::EPOCH, "/state/pipe", 0o666).unwrap();
+        fs.create_directory(FsClock::EPOCH, "/state/empty", 0o777)
+            .unwrap();
+        let fd = fs
+            .open(
+                FsClock::EPOCH,
+                "/state/log",
+                OpenFlags::create_truncate_write(),
+            )
+            .unwrap();
+        fs.write(FsClock::EPOCH, fd, b"stable").unwrap();
+        fs.set_times(FsClock::EPOCH, fd, Some(30), Some(40))
+            .unwrap();
         fs.close(fd).unwrap();
-        fs.link("/state/log", "/state/log.link").unwrap();
-        fs.symlink("../state/log", "/state/log.sym").unwrap();
-        fs.set_times_by_path("/state/log.sym", Some(50), Some(60))
+        fs.link(FsClock::EPOCH, "/state/log", "/state/log.link")
+            .unwrap();
+        fs.symlink(FsClock::EPOCH, "../state/log", "/state/log.sym")
+            .unwrap();
+        fs.set_times_by_path(FsClock::EPOCH, "/state/log.sym", Some(50), Some(60))
+            .unwrap();
+        // Last: every name created above stamped the directory's mtime/ctime.
+        fs.set_times_by_path(FsClock::EPOCH, "/state", Some(10), Some(20))
             .unwrap();
         fs
     }
@@ -754,11 +784,14 @@ mod tests {
         // Modes are not part of the hand-encoded tuples: every case below
         // probes structure (ordering, identity, bounds), so each entry carries
         // its ordinary creation mode.
+        // Change and birth times are not part of the tuples either: every
+        // case probes structure, so they are written as zero.
         for (path, ino, atime, mtime) in directories {
             encode_path(&mut bytes, path);
             bytes.extend_from_slice(&ino.to_le_bytes());
             bytes.extend_from_slice(&atime.to_le_bytes());
             bytes.extend_from_slice(&mtime.to_le_bytes());
+            bytes.extend_from_slice(&[0u8; 16]);
             bytes.extend_from_slice(&crate::DIRECTORY_MODE.to_le_bytes());
         }
         for (ino, links, atime, mtime, contents) in inodes {
@@ -766,6 +799,7 @@ mod tests {
             bytes.extend_from_slice(&links.to_le_bytes());
             bytes.extend_from_slice(&atime.to_le_bytes());
             bytes.extend_from_slice(&mtime.to_le_bytes());
+            bytes.extend_from_slice(&[0u8; 16]);
             bytes.extend_from_slice(&crate::FILE_MODE.to_le_bytes());
             encode_field(&mut bytes, contents);
         }
@@ -779,6 +813,7 @@ mod tests {
             bytes.extend_from_slice(&ino.to_le_bytes());
             bytes.extend_from_slice(&atime.to_le_bytes());
             bytes.extend_from_slice(&mtime.to_le_bytes());
+            bytes.extend_from_slice(&[0u8; 16]);
             bytes.extend_from_slice(&crate::SYMLINK_MODE.to_le_bytes());
         }
         bytes
@@ -787,7 +822,7 @@ mod tests {
     #[test]
     fn snapshot_round_trip_is_canonical_and_excludes_handles() {
         let mut fs = fixture();
-        let open = fs.open("/state/log", read_write()).unwrap();
+        let open = fs.open(FsClock::EPOCH, "/state/log", read_write()).unwrap();
         fs.seek(open, 3, SeekWhence::Start).unwrap();
         let encoded = fs.export_snapshot().encode().unwrap();
         let snapshot = FsSnapshot::decode(&encoded).unwrap();
@@ -795,12 +830,22 @@ mod tests {
 
         let mut imported = MemFs::import_snapshot(&snapshot);
         assert_eq!(
-            imported.read(Fd(3), 1).unwrap_err().code,
+            imported.read(FsClock::EPOCH, Fd(3), 1).unwrap_err().code,
             ErrorCode::InvalidHandle
         );
-        let fd = imported.open("/state/log", OpenFlags::read_only()).unwrap();
+        let fd = imported
+            .open(FsClock::EPOCH, "/state/log", OpenFlags::read_only())
+            .unwrap();
         assert_eq!(fd, Fd(3), "restart snapshot carried an old fd allocator");
-        assert_eq!(imported.read(fd, 64).unwrap(), b"stable");
+        // A read under `noatime` is the one read that leaves the image
+        // byte-identical; under the default `relatime` it would stamp `atime`
+        // (the file's mtime is newer than its atime), which is the point of
+        // the model, not a snapshot defect.
+        let noatime = FsClock {
+            now_nanos: 0,
+            atime: patina_dst_abi::AtimePolicy::NoAtime,
+        };
+        assert_eq!(imported.read(noatime, fd, 64).unwrap(), b"stable");
         assert_eq!(imported.export_snapshot().encode().unwrap(), encoded);
     }
 
@@ -808,10 +853,14 @@ mod tests {
     fn snapshot_preserves_hard_links_timestamps_and_inode_allocator() {
         let mut fs = fixture();
         let gap = fs
-            .open("/removed", OpenFlags::create_truncate_write())
+            .open(
+                FsClock::EPOCH,
+                "/removed",
+                OpenFlags::create_truncate_write(),
+            )
             .unwrap();
         fs.close(gap).unwrap();
-        fs.remove_file("/removed").unwrap();
+        fs.remove_file(FsClock::EPOCH, "/removed").unwrap();
         let expected_next_inode = fs.next_inode;
         let mut imported = FsSnapshot::decode(&fs.export_snapshot().encode().unwrap())
             .unwrap()
@@ -832,12 +881,14 @@ mod tests {
         assert_eq!(symlink.kind, FsEntryKind::Symlink);
         assert_eq!((symlink.atime_nanos, symlink.mtime_nanos), (50, 60));
         assert_eq!(
-            imported.read_link("/state/log.sym").unwrap(),
+            imported
+                .read_link(FsClock::EPOCH, "/state/log.sym")
+                .unwrap(),
             "../state/log"
         );
 
         let fd = imported
-            .open("/new", OpenFlags::create_truncate_write())
+            .open(FsClock::EPOCH, "/new", OpenFlags::create_truncate_write())
             .unwrap();
         assert_eq!(imported.metadata("/new").unwrap().ino, expected_next_inode);
         imported.close(fd).unwrap();
@@ -891,7 +942,7 @@ mod tests {
 
         let mut fs = MemFs::new();
         let path = format!("/{}", "a".repeat(MAX_PATH_BYTES as usize + 1));
-        fs.create_directory(&path, 0o777).unwrap();
+        fs.create_directory(FsClock::EPOCH, &path, 0o777).unwrap();
         assert_eq!(
             fs.export_snapshot().encode().unwrap_err(),
             FsSnapshotError::LimitExceeded("path length")
@@ -910,7 +961,11 @@ mod tests {
             .unwrap()
             .into_memfs();
         let fd = imported
-            .open("/allocated", OpenFlags::create_truncate_write())
+            .open(
+                FsClock::EPOCH,
+                "/allocated",
+                OpenFlags::create_truncate_write(),
+            )
             .unwrap();
         imported.close(fd).unwrap();
         assert_eq!(imported.metadata("/allocated").unwrap().ino, 2);

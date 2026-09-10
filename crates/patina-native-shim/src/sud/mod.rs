@@ -31,6 +31,7 @@
 
 use std::cell::Cell;
 
+use crate::PatinaMetadata;
 use crate::registry::{Arch, Disposition, SYSCALLS, SyscallRow};
 
 mod fd_io;
@@ -97,24 +98,34 @@ unsafe extern "C" {
         dirfd: c_int,
         path: *const c_char,
         flags: u32,
-        kind: *mut u32,
-        length: *mut u64,
-        ino: *mut u64,
-        nlink: *mut u32,
-        atime_nanos: *mut u64,
-        mtime_nanos: *mut u64,
-        mode: *mut u32,
+        out: *mut PatinaMetadata,
     ) -> c_int;
-    fn patina_fd_metadata_full(
+    fn patina_fd_metadata_full(fd: c_int, out: *mut PatinaMetadata) -> c_int;
+    // The one modeled identity, for st_uid/st_gid.
+    fn patina_uid() -> u32;
+    fn patina_gid() -> u32;
+    // Timestamps, ownership and sizes: the same entries the C utimensat/chown/
+    // truncate/fallocate families call.
+    fn patina_utimensat(
+        dirfd: c_int,
+        path: *const c_char,
+        flags: u32,
+        atime_kind: u32,
+        atime_nanos: u64,
+        mtime_kind: u32,
+        mtime_nanos: u64,
+    ) -> c_int;
+    fn patina_futimens(
         fd: c_int,
-        kind: *mut u32,
-        length: *mut u64,
-        ino: *mut u64,
-        nlink: *mut u32,
-        atime_nanos: *mut u64,
-        mtime_nanos: *mut u64,
-        mode: *mut u32,
+        atime_kind: u32,
+        atime_nanos: u64,
+        mtime_kind: u32,
+        mtime_nanos: u64,
     ) -> c_int;
+    fn patina_chown(dirfd: c_int, path: *const c_char, flags: u32, uid: u32, gid: u32) -> c_int;
+    fn patina_fchown(fd: c_int, uid: u32, gid: u32) -> c_int;
+    fn patina_truncate(dirfd: c_int, path: *const c_char, length: i64) -> c_int;
+    fn patina_fallocate(fd: c_int, mode: u32, offset: i64, length: i64) -> c_int;
     // Permission bits: the same entries the C chmod/fchmod/fchmodat interposers
     // call, so a raw-syscall guest and a libc guest change one mode model.
     fn patina_chmod(dirfd: c_int, path: *const c_char, mode: u32, flags: u32) -> c_int;
@@ -426,6 +437,10 @@ const X_OK: u64 = 1;
 const W_OK: u64 = 2;
 
 const R_OK: u64 = 4;
+
+/// `utimensat(2)` `tv_nsec` sentinels.
+const UTIME_NOW: i64 = (1 << 30) - 1;
+const UTIME_OMIT: i64 = (1 << 30) - 2;
 
 // `fcntl(2)` commands (identical on x86_64 and aarch64 Linux).
 const F_DUPFD: u64 = 0;
@@ -797,6 +812,9 @@ const BINDINGS: &[(&str, Handler)] = &[
     ("fsync", |_, a| sys_fsync(arg_fd(a[0]))),
     ("fdatasync", |_, a| sys_fsync(arg_fd(a[0]))),
     ("ftruncate", |_, a| sys_ftruncate(arg_fd(a[0]), a[1] as i64)),
+    ("fallocate", |_, a| {
+        sys_fallocate(arg_fd(a[0]), a[1], a[2] as i64, a[3] as i64)
+    }),
     ("flock", |_, a| sys_flock(arg_fd(a[0]), a[1] as i64)),
     ("dup", |_, a| sys_dup(arg_fd(a[0]))),
     ("dup3", |_, a| sys_dup3(arg_fd(a[0]), arg_fd(a[1]), a[2])),
@@ -810,7 +828,9 @@ const BINDINGS: &[(&str, Handler)] = &[
     ("newfstatat", |_, a| {
         sys_newfstatat(arg_fd(a[0]), a[1], a[2], a[3])
     }),
-    ("statx", |_, a| sys_statx(arg_fd(a[0]), a[1], a[2], a[4])),
+    ("statx", |_, a| {
+        sys_statx(arg_fd(a[0]), a[1], a[2], a[3], a[4])
+    }),
     ("getdents64", |_, a| {
         sys_getdents64(arg_fd(a[0]), a[1], a[2])
     }),
@@ -854,6 +874,16 @@ const BINDINGS: &[(&str, Handler)] = &[
     ("fchmodat2", |_, a| {
         sys_fchmodat(arg_fd(a[0]), a[1], a[2], a[3])
     }),
+    // Timestamps, ownership and sizes: the same `patina_*` entries the C
+    // utimensat/chown/truncate families call.
+    ("utimensat", |_, a| {
+        sys_utimensat(arg_fd(a[0]), a[1], a[2], a[3])
+    }),
+    ("fchownat", |_, a| {
+        sys_fchownat(arg_fd(a[0]), a[1], a[2], a[3], a[4])
+    }),
+    ("fchown", |_, a| sys_fchown(arg_fd(a[0]), a[1], a[2])),
+    ("truncate", |_, a| sys_truncate(a[0], a[1] as i64)),
     // `openat2` is the RESOLVE_BENEATH open: a NAMED soft deny whose ENOSYS is
     // exactly what its callers probe for before falling back to `openat`.
     ("openat2", |_, _| sud_deny(DENY_OPENAT2)),
@@ -935,6 +965,15 @@ const BINDINGS: &[(&str, Handler)] = &[
     }),
     ("access", |_, a| sys_faccessat(AT_FDCWD, a[0], a[1], 0)),
     ("chmod", |_, a| sys_fchmodat(AT_FDCWD, a[0], a[1], 0)),
+    ("chown", |_, a| sys_fchownat(AT_FDCWD, a[0], a[1], a[2], 0)),
+    ("lchown", |_, a| {
+        sys_fchownat(AT_FDCWD, a[0], a[1], a[2], AT_SYMLINK_NOFOLLOW)
+    }),
+    // The pre-utimensat time rows: whole seconds (`utime`), microseconds
+    // (`utimes`, `futimesat`), each decoded onto the one set-times entry.
+    ("utime", |_, a| sys_utime(a[0], a[1])),
+    ("utimes", |_, a| sys_futimesat(AT_FDCWD, a[0], a[1])),
+    ("futimesat", |_, a| sys_futimesat(arg_fd(a[0]), a[1], a[2])),
     ("dup2", |_, a| sys_dup2(arg_fd(a[0]), arg_fd(a[1]))),
     ("pipe", |_, a| sys_pipe2(a[0], 0)),
     ("eventfd", |_, a| sys_eventfd2(a[0], 0)),

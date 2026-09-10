@@ -11,7 +11,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use patina_dst_abi::{
-    EffectError, ErrorCode, Fd, FsDirectoryEntry, FsEntryKind, FsMetadata, OpenFlags, SeekWhence,
+    EffectError, ErrorCode, Fd, FsClock, FsDirectoryEntry, FsEntryKind, FsMetadata, OpenFlags,
+    SeekWhence,
 };
 use patina_dst_driver_api::{DriverResult, FsDriver};
 
@@ -92,7 +93,7 @@ impl HostCaptureFs {
 }
 
 impl FsDriver for HostCaptureFs {
-    fn open(&mut self, path: &str, flags: OpenFlags) -> DriverResult<Fd> {
+    fn open(&mut self, _clock: FsClock, path: &str, flags: OpenFlags) -> DriverResult<Fd> {
         if !flags.read
             || flags.write
             || flags.create
@@ -116,7 +117,7 @@ impl FsDriver for HostCaptureFs {
         self.allocate_fd(file)
     }
 
-    fn read(&mut self, fd: Fd, max_len: usize) -> DriverResult<Vec<u8>> {
+    fn read(&mut self, _clock: FsClock, fd: Fd, max_len: usize) -> DriverResult<Vec<u8>> {
         if max_len > MAX_CAPTURE_READ {
             return Err(EffectError::new(
                 ErrorCode::InvalidInput,
@@ -132,7 +133,7 @@ impl FsDriver for HostCaptureFs {
         Ok(bytes)
     }
 
-    fn write(&mut self, _fd: Fd, _bytes: &[u8]) -> DriverResult<usize> {
+    fn write(&mut self, _clock: FsClock, _fd: Fd, _bytes: &[u8]) -> DriverResult<usize> {
         Err(EffectError::new(
             ErrorCode::Denied,
             "host capture filesystem is read-only",
@@ -177,7 +178,11 @@ impl FsDriver for HostCaptureFs {
         metadata_from_host(&metadata)
     }
 
-    fn read_directory(&mut self, path: &str) -> DriverResult<Vec<FsDirectoryEntry>> {
+    fn read_directory(
+        &mut self,
+        _clock: FsClock,
+        path: &str,
+    ) -> DriverResult<Vec<FsDirectoryEntry>> {
         let path = self.resolve_existing(path)?;
         if !path.is_dir() {
             return Err(EffectError::new(
@@ -234,6 +239,8 @@ fn metadata_from_host(metadata: &fs::Metadata) -> DriverResult<FsMetadata> {
         nlink: 1,
         atime_nanos: 0,
         mtime_nanos: 0,
+        ctime_nanos: 0,
+        btime_nanos: 0,
         // Normalized like `ino`/`nlink`/the timestamps above: a captured host
         // file's real mode varies with the checkout that produced it (umask,
         // VCS, archive extraction), so reporting it would make a capture-backed
@@ -312,22 +319,36 @@ mod tests {
             .unwrap();
         let mut capture = HostCaptureFs::new("/fixtures", root.path()).unwrap();
         let fd = capture
-            .open("/fixtures/nested/value", OpenFlags::read_only())
+            .open(
+                FsClock::EPOCH,
+                "/fixtures/nested/value",
+                OpenFlags::read_only(),
+            )
             .unwrap();
-        assert_eq!(capture.read(fd, 99).unwrap(), b"captured");
+        assert_eq!(capture.read(FsClock::EPOCH, fd, 99).unwrap(), b"captured");
         assert_eq!(capture.fd_metadata(fd).unwrap().len, 8);
         capture.close(fd).unwrap();
-        assert_eq!(capture.read_directory("/fixtures/nested").unwrap().len(), 1);
         assert_eq!(
             capture
-                .open("/outside", OpenFlags::read_only())
+                .read_directory(FsClock::EPOCH, "/fixtures/nested")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            capture
+                .open(FsClock::EPOCH, "/outside", OpenFlags::read_only())
                 .unwrap_err()
                 .code,
             ErrorCode::Denied
         );
         assert_eq!(
             capture
-                .open("/fixtures/../outside", OpenFlags::read_only())
+                .open(
+                    FsClock::EPOCH,
+                    "/fixtures/../outside",
+                    OpenFlags::read_only()
+                )
                 .unwrap_err()
                 .code,
             ErrorCode::Denied
@@ -347,7 +368,7 @@ mod tests {
             let mut capture = HostCaptureFs::new("/fixtures", root.path()).unwrap();
             assert_eq!(
                 capture
-                    .open("/fixtures/escape", OpenFlags::read_only())
+                    .open(FsClock::EPOCH, "/fixtures/escape", OpenFlags::read_only())
                     .unwrap_err()
                     .code,
                 ErrorCode::Denied

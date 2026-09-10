@@ -218,6 +218,9 @@ const ENOTSOCK: c_int = 38;
 #[cfg(target_os = "linux")]
 const ENOTSOCK: c_int = 88;
 const EFBIG: c_int = 27;
+/// `fallocate` on a descriptor that is neither a regular file nor a block
+/// device (a socket, an eventfd, a character device); 19 on Linux and Darwin.
+const ENODEV: c_int = 19;
 const ERANGE: c_int = 34;
 const E2BIG: c_int = 7;
 const EXDEV: c_int = 18;
@@ -4535,39 +4538,64 @@ fn metadata_kind(kind: FsEntryKind) -> u32 {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn write_metadata_full(
-    metadata: patina_dst_abi::FsMetadata,
-    kind: *mut u32,
-    length: *mut u64,
-    ino: *mut u64,
-    nlink: *mut u32,
-    atime_nanos: *mut u64,
-    mtime_nanos: *mut u64,
-    mode: *mut u32,
-) -> c_int {
-    if kind.is_null()
-        || length.is_null()
-        || ino.is_null()
-        || nlink.is_null()
-        || atime_nanos.is_null()
-        || mtime_nanos.is_null()
-        || mode.is_null()
-    {
+/// The C face of a metadata record (`struct patina_metadata` in
+/// `include/patina_native.h`): what the stat family on both doors fills a
+/// `struct stat`/`struct statx` from. Every field is a modeled fact; the owner
+/// is not here because it is a property of the one identity the runtime
+/// models, read through [`patina_uid`]/[`patina_gid`], never per entry.
+#[repr(C)]
+pub struct PatinaMetadata {
+    /// A `PATINA_ENTRY_*` kind.
+    pub kind: u32,
+    /// The permission bits (`0o7777`) WITHOUT the file-type bits `kind` carries.
+    pub mode: u32,
+    pub nlink: u32,
+    pub reserved: u32,
+    pub length: u64,
+    pub ino: u64,
+    pub atime_nanos: u64,
+    pub mtime_nanos: u64,
+    pub ctime_nanos: u64,
+    pub btime_nanos: u64,
+}
+
+fn write_metadata(metadata: patina_dst_abi::FsMetadata, out: *mut PatinaMetadata) -> c_int {
+    if out.is_null() {
         return fail(EINVAL);
     }
-    // SAFETY: All pointers were checked and are required to be writable by the
-    // C ABI contract.
+    // SAFETY: the pointer was checked and is required to be writable by the C
+    // ABI contract.
     unsafe {
-        kind.write(metadata_kind(metadata.kind));
-        length.write(metadata.len);
-        ino.write(metadata.ino);
-        nlink.write(metadata.nlink);
-        atime_nanos.write(metadata.atime_nanos);
-        mtime_nanos.write(metadata.mtime_nanos);
-        mode.write(metadata.mode);
+        out.write(PatinaMetadata {
+            kind: metadata_kind(metadata.kind),
+            mode: metadata.mode,
+            nlink: metadata.nlink,
+            reserved: 0,
+            length: metadata.len,
+            ino: metadata.ino,
+            atime_nanos: metadata.atime_nanos,
+            mtime_nanos: metadata.mtime_nanos,
+            ctime_nanos: metadata.ctime_nanos,
+            btime_nanos: metadata.btime_nanos,
+        });
     }
     0
+}
+
+/// The one modeled identity's user id — the ONE accessor every `st_uid`,
+/// `getuid`/`geteuid`, and ownership comparison reads. A guest reading an
+/// owner reads this, never a per-entry field: the deterministic filesystem
+/// stores no owner because it models one, and `chown` to anything else is
+/// `EPERM` exactly as an unprivileged process gets.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_uid() -> u32 {
+    registry::IDENTITY_UID
+}
+
+/// The one modeled identity's group id; see [`patina_uid`].
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_gid() -> u32 {
+    registry::IDENTITY_GID
 }
 
 /// Read the metadata of the entry `(dirfd, path)` resolves to: the one entry
@@ -4579,21 +4607,14 @@ fn write_metadata_full(
 /// 40-hop limit. A missing entry is `ENOENT`.
 ///
 /// # Safety
-/// `path` must point to a valid NUL-terminated UTF-8 string and every out
-/// pointer to writable storage of its documented type.
+/// `path` must point to a valid NUL-terminated UTF-8 string and `out` to a
+/// writable `struct patina_metadata`.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn patina_metadata_at(
     dirfd: c_int,
     path: *const c_char,
     flags: u32,
-    kind: *mut u32,
-    length: *mut u64,
-    ino: *mut u64,
-    nlink: *mut u32,
-    atime_nanos: *mut u64,
-    mtime_nanos: *mut u64,
-    mode: *mut u32,
+    out: *mut PatinaMetadata,
 ) -> c_int {
     if flags & !paths::RESOLVE_ALL != 0 {
         return fail(EINVAL);
@@ -4609,34 +4630,15 @@ pub unsafe extern "C" fn patina_metadata_at(
     let Some(metadata) = resolved.metadata else {
         return fail(ENOENT);
     };
-    write_metadata_full(
-        metadata,
-        kind,
-        length,
-        ino,
-        nlink,
-        atime_nanos,
-        mtime_nanos,
-        mode,
-    )
+    write_metadata(metadata, out)
 }
 
 /// Read full metadata for a deterministic descriptor.
 ///
 /// # Safety
-/// All pointers must reference valid storage of their documented types.
+/// `out` must point to a writable `struct patina_metadata`.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn patina_fd_metadata_full(
-    raw_fd: c_int,
-    kind: *mut u32,
-    length: *mut u64,
-    ino: *mut u64,
-    nlink: *mut u32,
-    atime_nanos: *mut u64,
-    mtime_nanos: *mut u64,
-    mode: *mut u32,
-) -> c_int {
+pub unsafe extern "C" fn patina_fd_metadata_full(raw_fd: c_int, out: *mut PatinaMetadata) -> c_int {
     // A FIFO descriptor is a pipe endpoint, not a filesystem descriptor: the
     // filesystem knows the ENTRY but holds no handle to ask about. What the
     // descriptor holds is the NODE, so the filesystem is asked about the inode —
@@ -4651,16 +4653,7 @@ pub unsafe extern "C" fn patina_fd_metadata_full(
     // because a copy is a stale cache one field over from the cached path.
     if let Some(node) = thread::fifo_ino(raw_fd) {
         return match with_context(|context| context.fs_inode_metadata(node)) {
-            Ok(metadata) => write_metadata_full(
-                metadata,
-                kind,
-                length,
-                ino,
-                nlink,
-                atime_nanos,
-                mtime_nanos,
-                mode,
-            ),
+            Ok(metadata) => write_metadata(metadata, out),
             Err(errno) => fail(errno),
         };
     }
@@ -4669,16 +4662,7 @@ pub unsafe extern "C" fn patina_fd_metadata_full(
         Err(errno) => return fail(errno),
     };
     match with_context(|context| context.fs_fd_metadata(fd)) {
-        Ok(metadata) => write_metadata_full(
-            metadata,
-            kind,
-            length,
-            ino,
-            nlink,
-            atime_nanos,
-            mtime_nanos,
-            mode,
-        ),
+        Ok(metadata) => write_metadata(metadata, out),
         Err(errno) => fail(errno),
     }
 }
@@ -4744,6 +4728,397 @@ pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
         Err(errno) => return fail(errno),
     };
     match with_context(|context| context.fs_set_fd_mode(fd, mode)) {
+        Ok(()) => {
+            set_errno(0);
+            0
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Timestamps, ownership and sizes: the entries behind the utimensat, chown,
+// truncate and fallocate families on both doors.
+
+/// A time argument as the `utimensat` family spells it: leave the time alone.
+pub const TIME_OMIT: u32 = 0;
+/// Set the time to the virtual clock's now.
+pub const TIME_NOW: u32 = 1;
+/// Set the time to the nanoseconds given beside the kind.
+pub const TIME_SET: u32 = 2;
+
+/// Resolve the two `(kind, nanos)` time arguments of a `utimensat`-family call
+/// onto what crosses the boundary: `None` for `UTIME_OMIT`, the explicit value,
+/// or — for `UTIME_NOW` — the instant the filesystem stamps this call with,
+/// read once, unrecorded, from the same clock the driver is handed. The
+/// recorded operation therefore carries a concrete time and replays without a
+/// second clock read.
+fn resolve_time_arguments(
+    atime_kind: u32,
+    atime_nanos: u64,
+    mtime_kind: u32,
+    mtime_nanos: u64,
+) -> Result<(Option<u64>, Option<u64>), c_int> {
+    if atime_kind > TIME_SET || mtime_kind > TIME_SET {
+        return Err(EINVAL);
+    }
+    let now = if atime_kind == TIME_NOW || mtime_kind == TIME_NOW {
+        Some(with_context_raw(|context| context.fs_now_unrecorded())?)
+    } else {
+        None
+    };
+    let pick = |kind: u32, nanos: u64| match kind {
+        TIME_OMIT => None,
+        TIME_NOW => now,
+        _ => Some(nanos),
+    };
+    Ok((pick(atime_kind, atime_nanos), pick(mtime_kind, mtime_nanos)))
+}
+
+/// `utimensat(2)` on a `(dirfd, path)`: set the entry's access and
+/// modification times (each `PATINA_TIME_OMIT`, `PATINA_TIME_NOW`, or
+/// `PATINA_TIME_SET` with its nanoseconds); `ctime` moves whenever either does.
+/// `flags` are `PATINA_RESOLVE_*` (`NOFOLLOW` sets a symlink's own times, as
+/// `lutimes`/`AT_SYMLINK_NOFOLLOW` do). Both `OMIT` is the kernel's early
+/// success: nothing crosses the boundary and no time moves. The one modeled
+/// identity owns every entry, so the kernel's owner-or-`w` rule always passes.
+///
+/// # Safety
+/// `path` must point to a valid NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn patina_utimensat(
+    dirfd: c_int,
+    path: *const c_char,
+    flags: u32,
+    atime_kind: u32,
+    atime_nanos: u64,
+    mtime_kind: u32,
+    mtime_nanos: u64,
+) -> c_int {
+    if flags & !paths::RESOLVE_ALL != 0 {
+        return fail(EINVAL);
+    }
+    let path = match path_from_c(path) {
+        Ok(path) => path,
+        Err(errno) => return fail(errno),
+    };
+    let (atime, mtime) =
+        match resolve_time_arguments(atime_kind, atime_nanos, mtime_kind, mtime_nanos) {
+            Ok(times) => times,
+            Err(errno) => return fail(errno),
+        };
+    let resolved = match paths::resolve(dirfd, &path, flags) {
+        Ok(resolved) => resolved,
+        Err(errno) => return fail(errno),
+    };
+    if resolved.metadata.is_none() {
+        return fail(ENOENT);
+    }
+    if atime.is_none() && mtime.is_none() {
+        set_errno(0);
+        return 0;
+    }
+    match with_context(|context| context.fs_set_times_by_path(&resolved.path, atime, mtime)) {
+        Ok(()) => {
+            set_errno(0);
+            0
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
+/// `futimens(3)` / `utimensat(fd, NULL, …)`: the same change, on the node an
+/// open descriptor holds. An `O_PATH` descriptor is `EBADF` (the kernel's
+/// `fdget` never hands one out for this call). A descriptor on something the
+/// filesystem holds no node for — a pipe end, a socket, the captured streams,
+/// a FIFO endpoint — succeeds without an effect: the kernel would stamp an
+/// anonymous inode nobody can name.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_futimens(
+    raw_fd: c_int,
+    atime_kind: u32,
+    atime_nanos: u64,
+    mtime_kind: u32,
+    mtime_nanos: u64,
+) -> c_int {
+    let resolved = match resolve_fd(raw_fd) {
+        Ok(resolved) => resolved,
+        Err(errno) => return fail(errno),
+    };
+    if resolved.kind == FdKind::OPath {
+        return fail(EBADF);
+    }
+    let (atime, mtime) =
+        match resolve_time_arguments(atime_kind, atime_nanos, mtime_kind, mtime_nanos) {
+            Ok(times) => times,
+            Err(errno) => return fail(errno),
+        };
+    if (atime.is_none() && mtime.is_none()) || !resolved.kind.is_fs() {
+        set_errno(0);
+        return 0;
+    }
+    let fd = Fd(resolved.handle);
+    match with_context(|context| context.fs_set_times(fd, atime, mtime)) {
+        Ok(()) => {
+            set_errno(0);
+            0
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
+/// `uid_t`/`gid_t` `-1`: leave the id alone.
+const ID_UNCHANGED: u32 = u32::MAX;
+const S_ISUID: u32 = 0o4000;
+const S_ISGID: u32 = 0o2000;
+const S_IXGRP: u32 = 0o010;
+
+/// The `chown` decision for the one modeled identity: an id that is `-1` or
+/// already the owner's is a no-op the kernel accepts; anything else needs
+/// `CAP_CHOWN` (or a supplementary group this identity is not in) and is
+/// `EPERM`. `Ok` carries the mode the kernel would store afterwards — on a
+/// non-directory `chown` kills the setuid bit and, when the group may execute,
+/// the setgid bit — so the caller writes that mode back through the one mode
+/// entry, which is also what moves `ctime`.
+fn chown_decision(uid: u32, gid: u32, kind: FsEntryKind, mode: u32) -> Result<u32, c_int> {
+    if (uid != ID_UNCHANGED && uid != registry::IDENTITY_UID)
+        || (gid != ID_UNCHANGED && gid != registry::IDENTITY_GID)
+    {
+        return Err(EPERM);
+    }
+    if kind == FsEntryKind::Directory {
+        return Ok(mode);
+    }
+    let mut mode = mode & !S_ISUID;
+    if mode & (S_ISGID | S_IXGRP) == S_ISGID | S_IXGRP {
+        mode &= !S_ISGID;
+    }
+    Ok(mode)
+}
+
+/// `chown`/`lchown`/`fchownat` on a `(dirfd, path)`; `flags` are
+/// `PATINA_RESOLVE_*` (`NOFOLLOW` names a symlink itself, `EMPTY_PATH` lets
+/// `AT_EMPTY_PATH` name the base). A symlink named itself succeeds without
+/// an effect: it has no mode to kill and the filesystem gives a link no
+/// `ctime` of its own to move.
+///
+/// # Safety
+/// `path` must point to a valid NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_chown(
+    dirfd: c_int,
+    path: *const c_char,
+    flags: u32,
+    uid: u32,
+    gid: u32,
+) -> c_int {
+    if flags & !paths::RESOLVE_ALL != 0 {
+        return fail(EINVAL);
+    }
+    let path = match path_from_c(path) {
+        Ok(path) => path,
+        Err(errno) => return fail(errno),
+    };
+    let resolved = match paths::resolve(dirfd, &path, flags) {
+        Ok(resolved) => resolved,
+        Err(errno) => return fail(errno),
+    };
+    let Some(metadata) = resolved.metadata else {
+        return fail(ENOENT);
+    };
+    let mode = match chown_decision(uid, gid, metadata.kind, metadata.mode) {
+        Ok(mode) => mode,
+        Err(errno) => return fail(errno),
+    };
+    if metadata.kind == FsEntryKind::Symlink {
+        set_errno(0);
+        return 0;
+    }
+    match with_context(|context| context.fs_set_mode(&resolved.path, mode)) {
+        Ok(()) => {
+            set_errno(0);
+            0
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
+/// `fchown`: the same decision on the node a descriptor holds. `O_PATH` is
+/// `EBADF`; a descriptor the filesystem holds no node for (a pipe end, a
+/// socket, the captured streams) succeeds without an effect, as the kernel's
+/// `chown` of an anonymous inode the identity owns does.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_fchown(raw_fd: c_int, uid: u32, gid: u32) -> c_int {
+    let resolved = match resolve_fd(raw_fd) {
+        Ok(resolved) => resolved,
+        Err(errno) => return fail(errno),
+    };
+    if resolved.kind == FdKind::OPath {
+        return fail(EBADF);
+    }
+    if let Some(node) = thread::fifo_ino(raw_fd) {
+        let metadata = match with_context(|context| context.fs_inode_metadata(node)) {
+            Ok(metadata) => metadata,
+            Err(errno) => return fail(errno),
+        };
+        let mode = match chown_decision(uid, gid, metadata.kind, metadata.mode) {
+            Ok(mode) => mode,
+            Err(errno) => return fail(errno),
+        };
+        return match with_context(|context| context.fs_set_inode_mode(node, mode)) {
+            Ok(()) => {
+                set_errno(0);
+                0
+            }
+            Err(errno) => fail(errno),
+        };
+    }
+    if !resolved.kind.is_fs() {
+        return match chown_decision(uid, gid, FsEntryKind::File, 0) {
+            Ok(_) => {
+                set_errno(0);
+                0
+            }
+            Err(errno) => fail(errno),
+        };
+    }
+    let fd = Fd(resolved.handle);
+    let metadata = match with_context(|context| context.fs_fd_metadata(fd)) {
+        Ok(metadata) => metadata,
+        Err(errno) => return fail(errno),
+    };
+    let mode = match chown_decision(uid, gid, metadata.kind, metadata.mode) {
+        Ok(mode) => mode,
+        Err(errno) => return fail(errno),
+    };
+    match with_context(|context| context.fs_set_fd_mode(fd, mode)) {
+        Ok(()) => {
+            set_errno(0);
+            0
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
+/// `truncate(2)`: a regular file's length by name (a trailing symlink is
+/// followed). A negative length is `EINVAL`, a directory `EISDIR`, any other
+/// kind `EINVAL`; the driver charges `w` on the entry.
+///
+/// # Safety
+/// `path` must point to a valid NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_truncate(dirfd: c_int, path: *const c_char, length: i64) -> c_int {
+    let Ok(length) = u64::try_from(length) else {
+        return fail(EINVAL);
+    };
+    let path = match path_from_c(path) {
+        Ok(path) => path,
+        Err(errno) => return fail(errno),
+    };
+    let resolved = match paths::resolve(dirfd, &path, 0) {
+        Ok(resolved) => resolved,
+        Err(errno) => return fail(errno),
+    };
+    match resolved.metadata.map(|metadata| metadata.kind) {
+        None => return fail(ENOENT),
+        Some(FsEntryKind::Directory) => return fail(EISDIR),
+        Some(FsEntryKind::Fifo | FsEntryKind::Symlink) => return fail(EINVAL),
+        Some(FsEntryKind::File) => {}
+    }
+    match with_context(|context| context.fs_set_len_by_path(&resolved.path, length)) {
+        Ok(()) => {
+            set_errno(0);
+            0
+        }
+        Err(errno) => fail(errno),
+    }
+}
+
+/// `fallocate(2)` mode bits.
+pub const FALLOC_FL_KEEP_SIZE: u32 = 0x01;
+pub const FALLOC_FL_PUNCH_HOLE: u32 = 0x02;
+pub const FALLOC_FL_COLLAPSE_RANGE: u32 = 0x08;
+pub const FALLOC_FL_ZERO_RANGE: u32 = 0x10;
+pub const FALLOC_FL_INSERT_RANGE: u32 = 0x20;
+pub const FALLOC_FL_UNSHARE_RANGE: u32 = 0x40;
+/// The bits the kernel's `vfs_fallocate` recognizes at all; anything else is
+/// `EOPNOTSUPP` before the descriptor is even looked at.
+const FALLOC_FL_SUPPORTED: u32 = FALLOC_FL_KEEP_SIZE
+    | FALLOC_FL_PUNCH_HOLE
+    | FALLOC_FL_COLLAPSE_RANGE
+    | FALLOC_FL_ZERO_RANGE
+    | FALLOC_FL_INSERT_RANGE
+    | FALLOC_FL_UNSHARE_RANGE;
+
+/// The operation bits of a `fallocate` mode (everything but `KEEP_SIZE`); the
+/// kernel accepts at most one of them per call.
+const FALLOC_FL_OPERATIONS: u32 = FALLOC_FL_PUNCH_HOLE
+    | FALLOC_FL_COLLAPSE_RANGE
+    | FALLOC_FL_ZERO_RANGE
+    | FALLOC_FL_INSERT_RANGE
+    | FALLOC_FL_UNSHARE_RANGE;
+
+/// `fallocate(2)`, in the kernel's order of refusals: a bad range is
+/// `EINVAL`; an unknown bit, two operation bits at once, `PUNCH_HOLE` without
+/// `KEEP_SIZE`, or a range-shifting mode with `KEEP_SIZE` is `EOPNOTSUPP`
+/// (host-checked: Linux 6.8 answers `EOPNOTSUPP`, not `EINVAL`, for the
+/// self-contradictory modes); a descriptor not open for writing (or `O_PATH`)
+/// `EBADF`, a pipe `ESPIPE`, a directory `EISDIR`, any other non-file `ENODEV`,
+/// a range past the file size limit `EFBIG`. Mode `0` and `KEEP_SIZE` reserve
+/// (the file grows to `offset + len` unless `KEEP_SIZE`); `PUNCH_HOLE|KEEP_SIZE`
+/// and `ZERO_RANGE` zero the range; the range-shifting modes (`COLLAPSE_RANGE`,
+/// `INSERT_RANGE`) and `UNSHARE_RANGE` are `EOPNOTSUPP`, a real answer on
+/// filesystems without them. One recorded operation whatever the range.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length: i64) -> c_int {
+    if offset < 0 || length <= 0 {
+        return fail(EINVAL);
+    }
+    if mode & !FALLOC_FL_SUPPORTED != 0
+        || (mode & FALLOC_FL_OPERATIONS).count_ones() > 1
+        || (mode & FALLOC_FL_PUNCH_HOLE != 0 && mode & FALLOC_FL_KEEP_SIZE == 0)
+        || (mode & (FALLOC_FL_COLLAPSE_RANGE | FALLOC_FL_INSERT_RANGE) != 0
+            && mode & FALLOC_FL_KEEP_SIZE != 0)
+    {
+        return fail(EOPNOTSUPP);
+    }
+    let resolved = match resolve_fd(raw_fd) {
+        Ok(resolved) => resolved,
+        Err(errno) => return fail(errno),
+    };
+    if resolved.kind == FdKind::OPath || resolved.status & O_WRITE == 0 {
+        return fail(EBADF);
+    }
+    match resolved.kind {
+        FdKind::File => {}
+        FdKind::Pipe => return fail(ESPIPE),
+        FdKind::Dir => return fail(EISDIR),
+        FdKind::OPath
+        | FdKind::Stdin
+        | FdKind::Stdout
+        | FdKind::Stderr
+        | FdKind::Urandom
+        | FdKind::Socket => return fail(ENODEV),
+        #[cfg(target_os = "linux")]
+        FdKind::EventFd | FdKind::Epoll => return fail(ENODEV),
+        #[cfg(target_os = "macos")]
+        FdKind::Kqueue => return fail(ENODEV),
+    }
+    if mode & (FALLOC_FL_COLLAPSE_RANGE | FALLOC_FL_INSERT_RANGE | FALLOC_FL_UNSHARE_RANGE) != 0 {
+        return fail(EOPNOTSUPP);
+    }
+    let (offset, length) = (offset as u64, length as u64);
+    if offset
+        .checked_add(length)
+        .is_none_or(|end| end > i64::MAX as u64)
+    {
+        return fail(EFBIG);
+    }
+    let zero = mode & (FALLOC_FL_PUNCH_HOLE | FALLOC_FL_ZERO_RANGE) != 0;
+    let keep_size = mode & FALLOC_FL_KEEP_SIZE != 0;
+    let fd = Fd(resolved.handle);
+    match with_context(|context| context.fs_allocate(fd, offset, length, zero, keep_size)) {
         Ok(()) => {
             set_errno(0);
             0
@@ -4879,7 +5254,10 @@ unsafe fn path_unit(
 /// `path` must point to a valid NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_mkdir(dirfd: c_int, path: *const c_char, mode: u32) -> c_int {
-    let mode = (mode & 0o7777) & !paths::umask();
+    // `vfs_mkdir` keeps the permission triads and the sticky bit of the
+    // request and drops setuid/setgid: a directory never gets those from its
+    // creation mode.
+    let mode = (mode & 0o1777) & !paths::umask();
     // SAFETY: Forwarded from this function's C ABI contract.
     unsafe {
         path_unit(dirfd, path, paths::RESOLVE_NOFOLLOW, |context, path| {

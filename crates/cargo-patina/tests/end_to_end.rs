@@ -10419,10 +10419,11 @@ fn drop_trailing_task_yield(source: &Path, dest: &Path) {
 #[cfg(target_os = "macos")]
 const ESCAPE_CLASSES_SOURCE: &str = r#"
 unsafe extern "C" {
-    // truncate: an uninterposed path truncation -- the filesystem-class
-    // representative. (`link`, then `pwritev`, served here before; both are now
-    // routed through the deterministic filesystem, so neither is an escape.)
-    fn truncate(path: *const u8, length: i64) -> i32;
+    // acct: process accounting to a file, refused by decision (privileged,
+    // kernel-global) -- the filesystem-class representative. (`link`, then
+    // `pwritev`, then `truncate` served here before; all three are now routed
+    // through the deterministic filesystem, so none is an escape.)
+    fn acct(path: *const u8) -> i32;
     fn gethostbyname(name: *const u8) -> *mut u8;
     fn select(n: i32, r: *mut u8, w: *mut u8, e: *mut u8, t: *mut u8) -> i32;
     fn semaphore_wait(s: u32) -> i32;
@@ -10436,7 +10437,7 @@ unsafe extern "C" {
 }
 fn main() {
     let ptrs: &[*const ()] = &[
-        truncate as *const (), gethostbyname as *const (), select as *const (),
+        acct as *const (), gethostbyname as *const (), select as *const (),
         semaphore_wait as *const (), time as *const (), arc4random as *const (),
         killpg as *const (), dlopen as *const (), shm_open as *const (),
         setitimer as *const (), syscall as *const (),
@@ -14009,7 +14010,7 @@ fn native_run_json_envelope_has_stable_shape() {
     assert_eq!(value["result"], "ok");
     assert_eq!(value["exit_code"], 0);
     assert_eq!(value["seed"], 7);
-    assert_eq!(value["trace"]["format_version"], 7);
+    assert_eq!(value["trace"]["format_version"], 8);
     assert!(value["trace"]["event_count"].as_u64().unwrap() > 0);
     // The guest's PATINA_RESULT line is captured and surfaced as a marker.
     assert!(

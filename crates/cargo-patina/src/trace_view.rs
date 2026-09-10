@@ -699,6 +699,8 @@ pub const OP_KINDS: &[(&str, Category)] = &[
     ("fs_release_inode", Category::Fs),
     ("fs_sync", Category::Fs),
     ("fs_set_length", Category::Fs),
+    ("fs_set_length_by_path", Category::Fs),
+    ("fs_allocate", Category::Fs),
     ("fs_set_times", Category::Fs),
     ("fs_set_times_by_path", Category::Fs),
     ("fs_read_directory", Category::Fs),
@@ -777,6 +779,8 @@ pub fn operation_kind(operation: &Operation) -> &'static str {
         Operation::FsReleaseInode { .. } => "fs_release_inode",
         Operation::FsSync { .. } => "fs_sync",
         Operation::FsSetLength { .. } => "fs_set_length",
+        Operation::FsSetLengthByPath { .. } => "fs_set_length_by_path",
+        Operation::FsAllocate { .. } => "fs_allocate",
         Operation::FsSetTimes { .. } => "fs_set_times",
         Operation::FsSetTimesByPath { .. } => "fs_set_times_by_path",
         Operation::FsReadDirectory { .. } => "fs_read_directory",
@@ -830,6 +834,8 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
         nlink: 1,
         atime_nanos: 0,
         mtime_nanos: 0,
+        ctime_nanos: 0,
+        btime_nanos: 0,
         mode: 0o644,
     };
     let datagram = Datagram {
@@ -942,6 +948,23 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
         (Operation::FsReleaseInode { ino: 7 }, Outcome::Unit),
         (Operation::FsSync { fd: Fd(3) }, Outcome::Unit),
         (Operation::FsSetLength { fd: Fd(3), len: 9 }, Outcome::Unit),
+        (
+            Operation::FsSetLengthByPath {
+                path: "/state/log".into(),
+                len: 9,
+            },
+            Outcome::Unit,
+        ),
+        (
+            Operation::FsAllocate {
+                fd: Fd(3),
+                offset: 0,
+                len: 4096,
+                zero: false,
+                keep_size: true,
+            },
+            Outcome::Unit,
+        ),
         (
             Operation::FsSetTimes {
                 fd: Fd(3),

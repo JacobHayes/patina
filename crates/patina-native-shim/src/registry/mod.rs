@@ -44,6 +44,15 @@ pub use syscalls::SYSCALLS;
 /// names them).
 pub const VIRTUAL_ABI: &str = "6.8";
 
+/// The one identity the virtual kernel runs the guest as: an ordinary
+/// non-root user that owns every entry of the deterministic filesystem. The
+/// single source `getuid`/`geteuid` (the `Constant` rows below and the C
+/// interposers) and every `st_uid` are answered from, and what `chown` is a
+/// comparison against. The identity arc makes it a `--host-*` knob.
+pub const IDENTITY_UID: u32 = 1000;
+/// The group of [`IDENTITY_UID`]; see there.
+pub const IDENTITY_GID: u32 = 1000;
+
 /// `6.8.0-139-generic` → `(6, 8, 0)`; `6.10` → `(6, 10, 0)`. `None` when the
 /// text does not start with a dotted release number.
 pub fn parse_release(text: &str) -> Option<(u64, u64, u64)> {

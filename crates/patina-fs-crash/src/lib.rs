@@ -63,7 +63,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use patina_dst_abi::{
-    EffectError, ErrorCode, Fd, FsDirectoryEntry, FsEntryKind, FsMetadata, OpenFlags, SeekWhence,
+    EffectError, ErrorCode, Fd, FsClock, FsDirectoryEntry, FsEntryKind, FsMetadata, OpenFlags,
+    SeekWhence,
 };
 use patina_dst_driver_api::{DriverResult, FsDriver};
 use patina_dst_fs_mem::{FsSnapshot, MemFs};
@@ -158,6 +159,17 @@ struct BaselineFile {
     contents: Vec<u8>,
 }
 
+/// The four timestamps of one durable entry, restored verbatim onto a
+/// reconstructed image (the storage layer's own values, not stamps of the
+/// crash instant).
+#[derive(Clone, Copy, Debug, Default)]
+struct DurableTimes {
+    atime_nanos: u64,
+    mtime_nanos: u64,
+    ctime_nanos: u64,
+    btime_nanos: u64,
+}
+
 /// A durable filesystem baseline captured at a durability point: the directory
 /// set, file contents, file inode identity, symlink targets, and per-entry
 /// timestamps.
@@ -172,7 +184,9 @@ struct Baseline {
     /// flight through it are process state, so nothing here holds them and a
     /// crash simply drops them, exactly as a real one does.
     fifos: BTreeMap<String, u64>,
-    times: BTreeMap<String, (u64, u64)>,
+    /// All four timestamps, by path. A crash cannot reset a surviving entry's
+    /// change or birth time any more than its modification time.
+    times: BTreeMap<String, DurableTimes>,
     /// Permission bits, by path, for every entry that owns a mode (files,
     /// directories and FIFOs; a symlink leaf has none). A mode is durable
     /// metadata like a symlink's target — a crash reverts a lost entry, never a
@@ -679,7 +693,7 @@ impl CrashFs {
         let mut next = MemFs::new();
         for dir in &dirs {
             if dir != "/" && next.metadata(dir).is_err() {
-                next.create_directory(dir, RECONSTRUCTION_DIRECTORY_MODE)?;
+                next.create_directory(FsClock::EPOCH, dir, RECONSTRUCTION_DIRECTORY_MODE)?;
             }
         }
         for (source_inode, paths) in &file_paths_by_inode {
@@ -690,11 +704,11 @@ impl CrashFs {
                 .clone();
             next = next.with_file(first, bytes)?;
             for path in paths.iter().skip(1) {
-                next.link(first, path)?;
+                next.link(FsClock::EPOCH, first, path)?;
             }
         }
         for (path, target) in &symlink_targets {
-            next.symlink(target, path)?;
+            next.symlink(FsClock::EPOCH, target, path)?;
         }
         // A FIFO's name is what survives; its buffered bytes never were durable.
         // Names that share an inode are ONE node — a hard link to a FIFO is the
@@ -714,16 +728,25 @@ impl CrashFs {
         }
         for paths in fifo_paths_by_inode.values() {
             let first = paths.iter().next().expect("fifo group is non-empty");
-            next.make_fifo(first, RECONSTRUCTION_FILE_MODE)?;
+            next.make_fifo(FsClock::EPOCH, first, RECONSTRUCTION_FILE_MODE)?;
             for path in paths.iter().skip(1) {
-                next.link(first, path)?;
+                next.link(FsClock::EPOCH, first, path)?;
             }
         }
         // Restore durable timestamps for the surviving baseline entries so
-        // crash reconstruction does not silently reset metadata to zero.
-        for (path, (atime, mtime)) in &self.durable.times {
+        // crash reconstruction does not silently reset metadata to zero. All
+        // four are written back through the storage layer's own setter: a
+        // guest-facing `set_times` would stamp `ctime` with the rebuild instant
+        // and could not restore a birth time at all.
+        for (path, times) in &self.durable.times {
             if next.metadata(path).is_ok() {
-                next.set_times_by_path(path, Some(*atime), Some(*mtime))?;
+                next.restore_times(
+                    path,
+                    times.atime_nanos,
+                    times.mtime_nanos,
+                    times.ctime_nanos,
+                    times.btime_nanos,
+                )?;
             }
         }
         // Permission bits last, and deepest name first. A mode is metadata like
@@ -746,7 +769,7 @@ impl CrashFs {
             }
         }
         for (path, mode) in restored_modes.iter().rev() {
-            next.set_mode(path, *mode)?;
+            next.restore_mode(path, *mode)?;
         }
 
         self.durable = enumerate(&next);
@@ -811,13 +834,13 @@ impl Default for CrashFs {
 }
 
 impl FsDriver for CrashFs {
-    fn open(&mut self, path: &str, flags: OpenFlags) -> DriverResult<Fd> {
+    fn open(&mut self, clock: FsClock, path: &str, flags: OpenFlags) -> DriverResult<Fd> {
         let existed = self
             .live
             .metadata(path)
             .map(|metadata| matches!(metadata.kind, FsEntryKind::File))
             .unwrap_or(false);
-        let fd = self.live.open(path, flags)?;
+        let fd = self.live.open(clock, path, flags)?;
         let normalized = normalize_entry_path(path).expect("open normalized the path already");
         if flags.create && !existed {
             self.journal(PendingKind::Create {
@@ -829,12 +852,12 @@ impl FsDriver for CrashFs {
         Ok(fd)
     }
 
-    fn read(&mut self, fd: Fd, max_len: usize) -> DriverResult<Vec<u8>> {
-        self.live.read(fd, max_len)
+    fn read(&mut self, clock: FsClock, fd: Fd, max_len: usize) -> DriverResult<Vec<u8>> {
+        self.live.read(clock, fd, max_len)
     }
 
-    fn write(&mut self, fd: Fd, bytes: &[u8]) -> DriverResult<usize> {
-        let written = self.live.write(fd, bytes)?;
+    fn write(&mut self, clock: FsClock, fd: Fd, bytes: &[u8]) -> DriverResult<usize> {
+        let written = self.live.write(clock, fd, bytes)?;
         // Capture the actual byte range after the filesystem has applied open
         // mode semantics. In particular, O_APPEND chooses EOF at write time, so
         // the pre-write cursor can be stale after intervening writes or crash
@@ -853,8 +876,14 @@ impl FsDriver for CrashFs {
         Ok(written)
     }
 
-    fn write_at(&mut self, fd: Fd, offset: u64, bytes: &[u8]) -> DriverResult<usize> {
-        let written = self.live.write_at(fd, offset, bytes)?;
+    fn write_at(
+        &mut self,
+        clock: FsClock,
+        fd: Fd,
+        offset: u64,
+        bytes: &[u8],
+    ) -> DriverResult<usize> {
+        let written = self.live.write_at(clock, fd, offset, bytes)?;
         if let (Ok(offset), Some(path)) =
             (usize::try_from(offset), self.open_paths.get(&fd).cloned())
         {
@@ -898,8 +927,8 @@ impl FsDriver for CrashFs {
     /// A mode is durable metadata wherever it is named from; the crash model
     /// reads it back off the live image at reconstruction, exactly as it does
     /// for the path- and descriptor-named spellings.
-    fn set_inode_mode(&mut self, ino: u64, mode: u32) -> DriverResult<()> {
-        self.live.set_inode_mode(ino, mode)
+    fn set_inode_mode(&mut self, clock: FsClock, ino: u64, mode: u32) -> DriverResult<()> {
+        self.live.set_inode_mode(clock, ino, mode)
     }
 
     /// An inode reference is a descriptor's hold on a node, and a descriptor is
@@ -914,8 +943,8 @@ impl FsDriver for CrashFs {
         self.live.release_inode(ino)
     }
 
-    fn create_directory(&mut self, path: &str, mode: u32) -> DriverResult<()> {
-        self.live.create_directory(path, mode)?;
+    fn create_directory(&mut self, clock: FsClock, path: &str, mode: u32) -> DriverResult<()> {
+        self.live.create_directory(clock, path, mode)?;
         let normalized = normalize_entry_path(path).expect("create normalized the path already");
         self.journal(PendingKind::Create {
             path: normalized,
@@ -924,7 +953,7 @@ impl FsDriver for CrashFs {
         Ok(())
     }
 
-    fn remove_file(&mut self, path: &str) -> DriverResult<()> {
+    fn remove_file(&mut self, clock: FsClock, path: &str) -> DriverResult<()> {
         // A symlink is removed through this call too, so capture the kind before
         // it disappears to journal the correct survival set.
         let kind = self
@@ -932,7 +961,7 @@ impl FsDriver for CrashFs {
             .metadata(path)
             .map(|metadata| metadata.kind)
             .unwrap_or(FsEntryKind::File);
-        self.live.remove_file(path)?;
+        self.live.remove_file(clock, path)?;
         let normalized = normalize_entry_path(path).expect("remove normalized the path already");
         self.journal(PendingKind::Remove {
             path: normalized,
@@ -959,20 +988,42 @@ impl FsDriver for CrashFs {
         Ok(())
     }
 
-    fn set_len(&mut self, fd: Fd, len: u64) -> DriverResult<()> {
-        self.live.set_len(fd, len)
+    /// A length change is unsynced data like a write: the live image takes it
+    /// and the durable baseline keeps the old bytes until a `sync`.
+    fn set_len(&mut self, clock: FsClock, fd: Fd, len: u64) -> DriverResult<()> {
+        self.live.set_len(clock, fd, len)
     }
 
-    fn read_directory(&mut self, path: &str) -> DriverResult<Vec<FsDirectoryEntry>> {
-        self.live.read_directory(path)
+    fn set_len_by_path(&mut self, clock: FsClock, path: &str, len: u64) -> DriverResult<()> {
+        self.live.set_len_by_path(clock, path, len)
     }
 
-    fn read_directory_fd(&mut self, fd: Fd) -> DriverResult<Vec<FsDirectoryEntry>> {
-        self.live.read_directory_fd(fd)
+    fn allocate(
+        &mut self,
+        clock: FsClock,
+        fd: Fd,
+        offset: u64,
+        len: u64,
+        zero: bool,
+        keep_size: bool,
+    ) -> DriverResult<()> {
+        self.live.allocate(clock, fd, offset, len, zero, keep_size)
     }
 
-    fn remove_directory(&mut self, path: &str) -> DriverResult<()> {
-        self.live.remove_directory(path)?;
+    fn read_directory(
+        &mut self,
+        clock: FsClock,
+        path: &str,
+    ) -> DriverResult<Vec<FsDirectoryEntry>> {
+        self.live.read_directory(clock, path)
+    }
+
+    fn read_directory_fd(&mut self, clock: FsClock, fd: Fd) -> DriverResult<Vec<FsDirectoryEntry>> {
+        self.live.read_directory_fd(clock, fd)
+    }
+
+    fn remove_directory(&mut self, clock: FsClock, path: &str) -> DriverResult<()> {
+        self.live.remove_directory(clock, path)?;
         let normalized =
             normalize_entry_path(path).expect("remove_directory normalized the path already");
         self.journal(PendingKind::Remove {
@@ -982,8 +1033,8 @@ impl FsDriver for CrashFs {
         Ok(())
     }
 
-    fn rename(&mut self, from: &str, to: &str) -> DriverResult<()> {
-        self.live.rename(from, to)?;
+    fn rename(&mut self, clock: FsClock, from: &str, to: &str) -> DriverResult<()> {
+        self.live.rename(clock, from, to)?;
         let from = normalize_entry_path(from).expect("rename normalized the source already");
         let to = normalize_entry_path(to).expect("rename normalized the destination already");
         let kind = self.live.metadata(&to)?.kind;
@@ -1034,24 +1085,27 @@ impl FsDriver for CrashFs {
 
     fn set_times(
         &mut self,
+        clock: FsClock,
         fd: Fd,
         atime_nanos: Option<u64>,
         mtime_nanos: Option<u64>,
     ) -> DriverResult<()> {
-        self.live.set_times(fd, atime_nanos, mtime_nanos)
+        self.live.set_times(clock, fd, atime_nanos, mtime_nanos)
     }
 
     fn set_times_by_path(
         &mut self,
+        clock: FsClock,
         path: &str,
         atime_nanos: Option<u64>,
         mtime_nanos: Option<u64>,
     ) -> DriverResult<()> {
-        self.live.set_times_by_path(path, atime_nanos, mtime_nanos)
+        self.live
+            .set_times_by_path(clock, path, atime_nanos, mtime_nanos)
     }
 
-    fn link(&mut self, from: &str, to: &str) -> DriverResult<()> {
-        self.live.link(from, to)?;
+    fn link(&mut self, clock: FsClock, from: &str, to: &str) -> DriverResult<()> {
+        self.live.link(clock, from, to)?;
         // The new name is a fresh namespace entry; its kind follows the source
         // (a hard link to a file, or a copied symlink per MemFs semantics).
         let to_norm = normalize_entry_path(to).expect("link normalized the destination already");
@@ -1070,8 +1124,8 @@ impl FsDriver for CrashFs {
     /// A FIFO creation is a NAME appearing, exactly like a symlink's: the
     /// namespace-durability journal holds it, and a crash before the parent
     /// directory is fsynced can lose it.
-    fn make_fifo(&mut self, path: &str, mode: u32) -> DriverResult<()> {
-        self.live.make_fifo(path, mode)?;
+    fn make_fifo(&mut self, clock: FsClock, path: &str, mode: u32) -> DriverResult<()> {
+        self.live.make_fifo(clock, path, mode)?;
         let normalized = normalize_entry_path(path).expect("make_fifo normalized the path already");
         self.journal(PendingKind::Create {
             path: normalized,
@@ -1080,8 +1134,8 @@ impl FsDriver for CrashFs {
         Ok(())
     }
 
-    fn symlink(&mut self, target: &str, link_path: &str) -> DriverResult<()> {
-        self.live.symlink(target, link_path)?;
+    fn symlink(&mut self, clock: FsClock, target: &str, link_path: &str) -> DriverResult<()> {
+        self.live.symlink(clock, target, link_path)?;
         let normalized =
             normalize_entry_path(link_path).expect("symlink normalized the path already");
         self.journal(PendingKind::Create {
@@ -1091,19 +1145,19 @@ impl FsDriver for CrashFs {
         Ok(())
     }
 
-    fn read_link(&mut self, path: &str) -> DriverResult<String> {
-        self.live.read_link(path)
+    fn read_link(&mut self, clock: FsClock, path: &str) -> DriverResult<String> {
+        self.live.read_link(clock, path)
     }
 
     /// A mode change is metadata on an existing entry, like `set_times`: the
     /// live image takes it and no name appears or disappears, so there is
     /// nothing for the namespace-durability journal to hold.
-    fn set_mode(&mut self, path: &str, mode: u32) -> DriverResult<()> {
-        self.live.set_mode(path, mode)
+    fn set_mode(&mut self, clock: FsClock, path: &str, mode: u32) -> DriverResult<()> {
+        self.live.set_mode(clock, path, mode)
     }
 
-    fn set_fd_mode(&mut self, fd: Fd, mode: u32) -> DriverResult<()> {
-        self.live.set_fd_mode(fd, mode)
+    fn set_fd_mode(&mut self, clock: FsClock, fd: Fd, mode: u32) -> DriverResult<()> {
+        self.live.set_fd_mode(clock, fd, mode)
     }
 
     fn fd_path(&mut self, fd: Fd) -> DriverResult<String> {
@@ -1215,9 +1269,15 @@ fn enumerate(fs: &MemFs) -> Baseline {
     let mut baseline = Baseline::default();
     baseline.dirs.insert("/".to_owned());
     for (path, metadata) in fs.inventory() {
-        baseline
-            .times
-            .insert(path.clone(), (metadata.atime_nanos, metadata.mtime_nanos));
+        baseline.times.insert(
+            path.clone(),
+            DurableTimes {
+                atime_nanos: metadata.atime_nanos,
+                mtime_nanos: metadata.mtime_nanos,
+                ctime_nanos: metadata.ctime_nanos,
+                btime_nanos: metadata.btime_nanos,
+            },
+        );
         // A symlink leaf has no mode of its own; every other kind does.
         if metadata.kind != FsEntryKind::Symlink {
             baseline.modes.insert(path.clone(), metadata.mode);
@@ -1322,8 +1382,10 @@ mod tests {
     }
 
     fn write(fs: &mut CrashFs, path: &str, bytes: &[u8]) -> Fd {
-        let fd = fs.open(path, OpenFlags::create_truncate_write()).unwrap();
-        fs.write(fd, bytes).unwrap();
+        let fd = fs
+            .open(FsClock::EPOCH, path, OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.write(FsClock::EPOCH, fd, bytes).unwrap();
         fd
     }
 
@@ -1341,11 +1403,14 @@ mod tests {
         // Unsynced positional write is dropped: after a durable zero baseline,
         // a pwrite that is never fsynced reverts on crash.
         let mut fs = CrashFs::default();
-        let fd = fs.open("/db", OpenFlags::create_truncate_write()).unwrap();
-        fs.set_len(fd, 4096).unwrap();
+        let fd = fs
+            .open(FsClock::EPOCH, "/db", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.set_len(FsClock::EPOCH, fd, 4096).unwrap();
         fs.sync(fd).unwrap(); // durable baseline: 4096 zero bytes
         fs.sync_directory("/").unwrap(); // durable namespace entry
-        fs.write_at(fd, OFFSET, b"positional").unwrap();
+        fs.write_at(FsClock::EPOCH, fd, OFFSET, b"positional")
+            .unwrap();
         fs.crash().unwrap();
         let after = fs.contents("/db").unwrap();
         assert!(
@@ -1357,9 +1422,12 @@ mod tests {
 
         // A positional write that IS fsynced survives byte-for-byte.
         let mut fs = CrashFs::default();
-        let fd = fs.open("/db", OpenFlags::create_truncate_write()).unwrap();
-        fs.set_len(fd, 4096).unwrap();
-        fs.write_at(fd, OFFSET, b"positional").unwrap();
+        let fd = fs
+            .open(FsClock::EPOCH, "/db", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.set_len(FsClock::EPOCH, fd, 4096).unwrap();
+        fs.write_at(FsClock::EPOCH, fd, OFFSET, b"positional")
+            .unwrap();
         fs.sync(fd).unwrap();
         fs.sync_directory("/").unwrap();
         fs.crash().unwrap();
@@ -1385,18 +1453,21 @@ mod tests {
             path_only: false,
             mode: patina_dst_abi::DEFAULT_FILE_CREATE_MODE,
         };
-        let fd = fs.open("/db", read_write).unwrap();
-        fs.set_len(fd, 4096).unwrap();
-        fs.write_at(fd, OFFSET, b"positional").unwrap();
+        let fd = fs.open(FsClock::EPOCH, "/db", read_write).unwrap();
+        fs.set_len(FsClock::EPOCH, fd, 4096).unwrap();
+        fs.write_at(FsClock::EPOCH, fd, OFFSET, b"positional")
+            .unwrap();
         fs.seek(fd, 0, SeekWhence::Start).unwrap();
-        let positional = fs.read_at(fd, OFFSET, b"positional".len()).unwrap();
+        let positional = fs
+            .read_at(FsClock::EPOCH, fd, OFFSET, b"positional".len())
+            .unwrap();
         assert_eq!(positional, b"positional");
         let cursor_pos = fs.seek(fd, 0, SeekWhence::Current).unwrap();
         assert_eq!(cursor_pos, 0, "read_at disturbed the shared cursor");
 
         fs.seek(fd, 1, SeekWhence::Start).unwrap();
-        fs.write_at(fd, OFFSET + 32, b"X").unwrap();
-        fs.write(fd, b"Y").unwrap();
+        fs.write_at(FsClock::EPOCH, fd, OFFSET + 32, b"X").unwrap();
+        fs.write(FsClock::EPOCH, fd, b"Y").unwrap();
         let after = fs.contents("/db").unwrap();
         assert_eq!(after[1], b'Y', "write_at moved the shared cursor");
         assert_eq!(after[OFFSET as usize + 32], b'X');
@@ -1417,7 +1488,7 @@ mod tests {
         // The cursor is process state and survives with the fd, so the write
         // lands where the guest left off (past the rolled-back bytes).
         fs.seek(fd, 0, SeekWhence::Start).unwrap();
-        assert_eq!(fs.write(fd, b"stale").unwrap(), 5);
+        assert_eq!(fs.write(FsClock::EPOCH, fd, b"stale").unwrap(), 5);
         assert_eq!(fs.contents("/volatile").unwrap(), b"stale");
     }
 
@@ -1425,13 +1496,13 @@ mod tests {
     fn append_handle_survives_crash_and_appends_at_rebuilt_eof() {
         let initial = MemFs::new().with_file("/log", b"stable").unwrap();
         let mut fs = CrashFs::new(initial);
-        let fd = fs.open("/log", append_write()).unwrap();
+        let fd = fs.open(FsClock::EPOCH, "/log", append_write()).unwrap();
 
-        fs.write(fd, b"-volatile").unwrap();
+        fs.write(FsClock::EPOCH, fd, b"-volatile").unwrap();
         fs.crash().unwrap();
         assert_eq!(fs.contents("/log").unwrap(), b"stable");
 
-        fs.write(fd, b"-after").unwrap();
+        fs.write(FsClock::EPOCH, fd, b"-after").unwrap();
         assert_eq!(fs.contents("/log").unwrap(), b"stable-after");
     }
 
@@ -1445,15 +1516,15 @@ mod tests {
             .torn_write_probability(1.0)
             .build()
             .unwrap();
-        let append = fs.open("/log", append_write()).unwrap();
+        let append = fs.open(FsClock::EPOCH, "/log", append_write()).unwrap();
 
-        let regular = fs.open("/log", write_only()).unwrap();
+        let regular = fs.open(FsClock::EPOCH, "/log", write_only()).unwrap();
         fs.seek(regular, 0, SeekWhence::End).unwrap();
-        fs.write(regular, b"-intervening").unwrap();
+        fs.write(FsClock::EPOCH, regular, b"-intervening").unwrap();
         fs.sync(regular).unwrap();
         fs.close(regular).unwrap();
 
-        fs.write(append, b"-tail").unwrap();
+        fs.write(FsClock::EPOCH, append, b"-tail").unwrap();
         fs.crash().unwrap();
         let after = fs.contents("/log").unwrap();
         let full = b"stable-intervening-tail";
@@ -1466,12 +1537,12 @@ mod tests {
     fn crash_and_snapshot_exports_recovered_image_without_handles() {
         let mut fs = CrashFs::default();
         let fd = fs
-            .open("/state", OpenFlags::create_truncate_write())
+            .open(FsClock::EPOCH, "/state", OpenFlags::create_truncate_write())
             .unwrap();
-        fs.write(fd, b"stable").unwrap();
+        fs.write(FsClock::EPOCH, fd, b"stable").unwrap();
         fs.sync(fd).unwrap();
         fs.sync_directory("/").unwrap();
-        fs.write(fd, b"-volatile").unwrap();
+        fs.write(FsClock::EPOCH, fd, b"-volatile").unwrap();
 
         let snapshot = fs.crash_and_snapshot().unwrap();
         let encoded = snapshot.encode().unwrap();
@@ -1482,11 +1553,13 @@ mod tests {
         let mut imported = snapshot.into_memfs();
         assert_eq!(imported.contents("/state").unwrap(), b"stable");
         assert_eq!(
-            imported.read(fd, 1).unwrap_err().code,
+            imported.read(FsClock::EPOCH, fd, 1).unwrap_err().code,
             ErrorCode::InvalidHandle
         );
         assert_eq!(
-            imported.open("/state", OpenFlags::read_only()).unwrap(),
+            imported
+                .open(FsClock::EPOCH, "/state", OpenFlags::read_only())
+                .unwrap(),
             Fd(3)
         );
     }
@@ -1494,10 +1567,10 @@ mod tests {
     #[test]
     fn crash_and_snapshot_preserves_hard_link_inode_identity() {
         let mut base = MemFs::new().with_file("/a", b"stable").unwrap();
-        base.link("/a", "/b").unwrap();
+        base.link(FsClock::EPOCH, "/a", "/b").unwrap();
         let mut fs = CrashFs::new(base);
-        let fd = fs.open("/a", write_only()).unwrap();
-        fs.write(fd, b"volatile").unwrap();
+        let fd = fs.open(FsClock::EPOCH, "/a", write_only()).unwrap();
+        fs.write(FsClock::EPOCH, fd, b"volatile").unwrap();
 
         let snapshot = fs.crash_and_snapshot().unwrap();
         let mut imported = snapshot.into_memfs();
@@ -1517,11 +1590,14 @@ mod tests {
             .directory_loss_probability(1.0)
             .build()
             .unwrap();
-        fs.create_directory("/parent", 0o777).unwrap();
-        fs.create_directory("/parent/child", 0o777).unwrap();
+        fs.create_directory(FsClock::EPOCH, "/parent", 0o777)
+            .unwrap();
+        fs.create_directory(FsClock::EPOCH, "/parent/child", 0o777)
+            .unwrap();
         let fd = write(&mut fs, "/parent/child/file", b"data");
         fs.close(fd).unwrap();
-        fs.symlink("file", "/parent/child/link").unwrap();
+        fs.symlink(FsClock::EPOCH, "file", "/parent/child/link")
+            .unwrap();
         fs.sync_directory("/parent").unwrap();
         fs.sync_directory("/parent/child").unwrap();
 
@@ -1550,7 +1626,7 @@ mod tests {
         let fd = write(&mut fs, "/state", b"stable");
         fs.sync(fd).unwrap();
         fs.sync_directory("/").unwrap();
-        fs.write(fd, b"-volatile").unwrap();
+        fs.write(FsClock::EPOCH, fd, b"-volatile").unwrap();
         fs.crash().unwrap();
         assert_eq!(fs.contents("/state").unwrap(), b"stable");
     }
@@ -1607,16 +1683,18 @@ mod tests {
         // back bytes; it cannot invalidate the guest's descriptor table, and
         // reporting `InvalidHandle` here would surface as an impossible `EBADF`.
         fs.seek(durable, 0, SeekWhence::Start).unwrap();
-        assert_eq!(fs.write(durable, b"D").unwrap(), 1);
+        assert_eq!(fs.write(FsClock::EPOCH, durable, b"D").unwrap(), 1);
         assert_eq!(fs.contents("/keep").unwrap(), b"Durable");
         fs.seek(volatile, 0, SeekWhence::Start).unwrap();
-        assert_eq!(fs.write(volatile, b"x").unwrap(), 1);
+        assert_eq!(fs.write(FsClock::EPOCH, volatile, b"x").unwrap(), 1);
         assert_eq!(fs.contents("/lose").unwrap(), b"x");
 
         // A fresh open gets its own descriptor number and sees the live bytes.
-        let reopened = fs.open("/keep", OpenFlags::read_only()).unwrap();
+        let reopened = fs
+            .open(FsClock::EPOCH, "/keep", OpenFlags::read_only())
+            .unwrap();
         assert_ne!(reopened, durable);
-        assert_eq!(fs.read(reopened, 16).unwrap(), b"Durable");
+        assert_eq!(fs.read(FsClock::EPOCH, reopened, 16).unwrap(), b"Durable");
     }
 
     fn torn_after_crash(seed: u64) -> Vec<u8> {
@@ -1629,8 +1707,8 @@ mod tests {
         let fd = write(&mut fs, "/f", b"AAAAAAAA");
         fs.close(fd).unwrap();
         fs.checkpoint();
-        let fd = fs.open("/f", write_only()).unwrap();
-        fs.write(fd, b"BBBBBBBB").unwrap();
+        let fd = fs.open(FsClock::EPOCH, "/f", write_only()).unwrap();
+        fs.write(FsClock::EPOCH, fd, b"BBBBBBBB").unwrap();
         fs.crash().unwrap();
         fs.contents("/f").unwrap().to_vec()
     }
@@ -1666,8 +1744,8 @@ mod tests {
         let fd = write(&mut kept, "/f", b"AAAA");
         kept.close(fd).unwrap();
         kept.checkpoint();
-        let fd = kept.open("/f", write_only()).unwrap();
-        kept.write(fd, b"BBBB").unwrap();
+        let fd = kept.open(FsClock::EPOCH, "/f", write_only()).unwrap();
+        kept.write(FsClock::EPOCH, fd, b"BBBB").unwrap();
         kept.crash().unwrap();
         assert_eq!(kept.contents("/f").unwrap(), b"BBBB");
 
@@ -1679,8 +1757,8 @@ mod tests {
         let fd = write(&mut reverted, "/f", b"AAAA");
         reverted.close(fd).unwrap();
         reverted.checkpoint();
-        let fd = reverted.open("/f", write_only()).unwrap();
-        reverted.write(fd, b"BBBB").unwrap();
+        let fd = reverted.open(FsClock::EPOCH, "/f", write_only()).unwrap();
+        reverted.write(FsClock::EPOCH, fd, b"BBBB").unwrap();
         reverted.crash().unwrap();
         assert_eq!(reverted.contents("/f").unwrap(), b"AAAA");
     }
@@ -1696,8 +1774,8 @@ mod tests {
         let fd = write(&mut fs, "/f", b"AAAAAAAA");
         fs.close(fd).unwrap();
         fs.checkpoint();
-        let fd = fs.open("/f", write_only()).unwrap();
-        fs.write(fd, b"BBBBBBBB").unwrap();
+        let fd = fs.open(FsClock::EPOCH, "/f", write_only()).unwrap();
+        fs.write(FsClock::EPOCH, fd, b"BBBBBBBB").unwrap();
         fs.crash().unwrap();
         fs.contents("/f").unwrap().to_vec()
     }
@@ -1755,8 +1833,8 @@ mod tests {
             let fd = write(&mut fs, "/f", b"AAAAAAAA");
             fs.close(fd).unwrap();
             fs.checkpoint();
-            let fd = fs.open("/f", write_only()).unwrap();
-            fs.write(fd, b"BBBBBBBB").unwrap();
+            let fd = fs.open(FsClock::EPOCH, "/f", write_only()).unwrap();
+            fs.write(FsClock::EPOCH, fd, b"BBBBBBBB").unwrap();
             fs.crash().unwrap();
             assert_eq!(
                 fs.contents("/f").unwrap(),
@@ -1778,13 +1856,15 @@ mod tests {
             .build()
             .unwrap();
         // Durable baseline: two 4-byte pages of zeros.
-        let fd = fs.open("/db", OpenFlags::create_truncate_write()).unwrap();
-        fs.set_len(fd, 8).unwrap();
+        let fd = fs
+            .open(FsClock::EPOCH, "/db", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.set_len(FsClock::EPOCH, fd, 8).unwrap();
         fs.sync(fd).unwrap();
         fs.sync_directory("/").unwrap();
         // First (earlier) write to page 0, then the final write to page 1.
-        fs.write_at(fd, 0, b"XXXX").unwrap();
-        fs.write_at(fd, 4, b"YYYY").unwrap();
+        fs.write_at(FsClock::EPOCH, fd, 0, b"XXXX").unwrap();
+        fs.write_at(FsClock::EPOCH, fd, 4, b"YYYY").unwrap();
         fs.crash().unwrap();
         let after = fs.contents("/db").unwrap();
         assert_eq!(after.len(), 8);
@@ -1817,7 +1897,7 @@ mod tests {
         let fd = write(&mut fs, "/a", b"data");
         fs.close(fd).unwrap();
         fs.checkpoint();
-        fs.rename("/a", "/b").unwrap();
+        fs.rename(FsClock::EPOCH, "/a", "/b").unwrap();
         fs.crash().unwrap();
         let from = fs.metadata("/a").is_ok();
         let to = fs.metadata("/b").is_ok();
@@ -1850,7 +1930,7 @@ mod tests {
     #[test]
     fn directory_fd_sync_commits_namespace_operations() {
         let mut base = MemFs::new();
-        base.create_directory("/d", 0o777).unwrap();
+        base.create_directory(FsClock::EPOCH, "/d", 0o777).unwrap();
         let mut fs = CrashFs::builder()
             .filesystem(base)
             .model_directory_durability(true)
@@ -1860,7 +1940,9 @@ mod tests {
         let fd = write(&mut fs, "/d/f", b"x");
         fs.sync(fd).unwrap();
         fs.close(fd).unwrap();
-        let dir = fs.open("/d", OpenFlags::read_only()).unwrap();
+        let dir = fs
+            .open(FsClock::EPOCH, "/d", OpenFlags::read_only())
+            .unwrap();
         assert_eq!(fs.fd_metadata(dir).unwrap().kind, FsEntryKind::Directory);
         fs.sync(dir).unwrap();
         fs.close(dir).unwrap();
@@ -1871,7 +1953,7 @@ mod tests {
     #[test]
     fn directory_entry_loss_requires_a_directory_fsync() {
         let mut base = MemFs::new();
-        base.create_directory("/d", 0o777).unwrap();
+        base.create_directory(FsClock::EPOCH, "/d", 0o777).unwrap();
 
         // Without a directory fsync the created entry can be lost on crash.
         let mut fs = CrashFs::builder()
@@ -1959,7 +2041,7 @@ mod tests {
         fs.checkpoint();
         // A committed rename after the checkpoint survives; unsynced content
         // written afterwards does not.
-        fs.rename("/before", "/after").unwrap();
+        fs.rename(FsClock::EPOCH, "/before", "/after").unwrap();
         fs.checkpoint();
         fs.crash().unwrap();
         assert_eq!(fs.contents("/after").unwrap(), b"value");
@@ -1974,17 +2056,17 @@ mod tests {
     #[test]
     fn symlink_and_read_link_work_through_crashfs_before_and_after_crash() {
         let mut base = MemFs::new();
-        base.create_directory("/d", 0o777).unwrap();
+        base.create_directory(FsClock::EPOCH, "/d", 0o777).unwrap();
         let mut fs = CrashFs::builder().filesystem(base).build().unwrap();
-        fs.symlink("/target", "/d/link").unwrap();
-        assert_eq!(fs.read_link("/d/link").unwrap(), "/target");
+        fs.symlink(FsClock::EPOCH, "/target", "/d/link").unwrap();
+        assert_eq!(fs.read_link(FsClock::EPOCH, "/d/link").unwrap(), "/target");
         assert_eq!(fs.metadata("/d/link").unwrap().kind, FsEntryKind::Symlink);
 
         // Fsyncing the parent directory makes the symlink and its verbatim target
         // survive the crash rather than being silently dropped.
         fs.sync_directory("/d").unwrap();
         fs.crash().unwrap();
-        assert_eq!(fs.read_link("/d/link").unwrap(), "/target");
+        assert_eq!(fs.read_link(FsClock::EPOCH, "/d/link").unwrap(), "/target");
         assert_eq!(fs.metadata("/d/link").unwrap().kind, FsEntryKind::Symlink);
     }
 
@@ -1993,11 +2075,11 @@ mod tests {
     #[test]
     fn fifo_name_and_mode_survive_a_crash_once_the_parent_is_fsynced() {
         let mut base = MemFs::new();
-        base.create_directory("/d", 0o777).unwrap();
+        base.create_directory(FsClock::EPOCH, "/d", 0o777).unwrap();
         let mut fs = CrashFs::builder().filesystem(base).build().unwrap();
-        fs.make_fifo("/d/pipe", 0o666).unwrap();
+        fs.make_fifo(FsClock::EPOCH, "/d/pipe", 0o666).unwrap();
         assert_eq!(fs.metadata("/d/pipe").unwrap().kind, FsEntryKind::Fifo);
-        fs.set_mode("/d/pipe", 0o640).unwrap();
+        fs.set_mode(FsClock::EPOCH, "/d/pipe", 0o640).unwrap();
 
         // Fsyncing the parent commits the name; reconstruction must rebuild it
         // as a FIFO with the mode it had, not as a regular file.
@@ -2008,7 +2090,7 @@ mod tests {
         assert_eq!(metadata.mode, 0o640);
         // And it is still listed as a FIFO by its parent.
         assert_eq!(
-            fs.read_directory("/d").unwrap(),
+            fs.read_directory(FsClock::EPOCH, "/d").unwrap(),
             vec![patina_dst_abi::FsDirectoryEntry {
                 name: "pipe".into(),
                 kind: FsEntryKind::Fifo,
@@ -2023,10 +2105,11 @@ mod tests {
     #[test]
     fn modes_survive_a_crash_for_every_kind_that_owns_one() {
         let mut base = MemFs::new();
-        base.create_directory("/d", 0o755).unwrap();
+        base.create_directory(FsClock::EPOCH, "/d", 0o755).unwrap();
         let mut fs = CrashFs::builder().filesystem(base).build().unwrap();
         let fd = fs
             .open(
+                FsClock::EPOCH,
                 "/d/file",
                 OpenFlags {
                     path_only: false,
@@ -2035,11 +2118,12 @@ mod tests {
                 },
             )
             .unwrap();
-        fs.write(fd, b"bytes").unwrap();
+        fs.write(FsClock::EPOCH, fd, b"bytes").unwrap();
         fs.sync(fd).unwrap();
         fs.close(fd).unwrap();
-        fs.create_directory("/d/sub", 0o700).unwrap();
-        fs.make_fifo("/d/pipe", 0o640).unwrap();
+        fs.create_directory(FsClock::EPOCH, "/d/sub", 0o700)
+            .unwrap();
+        fs.make_fifo(FsClock::EPOCH, "/d/pipe", 0o640).unwrap();
         fs.sync_directory("/d").unwrap();
         fs.sync_directory("/d/sub").unwrap();
 
@@ -2056,18 +2140,23 @@ mod tests {
     #[test]
     fn a_restrictive_directory_mode_survives_without_hiding_its_children() {
         let mut base = MemFs::new();
-        base.create_directory("/d", 0o777).unwrap();
+        base.create_directory(FsClock::EPOCH, "/d", 0o777).unwrap();
         let mut fs = CrashFs::builder().filesystem(base).build().unwrap();
-        fs.create_directory("/d/vault", 0o777).unwrap();
-        let fd = fs
-            .open("/d/vault/secret", OpenFlags::create_truncate_write())
+        fs.create_directory(FsClock::EPOCH, "/d/vault", 0o777)
             .unwrap();
-        fs.write(fd, b"inner").unwrap();
+        let fd = fs
+            .open(
+                FsClock::EPOCH,
+                "/d/vault/secret",
+                OpenFlags::create_truncate_write(),
+            )
+            .unwrap();
+        fs.write(FsClock::EPOCH, fd, b"inner").unwrap();
         fs.sync(fd).unwrap();
         fs.close(fd).unwrap();
         fs.sync_directory("/d").unwrap();
         fs.sync_directory("/d/vault").unwrap();
-        fs.set_mode("/d/vault", 0o000).unwrap();
+        fs.set_mode(FsClock::EPOCH, "/d/vault", 0o000).unwrap();
 
         fs.crash().unwrap();
         assert_eq!(fs.metadata("/d/vault").unwrap().mode, 0o000);
@@ -2077,7 +2166,7 @@ mod tests {
             fs.metadata("/d/vault/secret").unwrap_err().code,
             ErrorCode::Denied
         );
-        fs.set_mode("/d/vault", 0o755).unwrap();
+        fs.set_mode(FsClock::EPOCH, "/d/vault", 0o755).unwrap();
         assert_eq!(fs.contents("/d/vault/secret").unwrap(), b"inner");
     }
 
@@ -2087,10 +2176,10 @@ mod tests {
     #[test]
     fn hard_linked_fifos_come_back_from_a_crash_as_one_node() {
         let mut base = MemFs::new();
-        base.create_directory("/d", 0o777).unwrap();
+        base.create_directory(FsClock::EPOCH, "/d", 0o777).unwrap();
         let mut fs = CrashFs::builder().filesystem(base).build().unwrap();
-        fs.make_fifo("/d/pipe", 0o666).unwrap();
-        fs.link("/d/pipe", "/d/alias").unwrap();
+        fs.make_fifo(FsClock::EPOCH, "/d/pipe", 0o666).unwrap();
+        fs.link(FsClock::EPOCH, "/d/pipe", "/d/alias").unwrap();
         fs.sync_directory("/d").unwrap();
 
         fs.crash().unwrap();
@@ -2105,7 +2194,7 @@ mod tests {
     #[test]
     fn an_unsynced_fifo_creation_is_lost_like_any_other_name() {
         let mut base = MemFs::new();
-        base.create_directory("/d", 0o777).unwrap();
+        base.create_directory(FsClock::EPOCH, "/d", 0o777).unwrap();
         let mut fs = CrashFs::builder()
             .filesystem(base)
             .seed(7)
@@ -2113,7 +2202,7 @@ mod tests {
             .directory_loss_probability(1.0)
             .build()
             .unwrap();
-        fs.make_fifo("/d/pipe", 0o666).unwrap();
+        fs.make_fifo(FsClock::EPOCH, "/d/pipe", 0o666).unwrap();
         fs.crash().unwrap();
         assert_eq!(
             fs.metadata("/d/pipe").unwrap_err().code,
@@ -2125,16 +2214,23 @@ mod tests {
     #[test]
     fn seed_image_symlink_survives_crash() {
         let mut base = MemFs::new();
-        base.symlink("/etc/target", "/link").unwrap();
+        base.symlink(FsClock::EPOCH, "/etc/target", "/link")
+            .unwrap();
         let mut fs = CrashFs::new(base);
-        assert_eq!(fs.read_link("/link").unwrap(), "/etc/target");
+        assert_eq!(
+            fs.read_link(FsClock::EPOCH, "/link").unwrap(),
+            "/etc/target"
+        );
         fs.crash().unwrap();
-        assert_eq!(fs.read_link("/link").unwrap(), "/etc/target");
+        assert_eq!(
+            fs.read_link(FsClock::EPOCH, "/link").unwrap(),
+            "/etc/target"
+        );
     }
 
     fn symlink_after_crash(sync_dir: bool, probability: f64, seed: u64) -> Option<String> {
         let mut base = MemFs::new();
-        base.create_directory("/d", 0o777).unwrap();
+        base.create_directory(FsClock::EPOCH, "/d", 0o777).unwrap();
         let mut fs = CrashFs::builder()
             .filesystem(base)
             .seed(seed)
@@ -2142,12 +2238,12 @@ mod tests {
             .directory_loss_probability(probability)
             .build()
             .unwrap();
-        fs.symlink("/target", "/d/link").unwrap();
+        fs.symlink(FsClock::EPOCH, "/target", "/d/link").unwrap();
         if sync_dir {
             fs.sync_directory("/d").unwrap();
         }
         fs.crash().unwrap();
-        fs.read_link("/d/link").ok()
+        fs.read_link(FsClock::EPOCH, "/d/link").ok()
     }
 
     #[test]
@@ -2193,8 +2289,10 @@ mod tests {
         seed: u64,
     ) -> (bool, bool) {
         let mut base = MemFs::new();
-        base.create_directory("/src", 0o777).unwrap();
-        base.create_directory("/dst", 0o777).unwrap();
+        base.create_directory(FsClock::EPOCH, "/src", 0o777)
+            .unwrap();
+        base.create_directory(FsClock::EPOCH, "/dst", 0o777)
+            .unwrap();
         let mut fs = CrashFs::builder()
             .filesystem(base)
             .seed(seed)
@@ -2206,7 +2304,7 @@ mod tests {
         let fd = write(&mut fs, "/src/a", b"data");
         fs.close(fd).unwrap();
         fs.checkpoint();
-        fs.rename("/src/a", "/dst/b").unwrap();
+        fs.rename(FsClock::EPOCH, "/src/a", "/dst/b").unwrap();
         if sync_dest {
             fs.sync_directory("/dst").unwrap();
         }
@@ -2284,9 +2382,10 @@ mod tests {
         let mut fs = CrashFs::default();
         let fd = write(&mut fs, "/a", b"data");
         fs.close(fd).unwrap();
-        fs.link("/a", "/b").unwrap();
+        fs.link(FsClock::EPOCH, "/a", "/b").unwrap();
         assert_eq!(fs.contents("/b").unwrap(), b"data");
-        fs.set_times_by_path("/a", Some(111), Some(222)).unwrap();
+        fs.set_times_by_path(FsClock::EPOCH, "/a", Some(111), Some(222))
+            .unwrap();
         fs.checkpoint();
         fs.crash().unwrap();
 
@@ -2308,7 +2407,7 @@ mod tests {
         fs.sync(fd).unwrap();
         fs.checkpoint();
         // A second, unsynced write is what the crash rolls back.
-        fs.write(fd, b"-lost").unwrap();
+        fs.write(FsClock::EPOCH, fd, b"-lost").unwrap();
         fs.crash().unwrap();
 
         // Every operation on the pre-crash fd resolves; none reports
@@ -2339,7 +2438,7 @@ mod tests {
         let metadata = fs.fd_metadata(fd).expect("the fd stays valid");
         assert_eq!(metadata.len, 0);
         // And it is still writable, so the guest recovers by rewriting.
-        assert_eq!(fs.write(fd, b"again").unwrap(), 5);
+        assert_eq!(fs.write(FsClock::EPOCH, fd, b"again").unwrap(), 5);
     }
 
     /// A descriptor on an entry whose last NAME is gone crosses a crash like any
@@ -2365,7 +2464,7 @@ mod tests {
         let doomed = write(&mut fs, "/doomed", b"anonymous");
         fs.sync(doomed).unwrap();
         fs.checkpoint();
-        fs.remove_file("/doomed").unwrap();
+        fs.remove_file(FsClock::EPOCH, "/doomed").unwrap();
         let anonymous_ino = fs.fd_metadata(doomed).unwrap().ino;
         let kept_ino = fs.fd_metadata(kept).unwrap().ino;
         assert_ne!(anonymous_ino, kept_ino);
@@ -2390,7 +2489,7 @@ mod tests {
         assert_eq!(after.len, 9, "and still holds what it last wrote");
         // The descriptor is write-only (it was minted by `File::create`), and it
         // still is: a crash cannot change what a descriptor was opened for.
-        assert_eq!(fs.write(doomed, b"!").unwrap(), 1);
+        assert_eq!(fs.write(FsClock::EPOCH, doomed, b"!").unwrap(), 1);
         assert_eq!(fs.fd_metadata(doomed).unwrap().len, 10);
     }
 
@@ -2405,7 +2504,9 @@ mod tests {
         fs.checkpoint();
         fs.crash().unwrap();
 
-        let fresh = fs.open("/a", OpenFlags::create_truncate_write()).unwrap();
+        let fresh = fs
+            .open(FsClock::EPOCH, "/a", OpenFlags::create_truncate_write())
+            .unwrap();
         assert_ne!(fresh, held);
     }
 }

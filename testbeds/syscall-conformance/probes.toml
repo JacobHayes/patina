@@ -38,6 +38,18 @@ symbols = ["symlinkat", "readlinkat", "linkat", "fstatat", "openat", "write", "c
 syscalls = ["getcwd", "chdir", "fchdir", "umask", "openat", "newfstatat", "fstat", "mkdirat", "symlinkat", "unlinkat", "mknodat", "close"]
 symbols = ["getcwd", "chdir", "fchdir", "umask", "openat", "fstatat", "fstat", "mkdirat", "symlinkat", "unlinkat", "mknodat", "close"]
 
+[probe."fs/times"]
+syscalls = ["utimensat", "utime", "utimes", "futimesat", "ftruncate", "fstat", "newfstatat", "statx", "openat", "read", "write", "close", "nanosleep", "linkat", "renameat", "mkdirat", "unlinkat", "symlinkat"]
+symbols = ["utimensat", "futimens", "utime", "utimes", "futimesat", "ftruncate", "fstat", "fstatat", "statx", "openat", "read", "write", "close", "nanosleep", "linkat", "renameat", "mkdirat", "unlinkat", "symlinkat"]
+
+[probe."fs/owner"]
+syscalls = ["chown", "fchown", "lchown", "fchownat", "access", "faccessat", "faccessat2", "fstat", "newfstatat", "openat", "close", "mkdirat", "symlinkat", "nanosleep", "getuid", "getgid"]
+symbols = ["chown", "fchown", "lchown", "fchownat", "access", "faccessat", "syscall", "fstat", "fstatat", "openat", "close", "mkdirat", "symlinkat", "nanosleep", "getuid", "getgid"]
+
+[probe."fs/size"]
+syscalls = ["truncate", "ftruncate", "fallocate", "fstat", "newfstatat", "openat", "read", "write", "lseek", "close", "mkdirat", "mknodat", "symlinkat", "pipe2", "nanosleep"]
+symbols = ["truncate", "ftruncate", "fallocate", "fstat", "fstatat", "openat", "read", "write", "lseek", "close", "mkdirat", "mknodat", "symlinkat", "pipe2", "nanosleep"]
+
 [probe."fd/pipes"]
 syscalls = ["pipe2", "dup", "fcntl", "flock", "read", "write", "close", "openat"]
 symbols = ["pipe2", "dup", "fcntl", "flock", "read", "write", "close", "openat"]

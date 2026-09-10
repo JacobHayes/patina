@@ -221,6 +221,53 @@ pub enum ClockKind {
     Realtime,
 }
 
+/// When a read updates an entry's access time — the kernel's `atime` mount
+/// policy, applied by the filesystem driver on every reading operation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AtimePolicy {
+    /// Linux's default since 2.6.30 (`relatime`): a read updates `atime` only
+    /// when it is not newer than `mtime` or `ctime`, or when it is at least a
+    /// day old.
+    #[default]
+    Relatime,
+    /// `strictatime`: every read updates `atime`.
+    Strict,
+    /// `noatime`: reads never touch `atime`.
+    NoAtime,
+}
+
+/// The virtual clock a filesystem operation runs at, handed to the driver by
+/// the runtime on every reading or mutating operation. Drivers hold no clock
+/// of their own: the runtime reads its virtual realtime clock (unrecorded — the
+/// value is a pure function of the recorded sleeps, so it reproduces on
+/// replay) and passes it down, so a driver stamps `atime`/`mtime`/`ctime`/
+/// `btime` by the kernel's rules without a second recorded effect per
+/// operation. A runtime with no clock driver stamps everything at the epoch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsClock {
+    /// Virtual realtime, nanoseconds since the Unix epoch.
+    pub now_nanos: u64,
+    pub atime: AtimePolicy,
+}
+
+impl FsClock {
+    /// The epoch under the default `relatime` policy: what a runtime without a
+    /// clock driver hands down, and the fixed instant unit tests use.
+    pub const EPOCH: FsClock = FsClock {
+        now_nanos: 0,
+        atime: AtimePolicy::Relatime,
+    };
+
+    /// A clock reading `now_nanos` under the default `relatime` policy.
+    pub const fn at(now_nanos: u64) -> FsClock {
+        FsClock {
+            now_nanos,
+            atime: AtimePolicy::Relatime,
+        }
+    }
+}
+
 /// Arguments accepted by the minimal filesystem `open` operation: POSIX
 /// `open(path, flags, mode)` minus the path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -450,18 +497,24 @@ pub struct FsMetadata {
     pub len: u64,
     /// Deterministic filesystem object identity.
     pub ino: u64,
-    /// Number of directory entries linked to this filesystem object.
+    /// Number of directory entries linked to this filesystem object. A
+    /// directory counts itself and every subdirectory's `..` (`2 +
+    /// subdirectories`), as every Unix filesystem reports it.
     pub nlink: u32,
-    /// Explicit virtual access timestamp in nanoseconds.
-    ///
-    /// Drivers without a clock do not auto-update this field. For example,
-    /// `patina-dst-fs-mem` changes timestamps only via explicit set-times calls.
+    /// Access time, nanoseconds since the epoch on the virtual clock. Updated
+    /// by reads under the [`FsClock`]'s [`AtimePolicy`], and set explicitly by
+    /// the set-times operations.
     pub atime_nanos: u64,
-    /// Explicit virtual modification timestamp in nanoseconds.
-    ///
-    /// Drivers without a clock do not auto-update this field. For example,
-    /// `patina-dst-fs-mem` changes timestamps only via explicit set-times calls.
+    /// Modification time: the last change to the entry's DATA (a write, a
+    /// truncation, an allocation; for a directory, a name appearing or
+    /// disappearing in it). Set explicitly by the set-times operations.
     pub mtime_nanos: u64,
+    /// Inode change time: the last change to the entry's data OR metadata (a
+    /// mode change, a link count change, a rename, a set-times call). Never
+    /// settable directly, exactly as on Linux.
+    pub ctime_nanos: u64,
+    /// Birth time: when the entry was created. Never changes.
+    pub btime_nanos: u64,
     /// POSIX permission bits (`0o7777`) — the mode WITHOUT the file-type bits,
     /// which [`FsMetadata::kind`] already carries. A creating call stores the
     /// mode it is handed verbatim: the umask is process state the caller above
@@ -799,6 +852,25 @@ pub enum Operation {
     FsSetLength {
         fd: Fd,
         len: u64,
+    },
+    /// `truncate(2)`: a file's length by NAME. Separate from
+    /// [`Operation::FsSetLength`] because it is a different question — the
+    /// entry is resolved and its permission bits are charged here, where a
+    /// descriptor form charged them at open.
+    FsSetLengthByPath {
+        path: String,
+        len: u64,
+    },
+    /// `fallocate(2)` over a regular file: `zero` writes zeros over the range
+    /// (`FALLOC_FL_PUNCH_HOLE`/`FALLOC_FL_ZERO_RANGE`), `keep_size` leaves the
+    /// length alone (`FALLOC_FL_KEEP_SIZE`); without it the file grows to
+    /// `offset + len` when that is past its end.
+    FsAllocate {
+        fd: Fd,
+        offset: u64,
+        len: u64,
+        zero: bool,
+        keep_size: bool,
     },
     FsSetTimes {
         fd: Fd,
@@ -1241,6 +1313,8 @@ mod tests {
             nlink: 1,
             atime_nanos: 1,
             mtime_nanos: 2,
+            ctime_nanos: 3,
+            btime_nanos: 4,
             mode: 0o777,
         };
         let json = serde_json::to_string(&metadata).unwrap();
@@ -1254,6 +1328,8 @@ mod tests {
             nlink: 1,
             atime_nanos: 0,
             mtime_nanos: 0,
+            ctime_nanos: 0,
+            btime_nanos: 0,
             mode: 0o644,
         };
         let json = serde_json::to_string(&fifo).unwrap();

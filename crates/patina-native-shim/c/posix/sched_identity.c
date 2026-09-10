@@ -86,10 +86,10 @@ int sched_setaffinity(pid_t pid, size_t cpusetsize, const cpu_set_t *mask) {
  * class itself — spawning, exec, reaping, credential and session changes — is a
  * deterministic-runtime non-goal, handled by the deny-traps just below.
  */
-uid_t getuid(void) { return (uid_t)1000; }
-uid_t geteuid(void) { return (uid_t)1000; }
-gid_t getgid(void) { return (gid_t)1000; }
-gid_t getegid(void) { return (gid_t)1000; }
+uid_t getuid(void) { return (uid_t)patina_uid(); }
+uid_t geteuid(void) { return (uid_t)patina_uid(); }
+gid_t getgid(void) { return (gid_t)patina_gid(); }
+gid_t getegid(void) { return (gid_t)patina_gid(); }
 
 long sysconf(int name) {
 #ifdef _SC_PAGESIZE

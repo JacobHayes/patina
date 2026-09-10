@@ -57,49 +57,6 @@ reason = "(syscall(2) forwards into the same SUD row) pending: network — recvf
 
 [[divergence]]
 probe = "fs/metadata"
-op = "fstat"
-field = "fields.uid"
-reason = "pending: identity — st_uid is 0 while getuid() is 1000 (patina_posix.c:2417 fills from fs-mem values that carry no owner)"
-
-[[divergence]]
-probe = "fs/metadata"
-op = "fstat"
-field = "fields.gid"
-reason = "pending: identity — st_gid is 0 while getgid() is 1000 (patina_posix.c:2417)"
-
-[[divergence]]
-probe = "fs/metadata"
-op = "newfstatat"
-field = "fields.uid"
-reason = "pending: identity — st_uid is 0 while getuid() is 1000 (patina_posix.c:2710)"
-
-[[divergence]]
-probe = "fs/metadata"
-op = "newfstatat"
-field = "fields.gid"
-reason = "pending: identity — st_gid is 0 while getgid() is 1000 (patina_posix.c:2710)"
-
-[[divergence]]
-probe = "fs/metadata"
-op = "statx"
-field = "fields.uid"
-reason = "pending: identity — stx_uid is 0 while getuid() is 1000 (patina_posix.c:2744 statx)"
-
-[[divergence]]
-probe = "fs/metadata"
-op = "statx"
-field = "fields.gid"
-reason = "pending: identity — stx_gid is 0 while getgid() is 1000 (patina_posix.c:2744 statx)"
-
-[[divergence]]
-probe = "fs/metadata"
-op = "check"
-field = "ret"
-label = "fstat: owned by the caller"
-reason = "pending: identity — see fstat fields.uid/gid"
-
-[[divergence]]
-probe = "fs/metadata"
 op = "newfstatat"
 field = "errno"
 seq = 22
@@ -111,55 +68,6 @@ op = "check"
 field = "ret"
 label = "an unknown flag is EINVAL"
 reason = "pending: fs — see newfstatat seq 22"
-
-[[divergence]]
-probe = "fs/metadata"
-op = "newfstatat"
-field = "fields.nlink"
-seqs = [28, 35, 37]
-reason = "pending: fs — a directory's st_nlink is 1: fs-mem counts names, not `.`/`..`/subdirectory back-links (crates/patina-fs-mem/src/lib.rs:103)"
-
-[[divergence]]
-probe = "fs/metadata"
-op = "fstat"
-field = "fields.nlink"
-seq = 31
-reason = "pending: fs — a directory's st_nlink is 1 (crates/patina-fs-mem/src/lib.rs:103)"
-
-[[divergence]]
-probe = "fs/metadata"
-op = "check"
-field = "ret"
-label = "a directory: kind dir, mode 0750, two links"
-reason = "pending: fs — see newfstatat seq 28"
-
-[[divergence]]
-probe = "fs/metadata"
-op = "check"
-field = "ret"
-label = "a subdirectory bumps the parent link count to 3"
-reason = "pending: fs — see newfstatat seq 35"
-
-[[divergence]]
-probe = "fs/metadata"
-op = "statx"
-field = "fields.mask"
-seqs = [50, 53, 55, 57, 63]
-reason = "pending: fs — statx answers a fixed mask (patina_posix.c:2757) without STATX_UID/GID/ATIME/BTIME/MNT_ID bits the kernel fills"
-
-[[divergence]]
-probe = "fs/metadata"
-op = "check"
-field = "ret"
-label = "statx fills every basic field"
-reason = "pending: fs — see statx seq 50"
-
-[[divergence]]
-probe = "fs/metadata"
-op = "statx"
-field = "fields.btime_present"
-seqs = [53, 55]
-reason = "pending: fs — no birth time in fs-mem (patina_posix.c:2757 never sets STATX_BTIME)"
 
 [[divergence]]
 probe = "fs/metadata"
@@ -175,28 +83,7 @@ field = "ret"
 label = "statx with an unknown flag is EINVAL"
 reason = "pending: fs — see statx seq 61"
 
-[[divergence]]
-probe = "fs/metadata"
-op = "statx"
-field = "fields.nlink"
-seq = 63
-reason = "pending: fs — a directory's stx_nlink is 1 (crates/patina-fs-mem/src/lib.rs:103)"
-
-[[divergence]]
-probe = "fs/metadata"
-op = "check"
-field = "ret"
-label = "statx can report a birth time"
-reason = "pending: fs — see statx seq 53"
-
 # ---- fs/dirs -------------------------------------------------------------------
-
-[[divergence]]
-probe = "fs/dirs"
-op = "newfstatat"
-field = "fields.nlink"
-seq = 15
-reason = "pending: fs — a directory's st_nlink is 1 (crates/patina-fs-mem/src/lib.rs:103)"
 
 [[divergence]]
 probe = "fs/dirs"
@@ -252,20 +139,6 @@ seq = 47
 reason = "pending: fs — linkat of a symlink without AT_SYMLINK_FOLLOW copies the link instead of hard-linking it: the new name's nlink is 1, not 2 (patina_posix.c:2865)"
 
 # ---- fs/paths ------------------------------------------------------------------
-
-[[divergence]]
-probe = "fs/paths"
-op = "newfstatat"
-field = "fields.nlink"
-seqs = [23, 24, 101, 103, 123]
-reason = "pending: fs — a directory's st_nlink is 1: fs-mem counts names, not `.`/`..`/subdirectory back-links (crates/patina-fs-mem/src/lib.rs:103)"
-
-[[divergence]]
-probe = "fs/paths"
-op = "fstat"
-field = "fields.nlink"
-seq = 27
-reason = "pending: fs — a directory's st_nlink is 1 (crates/patina-fs-mem/src/lib.rs:103)"
 
 # ---- fd/pipes ------------------------------------------------------------------
 

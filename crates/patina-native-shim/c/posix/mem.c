@@ -295,19 +295,13 @@ static void *patina_mmap_impl(void *hint, size_t length, int protection, int fla
      * on: two descriptors open on one file must share one backing region, or
      * stores through one would be invisible to the other. Taken before the
      * table scan so the scan itself contains no boundary call. */
-    uint32_t kind = 0;
-    uint64_t file_length = 0;
-    uint64_t inode = 0;
-    uint32_t nlink = 0;
-    uint64_t atime = 0;
-    uint64_t mtime = 0;
-    uint32_t entry_mode = 0;
-    if (patina_fd_metadata_full(fd, &kind, &file_length, &inode, &nlink, &atime, &mtime,
-                                &entry_mode) < 0) {
+    struct patina_metadata metadata;
+    if (patina_fd_metadata_full(fd, &metadata) < 0) {
         errno = patina_errno();
         return MAP_FAILED;
     }
-    if (kind != PATINA_ENTRY_FILE) {
+    uint64_t inode = metadata.ino;
+    if (metadata.kind != PATINA_ENTRY_FILE) {
         errno = ENODEV;
         return MAP_FAILED;
     }

@@ -3489,21 +3489,35 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "mkfifoat",
         "mknod",
         "mknodat",
-        // Not interposed: the deterministic filesystem has no owner /
-        // timestamp-by-path model, so a reference to one of these is a host
-        // filesystem escape and is LABELED here, never modeled. `truncate` is
-        // the planted filesystem representative of the gate-level e2e
-        // (`native_run_prerun_gate_refuses_every_escape_class`) now that every
-        // symbol above it is shim-defined.
+        // Timestamps, ownership and sizes ARE modeled (a four-timestamp inode
+        // model on the virtual clock, ownership as a comparison against the
+        // one identity, sizes by name and by descriptor), so the utimensat,
+        // chown, truncate and fallocate families are shim-defined too.
         "truncate",
         "truncate64",
         "chown",
         "fchown",
         "lchown",
         "fchownat",
+        "utime",
         "utimes",
+        "lutimes",
+        "futimes",
+        "futimesat",
         "utimensat",
         "futimens",
+        "fallocate",
+        "fallocate64",
+        "posix_fallocate",
+        "posix_fallocate64",
+        // Not interposed, by decision: `acct(2)` turns on process accounting
+        // to a file — a privileged, kernel-global effect (CAP_SYS_PACCT) no
+        // DST guest legitimately needs — so a reference to it is a host
+        // filesystem escape and is LABELED here, never modeled. It is the
+        // planted filesystem representative of the gate-level e2e
+        // (`native_run_prerun_gate_refuses_every_escape_class`) now that every
+        // symbol above it is shim-defined.
+        "acct",
     ];
     // (f) Network: BSD sockets. Modeled over SimNet when interposed.
     const NETWORK: &[&str] = &[

@@ -393,6 +393,7 @@ mod tests {
     use patina_dst_fs_mem::MemFs;
 
     use super::*;
+    use patina_dst_abi::FsClock;
 
     fn key() -> HandoffSealKey {
         HandoffSealKey::from_bytes([7; 32])
@@ -401,9 +402,13 @@ mod tests {
     fn handoff() -> IncarnationHandoff {
         let mut fs = MemFs::new();
         let fd = fs
-            .open("/state", patina_dst_abi::OpenFlags::create_truncate_write())
+            .open(
+                FsClock::EPOCH,
+                "/state",
+                patina_dst_abi::OpenFlags::create_truncate_write(),
+            )
             .unwrap();
-        fs.write(fd, b"stable").unwrap();
+        fs.write(FsClock::EPOCH, fd, b"stable").unwrap();
         fs.close(fd).unwrap();
         IncarnationHandoff {
             compatibility_fingerprint: "fingerprint+crash-restart".to_string(),

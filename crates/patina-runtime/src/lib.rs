@@ -84,9 +84,9 @@ use std::path::{Path, PathBuf};
 
 pub use patina_dst_abi::VerdictKind;
 use patina_dst_abi::{
-    ClockKind, Datagram, EffectError, ErrorCode, Fd, FsDirectoryEntry, FsMetadata, OpenFlags,
-    Operation, Outcome, SeekWhence, SendReport, ShutdownHow, SocketId, TaskId, TcpAccepted,
-    verdict_line,
+    AtimePolicy, ClockKind, Datagram, EffectError, ErrorCode, Fd, FsClock, FsDirectoryEntry,
+    FsMetadata, OpenFlags, Operation, Outcome, SeekWhence, SendReport, ShutdownHow, SocketId,
+    TaskId, TcpAccepted, verdict_line,
 };
 use patina_dst_driver_api::{ClockDriver, EntropyDriver, FsDriver, NetDriver, SchedulerDriver};
 use patina_dst_fs_crash::CrashFs;
@@ -951,6 +951,10 @@ pub struct RuntimeConfig {
     /// re-supplying the table. Not a fingerprint input — the recorded op stream
     /// already reflects every resolution outcome.
     dns_entries: BTreeMap<String, String>,
+    /// When a read updates an entry's access time on the deterministic
+    /// filesystem: Linux's default `relatime` unless configured otherwise. A
+    /// mount-option-shaped fact of the virtual kernel, not a fault knob.
+    fs_atime: AtimePolicy,
     /// The liveness-watchdog configuration. Default (disabled) leaves a run
     /// byte-for-byte unchanged; enabling it only ADDS a possible violation report
     /// and is deliberately NOT a fingerprint input (schedule-invariant).
@@ -998,6 +1002,7 @@ impl RuntimeConfig {
             guest_env: BTreeMap::new(),
             guest_cwd: None,
             dns_entries: BTreeMap::new(),
+            fs_atime: AtimePolicy::Relatime,
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
             sud: None,
@@ -1023,6 +1028,7 @@ impl RuntimeConfig {
             guest_env: BTreeMap::new(),
             guest_cwd: None,
             dns_entries: BTreeMap::new(),
+            fs_atime: AtimePolicy::Relatime,
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
             sud: None,
@@ -1053,6 +1059,7 @@ impl RuntimeConfig {
             guest_env: BTreeMap::new(),
             guest_cwd: None,
             dns_entries: BTreeMap::new(),
+            fs_atime: AtimePolicy::Relatime,
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
             sud: None,
@@ -1084,6 +1091,7 @@ impl RuntimeConfig {
             guest_env: BTreeMap::new(),
             guest_cwd: None,
             dns_entries: BTreeMap::new(),
+            fs_atime: AtimePolicy::Relatime,
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
             sud: None,
@@ -1116,6 +1124,7 @@ impl RuntimeConfig {
             guest_env: BTreeMap::new(),
             guest_cwd: None,
             dns_entries: BTreeMap::new(),
+            fs_atime: AtimePolicy::Relatime,
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
             sud: None,
@@ -1154,6 +1163,7 @@ impl RuntimeConfig {
             guest_env: BTreeMap::new(),
             guest_cwd: None,
             dns_entries: BTreeMap::new(),
+            fs_atime: AtimePolicy::Relatime,
             liveness: LivenessConfig::default(),
             reports: ReportConfig::default(),
             sud: None,
@@ -1560,6 +1570,13 @@ impl RuntimeConfig {
 
     /// Set the guest's initial working directory directly (tests and
     /// embedders). Validated and canonicalized exactly as [`ENV_GUEST_CWD`] is.
+    /// The access-time policy the deterministic filesystem applies to reads
+    /// (`relatime` by default, as a Linux mount does).
+    pub fn with_fs_atime_policy(mut self, policy: AtimePolicy) -> Self {
+        self.fs_atime = policy;
+        self
+    }
+
     pub fn with_guest_cwd(mut self, guest_cwd: Option<&str>) -> Result<Self, RuntimeError> {
         self.guest_cwd = guest_cwd.map(validate_guest_cwd).transpose()?;
         Ok(self)
@@ -2611,6 +2628,7 @@ impl RuntimeBuilder {
             fs_latency_eligible_ops: 0,
             fs_latency_applied: 0,
             dns_entries: self.config.dns_entries,
+            fs_atime: self.config.fs_atime,
             dns_fail_permille: self.config.faults.dns.fail_permille,
             dns_fault_rng: SplitMix64::new(domain_seed(root_seed, fault_domain::DNS_FAULT)),
             dns_latency_nanos: self.config.faults.dns.latency_nanos,
@@ -3870,6 +3888,7 @@ pub struct Context {
     fs_latency_eligible_ops: u64,
     fs_latency_applied: u64,
     /// The run's DNS host table: the only names that resolve to an address.
+    fs_atime: AtimePolicy,
     dns_entries: BTreeMap<String, String>,
     /// Seeded DNS resolution-failure knob and its domain-separated stream.
     dns_fail_permille: u16,
@@ -5003,6 +5022,30 @@ recording was produced by a guest whose result type no longer matches this one"
         self.sleep_until(ClockKind::Monotonic, deadline)
     }
 
+    /// The clock every reading or mutating filesystem operation is handed:
+    /// virtual realtime read UNRECORDED (the driver's value is a pure function
+    /// of the recorded sleeps, so it reproduces on replay exactly as
+    /// [`Self::current_monotonic`] does, and an fs op costs no extra trace op)
+    /// under the configured access-time policy. Without a clock driver the
+    /// filesystem runs at the epoch.
+    fn fs_clock(&mut self) -> Result<FsClock, RuntimeError> {
+        let now_nanos = match self.clock.as_mut() {
+            Some(clock) => clock.now(ClockKind::Realtime)?,
+            None => 0,
+        };
+        Ok(FsClock {
+            now_nanos,
+            atime: self.fs_atime,
+        })
+    }
+
+    /// The instant the filesystem stamps an operation issued now with — what
+    /// `UTIME_NOW` resolves to before it crosses the boundary as an explicit
+    /// time. Unrecorded, for the same reason [`Self::fs_clock`] is.
+    pub fn fs_now_unrecorded(&mut self) -> Result<u64, RuntimeError> {
+        Ok(self.fs_clock()?.now_nanos)
+    }
+
     pub fn fs_open(&mut self, path: &str, flags: OpenFlags) -> Result<Fd, RuntimeError> {
         if self.filesystem.is_none() {
             return Err(EffectError::missing_driver("filesystem").into());
@@ -5016,11 +5059,12 @@ recording was produced by a guest whose result type no longer matches this one"
             FilesystemExpected::Execute(expected) => expected,
             FilesystemExpected::Captured(outcome) => return decode_handle(&operation, outcome),
         };
+        let clock = self.fs_clock()?;
         let result = self
             .filesystem
             .as_mut()
             .expect("driver was checked")
-            .open(path, flags);
+            .open(clock, path, flags);
         let actual = match result {
             Ok(fd) => Outcome::Handle(fd),
             Err(error) => Outcome::Error(error),
@@ -5043,11 +5087,12 @@ recording was produced by a guest whose result type no longer matches this one"
             FilesystemExpected::Execute(expected) => expected,
             FilesystemExpected::Captured(outcome) => return decode_bytes(&operation, outcome),
         };
+        let clock = self.fs_clock()?;
         let result = self
             .filesystem
             .as_mut()
             .expect("driver was checked")
-            .read(fd, max_len);
+            .read(clock, fd, max_len);
         let actual = match result {
             Ok(bytes) => Outcome::Bytes(bytes),
             Err(error) => Outcome::Error(error),
@@ -5069,11 +5114,12 @@ recording was produced by a guest whose result type no longer matches this one"
             FilesystemExpected::Execute(expected) => expected,
             FilesystemExpected::Captured(outcome) => return decode_usize(&operation, outcome),
         };
+        let clock = self.fs_clock()?;
         let result = self
             .filesystem
             .as_mut()
             .expect("driver was checked")
-            .write(fd, bytes);
+            .write(clock, fd, bytes);
         let actual = match result {
             Ok(written) => Outcome::Usize(written),
             Err(error) => Outcome::Error(error),
@@ -5108,11 +5154,12 @@ recording was produced by a guest whose result type no longer matches this one"
             FilesystemExpected::Execute(expected) => expected,
             FilesystemExpected::Captured(outcome) => return decode_bytes(&operation, outcome),
         };
+        let clock = self.fs_clock()?;
         let result = self
             .filesystem
             .as_mut()
             .expect("driver was checked")
-            .read_at(fd, offset, max_len);
+            .read_at(clock, fd, offset, max_len);
         let actual = match result {
             Ok(bytes) => Outcome::Bytes(bytes),
             Err(error) => Outcome::Error(error),
@@ -5144,11 +5191,12 @@ recording was produced by a guest whose result type no longer matches this one"
             FilesystemExpected::Execute(expected) => expected,
             FilesystemExpected::Captured(outcome) => return decode_usize(&operation, outcome),
         };
+        let clock = self.fs_clock()?;
         let result = self
             .filesystem
             .as_mut()
             .expect("driver was checked")
-            .write_at(fd, offset, bytes);
+            .write_at(clock, fd, offset, bytes);
         let actual = match result {
             Ok(written) => Outcome::Usize(written),
             Err(error) => Outcome::Error(error),
@@ -5316,12 +5364,13 @@ recording was produced by a guest whose result type no longer matches this one"
     }
 
     pub fn fs_create_directory(&mut self, path: &str, mode: u32) -> Result<(), RuntimeError> {
+        let clock = self.fs_clock()?;
         self.filesystem_unit(
             Operation::FsCreateDirectory {
                 path: path.into(),
                 mode,
             },
-            |filesystem| filesystem.create_directory(path, mode),
+            |filesystem| filesystem.create_directory(clock, path, mode),
         )
     }
 
@@ -5330,19 +5379,21 @@ recording was produced by a guest whose result type no longer matches this one"
     /// through the FIFO are not filesystem state at all, so nothing about them
     /// crosses this boundary.
     pub fn fs_make_fifo(&mut self, path: &str, mode: u32) -> Result<(), RuntimeError> {
+        let clock = self.fs_clock()?;
         self.filesystem_unit(
             Operation::FsMakeFifo {
                 path: path.into(),
                 mode,
             },
-            |filesystem| filesystem.make_fifo(path, mode),
+            |filesystem| filesystem.make_fifo(clock, path, mode),
         )
     }
 
     pub fn fs_remove_file(&mut self, path: &str) -> Result<(), RuntimeError> {
+        let clock = self.fs_clock()?;
         self.filesystem_unit(
             Operation::FsRemoveFile { path: path.into() },
-            |filesystem| filesystem.remove_file(path),
+            |filesystem| filesystem.remove_file(clock, path),
         )
     }
 
@@ -5356,9 +5407,47 @@ recording was produced by a guest whose result type no longer matches this one"
     }
 
     pub fn fs_set_len(&mut self, fd: Fd, len: u64) -> Result<(), RuntimeError> {
+        let clock = self.fs_clock()?;
         self.filesystem_unit(Operation::FsSetLength { fd, len }, |filesystem| {
-            filesystem.set_len(fd, len)
+            filesystem.set_len(clock, fd, len)
         })
+    }
+
+    /// `truncate(2)`: a file's length by name, resolved and permission-checked
+    /// by the driver as a kernel does on the path.
+    pub fn fs_set_len_by_path(&mut self, path: &str, len: u64) -> Result<(), RuntimeError> {
+        let clock = self.fs_clock()?;
+        self.filesystem_unit(
+            Operation::FsSetLengthByPath {
+                path: path.into(),
+                len,
+            },
+            |filesystem| filesystem.set_len_by_path(clock, path, len),
+        )
+    }
+
+    /// `fallocate(2)` over a regular file: one recorded operation whatever the
+    /// range, so a gigabyte reservation or hole costs one trace event, never a
+    /// zero-filled payload.
+    pub fn fs_allocate(
+        &mut self,
+        fd: Fd,
+        offset: u64,
+        len: u64,
+        zero: bool,
+        keep_size: bool,
+    ) -> Result<(), RuntimeError> {
+        let clock = self.fs_clock()?;
+        self.filesystem_unit(
+            Operation::FsAllocate {
+                fd,
+                offset,
+                len,
+                zero,
+                keep_size,
+            },
+            |filesystem| filesystem.allocate(clock, fd, offset, len, zero, keep_size),
+        )
     }
 
     pub fn fs_set_times(
@@ -5367,13 +5456,14 @@ recording was produced by a guest whose result type no longer matches this one"
         atime_nanos: Option<u64>,
         mtime_nanos: Option<u64>,
     ) -> Result<(), RuntimeError> {
+        let clock = self.fs_clock()?;
         self.filesystem_unit(
             Operation::FsSetTimes {
                 fd,
                 atime_nanos,
                 mtime_nanos,
             },
-            |filesystem| filesystem.set_times(fd, atime_nanos, mtime_nanos),
+            |filesystem| filesystem.set_times(clock, fd, atime_nanos, mtime_nanos),
         )
     }
 
@@ -5383,13 +5473,14 @@ recording was produced by a guest whose result type no longer matches this one"
         atime_nanos: Option<u64>,
         mtime_nanos: Option<u64>,
     ) -> Result<(), RuntimeError> {
+        let clock = self.fs_clock()?;
         self.filesystem_unit(
             Operation::FsSetTimesByPath {
                 path: path.into(),
                 atime_nanos,
                 mtime_nanos,
             },
-            |filesystem| filesystem.set_times_by_path(path, atime_nanos, mtime_nanos),
+            |filesystem| filesystem.set_times_by_path(clock, path, atime_nanos, mtime_nanos),
         )
     }
 
@@ -5405,11 +5496,12 @@ recording was produced by a guest whose result type no longer matches this one"
                 return decode_directory_entries(&operation, outcome);
             }
         };
+        let clock = self.fs_clock()?;
         let result = self
             .filesystem
             .as_mut()
             .expect("driver was checked")
-            .read_directory(path);
+            .read_directory(clock, path);
         let actual = match result {
             Ok(entries) => Outcome::DirectoryEntries(entries),
             Err(error) => Outcome::Error(error),
@@ -5434,11 +5526,12 @@ recording was produced by a guest whose result type no longer matches this one"
                 return decode_directory_entries(&operation, outcome);
             }
         };
+        let clock = self.fs_clock()?;
         let result = self
             .filesystem
             .as_mut()
             .expect("driver was checked")
-            .read_directory_fd(fd);
+            .read_directory_fd(clock, fd);
         let actual = match result {
             Ok(entries) => Outcome::DirectoryEntries(entries),
             Err(error) => Outcome::Error(error),
@@ -5451,8 +5544,9 @@ recording was produced by a guest whose result type no longer matches this one"
     /// and fault eligibility match [`DeterministicContext::fs_set_fd_mode`],
     /// because this IS that `fchmod`, named by node instead of by descriptor.
     pub fn fs_set_inode_mode(&mut self, ino: u64, mode: u32) -> Result<(), RuntimeError> {
+        let clock = self.fs_clock()?;
         self.filesystem_unit(Operation::FsSetInodeMode { ino, mode }, |filesystem| {
-            filesystem.set_inode_mode(ino, mode)
+            filesystem.set_inode_mode(clock, ino, mode)
         })
     }
 
@@ -5474,39 +5568,43 @@ recording was produced by a guest whose result type no longer matches this one"
     }
 
     pub fn fs_remove_directory(&mut self, path: &str) -> Result<(), RuntimeError> {
+        let clock = self.fs_clock()?;
         self.filesystem_unit(
             Operation::FsRemoveDirectory { path: path.into() },
-            |filesystem| filesystem.remove_directory(path),
+            |filesystem| filesystem.remove_directory(clock, path),
         )
     }
 
     pub fn fs_rename(&mut self, from: &str, to: &str) -> Result<(), RuntimeError> {
+        let clock = self.fs_clock()?;
         self.filesystem_unit(
             Operation::FsRename {
                 from: from.into(),
                 to: to.into(),
             },
-            |filesystem| filesystem.rename(from, to),
+            |filesystem| filesystem.rename(clock, from, to),
         )
     }
 
     pub fn fs_link(&mut self, from: &str, to: &str) -> Result<(), RuntimeError> {
+        let clock = self.fs_clock()?;
         self.filesystem_unit(
             Operation::FsLink {
                 from: from.into(),
                 to: to.into(),
             },
-            |filesystem| filesystem.link(from, to),
+            |filesystem| filesystem.link(clock, from, to),
         )
     }
 
     pub fn fs_symlink(&mut self, target: &str, link_path: &str) -> Result<(), RuntimeError> {
+        let clock = self.fs_clock()?;
         self.filesystem_unit(
             Operation::FsSymlink {
                 target: target.into(),
                 link_path: link_path.into(),
             },
-            |filesystem| filesystem.symlink(target, link_path),
+            |filesystem| filesystem.symlink(clock, target, link_path),
         )
     }
 
@@ -5514,19 +5612,21 @@ recording was produced by a guest whose result type no longer matches this one"
     /// change is durable state, so it is a recorded boundary operation like
     /// every other namespace mutation.
     pub fn fs_set_mode(&mut self, path: &str, mode: u32) -> Result<(), RuntimeError> {
+        let clock = self.fs_clock()?;
         self.filesystem_unit(
             Operation::FsSetMode {
                 path: path.into(),
                 mode,
             },
-            |filesystem| filesystem.set_mode(path, mode),
+            |filesystem| filesystem.set_mode(clock, path, mode),
         )
     }
 
     /// `fchmod`: the same change, named by an open descriptor.
     pub fn fs_set_fd_mode(&mut self, fd: Fd, mode: u32) -> Result<(), RuntimeError> {
+        let clock = self.fs_clock()?;
         self.filesystem_unit(Operation::FsSetFdMode { fd, mode }, |filesystem| {
-            filesystem.set_fd_mode(fd, mode)
+            filesystem.set_fd_mode(clock, fd, mode)
         })
     }
 
@@ -5575,11 +5675,12 @@ recording was produced by a guest whose result type no longer matches this one"
             FilesystemExpected::Execute(expected) => expected,
             FilesystemExpected::Captured(outcome) => return decode_string(&operation, outcome),
         };
+        let clock = self.fs_clock()?;
         let result = self
             .filesystem
             .as_mut()
             .expect("driver was checked")
-            .read_link(path);
+            .read_link(clock, path);
         let actual = match result {
             Ok(target) => Outcome::Bytes(target.into_bytes()),
             Err(error) => Outcome::Error(error),
@@ -10126,8 +10227,8 @@ class=crash|0 class=buggify|0"
             ..OpenFlags::create_truncate_write()
         };
         let mut inner = MemFs::new();
-        let fd = inner.open("/file", readable_write).unwrap();
-        inner.write(fd, b"abcdef").unwrap();
+        let fd = inner.open(FsClock::EPOCH, "/file", readable_write).unwrap();
+        inner.write(FsClock::EPOCH, fd, b"abcdef").unwrap();
 
         // Every eligible operation fails, so the breakdown is exactly the
         // operations performed, in the report's fixed order rather than the
@@ -10135,9 +10236,9 @@ class=crash|0 class=buggify|0"
         let mut fs = FaultFs::new(inner, 1).error_permille(1000);
         assert!(fs.sync(fd).is_err());
         assert!(fs.metadata("/file").is_err());
-        assert!(fs.open("/other", readable_write).is_err());
-        assert!(fs.read(fd, 4).is_err());
-        assert!(fs.read(fd, 4).is_err());
+        assert!(fs.open(FsClock::EPOCH, "/other", readable_write).is_err());
+        assert!(fs.read(FsClock::EPOCH, fd, 4).is_err());
+        assert!(fs.read(FsClock::EPOCH, fd, 4).is_err());
         let report = fs.fault_report().unwrap();
         assert_eq!(report.errors_injected, 5);
         let line = fs_fault_report_line(&report);
@@ -10153,11 +10254,11 @@ class=crash|0 class=buggify|0"
         // The short class attributes independently: a truncation counts against
         // the op kind whose result it bound.
         let mut inner = MemFs::new();
-        let fd = inner.open("/file", readable_write).unwrap();
-        inner.write(fd, b"abcdef").unwrap();
+        let fd = inner.open(FsClock::EPOCH, "/file", readable_write).unwrap();
+        inner.write(FsClock::EPOCH, fd, b"abcdef").unwrap();
         let mut fs = FaultFs::new(inner, 1).short_permille(1000);
-        assert!(fs.write(fd, b"abcdef").unwrap() < 6);
-        assert!(fs.read_at(fd, 0, 6).unwrap().len() < 6);
+        assert!(fs.write(FsClock::EPOCH, fd, b"abcdef").unwrap() < 6);
+        assert!(fs.read_at(FsClock::EPOCH, fd, 0, 6).unwrap().len() < 6);
         let report = fs.fault_report().unwrap();
         assert_eq!(report.shorts_applied, 2);
         let line = fs_fault_report_line(&report);
@@ -11074,15 +11175,25 @@ class=crash|0 class=buggify|0"
     struct WrongHandleFs;
 
     impl FsDriver for WrongHandleFs {
-        fn open(&mut self, _path: &str, _flags: OpenFlags) -> Result<Fd, EffectError> {
+        fn open(
+            &mut self,
+            _clock: FsClock,
+            _path: &str,
+            _flags: OpenFlags,
+        ) -> Result<Fd, EffectError> {
             Ok(Fd(999))
         }
 
-        fn read(&mut self, _fd: Fd, _max_len: usize) -> Result<Vec<u8>, EffectError> {
+        fn read(
+            &mut self,
+            _clock: FsClock,
+            _fd: Fd,
+            _max_len: usize,
+        ) -> Result<Vec<u8>, EffectError> {
             unreachable!()
         }
 
-        fn write(&mut self, _fd: Fd, _bytes: &[u8]) -> Result<usize, EffectError> {
+        fn write(&mut self, _clock: FsClock, _fd: Fd, _bytes: &[u8]) -> Result<usize, EffectError> {
             unreachable!()
         }
 

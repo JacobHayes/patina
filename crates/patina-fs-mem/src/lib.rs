@@ -9,7 +9,8 @@ pub use snapshot::{FsSnapshot, FsSnapshotError};
 use std::collections::{BTreeMap, BTreeSet};
 
 use patina_dst_abi::{
-    EffectError, ErrorCode, Fd, FsDirectoryEntry, FsEntryKind, FsMetadata, OpenFlags, SeekWhence,
+    AtimePolicy, EffectError, ErrorCode, Fd, FsClock, FsDirectoryEntry, FsEntryKind, FsMetadata,
+    OpenFlags, SeekWhence,
 };
 use patina_dst_driver_api::{DriverResult, FsDriver};
 
@@ -30,6 +31,82 @@ pub const DIRECTORY_MODE: u32 = 0o755;
 /// A symlink leaf. Linux ignores a symlink's own mode entirely and reports the
 /// conventional `0o777`; nothing here consults it.
 pub const SYMLINK_MODE: u32 = 0o777;
+
+/// The `relatime` refresh window: an access time at least this old is updated
+/// by the next read even when it is newer than `mtime`/`ctime` (Linux's
+/// `relatime_need_update`, 24 hours).
+const RELATIME_REFRESH_NANOS: u64 = 24 * 60 * 60 * 1_000_000_000;
+
+/// The four timestamps every entry carries, stamped by the kernel's rules from
+/// the [`FsClock`] each operation is handed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Times {
+    atime_nanos: u64,
+    mtime_nanos: u64,
+    ctime_nanos: u64,
+    btime_nanos: u64,
+}
+
+impl Times {
+    /// A freshly created entry: all four at `now`.
+    fn created(clock: FsClock) -> Self {
+        let now = clock.now_nanos;
+        Self {
+            atime_nanos: now,
+            mtime_nanos: now,
+            ctime_nanos: now,
+            btime_nanos: now,
+        }
+    }
+
+    /// The entry's DATA changed (a write, a truncation, an allocation; for a
+    /// directory, a name appeared or disappeared): `mtime` and `ctime`.
+    fn data_changed(&mut self, clock: FsClock) {
+        self.mtime_nanos = clock.now_nanos;
+        self.ctime_nanos = clock.now_nanos;
+    }
+
+    /// The entry's METADATA changed (mode, link count, name, explicit times):
+    /// `ctime` only.
+    fn metadata_changed(&mut self, clock: FsClock) {
+        self.ctime_nanos = clock.now_nanos;
+    }
+
+    /// The entry was READ: `atime`, under the clock's policy. `relatime` is
+    /// Linux's `relatime_need_update` — an access time not newer than `mtime`
+    /// or `ctime`, or at least a day old, is refreshed; otherwise a read leaves
+    /// it alone — and no policy rewrites an access time that already reads
+    /// `now`.
+    fn accessed(&mut self, clock: FsClock) {
+        let now = clock.now_nanos;
+        let due = match clock.atime {
+            AtimePolicy::NoAtime => false,
+            AtimePolicy::Strict => true,
+            AtimePolicy::Relatime => {
+                self.mtime_nanos >= self.atime_nanos
+                    || self.ctime_nanos >= self.atime_nanos
+                    || now.saturating_sub(self.atime_nanos) >= RELATIME_REFRESH_NANOS
+            }
+        };
+        if due && self.atime_nanos != now {
+            self.atime_nanos = now;
+        }
+    }
+
+    /// `utimensat`: `None` leaves a time alone. Any change stamps `ctime`.
+    fn set(&mut self, clock: FsClock, atime: Option<u64>, mtime: Option<u64>) {
+        if atime.is_none() && mtime.is_none() {
+            return;
+        }
+        if let Some(value) = atime {
+            self.atime_nanos = value;
+        }
+        if let Some(value) = mtime {
+            self.mtime_nanos = value;
+        }
+        self.metadata_changed(clock);
+    }
+}
 
 /// Owner-triad permission bits, as POSIX spells them.
 const READ: u32 = 0o4;
@@ -110,8 +187,7 @@ struct Inode {
     /// unlinked-but-open entry answers `fstat`, reads, writes and `fchmod` from
     /// the live node rather than from a copy taken when it was opened.
     openers: u32,
-    atime_nanos: u64,
-    mtime_nanos: u64,
+    times: Times,
     /// POSIX permission bits (`0o7777`), without the file-type bits.
     mode: u32,
 }
@@ -119,8 +195,7 @@ struct Inode {
 #[derive(Clone, Copy, Debug)]
 struct EntryMetadata {
     ino: InodeId,
-    atime_nanos: u64,
-    mtime_nanos: u64,
+    times: Times,
     /// POSIX permission bits (`0o7777`), without the file-type bits.
     mode: u32,
 }
@@ -130,9 +205,12 @@ struct EntryMetadata {
 /// It models regular files, hard links, inert symlink leaves, named pipes
 /// (`mkfifo` — the NAME and its inode; the bytes belong to the openers' pipe
 /// channel, not to the filesystem), directories, cursors, basic metadata, and
-/// POSIX permission bits. MemFs has no clock, so
-/// access and modification times are not auto-updated by reads or writes;
-/// timestamps change only through explicit `set_times` calls.
+/// POSIX permission bits. MemFs has no clock of its own: every reading or
+/// mutating operation is handed the runtime's virtual clock ([`FsClock`]) and
+/// stamps `atime`/`mtime`/`ctime`/`btime` by the kernel's rules — creation sets
+/// all four, a data change `mtime`+`ctime`, a metadata change `ctime`, a read
+/// `atime` under the clock's `relatime`/`strictatime`/`noatime` policy — so the
+/// times a guest reads back are a pure function of the run.
 ///
 /// # Permissions
 ///
@@ -177,17 +255,24 @@ impl MemFs {
             next_inode: 1,
             ..Self::default()
         };
-        let root = filesystem.allocate_entry_metadata(DIRECTORY_MODE);
+        let root = filesystem.allocate_entry_metadata(FsClock::EPOCH, DIRECTORY_MODE);
         filesystem.directories.insert("/".into(), root);
-        let tmp = filesystem.allocate_entry_metadata(DIRECTORY_MODE);
+        let tmp = filesystem.allocate_entry_metadata(FsClock::EPOCH, DIRECTORY_MODE);
         filesystem.directories.insert("/tmp".into(), tmp);
         filesystem
     }
 
+    /// Seed a file into the initial image. It is stamped at the epoch, like the
+    /// image's directories: nothing in the run created it.
     pub fn with_file(mut self, path: &str, contents: impl Into<Vec<u8>>) -> DriverResult<Self> {
         let path = normalize_path(path)?;
-        self.insert_parent_directories(&path);
-        let inode = self.allocate_inode(FsEntryKind::File, contents.into(), FILE_MODE);
+        self.insert_parent_directories(FsClock::EPOCH, &path);
+        let inode = self.allocate_inode(
+            FsClock::EPOCH,
+            FsEntryKind::File,
+            contents.into(),
+            FILE_MODE,
+        );
         self.files.insert(path, inode);
         Ok(self)
     }
@@ -279,6 +364,55 @@ impl MemFs {
     pub fn symlink_target(&self, path: &str) -> Option<&str> {
         let path = normalize_entry_path(path).ok()?;
         self.symlinks.get(&path).map(String::as_str)
+    }
+
+    /// Write all four timestamps of the entry at `path` back verbatim — the
+    /// storage layer's own setter, for a crash model rebuilding an image from
+    /// its durable baseline. Unlike the guest-facing `set_times` it stamps
+    /// nothing (a rebuild is not an inode change) and it restores the birth
+    /// time, which no guest-facing call can set.
+    pub fn restore_times(
+        &mut self,
+        path: &str,
+        atime_nanos: u64,
+        mtime_nanos: u64,
+        ctime_nanos: u64,
+        btime_nanos: u64,
+    ) -> DriverResult<()> {
+        let path = normalize_entry_path(path)?;
+        let times = self.times_mut(&path).ok_or_else(|| not_found(&path))?;
+        *times = Times {
+            atime_nanos,
+            mtime_nanos,
+            ctime_nanos,
+            btime_nanos,
+        };
+        Ok(())
+    }
+
+    /// Write permission bits back onto the entry at `path` WITHOUT stamping
+    /// `ctime` or enforcing the search path: the storage-layer mirror of
+    /// [`MemFs::restore_times`], for the same rebuild.
+    pub fn restore_mode(&mut self, path: &str, mode: u32) -> DriverResult<()> {
+        let path = normalize_entry_path(path)?;
+        let mode = mode & MODE_MASK;
+        if let Some(inode) = self
+            .files
+            .get(&path)
+            .or_else(|| self.fifos.get(&path))
+            .copied()
+        {
+            self.inodes
+                .get_mut(&inode)
+                .expect("name references an inode")
+                .mode = mode;
+            return Ok(());
+        }
+        if let Some(metadata) = self.directories.get_mut(&path) {
+            metadata.mode = mode;
+            return Ok(());
+        }
+        Err(not_found(&path))
     }
 
     /// Every path that OWNS a mode — directories, files and FIFOs — in path
@@ -398,18 +532,23 @@ impl MemFs {
         self.inodes.retain(|_, inode| inode.links > 0);
     }
 
-    fn allocate_entry_metadata(&mut self, mode: u32) -> EntryMetadata {
+    fn allocate_entry_metadata(&mut self, clock: FsClock, mode: u32) -> EntryMetadata {
         let ino = self.next_inode;
         self.next_inode = self.next_inode.checked_add(1).expect("inode IDs exhausted");
         EntryMetadata {
             ino,
-            atime_nanos: 0,
-            mtime_nanos: 0,
+            times: Times::created(clock),
             mode: mode & MODE_MASK,
         }
     }
 
-    fn allocate_inode(&mut self, kind: FsEntryKind, contents: Vec<u8>, mode: u32) -> InodeId {
+    fn allocate_inode(
+        &mut self,
+        clock: FsClock,
+        kind: FsEntryKind,
+        contents: Vec<u8>,
+        mode: u32,
+    ) -> InodeId {
         let inode = self.next_inode;
         self.next_inode = self.next_inode.checked_add(1).expect("inode IDs exhausted");
         self.inodes.insert(
@@ -419,12 +558,57 @@ impl MemFs {
                 contents,
                 links: 1,
                 openers: 0,
-                atime_nanos: 0,
-                mtime_nanos: 0,
+                times: Times::created(clock),
                 mode: mode & MODE_MASK,
             },
         );
         inode
+    }
+
+    /// A name appeared in or disappeared from `directory`: its `mtime` and
+    /// `ctime`, as every namespace operation stamps its parent.
+    fn stamp_directory(&mut self, clock: FsClock, directory: &str) {
+        if let Some(metadata) = self.directories.get_mut(directory) {
+            metadata.times.data_changed(clock);
+        }
+    }
+
+    /// The timestamps of the entry at `path`, whatever its kind.
+    fn times_mut(&mut self, path: &str) -> Option<&mut Times> {
+        if let Some(inode) = self
+            .files
+            .get(path)
+            .or_else(|| self.fifos.get(path))
+            .copied()
+        {
+            return self.inodes.get_mut(&inode).map(|inode| &mut inode.times);
+        }
+        if let Some(metadata) = self.directories.get_mut(path) {
+            return Some(&mut metadata.times);
+        }
+        self.symlink_metadata
+            .get_mut(path)
+            .map(|metadata| &mut metadata.times)
+    }
+
+    /// `2 + subdirectories`: a directory's link count is its own `.`, its
+    /// parent's name for it, and every child's `..`.
+    fn directory_links(&self, path: &str) -> u32 {
+        let prefix = if path == "/" {
+            "/".to_owned()
+        } else {
+            format!("{path}/")
+        };
+        let children = self
+            .directories
+            .keys()
+            .filter(|candidate| {
+                candidate
+                    .strip_prefix(&prefix)
+                    .is_some_and(|relative| !relative.is_empty() && !relative.contains('/'))
+            })
+            .count();
+        2 + u32::try_from(children).unwrap_or(u32::MAX - 2)
     }
 
     /// The permission bits of an existing entry, or `None` when nothing is
@@ -591,9 +775,12 @@ impl MemFs {
 
     /// Drop one NAME's reference to a node, releasing it if that was its last
     /// reference of either kind.
-    fn drop_name(&mut self, inode: InodeId) {
+    fn drop_name(&mut self, clock: FsClock, inode: InodeId) {
         let entry = self.inodes.get_mut(&inode).expect("inode was checked");
         entry.links -= 1;
+        // The link count is inode metadata: `ctime` moves, on a node that may
+        // live on behind a descriptor.
+        entry.times.metadata_changed(clock);
         self.release_if_unreferenced(inode);
     }
 
@@ -644,8 +831,10 @@ impl MemFs {
             },
             ino: node,
             nlink: inode.links,
-            atime_nanos: inode.atime_nanos,
-            mtime_nanos: inode.mtime_nanos,
+            atime_nanos: inode.times.atime_nanos,
+            mtime_nanos: inode.times.mtime_nanos,
+            ctime_nanos: inode.times.ctime_nanos,
+            btime_nanos: inode.times.btime_nanos,
             mode: inode.mode,
         })
     }
@@ -678,7 +867,7 @@ impl MemFs {
         Ok(())
     }
 
-    fn insert_parent_directories(&mut self, path: &str) {
+    fn insert_parent_directories(&mut self, clock: FsClock, path: &str) {
         let mut parents = Vec::new();
         let mut parent = parent_path(path);
         while parent != "/" {
@@ -688,32 +877,18 @@ impl MemFs {
             parent = parent_path(parent);
         }
         for parent in parents.into_iter().rev() {
-            let metadata = self.allocate_entry_metadata(DIRECTORY_MODE);
+            let metadata = self.allocate_entry_metadata(clock, DIRECTORY_MODE);
             self.directories.insert(parent, metadata);
         }
         if !self.directories.contains_key("/") {
-            let metadata = self.allocate_entry_metadata(DIRECTORY_MODE);
+            let metadata = self.allocate_entry_metadata(clock, DIRECTORY_MODE);
             self.directories.insert("/".into(), metadata);
-        }
-    }
-
-    fn set_times_on_metadata(
-        atime_nanos: &mut u64,
-        mtime_nanos: &mut u64,
-        atime: Option<u64>,
-        mtime: Option<u64>,
-    ) {
-        if let Some(value) = atime {
-            *atime_nanos = value;
-        }
-        if let Some(value) = mtime {
-            *mtime_nanos = value;
         }
     }
 }
 
 impl FsDriver for MemFs {
-    fn open(&mut self, path: &str, flags: OpenFlags) -> DriverResult<Fd> {
+    fn open(&mut self, clock: FsClock, path: &str, flags: OpenFlags) -> DriverResult<Fd> {
         let path = normalize_entry_path(path)?;
         self.resolve_guard(&path)?;
         if flags.path_only {
@@ -834,12 +1009,13 @@ impl FsDriver for MemFs {
             // A path-only open creates nothing, so a missing name is missing.
             if flags.create {
                 self.check_directory_write(parent_path(&path))?;
-                self.insert_parent_directories(&path);
+                self.insert_parent_directories(clock, &path);
                 // The caller's own creation mode — `open`'s third argument, which
                 // the kernel reads only on the branch that actually creates the
                 // entry, already under the caller's umask.
-                let inode = self.allocate_inode(FsEntryKind::File, Vec::new(), flags.mode);
+                let inode = self.allocate_inode(clock, FsEntryKind::File, Vec::new(), flags.mode);
                 self.files.insert(path.clone(), inode);
+                self.stamp_directory(clock, parent_path(&path));
             } else {
                 return Err(not_found(&path));
             }
@@ -859,12 +1035,15 @@ impl FsDriver for MemFs {
                 return Err(denied(&path, "write"));
             }
             if flags.truncate {
+                // `O_TRUNC` is a truncation: `mtime`/`ctime` move even when the
+                // file was already empty (`handle_truncate` → `do_truncate`).
                 let inode = self.file_inode(&path)?;
-                self.inodes
+                let inode = self
+                    .inodes
                     .get_mut(&inode)
-                    .expect("file path references an inode")
-                    .contents
-                    .clear();
+                    .expect("file path references an inode");
+                inode.contents.clear();
+                inode.times.data_changed(clock);
             }
         }
 
@@ -881,7 +1060,7 @@ impl FsDriver for MemFs {
         self.allocate_handle(node, cursor, Access::from_flags(flags), FsEntryKind::File)
     }
 
-    fn read(&mut self, fd: Fd, max_len: usize) -> DriverResult<Vec<u8>> {
+    fn read(&mut self, clock: FsClock, fd: Fd, max_len: usize) -> DriverResult<Vec<u8>> {
         let description = self.description(fd)?;
         if !description.readable {
             return Err(EffectError::new(
@@ -897,18 +1076,19 @@ impl FsDriver for MemFs {
         }
         let start = description.cursor;
         let inode = self.handle_inode(fd)?;
-        let file = &self
+        let inode = self
             .inodes
-            .get(&inode)
-            .expect("open handle references a file")
-            .contents;
+            .get_mut(&inode)
+            .expect("open handle references a file");
+        let file = &inode.contents;
         let end = start.saturating_add(max_len).min(file.len());
         let bytes = file[start..end].to_vec();
+        inode.times.accessed(clock);
         self.description_mut(fd)?.cursor = end;
         Ok(bytes)
     }
 
-    fn write(&mut self, fd: Fd, bytes: &[u8]) -> DriverResult<usize> {
+    fn write(&mut self, clock: FsClock, fd: Fd, bytes: &[u8]) -> DriverResult<usize> {
         let description = self.description(fd)?;
         if !description.writable {
             return Err(EffectError::new(
@@ -925,11 +1105,11 @@ impl FsDriver for MemFs {
         let cursor = description.cursor;
         let append = description.append;
         let inode = self.handle_inode(fd)?;
-        let file = &mut self
+        let inode = self
             .inodes
             .get_mut(&inode)
-            .expect("open handle references a file")
-            .contents;
+            .expect("open handle references a file");
+        let file = &mut inode.contents;
         let start = if append { file.len() } else { cursor };
         let end = start.checked_add(bytes.len()).ok_or_else(|| {
             EffectError::new(ErrorCode::InvalidInput, "virtual file size overflowed")
@@ -938,11 +1118,18 @@ impl FsDriver for MemFs {
             file.resize(end, 0);
         }
         file[start..end].copy_from_slice(bytes);
+        inode.times.data_changed(clock);
         self.description_mut(fd)?.cursor = end;
         Ok(bytes.len())
     }
 
-    fn write_at(&mut self, fd: Fd, offset: u64, bytes: &[u8]) -> DriverResult<usize> {
+    fn write_at(
+        &mut self,
+        clock: FsClock,
+        fd: Fd,
+        offset: u64,
+        bytes: &[u8],
+    ) -> DriverResult<usize> {
         let description = self.description(fd)?;
         if !description.writable {
             return Err(EffectError::new(
@@ -966,15 +1153,16 @@ impl FsDriver for MemFs {
             EffectError::new(ErrorCode::InvalidInput, "virtual file size overflowed")
         })?;
         let inode = self.handle_inode(fd)?;
-        let file = &mut self
+        let inode = self
             .inodes
             .get_mut(&inode)
-            .expect("open handle references a file")
-            .contents;
+            .expect("open handle references a file");
+        let file = &mut inode.contents;
         if file.len() < end {
             file.resize(end, 0);
         }
         file[start..end].copy_from_slice(bytes);
+        inode.times.data_changed(clock);
         Ok(bytes.len())
     }
 
@@ -1087,7 +1275,7 @@ impl FsDriver for MemFs {
 
     /// `fchmod` on a node, for the descriptor class the filesystem holds no
     /// handle for. It reaches an unlinked node exactly as `inode_metadata` does.
-    fn set_inode_mode(&mut self, ino: u64, mode: u32) -> DriverResult<()> {
+    fn set_inode_mode(&mut self, clock: FsClock, ino: u64, mode: u32) -> DriverResult<()> {
         let inode = self.inodes.get_mut(&ino).ok_or_else(|| {
             EffectError::new(
                 ErrorCode::NotFound,
@@ -1095,6 +1283,7 @@ impl FsDriver for MemFs {
             )
         })?;
         inode.mode = mode & MODE_MASK;
+        inode.times.metadata_changed(clock);
         Ok(())
     }
 
@@ -1129,7 +1318,7 @@ impl FsDriver for MemFs {
         Ok(())
     }
 
-    fn create_directory(&mut self, path: &str, mode: u32) -> DriverResult<()> {
+    fn create_directory(&mut self, clock: FsClock, path: &str, mode: u32) -> DriverResult<()> {
         let path = normalize_entry_path(path)?;
         self.resolve_guard(&path)?;
         self.check_directory_write(parent_path(&path))?;
@@ -1147,12 +1336,13 @@ impl FsDriver for MemFs {
             ));
         }
         // `mkdir`'s mode argument, already under the caller's umask.
-        let metadata = self.allocate_entry_metadata(mode);
-        self.directories.insert(path, metadata);
+        let metadata = self.allocate_entry_metadata(clock, mode);
+        self.directories.insert(path.clone(), metadata);
+        self.stamp_directory(clock, parent_path(&path));
         Ok(())
     }
 
-    fn make_fifo(&mut self, path: &str, mode: u32) -> DriverResult<()> {
+    fn make_fifo(&mut self, clock: FsClock, path: &str, mode: u32) -> DriverResult<()> {
         let path = normalize_entry_path(path)?;
         self.resolve_guard(&path)?;
         self.check_directory_write(parent_path(&path))?;
@@ -1172,12 +1362,13 @@ impl FsDriver for MemFs {
         // A FIFO is an inode with no bytes: hard links, the link count, the
         // mode and the identity the openers' pipe channel is keyed by all live
         // there, exactly as they do for a regular file.
-        let inode = self.allocate_inode(FsEntryKind::Fifo, Vec::new(), mode);
-        self.fifos.insert(path, inode);
+        let inode = self.allocate_inode(clock, FsEntryKind::Fifo, Vec::new(), mode);
+        self.fifos.insert(path.clone(), inode);
+        self.stamp_directory(clock, parent_path(&path));
         Ok(())
     }
 
-    fn remove_file(&mut self, path: &str) -> DriverResult<()> {
+    fn remove_file(&mut self, clock: FsClock, path: &str) -> DriverResult<()> {
         let path = normalize_entry_path(path)?;
         self.resolve_guard(&path)?;
         self.check_directory_write(parent_path(&path))?;
@@ -1189,6 +1380,7 @@ impl FsDriver for MemFs {
         }
         if self.symlinks.remove(&path).is_some() {
             self.symlink_metadata.remove(&path);
+            self.stamp_directory(clock, parent_path(&path));
             return Ok(());
         }
         // A FIFO name goes away on unlink whatever is open on it: the openers
@@ -1196,7 +1388,8 @@ impl FsDriver for MemFs {
         // the kernel does not refuse it either. The inode outlives the name only
         // as long as another link names it.
         if let Some(inode) = self.fifos.remove(&path) {
-            self.drop_name(inode);
+            self.drop_name(clock, inode);
+            self.stamp_directory(clock, parent_path(&path));
             return Ok(());
         }
         let inode = self.file_inode(&path)?;
@@ -1204,7 +1397,8 @@ impl FsDriver for MemFs {
         // — another name, or an open descriptor — keeps it alive, and the last
         // reference of either kind is what frees it.
         self.files.remove(&path).expect("file was checked");
-        self.drop_name(inode);
+        self.drop_name(clock, inode);
+        self.stamp_directory(clock, parent_path(&path));
         Ok(())
     }
 
@@ -1222,105 +1416,171 @@ impl FsDriver for MemFs {
         Ok(())
     }
 
-    fn set_len(&mut self, fd: Fd, len: u64) -> DriverResult<()> {
+    /// `ftruncate`. The kernel's refusals (`do_sys_ftruncate`): a path-only
+    /// descriptor is `EBADF`; a directory, or any descriptor not open for
+    /// writing, is `EINVAL` — not `EBADF` (the number is valid) and not
+    /// `EISDIR` (that is the by-NAME answer). `mtime`/`ctime` move even when
+    /// the length does not.
+    fn set_len(&mut self, clock: FsClock, fd: Fd, len: u64) -> DriverResult<()> {
         let description = self.description(fd)?;
-        if !description.writable {
+        if description.kind == FsEntryKind::Directory {
             return Err(EffectError::new(
-                ErrorCode::NotWritable,
-                format!("virtual file handle {} is not writable", fd.0),
+                ErrorCode::InvalidInput,
+                format!("virtual file handle {} references a directory", fd.0),
             ));
         }
-        let len = usize::try_from(len).map_err(|_| {
-            EffectError::new(
+        if description.path_only {
+            return Err(EffectError::new(
+                ErrorCode::InvalidHandle,
+                format!(
+                    "virtual handle {} names a location and cannot be truncated",
+                    fd.0
+                ),
+            ));
+        }
+        if !description.writable {
+            return Err(EffectError::new(
                 ErrorCode::InvalidInput,
-                "virtual file length exceeds the addressable range",
-            )
-        })?;
+                format!("virtual file handle {} is not open for writing", fd.0),
+            ));
+        }
         let inode = self.handle_inode(fd)?;
-        self.inodes
-            .get_mut(&inode)
-            .expect("open handle references a file")
-            .contents
-            .resize(len, 0);
-        Ok(())
+        Self::truncate_inode(self.inodes.get_mut(&inode), clock, len)
     }
 
-    fn set_times(
+    /// `truncate(2)`: `EISDIR` for a directory, `EINVAL` for a FIFO or a
+    /// symlink the caller declined to follow, `EACCES` without `w`.
+    fn set_len_by_path(&mut self, clock: FsClock, path: &str, len: u64) -> DriverResult<()> {
+        let path = normalize_entry_path(path)?;
+        self.resolve_guard(&path)?;
+        if self.directories.contains_key(&path) {
+            return Err(EffectError::new(
+                ErrorCode::IsDirectory,
+                format!("virtual filesystem path is a directory: {path}"),
+            ));
+        }
+        if self.fifos.contains_key(&path) || self.symlinks.contains_key(&path) {
+            return Err(EffectError::new(
+                ErrorCode::InvalidInput,
+                format!("virtual filesystem entry is not a regular file: {path}"),
+            ));
+        }
+        let inode = self.file_inode(&path)?;
+        let mode = self
+            .inodes
+            .get(&inode)
+            .expect("file path references an inode")
+            .mode;
+        if !owner_allows(mode, WRITE) {
+            return Err(denied(&path, "write"));
+        }
+        Self::truncate_inode(self.inodes.get_mut(&inode), clock, len)
+    }
+
+    /// `fallocate`: the kernel's refusals in its order (`EBADF` for a
+    /// descriptor not open for writing or a path-only one, `EISDIR` for a
+    /// directory), then the range change, then `mtime`/`ctime`.
+    fn allocate(
         &mut self,
+        clock: FsClock,
         fd: Fd,
-        atime_nanos: Option<u64>,
-        mtime_nanos: Option<u64>,
+        offset: u64,
+        len: u64,
+        zero: bool,
+        keep_size: bool,
     ) -> DriverResult<()> {
+        let description = self.description(fd)?;
+        if description.path_only || !description.writable {
+            return Err(EffectError::new(
+                ErrorCode::NotWritable,
+                format!("virtual file handle {} is not open for writing", fd.0),
+            ));
+        }
+        if description.kind == FsEntryKind::Directory {
+            return Err(EffectError::new(
+                ErrorCode::IsDirectory,
+                format!("virtual file handle {} references a directory", fd.0),
+            ));
+        }
+        let end = offset.checked_add(len).ok_or_else(|| {
+            EffectError::new(
+                ErrorCode::InvalidInput,
+                "virtual allocation range overflowed",
+            )
+        })?;
+        let (start, end) = (usize::try_from(offset), usize::try_from(end));
+        let (Ok(start), Ok(end)) = (start, end) else {
+            return Err(EffectError::new(
+                ErrorCode::InvalidInput,
+                "virtual allocation range exceeds the addressable range",
+            ));
+        };
         let inode = self.handle_inode(fd)?;
         let inode = self
             .inodes
             .get_mut(&inode)
             .expect("open handle references a file");
-        Self::set_times_on_metadata(
-            &mut inode.atime_nanos,
-            &mut inode.mtime_nanos,
-            atime_nanos,
-            mtime_nanos,
-        );
+        let file = &mut inode.contents;
+        if !keep_size && end > file.len() {
+            file.resize(end, 0);
+        }
+        if zero {
+            let end = end.min(file.len());
+            if start < end {
+                file[start..end].fill(0);
+            }
+        }
+        inode.times.data_changed(clock);
+        Ok(())
+    }
+
+    fn set_times(
+        &mut self,
+        clock: FsClock,
+        fd: Fd,
+        atime_nanos: Option<u64>,
+        mtime_nanos: Option<u64>,
+    ) -> DriverResult<()> {
+        let description = self.description(fd)?;
+        if description.path_only {
+            return Err(EffectError::new(
+                ErrorCode::InvalidHandle,
+                format!("virtual handle {} names a location and has no times", fd.0),
+            ));
+        }
+        let (node, kind) = (description.node, description.kind);
+        if kind == FsEntryKind::Directory {
+            let path = self
+                .node_path(node, kind)
+                .ok_or_else(|| not_found("<removed directory>"))?;
+            let times = self.times_mut(&path).expect("a named directory has times");
+            times.set(clock, atime_nanos, mtime_nanos);
+            return Ok(());
+        }
+        let inode = self.inodes.get_mut(&node).ok_or_else(|| invalid_fd(fd))?;
+        inode.times.set(clock, atime_nanos, mtime_nanos);
         Ok(())
     }
 
     fn set_times_by_path(
         &mut self,
+        clock: FsClock,
         path: &str,
         atime_nanos: Option<u64>,
         mtime_nanos: Option<u64>,
     ) -> DriverResult<()> {
         let path = normalize_entry_path(path)?;
         self.resolve_guard(&path)?;
-        if let Some(inode) = self.files.get(&path).copied() {
-            let inode = self
-                .inodes
-                .get_mut(&inode)
-                .expect("file path references an inode");
-            Self::set_times_on_metadata(
-                &mut inode.atime_nanos,
-                &mut inode.mtime_nanos,
-                atime_nanos,
-                mtime_nanos,
-            );
-            return Ok(());
-        }
-        if let Some(times) = self.directories.get_mut(&path) {
-            Self::set_times_on_metadata(
-                &mut times.atime_nanos,
-                &mut times.mtime_nanos,
-                atime_nanos,
-                mtime_nanos,
-            );
-            return Ok(());
-        }
-        if let Some(metadata) = self.symlink_metadata.get_mut(&path) {
-            Self::set_times_on_metadata(
-                &mut metadata.atime_nanos,
-                &mut metadata.mtime_nanos,
-                atime_nanos,
-                mtime_nanos,
-            );
-            return Ok(());
-        }
-        if let Some(inode) = self.fifos.get(&path).copied() {
-            let inode = self
-                .inodes
-                .get_mut(&inode)
-                .expect("fifo references an inode");
-            Self::set_times_on_metadata(
-                &mut inode.atime_nanos,
-                &mut inode.mtime_nanos,
-                atime_nanos,
-                mtime_nanos,
-            );
-            return Ok(());
-        }
-        Err(not_found(&path))
+        let times = self.times_mut(&path).ok_or_else(|| not_found(&path))?;
+        times.set(clock, atime_nanos, mtime_nanos);
+        Ok(())
     }
 
-    fn read_directory(&mut self, path: &str) -> DriverResult<Vec<FsDirectoryEntry>> {
+    fn read_directory(
+        &mut self,
+        clock: FsClock,
+        path: &str,
+    ) -> DriverResult<Vec<FsDirectoryEntry>> {
         let path = normalize_entry_path(path)?;
         self.resolve_guard(&path)?;
         if self.files.contains_key(&path)
@@ -1342,10 +1602,15 @@ impl FsDriver for MemFs {
         if !owner_allows(metadata.mode, READ) {
             return Err(denied(&path, "list"));
         }
+        self.directories
+            .get_mut(&path)
+            .expect("directory was checked")
+            .times
+            .accessed(clock);
         self.list_directory(&path)
     }
 
-    fn read_directory_fd(&mut self, fd: Fd) -> DriverResult<Vec<FsDirectoryEntry>> {
+    fn read_directory_fd(&mut self, clock: FsClock, fd: Fd) -> DriverResult<Vec<FsDirectoryEntry>> {
         let description = self.description(fd)?;
         if description.kind != FsEntryKind::Directory {
             return Err(EffectError::new(
@@ -1374,10 +1639,15 @@ impl FsDriver for MemFs {
         // Reached through the descriptor, the listing itself is unenforced: the
         // access was charged at open, and a `chmod` afterwards cannot reach back
         // into a walk already under way.
+        self.directories
+            .get_mut(&path)
+            .expect("the node has a name")
+            .times
+            .accessed(clock);
         self.list_directory(&path)
     }
 
-    fn remove_directory(&mut self, path: &str) -> DriverResult<()> {
+    fn remove_directory(&mut self, clock: FsClock, path: &str) -> DriverResult<()> {
         let path = normalize_entry_path(path)?;
         self.resolve_guard(&path)?;
         self.check_directory_write(parent_path(&path))?;
@@ -1423,10 +1693,11 @@ impl FsDriver for MemFs {
             ));
         }
         self.directories.remove(&path);
+        self.stamp_directory(clock, parent_path(&path));
         Ok(())
     }
 
-    fn rename(&mut self, from: &str, to: &str) -> DriverResult<()> {
+    fn rename(&mut self, clock: FsClock, from: &str, to: &str) -> DriverResult<()> {
         let from = normalize_entry_path(from)?;
         let to = normalize_entry_path(to)?;
         self.resolve_guard(&from)?;
@@ -1450,14 +1721,15 @@ impl FsDriver for MemFs {
                     format!("virtual rename destination is a directory: {to}"),
                 ));
             }
-            self.unlink_leaf_at(&to);
-            self.files.insert(to, inode);
+            self.unlink_leaf_at(clock, &to);
+            self.files.insert(to.clone(), inode);
             // Nothing else to do: a description holds the NODE, so every
             // descriptor on this entry moved with it by construction.
+            self.stamp_renamed(clock, &from, &to);
             return Ok(());
         }
         if let Some(target) = self.symlinks.remove(&from) {
-            let metadata = self
+            let mut metadata = self
                 .symlink_metadata
                 .remove(&from)
                 .expect("symlink metadata exists");
@@ -1469,9 +1741,11 @@ impl FsDriver for MemFs {
                     format!("virtual rename destination is a directory: {to}"),
                 ));
             }
-            self.unlink_leaf_at(&to);
+            self.unlink_leaf_at(clock, &to);
+            metadata.times.metadata_changed(clock);
             self.symlinks.insert(to.clone(), target);
-            self.symlink_metadata.insert(to, metadata);
+            self.symlink_metadata.insert(to.clone(), metadata);
+            self.stamp_renamed(clock, &from, &to);
             return Ok(());
         }
         // A FIFO renames like any other leaf: the NAME moves and the entry keeps
@@ -1485,8 +1759,9 @@ impl FsDriver for MemFs {
                     format!("virtual rename destination is a directory: {to}"),
                 ));
             }
-            self.unlink_leaf_at(&to);
-            self.fifos.insert(to, inode);
+            self.unlink_leaf_at(clock, &to);
+            self.fifos.insert(to.clone(), inode);
+            self.stamp_renamed(clock, &from, &to);
             return Ok(());
         }
         if !self.directories.contains_key(&from) {
@@ -1551,10 +1826,11 @@ impl FsDriver for MemFs {
             self.fifos
                 .insert(format!("{to}{}", &path[from.len()..]), inode);
         }
+        self.stamp_renamed(clock, &from, &to);
         Ok(())
     }
 
-    fn link(&mut self, from: &str, to: &str) -> DriverResult<()> {
+    fn link(&mut self, clock: FsClock, from: &str, to: &str) -> DriverResult<()> {
         let from = normalize_entry_path(from)?;
         let to = normalize_entry_path(to)?;
         self.resolve_guard(&from)?;
@@ -1577,32 +1853,39 @@ impl FsDriver for MemFs {
         }
         if let Some(target) = self.symlinks.get(&from).cloned() {
             self.symlinks.insert(to.clone(), target);
-            let metadata = self.allocate_entry_metadata(SYMLINK_MODE);
-            self.symlink_metadata.insert(to, metadata);
+            let metadata = self.allocate_entry_metadata(clock, SYMLINK_MODE);
+            self.symlink_metadata.insert(to.clone(), metadata);
+            self.stamp_directory(clock, parent_path(&to));
             return Ok(());
         }
         // A hard link to a FIFO is a second NAME for the same inode, and the
         // inode is what the openers' pipe channel is keyed by — so the two names
         // are one pipe, as they are on a real kernel. Nothing else differs from
         // a file's link: the count lives on the inode either way.
-        if let Some(inode) = self.fifos.get(&from).copied() {
-            self.inodes
-                .get_mut(&inode)
-                .expect("fifo references an inode")
-                .links += 1;
-            self.fifos.insert(to, inode);
-            return Ok(());
-        }
-        let inode = self.file_inode(&from)?;
-        self.inodes
+        let inode = match self.fifos.get(&from).copied() {
+            Some(inode) => {
+                self.fifos.insert(to.clone(), inode);
+                inode
+            }
+            None => {
+                let inode = self.file_inode(&from)?;
+                self.files.insert(to.clone(), inode);
+                inode
+            }
+        };
+        let entry = self
+            .inodes
             .get_mut(&inode)
-            .expect("file path references an inode")
-            .links += 1;
-        self.files.insert(to, inode);
+            .expect("name references an inode");
+        entry.links += 1;
+        // The link count is inode metadata: `ctime` moves on the node, and the
+        // new name is a data change to its directory.
+        entry.times.metadata_changed(clock);
+        self.stamp_directory(clock, parent_path(&to));
         Ok(())
     }
 
-    fn symlink(&mut self, target: &str, link_path: &str) -> DriverResult<()> {
+    fn symlink(&mut self, clock: FsClock, target: &str, link_path: &str) -> DriverResult<()> {
         if target.contains('\0') {
             return Err(EffectError::new(
                 ErrorCode::InvalidInput,
@@ -1622,16 +1905,23 @@ impl FsDriver for MemFs {
             return Err(not_found(parent_path(&link_path)));
         }
         self.symlinks.insert(link_path.clone(), target.into());
-        let metadata = self.allocate_entry_metadata(SYMLINK_MODE);
-        self.symlink_metadata.insert(link_path, metadata);
+        let metadata = self.allocate_entry_metadata(clock, SYMLINK_MODE);
+        self.symlink_metadata.insert(link_path.clone(), metadata);
+        self.stamp_directory(clock, parent_path(&link_path));
         Ok(())
     }
 
-    fn read_link(&mut self, path: &str) -> DriverResult<String> {
+    fn read_link(&mut self, clock: FsClock, path: &str) -> DriverResult<String> {
         let path = normalize_entry_path(path)?;
         self.resolve_guard(&path)?;
-        if let Some(target) = self.symlinks.get(&path) {
-            return Ok(target.clone());
+        if let Some(target) = self.symlinks.get(&path).cloned() {
+            // Reading a link is a read of the link: `atime`, under the policy.
+            self.symlink_metadata
+                .get_mut(&path)
+                .expect("symlink has metadata")
+                .times
+                .accessed(clock);
+            return Ok(target);
         }
         // An entry that exists but is not a symlink is `EINVAL` (readlink(2)),
         // distinguishable from a name that is not there at all.
@@ -1652,7 +1942,7 @@ impl FsDriver for MemFs {
     /// naming a link fails closed rather than silently recording a mode nothing
     /// will ever read. `chmod`'s follow-the-link spelling resolves above this
     /// boundary and arrives naming the target.
-    fn set_mode(&mut self, path: &str, mode: u32) -> DriverResult<()> {
+    fn set_mode(&mut self, clock: FsClock, path: &str, mode: u32) -> DriverResult<()> {
         let path = normalize_entry_path(path)?;
         self.resolve_guard(&path)?;
         if self.symlinks.contains_key(&path) {
@@ -1661,13 +1951,13 @@ impl FsDriver for MemFs {
                 format!("virtual symlink has no mode of its own: {path}"),
             ));
         }
-        self.apply_mode(&path, mode)
+        self.apply_mode(clock, &path, mode)
     }
 
     /// `fchmod`. The bits belong to the NODE, so this reaches an unlinked entry
     /// through its descriptor exactly as a kernel does — and an `O_PATH`
     /// descriptor, which never opened the file, cannot change them at all.
-    fn set_fd_mode(&mut self, fd: Fd, mode: u32) -> DriverResult<()> {
+    fn set_fd_mode(&mut self, clock: FsClock, fd: Fd, mode: u32) -> DriverResult<()> {
         let description = self.description(fd)?;
         if description.path_only {
             return Err(EffectError::new(
@@ -1680,10 +1970,11 @@ impl FsDriver for MemFs {
             let path = self
                 .node_path(node, kind)
                 .ok_or_else(|| not_found("<removed directory>"))?;
-            return self.apply_mode(&path, mode);
+            return self.apply_mode(clock, &path, mode);
         }
         let inode = self.inodes.get_mut(&node).ok_or_else(|| invalid_fd(fd))?;
         inode.mode = mode & MODE_MASK;
+        inode.times.metadata_changed(clock);
         Ok(())
     }
 
@@ -1748,39 +2039,69 @@ impl MemFs {
     /// Drop whatever LEAF name sits at `path` — a file, a symlink, or a FIFO —
     /// releasing its inode reference. The one place a rename's destination is
     /// overwritten, so no kind can be dropped without its link count following.
-    fn unlink_leaf_at(&mut self, path: &str) {
+    fn unlink_leaf_at(&mut self, clock: FsClock, path: &str) {
         if let Some(replaced) = self.files.remove(path) {
-            self.drop_name(replaced);
+            self.drop_name(clock, replaced);
         }
         self.symlinks.remove(path);
         self.symlink_metadata.remove(path);
         if let Some(replaced) = self.fifos.remove(path) {
-            self.drop_name(replaced);
+            self.drop_name(clock, replaced);
         }
     }
 
-    /// Write `mode`'s permission bits onto the entry `path` names.
-    fn apply_mode(&mut self, path: &str, mode: u32) -> DriverResult<()> {
+    /// A rename moved the node from `from` to `to`: both parents changed (a
+    /// name left one, a name arrived in the other) and the node's own `ctime`
+    /// moves, as every Linux filesystem's `rename` stamps it.
+    fn stamp_renamed(&mut self, clock: FsClock, from: &str, to: &str) {
+        if let Some(times) = self.times_mut(to) {
+            times.metadata_changed(clock);
+        }
+        self.stamp_directory(clock, parent_path(from));
+        if parent_path(to) != parent_path(from) {
+            self.stamp_directory(clock, parent_path(to));
+        }
+    }
+
+    /// Write `mode`'s permission bits onto the entry `path` names, stamping
+    /// `ctime`: the kernel writes the inode whether or not the bits changed.
+    fn apply_mode(&mut self, clock: FsClock, path: &str, mode: u32) -> DriverResult<()> {
         let mode = mode & MODE_MASK;
-        if let Some(inode) = self.files.get(path).copied() {
-            self.inodes
+        if let Some(inode) = self
+            .files
+            .get(path)
+            .or_else(|| self.fifos.get(path))
+            .copied()
+        {
+            let inode = self
+                .inodes
                 .get_mut(&inode)
-                .expect("file path references an inode")
-                .mode = mode;
+                .expect("name references an inode");
+            inode.mode = mode;
+            inode.times.metadata_changed(clock);
             return Ok(());
         }
         if let Some(metadata) = self.directories.get_mut(path) {
             metadata.mode = mode;
-            return Ok(());
-        }
-        if let Some(inode) = self.fifos.get(path).copied() {
-            self.inodes
-                .get_mut(&inode)
-                .expect("fifo references an inode")
-                .mode = mode;
+            metadata.times.metadata_changed(clock);
             return Ok(());
         }
         Err(not_found(path))
+    }
+
+    /// Resize a file's contents (zero-filling growth) and stamp `mtime`/
+    /// `ctime` — `do_truncate` moves them even when the length is unchanged.
+    fn truncate_inode(inode: Option<&mut Inode>, clock: FsClock, len: u64) -> DriverResult<()> {
+        let len = usize::try_from(len).map_err(|_| {
+            EffectError::new(
+                ErrorCode::InvalidInput,
+                "virtual file length exceeds the addressable range",
+            )
+        })?;
+        let inode = inode.expect("a checked handle or name references an inode");
+        inode.contents.resize(len, 0);
+        inode.times.data_changed(clock);
+        Ok(())
     }
 
     fn metadata_for_path(&self, path: &str) -> DriverResult<FsMetadata> {
@@ -1794,8 +2115,10 @@ impl MemFs {
                 len: inode.contents.len() as u64,
                 ino: *inode_id,
                 nlink: inode.links,
-                atime_nanos: inode.atime_nanos,
-                mtime_nanos: inode.mtime_nanos,
+                atime_nanos: inode.times.atime_nanos,
+                mtime_nanos: inode.times.mtime_nanos,
+                ctime_nanos: inode.times.ctime_nanos,
+                btime_nanos: inode.times.btime_nanos,
                 mode: inode.mode,
             });
         }
@@ -1804,9 +2127,11 @@ impl MemFs {
                 kind: FsEntryKind::Directory,
                 len: 0,
                 ino: metadata.ino,
-                nlink: 1,
-                atime_nanos: metadata.atime_nanos,
-                mtime_nanos: metadata.mtime_nanos,
+                nlink: self.directory_links(path),
+                atime_nanos: metadata.times.atime_nanos,
+                mtime_nanos: metadata.times.mtime_nanos,
+                ctime_nanos: metadata.times.ctime_nanos,
+                btime_nanos: metadata.times.btime_nanos,
                 mode: metadata.mode,
             });
         }
@@ -1817,8 +2142,10 @@ impl MemFs {
                 len: 0,
                 ino: *inode_id,
                 nlink: inode.links,
-                atime_nanos: inode.atime_nanos,
-                mtime_nanos: inode.mtime_nanos,
+                atime_nanos: inode.times.atime_nanos,
+                mtime_nanos: inode.times.mtime_nanos,
+                ctime_nanos: inode.times.ctime_nanos,
+                btime_nanos: inode.times.btime_nanos,
                 mode: inode.mode,
             });
         }
@@ -1833,8 +2160,10 @@ impl MemFs {
                 len: target.len() as u64,
                 ino: metadata.ino,
                 nlink: 1,
-                atime_nanos: metadata.atime_nanos,
-                mtime_nanos: metadata.mtime_nanos,
+                atime_nanos: metadata.times.atime_nanos,
+                mtime_nanos: metadata.times.mtime_nanos,
+                ctime_nanos: metadata.times.ctime_nanos,
+                btime_nanos: metadata.times.btime_nanos,
                 mode: SYMLINK_MODE,
             });
         }
@@ -1925,9 +2254,10 @@ mod tests {
     #[test]
     fn modes_are_the_creation_modes_handed_down_and_chmod_changes_them() {
         let mut fs = MemFs::new();
-        fs.create_directory("/perm", 0o755).unwrap();
+        fs.create_directory(FsClock::EPOCH, "/perm", 0o755).unwrap();
         let fd = fs
             .open(
+                FsClock::EPOCH,
                 "/perm/file",
                 OpenFlags {
                     path_only: false,
@@ -1937,7 +2267,8 @@ mod tests {
             )
             .unwrap();
         fs.close(fd).unwrap();
-        fs.symlink("/perm/file", "/perm/link").unwrap();
+        fs.symlink(FsClock::EPOCH, "/perm/file", "/perm/link")
+            .unwrap();
 
         assert_eq!(fs.metadata("/perm").unwrap().mode, 0o755);
         assert_eq!(fs.metadata("/perm/file").unwrap().mode, 0o644);
@@ -1947,14 +2278,17 @@ mod tests {
         // cannot be changed.
         assert_eq!(fs.metadata("/perm/link").unwrap().mode, 0o777);
         assert_eq!(
-            fs.set_mode("/perm/link", 0o600).unwrap_err().code,
+            fs.set_mode(FsClock::EPOCH, "/perm/link", 0o600)
+                .unwrap_err()
+                .code,
             ErrorCode::Denied
         );
 
-        fs.set_mode("/perm/file", 0o600).unwrap();
+        fs.set_mode(FsClock::EPOCH, "/perm/file", 0o600).unwrap();
         assert_eq!(fs.metadata("/perm/file").unwrap().mode, 0o600);
         // Only the permission bits are stored; file-type bits are the kind's.
-        fs.set_mode("/perm/file", 0o100_644).unwrap();
+        fs.set_mode(FsClock::EPOCH, "/perm/file", 0o100_644)
+            .unwrap();
         assert_eq!(fs.metadata("/perm/file").unwrap().mode, 0o644);
     }
 
@@ -1972,15 +2306,21 @@ mod tests {
             mode: 0o400,
             ..OpenFlags::create_truncate_write()
         };
-        let fd = fs.open("/tmp/strict", read_only_file).unwrap();
+        let fd = fs
+            .open(FsClock::EPOCH, "/tmp/strict", read_only_file)
+            .unwrap();
         fs.close(fd).unwrap();
         assert_eq!(fs.metadata("/tmp/strict").unwrap().mode, 0o400);
 
         // And it is JUDGED on a later open: `r--` is readable, never writable.
-        let opened = fs.open("/tmp/strict", OpenFlags::read_only()).unwrap();
+        let opened = fs
+            .open(FsClock::EPOCH, "/tmp/strict", OpenFlags::read_only())
+            .unwrap();
         fs.close(opened).unwrap();
         assert_eq!(
-            fs.open("/tmp/strict", write_only()).unwrap_err().code,
+            fs.open(FsClock::EPOCH, "/tmp/strict", write_only())
+                .unwrap_err()
+                .code,
             ErrorCode::Denied
         );
 
@@ -1988,12 +2328,17 @@ mod tests {
         // above (the process umask's owner) already masked them, so `0o666`
         // handed down is `0o666` stored — the umask is the caller's business.
         let fd = fs
-            .open("/tmp/plain", OpenFlags::create_truncate_write())
+            .open(
+                FsClock::EPOCH,
+                "/tmp/plain",
+                OpenFlags::create_truncate_write(),
+            )
             .unwrap();
         fs.close(fd).unwrap();
         assert_eq!(fs.metadata("/tmp/plain").unwrap().mode, 0o666);
         let fd = fs
             .open(
+                FsClock::EPOCH,
                 "/tmp/wide",
                 OpenFlags {
                     path_only: false,
@@ -2007,15 +2352,24 @@ mod tests {
 
         // A directory's mode is the caller's too, and `0o500` refuses creation
         // inside it while still resolving through and listing.
-        fs.create_directory("/tmp/locked", 0o500).unwrap();
+        fs.create_directory(FsClock::EPOCH, "/tmp/locked", 0o500)
+            .unwrap();
         assert_eq!(fs.metadata("/tmp/locked").unwrap().mode, 0o500);
         assert_eq!(
-            fs.open("/tmp/locked/new", OpenFlags::create_truncate_write())
-                .unwrap_err()
-                .code,
+            fs.open(
+                FsClock::EPOCH,
+                "/tmp/locked/new",
+                OpenFlags::create_truncate_write()
+            )
+            .unwrap_err()
+            .code,
             ErrorCode::Denied
         );
-        assert!(fs.read_directory("/tmp/locked").unwrap().is_empty());
+        assert!(
+            fs.read_directory(FsClock::EPOCH, "/tmp/locked")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// An `open` of an EXISTING entry must never touch its mode, whatever third
@@ -2025,6 +2379,7 @@ mod tests {
         let mut fs = MemFs::new();
         let fd = fs
             .open(
+                FsClock::EPOCH,
                 "/tmp/kept",
                 OpenFlags {
                     path_only: false,
@@ -2039,6 +2394,7 @@ mod tests {
         // `O_CREAT` on a name that is already there is not a creation.
         let fd = fs
             .open(
+                FsClock::EPOCH,
                 "/tmp/kept",
                 OpenFlags {
                     path_only: false,
@@ -2051,7 +2407,9 @@ mod tests {
         assert_eq!(fs.metadata("/tmp/kept").unwrap().mode, 0o640);
 
         // Neither does an ordinary non-creating open.
-        let fd = fs.open("/tmp/kept", OpenFlags::read_only()).unwrap();
+        let fd = fs
+            .open(FsClock::EPOCH, "/tmp/kept", OpenFlags::read_only())
+            .unwrap();
         fs.close(fd).unwrap();
         assert_eq!(fs.metadata("/tmp/kept").unwrap().mode, 0o640);
     }
@@ -2061,8 +2419,9 @@ mod tests {
     #[test]
     fn a_hard_link_to_a_fifo_is_a_second_name_for_the_same_node() {
         let mut fs = MemFs::new();
-        fs.make_fifo("/tmp/pipe", 0o660).unwrap();
-        fs.link("/tmp/pipe", "/tmp/also-pipe").unwrap();
+        fs.make_fifo(FsClock::EPOCH, "/tmp/pipe", 0o660).unwrap();
+        fs.link(FsClock::EPOCH, "/tmp/pipe", "/tmp/also-pipe")
+            .unwrap();
 
         let first = fs.metadata("/tmp/pipe").unwrap();
         let second = fs.metadata("/tmp/also-pipe").unwrap();
@@ -2074,11 +2433,12 @@ mod tests {
         assert_eq!(second.nlink, 2);
         // One node, one mode: a chmod through either name is visible through
         // both.
-        fs.set_mode("/tmp/also-pipe", 0o600).unwrap();
+        fs.set_mode(FsClock::EPOCH, "/tmp/also-pipe", 0o600)
+            .unwrap();
         assert_eq!(fs.metadata("/tmp/pipe").unwrap().mode, 0o600);
 
         // Dropping one name leaves the node; dropping the last releases it.
-        fs.remove_file("/tmp/pipe").unwrap();
+        fs.remove_file(FsClock::EPOCH, "/tmp/pipe").unwrap();
         let remaining = fs.metadata("/tmp/also-pipe").unwrap();
         assert_eq!(remaining.nlink, 1);
         assert_eq!(remaining.ino, first.ino);
@@ -2086,7 +2446,7 @@ mod tests {
             fs.inode_metadata(first.ino).unwrap().kind,
             FsEntryKind::Fifo
         );
-        fs.remove_file("/tmp/also-pipe").unwrap();
+        fs.remove_file(FsClock::EPOCH, "/tmp/also-pipe").unwrap();
         assert_eq!(
             fs.inode_metadata(first.ino).unwrap_err().code,
             ErrorCode::NotFound
@@ -2099,15 +2459,16 @@ mod tests {
     #[test]
     fn inode_metadata_reads_the_live_entry() {
         let mut fs = MemFs::new();
-        fs.make_fifo("/tmp/pipe", 0o644).unwrap();
+        fs.make_fifo(FsClock::EPOCH, "/tmp/pipe", 0o644).unwrap();
         let ino = fs.metadata("/tmp/pipe").unwrap().ino;
         assert_eq!(fs.inode_metadata(ino).unwrap().mode, 0o644);
 
-        fs.set_mode("/tmp/pipe", 0o400).unwrap();
+        fs.set_mode(FsClock::EPOCH, "/tmp/pipe", 0o400).unwrap();
         assert_eq!(fs.inode_metadata(ino).unwrap().mode, 0o400);
 
         // A rename moves the name, never the node, so the inode still answers.
-        fs.rename("/tmp/pipe", "/tmp/moved").unwrap();
+        fs.rename(FsClock::EPOCH, "/tmp/pipe", "/tmp/moved")
+            .unwrap();
         let after = fs.inode_metadata(ino).unwrap();
         assert_eq!(after.ino, ino);
         assert_eq!(after.mode, 0o400);
@@ -2115,7 +2476,11 @@ mod tests {
         // A regular file's inode answers here too (the same node identity the
         // link table uses), and an unknown inode is `NotFound`, never a guess.
         let fd = fs
-            .open("/tmp/file", OpenFlags::create_truncate_write())
+            .open(
+                FsClock::EPOCH,
+                "/tmp/file",
+                OpenFlags::create_truncate_write(),
+            )
             .unwrap();
         fs.close(fd).unwrap();
         let file_ino = fs.metadata("/tmp/file").unwrap().ino;
@@ -2132,11 +2497,13 @@ mod tests {
     #[test]
     fn renaming_a_directory_carries_the_fifos_beneath_it() {
         let mut fs = MemFs::new();
-        fs.create_directory("/tmp/box", 0o777).unwrap();
-        fs.make_fifo("/tmp/box/pipe", 0o666).unwrap();
+        fs.create_directory(FsClock::EPOCH, "/tmp/box", 0o777)
+            .unwrap();
+        fs.make_fifo(FsClock::EPOCH, "/tmp/box/pipe", 0o666)
+            .unwrap();
         let ino = fs.metadata("/tmp/box/pipe").unwrap().ino;
 
-        fs.rename("/tmp/box", "/tmp/crate").unwrap();
+        fs.rename(FsClock::EPOCH, "/tmp/box", "/tmp/crate").unwrap();
         assert_eq!(
             fs.metadata("/tmp/box/pipe").unwrap_err().code,
             ErrorCode::NotFound
@@ -2151,14 +2518,19 @@ mod tests {
     #[test]
     fn renaming_over_a_fifo_releases_its_node() {
         let mut fs = MemFs::new();
-        fs.make_fifo("/tmp/victim", 0o666).unwrap();
+        fs.make_fifo(FsClock::EPOCH, "/tmp/victim", 0o666).unwrap();
         let victim = fs.metadata("/tmp/victim").unwrap().ino;
         let fd = fs
-            .open("/tmp/winner", OpenFlags::create_truncate_write())
+            .open(
+                FsClock::EPOCH,
+                "/tmp/winner",
+                OpenFlags::create_truncate_write(),
+            )
             .unwrap();
         fs.close(fd).unwrap();
 
-        fs.rename("/tmp/winner", "/tmp/victim").unwrap();
+        fs.rename(FsClock::EPOCH, "/tmp/winner", "/tmp/victim")
+            .unwrap();
         assert_eq!(fs.metadata("/tmp/victim").unwrap().kind, FsEntryKind::File);
         assert_eq!(
             fs.inode_metadata(victim).unwrap_err().code,
@@ -2170,59 +2542,79 @@ mod tests {
     fn file_modes_are_enforced_for_read_and_write() {
         let mut fs = MemFs::new();
         let fd = fs
-            .open("/tmp/data", OpenFlags::create_truncate_write())
+            .open(
+                FsClock::EPOCH,
+                "/tmp/data",
+                OpenFlags::create_truncate_write(),
+            )
             .unwrap();
-        fs.write(fd, b"bytes").unwrap();
+        fs.write(FsClock::EPOCH, fd, b"bytes").unwrap();
         fs.close(fd).unwrap();
 
-        fs.set_mode("/tmp/data", 0o000).unwrap();
+        fs.set_mode(FsClock::EPOCH, "/tmp/data", 0o000).unwrap();
         assert_eq!(
-            fs.open("/tmp/data", OpenFlags::read_only())
+            fs.open(FsClock::EPOCH, "/tmp/data", OpenFlags::read_only())
                 .unwrap_err()
                 .code,
             ErrorCode::Denied,
             "a 0o000 file must be denied, not reported missing"
         );
         assert_eq!(
-            fs.open("/tmp/data", OpenFlags::create_truncate_write())
-                .unwrap_err()
-                .code,
+            fs.open(
+                FsClock::EPOCH,
+                "/tmp/data",
+                OpenFlags::create_truncate_write()
+            )
+            .unwrap_err()
+            .code,
             ErrorCode::Denied
         );
 
-        fs.set_mode("/tmp/data", 0o400).unwrap();
-        let fd = fs.open("/tmp/data", OpenFlags::read_only()).unwrap();
-        assert_eq!(fs.read(fd, 8).unwrap(), b"bytes");
+        fs.set_mode(FsClock::EPOCH, "/tmp/data", 0o400).unwrap();
+        let fd = fs
+            .open(FsClock::EPOCH, "/tmp/data", OpenFlags::read_only())
+            .unwrap();
+        assert_eq!(fs.read(FsClock::EPOCH, fd, 8).unwrap(), b"bytes");
         fs.close(fd).unwrap();
         assert_eq!(
-            fs.open("/tmp/data", OpenFlags::create_truncate_write())
-                .unwrap_err()
-                .code,
+            fs.open(
+                FsClock::EPOCH,
+                "/tmp/data",
+                OpenFlags::create_truncate_write()
+            )
+            .unwrap_err()
+            .code,
             ErrorCode::Denied,
             "a read-only mode must not be openable for write"
         );
         // A descriptor opened while the mode allowed it keeps working: the
         // check belongs to `open`, not to every later read (POSIX).
-        let fd = fs.open("/tmp/data", OpenFlags::read_only()).unwrap();
-        fs.set_mode("/tmp/data", 0o000).unwrap();
-        assert_eq!(fs.read(fd, 8).unwrap(), b"bytes");
+        let fd = fs
+            .open(FsClock::EPOCH, "/tmp/data", OpenFlags::read_only())
+            .unwrap();
+        fs.set_mode(FsClock::EPOCH, "/tmp/data", 0o000).unwrap();
+        assert_eq!(fs.read(FsClock::EPOCH, fd, 8).unwrap(), b"bytes");
         fs.close(fd).unwrap();
     }
 
     #[test]
     fn directory_modes_gate_search_listing_and_name_creation() {
         let mut fs = MemFs::new();
-        fs.create_directory("/gate", 0o777).unwrap();
+        fs.create_directory(FsClock::EPOCH, "/gate", 0o777).unwrap();
         let fd = fs
-            .open("/gate/inner", OpenFlags::create_truncate_write())
+            .open(
+                FsClock::EPOCH,
+                "/gate/inner",
+                OpenFlags::create_truncate_write(),
+            )
             .unwrap();
         fs.close(fd).unwrap();
 
         // No `x`: nothing resolves THROUGH it, and the refusal is a permission
         // one even though the name behind it exists.
-        fs.set_mode("/gate", 0o000).unwrap();
+        fs.set_mode(FsClock::EPOCH, "/gate", 0o000).unwrap();
         assert_eq!(
-            fs.open("/gate/inner", OpenFlags::read_only())
+            fs.open(FsClock::EPOCH, "/gate/inner", OpenFlags::read_only())
                 .unwrap_err()
                 .code,
             ErrorCode::Denied
@@ -2232,7 +2624,7 @@ mod tests {
             ErrorCode::Denied
         );
         assert_eq!(
-            fs.read_directory("/gate").unwrap_err().code,
+            fs.read_directory(FsClock::EPOCH, "/gate").unwrap_err().code,
             ErrorCode::Denied
         );
         // Same refusal for a name that does NOT exist, so the error cannot be
@@ -2243,49 +2635,61 @@ mod tests {
         );
 
         // `r-x`: listing and traversal work, creating a name does not.
-        fs.set_mode("/gate", 0o500).unwrap();
-        assert_eq!(fs.read_directory("/gate").unwrap().len(), 1);
+        fs.set_mode(FsClock::EPOCH, "/gate", 0o500).unwrap();
+        assert_eq!(fs.read_directory(FsClock::EPOCH, "/gate").unwrap().len(), 1);
         let opened = fs
-            .open("/gate/inner", OpenFlags::read_only())
+            .open(FsClock::EPOCH, "/gate/inner", OpenFlags::read_only())
             .expect("search + read bits allow the open");
         fs.close(opened).unwrap();
         assert_eq!(
-            fs.open("/gate/new", OpenFlags::create_truncate_write())
+            fs.open(
+                FsClock::EPOCH,
+                "/gate/new",
+                OpenFlags::create_truncate_write()
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::Denied
+        );
+        assert_eq!(
+            fs.create_directory(FsClock::EPOCH, "/gate/sub", 0o777)
                 .unwrap_err()
                 .code,
             ErrorCode::Denied
         );
         assert_eq!(
-            fs.create_directory("/gate/sub", 0o777).unwrap_err().code,
+            fs.remove_file(FsClock::EPOCH, "/gate/inner")
+                .unwrap_err()
+                .code,
             ErrorCode::Denied
         );
         assert_eq!(
-            fs.remove_file("/gate/inner").unwrap_err().code,
+            fs.rename(FsClock::EPOCH, "/gate/inner", "/gate/moved")
+                .unwrap_err()
+                .code,
             ErrorCode::Denied
         );
         assert_eq!(
-            fs.rename("/gate/inner", "/gate/moved").unwrap_err().code,
-            ErrorCode::Denied
-        );
-        assert_eq!(
-            fs.symlink("/gate/inner", "/gate/link").unwrap_err().code,
+            fs.symlink(FsClock::EPOCH, "/gate/inner", "/gate/link")
+                .unwrap_err()
+                .code,
             ErrorCode::Denied
         );
 
         // `--x`: traversal only. The entry behind it is reachable, the listing
         // is not — the distinction a search-only directory exists to make.
-        fs.set_mode("/gate", 0o100).unwrap();
+        fs.set_mode(FsClock::EPOCH, "/gate", 0o100).unwrap();
         let opened = fs
-            .open("/gate/inner", OpenFlags::read_only())
+            .open(FsClock::EPOCH, "/gate/inner", OpenFlags::read_only())
             .expect("search alone is enough to resolve through");
         fs.close(opened).unwrap();
         assert_eq!(
-            fs.read_directory("/gate").unwrap_err().code,
+            fs.read_directory(FsClock::EPOCH, "/gate").unwrap_err().code,
             ErrorCode::Denied
         );
 
-        fs.set_mode("/gate", 0o755).unwrap();
-        fs.remove_file("/gate/inner").unwrap();
+        fs.set_mode(FsClock::EPOCH, "/gate", 0o755).unwrap();
+        fs.remove_file(FsClock::EPOCH, "/gate/inner").unwrap();
     }
 
     /// RED before node-identity resolution: `*at` resolution replayed the name a
@@ -2309,7 +2713,7 @@ mod tests {
     #[test]
     fn fifos_carry_the_creation_mode_and_report_their_own_kind() {
         let mut fs = MemFs::new();
-        fs.make_fifo("/tmp/pipe", 0o644).unwrap();
+        fs.make_fifo(FsClock::EPOCH, "/tmp/pipe", 0o644).unwrap();
         let metadata = fs.metadata("/tmp/pipe").unwrap();
         assert_eq!(metadata.kind, FsEntryKind::Fifo);
         // The caller's mode IS honored here, verbatim.
@@ -2319,21 +2723,26 @@ mod tests {
         assert_eq!(metadata.nlink, 1);
         assert_ne!(metadata.ino, 0);
 
-        fs.make_fifo("/tmp/strict", 0o755).unwrap();
+        fs.make_fifo(FsClock::EPOCH, "/tmp/strict", 0o755).unwrap();
         assert_eq!(fs.metadata("/tmp/strict").unwrap().mode, 0o755);
         // A mode change reaches a FIFO like any other entry.
-        fs.set_mode("/tmp/strict", 0o600).unwrap();
+        fs.set_mode(FsClock::EPOCH, "/tmp/strict", 0o600).unwrap();
         assert_eq!(fs.metadata("/tmp/strict").unwrap().mode, 0o600);
 
         assert_eq!(
-            fs.make_fifo("/tmp/pipe", 0o666).unwrap_err().code,
+            fs.make_fifo(FsClock::EPOCH, "/tmp/pipe", 0o666)
+                .unwrap_err()
+                .code,
             ErrorCode::AlreadyExists
         );
         // Creating a name needs `w` and `x` on the directory, as for any kind.
-        fs.create_directory("/tmp/locked", 0o777).unwrap();
-        fs.set_mode("/tmp/locked", 0o500).unwrap();
+        fs.create_directory(FsClock::EPOCH, "/tmp/locked", 0o777)
+            .unwrap();
+        fs.set_mode(FsClock::EPOCH, "/tmp/locked", 0o500).unwrap();
         assert_eq!(
-            fs.make_fifo("/tmp/locked/pipe", 0o666).unwrap_err().code,
+            fs.make_fifo(FsClock::EPOCH, "/tmp/locked/pipe", 0o666)
+                .unwrap_err()
+                .code,
             ErrorCode::Denied
         );
     }
@@ -2341,51 +2750,59 @@ mod tests {
     #[test]
     fn opening_a_fifo_enforces_its_mode_and_then_defers_to_the_pipe_boundary() {
         let mut fs = MemFs::new();
-        fs.make_fifo("/tmp/pipe", 0o666).unwrap();
+        fs.make_fifo(FsClock::EPOCH, "/tmp/pipe", 0o666).unwrap();
         // Permitted: the driver has nothing to hand back, because the bytes are
         // not filesystem state — but it says so with `InvalidInput`, never with
         // a permission or existence error.
         assert_eq!(
-            fs.open("/tmp/pipe", OpenFlags::read_only())
+            fs.open(FsClock::EPOCH, "/tmp/pipe", OpenFlags::read_only())
                 .unwrap_err()
                 .code,
             ErrorCode::InvalidInput
         );
         assert_eq!(
-            fs.open("/tmp/pipe", write_only()).unwrap_err().code,
+            fs.open(FsClock::EPOCH, "/tmp/pipe", write_only())
+                .unwrap_err()
+                .code,
             ErrorCode::InvalidInput
         );
 
         // Denied: the permission decision belongs to the ONE enforcement point,
         // and it has to stay distinguishable from "not found".
-        fs.set_mode("/tmp/pipe", 0o000).unwrap();
+        fs.set_mode(FsClock::EPOCH, "/tmp/pipe", 0o000).unwrap();
         assert_eq!(
-            fs.open("/tmp/pipe", OpenFlags::read_only())
+            fs.open(FsClock::EPOCH, "/tmp/pipe", OpenFlags::read_only())
                 .unwrap_err()
                 .code,
             ErrorCode::Denied,
             "a 0o000 FIFO must not be openable for reading"
         );
         assert_eq!(
-            fs.open("/tmp/pipe", write_only()).unwrap_err().code,
+            fs.open(FsClock::EPOCH, "/tmp/pipe", write_only())
+                .unwrap_err()
+                .code,
             ErrorCode::Denied
         );
-        fs.set_mode("/tmp/pipe", 0o400).unwrap();
+        fs.set_mode(FsClock::EPOCH, "/tmp/pipe", 0o400).unwrap();
         assert_eq!(
-            fs.open("/tmp/pipe", OpenFlags::read_only())
+            fs.open(FsClock::EPOCH, "/tmp/pipe", OpenFlags::read_only())
                 .unwrap_err()
                 .code,
             ErrorCode::InvalidInput
         );
         assert_eq!(
-            fs.open("/tmp/pipe", write_only()).unwrap_err().code,
+            fs.open(FsClock::EPOCH, "/tmp/pipe", write_only())
+                .unwrap_err()
+                .code,
             ErrorCode::Denied,
             "a read-only FIFO must not be openable for writing"
         );
         // An unsearchable parent hides it exactly as it hides a file.
-        fs.create_directory("/tmp/gate", 0o777).unwrap();
-        fs.make_fifo("/tmp/gate/pipe", 0o666).unwrap();
-        fs.set_mode("/tmp/gate", 0o000).unwrap();
+        fs.create_directory(FsClock::EPOCH, "/tmp/gate", 0o777)
+            .unwrap();
+        fs.make_fifo(FsClock::EPOCH, "/tmp/gate/pipe", 0o666)
+            .unwrap();
+        fs.set_mode(FsClock::EPOCH, "/tmp/gate", 0o000).unwrap();
         assert_eq!(
             fs.metadata("/tmp/gate/pipe").unwrap_err().code,
             ErrorCode::Denied
@@ -2395,8 +2812,8 @@ mod tests {
     #[test]
     fn a_fifo_lists_renames_and_unlinks_like_any_other_entry() {
         let mut fs = MemFs::new();
-        fs.make_fifo("/tmp/pipe", 0o666).unwrap();
-        let listed = fs.read_directory("/tmp").unwrap();
+        fs.make_fifo(FsClock::EPOCH, "/tmp/pipe", 0o666).unwrap();
+        let listed = fs.read_directory(FsClock::EPOCH, "/tmp").unwrap();
         assert_eq!(
             listed,
             vec![FsDirectoryEntry {
@@ -2405,22 +2822,30 @@ mod tests {
             }]
         );
         assert_eq!(
-            fs.read_directory("/tmp/pipe").unwrap_err().code,
+            fs.read_directory(FsClock::EPOCH, "/tmp/pipe")
+                .unwrap_err()
+                .code,
             ErrorCode::NotDirectory
         );
         assert_eq!(
-            fs.remove_directory("/tmp/pipe").unwrap_err().code,
+            fs.remove_directory(FsClock::EPOCH, "/tmp/pipe")
+                .unwrap_err()
+                .code,
             ErrorCode::NotDirectory
         );
 
         // The swap a sandbox race plants: a FIFO over a regular file, and back.
         let fd = fs
-            .open("/tmp/file", OpenFlags::create_truncate_write())
+            .open(
+                FsClock::EPOCH,
+                "/tmp/file",
+                OpenFlags::create_truncate_write(),
+            )
             .unwrap();
-        fs.write(fd, b"public").unwrap();
+        fs.write(FsClock::EPOCH, fd, b"public").unwrap();
         fs.close(fd).unwrap();
         let ino = fs.metadata("/tmp/pipe").unwrap().ino;
-        fs.rename("/tmp/pipe", "/tmp/file").unwrap();
+        fs.rename(FsClock::EPOCH, "/tmp/pipe", "/tmp/file").unwrap();
         let replaced = fs.metadata("/tmp/file").unwrap();
         assert_eq!(replaced.kind, FsEntryKind::Fifo);
         assert_eq!(replaced.ino, ino, "a renamed FIFO keeps its identity");
@@ -2429,16 +2854,21 @@ mod tests {
             ErrorCode::NotFound
         );
         let fd = fs
-            .open("/tmp/regular", OpenFlags::create_truncate_write())
+            .open(
+                FsClock::EPOCH,
+                "/tmp/regular",
+                OpenFlags::create_truncate_write(),
+            )
             .unwrap();
         fs.close(fd).unwrap();
-        fs.rename("/tmp/regular", "/tmp/file").unwrap();
+        fs.rename(FsClock::EPOCH, "/tmp/regular", "/tmp/file")
+            .unwrap();
         assert_eq!(fs.metadata("/tmp/file").unwrap().kind, FsEntryKind::File);
 
         // Unlink is unconditional: nothing filesystem-side is holding a FIFO
         // open, because what an opener holds is the pipe.
-        fs.make_fifo("/tmp/gone", 0o666).unwrap();
-        fs.remove_file("/tmp/gone").unwrap();
+        fs.make_fifo(FsClock::EPOCH, "/tmp/gone", 0o666).unwrap();
+        fs.remove_file(FsClock::EPOCH, "/tmp/gone").unwrap();
         assert_eq!(
             fs.metadata("/tmp/gone").unwrap_err().code,
             ErrorCode::NotFound
@@ -2448,8 +2878,8 @@ mod tests {
     #[test]
     fn fifos_survive_a_restart_snapshot_with_their_mode_and_identity() {
         let mut fs = MemFs::new();
-        fs.make_fifo("/tmp/pipe", 0o666).unwrap();
-        fs.set_mode("/tmp/pipe", 0o640).unwrap();
+        fs.make_fifo(FsClock::EPOCH, "/tmp/pipe", 0o666).unwrap();
+        fs.set_mode(FsClock::EPOCH, "/tmp/pipe", 0o640).unwrap();
         let before = fs.metadata("/tmp/pipe").unwrap();
 
         let encoded = fs.export_snapshot().encode().unwrap();
@@ -2467,8 +2897,8 @@ mod tests {
     #[test]
     fn linked_fifos_survive_a_restart_snapshot_as_one_node() {
         let mut fs = MemFs::new();
-        fs.make_fifo("/tmp/pipe", 0o600).unwrap();
-        fs.link("/tmp/pipe", "/tmp/alias").unwrap();
+        fs.make_fifo(FsClock::EPOCH, "/tmp/pipe", 0o600).unwrap();
+        fs.link(FsClock::EPOCH, "/tmp/pipe", "/tmp/alias").unwrap();
         let before = fs.metadata("/tmp/pipe").unwrap();
 
         let encoded = fs.export_snapshot().encode().unwrap();
@@ -2485,16 +2915,23 @@ mod tests {
     #[test]
     fn a_descriptor_follows_its_node_through_a_rename() {
         let mut fs = MemFs::new();
-        fs.create_directory("/pinned", 0o777).unwrap();
+        fs.create_directory(FsClock::EPOCH, "/pinned", 0o777)
+            .unwrap();
         let fd = fs
-            .open("/pinned/file", OpenFlags::create_truncate_write())
+            .open(
+                FsClock::EPOCH,
+                "/pinned/file",
+                OpenFlags::create_truncate_write(),
+            )
             .unwrap();
         fs.close(fd).unwrap();
 
-        let dir = fs.open("/pinned", OpenFlags::read_only()).unwrap();
+        let dir = fs
+            .open(FsClock::EPOCH, "/pinned", OpenFlags::read_only())
+            .unwrap();
         assert_eq!(fs.fd_path(dir).unwrap(), "/pinned");
 
-        fs.rename("/pinned", "/moved").unwrap();
+        fs.rename(FsClock::EPOCH, "/pinned", "/moved").unwrap();
         assert_eq!(
             fs.fd_path(dir).unwrap(),
             "/moved",
@@ -2502,27 +2939,34 @@ mod tests {
         );
 
         // Planting a symlink at the vacated name must not recapture it.
-        fs.symlink("/elsewhere", "/pinned").unwrap();
+        fs.symlink(FsClock::EPOCH, "/elsewhere", "/pinned").unwrap();
         assert_eq!(fs.fd_path(dir).unwrap(), "/moved");
 
         // An ancestor rename moves it too.
-        fs.create_directory("/outer", 0o777).unwrap();
-        fs.rename("/moved", "/outer/inner").unwrap();
+        fs.create_directory(FsClock::EPOCH, "/outer", 0o777)
+            .unwrap();
+        fs.rename(FsClock::EPOCH, "/moved", "/outer/inner").unwrap();
         assert_eq!(fs.fd_path(dir).unwrap(), "/outer/inner");
-        fs.rename("/outer", "/renamed-outer").unwrap();
+        fs.rename(FsClock::EPOCH, "/outer", "/renamed-outer")
+            .unwrap();
         assert_eq!(fs.fd_path(dir).unwrap(), "/renamed-outer/inner");
     }
 
     #[test]
     fn modes_survive_a_restart_snapshot() {
         let mut fs = MemFs::new();
-        fs.create_directory("/state", 0o777).unwrap();
+        fs.create_directory(FsClock::EPOCH, "/state", 0o777)
+            .unwrap();
         let fd = fs
-            .open("/state/file", OpenFlags::create_truncate_write())
+            .open(
+                FsClock::EPOCH,
+                "/state/file",
+                OpenFlags::create_truncate_write(),
+            )
             .unwrap();
         fs.close(fd).unwrap();
-        fs.set_mode("/state/file", 0o600).unwrap();
-        fs.set_mode("/state", 0o700).unwrap();
+        fs.set_mode(FsClock::EPOCH, "/state/file", 0o600).unwrap();
+        fs.set_mode(FsClock::EPOCH, "/state", 0o700).unwrap();
 
         let encoded = fs.export_snapshot().encode().unwrap();
         let mut restarted =
@@ -2541,12 +2985,21 @@ mod tests {
     #[test]
     fn read_only_directory_open_supports_fstat_fsync_and_close_only() {
         let mut fs = MemFs::new();
-        fs.create_directory("/state", 0o777).unwrap();
-        let fd = fs.open("/state", OpenFlags::read_only()).unwrap();
+        fs.create_directory(FsClock::EPOCH, "/state", 0o777)
+            .unwrap();
+        let fd = fs
+            .open(FsClock::EPOCH, "/state", OpenFlags::read_only())
+            .unwrap();
         assert_eq!(fs.fd_metadata(fd).unwrap().kind, FsEntryKind::Directory);
         fs.sync(fd).unwrap();
-        assert_eq!(fs.read(fd, 1).unwrap_err().code, ErrorCode::IsDirectory);
-        assert_eq!(fs.write(fd, b"x").unwrap_err().code, ErrorCode::NotWritable);
+        assert_eq!(
+            fs.read(FsClock::EPOCH, fd, 1).unwrap_err().code,
+            ErrorCode::IsDirectory
+        );
+        assert_eq!(
+            fs.write(FsClock::EPOCH, fd, b"x").unwrap_err().code,
+            ErrorCode::NotWritable
+        );
         assert_eq!(
             fs.seek(fd, 0, SeekWhence::Start).unwrap_err().code,
             ErrorCode::InvalidInput
@@ -2564,7 +3017,9 @@ mod tests {
             mode: patina_dst_abi::CREATE_MODE_UNUSED,
         };
         assert_eq!(
-            fs.open("/state", write_dir).unwrap_err().code,
+            fs.open(FsClock::EPOCH, "/state", write_dir)
+                .unwrap_err()
+                .code,
             ErrorCode::IsDirectory
         );
     }
@@ -2573,20 +3028,30 @@ mod tests {
     fn writes_reads_and_truncates_files() {
         let mut fs = MemFs::new();
         let write_fd = fs
-            .open("/state/value", OpenFlags::create_truncate_write())
+            .open(
+                FsClock::EPOCH,
+                "/state/value",
+                OpenFlags::create_truncate_write(),
+            )
             .unwrap();
-        assert_eq!(fs.write(write_fd, b"patina").unwrap(), 6);
+        assert_eq!(fs.write(FsClock::EPOCH, write_fd, b"patina").unwrap(), 6);
         fs.close(write_fd).unwrap();
 
-        let read_fd = fs.open("/state//./value", OpenFlags::read_only()).unwrap();
-        assert_eq!(fs.read(read_fd, 3).unwrap(), b"pat");
-        assert_eq!(fs.read(read_fd, 99).unwrap(), b"ina");
-        assert!(fs.read(read_fd, 1).unwrap().is_empty());
+        let read_fd = fs
+            .open(FsClock::EPOCH, "/state//./value", OpenFlags::read_only())
+            .unwrap();
+        assert_eq!(fs.read(FsClock::EPOCH, read_fd, 3).unwrap(), b"pat");
+        assert_eq!(fs.read(FsClock::EPOCH, read_fd, 99).unwrap(), b"ina");
+        assert!(fs.read(FsClock::EPOCH, read_fd, 1).unwrap().is_empty());
         fs.close(read_fd).unwrap();
         assert_eq!(fs.contents("/state/value").unwrap(), b"patina");
 
         let truncate_fd = fs
-            .open("/state/value", OpenFlags::create_truncate_write())
+            .open(
+                FsClock::EPOCH,
+                "/state/value",
+                OpenFlags::create_truncate_write(),
+            )
             .unwrap();
         fs.close(truncate_fd).unwrap();
         assert!(fs.contents("/state/value").unwrap().is_empty());
@@ -2595,10 +3060,12 @@ mod tests {
     #[test]
     fn directories_metadata_seek_append_and_remove_are_deterministic() {
         let mut fs = MemFs::new();
-        fs.create_directory("/state", 0o777).unwrap();
+        fs.create_directory(FsClock::EPOCH, "/state", 0o777)
+            .unwrap();
         assert_eq!(fs.metadata("/state").unwrap().kind, FsEntryKind::Directory);
         let fd = fs
             .open(
+                FsClock::EPOCH,
                 "/state/value",
                 OpenFlags {
                     read: true,
@@ -2612,14 +3079,15 @@ mod tests {
                 },
             )
             .unwrap();
-        fs.write(fd, b"patina").unwrap();
+        fs.write(FsClock::EPOCH, fd, b"patina").unwrap();
         assert_eq!(fs.seek(fd, -3, SeekWhence::End).unwrap(), 3);
-        assert_eq!(fs.read(fd, 3).unwrap(), b"ina");
+        assert_eq!(fs.read(FsClock::EPOCH, fd, 3).unwrap(), b"ina");
         assert_eq!(fs.fd_metadata(fd).unwrap().len, 6);
         fs.close(fd).unwrap();
 
         let append = fs
             .open(
+                FsClock::EPOCH,
                 "/state/value",
                 OpenFlags {
                     read: false,
@@ -2633,10 +3101,10 @@ mod tests {
                 },
             )
             .unwrap();
-        fs.write(append, b"!").unwrap();
+        fs.write(FsClock::EPOCH, append, b"!").unwrap();
         fs.close(append).unwrap();
         assert_eq!(fs.contents("/state/value").unwrap(), b"patina!");
-        fs.remove_file("/state/value").unwrap();
+        fs.remove_file(FsClock::EPOCH, "/state/value").unwrap();
         assert_eq!(
             fs.metadata("/state/value").unwrap_err().code,
             ErrorCode::NotFound
@@ -2646,14 +3114,16 @@ mod tests {
     #[test]
     fn missing_and_closed_handles_fail_explicitly() {
         let mut fs = MemFs::new();
-        let missing = fs.open("/missing", OpenFlags::read_only()).unwrap_err();
+        let missing = fs
+            .open(FsClock::EPOCH, "/missing", OpenFlags::read_only())
+            .unwrap_err();
         assert_eq!(missing.code, ErrorCode::NotFound);
 
         let fd = fs
-            .open("/value", OpenFlags::create_truncate_write())
+            .open(FsClock::EPOCH, "/value", OpenFlags::create_truncate_write())
             .unwrap();
         fs.close(fd).unwrap();
-        let closed = fs.write(fd, b"no").unwrap_err();
+        let closed = fs.write(FsClock::EPOCH, fd, b"no").unwrap_err();
         assert_eq!(closed.code, ErrorCode::InvalidHandle);
     }
 
@@ -2661,18 +3131,20 @@ mod tests {
     fn dup_shares_cursor_and_is_deterministically_numbered() {
         let mut fs = MemFs::new();
         let write = fs
-            .open("/value", OpenFlags::create_truncate_write())
+            .open(FsClock::EPOCH, "/value", OpenFlags::create_truncate_write())
             .unwrap();
-        fs.write(write, b"abcdef").unwrap();
+        fs.write(FsClock::EPOCH, write, b"abcdef").unwrap();
         fs.close(write).unwrap();
 
-        let first = fs.open("/value", OpenFlags::read_only()).unwrap();
+        let first = fs
+            .open(FsClock::EPOCH, "/value", OpenFlags::read_only())
+            .unwrap();
         let second = fs.dup(first).unwrap();
         assert_eq!(second, Fd(first.0 + 1));
-        assert_eq!(fs.read(first, 3).unwrap(), b"abc");
-        assert_eq!(fs.read(second, 3).unwrap(), b"def");
+        assert_eq!(fs.read(FsClock::EPOCH, first, 3).unwrap(), b"abc");
+        assert_eq!(fs.read(FsClock::EPOCH, second, 3).unwrap(), b"def");
         fs.seek(second, 1, SeekWhence::Start).unwrap();
-        assert_eq!(fs.read(first, 2).unwrap(), b"bc");
+        assert_eq!(fs.read(FsClock::EPOCH, first, 2).unwrap(), b"bc");
     }
 
     #[test]
@@ -2680,6 +3152,7 @@ mod tests {
         let mut fs = MemFs::new().with_file("/log", b"head").unwrap();
         let append = fs
             .open(
+                FsClock::EPOCH,
                 "/log",
                 OpenFlags {
                     read: false,
@@ -2697,6 +3170,7 @@ mod tests {
 
         let regular = fs
             .open(
+                FsClock::EPOCH,
                 "/log",
                 OpenFlags {
                     read: false,
@@ -2711,14 +3185,14 @@ mod tests {
             )
             .unwrap();
         fs.seek(regular, 0, SeekWhence::End).unwrap();
-        fs.write(regular, b"-intervening").unwrap();
+        fs.write(FsClock::EPOCH, regular, b"-intervening").unwrap();
         fs.close(regular).unwrap();
 
         fs.seek(append, 0, SeekWhence::Start).unwrap();
-        fs.write(append, b"-a").unwrap();
-        fs.write(duplicate, b"-d").unwrap();
-        fs.write_at(append, 1, b"EA").unwrap();
-        fs.write(append, b"-tail").unwrap();
+        fs.write(FsClock::EPOCH, append, b"-a").unwrap();
+        fs.write(FsClock::EPOCH, duplicate, b"-d").unwrap();
+        fs.write_at(FsClock::EPOCH, append, 1, b"EA").unwrap();
+        fs.write(FsClock::EPOCH, append, b"-tail").unwrap();
 
         assert_eq!(fs.contents("/log").unwrap(), b"hEAd-intervening-a-d-tail");
     }
@@ -2728,6 +3202,7 @@ mod tests {
         let mut fs = MemFs::new().with_file("/value", b"abcde").unwrap();
         let fd = fs
             .open(
+                FsClock::EPOCH,
                 "/value",
                 OpenFlags {
                     read: true,
@@ -2742,8 +3217,8 @@ mod tests {
             )
             .unwrap();
         fs.seek(fd, 2, SeekWhence::Start).unwrap();
-        fs.write_at(fd, 0, b"X").unwrap();
-        fs.write(fd, b"Y").unwrap();
+        fs.write_at(FsClock::EPOCH, fd, 0, b"X").unwrap();
+        fs.write(FsClock::EPOCH, fd, b"Y").unwrap();
 
         assert_eq!(fs.contents("/value").unwrap(), b"XbYde");
     }
@@ -2751,12 +3226,14 @@ mod tests {
     #[test]
     fn close_of_one_duplicate_keeps_the_description() {
         let mut fs = MemFs::new().with_file("/value", b"abc").unwrap();
-        let first = fs.open("/value", OpenFlags::read_only()).unwrap();
+        let first = fs
+            .open(FsClock::EPOCH, "/value", OpenFlags::read_only())
+            .unwrap();
         let second = fs.dup(first).unwrap();
         fs.close(first).unwrap();
-        assert_eq!(fs.read(second, 1).unwrap(), b"a");
+        assert_eq!(fs.read(FsClock::EPOCH, second, 1).unwrap(), b"a");
         fs.close(second).unwrap();
-        let error = fs.read(second, 1).unwrap_err();
+        let error = fs.read(FsClock::EPOCH, second, 1).unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidHandle);
         assert_eq!(
             error.message,
@@ -2784,27 +3261,42 @@ mod tests {
     #[test]
     fn a_path_only_open_names_a_location_and_a_plain_one_opens_the_entry() {
         let mut fs = MemFs::new();
-        fs.create_directory("/d", 0o777).unwrap();
+        fs.create_directory(FsClock::EPOCH, "/d", 0o777).unwrap();
         let fd = fs
-            .open("/d/file", OpenFlags::create_truncate_write())
+            .open(
+                FsClock::EPOCH,
+                "/d/file",
+                OpenFlags::create_truncate_write(),
+            )
             .unwrap();
         fs.close(fd).unwrap();
 
         // A plain `O_RDONLY|O_DIRECTORY` open opens the directory for reading
         // and can iterate it.
-        let readable = fs.open("/d", OpenFlags::read_only()).unwrap();
-        assert_eq!(fs.read_directory_fd(readable).unwrap().len(), 1);
+        let readable = fs
+            .open(FsClock::EPOCH, "/d", OpenFlags::read_only())
+            .unwrap();
+        assert_eq!(
+            fs.read_directory_fd(FsClock::EPOCH, readable)
+                .unwrap()
+                .len(),
+            1
+        );
 
         // An `O_PATH` open opens nothing: it resolves and answers `fstat`, and
         // every operation that touches the entry is refused.
-        let location = fs.open("/d", OpenFlags::path_only()).unwrap();
+        let location = fs
+            .open(FsClock::EPOCH, "/d", OpenFlags::path_only())
+            .unwrap();
         assert_eq!(
             fs.fd_metadata(location).unwrap().kind,
             FsEntryKind::Directory
         );
         assert_eq!(fs.fd_path(location).unwrap(), "/d");
         assert_eq!(
-            fs.read_directory_fd(location).unwrap_err().code,
+            fs.read_directory_fd(FsClock::EPOCH, location)
+                .unwrap_err()
+                .code,
             ErrorCode::NotReadable
         );
         assert_eq!(
@@ -2812,26 +3304,40 @@ mod tests {
             ErrorCode::InvalidHandle
         );
         assert_eq!(
-            fs.set_fd_mode(location, 0o700).unwrap_err().code,
+            fs.set_fd_mode(FsClock::EPOCH, location, 0o700)
+                .unwrap_err()
+                .code,
             ErrorCode::InvalidHandle
         );
 
         // Search-only bits: a plain open pays `r` and is refused, a path-only
         // open pays nothing on the entry and succeeds — which is exactly how a
         // capability guest walks a directory it may traverse but not list.
-        fs.set_mode("/d", 0o111).unwrap();
+        fs.set_mode(FsClock::EPOCH, "/d", 0o111).unwrap();
         assert_eq!(
-            fs.open("/d", OpenFlags::read_only()).unwrap_err().code,
+            fs.open(FsClock::EPOCH, "/d", OpenFlags::read_only())
+                .unwrap_err()
+                .code,
             ErrorCode::Denied
         );
-        let walked = fs.open("/d", OpenFlags::path_only()).unwrap();
+        let walked = fs
+            .open(FsClock::EPOCH, "/d", OpenFlags::path_only())
+            .unwrap();
         assert_eq!(fs.fd_path(walked).unwrap(), "/d");
 
         // The access was charged at open, so the `chmod` cannot reach back into
         // a descriptor already holding the directory — while the FUSED path form
         // (`opendir`+`readdir` in one call) charges its own `r` and is refused.
-        assert_eq!(fs.read_directory_fd(readable).unwrap().len(), 1);
-        assert_eq!(fs.read_directory("/d").unwrap_err().code, ErrorCode::Denied);
+        assert_eq!(
+            fs.read_directory_fd(FsClock::EPOCH, readable)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            fs.read_directory(FsClock::EPOCH, "/d").unwrap_err().code,
+            ErrorCode::Denied
+        );
         fs.close(readable).unwrap();
         fs.close(location).unwrap();
         fs.close(walked).unwrap();
@@ -2844,6 +3350,7 @@ mod tests {
         let mut fs = MemFs::new();
         let fd = fs
             .open(
+                FsClock::EPOCH,
                 "/tmp/locked",
                 OpenFlags {
                     mode: 0o000,
@@ -2851,26 +3358,28 @@ mod tests {
                 },
             )
             .unwrap();
-        fs.write(fd, b"hidden").unwrap();
+        fs.write(FsClock::EPOCH, fd, b"hidden").unwrap();
         fs.close(fd).unwrap();
         assert_eq!(
-            fs.open("/tmp/locked", OpenFlags::read_only())
+            fs.open(FsClock::EPOCH, "/tmp/locked", OpenFlags::read_only())
                 .unwrap_err()
                 .code,
             ErrorCode::Denied
         );
 
-        let location = fs.open("/tmp/locked", OpenFlags::path_only()).unwrap();
+        let location = fs
+            .open(FsClock::EPOCH, "/tmp/locked", OpenFlags::path_only())
+            .unwrap();
         let metadata = fs.fd_metadata(location).unwrap();
         assert_eq!(metadata.kind, FsEntryKind::File);
         assert_eq!(metadata.len, 6);
         assert_eq!(metadata.mode, 0o000);
         assert_eq!(
-            fs.read(location, 8).unwrap_err().code,
+            fs.read(FsClock::EPOCH, location, 8).unwrap_err().code,
             ErrorCode::NotReadable
         );
         assert_eq!(
-            fs.write(location, b"x").unwrap_err().code,
+            fs.write(FsClock::EPOCH, location, b"x").unwrap_err().code,
             ErrorCode::NotWritable
         );
         assert_eq!(
@@ -2879,14 +3388,17 @@ mod tests {
         );
         fs.close(location).unwrap();
 
-        fs.make_fifo("/tmp/pipe", 0o000).unwrap();
-        let fifo = fs.open("/tmp/pipe", OpenFlags::path_only()).unwrap();
+        fs.make_fifo(FsClock::EPOCH, "/tmp/pipe", 0o000).unwrap();
+        let fifo = fs
+            .open(FsClock::EPOCH, "/tmp/pipe", OpenFlags::path_only())
+            .unwrap();
         assert_eq!(fs.fd_metadata(fifo).unwrap().kind, FsEntryKind::Fifo);
         fs.close(fifo).unwrap();
         // A path-only open carries no access mode: asking for both is asking for
         // two different descriptors at once.
         assert_eq!(
             fs.open(
+                FsClock::EPOCH,
                 "/tmp/pipe",
                 OpenFlags {
                     read: true,
@@ -2909,23 +3421,25 @@ mod tests {
     #[test]
     fn an_unlinked_file_stays_alive_behind_its_descriptors() {
         let mut fs = MemFs::new().with_file("/value", b"abc").unwrap();
-        let first = fs.open("/value", OpenFlags::read_only()).unwrap();
+        let first = fs
+            .open(FsClock::EPOCH, "/value", OpenFlags::read_only())
+            .unwrap();
         let second = fs.dup(first).unwrap();
         let before = fs.fd_metadata(first).unwrap();
         fs.close(first).unwrap();
 
-        fs.remove_file("/value").unwrap();
+        fs.remove_file(FsClock::EPOCH, "/value").unwrap();
         assert_eq!(fs.metadata("/value").unwrap_err().code, ErrorCode::NotFound);
 
         // The NAME is gone; the NODE is not. Reads, `fstat` and `fchmod` all
         // reach it through the descriptor, and the link count reads 0 exactly
         // as it does on a real unlinked-but-open file.
-        assert_eq!(fs.read(second, 8).unwrap(), b"abc");
+        assert_eq!(fs.read(FsClock::EPOCH, second, 8).unwrap(), b"abc");
         let after = fs.fd_metadata(second).unwrap();
         assert_eq!(after.ino, before.ino);
         assert_eq!(after.nlink, 0);
         assert_eq!(after.len, 3);
-        fs.set_fd_mode(second, 0o600).unwrap();
+        fs.set_fd_mode(FsClock::EPOCH, second, 0o600).unwrap();
         assert_eq!(fs.fd_metadata(second).unwrap().mode, 0o600);
         // With no name left there is nothing to answer `fd_path` with.
         assert_eq!(fs.fd_path(second).unwrap_err().code, ErrorCode::NotFound);
@@ -2939,7 +3453,7 @@ mod tests {
         );
         // And a fresh entry never inherits a released node's identity.
         let fd = fs
-            .open("/value", OpenFlags::create_truncate_write())
+            .open(FsClock::EPOCH, "/value", OpenFlags::create_truncate_write())
             .unwrap();
         assert_ne!(fs.fd_metadata(fd).unwrap().ino, ino);
     }
@@ -2950,13 +3464,15 @@ mod tests {
     #[test]
     fn a_hard_link_is_removable_while_another_of_its_names_is_open() {
         let mut fs = MemFs::new().with_file("/a", b"abc").unwrap();
-        fs.link("/a", "/b").unwrap();
-        let fd = fs.open("/a", OpenFlags::read_only()).unwrap();
-        fs.remove_file("/b").unwrap();
+        fs.link(FsClock::EPOCH, "/a", "/b").unwrap();
+        let fd = fs
+            .open(FsClock::EPOCH, "/a", OpenFlags::read_only())
+            .unwrap();
+        fs.remove_file(FsClock::EPOCH, "/b").unwrap();
         assert_eq!(fs.fd_metadata(fd).unwrap().nlink, 1);
-        fs.remove_file("/a").unwrap();
+        fs.remove_file(FsClock::EPOCH, "/a").unwrap();
         assert_eq!(fs.fd_metadata(fd).unwrap().nlink, 0);
-        assert_eq!(fs.read(fd, 8).unwrap(), b"abc");
+        assert_eq!(fs.read(FsClock::EPOCH, fd, 8).unwrap(), b"abc");
         fs.close(fd).unwrap();
     }
 
@@ -2968,11 +3484,11 @@ mod tests {
     #[test]
     fn an_unlinked_fifo_answers_through_the_reference_its_endpoint_holds() {
         let mut fs = MemFs::new();
-        fs.make_fifo("/tmp/pipe", 0o640).unwrap();
+        fs.make_fifo(FsClock::EPOCH, "/tmp/pipe", 0o640).unwrap();
         let ino = fs.metadata("/tmp/pipe").unwrap().ino;
         fs.retain_inode(ino).unwrap();
 
-        fs.remove_file("/tmp/pipe").unwrap();
+        fs.remove_file(FsClock::EPOCH, "/tmp/pipe").unwrap();
         assert_eq!(
             fs.metadata("/tmp/pipe").unwrap_err().code,
             ErrorCode::NotFound
@@ -2994,15 +3510,17 @@ mod tests {
     #[test]
     fn persistent_snapshot_drops_descriptions() {
         let mut fs = MemFs::new().with_file("/value", b"abc").unwrap();
-        let first = fs.open("/value", OpenFlags::read_only()).unwrap();
+        let first = fs
+            .open(FsClock::EPOCH, "/value", OpenFlags::read_only())
+            .unwrap();
         let second = fs.dup(first).unwrap();
         let mut snapshot = fs.persistent_snapshot();
         assert_eq!(
-            snapshot.read(first, 1).unwrap_err().code,
+            snapshot.read(FsClock::EPOCH, first, 1).unwrap_err().code,
             ErrorCode::InvalidHandle
         );
         assert_eq!(
-            snapshot.read(second, 1).unwrap_err().code,
+            snapshot.read(FsClock::EPOCH, second, 1).unwrap_err().code,
             ErrorCode::InvalidHandle
         );
     }
@@ -3010,17 +3528,21 @@ mod tests {
     #[test]
     fn access_modes_and_unsafe_paths_are_rejected() {
         let mut fs = MemFs::new().with_file("/value", b"x").unwrap();
-        let read_fd = fs.open("/value", OpenFlags::read_only()).unwrap();
+        let read_fd = fs
+            .open(FsClock::EPOCH, "/value", OpenFlags::read_only())
+            .unwrap();
         assert_eq!(
-            fs.write(read_fd, b"no").unwrap_err().code,
+            fs.write(FsClock::EPOCH, read_fd, b"no").unwrap_err().code,
             ErrorCode::NotWritable
         );
         assert_eq!(
-            fs.open("../host", OpenFlags::read_only()).unwrap_err().code,
+            fs.open(FsClock::EPOCH, "../host", OpenFlags::read_only())
+                .unwrap_err()
+                .code,
             ErrorCode::InvalidInput
         );
         assert_eq!(
-            fs.open("/safe/../host", OpenFlags::read_only())
+            fs.open(FsClock::EPOCH, "/safe/../host", OpenFlags::read_only())
                 .unwrap_err()
                 .code,
             ErrorCode::InvalidInput
@@ -3030,7 +3552,7 @@ mod tests {
     #[test]
     fn hard_links_share_inodes_and_drop_after_last_name() {
         let mut fs = MemFs::new().with_file("/a", b"abc").unwrap();
-        fs.link("/a", "/b").unwrap();
+        fs.link(FsClock::EPOCH, "/a", "/b").unwrap();
         let a_metadata = fs.metadata("/a").unwrap();
         let b_metadata = fs.metadata("/b").unwrap();
         assert_eq!(a_metadata.ino, b_metadata.ino);
@@ -3038,6 +3560,7 @@ mod tests {
         assert_eq!(b_metadata.nlink, 2);
         let write = fs
             .open(
+                FsClock::EPOCH,
                 "/a",
                 OpenFlags {
                     read: false,
@@ -3051,43 +3574,50 @@ mod tests {
                 },
             )
             .unwrap();
-        fs.write(write, b"!").unwrap();
+        fs.write(FsClock::EPOCH, write, b"!").unwrap();
         fs.close(write).unwrap();
         assert_eq!(fs.contents("/b").unwrap(), b"abc!");
-        fs.remove_file("/a").unwrap();
+        fs.remove_file(FsClock::EPOCH, "/a").unwrap();
         assert_eq!(fs.contents("/b").unwrap(), b"abc!");
         let survivor = fs.metadata("/b").unwrap();
         assert_eq!(survivor.ino, b_metadata.ino);
         assert_eq!(survivor.nlink, 1);
-        fs.remove_file("/b").unwrap();
+        fs.remove_file(FsClock::EPOCH, "/b").unwrap();
         assert_eq!(fs.metadata("/b").unwrap_err().code, ErrorCode::NotFound);
     }
 
     #[test]
     fn symlinks_store_verbatim_targets_and_are_listed() {
         let mut fs = MemFs::new();
-        fs.create_directory("/state", 0o777).unwrap();
-        fs.symlink("../missing", "/state/link").unwrap();
-        assert_eq!(fs.read_link("/state/link").unwrap(), "../missing");
+        fs.create_directory(FsClock::EPOCH, "/state", 0o777)
+            .unwrap();
+        fs.symlink(FsClock::EPOCH, "../missing", "/state/link")
+            .unwrap();
+        assert_eq!(
+            fs.read_link(FsClock::EPOCH, "/state/link").unwrap(),
+            "../missing"
+        );
         let metadata = fs.metadata("/state/link").unwrap();
         assert_eq!(metadata.kind, FsEntryKind::Symlink);
         assert_eq!(metadata.len, 10);
         assert_eq!(
-            fs.read_directory("/state").unwrap(),
+            fs.read_directory(FsClock::EPOCH, "/state").unwrap(),
             vec![FsDirectoryEntry {
                 name: "link".into(),
                 kind: FsEntryKind::Symlink,
             }]
         );
         assert_eq!(
-            fs.open("/state/link/x", OpenFlags::read_only())
+            fs.open(FsClock::EPOCH, "/state/link/x", OpenFlags::read_only())
                 .unwrap_err()
                 .code,
             ErrorCode::Denied
         );
-        fs.remove_file("/state/link").unwrap();
+        fs.remove_file(FsClock::EPOCH, "/state/link").unwrap();
         assert_eq!(
-            fs.read_link("/state/link").unwrap_err().code,
+            fs.read_link(FsClock::EPOCH, "/state/link")
+                .unwrap_err()
+                .code,
             ErrorCode::NotFound
         );
     }
@@ -3095,20 +3625,421 @@ mod tests {
     #[test]
     fn explicit_timestamp_updates_are_reflected_in_metadata() {
         let mut fs = MemFs::new().with_file("/value", b"x").unwrap();
-        let fd = fs.open("/value", OpenFlags::read_only()).unwrap();
-        fs.set_times(fd, Some(10), Some(20)).unwrap();
+        let fd = fs
+            .open(FsClock::EPOCH, "/value", OpenFlags::read_only())
+            .unwrap();
+        fs.set_times(FsClock::EPOCH, fd, Some(10), Some(20))
+            .unwrap();
         assert_eq!(fs.fd_metadata(fd).unwrap().atime_nanos, 10);
         assert_eq!(fs.metadata("/value").unwrap().mtime_nanos, 20);
         fs.close(fd).unwrap();
-        fs.create_directory("/state", 0o777).unwrap();
+        fs.create_directory(FsClock::EPOCH, "/state", 0o777)
+            .unwrap();
         let state_ino = fs.metadata("/state").unwrap().ino;
-        fs.symlink("missing", "/state/link").unwrap();
+        fs.symlink(FsClock::EPOCH, "missing", "/state/link")
+            .unwrap();
         let link_metadata = fs.metadata("/state/link").unwrap();
         assert_ne!(state_ino, link_metadata.ino);
         assert_eq!(link_metadata.nlink, 1);
-        fs.set_times_by_path("/state", Some(30), None).unwrap();
-        fs.set_times_by_path("/state/link", None, Some(40)).unwrap();
+        fs.set_times_by_path(FsClock::EPOCH, "/state", Some(30), None)
+            .unwrap();
+        fs.set_times_by_path(FsClock::EPOCH, "/state/link", None, Some(40))
+            .unwrap();
         assert_eq!(fs.metadata("/state").unwrap().atime_nanos, 30);
         assert_eq!(fs.metadata("/state/link").unwrap().mtime_nanos, 40);
+    }
+
+    // ---- The timestamp model: the kernel's rules on the clock each operation
+    // is handed. Each test is the class detector for one rule; every assertion
+    // below was RED against the two-timestamp filesystem (ctime/btime absent,
+    // reads and writes stamping nothing).
+
+    fn read_write() -> OpenFlags {
+        OpenFlags {
+            read: true,
+            write: true,
+            create: false,
+            truncate: false,
+            append: false,
+            exclusive: false,
+            path_only: false,
+            mode: patina_dst_abi::CREATE_MODE_UNUSED,
+        }
+    }
+
+    fn times(fs: &mut MemFs, path: &str) -> (u64, u64, u64, u64) {
+        let metadata = fs.metadata(path).unwrap();
+        (
+            metadata.atime_nanos,
+            metadata.mtime_nanos,
+            metadata.ctime_nanos,
+            metadata.btime_nanos,
+        )
+    }
+
+    #[test]
+    fn creation_stamps_all_four_times_and_the_parent_directory() {
+        let mut fs = MemFs::new();
+        assert_eq!(
+            times(&mut fs, "/"),
+            (0, 0, 0, 0),
+            "the image is stamped at the epoch"
+        );
+        fs.create_directory(FsClock::at(10), "/d", 0o755).unwrap();
+        assert_eq!(times(&mut fs, "/d"), (10, 10, 10, 10));
+        assert_eq!(
+            times(&mut fs, "/"),
+            (0, 10, 10, 0),
+            "a new name is a data change to its parent"
+        );
+        let fd = fs
+            .open(FsClock::at(20), "/d/f", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.close(fd).unwrap();
+        assert_eq!(times(&mut fs, "/d/f"), (20, 20, 20, 20));
+        assert_eq!(times(&mut fs, "/d"), (10, 20, 20, 10));
+        fs.symlink(FsClock::at(30), "f", "/d/l").unwrap();
+        assert_eq!(times(&mut fs, "/d/l"), (30, 30, 30, 30));
+        fs.make_fifo(FsClock::at(40), "/d/p", 0o644).unwrap();
+        assert_eq!(times(&mut fs, "/d/p"), (40, 40, 40, 40));
+        assert_eq!(times(&mut fs, "/d"), (10, 40, 40, 10));
+        // Opening an existing entry touches nothing.
+        let fd = fs.open(FsClock::at(50), "/d/f", read_write()).unwrap();
+        fs.close(fd).unwrap();
+        assert_eq!(times(&mut fs, "/d/f"), (20, 20, 20, 20));
+    }
+
+    #[test]
+    fn data_changes_move_mtime_and_ctime_and_leave_atime_and_btime() {
+        let mut fs = MemFs::new();
+        let fd = fs
+            .open(FsClock::at(10), "/f", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.write(FsClock::at(20), fd, b"abc").unwrap();
+        assert_eq!(times(&mut fs, "/f"), (10, 20, 20, 10));
+        fs.write_at(FsClock::at(30), fd, 1, b"x").unwrap();
+        assert_eq!(times(&mut fs, "/f"), (10, 30, 30, 10));
+        // A truncation to the SAME length still moves the times (do_truncate).
+        fs.set_len(FsClock::at(40), fd, 3).unwrap();
+        assert_eq!(times(&mut fs, "/f"), (10, 40, 40, 10));
+        fs.allocate(FsClock::at(50), fd, 0, 8, false, false)
+            .unwrap();
+        assert_eq!(times(&mut fs, "/f"), (10, 50, 50, 10));
+        fs.close(fd).unwrap();
+        fs.set_len_by_path(FsClock::at(60), "/f", 2).unwrap();
+        assert_eq!(times(&mut fs, "/f"), (10, 60, 60, 10));
+        // O_TRUNC on an already-empty file is a truncation too.
+        fs.set_len_by_path(FsClock::at(61), "/f", 0).unwrap();
+        let fd = fs
+            .open(FsClock::at(70), "/f", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.close(fd).unwrap();
+        assert_eq!(times(&mut fs, "/f"), (10, 70, 70, 10));
+    }
+
+    #[test]
+    fn relatime_refreshes_atime_after_a_data_change_or_a_day_and_not_otherwise() {
+        let mut fs = MemFs::new();
+        let fd = fs
+            .open(FsClock::at(10), "/f", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.write(FsClock::at(10), fd, b"abc").unwrap();
+        fs.close(fd).unwrap();
+        let fd = fs
+            .open(FsClock::at(10), "/f", OpenFlags::read_only())
+            .unwrap();
+        // atime == now: nothing to write, even though mtime >= atime.
+        fs.read(FsClock::at(10), fd, 1).unwrap();
+        assert_eq!(times(&mut fs, "/f").0, 10);
+        // mtime (10) >= atime (10): the first read after the write refreshes.
+        fs.read(FsClock::at(20), fd, 1).unwrap();
+        assert_eq!(times(&mut fs, "/f").0, 20);
+        // atime (20) is now newer than mtime/ctime and less than a day old.
+        fs.read(FsClock::at(30), fd, 1).unwrap();
+        assert_eq!(times(&mut fs, "/f").0, 20);
+        // A day later it refreshes again.
+        let day = super::RELATIME_REFRESH_NANOS;
+        fs.read(FsClock::at(20 + day), fd, 1).unwrap();
+        assert_eq!(times(&mut fs, "/f").0, 20 + day);
+        // A metadata change (ctime >= atime) re-arms it as well.
+        fs.set_fd_mode(FsClock::at(20 + day + 5), fd, 0o600)
+            .unwrap();
+        fs.read(FsClock::at(20 + day + 6), fd, 1).unwrap();
+        assert_eq!(times(&mut fs, "/f").0, 20 + day + 6);
+        // strictatime: every read; noatime: never.
+        let strict = FsClock {
+            now_nanos: 20 + day + 7,
+            atime: AtimePolicy::Strict,
+        };
+        fs.read(strict, fd, 1).unwrap();
+        assert_eq!(times(&mut fs, "/f").0, 20 + day + 7);
+        let noatime = FsClock {
+            now_nanos: 20 + day + 9,
+            atime: AtimePolicy::NoAtime,
+        };
+        fs.set_fd_mode(FsClock::at(20 + day + 8), fd, 0o644)
+            .unwrap();
+        fs.read(noatime, fd, 1).unwrap();
+        assert_eq!(times(&mut fs, "/f").0, 20 + day + 7);
+        fs.close(fd).unwrap();
+        // Directory listings and readlink are reads of their entries.
+        fs.create_directory(FsClock::at(100), "/d", 0o755).unwrap();
+        fs.read_directory(FsClock::at(110), "/d").unwrap();
+        assert_eq!(times(&mut fs, "/d").0, 110);
+        fs.symlink(FsClock::at(120), "f", "/l").unwrap();
+        fs.read_link(FsClock::at(130), "/l").unwrap();
+        assert_eq!(times(&mut fs, "/l").0, 130);
+    }
+
+    #[test]
+    fn metadata_changes_move_ctime_only() {
+        let mut fs = MemFs::new();
+        fs.create_directory(FsClock::at(5), "/a", 0o755).unwrap();
+        fs.create_directory(FsClock::at(5), "/b", 0o755).unwrap();
+        let fd = fs
+            .open(FsClock::at(10), "/a/f", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.close(fd).unwrap();
+        fs.set_mode(FsClock::at(20), "/a/f", 0o600).unwrap();
+        assert_eq!(times(&mut fs, "/a/f"), (10, 10, 20, 10));
+        // Same bits again: the inode is still written.
+        fs.set_mode(FsClock::at(21), "/a/f", 0o600).unwrap();
+        assert_eq!(times(&mut fs, "/a/f"), (10, 10, 21, 10));
+        fs.link(FsClock::at(30), "/a/f", "/b/g").unwrap();
+        assert_eq!(
+            times(&mut fs, "/a/f"),
+            (10, 10, 30, 10),
+            "a link count change"
+        );
+        assert_eq!(
+            times(&mut fs, "/b"),
+            (5, 30, 30, 5),
+            "the new name's directory"
+        );
+        assert_eq!(times(&mut fs, "/a"), (5, 10, 10, 5), "not the old one's");
+        fs.rename(FsClock::at(40), "/b/g", "/a/h").unwrap();
+        assert_eq!(times(&mut fs, "/a/h"), (10, 10, 40, 10), "the moved node");
+        assert_eq!(times(&mut fs, "/a"), (5, 40, 40, 5));
+        assert_eq!(times(&mut fs, "/b"), (5, 40, 40, 5));
+        let fd = fs
+            .open(FsClock::at(45), "/a/f", OpenFlags::read_only())
+            .unwrap();
+        fs.remove_file(FsClock::at(50), "/a/h").unwrap();
+        assert_eq!(
+            fs.fd_metadata(fd).unwrap().ctime_nanos,
+            50,
+            "unlinking one name changes the node every other name and descriptor sees"
+        );
+        fs.close(fd).unwrap();
+        assert_eq!(times(&mut fs, "/a"), (5, 50, 50, 5));
+        // Explicit times: what was handed over, plus ctime; OMIT/OMIT is no-op.
+        fs.set_times_by_path(FsClock::at(60), "/a/f", Some(1), None)
+            .unwrap();
+        assert_eq!(times(&mut fs, "/a/f"), (1, 10, 60, 10));
+        fs.set_times_by_path(FsClock::at(70), "/a/f", None, None)
+            .unwrap();
+        assert_eq!(times(&mut fs, "/a/f"), (1, 10, 60, 10));
+        let fd = fs
+            .open(FsClock::at(75), "/a", OpenFlags::read_only())
+            .unwrap();
+        fs.set_times(FsClock::at(80), fd, None, Some(2)).unwrap();
+        assert_eq!(
+            times(&mut fs, "/a"),
+            (5, 2, 80, 5),
+            "a directory descriptor"
+        );
+        fs.close(fd).unwrap();
+        let fd = fs
+            .open(FsClock::at(85), "/a/f", OpenFlags::path_only())
+            .unwrap();
+        assert_eq!(
+            fs.set_times(FsClock::at(90), fd, Some(3), Some(3))
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidHandle,
+            "an O_PATH descriptor cannot set times (futimens is EBADF)"
+        );
+    }
+
+    #[test]
+    fn a_directory_link_count_is_two_plus_its_subdirectories() {
+        let mut fs = MemFs::new();
+        // `/` holds `/tmp` in the initial image.
+        assert_eq!(fs.metadata("/").unwrap().nlink, 3);
+        fs.create_directory(FsClock::EPOCH, "/d", 0o755).unwrap();
+        assert_eq!(fs.metadata("/d").unwrap().nlink, 2);
+        assert_eq!(fs.metadata("/").unwrap().nlink, 4);
+        fs.create_directory(FsClock::EPOCH, "/d/a", 0o755).unwrap();
+        fs.create_directory(FsClock::EPOCH, "/d/a/deeper", 0o755)
+            .unwrap();
+        let fd = fs
+            .open(
+                FsClock::EPOCH,
+                "/d/file",
+                OpenFlags::create_truncate_write(),
+            )
+            .unwrap();
+        fs.close(fd).unwrap();
+        assert_eq!(
+            fs.metadata("/d").unwrap().nlink,
+            3,
+            "files and grandchildren do not count"
+        );
+        let fd = fs
+            .open(FsClock::EPOCH, "/d", OpenFlags::read_only())
+            .unwrap();
+        assert_eq!(fs.fd_metadata(fd).unwrap().nlink, 3);
+        fs.close(fd).unwrap();
+        fs.remove_directory(FsClock::EPOCH, "/d/a/deeper").unwrap();
+        fs.remove_directory(FsClock::EPOCH, "/d/a").unwrap();
+        assert_eq!(fs.metadata("/d").unwrap().nlink, 2);
+    }
+
+    #[test]
+    fn truncation_by_descriptor_and_by_name_answer_the_kernels_errnos() {
+        let mut fs = MemFs::new();
+        fs.create_directory(FsClock::EPOCH, "/d", 0o755).unwrap();
+        fs.make_fifo(FsClock::EPOCH, "/p", 0o644).unwrap();
+        fs.symlink(FsClock::EPOCH, "f", "/l").unwrap();
+        let fd = fs
+            .open(FsClock::EPOCH, "/f", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.write(FsClock::EPOCH, fd, b"abcdef").unwrap();
+        fs.close(fd).unwrap();
+        let dir = fs
+            .open(FsClock::EPOCH, "/d", OpenFlags::read_only())
+            .unwrap();
+        assert_eq!(
+            fs.set_len(FsClock::EPOCH, dir, 0).unwrap_err().code,
+            ErrorCode::InvalidInput,
+            "ftruncate on a directory is EINVAL; EISDIR is the by-name answer"
+        );
+        let location = fs
+            .open(FsClock::EPOCH, "/f", OpenFlags::path_only())
+            .unwrap();
+        assert_eq!(
+            fs.set_len(FsClock::EPOCH, location, 0).unwrap_err().code,
+            ErrorCode::InvalidHandle
+        );
+        let reader = fs
+            .open(FsClock::EPOCH, "/f", OpenFlags::read_only())
+            .unwrap();
+        assert_eq!(
+            fs.set_len(FsClock::EPOCH, reader, 0).unwrap_err().code,
+            ErrorCode::InvalidInput,
+            "not open for writing is EINVAL, not EBADF"
+        );
+        assert_eq!(
+            fs.set_len_by_path(FsClock::EPOCH, "/d", 0)
+                .unwrap_err()
+                .code,
+            ErrorCode::IsDirectory
+        );
+        assert_eq!(
+            fs.set_len_by_path(FsClock::EPOCH, "/p", 0)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidInput
+        );
+        assert_eq!(
+            fs.set_len_by_path(FsClock::EPOCH, "/l", 0)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidInput,
+            "a link the caller declined to follow"
+        );
+        assert_eq!(
+            fs.set_len_by_path(FsClock::EPOCH, "/missing", 0)
+                .unwrap_err()
+                .code,
+            ErrorCode::NotFound
+        );
+        fs.set_mode(FsClock::EPOCH, "/f", 0o444).unwrap();
+        assert_eq!(
+            fs.set_len_by_path(FsClock::EPOCH, "/f", 0)
+                .unwrap_err()
+                .code,
+            ErrorCode::Denied
+        );
+        fs.set_mode(FsClock::EPOCH, "/f", 0o644).unwrap();
+        fs.set_len_by_path(FsClock::EPOCH, "/f", 8).unwrap();
+        assert_eq!(fs.contents("/f").unwrap(), b"abcdef\0\0");
+        fs.set_len_by_path(FsClock::EPOCH, "/f", 2).unwrap();
+        assert_eq!(fs.contents("/f").unwrap(), b"ab");
+    }
+
+    #[test]
+    fn allocate_grows_keeps_or_zeroes_and_answers_the_kernels_errnos() {
+        let mut fs = MemFs::new();
+        fs.create_directory(FsClock::EPOCH, "/d", 0o755).unwrap();
+        let fd = fs
+            .open(FsClock::EPOCH, "/f", OpenFlags::create_truncate_write())
+            .unwrap();
+        fs.write(FsClock::EPOCH, fd, b"abcdef").unwrap();
+        // mode 0 past the end grows, zero-filled; within the end changes nothing.
+        fs.allocate(FsClock::EPOCH, fd, 4, 4, false, false).unwrap();
+        assert_eq!(fs.contents("/f").unwrap(), b"abcdef\0\0");
+        fs.allocate(FsClock::EPOCH, fd, 0, 2, false, false).unwrap();
+        assert_eq!(fs.contents("/f").unwrap(), b"abcdef\0\0");
+        // KEEP_SIZE reserves without changing the visible length.
+        fs.allocate(FsClock::EPOCH, fd, 0, 100, false, true)
+            .unwrap();
+        assert_eq!(fs.metadata("/f").unwrap().len, 8);
+        // PUNCH_HOLE|KEEP_SIZE zeroes inside the file and never grows it.
+        fs.allocate(FsClock::EPOCH, fd, 1, 2, true, true).unwrap();
+        assert_eq!(fs.contents("/f").unwrap(), b"a\0\0def\0\0");
+        fs.allocate(FsClock::EPOCH, fd, 6, 100, true, true).unwrap();
+        assert_eq!(fs.metadata("/f").unwrap().len, 8);
+        // ZERO_RANGE without KEEP_SIZE grows to cover the range.
+        fs.allocate(FsClock::EPOCH, fd, 7, 3, true, false).unwrap();
+        assert_eq!(fs.contents("/f").unwrap(), b"a\0\0def\0\0\0\0");
+        fs.close(fd).unwrap();
+        let reader = fs
+            .open(FsClock::EPOCH, "/f", OpenFlags::read_only())
+            .unwrap();
+        assert_eq!(
+            fs.allocate(FsClock::EPOCH, reader, 0, 1, false, false)
+                .unwrap_err()
+                .code,
+            ErrorCode::NotWritable
+        );
+        let location = fs
+            .open(FsClock::EPOCH, "/f", OpenFlags::path_only())
+            .unwrap();
+        assert_eq!(
+            fs.allocate(FsClock::EPOCH, location, 0, 1, false, false)
+                .unwrap_err()
+                .code,
+            ErrorCode::NotWritable
+        );
+        let dir = fs
+            .open(FsClock::EPOCH, "/d", OpenFlags::read_only())
+            .unwrap();
+        assert_eq!(
+            fs.allocate(FsClock::EPOCH, dir, 0, 1, false, false)
+                .unwrap_err()
+                .code,
+            ErrorCode::NotWritable,
+            "a directory descriptor is never open for writing, which the kernel checks first"
+        );
+    }
+
+    #[test]
+    fn a_crash_model_restores_all_four_times_verbatim() {
+        let mut fs = MemFs::new();
+        fs.create_directory(FsClock::at(10), "/d", 0o755).unwrap();
+        fs.restore_times("/d", 1, 2, 3, 4).unwrap();
+        assert_eq!(times(&mut fs, "/d"), (1, 2, 3, 4));
+        fs.restore_mode("/d", 0o700).unwrap();
+        assert_eq!(
+            times(&mut fs, "/d"),
+            (1, 2, 3, 4),
+            "a restore stamps nothing"
+        );
+        assert_eq!(fs.metadata("/d").unwrap().mode, 0o700);
+        assert_eq!(
+            fs.restore_times("/missing", 1, 2, 3, 4).unwrap_err().code,
+            ErrorCode::NotFound
+        );
     }
 }

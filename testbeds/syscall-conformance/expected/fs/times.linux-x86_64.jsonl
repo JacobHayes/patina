@@ -1,0 +1,153 @@
+{"header":{"schema":"patina.conformance/v1","probe":"fs/times","os":"linux","arch":"x86_64","kernel":"6.8.0-139-generic","glibc":"2.39","virtual_abi":"6.8"}}
+{"seq":0,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":194,"mode":420,"path":"/tmp/syscall-conformance/fs-times/f"},"ret":"fd@0","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":1,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":1,"perm":420,"size":0,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":2,"op":"check","args":{"label":"creation stamps atime, mtime and ctime at one instant"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":3,"op":"statx","args":{"dirfd":"fd@0","flags":4096,"mask":4095,"path":""},"ret":0,"errno":null,"fields":{"btime_present":true,"gid":"id@1","ino":"ino@1","kind":"reg","mask":8191,"nlink":1,"perm":420,"size":0,"uid":"id@1"},"norm":{"args.dirfd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":4,"op":"check","args":{"label":"statx reports a birth time equal to the creation ctime"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":5,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":6,"op":"write","args":{"fd":"fd@0","len":5},"ret":5,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":7,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":1,"perm":420,"size":5,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":8,"op":"check","args":{"label":"a write moves mtime forward"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":9,"op":"check","args":{"label":"a write moves ctime forward"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":10,"op":"check","args":{"label":"a write leaves atime alone"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":11,"op":"statx","args":{"dirfd":"fd@0","flags":4096,"mask":2048,"path":""},"ret":0,"errno":null,"fields":{"btime_present":true,"gid":"id@1","ino":"ino@1","kind":"reg","mask":8191,"nlink":1,"perm":420,"size":5,"uid":"id@1"},"norm":{"args.dirfd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":12,"op":"check","args":{"label":"a write leaves the birth time alone"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":13,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":14,"op":"lseek","args":{"fd":"fd@0","offset":0,"whence":0},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":15,"op":"read","args":{"fd":"fd@0","len":5},"ret":5,"errno":null,"fields":{"data":"12345"},"norm":{"args.fd":"relative:fd"}}
+{"seq":16,"op":"check","args":{"label":"read back"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":17,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":1,"perm":420,"size":5,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":18,"op":"check","args":{"label":"a read leaves mtime alone"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":19,"op":"check","args":{"label":"a read leaves ctime alone"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":20,"op":"check","args":{"label":"a read never moves atime backwards"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":21,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":22,"op":"ftruncate","args":{"fd":"fd@0","len":5},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":23,"op":"check","args":{"label":"ftruncate to the same length"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":24,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":1,"perm":420,"size":5,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":25,"op":"check","args":{"label":"a truncation to the same length still moves mtime and ctime"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":26,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":27,"op":"linkat","args":{"flags":0,"new":"/tmp/syscall-conformance/fs-times/h","newdirfd":"AT_FDCWD","old":"/tmp/syscall-conformance/fs-times/f","olddirfd":"AT_FDCWD"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":28,"op":"check","args":{"label":"linkat f -> h"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":29,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":2,"perm":420,"size":5,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":30,"op":"check","args":{"label":"a link moves ctime forward"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":31,"op":"check","args":{"label":"a link leaves mtime alone"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":32,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":33,"op":"renameat","args":{"new":"/tmp/syscall-conformance/fs-times/g","newdirfd":"AT_FDCWD","old":"/tmp/syscall-conformance/fs-times/h","olddirfd":"AT_FDCWD"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":34,"op":"check","args":{"label":"renameat h -> g"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":35,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":2,"perm":420,"size":5,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":36,"op":"check","args":{"label":"a rename moves the node's ctime forward"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":37,"op":"check","args":{"label":"a rename leaves mtime alone"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":38,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":39,"op":"utimensat","args":{"atime":"1000.000000005","dirfd":"AT_FDCWD","flags":0,"mtime":"2000.000000007","path":"/tmp/syscall-conformance/fs-times/f"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":40,"op":"check","args":{"label":"utimensat with explicit nanosecond times"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":41,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":2,"perm":420,"size":5,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":42,"op":"check","args":{"label":"atime is exactly what was set"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":43,"op":"check","args":{"label":"mtime is exactly what was set"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":44,"op":"check","args":{"label":"setting times moves ctime forward"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":45,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":46,"op":"utimensat","args":{"atime":"UTIME_OMIT","dirfd":"AT_FDCWD","flags":0,"mtime":"3000.000000009","path":"/tmp/syscall-conformance/fs-times/f"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":47,"op":"check","args":{"label":"UTIME_OMIT on atime with an explicit mtime"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":48,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":2,"perm":420,"size":5,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":49,"op":"check","args":{"label":"UTIME_OMIT leaves atime alone"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":50,"op":"check","args":{"label":"the explicit mtime landed"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":51,"op":"check","args":{"label":"ctime moved for the mtime change"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":52,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":53,"op":"utimensat","args":{"atime":"UTIME_OMIT","dirfd":"AT_FDCWD","flags":0,"mtime":"UTIME_OMIT","path":"/tmp/syscall-conformance/fs-times/f"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":54,"op":"check","args":{"label":"UTIME_OMIT on both is a success"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":55,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":2,"perm":420,"size":5,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":56,"op":"check","args":{"label":"UTIME_OMIT on both changes nothing, ctime included"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":57,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":58,"op":"utimensat","args":{"atime":"UTIME_NOW","dirfd":"AT_FDCWD","flags":0,"mtime":"UTIME_NOW","path":"/tmp/syscall-conformance/fs-times/f"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":59,"op":"check","args":{"label":"UTIME_NOW on both"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":60,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":2,"perm":420,"size":5,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":61,"op":"check","args":{"label":"UTIME_NOW sets atime and mtime to one instant"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":62,"op":"check","args":{"label":"UTIME_NOW is after the creation instant"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":63,"op":"check","args":{"label":"UTIME_NOW is the ctime instant"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":64,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":65,"op":"utimensat","args":{"dirfd":"AT_FDCWD","flags":0,"path":"/tmp/syscall-conformance/fs-times/f","times":"NULL"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":66,"op":"check","args":{"label":"a null times pointer is now/now"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":67,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":2,"perm":420,"size":5,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":68,"op":"check","args":{"label":"null times set atime and mtime to one later instant"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":69,"op":"utimensat","args":{"atime":"1.1000000000","dirfd":"AT_FDCWD","flags":0,"mtime":"UTIME_OMIT","path":"/tmp/syscall-conformance/fs-times/f"},"ret":-1,"errno":"EINVAL","fields":{},"norm":{}}
+{"seq":70,"op":"check","args":{"label":"tv_nsec out of range is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":71,"op":"utimensat","args":{"dirfd":"AT_FDCWD","flags":1,"path":"/tmp/syscall-conformance/fs-times/f","times":"NULL"},"ret":-1,"errno":"EINVAL","fields":{},"norm":{}}
+{"seq":72,"op":"check","args":{"label":"an unknown flag is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":73,"op":"utimensat","args":{"dirfd":"AT_FDCWD","flags":0,"path":"/tmp/syscall-conformance/fs-times/missing","times":"NULL"},"ret":-1,"errno":"ENOENT","fields":{},"norm":{}}
+{"seq":74,"op":"check","args":{"label":"a missing path is ENOENT"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":75,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":76,"op":"utimensat","args":{"atime":"4000.000000011","dirfd":"fd@0","flags":0,"mtime":"5000.000000013","path":"NULL"},"ret":0,"errno":null,"fields":{},"norm":{"args.dirfd":"relative:fd"}}
+{"seq":77,"op":"check","args":{"label":"utimensat(fd, NULL, times, 0) sets the descriptor's times"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":78,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":2,"perm":420,"size":5,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":79,"op":"check","args":{"label":"the descriptor's times are what was set"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":80,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":2097152,"mode":0,"path":"/tmp/syscall-conformance/fs-times/f"},"ret":"fd@80","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":81,"op":"utimensat","args":{"dirfd":"fd@80","flags":0,"path":"NULL","times":"NULL"},"ret":-1,"errno":"EBADF","fields":{},"norm":{"args.dirfd":"relative:fd"}}
+{"seq":82,"op":"check","args":{"label":"an O_PATH descriptor is EBADF"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":83,"op":"utimensat","args":{"dirfd":"fd@83","flags":0,"path":"NULL","times":"NULL"},"ret":-1,"errno":"EBADF","fields":{},"norm":{"args.dirfd":"relative:fd"}}
+{"seq":84,"op":"check","args":{"label":"a closed descriptor is EBADF"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":85,"op":"close","args":{"fd":"fd@80"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":86,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":87,"op":"utimes","args":{"atime":"6000.123456","mtime":"7000.654321","path":"/tmp/syscall-conformance/fs-times/f"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":88,"op":"check","args":{"label":"utimes with microsecond times"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":89,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":2,"perm":420,"size":5,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":90,"op":"check","args":{"label":"utimes round-trips microseconds"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":91,"op":"utimes","args":{"atime":"1.1000000","mtime":"1.000000","path":"/tmp/syscall-conformance/fs-times/f"},"ret":-1,"errno":"EINVAL","fields":{},"norm":{}}
+{"seq":92,"op":"check","args":{"label":"tv_usec out of range is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":93,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":94,"op":"utimes","args":{"path":"/tmp/syscall-conformance/fs-times/f","times":"NULL"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":95,"op":"check","args":{"label":"utimes with null times is now/now"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":96,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":2,"perm":420,"size":5,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":97,"op":"check","args":{"label":"utimes now/now is one later instant"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":98,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":99,"op":"utime","args":{"actime":8000,"modtime":9000,"path":"/tmp/syscall-conformance/fs-times/f"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":100,"op":"check","args":{"label":"utime with whole-second times"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":101,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":2,"perm":420,"size":5,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":102,"op":"check","args":{"label":"utime round-trips whole seconds"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":103,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":104,"op":"utime","args":{"path":"/tmp/syscall-conformance/fs-times/f","times":"NULL"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":105,"op":"check","args":{"label":"utime with a null buffer is now/now"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":106,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":2,"perm":420,"size":5,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":107,"op":"check","args":{"label":"utime now/now is one later instant"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":108,"op":"mkdirat","args":{"dirfd":"AT_FDCWD","mode":493,"path":"/tmp/syscall-conformance/fs-times/d"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":109,"op":"check","args":{"label":"mkdirat d"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":110,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":65536,"mode":0,"path":"/tmp/syscall-conformance/fs-times/d"},"ret":"fd@110","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":111,"op":"openat","args":{"dirfd":"fd@110","flags":193,"mode":420,"path":"inner"},"ret":"fd@111","errno":null,"fields":{},"norm":{"args.dirfd":"relative:fd","ret":"relative:fd"}}
+{"seq":112,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":113,"op":"futimesat","args":{"atime":"10000.000001","dirfd":"fd@110","mtime":"11000.000002","path":"inner"},"ret":0,"errno":null,"fields":{},"norm":{"args.dirfd":"relative:fd"}}
+{"seq":114,"op":"check","args":{"label":"futimesat relative to a directory descriptor"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":115,"op":"fstat","args":{"fd":"fd@111"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@115","kind":"reg","nlink":1,"perm":420,"size":0,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":116,"op":"check","args":{"label":"futimesat round-trips microseconds through the dirfd"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":117,"op":"fstat","args":{"fd":"fd@110"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@117","kind":"dir","nlink":2,"perm":493,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":118,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":119,"op":"openat","args":{"dirfd":"fd@110","flags":193,"mode":420,"path":"child"},"ret":"fd@119","errno":null,"fields":{},"norm":{"args.dirfd":"relative:fd","ret":"relative:fd"}}
+{"seq":120,"op":"close","args":{"fd":"fd@119"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":121,"op":"fstat","args":{"fd":"fd@110"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@117","kind":"dir","nlink":2,"perm":493,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":122,"op":"check","args":{"label":"a name appearing moves the directory's mtime and ctime forward"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":123,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":124,"op":"unlinkat","args":{"dirfd":"fd@110","flags":0,"path":"child"},"ret":0,"errno":null,"fields":{},"norm":{"args.dirfd":"relative:fd"}}
+{"seq":125,"op":"check","args":{"label":"unlinkat d/child"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":126,"op":"fstat","args":{"fd":"fd@110"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@117","kind":"dir","nlink":2,"perm":493,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":127,"op":"check","args":{"label":"a name disappearing moves the directory's mtime and ctime forward"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":128,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":129,"op":"utimensat","args":{"atime":"12000.000000000","dirfd":"fd@110","flags":0,"mtime":"13000.000000000","path":"."},"ret":0,"errno":null,"fields":{},"norm":{"args.dirfd":"relative:fd"}}
+{"seq":130,"op":"check","args":{"label":"utimensat on a directory"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":131,"op":"fstat","args":{"fd":"fd@110"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@117","kind":"dir","nlink":2,"perm":493,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":132,"op":"check","args":{"label":"a directory's times are what was set"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":133,"op":"symlinkat","args":{"dirfd":"AT_FDCWD","path":"/tmp/syscall-conformance/fs-times/l","target":"f"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":134,"op":"check","args":{"label":"symlinkat l -> f"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":135,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":136,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":0,"path":"/tmp/syscall-conformance/fs-times/f"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":2,"perm":420,"size":5,"uid":"id@1"},"norm":{"fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":137,"op":"utimensat","args":{"atime":"14000.000000000","dirfd":"AT_FDCWD","flags":256,"mtime":"15000.000000000","path":"/tmp/syscall-conformance/fs-times/l"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":138,"op":"check","args":{"label":"AT_SYMLINK_NOFOLLOW names the link itself"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":139,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":256,"path":"/tmp/syscall-conformance/fs-times/l"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@139","kind":"lnk","nlink":1,"perm":511,"size":1,"uid":"id@1"},"norm":{"fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":140,"op":"check","args":{"label":"the link's own times are what was set"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":141,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":0,"path":"/tmp/syscall-conformance/fs-times/f"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":2,"perm":420,"size":5,"uid":"id@1"},"norm":{"fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":142,"op":"check","args":{"label":"the target's times are untouched"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":143,"op":"utimensat","args":{"atime":"16000.000000000","dirfd":"AT_FDCWD","flags":0,"mtime":"17000.000000000","path":"/tmp/syscall-conformance/fs-times/l"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":144,"op":"check","args":{"label":"without the flag the target is named"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":145,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":0,"path":"/tmp/syscall-conformance/fs-times/f"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":2,"perm":420,"size":5,"uid":"id@1"},"norm":{"fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":146,"op":"check","args":{"label":"the target's times are what was set through the link"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":147,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":256,"path":"/tmp/syscall-conformance/fs-times/l"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@139","kind":"lnk","nlink":1,"perm":511,"size":1,"uid":"id@1"},"norm":{"fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":148,"op":"check","args":{"label":"the link's own mtime and ctime are untouched"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":149,"op":"close","args":{"fd":"fd@111"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":150,"op":"close","args":{"fd":"fd@110"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":151,"op":"close","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}

@@ -149,6 +149,20 @@ pub enum Sys {
     Fchdir,
     Umask,
     Mknodat,
+    Access,
+    Faccessat,
+    Faccessat2,
+    Utimensat,
+    Utime,
+    Utimes,
+    Futimesat,
+    Chown,
+    Fchown,
+    Lchown,
+    Fchownat,
+    Truncate,
+    Ftruncate,
+    Fallocate,
     /// A number past the virtual ABI level (registry `since` 7.3 > 6.8): the
     /// probe asserts its absence, not its semantics.
     Fchroot,
@@ -210,6 +224,20 @@ impl Sys {
             Sys::Fchdir => "fchdir",
             Sys::Umask => "umask",
             Sys::Mknodat => "mknodat",
+            Sys::Access => "access",
+            Sys::Faccessat => "faccessat",
+            Sys::Faccessat2 => "faccessat2",
+            Sys::Utimensat => "utimensat",
+            Sys::Utime => "utime",
+            Sys::Utimes => "utimes",
+            Sys::Futimesat => "futimesat",
+            Sys::Chown => "chown",
+            Sys::Fchown => "fchown",
+            Sys::Lchown => "lchown",
+            Sys::Fchownat => "fchownat",
+            Sys::Truncate => "truncate",
+            Sys::Ftruncate => "ftruncate",
+            Sys::Fallocate => "fallocate",
             Sys::Fchroot => "fchroot",
         }
     }
@@ -297,6 +325,33 @@ impl Sys {
             Sys::Fchdir => libc::SYS_fchdir,
             Sys::Umask => libc::SYS_umask,
             Sys::Mknodat => libc::SYS_mknodat,
+            Sys::Faccessat => libc::SYS_faccessat,
+            Sys::Faccessat2 => libc::SYS_faccessat2,
+            Sys::Utimensat => libc::SYS_utimensat,
+            Sys::Fchown => libc::SYS_fchown,
+            Sys::Fchownat => libc::SYS_fchownat,
+            Sys::Truncate => libc::SYS_truncate,
+            Sys::Ftruncate => libc::SYS_ftruncate,
+            Sys::Fallocate => libc::SYS_fallocate,
+            // The x86_64 legacy time and ownership rows have no number on the
+            // generic (arm64) table; the probes issue them on x86_64 only.
+            Sys::Access | Sys::Utime | Sys::Utimes | Sys::Futimesat | Sys::Chown | Sys::Lchown => {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    match self {
+                        Sys::Access => libc::SYS_access,
+                        Sys::Utime => libc::SYS_utime,
+                        Sys::Utimes => libc::SYS_utimes,
+                        Sys::Futimesat => libc::SYS_futimesat,
+                        Sys::Chown => libc::SYS_chown,
+                        _ => libc::SYS_lchown,
+                    }
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    panic!("{}: an x86_64-only legacy row", self.name())
+                }
+            }
             // libc 0.2.189 predates the number; it is 472 in the vendored
             // x86_64 table and the generic (arm64) table alike.
             Sys::Fchroot => 472,
@@ -316,6 +371,16 @@ pub fn fold_errno(result: i64) -> i64 {
     } else {
         result
     }
+}
+
+// glibc exports `futimesat` (deprecated, still a strong symbol); the libc
+// crate does not declare it.
+unsafe extern "C" {
+    fn futimesat(
+        dirfd: libc::c_int,
+        path: *const libc::c_char,
+        times: *const libc::timeval,
+    ) -> libc::c_int;
 }
 
 /// The glibc symbol of the same name, folded to the kernel result convention.
@@ -499,6 +564,56 @@ fn libc_symbol(sys: Sys, a: Args) -> i64 {
                 a[2] as mode_t,
                 a[3] as dev_t,
             ) as i64,
+            Sys::Access => access(a[0] as *const c_char, a[1] as c_int) as i64,
+            Sys::Faccessat => faccessat(
+                a[0] as c_int,
+                a[1] as *const c_char,
+                a[2] as c_int,
+                a[3] as c_int,
+            ) as i64,
+            // glibc has no faccessat2 wrapper (its faccessat emulates the flags
+            // over this number); the libc spelling is syscall(2).
+            Sys::Faccessat2 => syscall(
+                SYS_faccessat2,
+                a[0] as c_long,
+                a[1] as c_long,
+                a[2] as c_long,
+                a[3] as c_long,
+                a[4] as c_long,
+                a[5] as c_long,
+            ) as i64,
+            // glibc's utimensat refuses a null path (EINVAL) and spells the
+            // kernel's descriptor shape as futimens(3), so that is the libc
+            // spelling of utimensat(fd, NULL, times, 0).
+            Sys::Utimensat if a[1] == 0 && a[3] == 0 => {
+                futimens(a[0] as c_int, a[2] as *const timespec) as i64
+            }
+            Sys::Utimensat => utimensat(
+                a[0] as c_int,
+                a[1] as *const c_char,
+                a[2] as *const timespec,
+                a[3] as c_int,
+            ) as i64,
+            Sys::Utime => utime(a[0] as *const c_char, a[1] as *const utimbuf) as i64,
+            Sys::Utimes => utimes(a[0] as *const c_char, a[1] as *const timeval) as i64,
+            Sys::Futimesat => {
+                futimesat(a[0] as c_int, a[1] as *const c_char, a[2] as *const timeval) as i64
+            }
+            Sys::Chown => chown(a[0] as *const c_char, a[1] as uid_t, a[2] as gid_t) as i64,
+            Sys::Fchown => fchown(a[0] as c_int, a[1] as uid_t, a[2] as gid_t) as i64,
+            Sys::Lchown => lchown(a[0] as *const c_char, a[1] as uid_t, a[2] as gid_t) as i64,
+            Sys::Fchownat => fchownat(
+                a[0] as c_int,
+                a[1] as *const c_char,
+                a[2] as uid_t,
+                a[3] as gid_t,
+                a[4] as c_int,
+            ) as i64,
+            Sys::Truncate => truncate(a[0] as *const c_char, a[1] as off_t) as i64,
+            Sys::Ftruncate => ftruncate(a[0] as c_int, a[1] as off_t) as i64,
+            Sys::Fallocate => {
+                fallocate(a[0] as c_int, a[1] as c_int, a[2] as off_t, a[3] as off_t) as i64
+            }
             // No glibc wrapper exists for a number this new; the libc spelling
             // is syscall(2), the same door glibc itself would use.
             Sys::Fchroot => syscall(

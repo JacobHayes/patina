@@ -49,6 +49,18 @@ name = "fs-paths"
 path = "probes/fs/paths.rs"
 
 [[bin]]
+name = "fs-times"
+path = "probes/fs/times.rs"
+
+[[bin]]
+name = "fs-owner"
+path = "probes/fs/owner.rs"
+
+[[bin]]
+name = "fs-size"
+path = "probes/fs/size.rs"
+
+[[bin]]
 name = "fd-pipes"
 path = "probes/fd/pipes.rs"
 

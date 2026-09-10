@@ -15,7 +15,7 @@
 
 use std::fmt;
 
-use patina_dst_abi::{DEFAULT_DIRECTORY_CREATE_MODE, DEFAULT_UMASK};
+use patina_dst_abi::{DEFAULT_DIRECTORY_CREATE_MODE, DEFAULT_UMASK, FsClock};
 use patina_dst_driver_api::{DriverResult, FsDriver};
 
 use crate::MemFs;
@@ -169,7 +169,7 @@ impl FsImage {
                     if let Some(parent) = parent_of(path) {
                         ensure_directory(&mut fs, parent)?;
                     }
-                    fs.symlink(target, path)?;
+                    fs.symlink(FsClock::EPOCH, target, path)?;
                 }
             }
         }
@@ -236,7 +236,11 @@ fn ensure_directory(fs: &mut MemFs, path: &str) -> DriverResult<()> {
     }
     // A mount image's directories are the ordinary `mkdir(0o777)` an image
     // builder would have run under the default umask: `0o755`.
-    match fs.create_directory(path, DEFAULT_DIRECTORY_CREATE_MODE & !DEFAULT_UMASK) {
+    match fs.create_directory(
+        FsClock::EPOCH,
+        path,
+        DEFAULT_DIRECTORY_CREATE_MODE & !DEFAULT_UMASK,
+    ) {
         Ok(()) => Ok(()),
         // An entry that already exists as a directory is the desired state; a
         // repeated create in a full tree walk is expected.
@@ -348,7 +352,7 @@ impl std::error::Error for FsImageError {}
 
 #[cfg(test)]
 mod tests {
-    use patina_dst_abi::{FsEntryKind, OpenFlags};
+    use patina_dst_abi::{FsClock, FsEntryKind, OpenFlags};
 
     use super::*;
 
@@ -391,11 +395,13 @@ mod tests {
     fn into_memfs_rebuilds_files_dirs_and_inert_symlinks() {
         let mut fs = sample().into_memfs().unwrap();
 
-        let fd = fs.open("/README", OpenFlags::read_only()).unwrap();
-        assert_eq!(fs.read(fd, 64).unwrap(), b"top level");
+        let fd = fs
+            .open(FsClock::EPOCH, "/README", OpenFlags::read_only())
+            .unwrap();
+        assert_eq!(fs.read(FsClock::EPOCH, fd, 64).unwrap(), b"top level");
 
         let root: Vec<_> = fs
-            .read_directory("/")
+            .read_directory(FsClock::EPOCH, "/")
             .unwrap()
             .into_iter()
             .map(|entry| (entry.name, entry.kind))
@@ -405,8 +411,11 @@ mod tests {
         assert!(root.contains(&("link_to_readme".to_string(), FsEntryKind::Symlink)));
         assert!(root.contains(&("README".to_string(), FsEntryKind::File)));
         // Empty directory survives.
-        assert_eq!(fs.read_link("/link_to_readme").unwrap(), "README");
-        let empty = fs.read_directory("/data/empty").unwrap();
+        assert_eq!(
+            fs.read_link(FsClock::EPOCH, "/link_to_readme").unwrap(),
+            "README"
+        );
+        let empty = fs.read_directory(FsClock::EPOCH, "/data/empty").unwrap();
         assert!(empty.is_empty());
     }
 
@@ -514,7 +523,7 @@ mod tests {
             .into_memfs()
             .unwrap();
         let names: Vec<_> = fs
-            .read_directory("/src")
+            .read_directory(FsClock::EPOCH, "/src")
             .unwrap()
             .into_iter()
             .map(|entry| entry.name)

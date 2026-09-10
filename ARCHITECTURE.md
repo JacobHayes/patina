@@ -437,6 +437,10 @@ The native ABI shim provides compatibility symbols such as:
 ```text
 open (including read-only directories), read, write, close, fsync
 chmod, fchmod, fchmodat (permission bits, modeled and enforced)
+chown, fchown, lchown, fchownat (ownership is the one modeled identity: its own ids succeed, any other is EPERM)
+utimensat, futimens, utimes, futimes, lutimes, utime, futimesat (explicit times, UTIME_NOW/UTIME_OMIT; every entry carries atime/mtime/ctime/btime stamped by the kernel's rules on the virtual clock)
+truncate, ftruncate, fallocate, posix_fallocate (sizes by name and by descriptor; reserve, KEEP_SIZE, PUNCH_HOLE, ZERO_RANGE)
+stat, fstat, fstatat, statx (kind, mode, link count, owner, the four timestamps, an honest statx mask)
 mkdir, mkdirat (creation mode carried, umask applied)
 getcwd, chdir, fchdir, umask (modeled process state: the working directory is a node, the umask applies to every creating call)
 mkfifo, mkfifoat, mknod/mknodat with S_IFIFO (named pipes)

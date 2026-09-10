@@ -69,7 +69,14 @@ pub use handoff::{
 /// read-only open of the directory and charged accordingly. Nothing a format-6
 /// run recorded was path-only, so the upgrade writes `false` — the flag the
 /// recorder behaved as if it had.
-pub const TRACE_FORMAT_VERSION: u32 = 7;
+///
+/// Format 8 adds the change and birth times to every recorded metadata outcome
+/// (`ctime_nanos`, `btime_nanos`). A format-7 runtime reported a file's change
+/// time AS its modification time (the stat fill copied `mtime` into `st_ctime`)
+/// and never reported a birth time (`STATX_BTIME` was never set), so the
+/// upgrade writes `ctime_nanos = mtime_nanos` and `btime_nanos = 0`: exactly
+/// what the recorded run answered.
+pub const TRACE_FORMAT_VERSION: u32 = 8;
 /// The oldest trace format version this runtime can read. A bundle at this
 /// version, or any later supported version, is migrated in memory through the
 /// `MIGRATIONS` chain up to [`TRACE_FORMAT_VERSION`] and then validated by
@@ -2184,6 +2191,7 @@ const MIGRATIONS: &[Migration] = &[
     migrate_v4_to_v5,
     migrate_v5_to_v6,
     migrate_v6_to_v7,
+    migrate_v7_to_v8,
 ];
 
 // One migration step must exist for each supported prior version; this keeps
@@ -2541,6 +2549,58 @@ fn migrate_v6_to_v7(mut value: serde_json::Value) -> Result<serde_json::Value, T
         }
     }
     object.insert("format_version".into(), serde_json::Value::from(7u32));
+    Ok(value)
+}
+
+/// Upgrade the two-timestamp format 7 layout to format 8.
+///
+/// Every recorded metadata outcome gains the change time the format-7 runtime
+/// reported to its guest — the modification time, which its stat fill copied
+/// into `st_ctime` — and a birth time of `0`, the value a run that never set
+/// `STATX_BTIME` behaved as if it had.
+fn migrate_v7_to_v8(mut value: serde_json::Value) -> Result<serde_json::Value, TraceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| TraceError::Invalid("format 7 trace is not a JSON object".into()))?;
+    let timelines = object
+        .get_mut("timelines")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| TraceError::Invalid("format 7 trace timelines must be an array".into()))?;
+    for timeline in timelines.iter_mut() {
+        let decisions = timeline
+            .get_mut("decisions")
+            .and_then(serde_json::Value::as_array_mut)
+            .ok_or_else(|| {
+                TraceError::Invalid("format 7 timeline decisions must be an array".into())
+            })?;
+        for event in decisions.iter_mut() {
+            let Some(outcome) = event
+                .get_mut("outcome")
+                .and_then(serde_json::Value::as_object_mut)
+            else {
+                continue;
+            };
+            if outcome.get("kind").and_then(serde_json::Value::as_str) != Some("metadata") {
+                continue;
+            }
+            let Some(metadata) = outcome
+                .get_mut("value")
+                .and_then(serde_json::Value::as_object_mut)
+            else {
+                return Err(TraceError::Invalid(
+                    "format 7 metadata outcome is missing its value object".into(),
+                ));
+            };
+            let Some(mtime) = metadata.get("mtime_nanos").cloned() else {
+                return Err(TraceError::Invalid(
+                    "format 7 metadata outcome is missing mtime_nanos".into(),
+                ));
+            };
+            metadata.insert("ctime_nanos".into(), mtime);
+            metadata.insert("btime_nanos".into(), serde_json::Value::from(0u64));
+        }
+    }
+    object.insert("format_version".into(), serde_json::Value::from(8u32));
     Ok(value)
 }
 

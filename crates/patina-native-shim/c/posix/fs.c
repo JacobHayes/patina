@@ -469,23 +469,13 @@ int openat64(int dirfd, const char *path, int flags, ...) {
 
 #endif
 
-struct patina_stat_values {
-    uint32_t kind;
-    uint64_t length;
-    uint64_t ino;
-    uint32_t nlink;
-    uint64_t atime_nanos;
-    uint64_t mtime_nanos;
-    uint32_t mode;
-};
-
 /*
  * st_mode is the entry's file-type bits ORed with its permission bits. The two
  * arrive separately from the deterministic filesystem (`kind` and `mode`)
  * because they are separate facts there: the kind is structural, the mode is
  * mutable state chmod changes.
  */
-static mode_t patina_stat_mode(const struct patina_stat_values *values) {
+static mode_t patina_stat_mode(const struct patina_metadata *values) {
     mode_t type;
     switch (values->kind) {
         case PATINA_ENTRY_DIRECTORY: type = S_IFDIR; break;
@@ -502,29 +492,39 @@ static void patina_split_nanos(uint64_t nanos, time_t *seconds, long *subseconds
     *subseconds = (long)(nanos % UINT64_C(1000000000));
 }
 
+/* The virtual volume's block geometry, the same 4 KiB the statfs profile
+ * reports: st_blksize, and st_blocks in the 512-byte units stat(2) counts. */
+#define PATINA_STAT_BLOCK_SIZE UINT64_C(4096)
+static uint64_t patina_stat_blocks(uint64_t length) {
+    return ((length + PATINA_STAT_BLOCK_SIZE - 1) / PATINA_STAT_BLOCK_SIZE) *
+           (PATINA_STAT_BLOCK_SIZE / 512);
+}
+
 /*
  * The by-path metadata read every stat-family interposer shares: (dirfd, path)
  * resolved by the runtime with `resolve_flags` (PATINA_RESOLVE_NOFOLLOW for the
  * lstat spellings). Sets errno on failure.
  */
 static int patina_metadata_values(int dirfd, const char *path, uint32_t resolve_flags,
-                                  struct patina_stat_values *values) {
-    int result = patina_metadata_at(dirfd, path, resolve_flags, &values->kind, &values->length,
-                                    &values->ino, &values->nlink, &values->atime_nanos,
-                                    &values->mtime_nanos, &values->mode);
+                                  struct patina_metadata *values) {
+    int result = patina_metadata_at(dirfd, path, resolve_flags, values);
     if (result < 0) errno = patina_errno();
     return result;
 }
 
-static int patina_fd_metadata_values(int fd, struct patina_stat_values *values) {
-    int result = patina_fd_metadata_full(fd, &values->kind, &values->length, &values->ino,
-                                         &values->nlink, &values->atime_nanos,
-                                         &values->mtime_nanos, &values->mode);
+static int patina_fd_metadata_values(int fd, struct patina_metadata *values) {
+    int result = patina_fd_metadata_full(fd, values);
     if (result < 0) errno = patina_errno();
     return result;
 }
 
-static int fill_stat(int result, const struct patina_stat_values *values, struct stat *status) {
+/*
+ * struct stat from a metadata record: the kind and permission bits as st_mode,
+ * the owner from the one modeled identity, all three POSIX timestamps from the
+ * record's own (ctime is the inode change time, never a copy of mtime), and
+ * the virtual volume's block geometry.
+ */
+static int fill_stat(int result, const struct patina_metadata *values, struct stat *status) {
     if (result < 0) return -1;
     if (status == NULL) {
         errno = EINVAL;
@@ -535,17 +535,23 @@ static int fill_stat(int result, const struct patina_stat_values *values, struct
     status->st_nlink = (nlink_t)values->nlink;
     status->st_ino = (ino_t)values->ino;
     status->st_size = (off_t)values->length;
+    status->st_uid = (uid_t)patina_uid();
+    status->st_gid = (gid_t)patina_gid();
+    status->st_blksize = (blksize_t)PATINA_STAT_BLOCK_SIZE;
+    status->st_blocks = (blkcnt_t)patina_stat_blocks(values->length);
 #ifdef __APPLE__
     patina_split_nanos(values->atime_nanos, &status->st_atimespec.tv_sec,
                        &status->st_atimespec.tv_nsec);
     patina_split_nanos(values->mtime_nanos, &status->st_mtimespec.tv_sec,
                        &status->st_mtimespec.tv_nsec);
-    patina_split_nanos(values->mtime_nanos, &status->st_ctimespec.tv_sec,
+    patina_split_nanos(values->ctime_nanos, &status->st_ctimespec.tv_sec,
                        &status->st_ctimespec.tv_nsec);
+    patina_split_nanos(values->btime_nanos, &status->st_birthtimespec.tv_sec,
+                       &status->st_birthtimespec.tv_nsec);
 #else
     patina_split_nanos(values->atime_nanos, &status->st_atim.tv_sec, &status->st_atim.tv_nsec);
     patina_split_nanos(values->mtime_nanos, &status->st_mtim.tv_sec, &status->st_mtim.tv_nsec);
-    patina_split_nanos(values->mtime_nanos, &status->st_ctim.tv_sec, &status->st_ctim.tv_nsec);
+    patina_split_nanos(values->ctime_nanos, &status->st_ctim.tv_sec, &status->st_ctim.tv_nsec);
 #endif
     return 0;
 }
@@ -575,7 +581,7 @@ static int fill_stat(int result, const struct patina_stat_values *values, struct
  * Flags outside `allowed` still fail closed.
  */
 static int patina_stat_at_values(int directory, const char *path, int flags, int allowed,
-                                 struct patina_stat_values *values) {
+                                 struct patina_metadata *values) {
     if ((flags & ~allowed) != 0) {
         errno = ENOSYS;
         return -1;
@@ -594,19 +600,15 @@ static int patina_stat_at_values(int directory, const char *path, int flags, int
 #define PATINA_STAT_AT_FLAGS (AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT)
 
 /*
- * Existence and permission probe. The guest is one non-root identity (uid 1000,
- * what getuid reports) owning every modeled entry, so the answer reads the
- * OWNER triad of the entry's modeled permission bits. X_OK on a regular file is
- * refused whatever its mode: nothing here can be executed, so reporting a file
- * as runnable would be a fabricated answer, not a permission one.
+ * Existence and permission probe. The guest is one non-root identity (what
+ * patina_uid reports) owning every modeled entry, so the answer reads the OWNER
+ * triad of the entry's modeled permission bits — X_OK included: the bit is a
+ * mode fact the kernel answers from, and whether anything can actually execute
+ * is the process family's business (exec itself stays a trap).
  */
 static int patina_access_impl(int dirfd, const char *path, int mode) {
-    struct patina_stat_values values;
+    struct patina_metadata values;
     if (patina_metadata_values(dirfd, path, 0, &values) < 0) return -1;
-    if ((mode & X_OK) != 0 && values.kind != PATINA_ENTRY_DIRECTORY) {
-        errno = EACCES;
-        return -1;
-    }
     unsigned owner = (values.mode >> 6) & 07;
     unsigned wanted = 0;
     if ((mode & R_OK) != 0) wanted |= 04;
@@ -704,32 +706,32 @@ int faccessat(int directory, const char *path, int mode, int flags) {
 #endif
     allowed |= AT_SYMLINK_NOFOLLOW;
     if ((flags & ~allowed) != 0) {
-        errno = ENOSYS;
+        errno = EINVAL;
         return -1;
     }
     return patina_access_impl(patina_at(directory), path, mode);
 }
 
 int stat(const char *path, struct stat *status) {
-    struct patina_stat_values values;
+    struct patina_metadata values;
     int result = patina_metadata_values(PATINA_AT_FDCWD, path, 0, &values);
     return fill_stat(result, &values, status);
 }
 
 int lstat(const char *path, struct stat *status) {
-    struct patina_stat_values values;
+    struct patina_metadata values;
     int result = patina_metadata_values(PATINA_AT_FDCWD, path, PATINA_RESOLVE_NOFOLLOW, &values);
     return fill_stat(result, &values, status);
 }
 
 int fstat(int fd, struct stat *status) {
-    struct patina_stat_values values;
+    struct patina_metadata values;
     int result = patina_fd_metadata_values(fd, &values);
     return fill_stat(result, &values, status);
 }
 
 int fstatat(int directory, const char *restrict path, struct stat *restrict status, int flags) {
-    struct patina_stat_values values;
+    struct patina_metadata values;
     int result = patina_stat_at_values(directory, path, flags, PATINA_STAT_AT_FLAGS, &values);
     return fill_stat(result, &values, status);
 }
@@ -768,31 +770,31 @@ static void patina_fill_statfs64_profile(struct statfs64 *out) {
     out->f_namelen = 255;
 }
 int statfs(const char *path, struct statfs *out) {
-    struct patina_stat_values values;
+    struct patina_metadata values;
     if (patina_metadata_values(PATINA_AT_FDCWD, path, 0, &values) < 0) return -1;
     patina_fill_statfs_profile(out);
     return 0;
 }
 int statfs64(const char *path, struct statfs64 *out) {
-    struct patina_stat_values values;
+    struct patina_metadata values;
     if (patina_metadata_values(PATINA_AT_FDCWD, path, 0, &values) < 0) return -1;
     patina_fill_statfs64_profile(out);
     return 0;
 }
 int fstatfs(int fd, struct statfs *out) {
-    struct patina_stat_values values;
+    struct patina_metadata values;
     if (patina_fd_metadata_values(fd, &values) < 0) return -1;
     patina_fill_statfs_profile(out);
     return 0;
 }
 int fstatfs64(int fd, struct statfs64 *out) {
-    struct patina_stat_values values;
+    struct patina_metadata values;
     if (patina_fd_metadata_values(fd, &values) < 0) return -1;
     patina_fill_statfs64_profile(out);
     return 0;
 }
 
-static int fill_stat64(int result, const struct patina_stat_values *values, struct stat64 *status) {
+static int fill_stat64(int result, const struct patina_metadata *values, struct stat64 *status) {
     if (result < 0) return -1;
     if (status == NULL) {
         errno = EINVAL;
@@ -803,63 +805,299 @@ static int fill_stat64(int result, const struct patina_stat_values *values, stru
     status->st_nlink = (nlink_t)values->nlink;
     status->st_ino = (ino64_t)values->ino;
     status->st_size = (off64_t)values->length;
+    status->st_uid = (uid_t)patina_uid();
+    status->st_gid = (gid_t)patina_gid();
+    status->st_blksize = (blksize_t)PATINA_STAT_BLOCK_SIZE;
+    status->st_blocks = (blkcnt64_t)patina_stat_blocks(values->length);
     patina_split_nanos(values->atime_nanos, &status->st_atim.tv_sec, &status->st_atim.tv_nsec);
     patina_split_nanos(values->mtime_nanos, &status->st_mtim.tv_sec, &status->st_mtim.tv_nsec);
-    patina_split_nanos(values->mtime_nanos, &status->st_ctim.tv_sec, &status->st_ctim.tv_nsec);
+    patina_split_nanos(values->ctime_nanos, &status->st_ctim.tv_sec, &status->st_ctim.tv_nsec);
     return 0;
 }
 
 int stat64(const char *path, struct stat64 *status) {
-    struct patina_stat_values values;
+    struct patina_metadata values;
     int result = patina_metadata_values(PATINA_AT_FDCWD, path, 0, &values);
     return fill_stat64(result, &values, status);
 }
 
 int lstat64(const char *path, struct stat64 *status) {
-    struct patina_stat_values values;
+    struct patina_metadata values;
     int result = patina_metadata_values(PATINA_AT_FDCWD, path, PATINA_RESOLVE_NOFOLLOW, &values);
     return fill_stat64(result, &values, status);
 }
 
 int fstat64(int fd, struct stat64 *status) {
-    struct patina_stat_values values;
+    struct patina_metadata values;
     int result = patina_fd_metadata_values(fd, &values);
     return fill_stat64(result, &values, status);
 }
 
 int fstatat64(int directory, const char *restrict path, struct stat64 *restrict status, int flags) {
-    struct patina_stat_values values;
+    struct patina_metadata values;
     int result = patina_stat_at_values(directory, path, flags, PATINA_STAT_AT_FLAGS, &values);
     return fill_stat64(result, &values, status);
 }
 
+/* The one virtual volume's mount id, as statx reports it (STATX_MNT_ID is
+ * always filled, like the kernel's vfs_statx). One mount, one id. */
+#define PATINA_STATX_MNT_ID UINT64_C(1)
+
+static void patina_statx_time(struct statx_timestamp *out, uint64_t nanos) {
+    out->tv_sec = (int64_t)(nanos / UINT64_C(1000000000));
+    out->tv_nsec = (uint32_t)(nanos % UINT64_C(1000000000));
+}
+
+/*
+ * statx: an honest mask. STATX_BASIC_STATS and STATX_MNT_ID are always filled,
+ * as the kernel's vfs_statx fills them whatever was asked; STATX_BTIME is
+ * filled — and reported — only when requested, as ext4/xfs do.
+ */
 int statx(int directory, const char *restrict path, int flags, unsigned int mask,
           struct statx *restrict status) {
-    (void)mask;
     /* The three STATX_SYNC bits only choose how fresh a network filesystem's
      * answer must be; a virtual filesystem is always exact, so they are accepted
      * and ignored rather than failing closed. */
-    struct patina_stat_values values;
+    struct patina_metadata values;
     int result = patina_stat_at_values(
         directory, path, flags,
         PATINA_STAT_AT_FLAGS | AT_STATX_SYNC_AS_STAT | AT_STATX_FORCE_SYNC | AT_STATX_DONT_SYNC,
         &values);
     if (result < 0) return -1;
     memset(status, 0, sizeof *status);
-    status->stx_mask = STATX_TYPE | STATX_MODE | STATX_NLINK | STATX_INO | STATX_SIZE |
-                       STATX_ATIME | STATX_MTIME | STATX_CTIME;
+    status->stx_mask = STATX_BASIC_STATS | STATX_MNT_ID;
+    status->stx_blksize = (uint32_t)PATINA_STAT_BLOCK_SIZE;
     status->stx_mode = (uint16_t)patina_stat_mode(&values);
     status->stx_nlink = values.nlink;
+    status->stx_uid = patina_uid();
+    status->stx_gid = patina_gid();
     status->stx_ino = values.ino;
     status->stx_size = values.length;
-    status->stx_atime.tv_sec = (int64_t)(values.atime_nanos / UINT64_C(1000000000));
-    status->stx_atime.tv_nsec = (uint32_t)(values.atime_nanos % UINT64_C(1000000000));
-    status->stx_mtime.tv_sec = (int64_t)(values.mtime_nanos / UINT64_C(1000000000));
-    status->stx_mtime.tv_nsec = (uint32_t)(values.mtime_nanos % UINT64_C(1000000000));
-    status->stx_ctime = status->stx_mtime;
+    status->stx_blocks = patina_stat_blocks(values.length);
+    patina_statx_time(&status->stx_atime, values.atime_nanos);
+    patina_statx_time(&status->stx_mtime, values.mtime_nanos);
+    patina_statx_time(&status->stx_ctime, values.ctime_nanos);
+    if ((mask & STATX_BTIME) != 0) {
+        status->stx_mask |= STATX_BTIME;
+        patina_statx_time(&status->stx_btime, values.btime_nanos);
+    }
+    status->stx_mnt_id = PATINA_STATX_MNT_ID;
     return 0;
 }
 
+#endif
+
+/*
+ * The utimensat family. Every spelling lowers onto the two PATINA_TIME_*
+ * arguments patina_utimensat/patina_futimens take, decoded here exactly as the
+ * kernel decodes them: UTIME_NOW/UTIME_OMIT in tv_nsec (utimensat/futimens), a
+ * NULL times pointer meaning now/now, a tv_nsec outside [0, 999999999] EINVAL,
+ * a tv_usec outside [0, 999999] EINVAL (utimes/futimes/lutimes/futimesat),
+ * whole seconds for utime(3). glibc's own wrappers would issue utimensat from
+ * inside libc text, past the dispatcher, so each is a strong definition here.
+ */
+static int patina_time_argument(const struct timespec *time, uint32_t *kind, uint64_t *nanos) {
+    if (time == NULL) {
+        *kind = PATINA_TIME_NOW;
+        *nanos = 0;
+        return 0;
+    }
+#ifdef UTIME_NOW
+    if (time->tv_nsec == UTIME_NOW) {
+        *kind = PATINA_TIME_NOW;
+        *nanos = 0;
+        return 0;
+    }
+    if (time->tv_nsec == UTIME_OMIT) {
+        *kind = PATINA_TIME_OMIT;
+        *nanos = 0;
+        return 0;
+    }
+#endif
+    if (time->tv_nsec < 0 || time->tv_nsec > 999999999L || time->tv_sec < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    *kind = PATINA_TIME_SET;
+    *nanos = (uint64_t)time->tv_sec * UINT64_C(1000000000) + (uint64_t)time->tv_nsec;
+    return 0;
+}
+
+static int patina_timeval_argument(const struct timeval *time, uint32_t *kind, uint64_t *nanos) {
+    if (time == NULL) {
+        *kind = PATINA_TIME_NOW;
+        *nanos = 0;
+        return 0;
+    }
+    if (time->tv_usec < 0 || time->tv_usec > 999999L || time->tv_sec < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    *kind = PATINA_TIME_SET;
+    *nanos = (uint64_t)time->tv_sec * UINT64_C(1000000000) +
+             (uint64_t)time->tv_usec * UINT64_C(1000);
+    return 0;
+}
+
+static int patina_utimensat_impl(int dirfd, const char *path, const struct timespec times[2],
+                                 uint32_t resolve_flags) {
+    uint32_t atime_kind, mtime_kind;
+    uint64_t atime_nanos, mtime_nanos;
+    if (patina_time_argument(times == NULL ? NULL : &times[0], &atime_kind, &atime_nanos) < 0)
+        return -1;
+    if (patina_time_argument(times == NULL ? NULL : &times[1], &mtime_kind, &mtime_nanos) < 0)
+        return -1;
+    return fail_int(patina_utimensat(dirfd, path, resolve_flags, atime_kind, atime_nanos,
+                                     mtime_kind, mtime_nanos));
+}
+
+static int patina_futimens_impl(int fd, const struct timespec times[2]) {
+    uint32_t atime_kind, mtime_kind;
+    uint64_t atime_nanos, mtime_nanos;
+    if (patina_time_argument(times == NULL ? NULL : &times[0], &atime_kind, &atime_nanos) < 0)
+        return -1;
+    if (patina_time_argument(times == NULL ? NULL : &times[1], &mtime_kind, &mtime_nanos) < 0)
+        return -1;
+    return fail_int(patina_futimens(fd, atime_kind, atime_nanos, mtime_kind, mtime_nanos));
+}
+
+static int patina_utimes_impl(int dirfd, const char *path, const struct timeval times[2],
+                              uint32_t resolve_flags) {
+    uint32_t atime_kind, mtime_kind;
+    uint64_t atime_nanos, mtime_nanos;
+    if (patina_timeval_argument(times == NULL ? NULL : &times[0], &atime_kind, &atime_nanos) < 0)
+        return -1;
+    if (patina_timeval_argument(times == NULL ? NULL : &times[1], &mtime_kind, &mtime_nanos) < 0)
+        return -1;
+    return fail_int(patina_utimensat(dirfd, path, resolve_flags, atime_kind, atime_nanos,
+                                     mtime_kind, mtime_nanos));
+}
+
+int utimensat(int dirfd, const char *path, const struct timespec times[2], int flags) {
+    if ((flags & ~AT_SYMLINK_NOFOLLOW) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    /* The kernel accepts utimensat(fd, NULL, …) as the descriptor shape, but
+     * glibc's wrapper — whose contract this symbol IS — refuses a null path
+     * with EINVAL and spells the descriptor shape as futimens(3). glibc
+     * declares the parameter nonnull, so the null test goes through a local
+     * the compiler cannot fold. */
+    const char *volatile spelled = path;
+    if (spelled == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    uint32_t resolve_flags = (flags & AT_SYMLINK_NOFOLLOW) != 0 ? PATINA_RESOLVE_NOFOLLOW : 0;
+    return patina_utimensat_impl(patina_at(dirfd), path, times, resolve_flags);
+}
+
+int futimens(int fd, const struct timespec times[2]) {
+    return patina_futimens_impl(fd, times);
+}
+
+int utimes(const char *path, const struct timeval times[2]) {
+    return patina_utimes_impl(PATINA_AT_FDCWD, path, times, 0);
+}
+
+int lutimes(const char *path, const struct timeval times[2]) {
+    return patina_utimes_impl(PATINA_AT_FDCWD, path, times, PATINA_RESOLVE_NOFOLLOW);
+}
+
+int futimes(int fd, const struct timeval times[2]) {
+    uint32_t atime_kind, mtime_kind;
+    uint64_t atime_nanos, mtime_nanos;
+    if (patina_timeval_argument(times == NULL ? NULL : &times[0], &atime_kind, &atime_nanos) < 0)
+        return -1;
+    if (patina_timeval_argument(times == NULL ? NULL : &times[1], &mtime_kind, &mtime_nanos) < 0)
+        return -1;
+    return fail_int(patina_futimens(fd, atime_kind, atime_nanos, mtime_kind, mtime_nanos));
+}
+
+int utime(const char *path, const struct utimbuf *times) {
+    if (times == NULL) return patina_utimensat_impl(PATINA_AT_FDCWD, path, NULL, 0);
+    if (times->actime < 0 || times->modtime < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    return fail_int(patina_utimensat(PATINA_AT_FDCWD, path, 0, PATINA_TIME_SET,
+                                     (uint64_t)times->actime * UINT64_C(1000000000),
+                                     PATINA_TIME_SET,
+                                     (uint64_t)times->modtime * UINT64_C(1000000000)));
+}
+
+#ifdef __linux__
+int futimesat(int dirfd, const char *path, const struct timeval times[2]) {
+    /* A NULL path names the directory descriptor itself (the pre-utimensat
+     * kernel contract glibc still honors). */
+    if (path == NULL) return futimes(dirfd, times);
+    return patina_utimes_impl(patina_at(dirfd), path, times, 0);
+}
+#endif
+
+/*
+ * The chown family: a comparison against the one modeled identity, with the
+ * kernel's setuid/setgid kill and ctime move on success (through the one mode
+ * entry), EPERM otherwise. fchownat honors AT_SYMLINK_NOFOLLOW and
+ * AT_EMPTY_PATH; any other flag is EINVAL.
+ */
+int chown(const char *path, uid_t owner, gid_t group) {
+    return fail_int(patina_chown(PATINA_AT_FDCWD, path, 0, (uint32_t)owner, (uint32_t)group));
+}
+
+int lchown(const char *path, uid_t owner, gid_t group) {
+    return fail_int(patina_chown(PATINA_AT_FDCWD, path, PATINA_RESOLVE_NOFOLLOW, (uint32_t)owner,
+                                 (uint32_t)group));
+}
+
+int fchown(int fd, uid_t owner, gid_t group) {
+    return fail_int(patina_fchown(fd, (uint32_t)owner, (uint32_t)group));
+}
+
+int fchownat(int dirfd, const char *path, uid_t owner, gid_t group, int flags) {
+    if ((flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    uint32_t resolve_flags = 0;
+    if ((flags & AT_SYMLINK_NOFOLLOW) != 0) resolve_flags |= PATINA_RESOLVE_NOFOLLOW;
+    if ((flags & AT_EMPTY_PATH) != 0) resolve_flags |= PATINA_RESOLVE_EMPTY_PATH;
+    return fail_int(patina_chown(patina_at(dirfd), path, resolve_flags, (uint32_t)owner,
+                                 (uint32_t)group));
+}
+
+/*
+ * truncate/fallocate: sizes by name and by descriptor over the deterministic
+ * filesystem. posix_fallocate is glibc's spelling of fallocate(fd, 0, …) that
+ * returns the errno value instead of -1 — and would otherwise issue the syscall
+ * from inside libc text, past the dispatcher.
+ */
+int truncate(const char *path, off_t length) {
+    return fail_int(patina_truncate(PATINA_AT_FDCWD, path, (int64_t)length));
+}
+
+#ifdef __linux__
+int truncate64(const char *path, off64_t length) {
+    return fail_int(patina_truncate(PATINA_AT_FDCWD, path, (int64_t)length));
+}
+
+int fallocate(int fd, int mode, off_t offset, off_t length) {
+    return fail_int(patina_fallocate(fd, (uint32_t)mode, (int64_t)offset, (int64_t)length));
+}
+
+int fallocate64(int fd, int mode, off64_t offset, off64_t length) {
+    return fail_int(patina_fallocate(fd, (uint32_t)mode, (int64_t)offset, (int64_t)length));
+}
+
+int posix_fallocate(int fd, off_t offset, off_t length) {
+    if (patina_fallocate(fd, 0, (int64_t)offset, (int64_t)length) < 0) return patina_errno();
+    return 0;
+}
+
+int posix_fallocate64(int fd, off64_t offset, off64_t length) {
+    if (patina_fallocate(fd, 0, (int64_t)offset, (int64_t)length) < 0) return patina_errno();
+    return 0;
+}
 #endif
 
 /*

@@ -7,7 +7,7 @@
 //! Row order is x86_64 number order. `closes_in` names the arc that changes the
 //! disposition (docs/arcs/syscall-conformance.md §6); `None` means final.
 
-use super::{Disposition, Family, Nr, SyscallRow};
+use super::{Disposition, Family, IDENTITY_GID, IDENTITY_UID, Nr, SyscallRow};
 use super::{TRAP_PRIVILEGED, TRAP_PROCESS, TRAP_REMOVED, TRAP_UNMODELED};
 
 const fn r(
@@ -748,19 +748,21 @@ pub const SYSCALLS: &[SyscallRow] = &[
         76,
         Some(45),
         Family::Fs,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
-        Some("fs"),
-    ),
+        Disposition::Modeled,
+        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_truncate`): a regular file's length by name over the deterministic filesystem, `EISDIR`/`EINVAL`/`EACCES` as the kernel answers, `mtime`/`ctime` stamped.",
+        None,
+    )
+    .probe("fs/size"),
     r(
         "ftruncate",
         77,
         Some(46),
         Family::FdIo,
         Disposition::Modeled,
-        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_set_len`).",
+        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_set_len`): EISDIR for a directory, EINVAL for a descriptor not open for writing, `mtime`/`ctime` stamped even when the length is unchanged.",
         None,
-    ),
+    )
+    .probe("fs/size"),
     r(
         "getdents",
         78,
@@ -895,28 +897,31 @@ pub const SYSCALLS: &[SyscallRow] = &[
         92,
         None,
         Family::Fs,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
-        Some("fs"),
-    ),
+        Disposition::Modeled,
+        "x86_64 legacy alias: `fchownat(AT_FDCWD, path, uid, gid, 0)` (`patina_chown`).",
+        None,
+    )
+    .probe("fs/owner"),
     r(
         "fchown",
         93,
         Some(55),
         Family::Fs,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
-        Some("fs"),
-    ),
+        Disposition::Modeled,
+        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_fchown`): a comparison against the one modeled identity — its own ids or -1 succeed (killing the setuid/setgid bits on a non-directory and moving `ctime`), any other id is `EPERM`.",
+        None,
+    )
+    .probe("fs/owner"),
     r(
         "lchown",
         94,
         None,
         Family::Fs,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
-        Some("fs"),
-    ),
+        Disposition::Modeled,
+        "x86_64 legacy alias: `fchownat(AT_FDCWD, path, uid, gid, AT_SYMLINK_NOFOLLOW)` (`patina_chown`).",
+        None,
+    )
+    .probe("fs/owner"),
     r(
         "umask",
         95,
@@ -987,7 +992,7 @@ pub const SYSCALLS: &[SyscallRow] = &[
         102,
         Some(174),
         Family::Identity,
-        Disposition::Constant(1000),
+        Disposition::Constant(IDENTITY_UID as i64),
         "The one modeled non-root identity (uid 1000), the same value the C interposer returns; the identity arc makes it a `--host-*` knob.",
         Some("time+identity"),
     )
@@ -1006,7 +1011,7 @@ pub const SYSCALLS: &[SyscallRow] = &[
         104,
         Some(176),
         Family::Identity,
-        Disposition::Constant(1000),
+        Disposition::Constant(IDENTITY_GID as i64),
         "The one modeled non-root identity (gid 1000), the same value the C interposer returns.",
         Some("time+identity"),
     )
@@ -1034,7 +1039,7 @@ pub const SYSCALLS: &[SyscallRow] = &[
         107,
         Some(175),
         Family::Identity,
-        Disposition::Constant(1000),
+        Disposition::Constant(IDENTITY_UID as i64),
         "The one modeled non-root identity (euid 1000), the same value the C interposer returns.",
         Some("time+identity"),
     ),
@@ -1043,7 +1048,7 @@ pub const SYSCALLS: &[SyscallRow] = &[
         108,
         Some(177),
         Family::Identity,
-        Disposition::Constant(1000),
+        Disposition::Constant(IDENTITY_GID as i64),
         "The one modeled non-root identity (egid 1000), the same value the C interposer returns.",
         Some("time+identity"),
     ),
@@ -1259,10 +1264,11 @@ pub const SYSCALLS: &[SyscallRow] = &[
         132,
         None,
         Family::Fs,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
-        Some("fs"),
-    ),
+        Disposition::Modeled,
+        "x86_64 legacy alias: whole-second times onto the same `patina_utimensat` entry as `utimensat`.",
+        None,
+    )
+    .probe("fs/times"),
     r(
         "mknod",
         133,
@@ -2192,10 +2198,11 @@ pub const SYSCALLS: &[SyscallRow] = &[
         235,
         None,
         Family::Fs,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
-        Some("fs"),
-    ),
+        Disposition::Modeled,
+        "x86_64 legacy alias: microsecond times onto the same `patina_utimensat` entry as `utimensat`.",
+        None,
+    )
+    .probe("fs/times"),
     r(
         "vserver",
         236,
@@ -2421,19 +2428,21 @@ pub const SYSCALLS: &[SyscallRow] = &[
         260,
         Some(54),
         Family::Fs,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
-        Some("fs"),
-    ),
+        Disposition::Modeled,
+        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_chown`, through the one path resolver; AT_SYMLINK_NOFOLLOW/AT_EMPTY_PATH honored, other flags EINVAL): the one-identity ownership rule of `fchown`.",
+        None,
+    )
+    .probe("fs/owner"),
     r(
         "futimesat",
         261,
         None,
         Family::Fs,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
-        Some("fs"),
-    ),
+        Disposition::Modeled,
+        "x86_64 legacy alias: microsecond times with a dirfd onto the same `patina_utimensat` entry as `utimensat` (a null path names the descriptor).",
+        None,
+    )
+    .probe("fs/times"),
     r(
         "newfstatat",
         262,
@@ -2515,9 +2524,10 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Some(48),
         Family::Fs,
         Disposition::Modeled,
-        "Modeled against the entry's permission bits (R_OK/W_OK; X_OK is the fs arc); the kernel form carries no flags.",
-        Some("fs"),
-    ),
+        "Modeled against the entry's permission bits, the owner triad of the one identity: R_OK/W_OK/X_OK are each a mode fact (`X_OK` on a file honors its `x` bit; exec itself stays a process-family trap); the kernel form carries no flags.",
+        None,
+    )
+    .probe("fs/owner"),
     r(
         "pselect6",
         270,
@@ -2615,10 +2625,11 @@ pub const SYSCALLS: &[SyscallRow] = &[
         280,
         Some(88),
         Family::Fs,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
-        Some("fs"),
-    ),
+        Disposition::Modeled,
+        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_utimensat`/`patina_futimens`, through the one path resolver): UTIME_NOW resolves to the virtual clock, UTIME_OMIT leaves a time alone, both OMIT is the kernel's early success, `ctime` moves with either time; AT_SYMLINK_NOFOLLOW honored, other flags EINVAL, a null path names the descriptor.",
+        None,
+    )
+    .probe("fs/times"),
     r(
         "epoll_pwait",
         281,
@@ -2660,10 +2671,11 @@ pub const SYSCALLS: &[SyscallRow] = &[
         285,
         Some(47),
         Family::Fs,
-        Disposition::Trap(TRAP_UNMODELED),
-        "Not modeled yet: a raw emitter aborts by name. The fs arc models it over the deterministic filesystem (§6).",
-        Some("fs"),
-    ),
+        Disposition::Modeled,
+        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_fallocate`): mode 0 and KEEP_SIZE reserve, PUNCH_HOLE|KEEP_SIZE and ZERO_RANGE zero the range, the range-shifting modes are EOPNOTSUPP; EINVAL/EBADF/ESPIPE/EISDIR/ENODEV in the kernel's order; one recorded operation whatever the range.",
+        None,
+    )
+    .probe("fs/size"),
     r(
         "timerfd_settime",
         286,
@@ -3095,7 +3107,7 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Some(291),
         Family::Fs,
         Disposition::Modeled,
-        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_metadata_at`, through the one path resolver), filling the `struct statx` fields the model has; synthesized fields (owner, device) are the fs arc.",
+        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_metadata_at`, through the one path resolver): an honest mask — STATX_BASIC_STATS and STATX_MNT_ID always, STATX_BTIME when requested — with the owner from the one identity and all four timestamps from the model; the device numbers (`stx_dev_*`) stay zero until the volume model of the fs arc.",
         Some("fs"),
     )
     .probe("fs/metadata")
@@ -3282,8 +3294,9 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Family::Fs,
         Disposition::Modeled,
         "The flagged form of `faccessat` (AT_EACCESS/AT_SYMLINK_NOFOLLOW); both are routed because callers probe this one first and fall back on ENOSYS.",
-        Some("fs"),
-    ),
+        None,
+    )
+    .probe("fs/owner"),
     r(
         "process_madvise",
         440,

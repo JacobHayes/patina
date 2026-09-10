@@ -960,6 +960,8 @@ impl Preview1Host {
                                 nlink: 1,
                                 atime_nanos: 0,
                                 mtime_nanos: 0,
+                                ctime_nanos: 0,
+                                btime_nanos: 0,
                                 mode: 0o755,
                             }
                         }
@@ -1994,6 +1996,8 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
                         nlink: 1,
                         atime_nanos: 0,
                         mtime_nanos: 0,
+                        ctime_nanos: 0,
+                        btime_nanos: 0,
                         mode: 0o644,
                     },
                     WASI_FILETYPE_CHARACTER_DEVICE,
@@ -2011,6 +2015,8 @@ fn define_preview1(linker: &mut Linker<Preview1Host>) -> Result<(), WasmiError> 
                             nlink: 1,
                             atime_nanos: 0,
                             mtime_nanos: 0,
+                            ctime_nanos: 0,
+                            btime_nanos: 0,
                             mode: 0o644,
                         },
                         WASI_FILETYPE_SOCKET_DGRAM,
@@ -3328,8 +3334,7 @@ fn write_filestat(
     stat[32..40].copy_from_slice(&metadata.len.to_le_bytes());
     stat[40..48].copy_from_slice(&metadata.atime_nanos.to_le_bytes());
     stat[48..56].copy_from_slice(&metadata.mtime_nanos.to_le_bytes());
-    // Preview1Host has no separate ctime model, so mirror mtime into ctim.
-    stat[56..64].copy_from_slice(&metadata.mtime_nanos.to_le_bytes());
+    stat[56..64].copy_from_slice(&metadata.ctime_nanos.to_le_bytes());
     memory(caller)?.write(caller, offset(pointer)?, &stat)?;
     Ok(())
 }

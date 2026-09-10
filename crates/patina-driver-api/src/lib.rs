@@ -4,16 +4,21 @@
 //! describe effects required by the runtime boundary.
 
 use patina_dst_abi::{
-    ClockKind, Datagram, EffectError, Fd, FsDirectoryEntry, FsMetadata, OpenFlags, SeekWhence,
-    SendReport, ShutdownHow, SocketId, TaskId, TcpAccepted,
+    ClockKind, Datagram, EffectError, Fd, FsClock, FsDirectoryEntry, FsMetadata, OpenFlags,
+    SeekWhence, SendReport, ShutdownHow, SocketId, TaskId, TcpAccepted,
 };
 
 pub type DriverResult<T> = Result<T, EffectError>;
 
 pub trait FsDriver: Send {
-    fn open(&mut self, path: &str, flags: OpenFlags) -> DriverResult<Fd>;
-    fn read(&mut self, fd: Fd, max_len: usize) -> DriverResult<Vec<u8>>;
-    fn write(&mut self, fd: Fd, bytes: &[u8]) -> DriverResult<usize>;
+    /// `open(2)`. `clock` stamps a created entry's four timestamps (and its
+    /// parent directory's `mtime`/`ctime`) and an `O_TRUNC`'d file's
+    /// `mtime`/`ctime`; an open of an existing entry touches no time.
+    fn open(&mut self, clock: FsClock, path: &str, flags: OpenFlags) -> DriverResult<Fd>;
+    /// A cursor read. Updates `atime` under the clock's [`patina_dst_abi::AtimePolicy`].
+    fn read(&mut self, clock: FsClock, fd: Fd, max_len: usize) -> DriverResult<Vec<u8>>;
+    /// A cursor write. Stamps `mtime` and `ctime`.
+    fn write(&mut self, clock: FsClock, fd: Fd, bytes: &[u8]) -> DriverResult<usize>;
     /// Positional read: read up to `max_len` bytes starting at `offset` WITHOUT
     /// disturbing the shared file cursor (the `pread`/`read_at` contract).
     ///
@@ -25,10 +30,16 @@ pub trait FsDriver: Send {
     /// which is exactly why positional I/O must reach the driver as ONE
     /// operation rather than being emulated with separate seek/read calls on the
     /// caller side. Drivers with native positional reads may override this.
-    fn read_at(&mut self, fd: Fd, offset: u64, max_len: usize) -> DriverResult<Vec<u8>> {
+    fn read_at(
+        &mut self,
+        clock: FsClock,
+        fd: Fd,
+        offset: u64,
+        max_len: usize,
+    ) -> DriverResult<Vec<u8>> {
         let saved = self.seek(fd, 0, SeekWhence::Current)?;
         self.seek(fd, checked_offset(offset)?, SeekWhence::Start)?;
-        let result = self.read(fd, max_len);
+        let result = self.read(clock, fd, max_len);
         // Restore the cursor regardless of the read outcome, so a positional
         // read is a no-op on the file offset; the read result takes precedence.
         let restored = self.seek(fd, checked_offset(saved)?, SeekWhence::Start);
@@ -39,10 +50,16 @@ pub trait FsDriver: Send {
     /// respect to the scheduler for the same reason as [`FsDriver::read_at`];
     /// crash-consistency wrappers see the underlying `write`, so a positional
     /// write is journaled and crash-losable exactly like a cursor write.
-    fn write_at(&mut self, fd: Fd, offset: u64, bytes: &[u8]) -> DriverResult<usize> {
+    fn write_at(
+        &mut self,
+        clock: FsClock,
+        fd: Fd,
+        offset: u64,
+        bytes: &[u8],
+    ) -> DriverResult<usize> {
         let saved = self.seek(fd, 0, SeekWhence::Current)?;
         self.seek(fd, checked_offset(offset)?, SeekWhence::Start)?;
-        let result = self.write(fd, bytes);
+        let result = self.write(clock, fd, bytes);
         let restored = self.seek(fd, checked_offset(saved)?, SeekWhence::Start);
         result.and_then(|written| restored.map(|_| written))
     }
@@ -71,22 +88,55 @@ pub trait FsDriver: Send {
     fn inode_metadata(&mut self, _ino: u64) -> DriverResult<FsMetadata> {
         Err(unsupported_filesystem_operation("inode metadata"))
     }
-    /// `mkdir`. `mode` is the caller's requested mode; the driver applies its
-    /// modeled umask, as the kernel does.
-    fn create_directory(&mut self, _path: &str, _mode: u32) -> DriverResult<()> {
+    /// `mkdir`. `mode` is the mode the kernel would store (the caller applied
+    /// the process umask). The new directory's four timestamps and its parent's
+    /// `mtime`/`ctime` are stamped from `clock`.
+    fn create_directory(&mut self, _clock: FsClock, _path: &str, _mode: u32) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("create directory"))
     }
-    fn remove_file(&mut self, _path: &str) -> DriverResult<()> {
+    /// `unlink`. The parent's `mtime`/`ctime` and the unlinked node's `ctime`
+    /// are stamped from `clock`.
+    fn remove_file(&mut self, _clock: FsClock, _path: &str) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("remove file"))
     }
     fn sync(&mut self, _fd: Fd) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("sync"))
     }
-    fn set_len(&mut self, _fd: Fd, _len: u64) -> DriverResult<()> {
+    /// `ftruncate`. Stamps `mtime`/`ctime` even when the length is unchanged,
+    /// as `do_truncate` does.
+    fn set_len(&mut self, _clock: FsClock, _fd: Fd, _len: u64) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("set length"))
     }
+    /// `truncate(2)`: [`FsDriver::set_len`] by NAME. The entry must be a
+    /// regular file the identity may write ([`patina_dst_abi::ErrorCode::IsDirectory`]
+    /// for a directory, `InvalidInput` for any other kind, `Denied` without `w`).
+    fn set_len_by_path(&mut self, _clock: FsClock, _path: &str, _len: u64) -> DriverResult<()> {
+        Err(unsupported_filesystem_operation("set length by path"))
+    }
+    /// `fallocate(2)` over a writable regular-file descriptor. With `zero`, the
+    /// bytes in `offset..offset+len` that lie inside the file become zeros
+    /// (`FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE`, `FALLOC_FL_ZERO_RANGE`);
+    /// without `keep_size` the file grows (zero-filled) to `offset + len` when
+    /// that is past its end. Stamps `mtime`/`ctime`. A non-writable
+    /// descriptor is `NotWritable`, a directory `IsDirectory`, a path-only
+    /// descriptor `InvalidHandle`.
+    fn allocate(
+        &mut self,
+        _clock: FsClock,
+        _fd: Fd,
+        _offset: u64,
+        _len: u64,
+        _zero: bool,
+        _keep_size: bool,
+    ) -> DriverResult<()> {
+        Err(unsupported_filesystem_operation("allocate"))
+    }
+    /// `utimensat` on a descriptor: `None` leaves a time alone (`UTIME_OMIT`);
+    /// the caller resolves `UTIME_NOW` to a value before the call. `ctime` is
+    /// stamped from `clock` whenever either time changes.
     fn set_times(
         &mut self,
+        _clock: FsClock,
         _fd: Fd,
         _atime_nanos: Option<u64>,
         _mtime_nanos: Option<u64>,
@@ -95,13 +145,20 @@ pub trait FsDriver: Send {
     }
     fn set_times_by_path(
         &mut self,
+        _clock: FsClock,
         _path: &str,
         _atime_nanos: Option<u64>,
         _mtime_nanos: Option<u64>,
     ) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("set times by path"))
     }
-    fn read_directory(&mut self, _path: &str) -> DriverResult<Vec<FsDirectoryEntry>> {
+    /// A listing by NAME (`opendir`+`readdir` fused). Updates the directory's
+    /// `atime` under the clock's policy.
+    fn read_directory(
+        &mut self,
+        _clock: FsClock,
+        _path: &str,
+    ) -> DriverResult<Vec<FsDirectoryEntry>> {
         Err(unsupported_filesystem_operation("read directory"))
     }
     /// List the directory an open DESCRIPTOR names (`getdents`/`readdir`).
@@ -114,44 +171,58 @@ pub trait FsDriver: Send {
     /// directory's bits are. The path-taking [`FsDriver::read_directory`] is the
     /// fused `opendir`+`readdir` an in-process guest issues and charges `r`
     /// itself.
-    fn read_directory_fd(&mut self, _fd: Fd) -> DriverResult<Vec<FsDirectoryEntry>> {
+    fn read_directory_fd(
+        &mut self,
+        _clock: FsClock,
+        _fd: Fd,
+    ) -> DriverResult<Vec<FsDirectoryEntry>> {
         Err(unsupported_filesystem_operation(
             "read directory descriptor",
         ))
     }
-    fn remove_directory(&mut self, _path: &str) -> DriverResult<()> {
+    /// `rmdir`. The parent's `mtime`/`ctime` are stamped from `clock`.
+    fn remove_directory(&mut self, _clock: FsClock, _path: &str) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("remove directory"))
     }
-    fn rename(&mut self, _from: &str, _to: &str) -> DriverResult<()> {
+    /// `rename`. Both parents' `mtime`/`ctime` and the moved node's `ctime` are
+    /// stamped from `clock`.
+    fn rename(&mut self, _clock: FsClock, _from: &str, _to: &str) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("rename"))
     }
-    fn link(&mut self, _from: &str, _to: &str) -> DriverResult<()> {
+    /// `link`. The node's `ctime` and the new parent's `mtime`/`ctime` are
+    /// stamped from `clock`.
+    fn link(&mut self, _clock: FsClock, _from: &str, _to: &str) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("link"))
     }
-    fn symlink(&mut self, _target: &str, _link_path: &str) -> DriverResult<()> {
+    /// `symlink`. The link's four timestamps and its parent's `mtime`/`ctime`
+    /// are stamped from `clock`.
+    fn symlink(&mut self, _clock: FsClock, _target: &str, _link_path: &str) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("symlink"))
     }
-    fn read_link(&mut self, _path: &str) -> DriverResult<String> {
+    /// `readlink`. Updates the link's `atime` under the clock's policy.
+    fn read_link(&mut self, _clock: FsClock, _path: &str) -> DriverResult<String> {
         Err(unsupported_filesystem_operation("read link"))
     }
     /// Create a named pipe (`mkfifo`). Creates only the NAME: a FIFO's bytes are
     /// never filesystem state, so nothing here holds them — the openers share a
     /// pipe channel above this boundary, exactly as they share a kernel pipe.
-    /// `mode` is the caller's requested mode; the driver applies its modeled
-    /// umask, as the kernel does.
-    fn make_fifo(&mut self, _path: &str, _mode: u32) -> DriverResult<()> {
+    /// `mode` is the mode the kernel would store (the caller applied the
+    /// process umask). Timestamps as for [`FsDriver::create_directory`].
+    fn make_fifo(&mut self, _clock: FsClock, _path: &str, _mode: u32) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("make fifo"))
     }
     /// Change the permission bits of the entry `path` names (`chmod` /
     /// `fchmodat`). Like every other path entry point here, this acts on the
     /// entry the caller named: a trailing symlink is resolved by the caller, not
-    /// by the driver.
-    fn set_mode(&mut self, _path: &str, _mode: u32) -> DriverResult<()> {
+    /// by the driver. Stamps `ctime` from `clock`, even when the bits are
+    /// unchanged (`chown` routes through here: the kernel writes the inode
+    /// either way).
+    fn set_mode(&mut self, _clock: FsClock, _path: &str, _mode: u32) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("set mode"))
     }
     /// Change the permission bits of the entry an open descriptor names
-    /// (`fchmod`).
-    fn set_fd_mode(&mut self, _fd: Fd, _mode: u32) -> DriverResult<()> {
+    /// (`fchmod`). Stamps `ctime`.
+    fn set_fd_mode(&mut self, _clock: FsClock, _fd: Fd, _mode: u32) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("set descriptor mode"))
     }
     /// The path the descriptor's filesystem NODE currently has.
@@ -167,7 +238,8 @@ pub trait FsDriver: Send {
     /// the one descriptor class the filesystem does not hold — a FIFO endpoint).
     /// The mirror of [`FsDriver::inode_metadata`], and it reaches an unlinked
     /// node for the same reason: the bits belong to the node, not to a name.
-    fn set_inode_mode(&mut self, _ino: u64, _mode: u32) -> DriverResult<()> {
+    /// Stamps `ctime`.
+    fn set_inode_mode(&mut self, _clock: FsClock, _ino: u64, _mode: u32) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("set inode mode"))
     }
     /// Take a reference on an inode that no filesystem descriptor holds.
@@ -1018,21 +1090,21 @@ mod tests {
     struct MinimalFs;
 
     impl FsDriver for MinimalFs {
-        fn open(&mut self, _path: &str, _flags: OpenFlags) -> DriverResult<Fd> {
+        fn open(&mut self, _clock: FsClock, _path: &str, _flags: OpenFlags) -> DriverResult<Fd> {
             Err(EffectError::new(
                 patina_dst_abi::ErrorCode::Denied,
                 "unused",
             ))
         }
 
-        fn read(&mut self, _fd: Fd, _max_len: usize) -> DriverResult<Vec<u8>> {
+        fn read(&mut self, _clock: FsClock, _fd: Fd, _max_len: usize) -> DriverResult<Vec<u8>> {
             Err(EffectError::new(
                 patina_dst_abi::ErrorCode::Denied,
                 "unused",
             ))
         }
 
-        fn write(&mut self, _fd: Fd, _bytes: &[u8]) -> DriverResult<usize> {
+        fn write(&mut self, _clock: FsClock, _fd: Fd, _bytes: &[u8]) -> DriverResult<usize> {
             Err(EffectError::new(
                 patina_dst_abi::ErrorCode::Denied,
                 "unused",

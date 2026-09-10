@@ -26,7 +26,7 @@ fn expected_operations() -> Vec<Operation> {
 
 #[test]
 fn current_format_fixture_parses_validates_and_is_canonically_encoded() {
-    let bundle = TraceBundle::load(fixture("format-7.patina")).unwrap();
+    let bundle = TraceBundle::load(fixture("format-8.patina")).unwrap();
     assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
     bundle.validate().unwrap();
     // A pre-metadata run records no fault configuration; the field is absent
@@ -42,7 +42,7 @@ fn current_format_fixture_parses_validates_and_is_canonically_encoded() {
     // on-disk encoding and guards against the fixture drifting from the writer.
     let reencoded = bundle.to_bytes().unwrap();
     assert_eq!(
-        std::fs::read(fixture("format-7.patina")).unwrap(),
+        std::fs::read(fixture("format-8.patina")).unwrap(),
         reencoded
     );
     let text = String::from_utf8(reencoded).unwrap();
@@ -59,14 +59,14 @@ fn current_format_fixture_parses_validates_and_is_canonically_encoded() {
 
 #[test]
 fn current_crash_restart_fixture_parses_validates_and_is_canonical() {
-    let bundle = TraceBundle::load(fixture("format-7-crash-restart.patina")).unwrap();
+    let bundle = TraceBundle::load(fixture("format-8-crash-restart.patina")).unwrap();
     bundle.validate().unwrap();
     assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
     assert_eq!(bundle.timelines[0].lifecycle.len(), 5);
     assert_eq!(bundle.timelines[0].decisions[0].order, 1);
     assert_eq!(bundle.timelines[0].decisions[1].incarnation, 1);
     assert_eq!(
-        std::fs::read(fixture("format-7-crash-restart.patina")).unwrap(),
+        std::fs::read(fixture("format-8-crash-restart.patina")).unwrap(),
         bundle.to_bytes().unwrap()
     );
 }
@@ -76,7 +76,7 @@ fn every_prior_format_migrates_to_an_equivalent_current_bundle() {
     // Every supported non-crash prior format upgrades to a bundle byte-for-byte
     // equivalent to the hand-written current-format fixture: current version, a single
     // unbranched `main` timeline, and absent branch metadata.
-    let current = TraceBundle::load(fixture("format-7.patina")).unwrap();
+    let current = TraceBundle::load(fixture("format-8.patina")).unwrap();
     for prior in [
         "format-1.patina",
         "format-2.patina",
@@ -84,6 +84,7 @@ fn every_prior_format_migrates_to_an_equivalent_current_bundle() {
         "format-4.patina",
         "format-5.patina",
         "format-6.patina",
+        "format-7.patina",
     ] {
         let migrated = TraceBundle::load(fixture(prior)).unwrap();
         assert_eq!(
@@ -171,6 +172,43 @@ fn the_path_only_migration_marks_every_prior_open_as_opening_the_entry() {
     }
 }
 
+/// The v7→v8 step gives every recorded metadata outcome the change time the
+/// format-7 runtime reported (its modification time: the stat fill copied
+/// `mtime` into `st_ctime`) and the birth time it never reported (`0`, with
+/// `STATX_BTIME` unset). RED without the step: the bundle fails to deserialize,
+/// because `ctime_nanos`/`btime_nanos` are required fields of `FsMetadata`.
+/// An error outcome and a set-times operation are untouched.
+#[test]
+fn the_timestamp_migration_reconstructs_the_times_a_format_7_run_reported() {
+    let bundle = TraceBundle::load(fixture("format-7-times.patina")).unwrap();
+    assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
+    bundle.validate().unwrap();
+    let main = bundle.resolved_timeline("main").unwrap();
+    assert_eq!(main.len(), 3);
+    let Outcome::Metadata(metadata) = &main[0].outcome else {
+        panic!("expected a metadata outcome, got {:?}", main[0].outcome);
+    };
+    assert_eq!((metadata.atime_nanos, metadata.mtime_nanos), (5, 9));
+    assert_eq!(
+        metadata.ctime_nanos, metadata.mtime_nanos,
+        "a format-7 run answered its modification time as the change time"
+    );
+    assert_eq!(
+        metadata.btime_nanos, 0,
+        "a format-7 run never reported a birth time"
+    );
+    assert_eq!(metadata.mode, 0o755);
+    assert!(matches!(
+        main[1].operation,
+        Operation::FsSetTimesByPath {
+            atime_nanos: Some(11),
+            mtime_nanos: None,
+            ..
+        }
+    ));
+    assert!(matches!(main[2].outcome, Outcome::Error(_)));
+}
+
 #[test]
 fn migration_never_rewrites_the_source_file() {
     for prior in [
@@ -180,6 +218,7 @@ fn migration_never_rewrites_the_source_file() {
         "format-4.patina",
         "format-5.patina",
         "format-6.patina",
+        "format-7.patina",
     ] {
         let path = fixture(prior);
         let before = std::fs::read(&path).unwrap();
@@ -293,7 +332,7 @@ fn malformed_fixture_is_rejected_as_a_parse_error() {
 fn migration_is_reachable_through_the_in_memory_transport_path() {
     // The same decode path backs `from_slice`, so transported prior-format
     // bundles migrate identically to file loads.
-    let current = TraceBundle::load(fixture("format-7.patina")).unwrap();
+    let current = TraceBundle::load(fixture("format-8.patina")).unwrap();
     for prior in [
         "format-1.patina",
         "format-2.patina",
@@ -301,6 +340,7 @@ fn migration_is_reachable_through_the_in_memory_transport_path() {
         "format-4.patina",
         "format-5.patina",
         "format-6.patina",
+        "format-7.patina",
     ] {
         let bytes = std::fs::read(fixture(prior)).unwrap();
         let migrated = TraceBundle::from_slice(&bytes).unwrap();

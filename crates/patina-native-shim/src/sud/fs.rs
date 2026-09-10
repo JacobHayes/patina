@@ -211,31 +211,38 @@ pub(crate) fn release_dir_iteration(fd: c_int) {
 
 // ---- Metadata (fstat / newfstatat / statx) ----
 
-pub(super) struct StatValues {
-    kind: u32,
-    length: u64,
-    ino: u64,
-    nlink: u32,
-    atime_nanos: u64,
-    mtime_nanos: u64,
-    /// Permission bits (`0o7777`) WITHOUT the file-type bits; `kind` carries
-    /// those. `st_mode` is the two ORed together — see [`stat_mode`].
-    mode: u32,
-}
+/// The metadata record the runtime fills (`struct patina_metadata`): the same
+/// one the C stat family normalizes. `mode` carries the permission bits
+/// (`0o7777`) WITHOUT the file-type bits; `kind` carries those, and `st_mode`
+/// is the two ORed together — see [`stat_mode`].
+pub(super) type StatValues = PatinaMetadata;
 
-impl StatValues {
-    const fn empty() -> Self {
-        Self {
-            kind: 0,
-            length: 0,
-            ino: 0,
-            nlink: 0,
-            atime_nanos: 0,
-            mtime_nanos: 0,
-            mode: 0,
-        }
+const fn empty_metadata() -> PatinaMetadata {
+    PatinaMetadata {
+        kind: 0,
+        mode: 0,
+        nlink: 0,
+        reserved: 0,
+        length: 0,
+        ino: 0,
+        atime_nanos: 0,
+        mtime_nanos: 0,
+        ctime_nanos: 0,
+        btime_nanos: 0,
     }
 }
+
+/// The virtual volume's block geometry, the same 4 KiB the statfs profile
+/// reports: `st_blksize`, and `st_blocks` in the 512-byte units `stat(2)`
+/// counts. Byte for byte with the C `patina_stat_blocks`.
+const STAT_BLOCK_SIZE: u64 = 4096;
+fn stat_blocks(length: u64) -> u64 {
+    length.div_ceil(STAT_BLOCK_SIZE) * (STAT_BLOCK_SIZE / 512)
+}
+
+/// The one virtual volume's mount id (`stx_mnt_id`), the C
+/// `PATINA_STATX_MNT_ID`.
+const STATX_MNT_ID_VALUE: u64 = 1;
 
 /// `st_mode`: the entry's file-type bits ORed with its permission bits, byte
 /// for byte with the C `patina_stat_mode`.
@@ -250,8 +257,10 @@ pub(super) fn stat_mode(values: &StatValues) -> u32 {
 }
 
 /// The kernel `struct stat` for the `fstat`/`newfstatat` syscalls. The layout is
-/// arch-specific (x86_64 vs the arm64 generic layout); only the fields the C
-/// `fill_stat` sets are populated, the rest stay zero.
+/// arch-specific (x86_64 vs the arm64 generic layout); the fields the C
+/// `fill_stat` sets are populated (mode, link count, inode, size, the owner
+/// from the one modeled identity, the three timestamps, the block geometry),
+/// the rest (`st_dev`, `st_rdev`) stay zero.
 #[cfg(target_arch = "x86_64")]
 #[repr(C)]
 #[derive(Default)]
@@ -303,36 +312,31 @@ pub(super) struct KernelStat {
 
 impl KernelStat {
     fn from_values(values: &StatValues) -> Self {
-        let mut stat = Self::default();
-        stat.st_mode = stat_mode(values);
-        stat.st_nlink = values.nlink as _;
-        stat.st_ino = values.ino;
-        stat.st_size = values.length as i64;
-        stat.st_atime = (values.atime_nanos / NANOS_PER_SEC) as i64;
-        stat.st_atime_nsec = (values.atime_nanos % NANOS_PER_SEC) as _;
-        stat.st_mtime = (values.mtime_nanos / NANOS_PER_SEC) as i64;
-        stat.st_mtime_nsec = (values.mtime_nanos % NANOS_PER_SEC) as _;
-        stat.st_ctime = stat.st_mtime;
-        stat.st_ctime_nsec = stat.st_mtime_nsec;
-        stat
+        Self {
+            st_mode: stat_mode(values),
+            st_nlink: values.nlink as _,
+            st_ino: values.ino,
+            st_size: values.length as i64,
+            // SAFETY: plain constant reads.
+            st_uid: unsafe { patina_uid() },
+            st_gid: unsafe { patina_gid() },
+            st_blksize: STAT_BLOCK_SIZE as _,
+            st_blocks: stat_blocks(values.length) as i64,
+            st_atime: (values.atime_nanos / NANOS_PER_SEC) as i64,
+            st_atime_nsec: (values.atime_nanos % NANOS_PER_SEC) as _,
+            st_mtime: (values.mtime_nanos / NANOS_PER_SEC) as i64,
+            st_mtime_nsec: (values.mtime_nanos % NANOS_PER_SEC) as _,
+            st_ctime: (values.ctime_nanos / NANOS_PER_SEC) as i64,
+            st_ctime_nsec: (values.ctime_nanos % NANOS_PER_SEC) as _,
+            ..Self::default()
+        }
     }
 }
 
 pub(super) fn fd_stat_values(fd: c_int) -> Result<StatValues, i64> {
-    let mut v = StatValues::empty();
-    // SAFETY: all out-pointers are writable local storage.
-    let rc = unsafe {
-        patina_fd_metadata_full(
-            fd,
-            &mut v.kind,
-            &mut v.length,
-            &mut v.ino,
-            &mut v.nlink,
-            &mut v.atime_nanos,
-            &mut v.mtime_nanos,
-            &mut v.mode,
-        )
-    };
+    let mut v = empty_metadata();
+    // SAFETY: the out-pointer is writable local storage.
+    let rc = unsafe { patina_fd_metadata_full(fd, &mut v) };
     if rc != 0 {
         // SAFETY: plain thread-local read.
         return Err(-(unsafe { patina_errno() } as i64));
@@ -344,22 +348,9 @@ pub(super) fn fd_stat_values(fd: c_int) -> Result<StatValues, i64> {
 /// metadata entry the C stat family calls (`flags` are `PATINA_RESOLVE_*`).
 pub(super) fn path_stat_values(dirfd: i64, path: u64, flags: u32) -> Result<StatValues, i64> {
     let path = guest_path(path)?;
-    let mut v = StatValues::empty();
-    // SAFETY: `path` is a valid guest C string; out-pointers are local storage.
-    let rc = unsafe {
-        patina_metadata_at(
-            dirfd as c_int,
-            path,
-            flags,
-            &mut v.kind,
-            &mut v.length,
-            &mut v.ino,
-            &mut v.nlink,
-            &mut v.atime_nanos,
-            &mut v.mtime_nanos,
-            &mut v.mode,
-        )
-    };
+    let mut v = empty_metadata();
+    // SAFETY: `path` is a valid guest C string; the out-pointer is local storage.
+    let rc = unsafe { patina_metadata_at(dirfd as c_int, path, flags, &mut v) };
     if rc != 0 {
         // SAFETY: plain thread-local read.
         return Err(-(unsafe { patina_errno() } as i64));
@@ -465,7 +456,7 @@ pub(super) struct Statx {
     __spare3: [u64; 12],
 }
 
-pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, statxbuf: u64) -> i64 {
+pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, flags_mask: u64, statxbuf: u64) -> i64 {
     if statxbuf == 0 {
         return -EFAULT;
     }
@@ -477,26 +468,39 @@ pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, statxbuf: u64) -> i64
         Ok(values) => values,
         Err(errno) => return errno,
     };
-    // STATX_{TYPE|MODE|NLINK|INO|SIZE|ATIME|MTIME|CTIME} — the exact mask the C
-    // statx interposer reports.
-    const STATX_MASK: u32 = 0x0001 | 0x0002 | 0x0004 | 0x0100 | 0x0200 | 0x0020 | 0x0040 | 0x0080;
-    let mut stx = Statx::default();
-    stx.stx_mask = STATX_MASK;
-    stx.stx_mode = stat_mode(&values) as u16;
-    stx.stx_nlink = values.nlink;
-    stx.stx_ino = values.ino;
-    stx.stx_size = values.length;
-    stx.stx_atime = StatxTimestamp {
-        tv_sec: (values.atime_nanos / NANOS_PER_SEC) as i64,
-        tv_nsec: (values.atime_nanos % NANOS_PER_SEC) as u32,
+    // An honest mask, the exact one the C statx interposer reports:
+    // STATX_BASIC_STATS and STATX_MNT_ID are always filled (as the kernel's
+    // vfs_statx fills them whatever was asked), STATX_BTIME only when requested.
+    const STATX_BASIC_STATS: u32 = 0x07ff;
+    const STATX_BTIME: u32 = 0x0800;
+    const STATX_MNT_ID: u32 = 0x1000;
+    let mask = flags_mask as u32;
+    let timestamp = |nanos: u64| StatxTimestamp {
+        tv_sec: (nanos / NANOS_PER_SEC) as i64,
+        tv_nsec: (nanos % NANOS_PER_SEC) as u32,
         __reserved: 0,
     };
-    stx.stx_mtime = StatxTimestamp {
-        tv_sec: (values.mtime_nanos / NANOS_PER_SEC) as i64,
-        tv_nsec: (values.mtime_nanos % NANOS_PER_SEC) as u32,
-        __reserved: 0,
+    let mut stx = Statx {
+        stx_mask: STATX_BASIC_STATS | STATX_MNT_ID,
+        stx_blksize: STAT_BLOCK_SIZE as u32,
+        stx_mode: stat_mode(&values) as u16,
+        stx_nlink: values.nlink,
+        // SAFETY: plain constant reads.
+        stx_uid: unsafe { patina_uid() },
+        stx_gid: unsafe { patina_gid() },
+        stx_ino: values.ino,
+        stx_size: values.length,
+        stx_blocks: stat_blocks(values.length),
+        stx_atime: timestamp(values.atime_nanos),
+        stx_mtime: timestamp(values.mtime_nanos),
+        stx_ctime: timestamp(values.ctime_nanos),
+        stx_mnt_id: STATX_MNT_ID_VALUE,
+        ..Statx::default()
     };
-    stx.stx_ctime = stx.stx_mtime;
+    if mask & STATX_BTIME != 0 {
+        stx.stx_mask |= STATX_BTIME;
+        stx.stx_btime = timestamp(values.btime_nanos);
+    }
     // SAFETY: `statxbuf` is the guest's `struct statx` storage.
     unsafe { (statxbuf as *mut Statx).write(stx) };
     0
@@ -682,28 +686,25 @@ pub(super) fn sys_symlinkat(target: u64, newdirfd: i64, linkpath: u64) -> i64 {
 }
 
 /// Existence / permission probe (`faccessat`, `faccessat2`, and the x86_64
-/// legacy `access`). The guest is one non-root identity (uid 1000) owning every
-/// modeled entry, so the answer reads the OWNER triad of the entry's modeled
-/// permission bits. `X_OK` on a non-directory is refused whatever its mode:
-/// nothing here can be executed, so reporting a file as runnable would be a
-/// fabricated answer rather than a permission one. Mirrors the C
-/// `faccessat`/`patina_access_impl` exactly, including its accepted flag set:
-/// `AT_EACCESS` only chooses effective vs real ids, which are one identity here.
+/// legacy `access`). The guest is one non-root identity owning every modeled
+/// entry, so the answer reads the OWNER triad of the entry's modeled
+/// permission bits — `X_OK` included: the bit is a mode fact the kernel
+/// answers from, and whether anything can actually execute is the process
+/// family's business. Mirrors the C `faccessat`/`patina_access_impl` exactly,
+/// including its accepted flag set: `AT_EACCESS` only chooses effective vs real
+/// ids, which are one identity here.
 ///
 /// `cap-primitives` calls this on every `..` component
 /// (`accessat(base, ".", X_OK, AT_EACCESS)`), so without it a capability-style
 /// guest cannot walk out of a subdirectory at all.
 pub(super) fn sys_faccessat(dirfd: i64, path: u64, mode: u64, flags: u64) -> i64 {
     if flags & !(AT_EACCESS | AT_SYMLINK_NOFOLLOW) != 0 {
-        return -ENOSYS;
+        return -EINVAL;
     }
     let values = match path_stat_values(dirfd, path, 0) {
         Ok(values) => values,
         Err(errno) => return errno,
     };
-    if mode & X_OK != 0 && values.kind != PATINA_ENTRY_DIRECTORY {
-        return -EACCES;
-    }
     // The guest is one non-root identity owning every entry, so the OWNER triad
     // is the answer — the same arithmetic the C `patina_access_impl` does.
     let owner = (values.mode >> 6) & 0o7;
@@ -870,4 +871,229 @@ pub(super) fn sys_fchdir(fd: i64) -> i64 {
 pub(super) fn sys_umask(mask: u64) -> i64 {
     // SAFETY: a plain runtime call with no pointers.
     i64::from(unsafe { patina_umask(mask as u32) })
+}
+
+// ---- Timestamps, ownership and sizes ----
+
+/// A kernel `struct __kernel_timespec` / `struct timespec` (x86_64: two i64).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KernelTimespec {
+    tv_sec: i64,
+    tv_nsec: i64,
+}
+
+/// A kernel `struct timeval` (x86_64: two i64).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KernelTimeval {
+    tv_sec: i64,
+    tv_usec: i64,
+}
+
+/// A `utimbuf` (`utime(2)`): two whole-second times.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KernelUtimbuf {
+    actime: i64,
+    modtime: i64,
+}
+
+/// One `utimensat` time argument decoded onto the runtime's `PATINA_TIME_*`
+/// vocabulary, exactly as the kernel decodes it: `UTIME_NOW`/`UTIME_OMIT` in
+/// `tv_nsec`, else a nanosecond count that must be in range (`EINVAL`).
+fn time_argument(time: &KernelTimespec) -> Result<(u32, u64), i64> {
+    match time.tv_nsec {
+        UTIME_NOW => Ok((crate::TIME_NOW, 0)),
+        UTIME_OMIT => Ok((crate::TIME_OMIT, 0)),
+        nsec if !(0..NANOS_PER_SEC as i64).contains(&nsec) || time.tv_sec < 0 => Err(-EINVAL),
+        nsec => Ok((
+            crate::TIME_SET,
+            time.tv_sec as u64 * NANOS_PER_SEC + nsec as u64,
+        )),
+    }
+}
+
+/// A `timeval` time argument (`utimes`/`futimesat`): microseconds in range.
+fn timeval_argument(time: &KernelTimeval) -> Result<(u32, u64), i64> {
+    if !(0..1_000_000).contains(&time.tv_usec) || time.tv_sec < 0 {
+        return Err(-EINVAL);
+    }
+    Ok((
+        crate::TIME_SET,
+        time.tv_sec as u64 * NANOS_PER_SEC + time.tv_usec as u64 * 1_000,
+    ))
+}
+
+/// The two time arguments of a `utimensat`/`utimes`-shaped row: a null
+/// pointer is now/now.
+fn times_arguments<T: Copy>(
+    times: u64,
+    decode: impl Fn(&T) -> Result<(u32, u64), i64>,
+) -> Result<[(u32, u64); 2], i64> {
+    if times == 0 {
+        return Ok([(crate::TIME_NOW, 0), (crate::TIME_NOW, 0)]);
+    }
+    // SAFETY: `times` is the guest's two-element array.
+    let pair = unsafe { (times as *const [T; 2]).read_unaligned() };
+    Ok([decode(&pair[0])?, decode(&pair[1])?])
+}
+
+/// `utimensat(2)`: `AT_SYMLINK_NOFOLLOW` is the only flag (`EINVAL` otherwise);
+/// a null path names the descriptor itself (the `futimens` shape), which the
+/// kernel accepts only flagless and not on `AT_FDCWD`.
+pub(super) fn sys_utimensat(dirfd: i64, path: u64, times: u64, flags: u64) -> i64 {
+    if flags & !AT_SYMLINK_NOFOLLOW != 0 {
+        return -EINVAL;
+    }
+    let [atime, mtime] = match times_arguments(times, time_argument) {
+        Ok(times) => times,
+        Err(errno) => return errno,
+    };
+    if path == 0 {
+        if flags != 0 {
+            return -EINVAL;
+        }
+        if dirfd == AT_FDCWD {
+            return -EFAULT;
+        }
+        if let Some(err) = fd_out_of_range(dirfd) {
+            return err;
+        }
+        // SAFETY: no pointers.
+        return ret_i32(unsafe {
+            patina_futimens(dirfd as c_int, atime.0, atime.1, mtime.0, mtime.1)
+        });
+    }
+    let path = match guest_path(path) {
+        Ok(path) => path,
+        Err(errno) => return errno,
+    };
+    // SAFETY: `path` is a valid NUL-terminated guest string pointer.
+    ret_i32(unsafe {
+        patina_utimensat(
+            dirfd as c_int,
+            path,
+            resolve_flags(flags),
+            atime.0,
+            atime.1,
+            mtime.0,
+            mtime.1,
+        )
+    })
+}
+
+/// `utimes(2)` and `futimesat(2)`: microsecond times, always following a
+/// trailing symlink; a null path on `futimesat` names the directory
+/// descriptor itself.
+pub(super) fn sys_futimesat(dirfd: i64, path: u64, times: u64) -> i64 {
+    let [atime, mtime] = match times_arguments(times, timeval_argument) {
+        Ok(times) => times,
+        Err(errno) => return errno,
+    };
+    if path == 0 {
+        if dirfd == AT_FDCWD {
+            return -EFAULT;
+        }
+        if let Some(err) = fd_out_of_range(dirfd) {
+            return err;
+        }
+        // SAFETY: no pointers.
+        return ret_i32(unsafe {
+            patina_futimens(dirfd as c_int, atime.0, atime.1, mtime.0, mtime.1)
+        });
+    }
+    let path = match guest_path(path) {
+        Ok(path) => path,
+        Err(errno) => return errno,
+    };
+    // SAFETY: `path` is a valid NUL-terminated guest string pointer.
+    ret_i32(unsafe {
+        patina_utimensat(dirfd as c_int, path, 0, atime.0, atime.1, mtime.0, mtime.1)
+    })
+}
+
+/// `utime(2)`: whole-second times; a null buffer is now/now.
+pub(super) fn sys_utime(path: u64, times: u64) -> i64 {
+    let (atime, mtime) = if times == 0 {
+        ((crate::TIME_NOW, 0), (crate::TIME_NOW, 0))
+    } else {
+        // SAFETY: `times` is the guest's `struct utimbuf`.
+        let buf = unsafe { (times as *const KernelUtimbuf).read_unaligned() };
+        if buf.actime < 0 || buf.modtime < 0 {
+            return -EINVAL;
+        }
+        (
+            (crate::TIME_SET, buf.actime as u64 * NANOS_PER_SEC),
+            (crate::TIME_SET, buf.modtime as u64 * NANOS_PER_SEC),
+        )
+    };
+    let path = match guest_path(path) {
+        Ok(path) => path,
+        Err(errno) => return errno,
+    };
+    // SAFETY: `path` is a valid NUL-terminated guest string pointer.
+    ret_i32(unsafe {
+        patina_utimensat(
+            AT_FDCWD as c_int,
+            path,
+            0,
+            atime.0,
+            atime.1,
+            mtime.0,
+            mtime.1,
+        )
+    })
+}
+
+/// `fchownat(2)`, and the x86_64 legacy `chown`/`lchown`: `AT_SYMLINK_NOFOLLOW`
+/// and `AT_EMPTY_PATH` are the flags (`EINVAL` otherwise). The ids are the
+/// kernel's `uid_t`/`gid_t` (`-1` = unchanged), passed through as the 32-bit
+/// values they are.
+pub(super) fn sys_fchownat(dirfd: i64, path: u64, uid: u64, gid: u64, flags: u64) -> i64 {
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return -EINVAL;
+    }
+    let path = match guest_path(path) {
+        Ok(path) => path,
+        Err(errno) => return errno,
+    };
+    // SAFETY: `path` is a valid NUL-terminated guest string pointer.
+    ret_i32(unsafe {
+        patina_chown(
+            dirfd as c_int,
+            path,
+            resolve_flags(flags),
+            uid as u32,
+            gid as u32,
+        )
+    })
+}
+
+/// `fchown(2)`.
+pub(super) fn sys_fchown(fd: i64, uid: u64, gid: u64) -> i64 {
+    if let Some(err) = fd_out_of_range(fd) {
+        return err;
+    }
+    // SAFETY: no pointers.
+    ret_i32(unsafe { patina_fchown(fd as c_int, uid as u32, gid as u32) })
+}
+
+/// `truncate(2)`: by name, following a trailing symlink.
+pub(super) fn sys_truncate(path: u64, length: i64) -> i64 {
+    let path = match guest_path(path) {
+        Ok(path) => path,
+        Err(errno) => return errno,
+    };
+    // SAFETY: `path` is a valid NUL-terminated guest string pointer.
+    ret_i32(unsafe { patina_truncate(AT_FDCWD as c_int, path, length) })
+}
+
+/// `fallocate(2)`: the mode word is the kernel's; the one entry decodes it.
+pub(super) fn sys_fallocate(fd: i64, mode: u64, offset: i64, length: i64) -> i64 {
+    if let Some(err) = fd_out_of_range(fd) {
+        return err;
+    }
+    // SAFETY: no pointers.
+    ret_i32(unsafe { patina_fallocate(fd as c_int, mode as u32, offset, length) })
 }

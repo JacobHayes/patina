@@ -320,19 +320,77 @@ enum {
 };
 
 /*
+ * One metadata record: what the stat family on both doors fills a struct
+ * stat/statx from. `kind` is a PATINA_ENTRY_* value and `mode` the POSIX
+ * permission bits (0o7777) WITHOUT the file-type bits: a caller assembling
+ * st_mode ORs the two. The four timestamps are nanoseconds on the virtual
+ * clock, stamped by the kernel's rules (creation sets all four, a data change
+ * mtime+ctime, a metadata change ctime, a read atime under relatime). The
+ * owner is not a field: every entry belongs to the one modeled identity,
+ * read through patina_uid/patina_gid.
+ */
+struct patina_metadata {
+    uint32_t kind;
+    uint32_t mode;
+    uint32_t nlink;
+    uint32_t reserved;
+    uint64_t length;
+    uint64_t ino;
+    uint64_t atime_nanos;
+    uint64_t mtime_nanos;
+    uint64_t ctime_nanos;
+    uint64_t btime_nanos;
+};
+/*
  * The metadata of what (dirfd, path) resolves to — the one entry behind the
  * stat family, access and statfs on both doors (`flags` are PATINA_RESOLVE_*;
- * a missing entry is ENOENT) — and of an open descriptor. `mode` receives the
- * POSIX permission bits (0o7777) WITHOUT the file-type bits, which `kind`
- * already carries: a caller assembling a struct stat ORs the two.
+ * a missing entry is ENOENT) — and of an open descriptor.
  */
-int32_t patina_metadata_at(int32_t dirfd, const char *path, uint32_t flags, uint32_t *kind,
-                           uint64_t *length, uint64_t *ino, uint32_t *nlink,
-                           uint64_t *atime_nanos, uint64_t *mtime_nanos, uint32_t *mode);
-int32_t patina_fd_metadata_full(int32_t fd, uint32_t *kind, uint64_t *length,
-                                uint64_t *ino, uint32_t *nlink,
-                                uint64_t *atime_nanos, uint64_t *mtime_nanos,
-                                uint32_t *mode);
+int32_t patina_metadata_at(int32_t dirfd, const char *path, uint32_t flags,
+                           struct patina_metadata *out);
+int32_t patina_fd_metadata_full(int32_t fd, struct patina_metadata *out);
+/*
+ * The one modeled identity (uid/gid 1000): the ONE accessor getuid/geteuid,
+ * getgid/getegid, every st_uid/st_gid, and the chown comparison read.
+ */
+uint32_t patina_uid(void);
+uint32_t patina_gid(void);
+/*
+ * utimensat(2) on a (dirfd, path) (`flags` are PATINA_RESOLVE_*; NOFOLLOW
+ * sets a symlink's own times) and futimens(3) on a descriptor. Each time is a
+ * (kind, nanos) pair: PATINA_TIME_OMIT leaves it alone, PATINA_TIME_NOW sets
+ * the virtual clock's now, PATINA_TIME_SET sets `nanos`. Both OMIT is the
+ * kernel's early success (nothing crosses the boundary). ctime moves whenever
+ * either time does. An O_PATH descriptor is EBADF.
+ */
+enum {
+    PATINA_TIME_OMIT = 0,
+    PATINA_TIME_NOW = 1,
+    PATINA_TIME_SET = 2,
+};
+int32_t patina_utimensat(int32_t dirfd, const char *path, uint32_t flags, uint32_t atime_kind,
+                         uint64_t atime_nanos, uint32_t mtime_kind, uint64_t mtime_nanos);
+int32_t patina_futimens(int32_t fd, uint32_t atime_kind, uint64_t atime_nanos,
+                        uint32_t mtime_kind, uint64_t mtime_nanos);
+/*
+ * chown/lchown/fchownat on a (dirfd, path) (`flags` are PATINA_RESOLVE_*) and
+ * fchown on a descriptor. `uid`/`gid` are the kernel's uid_t/gid_t: UINT32_MAX
+ * is "unchanged". An id that is the modeled identity's or unchanged succeeds
+ * (killing the setuid bit, and the setgid bit of a group-executable file, on
+ * a non-directory, and moving ctime); any other id is the EPERM an
+ * unprivileged process gets. An O_PATH descriptor is EBADF.
+ */
+int32_t patina_chown(int32_t dirfd, const char *path, uint32_t flags, uint32_t uid, uint32_t gid);
+int32_t patina_fchown(int32_t fd, uint32_t uid, uint32_t gid);
+/*
+ * truncate(2): a regular file's length by name (a trailing symlink is
+ * followed): negative is EINVAL, a directory EISDIR, any other kind EINVAL,
+ * a file without `w` EACCES. fallocate(2) with the kernel's mode vocabulary
+ * (FALLOC_FL_*) and order of refusals; the range-shifting modes are
+ * EOPNOTSUPP.
+ */
+int32_t patina_truncate(int32_t dirfd, const char *path, int64_t length);
+int32_t patina_fallocate(int32_t fd, uint32_t mode, int64_t offset, int64_t length);
 /*
  * Change an entry's permission bits (chmod/fchmod/fchmodat). Without
  * PATINA_RESOLVE_NOFOLLOW a trailing symlink resolves and its TARGET changes

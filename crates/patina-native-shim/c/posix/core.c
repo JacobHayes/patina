@@ -57,6 +57,7 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/uio.h>
+#include <utime.h>
 #include <sys/utsname.h>
 
 #ifdef __linux__

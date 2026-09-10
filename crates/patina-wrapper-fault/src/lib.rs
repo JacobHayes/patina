@@ -1,8 +1,8 @@
 //! Deterministic fault injection around data-plane drivers.
 
 use patina_dst_abi::{
-    Datagram, EffectError, ErrorCode, Fd, FsDirectoryEntry, FsMetadata, OpenFlags, SeekWhence,
-    SendDisposition, SendReport, ShutdownHow, SocketId, TcpAccepted,
+    Datagram, EffectError, ErrorCode, Fd, FsClock, FsDirectoryEntry, FsMetadata, OpenFlags,
+    SeekWhence, SendDisposition, SendReport, ShutdownHow, SocketId, TcpAccepted,
 };
 use patina_dst_driver_api::{
     DriverResult, FsDriver, FsFaultOpKind, FsFaultReport, NetDriver, NetFaultReport, NetReadiness,
@@ -174,27 +174,27 @@ impl<D> FaultFs<D> {
 }
 
 impl<D: FsDriver> FsDriver for FaultFs<D> {
-    fn open(&mut self, path: &str, flags: OpenFlags) -> DriverResult<Fd> {
+    fn open(&mut self, clock: FsClock, path: &str, flags: OpenFlags) -> DriverResult<Fd> {
         if let Some(error) = self.maybe_error(FsFaultOp::Open {
             allocating: flags.create,
         }) {
             return Err(error);
         }
-        self.inner.open(path, flags)
+        self.inner.open(clock, path, flags)
     }
 
-    fn read(&mut self, fd: Fd, max_len: usize) -> DriverResult<Vec<u8>> {
+    fn read(&mut self, clock: FsClock, fd: Fd, max_len: usize) -> DriverResult<Vec<u8>> {
         let error = self.maybe_error(FsFaultOp::Read);
         let short = self.maybe_short_len(max_len);
         if let Some(error) = error {
             return Err(error);
         }
-        let bytes = self.inner.read(fd, short.unwrap_or(max_len))?;
+        let bytes = self.inner.read(clock, fd, short.unwrap_or(max_len))?;
         self.count_short_read(FsFaultOpKind::Read, short, &bytes);
         Ok(bytes)
     }
 
-    fn write(&mut self, fd: Fd, bytes: &[u8]) -> DriverResult<usize> {
+    fn write(&mut self, clock: FsClock, fd: Fd, bytes: &[u8]) -> DriverResult<usize> {
         let error = self.maybe_error(FsFaultOp::Write);
         let short = self.maybe_short_len(bytes.len());
         if let Some(error) = error {
@@ -202,31 +202,45 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         }
         let written = self
             .inner
-            .write(fd, &bytes[..short.unwrap_or(bytes.len())])?;
+            .write(clock, fd, &bytes[..short.unwrap_or(bytes.len())])?;
         self.count_short_write(FsFaultOpKind::Write, short);
         Ok(written)
     }
 
-    fn read_at(&mut self, fd: Fd, offset: u64, max_len: usize) -> DriverResult<Vec<u8>> {
+    fn read_at(
+        &mut self,
+        clock: FsClock,
+        fd: Fd,
+        offset: u64,
+        max_len: usize,
+    ) -> DriverResult<Vec<u8>> {
         let error = self.maybe_error(FsFaultOp::ReadAt);
         let short = self.maybe_short_len(max_len);
         if let Some(error) = error {
             return Err(error);
         }
-        let bytes = self.inner.read_at(fd, offset, short.unwrap_or(max_len))?;
+        let bytes = self
+            .inner
+            .read_at(clock, fd, offset, short.unwrap_or(max_len))?;
         self.count_short_read(FsFaultOpKind::ReadAt, short, &bytes);
         Ok(bytes)
     }
 
-    fn write_at(&mut self, fd: Fd, offset: u64, bytes: &[u8]) -> DriverResult<usize> {
+    fn write_at(
+        &mut self,
+        clock: FsClock,
+        fd: Fd,
+        offset: u64,
+        bytes: &[u8],
+    ) -> DriverResult<usize> {
         let error = self.maybe_error(FsFaultOp::WriteAt);
         let short = self.maybe_short_len(bytes.len());
         if let Some(error) = error {
             return Err(error);
         }
-        let written = self
-            .inner
-            .write_at(fd, offset, &bytes[..short.unwrap_or(bytes.len())])?;
+        let written =
+            self.inner
+                .write_at(clock, fd, offset, &bytes[..short.unwrap_or(bytes.len())])?;
         self.count_short_write(FsFaultOpKind::WriteAt, short);
         Ok(written)
     }
@@ -267,18 +281,18 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         self.inner.inode_metadata(ino)
     }
 
-    fn create_directory(&mut self, path: &str, mode: u32) -> DriverResult<()> {
+    fn create_directory(&mut self, clock: FsClock, path: &str, mode: u32) -> DriverResult<()> {
         if let Some(error) = self.maybe_error(FsFaultOp::CreateDirectory) {
             return Err(error);
         }
-        self.inner.create_directory(path, mode)
+        self.inner.create_directory(clock, path, mode)
     }
 
-    fn remove_file(&mut self, path: &str) -> DriverResult<()> {
+    fn remove_file(&mut self, clock: FsClock, path: &str) -> DriverResult<()> {
         if let Some(error) = self.maybe_error(FsFaultOp::RemoveFile) {
             return Err(error);
         }
-        self.inner.remove_file(path)
+        self.inner.remove_file(clock, path)
     }
 
     fn sync(&mut self, fd: Fd) -> DriverResult<()> {
@@ -288,15 +302,42 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         self.inner.sync(fd)
     }
 
-    fn set_len(&mut self, fd: Fd, len: u64) -> DriverResult<()> {
+    fn set_len(&mut self, clock: FsClock, fd: Fd, len: u64) -> DriverResult<()> {
         if let Some(error) = self.maybe_error(FsFaultOp::SetLen) {
             return Err(error);
         }
-        self.inner.set_len(fd, len)
+        self.inner.set_len(clock, fd, len)
+    }
+
+    /// The same truncation the descriptor form is, addressed by name — so it
+    /// draws from the same fault op.
+    fn set_len_by_path(&mut self, clock: FsClock, path: &str, len: u64) -> DriverResult<()> {
+        if let Some(error) = self.maybe_error(FsFaultOp::SetLen) {
+            return Err(error);
+        }
+        self.inner.set_len_by_path(clock, path, len)
+    }
+
+    /// A length/space change like `set_len` (it can consume space, so it can
+    /// fail `ENOSPC`), so it draws from the same fault op.
+    fn allocate(
+        &mut self,
+        clock: FsClock,
+        fd: Fd,
+        offset: u64,
+        len: u64,
+        zero: bool,
+        keep_size: bool,
+    ) -> DriverResult<()> {
+        if let Some(error) = self.maybe_error(FsFaultOp::SetLen) {
+            return Err(error);
+        }
+        self.inner.allocate(clock, fd, offset, len, zero, keep_size)
     }
 
     fn set_times(
         &mut self,
+        clock: FsClock,
         fd: Fd,
         atime_nanos: Option<u64>,
         mtime_nanos: Option<u64>,
@@ -304,11 +345,12 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         if let Some(error) = self.maybe_error(FsFaultOp::SetTimes) {
             return Err(error);
         }
-        self.inner.set_times(fd, atime_nanos, mtime_nanos)
+        self.inner.set_times(clock, fd, atime_nanos, mtime_nanos)
     }
 
     fn set_times_by_path(
         &mut self,
+        clock: FsClock,
         path: &str,
         atime_nanos: Option<u64>,
         mtime_nanos: Option<u64>,
@@ -316,83 +358,88 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         if let Some(error) = self.maybe_error(FsFaultOp::SetTimesByPath) {
             return Err(error);
         }
-        self.inner.set_times_by_path(path, atime_nanos, mtime_nanos)
+        self.inner
+            .set_times_by_path(clock, path, atime_nanos, mtime_nanos)
     }
 
-    fn read_directory(&mut self, path: &str) -> DriverResult<Vec<FsDirectoryEntry>> {
+    fn read_directory(
+        &mut self,
+        clock: FsClock,
+        path: &str,
+    ) -> DriverResult<Vec<FsDirectoryEntry>> {
         if let Some(error) = self.maybe_error(FsFaultOp::ReadDirectory) {
             return Err(error);
         }
-        self.inner.read_directory(path)
+        self.inner.read_directory(clock, path)
     }
 
     /// The same listing the path form is, addressed by descriptor — so it draws
     /// from the same fault op rather than becoming a directory read no injected
     /// failure can ever reach.
-    fn read_directory_fd(&mut self, fd: Fd) -> DriverResult<Vec<FsDirectoryEntry>> {
+    fn read_directory_fd(&mut self, clock: FsClock, fd: Fd) -> DriverResult<Vec<FsDirectoryEntry>> {
         if let Some(error) = self.maybe_error(FsFaultOp::ReadDirectory) {
             return Err(error);
         }
-        self.inner.read_directory_fd(fd)
+        self.inner.read_directory_fd(clock, fd)
     }
 
-    fn remove_directory(&mut self, path: &str) -> DriverResult<()> {
+    fn remove_directory(&mut self, clock: FsClock, path: &str) -> DriverResult<()> {
         if let Some(error) = self.maybe_error(FsFaultOp::RemoveDirectory) {
             return Err(error);
         }
-        self.inner.remove_directory(path)
+        self.inner.remove_directory(clock, path)
     }
 
-    fn rename(&mut self, from: &str, to: &str) -> DriverResult<()> {
+    fn rename(&mut self, clock: FsClock, from: &str, to: &str) -> DriverResult<()> {
         if let Some(error) = self.maybe_error(FsFaultOp::Rename) {
             return Err(error);
         }
-        self.inner.rename(from, to)
+        self.inner.rename(clock, from, to)
     }
 
-    fn link(&mut self, from: &str, to: &str) -> DriverResult<()> {
+    fn link(&mut self, clock: FsClock, from: &str, to: &str) -> DriverResult<()> {
         if let Some(error) = self.maybe_error(FsFaultOp::Link) {
             return Err(error);
         }
-        self.inner.link(from, to)
+        self.inner.link(clock, from, to)
     }
 
     /// Shares the namespace-creation fault kind with `create_directory`: both
     /// are "a new name appears in a directory", which is the failure the
     /// injector is modeling.
-    fn make_fifo(&mut self, path: &str, mode: u32) -> DriverResult<()> {
+    fn make_fifo(&mut self, clock: FsClock, path: &str, mode: u32) -> DriverResult<()> {
         if let Some(error) = self.maybe_error(FsFaultOp::CreateDirectory) {
             return Err(error);
         }
-        self.inner.make_fifo(path, mode)
+        self.inner.make_fifo(clock, path, mode)
     }
 
-    fn symlink(&mut self, target: &str, link_path: &str) -> DriverResult<()> {
+    fn symlink(&mut self, clock: FsClock, target: &str, link_path: &str) -> DriverResult<()> {
         if let Some(error) = self.maybe_error(FsFaultOp::Symlink) {
             return Err(error);
         }
-        self.inner.symlink(target, link_path)
+        self.inner.symlink(clock, target, link_path)
     }
 
-    fn read_link(&mut self, path: &str) -> DriverResult<String> {
+    fn read_link(&mut self, clock: FsClock, path: &str) -> DriverResult<String> {
         if let Some(error) = self.maybe_error(FsFaultOp::ReadLink) {
             return Err(error);
         }
-        self.inner.read_link(path)
+        self.inner.read_link(clock, path)
     }
 
-    fn set_mode(&mut self, path: &str, mode: u32) -> DriverResult<()> {
+    fn set_mode(&mut self, clock: FsClock, path: &str, mode: u32) -> DriverResult<()> {
         if let Some(error) = self.maybe_error(FsFaultOp::SetTimesByPath) {
             return Err(error);
         }
-        self.inner.set_mode(path, mode)
+        self.inner.set_mode(clock, path, mode)
     }
 
-    fn set_fd_mode(&mut self, fd: Fd, mode: u32) -> DriverResult<()> {
+    fn set_fd_mode(&mut self, clock: FsClock, fd: Fd, mode: u32) -> DriverResult<()> {
         if let Some(error) = self.maybe_error(FsFaultOp::SetTimes) {
             return Err(error);
         }
-        self.inner.set_fd_mode(fd, mode)
+        self.inner.set_fd_mode(clock, fd, mode)
     }
 
     /// Never fault-eligible: this is the name lookup inside a `*at` call, not a
@@ -400,11 +447,11 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
     /// say where a descriptor's inode lives.
     /// The same `fchmod` the descriptor form is, addressed by node — so it draws
     /// from the same fault op.
-    fn set_inode_mode(&mut self, ino: u64, mode: u32) -> DriverResult<()> {
+    fn set_inode_mode(&mut self, clock: FsClock, ino: u64, mode: u32) -> DriverResult<()> {
         if let Some(error) = self.maybe_error(FsFaultOp::SetTimes) {
             return Err(error);
         }
-        self.inner.set_inode_mode(ino, mode)
+        self.inner.set_inode_mode(clock, ino, mode)
     }
 
     /// Taking or dropping a node reference is the bookkeeping half of an open
@@ -770,7 +817,7 @@ mod tests {
     fn fs_with_open_file() -> (MemFs, Fd) {
         let mut fs = MemFs::new();
         let fd = fs
-            .open("/file", OpenFlags::create_truncate_write())
+            .open(FsClock::EPOCH, "/file", OpenFlags::create_truncate_write())
             .unwrap();
         (fs, fd)
     }
@@ -778,21 +825,21 @@ mod tests {
     fn short_write_len(seed: u64) -> usize {
         let (inner, fd) = fs_with_open_file();
         let mut fs = FaultFs::new(inner, seed).short_permille(1000);
-        fs.write(fd, b"abcdef").unwrap()
+        fs.write(FsClock::EPOCH, fd, b"abcdef").unwrap()
     }
 
     struct RestartSnapshotDriver;
 
     impl FsDriver for RestartSnapshotDriver {
-        fn open(&mut self, _path: &str, _flags: OpenFlags) -> DriverResult<Fd> {
+        fn open(&mut self, _clock: FsClock, _path: &str, _flags: OpenFlags) -> DriverResult<Fd> {
             Err(EffectError::new(ErrorCode::Denied, "unused"))
         }
 
-        fn read(&mut self, _fd: Fd, _max_len: usize) -> DriverResult<Vec<u8>> {
+        fn read(&mut self, _clock: FsClock, _fd: Fd, _max_len: usize) -> DriverResult<Vec<u8>> {
             Err(EffectError::new(ErrorCode::Denied, "unused"))
         }
 
-        fn write(&mut self, _fd: Fd, _bytes: &[u8]) -> DriverResult<usize> {
+        fn write(&mut self, _clock: FsClock, _fd: Fd, _bytes: &[u8]) -> DriverResult<usize> {
             Err(EffectError::new(ErrorCode::Denied, "unused"))
         }
 
@@ -831,7 +878,7 @@ mod tests {
         for seed in 0..256 {
             let (inner, fd) = fs_with_open_file();
             let mut fs = FaultFs::new(inner, seed).error_permille(1000);
-            let error = fs.write(fd, b"x").unwrap_err();
+            let error = fs.write(FsClock::EPOCH, fd, b"x").unwrap_err();
             seen.push(error.code);
         }
         assert!(seen.contains(&ErrorCode::Io), "seen={seen:?}");
@@ -927,6 +974,7 @@ mod tests {
         let mut inner = MemFs::new();
         let fd = inner
             .open(
+                FsClock::EPOCH,
                 "/file",
                 OpenFlags {
                     read: true,
@@ -940,14 +988,14 @@ mod tests {
                 },
             )
             .unwrap();
-        inner.write(fd, b"abcdef").unwrap();
+        inner.write(FsClock::EPOCH, fd, b"abcdef").unwrap();
         inner.seek(fd, 2, SeekWhence::Start).unwrap();
 
         let mut fs = FaultFs::new(inner, 3).short_permille(1000);
-        let positional = fs.read_at(fd, 0, 6).unwrap();
+        let positional = fs.read_at(FsClock::EPOCH, fd, 0, 6).unwrap();
         assert!(!positional.is_empty() && positional.len() < 6);
         let mut inner = fs.into_inner();
-        assert_eq!(inner.read(fd, 2).unwrap(), b"cd");
+        assert_eq!(inner.read(FsClock::EPOCH, fd, 2).unwrap(), b"cd");
     }
 
     #[test]
@@ -955,7 +1003,7 @@ mod tests {
         let (inner, fd) = fs_with_open_file();
         let mut fs = FaultFs::new(inner, 1).short_permille(1000);
         for _ in 0..5 {
-            let written = fs.write(fd, b"abcdef").unwrap();
+            let written = fs.write(FsClock::EPOCH, fd, b"abcdef").unwrap();
             assert!((1..6).contains(&written), "written={written}");
         }
         let report = fs.fault_report().unwrap();
@@ -983,25 +1031,31 @@ mod tests {
         // Errors fire before the inner filesystem is touched, so an empty MemFs
         // and a synthetic fd exercise every arm.
         let drive = |fs: &mut FaultFs<MemFs>, kind: FsFaultOpKind| match kind {
-            FsFaultOpKind::Open => fs.open("/f", OpenFlags::create_truncate_write()).err(),
-            FsFaultOpKind::Read => fs.read(fd, 8).err(),
-            FsFaultOpKind::Write => fs.write(fd, b"abcdef").err(),
-            FsFaultOpKind::ReadAt => fs.read_at(fd, 0, 8).err(),
-            FsFaultOpKind::WriteAt => fs.write_at(fd, 0, b"abcdef").err(),
+            FsFaultOpKind::Open => fs
+                .open(FsClock::EPOCH, "/f", OpenFlags::create_truncate_write())
+                .err(),
+            FsFaultOpKind::Read => fs.read(FsClock::EPOCH, fd, 8).err(),
+            FsFaultOpKind::Write => fs.write(FsClock::EPOCH, fd, b"abcdef").err(),
+            FsFaultOpKind::ReadAt => fs.read_at(FsClock::EPOCH, fd, 0, 8).err(),
+            FsFaultOpKind::WriteAt => fs.write_at(FsClock::EPOCH, fd, 0, b"abcdef").err(),
             FsFaultOpKind::Metadata => fs.metadata("/f").err(),
             FsFaultOpKind::FdMetadata => fs.fd_metadata(fd).err(),
-            FsFaultOpKind::CreateDirectory => fs.create_directory("/d", 0o777).err(),
-            FsFaultOpKind::RemoveFile => fs.remove_file("/f").err(),
+            FsFaultOpKind::CreateDirectory => {
+                fs.create_directory(FsClock::EPOCH, "/d", 0o777).err()
+            }
+            FsFaultOpKind::RemoveFile => fs.remove_file(FsClock::EPOCH, "/f").err(),
             FsFaultOpKind::Sync => fs.sync(fd).err(),
-            FsFaultOpKind::SetLen => fs.set_len(fd, 1).err(),
-            FsFaultOpKind::SetTimes => fs.set_times(fd, Some(1), Some(1)).err(),
-            FsFaultOpKind::SetTimesByPath => fs.set_times_by_path("/f", Some(1), Some(1)).err(),
-            FsFaultOpKind::ReadDirectory => fs.read_directory("/").err(),
-            FsFaultOpKind::RemoveDirectory => fs.remove_directory("/d").err(),
-            FsFaultOpKind::Rename => fs.rename("/f", "/g").err(),
-            FsFaultOpKind::Link => fs.link("/f", "/g").err(),
-            FsFaultOpKind::Symlink => fs.symlink("/f", "/g").err(),
-            FsFaultOpKind::ReadLink => fs.read_link("/f").err(),
+            FsFaultOpKind::SetLen => fs.set_len(FsClock::EPOCH, fd, 1).err(),
+            FsFaultOpKind::SetTimes => fs.set_times(FsClock::EPOCH, fd, Some(1), Some(1)).err(),
+            FsFaultOpKind::SetTimesByPath => fs
+                .set_times_by_path(FsClock::EPOCH, "/f", Some(1), Some(1))
+                .err(),
+            FsFaultOpKind::ReadDirectory => fs.read_directory(FsClock::EPOCH, "/").err(),
+            FsFaultOpKind::RemoveDirectory => fs.remove_directory(FsClock::EPOCH, "/d").err(),
+            FsFaultOpKind::Rename => fs.rename(FsClock::EPOCH, "/f", "/g").err(),
+            FsFaultOpKind::Link => fs.link(FsClock::EPOCH, "/f", "/g").err(),
+            FsFaultOpKind::Symlink => fs.symlink(FsClock::EPOCH, "/f", "/g").err(),
+            FsFaultOpKind::ReadLink => fs.read_link(FsClock::EPOCH, "/f").err(),
         };
 
         for kind in FsFaultOpKind::ALL {
@@ -1036,6 +1090,7 @@ mod tests {
         let mut inner = MemFs::new();
         let fd = inner
             .open(
+                FsClock::EPOCH,
                 "/file",
                 OpenFlags {
                     read: true,
@@ -1045,9 +1100,9 @@ mod tests {
             .unwrap();
         let mut fs = FaultFs::new(inner, 1).short_permille(1000);
         for _ in 0..4 {
-            fs.write(fd, b"abcdef").unwrap();
-            fs.write_at(fd, 0, b"abcdef").unwrap();
-            fs.read_at(fd, 0, 4).unwrap();
+            fs.write(FsClock::EPOCH, fd, b"abcdef").unwrap();
+            fs.write_at(FsClock::EPOCH, fd, 0, b"abcdef").unwrap();
+            fs.read_at(FsClock::EPOCH, fd, 0, 4).unwrap();
         }
         let report = fs.fault_report().unwrap();
         assert_eq!(report.shorts_by_op.total(), report.shorts_applied);
@@ -1072,7 +1127,7 @@ mod tests {
         let (inner, fd) = fs_with_open_file();
         let mut fs = FaultFs::new(inner, 1).short_permille(1);
         for _ in 0..10 {
-            assert_eq!(fs.write(fd, b"abcdef").unwrap(), 6);
+            assert_eq!(fs.write(FsClock::EPOCH, fd, b"abcdef").unwrap(), 6);
         }
         let report = fs.fault_report().unwrap();
         // Ten draws at one per-mille expect 0.01 fires: zero applied shorts is
@@ -1087,6 +1142,7 @@ mod tests {
         let mut inner = MemFs::new();
         let fd = inner
             .open(
+                FsClock::EPOCH,
                 "/file",
                 OpenFlags {
                     read: true,
@@ -1100,14 +1156,14 @@ mod tests {
                 },
             )
             .unwrap();
-        inner.write(fd, b"abcdef").unwrap();
+        inner.write(FsClock::EPOCH, fd, b"abcdef").unwrap();
 
         // A guest reading into a buffer far larger than the file has left never
         // observes the truncation, so the knob is inert on this I/O path however
         // often it fires — the silent-inertness signature the report exists for.
         let mut fs = FaultFs::new(inner, 1).short_permille(1000);
         for _ in 0..5 {
-            assert_eq!(fs.read_at(fd, 0, 8192).unwrap(), b"abcdef");
+            assert_eq!(fs.read_at(FsClock::EPOCH, fd, 0, 8192).unwrap(), b"abcdef");
         }
         let report = fs.fault_report().unwrap();
         assert!(report.short_vacuity_diagnosable);

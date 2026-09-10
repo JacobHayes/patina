@@ -74,7 +74,17 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   through interposed `chmod`/`fchmod`/`fchmodat` as recorded boundary operations,
   and are ENFORCED against the one non-root identity the runtime models. A
   fabricated constant is not a neutral default — it is an answer the guest will
-  act on. The remaining synthesized fields (owner, device numbers) are the same
+  act on. The owner and the timestamps followed: `st_uid`/`st_gid` are the ONE
+  modeled identity read through one accessor (`patina_uid`/`patina_gid`, the
+  same value `getuid` answers), never a per-entry field, and `chown` is a
+  comparison against it (its own ids or -1 succeed, with the kernel's
+  setuid/setgid kill and a `ctime` move through the one mode entry; anything
+  else is `EPERM`); every entry carries atime/mtime/ctime/btime stamped by the
+  kernel's rules from the virtual clock the runtime hands each driver operation
+  (`FsClock`, read unrecorded — the value is a function of the recorded sleeps,
+  so replay reproduces it without a second trace op per fs call), and
+  `UTIME_NOW` resolves to that same instant before it crosses the boundary. The
+  remaining synthesized fields (device numbers, the statx mount id) are the same
   hazard waiting for the guest that reads them.
 - An ARGUMENT the guest supplied is not a synthesized field's smaller cousin —
   dropping it is the same bug. Every creating call carries its mode across the

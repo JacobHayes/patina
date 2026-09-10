@@ -16,6 +16,27 @@ pub const AT_FDCWD: i32 = libc::AT_FDCWD;
 /// A libc spelling of a row, registered by the one probe that links it.
 pub type LibcSpelling = fn(Args) -> i64;
 
+/// One time argument of the `utimensat` family.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimeArg {
+    /// An explicit `(tv_sec, tv_nsec)`.
+    Set(i64, i64),
+    /// `UTIME_NOW`.
+    Now,
+    /// `UTIME_OMIT`.
+    Omit,
+}
+
+impl TimeArg {
+    fn label(self) -> String {
+        match self {
+            TimeArg::Set(sec, nsec) => format!("{sec}.{nsec:09}"),
+            TimeArg::Now => "UTIME_NOW".to_string(),
+            TimeArg::Omit => "UTIME_OMIT".to_string(),
+        }
+    }
+}
+
 /// A negative errno in the kernel convention.
 pub fn neg(errno: i32) -> i64 {
     -(errno as i64)
@@ -42,8 +63,14 @@ pub struct StatView {
     pub uid: u32,
     pub gid: u32,
     pub ino: u64,
+    /// The timestamps, for the probe's own relation checks; never recorded
+    /// as fields (absolute times are the host's business, and no
+    /// normalization relates two entries' times).
+    pub atime_ns: i128,
     pub mtime_ns: i128,
     pub ctime_ns: i128,
+    /// `statx` only: the birth time when the mask reports one.
+    pub btime_ns: Option<i128>,
 }
 
 fn kind_of(mode: u32) -> &'static str {
@@ -284,8 +311,10 @@ impl Probe {
             uid: st.st_uid,
             gid: st.st_gid,
             ino: st.st_ino,
+            atime_ns: st.st_atime as i128 * 1_000_000_000 + st.st_atime_nsec as i128,
             mtime_ns: st.st_mtime as i128 * 1_000_000_000 + st.st_mtime_nsec as i128,
             ctime_ns: st.st_ctime as i128 * 1_000_000_000 + st.st_ctime_nsec as i128,
+            btime_ns: None,
         }
     }
 
@@ -363,8 +392,12 @@ impl Probe {
             uid: stx.stx_uid,
             gid: stx.stx_gid,
             ino: stx.stx_ino,
+            atime_ns: stx.stx_atime.tv_sec as i128 * 1_000_000_000 + stx.stx_atime.tv_nsec as i128,
             mtime_ns: stx.stx_mtime.tv_sec as i128 * 1_000_000_000 + stx.stx_mtime.tv_nsec as i128,
             ctime_ns: stx.stx_ctime.tv_sec as i128 * 1_000_000_000 + stx.stx_ctime.tv_nsec as i128,
+            btime_ns: (stx.stx_mask & libc::STATX_BTIME != 0).then(|| {
+                stx.stx_btime.tv_sec as i128 * 1_000_000_000 + stx.stx_btime.tv_nsec as i128
+            }),
         });
         let builder = self.event(Sys::Statx, result);
         let builder = self
@@ -1375,6 +1408,286 @@ impl Probe {
             .arg("path", path)
             .arg("mode", mode)
             .arg("dev", dev)
+            .emit();
+        result
+    }
+
+    // ---- timestamps, ownership, sizes ----------------------------------------
+
+    /// One `utimensat` time argument: `Set(sec, nsec)`, `Now` (`UTIME_NOW`),
+    /// or `Omit` (`UTIME_OMIT`). Recorded by name so a stream says what was
+    /// asked without an absolute value.
+    fn timespec_of(time: TimeArg) -> libc::timespec {
+        match time {
+            TimeArg::Set(sec, nsec) => libc::timespec {
+                tv_sec: sec,
+                tv_nsec: nsec,
+            },
+            TimeArg::Now => libc::timespec {
+                tv_sec: 0,
+                tv_nsec: libc::UTIME_NOW,
+            },
+            TimeArg::Omit => libc::timespec {
+                tv_sec: 0,
+                tv_nsec: libc::UTIME_OMIT,
+            },
+        }
+    }
+
+    fn time_args<'a>(
+        &self,
+        builder: EventBuilder<'a>,
+        times: Option<[TimeArg; 2]>,
+    ) -> EventBuilder<'a> {
+        match times {
+            None => builder.arg("times", "NULL"),
+            Some([atime, mtime]) => builder
+                .arg("atime", atime.label())
+                .arg("mtime", mtime.label()),
+        }
+    }
+
+    /// `utimensat`; a `None` path is the `futimens` shape (the descriptor's
+    /// own times), a `None` times pointer sets both to now.
+    pub fn utimensat(
+        &self,
+        dirfd: i32,
+        path: Option<&str>,
+        times: Option<[TimeArg; 2]>,
+        flags: i32,
+    ) -> i64 {
+        let c = path.map(cstr);
+        let spec = times.map(|[a, m]| [Self::timespec_of(a), Self::timespec_of(m)]);
+        let result = self.call(
+            Sys::Utimensat,
+            [
+                dirfd as i64,
+                c.as_ref().map_or(0, |c| c.as_ptr() as i64),
+                spec.as_ref().map_or(0, |s| s.as_ptr() as i64),
+                flags as i64,
+                0,
+                0,
+            ],
+        );
+        let builder = self.event(Sys::Utimensat, result);
+        let builder = self
+            .fd_arg(builder, "dirfd", dirfd)
+            .arg("path", path.unwrap_or("NULL"))
+            .arg("flags", flags);
+        self.time_args(builder, times).emit();
+        result
+    }
+
+    /// `utime(2)`: whole seconds, or `None` for now/now.
+    pub fn utime(&self, path: &str, times: Option<(i64, i64)>) -> i64 {
+        let c = cstr(path);
+        let buf = times.map(|(actime, modtime)| libc::utimbuf { actime, modtime });
+        let result = self.call(
+            Sys::Utime,
+            [
+                c.as_ptr() as i64,
+                buf.as_ref().map_or(0, |b| b as *const libc::utimbuf as i64),
+                0,
+                0,
+                0,
+                0,
+            ],
+        );
+        let builder = self.event(Sys::Utime, result).arg("path", path);
+        let builder = match times {
+            None => builder.arg("times", "NULL"),
+            Some((actime, modtime)) => builder.arg("actime", actime).arg("modtime", modtime),
+        };
+        builder.emit();
+        result
+    }
+
+    fn timeval_pair(times: Option<[(i64, i64); 2]>) -> Option<[libc::timeval; 2]> {
+        times.map(|[(asec, ausec), (msec, musec)]| {
+            [
+                libc::timeval {
+                    tv_sec: asec,
+                    tv_usec: ausec,
+                },
+                libc::timeval {
+                    tv_sec: msec,
+                    tv_usec: musec,
+                },
+            ]
+        })
+    }
+
+    fn timeval_args<'a>(
+        &self,
+        builder: EventBuilder<'a>,
+        times: Option<[(i64, i64); 2]>,
+    ) -> EventBuilder<'a> {
+        match times {
+            None => builder.arg("times", "NULL"),
+            Some([(asec, ausec), (msec, musec)]) => builder
+                .arg("atime", format!("{asec}.{ausec:06}"))
+                .arg("mtime", format!("{msec}.{musec:06}")),
+        }
+    }
+
+    /// `utimes(2)`: microsecond times, or `None` for now/now.
+    pub fn utimes(&self, path: &str, times: Option<[(i64, i64); 2]>) -> i64 {
+        let c = cstr(path);
+        let tv = Self::timeval_pair(times);
+        let result = self.call(
+            Sys::Utimes,
+            [
+                c.as_ptr() as i64,
+                tv.as_ref().map_or(0, |t| t.as_ptr() as i64),
+                0,
+                0,
+                0,
+                0,
+            ],
+        );
+        let builder = self.event(Sys::Utimes, result).arg("path", path);
+        self.timeval_args(builder, times).emit();
+        result
+    }
+
+    /// `futimesat(2)`: `utimes` with a dirfd.
+    pub fn futimesat(&self, dirfd: i32, path: &str, times: Option<[(i64, i64); 2]>) -> i64 {
+        let c = cstr(path);
+        let tv = Self::timeval_pair(times);
+        let result = self.call(
+            Sys::Futimesat,
+            [
+                dirfd as i64,
+                c.as_ptr() as i64,
+                tv.as_ref().map_or(0, |t| t.as_ptr() as i64),
+                0,
+                0,
+                0,
+            ],
+        );
+        let builder = self.event(Sys::Futimesat, result);
+        let builder = self.fd_arg(builder, "dirfd", dirfd).arg("path", path);
+        self.timeval_args(builder, times).emit();
+        result
+    }
+
+    fn id_arg<'a>(&self, builder: EventBuilder<'a>, key: &str, id: u32) -> EventBuilder<'a> {
+        if id == u32::MAX {
+            builder.arg(key, "-1")
+        } else {
+            builder
+                .arg(key, id)
+                .norm(&format!("args.{key}"), Norm::Identity)
+        }
+    }
+
+    /// `chown`/`lchown` (x86_64 legacy rows): `u32::MAX` is `-1`.
+    pub fn chown(&self, path: &str, uid: u32, gid: u32, follow: bool) -> i64 {
+        let sys = if follow { Sys::Chown } else { Sys::Lchown };
+        let c = cstr(path);
+        let result = self.call(sys, [c.as_ptr() as i64, uid as i64, gid as i64, 0, 0, 0]);
+        let builder = self.event(sys, result).arg("path", path);
+        let builder = self.id_arg(builder, "uid", uid);
+        self.id_arg(builder, "gid", gid).emit();
+        result
+    }
+
+    pub fn fchown(&self, fd: i32, uid: u32, gid: u32) -> i64 {
+        let result = self.call(Sys::Fchown, [fd as i64, uid as i64, gid as i64, 0, 0, 0]);
+        let builder = self.event(Sys::Fchown, result);
+        let builder = self.fd_arg(builder, "fd", fd);
+        let builder = self.id_arg(builder, "uid", uid);
+        self.id_arg(builder, "gid", gid).emit();
+        result
+    }
+
+    pub fn fchownat(&self, dirfd: i32, path: &str, uid: u32, gid: u32, flags: i32) -> i64 {
+        let c = cstr(path);
+        let result = self.call(
+            Sys::Fchownat,
+            [
+                dirfd as i64,
+                c.as_ptr() as i64,
+                uid as i64,
+                gid as i64,
+                flags as i64,
+                0,
+            ],
+        );
+        let builder = self.event(Sys::Fchownat, result);
+        let builder = self
+            .fd_arg(builder, "dirfd", dirfd)
+            .arg("path", path)
+            .arg("flags", flags);
+        let builder = self.id_arg(builder, "uid", uid);
+        self.id_arg(builder, "gid", gid).emit();
+        result
+    }
+
+    /// `access` (x86_64 legacy row).
+    pub fn access(&self, path: &str, mode: i32) -> i64 {
+        let c = cstr(path);
+        let result = self.call(Sys::Access, [c.as_ptr() as i64, mode as i64, 0, 0, 0, 0]);
+        self.event(Sys::Access, result)
+            .arg("path", path)
+            .arg("mode", mode)
+            .emit();
+        result
+    }
+
+    /// `faccessat` (`flagged`: the `faccessat2` row, the only one that carries
+    /// flags to the kernel).
+    pub fn faccessat(&self, dirfd: i32, path: &str, mode: i32, flags: i32, flagged: bool) -> i64 {
+        let sys = if flagged {
+            Sys::Faccessat2
+        } else {
+            Sys::Faccessat
+        };
+        let c = cstr(path);
+        let result = self.call(
+            sys,
+            [
+                dirfd as i64,
+                c.as_ptr() as i64,
+                mode as i64,
+                flags as i64,
+                0,
+                0,
+            ],
+        );
+        let builder = self.event(sys, result);
+        self.fd_arg(builder, "dirfd", dirfd)
+            .arg("path", path)
+            .arg("mode", mode)
+            .arg("flags", flags)
+            .emit();
+        result
+    }
+
+    pub fn truncate(&self, path: &str, len: i64) -> i64 {
+        let c = cstr(path);
+        let result = self.call(Sys::Truncate, [c.as_ptr() as i64, len, 0, 0, 0, 0]);
+        self.event(Sys::Truncate, result)
+            .arg("path", path)
+            .arg("len", len)
+            .emit();
+        result
+    }
+
+    pub fn ftruncate(&self, fd: i32, len: i64) -> i64 {
+        let result = self.call(Sys::Ftruncate, [fd as i64, len, 0, 0, 0, 0]);
+        let builder = self.event(Sys::Ftruncate, result);
+        self.fd_arg(builder, "fd", fd).arg("len", len).emit();
+        result
+    }
+
+    pub fn fallocate(&self, fd: i32, mode: i32, offset: i64, len: i64) -> i64 {
+        let result = self.call(Sys::Fallocate, [fd as i64, mode as i64, offset, len, 0, 0]);
+        let builder = self.event(Sys::Fallocate, result);
+        self.fd_arg(builder, "fd", fd)
+            .arg("mode", mode)
+            .arg("offset", offset)
+            .arg("len", len)
             .emit();
         result
     }

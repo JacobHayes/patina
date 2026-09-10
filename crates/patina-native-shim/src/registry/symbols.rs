@@ -484,14 +484,16 @@ pub const SYMBOLS: &[SymbolRow] = &[
         "access",
         Platform::Both,
         Serves::Syscalls(&["access", "faccessat"]),
-        SymbolStatus::Partial,
-    ),
+        SymbolStatus::Modeled,
+    )
+    .probe("fs/owner"),
     s(
         "faccessat",
         Platform::Both,
         Serves::Syscalls(&["faccessat", "faccessat2"]),
-        SymbolStatus::Partial,
-    ),
+        SymbolStatus::Modeled,
+    )
+    .probe("fs/owner"),
     s(
         "mkdir",
         Platform::Both,
@@ -2006,7 +2008,7 @@ pub const SYMBOLS: &[SymbolRow] = &[
         "fallocate64",
         Platform::Linux,
         Serves::Syscalls(&["fallocate"]),
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
     s(
         "statvfs64",
@@ -2048,8 +2050,9 @@ pub const SYMBOLS: &[SymbolRow] = &[
         "fallocate",
         Platform::Linux,
         Serves::Syscalls(&["fallocate"]),
-        SymbolStatus::Absent,
-    ),
+        SymbolStatus::Modeled,
+    )
+    .probe("fs/size"),
     s(
         "posix_fadvise",
         Platform::Linux,
@@ -2088,46 +2091,104 @@ pub const SYMBOLS: &[SymbolRow] = &[
     ),
     s(
         "fchown",
-        Platform::Linux,
+        Platform::Both,
         Serves::Syscalls(&["fchown"]),
-        SymbolStatus::Absent,
-    ),
+        SymbolStatus::Modeled,
+    )
+    .probe("fs/owner"),
     s(
         "chown",
-        Platform::Linux,
+        Platform::Both,
         Serves::Syscalls(&["chown"]),
-        SymbolStatus::Absent,
-    ),
+        SymbolStatus::Modeled,
+    )
+    .probe("fs/owner"),
     s(
         "lchown",
-        Platform::Linux,
+        Platform::Both,
         Serves::Syscalls(&["lchown"]),
-        SymbolStatus::Absent,
-    ),
+        SymbolStatus::Modeled,
+    )
+    .probe("fs/owner"),
     s(
         "utimes",
-        Platform::Linux,
+        Platform::Both,
         Serves::Syscalls(&["utimes"]),
-        SymbolStatus::Absent,
-    ),
+        SymbolStatus::Modeled,
+    )
+    .probe("fs/times"),
     s(
         "utimensat",
-        Platform::Linux,
+        Platform::Both,
         Serves::Syscalls(&["utimensat"]),
-        SymbolStatus::Absent,
-    ),
+        SymbolStatus::Modeled,
+    )
+    .probe("fs/times"),
     s(
         "futimens",
-        Platform::Linux,
+        Platform::Both,
         Serves::Syscalls(&["utimensat"]),
-        SymbolStatus::Absent,
-    ),
+        SymbolStatus::Modeled,
+    )
+    .probe("fs/times"),
     s(
         "truncate",
+        Platform::Both,
+        Serves::Syscalls(&["truncate"]),
+        SymbolStatus::Modeled,
+    )
+    .probe("fs/size"),
+    s(
+        "truncate64",
         Platform::Linux,
         Serves::Syscalls(&["truncate"]),
-        SymbolStatus::Absent,
+        SymbolStatus::Modeled,
     ),
+    s(
+        "posix_fallocate",
+        Platform::Linux,
+        Serves::Syscalls(&["fallocate"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "posix_fallocate64",
+        Platform::Linux,
+        Serves::Syscalls(&["fallocate"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "fchownat",
+        Platform::Both,
+        Serves::Syscalls(&["fchownat"]),
+        SymbolStatus::Modeled,
+    )
+    .probe("fs/owner"),
+    s(
+        "utime",
+        Platform::Both,
+        Serves::Syscalls(&["utime"]),
+        SymbolStatus::Modeled,
+    )
+    .probe("fs/times"),
+    s(
+        "lutimes",
+        Platform::Both,
+        Serves::Syscalls(&["utimensat"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "futimes",
+        Platform::Both,
+        Serves::Syscalls(&["utimensat"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "futimesat",
+        Platform::Linux,
+        Serves::Syscalls(&["futimesat"]),
+        SymbolStatus::Modeled,
+    )
+    .probe("fs/times"),
     s(
         "sigprocmask",
         Platform::Linux,
