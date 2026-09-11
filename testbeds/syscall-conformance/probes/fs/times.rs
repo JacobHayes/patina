@@ -395,6 +395,118 @@ mod scenario {
                 && link_after.ctime_ns == link_times.ctime_ns,
         );
 
+        // Class pairing: zero-transfer effects and inode-addressed timestamps.
+        pause(p);
+        let before = fstat(p, fd);
+        p.lseek(fd, 100, SEEK_SET);
+        p.check("zero read past EOF", p.read(fd, 0).0 == 0);
+        p.check("zero write past EOF", p.write(fd, b"") == 0);
+        let after = fstat(p, fd);
+        p.check(
+            "zero I/O stamps nothing and never grows",
+            after.size == before.size
+                && after.atime_ns == before.atime_ns
+                && after.mtime_ns == before.mtime_ns
+                && after.ctime_ns == before.ctime_ns,
+        );
+        p.check("zero I/O preserves cursor", p.lseek(fd, 0, SEEK_CUR) == 100);
+        p.check("truncate below cursor", p.ftruncate(fd, 0) == 0);
+        p.check("read past truncated EOF", p.read(fd, 1).0 == 0);
+        p.check("EOF read preserves cursor", p.lseek(fd, 0, SEEK_CUR) == 100);
+        for flags in [0, 1] {
+            p.check(
+                "OMIT ignores missing path and flags",
+                p.utimensat(
+                    AT_FDCWD,
+                    Some(&format!("{root}/missing")),
+                    Some([TimeArg::Omit, TimeArg::Omit]),
+                    flags,
+                ) == 0,
+            );
+        }
+        p.check(
+            "OMIT ignores closed fd",
+            p.utimensat(4000, None, Some([TimeArg::Omit, TimeArg::Omit]), 0) == 0,
+        );
+        let location = p.openat(AT_FDCWD, &file, O_PATH, 0);
+        p.require("open timestamp location", location >= 0);
+        p.check(
+            "utimensat AT_EMPTY_PATH on O_PATH",
+            p.utimensat(
+                location,
+                Some(""),
+                Some([TimeArg::Set(21, 3), TimeArg::Set(22, 4)]),
+                AT_EMPTY_PATH,
+            ) == 0,
+        );
+        let after = fstat(p, fd);
+        p.check(
+            "empty path reached the inode",
+            after.atime_ns == 21 * SEC + 3 && after.mtime_ns == 22 * SEC + 4,
+        );
+        p.close(location);
+        let fifo = format!("{root}/fifo-times");
+        p.require(
+            "create FIFO for timestamps",
+            p.mknodat(AT_FDCWD, &fifo, S_IFIFO | 0o600, 0) == 0,
+        );
+        let pipe = p.openat(AT_FDCWD, &fifo, O_RDWR, 0);
+        p.require("open FIFO for timestamps", pipe >= 0);
+        for unlinked in [false, true] {
+            if unlinked {
+                p.unlinkat(AT_FDCWD, &fifo, 0);
+            }
+            p.check(
+                "futimens reaches retained FIFO",
+                p.utimensat(
+                    pipe,
+                    None,
+                    Some([TimeArg::Set(23, 5), TimeArg::Set(24, 6)]),
+                    0,
+                ) == 0,
+            );
+            let after = fstat(p, pipe);
+            p.check(
+                "FIFO times landed",
+                after.atime_ns == 23 * SEC + 5 && after.mtime_ns == 24 * SEC + 6,
+            );
+        }
+        p.close(pipe);
+        // Linux accepts and clamps to its filesystem range; Patina's unsigned
+        // nanosecond ABI explicitly refuses unrepresentable values (registry gap).
+        let overflow = 18_446_744_074;
+        for spelling in 0..3 {
+            let r = match spelling {
+                0 => p.utimensat(
+                    fd,
+                    None,
+                    Some([TimeArg::Set(overflow, 0), TimeArg::Set(overflow, 0)]),
+                    0,
+                ),
+                1 => p.utimes(&file, Some([(overflow, 0), (overflow, 0)])),
+                _ => p.utime(&file, Some((overflow, overflow))),
+            };
+            let after = fstat(p, fd);
+            p.check(
+                "time overflow is refused or clamped, never wrapped",
+                r == neg(EINVAL) || (r == 0 && after.mtime_ns > 10_000_000_000_000_000_000),
+            );
+        }
+        // Exercise the literal libc symbol too: the adapter above intentionally
+        // spells a null-path request as futimens, which cannot detect this split.
+        let literal_ok = if p.vehicle == syscall_conformance::vehicle::Vehicle::Libc {
+            let r = unsafe { libc::utimensat(fd, std::ptr::null(), std::ptr::null(), 0) };
+            r == -1 && std::io::Error::last_os_error().raw_os_error() == Some(EINVAL)
+        } else {
+            p.vehicle.call(
+                syscall_conformance::vehicle::Sys::Utimensat,
+                [fd as i64, 0, 0, 0, 0, 0],
+            ) == 0
+        };
+        p.check(
+            "literal null path preserves libc versus kernel contract",
+            literal_ok,
+        );
         p.close(inner);
         p.close(dirfd);
         p.close(fd);

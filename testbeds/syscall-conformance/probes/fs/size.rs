@@ -240,6 +240,40 @@ mod scenario {
             p.fallocate(4000, 0, 0, 1) == neg(EBADF),
         );
 
+        p.check(
+            "fallocate overflow is EFBIG",
+            p.fallocate(fd, FALLOC_FL_KEEP_SIZE, i64::MAX, 1) == neg(EFBIG),
+        );
+        let reserved = p.openat(
+            AT_FDCWD,
+            &format!("{root}/reserved"),
+            O_RDWR | O_CREAT | O_EXCL,
+            0o600,
+        );
+        p.require("open allocation inventory", reserved >= 0);
+        p.check(
+            "reserve without size growth",
+            p.fallocate(reserved, FALLOC_FL_KEEP_SIZE, 0, 4096) == 0,
+        );
+        // A claimed BLOCKS field must reflect allocation, not logical length.
+        let mut sx: libc::statx = unsafe { std::mem::zeroed() };
+        let empty = b"\0";
+        let r = p.vehicle.call(
+            syscall_conformance::vehicle::Sys::Statx,
+            [
+                reserved as i64,
+                empty.as_ptr() as i64,
+                AT_EMPTY_PATH as i64,
+                STATX_BASIC_STATS as i64,
+                &mut sx as *mut _ as i64,
+                0,
+            ],
+        );
+        p.check(
+            "statx either models reservations or omits BLOCKS",
+            r == 0 && (sx.stx_mask & STATX_BLOCKS == 0 || sx.stx_blocks > 0),
+        );
+        p.close(reserved);
         p.close(pipe[0]);
         p.close(pipe[1]);
         p.close(location);

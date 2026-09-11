@@ -14,11 +14,17 @@ pub trait FsDriver: Send {
     /// `open(2)`. `clock` stamps a created entry's four timestamps (and its
     /// parent directory's `mtime`/`ctime`) and an `O_TRUNC`'d file's
     /// `mtime`/`ctime`; an open of an existing entry touches no time.
-    fn open(&mut self, clock: FsClock, path: &str, flags: OpenFlags) -> DriverResult<Fd>;
+    fn open(&mut self, _clock: FsClock, _path: &str, _flags: OpenFlags) -> DriverResult<Fd> {
+        Err(unsupported_filesystem_operation("open"))
+    }
     /// A cursor read. Updates `atime` under the clock's [`patina_dst_abi::AtimePolicy`].
-    fn read(&mut self, clock: FsClock, fd: Fd, max_len: usize) -> DriverResult<Vec<u8>>;
+    fn read(&mut self, _clock: FsClock, _fd: Fd, _max_len: usize) -> DriverResult<Vec<u8>> {
+        Err(unsupported_filesystem_operation("read"))
+    }
     /// A cursor write. Stamps `mtime` and `ctime`.
-    fn write(&mut self, clock: FsClock, fd: Fd, bytes: &[u8]) -> DriverResult<usize>;
+    fn write(&mut self, _clock: FsClock, _fd: Fd, _bytes: &[u8]) -> DriverResult<usize> {
+        Err(unsupported_filesystem_operation("write"))
+    }
     /// Positional read: read up to `max_len` bytes starting at `offset` WITHOUT
     /// disturbing the shared file cursor (the `pread`/`read_at` contract).
     ///
@@ -63,7 +69,9 @@ pub trait FsDriver: Send {
         let restored = self.seek(fd, checked_offset(saved)?, SeekWhence::Start);
         result.and_then(|written| restored.map(|_| written))
     }
-    fn close(&mut self, fd: Fd) -> DriverResult<()>;
+    fn close(&mut self, _fd: Fd) -> DriverResult<()> {
+        Err(unsupported_filesystem_operation("close"))
+    }
     fn seek(&mut self, _fd: Fd, _offset: i64, _whence: SeekWhence) -> DriverResult<u64> {
         Err(unsupported_filesystem_operation("seek"))
     }
@@ -142,6 +150,16 @@ pub trait FsDriver: Send {
         _mtime_nanos: Option<u64>,
     ) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("set times"))
+    }
+    /// Timestamp update through a retained inode (for FIFO endpoints).
+    fn set_inode_times(
+        &mut self,
+        _clock: FsClock,
+        _ino: u64,
+        _atime_nanos: Option<u64>,
+        _mtime_nanos: Option<u64>,
+    ) -> DriverResult<()> {
+        Err(unsupported_filesystem_operation("set inode times"))
     }
     fn set_times_by_path(
         &mut self,

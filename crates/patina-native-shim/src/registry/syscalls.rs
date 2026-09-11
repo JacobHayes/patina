@@ -908,7 +908,7 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Some(55),
         Family::Fs,
         Disposition::Modeled,
-        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_fchown`): a comparison against the one modeled identity — its own ids or -1 succeed (killing the setuid/setgid bits on a non-directory and moving `ctime`), any other id is `EPERM`.",
+        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_fchown`): a comparison against the one modeled identity — its own ids or -1 succeed (killing the setuid/setgid bits on a non-directory and moving `ctime`), any other id is `EPERM`. FIFO endpoints mutate retained inode metadata even after unlink; anonymous descriptors without modeled filesystem inodes refuse loudly (ENOSYS), a named remaining gap.",
         None,
     )
     .probe("fs/owner"),
@@ -1265,7 +1265,7 @@ pub const SYSCALLS: &[SyscallRow] = &[
         None,
         Family::Fs,
         Disposition::Modeled,
-        "x86_64 legacy alias: whole-second times onto the same `patina_utimensat` entry as `utimensat`.",
+        "x86_64 legacy alias: whole-second times onto the same `patina_utimensat` entry as `utimensat`. Gap: unsigned-nanosecond timestamps refuse pre-epoch and overflowing seconds with EINVAL (Linux may clamp wide positive times); NOW samples after modeled latency, OMIT/OMIT skips resolution, and AT_EMPTY_PATH reaches retained inodes.",
         None,
     )
     .probe("fs/times"),
@@ -2199,7 +2199,7 @@ pub const SYSCALLS: &[SyscallRow] = &[
         None,
         Family::Fs,
         Disposition::Modeled,
-        "x86_64 legacy alias: microsecond times onto the same `patina_utimensat` entry as `utimensat`.",
+        "x86_64 legacy alias: microsecond times onto the same `patina_utimensat` entry as `utimensat`. Gap: unsigned-nanosecond timestamps refuse pre-epoch and overflowing seconds with EINVAL (Linux may clamp wide positive times); NOW samples after modeled latency, OMIT/OMIT skips resolution, and AT_EMPTY_PATH reaches retained inodes.",
         None,
     )
     .probe("fs/times"),
@@ -2439,7 +2439,7 @@ pub const SYSCALLS: &[SyscallRow] = &[
         None,
         Family::Fs,
         Disposition::Modeled,
-        "x86_64 legacy alias: microsecond times with a dirfd onto the same `patina_utimensat` entry as `utimensat` (a null path names the descriptor).",
+        "x86_64 legacy alias: microsecond times with a dirfd onto the same `patina_utimensat` entry as `utimensat` (a null path names the descriptor). Gap: unsigned-nanosecond timestamps refuse pre-epoch and overflowing seconds with EINVAL (Linux may clamp wide positive times); NOW samples after modeled latency, OMIT/OMIT skips resolution, and AT_EMPTY_PATH reaches retained inodes.",
         None,
     )
     .probe("fs/times"),
@@ -2626,7 +2626,7 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Some(88),
         Family::Fs,
         Disposition::Modeled,
-        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_utimensat`/`patina_futimens`, through the one path resolver): UTIME_NOW resolves to the virtual clock, UTIME_OMIT leaves a time alone, both OMIT is the kernel's early success, `ctime` moves with either time; AT_SYMLINK_NOFOLLOW honored, other flags EINVAL, a null path names the descriptor.",
+        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_utimensat`/`patina_futimens`, through the one path resolver): UTIME_NOW resolves to the virtual clock, UTIME_OMIT leaves a time alone, both OMIT is the kernel's early success, `ctime` moves with either time; AT_SYMLINK_NOFOLLOW honored, other flags EINVAL, a null path names the descriptor. Gap: unsigned-nanosecond timestamps refuse pre-epoch and overflowing seconds with EINVAL (Linux may clamp wide positive times); NOW samples after modeled latency, OMIT/OMIT skips resolution, and AT_EMPTY_PATH reaches retained inodes. FIFO endpoints mutate retained inode metadata even after unlink; anonymous descriptors without modeled filesystem inodes refuse loudly (ENOSYS), a named remaining gap.",
         None,
     )
     .probe("fs/times"),
@@ -2672,7 +2672,7 @@ pub const SYSCALLS: &[SyscallRow] = &[
         Some(47),
         Family::Fs,
         Disposition::Modeled,
-        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_fallocate`): mode 0 and KEEP_SIZE reserve, PUNCH_HOLE|KEEP_SIZE and ZERO_RANGE zero the range, the range-shifting modes are EOPNOTSUPP; EINVAL/EBADF/ESPIPE/EISDIR/ENODEV in the kernel's order; one recorded operation whatever the range.",
+        "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_fallocate`): mode 0 and KEEP_SIZE reserve, PUNCH_HOLE|KEEP_SIZE and ZERO_RANGE zero the range, the range-shifting modes are EOPNOTSUPP; EINVAL/EBADF/ESPIPE/EISDIR/ENODEV in the kernel's order; one recorded operation whatever the range. Modeled modes are 0, KEEP_SIZE, PUNCH_HOLE|KEEP_SIZE, ZERO_RANGE and ZERO_RANGE|KEEP_SIZE; Linux itself refuses unknown/self-contradictory combinations, while valid COLLAPSE_RANGE/INSERT_RANGE remain unmodeled EOPNOTSUPP. No allocation extent accounting is claimed via statx BLOCKS.",
         None,
     )
     .probe("fs/size"),

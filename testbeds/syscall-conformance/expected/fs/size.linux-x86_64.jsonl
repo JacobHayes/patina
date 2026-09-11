@@ -127,10 +127,17 @@
 {"seq":125,"op":"check","args":{"label":"a pipe's read end is EBADF"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":126,"op":"fallocate","args":{"fd":"fd@56","len":1,"mode":0,"offset":0},"ret":-1,"errno":"EBADF","fields":{},"norm":{"args.fd":"relative:fd"}}
 {"seq":127,"op":"check","args":{"label":"a closed descriptor is EBADF"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":128,"op":"close","args":{"fd":"fd@58"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
-{"seq":129,"op":"close","args":{"fd":"fd@58.1"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
-{"seq":130,"op":"close","args":{"fd":"fd@53"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
-{"seq":131,"op":"close","args":{"fd":"fd@50"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
-{"seq":132,"op":"close","args":{"fd":"fd@47"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
-{"seq":133,"op":"close","args":{"fd":"fd@38"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
-{"seq":134,"op":"close","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":128,"op":"fallocate","args":{"fd":"fd@0","len":1,"mode":1,"offset":9223372036854775807},"ret":-1,"errno":"EFBIG","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":129,"op":"check","args":{"label":"fallocate overflow is EFBIG"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":130,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":194,"mode":384,"path":"/tmp/syscall-conformance/fs-size/reserved"},"ret":"fd@130","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":131,"op":"fallocate","args":{"fd":"fd@130","len":4096,"mode":1,"offset":0},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":132,"op":"check","args":{"label":"reserve without size growth"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":133,"op":"check","args":{"label":"statx either models reservations or omits BLOCKS"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":134,"op":"close","args":{"fd":"fd@130"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":135,"op":"close","args":{"fd":"fd@58"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":136,"op":"close","args":{"fd":"fd@58.1"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":137,"op":"close","args":{"fd":"fd@53"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":138,"op":"close","args":{"fd":"fd@50"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":139,"op":"close","args":{"fd":"fd@47"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":140,"op":"close","args":{"fd":"fd@38"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":141,"op":"close","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}

@@ -17,6 +17,18 @@ testbeds/syscall-conformance/run.sh --bless         # re-record expected/ on THI
 testbeds/syscall-conformance/run.sh --help
 ```
 
+## Filesystem attribute coverage
+
+`fs/times`, `fs/owner`, and `fs/size` include zero-count I/O and EOF after
+truncation, missing-name/closed-fd OMIT, empty-path timestamps, symlink chown,
+retained FIFO timestamps/ownership before and after unlink, checked time-range
+conversion, fallocate overflow, ZERO_RANGE, and truthful statx allocation masks.
+The literal libc null-path call is checked separately from the futimens adapter.
+Wide timestamps are an explicit EINVAL divergence (Linux can clamp them);
+unmodeled allocation accounting leaves STATX_BLOCKS absent. Actual crash
+reconstruction and positive-latency record/replay are driver/runtime unit gates,
+not claims made by a host process that cannot crash the virtual filesystem.
+
 ## The registry and the manifest
 
 `probes.toml` says which rows and symbols each probe covers; the registry

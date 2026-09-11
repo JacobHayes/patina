@@ -4747,32 +4747,24 @@ pub const TIME_NOW: u32 = 1;
 /// Set the time to the nanoseconds given beside the kind.
 pub const TIME_SET: u32 = 2;
 
-/// Resolve the two `(kind, nanos)` time arguments of a `utimensat`-family call
-/// onto what crosses the boundary: `None` for `UTIME_OMIT`, the explicit value,
-/// or — for `UTIME_NOW` — the instant the filesystem stamps this call with,
-/// read once, unrecorded, from the same clock the driver is handed. The
-/// recorded operation therefore carries a concrete time and replays without a
-/// second clock read.
+/// Decode requests without sampling NOW; the runtime resolves it after latency.
 fn resolve_time_arguments(
     atime_kind: u32,
     atime_nanos: u64,
     mtime_kind: u32,
     mtime_nanos: u64,
-) -> Result<(Option<u64>, Option<u64>), c_int> {
-    if atime_kind > TIME_SET || mtime_kind > TIME_SET {
-        return Err(EINVAL);
-    }
-    let now = if atime_kind == TIME_NOW || mtime_kind == TIME_NOW {
-        Some(with_context_raw(|context| context.fs_now_unrecorded())?)
-    } else {
-        None
+) -> Result<(patina_dst_runtime::FsTime, patina_dst_runtime::FsTime), c_int> {
+    use patina_dst_runtime::FsTime;
+    let pick = |kind, nanos| match kind {
+        TIME_OMIT => Ok(FsTime::Omit),
+        TIME_NOW => Ok(FsTime::Now),
+        TIME_SET => Ok(FsTime::Nanos(nanos)),
+        _ => Err(EINVAL),
     };
-    let pick = |kind: u32, nanos: u64| match kind {
-        TIME_OMIT => None,
-        TIME_NOW => now,
-        _ => Some(nanos),
-    };
-    Ok((pick(atime_kind, atime_nanos), pick(mtime_kind, mtime_nanos)))
+    Ok((
+        pick(atime_kind, atime_nanos)?,
+        pick(mtime_kind, mtime_nanos)?,
+    ))
 }
 
 /// `utimensat(2)` on a `(dirfd, path)`: set the entry's access and
@@ -4796,6 +4788,11 @@ pub unsafe extern "C" fn patina_utimensat(
     mtime_kind: u32,
     mtime_nanos: u64,
 ) -> c_int {
+    abort_if_init_failed();
+    if atime_kind == TIME_OMIT && mtime_kind == TIME_OMIT {
+        set_errno(0);
+        return 0;
+    }
     if flags & !paths::RESOLVE_ALL != 0 {
         return fail(EINVAL);
     }
@@ -4808,6 +4805,31 @@ pub unsafe extern "C" fn patina_utimensat(
             Ok(times) => times,
             Err(errno) => return fail(errno),
         };
+    if path.is_empty() && flags & paths::RESOLVE_EMPTY_PATH != 0 && dirfd != paths::AT_FDCWD {
+        let descriptor = match resolve_fd(dirfd) {
+            Ok(descriptor) => descriptor,
+            Err(errno) => return fail(errno),
+        };
+        let ino = if let Some(ino) = thread::fifo_ino(dirfd) {
+            ino
+        } else if descriptor.kind.is_fs() {
+            match with_context(|context| context.fs_fd_metadata(Fd(descriptor.handle))) {
+                Ok(metadata) => metadata.ino,
+                Err(errno) => return fail(errno),
+            }
+        } else {
+            return deny(
+                "patina: utimensat on a descriptor without a modeled inode; failing closed\n",
+            );
+        };
+        return match with_context(|context| context.fs_set_inode_times_spec(ino, atime, mtime)) {
+            Ok(()) => {
+                set_errno(0);
+                0
+            }
+            Err(errno) => fail(errno),
+        };
+    }
     let resolved = match paths::resolve(dirfd, &path, flags) {
         Ok(resolved) => resolved,
         Err(errno) => return fail(errno),
@@ -4815,11 +4837,7 @@ pub unsafe extern "C" fn patina_utimensat(
     if resolved.metadata.is_none() {
         return fail(ENOENT);
     }
-    if atime.is_none() && mtime.is_none() {
-        set_errno(0);
-        return 0;
-    }
-    match with_context(|context| context.fs_set_times_by_path(&resolved.path, atime, mtime)) {
+    match with_context(|context| context.fs_set_times_by_path_spec(&resolved.path, atime, mtime)) {
         Ok(()) => {
             set_errno(0);
             0
@@ -4831,9 +4849,8 @@ pub unsafe extern "C" fn patina_utimensat(
 /// `futimens(3)` / `utimensat(fd, NULL, …)`: the same change, on the node an
 /// open descriptor holds. An `O_PATH` descriptor is `EBADF` (the kernel's
 /// `fdget` never hands one out for this call). A descriptor on something the
-/// filesystem holds no node for — a pipe end, a socket, the captured streams,
-/// a FIFO endpoint — succeeds without an effect: the kernel would stamp an
-/// anonymous inode nobody can name.
+/// filesystem holds no node for refuses loudly. Named FIFO endpoints reach
+/// their retained inode, including after unlink.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_futimens(
     raw_fd: c_int,
@@ -4842,6 +4859,11 @@ pub extern "C" fn patina_futimens(
     mtime_kind: u32,
     mtime_nanos: u64,
 ) -> c_int {
+    abort_if_init_failed();
+    if atime_kind == TIME_OMIT && mtime_kind == TIME_OMIT {
+        set_errno(0);
+        return 0;
+    }
     let resolved = match resolve_fd(raw_fd) {
         Ok(resolved) => resolved,
         Err(errno) => return fail(errno),
@@ -4854,12 +4876,20 @@ pub extern "C" fn patina_futimens(
             Ok(times) => times,
             Err(errno) => return fail(errno),
         };
-    if (atime.is_none() && mtime.is_none()) || !resolved.kind.is_fs() {
-        set_errno(0);
-        return 0;
+    if let Some(ino) = thread::fifo_ino(raw_fd) {
+        return match with_context(|context| context.fs_set_inode_times_spec(ino, atime, mtime)) {
+            Ok(()) => {
+                set_errno(0);
+                0
+            }
+            Err(errno) => fail(errno),
+        };
+    }
+    if !resolved.kind.is_fs() {
+        return deny("patina: futimens on a descriptor without a modeled inode; failing closed\n");
     }
     let fd = Fd(resolved.handle);
-    match with_context(|context| context.fs_set_times(fd, atime, mtime)) {
+    match with_context(|context| context.fs_set_times_spec(fd, atime, mtime)) {
         Ok(()) => {
             set_errno(0);
             0
@@ -4899,9 +4929,8 @@ fn chown_decision(uid: u32, gid: u32, kind: FsEntryKind, mode: u32) -> Result<u3
 
 /// `chown`/`lchown`/`fchownat` on a `(dirfd, path)`; `flags` are
 /// `PATINA_RESOLVE_*` (`NOFOLLOW` names a symlink itself, `EMPTY_PATH` lets
-/// `AT_EMPTY_PATH` name the base). A symlink named itself succeeds without
-/// an effect: it has no mode to kill and the filesystem gives a link no
-/// `ctime` of its own to move.
+/// `AT_EMPTY_PATH` name the base). A symlink keeps its mode and data times,
+/// but its own ctime moves.
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
@@ -4931,11 +4960,18 @@ pub unsafe extern "C" fn patina_chown(
         Ok(mode) => mode,
         Err(errno) => return fail(errno),
     };
-    if metadata.kind == FsEntryKind::Symlink {
-        set_errno(0);
-        return 0;
-    }
-    match with_context(|context| context.fs_set_mode(&resolved.path, mode)) {
+    let result = if metadata.kind == FsEntryKind::Symlink {
+        with_context(|context| {
+            context.fs_set_times_by_path(
+                &resolved.path,
+                Some(metadata.atime_nanos),
+                Some(metadata.mtime_nanos),
+            )
+        })
+    } else {
+        with_context(|context| context.fs_set_mode(&resolved.path, mode))
+    };
+    match result {
         Ok(()) => {
             set_errno(0);
             0
@@ -4945,9 +4981,7 @@ pub unsafe extern "C" fn patina_chown(
 }
 
 /// `fchown`: the same decision on the node a descriptor holds. `O_PATH` is
-/// `EBADF`; a descriptor the filesystem holds no node for (a pipe end, a
-/// socket, the captured streams) succeeds without an effect, as the kernel's
-/// `chown` of an anonymous inode the identity owns does.
+/// `EBADF`; descriptors without a modeled inode refuse loudly.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_fchown(raw_fd: c_int, uid: u32, gid: u32) -> c_int {
     let resolved = match resolve_fd(raw_fd) {
@@ -4975,13 +5009,7 @@ pub extern "C" fn patina_fchown(raw_fd: c_int, uid: u32, gid: u32) -> c_int {
         };
     }
     if !resolved.kind.is_fs() {
-        return match chown_decision(uid, gid, FsEntryKind::File, 0) {
-            Ok(_) => {
-                set_errno(0);
-                0
-            }
-            Err(errno) => fail(errno),
-        };
+        return deny("patina: fchown on a descriptor without a modeled inode; failing closed\n");
     }
     let fd = Fd(resolved.handle);
     let metadata = match with_context(|context| context.fs_fd_metadata(fd)) {

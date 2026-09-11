@@ -148,6 +148,57 @@
 {"seq":146,"op":"check","args":{"label":"the target's times are what was set through the link"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":147,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":256,"path":"/tmp/syscall-conformance/fs-times/l"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@139","kind":"lnk","nlink":1,"perm":511,"size":1,"uid":"id@1"},"norm":{"fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
 {"seq":148,"op":"check","args":{"label":"the link's own mtime and ctime are untouched"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":149,"op":"close","args":{"fd":"fd@111"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
-{"seq":150,"op":"close","args":{"fd":"fd@110"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
-{"seq":151,"op":"close","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":149,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":150,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":2,"perm":420,"size":5,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":151,"op":"lseek","args":{"fd":"fd@0","offset":100,"whence":0},"ret":100,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":152,"op":"read","args":{"fd":"fd@0","len":0},"ret":0,"errno":null,"fields":{"data":""},"norm":{"args.fd":"relative:fd"}}
+{"seq":153,"op":"check","args":{"label":"zero read past EOF"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":154,"op":"write","args":{"fd":"fd@0","len":0},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":155,"op":"check","args":{"label":"zero write past EOF"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":156,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":2,"perm":420,"size":5,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":157,"op":"check","args":{"label":"zero I/O stamps nothing and never grows"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":158,"op":"lseek","args":{"fd":"fd@0","offset":0,"whence":1},"ret":100,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":159,"op":"check","args":{"label":"zero I/O preserves cursor"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":160,"op":"ftruncate","args":{"fd":"fd@0","len":0},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":161,"op":"check","args":{"label":"truncate below cursor"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":162,"op":"read","args":{"fd":"fd@0","len":1},"ret":0,"errno":null,"fields":{"data":""},"norm":{"args.fd":"relative:fd"}}
+{"seq":163,"op":"check","args":{"label":"read past truncated EOF"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":164,"op":"lseek","args":{"fd":"fd@0","offset":0,"whence":1},"ret":100,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":165,"op":"check","args":{"label":"EOF read preserves cursor"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":166,"op":"utimensat","args":{"atime":"UTIME_OMIT","dirfd":"AT_FDCWD","flags":0,"mtime":"UTIME_OMIT","path":"/tmp/syscall-conformance/fs-times/missing"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":167,"op":"check","args":{"label":"OMIT ignores missing path and flags"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":168,"op":"utimensat","args":{"atime":"UTIME_OMIT","dirfd":"AT_FDCWD","flags":1,"mtime":"UTIME_OMIT","path":"/tmp/syscall-conformance/fs-times/missing"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":169,"op":"check","args":{"label":"OMIT ignores missing path and flags"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":170,"op":"utimensat","args":{"atime":"UTIME_OMIT","dirfd":"fd@83","flags":0,"mtime":"UTIME_OMIT","path":"NULL"},"ret":0,"errno":null,"fields":{},"norm":{"args.dirfd":"relative:fd"}}
+{"seq":171,"op":"check","args":{"label":"OMIT ignores closed fd"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":172,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":2097152,"mode":0,"path":"/tmp/syscall-conformance/fs-times/f"},"ret":"fd@172","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":173,"op":"utimensat","args":{"atime":"21.000000003","dirfd":"fd@172","flags":4096,"mtime":"22.000000004","path":""},"ret":0,"errno":null,"fields":{},"norm":{"args.dirfd":"relative:fd"}}
+{"seq":174,"op":"check","args":{"label":"utimensat AT_EMPTY_PATH on O_PATH"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":175,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":2,"perm":420,"size":0,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":176,"op":"check","args":{"label":"empty path reached the inode"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":177,"op":"close","args":{"fd":"fd@172"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":178,"op":"mknodat","args":{"dev":0,"dirfd":"AT_FDCWD","mode":4480,"path":"/tmp/syscall-conformance/fs-times/fifo-times"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":179,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":2,"mode":0,"path":"/tmp/syscall-conformance/fs-times/fifo-times"},"ret":"fd@179","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":180,"op":"utimensat","args":{"atime":"23.000000005","dirfd":"fd@179","flags":0,"mtime":"24.000000006","path":"NULL"},"ret":0,"errno":null,"fields":{},"norm":{"args.dirfd":"relative:fd"}}
+{"seq":181,"op":"check","args":{"label":"futimens reaches retained FIFO"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":182,"op":"fstat","args":{"fd":"fd@179"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@182","kind":"fifo","nlink":1,"perm":384,"size":0,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":183,"op":"check","args":{"label":"FIFO times landed"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":184,"op":"unlinkat","args":{"dirfd":"AT_FDCWD","flags":0,"path":"/tmp/syscall-conformance/fs-times/fifo-times"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":185,"op":"utimensat","args":{"atime":"23.000000005","dirfd":"fd@179","flags":0,"mtime":"24.000000006","path":"NULL"},"ret":0,"errno":null,"fields":{},"norm":{"args.dirfd":"relative:fd"}}
+{"seq":186,"op":"check","args":{"label":"futimens reaches retained FIFO"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":187,"op":"fstat","args":{"fd":"fd@179"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@182","kind":"fifo","nlink":0,"perm":384,"size":0,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":188,"op":"check","args":{"label":"FIFO times landed"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":189,"op":"close","args":{"fd":"fd@179"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":190,"op":"utimensat","args":{"atime":"18446744074.000000000","dirfd":"fd@0","flags":0,"mtime":"18446744074.000000000","path":"NULL"},"ret":0,"errno":null,"fields":{},"norm":{"args.dirfd":"relative:fd"}}
+{"seq":191,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":2,"perm":420,"size":0,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":192,"op":"check","args":{"label":"time overflow is refused or clamped, never wrapped"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":193,"op":"utimes","args":{"atime":"18446744074.000000","mtime":"18446744074.000000","path":"/tmp/syscall-conformance/fs-times/f"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":194,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":2,"perm":420,"size":0,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":195,"op":"check","args":{"label":"time overflow is refused or clamped, never wrapped"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":196,"op":"utime","args":{"actime":18446744074,"modtime":18446744074,"path":"/tmp/syscall-conformance/fs-times/f"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":197,"op":"fstat","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{"gid":"id@1","ino":"ino@1","kind":"reg","nlink":2,"perm":420,"size":0,"uid":"id@1"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":198,"op":"check","args":{"label":"time overflow is refused or clamped, never wrapped"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":199,"op":"check","args":{"label":"literal null path preserves libc versus kernel contract"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":200,"op":"close","args":{"fd":"fd@111"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":201,"op":"close","args":{"fd":"fd@110"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":202,"op":"close","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}

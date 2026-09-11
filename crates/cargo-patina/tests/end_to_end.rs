@@ -5308,9 +5308,7 @@ wasm32-wasip1 target not installed"
         String::from_utf8_lossy(&built.stdout),
         String::from_utf8_lossy(&built.stderr)
     );
-    let module = package
-        .join("target/wasm32-wasip1/debug")
-        .join("wasi-hello.wasm");
+    let module = fixture_target_directory(&package).join("wasm32-wasip1/debug/wasi-hello.wasm");
     assert!(
         module.is_file(),
         "missing wasm artifact at {}",
@@ -5327,6 +5325,26 @@ wasm32-wasip1 target not installed"
         String::from_utf8_lossy(&ran.stdout),
         String::from_utf8_lossy(&ran.stderr)
     );
+}
+
+// Class pairing: build/run artifact discovery must use Cargo's target directory,
+// not assume package/target (build caches and CARGO_TARGET_DIR redirect it).
+fn fixture_target_directory(package: &Path) -> std::path::PathBuf {
+    let output = Command::new("cargo")
+        .current_dir(package)
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    metadata["target_directory"]
+        .as_str()
+        .expect("Cargo target_directory")
+        .into()
 }
 
 fn wasm32_wasip1_installed() -> bool {
@@ -5720,9 +5738,8 @@ wasm32-wasip1 target not installed"
     let directory = tempdir().unwrap();
     let package = directory.path().join("guest");
     create_wasi_buggify_package(&package);
-    let wasm = package
-        .join("target/wasm32-wasip1/debug")
-        .join("wasi-buggify-guest.wasm");
+    let wasm =
+        fixture_target_directory(&package).join("wasm32-wasip1/debug/wasi-buggify-guest.wasm");
 
     // Plain build (no `cfg(patina)`): serialized behind BUILD_LOCK because it
     // compiles, and its output must import no `patina_sdk`.
@@ -13831,9 +13848,8 @@ fn native_harness_mode_filters_records_replays_and_refuses_missing_target() {
         "filtered harness JSON stdout should be byte-identical across repeats"
     );
 
-    let pass_guest = directory.path().join(
-        "target/patina/dst/dst_harness_fixture/dst_harness_fixture/tests__epoch_is_seeded/guest",
-    );
+    let pass_guest = fixture_target_directory(directory.path())
+        .join("patina/dst/dst_harness_fixture/dst_harness_fixture/tests__epoch_is_seeded/guest");
     assert!(
         pass_guest.exists(),
         "staged pass harness missing: {pass_guest:?}"
@@ -13881,12 +13897,10 @@ fn native_harness_mode_filters_records_replays_and_refuses_missing_target() {
             && fail_stderr.contains("cargo patina replay"),
         "failure block missing seed/repro commands:\n{fail_stderr}"
     );
-    let fail_guest = directory.path().join(
-        "target/patina/dst/dst_harness_fixture/dst_harness_fixture/tests__buggify_failure_records/guest",
-    );
-    let trace = directory.path().join(
-        "target/patina/dst/dst_harness_fixture/dst_harness_fixture/tests__buggify_failure_records/seed-0.patina",
-    );
+    let failure_dir = fixture_target_directory(directory.path())
+        .join("patina/dst/dst_harness_fixture/dst_harness_fixture/tests__buggify_failure_records");
+    let fail_guest = failure_dir.join("guest");
+    let trace = failure_dir.join("seed-0.patina");
     assert!(trace.exists(), "record-on-failure trace missing: {trace:?}");
     let replay = invoke_unchecked(
         patina,

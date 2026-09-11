@@ -309,6 +309,22 @@ Concrete drivers implement capabilities:
 
 A runtime built without a requested driver returns `missing_driver`; it never falls through to the host.
 
+Filesystem timestamp sampling occurs after each operation's modeled latency.
+`FsTime::Now` resolves there, alongside the mutation's ctime; concrete values
+cross the recorded boundary. Filesystem execution requires a clock driver,
+including for custom builders (install `VirtualClock`); it never silently uses
+epoch. Runtime reads use fixed relatime; alternative atime policies are only
+explicit driver-level `FsClock` inputs, not a runtime configuration knob.
+File fsync stages timestamp metadata by inode, and directory fsync stages the
+directory's timestamps; crash reconstruction restores them without manufacturing
+new effects, includes symlinks, and preserves surviving new entries' birth times.
+Zero-count I/O is timestamp- and size-inert. Guest-sized growth reserves storage
+fallibly, and reports ENOSPC on capacity failure. Allocation extents are not
+modeled: statx omits STATX_BLOCKS rather than claiming length-derived allocation.
+The unsigned-nanosecond timestamp ABI refuses negative/overflowing seconds with
+EINVAL; signed/wide kernel timestamps remain an explicit registry gap.
+
+
 Wrapper drivers compose around concrete drivers:
 
 - `FaultNet` (`patina-dst-wrapper-fault`): seeded packet loss and duplication decisions.

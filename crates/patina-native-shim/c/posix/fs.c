@@ -849,7 +849,7 @@ static void patina_statx_time(struct statx_timestamp *out, uint64_t nanos) {
 }
 
 /*
- * statx: an honest mask. STATX_BASIC_STATS and STATX_MNT_ID are always filled,
+ * statx: BASIC_STATS except BLOCKS (no allocation extent model), plus MNT_ID,
  * as the kernel's vfs_statx fills them whatever was asked; STATX_BTIME is
  * filled — and reported — only when requested, as ext4/xfs do.
  */
@@ -865,7 +865,7 @@ int statx(int directory, const char *restrict path, int flags, unsigned int mask
         &values);
     if (result < 0) return -1;
     memset(status, 0, sizeof *status);
-    status->stx_mask = STATX_BASIC_STATS | STATX_MNT_ID;
+    status->stx_mask = (STATX_BASIC_STATS & ~STATX_BLOCKS) | STATX_MNT_ID;
     status->stx_blksize = (uint32_t)PATINA_STAT_BLOCK_SIZE;
     status->stx_mode = (uint16_t)patina_stat_mode(&values);
     status->stx_nlink = values.nlink;
@@ -873,7 +873,7 @@ int statx(int directory, const char *restrict path, int flags, unsigned int mask
     status->stx_gid = patina_gid();
     status->stx_ino = values.ino;
     status->stx_size = values.length;
-    status->stx_blocks = patina_stat_blocks(values.length);
+    status->stx_blocks = 0; /* Allocation extents are not modeled. */
     patina_statx_time(&status->stx_atime, values.atime_nanos);
     patina_statx_time(&status->stx_mtime, values.mtime_nanos);
     patina_statx_time(&status->stx_ctime, values.ctime_nanos);
@@ -896,6 +896,16 @@ int statx(int directory, const char *restrict path, int flags, unsigned int mask
  * whole seconds for utime(3). glibc's own wrappers would issue utimensat from
  * inside libc text, past the dispatcher, so each is a strong definition here.
  */
+/* The timestamp ABI is unsigned nanoseconds. Never wrap a guest time. */
+static int patina_checked_time(int64_t seconds, uint64_t fraction, uint64_t *nanos) {
+    if (seconds < 0 || (uint64_t)seconds > (UINT64_MAX - fraction) / UINT64_C(1000000000)) {
+        errno = EINVAL;
+        return -1;
+    }
+    *nanos = (uint64_t)seconds * UINT64_C(1000000000) + fraction;
+    return 0;
+}
+
 static int patina_time_argument(const struct timespec *time, uint32_t *kind, uint64_t *nanos) {
     if (time == NULL) {
         *kind = PATINA_TIME_NOW;
@@ -919,8 +929,7 @@ static int patina_time_argument(const struct timespec *time, uint32_t *kind, uin
         return -1;
     }
     *kind = PATINA_TIME_SET;
-    *nanos = (uint64_t)time->tv_sec * UINT64_C(1000000000) + (uint64_t)time->tv_nsec;
-    return 0;
+    return patina_checked_time(time->tv_sec, (uint64_t)time->tv_nsec, nanos);
 }
 
 static int patina_timeval_argument(const struct timeval *time, uint32_t *kind, uint64_t *nanos) {
@@ -934,9 +943,7 @@ static int patina_timeval_argument(const struct timeval *time, uint32_t *kind, u
         return -1;
     }
     *kind = PATINA_TIME_SET;
-    *nanos = (uint64_t)time->tv_sec * UINT64_C(1000000000) +
-             (uint64_t)time->tv_usec * UINT64_C(1000);
-    return 0;
+    return patina_checked_time(time->tv_sec, (uint64_t)time->tv_usec * UINT64_C(1000), nanos);
 }
 
 static int patina_utimensat_impl(int dirfd, const char *path, const struct timespec times[2],
@@ -974,10 +981,6 @@ static int patina_utimes_impl(int dirfd, const char *path, const struct timeval 
 }
 
 int utimensat(int dirfd, const char *path, const struct timespec times[2], int flags) {
-    if ((flags & ~AT_SYMLINK_NOFOLLOW) != 0) {
-        errno = EINVAL;
-        return -1;
-    }
     /* The kernel accepts utimensat(fd, NULL, …) as the descriptor shape, but
      * glibc's wrapper — whose contract this symbol IS — refuses a null path
      * with EINVAL and spells the descriptor shape as futimens(3). glibc
@@ -988,7 +991,14 @@ int utimensat(int dirfd, const char *path, const struct timespec times[2], int f
         errno = EINVAL;
         return -1;
     }
+    if (times != NULL && times[0].tv_nsec == UTIME_OMIT && times[1].tv_nsec == UTIME_OMIT)
+        return patina_utimensat_impl(patina_at(dirfd), path, times, 0);
+    if ((flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
     uint32_t resolve_flags = (flags & AT_SYMLINK_NOFOLLOW) != 0 ? PATINA_RESOLVE_NOFOLLOW : 0;
+    if (flags & AT_EMPTY_PATH) resolve_flags |= PATINA_RESOLVE_EMPTY_PATH;
     return patina_utimensat_impl(patina_at(dirfd), path, times, resolve_flags);
 }
 
@@ -1016,14 +1026,11 @@ int futimes(int fd, const struct timeval times[2]) {
 
 int utime(const char *path, const struct utimbuf *times) {
     if (times == NULL) return patina_utimensat_impl(PATINA_AT_FDCWD, path, NULL, 0);
-    if (times->actime < 0 || times->modtime < 0) {
-        errno = EINVAL;
-        return -1;
-    }
+    uint64_t atime, mtime;
+    if (patina_checked_time(times->actime, 0, &atime) < 0 ||
+        patina_checked_time(times->modtime, 0, &mtime) < 0) return -1;
     return fail_int(patina_utimensat(PATINA_AT_FDCWD, path, 0, PATINA_TIME_SET,
-                                     (uint64_t)times->actime * UINT64_C(1000000000),
-                                     PATINA_TIME_SET,
-                                     (uint64_t)times->modtime * UINT64_C(1000000000)));
+                                     atime, PATINA_TIME_SET, mtime));
 }
 
 #ifdef __linux__

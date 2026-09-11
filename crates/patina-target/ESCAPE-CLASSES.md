@@ -315,6 +315,12 @@ is stated plainly:
    primitive should be supported, not silently pass the gate and then fail at
    runtime. A member stays fail-closed only when the semantics genuinely cannot be
    modeled — `putenv` keeps its entry aliased to caller-owned memory.
+   Timestamp/ownership mutation on named FIFO endpoints reaches retained inode
+   state, including after unlink; anonymous pipe/socket/stream descriptors
+   without modeled filesystem inodes refuse loudly instead of dropping effects.
+   Pre-epoch and overflowing timestamp inputs remain an explicit EINVAL gap in
+   the unsigned-nanosecond ABI. Allocation extents are also unmodeled: statx
+   omits BLOCKS instead of claiming allocation derived from file length.
    The symbol registry (`crates/patina-native-shim/src/registry/symbols.rs`)
    enumerates this surface: every public symbol the shim defines carries a
    status — `Modeled`, `Partial` (a subset modeled, the rest refuses loudly),

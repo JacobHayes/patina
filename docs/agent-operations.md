@@ -109,6 +109,11 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
 - Campaign output directories, generated harness binaries, and shared build
   artifacts are single-writer resources while a campaign is running. Rebuilding
   or deleting them mid-run can poison otherwise deterministic evidence.
+- Tests must locate Cargo artifacts through `cargo metadata` (or compiler
+  artifact messages), not assume a fixture's `target/` directory. Target-dir
+  redirection also makes independent fixture packages share output names: keep
+  those test builds single-writer, and use a serial test run when the build
+  environment redirects them into one target directory.
 - Before updating canonical outputs or hashes, verify them from a clean build and
   on every platform the claim covers.
 - Concurrent builders on one machine share more than they think: session-shared
@@ -202,7 +207,16 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   interpose, or deny-trap the effect.
 - The `cargo-patina` binary embeds native C shim sources at build time. After
   changing the C layer, rebuild `cargo-patina` before trusting native validation.
-- A native build has two halves — the shim staticlib, built in the Patina source
+- After a source-mutation detector restores an older embedded shim bundle,
+  verify the linked artifact, not just the restored checkout. Distinct bundles
+  share a toolchain-keyed shim target directory; Cargo can report it fresh while
+  its staticlib still contains the planted mutation. If observed, clean that
+  package's release artifacts using Cargo with the actual bundled manifest and
+  shim target directory, then rerun the detector GREEN. Cleaning the checkout's
+  target does not clean this separate artifact. This cache-invalidation class
+  needs a dedicated build-layer detector; filesystem conformance caught it in
+  the fs-fixup battery.
+- A native build has two halves — the shim staticlib, built in the unpacked shim
   workspace, and the guest, built in the caller's working directory — and a build
   tool that resolves its compiler per directory (rustup's `rustc` proxy reads the
   rust-toolchain file above wherever it runs) can give them different toolchains.

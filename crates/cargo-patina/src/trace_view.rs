@@ -782,6 +782,7 @@ pub fn operation_kind(operation: &Operation) -> &'static str {
         Operation::FsSetLengthByPath { .. } => "fs_set_length_by_path",
         Operation::FsAllocate { .. } => "fs_allocate",
         Operation::FsSetTimes { .. } => "fs_set_times",
+        Operation::FsSetInodeTimes { .. } => "fs_set_inode_times",
         Operation::FsSetTimesByPath { .. } => "fs_set_times_by_path",
         Operation::FsReadDirectory { .. } => "fs_read_directory",
         Operation::FsReadDirectoryFd { .. } => "fs_read_directory_fd",

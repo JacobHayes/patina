@@ -357,11 +357,13 @@ uint32_t patina_uid(void);
 uint32_t patina_gid(void);
 /*
  * utimensat(2) on a (dirfd, path) (`flags` are PATINA_RESOLVE_*; NOFOLLOW
- * sets a symlink's own times) and futimens(3) on a descriptor. Each time is a
+ * sets a symlink's own times; EMPTY_PATH reaches the descriptor's inode,
+ * including O_PATH) and futimens(3) on a descriptor. Each time is a
  * (kind, nanos) pair: PATINA_TIME_OMIT leaves it alone, PATINA_TIME_NOW sets
- * the virtual clock's now, PATINA_TIME_SET sets `nanos`. Both OMIT is the
+ * the virtual clock's now AFTER modeled latency, PATINA_TIME_SET sets `nanos`. Both OMIT is the
  * kernel's early success (nothing crosses the boundary). ctime moves whenever
- * either time does. An O_PATH descriptor is EBADF.
+ * either time does. A futimens O_PATH descriptor is EBADF. FIFO endpoints
+ * reach retained inode state; kinds without a modeled inode refuse loudly.
  */
 enum {
     PATINA_TIME_OMIT = 0,

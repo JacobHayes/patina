@@ -71,46 +71,65 @@
 {"seq":69,"op":"check","args":{"label":"symlinkat l -> setuid"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":70,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":256,"path":"/tmp/syscall-conformance/fs-owner/l"},"ret":0,"errno":null,"fields":{"gid":"id@0","ino":"ino@70","kind":"lnk","nlink":1,"perm":511,"size":6,"uid":"id@0"},"norm":{"fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
 {"seq":71,"op":"check","args":{"label":"a symlink is owned by the caller"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":72,"op":"lchown","args":{"gid":"id@0","path":"/tmp/syscall-conformance/fs-owner/l","uid":"id@0"},"ret":0,"errno":null,"fields":{},"norm":{"args.gid":"identity","args.uid":"identity"}}
-{"seq":73,"op":"check","args":{"label":"lchown(own, own) on a symlink"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":74,"op":"lchown","args":{"gid":"id@0","path":"/tmp/syscall-conformance/fs-owner/l","uid":"id@15"},"ret":-1,"errno":"EPERM","fields":{},"norm":{"args.gid":"identity","args.uid":"identity"}}
-{"seq":75,"op":"check","args":{"label":"lchown to another user is EPERM"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":76,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":256,"path":"/tmp/syscall-conformance/fs-owner/l"},"ret":0,"errno":null,"fields":{"gid":"id@0","ino":"ino@70","kind":"lnk","nlink":1,"perm":511,"size":6,"uid":"id@0"},"norm":{"fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
-{"seq":77,"op":"check","args":{"label":"the link's mode is untouched"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":78,"op":"chown","args":{"gid":"id@0","path":"/tmp/syscall-conformance/fs-owner/l","uid":"id@0"},"ret":0,"errno":null,"fields":{},"norm":{"args.gid":"identity","args.uid":"identity"}}
-{"seq":79,"op":"check","args":{"label":"chown through the link reaches the target"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":80,"op":"fchownat","args":{"dirfd":"AT_FDCWD","flags":256,"gid":"id@0","path":"/tmp/syscall-conformance/fs-owner/l","uid":"id@0"},"ret":0,"errno":null,"fields":{},"norm":{"args.gid":"identity","args.uid":"identity"}}
-{"seq":81,"op":"check","args":{"label":"fchownat AT_SYMLINK_NOFOLLOW names the link"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":82,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":194,"mode":420,"path":"/tmp/syscall-conformance/fs-owner/plain"},"ret":"fd@82","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
-{"seq":83,"op":"close","args":{"fd":"fd@82"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
-{"seq":84,"op":"access","args":{"mode":0,"path":"/tmp/syscall-conformance/fs-owner/plain"},"ret":0,"errno":null,"fields":{},"norm":{}}
-{"seq":85,"op":"check","args":{"label":"F_OK on a file"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":86,"op":"access","args":{"mode":6,"path":"/tmp/syscall-conformance/fs-owner/plain"},"ret":0,"errno":null,"fields":{},"norm":{}}
-{"seq":87,"op":"check","args":{"label":"R_OK|W_OK on 0644"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":88,"op":"access","args":{"mode":1,"path":"/tmp/syscall-conformance/fs-owner/plain"},"ret":-1,"errno":"EACCES","fields":{},"norm":{}}
-{"seq":89,"op":"check","args":{"label":"X_OK on 0644 is EACCES"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":90,"op":"access","args":{"mode":1,"path":"/tmp/syscall-conformance/fs-owner/setuid"},"ret":0,"errno":null,"fields":{},"norm":{}}
-{"seq":91,"op":"check","args":{"label":"X_OK on 0755"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":92,"op":"access","args":{"mode":1,"path":"/tmp/syscall-conformance/fs-owner/d"},"ret":0,"errno":null,"fields":{},"norm":{}}
-{"seq":93,"op":"check","args":{"label":"X_OK on a directory"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":94,"op":"access","args":{"mode":0,"path":"/tmp/syscall-conformance/fs-owner/missing"},"ret":-1,"errno":"ENOENT","fields":{},"norm":{}}
-{"seq":95,"op":"check","args":{"label":"F_OK on a missing path is ENOENT"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":96,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":193,"mode":128,"path":"/tmp/syscall-conformance/fs-owner/unreadable"},"ret":"fd@96","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
-{"seq":97,"op":"close","args":{"fd":"fd@96"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
-{"seq":98,"op":"access","args":{"mode":4,"path":"/tmp/syscall-conformance/fs-owner/unreadable"},"ret":-1,"errno":"EACCES","fields":{},"norm":{}}
-{"seq":99,"op":"check","args":{"label":"R_OK on 0200 is EACCES"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":100,"op":"access","args":{"mode":2,"path":"/tmp/syscall-conformance/fs-owner/unreadable"},"ret":0,"errno":null,"fields":{},"norm":{}}
-{"seq":101,"op":"check","args":{"label":"W_OK on 0200"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":102,"op":"faccessat","args":{"dirfd":"fd@49","flags":0,"mode":1,"path":"inner"},"ret":-1,"errno":"EACCES","fields":{},"norm":{"args.dirfd":"relative:fd"}}
-{"seq":103,"op":"check","args":{"label":"faccessat X_OK relative to a dirfd is EACCES on 0644"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":104,"op":"faccessat","args":{"dirfd":"fd@49","flags":0,"mode":4,"path":"inner"},"ret":0,"errno":null,"fields":{},"norm":{"args.dirfd":"relative:fd"}}
-{"seq":105,"op":"check","args":{"label":"faccessat R_OK relative to a dirfd"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":106,"op":"faccessat2","args":{"dirfd":"AT_FDCWD","flags":0,"mode":1,"path":"/tmp/syscall-conformance/fs-owner/setuid"},"ret":0,"errno":null,"fields":{},"norm":{}}
-{"seq":107,"op":"check","args":{"label":"faccessat2 X_OK on 0755"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":108,"op":"faccessat2","args":{"dirfd":"AT_FDCWD","flags":0,"mode":1,"path":"/tmp/syscall-conformance/fs-owner/plain"},"ret":-1,"errno":"EACCES","fields":{},"norm":{}}
-{"seq":109,"op":"check","args":{"label":"faccessat2 X_OK on 0644 is EACCES"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":110,"op":"faccessat2","args":{"dirfd":"AT_FDCWD","flags":512,"mode":4,"path":"/tmp/syscall-conformance/fs-owner/plain"},"ret":0,"errno":null,"fields":{},"norm":{}}
-{"seq":111,"op":"check","args":{"label":"faccessat2 AT_EACCESS reads the same identity"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":112,"op":"faccessat2","args":{"dirfd":"AT_FDCWD","flags":1,"mode":4,"path":"/tmp/syscall-conformance/fs-owner/plain"},"ret":-1,"errno":"EINVAL","fields":{},"norm":{}}
-{"seq":113,"op":"check","args":{"label":"faccessat2 with an unknown flag is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":114,"op":"close","args":{"fd":"fd@49"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":72,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":73,"op":"lchown","args":{"gid":"id@0","path":"/tmp/syscall-conformance/fs-owner/l","uid":"id@0"},"ret":0,"errno":null,"fields":{},"norm":{"args.gid":"identity","args.uid":"identity"}}
+{"seq":74,"op":"check","args":{"label":"lchown(own, own) on a symlink"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":75,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":256,"path":"/tmp/syscall-conformance/fs-owner/l"},"ret":0,"errno":null,"fields":{"gid":"id@0","ino":"ino@70","kind":"lnk","nlink":1,"perm":511,"size":6,"uid":"id@0"},"norm":{"fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":76,"op":"check","args":{"label":"lchown moves the symlink ctime only"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":77,"op":"mknodat","args":{"dev":0,"dirfd":"AT_FDCWD","mode":4480,"path":"/tmp/syscall-conformance/fs-owner/owner-fifo"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":78,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":2,"mode":0,"path":"/tmp/syscall-conformance/fs-owner/owner-fifo"},"ret":"fd@78","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":79,"op":"fstat","args":{"fd":"fd@78"},"ret":0,"errno":null,"fields":{"gid":"id@0","ino":"ino@79","kind":"fifo","nlink":1,"perm":384,"size":0,"uid":"id@0"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":80,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":81,"op":"fchown","args":{"fd":"fd@78","gid":"id@0","uid":"id@0"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd","args.gid":"identity","args.uid":"identity"}}
+{"seq":82,"op":"check","args":{"label":"fchown reaches retained FIFO"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":83,"op":"fstat","args":{"fd":"fd@78"},"ret":0,"errno":null,"fields":{"gid":"id@0","ino":"ino@79","kind":"fifo","nlink":1,"perm":384,"size":0,"uid":"id@0"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":84,"op":"check","args":{"label":"FIFO ownership moves ctime only"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":85,"op":"unlinkat","args":{"dirfd":"AT_FDCWD","flags":0,"path":"/tmp/syscall-conformance/fs-owner/owner-fifo"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":86,"op":"fstat","args":{"fd":"fd@78"},"ret":0,"errno":null,"fields":{"gid":"id@0","ino":"ino@79","kind":"fifo","nlink":0,"perm":384,"size":0,"uid":"id@0"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":87,"op":"nanosleep","args":{"nsec":20000000,"sec":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":88,"op":"fchown","args":{"fd":"fd@78","gid":"id@0","uid":"id@0"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd","args.gid":"identity","args.uid":"identity"}}
+{"seq":89,"op":"check","args":{"label":"fchown reaches retained FIFO"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":90,"op":"fstat","args":{"fd":"fd@78"},"ret":0,"errno":null,"fields":{"gid":"id@0","ino":"ino@79","kind":"fifo","nlink":0,"perm":384,"size":0,"uid":"id@0"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":91,"op":"check","args":{"label":"FIFO ownership moves ctime only"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":92,"op":"close","args":{"fd":"fd@78"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":93,"op":"lchown","args":{"gid":"id@0","path":"/tmp/syscall-conformance/fs-owner/l","uid":"id@15"},"ret":-1,"errno":"EPERM","fields":{},"norm":{"args.gid":"identity","args.uid":"identity"}}
+{"seq":94,"op":"check","args":{"label":"lchown to another user is EPERM"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":95,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":256,"path":"/tmp/syscall-conformance/fs-owner/l"},"ret":0,"errno":null,"fields":{"gid":"id@0","ino":"ino@70","kind":"lnk","nlink":1,"perm":511,"size":6,"uid":"id@0"},"norm":{"fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":96,"op":"check","args":{"label":"the link's mode is untouched"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":97,"op":"chown","args":{"gid":"id@0","path":"/tmp/syscall-conformance/fs-owner/l","uid":"id@0"},"ret":0,"errno":null,"fields":{},"norm":{"args.gid":"identity","args.uid":"identity"}}
+{"seq":98,"op":"check","args":{"label":"chown through the link reaches the target"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":99,"op":"fchownat","args":{"dirfd":"AT_FDCWD","flags":256,"gid":"id@0","path":"/tmp/syscall-conformance/fs-owner/l","uid":"id@0"},"ret":0,"errno":null,"fields":{},"norm":{"args.gid":"identity","args.uid":"identity"}}
+{"seq":100,"op":"check","args":{"label":"fchownat AT_SYMLINK_NOFOLLOW names the link"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":101,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":194,"mode":420,"path":"/tmp/syscall-conformance/fs-owner/plain"},"ret":"fd@101","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":102,"op":"close","args":{"fd":"fd@101"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":103,"op":"access","args":{"mode":0,"path":"/tmp/syscall-conformance/fs-owner/plain"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":104,"op":"check","args":{"label":"F_OK on a file"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":105,"op":"access","args":{"mode":6,"path":"/tmp/syscall-conformance/fs-owner/plain"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":106,"op":"check","args":{"label":"R_OK|W_OK on 0644"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":107,"op":"access","args":{"mode":1,"path":"/tmp/syscall-conformance/fs-owner/plain"},"ret":-1,"errno":"EACCES","fields":{},"norm":{}}
+{"seq":108,"op":"check","args":{"label":"X_OK on 0644 is EACCES"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":109,"op":"access","args":{"mode":1,"path":"/tmp/syscall-conformance/fs-owner/setuid"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":110,"op":"check","args":{"label":"X_OK on 0755"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":111,"op":"access","args":{"mode":1,"path":"/tmp/syscall-conformance/fs-owner/d"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":112,"op":"check","args":{"label":"X_OK on a directory"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":113,"op":"access","args":{"mode":0,"path":"/tmp/syscall-conformance/fs-owner/missing"},"ret":-1,"errno":"ENOENT","fields":{},"norm":{}}
+{"seq":114,"op":"check","args":{"label":"F_OK on a missing path is ENOENT"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":115,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":193,"mode":128,"path":"/tmp/syscall-conformance/fs-owner/unreadable"},"ret":"fd@115","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":116,"op":"close","args":{"fd":"fd@115"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":117,"op":"access","args":{"mode":4,"path":"/tmp/syscall-conformance/fs-owner/unreadable"},"ret":-1,"errno":"EACCES","fields":{},"norm":{}}
+{"seq":118,"op":"check","args":{"label":"R_OK on 0200 is EACCES"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":119,"op":"access","args":{"mode":2,"path":"/tmp/syscall-conformance/fs-owner/unreadable"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":120,"op":"check","args":{"label":"W_OK on 0200"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":121,"op":"faccessat","args":{"dirfd":"fd@49","flags":0,"mode":1,"path":"inner"},"ret":-1,"errno":"EACCES","fields":{},"norm":{"args.dirfd":"relative:fd"}}
+{"seq":122,"op":"check","args":{"label":"faccessat X_OK relative to a dirfd is EACCES on 0644"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":123,"op":"faccessat","args":{"dirfd":"fd@49","flags":0,"mode":4,"path":"inner"},"ret":0,"errno":null,"fields":{},"norm":{"args.dirfd":"relative:fd"}}
+{"seq":124,"op":"check","args":{"label":"faccessat R_OK relative to a dirfd"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":125,"op":"faccessat2","args":{"dirfd":"AT_FDCWD","flags":0,"mode":1,"path":"/tmp/syscall-conformance/fs-owner/setuid"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":126,"op":"check","args":{"label":"faccessat2 X_OK on 0755"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":127,"op":"faccessat2","args":{"dirfd":"AT_FDCWD","flags":0,"mode":1,"path":"/tmp/syscall-conformance/fs-owner/plain"},"ret":-1,"errno":"EACCES","fields":{},"norm":{}}
+{"seq":128,"op":"check","args":{"label":"faccessat2 X_OK on 0644 is EACCES"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":129,"op":"faccessat2","args":{"dirfd":"AT_FDCWD","flags":512,"mode":4,"path":"/tmp/syscall-conformance/fs-owner/plain"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":130,"op":"check","args":{"label":"faccessat2 AT_EACCESS reads the same identity"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":131,"op":"faccessat2","args":{"dirfd":"AT_FDCWD","flags":1,"mode":4,"path":"/tmp/syscall-conformance/fs-owner/plain"},"ret":-1,"errno":"EINVAL","fields":{},"norm":{}}
+{"seq":132,"op":"check","args":{"label":"faccessat2 with an unknown flag is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":133,"op":"close","args":{"fd":"fd@49"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}

@@ -348,6 +348,20 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         self.inner.set_times(clock, fd, atime_nanos, mtime_nanos)
     }
 
+    fn set_inode_times(
+        &mut self,
+        clock: FsClock,
+        ino: u64,
+        atime_nanos: Option<u64>,
+        mtime_nanos: Option<u64>,
+    ) -> DriverResult<()> {
+        if let Some(error) = self.maybe_error(FsFaultOp::SetTimes) {
+            return Err(error);
+        }
+        self.inner
+            .set_inode_times(clock, ino, atime_nanos, mtime_nanos)
+    }
+
     fn set_times_by_path(
         &mut self,
         clock: FsClock,

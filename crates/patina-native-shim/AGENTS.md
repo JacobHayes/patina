@@ -83,7 +83,7 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   kernel's rules from the virtual clock the runtime hands each driver operation
   (`FsClock`, read unrecorded — the value is a function of the recorded sleeps,
   so replay reproduces it without a second trace op per fs call), and
-  `UTIME_NOW` resolves to that same instant before it crosses the boundary. The
+  `UTIME_NOW` resolves after modeled latency to that same instant before it crosses the recorded boundary. The runtime fixes atime policy to relatime; there is no unrecorded runtime policy knob. The
   remaining synthesized fields (device numbers, the statx mount id) are the same
   hazard waiting for the guest that reads them.
 - An ARGUMENT the guest supplied is not a synthesized field's smaller cousin —

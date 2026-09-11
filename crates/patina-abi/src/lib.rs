@@ -877,6 +877,11 @@ pub enum Operation {
         atime_nanos: Option<u64>,
         mtime_nanos: Option<u64>,
     },
+    FsSetInodeTimes {
+        ino: u64,
+        atime_nanos: Option<u64>,
+        mtime_nanos: Option<u64>,
+    },
     FsSetTimesByPath {
         path: String,
         atime_nanos: Option<u64>,

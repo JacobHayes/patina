@@ -467,3 +467,64 @@ op = "check"
 field = "ret"
 label = "a non-blocking connect is EINPROGRESS"
 reason = "pending: network — see connect seq 88"
+
+[[divergence]]
+probe = "fs/metadata"
+op = "statx"
+field = "fields.mask"
+reason = "pending: fs allocation accounting — STATX_BLOCKS is absent because allocation extents are not modeled; length-derived blocks would lie after KEEP_SIZE or PUNCH_HOLE"
+
+[[divergence]]
+probe = "fs/times"
+op = "statx"
+field = "fields.mask"
+reason = "pending: fs allocation accounting — STATX_BLOCKS is absent because allocation extents are not modeled; length-derived blocks would lie after KEEP_SIZE or PUNCH_HOLE"
+
+[[divergence]]
+probe = "fs/metadata"
+op = "check"
+field = "ret"
+label = "statx fills every basic field"
+reason = "pending: fs allocation accounting — STATX_BLOCKS is deliberately not claimed"
+
+[[divergence]]
+probe = "fs/times"
+op = "utimensat"
+seq = 190
+field = "errno"
+reason = "pending: signed/wide filesystem timestamps — unsigned-nanosecond ABI refuses out-of-range seconds with EINVAL; Linux accepts then clamps to its filesystem range (checked conversion, never wrap)"
+
+[[divergence]]
+probe = "fs/times"
+op = "utimensat"
+seq = 190
+field = "ret"
+reason = "pending: signed/wide filesystem timestamps — unsigned-nanosecond ABI refuses out-of-range seconds with EINVAL; Linux accepts then clamps to its filesystem range (checked conversion, never wrap)"
+
+[[divergence]]
+probe = "fs/times"
+op = "utimes"
+seq = 193
+field = "errno"
+reason = "pending: signed/wide filesystem timestamps — unsigned-nanosecond ABI refuses out-of-range seconds with EINVAL; Linux accepts then clamps to its filesystem range (checked conversion, never wrap)"
+
+[[divergence]]
+probe = "fs/times"
+op = "utimes"
+seq = 193
+field = "ret"
+reason = "pending: signed/wide filesystem timestamps — unsigned-nanosecond ABI refuses out-of-range seconds with EINVAL; Linux accepts then clamps to its filesystem range (checked conversion, never wrap)"
+
+[[divergence]]
+probe = "fs/times"
+op = "utime"
+seq = 196
+field = "errno"
+reason = "pending: signed/wide filesystem timestamps — unsigned-nanosecond ABI refuses out-of-range seconds with EINVAL; Linux accepts then clamps to its filesystem range (checked conversion, never wrap)"
+
+[[divergence]]
+probe = "fs/times"
+op = "utime"
+seq = 196
+field = "ret"
+reason = "pending: signed/wide filesystem timestamps — unsigned-nanosecond ABI refuses out-of-range seconds with EINVAL; Linux accepts then clamps to its filesystem range (checked conversion, never wrap)"

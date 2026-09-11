@@ -184,10 +184,44 @@ mod scenario {
             "a symlink is owned by the caller",
             link_stat.uid == uid && link_stat.gid == gid,
         );
+        pause(p);
         p.check(
             "lchown(own, own) on a symlink",
             p.chown(&link, uid, gid, false) == 0,
         );
+        let changed_link = stat(p, &link, AT_SYMLINK_NOFOLLOW);
+        p.check(
+            "lchown moves the symlink ctime only",
+            changed_link.ctime_ns > link_stat.ctime_ns
+                && changed_link.atime_ns == link_stat.atime_ns
+                && changed_link.mtime_ns == link_stat.mtime_ns,
+        );
+        let fifo = format!("{root}/owner-fifo");
+        p.require(
+            "create owner FIFO",
+            p.mknodat(AT_FDCWD, &fifo, S_IFIFO | 0o600, 0) == 0,
+        );
+        let fifo_fd = p.openat(AT_FDCWD, &fifo, O_RDWR, 0);
+        p.require("open owner FIFO", fifo_fd >= 0);
+        for unlinked in [false, true] {
+            if unlinked {
+                p.unlinkat(AT_FDCWD, &fifo, 0);
+            }
+            let before = p.fstat(fifo_fd).1.unwrap();
+            pause(p);
+            p.check(
+                "fchown reaches retained FIFO",
+                p.fchown(fifo_fd, uid, gid) == 0,
+            );
+            let after = p.fstat(fifo_fd).1.unwrap();
+            p.check(
+                "FIFO ownership moves ctime only",
+                after.ctime_ns > before.ctime_ns
+                    && after.mtime_ns == before.mtime_ns
+                    && after.atime_ns == before.atime_ns,
+            );
+        }
+        p.close(fifo_fd);
         p.check(
             "lchown to another user is EPERM",
             p.chown(&link, other_uid, gid, false) == neg(EPERM),

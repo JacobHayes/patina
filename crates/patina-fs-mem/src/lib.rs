@@ -1082,9 +1082,11 @@ impl FsDriver for MemFs {
             .expect("open handle references a file");
         let file = &inode.contents;
         let end = start.saturating_add(max_len).min(file.len());
-        let bytes = file[start..end].to_vec();
-        inode.times.accessed(clock);
-        self.description_mut(fd)?.cursor = end;
+        let bytes = file[start.min(end)..end].to_vec();
+        if max_len != 0 {
+            inode.times.accessed(clock);
+        }
+        self.description_mut(fd)?.cursor = start + bytes.len();
         Ok(bytes)
     }
 
@@ -1102,6 +1104,9 @@ impl FsDriver for MemFs {
                 format!("virtual file handle {} references a directory", fd.0),
             ));
         }
+        if bytes.is_empty() {
+            return Ok(0);
+        }
         let cursor = description.cursor;
         let append = description.append;
         let inode = self.handle_inode(fd)?;
@@ -1115,7 +1120,7 @@ impl FsDriver for MemFs {
             EffectError::new(ErrorCode::InvalidInput, "virtual file size overflowed")
         })?;
         if file.len() < end {
-            file.resize(end, 0);
+            Self::resize_contents(file, end)?;
         }
         file[start..end].copy_from_slice(bytes);
         inode.times.data_changed(clock);
@@ -1143,6 +1148,9 @@ impl FsDriver for MemFs {
                 format!("virtual file handle {} references a directory", fd.0),
             ));
         }
+        if bytes.is_empty() {
+            return Ok(0);
+        }
         let start = usize::try_from(offset).map_err(|_| {
             EffectError::new(
                 ErrorCode::InvalidInput,
@@ -1159,7 +1167,7 @@ impl FsDriver for MemFs {
             .expect("open handle references a file");
         let file = &mut inode.contents;
         if file.len() < end {
-            file.resize(end, 0);
+            Self::resize_contents(file, end)?;
         }
         file[start..end].copy_from_slice(bytes);
         inode.times.data_changed(clock);
@@ -1522,7 +1530,7 @@ impl FsDriver for MemFs {
             .expect("open handle references a file");
         let file = &mut inode.contents;
         if !keep_size && end > file.len() {
-            file.resize(end, 0);
+            Self::resize_contents(file, end)?;
         }
         if zero {
             let end = end.min(file.len());
@@ -1559,6 +1567,28 @@ impl FsDriver for MemFs {
         }
         let inode = self.inodes.get_mut(&node).ok_or_else(|| invalid_fd(fd))?;
         inode.times.set(clock, atime_nanos, mtime_nanos);
+        Ok(())
+    }
+
+    fn set_inode_times(
+        &mut self,
+        clock: FsClock,
+        ino: u64,
+        atime_nanos: Option<u64>,
+        mtime_nanos: Option<u64>,
+    ) -> DriverResult<()> {
+        let times = if let Some(inode) = self.inodes.get_mut(&ino) {
+            &mut inode.times
+        } else {
+            &mut self
+                .directories
+                .values_mut()
+                .chain(self.symlink_metadata.values_mut())
+                .find(|entry| entry.ino == ino)
+                .ok_or_else(|| not_found("<inode>"))?
+                .times
+        };
+        times.set(clock, atime_nanos, mtime_nanos);
         Ok(())
     }
 
@@ -2091,6 +2121,16 @@ impl MemFs {
 
     /// Resize a file's contents (zero-filling growth) and stamp `mtime`/
     /// `ctime` — `do_truncate` moves them even when the length is unchanged.
+    fn resize_contents(contents: &mut Vec<u8>, len: usize) -> DriverResult<()> {
+        if len > contents.len() {
+            contents.try_reserve(len - contents.len()).map_err(|_| {
+                EffectError::new(ErrorCode::NoSpace, "virtual filesystem capacity exhausted")
+            })?;
+        }
+        contents.resize(len, 0);
+        Ok(())
+    }
+
     fn truncate_inode(inode: Option<&mut Inode>, clock: FsClock, len: u64) -> DriverResult<()> {
         let len = usize::try_from(len).map_err(|_| {
             EffectError::new(
@@ -2099,7 +2139,7 @@ impl MemFs {
             )
         })?;
         let inode = inode.expect("a checked handle or name references an inode");
-        inode.contents.resize(len, 0);
+        Self::resize_contents(&mut inode.contents, len)?;
         inode.times.data_changed(clock);
         Ok(())
     }
@@ -3675,6 +3715,50 @@ mod tests {
             metadata.ctime_nanos,
             metadata.btime_nanos,
         )
+    }
+
+    #[test]
+    fn impossible_capacity_is_a_storage_error_not_a_process_abort() {
+        // Class pairing: fallible guest-sized growth, also used by writes.
+        let mut fs = MemFs::new().with_file("/f", b"abc".to_vec()).unwrap();
+        let fd = fs.open(FsClock::at(10), "/f", read_write()).unwrap();
+        assert_eq!(
+            fs.set_len(FsClock::at(20), fd, i64::MAX as u64)
+                .unwrap_err()
+                .code,
+            ErrorCode::NoSpace
+        );
+        assert_eq!(
+            fs.allocate(FsClock::at(30), fd, 0, i64::MAX as u64, false, false)
+                .unwrap_err()
+                .code,
+            ErrorCode::NoSpace
+        );
+        assert_eq!(fs.metadata("/f").unwrap().len, 3);
+    }
+
+    #[test]
+    fn zero_io_preserves_times_size_and_cursor() {
+        let mut fs = MemFs::new().with_file("/f", b"abc".to_vec()).unwrap();
+        let fd = fs.open(FsClock::at(10), "/f", read_write()).unwrap();
+        fs.seek(fd, 20, SeekWhence::Start).unwrap();
+        let before = times(&mut fs, "/f");
+        assert_eq!(fs.read(FsClock::at(30), fd, 0).unwrap(), b"");
+        assert_eq!(fs.write(FsClock::at(40), fd, b"").unwrap(), 0);
+        assert_eq!(fs.write_at(FsClock::at(50), fd, 30, b"").unwrap(), 0);
+        assert_eq!(times(&mut fs, "/f"), before);
+        assert_eq!(fs.metadata("/f").unwrap().len, 3);
+        assert_eq!(fs.seek(fd, 0, SeekWhence::Current).unwrap(), 20);
+    }
+
+    #[test]
+    fn read_after_truncate_past_cursor_returns_eof_without_rewinding() {
+        let mut fs = MemFs::new().with_file("/f", b"abc".to_vec()).unwrap();
+        let fd = fs.open(FsClock::at(10), "/f", read_write()).unwrap();
+        fs.seek(fd, 3, SeekWhence::Start).unwrap();
+        fs.set_len(FsClock::at(20), fd, 0).unwrap();
+        assert!(fs.read(FsClock::at(30), fd, 8).unwrap().is_empty());
+        assert_eq!(fs.seek(fd, 0, SeekWhence::Current).unwrap(), 3);
     }
 
     #[test]

@@ -469,7 +469,7 @@ pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, flags_mask: u64, stat
         Err(errno) => return errno,
     };
     // An honest mask, the exact one the C statx interposer reports:
-    // STATX_BASIC_STATS and STATX_MNT_ID are always filled (as the kernel's
+    // BASIC_STATS except unmodeled BLOCKS, plus MNT_ID (the kernel's
     // vfs_statx fills them whatever was asked), STATX_BTIME only when requested.
     const STATX_BASIC_STATS: u32 = 0x07ff;
     const STATX_BTIME: u32 = 0x0800;
@@ -481,7 +481,7 @@ pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, flags_mask: u64, stat
         __reserved: 0,
     };
     let mut stx = Statx {
-        stx_mask: STATX_BASIC_STATS | STATX_MNT_ID,
+        stx_mask: (STATX_BASIC_STATS & !0x400) | STATX_MNT_ID,
         stx_blksize: STAT_BLOCK_SIZE as u32,
         stx_mode: stat_mode(&values) as u16,
         stx_nlink: values.nlink,
@@ -490,7 +490,7 @@ pub(super) fn sys_statx(dirfd: i64, path: u64, flags: u64, flags_mask: u64, stat
         stx_gid: unsafe { patina_gid() },
         stx_ino: values.ino,
         stx_size: values.length,
-        stx_blocks: stat_blocks(values.length),
+        stx_blocks: 0, // Allocation extents are not modeled.
         stx_atime: timestamp(values.atime_nanos),
         stx_mtime: timestamp(values.mtime_nanos),
         stx_ctime: timestamp(values.ctime_nanos),
@@ -902,15 +902,20 @@ struct KernelUtimbuf {
 /// One `utimensat` time argument decoded onto the runtime's `PATINA_TIME_*`
 /// vocabulary, exactly as the kernel decodes it: `UTIME_NOW`/`UTIME_OMIT` in
 /// `tv_nsec`, else a nanosecond count that must be in range (`EINVAL`).
+fn checked_time(seconds: i64, fraction: u64) -> Result<u64, i64> {
+    u64::try_from(seconds)
+        .ok()
+        .and_then(|s| s.checked_mul(NANOS_PER_SEC))
+        .and_then(|n| n.checked_add(fraction))
+        .ok_or(-EINVAL)
+}
+
 fn time_argument(time: &KernelTimespec) -> Result<(u32, u64), i64> {
     match time.tv_nsec {
         UTIME_NOW => Ok((crate::TIME_NOW, 0)),
         UTIME_OMIT => Ok((crate::TIME_OMIT, 0)),
         nsec if !(0..NANOS_PER_SEC as i64).contains(&nsec) || time.tv_sec < 0 => Err(-EINVAL),
-        nsec => Ok((
-            crate::TIME_SET,
-            time.tv_sec as u64 * NANOS_PER_SEC + nsec as u64,
-        )),
+        nsec => Ok((crate::TIME_SET, checked_time(time.tv_sec, nsec as u64)?)),
     }
 }
 
@@ -921,7 +926,7 @@ fn timeval_argument(time: &KernelTimeval) -> Result<(u32, u64), i64> {
     }
     Ok((
         crate::TIME_SET,
-        time.tv_sec as u64 * NANOS_PER_SEC + time.tv_usec as u64 * 1_000,
+        checked_time(time.tv_sec, time.tv_usec as u64 * 1_000)?,
     ))
 }
 
@@ -939,17 +944,21 @@ fn times_arguments<T: Copy>(
     Ok([decode(&pair[0])?, decode(&pair[1])?])
 }
 
-/// `utimensat(2)`: `AT_SYMLINK_NOFOLLOW` is the only flag (`EINVAL` otherwise);
+/// `utimensat(2)`: NOFOLLOW and EMPTY_PATH are supported; OMIT/OMIT skips flags.
 /// a null path names the descriptor itself (the `futimens` shape), which the
 /// kernel accepts only flagless and not on `AT_FDCWD`.
 pub(super) fn sys_utimensat(dirfd: i64, path: u64, times: u64, flags: u64) -> i64 {
-    if flags & !AT_SYMLINK_NOFOLLOW != 0 {
-        return -EINVAL;
-    }
     let [atime, mtime] = match times_arguments(times, time_argument) {
         Ok(times) => times,
         Err(errno) => return errno,
     };
+    if atime.0 == crate::TIME_OMIT && mtime.0 == crate::TIME_OMIT {
+        crate::abort_if_init_failed();
+        return 0;
+    }
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return -EINVAL;
+    }
     if path == 0 {
         if flags != 0 {
             return -EINVAL;
@@ -1023,10 +1032,11 @@ pub(super) fn sys_utime(path: u64, times: u64) -> i64 {
         if buf.actime < 0 || buf.modtime < 0 {
             return -EINVAL;
         }
-        (
-            (crate::TIME_SET, buf.actime as u64 * NANOS_PER_SEC),
-            (crate::TIME_SET, buf.modtime as u64 * NANOS_PER_SEC),
-        )
+        let (Ok(atime), Ok(mtime)) = (checked_time(buf.actime, 0), checked_time(buf.modtime, 0))
+        else {
+            return -EINVAL;
+        };
+        ((crate::TIME_SET, atime), (crate::TIME_SET, mtime))
     };
     let path = match guest_path(path) {
         Ok(path) => path,

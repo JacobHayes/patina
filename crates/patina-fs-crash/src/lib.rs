@@ -170,6 +170,17 @@ struct DurableTimes {
     btime_nanos: u64,
 }
 
+impl From<FsMetadata> for DurableTimes {
+    fn from(m: FsMetadata) -> Self {
+        Self {
+            atime_nanos: m.atime_nanos,
+            mtime_nanos: m.mtime_nanos,
+            ctime_nanos: m.ctime_nanos,
+            btime_nanos: m.btime_nanos,
+        }
+    }
+}
+
 /// A durable filesystem baseline captured at a durability point: the directory
 /// set, file contents, file inode identity, symlink targets, and per-entry
 /// timestamps.
@@ -207,6 +218,8 @@ pub struct CrashFs {
     durable: Baseline,
     /// Per-file content made durable by an explicit file `sync`.
     staged_content: BTreeMap<String, Vec<u8>>,
+    /// Fsynced timestamps belong to the inode, not any one hard-link name.
+    staged_times: BTreeMap<u64, DurableTimes>,
     /// Namespace operations since the baseline, in observation order.
     pending: Vec<PendingOp>,
     /// Live descriptor-to-path map used to attribute `sync` calls.
@@ -341,6 +354,7 @@ impl CrashFs {
             live: filesystem,
             durable,
             staged_content: BTreeMap::new(),
+            staged_times: BTreeMap::new(),
             pending: Vec::new(),
             open_paths: BTreeMap::new(),
             last_write: None,
@@ -354,6 +368,7 @@ impl CrashFs {
     pub fn checkpoint(&mut self) {
         self.durable = enumerate(&self.live);
         self.staged_content.clear();
+        self.staged_times.clear();
         self.pending.clear();
         self.last_write = None;
     }
@@ -371,12 +386,15 @@ impl CrashFs {
     /// survive a crash even under the directory-durability model.
     pub fn sync_directory(&mut self, path: &str) -> DriverResult<()> {
         let path = normalize_entry_path(path)?;
-        if !matches!(self.live.metadata(&path)?.kind, FsEntryKind::Directory) {
+        let metadata = self.live.metadata(&path)?;
+        if !matches!(metadata.kind, FsEntryKind::Directory) {
             return Err(EffectError::new(
                 ErrorCode::NotDirectory,
                 format!("virtual filesystem path is not a directory: {path}"),
             ));
         }
+        self.staged_times
+            .insert(metadata.ino, DurableTimes::from(metadata));
         // Committing a directory makes durable exactly the namespace changes it
         // governs. A rename has two governing directories: the destination
         // parent (its link side, tracked by `committed`) and the source parent
@@ -738,8 +756,18 @@ impl CrashFs {
         // four are written back through the storage layer's own setter: a
         // guest-facing `set_times` would stamp `ctime` with the rebuild instant
         // and could not restore a birth time at all.
-        for (path, times) in &self.durable.times {
-            if next.metadata(path).is_ok() {
+        // enumerate includes symlinks, unlike paths_with_modes.
+        for path in enumerate(&next).times.keys() {
+            let live = self.live.entry_metadata(path).ok();
+            let source_ino = live
+                .map(|m| m.ino)
+                .or_else(|| self.durable.files.get(path).map(|f| f.inode))
+                .or_else(|| self.durable.fifos.get(path).copied());
+            let times = source_ino
+                .and_then(|ino| self.staged_times.get(&ino).copied())
+                .or_else(|| self.durable.times.get(path).copied())
+                .or_else(|| live.map(DurableTimes::from));
+            if let Some(times) = times {
                 next.restore_times(
                     path,
                     times.atime_nanos,
@@ -779,6 +807,7 @@ impl CrashFs {
         next.adopt_handles(&self.live);
         self.live = next;
         self.staged_content.clear();
+        self.staged_times.clear();
         self.pending.clear();
         self.last_write = None;
         Ok(())
@@ -972,6 +1001,9 @@ impl FsDriver for CrashFs {
 
     fn sync(&mut self, fd: Fd) -> DriverResult<()> {
         self.live.sync(fd)?;
+        let metadata = self.live.fd_metadata(fd)?;
+        self.staged_times
+            .insert(metadata.ino, DurableTimes::from(metadata));
         if let Some(path) = self.open_paths.get(&fd).cloned() {
             match self.live.metadata(&path)?.kind {
                 FsEntryKind::File => {
@@ -1091,6 +1123,17 @@ impl FsDriver for CrashFs {
         mtime_nanos: Option<u64>,
     ) -> DriverResult<()> {
         self.live.set_times(clock, fd, atime_nanos, mtime_nanos)
+    }
+
+    fn set_inode_times(
+        &mut self,
+        clock: FsClock,
+        ino: u64,
+        atime_nanos: Option<u64>,
+        mtime_nanos: Option<u64>,
+    ) -> DriverResult<()> {
+        self.live
+            .set_inode_times(clock, ino, atime_nanos, mtime_nanos)
     }
 
     fn set_times_by_path(
@@ -2375,6 +2418,67 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn crash_restores_newly_synced_times_and_symlink_times() {
+        // Class pairing: inode metadata durability across actual reconstruction.
+        let mut fs = CrashFs::default();
+        let fd = fs
+            .open(
+                FsClock::at(10),
+                "/attrs",
+                OpenFlags::create_truncate_write(),
+            )
+            .unwrap();
+        fs.write(FsClock::at(20), fd, b"stable").unwrap();
+        fs.set_times(FsClock::at(30), fd, Some(1), Some(2)).unwrap();
+        fs.symlink(FsClock::at(40), "attrs", "/link").unwrap();
+        fs.set_times_by_path(FsClock::at(50), "/link", Some(3), Some(4))
+            .unwrap();
+        fs.sync(fd).unwrap();
+        fs.sync_directory("/").unwrap();
+        let durable = fs.fd_metadata(fd).unwrap();
+        let link = fs.metadata("/link").unwrap();
+        fs.set_times(FsClock::at(60), fd, Some(5), Some(6)).unwrap();
+        fs.close(fd).unwrap();
+        let mut restored = fs.crash_and_snapshot().unwrap().into_memfs();
+        let actual = restored.metadata("/attrs").unwrap();
+        assert_eq!(
+            (
+                actual.atime_nanos,
+                actual.mtime_nanos,
+                actual.ctime_nanos,
+                actual.btime_nanos
+            ),
+            (
+                durable.atime_nanos,
+                durable.mtime_nanos,
+                durable.ctime_nanos,
+                durable.btime_nanos
+            )
+        );
+        let actual = restored.metadata("/link").unwrap();
+        assert_eq!(
+            (
+                actual.atime_nanos,
+                actual.mtime_nanos,
+                actual.ctime_nanos,
+                actual.btime_nanos
+            ),
+            (
+                link.atime_nanos,
+                link.mtime_nanos,
+                link.ctime_nanos,
+                link.btime_nanos
+            )
+        );
+        // Checkpointed symlinks must also retain their nonzero timestamps.
+        let mut fs = CrashFs::new(restored);
+        fs.crash().unwrap();
+        let actual = fs.metadata("/link").unwrap();
+        assert_eq!(actual.btime_nanos, 40);
+        assert_eq!(actual.ctime_nanos, 50);
     }
 
     #[test]
