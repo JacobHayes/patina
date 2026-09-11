@@ -1284,30 +1284,24 @@ fn append_relink_probe(scratch: &Path, staticlib: &Path, generation: u32) {
 // standard libraries meet at the guest link: a `duplicate symbol:
 // rust_eh_personality` error on Linux and — as this fixture showed before the
 // detector — a SILENT success on macOS, producing a guest carrying two libstds.
-// The split is staged hermetically here (a `rustc` that reports a distinct
-// identity when probed from the shim source cache), so the gate holds with or without
-// rustup installed; `a_rust_toolchain_pin_is_refused_when_it_splits_the_build`
-// covers the real rustup mechanism.
+// The split is staged hermetically: a proxy reports an identity its concrete
+// sysroot compiler cannot reproduce. The propagation gate above the link must
+// refuse it. The hostile-proxy success test is the class-level pairing.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn a_split_shim_guest_toolchain_is_refused_before_the_link() {
+fn an_unverifiable_guest_compiler_is_refused_before_the_link() {
     let directory = tempdir().unwrap();
-    let shim_sources = shim_source_cache();
 
-    // A `rustc` that reports a distinct identity when it runs inside the shim
-    // source cache (where cargo-patina builds the shim) and the host identity
-    // everywhere else — the same per-directory resolution rustup's proxy
-    // performs, without needing rustup. The stub compares against the PHYSICAL
-    // cache path: `pwd -P` resolves symlinks, and a home or temp path can sit
-    // behind one (macOS `/var` is a symlink to `/private/var`).
+    // A proxy claims a guest identity that its sysroot cannot reproduce.
     let stub = directory.path().join("rustc-split.sh");
     fs::write(
         &stub,
         format!(
-            "#!/bin/sh\ncase \"$1:$(pwd -P)\" in\n  \"-vV:{}\"/*)\n    rustc -vV \
-             | sed '1s/.*/rustc 9.9.9-patina-split-stub (0000000 2000-01-01)/'\n    exit 0;;\n\
-             esac\nexec rustc \"$@\"\n",
-            fs::canonicalize(&shim_sources).unwrap().display()
+            "#!/bin/sh\nif [ \"$1\" = -vV ]; then \"{}\" -vV \
+             | sed '1s/.*/rustc 9.9.9-patina-split-stub (0000000 2000-01-01)/'; exit 0; fi\n\
+             exec \"{}\" \"$@\"\n",
+            active_toolchain_binary("rustc").display(),
+            active_toolchain_binary("rustc").display()
         ),
     )
     .unwrap();
@@ -1350,27 +1344,20 @@ fn a_split_shim_guest_toolchain_is_refused_before_the_link() {
         "9.9.9-patina-split-stub",
         "shim toolchain:",
         "guest toolchain:",
-        "When `rustc` is a rustup proxy",
-        "RUSTUP_TOOLCHAIN",
+        "No ambient fallback",
         "absolute, matching RUSTC and CARGO binaries from one toolchain",
-        "cargo patina",
     ] {
         assert!(
             stderr.contains(expected),
             "refusal did not mention {expected:?}:\n{stderr}"
         );
     }
-    // The refusal names the shim directory as the CLI holds it (the bundle
-    // directory under the shim source cache, built from HOME/XDG_CACHE_HOME the
-    // way `shim_source_cache` reproduces) and the guest directory as
-    // `current_dir` reports it — physical, so symlinks are already resolved
-    // there.
+    // Verification already fails in the guest directory; name that physical
+    // directory rather than claiming a cache-directory probe ran.
     let package_physical = fs::canonicalize(&package).unwrap();
     assert!(
-        stderr.contains(&shim_sources.display().to_string())
-            && stderr.contains(&package_physical.display().to_string()),
-        "refusal did not name both directories ({} and {}):\n{stderr}",
-        shim_sources.display(),
+        stderr.contains(&package_physical.display().to_string()),
+        "refusal did not name the guest directory {}:\n{stderr}",
         package_physical.display()
     );
     assert!(
@@ -1379,12 +1366,7 @@ fn a_split_shim_guest_toolchain_is_refused_before_the_link() {
         split_output.display()
     );
 
-    // Agreeing: the same fixture with the split removed must build untouched.
-    // This is what keeps the detector from firing spuriously. The stub is dropped
-    // entirely rather than kept in a pass-through mode, because a `RUSTC` pointing
-    // at a different path changes Cargo's rustc fingerprint and would rebuild the
-    // shim's whole dependency chain in the shared workspace `target/`, then
-    // rebuild it again for the next test.
+    // Removing the false identity must allow this same guest to build.
     let built = invoke_unchecked_clean_env(
         env!("CARGO_BIN_EXE_cargo-patina"),
         &package,
@@ -1411,28 +1393,23 @@ fn a_split_shim_guest_toolchain_is_refused_before_the_link() {
     );
 }
 
-// The reported shape, through the real rustup mechanism rather than a stub: a
-// guest tree carrying its own `rust-toolchain.toml` with the `cargo-patina`
-// binary invoked DIRECTLY. Invoked as `cargo patina`, rustup's cargo proxy
-// exports `RUSTUP_TOOLCHAIN` and pins both halves; invoked directly there is no
-// such variable, and rustup's `rustc` proxy resolves each half from the
-// directory it runs in — the shim in its source cache, the guest under its
-// pin. Skipped (loudly) without rustup or without the MSRV toolchain the check
-// ladder already requires; the hermetic test above never skips.
+// Real rustup directory resolution: the guest pins MSRV while the cache would
+// select the default. The hostile per-directory proxy is the non-skipping
+// class-level detector; this test covers rustup's actual selector.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn a_rust_toolchain_pin_is_refused_when_it_splits_the_build() {
+fn a_rust_toolchain_pin_builds_with_the_guest_compiler() {
     const PINNED: &str = "1.86.0";
     let Some(installed) = rustup_toolchain_list() else {
         eprintln!(
-            "SKIP a_rust_toolchain_pin_is_refused_when_it_splits_the_build: no rustup on PATH, \
+            "SKIP a_rust_toolchain_pin_builds_with_the_guest_compiler: no rustup on PATH, \
              so no per-directory toolchain resolution exists to split"
         );
         return;
     };
     if !installed.lines().any(|line| line.starts_with(PINNED)) {
         eprintln!(
-            "SKIP a_rust_toolchain_pin_is_refused_when_it_splits_the_build: rustup toolchain \
+            "SKIP a_rust_toolchain_pin_builds_with_the_guest_compiler: rustup toolchain \
              {PINNED} is not installed (run `mise run setup`)"
         );
         return;
@@ -1447,10 +1424,14 @@ fn a_rust_toolchain_pin_is_refused_when_it_splits_the_build() {
         .env_remove("RUSTUP_TOOLCHAIN")
         .output()
         .unwrap();
+    assert!(
+        default.status.success(),
+        "rustup default query failed: {default:?}"
+    );
     let default = String::from_utf8_lossy(&default.stdout).into_owned();
     if default.starts_with(PINNED) {
         eprintln!(
-            "SKIP a_rust_toolchain_pin_is_refused_when_it_splits_the_build: the default toolchain \
+            "SKIP a_rust_toolchain_pin_builds_with_the_guest_compiler: the default toolchain \
              is already {PINNED}, so the two halves cannot split"
         );
         return;
@@ -1469,12 +1450,16 @@ fn a_rust_toolchain_pin_is_refused_when_it_splits_the_build() {
     )
     .unwrap();
     let output_path = package.join("pinned-build");
+    // Use rustup's directory resolver even when PATH rustc is a mise shim.
+    let proxy = directory.path().join("rustc");
+    fs::write(&proxy, "#!/bin/sh\nexec rustup run \"$(rustup show active-toolchain | cut -d ' ' -f1)\" rustc \"$@\"\n").unwrap();
+    fs::set_permissions(&proxy, fs::Permissions::from_mode(0o755)).unwrap();
 
-    // Hold the build lock: if the detection regresses, this invocation compiles.
+    // Serialize shared shim-cache builds.
     let _build_guard = BUILD_LOCK
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    let refused = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+    let built = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
         .current_dir(&package)
         .args([
             "build",
@@ -1482,30 +1467,22 @@ fn a_rust_toolchain_pin_is_refused_when_it_splits_the_build() {
             "--output",
             output_path.to_str().unwrap(),
         ])
-        // Exactly the reported invocation: the binary run directly, so nothing
+        // The binary runs directly; no ambient override
         // pins a toolchain across both halves.
         .env_remove("RUSTUP_TOOLCHAIN")
         .env_remove("CARGO")
-        .env_remove("RUSTC")
+        .env("RUSTC", &proxy)
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    let stderr = String::from_utf8_lossy(&built.stderr).into_owned();
     assert!(
-        !refused.status.success(),
-        "a `rust-toolchain.toml`-pinned guest built against a differently-pinned shim without \
-         complaint (exit {})\nstdout:\n{}\nstderr:\n{stderr}",
-        refused.status,
-        String::from_utf8_lossy(&refused.stdout)
+        built.status.success(),
+        "a `rust-toolchain.toml`-pinned guest did not build (exit {})\nstdout:\n{}\nstderr:\n{stderr}",
+        built.status,
+        String::from_utf8_lossy(&built.stdout)
     );
-    assert!(
-        stderr.contains("two different rustc toolchains") && stderr.contains(PINNED),
-        "the refusal did not name the toolchain split or the pinned toolchain {PINNED}:\n{stderr}"
-    );
-    assert!(
-        !output_path.exists(),
-        "the refusal produced a binary at {}; it must refuse BEFORE the link",
-        output_path.display()
-    );
+    assert!(output_path.is_file());
+    assert_no_bundle_toolchain_pin(&shim_sources);
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1541,13 +1518,36 @@ fn active_toolchain_binary(name: &str) -> PathBuf {
     binary
 }
 
-// A Mise-like `rustc` proxy ignores RUSTUP_TOOLCHAIN and resolves from its own
-// mechanism instead. The mismatch diagnostic must not present rustup variables as
-// a universal fix; the proxy-agnostic fix is absolute, matching RUSTC and CARGO
-// binaries from one toolchain.
+// Class-level detector: per-directory selectors must never be re-entered after
+// materializing the guest compiler. Both ambient tools are hostile in the cache.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn assert_no_bundle_toolchain_pin(cache: &Path) {
+    let mut bundles = 0;
+    for entry in fs::read_dir(cache).unwrap() {
+        let bundle = entry.unwrap().path();
+        if bundle.is_dir() {
+            bundles += 1;
+            for pin in [
+                "rust-toolchain",
+                "rust-toolchain.toml",
+                "mise.toml",
+                ".mise.toml",
+                ".cargo",
+            ] {
+                assert!(
+                    !bundle.join(pin).exists(),
+                    "mutable pin in {}",
+                    bundle.display()
+                );
+            }
+        }
+    }
+    assert!(bundles > 0, "no extracted bundles were inspected");
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn a_non_rustup_rustc_proxy_gets_proxy_agnostic_toolchain_guidance() {
+fn a_hostile_per_directory_proxy_builds_with_the_guest_compiler() {
     let directory = tempdir().unwrap();
     let shim_sources = shim_source_cache();
     let real_rustc = active_toolchain_binary("rustc");
@@ -1559,11 +1559,9 @@ fn a_non_rustup_rustc_proxy_gets_proxy_agnostic_toolchain_guidance() {
     fs::write(
         &rustc_proxy,
         format!(
-            "#!/bin/sh\ncase \"$1:$(pwd -P)\" in\n  \"-vV:{}\"/*)\n    \
-             \"{}\" -vV | sed '1s/.*/rustc 9.9.9-patina-mise-like-proxy \
-             (0000000 2000-01-01)/'\n    exit 0;;\nesac\nexec \"{}\" \"$@\"\n",
+            "#!/bin/sh\ncase \"$(pwd -P)\" in\n  \"{}\"/*)\n    \
+             echo HOSTILE_SHIM_RUSTC_USED >&2; exit 99;;\nesac\nexec \"{}\" \"$@\"\n",
             fs::canonicalize(&shim_sources).unwrap().display(),
-            real_rustc.display(),
             real_rustc.display()
         ),
     )
@@ -1576,7 +1574,14 @@ fn a_non_rustup_rustc_proxy_gets_proxy_agnostic_toolchain_guidance() {
         "patina-toolchain-mise-like-fixture",
         "fn main() { println!(\"TOOLCHAIN_MISE_LIKE_FIXTURE_OK\"); }\n",
     );
-    let refused_output = package.join("refused-build");
+    let cargo_proxy = proxy_dir.join("cargo");
+    fs::write(
+        &cargo_proxy,
+        "#!/bin/sh\necho HOSTILE_PATH_CARGO_USED >&2\nexit 99\n",
+    )
+    .unwrap();
+    fs::set_permissions(&cargo_proxy, fs::Permissions::from_mode(0o755)).unwrap();
+    let propagated_output = package.join("propagated-build");
     let aligned_output = package.join("aligned-build");
     let path = format!(
         "{}:{}",
@@ -1587,13 +1592,13 @@ fn a_non_rustup_rustc_proxy_gets_proxy_agnostic_toolchain_guidance() {
     let _build_guard = BUILD_LOCK
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    let refused = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+    let built = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
         .current_dir(&package)
         .args([
             "build",
             package.to_str().unwrap(),
             "--output",
-            refused_output.to_str().unwrap(),
+            propagated_output.to_str().unwrap(),
         ])
         .env("PATH", &path)
         .env("RUSTUP_TOOLCHAIN", "1.96.1")
@@ -1601,29 +1606,15 @@ fn a_non_rustup_rustc_proxy_gets_proxy_agnostic_toolchain_guidance() {
         .env_remove("CARGO")
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    let stderr = String::from_utf8_lossy(&built.stderr).into_owned();
     assert!(
-        !refused.status.success(),
-        "a Mise-like proxy split built without complaint (exit {})\nstdout:\n{}\nstderr:\n{stderr}",
-        refused.status,
-        String::from_utf8_lossy(&refused.stdout)
+        built.status.success(),
+        "a Mise-like proxy guest failed to build (exit {})\nstdout:\n{}\nstderr:\n{stderr}",
+        built.status,
+        String::from_utf8_lossy(&built.stdout)
     );
-    assert!(
-        stderr.contains("9.9.9-patina-mise-like-proxy")
-            && stderr.contains("When `rustc` is a rustup proxy")
-            && stderr.contains("absolute, matching RUSTC and CARGO binaries from one toolchain"),
-        "refusal did not give proxy-scoped rustup guidance plus the universal absolute-binary \
-         remedy:\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("set RUSTUP_TOOLCHAIN yourself"),
-        "refusal still presents RUSTUP_TOOLCHAIN as a universal direct-invocation fix:\n{stderr}"
-    );
-    assert!(
-        !refused_output.exists(),
-        "the refusal produced a binary at {}; it must refuse BEFORE the link",
-        refused_output.display()
-    );
+    assert!(propagated_output.is_file());
+    assert_no_bundle_toolchain_pin(&shim_sources);
 
     // From here on, PATH is hostile: the aligned build must use the absolute
     // RUSTC/CARGO values below for every compiler probe and Cargo child. If any
@@ -1633,14 +1624,6 @@ fn a_non_rustup_rustc_proxy_gets_proxy_agnostic_toolchain_guidance() {
         "#!/bin/sh\necho HOSTILE_PATH_RUSTC_USED \"$@\" >&2\nexit 99\n",
     )
     .unwrap();
-    let cargo_proxy = proxy_dir.join("cargo");
-    fs::write(
-        &cargo_proxy,
-        "#!/bin/sh\necho HOSTILE_PATH_CARGO_USED \"$@\" >&2\nexit 99\n",
-    )
-    .unwrap();
-    fs::set_permissions(&cargo_proxy, fs::Permissions::from_mode(0o755)).unwrap();
-
     let aligned = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
         .current_dir(&package)
         .args([
@@ -1667,6 +1650,102 @@ fn a_non_rustup_rustc_proxy_gets_proxy_agnostic_toolchain_guidance() {
         "the aligned build produced no binary at {}",
         aligned_output.display()
     );
+}
+
+// Refusal matrix paired with the hostile-proxy propagation detector. Every
+// planted failure must stop before Cargo or the link, naming a concrete remedy.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn unmaterializable_guest_toolchains_refuse_without_fallback() {
+    let directory = tempdir().unwrap();
+    let package = directory.path().join("guest");
+    write_plain_package(&package, "unmaterializable-guest", "fn main() {}\n");
+    let real = active_toolchain_binary("rustc");
+    let fake_root = directory.path().join("sysroot");
+    fs::create_dir_all(fake_root.join("bin")).unwrap();
+    let fake_rustc = fake_root.join("bin/rustc");
+    fs::write(&fake_rustc, format!(
+        "#!/bin/sh\ncase \"$(pwd -P)\" in \"{}\"/*) echo rustc-SHIM-VERIFICATION-MISMATCH; exit 0;; esac\nexec \"{}\" \"$@\"\n",
+        fs::canonicalize(shim_source_cache()).unwrap().display(), real.display()
+    )).unwrap();
+    fs::set_permissions(&fake_rustc, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        fake_root.join("bin/cargo"),
+        "#!/bin/sh\necho CARGO_MUST_NOT_RUN >&2\nexit 98\n",
+    )
+    .unwrap();
+    fs::set_permissions(
+        fake_root.join("bin/cargo"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let cases = [
+        (
+            "query",
+            "echo GUEST_QUERY_FAILED >&2; exit 91".to_owned(),
+            "GUEST_QUERY_FAILED",
+        ),
+        (
+            "sysroot-query",
+            "if [ \"$1\" = --print ]; then echo NO_SYSROOT >&2; exit 92; fi".to_owned(),
+            "NO_SYSROOT",
+        ),
+        (
+            "empty-sysroot",
+            "if [ \"$1\" = --print ]; then exit 0; fi".to_owned(),
+            "sysroot is not an absolute path",
+        ),
+        (
+            "missing-binaries",
+            format!(
+                "if [ \"$1\" = --print ]; then echo '{}'; exit 0; fi",
+                directory.path().join("missing").display()
+            ),
+            "missing bin/rustc or bin/cargo",
+        ),
+        (
+            "shim-verification",
+            format!(
+                "if [ \"$1\" = --print ]; then echo '{}'; exit 0; fi",
+                fake_root.display()
+            ),
+            "rustc-SHIM-VERIFICATION-MISMATCH",
+        ),
+    ];
+    for (name, body, expected) in cases {
+        let proxy = directory.path().join(name);
+        fs::write(
+            &proxy,
+            format!("#!/bin/sh\n{body}\nexec \"{}\" \"$@\"\n", real.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&proxy, fs::Permissions::from_mode(0o755)).unwrap();
+        let output = package.join("must-not-exist");
+        let refused = invoke_unchecked_clean_env(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            &package,
+            &[
+                "build",
+                package.to_str().unwrap(),
+                "--output",
+                output.to_str().unwrap(),
+            ],
+            &[("RUSTC", proxy.to_str().unwrap())],
+        );
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(!refused.status.success(), "{name} built unexpectedly");
+        for text in [
+            "refusing to build",
+            expected,
+            "absolute, matching RUSTC and CARGO binaries from one toolchain",
+        ] {
+            assert!(stderr.contains(text), "{name}: missing {text:?}: {stderr}");
+        }
+        assert!(!stderr.contains("CARGO_MUST_NOT_RUN"), "{stderr}");
+        assert!(!output.exists());
+        eprintln!("{name}: refused before link ({expected})");
+    }
+    assert_no_bundle_toolchain_pin(&shim_source_cache());
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

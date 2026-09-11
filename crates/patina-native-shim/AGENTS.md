@@ -274,13 +274,15 @@ ARCHITECTURE.md "Native (linked shim)" and `crates/cargo-patina/build.rs`).
   closure deps repointed to sibling paths, dev-deps dropped). A new kind of
   workspace-inherited key (`[lints] workspace = true`, say) is refused at build
   time rather than shipped broken; extend the normalizer deliberately.
-- The unpacked bundle carries no toolchain pin and no version-manager config,
-  so the shim half of a native build resolves the AMBIENT toolchain. A `rustc`
-  proxy that resolves per directory and has no default (a mise shim outside the
-  tree it is configured for; rustup with no default toolchain) fails the
-  identity probe there, and the CLI says so with the remedies. Run the runtime
-  batteries through the activated environment (`mise run ...`, `mise exec --
-  scripts/validate-native-shim.sh`), not with bare shims on `PATH`.
+- The unpacked bundle carries no toolchain pin or version-manager config and
+  must never gain one at build time. Native builds materialize the guest
+  compiler from its sysroot, verify its full identity from the guest and bundle
+  directories, and drive both builds with that absolute compiler. Cargo comes
+  from that sysroot unless explicitly supplied; relative `RUSTC`/`CARGO` paths
+  are anchored to the guest directory. Operators do not need an ambient
+  toolchain override merely because the bundle lives outside their pinned tree.
+  Unqueryable or unverifiable compilers still refuse before compilation; never
+  fall back to the cache directory's ambient compiler.
 
 ## Change checklist
 

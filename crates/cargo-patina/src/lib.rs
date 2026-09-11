@@ -3446,6 +3446,7 @@ fn run_wasi_build(
         &invocation.manifest,
         invocation.package.as_deref(),
         invocation.bin.as_deref(),
+        None,
     )?;
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let mut command = Command::new(&cargo);
@@ -3729,7 +3730,7 @@ fn build_native_harness(
     let shim = prepare_shim_sources()?;
     let rustc = check_native_toolchain_agreement(&shim.dir)?;
     let staticlib = build_native_shim(invocation.release, &rustc, &shim)?;
-    let host_target = host_target_triple(&rustc.command)?;
+    let host_target = host_target_triple(&rustc)?;
     let objects_base = staticlib
         .parent()
         .expect("shim staticlib path has a profile directory parent")
@@ -3745,7 +3746,7 @@ fn build_native_harness(
         sancov_stub.as_deref(),
         &host_target,
     )?;
-    let metadata = cargo_metadata(&invocation.manifest)?;
+    let metadata = cargo_metadata(&invocation.manifest, Some(&rustc))?;
     let target_dir = metadata
         .get("target_directory")
         .and_then(serde_json::Value::as_str)
@@ -3842,9 +3843,18 @@ fn build_native_harness(
     })
 }
 
-fn cargo_metadata(manifest: &Path) -> Result<serde_json::Value, CliError> {
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = Command::new(&cargo)
+fn cargo_metadata(
+    manifest: &Path,
+    rustc: Option<&RustcInvocation>,
+) -> Result<serde_json::Value, CliError> {
+    let cargo = rustc
+        .map(|r| r.cargo_command.clone())
+        .unwrap_or_else(|| env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo")));
+    let mut command = Command::new(&cargo);
+    if let Some(rustc) = rustc {
+        apply_rustc_env(&mut command, rustc);
+    }
+    let output = command
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .arg("--manifest-path")
         .arg(manifest)
@@ -4848,9 +4858,11 @@ fn build_native_shim(
     // fails with "package ID specification `patina-dst-native-shim` did not match
     // any packages" — the observed `build .` regression.
     let explicit_target = env::var_os("CARGO_TARGET_DIR");
-    let toolchain = rustc_identity(&rustc.command, &shim.dir)?;
-    let target_dir =
-        native_shim_target_dir(&shim.cache_root, explicit_target.as_deref(), &toolchain);
+    let target_dir = native_shim_target_dir(
+        &shim.cache_root,
+        explicit_target.as_deref(),
+        &rustc.identity,
+    );
     let mut command = Command::new(&rustc.cargo_command);
     command
         .current_dir(&shim.dir)
@@ -4914,25 +4926,18 @@ struct RustcIdentity {
 struct RustcInvocation {
     command: OsString,
     cargo_command: OsString,
-    cargo_env: Option<OsString>,
+    identity: RustcIdentity,
 }
 
-fn rustc_invocation_from_env(from: &Path) -> RustcInvocation {
-    let original = env::var_os("RUSTC");
-    let command = anchored_program(original.clone(), from, "rustc");
-    let cargo_command = anchored_program(env::var_os("CARGO"), from, "cargo");
-    let cargo_env = original.and_then(|value| (value != command).then(|| command.clone()));
-    RustcInvocation {
-        command,
-        cargo_command,
-        cargo_env,
-    }
+fn rustc_invocation_from_env(from: &Path) -> (OsString, Option<OsString>) {
+    (
+        anchored_program(env::var_os("RUSTC"), from, "rustc"),
+        env::var_os("CARGO").map(|cargo| anchored_program(Some(cargo), from, "cargo")),
+    )
 }
 
 fn apply_rustc_env(command: &mut Command, rustc: &RustcInvocation) {
-    if let Some(value) = &rustc.cargo_env {
-        command.env("RUSTC", value);
-    }
+    command.env("RUSTC", &rustc.command);
 }
 
 /// Resolve the rustc that compiles code in `directory`.
@@ -4941,9 +4946,9 @@ fn apply_rustc_env(command: &mut Command, rustc: &RustcInvocation) {
 /// `PATH` is a proxy that picks its toolchain from the `rust-toolchain.toml`
 /// found by walking up from wherever it runs, and Cargo inherits that: even a
 /// toolchain's own `cargo` binary invokes the `PATH` proxy for `rustc`, so the
-/// directory a build runs in — not the `cargo` that drives it — decides which
-/// compiler compiles the crate. Without rustup, `rustc` is a real binary and
-/// every directory resolves the same identity.
+/// directory a build runs in — not the `cargo` that drives it — can decide which
+/// compiler compiles the crate. Other directory-scoped selectors behave likewise;
+/// a concrete compiler should report the same identity from every directory.
 fn rustc_identity(rustc: &OsStr, directory: &Path) -> Result<RustcIdentity, CliError> {
     let output = Command::new(rustc)
         .arg("-vV")
@@ -4996,50 +5001,82 @@ fn anchored_program(program: Option<OsString>, from: &Path, fallback: &str) -> O
     }
 }
 
-/// Refuse a native build whose shim staticlib and guest program would be
-/// compiled by two different toolchains.
+/// Materialize the guest compiler once; never resolve an ambient compiler in
+/// the shared shim cache. Two stdlibs cause a duplicate rust_eh_personality on
+/// Linux and can silently link on macOS.
 ///
-/// [`build_native_shim`] runs the shim's Cargo build in the unpacked source
-/// bundle under the per-user cache — a directory that carries no toolchain pin,
-/// so the identity resolving there is the ambient one (`RUSTUP_TOOLCHAIN`, or
-/// the rustup default); the guest build runs in the caller's working directory.
-/// When those two directories resolve different toolchains — a guest tree
-/// carrying its own `rust-toolchain.toml`, with the `cargo-patina` binary
-/// invoked directly rather than as `cargo patina` — two Rust standard libraries
-/// meet at the guest link. That is a `duplicate symbol: rust_eh_personality`
-/// link error on Linux and, worse, a silent success on macOS: the guest links
-/// and runs carrying two libstds. Name it before either happens.
+/// A -vV banner is an identity, NOT a selector: it cannot encode a rustup name,
+/// `stable`, a mise version, or a Nix path. RUSTUP_TOOLCHAIN / +toolchain are
+/// rustup-specific, and writing rust-toolchain.toml into the content-addressed
+/// bundle would mutate shared input and race concurrent builds. Instead verify
+/// the sysroot's absolute compiler in BOTH directories and use it everywhere.
 fn check_native_toolchain_agreement(shim_dir: &Path) -> Result<RustcInvocation, CliError> {
     let guest_dir = env::current_dir()
         .map_err(|error| CliError(format!("failed to read the working directory: {error}")))?;
-    let rustc = rustc_invocation_from_env(&guest_dir);
-    let shim = rustc_identity(&rustc.command, shim_dir).map_err(|error| {
-        // A per-directory proxy with nothing to resolve in the cache (rustup
-        // with no default toolchain; a version-manager shim outside the tree it
-        // is configured for) fails HERE, before any mismatch can be named — so
-        // name the cause and the remedies now rather than leave a bare probe
-        // failure.
+    let (selected, explicit_cargo) = rustc_invocation_from_env(&guest_dir);
+    let refusal = |reason: String| {
         CliError(format!(
-            "{}\nthe shim builds in cargo-patina's shim source cache, which carries no toolchain \
-pin of its own, so a `rustc` proxy that resolves its toolchain per directory (rustup without a \
-default toolchain; a version-manager shim outside its configured tree) finds nothing there. Give \
-the whole build one ambient toolchain: set RUSTUP_TOOLCHAIN, run inside the activated tool \
-environment, or invoke cargo-patina with absolute, matching RUSTC and CARGO binaries from one \
-toolchain.",
-            error.0
+            "refusing to build: cannot prove one rustc toolchain for the guest in {} and the shim in {}: {reason}\n\
+         invoke cargo-patina with absolute, matching RUSTC and CARGO binaries from one toolchain; \
+         the compiler must expose a sysroot with bin/rustc and bin/cargo. No ambient fallback is used.",
+            guest_dir.display(),
+            shim_dir.display()
         ))
-    })?;
-    let guest = rustc_identity(&rustc.command, &guest_dir)?;
-    if shim == guest {
-        return Ok(rustc);
+    };
+    let guest = rustc_identity(&selected, &guest_dir).map_err(|e| refusal(e.0))?;
+    let output = Command::new(&selected)
+        .args(["--print", "sysroot"])
+        .current_dir(&guest_dir)
+        .output()
+        .map_err(|e| {
+            refusal(format!(
+                "guest toolchain {}: failed to query sysroot: {e}",
+                guest.banner
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(refusal(format!(
+            "guest toolchain {}: rustc --print sysroot failed: {}",
+            guest.banner,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
     }
-    Err(CliError(toolchain_mismatch_message(
-        &shim, shim_dir, &guest, &guest_dir,
-    )))
+    let sysroot = std::str::from_utf8(&output.stdout)
+        .map_err(|e| refusal(format!("invalid sysroot: {e}")))?
+        .trim();
+    let sysroot = Path::new(sysroot);
+    if !sysroot.is_absolute() {
+        return Err(refusal(format!(
+            "guest toolchain {}: sysroot is not an absolute path: {sysroot:?}",
+            guest.banner
+        )));
+    }
+    let command = sysroot.join("bin/rustc").into_os_string();
+    let cargo = sysroot.join("bin/cargo");
+    if !Path::new(&command).is_file() || !cargo.is_file() {
+        return Err(refusal(format!(
+            "guest toolchain {}: missing bin/rustc or bin/cargo in {}",
+            guest.banner,
+            sysroot.display()
+        )));
+    }
+    for directory in [&guest_dir, shim_dir] {
+        let verified = rustc_identity(&command, directory).map_err(|e| refusal(e.0))?;
+        if verified != guest {
+            return Err(CliError(toolchain_mismatch_message(
+                &verified, directory, &guest, &guest_dir,
+            )));
+        }
+    }
+    Ok(RustcInvocation {
+        command,
+        cargo_command: explicit_cargo.unwrap_or_else(|| cargo.into_os_string()),
+        identity: guest,
+    })
 }
 
-/// The refusal text for a shim/guest toolchain split: name both toolchains, the
-/// directory each resolved in, and scoped remedies for pinning one toolchain.
+/// Name the selected and materialized identities and the verification directory,
+/// with a proxy-agnostic remedy. Never turn an identity banner into a selector.
 fn toolchain_mismatch_message(
     shim: &RustcIdentity,
     shim_dir: &Path,
@@ -5070,13 +5107,9 @@ guest:\n{}\n",
         ));
     }
     message.push_str(
-        "the shim always builds in cargo-patina's shim source cache (a directory with no \
-toolchain pin, so the ambient toolchain resolves there), while the guest builds in the working \
-directory. When `rustc` is a rustup proxy, it picks its toolchain from the rust-toolchain file \
-above whichever directory it runs in; in that case invoking through rustup as `cargo patina ...` \
-(the cargo proxy exports RUSTUP_TOOLCHAIN for the whole build) or setting RUSTUP_TOOLCHAIN before \
-invoking the cargo-patina binary directly pins both halves. Proxy-agnostic remedy: invoke \
-cargo-patina with absolute, matching RUSTC and CARGO binaries from one toolchain.",
+        "the absolute compiler in the guest's sysroot could not be verified against the \
+selected guest identity. No ambient fallback is used. Invoke cargo-patina with absolute, matching \
+RUSTC and CARGO binaries from one toolchain.",
     );
     message
 }
@@ -5107,7 +5140,7 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
     let shim = prepare_shim_sources()?;
     let rustc = check_native_toolchain_agreement(&shim.dir)?;
     let staticlib = build_native_shim(invocation.release, &rustc, &shim)?;
-    let host_target = host_target_triple(&rustc.command)?;
+    let host_target = host_target_triple(&rustc)?;
 
     // Stage the embedded POSIX shim layer at a stable content-addressed path in
     // the shim's own profile target dir (beside the staticlib), compiled below
@@ -5585,7 +5618,7 @@ fn build_native_package(
             manifest.display()
         )));
     }
-    let selected = select_native_package_bin(manifest, package, bin)?;
+    let selected = select_native_package_bin(manifest, package, bin, Some(rustc))?;
     let objects_base = staticlib
         .parent()
         .expect("shim staticlib path has a profile directory parent")
@@ -5666,22 +5699,9 @@ fn select_native_package_bin(
     manifest: &Path,
     package: Option<&str>,
     bin: Option<&str>,
+    rustc: Option<&RustcInvocation>,
 ) -> Result<SelectedNativeBin, CliError> {
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let output = Command::new(&cargo)
-        .args(["metadata", "--no-deps", "--format-version", "1"])
-        .arg("--manifest-path")
-        .arg(manifest)
-        .output()
-        .map_err(|error| CliError(format!("failed to run cargo metadata: {error}")))?;
-    if !output.status.success() {
-        return Err(CliError(format!(
-            "cargo metadata failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|error| CliError(format!("failed to parse cargo metadata: {error}")))?;
+    let metadata = cargo_metadata(manifest, rustc)?;
     let packages = metadata
         .get("packages")
         .and_then(serde_json::Value::as_array)
@@ -5803,20 +5823,12 @@ fn native_build_executable(stdout: &[u8], bin: &str) -> Result<PathBuf, CliError
     )))
 }
 
-/// Query rustc for the host target triple so the package build isolates its
-/// link arguments to host artifacts.
-fn host_target_triple(rustc: &OsStr) -> Result<String, CliError> {
-    let output = Command::new(rustc)
-        .arg("-vV")
-        .output()
-        .map_err(|error| CliError(format!("failed to query rustc host target: {error}")))?;
-    if !output.status.success() {
-        return Err(CliError(format!(
-            "rustc -vV failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    String::from_utf8_lossy(&output.stdout)
+/// Read the verified guest identity's host target so no later probe re-enters
+/// directory-scoped resolution; package link arguments stay host-only.
+fn host_target_triple(rustc: &RustcInvocation) -> Result<String, CliError> {
+    rustc
+        .identity
+        .verbose
         .lines()
         .find_map(|line| line.strip_prefix("host: "))
         .map(str::to_owned)
@@ -8818,7 +8830,11 @@ mod tests {
                 && message.contains("commit-hash: bbbbbbbbb"),
             "the same-banner case must show the full identities:\n{message}"
         );
-        assert!(message.contains("RUSTUP_TOOLCHAIN"), "{message}");
+        assert!(message.contains("No ambient fallback"), "{message}");
+        assert!(
+            message.contains("absolute, matching RUSTC and CARGO"),
+            "{message}"
+        );
 
         // Differing banners are self-explanatory; no full dump.
         let other = RustcIdentity {
