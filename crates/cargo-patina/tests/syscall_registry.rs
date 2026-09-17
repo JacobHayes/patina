@@ -99,10 +99,24 @@ fn every_defined_public_symbol_has_a_row_and_every_row_is_defined() {
             }
         }
     });
-    // rustc emits two unmangled globals of its own into every object set: the
-    // DWARF EH personality reference and the gdb-scripts section marker.
-    // Neither is a definition the shim wrote, so neither needs a row.
-    let toolchain_glue = |name: &str| name.starts_with("DW.ref.") || name.starts_with("__rustc_");
+    // rustc emits unmangled globals of its own into the Rust object set: the
+    // DWARF EH personality reference, the gdb-scripts section marker, and (on
+    // MSRV 1.86) allocator shims. None is a definition the shim wrote, so none
+    // needs a row.
+    let toolchain_glue = |name: &str| {
+        name.starts_with("DW.ref.")
+            || name.starts_with("__rustc_")
+            || matches!(
+                name,
+                "__rust_alloc"
+                    | "__rust_alloc_error_handler"
+                    | "__rust_alloc_error_handler_should_panic"
+                    | "__rust_alloc_zeroed"
+                    | "__rust_dealloc"
+                    | "__rust_no_alloc_shim_is_unstable"
+                    | "__rust_realloc"
+            )
+    };
     let stray: Vec<&String> = rust_exports
         .iter()
         .filter(|name| !is_control_plane_abi(name) && !toolchain_glue(name))

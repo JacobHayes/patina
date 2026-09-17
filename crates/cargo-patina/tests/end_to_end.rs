@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, OpenOptions};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Write};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::fs::PermissionsExt;
@@ -10792,6 +10793,29 @@ fn invoke_in(directory: &Path, arguments: &[&str]) -> Output {
     invoke_with(env!("CARGO_BIN_EXE_cargo-patina"), directory, arguments)
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn invoke_in_with_env(directory: &Path, arguments: &[&str], envs: &[(&str, &str)]) -> Output {
+    let _build_guard = command_compiles(arguments).then(|| {
+        BUILD_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    });
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-patina"));
+    command.current_dir(directory).args(arguments);
+    for (name, value) in envs {
+        command.env(name, value);
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "command failed with {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
 // Schedule reduction end to end: record a three-task run whose failure depends
 // on the interleaving (task b runs before task a completes), then minimize it
 // with a replay oracle. The oracle accepts a candidate only when the replayed
@@ -12113,18 +12137,83 @@ mod tests {
 // aborts with the fatal marker.
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+fn sdk_fixture_package_name(root: &Path) -> String {
+    let mut hash = DefaultHasher::new();
+    root.hash(&mut hash);
+    format!("buggify-sdk-fixture-{:016x}", hash.finish())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn write_sdk_fixture(root: &Path, main: &str) {
     fs::create_dir_all(root.join("src")).unwrap();
+    let package_name = sdk_fixture_package_name(root);
     let patina_path = native_workspace().join("crates/patina");
     let patina_path = patina_path.to_string_lossy().replace('\\', "\\\\");
     fs::write(
         root.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"buggify-sdk-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina-dst = {{ path = \"{patina_path}\" }}\n"
+            "[package]\nname = \"{package_name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina-dst = {{ path = \"{patina_path}\" }}\n"
         ),
     )
     .unwrap();
     fs::write(root.join("src/main.rs"), main).unwrap();
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn sdk_fixtures_with_shared_cargo_target_dir_do_not_reuse_stale_binary() {
+    let directory = tempdir().unwrap();
+    let first_pkg = directory.path().join("first");
+    let second_pkg = directory.path().join("second");
+    write_sdk_fixture(
+        &first_pkg,
+        r#"fn main() { println!("SDK_TARGET_COLLISION first"); }"#,
+    );
+    write_sdk_fixture(
+        &second_pkg,
+        r#"fn main() { println!("SDK_TARGET_COLLISION second"); }"#,
+    );
+
+    let workspace = native_workspace();
+    let shared_target = directory.path().join("shared-target");
+    let shared_target = shared_target.to_str().unwrap();
+    let first_bin = directory.path().join("first-bin");
+    let second_bin = directory.path().join("second-bin");
+    invoke_in_with_env(
+        workspace,
+        &[
+            "build",
+            first_pkg.to_str().unwrap(),
+            "--output",
+            first_bin.to_str().unwrap(),
+        ],
+        &[("CARGO_TARGET_DIR", shared_target)],
+    );
+    invoke_in_with_env(
+        workspace,
+        &[
+            "build",
+            second_pkg.to_str().unwrap(),
+            "--output",
+            second_bin.to_str().unwrap(),
+        ],
+        &[("CARGO_TARGET_DIR", shared_target)],
+    );
+
+    let second = invoke_in(
+        workspace,
+        &["run", second_bin.to_str().unwrap(), "--seed", "1"],
+    );
+    let stdout = String::from_utf8_lossy(&second.stdout);
+    assert!(
+        stdout.contains("SDK_TARGET_COLLISION second"),
+        "shared target dir reused the first SDK fixture's stale binary instead of the second:\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(
+        !stdout.contains("SDK_TARGET_COLLISION first"),
+        "shared target dir ran the first SDK fixture from the second build output:\nstdout:\n{stdout}"
+    );
 }
 
 // A guest whose buggify sites all activate and always fire under

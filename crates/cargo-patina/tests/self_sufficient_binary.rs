@@ -20,6 +20,34 @@
 use object::{Object, ObjectSection, SectionFlags, SectionKind};
 use std::path::Path;
 
+/// A workspace-root hit is harmless only when it is the file name Rust stored
+/// for a panic location. rustc 1.86 emits those as absolute `Location::file()`
+/// strings in loadable rodata; newer rustc emits workspace-relative paths. A
+/// runtime checkout dependency (the bug class pinned here) bakes a directory
+/// path such as `env!("CARGO_MANIFEST_DIR")`, not a Rust source-location file.
+fn rust_source_location_at(data: &[u8], offset: usize, root: &[u8]) -> bool {
+    let Some(suffix) = data.get(offset + root.len()..) else {
+        return false;
+    };
+    if !suffix.starts_with(b"/crates/") {
+        return false;
+    }
+    let terminator = suffix
+        .iter()
+        .position(|byte| matches!(*byte, 0 | b'\n'))
+        .unwrap_or(suffix.len());
+    suffix[..terminator]
+        .windows(3)
+        .any(|window| window == b".rs")
+}
+
+fn checkout_dependency_hits(data: &[u8], root: &[u8]) -> usize {
+    data.windows(root.len())
+        .enumerate()
+        .filter(|(offset, window)| *window == root && !rust_source_location_at(data, *offset, root))
+        .count()
+}
+
 /// Whether a section is part of the process image. ELF says so directly
 /// (`SHF_ALLOC`; DWARF sections such as `.debug_str` are unallocated string
 /// tables). Other formats fall back to the section kind: a linked Mach-O binary
@@ -62,10 +90,7 @@ fn the_cli_binary_does_not_name_its_source_checkout() {
         }
         let Ok(data) = section.data() else { continue };
         scanned += data.len();
-        let hits = data
-            .windows(needle.len())
-            .filter(|window| *window == needle)
-            .count();
+        let hits = checkout_dependency_hits(data, needle);
         if hits > 0 {
             offenders.push(format!(
                 "{} [{:?}] ({hits} occurrence{})",
@@ -86,5 +111,32 @@ fn the_cli_binary_does_not_name_its_source_checkout() {
          installed binary depends on the source checkout)",
         workspace_root(),
         offenders.join(", ")
+    );
+}
+
+#[test]
+fn panic_location_filter_still_catches_runtime_checkout_paths() {
+    let root = workspace_root().as_bytes();
+    let mut panic_location = Vec::new();
+    panic_location.push(0);
+    panic_location.extend_from_slice(root);
+    panic_location.extend_from_slice(b"/crates/cargo-patina/src/lib.rs");
+    panic_location.push(0);
+
+    assert_eq!(
+        checkout_dependency_hits(&panic_location, root),
+        0,
+        "rustc 1.86 absolute panic Location::file() strings are not runtime checkout dependencies"
+    );
+
+    let mut runtime_lookup = Vec::new();
+    runtime_lookup.push(0);
+    runtime_lookup.extend_from_slice(root);
+    runtime_lookup.extend_from_slice(b"/crates/cargo-patina");
+    runtime_lookup.push(0);
+    assert_eq!(
+        checkout_dependency_hits(&runtime_lookup, root),
+        1,
+        "a baked env!(\"CARGO_MANIFEST_DIR\") directory still trips the detector"
     );
 }
