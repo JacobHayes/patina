@@ -1,0 +1,29 @@
+{"header":{"schema":"patina.conformance/v1","probe":"signal/wait","os":"linux","arch":"x86_64","kernel":"6.8.0-139-generic","glibc":"2.39","virtual_abi":"6.8"}}
+{"seq":0,"op":"getpid","args":{},"ret":"id@0","errno":null,"fields":{},"norm":{"ret":"identity"}}
+{"seq":1,"op":"getuid","args":{},"ret":"id@1","errno":null,"fields":{},"norm":{"ret":"identity"}}
+{"seq":2,"op":"rt_sigprocmask","args":{"how":0,"sigset_size":8},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":3,"op":"check","args":{"label":"block realtime signal"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":4,"op":"signalfd4","args":{"fd":-1,"flags":526336},"ret":"fd@4","errno":null,"fields":{},"norm":{"args.fd":"relative:fd","ret":"relative:fd"}}
+{"seq":5,"op":"read","args":{"fd":"fd@4","len":128},"ret":-1,"errno":"EAGAIN","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":6,"op":"check","args":{"label":"empty nonblocking signalfd read is EAGAIN"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":7,"op":"fcntl","args":{"arg":0,"cmd":1,"fd":"fd@4"},"ret":1,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":8,"op":"check","args":{"label":"signalfd fd has FD_CLOEXEC"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":9,"op":"rt_sigqueueinfo","args":{"pid":"id@0","si_code":-1,"sig":34},"ret":0,"errno":null,"fields":{},"norm":{"args.pid":"identity"}}
+{"seq":10,"op":"check","args":{"label":"queue signal for signalfd"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":11,"op":"read","args":{"fd":"fd@4","len":128},"ret":128,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":12,"op":"signalfd_siginfo","args":{},"ret":0,"errno":null,"fields":{"ssi_code":-1,"ssi_int":0,"ssi_pid":"id@1","ssi_signo":34,"ssi_uid":"id@12"},"norm":{"fields.ssi_pid":"identity","fields.ssi_uid":"identity"}}
+{"seq":13,"op":"check","args":{"label":"signalfd reports the signal number"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":14,"op":"check","args":{"label":"signalfd reports SI_QUEUE"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":15,"op":"check","args":{"label":"signalfd exposes nonzero sender metadata"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":16,"op":"signalfd","args":{"fd":-1},"ret":"fd@16","errno":null,"fields":{},"norm":{"args.fd":"relative:fd","ret":"relative:fd"}}
+{"seq":17,"op":"fcntl","args":{"arg":0,"cmd":1,"fd":"fd@16"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":18,"op":"check","args":{"label":"legacy signalfd does not set CLOEXEC"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":19,"op":"rt_sigqueueinfo","args":{"pid":"id@0","si_code":-1,"sig":34},"ret":0,"errno":null,"fields":{},"norm":{"args.pid":"identity"}}
+{"seq":20,"op":"check","args":{"label":"queue signal for sigtimedwait"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":21,"op":"rt_sigtimedwait","args":{"sigset_size":8,"timeout_ns":0},"ret":34,"errno":null,"fields":{"si_code":-1,"si_signo":34},"norm":{}}
+{"seq":22,"op":"check","args":{"label":"rt_sigtimedwait returns the signum"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":23,"op":"check","args":{"label":"rt_sigtimedwait preserves SI_QUEUE"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":24,"op":"check","args":{"label":"rt_sigtimedwait fills siginfo"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":25,"op":"close","args":{"fd":"fd@4"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":26,"op":"close","args":{"fd":"fd@16"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":27,"op":"rt_sigprocmask","args":{"how":1,"sigset_size":8},"ret":0,"errno":null,"fields":{},"norm":{}}

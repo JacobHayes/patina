@@ -1,0 +1,12 @@
+{"header":{"schema":"patina.conformance/v1","probe":"signal/pipe","os":"linux","arch":"x86_64","kernel":"6.8.0-139-generic","glibc":"2.39","virtual_abi":"6.8"}}
+{"seq":0,"op":"wait_status","args":{"case":"SIGPIPE"},"ret":0,"errno":null,"fields":{"core":false,"signaled":true,"termsig":13},"norm":{}}
+{"seq":1,"op":"check","args":{"label":"default SIGPIPE terminates without core"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":2,"op":"pipe2","args":{"flags":0},"ret":0,"errno":null,"fields":{"read_end":"fd@2","write_end":"fd@2.1"},"norm":{"fields.read_end":"relative:fd","fields.write_end":"relative:fd"}}
+{"seq":3,"op":"close","args":{"fd":"fd@2"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":4,"op":"write","args":{"fd":"fd@2.1","len":1},"ret":-1,"errno":"EPIPE","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":5,"op":"check","args":{"label":"ignored SIGPIPE makes pipe write return EPIPE"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":6,"op":"close","args":{"fd":"fd@2.1"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":7,"op":"socket","args":{"domain":2,"protocol":0,"type":1},"ret":"fd@7","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":8,"op":"sendto","args":{"addr":null,"fd":"fd@7","flags":16384,"len":1},"ret":-1,"errno":"EPIPE","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":9,"op":"check","args":{"label":"MSG_NOSIGNAL makes socket send return EPIPE without a signal"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":10,"op":"close","args":{"fd":"fd@7"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}

@@ -93,8 +93,76 @@ name = "readiness-ppoll"
 path = "probes/readiness/ppoll.rs"
 
 [[bin]]
+name = "signal-basic"
+path = "probes/signal/basic.rs"
+
+[[bin]]
+name = "signal-mask"
+path = "probes/signal/mask.rs"
+
+[[bin]]
+name = "signal-eintr"
+path = "probes/signal/eintr.rs"
+
+[[bin]]
+name = "signal-wait"
+path = "probes/signal/wait.rs"
+
+[[bin]]
+name = "signal-default"
+path = "probes/signal/default.rs"
+
+[[bin]]
+name = "signal-pipe"
+path = "probes/signal/pipe.rs"
+
+[[bin]]
+name = "signal-altstack"
+path = "probes/signal/altstack.rs"
+
+[[bin]]
+name = "signal-queue"
+path = "probes/signal/queue.rs"
+
+[[bin]]
+name = "signal-rt_order"
+path = "probes/signal/rt_order.rs"
+
+[[bin]]
+name = "signal-nested"
+path = "probes/signal/nested.rs"
+
+[[bin]]
 name = "thread-futex"
 path = "probes/thread/futex.rs"
+
+[[bin]]
+name = "thread-lifecycle"
+path = "probes/thread/lifecycle.rs"
+
+[[bin]]
+name = "thread-kill"
+path = "probes/thread/kill.rs"
+
+[[bin]]
+name = "proc-ids"
+path = "probes/proc/ids.rs"
+
+[[bin]]
+name = "proc-traps"
+path = "probes/proc/traps.rs"
+
+[[bin]]
+name = "proc-absent"
+path = "probes/proc/absent.rs"
+
+[[bin]]
+name = "proc-prctl"
+path = "probes/proc/prctl.rs"
+
+[[bin]]
+name = "proc-wait"
+path = "probes/proc/wait.rs"
 
 [[bin]]
 name = "abi-newer-than-virtual"

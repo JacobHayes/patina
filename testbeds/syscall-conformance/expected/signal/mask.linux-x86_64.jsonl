@@ -1,0 +1,23 @@
+{"header":{"schema":"patina.conformance/v1","probe":"signal/mask","os":"linux","arch":"x86_64","kernel":"6.8.0-139-generic","glibc":"2.39","virtual_abi":"6.8"}}
+{"seq":0,"op":"getpid","args":{},"ret":"id@0","errno":null,"fields":{},"norm":{"ret":"identity"}}
+{"seq":1,"op":"rt_sigprocmask","args":{"how":0,"sigset_size":8},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":2,"op":"check","args":{"label":"block SIGUSR2"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":3,"op":"check","args":{"label":"SIGUSR2 was not already blocked"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":4,"op":"kill","args":{"pid":"id@0","sig":12},"ret":0,"errno":null,"fields":{},"norm":{"args.pid":"identity"}}
+{"seq":5,"op":"check","args":{"label":"kill blocked SIGUSR2"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":6,"op":"rt_sigpending","args":{"sigset_size":8},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":7,"op":"check","args":{"label":"rt_sigpending succeeds"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":8,"op":"check","args":{"label":"blocked SIGUSR2 is pending"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":9,"op":"rt_sigtimedwait","args":{"sigset_size":8,"timeout_ns":0},"ret":12,"errno":null,"fields":{"si_code":0,"si_signo":12},"norm":{}}
+{"seq":10,"op":"check","args":{"label":"rt_sigtimedwait dequeues SIGUSR2"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":11,"op":"check","args":{"label":"rt_sigtimedwait reports SI_USER"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":12,"op":"rt_sigpending","args":{"sigset_size":8},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":13,"op":"check","args":{"label":"SIGUSR2 is no longer pending"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":14,"op":"rt_sigtimedwait","args":{"sigset_size":8,"timeout_ns":1000000},"ret":-1,"errno":"EAGAIN","fields":{"si_code":0,"si_signo":12},"norm":{}}
+{"seq":15,"op":"check","args":{"label":"rt_sigtimedwait with no pending signal times out"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":16,"op":"rt_sigprocmask","args":{"how":0,"sigset_size":4},"ret":-1,"errno":"EINVAL","fields":{},"norm":{}}
+{"seq":17,"op":"check","args":{"label":"rt_sigprocmask size other than 8 is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":18,"op":"rt_sigsuspend","args":{"sigset_size":8},"ret":-1,"errno":"EINTR","fields":{},"norm":{}}
+{"seq":19,"op":"check","args":{"label":"rt_sigsuspend returns EINTR after delivery"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":20,"op":"rt_sigprocmask","args":{"how":1,"sigset_size":8},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":21,"op":"check","args":{"label":"unblock SIGUSR2"},"ret":1,"errno":null,"fields":{},"norm":{}}

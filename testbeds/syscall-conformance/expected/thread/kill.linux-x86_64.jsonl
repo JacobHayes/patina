@@ -1,0 +1,11 @@
+{"header":{"schema":"patina.conformance/v1","probe":"thread/kill","os":"linux","arch":"x86_64","kernel":"6.8.0-139-generic","glibc":"2.39","virtual_abi":"6.8"}}
+{"seq":0,"op":"getpid","args":{},"ret":"id@0","errno":null,"fields":{},"norm":{"ret":"identity"}}
+{"seq":1,"op":"tgkill","args":{"sig":10,"tgid":"id@0","tid":"id@1"},"ret":0,"errno":null,"fields":{},"norm":{"args.tgid":"identity","args.tid":"identity"}}
+{"seq":2,"op":"check","args":{"label":"tgkill to a specific live tid"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":3,"op":"check","args":{"label":"tgkill delivered exactly one handler"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":4,"op":"tkill","args":{"sig":10,"tid":"id@1"},"ret":0,"errno":null,"fields":{},"norm":{"args.tid":"identity"}}
+{"seq":5,"op":"check","args":{"label":"tkill to a specific live tid"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":6,"op":"check","args":{"label":"tkill delivered another handler"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":7,"op":"check","args":{"label":"the helper exposed a pthread identity"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":8,"op":"tgkill","args":{"sig":10,"tgid":"id@0","tid":"id@1"},"ret":-1,"errno":"ESRCH","fields":{},"norm":{"args.tgid":"identity","args.tid":"identity"}}
+{"seq":9,"op":"check","args":{"label":"tgkill of a dead tid is ESRCH"},"ret":1,"errno":null,"fields":{},"norm":{}}

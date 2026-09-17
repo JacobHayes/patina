@@ -82,9 +82,77 @@ symbols = ["epoll_create1", "epoll_ctl", "epoll_wait", "eventfd", "pipe2", "read
 syscalls = ["ppoll", "pipe2", "eventfd2", "read", "write", "close", "clock_gettime"]
 symbols = ["ppoll", "pipe2", "eventfd", "read", "write", "close", "clock_gettime"]
 
+[probe."signal/basic"]
+syscalls = ["getpid", "getuid", "kill", "rt_sigaction"]
+symbols = ["getpid", "getuid", "kill", "sigaction"]
+
+[probe."signal/mask"]
+syscalls = ["rt_sigprocmask", "kill", "rt_sigpending", "rt_sigtimedwait", "rt_sigsuspend"]
+symbols = ["pthread_sigmask", "kill"]
+
+[probe."signal/eintr"]
+syscalls = ["pipe2", "read", "write", "close", "kill", "nanosleep"]
+symbols = ["pipe2", "read", "write", "close", "kill", "nanosleep", "sigaction"]
+
+[probe."signal/wait"]
+syscalls = ["getpid", "getuid", "rt_sigprocmask", "rt_sigtimedwait", "signalfd", "signalfd4", "read", "fcntl", "close"]
+symbols = ["getpid", "getuid", "pthread_sigmask", "read", "fcntl", "close"]
+
+[probe."signal/default"]
+syscalls = ["getpid"]
+symbols = ["getpid"]
+
+[probe."signal/pipe"]
+syscalls = ["pipe2", "write", "close", "socket", "sendto"]
+symbols = ["pipe2", "write", "close", "socket", "sendto", "signal"]
+
+[probe."signal/altstack"]
+syscalls = ["sigaltstack", "kill", "getpid"]
+symbols = ["kill", "getpid", "sigaction"]
+
+[probe."signal/queue"]
+syscalls = ["getpid", "gettid", "getuid", "rt_sigprocmask", "kill", "rt_sigtimedwait", "rt_sigqueueinfo", "rt_tgsigqueueinfo"]
+symbols = ["getpid", "syscall", "getuid", "pthread_sigmask", "kill"]
+
+[probe."signal/rt_order"]
+syscalls = ["getpid", "rt_sigprocmask", "kill", "rt_sigtimedwait"]
+symbols = ["getpid", "pthread_sigmask", "kill"]
+
+[probe."signal/nested"]
+syscalls = ["getpid", "kill", "rt_sigaction"]
+symbols = ["getpid", "kill", "sigaction"]
+
 [probe."thread/futex"]
 syscalls = ["futex", "clock_gettime"]
 symbols = ["syscall", "clock_gettime"]
+
+[probe."thread/lifecycle"]
+syscalls = ["set_tid_address", "gettid", "futex", "exit"]
+symbols = ["syscall"]
+
+[probe."thread/kill"]
+syscalls = ["getpid", "tgkill", "tkill"]
+symbols = ["getpid", "syscall"]
+
+[probe."proc/ids"]
+syscalls = ["getpid", "gettid", "getppid", "getpgid", "getsid", "tgkill", "kill"]
+symbols = ["getpid", "syscall", "getppid", "kill"]
+
+[probe."proc/traps"]
+syscalls = ["fork", "clone", "clone3", "execve", "execveat"]
+symbols = ["fork", "syscall"]
+
+[probe."proc/absent"]
+syscalls = ["_sysctl", "nfsservctl", "vserver", "security", "tuxcall", "afs_syscall", "getpmsg", "putpmsg", "epoll_ctl_old", "epoll_wait_old", "lookup_dcookie", "create_module", "query_module", "get_kernel_syms", "uselib"]
+symbols = ["syscall"]
+
+[probe."proc/prctl"]
+syscalls = ["prctl"]
+symbols = ["prctl"]
+
+[probe."proc/wait"]
+syscalls = ["wait4", "waitid"]
+symbols = ["waitid"]
 
 [probe."abi/newer-than-virtual"]
 absent = ["fchroot"]

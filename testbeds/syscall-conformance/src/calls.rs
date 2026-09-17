@@ -157,6 +157,14 @@ impl Probe {
     /// patina it is recorded (`op: check`, `ret: 0`) and the probe continues so
     /// the rest of the stream still carries information.
     pub fn check(&self, label: &str, ok: bool) -> bool {
+        let ok = if std::env::var("PATINA_PROBE_BREAK")
+            .ok()
+            .is_some_and(|wanted| wanted == self.id || wanted == format!("{}:{label}", self.id))
+        {
+            !ok
+        } else {
+            ok
+        };
         self.rec
             .event("check", if ok { 1 } else { 0 })
             .arg("label", label)
@@ -172,6 +180,20 @@ impl Probe {
         if !ok {
             panic!("{}: cannot continue: {label}", self.id);
         }
+    }
+
+    pub fn call_observed(&self, sys: Sys, args: Args) -> i64 {
+        let result = self.call(sys, args);
+        self.event(sys, result).emit();
+        result
+    }
+
+    pub fn call_unrecorded(&self, sys: Sys, args: Args) -> i64 {
+        self.call(sys, args)
+    }
+
+    pub fn record_result(&self, sys: Sys, result: i64) {
+        self.event(sys, result).emit();
     }
 
     fn call(&self, sys: Sys, args: Args) -> i64 {
@@ -751,9 +773,17 @@ impl Probe {
             tv_sec: sec,
             tv_nsec: nsec,
         };
+        let mut rem = libc::timespec { tv_sec: 0, tv_nsec: 0 };
         let result = self.call(
             Sys::Nanosleep,
-            [&req as *const libc::timespec as i64, 0, 0, 0, 0, 0],
+            [
+                &req as *const libc::timespec as i64,
+                &mut rem as *mut libc::timespec as i64,
+                0,
+                0,
+                0,
+                0,
+            ],
         );
         self.event(Sys::Nanosleep, result)
             .arg("sec", sec)
@@ -1339,6 +1369,324 @@ impl Probe {
             .norm("ret", Norm::Identity)
             .emit();
         result
+    }
+
+    pub fn gettid(&self) -> i64 {
+        let result = self.call(Sys::Gettid, [0; 6]);
+        self.event(Sys::Gettid, result)
+            .norm("ret", Norm::Identity)
+            .emit();
+        result
+    }
+
+    pub fn getppid(&self) -> i64 {
+        let result = self.call(Sys::Getppid, [0; 6]);
+        self.event(Sys::Getppid, result)
+            .norm("ret", Norm::Identity)
+            .emit();
+        result
+    }
+
+    pub fn getpgid(&self, pid: i32) -> i64 {
+        let result = self.call(Sys::Getpgid, [pid as i64, 0, 0, 0, 0, 0]);
+        self.event(Sys::Getpgid, if result >= 0 { 0 } else { result })
+            .arg("pid", pid)
+            .norm("args.pid", Norm::Identity)
+            .field("positive", result > 0)
+            .emit();
+        result
+    }
+
+    pub fn getsid(&self, pid: i32) -> i64 {
+        let result = self.call(Sys::Getsid, [pid as i64, 0, 0, 0, 0, 0]);
+        self.event(Sys::Getsid, if result >= 0 { 0 } else { result })
+            .arg("pid", pid)
+            .norm("args.pid", Norm::Identity)
+            .field("positive", result > 0)
+            .emit();
+        result
+    }
+
+    pub fn kill(&self, pid: i32, sig: i32) -> i64 {
+        let result = self.call(Sys::Kill, [pid as i64, sig as i64, 0, 0, 0, 0]);
+        self.event(Sys::Kill, result)
+            .arg("pid", pid)
+            .norm("args.pid", Norm::Identity)
+            .arg("sig", sig)
+            .emit();
+        result
+    }
+
+    pub fn tkill(&self, tid: i32, sig: i32) -> i64 {
+        let result = self.call(Sys::Tkill, [tid as i64, sig as i64, 0, 0, 0, 0]);
+        self.event(Sys::Tkill, result)
+            .arg("tid", tid)
+            .norm("args.tid", Norm::Identity)
+            .arg("sig", sig)
+            .emit();
+        result
+    }
+
+    pub fn tgkill(&self, tgid: i32, tid: i32, sig: i32) -> i64 {
+        let result = self.call(
+            Sys::Tgkill,
+            [tgid as i64, tid as i64, sig as i64, 0, 0, 0],
+        );
+        self.event(Sys::Tgkill, result)
+            .arg("tgid", tgid)
+            .norm("args.tgid", Norm::Identity)
+            .arg("tid", tid)
+            .norm("args.tid", Norm::Identity)
+            .arg("sig", sig)
+            .emit();
+        result
+    }
+
+    pub fn rt_sigprocmask(
+        &self,
+        how: i32,
+        set: Option<&libc::sigset_t>,
+        old: Option<&mut libc::sigset_t>,
+        sigset_size: usize,
+    ) -> i64 {
+        let result = self.call(
+            Sys::RtSigprocmask,
+            [
+                how as i64,
+                set.map_or(0, |s| s as *const libc::sigset_t as i64),
+                old.map_or(0, |s| s as *mut libc::sigset_t as i64),
+                sigset_size as i64,
+                0,
+                0,
+            ],
+        );
+        self.event(Sys::RtSigprocmask, result)
+            .arg("how", how)
+            .arg("sigset_size", sigset_size)
+            .emit();
+        result
+    }
+
+    pub fn rt_sigpending(&self, set: &mut libc::sigset_t, sigset_size: usize) -> i64 {
+        let result = self.call(
+            Sys::RtSigpending,
+            [set as *mut libc::sigset_t as i64, sigset_size as i64, 0, 0, 0, 0],
+        );
+        self.event(Sys::RtSigpending, result)
+            .arg("sigset_size", sigset_size)
+            .emit();
+        result
+    }
+
+    pub fn rt_sigtimedwait(
+        &self,
+        set: &libc::sigset_t,
+        info: Option<&mut libc::siginfo_t>,
+        timeout_ns: Option<i64>,
+        sigset_size: usize,
+    ) -> i64 {
+        let timeout = timeout_ns.map(|ns| libc::timespec {
+            tv_sec: ns / 1_000_000_000,
+            tv_nsec: ns % 1_000_000_000,
+        });
+        let info_ptr = info
+            .as_ref()
+            .map_or(0, |i| (*i as *const libc::siginfo_t).cast_mut() as i64);
+        let result = self.call(
+            Sys::RtSigtimedwait,
+            [
+                set as *const libc::sigset_t as i64,
+                info_ptr,
+                timeout
+                    .as_ref()
+                    .map_or(0, |ts| ts as *const libc::timespec as i64),
+                sigset_size as i64,
+                0,
+                0,
+            ],
+        );
+        self.event(Sys::RtSigtimedwait, result)
+            .arg("timeout_ns", timeout_ns.map_or(Value::Null, Value::from))
+            .arg("sigset_size", sigset_size)
+            .field("si_signo", info.as_ref().map_or(0, |i| i.si_signo))
+            .field("si_code", info.as_ref().map_or(0, |i| i.si_code))
+            .emit();
+        result
+    }
+
+    pub fn rt_sigsuspend(&self, set: &libc::sigset_t, sigset_size: usize) -> i64 {
+        let result = self.call(
+            Sys::RtSigsuspend,
+            [set as *const libc::sigset_t as i64, sigset_size as i64, 0, 0, 0, 0],
+        );
+        self.event(Sys::RtSigsuspend, result)
+            .arg("sigset_size", sigset_size)
+            .emit();
+        result
+    }
+
+    pub fn signalfd4(&self, fd: i32, set: &libc::sigset_t, flags: i32) -> i32 {
+        let result = self.call(
+            Sys::Signalfd4,
+            [
+                fd as i64,
+                set as *const libc::sigset_t as i64,
+                8,
+                flags as i64,
+                0,
+                0,
+            ],
+        );
+        let builder = self.event(Sys::Signalfd4, result).arg("flags", flags);
+        self.fd_arg(builder, "fd", fd)
+            .norm("ret", Norm::Relative("fd"))
+            .emit();
+        result as i32
+    }
+
+    pub fn signalfd(&self, fd: i32, set: &libc::sigset_t) -> i32 {
+        let result = self.call(
+            Sys::Signalfd,
+            [
+                fd as i64,
+                set as *const libc::sigset_t as i64,
+                8,
+                0,
+                0,
+                0,
+            ],
+        );
+        let builder = self.event(Sys::Signalfd, result);
+        self.fd_arg(builder, "fd", fd)
+            .norm("ret", Norm::Relative("fd"))
+            .emit();
+        result as i32
+    }
+
+    pub fn sigaltstack(
+        &self,
+        new: Option<&libc::stack_t>,
+        old: Option<&mut libc::stack_t>,
+    ) -> i64 {
+        let old_ptr = old
+            .as_ref()
+            .map_or(0, |s| (*s as *const libc::stack_t).cast_mut() as i64);
+        let result = self.call(
+            Sys::Sigaltstack,
+            [
+                new.map_or(0, |s| s as *const libc::stack_t as i64),
+                old_ptr,
+                0,
+                0,
+                0,
+                0,
+            ],
+        );
+        let flags = old.as_ref().map_or(-1, |s| s.ss_flags);
+        self.event(Sys::Sigaltstack, result)
+            .field("old_flags", flags)
+            .emit();
+        result
+    }
+
+    pub fn rt_sigaction_raw(&self, signum: i32, size: usize) -> i64 {
+        let result = self.call(Sys::RtSigaction, [signum as i64, 0, 0, size as i64, 0, 0]);
+        self.event(Sys::RtSigaction, result)
+            .arg("signum", signum)
+            .arg("sigset_size", size)
+            .emit();
+        result
+    }
+
+    pub fn rt_sigqueueinfo(&self, pid: i32, sig: i32, info: &libc::siginfo_t) -> i64 {
+        let result = self.call(
+            Sys::RtSigqueueinfo,
+            [pid as i64, sig as i64, info as *const libc::siginfo_t as i64, 0, 0, 0],
+        );
+        self.event(Sys::RtSigqueueinfo, result)
+            .arg("pid", pid)
+            .norm("args.pid", Norm::Identity)
+            .arg("sig", sig)
+            .arg("si_code", info.si_code)
+            .emit();
+        result
+    }
+
+    pub fn rt_tgsigqueueinfo(&self, tgid: i32, tid: i32, sig: i32, info: &libc::siginfo_t) -> i64 {
+        let result = self.call(
+            Sys::RtTgsigqueueinfo,
+            [
+                tgid as i64,
+                tid as i64,
+                sig as i64,
+                info as *const libc::siginfo_t as i64,
+                0,
+                0,
+            ],
+        );
+        self.event(Sys::RtTgsigqueueinfo, result)
+            .arg("tgid", tgid)
+            .norm("args.tgid", Norm::Identity)
+            .arg("tid", tid)
+            .norm("args.tid", Norm::Identity)
+            .arg("sig", sig)
+            .arg("si_code", info.si_code)
+            .emit();
+        result
+    }
+
+    pub fn set_tid_address(&self, ptr: *mut i32) -> i64 {
+        let result = self.call(Sys::SetTidAddress, [ptr as i64, 0, 0, 0, 0, 0]);
+        self.event(Sys::SetTidAddress, result)
+            .norm("ret", Norm::Identity)
+            .emit();
+        result
+    }
+
+    pub fn prctl(&self, option: i32, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
+        let result = self.call(
+            Sys::Prctl,
+            [option as i64, a2 as i64, a3 as i64, a4 as i64, a5 as i64, 0],
+        );
+        self.event(Sys::Prctl, result).arg("option", option).emit();
+        result
+    }
+
+    pub fn wait4(&self, pid: i32, options: i32) -> (i64, i32) {
+        let mut status = 0;
+        let result = self.call(
+            Sys::Wait4,
+            [pid as i64, &mut status as *mut i32 as i64, options as i64, 0, 0, 0],
+        );
+        self.event(Sys::Wait4, result)
+            .arg("pid", pid)
+            .arg("options", options)
+            .field("status", status)
+            .emit();
+        (result, status)
+    }
+
+    pub fn waitid(&self, idtype: i32, id: u32, options: i32) -> (i64, i32) {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = self.call(
+            Sys::Waitid,
+            [
+                idtype as i64,
+                id as i64,
+                &mut info as *mut libc::siginfo_t as i64,
+                options as i64,
+                0,
+                0,
+            ],
+        );
+        self.event(Sys::Waitid, result)
+            .arg("idtype", idtype)
+            .arg("id", id)
+            .arg("options", options)
+            .field("si_signo", info.si_signo)
+            .field("si_code", info.si_code)
+            .emit();
+        (result, info.si_code)
     }
 
     // ---- the working directory and the umask --------------------------------

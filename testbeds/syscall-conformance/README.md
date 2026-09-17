@@ -29,6 +29,13 @@ unmodeled allocation accounting leaves STATX_BLOCKS absent. Actual crash
 reconstruction and positive-latency record/replay are driver/runtime unit gates,
 not claims made by a host process that cannot crash the virtual filesystem.
 
+## Proving a probe can fail
+
+`PATINA_PROBE_BREAK=<probe>` (or `<probe>:<check label>`) inverts the outcome of
+that probe's `check` events, so `run.sh --mode native --probe <probe>` goes red
+against the host oracle. Every new probe's report pastes that red leg once; the
+variable is never set by `run.sh` itself.
+
 ## The registry and the manifest
 
 `probes.toml` says which rows and symbols each probe covers; the registry

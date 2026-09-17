@@ -1,0 +1,11 @@
+{"header":{"schema":"patina.conformance/v1","probe":"signal/eintr","os":"linux","arch":"x86_64","kernel":"6.8.0-139-generic","glibc":"2.39","virtual_abi":"6.8"}}
+{"seq":0,"op":"getpid","args":{},"ret":"id@0","errno":null,"fields":{},"norm":{"ret":"identity"}}
+{"seq":1,"op":"pipe2","args":{"flags":0},"ret":0,"errno":null,"fields":{"read_end":"fd@1","write_end":"fd@1.1"},"norm":{"fields.read_end":"relative:fd","fields.write_end":"relative:fd"}}
+{"seq":2,"op":"read","args":{"fd":"fd@1","len":1},"ret":-1,"errno":"EINTR","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":3,"op":"check","args":{"label":"blocking read without SA_RESTART is EINTR"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":4,"op":"read","args":{"fd":"fd@1","len":1},"ret":1,"errno":null,"fields":{"data":"x"},"norm":{"args.fd":"relative:fd"}}
+{"seq":5,"op":"check","args":{"label":"blocking read with SA_RESTART resumes"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":6,"op":"nanosleep","args":{"nsec":0,"sec":1},"ret":-1,"errno":"EINTR","fields":{},"norm":{}}
+{"seq":7,"op":"check","args":{"label":"nanosleep is never restarted"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":8,"op":"close","args":{"fd":"fd@1"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":9,"op":"close","args":{"fd":"fd@1.1"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}

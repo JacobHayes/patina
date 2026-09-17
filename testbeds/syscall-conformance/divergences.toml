@@ -528,3 +528,89 @@ op = "utime"
 seq = 196
 field = "ret"
 reason = "pending: signed/wide filesystem timestamps — unsigned-nanosecond ABI refuses out-of-range seconds with EINVAL; Linux accepts then clamps to its filesystem range (checked conversion, never wrap)"
+# ---- signals + threads + process adversarial probes --------------------------
+
+[[divergence]]
+probe = "signal/basic"
+kind = "probe"
+reason = "pending: signals — kill delivery and rt_sigaction validation are not modeled (crates/patina-native-shim/src/registry/syscalls.rs:163,619)"
+
+[[divergence]]
+probe = "signal/mask"
+kind = "probe"
+reason = "pending: signals — rt_sigprocmask/pending/sigtimedwait/sigsuspend virtual signal state is not modeled (crates/patina-native-shim/src/registry/syscalls.rs:172,1218,1227,1245)"
+
+[[divergence]]
+probe = "signal/eintr"
+kind = "probe"
+reason = "pending: signals — signal interruption and SA_RESTART restart rules are not modeled (docs/arcs/syscall-conformance.md:167)"
+
+[[divergence]]
+probe = "signal/wait"
+kind = "probe"
+reason = "pending: signals — signalfd/signalfd4 and rt_sigtimedwait are not modeled (crates/patina-native-shim/src/registry/syscalls.rs:1227,2643,2709)"
+
+[[divergence]]
+probe = "signal/default"
+kind = "probe"
+reason = "pending: signals — default signal termination metadata requires the signals arc (docs/arcs/syscall-conformance.md:167)"
+
+[[divergence]]
+probe = "signal/pipe"
+kind = "probe"
+reason = "pending: signals — SIGPIPE generation/default/ignored handling is not modeled (docs/arcs/syscall-conformance.md:167)"
+
+[[divergence]]
+probe = "signal/altstack"
+kind = "probe"
+reason = "pending: signals — sigaltstack state and SA_ONSTACK delivery are not modeled (crates/patina-native-shim/src/registry/syscalls.rs:1254)"
+
+[[divergence]]
+probe = "signal/queue"
+kind = "probe"
+reason = "pending: signals — rt_sigqueueinfo/rt_tgsigqueueinfo and signal queueing are not modeled (crates/patina-native-shim/src/registry/syscalls.rs:1236,2788)"
+
+[[divergence]]
+probe = "signal/rt_order"
+kind = "probe"
+reason = "pending: signals — pending signal selection and realtime queue order are not modeled (docs/arcs/syscall-conformance.md:167)"
+
+[[divergence]]
+probe = "signal/nested"
+kind = "probe"
+reason = "pending: signals — handler masks, SA_NODEFER, SA_RESETHAND and raw rt_sigaction behavior are not modeled (docs/arcs/syscall-conformance.md:167)"
+
+[[divergence]]
+probe = "thread/lifecycle"
+kind = "probe"
+reason = "pending: signals — set_tid_address/thread exit semantics are not modeled (crates/patina-native-shim/src/registry/syscalls.rs:2040)"
+
+[[divergence]]
+probe = "thread/kill"
+kind = "probe"
+reason = "pending: signals — tgkill/tkill per-thread signal targeting is not modeled (crates/patina-native-shim/src/registry/syscalls.rs:1876,2188)"
+
+[[divergence]]
+probe = "proc/ids"
+kind = "probe"
+reason = "pending: signals — gettid/getpgid/getsid plus kill process-selection semantics are not modeled consistently (crates/patina-native-shim/src/registry/syscalls.rs:1065,1164,1191,1750,619)"
+
+[[divergence]]
+probe = "proc/traps"
+kind = "probe"
+reason = "pending: signals — process lifecycle rows remain traps and need exact process diagnostics (crates/patina-native-shim/src/registry/syscalls.rs:565)"
+
+[[divergence]]
+probe = "proc/absent"
+kind = "probe"
+reason = "pending: signals — removed syscall numbers still trap instead of ENOSYS (crates/patina-native-shim/src/registry/syscalls.rs:1480)"
+
+[[divergence]]
+probe = "proc/prctl"
+kind = "probe"
+reason = "pending: signals — prctl option table bookkeeping is not modeled (crates/patina-native-shim/src/registry/syscalls.rs:1489)"
+
+[[divergence]]
+probe = "proc/wait"
+kind = "probe"
+reason = "pending: signals — wait4/waitid still trap instead of childless ECHILD/EINVAL semantics (crates/patina-native-shim/src/registry/syscalls.rs:610,2306)"

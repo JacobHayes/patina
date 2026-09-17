@@ -1,0 +1,18 @@
+{"header":{"schema":"patina.conformance/v1","probe":"signal/altstack","os":"linux","arch":"x86_64","kernel":"6.8.0-139-generic","glibc":"2.39","virtual_abi":"6.8"}}
+{"seq":0,"op":"sigaltstack","args":{},"ret":0,"errno":null,"fields":{"old_flags":0},"norm":{}}
+{"seq":1,"op":"check","args":{"label":"query initial altstack"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":2,"op":"check","args":{"label":"initial altstack flags are a known state"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":3,"op":"sigaltstack","args":{},"ret":-1,"errno":"ENOMEM","fields":{"old_flags":-1},"norm":{}}
+{"seq":4,"op":"check","args":{"label":"altstack smaller than MINSIGSTKSZ is ENOMEM"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":5,"op":"sigaltstack","args":{},"ret":-1,"errno":"EINVAL","fields":{"old_flags":-1},"norm":{}}
+{"seq":6,"op":"check","args":{"label":"unknown sigaltstack flags are EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":7,"op":"sigaltstack","args":{},"ret":0,"errno":null,"fields":{"old_flags":0},"norm":{}}
+{"seq":8,"op":"check","args":{"label":"install altstack"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":9,"op":"sigaltstack","args":{},"ret":0,"errno":null,"fields":{"old_flags":0},"norm":{}}
+{"seq":10,"op":"check","args":{"label":"installed altstack is enabled"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":11,"op":"getpid","args":{},"ret":"id@11","errno":null,"fields":{},"norm":{"ret":"identity"}}
+{"seq":12,"op":"kill","args":{"pid":"id@11","sig":10},"ret":0,"errno":null,"fields":{},"norm":{"args.pid":"identity"}}
+{"seq":13,"op":"sigaltstack","args":{},"ret":0,"errno":null,"fields":{"old_flags":-1},"norm":{}}
+{"seq":14,"op":"check","args":{"label":"disable altstack"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":15,"op":"sigaltstack","args":{},"ret":0,"errno":null,"fields":{"old_flags":-1},"norm":{}}
+{"seq":16,"op":"check","args":{"label":"SS_AUTODISARM is accepted"},"ret":1,"errno":null,"fields":{},"norm":{}}

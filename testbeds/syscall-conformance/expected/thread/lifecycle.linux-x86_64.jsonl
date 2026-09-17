@@ -1,0 +1,8 @@
+{"header":{"schema":"patina.conformance/v1","probe":"thread/lifecycle","os":"linux","arch":"x86_64","kernel":"6.8.0-139-generic","glibc":"2.39","virtual_abi":"6.8"}}
+{"seq":0,"op":"set_tid_address","args":{},"ret":"id@0","errno":null,"fields":{},"norm":{"ret":"identity"}}
+{"seq":1,"op":"gettid","args":{},"ret":"id@0","errno":null,"fields":{},"norm":{"ret":"identity"}}
+{"seq":2,"op":"check","args":{"label":"set_tid_address returns the caller tid"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":3,"op":"wait_status","args":{"case":"main-thread-raw-exit"},"ret":0,"errno":null,"fields":{"code":0,"exited":true},"norm":{}}
+{"seq":4,"op":"check","args":{"label":"main thread raw exit leaves process alive until other threads finish"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":5,"op":"futex","args":{"op":0,"timeout_ns":null,"value":1},"ret":-1,"errno":"EAGAIN","fields":{},"norm":{}}
+{"seq":6,"op":"check","args":{"label":"futex wait with mismatched value is EAGAIN"},"ret":1,"errno":null,"fields":{},"norm":{}}
