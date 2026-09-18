@@ -4753,6 +4753,8 @@ struct ShimSources {
     /// holding the shim's whole dependency closure, the pinning `Cargo.lock`, and
     /// no toolchain pin of its own.
     dir: PathBuf,
+    /// The content address of the embedded source bundle that produced `dir`.
+    bundle_hash: &'static str,
 }
 
 /// Unpack the embedded shim source bundle into the per-user cache (a no-op when
@@ -4769,7 +4771,11 @@ struct ShimSources {
 fn prepare_shim_sources() -> Result<ShimSources, CliError> {
     let cache_root = patina_cache_root()?;
     let dir = unpack_embedded_shim_sources(&cache_root)?;
-    Ok(ShimSources { cache_root, dir })
+    Ok(ShimSources {
+        cache_root,
+        dir,
+        bundle_hash: shim_bundle::EMBEDDED_SHIM_BUNDLE_SHA256,
+    })
 }
 
 /// Write the bundle to `<cache_root>/shim-src/<sha256>` atomically: stage into
@@ -4861,6 +4867,7 @@ fn build_native_shim(
     let target_dir = native_shim_target_dir(
         &shim.cache_root,
         explicit_target.as_deref(),
+        shim.bundle_hash,
         &rustc.identity,
     );
     let mut command = Command::new(&rustc.cargo_command);
@@ -4895,22 +4902,29 @@ fn build_native_shim(
 
 /// Select the shim's Cargo target directory.
 ///
-/// An explicit `CARGO_TARGET_DIR` remains authoritative. Without one, key the
-/// internal shim cache (`<cache root>/shim-target/<identity>`) by the complete
-/// compiler identity: stable and MSRV can otherwise publish the same-named
-/// staticlib in one `debug/`, and a nested guest build can consume whichever
-/// toolchain wrote last. Cargo's file locks serialize writes but cannot make this
-/// out-of-band path handoff type-safe.
+/// The caller's explicit `CARGO_TARGET_DIR`, when present, is the base directory;
+/// the default base is `<cache root>/shim-target`. Under either base, namespace
+/// the shim target by the embedded source bundle and the complete compiler
+/// identity. Stable/MSRV builds, and two `cargo-patina` binaries carrying
+/// different shim sources, otherwise publish the same-named staticlib in one
+/// `debug/`, and a nested guest build can consume whichever archive won last (or
+/// whichever archive Cargo incorrectly considered fresh). Cargo's file locks
+/// serialize writes but cannot make this out-of-band path handoff type-safe.
 fn native_shim_target_dir(
     cache_root: &Path,
     explicit: Option<&OsStr>,
+    bundle_hash: &str,
     toolchain: &RustcIdentity,
 ) -> PathBuf {
-    if let Some(explicit) = explicit {
-        return PathBuf::from(explicit);
-    }
-    let digest = Sha256::digest(toolchain.verbose.as_bytes());
-    cache_root.join("shim-target").join(hex(&digest))
+    let base = explicit
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cache_root.join("shim-target"));
+    let mut hasher = Sha256::new();
+    hash_bytes(&mut hasher, b"patina-native-shim-target/v1");
+    hash_bytes(&mut hasher, bundle_hash.as_bytes());
+    hash_bytes(&mut hasher, toolchain.verbose.as_bytes());
+    base.join("patina-native-shim")
+        .join(hex(&hasher.finalize()))
 }
 
 /// A resolved rustc, as `rustc -vV` reports it.
@@ -8771,7 +8785,7 @@ mod tests {
     }
 
     #[test]
-    fn default_shim_caches_are_separated_by_complete_toolchain_identity() {
+    fn shim_caches_are_separated_by_source_bundle_and_complete_toolchain_identity() {
         let workspace = Path::new("/home/someone/.cache/patina");
         let stable = RustcIdentity {
             banner: "rustc 1.98.0 (stable)".into(),
@@ -8781,18 +8795,29 @@ mod tests {
             banner: "rustc 1.86.0 (msrv)".into(),
             verbose: "rustc 1.86.0 (msrv)\ncommit-hash: msrv".into(),
         };
-        let stable_dir = native_shim_target_dir(workspace, None, &stable);
-        let msrv_dir = native_shim_target_dir(workspace, None, &msrv);
+        let stable_dir = native_shim_target_dir(workspace, None, "bundle-a", &stable);
+        let msrv_dir = native_shim_target_dir(workspace, None, "bundle-a", &msrv);
+        let changed_source_dir = native_shim_target_dir(workspace, None, "bundle-b", &stable);
         assert_ne!(stable_dir, msrv_dir);
-        assert_eq!(stable_dir, native_shim_target_dir(workspace, None, &stable));
-        assert!(stable_dir.starts_with("/home/someone/.cache/patina/shim-target"));
-
-        // An explicit Cargo target remains the user's authoritative staging
-        // contract rather than being silently rewritten.
+        assert_ne!(stable_dir, changed_source_dir);
         assert_eq!(
-            native_shim_target_dir(workspace, Some(OsStr::new("/custom-target")), &stable),
-            PathBuf::from("/custom-target")
+            stable_dir,
+            native_shim_target_dir(workspace, None, "bundle-a", &stable)
         );
+        assert!(
+            stable_dir.starts_with("/home/someone/.cache/patina/shim-target/patina-native-shim")
+        );
+
+        // An explicit Cargo target remains the user's authoritative staging base,
+        // but the shim still gets its own source/compiler namespace below it.
+        let explicit = native_shim_target_dir(
+            workspace,
+            Some(OsStr::new("/custom-target")),
+            "bundle-a",
+            &stable,
+        );
+        assert!(explicit.starts_with("/custom-target/patina-native-shim"));
+        assert_ne!(explicit, PathBuf::from("/custom-target"));
     }
 
     #[test]

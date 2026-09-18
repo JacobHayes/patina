@@ -54,8 +54,9 @@ root-workspace checks plus the core WASI/native smoke scripts. After cheap
 failure checks, its independent heavyweight suites run concurrently; successful
 rung logs are suppressed and every rung is timed. Stable, MSRV, and native
 validation overlap safely: the outer MSRV build uses `target/msrv`, while every
-nested native shim cache is keyed by the complete compiler identity. The mise
-workflow intentionally excludes heavyweight standalone testbed setup such as
+nested native shim cache is keyed by the shim source bundle and complete compiler
+identity, under a Patina namespace even when `CARGO_TARGET_DIR` is explicit. The
+mise workflow intentionally excludes heavyweight standalone testbed setup such as
 raft and redb.
 
 ### V1: deterministic Rust-level vertical slice

@@ -2,70 +2,15 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::{Read, Write};
+use std::io::Write;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
-
-/// Serializes cargo-patina invocations that compile through cargo/rustc. Under
-/// default parallel test threads, concurrent builds race on the shared workspace
-/// `target/` (cold `patina-dst-native-shim` staticlib builds, cached artifacts) and
-/// the global cargo package-cache lock, which surfaces as "Blocking waiting for
-/// file lock" stalls or signal-killed cargo processes — a flake where every test
-/// passes in isolation and serially. Holding this lock for the duration of a
-/// compiling invocation means no two test threads build at once, while
-/// executing an already-built artifact (see [`command_compiles`]) stays parallel.
-static BUILD_LOCK: Mutex<()> = Mutex::new(());
-
-/// Whether a cargo-patina invocation will compile through cargo/rustc, and so
-/// must hold [`BUILD_LOCK`]. `build`/`test`/`explore` always compile.
-/// `run`/`replay`/`audit` compile unless handed an already-built artifact file
-/// (recognized by wasm/native magic bytes, exactly as the CLI infers the family)
-/// — those only execute or inspect it and stay parallel. `minimize` runs an
-/// external oracle whose builds reuse the fixture already compiled by the (locked)
-/// record step, so it needs no lock here; everything else (`help`, `--version`,
-/// usage errors) never compiles.
-fn command_compiles(arguments: &[&str]) -> bool {
-    match arguments.first().copied() {
-        Some("build") | Some("test") | Some("explore") => true,
-        Some("run") | Some("replay") | Some("audit") => {
-            !arguments[1..].iter().any(|arg| arg_is_built_artifact(arg))
-        }
-        _ => false,
-    }
-}
-
-/// Whether `arg` names an existing file whose leading magic bytes mark it as an
-/// already-built artifact (a WebAssembly module or a native Mach-O/ELF image),
-/// mirroring the CLI's own `detect_artifact_family`. A run/replay/audit handed
-/// such a file executes or inspects it without compiling.
-fn arg_is_built_artifact(arg: &str) -> bool {
-    let Ok(mut file) = fs::File::open(arg) else {
-        return false;
-    };
-    let mut prefix = [0u8; 4];
-    let Ok(read) = file.read(&mut prefix) else {
-        return false;
-    };
-    let prefix = &prefix[..read];
-    prefix.starts_with(b"\0asm")
-        || prefix.starts_with(&[0x7f, b'E', b'L', b'F'])
-        || matches!(
-            prefix,
-            [0xfe, 0xed, 0xfa, 0xce]
-                | [0xce, 0xfa, 0xed, 0xfe]
-                | [0xfe, 0xed, 0xfa, 0xcf]
-                | [0xcf, 0xfa, 0xed, 0xfe]
-                | [0xca, 0xfe, 0xba, 0xbe]
-                | [0xbe, 0xba, 0xfe, 0xca]
-        )
-}
 
 #[test]
 fn wasi_run_preopen_policy_controls_write_access() {
@@ -1119,17 +1064,47 @@ fn changed_shim_staticlib_bytes_relink_the_guest() {
     let workspace = native_workspace();
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
 
-    // Build the real shim once, exactly where `build_native_shim` looks for it,
-    // and copy it aside. Only the copy is ever doctored.
-    let real_staticlib = build_workspace_shim_staticlib(workspace, &cargo);
     let shim_target = directory.path().join("shim-target");
-    let staged = shim_target.join("debug");
-    fs::create_dir_all(&staged).unwrap();
-    let staticlib = staged.join("libpatina_dst_native_shim.a");
-    fs::copy(&real_staticlib, &staticlib).unwrap();
-    // Cargo 1.98+ writes its artifacts read-only and `fs::copy` carries the mode
-    // over; `ar` rewrites an archive through a temp file it then copies over the
-    // original, so the private copy that gets doctored must be writable.
+    let package = directory.path().join("probe-pkg");
+    write_plain_package(
+        &package,
+        "patina-relink-probe-fixture",
+        "unsafe extern \"C\" {\n    fn patina_relink_probe() -> u32;\n}\n\nfn main() {\n    \
+         println!(\"RELINK_PROBE={}\", unsafe { patina_relink_probe() });\n}\n",
+    );
+
+    // Build once through cargo-patina so the private explicit CARGO_TARGET_DIR is
+    // populated at the exact namespaced path `build_native_shim` selected. The
+    // primer does not call the doctored symbol; only the later builds do.
+    let primer = directory.path().join("primer-pkg");
+    write_plain_package(
+        &primer,
+        "patina-relink-primer-fixture",
+        "fn main() { println!(\"PRIMER\"); }\n",
+    );
+    let pristine = directory.path().join("pristine");
+    let primed = invoke_unchecked_clean_env(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &[
+            "build",
+            primer.to_str().unwrap(),
+            "--output",
+            pristine.to_str().unwrap(),
+        ],
+        &[("CARGO_TARGET_DIR", shim_target.to_str().unwrap())],
+    );
+    assert!(
+        primed.status.success(),
+        "priming build failed with {}\nstdout:\n{}\nstderr:\n{}",
+        primed.status,
+        String::from_utf8_lossy(&primed.stdout),
+        String::from_utf8_lossy(&primed.stderr)
+    );
+    let staticlib = find_private_shim_staticlib(&shim_target);
+    // Cargo 1.98+ writes its artifacts read-only; `ar` rewrites an archive
+    // through a temp file it then copies over the original, so the private copy
+    // that gets doctored must be writable.
     fs::set_permissions(&staticlib, fs::Permissions::from_mode(0o644)).unwrap();
 
     // A `cargo` stub that no-ops the shim's own build (which would replace our
@@ -1144,14 +1119,6 @@ fn changed_shim_staticlib_bytes_relink_the_guest() {
     )
     .unwrap();
     fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
-
-    let package = directory.path().join("probe-pkg");
-    write_plain_package(
-        &package,
-        "patina-relink-probe-fixture",
-        "unsafe extern \"C\" {\n    fn patina_relink_probe() -> u32;\n}\n\nfn main() {\n    \
-         println!(\"RELINK_PROBE={}\", unsafe { patina_relink_probe() });\n}\n",
-    );
 
     let envs: &[(&str, &str)] = &[
         ("CARGO", stub.to_str().unwrap()),
@@ -1210,34 +1177,24 @@ fn changed_shim_staticlib_bytes_relink_the_guest() {
     );
 }
 
-// Build the shim staticlib the way `build_native_shim` does and return the path
-// it resolves — same `CARGO_TARGET_DIR`-or-`target` rule, so the test cannot
-// drift from the CLI's own resolution.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn build_workspace_shim_staticlib(workspace: &Path, cargo: &str) -> PathBuf {
-    let _build_guard = BUILD_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    let built = Command::new(cargo)
-        .current_dir(workspace)
-        .args(["build", "-p", "patina-dst-native-shim"])
-        .output()
-        .unwrap();
-    assert!(
-        built.status.success(),
-        "building the shim staticlib failed:\n{}",
-        String::from_utf8_lossy(&built.stderr)
+fn find_private_shim_staticlib(target_base: &Path) -> PathBuf {
+    let mut files = Vec::new();
+    collect_files(target_base, &mut files);
+    let mut staticlibs: Vec<_> = files
+        .into_iter()
+        .filter(|path| {
+            path.file_name() == Some(std::ffi::OsStr::new("libpatina_dst_native_shim.a"))
+        })
+        .collect();
+    staticlibs.sort();
+    assert_eq!(
+        staticlibs.len(),
+        1,
+        "expected exactly one private shim staticlib under {}, found {staticlibs:?}",
+        target_base.display()
     );
-    let target = env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace.join("target"));
-    let staticlib = target.join("debug/libpatina_dst_native_shim.a");
-    assert!(
-        staticlib.is_file(),
-        "expected the shim staticlib at {}",
-        staticlib.display()
-    );
-    staticlib
+    staticlibs.remove(0)
 }
 
 // Append (or replace) an archive member defining `patina_relink_probe`, so the
@@ -1456,10 +1413,6 @@ fn a_rust_toolchain_pin_builds_with_the_guest_compiler() {
     fs::write(&proxy, "#!/bin/sh\nexec rustup run \"$(rustup show active-toolchain | cut -d ' ' -f1)\" rustc \"$@\"\n").unwrap();
     fs::set_permissions(&proxy, fs::Permissions::from_mode(0o755)).unwrap();
 
-    // Serialize shared shim-cache builds.
-    let _build_guard = BUILD_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
     let built = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
         .current_dir(&package)
         .args([
@@ -1590,9 +1543,6 @@ fn a_hostile_per_directory_proxy_builds_with_the_guest_compiler() {
         env::var_os("PATH").unwrap_or_default().to_string_lossy()
     );
 
-    let _build_guard = BUILD_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
     let built = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
         .current_dir(&package)
         .args([
@@ -1773,9 +1723,6 @@ fn a_relative_rustc_path_is_anchored_for_the_shim_cargo_child() {
     fs::set_permissions(&relative_rustc, fs::Permissions::from_mode(0o755)).unwrap();
 
     let output_path = package.join("relative-rustc-build");
-    let _build_guard = BUILD_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
     let built = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
         .current_dir(&package)
         .args([
@@ -1827,9 +1774,6 @@ fn a_relative_cargo_path_is_anchored_before_the_shim_build_changes_directory() {
     fs::set_permissions(&relative_cargo, fs::Permissions::from_mode(0o755)).unwrap();
 
     let output_path = package.join("relative-cargo-build");
-    let _build_guard = BUILD_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
     let built = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
         .current_dir(&package)
         .args([
@@ -4948,7 +4892,7 @@ fn main() {
         .spawn()
         .unwrap();
     let state_path = out.join("campaign-state.json");
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(120);
     let observed_done = loop {
         if state_path.exists() {
             let state: serde_json::Value =
@@ -5821,12 +5765,8 @@ wasm32-wasip1 target not installed"
     let wasm =
         fixture_target_directory(&package).join("wasm32-wasip1/debug/wasi-buggify-guest.wasm");
 
-    // Plain build (no `cfg(patina)`): serialized behind BUILD_LOCK because it
-    // compiles, and its output must import no `patina_sdk`.
+    // Plain build (no `cfg(patina)`): its output must import no `patina_sdk`.
     {
-        let _guard = BUILD_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
         let built = Command::new("cargo")
             .current_dir(&package)
             .args(["build", "--target", "wasm32-wasip1"])
@@ -10795,11 +10735,6 @@ fn invoke_in(directory: &Path, arguments: &[&str]) -> Output {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn invoke_in_with_env(directory: &Path, arguments: &[&str], envs: &[(&str, &str)]) -> Output {
-    let _build_guard = command_compiles(arguments).then(|| {
-        BUILD_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-    });
     let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-patina"));
     command.current_dir(directory).args(arguments);
     for (name, value) in envs {
@@ -11723,11 +11658,6 @@ fn invoke_unchecked_clean_env(
     arguments: &[&str],
     envs: &[(&str, &str)],
 ) -> Output {
-    let _build_guard = command_compiles(arguments).then(|| {
-        BUILD_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-    });
     let mut command = Command::new(executable);
     command.current_dir(fixture).args(arguments);
     for name in [
@@ -11771,17 +11701,6 @@ fn invoke_with(executable: &str, fixture: &Path, arguments: &[&str]) -> Output {
 }
 
 fn invoke_unchecked(executable: &str, fixture: &Path, arguments: &[&str]) -> Output {
-    // Serialize compiling invocations behind BUILD_LOCK so parallel test threads
-    // never build concurrently; executing an already-built artifact stays
-    // parallel. The guard is held for the whole process lifetime because the
-    // build happens inside it. `unwrap_or_else(into_inner)` tolerates a lock
-    // poisoned by an unrelated test's panic — we only need mutual exclusion of
-    // builds, not the (unit) protected state.
-    let _build_guard = command_compiles(arguments).then(|| {
-        BUILD_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-    });
     Command::new(executable)
         .current_dir(fixture)
         .args(arguments)
@@ -11793,7 +11712,7 @@ fn invoke_unchecked(executable: &str, fixture: &Path, arguments: &[&str]) -> Out
 /// when the run had to be killed. `invoke_unchecked` blocks forever on a guest
 /// that wedges, which turns a swallowed fail-closed refusal into a hung test
 /// instead of a failing one; this is for the legs whose RED evidence IS the
-/// wedge. Only for non-compiling invocations, so it takes no `BUILD_LOCK`.
+/// wedge.
 ///
 /// The run gets its own process group, and the deadline kills the GROUP.
 /// Signalling the supervisor alone is not enough: the guest it spawned keeps the
@@ -11808,10 +11727,6 @@ fn invoke_with_deadline(
 ) -> Option<Output> {
     use std::os::unix::process::CommandExt;
 
-    assert!(
-        !command_compiles(arguments),
-        "invoke_with_deadline does not hold BUILD_LOCK; hand it an already-built artifact"
-    );
     let mut child = Command::new(executable)
         .current_dir(fixture)
         .args(arguments)

@@ -2448,7 +2448,7 @@ pub const ENVIRONMENT: &[EnvVar] = &[
     EnvVar {
         name: "RUSTFLAGS / CARGO_TARGET_DIR",
         scope: "tool",
-        doc: "Honored as usual; Patina augments RUSTFLAGS via CARGO_ENCODED_RUSTFLAGS for package builds and respects CARGO_TARGET_DIR for staging.",
+        doc: "Honored as usual; Patina augments RUSTFLAGS via CARGO_ENCODED_RUSTFLAGS for package builds and uses CARGO_TARGET_DIR as the base for its namespaced shim staging.",
     },
 ];
 
