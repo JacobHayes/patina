@@ -174,6 +174,9 @@ pub enum Sys {
     Execve,
     Execveat,
     Exit,
+    ExitGroup,
+    Pause,
+    Socketpair,
     Getcwd,
     Chdir,
     Fchdir,
@@ -292,6 +295,9 @@ impl Sys {
             Sys::Execve => "execve",
             Sys::Execveat => "execveat",
             Sys::Exit => "exit",
+            Sys::ExitGroup => "exit_group",
+            Sys::Pause => "pause",
+            Sys::Socketpair => "socketpair",
             Sys::Getcwd => "getcwd",
             Sys::Chdir => "chdir",
             Sys::Fchdir => "fchdir",
@@ -436,6 +442,8 @@ impl Sys {
             Sys::Execve => libc::SYS_execve,
             Sys::Execveat => libc::SYS_execveat,
             Sys::Exit => libc::SYS_exit,
+            Sys::ExitGroup => libc::SYS_exit_group,
+            Sys::Socketpair => libc::SYS_socketpair,
             Sys::Getcwd => libc::SYS_getcwd,
             Sys::Chdir => libc::SYS_chdir,
             Sys::Fchdir => libc::SYS_fchdir,
@@ -466,7 +474,13 @@ impl Sys {
             Sys::Uselib => libc::SYS_uselib,
             // The x86_64 legacy time and ownership rows have no number on the
             // generic (arm64) table; the probes issue them on x86_64 only.
-            Sys::Access | Sys::Utime | Sys::Utimes | Sys::Futimesat | Sys::Chown | Sys::Lchown => {
+            Sys::Access
+            | Sys::Utime
+            | Sys::Utimes
+            | Sys::Futimesat
+            | Sys::Chown
+            | Sys::Lchown
+            | Sys::Pause => {
                 #[cfg(target_arch = "x86_64")]
                 {
                     match self {
@@ -475,6 +489,7 @@ impl Sys {
                         Sys::Utimes => libc::SYS_utimes,
                         Sys::Futimesat => libc::SYS_futimesat,
                         Sys::Chown => libc::SYS_chown,
+                        Sys::Pause => libc::SYS_pause,
                         _ => libc::SYS_lchown,
                     }
                 }
@@ -696,6 +711,13 @@ fn libc_symbol(sys: Sys, a: Args) -> i64 {
             Sys::RtSigsuspend => syscall(SYS_rt_sigsuspend, a[0] as c_long, a[1] as c_long) as i64,
             Sys::Sigaltstack => sigaltstack(a[0] as *const stack_t, a[1] as *mut stack_t) as i64,
             Sys::Kill => kill(a[0] as pid_t, a[1] as c_int) as i64,
+            Sys::Pause => pause() as i64,
+            Sys::Socketpair => socketpair(
+                a[0] as c_int,
+                a[1] as c_int,
+                a[2] as c_int,
+                a[3] as *mut c_int,
+            ) as i64,
             // glibc has no wrappers for these Linux-only signal/thread rows.
             Sys::Tkill => syscall(SYS_tkill, a[0] as c_long, a[1] as c_long) as i64,
             Sys::Tgkill => syscall(
@@ -758,8 +780,11 @@ fn libc_symbol(sys: Sys, a: Args) -> i64 {
                 a[2] as *mut siginfo_t,
                 a[3] as c_int,
             ) as i64,
+            // `_exit(2)` is exit_group's only wrapper and is not interposed
+            // (its import would be refused), so the libc spelling of exit_group
+            // is syscall(2), like exit's.
             Sys::Clone | Sys::Clone3 | Sys::Fork | Sys::Vfork | Sys::Execve | Sys::Execveat
-            | Sys::Exit | Sys::Sysctl | Sys::Nfsservctl | Sys::Vserver | Sys::Security
+            | Sys::Exit | Sys::ExitGroup | Sys::Sysctl | Sys::Nfsservctl | Sys::Vserver | Sys::Security
             | Sys::Tuxcall | Sys::AfsSyscall | Sys::Getpmsg | Sys::Putpmsg | Sys::EpollCtlOld
             | Sys::EpollWaitOld | Sys::LookupDcookie | Sys::CreateModule | Sys::QueryModule
             | Sys::GetKernelSyms | Sys::Uselib => syscall(

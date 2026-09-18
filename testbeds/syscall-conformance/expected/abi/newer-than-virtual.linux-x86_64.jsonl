@@ -3,3 +3,4 @@
 {"seq":1,"op":"check","args":{"label":"a number past the virtual ABI level is ENOSYS"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":2,"op":"fchroot","args":{"fd":-1,"flags":0},"ret":-1,"errno":"ENOSYS","fields":{},"norm":{}}
 {"seq":3,"op":"check","args":{"label":"ENOSYS regardless of the arguments"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":4,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

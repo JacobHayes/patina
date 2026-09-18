@@ -22,12 +22,26 @@
 #           byte-identical, and the recorded stream passes the patina diff.
 #   leak    the shim-linked binary directly under strace with the
 #           validate-native-shim.sh default-deny filter (its trace set widened
-#           to the classes the probes touch): no host syscall may escape.
+#           to the classes the probes touch): no host syscall may escape. A
+#           probe blessed to die by a signal is also run directly, unstraced
+#           and unsupervised by patina, and its waitpid outcome (signal AND
+#           core flag) must be the blessed one.
+#
+# Every leg runs under `conform supervise`: its own process group, a wall-clock
+# timeout (PATINA_CONFORMANCE_LEG_TIMEOUT seconds, default 60) that kills the
+# whole group, and — the one line the harness itself appends to a stream — the
+# process outcome the supervisor OBSERVED (`__termination`: the native leg's
+# waitpid status; the `guest_exit` of the `cargo patina … --format json`
+# envelope for patina/replay). It is compared like any other event and never
+# copied from the expectation.
+#
 # --selftest proves each gate can fail: planted divergence, planted stale
-# divergence, planted event-count drift (both directions), planted stale
-# probe-level declaration, the host gate's refusals (`conform selftest`), and a
-# planted openat("/etc/hostname") escape under the leak leg's EXACT strace
-# invocation and filter.
+# divergence, planted event-count drift (both directions), planted wrong or
+# missing termination, a stale pending declaration, an abort whose pinned
+# diagnostic is absent, the frozen declaration rule's refusals, the host gate's
+# refusals (`conform selftest`), a planted openat("/etc/hostname") escape under
+# the leak leg's EXACT strace invocation and filter, and a planted
+# never-returning process group under the leg timeout.
 #
 # Exit codes: 0 every leg passed (or a loud, counted skip); 1 a leg failed;
 # 2 usage; 3 FATAL prelude (build/tooling), never a silent green.
@@ -42,6 +56,7 @@ conform="$here/target/release/conform"
 divergences="$here/divergences.toml"
 manifest="$here/probes.toml"
 registry="$out/registry.json"
+leg_timeout="${PATINA_CONFORMANCE_LEG_TIMEOUT:-60}"
 
 usage() {
   cat <<'EOF'
@@ -50,12 +65,16 @@ usage: testbeds/syscall-conformance/run.sh [--mode M[,M...]] [--vehicle V[,V...]
 
   --mode      native|patina|replay|leak, comma-separated (default: all four)
   --vehicle   libc|syscall|raw, comma-separated (default: all three; raw is
-              x86_64 Linux only and needs a SUD kernel under patina)
+              x86_64 Linux only and needs a SUD kernel under patina; a probe
+              with no shape through a vehicle exits 4 and is a counted skip)
   --probe     run one probe id (repeatable), e.g. fs/open_rw
   --bless     re-record expected/<probe>.<os>-<arch>.jsonl from the native libc
               vehicle on THIS host, then run the requested legs against it
   --selftest  prove every gate can fail, then exit
   --fast      the check:fast tier: --mode native,patina --vehicle libc
+
+  PATINA_CONFORMANCE_LEG_TIMEOUT  seconds before a leg's process group is
+                                  killed and the leg fails (default 60)
 EOF
 }
 
@@ -93,6 +112,9 @@ done
 for vehicle in "${vehicles[@]}"; do
   case "$vehicle" in libc|syscall|raw) ;; *) echo "syscall-conformance: unknown vehicle: $vehicle" >&2; exit 2 ;; esac
 done
+if ! [[ "$leg_timeout" =~ ^[0-9]+$ ]] || [[ "$leg_timeout" == 0 ]]; then
+  echo "syscall-conformance: PATINA_CONFORMANCE_LEG_TIMEOUT must be a positive integer (seconds), not '$leg_timeout'" >&2; exit 2
+fi
 
 if [[ "$(uname -s)" != Linux ]]; then
   # COUNTED, LOUD skip: the probes are the Linux syscall ABI.
@@ -105,7 +127,7 @@ host_glibc="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')"
 platform="linux-$host_arch"
 
 # ---- prelude: fails CLOSED (FATAL) — a gate that cannot build never reads green
-if ! cargo build --release --quiet -p cargo-patina; then
+if ! cargo build --release --quiet --manifest-path "$repo_root/Cargo.toml" -p cargo-patina; then
   echo "FATAL: cargo build -p cargo-patina failed" >&2; exit 3
 fi
 if ! mkdir -p "$out"; then
@@ -156,16 +178,40 @@ fi
 # managed thread's host pthread_create issues (clone3/clone, set_robust_list,
 # rseq, set_tid_address, gettid, prlimit64, sched_getaffinity, mprotect on the
 # new stack, rt_sigprocmask) — process-local, no fs/net/clock/entropy reach —
-# and exit_group's sibling `exit` for the thread's own end. Everything else is
+# and exit_group's sibling `exit` for the thread's own end.
+#
+# The ONE signal allowance is the shim's own delivery vehicle (the signals
+# family design, docs/arcs/syscall-conformance-signals.md §2.4): a kernel-built
+# frame is obtained by signalling the CALLING THREAD ITSELF — `tgkill(pid, tid,
+# …)` / `rt_tgsigqueueinfo(pid, tid, …)` with pid the traced process and tid the
+# thread issuing the call (strace's own line prefix), or `tkill(tid, …)` with
+# that tid. The predicate is target == self, any signal number: never a signal
+# name list, never a uid, never a process-directed `kill`/`rt_sigqueueinfo`. A
+# modeled row reaching the host (a `kill`, a `rt_sigpending`, a `signalfd4`) is
 # printed = DENIED. The planted self-test below runs the SAME variables.
 strace_events='trace=%file,%network,%desc,%memory,%clock,%process,%signal,%ipc,nanosleep,gettimeofday,futex,rt_sigaction,rt_sigprocmask,rt_sigreturn,sigaltstack,sched_yield,exit_group,exit,getrandom'
 strace_filter='
   function trusted_path(a) {
     return (a ~ /\.so(\.|"|$)/) || (a ~ /"\/etc\/ld\.so\.cache"/) || (a ~ /"\/etc\/ld\.so\.preload"/) || (a ~ /"\/proc\/self\/maps"/)
   }
+  function self_directed(name, a, caller,    n, parts, tgid, tid) {
+    n = split(a, parts, /, */)
+    if (name == "tgkill" || name == "rt_tgsigqueueinfo") {
+      tgid = parts[1]; tid = parts[2]
+      return (n >= 3 && tgid == pid && tid == caller)
+    }
+    if (name == "tkill") {
+      tid = parts[1]
+      return (n >= 2 && tid == caller)
+    }
+    return 0
+  }
   {
     line = $0
+    caller = ""
+    if (match(line, /^[0-9]+ +/)) { caller = substr(line, 1, RLENGTH); sub(/ +$/, "", caller) }
     sub(/^[0-9]+ +/, "", line)
+    if (pid == "" && line ~ /^execve\(/) pid = caller
     if (line ~ /^--- / || line ~ /^\+\+\+ /) next
     # A call split across two lines by a concurrent thread: the `unfinished`
     # line carries the name and arguments and is judged by the rules below
@@ -184,6 +230,7 @@ strace_filter='
     if (syscall == "close") { cfd = args; sub(/[^0-9].*/, "", cfd); if (cfd != "") delete trusted[cfd] }
     if (syscall ~ /^(execve|brk|arch_prctl|mmap|mmap2|munmap|mprotect|madvise|futex|sched_yield|sigaltstack|rt_sigaction|rt_sigprocmask|rt_sigreturn|exit|exit_group|close)$/) next
     if (syscall ~ /^(clone|clone3|set_robust_list|rseq|set_tid_address|gettid|prlimit64|sched_getaffinity)$/) next
+    if (syscall ~ /^(tgkill|tkill|rt_tgsigqueueinfo)$/ && self_directed(syscall, args, caller)) next
     if (syscall == "getrandom" && args ~ /GRND_NONBLOCK/) next
     if (syscall ~ /^(openat|openat2|open|newfstatat|readlink|readlinkat)$/ && trusted_path(args)) next
     if (syscall ~ /^(faccessat|faccessat2|access)$/ && args ~ /"\/etc\/ld\.so\.preload"/) next
@@ -217,9 +264,9 @@ rm -f "$probe_c" "$probe_bin"
 # ---- --selftest: every gate must be able to fail
 if [[ $selftest == 1 ]]; then
   status=0
-  echo "==> conform selftest (differ + host gate, planted failures)"
+  echo "==> conform selftest (differ + termination + pending + frozen rule + design obligations + host gate, planted failures)"
   if ! "$conform" selftest; then status=1; fi
-  echo "==> strace leak selftest (planted openat(\"/etc/hostname\") through syscall(2))"
+  echo "==> strace leak selftest (planted openat(\"/etc/hostname\") through syscall(2); planted self-signal allowance bounds)"
   if [[ $have_strace == 1 ]]; then
     leak_bin="$here/target/release/selftest-leak"
     if strace -f -s 4096 -e "$strace_events" -o "$out/selftest-leak.strace" \
@@ -235,15 +282,91 @@ if [[ $selftest == 1 ]]; then
     else
       echo "SELFTEST ok: strace leak: planted escape flagged: $(grep -E 'openat.*"/etc/hostname"' "$out/selftest-leak.denied" | head -1)"
     fi
+    # The self-signal allowance, on synthetic strace lines through the SAME
+    # filter: a tgkill/tkill/rt_tgsigqueueinfo to the calling thread passes; a
+    # process-directed kill/rt_sigqueueinfo, a tgkill to ANOTHER thread, a
+    # rt_sigpending, and a signalfd4 are all denied, whatever the signal name.
+    synthetic="$out/selftest-leak.synthetic.strace"
+    cat >"$synthetic" <<'STRACE'
+4242 execve("/x/probe", ["/x/probe"], 0x7ffd /* 3 vars */) = 0
+4242 tgkill(4242, 4242, SIGUSR1)          = 0
+4242 --- SIGUSR1 {si_signo=SIGUSR1, si_code=SI_TKILL, si_pid=4242, si_uid=1000} ---
+4242 rt_sigreturn({mask=[]})              = 0
+4243 tgkill(4242, 4243, SIGRT_3)          = 0
+4243 tkill(4243, SIGTERM)                 = 0
+4243 rt_tgsigqueueinfo(4242, 4243, SIGUSR2, {si_signo=SIGUSR2, si_code=SI_QUEUE, si_pid=1, si_uid=1000}) = 0
+4242 tgkill(4242, 4243, SIGUSR1)          = 0
+4242 tgkill(4243, 4243, SIGUSR1)          = 0
+4243 tkill(4242, SIGUSR1)                 = 0
+4242 kill(4242, SIGUSR1)                  = 0
+4242 rt_sigqueueinfo(4242, SIGUSR1, {si_signo=SIGUSR1, si_code=SI_QUEUE, si_pid=1, si_uid=1000}) = 0
+4242 rt_sigpending([], 8)                 = 0
+4242 signalfd4(-1, [USR1], 8, SFD_NONBLOCK) = 5
+4242 exit_group(0)                        = ?
+STRACE
+    awk "$strace_filter" "$synthetic" >"$synthetic.denied"
+    expected_denied='tgkill(4242, 4243, SIGUSR1)
+tgkill(4243, 4243, SIGUSR1)
+tkill(4242, SIGUSR1)
+kill(4242, SIGUSR1)
+rt_sigqueueinfo(4242, SIGUSR1, {si_signo=SIGUSR1, si_code=SI_QUEUE, si_pid=1, si_uid=1000})
+rt_sigpending([], 8)
+signalfd4(-1, [USR1], 8, SFD_NONBLOCK)'
+    got_denied="$(sed -E 's/ += .*$//' "$synthetic.denied")"
+    if [[ "$got_denied" != "$expected_denied" ]]; then
+      echo "SELFTEST FAILED: strace leak: the self-signal allowance is not exactly 'to the calling thread'; denied set was:" >&2
+      cat "$synthetic.denied" >&2
+      echo "expected exactly:" >&2
+      echo "$expected_denied" >&2
+      status=1
+    else
+      echo "SELFTEST ok: strace leak: self-directed tgkill/tkill/rt_tgsigqueueinfo allowed; cross-thread, process-directed, rt_sigpending and signalfd4 denied"
+    fi
   elif [[ "${PATINA_REQUIRE_STRACE:-0}" == 1 ]]; then
     echo "SELFTEST FAILED: PATINA_REQUIRE_STRACE=1 but strace is not on PATH" >&2; status=1
   else
     echo "SELFTEST SKIPPED 1: strace leak (strace not on PATH)"
   fi
+  echo "==> leg-timeout selftest (planted never-returning process group under conform supervise)"
+  timeout_out="$out/selftest-timeout.jsonl"
+  timeout_err="$out/selftest-timeout.err"
+  "$conform" supervise native 1 "$timeout_out" "$timeout_err" -- \
+    sh -c 'echo planted-timeout-stderr >&2; sleep 600 & sleep 600' >"$out/selftest-timeout.verdict" 2>&1
+  timeout_rc=$?
+  pgid="$(grep -o 'pgid=[0-9]*' "$out/selftest-timeout.verdict" | cut -d= -f2)"
+  if [[ $timeout_rc != 3 ]]; then
+    echo "SELFTEST FAILED: leg timeout: conform supervise returned $timeout_rc, not 3, for a never-returning process group" >&2
+    cat "$out/selftest-timeout.verdict" >&2
+    status=1
+  elif [[ -n "$pgid" ]] && ps -o pid= -g "$pgid" 2>/dev/null | grep -q .; then
+    echo "SELFTEST FAILED: leg timeout: process group $pgid survived the timeout:" >&2
+    ps -o pid=,comm= -g "$pgid" >&2
+    status=1
+  elif ! grep -q '"kind":"timeout"' "$timeout_out"; then
+    echo "SELFTEST FAILED: leg timeout: the stream did not record a timeout termination" >&2
+    cat "$timeout_out" >&2
+    status=1
+  elif ! grep -q planted-timeout-stderr "$timeout_err"; then
+    echo "SELFTEST FAILED: leg timeout: the leg's stderr was not captured" >&2
+    status=1
+  else
+    echo "SELFTEST ok: leg timeout killed process group $pgid and recorded a timeout termination; stderr tail: $(tail -n 1 "$timeout_err")"
+  fi
+  echo "==> direct-termination selftest (an exit code of 128+N is not a death by signal N)"
+  "$conform" supervise native 30 "$out/selftest-died.jsonl" "$out/selftest-died.err" -- sh -c 'kill -TERM $$' >/dev/null 2>&1
+  "$conform" supervise native 30 "$out/selftest-exited.jsonl" "$out/selftest-exited.err" -- sh -c 'exit 143' >/dev/null 2>&1
+  died="$("$conform" termination-of "$out/selftest-died.jsonl" full)"
+  exited="$("$conform" termination-of "$out/selftest-exited.jsonl" full)"
+  if [[ "$died" != "signaled 15" || "$exited" != "exited 143" || "$died" == "$exited" ]]; then
+    echo "SELFTEST FAILED: direct termination: a real SIGTERM death read '$died' and an exit(143) read '$exited'; the leak leg's waitpid comparison cannot tell them apart" >&2
+    status=1
+  else
+    echo "SELFTEST ok: direct termination: waitpid reads a real death as '$died' and the 128+N impostor as '$exited'"
+  fi
   if [[ $status != 0 ]]; then
     echo "syscall-conformance: SELFTEST FAILED — a gate cannot fail" >&2; exit 1
   fi
-  echo "CONFORMANCE_SELFTEST_RAN cases=differ,host-gate,strace-leak"
+  echo "CONFORMANCE_SELFTEST_RAN cases=differ,termination,pending,frozen-rule,obligations,host-gate,strace-leak,self-signal-bounds,leg-timeout,direct-termination"
   exit 0
 fi
 
@@ -266,7 +389,6 @@ passed=0
 failed=0
 skipped=0
 unavailable=0
-legs=()
 
 fail_leg() {
   local leg=$1 why=$2 log=${3:-}
@@ -289,11 +411,30 @@ skip_leg() {
   echo "SKIP $leg: $why"
 }
 
+# Run one supervised leg process: kind native|patina, the stream and stderr
+# paths, then the command. Returns conform's status (0 ran, 3 timeout, 2 the
+# supervisor's output was not an envelope); the termination line is in the
+# stream either way.
+supervise() {
+  local kind=$1 raw=$2 err=$3
+  shift 3
+  "$conform" supervise "$kind" "$leg_timeout" "$raw" "$err" -- "$@" >"$raw.verdict" 2>&1
+}
+
+# A probe that has no shape through the leg's vehicle says so by exiting 4
+# (`EXIT_VEHICLE_UNAVAILABLE`, `probe_main!(…, libc)`) before recording
+# anything: the stream is only the supervisor's termination line. A counted
+# SKIP, never a pass — and never an empty stream that "matched".
+vehicle_unavailable() {
+  local raw=$1
+  [[ "$("$conform" termination-of "$raw" 2>/dev/null)" == "exited 4" && "$(grep -c . "$raw")" == 1 ]]
+}
+
 # Run the differ for one leg; prints its lines (indented) on failure.
 diff_leg() {
-  local mode=$1 probe=$2 vehicle=$3 expected=$4 raw=$5 status=$6 leg=$7 err=$8
+  local mode=$1 probe=$2 vehicle=$3 expected=$4 raw=$5 leg=$6 err=$7
   local report="$raw.diff"
-  if "$conform" diff "$mode" "$probe" "$vehicle" "$expected" "$raw" "$divergences" "$status" >"$report" 2>&1; then
+  if "$conform" diff "$mode" "$probe" "$vehicle" "$expected" "$raw" "$divergences" "$err" >"$report" 2>&1; then
     local note
     note="$(grep -E 'declared' "$report" | head -1 || true)"
     pass_leg "$leg" "$note"
@@ -316,12 +457,15 @@ for probe in "${probes[@]}"; do
 
   if [[ $bless == 1 ]]; then
     echo "==> blessing $probe from the native libc vehicle on $platform ($host_kernel, glibc $host_glibc)"
-    if ! "$native_bin" --vehicle libc --strict >"$legdir/bless.raw.jsonl" 2>"$legdir/bless.err"; then
-      fail_leg "$probe[bless]" "the probe does not pass natively; refusing to bless" "$legdir/bless.err"
+    supervise native "$legdir/bless.raw.jsonl" "$legdir/bless.err" "$native_bin" --vehicle libc --strict
+    bless_rc=$?
+    if [[ $bless_rc == 3 ]]; then
+      fail_leg "$probe[bless]" "wall-clock timeout ($leg_timeout s); refusing to bless" "$legdir/bless.err"
       continue
     fi
-    if ! "$conform" bless "$probe" "$legdir/bless.raw.jsonl" "$expected" linux "$host_arch" "$host_kernel" "$host_glibc" "$manifest" "$registry"; then
-      fail_leg "$probe[bless]" "conform bless failed"
+    if ! "$conform" bless "$probe" "$legdir/bless.raw.jsonl" "$expected" linux "$host_arch" "$host_kernel" "$host_glibc" "$manifest" "$registry" 2>"$legdir/bless.conform.err"; then
+      cat "$legdir/bless.conform.err" "$legdir/bless.err" >"$legdir/bless.refused" 2>/dev/null
+      fail_leg "$probe[bless]" "the probe does not pass natively; refusing to bless" "$legdir/bless.refused"
       continue
     fi
   fi
@@ -340,6 +484,7 @@ for probe in "${probes[@]}"; do
     fail_leg "$probe[host-gate]" "$gate"
     continue
   fi
+  blessed_term="$("$conform" termination-of "$expected")"
 
   for mode in "${modes[@]}"; do
     for vehicle in "${vehicles[@]}"; do
@@ -354,42 +499,79 @@ for probe in "${probes[@]}"; do
       err="$legdir/$mode.$vehicle.err"
       case "$mode" in
         native)
-          if "$native_bin" --vehicle "$vehicle" --strict >"$raw" 2>"$err"; then status=ok; else status=failed; fi
-          diff_leg native "$probe" "$vehicle" "$expected" "$raw" "$status" "$leg" "$err" || true
+          supervise native "$raw" "$err" "$native_bin" --vehicle "$vehicle" --strict
+          if [[ $? == 3 ]]; then
+            fail_leg "$leg" "wall-clock timeout ($leg_timeout s); the process group was killed" "$err"; continue
+          fi
+          if vehicle_unavailable "$raw"; then
+            skip_leg "$leg" "$(tail -n 1 "$err")"; continue
+          fi
+          diff_leg native "$probe" "$vehicle" "$expected" "$raw" "$leg" "$err" || true
           ;;
         patina)
-          if "$PATINA" patina run "$out/patina/$bin" --seed 1 -- --vehicle "$vehicle" >"$raw" 2>"$err"; then status=ok; else status=failed; fi
-          diff_leg patina "$probe" "$vehicle" "$expected" "$raw" "$status" "$leg" "$err" || true
+          supervise patina "$raw" "$err" "$PATINA" patina run "$out/patina/$bin" --seed 1 --format json -- --vehicle "$vehicle"
+          rc=$?
+          if [[ $rc == 3 ]]; then
+            fail_leg "$leg" "wall-clock timeout ($leg_timeout s); the process group was killed" "$err"; continue
+          elif [[ $rc == 2 ]]; then
+            fail_leg "$leg" "the supervisor produced no patina.result/v1 envelope" "$raw.verdict"; continue
+          fi
+          if vehicle_unavailable "$raw"; then
+            skip_leg "$leg" "$(tail -n 1 "$err")"; continue
+          fi
+          diff_leg patina "$probe" "$vehicle" "$expected" "$raw" "$leg" "$err" || true
           ;;
         replay)
+          # A dump left by an earlier run must never stand in for this one's
+          # (the family gate reads these): gone before anything can skip.
+          rm -f "$legdir/replay.$vehicle.trace-info.json" "$legdir/replay.$vehicle.trace-events.jsonl"
           if reason="$("$conform" declared-failing "$probe" "$vehicle" "$divergences")"; then
-            # A probe the supervisor refuses, or that dies at a declared event,
-            # leaves no trace to replay (an abort is not a runtime-initiated
-            # stop, so the recording is incomplete); the patina leg already
-            # holds it to its declaration.
+            # A probe the supervisor refuses, that is not conformant yet, or
+            # that dies at a declared event leaves no complete trace to replay;
+            # the patina leg already holds it to its declaration.
             skip_leg "$leg" "declared failing under patina; nothing to replay ($reason)"; continue
           fi
           trace="$legdir/replay.$vehicle.patina"
           rm -f "$trace"
-          if "$PATINA" patina run "$out/patina/$bin" --seed 1 --record "$trace" --fingerprint syscall-conformance-v1 \
-              -- --vehicle "$vehicle" >"$raw" 2>"$err"; then status=ok; else status=failed; fi
+          supervise patina "$raw" "$err" "$PATINA" patina run "$out/patina/$bin" --seed 1 --record "$trace" \
+            --fingerprint syscall-conformance-v1 --format json -- --vehicle "$vehicle"
+          rc=$?
+          if [[ $rc == 3 ]]; then
+            fail_leg "$leg" "wall-clock timeout ($leg_timeout s) while recording; the process group was killed" "$err"; continue
+          elif [[ $rc == 2 ]]; then
+            fail_leg "$leg" "the recording supervisor produced no patina.result/v1 envelope" "$raw.verdict"; continue
+          fi
+          if vehicle_unavailable "$raw"; then
+            skip_leg "$leg" "$(tail -n 1 "$err")"; continue
+          fi
           if [[ ! -s "$trace" ]]; then
             fail_leg "$leg" "record produced no trace" "$err"; continue
           fi
+          # The recorded trace AS THE SUPERVISOR REPORTS IT, for the family
+          # gate's trace obligations (gate.sh: the format version and the
+          # signal_generated ops a probe's generations must have recorded).
+          if ! "$PATINA" patina trace info "$trace" --format json >"$legdir/replay.$vehicle.trace-info.json" 2>"$legdir/replay.$vehicle.trace.err" ||
+             ! "$PATINA" patina trace events "$trace" --format json >"$legdir/replay.$vehicle.trace-events.jsonl" 2>>"$legdir/replay.$vehicle.trace.err"; then
+            rm -f "$legdir/replay.$vehicle.trace-info.json" "$legdir/replay.$vehicle.trace-events.jsonl"
+            fail_leg "$leg" "the supervisor cannot read back the trace it recorded" "$legdir/replay.$vehicle.trace.err"; continue
+          fi
           replayed="$legdir/replay.$vehicle.replayed.jsonl"
-          if ! "$PATINA" patina replay "$out/patina/$bin" "$trace" --fingerprint syscall-conformance-v1 >"$replayed" 2>"$replayed.err"; then
-            # A probe declared failing under patina fails identically on replay;
-            # the byte-identity check below is what the leg proves either way.
-            :
+          supervise patina "$replayed" "$replayed.err" "$PATINA" patina replay "$out/patina/$bin" "$trace" \
+            --fingerprint syscall-conformance-v1 --format json
+          rc=$?
+          if [[ $rc == 3 ]]; then
+            fail_leg "$leg" "wall-clock timeout ($leg_timeout s) while replaying; the process group was killed" "$replayed.err"; continue
+          elif [[ $rc == 2 ]]; then
+            fail_leg "$leg" "the replay supervisor produced no patina.result/v1 envelope" "$replayed.verdict"; continue
           fi
           if ! cmp -s "$raw" "$replayed"; then
             diff "$raw" "$replayed" >"$legdir/replay.$vehicle.divergence" 2>&1 || true
-            fail_leg "$leg" "record and replay event streams differ" "$legdir/replay.$vehicle.divergence"; continue
+            fail_leg "$leg" "record and replay event streams (including the termination) differ" "$legdir/replay.$vehicle.divergence"; continue
           fi
-          if [[ ! -s "$raw" ]]; then
+          if [[ "$(grep -c . "$raw")" -lt 2 ]]; then
             fail_leg "$leg" "record produced no events (vacuous replay identity)" "$err"; continue
           fi
-          diff_leg patina "$probe" "$vehicle" "$expected" "$raw" "$status" "$leg" "$err" || true
+          diff_leg patina "$probe" "$vehicle" "$expected" "$raw" "$leg" "$err" || true
           ;;
         leak)
           if [[ $have_strace != 1 ]]; then
@@ -403,21 +585,50 @@ for probe in "${probes[@]}"; do
             # so a leak here would be the audit's finding, not the runtime's.
             skip_leg "$leg" "declared failing under patina; not run outside the supervisor ($reason)"; continue
           fi
-          PATINA_MODE=seeded PATINA_SEED=9 \
+          supervise native "$raw" "$err" env PATINA_MODE=seeded PATINA_SEED=9 \
             strace -f -s 4096 -e "$strace_events" -o "$legdir/leak.$vehicle.strace" \
-              "$out/patina/$bin" --vehicle "$vehicle" >"$raw" 2>"$err"
-          status=$?
+              "$out/patina/$bin" --vehicle "$vehicle"
+          if [[ $? == 3 ]]; then
+            fail_leg "$leg" "wall-clock timeout ($leg_timeout s) under strace; the process group was killed" "$err"; continue
+          fi
+          if vehicle_unavailable "$raw"; then
+            skip_leg "$leg" "$(tail -n 1 "$err")"; continue
+          fi
           awk "$strace_filter" "$legdir/leak.$vehicle.strace" >"$legdir/leak.$vehicle.denied"
           if [[ -s "$legdir/leak.$vehicle.denied" ]]; then
             fail_leg "$leg" "host syscalls escaped the deterministic boundary:" "$legdir/leak.$vehicle.denied"; continue
           fi
-          if [[ ! -s "$raw" ]]; then
+          if [[ "$(grep -c . "$raw")" -lt 2 ]]; then
             fail_leg "$leg" "the probe recorded no events under strace (vacuous leak leg)" "$err"; continue
           fi
-          if [[ $status != 0 ]]; then
-            fail_leg "$leg" "the probe exited $status under strace" "$err"; continue
+          # strace ends the way its tracee did (it re-raises a terminating
+          # signal on itself), so the supervised outcome must be the blessed
+          # one: a probe that dies by its own SIG_DFL signal is not an escape.
+          observed_term="$("$conform" termination-of "$raw")"
+          if [[ "$observed_term" != "$blessed_term" ]]; then
+            fail_leg "$leg" "the probe ended '$observed_term' under strace; blessed '$blessed_term'" "$err"; continue
           fi
-          pass_leg "$leg" "$(wc -l <"$raw" | tr -d ' ') events, no escaped syscall"
+          # A blessed signal death is checked once more WITHOUT any supervisor
+          # in between: the shim-linked binary run directly, its outcome read
+          # from waitpid. The guest must really die by that signal, with the
+          # core flag the host kernel gives it — an exit code that a supervisor
+          # translates into "signaled" does not survive this.
+          direct_note=""
+          if [[ "$blessed_term" == signaled* ]]; then
+            direct="$legdir/direct.$vehicle.jsonl"
+            supervise native "$direct" "$direct.err" env PATINA_MODE=seeded PATINA_SEED=9 \
+              "$out/patina/$bin" --vehicle "$vehicle"
+            if [[ $? == 3 ]]; then
+              fail_leg "$leg" "wall-clock timeout ($leg_timeout s) in the direct run; the process group was killed" "$direct.err"; continue
+            fi
+            direct_term="$("$conform" termination-of "$direct" full)"
+            blessed_full="$("$conform" termination-of "$expected" full)"
+            if [[ "$direct_term" != "$blessed_full" ]]; then
+              fail_leg "$leg" "run directly (no supervisor) the guest ended '$direct_term'; blessed '$blessed_full'" "$direct.err"; continue
+            fi
+            direct_note=", waitpid: $direct_term"
+          fi
+          pass_leg "$leg" "$(($(grep -c . "$raw") - 1)) events, no escaped syscall, $observed_term$direct_note"
           ;;
       esac
     done

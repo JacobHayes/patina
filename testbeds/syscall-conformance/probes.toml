@@ -83,24 +83,60 @@ syscalls = ["ppoll", "pipe2", "eventfd2", "read", "write", "close", "clock_getti
 symbols = ["ppoll", "pipe2", "eventfd", "read", "write", "close", "clock_gettime"]
 
 [probe."signal/basic"]
-syscalls = ["getpid", "getuid", "kill", "rt_sigaction"]
-symbols = ["getpid", "getuid", "kill", "sigaction"]
+syscalls = ["getpid", "gettid", "getuid", "kill", "tkill", "tgkill", "rt_sigaction"]
+symbols = ["getpid", "getuid", "kill", "sigaction", "syscall"]
+
+[probe."signal/raw_action"]
+syscalls = ["getpid", "kill", "rt_sigaction"]
+symbols = ["getpid", "kill", "sigaction", "syscall"]
 
 [probe."signal/mask"]
-syscalls = ["rt_sigprocmask", "kill", "rt_sigpending", "rt_sigtimedwait", "rt_sigsuspend"]
-symbols = ["pthread_sigmask", "kill"]
+syscalls = ["getpid", "rt_sigprocmask", "kill", "rt_sigpending", "rt_sigtimedwait", "rt_sigsuspend", "clock_gettime"]
+symbols = ["getpid", "kill", "sigaction", "syscall", "clock_gettime"]
+
+[probe."signal/block"]
+syscalls = ["getpid", "pause", "rt_sigprocmask", "rt_sigtimedwait", "signalfd4", "read", "close", "kill"]
+symbols = ["getpid", "pause", "read", "close", "kill", "sigaction", "syscall"]
+
+[probe."signal/per_thread"]
+syscalls = ["getpid", "gettid", "rt_sigprocmask", "rt_sigpending", "sigaltstack", "kill", "tgkill"]
+symbols = ["getpid", "kill", "sigaction", "syscall"]
+
+[probe."signal/one_wake"]
+syscalls = ["getpid", "gettid", "pipe2", "read", "write", "close", "rt_sigprocmask", "rt_sigpending", "kill"]
+symbols = ["getpid", "pipe2", "read", "write", "close", "kill", "sigaction", "pthread_sigmask", "syscall"]
+
+[probe."signal/unmask"]
+syscalls = ["getpid", "gettid", "rt_sigprocmask", "rt_sigpending", "kill", "tgkill"]
+symbols = ["getpid", "kill", "sigaction", "syscall"]
 
 [probe."signal/eintr"]
-syscalls = ["pipe2", "read", "write", "close", "kill", "nanosleep"]
-symbols = ["pipe2", "read", "write", "close", "kill", "nanosleep", "sigaction"]
+syscalls = ["getpid", "pipe2", "read", "write", "close", "kill", "nanosleep", "clock_nanosleep", "clock_gettime", "epoll_create1", "epoll_ctl", "epoll_wait", "futex"]
+symbols = ["getpid", "pipe2", "read", "write", "close", "kill", "nanosleep", "clock_nanosleep", "clock_gettime", "epoll_create1", "epoll_ctl", "epoll_wait", "syscall", "sigaction"]
 
 [probe."signal/wait"]
-syscalls = ["getpid", "getuid", "rt_sigprocmask", "rt_sigtimedwait", "signalfd", "signalfd4", "read", "fcntl", "close"]
-symbols = ["getpid", "getuid", "pthread_sigmask", "read", "fcntl", "close"]
+syscalls = ["getpid", "getuid", "rt_sigprocmask", "rt_sigtimedwait", "rt_sigqueueinfo", "signalfd", "signalfd4", "read", "fcntl", "close", "kill", "epoll_create1", "epoll_ctl", "epoll_wait"]
+symbols = ["getpid", "getuid", "read", "fcntl", "close", "kill", "epoll_create1", "epoll_ctl", "epoll_wait", "sigaction", "syscall"]
 
 [probe."signal/default"]
 syscalls = ["getpid"]
 symbols = ["getpid"]
+
+[probe."signal/default_term"]
+syscalls = ["getpid", "kill"]
+symbols = ["getpid", "kill", "sigaction"]
+
+[probe."signal/core_term"]
+syscalls = ["getpid", "kill"]
+symbols = ["getpid", "kill", "sigaction"]
+
+[probe."signal/pipe_term"]
+syscalls = ["pipe2", "write", "close", "socketpair", "sendto"]
+symbols = ["pipe2", "write", "close", "socketpair", "sendto", "sigaction"]
+
+[probe."signal/resethand_term"]
+syscalls = ["getpid", "kill", "rt_sigaction"]
+symbols = ["getpid", "kill", "sigaction", "syscall"]
 
 [probe."signal/pipe"]
 syscalls = ["pipe2", "write", "close", "socket", "sendto"]
@@ -131,7 +167,23 @@ syscalls = ["set_tid_address", "gettid", "futex", "exit"]
 symbols = ["syscall"]
 
 [probe."thread/kill"]
-syscalls = ["getpid", "tgkill", "tkill"]
+syscalls = ["getpid", "gettid", "tgkill", "tkill"]
+symbols = ["getpid", "syscall", "sigaction"]
+
+[probe."thread/masks"]
+syscalls = ["getpid", "gettid", "rt_sigprocmask", "rt_sigpending", "kill", "tgkill"]
+symbols = ["getpid", "kill", "syscall", "sigaction"]
+
+[probe."thread/pthread_kill"]
+syscalls = ["getpid", "gettid", "tgkill"]
+symbols = ["getpid", "syscall", "sigaction", "pthread_kill"]
+
+[probe."thread/tid_clear"]
+syscalls = ["set_tid_address", "gettid", "futex"]
+symbols = ["syscall"]
+
+[probe."thread/main_exit"]
+syscalls = ["getpid", "gettid", "exit", "exit_group"]
 symbols = ["getpid", "syscall"]
 
 [probe."proc/ids"]

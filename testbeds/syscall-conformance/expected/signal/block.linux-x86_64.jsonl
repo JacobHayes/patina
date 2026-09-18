@@ -1,0 +1,26 @@
+{"header":{"schema":"patina.conformance/v1","probe":"signal/block","os":"linux","arch":"x86_64","kernel":"6.8.0-139-generic","glibc":"2.39","virtual_abi":"6.8"}}
+{"seq":0,"op":"getpid","args":{},"ret":"id@0","errno":null,"fields":{},"norm":{"ret":"identity"}}
+{"seq":1,"op":"helper_kill","args":{},"ret":0,"errno":null,"fields":{"sig":10},"norm":{}}
+{"seq":2,"op":"pause","args":{},"ret":-1,"errno":"EINTR","fields":{},"norm":{}}
+{"seq":3,"op":"check","args":{"label":"pause returns EINTR once a handled signal was delivered"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":4,"op":"check","args":{"label":"the handler ran before pause returned"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":5,"op":"rt_sigprocmask","args":{"how":0,"sigset_size":8},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":6,"op":"check","args":{"label":"block SIGUSR2"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":7,"op":"helper_kill","args":{},"ret":0,"errno":null,"fields":{"sig":12},"norm":{}}
+{"seq":8,"op":"rt_sigtimedwait","args":{"sigset_size":8,"timeout_ns":null},"ret":12,"errno":null,"fields":{"si_code":0,"si_int":0,"si_signo":12},"norm":{}}
+{"seq":9,"op":"check","args":{"label":"rt_sigtimedwait without a timeout parks until the helper's signal"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":10,"op":"check","args":{"label":"it reports the sender code SI_USER"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":11,"op":"check","args":{"label":"no handler ran for the dequeued signal"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":12,"op":"helper_kill","args":{},"ret":0,"errno":null,"fields":{"sig":10},"norm":{}}
+{"seq":13,"op":"rt_sigtimedwait","args":{"sigset_size":8,"timeout_ns":null},"ret":-1,"errno":"EINTR","fields":{"si_code":0,"si_int":0,"si_signo":12},"norm":{}}
+{"seq":14,"op":"check","args":{"label":"a handled signal outside the set interrupts rt_sigtimedwait with EINTR"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":15,"op":"check","args":{"label":"that handler ran before the wait returned"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":16,"op":"signalfd4","args":{"fd":-1,"flags":0},"ret":"fd@16","errno":null,"fields":{},"norm":{"args.fd":"relative:fd","ret":"relative:fd"}}
+{"seq":17,"op":"helper_kill","args":{},"ret":0,"errno":null,"fields":{"sig":12},"norm":{}}
+{"seq":18,"op":"read","args":{"fd":"fd@16","len":128},"ret":128,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":19,"op":"check","args":{"label":"a blocking signalfd read parks until a matching signal is pending"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":20,"op":"check","args":{"label":"the read dequeued the helper's signal"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":21,"op":"check","args":{"label":"no handler ran for the signalfd-dequeued signal"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":22,"op":"close","args":{"fd":"fd@16"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":23,"op":"rt_sigprocmask","args":{"how":1,"sigset_size":8},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":24,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

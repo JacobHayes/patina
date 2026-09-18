@@ -143,6 +143,8 @@ ALLOWED_FLAGS='
 --bless
 --fast
 --strict
+--family
+--name-only
 --apply
 '
 # -- cargo / rustc / rustup / linker tool flags --
@@ -180,6 +182,8 @@ ALLOWED_FLAGS='
 #   probe selection, re-recording expectations, the check:fast tier).
 # --strict: the probe binaries' own switch (a failed semantic check panics on
 #   the native oracle leg; under patina it is recorded as a divergence).
+# --family: gate.sh's own option (the frozen family to gate).
+# --name-only: `jj diff --name-only`, gate.sh's frozen-path check.
 # -- syscall-table refresh (scripts/refresh-syscall-tables.sh) --
 # --apply: its own overwrite-the-vendored-copies switch.
 # (--selftest and --seed are REAL registry flags — not allowlisted here.)

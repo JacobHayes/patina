@@ -54,6 +54,14 @@ pub fn parse_options(probe: &str, args: &[String]) -> Result<Options, String> {
 
 /// Parse argv, gate the vehicle, run `body`, exit.
 pub fn run(probe: &'static str, body: fn(&Probe)) -> ! {
+    run_with(probe, body, &Vehicle::ALL)
+}
+
+/// [`run`] for a probe that has a shape through `vehicles` only (a pthread
+/// wrapper with no kernel-row spelling is libc-only): any other vehicle exits
+/// [`EXIT_VEHICLE_UNAVAILABLE`] before recording anything, and the runner
+/// counts that leg as a skip on every mode — never a pass.
+pub fn run_with(probe: &'static str, body: fn(&Probe), vehicles: &[Vehicle]) -> ! {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let options = match parse_options(probe, &args) {
         Ok(options) => options,
@@ -71,13 +79,26 @@ pub fn run(probe: &'static str, body: fn(&Probe)) -> ! {
         );
         std::process::exit(EXIT_VEHICLE_UNAVAILABLE);
     }
+    if !vehicles.contains(&options.vehicle) {
+        eprintln!(
+            "{probe}: the probe has no shape through the {} vehicle (it runs through {} only)",
+            options.vehicle.name(),
+            vehicles
+                .iter()
+                .map(|v| v.name())
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        std::process::exit(EXIT_VEHICLE_UNAVAILABLE);
+    }
     let probe_state = Probe::new(probe, options.vehicle, options.strict);
     body(&probe_state);
     std::process::exit(0);
 }
 
 /// Expand to `fn main` for a probe: `probe_main!("fs/open_rw", scenario);` where
-/// `scenario: fn(&Probe)`.
+/// `scenario: fn(&Probe)`; `probe_main!("thread/pthread_kill", scenario, libc)`
+/// for a probe with a shape through the listed vehicles only.
 #[macro_export]
 macro_rules! probe_main {
     ($id:literal, $body:path) => {
@@ -85,4 +106,18 @@ macro_rules! probe_main {
             $crate::probe::run($id, $body)
         }
     };
+    ($id:literal, $body:path, $($vehicle:ident),+) => {
+        fn main() {
+            $crate::probe::run_with(
+                $id,
+                $body,
+                &[$($crate::probe::vehicle_named(stringify!($vehicle))),+],
+            )
+        }
+    };
+}
+
+/// The vehicle a `probe_main!` list names (`libc`, `syscall`, `raw`).
+pub fn vehicle_named(name: &str) -> Vehicle {
+    Vehicle::parse(name).unwrap_or_else(|| panic!("probe_main!: unknown vehicle {name:?}"))
 }

@@ -31,3 +31,4 @@
 {"seq":29,"op":"check","args":{"label":"a written eventfd is readable and writable"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":30,"op":"close","args":{"fd":"fd@24"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
 {"seq":31,"op":"close","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":32,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

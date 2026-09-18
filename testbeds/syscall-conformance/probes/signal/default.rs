@@ -24,22 +24,30 @@ mod scenario {
     pub fn run(p: &Probe) {
         p.getpid();
         let term = child_signal(SIGTERM);
-        p.rec.event("wait_status", 0)
+        p.rec
+            .event("wait_status", 0)
             .arg("case", "SIGTERM")
             .field("signaled", WIFSIGNALED(term))
             .field("termsig", WTERMSIG(term))
             .field("core", WCOREDUMP(term))
             .emit();
-        p.check("SIGTERM terminates with no core flag", WIFSIGNALED(term) && WTERMSIG(term) == SIGTERM && !WCOREDUMP(term));
+        p.check(
+            "SIGTERM terminates with no core flag",
+            WIFSIGNALED(term) && WTERMSIG(term) == SIGTERM && !WCOREDUMP(term),
+        );
 
         let core = child_signal(SIGABRT);
-        p.rec.event("wait_status", 0)
+        p.rec
+            .event("wait_status", 0)
             .arg("case", "SIGABRT")
             .field("signaled", WIFSIGNALED(core))
             .field("termsig", WTERMSIG(core))
             .field("core", WCOREDUMP(core))
             .emit();
-        p.check("SIGABRT terminates and sets the core flag", WIFSIGNALED(core) && WTERMSIG(core) == SIGABRT && WCOREDUMP(core));
+        p.check(
+            "SIGABRT terminates and sets the core flag",
+            WIFSIGNALED(core) && WTERMSIG(core) == SIGABRT && WCOREDUMP(core),
+        );
     }
 }
 

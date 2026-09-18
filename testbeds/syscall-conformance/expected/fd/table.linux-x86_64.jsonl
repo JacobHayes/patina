@@ -139,3 +139,4 @@
 {"seq":137,"op":"close","args":{"fd":"fd@2"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
 {"seq":138,"op":"close","args":{"fd":"fd@6"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
 {"seq":139,"op":"close","args":{"fd":"fd@10"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":140,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

@@ -32,7 +32,11 @@ mod scenario {
             close(fds[0]);
             let mut status = 0;
             waitpid(pid, &mut status, 0);
-            if n == 1 { status } else { 0x7f00 }
+            if n == 1 {
+                status
+            } else {
+                0x7f00
+            }
         }
     }
 
@@ -40,16 +44,26 @@ mod scenario {
         let word = AtomicU32::new(0);
         let mut own = 0i32;
         let my_tid = p.set_tid_address(&mut own as *mut i32);
-        p.check("set_tid_address returns the caller tid", my_tid == p.gettid());
+        p.check(
+            "set_tid_address returns the caller tid",
+            my_tid == p.gettid(),
+        );
 
         let st = main_exit_child_status();
-        p.rec.event("wait_status", 0)
+        p.rec
+            .event("wait_status", 0)
             .arg("case", "main-thread-raw-exit")
             .field("exited", WIFEXITED(st))
             .field("code", WEXITSTATUS(st))
             .emit();
-        p.check("main thread raw exit leaves process alive until other threads finish", WIFEXITED(st) && WEXITSTATUS(st) == 0);
-        p.check("futex wait with mismatched value is EAGAIN", p.futex(&word, WAIT, 1, None) == neg(EAGAIN));
+        p.check(
+            "main thread raw exit leaves process alive until other threads finish",
+            WIFEXITED(st) && WEXITSTATUS(st) == 0,
+        );
+        p.check(
+            "futex wait with mismatched value is EAGAIN",
+            p.futex(&word, WAIT, 1, None) == neg(EAGAIN),
+        );
     }
 }
 

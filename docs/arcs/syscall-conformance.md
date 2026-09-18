@@ -121,6 +121,21 @@ forwards into the same dispatcher instead of its two-number allowlist.
   row proves the registry gate fails; a planted raw `openat("/etc/hostname")`
   proves the strace leak gate fails (reusing `validate-native-shim.sh`'s
   filter).
+- Every leg is supervised (`conform supervise`): its own process group, a
+  wall-clock timeout, and the process outcome the supervisor observed appended
+  as the stream's `__termination` event (`waitpid` natively; the
+  `patina.result/v1` envelope's `guest_exit` under patina/replay), compared
+  like any event — so a probe whose last act is a `SIG_DFL` signal to itself
+  is blessed as "signaled N" and the virtual kernel must die the same way.
+- A family whose runtime is built after its probes is a FROZEN oracle:
+  `frozen.toml` (per family: the oracle's paths, which must carry no
+  uncommitted change; the exact declaration set, `pending: <family> — …`
+  entries a builder may only delete plus `by design:` aborts; and the design
+  obligations — required unit tests and recorded-trace facts) and ONE gate,
+  `gate.sh --family <f>`: the remaining work as plain lines, then
+  `FAMILY_GATE <f>: PASS|FAIL`; `gate.sh --selftest` proves each mechanism can
+  refuse. The signals family's spec, suggested order of work and frozen set:
+  [syscall-conformance-signals.md](syscall-conformance-signals.md).
 - Ladder: `run.sh --fast` (native + patina, libc vehicle) in `check:fast`;
   the three-vehicle + replay leg in `mise run check` and CI (Linux x86_64 and
   the arm64 job with `raw` skipped by cfg).
@@ -164,7 +179,8 @@ forwards into the same dispatcher instead of its two-number allowlist.
   cgroup,mountinfo,auxv}, sys/devices/system/cpu/online, fs/cgroup cpu.max),
   `/etc/localtime`, hostname — all from one `--host-*` knob group recorded in
   the fingerprint; getcpu; personality; syslog → EPERM.
-- **signals + threads + process**: D1 state in `ThreadRuntime` (dispositions,
+- **signals + threads + process** (spec, suggested order M1–M5 and the frozen oracle:
+  [syscall-conformance-signals.md](syscall-conformance-signals.md)): D1 state in `ThreadRuntime` (dispositions,
   per-task mask, pending sets, altstack); D2 generation records a trace op and
   delivery happens only on the baton-holding task at syscall return / sched
   points / blocking-call resume; D3 kernel-built frames (`host_tgkill` to self

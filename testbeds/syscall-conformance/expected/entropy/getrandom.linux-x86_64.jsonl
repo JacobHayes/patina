@@ -15,3 +15,4 @@
 {"seq":13,"op":"check","args":{"label":"an unknown flag is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":14,"op":"getrandom","args":{"flags":0,"len":4096},"ret":4096,"errno":null,"fields":{"nonzero":true},"norm":{}}
 {"seq":15,"op":"check","args":{"label":"a large draw is served in full"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":16,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

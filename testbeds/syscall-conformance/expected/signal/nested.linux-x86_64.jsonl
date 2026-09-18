@@ -9,3 +9,4 @@
 {"seq":7,"op":"check","args":{"label":"SA_RESETHAND resets disposition before the second raise"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":8,"op":"rt_sigaction","args":{},"ret":0,"errno":null,"fields":{},"norm":{}}
 {"seq":9,"op":"check","args":{"label":"raw rt_sigaction without SA_RESTORER is accepted at registration time"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":10,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

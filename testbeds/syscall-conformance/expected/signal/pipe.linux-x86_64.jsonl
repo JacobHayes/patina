@@ -10,3 +10,4 @@
 {"seq":8,"op":"sendto","args":{"addr":null,"fd":"fd@7","flags":16384,"len":1},"ret":-1,"errno":"EPIPE","fields":{},"norm":{"args.fd":"relative:fd"}}
 {"seq":9,"op":"check","args":{"label":"MSG_NOSIGNAL makes socket send return EPIPE without a signal"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":10,"op":"close","args":{"fd":"fd@7"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":11,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

@@ -1,0 +1,7 @@
+{"header":{"schema":"patina.conformance/v1","probe":"signal/default_term","os":"linux","arch":"x86_64","kernel":"6.8.0-139-generic","glibc":"2.39","virtual_abi":"6.8"}}
+{"seq":0,"op":"getpid","args":{},"ret":"id@0","errno":null,"fields":{},"norm":{"ret":"identity"}}
+{"seq":1,"op":"check","args":{"label":"SIGTERM is at its default disposition"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":2,"op":"kill","args":{"pid":"id@0","sig":0},"ret":0,"errno":null,"fields":{},"norm":{"args.pid":"identity"}}
+{"seq":3,"op":"check","args":{"label":"kill(self, 0) still probes existence"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":4,"op":"expect_death","args":{"signal":15},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":5,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"core":false,"kind":"signaled","signal":15},"norm":{}}

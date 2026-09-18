@@ -1,5 +1,12 @@
-//! signal/nested — handler mask semantics, SA_NODEFER recursion, SA_RESETHAND's
-//! reset-to-default action, and raw rt_sigaction's SA_RESTORER requirement.
+//! signal/nested — handler mask semantics (the signal being handled is
+//! blocked for the handler's extent unless `SA_NODEFER`, so a same-signal
+//! raise inside the handler is delivered after it returns), `SA_NODEFER`
+//! recursion, `SA_RESETHAND` observed by the child oracle's termination
+//! (kept natively; under patina `fork` is a process-lifecycle trap by design,
+//! and `signal/resethand_term` pins the same fact in-process), and a raw
+//! `rt_sigaction` without `SA_RESTORER`, which the kernel accepts at
+//! registration (the restorer matters at frame setup, arch/x86/kernel/
+//! signal.c).
 
 #[cfg(target_os = "linux")]
 mod scenario {
@@ -15,7 +22,9 @@ mod scenario {
         let d = DEPTH.fetch_add(1, Ordering::SeqCst) + 1;
         MAX_DEPTH.fetch_max(d, Ordering::SeqCst);
         if COUNT.fetch_add(1, Ordering::SeqCst) == 0 {
-            unsafe { kill(getpid(), sig); }
+            unsafe {
+                kill(getpid(), sig);
+            }
         }
         DEPTH.fetch_sub(1, Ordering::SeqCst);
     }
@@ -30,7 +39,11 @@ mod scenario {
         }
     }
 
-    fn reset() { DEPTH.store(0, Ordering::SeqCst); MAX_DEPTH.store(0, Ordering::SeqCst); COUNT.store(0, Ordering::SeqCst); }
+    fn reset() {
+        DEPTH.store(0, Ordering::SeqCst);
+        MAX_DEPTH.store(0, Ordering::SeqCst);
+        COUNT.store(0, Ordering::SeqCst);
+    }
 
     fn reset_hand_status() -> c_int {
         unsafe {
@@ -51,23 +64,35 @@ mod scenario {
         reset();
         install(SIGUSR1, 0);
         p.kill(p.getpid() as pid_t, SIGUSR1);
-        p.check("default handler mask defers same signal", COUNT.load(Ordering::SeqCst) == 2 && MAX_DEPTH.load(Ordering::SeqCst) == 1);
+        p.check(
+            "default handler mask defers same signal",
+            COUNT.load(Ordering::SeqCst) == 2 && MAX_DEPTH.load(Ordering::SeqCst) == 1,
+        );
 
         reset();
         install(SIGUSR1, SA_NODEFER);
         p.kill(p.getpid() as pid_t, SIGUSR1);
-        p.check("SA_NODEFER permits nested same-signal delivery", COUNT.load(Ordering::SeqCst) == 2 && MAX_DEPTH.load(Ordering::SeqCst) == 2);
+        p.check(
+            "SA_NODEFER permits nested same-signal delivery",
+            COUNT.load(Ordering::SeqCst) == 2 && MAX_DEPTH.load(Ordering::SeqCst) == 2,
+        );
 
         let status = reset_hand_status();
-        p.rec.event("wait_status", 0)
+        p.rec
+            .event("wait_status", 0)
             .arg("case", "SA_RESETHAND")
             .field("signaled", WIFSIGNALED(status))
             .field("termsig", WTERMSIG(status))
             .emit();
-        p.check("SA_RESETHAND resets disposition before the second raise", WIFSIGNALED(status) && WTERMSIG(status) == SIGUSR2);
+        p.check(
+            "SA_RESETHAND resets disposition before the second raise",
+            WIFSIGNALED(status) && WTERMSIG(status) == SIGUSR2,
+        );
         let mut bad: sigaction = unsafe { std::mem::zeroed() };
         bad.sa_sigaction = raises_same as *const () as usize;
-        unsafe { sigemptyset(&mut bad.sa_mask); }
+        unsafe {
+            sigemptyset(&mut bad.sa_mask);
+        }
         bad.sa_flags = 0;
         p.check(
             "raw rt_sigaction without SA_RESTORER is accepted at registration time",

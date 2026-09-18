@@ -9,3 +9,4 @@
 {"seq":7,"op":"check","args":{"label":"waitid WNOHANG without children is ECHILD"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":8,"op":"waitid","args":{"id":0,"idtype":0,"options":1073741824},"ret":-1,"errno":"EINVAL","fields":{"si_code":0,"si_signo":0},"norm":{}}
 {"seq":9,"op":"check","args":{"label":"waitid invalid options are EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":10,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

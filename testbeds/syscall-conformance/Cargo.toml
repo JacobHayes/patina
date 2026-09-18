@@ -165,6 +165,58 @@ name = "proc-wait"
 path = "probes/proc/wait.rs"
 
 [[bin]]
+name = "signal-raw_action"
+path = "probes/signal/raw_action.rs"
+
+[[bin]]
+name = "signal-block"
+path = "probes/signal/block.rs"
+
+[[bin]]
+name = "signal-unmask"
+path = "probes/signal/unmask.rs"
+
+[[bin]]
+name = "signal-per_thread"
+path = "probes/signal/per_thread.rs"
+
+[[bin]]
+name = "signal-one_wake"
+path = "probes/signal/one_wake.rs"
+
+[[bin]]
+name = "signal-default_term"
+path = "probes/signal/default_term.rs"
+
+[[bin]]
+name = "signal-core_term"
+path = "probes/signal/core_term.rs"
+
+[[bin]]
+name = "signal-pipe_term"
+path = "probes/signal/pipe_term.rs"
+
+[[bin]]
+name = "signal-resethand_term"
+path = "probes/signal/resethand_term.rs"
+
+[[bin]]
+name = "thread-masks"
+path = "probes/thread/masks.rs"
+
+[[bin]]
+name = "thread-pthread_kill"
+path = "probes/thread/pthread_kill.rs"
+
+[[bin]]
+name = "thread-tid_clear"
+path = "probes/thread/tid_clear.rs"
+
+[[bin]]
+name = "thread-main_exit"
+path = "probes/thread/main_exit.rs"
+
+[[bin]]
 name = "abi-newer-than-virtual"
 path = "probes/abi/newer_than_virtual.rs"
 

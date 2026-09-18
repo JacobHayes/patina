@@ -6,24 +6,58 @@
 {"seq":4,"op":"signalfd4","args":{"fd":-1,"flags":526336},"ret":"fd@4","errno":null,"fields":{},"norm":{"args.fd":"relative:fd","ret":"relative:fd"}}
 {"seq":5,"op":"read","args":{"fd":"fd@4","len":128},"ret":-1,"errno":"EAGAIN","fields":{},"norm":{"args.fd":"relative:fd"}}
 {"seq":6,"op":"check","args":{"label":"empty nonblocking signalfd read is EAGAIN"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":7,"op":"fcntl","args":{"arg":0,"cmd":1,"fd":"fd@4"},"ret":1,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
-{"seq":8,"op":"check","args":{"label":"signalfd fd has FD_CLOEXEC"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":9,"op":"rt_sigqueueinfo","args":{"pid":"id@0","si_code":-1,"sig":34},"ret":0,"errno":null,"fields":{},"norm":{"args.pid":"identity"}}
-{"seq":10,"op":"check","args":{"label":"queue signal for signalfd"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":11,"op":"read","args":{"fd":"fd@4","len":128},"ret":128,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
-{"seq":12,"op":"signalfd_siginfo","args":{},"ret":0,"errno":null,"fields":{"ssi_code":-1,"ssi_int":0,"ssi_pid":"id@1","ssi_signo":34,"ssi_uid":"id@12"},"norm":{"fields.ssi_pid":"identity","fields.ssi_uid":"identity"}}
-{"seq":13,"op":"check","args":{"label":"signalfd reports the signal number"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":14,"op":"check","args":{"label":"signalfd reports SI_QUEUE"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":15,"op":"check","args":{"label":"signalfd exposes nonzero sender metadata"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":16,"op":"signalfd","args":{"fd":-1},"ret":"fd@16","errno":null,"fields":{},"norm":{"args.fd":"relative:fd","ret":"relative:fd"}}
-{"seq":17,"op":"fcntl","args":{"arg":0,"cmd":1,"fd":"fd@16"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
-{"seq":18,"op":"check","args":{"label":"legacy signalfd does not set CLOEXEC"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":19,"op":"rt_sigqueueinfo","args":{"pid":"id@0","si_code":-1,"sig":34},"ret":0,"errno":null,"fields":{},"norm":{"args.pid":"identity"}}
-{"seq":20,"op":"check","args":{"label":"queue signal for sigtimedwait"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":21,"op":"rt_sigtimedwait","args":{"sigset_size":8,"timeout_ns":0},"ret":34,"errno":null,"fields":{"si_code":-1,"si_signo":34},"norm":{}}
-{"seq":22,"op":"check","args":{"label":"rt_sigtimedwait returns the signum"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":23,"op":"check","args":{"label":"rt_sigtimedwait preserves SI_QUEUE"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":24,"op":"check","args":{"label":"rt_sigtimedwait fills siginfo"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":25,"op":"close","args":{"fd":"fd@4"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
-{"seq":26,"op":"close","args":{"fd":"fd@16"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
-{"seq":27,"op":"rt_sigprocmask","args":{"how":1,"sigset_size":8},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":7,"op":"read","args":{"fd":"fd@4","len":64},"ret":-1,"errno":"EINVAL","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":8,"op":"check","args":{"label":"a signalfd read buffer shorter than signalfd_siginfo is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":9,"op":"fcntl","args":{"arg":0,"cmd":1,"fd":"fd@4"},"ret":1,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":10,"op":"check","args":{"label":"signalfd fd has FD_CLOEXEC"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":11,"op":"signalfd4","args":{"fd":-1,"flags":16384},"ret":-1,"errno":"EINVAL","fields":{},"norm":{"args.fd":"relative:fd","ret":"relative:fd"}}
+{"seq":12,"op":"check","args":{"label":"signalfd4 with an unknown flag is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":13,"op":"rt_sigqueueinfo","args":{"pid":"id@0","si_code":-1,"sig":34},"ret":0,"errno":null,"fields":{},"norm":{"args.pid":"identity"}}
+{"seq":14,"op":"check","args":{"label":"queue signal for signalfd"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":15,"op":"read","args":{"fd":"fd@4","len":128},"ret":128,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":16,"op":"signalfd_siginfo","args":{},"ret":0,"errno":null,"fields":{"ssi_code":-1,"ssi_int":4660,"ssi_pid":"id@0","ssi_signo":34,"ssi_uid":"id@1"},"norm":{"fields.ssi_pid":"identity","fields.ssi_uid":"identity"}}
+{"seq":17,"op":"check","args":{"label":"signalfd reports the signal number"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":18,"op":"check","args":{"label":"signalfd reports SI_QUEUE"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":19,"op":"check","args":{"label":"signalfd carries the queued payload"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":20,"op":"check","args":{"label":"signalfd exposes the sender identity"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":21,"op":"epoll_create1","args":{"flags":0},"ret":"fd@21","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":22,"op":"epoll_ctl","args":{"data":9,"epfd":"fd@21","events":1,"fd":"fd@4","op":1},"ret":0,"errno":null,"fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":23,"op":"check","args":{"label":"watch the signalfd"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":24,"op":"epoll_wait","args":{"epfd":"fd@21","maxevents":4,"timeout_ms":0},"ret":0,"errno":null,"fields":{"events":[]},"norm":{"args.epfd":"relative:fd"}}
+{"seq":25,"op":"check","args":{"label":"an empty signalfd is not readable"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":26,"op":"kill","args":{"pid":"id@0","sig":34},"ret":0,"errno":null,"fields":{},"norm":{"args.pid":"identity"}}
+{"seq":27,"op":"check","args":{"label":"kill(self) with the signal blocked"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":28,"op":"epoll_wait","args":{"epfd":"fd@21","maxevents":4,"timeout_ms":0},"ret":1,"errno":null,"fields":{"events":["9:0x1"]},"norm":{"args.epfd":"relative:fd"}}
+{"seq":29,"op":"check","args":{"label":"a pending matching signal makes the signalfd readable"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":30,"op":"read","args":{"fd":"fd@4","len":128},"ret":128,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":31,"op":"signalfd_siginfo","args":{},"ret":0,"errno":null,"fields":{"ssi_code":0,"ssi_int":0,"ssi_pid":"id@0","ssi_signo":34,"ssi_uid":"id@1"},"norm":{"fields.ssi_pid":"identity","fields.ssi_uid":"identity"}}
+{"seq":32,"op":"check","args":{"label":"the read dequeues it"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":33,"op":"epoll_wait","args":{"epfd":"fd@21","maxevents":4,"timeout_ms":0},"ret":0,"errno":null,"fields":{"events":[]},"norm":{"args.epfd":"relative:fd"}}
+{"seq":34,"op":"check","args":{"label":"after the read the signalfd is not readable"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":35,"op":"signalfd4","args":{"fd":-1,"flags":2048},"ret":"fd@35","errno":null,"fields":{},"norm":{"args.fd":"relative:fd","ret":"relative:fd"}}
+{"seq":36,"op":"kill","args":{"pid":"id@0","sig":12},"ret":0,"errno":null,"fields":{},"norm":{"args.pid":"identity"}}
+{"seq":37,"op":"check","args":{"label":"kill(self, SIGUSR2) while unblocked with a handler"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":38,"op":"check","args":{"label":"the handler ran before kill returned"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":39,"op":"read","args":{"fd":"fd@35","len":128},"ret":-1,"errno":"EAGAIN","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":40,"op":"check","args":{"label":"nothing reached the signalfd"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":41,"op":"signalfd4","args":{"fd":"fd@35","flags":2048},"ret":"fd@35","errno":null,"fields":{},"norm":{"args.fd":"relative:fd","ret":"relative:fd"}}
+{"seq":42,"op":"check","args":{"label":"signalfd4(fd, newmask) narrows an existing signalfd"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":43,"op":"signalfd","args":{"fd":-1},"ret":"fd@43","errno":null,"fields":{},"norm":{"args.fd":"relative:fd","ret":"relative:fd"}}
+{"seq":44,"op":"fcntl","args":{"arg":0,"cmd":1,"fd":"fd@43"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":45,"op":"check","args":{"label":"legacy signalfd does not set CLOEXEC"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":46,"op":"rt_sigqueueinfo","args":{"pid":"id@0","si_code":-1,"sig":34},"ret":0,"errno":null,"fields":{},"norm":{"args.pid":"identity"}}
+{"seq":47,"op":"check","args":{"label":"queue signal for sigtimedwait"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":48,"op":"rt_sigtimedwait","args":{"sigset_size":8,"timeout_ns":0},"ret":34,"errno":null,"fields":{"si_code":-1,"si_int":85,"si_signo":34},"norm":{}}
+{"seq":49,"op":"check","args":{"label":"rt_sigtimedwait returns the signum"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":50,"op":"check","args":{"label":"rt_sigtimedwait preserves SI_QUEUE"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":51,"op":"check","args":{"label":"rt_sigtimedwait fills siginfo"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":52,"op":"rt_sigtimedwait","args":{"sigset_size":4,"timeout_ns":0},"ret":-1,"errno":"EINVAL","fields":{"si_code":-1,"si_int":0,"si_signo":34},"norm":{}}
+{"seq":53,"op":"check","args":{"label":"rt_sigtimedwait with a sigset size other than 8 is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":54,"op":"rt_sigtimedwait","args":{"sigset_size":8,"timeout_ns":-1},"ret":-1,"errno":"EINVAL","fields":{"si_code":-1,"si_int":0,"si_signo":34},"norm":{}}
+{"seq":55,"op":"check","args":{"label":"rt_sigtimedwait with a negative timeout is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":56,"op":"close","args":{"fd":"fd@4"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":57,"op":"close","args":{"fd":"fd@35"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":58,"op":"close","args":{"fd":"fd@43"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":59,"op":"close","args":{"fd":"fd@21"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":60,"op":"rt_sigprocmask","args":{"how":1,"sigset_size":8},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":61,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

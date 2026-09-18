@@ -149,3 +149,4 @@
 {"seq":147,"op":"getcwd","args":{"size":4096},"ret":0,"errno":null,"fields":{"path":"/tmp/syscall-conformance/fs-paths"},"norm":{}}
 {"seq":148,"op":"check","args":{"label":"getcwd recovers"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":149,"op":"close","args":{"fd":"fd@54"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":150,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

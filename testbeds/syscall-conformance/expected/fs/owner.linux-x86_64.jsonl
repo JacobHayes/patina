@@ -133,3 +133,4 @@
 {"seq":131,"op":"faccessat2","args":{"dirfd":"AT_FDCWD","flags":1,"mode":4,"path":"/tmp/syscall-conformance/fs-owner/plain"},"ret":-1,"errno":"EINVAL","fields":{},"norm":{}}
 {"seq":132,"op":"check","args":{"label":"faccessat2 with an unknown flag is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":133,"op":"close","args":{"fd":"fd@49"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":134,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

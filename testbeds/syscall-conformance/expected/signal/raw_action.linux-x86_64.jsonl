@@ -1,0 +1,27 @@
+{"header":{"schema":"patina.conformance/v1","probe":"signal/raw_action","os":"linux","arch":"x86_64","kernel":"6.8.0-139-generic","glibc":"2.39","virtual_abi":"6.8"}}
+{"seq":0,"op":"getpid","args":{},"ret":"id@0","errno":null,"fields":{},"norm":{"ret":"identity"}}
+{"seq":1,"op":"rt_sigaction","args":{"has_act":false,"has_oldact":true,"signum":12},"ret":0,"errno":null,"fields":{"old_flags":0,"old_has_restorer":true,"old_kind":"handler"},"norm":{}}
+{"seq":2,"op":"check","args":{"label":"the kernel reports SA_RESTORER and glibc's restorer for a libc-installed action"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":3,"op":"check","args":{"label":"the libc-installed handler is reported back raw"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":4,"op":"rt_sigaction","args":{"has_act":true,"has_oldact":true,"signum":10},"ret":0,"errno":null,"fields":{"old_flags":0,"old_has_restorer":false,"old_kind":"SIG_DFL"},"norm":{}}
+{"seq":5,"op":"check","args":{"label":"raw rt_sigaction installs a handler"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":6,"op":"check","args":{"label":"the previous SIGUSR1 action was SIG_DFL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":7,"op":"rt_sigaction","args":{"has_act":false,"has_oldact":true,"signum":10},"ret":0,"errno":null,"fields":{"old_flags":268435460,"old_has_restorer":true,"old_kind":"handler"},"norm":{}}
+{"seq":8,"op":"check","args":{"label":"raw query after the raw install"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":9,"op":"check","args":{"label":"oldact reports the raw-installed handler, flags and restorer"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":10,"op":"check","args":{"label":"libc sigaction sees the raw-installed handler"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":11,"op":"kill","args":{"pid":"id@0","sig":10},"ret":0,"errno":null,"fields":{},"norm":{"args.pid":"identity"}}
+{"seq":12,"op":"check","args":{"label":"kill(self, SIGUSR1) after a raw install"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":13,"op":"check","args":{"label":"the raw-installed handler ran before kill returned"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":14,"op":"check","args":{"label":"it saw SI_USER"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":15,"op":"rt_sigaction","args":{"has_act":true,"has_oldact":true,"signum":10},"ret":0,"errno":null,"fields":{"old_flags":268435460,"old_has_restorer":true,"old_kind":"handler"},"norm":{}}
+{"seq":16,"op":"check","args":{"label":"raw rt_sigaction installs SIG_IGN"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":17,"op":"check","args":{"label":"oldact reports the handler SIG_IGN replaced"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":18,"op":"kill","args":{"pid":"id@0","sig":10},"ret":0,"errno":null,"fields":{},"norm":{"args.pid":"identity"}}
+{"seq":19,"op":"check","args":{"label":"kill(self, SIGUSR1) while raw-ignored"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":20,"op":"check","args":{"label":"a raw SIG_IGN is honoured (no handler run)"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":21,"op":"check","args":{"label":"libc sigaction sees the raw SIG_IGN"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":22,"op":"rt_sigaction","args":{"has_act":true,"has_oldact":false,"signum":10},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":23,"op":"check","args":{"label":"raw rt_sigaction restores SIG_DFL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":24,"op":"check","args":{"label":"libc sigaction sees SIG_DFL again"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":25,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

@@ -193,7 +193,7 @@ pub fn normalize(mut events: Vec<Event>) -> Vec<Event> {
 
 // ---- divergences.toml -------------------------------------------------------
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Divergence {
     pub probe: String,
     /// Absent = the divergence holds for every vehicle.
@@ -202,10 +202,18 @@ pub struct Divergence {
     /// `field` (default): one field path at matching events differs.
     /// `abort`: the probe dies under patina at event `seq` (a fatal trap or a
     /// refusal inside that call); the recorded stream must be exactly the
-    /// blessed prefix before `seq` (compared field-wise as usual). A probe that
+    /// blessed prefix before `seq` (compared field-wise as usual), the
+    /// termination must be a signal death, and `stderr`, when given, must
+    /// appear in the leg's stderr (the exact named diagnostic). A probe that
     /// records more events than that is stale.
-    /// `probe`: the whole probe fails under patina (aborts or its stream cannot
-    /// be compared); a declared failing probe that now passes is stale.
+    /// `probe`: the whole probe cannot be compared under patina (an audit
+    /// refusal, a stream lost before its first event); stale once it runs to
+    /// completion with the blessed event count.
+    /// `pending`: the probe is not conformant yet — any death, event loss, field
+    /// or termination divergence is covered, and the leg still lists every
+    /// difference it found; stale the moment the probe passes cleanly. It is
+    /// the only kind a frozen oracle probe may carry besides its by-design
+    /// aborts, and the family gate requires every one gone.
     #[serde(default = "default_kind")]
     pub kind: String,
     /// Event op the field divergence applies to (`*` = any op).
@@ -223,6 +231,10 @@ pub struct Divergence {
     /// Narrow to `check` events with this label (`args.label`).
     #[serde(default)]
     pub label: Option<String>,
+    /// `abort` only: a substring the leg's stderr must carry (the trap's named
+    /// diagnostic), so a declared abort pins WHY the probe died, not just where.
+    #[serde(default)]
+    pub stderr: Option<String>,
     pub reason: String,
 }
 
@@ -241,28 +253,45 @@ pub fn load_divergences(text: &str) -> Result<Vec<Divergence>, String> {
         toml::from_str(text).map_err(|error| format!("divergences.toml: {error}"))?;
     for (index, divergence) in file.divergence.iter().enumerate() {
         let at = format!("divergences.toml [[divergence]] #{}", index + 1);
-        if divergence.reason.trim().is_empty() {
-            return Err(format!("{at}: reason is required"));
-        }
-        match divergence.kind.as_str() {
-            "field" => {
-                if divergence.op.is_none() || divergence.field.is_none() {
-                    return Err(format!("{at}: kind = \"field\" needs op and field"));
-                }
-            }
-            "abort" => {
-                if divergence.seq.is_none() {
-                    return Err(format!("{at}: kind = \"abort\" needs seq"));
-                }
-            }
-            "probe" => {}
-            other => return Err(format!("{at}: unknown kind {other:?}")),
-        }
+        divergence
+            .validate()
+            .map_err(|error| format!("{at}: {error}"))?;
     }
     Ok(file.divergence)
 }
 
 impl Divergence {
+    /// The shape rules of one declaration (shared by `divergences.toml` and the
+    /// frozen manifest, which lists declarations in the same form).
+    pub fn validate(&self) -> Result<(), String> {
+        if self.reason.trim().is_empty() {
+            return Err("reason is required".to_string());
+        }
+        match self.kind.as_str() {
+            "field" => {
+                if self.op.is_none() || self.field.is_none() {
+                    return Err("kind = \"field\" needs op and field".to_string());
+                }
+            }
+            "abort" => {
+                if self.seq.is_none() {
+                    return Err("kind = \"abort\" needs seq".to_string());
+                }
+            }
+            "probe" | "pending" => {}
+            other => return Err(format!("unknown kind {other:?}")),
+        }
+        if self.stderr.is_some() && self.kind != "abort" {
+            return Err("stderr is only meaningful on kind = \"abort\"".to_string());
+        }
+        if let Some(vehicle) = &self.vehicle {
+            if !VEHICLES.contains(&vehicle.as_str()) {
+                return Err(format!("unknown vehicle {vehicle:?}"));
+            }
+        }
+        Ok(())
+    }
+
     fn applies_to(&self, probe: &str, vehicle: &str) -> bool {
         self.probe == probe && self.vehicle.as_deref().is_none_or(|v| v == vehicle)
     }
@@ -282,19 +311,30 @@ impl Divergence {
                 .is_none_or(|label| event.args.get("label").and_then(Value::as_str) == Some(label))
     }
 
+    /// A declaration the design makes permanent (a process-lifecycle trap the
+    /// probe's native oracle needs), never a gap to close.
+    pub fn by_design(&self) -> bool {
+        self.reason.starts_with("by design:")
+    }
+
     pub fn describe(&self) -> String {
         match self.kind.as_str() {
             "abort" => format!(
-                "probe {} vehicle={} kind=abort seq={}: {}",
+                "probe {} vehicle={} kind=abort seq={}{}: {}",
                 self.probe,
                 self.vehicle.as_deref().unwrap_or("*"),
                 self.seq.unwrap_or(0),
+                self.stderr
+                    .as_deref()
+                    .map(|s| format!(" stderr={s:?}"))
+                    .unwrap_or_default(),
                 self.reason
             ),
-            "probe" => format!(
-                "probe {} vehicle={} kind=probe: {}",
+            "probe" | "pending" => format!(
+                "probe {} vehicle={} kind={}: {}",
                 self.probe,
                 self.vehicle.as_deref().unwrap_or("*"),
+                self.kind,
                 self.reason
             ),
             _ => format!(
@@ -320,19 +360,23 @@ impl Divergence {
 }
 
 /// The declaration under which `(probe, vehicle)` does not run to completion
-/// under patina — a probe-level one (refused, or its stream lost) or an abort
-/// at a known event — if any. Either way the run leaves no trace to replay.
+/// under patina — a probe-level one (refused, or its stream lost), a pending
+/// one (not conformant yet), or an abort at a known event — if any. Either way
+/// the run leaves no trace to replay.
 pub fn declared_failing<'a>(
     divergences: &'a [Divergence],
     probe: &str,
     vehicle: &str,
 ) -> Option<&'a Divergence> {
-    divergences
-        .iter()
-        .find(|d| (d.kind == "probe" || d.kind == "abort") && d.applies_to(probe, vehicle))
+    divergences.iter().find(|d| {
+        (d.kind == "probe" || d.kind == "abort" || d.kind == "pending")
+            && d.applies_to(probe, vehicle)
+    })
 }
 
 // ---- probes.toml and the registry -------------------------------------------
+
+pub const VEHICLES: [&str; 3] = ["libc", "syscall", "raw"];
 
 /// One probe's coverage. Unknown keys are refused so a stale table cannot sit
 /// in the manifest unread.
@@ -497,6 +541,166 @@ pub fn validate_manifest(manifest: &Manifest, registry: &Registry) -> Result<(),
     }
 }
 
+// ---- termination ------------------------------------------------------------
+
+/// The op of the one event the harness itself appends to every leg's stream:
+/// how the probe process ended, as the SUPERVISOR observed it — the native
+/// leg's `waitpid` status, or the `guest_exit` the `cargo patina` envelope
+/// reports. It is compared like any other event, so a probe whose last act is
+/// `kill(getpid(), SIGTERM)` with `SIG_DFL` is blessed as "signaled 15" and a
+/// virtual kernel that does not die the same way diverges on it. The runner
+/// never writes this line from the expectation.
+pub const TERMINATION_OP: &str = "__termination";
+
+/// The op a probe records right before it dies on purpose (`Probe::dies_by`):
+/// the blessing accepts a signal termination only when the last recorded event
+/// announces that very signal, so a probe that dies by accident (a stray
+/// SIGSEGV) is refused at bless time, never recorded as an expectation.
+pub const EXPECT_DEATH_OP: &str = "expect_death";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Termination {
+    Exited(i32),
+    /// `core` is `None` when the supervisor does not report the core flag
+    /// (the `cargo patina` envelope today), and a blessed `true`/`false` then
+    /// diverges on `fields.core` — a gap the runtime closes, never the harness.
+    Signaled {
+        signal: i32,
+        core: Option<bool>,
+    },
+    /// The leg's wall-clock timeout killed the process group.
+    Timeout,
+    /// The supervisor reported no process outcome (a refusal before the guest
+    /// ran, or an envelope without `guest_exit`).
+    Absent,
+}
+
+impl Termination {
+    pub fn event(&self, seq: u64) -> Event {
+        let mut fields = BTreeMap::new();
+        match self {
+            Termination::Exited(code) => {
+                fields.insert("kind".to_string(), Value::from("exited"));
+                fields.insert("code".to_string(), Value::from(*code));
+            }
+            Termination::Signaled { signal, core } => {
+                fields.insert("kind".to_string(), Value::from("signaled"));
+                fields.insert("signal".to_string(), Value::from(*signal));
+                fields.insert("core".to_string(), core.map_or(Value::Null, Value::from));
+            }
+            Termination::Timeout => {
+                fields.insert("kind".to_string(), Value::from("timeout"));
+            }
+            Termination::Absent => {
+                fields.insert("kind".to_string(), Value::from("absent"));
+            }
+        }
+        Event {
+            seq,
+            op: TERMINATION_OP.to_string(),
+            args: BTreeMap::new(),
+            ret: Value::from(0),
+            errno: None,
+            fields,
+            norm: BTreeMap::new(),
+        }
+    }
+
+    pub fn from_event(event: &Event) -> Option<Termination> {
+        if event.op != TERMINATION_OP {
+            return None;
+        }
+        match event.fields.get("kind").and_then(Value::as_str)? {
+            "exited" => Some(Termination::Exited(
+                event.fields.get("code")?.as_i64()? as i32
+            )),
+            "signaled" => Some(Termination::Signaled {
+                signal: event.fields.get("signal")?.as_i64()? as i32,
+                core: event.fields.get("core").and_then(Value::as_bool),
+            }),
+            "timeout" => Some(Termination::Timeout),
+            "absent" => Some(Termination::Absent),
+            _ => None,
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        match self {
+            Termination::Exited(code) => format!("exited {code}"),
+            Termination::Signaled { signal, core } => format!(
+                "signaled {signal}{}",
+                match core {
+                    Some(true) => " (core dumped)",
+                    Some(false) => "",
+                    None => " (core flag unreported)",
+                }
+            ),
+            Termination::Timeout => "killed by the leg timeout".to_string(),
+            Termination::Absent => "no process outcome reported".to_string(),
+        }
+    }
+}
+
+/// Split a stream into its events and its trailing termination line (if any).
+pub fn split_termination(mut events: Vec<Event>) -> (Vec<Event>, Option<Event>) {
+    let termination = match events.last() {
+        Some(last) if last.op == TERMINATION_OP => events.pop(),
+        _ => None,
+    };
+    (events, termination)
+}
+
+/// The blessed termination of an expectation, for the legs that observe the
+/// process outcome directly (the leak leg under strace).
+pub fn blessed_termination(expected: &Expectation) -> Result<Termination, String> {
+    let (_, termination) = split_termination(expected.events.clone());
+    let event = termination.ok_or("expectation has no termination line; re-bless")?;
+    Termination::from_event(&event).ok_or_else(|| "malformed termination line".to_string())
+}
+
+/// Whether a raw native stream is blessable: every check passed, and the
+/// termination is `exited 0` or a signal death the probe announced with
+/// `expect_death` as its last event.
+pub fn blessable(events: &[Event]) -> Result<(), String> {
+    let (events, termination) = split_termination(events.to_vec());
+    let termination = termination.ok_or("the stream has no termination line")?;
+    let termination = Termination::from_event(&termination).ok_or("malformed termination line")?;
+    if let Some(failed) = events
+        .iter()
+        .find(|event| event.op == "check" && event.ret != Value::from(1))
+    {
+        return Err(format!(
+            "a check failed natively: {}",
+            failed
+                .args
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+        ));
+    }
+    match termination {
+        Termination::Exited(0) => Ok(()),
+        Termination::Signaled { signal, .. } => {
+            let announced = events
+                .last()
+                .filter(|event| event.op == EXPECT_DEATH_OP)
+                .and_then(|event| event.args.get("signal"))
+                .and_then(Value::as_i64);
+            if announced == Some(i64::from(signal)) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "the probe died on signal {signal} without announcing it (Probe::dies_by as its last act)"
+                ))
+            }
+        }
+        other => Err(format!(
+            "the probe did not pass natively: {}",
+            other.describe()
+        )),
+    }
+}
+
 // ---- the differ -------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -552,7 +756,8 @@ fn describe_event(event: &Event) -> String {
     format!("seq {} {}({})", event.seq, event.op, args.join(", "))
 }
 
-/// Compare an actual (raw) stream with the blessing.
+/// Compare an actual (raw) stream with the blessing. `stderr` is the leg's
+/// captured stderr, consulted by abort declarations that pin a diagnostic.
 pub fn diff(
     mode: Mode,
     probe: &str,
@@ -560,9 +765,8 @@ pub fn diff(
     expected: &Expectation,
     actual_raw: Vec<Event>,
     divergences: &[Divergence],
-    probe_ok: bool,
+    stderr: Option<&str>,
 ) -> Outcome {
-    let actual = normalize(actual_raw);
     let mut lines = Vec::new();
     let mut failures = 0usize;
     let mut fail = |lines: &mut Vec<String>, text: String| {
@@ -570,10 +774,42 @@ pub fn diff(
         lines.push(format!("FAIL {text}"));
     };
 
+    let (expected_events, expected_term) = split_termination(expected.events.clone());
+    let Some(expected_term) = expected_term else {
+        fail(
+            &mut lines,
+            "the expectation has no termination line; re-bless it on this host".to_string(),
+        );
+        return Outcome { ok: false, lines };
+    };
+    let (actual_events, actual_term) = split_termination(actual_raw);
+    let actual = normalize(actual_events);
+    let Some(actual_term) = actual_term else {
+        fail(
+            &mut lines,
+            format!(
+                "no termination line observed ({} events): the supervisor did not append the \
+                 process outcome, and a stream is never compared without one",
+                actual.len()
+            ),
+        );
+        return Outcome { ok: false, lines };
+    };
+    let Some(termination) = Termination::from_event(&actual_term) else {
+        fail(&mut lines, "malformed termination line".to_string());
+        return Outcome { ok: false, lines };
+    };
+    let probe_ok = termination == Termination::Exited(0);
+
     let applicable: Vec<&Divergence> = divergences
         .iter()
         .filter(|d| d.applies_to(probe, vehicle))
         .collect();
+    let pending = if mode == Mode::Patina {
+        applicable.iter().find(|d| d.kind == "pending").copied()
+    } else {
+        None
+    };
 
     if mode == Mode::Patina {
         if let Some(declared) = applicable.iter().find(|d| d.kind == "probe") {
@@ -582,7 +818,7 @@ pub fn diff(
             // shape, the declaration is stale even if individual fields still
             // diverge: those are field-kind declarations of their own, and the
             // ordinary diff below must judge them.
-            let completed = probe_ok && actual.len() == expected.events.len();
+            let completed = probe_ok && actual.len() == expected_events.len();
             if completed {
                 fail(
                     &mut lines,
@@ -593,9 +829,10 @@ pub fn diff(
                 );
             } else {
                 lines.push(format!(
-                    "declared failing probe (probe_ok={probe_ok}, {} events vs {} blessed): {}",
+                    "declared failing probe ({}, {} events vs {} blessed): {}",
+                    termination.describe(),
                     actual.len(),
-                    expected.events.len(),
+                    expected_events.len(),
                     declared.describe()
                 ));
             }
@@ -606,17 +843,19 @@ pub fn diff(
         }
     }
 
-    // A declared abort: the stream must be exactly the prefix before `seq`.
+    // A declared abort: the stream must be exactly the prefix before `seq`, the
+    // probe must have died on a signal, and the pinned diagnostic (if any) must
+    // be in its stderr.
     let abort_at = if mode == Mode::Patina {
         applicable
             .iter()
             .find(|d| d.kind == "abort")
-            .map(|d| (d.seq.unwrap_or(0) as usize, d.describe()))
+            .map(|d| (d.seq.unwrap_or(0) as usize, d.describe(), d.stderr.clone()))
     } else {
         None
     };
     let expected_len = match &abort_at {
-        Some((seq, description)) => {
+        Some((seq, description, pinned)) => {
             if probe_ok || actual.len() > *seq {
                 fail(
                     &mut lines,
@@ -630,43 +869,55 @@ pub fn diff(
                 fail(
                     &mut lines,
                     format!(
-                        "the probe died before its declared abort (seq {seq}): {} events recorded; see its stderr",
-                        actual.len()
+                        "the probe died before its declared abort (seq {seq}): {} events recorded, {}; see its stderr",
+                        actual.len(),
+                        termination.describe()
                     ),
                 );
             } else {
+                if !matches!(termination, Termination::Signaled { .. }) {
+                    fail(
+                        &mut lines,
+                        format!(
+                            "declared abort at seq {seq}, but the probe did not die on a signal ({}): {description}",
+                            termination.describe()
+                        ),
+                    );
+                }
+                if let Some(pinned) = pinned {
+                    let observed = stderr.unwrap_or("");
+                    if observed.contains(pinned.as_str()) {
+                        lines.push(format!("declared abort diagnostic observed: {pinned:?}"));
+                    } else {
+                        fail(
+                            &mut lines,
+                            format!(
+                                "declared abort diagnostic not observed in the leg's stderr: {pinned:?}: {description}"
+                            ),
+                        );
+                    }
+                }
                 lines.push(format!(
-                    "declared abort observed at seq {seq}: {description}"
+                    "declared abort observed at seq {seq} ({}): {description}",
+                    termination.describe()
                 ));
             }
-            (*seq).min(expected.events.len())
+            (*seq).min(expected_events.len())
         }
-        None => {
-            if !probe_ok {
-                fail(
-                    &mut lines,
-                    format!(
-                        "the probe did not exit 0 ({} events recorded, {} blessed); see its stderr",
-                        actual.len(),
-                        expected.events.len()
-                    ),
-                );
-            }
-            expected.events.len()
-        }
+        None => expected_events.len(),
     };
 
     if abort_at.is_none() && actual.len() != expected_len {
         let first_divergent = actual
             .iter()
-            .zip(expected.events.iter())
+            .zip(expected_events.iter())
             .find(|(a, e)| a != e)
             .map(|(a, _)| describe_event(a));
         fail(
             &mut lines,
             format!(
                 "event-count drift: {} blessed events, {} actual{}",
-                expected.events.len(),
+                expected_events.len(),
                 actual.len(),
                 first_divergent
                     .map(|d| format!("; first divergent event: {d}"))
@@ -677,14 +928,25 @@ pub fn diff(
 
     let mut used = vec![false; applicable.len()];
     let mut reported = 0usize;
-    for (actual_event, expected_event) in
-        actual.iter().zip(expected.events.iter().take(expected_len))
-    {
+    // The termination is compared like any other event (declarable as
+    // `op = "__termination"`), except under a declared abort, which already
+    // required a signal death.
+    let termination_pair = if abort_at.is_none() {
+        Some((actual_term, expected_term))
+    } else {
+        None
+    };
+    let pairs = actual
+        .iter()
+        .zip(expected_events.iter().take(expected_len))
+        .map(|(a, e)| (a.clone(), e.clone()))
+        .chain(termination_pair);
+    for (actual_event, expected_event) in pairs {
         if actual_event == expected_event {
             continue;
         }
-        let a = flatten(actual_event);
-        let e = flatten(expected_event);
+        let a = flatten(&actual_event);
+        let e = flatten(&expected_event);
         let mut paths: Vec<&String> = a.keys().chain(e.keys()).collect();
         paths.sort();
         paths.dedup();
@@ -698,7 +960,7 @@ pub fn diff(
                 applicable
                     .iter()
                     .enumerate()
-                    .find(|(_, d)| d.matches(expected_event, path))
+                    .find(|(_, d)| d.matches(&expected_event, path))
                     .map(|(index, _)| index)
             } else {
                 None
@@ -716,7 +978,7 @@ pub fn diff(
                                 } else {
                                     "host-oracle"
                                 },
-                                describe_event(expected_event)
+                                describe_event(&expected_event)
                             ),
                         );
                     }
@@ -729,6 +991,12 @@ pub fn diff(
         lines.push(format!(
             "… {} more divergent fields not listed",
             reported - 40
+        ));
+    }
+    if abort_at.is_none() && !probe_ok && lines.iter().any(|line| line.starts_with("FAIL ")) {
+        lines.push(format!(
+            "the probe did not exit 0 ({}); see its stderr",
+            termination.describe()
         ));
     }
 
@@ -752,10 +1020,325 @@ pub fn diff(
         }
     }
 
+    if let Some(pending) = pending {
+        if failures == 0 {
+            lines.push(format!(
+                "FAIL STALE: the probe is declared pending but now passes cleanly; delete the declaration: {}",
+                pending.describe()
+            ));
+            return Outcome { ok: false, lines };
+        }
+        // Every failure above is the gap the declaration names; the leg still
+        // lists them so the builder sees exactly what remains.
+        let covered: Vec<String> = lines
+            .iter()
+            .map(|line| match line.strip_prefix("FAIL ") {
+                Some(rest) => format!("  pending: {rest}"),
+                None => format!("  {line}"),
+            })
+            .collect();
+        let mut out = vec![format!(
+            "declared pending ({failures} difference(s) covered, {}): {}",
+            termination.describe(),
+            pending.describe()
+        )];
+        out.extend(covered);
+        return Outcome {
+            ok: true,
+            lines: out,
+        };
+    }
+
     Outcome {
         ok: failures == 0,
         lines,
     }
+}
+
+// ---- the frozen oracle (family gate) ----------------------------------------
+
+/// `frozen.toml`: per family, the oracle a builder may not touch and what the
+/// runtime must show beyond green probes. Version control is the
+/// tamper evidence: `gate.sh` requires `paths` to carry no uncommitted change.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct Frozen {
+    pub family: BTreeMap<String, FrozenFamily>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct FrozenFamily {
+    /// The probe ids the family owns; their declarations are gated.
+    pub probes: Vec<String>,
+    /// The oracle's paths (files or directories, from the repo root).
+    pub paths: Vec<String>,
+    /// The exact declarations the family's probes may carry, in the
+    /// `divergences.toml` shape.
+    #[serde(default)]
+    pub declaration: Vec<Divergence>,
+    /// What the runtime must show that green probes cannot: a shallow model
+    /// can satisfy behaviour-only probes.
+    #[serde(default)]
+    pub obligation: Vec<Obligation>,
+}
+
+/// One design obligation:
+///
+/// * `unit-test` — `krate` + `test`: exactly one test of that crate has the
+///   path `test` (or a path ending in `::test`), is not ignored, and passes
+///   when run alone. `asserts` says what it must assert; the gate checks
+///   existence and passing, the code review checks substance.
+/// * `trace` — `probe` (+ `vehicles`): the trace the probe's replay leg
+///   RECORDED has `format_version >= format_version_min`, its
+///   `signal_generated` ops are exactly `signal_generated` (in order, `<sig>:p`
+///   process-directed or `<sig>:t` thread-directed), and no generation is
+///   directly followed by more than `max_wakes_per_generation` `task_wake` ops.
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Obligation {
+    pub kind: String,
+    #[serde(default, rename = "crate")]
+    pub krate: Option<String>,
+    #[serde(default)]
+    pub test: Option<String>,
+    #[serde(default)]
+    pub asserts: Option<String>,
+    #[serde(default)]
+    pub probe: Option<String>,
+    #[serde(default)]
+    pub vehicles: Vec<String>,
+    #[serde(default)]
+    pub format_version_min: Option<u64>,
+    #[serde(default)]
+    pub signal_generated: Option<Vec<String>>,
+    #[serde(default)]
+    pub max_wakes_per_generation: Option<usize>,
+}
+
+impl Obligation {
+    fn validate(&self) -> Result<(), String> {
+        let ok = match self.kind.as_str() {
+            "unit-test" => {
+                self.krate.is_some()
+                    && self.test.is_some()
+                    && self
+                        .asserts
+                        .as_deref()
+                        .is_some_and(|a| !a.trim().is_empty())
+            }
+            "trace" => {
+                self.probe.is_some()
+                    && self.signal_generated.iter().flatten().all(|generation| {
+                        generation.rsplit_once(':').is_some_and(|(sig, target)| {
+                            sig.parse::<u32>().is_ok() && (target == "p" || target == "t")
+                        })
+                    })
+                    && self.vehicles.iter().all(|v| VEHICLES.contains(&v.as_str()))
+            }
+            other => return Err(format!("unknown obligation kind {other:?}")),
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(format!("a malformed {:?} obligation", self.kind))
+        }
+    }
+
+    fn vehicles(&self) -> Vec<&str> {
+        if self.vehicles.is_empty() {
+            VEHICLES.to_vec()
+        } else {
+            self.vehicles.iter().map(String::as_str).collect()
+        }
+    }
+}
+
+pub fn load_frozen(text: &str) -> Result<Frozen, String> {
+    let frozen: Frozen = toml::from_str(text).map_err(|error| format!("frozen.toml: {error}"))?;
+    for (family, spec) in &frozen.family {
+        if spec.probes.is_empty() || spec.paths.is_empty() {
+            return Err(format!(
+                "frozen.toml: family {family:?} needs probes and paths"
+            ));
+        }
+        for declaration in &spec.declaration {
+            declaration
+                .validate()
+                .map_err(|error| format!("frozen.toml: family {family:?}: {error}"))?;
+            let pending = declaration.kind == "pending";
+            if !spec.probes.contains(&declaration.probe) || !(pending || declaration.by_design()) {
+                return Err(format!(
+                    "frozen.toml: family {family:?}: the declaration for {:?} must be for an owned probe and be `pending` or `by design:`",
+                    declaration.probe
+                ));
+            }
+        }
+        for obligation in &spec.obligation {
+            obligation
+                .validate()
+                .map_err(|error| format!("frozen.toml: family {family:?}: {error}"))?;
+        }
+    }
+    Ok(frozen)
+}
+
+/// The declaration rule of the family gate: the family's probes may carry
+/// only frozen declarations (a new or relabeled one fails), every by-design
+/// one must still be there, and every pending one must be gone. One line per
+/// violation; none means the rule holds.
+pub fn gate_declarations(frozen: &FrozenFamily, current: &[Divergence]) -> Vec<String> {
+    let mut violations = Vec::new();
+    for declaration in current {
+        if frozen.probes.contains(&declaration.probe) && !frozen.declaration.contains(declaration) {
+            violations.push(format!(
+                "declaration not in the frozen set (new, relabeled or re-scoped): {}",
+                declaration.describe()
+            ));
+        }
+    }
+    for declaration in &frozen.declaration {
+        let present = current.contains(declaration);
+        if declaration.by_design() && !present {
+            violations.push(format!(
+                "by-design declaration removed: {}",
+                declaration.describe()
+            ));
+        } else if !declaration.by_design() && present {
+            violations.push(format!(
+                "still pending: {}{}",
+                declaration.probe,
+                declaration
+                    .vehicle
+                    .as_deref()
+                    .map(|v| format!("[{v}]"))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+    violations
+}
+
+/// One recorded trace as the supervisor reports it: `trace info --format json`
+/// and the `trace events --format json` lines (`patina.trace.events/v1`).
+pub struct RecordedTrace {
+    pub format_version: Option<u64>,
+    pub events: Vec<Value>,
+}
+
+pub fn parse_recorded_trace(info_text: &str, events_text: &str) -> Result<RecordedTrace, String> {
+    let info: Value = serde_json::from_str(info_text)
+        .map_err(|error| format!("trace info is not JSON: {error}"))?;
+    let info = if info["trace_info"].is_object() {
+        info["trace_info"].clone()
+    } else {
+        info
+    };
+    let mut events = Vec::new();
+    for (index, line) in events_text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(line)
+            .map_err(|error| format!("trace events line {}: {error}", index + 1))?;
+        if value["kind"].is_string() {
+            events.push(value);
+        }
+    }
+    Ok(RecordedTrace {
+        format_version: info["format_version"].as_u64(),
+        events,
+    })
+}
+
+/// A `signal_generated` op as `<sig>:p|t`: process-directed when the op's
+/// `target` is the string `process`, thread-directed otherwise (`{"task": N}`).
+fn generation_of(event: &Value) -> Option<String> {
+    if event["kind"] != "signal_generated" {
+        return None;
+    }
+    let sig = event["operation"]["sig"].as_u64()?;
+    let process = event["operation"]["target"]
+        .as_str()
+        .is_some_and(|t| t.eq_ignore_ascii_case("process"));
+    Some(format!("{sig}:{}", if process { "p" } else { "t" }))
+}
+
+/// One trace obligation against one recorded trace: a work-order line per
+/// unmet fact. `leg` names the probe and vehicle.
+pub fn check_trace_obligation(
+    obligation: &Obligation,
+    leg: &str,
+    trace: &RecordedTrace,
+) -> Vec<String> {
+    let mut unmet = Vec::new();
+    if let Some(min) = obligation.format_version_min {
+        if trace.format_version.is_none_or(|version| version < min) {
+            unmet.push(format!(
+                "trace fact unmet: {leg}: the recorded trace is format {}, required >= {min}",
+                trace
+                    .format_version
+                    .map_or("?".to_string(), |v| v.to_string())
+            ));
+        }
+    }
+    if let Some(expected) = &obligation.signal_generated {
+        let observed: Vec<String> = trace.events.iter().filter_map(generation_of).collect();
+        if &observed != expected {
+            unmet.push(format!(
+                "trace fact unmet: {leg}: signal_generated ops recorded [{}], the probe generates [{}]",
+                observed.join(" "),
+                expected.join(" ")
+            ));
+        }
+    }
+    if let Some(max) = obligation.max_wakes_per_generation {
+        for (index, event) in trace.events.iter().enumerate() {
+            let wakes = trace.events[index + 1..]
+                .iter()
+                .take_while(|next| next["kind"] == "task_wake")
+                .count();
+            if event["kind"] == "signal_generated" && wakes > max {
+                unmet.push(format!(
+                    "trace fact unmet: {leg}: a generation woke {wakes} tasks (at most {max}: only the chosen target is unlinked and woken)"
+                ));
+            }
+        }
+    }
+    unmet
+}
+
+/// Every trace obligation against the replay legs' dumped traces under
+/// `out_dir` (`<bin>/replay.<vehicle>.trace-info.json` and
+/// `.trace-events.jsonl`, written by `run.sh`). A missing dump is unmet: the
+/// probe's replay leg did not run (it is still declared, or it failed).
+pub fn check_trace_obligations(due: &[Obligation], out_dir: &std::path::Path) -> Vec<String> {
+    let mut unmet = Vec::new();
+    for obligation in due.iter().filter(|o| o.kind == "trace") {
+        let probe = obligation.probe.as_deref().unwrap_or("?");
+        let base = out_dir.join(probe.replace('/', "-"));
+        let mut missing = Vec::new();
+        for vehicle in obligation.vehicles() {
+            let leg = format!("{probe}[{vehicle}]");
+            let read = |suffix: &str| {
+                std::fs::read_to_string(base.join(format!("replay.{vehicle}.{suffix}")))
+            };
+            match (read("trace-info.json"), read("trace-events.jsonl")) {
+                (Ok(info), Ok(events)) => match parse_recorded_trace(&info, &events) {
+                    Ok(trace) => unmet.extend(check_trace_obligation(obligation, &leg, &trace)),
+                    Err(error) => unmet.push(format!("trace fact unmet: {leg}: {error}")),
+                },
+                _ => missing.push(vehicle),
+            }
+        }
+        if !missing.is_empty() {
+            unmet.push(format!(
+                "trace fact unmet: {probe}[{}]: no recorded trace (the probe's replay leg did not run)",
+                missing.join(",")
+            ));
+        }
+    }
+    unmet
 }
 
 // ---- the host gate ----------------------------------------------------------
@@ -859,7 +1442,8 @@ fn synthetic_header() -> Header {
     }
 }
 
-/// A small raw stream with every normalization kind in play.
+/// A small raw stream with every normalization kind in play (no termination
+/// line; `with_term` appends one the way the supervisor does).
 fn synthetic_raw() -> Vec<Event> {
     let mut events = Vec::new();
     let mut push = |op: &str,
@@ -956,6 +1540,13 @@ fn synthetic_raw() -> Vec<Event> {
     events
 }
 
+/// Append the supervisor's termination line to a stream.
+fn with_term(mut events: Vec<Event>, termination: Termination) -> Vec<Event> {
+    let seq = events.len() as u64;
+    events.push(termination.event(seq));
+    events
+}
+
 fn divergence(op: &str, field: &str, vehicle: Option<&str>) -> Divergence {
     Divergence {
         probe: "selftest/synthetic".to_string(),
@@ -966,20 +1557,34 @@ fn divergence(op: &str, field: &str, vehicle: Option<&str>) -> Divergence {
         seq: None,
         seqs: Vec::new(),
         label: None,
+        stderr: None,
         reason: "selftest: planted".to_string(),
+    }
+}
+
+fn pending_declaration(reason: &str) -> Divergence {
+    Divergence {
+        kind: "pending".to_string(),
+        op: None,
+        field: None,
+        reason: reason.to_string(),
+        ..divergence("", "", None)
     }
 }
 
 /// Prove every differ gate can fail: a planted divergence, a planted stale
 /// divergence, a planted event-count drift (both directions), a planted stale
-/// probe-level declaration, plus the controls that must pass, plus the host
-/// gate's two refusals. Returns `ok` only if every case behaved.
+/// probe-level declaration, a planted wrong / missing termination, a pending
+/// declaration that covers and one that went stale, an abort whose pinned
+/// diagnostic is absent, the frozen declaration rule's four refusals, plus the
+/// controls that must pass, plus the host gate's two refusals. Returns `ok`
+/// only if every case behaved.
 pub fn selftest() -> Outcome {
     let header = synthetic_header();
-    let raw = synthetic_raw();
+    let raw = with_term(synthetic_raw(), Termination::Exited(0));
     let expected = Expectation {
         header: header.clone(),
-        events: normalize(raw.clone()),
+        events: with_term(normalize(synthetic_raw()), Termination::Exited(0)),
     };
     let mut lines = Vec::new();
     let mut all_ok = true;
@@ -1006,6 +1611,9 @@ pub fn selftest() -> Outcome {
     };
 
     let probe = "selftest/synthetic";
+    let d = |mode, actual: Vec<Event>, divs: &[Divergence], stderr: Option<&str>| {
+        diff(mode, probe, "libc", &expected, actual, divs, stderr)
+    };
 
     // Controls: an identical stream passes natively and under patina, and the
     // normalizer erases host magnitudes (a different fd/inode/uid/clock still
@@ -1013,29 +1621,13 @@ pub fn selftest() -> Outcome {
     case(
         "control: identical stream passes (native)",
         true,
-        diff(
-            Mode::Native,
-            probe,
-            "libc",
-            &expected,
-            raw.clone(),
-            &[],
-            true,
-        ),
+        d(Mode::Native, raw.clone(), &[], None),
         "",
     );
     case(
         "control: identical stream passes (patina)",
         true,
-        diff(
-            Mode::Patina,
-            probe,
-            "libc",
-            &expected,
-            raw.clone(),
-            &[],
-            true,
-        ),
+        d(Mode::Patina, raw.clone(), &[], None),
         "",
     );
     let mut renumbered = raw.clone();
@@ -1057,15 +1649,7 @@ pub fn selftest() -> Outcome {
     case(
         "control: normalized magnitudes (fd/uid/ino/clock) match",
         true,
-        diff(
-            Mode::Patina,
-            probe,
-            "libc",
-            &expected,
-            renumbered,
-            &[],
-            true,
-        ),
+        d(Mode::Patina, renumbered, &[], None),
         "",
     );
 
@@ -1075,56 +1659,34 @@ pub fn selftest() -> Outcome {
     case(
         "planted divergence is refused (patina, undeclared)",
         false,
-        diff(
-            Mode::Patina,
-            probe,
-            "libc",
-            &expected,
-            planted.clone(),
-            &[],
-            true,
-        ),
+        d(Mode::Patina, planted.clone(), &[], None),
         "undeclared divergence",
     );
     case(
         "planted divergence is refused (native oracle)",
         false,
-        diff(
-            Mode::Native,
-            probe,
-            "libc",
-            &expected,
-            planted.clone(),
-            &[],
-            true,
-        ),
+        d(Mode::Native, planted.clone(), &[], None),
         "host-oracle divergence",
     );
     case(
         "planted divergence passes once declared",
         true,
-        diff(
+        d(
             Mode::Patina,
-            probe,
-            "libc",
-            &expected,
             planted.clone(),
             &[divergence("write", "ret", None)],
-            true,
+            None,
         ),
         "still needed",
     );
     case(
         "a declaration for another vehicle does not cover it",
         false,
-        diff(
+        d(
             Mode::Patina,
-            probe,
-            "libc",
-            &expected,
             planted.clone(),
             &[divergence("write", "ret", Some("raw"))],
-            true,
+            None,
         ),
         "undeclared divergence",
     );
@@ -1133,35 +1695,36 @@ pub fn selftest() -> Outcome {
     case(
         "planted stale divergence is refused",
         false,
-        diff(
+        d(
             Mode::Patina,
-            probe,
-            "libc",
-            &expected,
             raw.clone(),
             &[divergence("write", "ret", None)],
-            true,
+            None,
         ),
         "STALE",
     );
 
     // Planted event-count drift, both directions.
-    let mut short = raw.clone();
-    short.pop();
+    let short = with_term(synthetic_raw()[..6].to_vec(), Termination::Exited(0));
     case(
         "planted event-count drift (missing event) is refused",
         false,
-        diff(Mode::Patina, probe, "libc", &expected, short, &[], true),
+        d(Mode::Patina, short, &[], None),
         "event-count drift",
     );
-    let mut long = raw.clone();
-    let mut extra = raw[6].clone();
+    let mut long = synthetic_raw();
+    let mut extra = long[6].clone();
     extra.seq = 7;
     long.push(extra);
     case(
         "planted event-count drift (extra event) is refused",
         false,
-        diff(Mode::Patina, probe, "libc", &expected, long, &[], true),
+        d(
+            Mode::Patina,
+            with_term(long, Termination::Exited(0)),
+            &[],
+            None,
+        ),
         "event-count drift",
     );
 
@@ -1171,15 +1734,7 @@ pub fn selftest() -> Outcome {
     case(
         "a failed check is an undeclared divergence",
         false,
-        diff(
-            Mode::Patina,
-            probe,
-            "libc",
-            &expected,
-            failed_check.clone(),
-            &[],
-            true,
-        ),
+        d(Mode::Patina, failed_check.clone(), &[], None),
         "check(label=",
     );
     let labelled = Divergence {
@@ -1189,16 +1744,175 @@ pub fn selftest() -> Outcome {
     case(
         "a failed check passes once declared by label",
         true,
+        d(Mode::Patina, failed_check, &[labelled], None),
+        "still needed",
+    );
+
+    // The termination line: the supervisor's observation, never synthesized.
+    let died = with_term(
+        synthetic_raw(),
+        Termination::Signaled {
+            signal: 15,
+            core: Some(false),
+        },
+    );
+    case(
+        "a planted wrong termination (signal death vs blessed exit 0) is refused",
+        false,
+        d(Mode::Patina, died.clone(), &[], None),
+        "__termination",
+    );
+    case(
+        "a planted wrong termination never passes the native oracle",
+        false,
+        d(Mode::Native, died.clone(), &[], None),
+        "__termination",
+    );
+    let term_kind = divergence("__termination", "fields.kind", None);
+    let term_code = divergence("__termination", "fields.code", None);
+    let term_signal = divergence("__termination", "fields.signal", None);
+    let term_core = divergence("__termination", "fields.core", None);
+    case(
+        "a wrong termination passes once every differing field is declared",
+        true,
+        d(
+            Mode::Patina,
+            died,
+            &[
+                term_kind.clone(),
+                term_code.clone(),
+                term_signal.clone(),
+                term_core.clone(),
+            ],
+            None,
+        ),
+        "still needed",
+    );
+    case(
+        "a stream without a termination line is refused (it cannot be filled in)",
+        false,
+        d(Mode::Patina, synthetic_raw(), &[], None),
+        "no termination line observed",
+    );
+    let unblessed = Expectation {
+        header: header.clone(),
+        events: normalize(synthetic_raw()),
+    };
+    case(
+        "an expectation without a termination line is refused",
+        false,
         diff(
             Mode::Patina,
             probe,
             "libc",
-            &expected,
-            failed_check,
-            &[labelled],
-            true,
+            &unblessed,
+            raw.clone(),
+            &[],
+            None,
+        ),
+        "no termination line; re-bless",
+    );
+    let unreported = with_term(
+        synthetic_raw(),
+        Termination::Signaled {
+            signal: 6,
+            core: None,
+        },
+    );
+    let blessed_core = Expectation {
+        header: header.clone(),
+        events: with_term(
+            normalize(synthetic_raw()),
+            Termination::Signaled {
+                signal: 6,
+                core: Some(true),
+            },
+        ),
+    };
+    case(
+        "an unreported core flag diverges from a blessed one",
+        false,
+        diff(
+            Mode::Patina,
+            probe,
+            "libc",
+            &blessed_core,
+            unreported.clone(),
+            &[],
+            None,
+        ),
+        "fields.core",
+    );
+    case(
+        "an unreported core flag passes once declared",
+        true,
+        diff(
+            Mode::Patina,
+            probe,
+            "libc",
+            &blessed_core,
+            unreported,
+            std::slice::from_ref(&term_core),
+            None,
         ),
         "still needed",
+    );
+    case(
+        "blessing refuses a signal death the probe did not announce",
+        true,
+        Outcome {
+            ok: blessable(&with_term(
+                synthetic_raw(),
+                Termination::Signaled {
+                    signal: 15,
+                    core: Some(false),
+                },
+            ))
+            .is_err(),
+            lines: vec![],
+        },
+        "",
+    );
+    let mut announced = synthetic_raw();
+    announced.push(Event {
+        seq: announced.len() as u64,
+        op: EXPECT_DEATH_OP.to_string(),
+        args: BTreeMap::from([("signal".to_string(), Value::from(15))]),
+        ret: Value::from(0),
+        errno: None,
+        fields: BTreeMap::new(),
+        norm: BTreeMap::new(),
+    });
+    case(
+        "blessing accepts an announced signal death",
+        true,
+        Outcome {
+            ok: blessable(&with_term(
+                announced,
+                Termination::Signaled {
+                    signal: 15,
+                    core: Some(false),
+                },
+            ))
+            .is_ok(),
+            lines: vec![],
+        },
+        "",
+    );
+    case(
+        "blessing refuses a failed check and a nonzero exit",
+        true,
+        Outcome {
+            ok: blessable(&with_term(synthetic_raw(), Termination::Exited(101))).is_err()
+                && blessable(&{
+                    let mut failed = synthetic_raw();
+                    failed[6].ret = Value::from(0);
+                    with_term(failed, Termination::Exited(0))
+                })
+                .is_err(),
+            lines: vec![],
+        },
+        "",
     );
 
     // Probe-level declarations.
@@ -1208,64 +1922,86 @@ pub fn selftest() -> Outcome {
         field: None,
         ..divergence("", "", None)
     };
+    let abort_stream = with_term(
+        synthetic_raw()[..2].to_vec(),
+        Termination::Signaled {
+            signal: 6,
+            core: Some(true),
+        },
+    );
     case(
         "a probe that dies is refused when undeclared",
         false,
-        diff(
-            Mode::Patina,
-            probe,
-            "libc",
-            &expected,
-            raw[..2].to_vec(),
-            &[],
-            false,
-        ),
-        "did not exit 0",
+        d(Mode::Patina, abort_stream.clone(), &[], None),
+        "event-count drift",
     );
     case(
         "a probe that dies passes when declared failing",
         true,
-        diff(
+        d(
             Mode::Patina,
-            probe,
-            "libc",
-            &expected,
-            raw[..2].to_vec(),
+            abort_stream.clone(),
             std::slice::from_ref(&failing_probe),
-            false,
+            None,
         ),
         "declared failing probe",
     );
     case(
         "planted stale probe-level declaration is refused",
         false,
-        diff(
+        d(
             Mode::Patina,
-            probe,
-            "libc",
-            &expected,
             raw.clone(),
             std::slice::from_ref(&failing_probe),
-            true,
+            None,
         ),
         "STALE",
     );
     case(
         "a dying probe never passes the native oracle",
         false,
-        diff(
-            Mode::Native,
-            probe,
-            "libc",
-            &expected,
-            raw.clone(),
-            &[],
-            false,
-        ),
-        "did not exit 0",
+        d(Mode::Native, abort_stream.clone(), &[], None),
+        "",
     );
 
-    // Abort-level declarations: exact prefix, stale when the probe outlives it.
+    // Pending declarations: cover any difference, stale once none remains.
+    let pending = pending_declaration("pending: selftest — M1: planted");
+    case(
+        "a pending declaration covers a dying probe and lists the gap",
+        true,
+        d(
+            Mode::Patina,
+            abort_stream.clone(),
+            std::slice::from_ref(&pending),
+            None,
+        ),
+        "pending: event-count drift",
+    );
+    case(
+        "a pending declaration covers a field divergence",
+        true,
+        d(
+            Mode::Patina,
+            planted.clone(),
+            std::slice::from_ref(&pending),
+            None,
+        ),
+        "pending: undeclared divergence",
+    );
+    case(
+        "planted stale pending declaration (the probe passes) is refused",
+        false,
+        d(
+            Mode::Patina,
+            raw.clone(),
+            std::slice::from_ref(&pending),
+            None,
+        ),
+        "STALE",
+    );
+
+    // Abort-level declarations: exact prefix, a signal death, the pinned
+    // diagnostic, stale when the probe outlives it.
     let abort_at_3 = Divergence {
         kind: "abort".to_string(),
         op: None,
@@ -1273,75 +2009,273 @@ pub fn selftest() -> Outcome {
         seq: Some(3),
         ..divergence("", "", None)
     };
+    let died_at_3 = with_term(
+        synthetic_raw()[..3].to_vec(),
+        Termination::Signaled {
+            signal: 6,
+            core: Some(true),
+        },
+    );
     case(
         "a declared abort with the exact prefix passes",
         true,
-        diff(
+        d(
             Mode::Patina,
-            probe,
-            "libc",
-            &expected,
-            raw[..3].to_vec(),
+            died_at_3.clone(),
             std::slice::from_ref(&abort_at_3),
-            false,
+            None,
         ),
         "declared abort observed",
     );
+    let mut planted_prefix = died_at_3.clone();
+    planted_prefix[1].ret = Value::from(4);
     case(
         "a declared abort still compares the prefix",
         false,
-        diff(
+        d(
             Mode::Patina,
-            probe,
-            "libc",
-            &expected,
-            planted[..3].to_vec(),
+            planted_prefix,
             std::slice::from_ref(&abort_at_3),
-            false,
+            None,
         ),
         "undeclared divergence",
     );
     case(
+        "a declared abort whose probe exited instead of dying is refused",
+        false,
+        d(
+            Mode::Patina,
+            with_term(synthetic_raw()[..3].to_vec(), Termination::Exited(1)),
+            std::slice::from_ref(&abort_at_3),
+            None,
+        ),
+        "did not die on a signal",
+    );
+    case(
         "planted stale abort (the probe outlived it) is refused",
         false,
-        diff(
+        d(
             Mode::Patina,
-            probe,
-            "libc",
-            &expected,
-            raw[..5].to_vec(),
+            with_term(
+                synthetic_raw()[..5].to_vec(),
+                Termination::Signaled {
+                    signal: 6,
+                    core: Some(true),
+                },
+            ),
             std::slice::from_ref(&abort_at_3),
-            false,
+            None,
         ),
         "STALE",
     );
     case(
         "planted stale abort (the probe now passes) is refused",
         false,
-        diff(
+        d(
             Mode::Patina,
-            probe,
-            "libc",
-            &expected,
             raw.clone(),
             std::slice::from_ref(&abort_at_3),
-            true,
+            None,
         ),
         "STALE",
     );
     case(
         "a probe dying before its declared abort is refused",
         false,
-        diff(
+        d(
             Mode::Patina,
-            probe,
-            "libc",
-            &expected,
-            raw[..1].to_vec(),
+            with_term(
+                synthetic_raw()[..1].to_vec(),
+                Termination::Signaled {
+                    signal: 6,
+                    core: Some(true),
+                },
+            ),
             std::slice::from_ref(&abort_at_3),
-            false,
+            None,
         ),
         "died before its declared abort",
+    );
+    let pinned_abort = Divergence {
+        stderr: Some("patina: process spawn reached under patina: fork".to_string()),
+        ..abort_at_3.clone()
+    };
+    case(
+        "a declared abort whose pinned diagnostic is absent from stderr is refused",
+        false,
+        d(
+            Mode::Patina,
+            died_at_3.clone(),
+            std::slice::from_ref(&pinned_abort),
+            Some("patina: something else entirely\n"),
+        ),
+        "diagnostic not observed",
+    );
+    case(
+        "a declared abort whose pinned diagnostic is in stderr passes",
+        true,
+        d(
+            Mode::Patina,
+            died_at_3.clone(),
+            std::slice::from_ref(&pinned_abort),
+            Some("patina: process spawn reached under patina: fork; failing closed\n"),
+        ),
+        "declared abort diagnostic observed",
+    );
+
+    // The frozen declaration rule.
+    let by_design = Divergence {
+        kind: "abort".to_string(),
+        op: None,
+        field: None,
+        seq: Some(1),
+        reason: "by design: fork is a process-lifecycle trap".to_string(),
+        ..divergence("", "", None)
+    };
+    let pending = pending_declaration("pending: selftest — planted");
+    let trace_obligation = Obligation {
+        kind: "trace".to_string(),
+        krate: None,
+        test: None,
+        asserts: None,
+        probe: Some(probe.to_string()),
+        vehicles: Vec::new(),
+        format_version_min: Some(9),
+        signal_generated: Some(vec!["10:p".to_string(), "10:t".to_string()]),
+        max_wakes_per_generation: Some(1),
+    };
+    let frozen = FrozenFamily {
+        probes: vec!["selftest/synthetic".to_string()],
+        paths: vec!["probes".to_string()],
+        declaration: vec![by_design.clone(), pending.clone()],
+        obligation: vec![trace_obligation.clone()],
+    };
+    let gate = |current: &[Divergence], mention: &str| {
+        let lines = gate_declarations(&frozen, current);
+        Outcome {
+            ok: if mention.is_empty() {
+                lines.is_empty()
+            } else {
+                lines.iter().any(|l| l.contains(mention))
+            },
+            lines,
+        }
+    };
+    case(
+        "frozen rule: only the by-design declarations left passes",
+        true,
+        gate(std::slice::from_ref(&by_design), ""),
+        "",
+    );
+    case(
+        "frozen rule: a pending declaration still present is refused",
+        true,
+        gate(&[by_design.clone(), pending.clone()], "still pending"),
+        "",
+    );
+    case(
+        "frozen rule: a new or relabeled declaration is refused",
+        true,
+        gate(
+            &[
+                by_design.clone(),
+                pending_declaration("pending: selftest — relabeled"),
+            ],
+            "not in the frozen set",
+        ),
+        "",
+    );
+    case(
+        "frozen rule: a removed by-design declaration is refused",
+        true,
+        gate(&[], "by-design declaration removed"),
+        "",
+    );
+
+    // Trace obligations: what a behaviour-only pass skips.
+    let op =
+        |kind: &str, operation: Value| serde_json::json!({"kind": kind, "operation": operation});
+    let generated = |sig: u64, target: Value| {
+        op(
+            "signal_generated",
+            serde_json::json!({"sig": sig, "target": target}),
+        )
+    };
+    let wake = || op("task_wake", serde_json::json!({"task": 1}));
+    let next = || op("scheduler_next", Value::Null);
+    let trace_case = |format: u64, events: Vec<Value>, mention: &str| {
+        let unmet = check_trace_obligation(
+            &trace_obligation,
+            "selftest/synthetic[libc]",
+            &RecordedTrace {
+                format_version: Some(format),
+                events,
+            },
+        );
+        Outcome {
+            ok: if mention.is_empty() {
+                unmet.is_empty()
+            } else {
+                unmet.iter().any(|line| line.contains(mention))
+            },
+            lines: unmet,
+        }
+    };
+    let faithful = vec![
+        generated(10, Value::from("process")),
+        wake(),
+        next(),
+        generated(10, serde_json::json!({"task": 2})),
+    ];
+    case(
+        "obligation: a trace with the probe's generations, in order, at the required format is met",
+        true,
+        trace_case(9, faithful.clone(), ""),
+        "",
+    );
+    case(
+        "obligation: a recorded trace with no signal_generated op for a generating probe is unmet",
+        true,
+        trace_case(
+            9,
+            vec![next(), wake(), next()],
+            "signal_generated ops recorded []",
+        ),
+        "",
+    );
+    case(
+        "obligation: generations in the wrong order or with the wrong target are unmet",
+        true,
+        trace_case(
+            9,
+            vec![
+                generated(10, serde_json::json!({"task": 2})),
+                generated(10, Value::from("process")),
+            ],
+            "recorded [10:t 10:p]",
+        ),
+        "",
+    );
+    case(
+        "obligation: a trace below the required format version is unmet",
+        true,
+        trace_case(8, faithful.clone(), "is format 8"),
+        "",
+    );
+    case(
+        "obligation: a generation that wakes every parked task is unmet",
+        true,
+        trace_case(
+            9,
+            vec![
+                generated(10, Value::from("process")),
+                wake(),
+                wake(),
+                generated(10, serde_json::json!({"task": 2})),
+            ],
+            "woke 2 tasks",
+        ),
+        "",
     );
 
     // The host gate.

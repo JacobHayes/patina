@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -122,8 +122,14 @@ impl EventBuilder<'_> {
 /// total order over the stream.
 pub struct Recorder {
     seq: AtomicU64,
-    recording: AtomicBool,
     lock: Mutex<()>,
+}
+
+thread_local! {
+    /// Depth of [`Recorder::quiet`] on THIS thread. Per thread, not per
+    /// process: a helper thread's quiet window must never swallow an event the
+    /// thread under test emits meanwhile.
+    static QUIET: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 impl Default for Recorder {
@@ -136,7 +142,6 @@ impl Recorder {
     pub fn new() -> Self {
         Recorder {
             seq: AtomicU64::new(0),
-            recording: AtomicBool::new(true),
             lock: Mutex::new(()),
         }
     }
@@ -166,7 +171,7 @@ impl Recorder {
     }
 
     pub fn emit(&self, mut event: Event) {
-        if !self.recording.load(Ordering::SeqCst) {
+        if QUIET.with(std::cell::Cell::get) != 0 {
             return;
         }
         let _guard = self
@@ -182,12 +187,13 @@ impl Recorder {
         out.flush().expect("stdout flush");
     }
 
-    /// Run `body` with recording suspended (setup/teardown and racy loops whose
-    /// iteration count is not a property under test).
+    /// Run `body` with this thread's recording suspended (setup/teardown and
+    /// racy loops whose iteration count is not a property under test). Other
+    /// threads keep recording.
     pub fn quiet<T>(&self, body: impl FnOnce() -> T) -> T {
-        let previous = self.recording.swap(false, Ordering::SeqCst);
+        QUIET.with(|depth| depth.set(depth.get() + 1));
         let value = body();
-        self.recording.store(previous, Ordering::SeqCst);
+        QUIET.with(|depth| depth.set(depth.get() - 1));
         value
     }
 }

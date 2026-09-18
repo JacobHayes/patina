@@ -51,3 +51,4 @@
 {"seq":49,"op":"check","args":{"label":"CLOCK_REALTIME advanced across the sleeps"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":50,"op":"gettimeofday","args":{},"ret":0,"errno":null,"fields":{"us":"mono:>=","usec_in_range":true},"norm":{"fields.us":"monotonic"}}
 {"seq":51,"op":"check","args":{"label":"gettimeofday agrees with CLOCK_REALTIME to the second"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":52,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

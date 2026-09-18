@@ -93,3 +93,4 @@
 {"seq":91,"op":"close","args":{"fd":"fd@69"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
 {"seq":92,"op":"close","args":{"fd":"fd@70"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
 {"seq":93,"op":"close","args":{"fd":"fd@83"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":94,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

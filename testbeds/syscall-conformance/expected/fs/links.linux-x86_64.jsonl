@@ -59,3 +59,4 @@
 {"seq":57,"op":"newfstatat","args":{"dirfd":"AT_FDCWD","flags":0,"path":"/tmp/syscall-conformance/fs-links/f"},"ret":0,"errno":null,"fields":{"gid":"id@3","ino":"ino@3","kind":"reg","nlink":2,"perm":416,"size":3,"uid":"id@3"},"norm":{"fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
 {"seq":58,"op":"check","args":{"label":"unlinking one name drops nlink to 2"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":59,"op":"close","args":{"fd":"fd@18"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":60,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

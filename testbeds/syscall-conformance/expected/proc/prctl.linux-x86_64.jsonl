@@ -9,16 +9,45 @@
 {"seq":7,"op":"check","args":{"label":"PR_SET_PDEATHSIG SIGTERM"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":8,"op":"prctl","args":{"option":2},"ret":0,"errno":null,"fields":{},"norm":{}}
 {"seq":9,"op":"check","args":{"label":"PR_GET_PDEATHSIG reads it back"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":10,"op":"prctl","args":{"option":4},"ret":0,"errno":null,"fields":{},"norm":{}}
-{"seq":11,"op":"check","args":{"label":"PR_SET_DUMPABLE 0"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":12,"op":"prctl","args":{"option":3},"ret":0,"errno":null,"fields":{},"norm":{}}
-{"seq":13,"op":"check","args":{"label":"PR_GET_DUMPABLE reads 0"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":14,"op":"prctl","args":{"option":38},"ret":0,"errno":null,"fields":{},"norm":{}}
-{"seq":15,"op":"check","args":{"label":"PR_SET_NO_NEW_PRIVS 1"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":16,"op":"prctl","args":{"option":39},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":17,"op":"check","args":{"label":"PR_GET_NO_NEW_PRIVS reads 1"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":18,"op":"prctl","args":{"option":29},"ret":0,"errno":null,"fields":{},"norm":{}}
-{"seq":19,"op":"check","args":{"label":"PR_SET_TIMERSLACK accepts a value"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":20,"op":"prctl","args":{"option":30},"ret":123456,"errno":null,"fields":{},"norm":{}}
-{"seq":21,"op":"check","args":{"label":"PR_GET_TIMERSLACK reads it back"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":22,"op":"prctl","args":{"option":2147483647},"ret":-1,"errno":"EINVAL","fields":{},"norm":{}}
+{"seq":10,"op":"prctl","args":{"option":1},"ret":-1,"errno":"EINVAL","fields":{},"norm":{}}
+{"seq":11,"op":"check","args":{"label":"PR_SET_PDEATHSIG past SIGRTMAX is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":12,"op":"prctl","args":{"option":1},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":13,"op":"check","args":{"label":"PR_SET_PDEATHSIG 0 clears it"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":14,"op":"prctl","args":{"option":2},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":15,"op":"check","args":{"label":"PR_GET_PDEATHSIG reads 0 after the clear"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":16,"op":"prctl","args":{"option":2},"ret":-1,"errno":"EFAULT","fields":{},"norm":{}}
+{"seq":17,"op":"check","args":{"label":"PR_GET_PDEATHSIG with a NULL pointer is EFAULT"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":18,"op":"prctl","args":{"option":3},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":19,"op":"check","args":{"label":"PR_GET_DUMPABLE starts at 1"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":20,"op":"prctl","args":{"option":4},"ret":-1,"errno":"EINVAL","fields":{},"norm":{}}
+{"seq":21,"op":"check","args":{"label":"PR_SET_DUMPABLE 2 is EINVAL (not settable through prctl)"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":22,"op":"prctl","args":{"option":4},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":23,"op":"check","args":{"label":"PR_SET_DUMPABLE 0"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":24,"op":"prctl","args":{"option":3},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":25,"op":"check","args":{"label":"PR_GET_DUMPABLE reads 0"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":26,"op":"prctl","args":{"option":4},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":27,"op":"check","args":{"label":"PR_SET_DUMPABLE 1 restores it"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":28,"op":"prctl","args":{"option":39},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":29,"op":"check","args":{"label":"PR_GET_NO_NEW_PRIVS starts at 0"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":30,"op":"prctl","args":{"option":38},"ret":-1,"errno":"EINVAL","fields":{},"norm":{}}
+{"seq":31,"op":"check","args":{"label":"PR_SET_NO_NEW_PRIVS 0 is EINVAL (only 1 can be set)"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":32,"op":"prctl","args":{"option":38},"ret":-1,"errno":"EINVAL","fields":{},"norm":{}}
+{"seq":33,"op":"check","args":{"label":"PR_SET_NO_NEW_PRIVS 1 with a nonzero trailing argument is EINVAL"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":34,"op":"prctl","args":{"option":38},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":35,"op":"check","args":{"label":"PR_SET_NO_NEW_PRIVS 1"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":36,"op":"prctl","args":{"option":39},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":37,"op":"check","args":{"label":"PR_GET_NO_NEW_PRIVS reads 1"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":38,"op":"prctl","args":{"option":38},"ret":-1,"errno":"EINVAL","fields":{},"norm":{}}
+{"seq":39,"op":"check","args":{"label":"PR_SET_NO_NEW_PRIVS 0 is still EINVAL (sticky)"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":40,"op":"prctl","args":{"option":30},"ret":50000,"errno":null,"fields":{},"norm":{}}
+{"seq":41,"op":"check","args":{"label":"PR_GET_TIMERSLACK starts at the 50 µs default"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":42,"op":"prctl","args":{"option":29},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":43,"op":"check","args":{"label":"PR_SET_TIMERSLACK accepts a value"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":44,"op":"prctl","args":{"option":30},"ret":123456,"errno":null,"fields":{},"norm":{}}
+{"seq":45,"op":"check","args":{"label":"PR_GET_TIMERSLACK reads it back"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":46,"op":"prctl","args":{"option":29},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":47,"op":"check","args":{"label":"PR_SET_TIMERSLACK 0 restores the default"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":48,"op":"prctl","args":{"option":30},"ret":50000,"errno":null,"fields":{},"norm":{}}
+{"seq":49,"op":"check","args":{"label":"PR_GET_TIMERSLACK reads the default again"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":50,"op":"prctl","args":{"option":2147483647},"ret":-1,"errno":"EINVAL","fields":{},"norm":{}}
+{"seq":51,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

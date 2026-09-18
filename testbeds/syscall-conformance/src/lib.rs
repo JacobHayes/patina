@@ -6,6 +6,7 @@
 //! * [`calls`] — the probe-facing API: one method per row, each recording its
 //!   event with the right normalizations, plus `check` for semantic properties.
 //! * [`probe`] — argv parsing and the `probe_main!` entry macro.
+//! * [`signals`] — the signal-family probes' shared handler state.
 //! * [`expect`] — the harness half used by the `conform` binary: normalizer,
 //!   expectation files with their blessing header, `divergences.toml`, the
 //!   differ (undeclared and stale divergences both fail), the host gate, and
@@ -21,6 +22,8 @@ pub mod expect;
 pub mod observe;
 #[cfg(target_os = "linux")]
 pub mod probe;
+#[cfg(target_os = "linux")]
+pub mod signals;
 #[cfg(target_os = "linux")]
 pub mod vehicle;
 

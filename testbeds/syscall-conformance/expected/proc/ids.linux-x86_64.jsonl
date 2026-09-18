@@ -18,3 +18,4 @@
 {"seq":16,"op":"check","args":{"label":"kill(0,0) succeeds for our process group"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":17,"op":"kill","args":{"pid":"id@17","sig":0},"ret":0,"errno":null,"fields":{},"norm":{"args.pid":"identity"}}
 {"seq":18,"op":"check","args":{"label":"kill(-1,0) succeeds when at least one process is signalable"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":19,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

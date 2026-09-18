@@ -72,3 +72,4 @@
 {"seq":70,"op":"check","args":{"label":"unlinkat AT_REMOVEDIR on the now-empty sub"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":71,"op":"close","args":{"fd":"fd@6"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
 {"seq":72,"op":"close","args":{"fd":"fd@12"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":73,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

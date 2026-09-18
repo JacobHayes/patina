@@ -1,11 +1,44 @@
 {"header":{"schema":"patina.conformance/v1","probe":"signal/eintr","os":"linux","arch":"x86_64","kernel":"6.8.0-139-generic","glibc":"2.39","virtual_abi":"6.8"}}
 {"seq":0,"op":"getpid","args":{},"ret":"id@0","errno":null,"fields":{},"norm":{"ret":"identity"}}
 {"seq":1,"op":"pipe2","args":{"flags":0},"ret":0,"errno":null,"fields":{"read_end":"fd@1","write_end":"fd@1.1"},"norm":{"fields.read_end":"relative:fd","fields.write_end":"relative:fd"}}
-{"seq":2,"op":"read","args":{"fd":"fd@1","len":1},"ret":-1,"errno":"EINTR","fields":{},"norm":{"args.fd":"relative:fd"}}
-{"seq":3,"op":"check","args":{"label":"blocking read without SA_RESTART is EINTR"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":4,"op":"read","args":{"fd":"fd@1","len":1},"ret":1,"errno":null,"fields":{"data":"x"},"norm":{"args.fd":"relative:fd"}}
-{"seq":5,"op":"check","args":{"label":"blocking read with SA_RESTART resumes"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":6,"op":"nanosleep","args":{"nsec":0,"sec":1},"ret":-1,"errno":"EINTR","fields":{},"norm":{}}
-{"seq":7,"op":"check","args":{"label":"nanosleep is never restarted"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":8,"op":"close","args":{"fd":"fd@1"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
-{"seq":9,"op":"close","args":{"fd":"fd@1.1"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":2,"op":"helper_kill","args":{},"ret":0,"errno":null,"fields":{"sig":10},"norm":{}}
+{"seq":3,"op":"read","args":{"fd":"fd@1","len":1},"ret":-1,"errno":"EINTR","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":4,"op":"check","args":{"label":"blocking read without SA_RESTART is EINTR"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":5,"op":"check","args":{"label":"the handler ran once before read returned"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":6,"op":"helper_kill","args":{},"ret":0,"errno":null,"fields":{"sig":10},"norm":{}}
+{"seq":7,"op":"helper_write","args":{},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":8,"op":"read","args":{"fd":"fd@1","len":1},"ret":1,"errno":null,"fields":{"data":"x"},"norm":{"args.fd":"relative:fd"}}
+{"seq":9,"op":"check","args":{"label":"blocking read with SA_RESTART resumes and completes on the later write"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":10,"op":"check","args":{"label":"the handler ran during the restarted read"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":11,"op":"helper_kill","args":{},"ret":0,"errno":null,"fields":{"sig":10},"norm":{}}
+{"seq":12,"op":"nanosleep","args":{"nsec":0,"sec":1},"ret":-1,"errno":"EINTR","fields":{"remain_in_range":true},"norm":{}}
+{"seq":13,"op":"check","args":{"label":"nanosleep is never restarted"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":14,"op":"helper_kill","args":{},"ret":0,"errno":null,"fields":{"sig":10},"norm":{}}
+{"seq":15,"op":"clock_nanosleep","args":{"clock":1,"flags":0,"nsec":0,"sec":1},"ret":-1,"errno":"EINTR","fields":{"remain_in_range":true},"norm":{}}
+{"seq":16,"op":"check","args":{"label":"a relative clock_nanosleep is never restarted"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":17,"op":"clock_gettime","args":{"clock":1},"ret":0,"errno":null,"fields":{"ns":"mono:first"},"norm":{"fields.ns":"monotonic"}}
+{"seq":18,"op":"helper_kill","args":{},"ret":0,"errno":null,"fields":{"sig":10},"norm":{}}
+{"seq":19,"op":"clock_nanosleep","args":{"absolute":true,"clock":1,"flags":1},"ret":-1,"errno":"EINTR","fields":{"remain_untouched":true},"norm":{}}
+{"seq":20,"op":"check","args":{"label":"an absolute clock_nanosleep is never restarted"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":21,"op":"check","args":{"label":"every sleep ran the handler once"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":22,"op":"epoll_create1","args":{"flags":0},"ret":"fd@22","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":23,"op":"epoll_ctl","args":{"data":7,"epfd":"fd@22","events":1,"fd":"fd@1","op":1},"ret":0,"errno":null,"fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":24,"op":"check","args":{"label":"watch the pipe's read end"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":25,"op":"helper_kill","args":{},"ret":0,"errno":null,"fields":{"sig":10},"norm":{}}
+{"seq":26,"op":"epoll_wait","args":{"epfd":"fd@22","maxevents":4,"timeout_ms":-1},"ret":-1,"errno":"EINTR","fields":{},"norm":{"args.epfd":"relative:fd"}}
+{"seq":27,"op":"check","args":{"label":"epoll_wait is never restarted, even under SA_RESTART"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":28,"op":"helper_kill","args":{},"ret":0,"errno":null,"fields":{"sig":10},"norm":{}}
+{"seq":29,"op":"helper_wake","args":{},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":30,"op":"futex","args":{"op":128,"timeout_ns":null,"value":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":31,"op":"check","args":{"label":"FUTEX_WAIT without a timeout restarts under SA_RESTART and returns on the wake"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":32,"op":"helper_kill","args":{},"ret":0,"errno":null,"fields":{"sig":10},"norm":{}}
+{"seq":33,"op":"futex","args":{"op":128,"timeout_ns":2000000000,"value":0},"ret":-1,"errno":"EINTR","fields":{},"norm":{}}
+{"seq":34,"op":"check","args":{"label":"FUTEX_WAIT with a timeout is EINTR even under SA_RESTART"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":35,"op":"helper_kill","args":{},"ret":0,"errno":null,"fields":{"sig":10},"norm":{}}
+{"seq":36,"op":"futex","args":{"op":128,"timeout_ns":null,"value":0},"ret":-1,"errno":"EINTR","fields":{},"norm":{}}
+{"seq":37,"op":"check","args":{"label":"FUTEX_WAIT without SA_RESTART is EINTR"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":38,"op":"check","args":{"label":"every interrupted call ran the handler exactly once"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":39,"op":"close","args":{"fd":"fd@22"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":40,"op":"close","args":{"fd":"fd@1"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":41,"op":"close","args":{"fd":"fd@1.1"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":42,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

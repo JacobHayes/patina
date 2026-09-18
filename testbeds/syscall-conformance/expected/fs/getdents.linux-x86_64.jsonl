@@ -36,3 +36,4 @@
 {"seq":34,"op":"check","args":{"label":"an unlinked entry is no longer listed"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":35,"op":"close","args":{"fd":"fd@25"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
 {"seq":36,"op":"close","args":{"fd":"fd@8"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":37,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

@@ -375,6 +375,8 @@ dev-dependency use under plain `cargo test`.
 - `testbeds/syscall-conformance/run.sh`: host-oracle syscall conformance — probes
   run natively (kernel answers), under patina, under replay, and under strace;
   `divergences.toml` is the exact current host≠patina gap (`--selftest`, `--bless`).
+  `gate.sh --family signals` is the frozen-oracle family gate
+  (`frozen.toml`; spec `docs/arcs/syscall-conformance-signals.md`).
 - `testbeds/`: real end-to-end guests — `workq` (the flagship durable-work-queue
   demo), `pubsub` (a tokio broker on the interposed reactors), and more; see
   `testbeds/README.md` and each testbed's `run-patina.sh`.

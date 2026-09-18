@@ -96,3 +96,4 @@
 {"seq":94,"op":"recvfrom","args":{"fd":"fd@0","flags":64,"len":64,"want_addr":false},"ret":-1,"errno":"EAGAIN","fields":{},"norm":{"args.fd":"relative:fd"}}
 {"seq":95,"op":"check","args":{"label":"MSG_DONTWAIT on an empty blocking socket is EAGAIN"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":96,"op":"close","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":97,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

@@ -66,3 +66,4 @@
 {"seq":64,"op":"check","args":{"label":"statx relative to a dirfd with a narrow mask"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":65,"op":"close","args":{"fd":"fd@4"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
 {"seq":66,"op":"close","args":{"fd":"fd@30"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":67,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

@@ -13,3 +13,4 @@
 {"seq":11,"op":"check","args":{"label":"the second thread observed 1 and answered 2"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":12,"op":"futex","args":{"op":129,"timeout_ns":null,"value":2147483647},"ret":0,"errno":null,"fields":{},"norm":{}}
 {"seq":13,"op":"check","args":{"label":"a final FUTEX_WAKE finds nobody"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":14,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

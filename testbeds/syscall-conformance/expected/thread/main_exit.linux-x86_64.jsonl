@@ -1,0 +1,9 @@
+{"header":{"schema":"patina.conformance/v1","probe":"thread/main_exit","os":"linux","arch":"x86_64","kernel":"6.8.0-139-generic","glibc":"2.39","virtual_abi":"6.8"}}
+{"seq":0,"op":"gettid","args":{},"ret":"id@0","errno":null,"fields":{},"norm":{"ret":"identity"}}
+{"seq":1,"op":"getpid","args":{},"ret":"id@0","errno":null,"fields":{},"norm":{"ret":"identity"}}
+{"seq":2,"op":"check","args":{"label":"the main thread is the thread group leader"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":3,"op":"exit","args":{"code":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":4,"op":"check","args":{"label":"the worker runs after the main thread's raw exit"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":5,"op":"worker_done","args":{},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":6,"op":"exit_group","args":{"code":0},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":7,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

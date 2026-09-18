@@ -16,6 +16,31 @@ pub const AT_FDCWD: i32 = libc::AT_FDCWD;
 /// A libc spelling of a row, registered by the one probe that links it.
 pub type LibcSpelling = fn(Args) -> i64;
 
+/// The kernel's `rt_sigaction` struct on x86_64 (NOT glibc's `struct
+/// sigaction`, whose field order differs): handler, flags, restorer, then the
+/// 8-byte mask. A raw registration needs `SA_RESTORER` with a restorer the
+/// kernel can return through, which a probe reads back from a libc-installed
+/// action (`Probe::rt_sigaction_query`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KernelSigaction {
+    pub handler: usize,
+    pub flags: u64,
+    pub restorer: usize,
+    pub mask: u64,
+}
+
+/// The kernel's `SA_RESTORER` flag bit (glibc hides it from `sa_flags`).
+pub const SA_RESTORER: u64 = 0x0400_0000;
+
+/// The action flags a probe compares (the kernel adds `SA_RESTORER`, which is
+/// the restorer's business, not the disposition's).
+pub const SA_FLAGS_COMPARED: u64 = (libc::SA_SIGINFO
+    | libc::SA_RESTART
+    | libc::SA_NODEFER
+    | libc::SA_RESETHAND
+    | libc::SA_ONSTACK) as u64;
+
 /// One time argument of the `utimensat` family.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimeArg {
@@ -1505,11 +1530,18 @@ impl Probe {
                 0,
             ],
         );
+        // The queued payload is only meaningful (and only kernel-filled) for
+        // SI_QUEUE; every other code records 0 so the field is stable.
+        let si_int = info
+            .as_ref()
+            .filter(|i| result > 0 && i.si_code == libc::SI_QUEUE)
+            .map_or(0, |i| unsafe { i.si_value().sival_ptr as usize as i32 });
         self.event(Sys::RtSigtimedwait, result)
             .arg("timeout_ns", timeout_ns.map_or(Value::Null, Value::from))
             .arg("sigset_size", sigset_size)
             .field("si_signo", info.as_ref().map_or(0, |i| i.si_signo))
             .field("si_code", info.as_ref().map_or(0, |i| i.si_code))
+            .field("si_int", si_int)
             .emit();
         result
     }
@@ -2052,5 +2084,224 @@ impl Probe {
             .arg("flags", flags)
             .emit();
         result
+    }
+
+    // ---- signals, threads and process rows (the signals family) -------------
+
+    /// Announce that the probe's next act ends the process on `signal`
+    /// (`SIG_DFL` termination). The blessing accepts a signal death only when
+    /// this is the last recorded event, and the recorded `__termination` line
+    /// must then agree with the announcement on both sides.
+    pub fn dies_by(&self, signal: i32) {
+        self.rec
+            .event(crate::expect::EXPECT_DEATH_OP, 0)
+            .arg("signal", signal)
+            .emit();
+    }
+
+    /// `pause`: returns only when a handled signal was delivered (`-EINTR`).
+    pub fn pause(&self) -> i64 {
+        let result = self.call(Sys::Pause, [0; 6]);
+        self.event(Sys::Pause, result).emit();
+        result
+    }
+
+    pub fn socketpair(&self, domain: i32, kind: i32, protocol: i32) -> (i64, [i32; 2]) {
+        let mut fds = [-1i32; 2];
+        let result = self.call(
+            Sys::Socketpair,
+            [
+                domain as i64,
+                kind as i64,
+                protocol as i64,
+                fds.as_mut_ptr() as i64,
+                0,
+                0,
+            ],
+        );
+        let builder = self
+            .event(Sys::Socketpair, result)
+            .arg("domain", domain)
+            .arg("type", kind)
+            .arg("protocol", protocol);
+        let builder = if result >= 0 {
+            builder
+                .field("first", fds[0])
+                .norm("fields.first", Norm::Relative("fd"))
+                .field("second", fds[1])
+                .norm("fields.second", Norm::Relative("fd"))
+        } else {
+            builder
+        };
+        builder.emit();
+        (result, fds)
+    }
+
+    /// The raw `exit` row (one thread ends; the process lives while others
+    /// run). The event is recorded BEFORE the call, which never returns.
+    pub fn exit_thread(&self, code: i32) -> ! {
+        self.event(Sys::Exit, 0).arg("code", code).emit();
+        self.call(Sys::Exit, [code as i64, 0, 0, 0, 0, 0]);
+        unreachable!("exit returned")
+    }
+
+    /// `exit_group`: the whole process ends with `code`. Recorded before the
+    /// call, which never returns.
+    pub fn exit_group(&self, code: i32) -> ! {
+        self.event(Sys::ExitGroup, 0).arg("code", code).emit();
+        self.call(Sys::ExitGroup, [code as i64, 0, 0, 0, 0, 0]);
+        unreachable!("exit_group returned")
+    }
+
+    /// `nanosleep` recording whether an interrupted sleep reported a remaining
+    /// time inside `(0, request]` (the kernel fills `rem` on `EINTR`; a
+    /// completed sleep leaves it alone). Returns the result and `rem` in ns.
+    pub fn nanosleep_rem(&self, sec: i64, nsec: i64) -> (i64, i64) {
+        let req = libc::timespec {
+            tv_sec: sec,
+            tv_nsec: nsec,
+        };
+        let mut rem = libc::timespec {
+            tv_sec: -1,
+            tv_nsec: -1,
+        };
+        let result = self.call(
+            Sys::Nanosleep,
+            [
+                &req as *const libc::timespec as i64,
+                &mut rem as *mut libc::timespec as i64,
+                0,
+                0,
+                0,
+                0,
+            ],
+        );
+        let request_ns = sec * 1_000_000_000 + nsec;
+        let rem_ns = rem.tv_sec * 1_000_000_000 + rem.tv_nsec;
+        let builder = self
+            .event(Sys::Nanosleep, result)
+            .arg("sec", sec)
+            .arg("nsec", nsec);
+        let builder = if result == neg(libc::EINTR) {
+            builder.field("remain_in_range", rem_ns > 0 && rem_ns <= request_ns)
+        } else {
+            builder
+        };
+        builder.emit();
+        (result, rem_ns)
+    }
+
+    /// `clock_nanosleep` (relative unless `TIMER_ABSTIME`) with the same
+    /// remaining-time observation as [`Self::nanosleep_rem`]; for an absolute
+    /// sleep the kernel leaves `rem` untouched, recorded as `remain_untouched`.
+    pub fn clock_nanosleep_rem(&self, clock: i32, flags: i32, sec: i64, nsec: i64) -> (i64, i64) {
+        let req = libc::timespec {
+            tv_sec: sec,
+            tv_nsec: nsec,
+        };
+        let mut rem = libc::timespec {
+            tv_sec: -1,
+            tv_nsec: -1,
+        };
+        let result = self.call(
+            Sys::ClockNanosleep,
+            [
+                clock as i64,
+                flags as i64,
+                &req as *const libc::timespec as i64,
+                &mut rem as *mut libc::timespec as i64,
+                0,
+                0,
+            ],
+        );
+        let request_ns = sec * 1_000_000_000 + nsec;
+        let rem_ns = rem.tv_sec * 1_000_000_000 + rem.tv_nsec;
+        let absolute = flags & libc::TIMER_ABSTIME != 0;
+        let builder = self
+            .event(Sys::ClockNanosleep, result)
+            .arg("clock", clock)
+            .arg("flags", flags);
+        let builder = if absolute {
+            builder.arg("absolute", true)
+        } else {
+            builder.arg("sec", sec).arg("nsec", nsec)
+        };
+        let builder = if result == neg(libc::EINTR) {
+            if absolute {
+                builder.field("remain_untouched", rem.tv_sec == -1 && rem.tv_nsec == -1)
+            } else {
+                builder.field("remain_in_range", rem_ns > 0 && rem_ns <= request_ns)
+            }
+        } else {
+            builder
+        };
+        builder.emit();
+        (result, rem_ns)
+    }
+
+    /// Raw `rt_sigaction(signum, act, oldact, 8)` with the KERNEL struct
+    /// layout. Records which pointers were passed and, on success with an
+    /// `oldact`, the previous action's compared flags and whether it was
+    /// `SIG_DFL`/`SIG_IGN`/a handler (`old_kind`), never a code address.
+    pub fn rt_sigaction_install(
+        &self,
+        signum: i32,
+        act: Option<&KernelSigaction>,
+        old: Option<&mut KernelSigaction>,
+    ) -> i64 {
+        let old_ptr = old
+            .as_ref()
+            .map_or(0, |o| (*o as *const KernelSigaction).cast_mut() as i64);
+        let result = self.call(
+            Sys::RtSigaction,
+            [
+                signum as i64,
+                act.map_or(0, |a| a as *const KernelSigaction as i64),
+                old_ptr,
+                8,
+                0,
+                0,
+            ],
+        );
+        let builder = self
+            .event(Sys::RtSigaction, result)
+            .arg("signum", signum)
+            .arg("has_act", act.is_some())
+            .arg("has_oldact", old.is_some());
+        let builder = match (result, old) {
+            (0, Some(old)) => builder
+                .field(
+                    "old_kind",
+                    match old.handler {
+                        0 => "SIG_DFL",
+                        1 => "SIG_IGN",
+                        _ => "handler",
+                    },
+                )
+                .field("old_flags", old.flags & SA_FLAGS_COMPARED)
+                .field("old_has_restorer", old.flags & SA_RESTORER != 0 && old.restorer != 0),
+            _ => builder,
+        };
+        builder.emit();
+        result
+    }
+
+    /// Query an action raw (`act = NULL`), returning it for the probe's own
+    /// use (the restorer a raw install needs).
+    pub fn rt_sigaction_query(&self, signum: i32) -> (i64, KernelSigaction) {
+        let mut old = KernelSigaction::default();
+        let result = self.rt_sigaction_install(signum, None, Some(&mut old));
+        (result, old)
+    }
+
+    /// A probe-side observation with no kernel call behind it: an ordering
+    /// mark (`helper_kill` right before a helper thread signals the main
+    /// thread) or a fact a handler recorded. `fields` are recorded verbatim.
+    pub fn mark(&self, op: &str, fields: &[(&str, Value)]) {
+        let mut builder = self.rec.event(op, 0);
+        for (key, value) in fields {
+            builder = builder.field(key, value.clone());
+        }
+        builder.emit();
     }
 }

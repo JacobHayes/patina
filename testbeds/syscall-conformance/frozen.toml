@@ -1,0 +1,621 @@
+# The frozen oracle of a family whose runtime is built after its probes
+# (docs/arcs/syscall-conformance-signals.md §5). Per family:
+#   probes       the probe ids it owns;
+#   paths        the oracle itself — `gate.sh` requires these to carry no
+#                uncommitted change (version control is the tamper evidence: a
+#                builder never commits, the coordinator lands);
+#   declaration  the exact set the family's probes may carry in
+#                divergences.toml: `pending` entries a builder may only DELETE
+#                (all of them, for the gate to pass), and `by design:` aborts
+#                that stay;
+#   obligation   what the runtime must show that green probes cannot (a
+#                shallow model can satisfy behaviour-only probes): the unit
+#                tests that must exist and pass, and the facts the probes'
+#                RECORDED traces must show. Grouped in the spec's suggested
+#                order of work (§4, M1..M5); the gate holds all of them.
+
+[family.signals]
+probes = [
+  "proc/absent",
+  "proc/ids",
+  "proc/prctl",
+  "proc/traps",
+  "proc/wait",
+  "signal/altstack",
+  "signal/basic",
+  "signal/block",
+  "signal/core_term",
+  "signal/default",
+  "signal/default_term",
+  "signal/eintr",
+  "signal/mask",
+  "signal/nested",
+  "signal/one_wake",
+  "signal/per_thread",
+  "signal/pipe",
+  "signal/pipe_term",
+  "signal/queue",
+  "signal/raw_action",
+  "signal/resethand_term",
+  "signal/rt_order",
+  "signal/unmask",
+  "signal/wait",
+  "thread/futex",
+  "thread/kill",
+  "thread/lifecycle",
+  "thread/main_exit",
+  "thread/masks",
+  "thread/pthread_kill",
+  "thread/tid_clear",
+]
+paths = [
+  "testbeds/syscall-conformance/probes/signal",
+  "testbeds/syscall-conformance/probes/thread",
+  "testbeds/syscall-conformance/probes/proc",
+  "testbeds/syscall-conformance/probes/selftest",
+  "testbeds/syscall-conformance/expected/signal",
+  "testbeds/syscall-conformance/expected/thread",
+  "testbeds/syscall-conformance/expected/proc",
+  "testbeds/syscall-conformance/src",
+  "testbeds/syscall-conformance/run.sh",
+  "testbeds/syscall-conformance/gate.sh",
+  "testbeds/syscall-conformance/frozen.toml",
+  "testbeds/syscall-conformance/probes.toml",
+  "testbeds/syscall-conformance/Cargo.toml",
+  "testbeds/syscall-conformance/Cargo.lock",
+]
+
+[[family.signals.declaration]]
+probe = "proc/prctl"
+kind = "pending"
+reason = "pending: signals — M1: the prctl option table (PR_SET/GET_NAME, PDEATHSIG, DUMPABLE, NO_NEW_PRIVS, TIMERSLACK) with the kernel's validation and EINVAL for an unknown option, on both doors (c/posix/sched_identity.c prctl answers ENOSYS; sud/signal_process.rs sys_prctl traps everything but PR_GET_AUXV)"
+
+[[family.signals.declaration]]
+probe = "proc/wait"
+kind = "pending"
+reason = "pending: signals — M1: wait4/waitid answer the childless kernel's ECHILD (and EINVAL for bad waitid options) instead of trapping (c/posix/signal_process.c waitpid/waitid traps; registry rows wait4/waitid are Trap(process))"
+
+[[family.signals.declaration]]
+probe = "proc/absent"
+kind = "pending"
+reason = "pending: signals — M1: the fifteen removed x86_64 numbers (_sysctl, nfsservctl, vserver, security, tuxcall, afs_syscall, getpmsg, putpmsg, epoll_ctl_old, epoll_wait_old, lookup_dcookie, create_module, query_module, get_kernel_syms, uselib) answer ENOSYS (SoftDeny rows) instead of trapping"
+
+[[family.signals.declaration]]
+probe = "proc/ids"
+kind = "pending"
+reason = "pending: signals — M1: getpgid/getsid answer the virtual process group and session (1) and kill(0, 0)/kill(-1, 0)/tgkill(pid, pid, 0) probe the one process (sud/sched_identity.rs traps getpgid; c/posix/signal_process.c kill answers ESRCH for pid 0 and -1)"
+
+[[family.signals.declaration]]
+probe = "proc/traps"
+kind = "abort"
+seq = 0
+stderr = "SUD trapped unsupported syscall fork (nr 57, class process"
+reason = "by design: fork is a process-lifecycle trap (docs/arcs/syscall-conformance.md §7); the child oracle runs natively only"
+
+[[family.signals.declaration]]
+probe = "signal/basic"
+kind = "pending"
+reason = "pending: signals — M2: kill/tkill/tgkill to self generate a virtual signal delivered synchronously at syscall return through a kernel-built frame with the SI_USER/SI_TKILL sender fields, plus the kernel's EINVAL/ESRCH vocabulary (c/posix/signal_process.c kill answers ENOSYS; sud/signal_process.rs has no kill/tkill/tgkill rows)"
+
+[[family.signals.declaration]]
+probe = "signal/raw_action"
+kind = "pending"
+reason = "pending: signals — M2: the raw rt_sigaction door installs the guest's action (with its restorer) and writes oldact, sharing one disposition table with the libc door (sud/signal_process.rs sys_rt_sigaction ignores act and oldact)"
+
+[[family.signals.declaration]]
+probe = "signal/queue"
+kind = "pending"
+reason = "pending: signals — M2: rt_sigqueueinfo/rt_tgsigqueueinfo queue realtime instances FIFO with their payloads, the thread-private queue dequeues before the shared one, standard signals coalesce, a nonnegative si_code to the own thread group is accepted, ESRCH/EINVAL as the kernel (no rows in sud/signal_process.rs)"
+
+[[family.signals.declaration]]
+probe = "signal/rt_order"
+kind = "pending"
+reason = "pending: signals — M2: rt_sigtimedwait dequeues the lowest-numbered pending signal first (standard before realtime) and FIFO within a number (no rt_sigtimedwait row)"
+
+[[family.signals.declaration]]
+probe = "signal/unmask"
+kind = "pending"
+reason = "pending: signals — M2: rt_sigprocmask/rt_sigpending are per-task virtual state, a pending signal is delivered on the unblocking syscall before it returns (SI_USER and SI_TKILL), and several signals unblocked together are delivered through one host unblock so their frames stack as the kernel's do (sud/signal_process.rs rt_sigprocmask is a no-op without oldset; no rt_sigpending row)"
+
+[[family.signals.declaration]]
+probe = "signal/altstack"
+kind = "pending"
+reason = "pending: signals — M2: sigaltstack is per-task virtual state forwarded to the host (old_ss written, ENOMEM/EINVAL/EPERM vocabulary), and SA_ONSTACK delivery of a virtual signal lands on it (sud/signal_process.rs sigaltstack is a no-op without old_ss; kill delivers nothing)"
+
+[[family.signals.declaration]]
+probe = "signal/per_thread"
+kind = "pending"
+reason = "pending: signals — M2: the mask, the private pending set and the altstack are per TASK and a spawned task inherits its creator's mask, so a worker's block does not stop the main task's own kill(self) from being handled, its thread-directed pending signal is invisible to the main task's rt_sigpending, and its unmask delivers on the worker (no per-task signal state exists; kill answers ENOSYS / traps)"
+
+[[family.signals.declaration]]
+probe = "signal/nested"
+kind = "pending"
+reason = "pending: signals — M2: the handler's frame mask defers a same-signal raise until the handler returns and SA_NODEFER permits nesting, through kernel-built frames (kill answers ENOSYS on the libc door and traps on the raw door)"
+
+[[family.signals.declaration]]
+probe = "signal/nested"
+kind = "abort"
+seq = 6
+stderr = "patina: process spawn reached under patina: fork; the process class is a deterministic-runtime non-goal; failing closed"
+reason = "by design: fork is a process-lifecycle trap (docs/arcs/syscall-conformance.md §7); the child oracle runs natively only"
+
+[[family.signals.declaration]]
+probe = "signal/mask"
+kind = "pending"
+reason = "pending: signals — M3: rt_sigtimedwait with a timeout parks on the virtual clock (EAGAIN after it elapses); rt_sigsuspend installs its mask atomically, parks until a handled signal is delivered, returns EINTR and restores the mask (no rows; kill answers ENOSYS)"
+
+[[family.signals.declaration]]
+probe = "signal/eintr"
+kind = "pending"
+reason = "pending: signals — M3: generation against a task parked in a modeled blocking call wakes it interrupted and the per-call restart rule applies: read restarts under SA_RESTART else EINTR; nanosleep/clock_nanosleep always EINTR with remain from the virtual clock; epoll_wait always EINTR; FUTEX_WAIT restarts under SA_RESTART without a timeout, EINTR with one (the reader parks forever: patina native shim fatal: deadlock)"
+
+[[family.signals.declaration]]
+probe = "signal/wait"
+kind = "pending"
+reason = "pending: signals — M3: signalfd/signalfd4 as a virtual fd kind readable exactly while a matching signal is pending (epoll readiness), a handled unblocked signal never reaches it, and rt_sigtimedwait/rt_sigqueueinfo answer from virtual state (sud/signal_process.rs has no signalfd rows)"
+
+[[family.signals.declaration]]
+probe = "signal/block"
+kind = "pending"
+reason = "pending: signals — M3: pause, rt_sigtimedwait without a timeout and a blocking signalfd read park on the scheduler until a matching (or handled) signal is generated, never returning early (c/posix/signal_process.c pause answers ENOSYS; the raw rows trap)"
+
+[[family.signals.declaration]]
+probe = "signal/one_wake"
+kind = "pending"
+reason = "pending: signals — M3: a process-directed signal interrupts exactly one task — the main task when it does not block it, else the lowest task that does not — unlinking only that task's wait; a task parked in a read that blocks the signal is neither failed EINTR nor woken (no generation or interruption exists: the reader parks forever)"
+
+[[family.signals.declaration]]
+probe = "thread/futex"
+kind = "pending"
+reason = "pending: signals — M3: a timed FUTEX_WAIT nobody wakes returns ETIMEDOUT after the virtual timeout elapses instead of EAGAIN immediately on a single-task run (lib.rs patina_futex_wait_timed)"
+
+[[family.signals.declaration]]
+probe = "signal/default_term"
+kind = "pending"
+reason = "pending: signals — M4: a SIG_DFL terminating signal to self ends the guest by that signal after trace finalization, and the supervisor's envelope reports guest_exit {signal, core} (kill answers ENOSYS / traps; guest_exit has no core field)"
+
+[[family.signals.declaration]]
+probe = "signal/core_term"
+kind = "pending"
+reason = "pending: signals — M4: a SIG_DFL core signal to self ends the guest by that signal with the host's core flag reported in guest_exit.core (kill answers ENOSYS / traps; cargo-patina reports no core flag)"
+
+[[family.signals.declaration]]
+probe = "signal/pipe_term"
+kind = "pending"
+reason = "pending: signals — M4: a write to a reader-less pipe or a send to a closed socketpair peer generates SIGPIPE to the writing task before EPIPE (handler runs first; MSG_NOSIGNAL suppresses it; SIG_IGN leaves a bare EPIPE; SIG_DFL ends the guest by SIGPIPE) — lib.rs pipe_write returns EPIPE without any generation"
+
+[[family.signals.declaration]]
+probe = "signal/resethand_term"
+kind = "pending"
+reason = "pending: signals — M4: SA_RESETHAND restores SIG_DFL before the handler runs and the second signal ends the guest by SIGUSR2 (kill answers ENOSYS / traps)"
+
+[[family.signals.declaration]]
+probe = "signal/default"
+kind = "abort"
+seq = 1
+stderr = "patina: process spawn reached under patina: fork; the process class is a deterministic-runtime non-goal; failing closed"
+reason = "by design: fork is a process-lifecycle trap (docs/arcs/syscall-conformance.md §7); the child oracle runs natively only"
+
+[[family.signals.declaration]]
+probe = "signal/pipe"
+kind = "abort"
+seq = 0
+stderr = "patina: process spawn reached under patina: fork; the process class is a deterministic-runtime non-goal; failing closed"
+reason = "by design: fork is a process-lifecycle trap (docs/arcs/syscall-conformance.md §7); the child oracle runs natively only"
+
+[[family.signals.declaration]]
+probe = "thread/kill"
+kind = "pending"
+reason = "pending: signals — M5: tgkill/tkill deliver to the named managed task (the handler runs on that task's host thread, recorded through gettid), ESRCH for a dead or foreign tid, EINVAL for tid <= 0 (no rows in sud/signal_process.rs)"
+
+[[family.signals.declaration]]
+probe = "thread/masks"
+kind = "pending"
+reason = "pending: signals — M5: the signal mask and pending set are per task: a process-directed signal goes to a task not blocking it, a thread-directed one stays pending for its task alone and is delivered on that task's unmask"
+
+[[family.signals.declaration]]
+probe = "thread/pthread_kill"
+kind = "pending"
+reason = "pending: signals — M5: the pthread_kill wrapper is interposed (registry/symbols.rs marks it Absent, so the audit refuses the binary) and routes to the tgkill model"
+
+[[family.signals.declaration]]
+probe = "thread/tid_clear"
+kind = "pending"
+reason = "pending: signals — M5: set_tid_address is per task (returns the managed tid) and the word is cleared and futex-woken when the task exits (sud/sched_identity.rs traps set_tid_address; thread_finish clears nothing)"
+
+[[family.signals.declaration]]
+probe = "thread/main_exit"
+kind = "pending"
+reason = "pending: signals — M5: a raw exit from the main task ends only that task and the process lives until the worker's exit_group (sud/mod.rs routes exit to patina_exit, ending the whole process)"
+
+[[family.signals.declaration]]
+probe = "thread/lifecycle"
+kind = "pending"
+reason = "pending: signals — M5: set_tid_address returns the calling task's tid on both doors (sud/sched_identity.rs traps it)"
+
+[[family.signals.declaration]]
+probe = "thread/lifecycle"
+kind = "abort"
+seq = 3
+stderr = "patina: process spawn reached under patina: fork; the process class is a deterministic-runtime non-goal; failing closed"
+reason = "by design: fork is a process-lifecycle trap (docs/arcs/syscall-conformance.md §7); the child oracle runs natively only"
+
+# ---- spec §4, M1 ----
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "sud::signal_process::tests::prctl_no_new_privs_accepts_only_one_with_zero_tail"
+asserts = "PR_SET_NO_NEW_PRIVS answers 0 only for (1, 0, 0, 0): 0 is EINVAL, a nonzero trailing argument is EINVAL, and once set PR_GET reads 1 and setting 0 is still EINVAL — through the one entry both doors call."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "sud::signal_process::tests::prctl_dumpable_refuses_two"
+asserts = "PR_SET_DUMPABLE accepts 0 and 1 and refuses 2 (and every other value) with EINVAL; PR_GET_DUMPABLE starts at 1 and reads back what was set."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "sud::signal_process::tests::prctl_pdeathsig_range"
+asserts = "PR_SET_PDEATHSIG accepts 0..=64 (0 clears) and refuses 65 with EINVAL; PR_GET_PDEATHSIG writes the stored value and is EFAULT for a null pointer."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "sud::signal_process::tests::prctl_timerslack_zero_restores_default"
+asserts = "PR_GET_TIMERSLACK starts at 50000; a set value reads back; PR_SET_TIMERSLACK 0 restores 50000."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "sud::signal_process::tests::wait_rows_answer_echild_and_einval"
+asserts = "wait4 and waitid answer ECHILD for a childless process (with and without WNOHANG) and waitid answers EINVAL for unknown option bits or none of WEXITED|WSTOPPED|WCONTINUED."
+
+# ---- spec §4, M2 ----
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-abi"
+test = "signal_generated_round_trips_and_mismatches"
+asserts = "Operation::SignalGenerated serializes with the tag `signal_generated` and its seq/sig/target/code/value fields, deserializes to an equal value, and two ops differing in seq, sig or target compare unequal (so replay reconciliation mismatches)."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-trace"
+test = "format_8_migrates_to_9"
+asserts = "TRACE_FORMAT_VERSION is 9; a committed format-8 fixture decodes through the MIGRATIONS chain to an equal bundle at version 9, and a format-9 trace carrying signal_generated round-trips."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "signal_state_is_per_task"
+asserts = "With two tasks in one ThreadRuntime, blocking a signal on task A leaves task B's mask unchanged, a thread-directed instance queued to A is absent from B's pending set, and each task's altstack is its own."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "mask_is_inherited_at_spawn"
+asserts = "A task spawned while its creator blocks a signal starts with that signal blocked in its virtual mask and with no private pending signals and no altstack."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "same_task_kill_delivers_at_syscall_return"
+asserts = "A process-directed generation by the running task with the signal unblocked records SignalGenerated, enqueues, wakes nobody, and the delivery point at that call's return dequeues it for the handler — generation itself invokes no handler and issues no host signal."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "unmask_delivers_pending_before_return"
+asserts = "A signal generated while blocked stays pending (no delivery at the generating call's return); the rt_sigprocmask that unblocks it reaches a delivery point that dequeues it before that call returns, for both SIG_UNBLOCK and SIG_SETMASK."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "stacked_delivery_releases_frames_with_one_host_unblock"
+asserts = "When several signals become deliverable at one delivery point they are all queued on the host while blocked and released by ONE host mask change, in dequeue order (lowest first), never one host signal per instance with a handler run in between."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "raw_rt_sigaction_installs_and_reports_oldact"
+asserts = "The raw rt_sigaction entry stores handler, flags, mask and restorer in the one action table the libc door reads, writes the previous action (SA_RESTORER and restorer included) to oldact, and flushes pending instances when SIG_IGN is installed."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "sigaltstack_is_per_task_and_forwarded"
+asserts = "sigaltstack stores the stack per task, writes old_ss from that task's state, answers ENOMEM/EINVAL/EPERM as the kernel, and forwards the accepted stack to the host for the calling host thread."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "dequeue_private_before_shared_lowest_first_fifo"
+asserts = "Dequeue takes the task's private pending set before the shared one, the lowest signal number within a set, FIFO within one realtime number with payloads intact, and coalesces a standard signal already pending."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "generation_never_takes_the_runtime_lock_twice"
+asserts = "Generation reached from a path that holds the ThreadRuntime lock (the broken-pipe arm of pipe_write) trips the lock-order assertion; every shipped generation path runs with the lock released."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "reserved_signals_are_stripped_from_every_host_mask"
+asserts = "Every mask the shim installs on the host — at delivery, at spawn, from rt_sigprocmask/rt_sigsuspend on both doors — has SIGSYS (and SIGSEGV while the TSC trap is armed) removed, and a guest registration for them is the named fatal on both doors."
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "signal/basic"
+format_version_min = 9
+signal_generated = ["10:p", "10:t", "10:t"]
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "signal/raw_action"
+format_version_min = 9
+signal_generated = ["10:p", "10:p"]
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "signal/queue"
+format_version_min = 9
+signal_generated = ["34:p", "34:p", "34:t", "10:p", "10:p", "34:p", "34:t"]
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "signal/rt_order"
+format_version_min = 9
+signal_generated = ["12:p", "10:p", "34:p", "34:p", "35:p", "34:p", "34:p", "12:p", "10:p"]
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "signal/unmask"
+format_version_min = 9
+signal_generated = ["10:p", "10:t", "12:p", "10:p"]
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "signal/altstack"
+format_version_min = 9
+signal_generated = ["10:p"]
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "signal/per_thread"
+format_version_min = 9
+signal_generated = ["10:p", "10:t"]
+
+# ---- spec §4, M3 ----
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "process_directed_signal_picks_the_leader_when_unblocked_else_lowest_unblocked"
+asserts = "For a process-directed generation the chosen task is the main task when it does not block the signal, else the lowest TaskId that does not, else nobody (it stays shared-pending) — independent of which task generated it."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "generation_wakes_only_the_chosen_parked_task"
+asserts = "With two tasks parked in registered waits, a generation records at most one TaskWake — for the chosen task — and leaves the other parked and on its waiter list."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "interrupted_waiter_is_unlinked_before_wake"
+asserts = "The chosen task is removed from its primitive's waiter list (pipe, futex, readiness, sleep timer) before it is woken, so a later data wake neither finds nor double-wakes it."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "sa_restart_restarts_pipe_read"
+asserts = "A pipe read resumed as Step::Interrupted by a handler installed with SA_RESTART re-enters the wait and returns the byte written later."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "no_sa_restart_pipe_read_is_eintr"
+asserts = "The same read without SA_RESTART returns EINTR after the handler's delivery point."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "nanosleep_interrupted_reports_remaining_and_never_restarts"
+asserts = "An interrupted sleep returns EINTR even under SA_RESTART with remaining = deadline - virtual now, 0 < remaining <= request, on both doors' out-pointers."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "absolute_clock_nanosleep_leaves_rem_untouched"
+asserts = "An interrupted TIMER_ABSTIME clock_nanosleep returns EINTR and does not write rem."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "epoll_wait_is_eintr_even_with_sa_restart"
+asserts = "A readiness wait resumed as interrupted returns EINTR regardless of SA_RESTART and leaves no readiness waiter registered."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "timed_futex_wait_is_eintr_under_a_handler"
+asserts = "A FUTEX_WAIT with a timeout interrupted by a handler is EINTR regardless of SA_RESTART; without a timeout it restarts under SA_RESTART and is EINTR otherwise."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "sigsuspend_parks_until_an_unblocked_signal"
+asserts = "rt_sigsuspend installs its mask and parks; a signal the temporary mask blocks only becomes pending; one it does not wakes the task, which returns EINTR with the previous mask restored; pause and a NULL-timeout rt_sigtimedwait park the same way."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "signalfd_readable_iff_matching_pending"
+asserts = "A signalfd's readiness is true exactly while a signal in its mask is pending for the reader; a read dequeues without running a handler; a blocking read parks until generation."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-runtime"
+test = "signal_wake_records_task_wake_before_scheduler_next"
+asserts = "Record then replay of task_park, task_wake, scheduler_next consumes the three ops in that order."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-runtime"
+test = "early_signal_wake_deregisters_timed_sleep"
+asserts = "Waking a task parked with a deadline before it fires deregisters the timer: the deadlock rescue does not wake it again."
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "signal/mask"
+format_version_min = 9
+signal_generated = ["12:p", "12:p", "12:p", "10:p"]
+max_wakes_per_generation = 1
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "signal/eintr"
+format_version_min = 9
+signal_generated = ["10:p", "10:p", "10:p", "10:p", "10:p", "10:p", "10:p", "10:p", "10:p"]
+max_wakes_per_generation = 1
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "signal/wait"
+format_version_min = 9
+signal_generated = ["34:p", "34:p", "12:p", "34:p"]
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "signal/block"
+format_version_min = 9
+signal_generated = ["10:p", "12:p", "10:p", "12:p"]
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "signal/one_wake"
+format_version_min = 9
+signal_generated = ["10:p", "10:p"]
+max_wakes_per_generation = 1
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "thread/futex"
+format_version_min = 9
+signal_generated = []
+
+# ---- spec §4, M4 ----
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "cargo-patina"
+test = "guest_exit_reports_the_core_flag"
+asserts = "The patina.result/v1 envelope's guest_exit carries core: true|false taken from the child's wait status (ExitStatusExt::core_dumped) whenever signal is present, and no core key for a normal exit."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "cargo-patina"
+test = "default_terminate_finalizes_then_dies_by_the_signal"
+asserts = "End to end: a guest that sends itself a SIG_DFL SIGTERM under `run --record` leaves a COMPLETE trace, the child's wait status is signaled 15 (not an exit code), and replay reproduces the same death."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "broken_pipe_generates_sigpipe_before_epipe"
+asserts = "A write to a reader-less pipe records a thread-directed SignalGenerated for SIGPIPE with the runtime lock released, then answers EPIPE; with SIG_IGN the generation is recorded and dropped."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "msg_nosignal_suppresses_sigpipe"
+asserts = "A socketpair send to a closed peer with MSG_NOSIGNAL answers EPIPE and records no generation; without the flag it records one."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "sigstop_to_self_is_a_named_trap"
+asserts = "A default-action Stop-class signal reaching delivery is the named fatal trap; SIGTSTP/SIGTTIN/SIGTTOU with a handler run the handler."
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "signal/default_term"
+format_version_min = 9
+signal_generated = ["15:p"]
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "signal/core_term"
+format_version_min = 9
+signal_generated = ["6:p"]
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "signal/resethand_term"
+format_version_min = 9
+signal_generated = ["12:p", "12:p"]
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "signal/pipe_term"
+format_version_min = 9
+signal_generated = ["13:t", "13:t", "13:t", "13:t"]
+
+# ---- spec §4, M5 ----
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "thread_directed_signal_targets_only_that_task"
+asserts = "tgkill/tkill queue to the named task's private set, choose that task alone for the wake, and deliver at ITS next delivery point; the generating task neither runs the handler nor is marked interrupted."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "pending_for_a_blocking_task_is_invisible_to_another_tasks_sigpending"
+asserts = "A thread-directed signal pending for a task that blocks it is absent from every other task's rt_sigpending and is delivered when that task unblocks."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "set_tid_address_is_cleared_and_woken_at_thread_finish"
+asserts = "set_tid_address returns the managed tid and records the word per task; thread_finish writes 0 to it and futex-wakes its waiters."
+
+[[family.signals.obligation]]
+kind = "unit-test"
+crate = "patina-dst-native-shim"
+test = "raw_exit_from_main_keeps_the_process_alive"
+asserts = "A raw exit from the main task completes that task only; the process ends with the status of a later exit_group from another task, and a raw exit_group runs no atexit handlers."
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "thread/kill"
+format_version_min = 9
+signal_generated = ["10:t", "10:t", "10:t"]
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "thread/masks"
+format_version_min = 9
+signal_generated = ["10:p", "10:t"]
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "thread/pthread_kill"
+format_version_min = 9
+signal_generated = ["10:t", "10:t"]
+vehicles = ["libc"]
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "thread/tid_clear"
+format_version_min = 9
+signal_generated = []
+
+[[family.signals.obligation]]
+kind = "trace"
+probe = "thread/main_exit"
+format_version_min = 9
+signal_generated = []

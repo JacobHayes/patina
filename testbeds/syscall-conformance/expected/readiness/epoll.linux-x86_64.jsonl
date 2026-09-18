@@ -128,3 +128,4 @@
 {"seq":126,"op":"close","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
 {"seq":127,"op":"epoll_wait","args":{"epfd":"fd@127","maxevents":8,"timeout_ms":0},"ret":-1,"errno":"EBADF","fields":{},"norm":{"args.epfd":"relative:fd"}}
 {"seq":128,"op":"check","args":{"label":"epoll_wait on the closed epoll descriptor is EBADF"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":129,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

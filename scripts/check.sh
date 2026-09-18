@@ -156,6 +156,7 @@ run_full() {
   run_rung 'crate packaging' cargo package --workspace --no-verify --locked --allow-dirty || return $?
   run_rung 'workq classifier selftest' testbeds/workq/fuzz-sweep.sh --selftest || return $?
   run_rung 'campaign classifier selftest' cargo run -q -p cargo-patina -- patina campaign --selftest || return $?
+  run_rung 'conformance gate selftest' testbeds/syscall-conformance/gate.sh --selftest || return $?
 
   # The stable and MSRV outer Cargo caches are separate, and cargo-patina keys
   # every nested shim cache by complete compiler identity. Native validation uses
@@ -177,7 +178,9 @@ run_full() {
   start_rung 'cross-target smoke' scripts/smoke-cross-target.sh
   # The syscall-conformance testbed's full tier: every probe through all three
   # vehicles natively (host oracle) and under patina, plus record/replay identity
-  # and the strace leak leg. Linux-only; loud counted skip elsewhere.
+  # and the strace leak leg. Linux-only; loud counted skip elsewhere. (A frozen
+  # family's own gate, `gate.sh --family <f>`, is its builder's done-line; it
+  # joins this ladder in the change that makes it pass.)
   start_rung 'syscall conformance' testbeds/syscall-conformance/run.sh
   wait_rungs || return $?
 
@@ -190,6 +193,9 @@ run_fast() {
   run_rung 'format' cargo fmt --all -- --check || return $?
   run_rung 'host clippy' cargo clippy --workspace --all-targets --locked -- -D warnings || return $?
   run_rung 'Linux-cfg clippy' cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu -- -D warnings || return $?
+  # The frozen-oracle gate's own selftest (each mechanism can refuse); cheap, so
+  # it sits in the inner loop.
+  run_rung 'conformance gate selftest' testbeds/syscall-conformance/gate.sh --selftest || return $?
   start_rung 'workspace tests (fast exclusions)' cargo test --workspace --locked -- \
     --skip native_two_axis_stateful_shrink_then_schedule_minimize \
     --skip minimize_canonicalizes_a_recorded_schedule_via_replay_oracle \

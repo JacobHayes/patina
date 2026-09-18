@@ -9,3 +9,4 @@
 {"seq":7,"op":"check","args":{"label":"execve missing path is ENOENT"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":8,"op":"execveat","args":{},"ret":-1,"errno":"ENOENT","fields":{},"norm":{}}
 {"seq":9,"op":"check","args":{"label":"execveat missing path is ENOENT"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":10,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}
