@@ -32,6 +32,8 @@ jobs:
         # split-stack wrap symbols exist only on x86; the dev VM is aarch64).
         runner: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
+    env:
+      PATINA_REQUIRE_SUD: ${{ matrix.runner == 'ubuntu-latest' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v7
       - if: matrix.toolchain == 'stable'
@@ -58,7 +60,7 @@ jobs:
           cache-directories: |
             ~/.cache/patina
       # strace is the Linux whole-run syscall-containment class detector invoked
-      # by validate-native-shim.sh. Install it and require it (PATINA_REQUIRE_STRACE=1
+      # by cargo-patina's native_trace test. Install it and require it (PATINA_REQUIRE_STRACE=1
       # below) so a runner image without strace hard-fails instead of silently
       # dropping the containment gate.
       - if: runner.os == 'Linux'
@@ -73,8 +75,12 @@ jobs:
       # caches are compiler-identity keyed.
       - if: matrix.toolchain == 'stable'
         run: cargo test --workspace --locked
+        env:
+          PATINA_REQUIRE_STRACE: '1'
       - if: matrix.toolchain == 'msrv'
         run: scripts/check.sh msrv
+        env:
+          PATINA_REQUIRE_STRACE: '1'
       - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
         run: cargo doc --workspace --no-deps --locked
       # Flag drift gate: every --flag mentioned in the docs OR in any shell script
@@ -83,9 +89,7 @@ jobs:
       - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
         run: scripts/check-flag-drift.sh
       - run: scripts/validate-wasi.sh
-      - run: scripts/validate-native-shim.sh
-        env:
-          PATINA_REQUIRE_STRACE: ${{ runner.os == 'Linux' && '1' || '0' }}
+      - run: scripts/check-native-testbeds.sh
       - run: scripts/smoke-cross-target.sh
       # Fast, build-free classifier selftests (pure functions over canned tuples;
       # ~1.4s + ~0.5s locally). The fuzz-sweep bash classifier is NOT otherwise
@@ -118,7 +122,15 @@ jobs:
       # skips it by cfg (counted) and its expectations are recorded separately
       # (`run.sh --bless` on an aarch64 host; unblessed platforms skip loudly).
       - if: matrix.toolchain == 'stable' && runner.os == 'Linux'
-        run: testbeds/syscall-conformance/run.sh
+        run: |
+          testbeds/syscall-conformance/run.sh --selftest
+          testbeds/syscall-conformance/run.sh
+        env:
+          PATINA_REQUIRE_STRACE: '1'
+      # Raw eventfd/epoll semantics run on MSRV as well as stable.
+      # Expectations currently exist only for Linux x86_64.
+      - if: matrix.toolchain == 'msrv' && matrix.runner == 'ubuntu-latest'
+        run: testbeds/syscall-conformance/run.sh --probe readiness/epoll --vehicle raw
         env:
           PATINA_REQUIRE_STRACE: '1'
       # The ecosystem symbol-audit corpus: 20 per-crate MREs built + audited,
@@ -150,12 +162,10 @@ jobs:
             ~/Library/Caches/patina
       - run: cargo test --workspace --locked
       - run: scripts/validate-wasi.sh
-      # macOS has no sound whole-run syscall tracing gate; the native script
-      # still exercises the static instruction scan, import audit, and runtime
-      # behavior. Linux's required strace detector runs in `platform` above.
-      - run: scripts/validate-native-shim.sh
-        env:
-          PATINA_REQUIRE_STRACE: "0"
+      # native_abi/native_containment/native_workloads ran in workspace tests,
+      # including kqueue and Darwin locks/clocks. native_trace refuses a demanded
+      # ktrace guarantee; Linux's required strace detector runs in platform.
+      - run: scripts/check-native-testbeds.sh
       - run: scripts/smoke-cross-target.sh
       - run: testbeds/workq/run-patina.sh
       - run: testbeds/pubsub/run-patina.sh
@@ -179,7 +189,7 @@ jobs:
         run: |
           # Testbeds are standalone workspaces (publish=false) with their own
           # lockfiles. Every one is strict — no advisory is ignored anywhere.
-          for tb in buggify-wasi liveness-campaign pubsub syscall-conformance workq; do
+          for tb in buggify-wasi liveness-campaign pubsub syscall-conformance workq native-boundary/rand-rng native-boundary/tokio native-boundary/raw; do
             echo "== audit testbeds/$tb =="
             cargo audit --file "testbeds/$tb/Cargo.lock"
           done

@@ -12,9 +12,8 @@
 //! object files (isolated from the ~1000 std/dependency members bundled into the
 //! staticlib) and fails on any undefined external that the native import audit
 //! would deny as a classified escape, given the shim's declared control-plane
-//! allowance. It is the automated, in-suite half of the
-//! `scripts/validate-native-shim.sh` "host-alias" section; the classifier it
-//! calls (`patina_dst_target::shim_host_alias_violation`) is the exact predicate the
+//! allowance. The classifier (`patina_dst_target::shim_host_alias_violation`)
+//! is the exact predicate the
 //! guest-binary audit uses, so the shim is held to the standard it enforces.
 //!
 //! Red→green: on the pre-doctrine shim (which named `semaphore_wait`,

@@ -135,7 +135,7 @@ cmp "$tmp/wasi-seed-1" "$tmp/wasi-replay"
 # --- Native target: the same source built and driven by the packaged target ---
 "$runner" build "$tmp/smoke.rs" --output "$tmp/smoke-native" >/dev/null
 # Shim control-plane symbols are --allow'ed per binary rather than statically
-# allowlisted (see validate-native-shim.sh for the full rationale). Post
+# allowlisted (see testbeds/native-boundary/README.md for the native test map). Post
 # host-alias doctrine the control plane is a single symbol on both platforms: the
 # shim's dlsym resolution primitive. Every former named vehicle (suspended-thread
 # create, Mach/POSIX semaphores, $NOCANCEL/__ I/O, and — on Linux —

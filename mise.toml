@@ -32,7 +32,7 @@ description = "Full local pre-landing validation (audit-corpus and full MSRV sui
 run = "scripts/check.sh full"
 
 # Inner-loop tier: fmt, both clippy passes, all workspace tests except the
-# cargo-patina end_to_end integration binary, fast conformance, cheap selftests,
+# cargo-patina end_to_end and native execution targets, fast conformance, cheap selftests,
 # flag drift, MSRV cargo check, WASI validation, and cross-target smoke.
 [tasks."check:fast"]
 description = "Fast iteration tier of `check`; not sufficient for landing"
@@ -42,11 +42,16 @@ run = "scripts/check.sh fast"
 description = "Run the full Rust 1.86 suite (CI/final-gate tier)"
 run = "scripts/check.sh msrv"
 
+[tasks."check:native-abi"]
+description = "Targetable native ABI feedback, without the full landing battery"
+run = "cargo test -p cargo-patina --test native_abi --locked"
+
 [tasks.smoke]
-description = "Run core Patina validation scripts"
+description = "Run core Patina native, WASI, and cross-target checks"
 run = [
   "scripts/validate-wasi.sh",
-  "scripts/validate-native-shim.sh",
+  "cargo test -p cargo-patina --test native_abi --test native_containment --test native_raw --test native_trace --test native_workloads --test shim_host_alias --locked",
+  "scripts/check-native-testbeds.sh",
   "scripts/smoke-cross-target.sh",
 ]
 

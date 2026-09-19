@@ -659,7 +659,7 @@ struct StdioCapture {
 // host use is invisible to the symbol namespace while a guest naming the same
 // public symbol still binds to the interposer (its own image) or is denied by
 // the audit. The only escape-surface symbol the shim objects still name is
-// `dlsym` itself; the `scripts/validate-native-shim.sh` "host-alias" section
+// `dlsym` itself; the `cargo-patina/tests/shim_host_alias.rs` scan
 // enforces that by scanning the shim's own objects (red→green: it fails on the
 // pre-doctrine shim that named `semaphore_wait`, `pthread_create_suspended_np`,
 // `read$NOCANCEL`, ... and passes once they route through here).
@@ -884,7 +884,7 @@ mod hostapi {
     // `-Wl,--wrap=dlsym`, the single wrap the shim needs (thread creation is a
     // strong-def interposer whose real vehicle this same table resolves, so it
     // needs no wrap of its own); `cargo patina native-build` always links it, and
-    // the direct-`cc` validate-native-shim.sh probes pass it explicitly.
+    // the direct-`cc` native_abi probes pass it explicitly.
     unsafe extern "C" {
         fn __real_dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     }
@@ -12699,7 +12699,7 @@ mod thread {
         }
 
         // Pure pipe-channel semantics (the scheduler-integrated parking is covered
-        // end-to-end by the pipe/socketpair legs in validate-native-shim.sh):
+        // end-to-end by the pipe/socketpair tests in cargo-patina/tests/native_abi.rs):
         // bounded capacity, partial reads/writes, and EOF only after drain.
         #[test]
         fn pipe_channel_transfers_bytes_with_bounded_capacity_and_eof() {

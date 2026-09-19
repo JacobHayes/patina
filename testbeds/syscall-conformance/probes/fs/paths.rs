@@ -326,6 +326,49 @@ mod scenario {
         p.check("getcwd recovers", r == 0 && cwd == root);
 
         p.close(file_fd);
+
+        // Creation permissions are enforced on the NEXT open, not merely
+        // reported by stat (native_raw::creation_modes_are_enforced_on_later_open pairs the
+        // modern spelling with x86's legacy open/creat/mkdir aliases).
+        let fd = p.openat(AT_FDCWD, "strict", O_WRONLY | O_CREAT, 0o400);
+        p.require("create strict file", fd >= 0);
+        let (rc, st) = p.fstat(fd);
+        p.check(
+            "requested 0400 is stored",
+            rc == 0 && st.is_some_and(|s| s.perm == 0o400),
+        );
+        p.close(fd);
+        p.check(
+            "0400 refuses a later write-open",
+            i64::from(p.openat(AT_FDCWD, "strict", O_WRONLY, 0)) == neg(EACCES),
+        );
+        p.check("mkdir 0500", p.mkdirat(AT_FDCWD, "locked", 0o500) == 0);
+        p.check(
+            "0500 directory refuses a new name",
+            i64::from(p.openat(AT_FDCWD, "locked/nope", O_WRONLY | O_CREAT, 0o600)) == neg(EACCES),
+        );
+
+        // A FIFO's descriptor uses the pipe channel while its metadata stays
+        // filesystem-backed. No blocking host rendezvous is needed here.
+        let rd = p.openat(AT_FDCWD, "maskfifo", O_RDONLY | O_NONBLOCK, 0);
+        p.require("FIFO read-open without a writer", rd >= 0);
+        let (rc, st) = p.fstat(rd);
+        p.check(
+            "FIFO fd reports FIFO",
+            rc == 0 && st.is_some_and(|s| s.kind == "fifo" && s.perm == 0o600),
+        );
+        let wr = p.openat(AT_FDCWD, "maskfifo", O_WRONLY, 0);
+        p.require("FIFO write-open with reader", wr >= 0);
+        p.check("FIFO transfer write", p.write(wr, b"raw-fifo") == 8);
+        let (n, bytes) = p.read(rd, 16);
+        p.check("FIFO transfer read", n == 8 && bytes == b"raw-fifo");
+        p.check("close FIFO writer", p.close(wr) == 0);
+        p.check("FIFO EOF after last writer", p.read(rd, 1).0 == 0);
+        p.close(rd);
+        p.check(
+            "FIFO writer without reader is ENXIO",
+            i64::from(p.openat(AT_FDCWD, "maskfifo", O_WRONLY | O_NONBLOCK, 0)) == neg(ENXIO),
+        );
     }
 }
 

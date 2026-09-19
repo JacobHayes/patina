@@ -300,8 +300,9 @@ ARCHITECTURE.md "Native (linked shim)" and `crates/cargo-patina/build.rs`).
   the guest whenever this crate (or the runtime beneath it) is rebuilt. A guest
   still showing the old behavior after a rebuilt `cargo-patina` is a real
   result, not a stale build.
-- Run targeted shim tests and `scripts/validate-native-shim.sh` for any native
-  interposition change. If the change can affect WASI or cross-target behavior,
+- Run targeted shim tests and `mise run check:native-abi` for first feedback on a
+  native interposition change; run `mise run check` for the full native typed
+  targets, ecosystem testbeds and landing evidence. If the change can affect WASI or cross-target behavior,
   also run `scripts/validate-wasi.sh` and `scripts/smoke-cross-target.sh`.
 - OS- or architecture-specific paths must be executed on that OS/arch before
   being described as working; cross-clippy/cross-builds are useful, but not

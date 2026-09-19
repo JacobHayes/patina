@@ -87,7 +87,7 @@ if ! "$PATINA" patina build "$here" --output "$built" --release >/dev/null; then
 fi
 # dlsym is the shim's Linux `__real_dlsym` control-plane residue (tolerated as
 # control-plane on macOS too) — the identical allowance the shim's own
-# validate-native-shim.sh audits carry. Nothing else.
+# native_workloads::std_runs_seeded_and_replayable_but_not_standalone audits carry. Nothing else.
 if ! "$PATINA" patina audit "$built" --allow dlsym >/dev/null; then
   echo "    FAIL: audit found residue beyond the dlsym control-plane"; exit 1
 fi

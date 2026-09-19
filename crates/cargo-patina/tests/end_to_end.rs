@@ -1,3 +1,8 @@
+mod common;
+use common::{invoke, invoke_unchecked, invoke_with, native_workspace};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use common::{invoke_in_with_env, invoke_with_deadline};
+
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, OpenOptions};
@@ -481,7 +486,7 @@ fn the_boundary_operation_budget_reaches_the_wasi_and_native_families() {
         fs::write(&source, FS_FAULT_SOURCE).unwrap();
         let workspace = native_workspace();
         let bin = directory.path().join("budgeted");
-        invoke_in(
+        invoke(
             workspace,
             &[
                 "build",
@@ -690,7 +695,7 @@ fn native_build_package_audits_records_and_fails_closed() {
     // shim link args isolated to the final binary by the explicit host --target
     // (the build script's file I/O proves it did not leak onto host artifacts).
     let clean = package.join("clean-bin");
-    let built = invoke_in(
+    let built = invoke(
         workspace,
         &[
             "build",
@@ -721,19 +726,19 @@ fn native_build_package_audits_records_and_fails_closed() {
         audit_args.push("--allow");
         audit_args.push(symbol);
     }
-    invoke_in(workspace, &audit_args);
+    invoke(workspace, &audit_args);
 
     // The package binary runs under native-run with cross-process seed stability,
     // seed variation, and byte-identical record/replay through the supervisor.
-    let seeded = package_result(&invoke_in(
+    let seeded = package_result(&invoke(
         workspace,
         &["run", clean.to_str().unwrap(), "--seed", "5"],
     ));
-    let repeated = package_result(&invoke_in(
+    let repeated = package_result(&invoke(
         workspace,
         &["run", clean.to_str().unwrap(), "--seed", "5"],
     ));
-    let other = package_result(&invoke_in(
+    let other = package_result(&invoke(
         workspace,
         &["run", clean.to_str().unwrap(), "--seed", "6"],
     ));
@@ -749,7 +754,7 @@ fn native_build_package_audits_records_and_fails_closed() {
     );
 
     let trace = directory.path().join("pkg.patina");
-    let recorded = package_result(&invoke_in(
+    let recorded = package_result(&invoke(
         workspace,
         &[
             "run",
@@ -762,7 +767,7 @@ fn native_build_package_audits_records_and_fails_closed() {
             "native-pkg-v1",
         ],
     ));
-    let replayed = package_result(&invoke_in(
+    let replayed = package_result(&invoke(
         workspace,
         &[
             "replay",
@@ -792,7 +797,7 @@ fn native_build_package_audits_records_and_fails_closed() {
     // A binary whose build product imports an off-allowlist symbol builds, but
     // fails the audit with the existing category diagnostic.
     let leaky = package.join("leaky-bin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -849,8 +854,8 @@ fn second_native_package_build_reuses_cargo_cache() {
     ];
 
     // Cold build compiles the graph; the warm build must recompile nothing.
-    invoke_in(workspace, plain);
-    let warm = invoke_in(workspace, plain);
+    invoke(workspace, plain);
+    let warm = invoke(workspace, plain);
     let warm_stderr = String::from_utf8_lossy(&warm.stderr);
     assert!(
         !warm_stderr.contains("Compiling "),
@@ -859,8 +864,8 @@ fn second_native_package_build_reuses_cargo_cache() {
 
     // The same must hold for `--yield-points`, whose second object is also
     // content-addressed rather than tempdir-staged.
-    invoke_in(workspace, yielded);
-    let warm_yield = invoke_in(workspace, yielded);
+    invoke(workspace, yielded);
+    let warm_yield = invoke(workspace, yielded);
     let warm_yield_stderr = String::from_utf8_lossy(&warm_yield.stderr);
     assert!(
         !warm_yield_stderr.contains("Compiling "),
@@ -895,7 +900,7 @@ fn native_build_package_keeps_shim_link_args_off_a_dependency_cdylib() {
     let workspace = native_workspace();
 
     let output = package.join("cdylib-dep-bin");
-    let built = invoke_in(
+    let built = invoke(
         workspace,
         &[
             "build",
@@ -944,7 +949,7 @@ fn native_build_package_keeps_shim_link_args_off_a_dependency_cdylib() {
     }
 
     let result = String::from_utf8_lossy(
-        &invoke_in(workspace, &["run", output.to_str().unwrap(), "--seed", "1"]).stdout,
+        &invoke(workspace, &["run", output.to_str().unwrap(), "--seed", "1"]).stdout,
     )
     .into_owned();
     assert!(
@@ -1834,7 +1839,7 @@ fn audit_and_run_select_workspace_member_with_package_and_bin() {
     // The bug's exact command: audit a workspace Cargo.toml with --package/--bin.
     // Previously rejected ("unsupported option \"--package\" for `audit`"); now it
     // builds the selected member's shim-linked binary and audits it (exit 0).
-    invoke_in(
+    invoke(
         build_workspace,
         &[
             "audit",
@@ -1852,7 +1857,7 @@ fn audit_and_run_select_workspace_member_with_package_and_bin() {
     // also builds native on the fly now, unless the package integrates the Patina
     // runtime — then it stays the cargo family; see the package-dir routing
     // tests above.)
-    let ran = invoke_in(
+    let ran = invoke(
         build_workspace,
         &[
             "run",
@@ -1876,7 +1881,7 @@ fn audit_and_run_select_workspace_member_with_package_and_bin() {
     // `--package`/`--bin` do not apply to an already-built artifact: fail closed
     // with a precise message rather than silently ignoring the selection.
     let prebuilt = ws.join("prebuilt-bin");
-    invoke_in(
+    invoke(
         build_workspace,
         &[
             "build",
@@ -1942,7 +1947,7 @@ fn run_package_dir_positional_resolves_as_source_not_cwd_package() {
     );
 
     // Run the target package by path, from inside the decoy package's directory.
-    let ran = invoke_in(
+    let ran = invoke(
         &decoy,
         &["run", target_pkg.to_str().unwrap(), "--seed", "1"],
     );
@@ -1966,7 +1971,7 @@ fn run_package_dir_positional_resolves_as_source_not_cwd_package() {
     // caller's). The regression failed here with "building the
     // patina-dst-native-shim staticlib failed".
     let built = directory.path().join("built-in-place");
-    let build = invoke_in(
+    let build = invoke(
         &target_pkg,
         &["build", ".", "--output", built.to_str().unwrap()],
     );
@@ -1996,7 +2001,7 @@ fn run_package_dir_records_and_replays_byte_identically() {
          println!(\"REC_PKG args={a:?}\"); }\n",
     );
     let trace = directory.path().join("rec.patina");
-    let recorded = invoke_in(
+    let recorded = invoke(
         &pkg,
         &[
             "run",
@@ -2013,7 +2018,7 @@ fn run_package_dir_records_and_replays_byte_identically() {
         String::from_utf8_lossy(&recorded.stdout),
         String::from_utf8_lossy(&recorded.stderr)
     );
-    let replayed = invoke_in(
+    let replayed = invoke(
         &pkg,
         &["replay", pkg.to_str().unwrap(), trace.to_str().unwrap()],
     );
@@ -2090,7 +2095,7 @@ fn run_package_dir_and_prebuilt_gate_deny_the_same_symbol() {
 
     // Prebuilt path: build the artifact, then run it.
     let bin = directory.path().join("gate-bin");
-    invoke_in(
+    invoke(
         &pkg,
         &[
             "build",
@@ -2198,7 +2203,7 @@ fn audit_and_run_agree_on_the_shim_control_plane_symbol() {
     let source = directory.path().join("parity.rs");
     fs::write(&source, "fn main() { println!(\"PARITY_OK\"); }").unwrap();
     let bin = directory.path().join("parity-bin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -2211,7 +2216,7 @@ fn audit_and_run_agree_on_the_shim_control_plane_symbol() {
     // audit with NO --allow now passes and reports no dynamic-loading (dlsym)
     // denial — before the parity fix this failed closed on the control-plane
     // vehicle that `run` silently permits.
-    let audited = invoke_in(workspace, &["audit", bin.to_str().unwrap()]);
+    let audited = invoke(workspace, &["audit", bin.to_str().unwrap()]);
     let audit_out = String::from_utf8_lossy(&audited.stdout);
     assert!(
         !audit_out.contains("dynamic-loading"),
@@ -2220,7 +2225,7 @@ fn audit_and_run_agree_on_the_shim_control_plane_symbol() {
 
     // run with NO --allow succeeds: the same symbol `run` enforces is the same one
     // `audit` accepted.
-    let ran = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     assert!(
         String::from_utf8_lossy(&ran.stdout).contains("PARITY_OK"),
         "run did not execute the guest:\n{}",
@@ -2282,7 +2287,7 @@ fn native_run_supports_a_custom_global_allocator() {
     let source = directory.path().join("custom-alloc.rs");
     fs::write(&source, CUSTOM_ALLOCATOR_SOURCE).unwrap();
     let bin = directory.path().join("custom-alloc-bin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -2293,7 +2298,7 @@ fn native_run_supports_a_custom_global_allocator() {
     );
 
     // Audits clean with NO flags: a custom global allocator is no longer refused.
-    let audited = invoke_in(workspace, &["audit", bin.to_str().unwrap()]);
+    let audited = invoke(workspace, &["audit", bin.to_str().unwrap()]);
     assert!(
         !String::from_utf8_lossy(&audited.stderr).contains("custom-global-allocator"),
         "custom global allocator is still refused by audit:\n{}",
@@ -2302,7 +2307,7 @@ fn native_run_supports_a_custom_global_allocator() {
 
     // Runs with NO flags and prints — the allocator's interposed `os_unfair_lock`
     // never re-enters the shim.
-    let ran = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     assert!(
         String::from_utf8_lossy(&ran.stdout).contains("CUSTOM_ALLOC_OK len=3"),
         "custom-allocator guest did not run:\nstdout:\n{}\nstderr:\n{}",
@@ -2311,7 +2316,7 @@ fn native_run_supports_a_custom_global_allocator() {
     );
 
     // Deterministic: two same-seed runs are byte-identical.
-    let again = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let again = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     assert_eq!(
         ran.stdout, again.stdout,
         "custom-allocator run is not seed-stable"
@@ -2371,7 +2376,7 @@ fn main() {
     )
     .unwrap();
     let bin = directory.path().join("localtime-bin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -2381,7 +2386,7 @@ fn main() {
         ],
     );
 
-    let ran = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     let out = String::from_utf8_lossy(&ran.stdout);
     assert!(
         out.contains(
@@ -2391,7 +2396,7 @@ fn main() {
         String::from_utf8_lossy(&ran.stderr)
     );
 
-    let again = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let again = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     assert_eq!(
         ran.stdout, again.stdout,
         "localtime_r run is not seed-stable"
@@ -2413,7 +2418,7 @@ fn native_source_prints_deterministically(source_name: &str, source: &str) -> St
     let src = directory.path().join(source_name);
     fs::write(&src, source).unwrap();
     let bin = directory.path().join("dormant-bin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -2422,8 +2427,8 @@ fn native_source_prints_deterministically(source_name: &str, source: &str) -> St
             bin.to_str().unwrap(),
         ],
     );
-    let ran = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
-    let again = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let again = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     assert_eq!(
         ran.stdout, again.stdout,
         "same-seed runs of {source_name} are not byte-identical"
@@ -2661,7 +2666,7 @@ fn main() {
     )
     .unwrap();
     let bin = directory.path().join("sleep-bin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -2670,7 +2675,7 @@ fn main() {
             bin.to_str().unwrap(),
         ],
     );
-    let ran = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     assert!(
         String::from_utf8_lossy(&ran.stdout).contains("SLEEP remaining=0 zero=0 done"),
         "sleep did not return promptly under virtual time:\nstdout:\n{}\nstderr:\n{}",
@@ -2727,7 +2732,7 @@ fn main() {
     )
     .unwrap();
     let bin = directory.path().join("rusage-bin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -2737,7 +2742,7 @@ fn main() {
         ],
     );
 
-    let ran = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     let out = String::from_utf8_lossy(&ran.stdout);
     assert!(
         out.contains("RU before=0 after=5"),
@@ -2745,7 +2750,7 @@ fn main() {
         String::from_utf8_lossy(&ran.stderr)
     );
 
-    let again = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let again = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     assert_eq!(ran.stdout, again.stdout, "getrusage run is not seed-stable");
 }
 
@@ -2798,7 +2803,7 @@ fn main() {
     )
     .unwrap();
     let bin = directory.path().join("taskinfo-bin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -2808,7 +2813,7 @@ fn main() {
         ],
     );
 
-    let ran = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     let out = String::from_utf8_lossy(&ran.stdout);
     assert!(
         out.contains("TI before=0 after=5"),
@@ -2816,7 +2821,7 @@ fn main() {
         String::from_utf8_lossy(&ran.stderr)
     );
 
-    let again = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let again = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     assert_eq!(ran.stdout, again.stdout, "task_info run is not seed-stable");
 }
 
@@ -2843,21 +2848,25 @@ unsafe extern "C" {
     fn fwrite(pointer: *const c_void, size: usize, count: usize, stream: *mut c_void) -> usize;
 }
 
+
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     static __stdoutp: *mut c_void;
     static __stderrp: *mut c_void;
 }
+
 #[cfg(target_os = "linux")]
 unsafe extern "C" {
     static stdout: *mut c_void;
     static stderr: *mut c_void;
 }
 
+
 #[cfg(target_os = "macos")]
 fn streams() -> (*mut c_void, *mut c_void) {
     unsafe { (__stdoutp, __stderrp) }
 }
+
 #[cfg(target_os = "linux")]
 fn streams() -> (*mut c_void, *mut c_void) {
     unsafe { (stdout, stderr) }
@@ -2877,7 +2886,7 @@ fn main() {
     )
     .unwrap();
     let bin = directory.path().join("stdio-bin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -2886,7 +2895,7 @@ fn main() {
             bin.to_str().unwrap(),
         ],
     );
-    let ran = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     let out = String::from_utf8_lossy(&ran.stdout);
     let err = String::from_utf8_lossy(&ran.stderr);
     assert!(
@@ -2899,7 +2908,7 @@ fn main() {
         err.contains("FWRITE_ERR line"),
         "stderr-sentinel write did not reach captured stderr:\nstdout:\n{out}\nstderr:\n{err}"
     );
-    let again = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let again = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     assert_eq!(
         ran.stdout, again.stdout,
         "stdio run is not seed-stable (stdout)"
@@ -2952,7 +2961,7 @@ fn main() {
     )
     .unwrap();
     let bin = directory.path().join("once-bin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -2961,7 +2970,7 @@ fn main() {
             bin.to_str().unwrap(),
         ],
     );
-    let ran = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     assert!(
         String::from_utf8_lossy(&ran.stdout).contains("ONCE a=0 b=0 count=1"),
         "pthread_once did not run the init exactly once:\nstdout:\n{}\nstderr:\n{}",
@@ -3048,7 +3057,7 @@ fn main() {
     )
     .unwrap();
     let bin = directory.path().join("sysctl-bin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -3057,7 +3066,7 @@ fn main() {
             bin.to_str().unwrap(),
         ],
     );
-    let ran = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     assert!(
         String::from_utf8_lossy(&ran.stdout)
             .contains("MEMSIZE r=0 val=8589934592 NCPU r=0 val=1 UNKNOWN r=-1"),
@@ -3100,7 +3109,7 @@ fn main() {
     )
     .unwrap();
     let bin = directory.path().join("sec-bin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -3185,7 +3194,7 @@ fn main() {
     )
     .unwrap();
     let bin = directory.path().join("dormant-bin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -3253,7 +3262,7 @@ fn main() {
     )
     .unwrap();
     let bin = directory.path().join("armed-bin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -3264,7 +3273,7 @@ fn main() {
     );
 
     // audit: succeeds (exit 0), and the note names exactly the referenced symbol.
-    let audited = invoke_in(workspace, &["audit", bin.to_str().unwrap()]);
+    let audited = invoke(workspace, &["audit", bin.to_str().unwrap()]);
     let audit_stderr = String::from_utf8_lossy(&audited.stderr);
     assert!(
         audit_stderr.contains("deny-trap armed")
@@ -3273,7 +3282,7 @@ fn main() {
     );
 
     // run: the same note, and the dormant guest still runs to completion.
-    let ran = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     let run_stderr = String::from_utf8_lossy(&ran.stderr);
     assert!(
         run_stderr.contains("IOServiceGetMatchingServices (host-introspection)"),
@@ -3302,7 +3311,7 @@ fn native_audit_and_run_emit_no_deny_trap_note_when_none_referenced() {
     )
     .unwrap();
     let bin = directory.path().join("plain-bin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -3312,14 +3321,14 @@ fn native_audit_and_run_emit_no_deny_trap_note_when_none_referenced() {
         ],
     );
 
-    let audited = invoke_in(workspace, &["audit", bin.to_str().unwrap()]);
+    let audited = invoke(workspace, &["audit", bin.to_str().unwrap()]);
     assert!(
         !String::from_utf8_lossy(&audited.stderr).contains("deny-trap armed"),
         "audit must emit no deny-trap note for a guest that references none:\n{}",
         String::from_utf8_lossy(&audited.stderr)
     );
 
-    let ran = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     assert!(
         !String::from_utf8_lossy(&ran.stderr).contains("deny-trap armed"),
         "run must emit no deny-trap note for a guest that references none:\n{}",
@@ -3409,7 +3418,7 @@ fn native_live_interposers_survive_the_link() {
     let source = directory.path().join("plain.rs");
     fs::write(&source, "fn main() { println!(\"PLAIN_OK\"); }\n").unwrap();
     let bin = directory.path().join("plain-bin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -3453,7 +3462,7 @@ fn main() {
     )
     .unwrap();
     let bin = directory.path().join("printer-bin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -3514,7 +3523,7 @@ fn main() {
     )
     .unwrap();
     let bin = directory.path().join("trap-bin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -3584,8 +3593,8 @@ fn run_and_audit_infer_target_and_reject_cross_target_flags() {
             .unwrap(),
     )
     .unwrap();
-    invoke_in(workspace, &["audit", module.to_str().unwrap()]);
-    invoke_in(workspace, &["run", module.to_str().unwrap(), "--seed", "1"]);
+    invoke(workspace, &["audit", module.to_str().unwrap()]);
+    invoke(workspace, &["run", module.to_str().unwrap(), "--seed", "1"]);
 
     // `--allow` is native-only, so auditing a WASI module with it is refused.
     let allow_on_wasm = invoke_unchecked(
@@ -3624,7 +3633,7 @@ fn run_and_audit_infer_target_and_reject_cross_target_flags() {
     // applies the seeded jitter at its single sleep entry (`Preview1Host::
     // sleep_until`, also covering `poll_oneoff` timeouts), so a knob the no-op
     // guest never triggers simply runs clean rather than being refused.
-    invoke_in(
+    invoke(
         workspace,
         &[
             "run",
@@ -3639,7 +3648,7 @@ fn run_and_audit_infer_target_and_reject_cross_target_flags() {
     let source = directory.path().join("noop.rs");
     fs::write(&source, "fn main() { println!(\"NATIVE_OK\"); }").unwrap();
     let bin = directory.path().join("noop-native");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -3657,8 +3666,8 @@ fn run_and_audit_infer_target_and_reject_cross_target_flags() {
         audit_args.push("--allow");
         audit_args.push(symbol);
     }
-    invoke_in(workspace, &audit_args);
-    let ran = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    invoke(workspace, &audit_args);
+    let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     assert!(String::from_utf8_lossy(&ran.stdout).contains("NATIVE_OK"));
 
     // `build --target wasi` is package-only and thread-free: a `.rs` source and
@@ -3881,7 +3890,7 @@ fn campaign_catches_planted_liveness_bug_dedups_and_reproduces() {
     let guest = directory.path().join("liveness-guest");
 
     // Build the planted-bug guest once; the campaign sweeps this same binary.
-    let built = invoke_in(
+    let built = invoke(
         workspace,
         &[
             "build",
@@ -4039,7 +4048,7 @@ fn swarm_deselection_stays_coherent_with_fingerprint_and_metadata() {
     let fixture = workspace.join("testbeds/liveness-campaign");
     let directory = tempdir().unwrap();
     let guest = directory.path().join("swarm-guest");
-    let built = invoke_in(
+    let built = invoke(
         workspace,
         &[
             "build",
@@ -4106,7 +4115,7 @@ fn swarm_deselection_stays_coherent_with_fingerprint_and_metadata() {
     let (_kept_seed, kept_trace, kept_stderr) = kept.expect("no seed in 0..24 selected buggify");
 
     // (1) The masked run's trace declares the effective configuration.
-    let info = invoke_in(
+    let info = invoke(
         workspace,
         &["trace", "info", dropped_trace.to_str().unwrap()],
     );
@@ -4185,7 +4194,7 @@ fn swarm_deselection_stays_coherent_with_fingerprint_and_metadata() {
         kept_stderr.contains("PATINA_SDK_REPORT enabled=1 swarm_deselected=0"),
         "an unmasked swarm run must keep buggify armed\nstderr:\n{kept_stderr}"
     );
-    let info = invoke_in(workspace, &["trace", "info", kept_trace.to_str().unwrap()]);
+    let info = invoke(workspace, &["trace", "info", kept_trace.to_str().unwrap()]);
     let info = String::from_utf8_lossy(&info.stdout).to_string();
     assert!(
         info.contains("fingerprint: patina-native+buggify+swarm"),
@@ -4233,7 +4242,7 @@ fn campaign_with_swarm_and_buggify_has_no_coherence_aborts() {
     let fixture = workspace.join("testbeds/liveness-campaign");
     let directory = tempdir().unwrap();
     let guest = directory.path().join("swarm-campaign-guest");
-    let built = invoke_in(
+    let built = invoke(
         workspace,
         &[
             "build",
@@ -4345,7 +4354,7 @@ fn swarm_with_zero_candidate_classes_is_reported_and_classified_vacuous() {
     )
     .unwrap();
     let guest = directory.path().join("swarm-zero");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -4446,7 +4455,7 @@ fn campaign_timeout_does_not_save_incomplete_trace() {
     )
     .unwrap();
     let guest = directory.path().join("spin-forever");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -4526,7 +4535,7 @@ fn campaign_extend_equals_fresh_campaign() {
     let directory = tempdir().unwrap();
     let guest = directory.path().join("liveness-guest");
 
-    let built = invoke_in(
+    let built = invoke(
         workspace,
         &[
             "build",
@@ -4706,7 +4715,7 @@ fn campaign_extend_reproduces_aux_store_bytes_for_sites_and_coverage() {
 "#,
     )
     .unwrap();
-    let built = invoke_in(
+    let built = invoke(
         workspace,
         &[
             "build",
@@ -4836,7 +4845,7 @@ fn main() {
 "#,
     )
     .unwrap();
-    let built = invoke_in(
+    let built = invoke(
         workspace,
         &[
             "build",
@@ -5284,7 +5293,7 @@ fn campaign_continuation_refusals_are_loud() {
 // fuzz-sweep's `--selftest`.
 #[test]
 fn campaign_selftest_passes() {
-    let ran = invoke_in(native_workspace(), &["campaign", "--selftest"]);
+    let ran = invoke(native_workspace(), &["campaign", "--selftest"]);
     assert!(
         ran.status.success(),
         "campaign --selftest failed:\nstdout:\n{}\nstderr:\n{}",
@@ -5322,7 +5331,7 @@ wasm32-wasip1 target not installed"
     .unwrap();
 
     let workspace = native_workspace();
-    let built = invoke_in(
+    let built = invoke(
         workspace,
         &["build", package.to_str().unwrap(), "--target", "wasi"],
     );
@@ -5340,9 +5349,9 @@ wasm32-wasip1 target not installed"
     );
 
     // `audit` infers the WASI path from the `\0asm` magic and lists imports.
-    invoke_in(workspace, &["audit", module.to_str().unwrap()]);
+    invoke(workspace, &["audit", module.to_str().unwrap()]);
     // `run` infers the WASI runner and executes `_start` deterministically.
-    let ran = invoke_in(workspace, &["run", module.to_str().unwrap(), "--seed", "1"]);
+    let ran = invoke(workspace, &["run", module.to_str().unwrap(), "--seed", "1"]);
     assert!(
         String::from_utf8_lossy(&ran.stdout).contains("WASI_HELLO"),
         "unexpected wasi run output:\nstdout:\n{}\nstderr:\n{}",
@@ -5786,7 +5795,7 @@ wasm32-wasip1 target not installed"
 
     // Patina build: the same source, now with the SDK lowered to patina_sdk.
     let workspace = native_workspace();
-    invoke_in(
+    invoke(
         workspace,
         &["build", package.to_str().unwrap(), "--target", "wasi"],
     );
@@ -5921,7 +5930,7 @@ fn run_builds_native_source_on_the_fly_and_matches_explicit_build() {
 
     // Explicit: build to an artifact, then run the artifact.
     let bin = directory.path().join("greet");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -5930,7 +5939,7 @@ fn run_builds_native_source_on_the_fly_and_matches_explicit_build() {
             bin.to_str().unwrap(),
         ],
     );
-    let explicit = invoke_in(
+    let explicit = invoke(
         workspace,
         &[
             "run",
@@ -5949,7 +5958,7 @@ fn run_builds_native_source_on_the_fly_and_matches_explicit_build() {
     );
 
     // Implicit: run the source directly — build-on-the-fly then run.
-    let implicit = invoke_in(
+    let implicit = invoke(
         workspace,
         &[
             "run",
@@ -5992,7 +6001,7 @@ fn audit_and_replay_are_source_first() {
     .unwrap();
 
     let bin = directory.path().join("sf");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -6010,14 +6019,14 @@ fn audit_and_replay_are_source_first() {
         source_args.push("--allow");
         source_args.push(symbol);
     }
-    let artifact_audit = invoke_in(workspace, &artifact_args);
-    let source_audit = invoke_in(workspace, &source_args);
+    let artifact_audit = invoke(workspace, &artifact_args);
+    let source_audit = invoke(workspace, &source_args);
     assert_eq!(audit_imports(&artifact_audit), audit_imports(&source_audit));
 
     // Record from the built artifact, then source-first replay of the UNCHANGED
     // source reproduces the recording byte-identically (rebuilt binary matches).
     let trace = directory.path().join("sf.patina");
-    let recorded = invoke_in(
+    let recorded = invoke(
         workspace,
         &[
             "run",
@@ -6030,7 +6039,7 @@ fn audit_and_replay_are_source_first() {
             "sf-v1",
         ],
     );
-    let replayed = invoke_in(
+    let replayed = invoke(
         workspace,
         &[
             "replay",
@@ -6117,7 +6126,7 @@ fn native_audit_attributes_unsupported_imports_to_dependency_crates() {
 
     let workspace = native_workspace();
     let bin = directory.path().join("provenance-bin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -6367,7 +6376,7 @@ fn audit_prebuilt_non_shim_binary_fails_closed_unless_raw() {
     let shim_source = directory.path().join("shim.rs");
     fs::write(&shim_source, "fn main() { println!(\"SHIM\"); }").unwrap();
     let shim_bin = directory.path().join("shim");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -6376,7 +6385,7 @@ fn audit_prebuilt_non_shim_binary_fails_closed_unless_raw() {
             shim_bin.to_str().unwrap(),
         ],
     );
-    let shim_audit = invoke_in(
+    let shim_audit = invoke(
         workspace,
         &["audit", shim_bin.to_str().unwrap(), "--allow", "dlsym"],
     );
@@ -6413,7 +6422,7 @@ fn run_source_package_target_wasi_on_the_fly() {
     .unwrap();
 
     let workspace = native_workspace();
-    let ran = invoke_in(
+    let ran = invoke(
         workspace,
         &[
             "run",
@@ -6605,18 +6614,6 @@ fn audit_reports_host_identity_reads_without_refusing_them() {
     );
 }
 
-fn invoke(fixture: &Path, arguments: &[&str]) -> Output {
-    invoke_with(env!("CARGO_BIN_EXE_cargo-patina"), fixture, arguments)
-}
-
-fn native_workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-}
-
 /// Where the CLI unpacks its embedded shim source bundle and builds the shim:
 /// `<cache root>/patina/shim-src`, with the cache root resolved exactly as the
 /// CLI resolves it (`XDG_CACHE_HOME`, else the platform's per-user cache under
@@ -6691,7 +6688,7 @@ fn native_recv_timeout_is_deterministic_across_seeds_and_replay() {
     fs::write(&source, RECV_TIMEOUT_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("recv-timeout");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -6702,14 +6699,14 @@ fn native_recv_timeout_is_deterministic_across_seeds_and_replay() {
     );
 
     for seed in ["1", "5", "9"] {
-        let first = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
+        let first = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
         let baseline = String::from_utf8_lossy(&first.stdout).into_owned();
         assert!(
             baseline.contains("delivered="),
             "unexpected recv_timeout output at seed {seed}: {baseline}"
         );
         for _ in 0..2 {
-            let again = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
+            let again = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
             assert_eq!(
                 baseline,
                 String::from_utf8_lossy(&again.stdout),
@@ -6719,7 +6716,7 @@ fn native_recv_timeout_is_deterministic_across_seeds_and_replay() {
     }
 
     let trace = directory.path().join("recv.patina");
-    let recorded = invoke_in(
+    let recorded = invoke(
         workspace,
         &[
             "run",
@@ -6732,7 +6729,7 @@ fn native_recv_timeout_is_deterministic_across_seeds_and_replay() {
             "recv-timeout",
         ],
     );
-    let replayed = invoke_in(
+    let replayed = invoke(
         workspace,
         &[
             "replay",
@@ -6824,7 +6821,7 @@ fn native_calibration_busy_wait_converges_and_replays_identically() {
     let source = directory.path().join("calibration_spin.rs");
     fs::write(&source, CALIBRATION_SPIN_SOURCE).unwrap();
     let bin = directory.path().join("calibration-spin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -6939,6 +6936,7 @@ unsafe extern "C" {
     fn patina_sleep_until(clock: u32, deadline_nanos: u64) -> i32;
 }
 
+
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn os_unfair_lock_lock(lock: *mut u32);
@@ -7002,6 +7000,7 @@ fn main() {
                 std::process::abort();
             }
         }
+
         #[cfg(target_os = "macos")]
         "unfair-lock" => {
             let mut lock = 0u32;
@@ -7059,7 +7058,7 @@ fn native_replay_init_error_reaches_every_bootstrap_window_entry_point() {
     let source = directory.path().join("bootstrap_window_probe.rs");
     fs::write(&source, BOOTSTRAP_WINDOW_PROBE_SOURCE).unwrap();
     let bin = directory.path().join("bootstrap-window-probe");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -7161,7 +7160,7 @@ fn native_replay_init_error_aborts_under_a_custom_global_allocator() {
     let source = directory.path().join("custom_alloc_init_error.rs");
     fs::write(&source, CUSTOM_ALLOCATOR_SOURCE).unwrap();
     let bin = directory.path().join("custom-alloc-init-error");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -7227,7 +7226,7 @@ fn native_budget_abort_under_record_preserves_a_loadable_trace() {
     let source = directory.path().join("budget_record.rs");
     fs::write(&source, CALIBRATION_SPIN_SOURCE).unwrap();
     let bin = directory.path().join("budget-record");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -7299,7 +7298,7 @@ fn native_record_abort_leaves_trace_absent_and_infra_classified() {
     )
     .unwrap();
     let bin = directory.path().join("abort-record");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -7384,7 +7383,7 @@ fn native_replay_refuses_incomplete_traces_before_guest_exec() {
     let source = directory.path().join("noop_replay.rs");
     fs::write(&source, "fn main() { println!(\"SHOULD_NOT_RUN\"); }\n").unwrap();
     let bin = directory.path().join("noop-replay");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -7449,7 +7448,7 @@ fn native_hard_link_and_remove_dir_all_are_supported_and_deterministic() {
     fs::write(&source, HARD_LINK_AND_REMOVE_TREE_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("hard-link-tree");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -7462,7 +7461,7 @@ fn native_hard_link_and_remove_dir_all_are_supported_and_deterministic() {
     // Audit is clean: `invoke_in` already asserts exit 0, and neither `linkat`
     // nor `fdopendir` may surface as an unsupported/unknown import or force an
     // allowance -- the strong defs drop them off the import table entirely.
-    let audited = invoke_in(workspace, &["audit", bin.to_str().unwrap()]);
+    let audited = invoke(workspace, &["audit", bin.to_str().unwrap()]);
     let audit_text = format!(
         "{}{}",
         String::from_utf8_lossy(&audited.stdout),
@@ -7486,14 +7485,14 @@ fn native_hard_link_and_remove_dir_all_are_supported_and_deterministic() {
     // several seeds. The hard link observes the mutation (same inode) and the
     // tree is gone.
     for seed in ["0", "3", "8"] {
-        let first = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
+        let first = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
         let baseline = String::from_utf8_lossy(&first.stdout).into_owned();
         assert_eq!(
             baseline, EXPECTED,
             "unexpected hard-link/remove-tree output at seed {seed}: {baseline}"
         );
         for _ in 0..2 {
-            let again = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
+            let again = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
             assert_eq!(
                 baseline,
                 String::from_utf8_lossy(&again.stdout),
@@ -7504,7 +7503,7 @@ fn native_hard_link_and_remove_dir_all_are_supported_and_deterministic() {
 
     // A recorded run replays byte-identically under strict replay.
     let trace = directory.path().join("hard-link.patina");
-    let recorded = invoke_in(
+    let recorded = invoke(
         workspace,
         &[
             "run",
@@ -7518,7 +7517,7 @@ fn native_hard_link_and_remove_dir_all_are_supported_and_deterministic() {
         ],
     );
     assert_eq!(String::from_utf8_lossy(&recorded.stdout), EXPECTED);
-    let replayed = invoke_in(
+    let replayed = invoke(
         workspace,
         &[
             "replay",
@@ -7598,7 +7597,7 @@ fn native_mount_composes_with_record_and_replay_two_inherited_descriptors() {
     fs::write(&source, MOUNT_READER_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("read-mount");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -7613,7 +7612,7 @@ fn native_mount_composes_with_record_and_replay_two_inherited_descriptors() {
     fs::write(mount.join("data.txt"), "MOUNTED-CONTENT\n").unwrap();
 
     let trace = directory.path().join("mount.patina");
-    let recorded = invoke_in(
+    let recorded = invoke(
         workspace,
         &[
             "run",
@@ -7637,7 +7636,7 @@ fn native_mount_composes_with_record_and_replay_two_inherited_descriptors() {
     // `replay` re-supplies the host corpus with --mount (a host input the trace
     // cannot carry; only its hash is in the fingerprint). The seed and everything
     // else come from the trace, so the run reproduces byte-identically.
-    let replayed = invoke_in(
+    let replayed = invoke(
         workspace,
         &[
             "replay",
@@ -7750,7 +7749,7 @@ fn native_flock_contends_on_a_second_open_and_releases_on_close() {
     fs::write(&source, FLOCK_CONTENTION_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("flock");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -7759,7 +7758,7 @@ fn native_flock_contends_on_a_second_open_and_releases_on_close() {
             bin.to_str().unwrap(),
         ],
     );
-    let run = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let run = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     let stdout = String::from_utf8_lossy(&run.stdout);
     let ewouldblock = if cfg!(target_os = "macos") { 35 } else { 11 };
     assert!(
@@ -7786,6 +7785,7 @@ unsafe extern "C" {
     fn fcntl(fd: i32, command: i32, ...) -> i32;
 }
 
+
 #[cfg(target_os = "linux")]
 mod abi {
     pub const F_GETLK: i32 = 5;
@@ -7806,6 +7806,7 @@ mod abi {
         Flock { l_type, l_whence: 0, l_start: 0, l_len: 0, l_pid: 0 }
     }
 }
+
 #[cfg(target_os = "macos")]
 mod abi {
     pub const F_GETLK: i32 = 7;
@@ -7908,7 +7909,7 @@ fn native_fcntl_record_locks_are_modeled_for_the_lone_opener() {
     fs::write(&source, FCNTL_RECORD_LOCK_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("fcntl-lock");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -7917,7 +7918,7 @@ fn native_fcntl_record_locks_are_modeled_for_the_lone_opener() {
             bin.to_str().unwrap(),
         ],
     );
-    let run = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let run = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     let stdout = String::from_utf8_lossy(&run.stdout);
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(
@@ -8004,7 +8005,7 @@ fn native_positional_vectored_io_round_trips_through_the_deterministic_fs() {
     fs::write(&source, POSITIONAL_VECTORED_IO_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("pvec");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -8013,7 +8014,7 @@ fn native_positional_vectored_io_round_trips_through_the_deterministic_fs() {
             bin.to_str().unwrap(),
         ],
     );
-    let run = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let run = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(
         stdout.contains(
@@ -8088,7 +8089,7 @@ fn native_statfs_answers_as_one_virtual_volume() {
     fs::write(&source, STATFS_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("statfs");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -8097,7 +8098,7 @@ fn native_statfs_answers_as_one_virtual_volume() {
             bin.to_str().unwrap(),
         ],
     );
-    let run = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let run = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(
         stdout.contains(
@@ -8135,7 +8136,7 @@ fn native_canonicalize_resolves_an_existing_guest_path_deterministically() {
     fs::write(&source, CANONICALIZE_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("canonicalize");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -8144,7 +8145,7 @@ fn native_canonicalize_resolves_an_existing_guest_path_deterministically() {
             bin.to_str().unwrap(),
         ],
     );
-    let first = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let first = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     let first_stdout = String::from_utf8_lossy(&first.stdout);
     assert!(
         first_stdout.contains("direct=/tmp/patina-root/fragments")
@@ -8152,7 +8153,7 @@ fn native_canonicalize_resolves_an_existing_guest_path_deterministically() {
         "canonicalize must resolve both spellings to the same canonical guest path:\nstdout:\n{first_stdout}\nstderr:\n{}",
         String::from_utf8_lossy(&first.stderr),
     );
-    let second = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let second = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     assert_eq!(
         first.stdout,
         second.stdout,
@@ -8203,7 +8204,7 @@ fn main() {
     .unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("ctor-open");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -8293,7 +8294,7 @@ tempfile = "3"
 
     let workspace = native_workspace();
     let bin = directory.path().join("env-tmp-bin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -8304,8 +8305,8 @@ tempfile = "3"
     );
     let bin = bin.to_str().unwrap();
 
-    let empty_a = invoke_in(workspace, &["run", bin, "--seed", "7"]);
-    let empty_b = invoke_in(workspace, &["run", bin, "--seed", "7"]);
+    let empty_a = invoke(workspace, &["run", bin, "--seed", "7"]);
+    let empty_b = invoke(workspace, &["run", bin, "--seed", "7"]);
     assert_eq!(
         empty_a.stdout, empty_b.stdout,
         "tempfile path must be same-seed deterministic with an empty guest env"
@@ -8315,7 +8316,7 @@ tempfile = "3"
     assert!(empty_stdout.contains("path=/tmp/"), "{empty_stdout}");
 
     let trace = directory.path().join("env-tmp.patina");
-    let recorded = invoke_in(
+    let recorded = invoke(
         workspace,
         &[
             "run",
@@ -8328,7 +8329,7 @@ tempfile = "3"
             trace.to_str().unwrap(),
         ],
     );
-    let replayed = invoke_in(workspace, &["replay", bin, trace.to_str().unwrap()]);
+    let replayed = invoke(workspace, &["replay", bin, trace.to_str().unwrap()]);
     assert_eq!(
         recorded.stdout, replayed.stdout,
         "native replay must restore --env and tempfile effects flag-free"
@@ -8403,7 +8404,7 @@ fn native_cwd_flag_records_replays_and_relative_paths_resolve_against_it() {
 
     let workspace = native_workspace();
     let bin = directory.path().join("cwd-bin");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -8415,7 +8416,7 @@ fn native_cwd_flag_records_replays_and_relative_paths_resolve_against_it() {
     let bin = bin.to_str().unwrap();
 
     // The default working directory is the root of the deterministic image.
-    let at_root = invoke_in(workspace, &["run", bin, "--seed", "3"]);
+    let at_root = invoke(workspace, &["run", bin, "--seed", "3"]);
     let at_root_stdout = String::from_utf8_lossy(&at_root.stdout);
     assert!(
         at_root_stdout.contains(
@@ -8425,7 +8426,7 @@ fn native_cwd_flag_records_replays_and_relative_paths_resolve_against_it() {
     );
 
     let trace = directory.path().join("cwd.patina");
-    let recorded = invoke_in(
+    let recorded = invoke(
         workspace,
         &[
             "run",
@@ -8445,7 +8446,7 @@ fn native_cwd_flag_records_replays_and_relative_paths_resolve_against_it() {
         ),
         "{recorded_stdout}"
     );
-    let replayed = invoke_in(workspace, &["replay", bin, trace.to_str().unwrap()]);
+    let replayed = invoke(workspace, &["replay", bin, trace.to_str().unwrap()]);
     assert_eq!(
         recorded.stdout, replayed.stdout,
         "native replay must restore --cwd flag-free"
@@ -8553,7 +8554,7 @@ fn main() {
 
     let workspace = native_workspace();
     let bin = directory.path().join("env-mutation");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -8564,7 +8565,7 @@ fn main() {
     );
     let bin = bin.to_str().unwrap();
 
-    let seeded_run = invoke_in(
+    let seeded_run = invoke(
         workspace,
         &["run", bin, "--seed", "11", "--env", "SEEDED=from-flag"],
     );
@@ -8599,7 +8600,7 @@ fn main() {
     assert!(stdout.contains("drain scan=[]"), "{stdout}");
 
     // Same seed, same bytes: mutation is a pure function of guest control flow.
-    let repeat = invoke_in(
+    let repeat = invoke(
         workspace,
         &["run", bin, "--seed", "11", "--env", "SEEDED=from-flag"],
     );
@@ -8609,7 +8610,7 @@ fn main() {
     );
 
     let trace = directory.path().join("env-mutation.patina");
-    let recorded = invoke_in(
+    let recorded = invoke(
         workspace,
         &[
             "run",
@@ -8622,7 +8623,7 @@ fn main() {
             trace.to_str().unwrap(),
         ],
     );
-    let replayed = invoke_in(workspace, &["replay", bin, trace.to_str().unwrap()]);
+    let replayed = invoke(workspace, &["replay", bin, trace.to_str().unwrap()]);
     assert_eq!(
         recorded.stdout, replayed.stdout,
         "replay must reproduce a guest that mutates its environment, flag-free"
@@ -8647,7 +8648,7 @@ fn main() {
     // Re-recording produces a byte-identical trace: no mutation-derived state
     // leaks into the recorded stream.
     let trace_again = directory.path().join("env-mutation-again.patina");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "run",
@@ -8681,7 +8682,7 @@ fn native_replay_rejects_fault_knobs_and_reproduces_flag_free() {
     fs::write(&source, FS_TOUCH_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("fs-touch");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -8692,7 +8693,7 @@ fn native_replay_rejects_fault_knobs_and_reproduces_flag_free() {
     );
 
     let trace = directory.path().join("faults.patina");
-    let recorded = invoke_in(
+    let recorded = invoke(
         workspace,
         &[
             "run",
@@ -8710,7 +8711,7 @@ fn native_replay_rejects_fault_knobs_and_reproduces_flag_free() {
 
     // Flag-free replay reproduces the recorded fault run — the fault config comes
     // from the trace, not the command line.
-    let replayed = invoke_in(
+    let replayed = invoke(
         workspace,
         &[
             "replay",
@@ -8848,7 +8849,7 @@ fn native_fs_fault_errors_and_shorts_are_deterministic_replayable_and_reported()
     fs::write(&source, FS_FAULT_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("fs-fault");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -8881,7 +8882,7 @@ fn native_fs_fault_errors_and_shorts_are_deterministic_replayable_and_reported()
     };
     let run_vec = |args: Vec<String>| {
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        invoke_in(workspace, &refs)
+        invoke(workspace, &refs)
     };
     let eio1 = run_vec(eio_args(&trace1));
     let eio2 = run_vec(eio_args(&trace2));
@@ -8894,7 +8895,7 @@ fn native_fs_fault_errors_and_shorts_are_deterministic_replayable_and_reported()
         "fs fault report must prove the read EIO was non-vacuous:\n{eio_stderr}"
     );
 
-    let replayed = invoke_in(workspace, &["replay", &bin, trace1.to_str().unwrap()]);
+    let replayed = invoke(workspace, &["replay", &bin, trace1.to_str().unwrap()]);
     assert_eq!(
         eio_line,
         stdout_line_with(&replayed, "NATIVE_FS_FAULT_RESULT"),
@@ -8914,7 +8915,7 @@ fn native_fs_fault_errors_and_shorts_are_deterministic_replayable_and_reported()
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("--fs-short-permille"));
 
-    let enospc = invoke_in(
+    let enospc = invoke(
         workspace,
         &[
             "run",
@@ -8930,7 +8931,7 @@ fn native_fs_fault_errors_and_shorts_are_deterministic_replayable_and_reported()
     assert!(stdout_line_with(&enospc, "NATIVE_FS_FAULT_RESULT").contains("errno=28"));
 
     for mode in ["short_write", "short_read"] {
-        let output = invoke_in(
+        let output = invoke(
             workspace,
             &[
                 "run",
@@ -8964,7 +8965,7 @@ fn native_fs_latency_is_observable_in_the_guest_and_replays_flag_free() {
     fs::write(&source, FS_FAULT_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("fs-latency");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -8984,7 +8985,7 @@ fn native_fs_latency_is_observable_in_the_guest_and_replays_flag_free() {
     };
 
     // Control: a knob-free run advances no virtual time across the operation.
-    let clean = invoke_in(workspace, &["run", &bin, "--seed", "4", "--", "latency"]);
+    let clean = invoke(workspace, &["run", &bin, "--seed", "4", "--", "latency"]);
     assert_eq!(
         elapsed_of(&clean),
         0,
@@ -9008,7 +9009,7 @@ fn native_fs_latency_is_observable_in_the_guest_and_replays_flag_free() {
         "latency".to_string(),
     ];
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let delayed = invoke_in(workspace, &refs);
+    let delayed = invoke(workspace, &refs);
     let elapsed = elapsed_of(&delayed);
     assert!(
         elapsed >= 1_000_000 && elapsed % 1_000_000 == 0,
@@ -9021,7 +9022,7 @@ fn native_fs_latency_is_observable_in_the_guest_and_replays_flag_free() {
     );
 
     // Flag-free replay restores the latency from the trace and reproduces it.
-    let replayed = invoke_in(workspace, &["replay", &bin, trace.to_str().unwrap()]);
+    let replayed = invoke(workspace, &["replay", &bin, trace.to_str().unwrap()]);
     assert_eq!(elapsed_of(&replayed), elapsed);
 
     // Re-supplying the knob on replay is refused: the trace is authoritative.
@@ -9131,7 +9132,7 @@ fn a_wildcard_bound_guest_is_reachable_at_any_address_on_its_port() {
     fs::write(&source, WILDCARD_BIND_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("wildcard");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -9141,7 +9142,7 @@ fn a_wildcard_bound_guest_is_reachable_at_any_address_on_its_port() {
         ],
     );
     let bin = bin.to_str().unwrap().to_owned();
-    let output = invoke_in(workspace, &["run", &bin, "--seed", "3"]);
+    let output = invoke(workspace, &["run", &bin, "--seed", "3"]);
     let line = stdout_line_with(&output, "WILDCARD_RESULT");
     assert!(
         line.contains("udp=udp-ping")
@@ -9218,7 +9219,7 @@ fn native_dns_resolves_the_host_table_injects_faults_and_replays_flag_free() {
     fs::write(&source, DNS_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("dns");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -9232,7 +9233,7 @@ fn native_dns_resolves_the_host_table_injects_faults_and_replays_flag_free() {
 
     // Baseline: a DEFINED name resolves to its address and an undefined one is
     // NXDOMAIN. Both are ordinary `std` name lookups through the interposer.
-    let resolved = invoke_in(
+    let resolved = invoke(
         workspace,
         &[
             "run",
@@ -9257,7 +9258,7 @@ fn native_dns_resolves_the_host_table_injects_faults_and_replays_flag_free() {
 
     // The failure knob turns a defined name's resolution into an error, and the
     // report proves it was applied rather than silently inert.
-    let failed = invoke_in(
+    let failed = invoke(
         workspace,
         &[
             "run",
@@ -9285,7 +9286,7 @@ fn native_dns_resolves_the_host_table_injects_faults_and_replays_flag_free() {
 
     // The latency knob shows up as virtual time inside the guest.
     let trace = directory.path().join("dns.patina");
-    let delayed = invoke_in(
+    let delayed = invoke(
         workspace,
         &[
             "run",
@@ -9310,7 +9311,7 @@ fn native_dns_resolves_the_host_table_injects_faults_and_replays_flag_free() {
 
     // Flag-free replay restores BOTH the host table and the knobs from the
     // trace, and a re-supplied table is refused.
-    let replayed = invoke_in(workspace, &["replay", &bin, trace.to_str().unwrap()]);
+    let replayed = invoke(workspace, &["replay", &bin, trace.to_str().unwrap()]);
     assert_eq!(stdout_line_with(&replayed, "DNS_RESULT"), delayed_line);
     let rejected = invoke_unchecked(
         env!("CARGO_BIN_EXE_cargo-patina"),
@@ -9328,7 +9329,7 @@ fn native_dns_resolves_the_host_table_injects_faults_and_replays_flag_free() {
 
     // The producer side end to end: resolve a name, reach a wildcard-bound
     // listener that never knew the name existed.
-    let connected = invoke_in(
+    let connected = invoke(
         workspace,
         &[
             "run",
@@ -9387,7 +9388,7 @@ fn native_tcp_base_latency_delays_the_stream_round_trip() {
     fs::write(&source, TCP_LATENCY_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("tcp-latency");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -9407,12 +9408,12 @@ fn native_tcp_base_latency_delays_the_stream_round_trip() {
     };
 
     // Control: a zero-latency link completes the round trip in no virtual time.
-    let clean = invoke_in(workspace, &["run", &bin, "--seed", "5"]);
+    let clean = invoke(workspace, &["run", &bin, "--seed", "5"]);
     assert_eq!(elapsed_of(&clean), 0);
 
     // MUST delay: each of the two segments (request and reply) carries the base
     // latency, so the round trip costs at least twice it.
-    let delayed = invoke_in(
+    let delayed = invoke(
         workspace,
         &["run", &bin, "--seed", "5", "--net-latency-nanos", "1000000"],
     );
@@ -9440,7 +9441,7 @@ fn native_tcp_stream_faults_are_deterministic_replayable_and_non_vacuous() {
     fs::write(&source, TCP_ECHO_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("tcp-echo");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -9453,7 +9454,7 @@ fn native_tcp_stream_faults_are_deterministic_replayable_and_non_vacuous() {
     let bin_str = bin.to_str().unwrap().to_owned();
     let trace_path = |name: &str| directory.path().join(name);
     let run_fault = |seed: &str, trace: &Path| {
-        invoke_in(
+        invoke(
             workspace,
             &[
                 "run",
@@ -9478,7 +9479,7 @@ fn native_tcp_stream_faults_are_deterministic_replayable_and_non_vacuous() {
     let out1 = run_fault("1", &f1);
     let out2 = run_fault("1", &f2);
     let out_seed2 = run_fault("2", &f_seed2);
-    let out_nofault = invoke_in(
+    let out_nofault = invoke(
         workspace,
         &[
             "run",
@@ -9505,7 +9506,7 @@ fn native_tcp_stream_faults_are_deterministic_replayable_and_non_vacuous() {
     );
 
     // (b) record + strict replay byte-identical.
-    let replayed = invoke_in(workspace, &["replay", &bin_str, f1.to_str().unwrap()]);
+    let replayed = invoke(workspace, &["replay", &bin_str, f1.to_str().unwrap()]);
     assert_eq!(
         result1,
         stdout_line_with(&replayed, "TCP_ECHO_RESULT"),
@@ -9597,7 +9598,7 @@ fn native_rwlock_contention_is_seed_deterministic_and_varies_across_seeds() {
     fs::write(&source, RWLOCK_CONTENTION_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("rwlock");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -9609,7 +9610,7 @@ fn native_rwlock_contention_is_seed_deterministic_and_varies_across_seeds() {
 
     let mut outputs = std::collections::BTreeSet::new();
     for seed in ["1", "2", "3", "4", "5", "6"] {
-        let first = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
+        let first = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
         let baseline = String::from_utf8_lossy(&first.stdout).into_owned();
         // Schedule-invariant total (correctly locked, no lost updates).
         assert!(
@@ -9617,7 +9618,7 @@ fn native_rwlock_contention_is_seed_deterministic_and_varies_across_seeds() {
             "unexpected rwlock output at seed {seed}: {baseline}"
         );
         for _ in 0..2 {
-            let again = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
+            let again = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
             assert_eq!(
                 baseline,
                 String::from_utf8_lossy(&again.stdout),
@@ -9634,7 +9635,7 @@ fn native_rwlock_contention_is_seed_deterministic_and_varies_across_seeds() {
     );
 
     let trace = directory.path().join("rwlock.patina");
-    let recorded = invoke_in(
+    let recorded = invoke(
         workspace,
         &[
             "run",
@@ -9647,7 +9648,7 @@ fn native_rwlock_contention_is_seed_deterministic_and_varies_across_seeds() {
             "rwlock-contention",
         ],
     );
-    let replayed = invoke_in(
+    let replayed = invoke(
         workspace,
         &[
             "replay",
@@ -9706,7 +9707,7 @@ fn native_yield_points_trace_fails_closed_against_plain_binary() {
     let workspace = native_workspace();
     let plain = directory.path().join("plain");
     let instrumented = directory.path().join("instrumented");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -9715,7 +9716,7 @@ fn native_yield_points_trace_fails_closed_against_plain_binary() {
             plain.to_str().unwrap(),
         ],
     );
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -9727,7 +9728,7 @@ fn native_yield_points_trace_fails_closed_against_plain_binary() {
     );
 
     let yp_trace = directory.path().join("yp.patina");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "run",
@@ -9740,7 +9741,7 @@ fn native_yield_points_trace_fails_closed_against_plain_binary() {
     );
 
     // The instrumented binary replays its own trace exactly.
-    let self_replay = invoke_in(
+    let self_replay = invoke(
         workspace,
         &[
             "replay",
@@ -9782,7 +9783,7 @@ fn native_yield_points_trace_fails_closed_against_plain_binary() {
     // And the reverse: a plain trace must not replay against the instrumented
     // binary.
     let plain_trace = directory.path().join("plain.patina");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "run",
@@ -9827,7 +9828,7 @@ fn native_coverage_out_writes_covmap_and_is_byte_identical() {
     let workspace = native_workspace();
     let plain = directory.path().join("plain-cov");
     let instrumented = directory.path().join("instrumented-cov");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -9836,7 +9837,7 @@ fn native_coverage_out_writes_covmap_and_is_byte_identical() {
             plain.to_str().unwrap(),
         ],
     );
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -9871,7 +9872,7 @@ fn native_coverage_out_writes_covmap_and_is_byte_identical() {
     for seed in [3u64, 7] {
         let seed = seed.to_string();
         let first_map = directory.path().join(format!("seed-{seed}-a.covmap"));
-        let first = invoke_in(
+        let first = invoke(
             workspace,
             &[
                 "run",
@@ -9885,7 +9886,7 @@ fn native_coverage_out_writes_covmap_and_is_byte_identical() {
         assert_covmap_has_magic_and_report(&first_map, &first);
 
         let second_map = directory.path().join(format!("seed-{seed}-b.covmap"));
-        let second = invoke_in(
+        let second = invoke(
             workspace,
             &[
                 "run",
@@ -9905,7 +9906,7 @@ fn native_coverage_out_writes_covmap_and_is_byte_identical() {
 
         let trace = directory.path().join(format!("seed-{seed}.patina"));
         let record_map = directory.path().join(format!("seed-{seed}-record.covmap"));
-        let recorded = invoke_in(
+        let recorded = invoke(
             workspace,
             &[
                 "run",
@@ -9921,7 +9922,7 @@ fn native_coverage_out_writes_covmap_and_is_byte_identical() {
         assert_covmap_has_magic_and_report(&record_map, &recorded);
 
         let replay_map = directory.path().join(format!("seed-{seed}-replay.covmap"));
-        let replayed = invoke_in(
+        let replayed = invoke(
             workspace,
             &[
                 "replay",
@@ -10148,7 +10149,7 @@ fn native_yield_points_survive_thread_local_teardown() {
     fs::write(&source, YIELD_TEARDOWN_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("teardown");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -10160,7 +10161,7 @@ fn native_yield_points_survive_thread_local_teardown() {
     );
 
     // Before the fix this aborted at thread exit; it must now run to completion.
-    let first = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let first = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     let baseline = String::from_utf8_lossy(&first.stdout).into_owned();
     assert!(
         baseline.contains("TEARDOWN_ok"),
@@ -10170,7 +10171,7 @@ fn native_yield_points_survive_thread_local_teardown() {
 
     // Deterministic across repeats and exactly replayable.
     for _ in 0..2 {
-        let again = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+        let again = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
         assert_eq!(
             baseline,
             String::from_utf8_lossy(&again.stdout),
@@ -10178,7 +10179,7 @@ fn native_yield_points_survive_thread_local_teardown() {
         );
     }
     let trace = directory.path().join("teardown.patina");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "run",
@@ -10189,7 +10190,7 @@ fn native_yield_points_survive_thread_local_teardown() {
             trace.to_str().unwrap(),
         ],
     );
-    let replayed = invoke_in(
+    let replayed = invoke(
         workspace,
         &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
     );
@@ -10266,7 +10267,7 @@ fn native_yield_points_main_thread_tls_teardown_is_deterministic() {
     fs::write(&source, MAIN_TLS_TEARDOWN_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("main-tls");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -10277,7 +10278,7 @@ fn native_yield_points_main_thread_tls_teardown_is_deterministic() {
         ],
     );
 
-    let first = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+    let first = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
     let baseline = String::from_utf8_lossy(&first.stdout).into_owned();
     assert!(
         baseline.contains("MAIN_TLS_ok"),
@@ -10289,7 +10290,7 @@ fn native_yield_points_main_thread_tls_teardown_is_deterministic() {
     // teardown yields, replay never exhausts the trace on a trailing teardown
     // yield. Before the fix this replay aborted (fail-closed) on Linux.
     let trace = directory.path().join("main_tls.patina");
-    let recorded = invoke_in(
+    let recorded = invoke(
         workspace,
         &[
             "run",
@@ -10301,7 +10302,7 @@ fn native_yield_points_main_thread_tls_teardown_is_deterministic() {
         ],
     );
     for _ in 0..4 {
-        let replayed = invoke_in(
+        let replayed = invoke(
             workspace,
             &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
         );
@@ -10315,7 +10316,7 @@ fn native_yield_points_main_thread_tls_teardown_is_deterministic() {
     // Re-record and replay repeatedly: a nondeterministic trailing teardown yield
     // would surface as a fresh recording whose own replay fails closed.
     for _ in 0..4 {
-        let again = invoke_in(
+        let again = invoke(
             workspace,
             &[
                 "run",
@@ -10326,7 +10327,7 @@ fn native_yield_points_main_thread_tls_teardown_is_deterministic() {
                 trace.to_str().unwrap(),
             ],
         );
-        let replay = invoke_in(
+        let replay = invoke(
             workspace,
             &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
         );
@@ -10355,7 +10356,7 @@ fn native_yield_points_divergence_reports_accounting_and_site() {
     fs::write(&source, MAIN_TLS_TEARDOWN_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("main-tls");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -10366,7 +10367,7 @@ fn native_yield_points_divergence_reports_accounting_and_site() {
         ],
     );
     let trace = directory.path().join("full.patina");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "run",
@@ -10436,7 +10437,7 @@ fn drop_trailing_task_yield(source: &Path, dest: &Path) {
 // fails. Two classes have no plantable member here and are covered elsewhere:
 // `environment` (getenv/setenv/... are all interposed, so no shim-linked binary
 // can import an uninterposed one) and `unmanaged-thread` (pthread_create is
-// interposed; the C `escape_probe` in validate-native-shim.sh imports it and
+// interposed; the C `escape_probe.c` used by native_containment imports it and
 // native-audit rejects it as `unmanaged-thread`).
 //
 // The `process` representative is `killpg`, deliberately NOT a spawn-family
@@ -10496,7 +10497,7 @@ fn native_run_prerun_gate_refuses_every_escape_class() {
     fs::write(&source, ESCAPE_CLASSES_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("escape-classes");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -10577,7 +10578,7 @@ fn native_run_prerun_gate_blocks_and_flags_uninterposed_blocking_symbol() {
     fs::write(&source, PLANTED_ESCAPE_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("planted-escape");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -10691,7 +10692,7 @@ fn native_run_deny_trap_aborts_a_guest_that_actually_spawns() {
     fs::write(&source, PLANTED_SPAWN_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("planted-spawn");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -10726,29 +10727,6 @@ fn native_run_deny_trap_aborts_a_guest_that_actually_spawns() {
         !stdout.contains("after spawn"),
         "the guest must not continue past the deny-trap"
     );
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn invoke_in(directory: &Path, arguments: &[&str]) -> Output {
-    invoke_with(env!("CARGO_BIN_EXE_cargo-patina"), directory, arguments)
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn invoke_in_with_env(directory: &Path, arguments: &[&str], envs: &[(&str, &str)]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-patina"));
-    command.current_dir(directory).args(arguments);
-    for (name, value) in envs {
-        command.env(name, value);
-    }
-    let output = command.output().unwrap();
-    assert!(
-        output.status.success(),
-        "command failed with {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output
 }
 
 // Schedule reduction end to end: record a three-task run whose failure depends
@@ -10949,7 +10927,7 @@ fn minimize_generation_targets_the_campaigns_own_verdicts_without_a_marker() {
     let source = directory.path().join("short_write_verdict.rs");
     fs::write(&source, SHORT_WRITE_VERDICT_SOURCE).unwrap();
     let guest = directory.path().join("verdict-guest");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -11112,7 +11090,7 @@ fn minimize_generation_reduces_the_fault_vector_to_the_knob_that_matters() {
     let source = directory.path().join("short_write.rs");
     fs::write(&source, SHORT_WRITE_SOURCE).unwrap();
     let guest = directory.path().join("short-write-guest");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -11333,16 +11311,16 @@ fn switch_count(line: &str) -> u64 {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn package_result(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find(|line| line.starts_with("NATIVE_PKG_RESULT"))
-        .unwrap_or_else(|| {
-            panic!(
-                "missing NATIVE_PKG_RESULT in stdout:\n{}",
-                String::from_utf8_lossy(&output.stdout)
-            )
-        })
-        .to_owned()
+    let stdout = String::from_utf8(output.stdout.clone()).unwrap();
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with("NATIVE_PKG_RESULT")),
+        "missing package result: {stdout}"
+    );
+    // Compare the entire stream, not just the summary: extra nondeterministic
+    // output must fail the package's seed/record/replay checks too.
+    stdout
 }
 
 #[test]
@@ -11688,67 +11666,6 @@ fn invoke_unchecked_clean_env(
     command.output().unwrap()
 }
 
-fn invoke_with(executable: &str, fixture: &Path, arguments: &[&str]) -> Output {
-    let output = invoke_unchecked(executable, fixture, arguments);
-    assert!(
-        output.status.success(),
-        "command failed with {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output
-}
-
-fn invoke_unchecked(executable: &str, fixture: &Path, arguments: &[&str]) -> Output {
-    Command::new(executable)
-        .current_dir(fixture)
-        .args(arguments)
-        .output()
-        .unwrap()
-}
-
-/// Run an already-built artifact and give up after `deadline`, returning `None`
-/// when the run had to be killed. `invoke_unchecked` blocks forever on a guest
-/// that wedges, which turns a swallowed fail-closed refusal into a hung test
-/// instead of a failing one; this is for the legs whose RED evidence IS the
-/// wedge.
-///
-/// The run gets its own process group, and the deadline kills the GROUP.
-/// Signalling the supervisor alone is not enough: the guest it spawned keeps the
-/// inherited stdout/stderr pipes open, so `wait_with_output` would poll them
-/// forever while the guest span at 100% CPU with no parent left to stop it.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn invoke_with_deadline(
-    executable: &str,
-    fixture: &Path,
-    arguments: &[&str],
-    deadline: Duration,
-) -> Option<Output> {
-    use std::os::unix::process::CommandExt;
-
-    let mut child = Command::new(executable)
-        .current_dir(fixture)
-        .args(arguments)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .unwrap();
-    let give_up = Instant::now() + deadline;
-    while child.try_wait().unwrap().is_none() {
-        if Instant::now() >= give_up {
-            // The child leads its own group, so its pid IS the group id.
-            let group = format!("-{}", child.id());
-            let _ = Command::new("kill").args(["-9", &group]).status();
-            let _ = child.wait();
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    Some(child.wait_with_output().unwrap())
-}
-
 fn result_line(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout)
         .lines()
@@ -12031,6 +11948,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -12115,7 +12033,7 @@ fn sdk_fixtures_with_shared_cargo_target_dir_do_not_reuse_stale_binary() {
         &[("CARGO_TARGET_DIR", shared_target)],
     );
 
-    let second = invoke_in(
+    let second = invoke(
         workspace,
         &["run", second_bin.to_str().unwrap(), "--seed", "1"],
     );
@@ -12160,7 +12078,7 @@ fn native_buggify_sdk_reports_records_and_replays() {
     write_sdk_fixture(&pkg, BUGGIFY_SDK_MAIN);
     let workspace = native_workspace();
     let bin = directory.path().join("buggify-sdk");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -12172,7 +12090,7 @@ fn native_buggify_sdk_reports_records_and_replays() {
 
     // Seeded run with every site active and always firing.
     let flags = ["--buggify=1000", "--buggify-activation-permille", "1000"];
-    let seeded = invoke_in(
+    let seeded = invoke(
         workspace,
         &[
             &["run", bin.to_str().unwrap(), "--seed", "4"][..],
@@ -12212,7 +12130,7 @@ fn native_buggify_sdk_reports_records_and_replays() {
 
     // Record, then replay WITHOUT re-supplying --buggify: byte-identical stdout.
     let trace = directory.path().join("buggify.patina");
-    let recorded = invoke_in(
+    let recorded = invoke(
         workspace,
         &[
             &["run", bin.to_str().unwrap(), "--seed", "4"][..],
@@ -12221,7 +12139,7 @@ fn native_buggify_sdk_reports_records_and_replays() {
         ]
         .concat(),
     );
-    let replayed = invoke_in(
+    let replayed = invoke(
         workspace,
         &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
     );
@@ -12312,7 +12230,7 @@ fn native_static_site_table_surfaces_never_called_reachable_in_campaign() {
     write_sdk_fixture(&pkg, BUGGIFY_NEVER_REACHABLE_MAIN);
     let workspace = native_workspace();
     let bin = directory.path().join("buggify-never-reachable");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -12415,7 +12333,7 @@ fn native_buggify_duplicate_label_aborts_with_marker() {
     write_sdk_fixture(&pkg, BUGGIFY_DUP_MAIN);
     let workspace = native_workspace();
     let bin = directory.path().join("buggify-dup");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -12461,7 +12379,7 @@ fn native_buggify_after_setup_never_called_fails_loudly() {
     write_sdk_fixture(&pkg, BUGGIFY_NO_SETUP_MAIN);
     let workspace = native_workspace();
     let bin = directory.path().join("buggify-nosetup");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -12496,7 +12414,7 @@ fn native_buggify_after_setup_never_called_fails_loudly() {
     );
 
     // Same guest WITHOUT the gate declaration runs clean.
-    let plain = invoke_in(
+    let plain = invoke(
         workspace,
         &["run", bin.to_str().unwrap(), "--seed", "1", "--buggify"],
     );
@@ -12589,7 +12507,7 @@ fn native_proptest_case_generation_is_seed_deterministic_and_replays() {
     write_proptest_fixture(&pkg);
     let workspace = native_workspace();
     let bin = directory.path().join("proptest-digest");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -12603,15 +12521,15 @@ fn native_proptest_case_generation_is_seed_deterministic_and_replays() {
 
     // Same seed -> byte-identical case digest across two separate native-run
     // invocations; a different seed -> a different digest.
-    let seeded = proptest_digest(&invoke_in(
+    let seeded = proptest_digest(&invoke(
         workspace,
         &["run", bin.to_str().unwrap(), "--seed", "5"],
     ));
-    let repeated = proptest_digest(&invoke_in(
+    let repeated = proptest_digest(&invoke(
         workspace,
         &["run", bin.to_str().unwrap(), "--seed", "5"],
     ));
-    let other = proptest_digest(&invoke_in(
+    let other = proptest_digest(&invoke(
         workspace,
         &["run", bin.to_str().unwrap(), "--seed", "6"],
     ));
@@ -12626,7 +12544,7 @@ fn native_proptest_case_generation_is_seed_deterministic_and_replays() {
 
     // Record at seed 5, then strict replay: byte-identical digest.
     let trace = directory.path().join("proptest.patina");
-    let recorded = proptest_digest(&invoke_in(
+    let recorded = proptest_digest(&invoke(
         workspace,
         &[
             "run",
@@ -12639,7 +12557,7 @@ fn native_proptest_case_generation_is_seed_deterministic_and_replays() {
             "proptest-digest-v1",
         ],
     ));
-    let replayed = proptest_digest(&invoke_in(
+    let replayed = proptest_digest(&invoke(
         workspace,
         &[
             "replay",
@@ -12864,7 +12782,7 @@ fn native_two_axis_stateful_shrink_then_schedule_minimize() {
     write_two_axis_fixture(&pkg);
     let workspace = native_workspace();
     let bin = directory.path().join("two-axis");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -12971,7 +12889,7 @@ fn native_two_axis_stateful_shrink_then_schedule_minimize() {
     }
 
     let minimized_path = directory.path().join("fail-min.patina");
-    let minimized = invoke_in(
+    let minimized = invoke(
         workspace,
         &[
             "minimize",
@@ -13052,7 +12970,7 @@ fn native_replay_restores_guest_argv_and_normalizes_argv0() {
     fs::write(&source, ARGV_ECHO_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("argv-echo");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -13065,7 +12983,7 @@ fn native_replay_restores_guest_argv_and_normalizes_argv0() {
 
     // argv[0] is the supervisor-synthesized fixed name, never the host binary
     // path, so a guest reading std::env::args().next() gets a portable value.
-    let seeded = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "0"]);
+    let seeded = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "0"]);
     let seeded_out = String::from_utf8_lossy(&seeded.stdout);
     assert!(
         seeded_out.contains("ARGV0=patina-guest"),
@@ -13082,7 +13000,7 @@ fn native_replay_restores_guest_argv_and_normalizes_argv0() {
     // from the trace. Before argv capture this bare replay ran the guest with
     // default args and diverged with an operation mismatch.
     let trace = directory.path().join("argv.patina");
-    let recorded = invoke_in(
+    let recorded = invoke(
         workspace,
         &[
             "run",
@@ -13168,7 +13086,7 @@ fn native_replay_restores_guest_argv_and_normalizes_argv0() {
     // command line.
     let old_trace = directory.path().join("old.patina");
     strip_guest_argv(&trace, &old_trace);
-    let old_replay = invoke_in(
+    let old_replay = invoke(
         workspace,
         &[
             "replay",
@@ -13285,7 +13203,7 @@ fn native_fs_crash_at_restarts_fresh_incarnation() {
     fs::write(&source, NATIVE_CRASH_RESTART_CANARY_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("crash_restart");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -13294,7 +13212,7 @@ fn native_fs_crash_at_restarts_fresh_incarnation() {
             bin.to_str().unwrap(),
         ],
     );
-    let output = invoke_in(
+    let output = invoke(
         workspace,
         &[
             "run",
@@ -13329,7 +13247,7 @@ fn native_fs_crash_at_restarts_fresh_incarnation() {
         stderr.matches("PATINA_FS_CRASH_RESTART").count() == 1,
         "{stderr}"
     );
-    let json = invoke_in(
+    let json = invoke(
         workspace,
         &[
             "run",
@@ -13455,7 +13373,7 @@ fn native_fs_torn_granularity_byte_reaches_the_guest() {
     fs::write(&source, TORN_GRANULARITY_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("torn");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -13466,7 +13384,7 @@ fn native_fs_torn_granularity_byte_reaches_the_guest() {
     );
 
     let run = |gran: &str| {
-        let output = invoke_in(
+        let output = invoke(
             workspace,
             &[
                 "run",
@@ -13512,7 +13430,7 @@ fn native_fs_crash_image_is_seed_live_and_deterministic() {
     fs::write(&source, TORN_GRANULARITY_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("torn");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -13523,7 +13441,7 @@ fn native_fs_crash_image_is_seed_live_and_deterministic() {
     );
 
     let run = |seed: &str| {
-        let output = invoke_in(
+        let output = invoke(
             workspace,
             &[
                 "run",
@@ -13624,7 +13542,7 @@ fn native_directory_fsync_guards_namespace_durability_and_replays() {
     fs::write(&source, NAMESPACE_DURABILITY_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("namespace");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -13635,7 +13553,7 @@ fn native_directory_fsync_guards_namespace_durability_and_replays() {
     );
 
     let run_stdout = |args: &[&str]| -> String {
-        String::from_utf8_lossy(&invoke_in(workspace, args).stdout).into_owned()
+        String::from_utf8_lossy(&invoke(workspace, args).stdout).into_owned()
     };
     let bin_str = bin.to_str().unwrap();
 
@@ -13674,7 +13592,7 @@ fn native_directory_fsync_guards_namespace_durability_and_replays() {
 
     // A dir-fsync-bearing trace records and replays byte-identically.
     let trace = directory.path().join("namespace.patina");
-    let recorded = invoke_in(
+    let recorded = invoke(
         workspace,
         &[
             "run",
@@ -13689,7 +13607,7 @@ fn native_directory_fsync_guards_namespace_durability_and_replays() {
             "--dir-fsync",
         ],
     );
-    let replayed = invoke_in(
+    let replayed = invoke(
         workspace,
         &[
             "replay",
@@ -13747,7 +13665,7 @@ fn native_render_produces_standalone_timeline_and_preserves_replay_hash() {
     fs::write(&source, RENDER_GUEST_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("render-guest");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -13758,7 +13676,7 @@ fn native_render_produces_standalone_timeline_and_preserves_replay_hash() {
     );
 
     let trace = directory.path().join("run.patina");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "run",
@@ -13774,7 +13692,7 @@ fn native_render_produces_standalone_timeline_and_preserves_replay_hash() {
     // Replaying WITH --render must not perturb the trace file (render only reads
     // it and writes a separate HTML file).
     let html = directory.path().join("timeline.html");
-    let replayed = invoke_in(
+    let replayed = invoke(
         workspace,
         &[
             "replay",
@@ -14052,6 +13970,7 @@ mod tests {
         assert_eq!(epoch, 0);
     }
 
+
     #[test]
     fn buggify_failure_records() {
         if patina_dst::buggify_with_prob!("native-harness-record", 1.0) {
@@ -14073,7 +13992,7 @@ fn native_run_json_envelope_has_stable_shape() {
     fs::write(&source, RENDER_GUEST_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("json-guest");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -14084,7 +14003,7 @@ fn native_run_json_envelope_has_stable_shape() {
     );
 
     let trace = directory.path().join("run.patina");
-    let output = invoke_in(
+    let output = invoke(
         workspace,
         &[
             "run",
@@ -14139,7 +14058,7 @@ fn native_planted_failure_emits_report_and_json_violation() {
     fs::write(&source, PLANTED_FAILURE_SOURCE).unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("planted");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -14217,7 +14136,7 @@ fn native_build_json_envelope_reports_output_and_hash() {
     fs::write(&source, "fn main() { println!(\"hi\"); }\n").unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("build-json");
-    let output = invoke_in(
+    let output = invoke(
         workspace,
         &[
             "build",
@@ -14257,7 +14176,7 @@ fn render_without_a_trace_is_rejected() {
     fs::write(&source, "fn main() { println!(\"hi\"); }\n").unwrap();
     let workspace = native_workspace();
     let bin = directory.path().join("no-trace");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -14327,7 +14246,7 @@ fn write_harness_fixture(dir: &Path, name: &str, main_rs: &str) {
 /// Build a harness fixture into `out` through `cargo patina build`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn build_harness_bin(dir: &Path, out: &Path) {
-    invoke_in(
+    invoke(
         native_workspace(),
         &[
             "build",
@@ -14431,7 +14350,7 @@ fn harness_run_is_deterministic_with_std_interposed() {
     let bin = directory.path().join("harness-det-bin");
     build_harness_bin(&fixture, &bin);
 
-    let first = invoke_in(
+    let first = invoke(
         native_workspace(),
         &["run", bin.to_str().unwrap(), "--harness", "--seed", "1"],
     );
@@ -14441,7 +14360,7 @@ fn harness_run_is_deterministic_with_std_interposed() {
         "std::fs was not interposed (unexpected output): {baseline}"
     );
     for _ in 0..2 {
-        let again = invoke_in(
+        let again = invoke(
             native_workspace(),
             &["run", bin.to_str().unwrap(), "--harness", "--seed", "1"],
         );
@@ -14493,11 +14412,11 @@ fn harness_configured_knob_affects_std_observed_behavior() {
     let bin = directory.path().join("harness-jitter-bin");
     build_harness_bin(&fixture, &bin);
 
-    let base = invoke_in(
+    let base = invoke(
         native_workspace(),
         &["run", bin.to_str().unwrap(), "--harness", "--seed", "1"],
     );
-    let jittered = invoke_in(
+    let jittered = invoke(
         native_workspace(),
         &[
             "run",
@@ -14535,7 +14454,7 @@ fn harness_record_then_flag_free_replay_is_byte_identical() {
     build_harness_bin(&fixture, &bin);
 
     let trace = directory.path().join("harness.patina");
-    let recorded = invoke_in(
+    let recorded = invoke(
         native_workspace(),
         &[
             "run",
@@ -14549,7 +14468,7 @@ fn harness_record_then_flag_free_replay_is_byte_identical() {
             "harness-replay",
         ],
     );
-    let replayed = invoke_in(
+    let replayed = invoke(
         native_workspace(),
         &[
             "replay",
@@ -14614,7 +14533,7 @@ fn harness_replay_with_conflicting_config_fails_closed() {
     build_harness_bin(&fixture_b, &bin_b);
 
     let trace = directory.path().join("jit.patina");
-    invoke_in(
+    invoke(
         native_workspace(),
         &[
             "run",
@@ -14655,7 +14574,7 @@ fn harness_replay_with_conflicting_config_fails_closed() {
     );
 
     // The original binary (matching config) replays cleanly.
-    let matching = invoke_in(
+    let matching = invoke(
         native_workspace(),
         &[
             "replay",
@@ -14771,7 +14690,7 @@ fn harness_dns_service_and_entry_reach_the_host_table_and_replay_flag_free() {
     build_harness_bin(&fixture, &bin);
 
     let trace = directory.path().join("harness-dns.patina");
-    let recorded = invoke_in(
+    let recorded = invoke(
         native_workspace(),
         &[
             "run",
@@ -14797,7 +14716,7 @@ fn harness_dns_service_and_entry_reach_the_host_table_and_replay_flag_free() {
         "an unregistered name must stay NXDOMAIN: {line}"
     );
 
-    let replayed = invoke_in(
+    let replayed = invoke(
         native_workspace(),
         &[
             "replay",
@@ -14909,7 +14828,7 @@ fn harness_guest_that_spawns_threads_finalizes_and_replays_flag_free() {
         "the recorded trace was never finalized"
     );
 
-    let replayed = invoke_in(
+    let replayed = invoke(
         native_workspace(),
         &[
             "replay",
@@ -15009,7 +14928,7 @@ fn harness_dns_service_reaches_a_listener_thread_and_replays_flag_free() {
         "the wildcard-bound listener thread did not serve the named request: {line}"
     );
 
-    let replayed = invoke_in(
+    let replayed = invoke(
         native_workspace(),
         &[
             "replay",
@@ -15867,7 +15786,7 @@ fn campaign_guided_refuses_without_a_novelty_signal() {
     let source = directory.path().join("plain.rs");
     let guest = directory.path().join("plain-guest");
     fs::write(&source, "fn main() { println!(\"PLAIN_DONE\"); }\n").unwrap();
-    let built = invoke_in(
+    let built = invoke(
         workspace,
         &[
             "build",
@@ -16279,7 +16198,7 @@ fn campaign_drains_generation_output_wider_than_the_pipe_buffer() {
     let source = directory.path().join("wide.rs");
     fs::write(&source, WIDE_OUTPUT_SOURCE).unwrap();
     let guest = directory.path().join("wide");
-    invoke_in(
+    invoke(
         native_workspace(),
         &[
             "build",
@@ -16334,7 +16253,7 @@ fn campaign_splits_a_guest_abort_from_a_patina_refusal() {
     let source = directory.path().join("guest_abort.rs");
     fs::write(&source, GUEST_ABORT_SOURCE).unwrap();
     let aborting = directory.path().join("guest-abort");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -16361,7 +16280,7 @@ fn campaign_splits_a_guest_abort_from_a_patina_refusal() {
     let pkg = directory.path().join("dup");
     write_sdk_fixture(&pkg, BUGGIFY_DUP_MAIN);
     let refusing = directory.path().join("dup-label");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -16401,7 +16320,7 @@ fn campaign_classifies_a_level_one_guest_from_spec_declared_patterns() {
     )
     .unwrap();
     let guest = directory.path().join("level-one");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -16464,7 +16383,7 @@ fn campaign_forwards_the_prerun_gate_hatches_to_every_generation() {
     let source = directory.path().join("planted_escape.rs");
     fs::write(&source, PLANTED_ESCAPE_SOURCE).unwrap();
     let guest = directory.path().join("planted-escape-campaign");
-    invoke_in(
+    invoke(
         native_workspace(),
         &[
             "build",
@@ -16612,7 +16531,7 @@ fn native_verdict_abi_records_replays_and_reaches_the_envelope() {
     write_sdk_fixture(&pkg, VERDICT_SDK_MAIN);
     let workspace = native_workspace();
     let bin = directory.path().join("verdict-guest");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -16624,7 +16543,7 @@ fn native_verdict_abi_records_replays_and_reaches_the_envelope() {
 
     // The envelope carries the verdicts structurally, in call order.
     let trace = directory.path().join("verdict.patina");
-    let recorded = invoke_in(
+    let recorded = invoke(
         workspace,
         &[
             "run",
@@ -16674,7 +16593,7 @@ fn native_verdict_abi_records_replays_and_reaches_the_envelope() {
     // recording ran under `--format json`, which folds guest stderr into the
     // envelope rather than re-emitting it, so its lines come from there.
     let recorded_lines = verdict_lines_in(value["stderr"].as_str().unwrap_or_default());
-    let replayed = invoke_in(
+    let replayed = invoke(
         workspace,
         &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
     );
@@ -16690,8 +16609,8 @@ fn native_verdict_abi_records_replays_and_reaches_the_envelope() {
     );
 
     // Same seed twice: byte-identical, verdict lines included.
-    let first = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "4"]);
-    let second = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "4"]);
+    let first = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "4"]);
+    let second = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "4"]);
     assert_eq!(first.stdout, second.stdout);
     assert_eq!(first.stderr, second.stderr);
     assert_eq!(verdict_lines(&first).len(), 3);
@@ -16717,7 +16636,7 @@ fn main() {
     );
     let workspace = native_workspace();
     let bin = directory.path().join("always-verdict");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -16886,7 +16805,7 @@ fn native_custom_op_records_replays_and_never_reruns_perform() {
     write_sdk_fixture(&pkg, CUSTOM_OP_SDK_MAIN);
     let workspace = native_workspace();
     let bin = directory.path().join("custom-op-guest");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -16897,7 +16816,7 @@ fn native_custom_op_records_replays_and_never_reruns_perform() {
     );
 
     let trace = directory.path().join("custom-op.patina");
-    let recorded = invoke_in(
+    let recorded = invoke(
         workspace,
         &[
             "run",
@@ -16939,7 +16858,7 @@ fn native_custom_op_records_replays_and_never_reruns_perform() {
     assert_eq!(events[1].2, patina_dst_abi::Outcome::Bytes(Vec::new()));
 
     // Replay: the guest sees the same values, but `perform` never ran.
-    let replayed = invoke_in(
+    let replayed = invoke(
         workspace,
         &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
     );
@@ -16952,8 +16871,8 @@ fn native_custom_op_records_replays_and_never_reruns_perform() {
     );
 
     // Same seed twice: byte-identical, custom-op stream included.
-    let first = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "4"]);
-    let second = invoke_in(workspace, &["run", bin.to_str().unwrap(), "--seed", "4"]);
+    let first = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "4"]);
+    let second = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "4"]);
     assert_eq!(first.stdout, second.stdout);
     assert_eq!(first.stderr, second.stderr);
     assert_eq!(
@@ -17034,7 +16953,7 @@ fn main() {
     );
     let workspace = native_workspace();
     let bin = directory.path().join("custom-op-escape");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -17175,7 +17094,7 @@ fn native_custom_op_faults_fire_report_and_replay() {
     write_sdk_fixture(&pkg, CUSTOM_OP_FAULT_SDK_MAIN);
     let workspace = native_workspace();
     let bin = directory.path().join("custom-op-fault-guest");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -17187,7 +17106,7 @@ fn native_custom_op_faults_fire_report_and_replay() {
     let bin = bin.to_str().unwrap();
 
     // Knob off: the declared failure is never reached, both closures run.
-    let clean = invoke_in(workspace, &["run", bin, "--seed", "4", "--", "probe"]);
+    let clean = invoke(workspace, &["run", bin, "--seed", "4", "--", "probe"]);
     assert_eq!(
         result_line(&clean),
         "PATINA_RESULT performed=2 faultable=obj-1 plain=7"
@@ -17201,7 +17120,7 @@ fn native_custom_op_faults_fire_report_and_replay() {
     // failure WITHOUT performing, and the op that declared nothing is untouched
     // — so `performed=1` is the whole control in one number.
     let trace = directory.path().join("custom-op-fault.patina");
-    let faulted = invoke_in(
+    let faulted = invoke(
         workspace,
         &[
             "run",
@@ -17256,7 +17175,7 @@ fn native_custom_op_faults_fire_report_and_replay() {
     );
 
     // Flag-free replay: the trace restores the knob and reproduces the fault.
-    let replayed = invoke_in(workspace, &["replay", bin, trace.to_str().unwrap()]);
+    let replayed = invoke(workspace, &["replay", bin, trace.to_str().unwrap()]);
     assert_eq!(
         result_line(&replayed),
         "PATINA_RESULT performed=0 faultable=UNAVAILABLE plain=7",
@@ -17266,7 +17185,7 @@ fn native_custom_op_faults_fire_report_and_replay() {
 
     // Vacuity, the honest half: the knob armed over a guest that reached no
     // fault-eligible operation at all is a coverage failure, not a clean run.
-    let vacuous = invoke_in(
+    let vacuous = invoke(
         workspace,
         &[
             "run",
@@ -17299,7 +17218,7 @@ fn campaign_custom_op_faults_find_a_planted_mishandling() {
     write_sdk_fixture(&pkg, CUSTOM_OP_FAULT_SDK_MAIN);
     let workspace = native_workspace();
     let bin = directory.path().join("custom-op-campaign-guest");
-    invoke_in(
+    invoke(
         workspace,
         &[
             "build",
@@ -17638,7 +17557,7 @@ fn build_facts_guest(directory: &Path, name: &str, source: &str) -> PathBuf {
     let path = directory.join(format!("{name}.rs"));
     fs::write(&path, source).unwrap();
     let binary = directory.join(name);
-    invoke_in(
+    invoke(
         native_workspace(),
         &[
             "build",
@@ -17781,7 +17700,7 @@ fn the_envelope_attributes_a_patina_refusal_and_leaves_a_guest_abort_unattribute
     // recorded fingerprint does not match the runtime's is the canonical case.
     let fs_guest = build_facts_guest(directory.path(), "facts-refusal-guest", FACTS_FS_SOURCE);
     let trace = directory.path().join("refusal.patina");
-    invoke_in(
+    invoke(
         native_workspace(),
         &[
             "run",

@@ -170,6 +170,50 @@ mod scenario {
         for f in [fa, fb, fc] {
             p.close(f);
         }
+
+        // A duplicated endpoint keeps its side alive until the LAST alias
+        // closes, not until the original descriptor closes (native ABI pin:
+        // native_abi::pipe_aliases_keep_channels_alive, also run on arm64 and macOS).
+        let (rc, ends) = p.pipe2(O_NONBLOCK);
+        p.require("alias lifetime pipe", rc == 0);
+        let [rd, wr] = ends;
+        let writer_alias = p.dup(wr) as i32;
+        p.require("duplicate writer", writer_alias >= 0);
+        p.check("close original writer", p.close(wr) == 0);
+        p.check("writer alias prevents EOF", p.read(rd, 1).0 == neg(EAGAIN));
+        p.check("write through alias", p.write(writer_alias, b"a") == 1);
+        let (n, bytes) = p.read(rd, 1);
+        p.check("read alias payload", n == 1 && bytes == b"a");
+        p.check("close last writer", p.close(writer_alias) == 0);
+        p.check("last writer produces EOF", p.read(rd, 1).0 == 0);
+        p.close(rd);
+
+        let (rc, ends) = p.pipe2(O_NONBLOCK);
+        p.require("reader alias lifetime pipe", rc == 0);
+        let [rd, wr] = ends;
+        let reader_alias = p.fcntl(rd, F_DUPFD_CLOEXEC, 0) as i32;
+        p.require("duplicate reader", reader_alias >= 0);
+        p.check("close original reader", p.close(rd) == 0);
+        p.check("reader alias prevents EPIPE", p.write(wr, b"b") == 1);
+        p.check("close last reader", p.close(reader_alias) == 0);
+        p.check(
+            "last reader produces EPIPE",
+            p.write(wr, b"c") == neg(EPIPE),
+        );
+        p.close(wr);
+
+        // Duplex socketpairs have two directions; both use the fd table.
+        let (rc, pair) = p.socketpair(AF_UNIX, SOCK_STREAM, 0);
+        p.require("socketpair", rc == 0);
+        let [a, b] = pair;
+        p.check("socketpair request", p.write(a, b"ping") == 4);
+        let (n, bytes) = p.read(b, 4);
+        p.check("socketpair receives request", n == 4 && bytes == b"ping");
+        p.check("socketpair reply", p.write(b, b"PONG") == 4);
+        let (n, bytes) = p.read(a, 4);
+        p.check("socketpair receives reply", n == 4 && bytes == b"PONG");
+        p.close(a);
+        p.close(b);
     }
 }
 

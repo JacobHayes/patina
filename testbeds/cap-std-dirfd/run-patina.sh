@@ -60,14 +60,21 @@ if [[ "$(uname -s)" == Linux ]]; then
 #endif
 int main(void) { return prctl(PR_SET_SYSCALL_USER_DISPATCH, 0, 0, 0, 0) == 0 ? 0 : 1; }
 C
-  if "$cc" "$probe_c" -o "$probe_bin" 2>/dev/null && "$probe_bin"; then
-    sud_kernel=1
+  if ! "$cc" "$probe_c" -o "$probe_bin"; then
+    rm -f "$probe_c" "$probe_bin"
+    echo 'FATAL: compiling the SUD capability probe failed' >&2; exit 3
   fi
+  "$probe_bin"; probe_status=$?
+  case "$probe_status" in
+    0) sud_kernel=1 ;;
+    1) ;; # The kernel refused the capability probe.
+    *) echo "FATAL: SUD capability probe exited $probe_status" >&2; exit 3 ;;
+  esac
   rm -f "$probe_c" "$probe_bin"
 fi
 
 if [[ "$sud_kernel" != 1 ]]; then
-  # COUNTED, LOUD skip: one grep-able line the SUD gate looks for. Never green.
+  # The ecosystem wrapper independently verifies this unsupported-host receipt.
   echo "cap-std-dirfd: SKIPPED 1 (host lacks syscall-user-dispatch: $(uname -s) $(uname -m); SUD is x86_64 Linux >= 5.11)"
   exit 0
 fi

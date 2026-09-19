@@ -1,13 +1,18 @@
-//! Shared helpers for the tests that scan the native shim's own compiled
-//! objects: the Rust staticlib (`libpatina_dst_native_shim.a`, built here on
-//! demand) and the C POSIX layer (compiled from the embedded sources with the
-//! same flags `cargo patina build` uses).
+//! Shared CLI invocation, process deadlines, workspace paths, and native shim
+//! compilation for e2e and native acceptance tests. Object checks use the Rust
+//! staticlib (`libpatina_dst_native_shim.a`, built on demand) and the C POSIX
+//! layer compiled from embedded sources with the packaged build's flags.
 
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+pub mod native;
 
 use object::read::archive::ArchiveFile;
 use object::{Object, ObjectSymbol};
@@ -21,12 +26,18 @@ pub fn profile_dir() -> PathBuf {
         .to_path_buf()
 }
 
-pub fn workspace_manifest() -> PathBuf {
+/// Return the repository root containing the acceptance guests.
+pub fn native_workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .and_then(Path::parent)
-        .expect("crate is two levels below the workspace root")
-        .join("Cargo.toml")
+        .unwrap()
+        .parent()
+        .unwrap()
+}
+
+/// Return the repository Cargo manifest.
+pub fn workspace_manifest() -> PathBuf {
+    native_workspace().join("Cargo.toml")
 }
 
 /// Build (idempotently) and locate `libpatina_dst_native_shim.a`.
@@ -104,8 +115,7 @@ pub fn compile_posix_object(dir: &Path) -> PathBuf {
     let source = dir.join("patina_posix.c");
     std::fs::write(&source, patina_dst_native_shim::POSIX_C_SOURCE).unwrap();
     let object = dir.join("patina_posix.o");
-    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
-    let status = Command::new(&cc)
+    let status = c_compiler()
         .args([
             "-std=c11",
             "-D_POSIX_C_SOURCE=200809L",
@@ -141,4 +151,104 @@ pub fn defined_public_symbols(object: &object::File<'_>) -> BTreeSet<String> {
             }
         })
         .collect()
+}
+
+/// Select the configured C compiler, or the platform default.
+pub fn c_compiler() -> Command {
+    Command::new(std::env::var("CC").unwrap_or_else(|_| "cc".into()))
+}
+
+/// Require a successful invocation of the integration test's cargo-patina binary.
+pub fn invoke(directory: &Path, arguments: &[&str]) -> Output {
+    invoke_with(env!("CARGO_BIN_EXE_cargo-patina"), directory, arguments)
+}
+
+/// Require a successful CLI invocation with explicit environment overrides.
+pub fn invoke_in_with_env(directory: &Path, arguments: &[&str], envs: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-patina"));
+    command.current_dir(directory).args(arguments);
+    for (name, value) in envs {
+        command.env(name, value);
+    }
+    assert_success(command.output().unwrap())
+}
+
+/// Require a successful exit, displaying both captured streams on failure.
+pub fn assert_success(output: Output) -> Output {
+    assert!(
+        output.status.success(),
+        "command failed with {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+/// Require a successful invocation of the selected executable.
+pub fn invoke_with(executable: &str, directory: &Path, arguments: &[&str]) -> Output {
+    assert_success(invoke_unchecked(executable, directory, arguments))
+}
+
+/// Capture the selected executable without requiring a successful exit.
+pub fn invoke_unchecked(executable: &str, directory: &Path, arguments: &[&str]) -> Output {
+    Command::new(executable)
+        .current_dir(directory)
+        .args(arguments)
+        .output()
+        .unwrap()
+}
+
+/// Capture both output streams concurrently until the child and pipe readers finish.
+/// On deadline, kill the entire process group and return `None`: descendants may
+/// keep output pipes open even after the supervisor exits.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn invoke_with_deadline(
+    executable: &str,
+    directory: &Path,
+    arguments: &[&str],
+    deadline: Duration,
+) -> Option<Output> {
+    let mut child = Command::new(executable)
+        .current_dir(directory)
+        .args(arguments)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let stdout = std::thread::spawn(move || read_pipe(stdout));
+    let stderr = std::thread::spawn(move || read_pipe(stderr));
+    let give_up = Instant::now() + deadline;
+    while child.try_wait().unwrap().is_none() || !stdout.is_finished() || !stderr.is_finished() {
+        if Instant::now() >= give_up {
+            // The child leads its own group, so its pid IS the group id.
+            let group = format!("-{}", child.id());
+            // The process group may already have exited, but a missing kill
+            // executable must fail immediately rather than hang in a pipe join.
+            Command::new("kill")
+                .args(["-9", "--", &group])
+                .status()
+                .expect("launch kill for deadline process group");
+            let _ = child.wait();
+            stdout.join().unwrap();
+            stderr.join().unwrap();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Some(Output {
+        status: child.wait().unwrap(),
+        stdout: stdout.join().unwrap(),
+        stderr: stderr.join().unwrap(),
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn read_pipe(mut pipe: impl std::io::Read) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    pipe.read_to_end(&mut bytes).unwrap();
+    bytes
 }

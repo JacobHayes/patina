@@ -348,7 +348,10 @@ then `run` the resulting artifact.
 If you use [mise](https://mise.jdx.dev/): `mise run setup` installs toolchains
 and targets, `mise run check:fast` is the inner-loop signal, `mise run check` is
 the local landing gate, `mise run msrv` is the full Rust 1.86 CI/final-gate
-suite, and `mise run demo` runs a small end-to-end demo.
+suite, and `mise run demo` runs a small end-to-end demo. For focused shim ABI
+feedback, use `mise run check:native-abi`; the individually selectable native test
+targets and their platform coverage are listed in
+[testbeds/native-boundary](testbeds/native-boundary/README.md).
 
 ## What Patina is not (yet)
 

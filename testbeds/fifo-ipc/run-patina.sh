@@ -14,8 +14,8 @@
 #
 # Unlike the rustix-default and cap-std-dirfd MREs this one is NOT SUD-only: it
 # reaches every call through libc, so it runs on every platform the native shim
-# supports. The raw-syscall `mknodat` row is proved by the SUD battery in
-# scripts/validate-native-shim.sh.
+# supports. The raw-syscall `mknodat` row is proved on x86_64 Linux by
+# native_raw::raw_fifo_rows_transfer_and_refuse_consistently.
 #
 # It asserts:
 #   [1] the pre-run audit is CLEAN — no --allow-unsupported-symbols, and the

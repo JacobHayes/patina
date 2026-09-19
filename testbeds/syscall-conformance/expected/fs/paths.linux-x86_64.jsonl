@@ -149,4 +149,29 @@
 {"seq":147,"op":"getcwd","args":{"size":4096},"ret":0,"errno":null,"fields":{"path":"/tmp/syscall-conformance/fs-paths"},"norm":{}}
 {"seq":148,"op":"check","args":{"label":"getcwd recovers"},"ret":1,"errno":null,"fields":{},"norm":{}}
 {"seq":149,"op":"close","args":{"fd":"fd@54"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
-{"seq":150,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}
+{"seq":150,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":65,"mode":256,"path":"strict"},"ret":"fd@150","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":151,"op":"fstat","args":{"fd":"fd@150"},"ret":0,"errno":null,"fields":{"gid":"id@8","ino":"ino@151","kind":"reg","nlink":1,"perm":256,"size":0,"uid":"id@8"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":152,"op":"check","args":{"label":"requested 0400 is stored"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":153,"op":"close","args":{"fd":"fd@150"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":154,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":1,"mode":0,"path":"strict"},"ret":-1,"errno":"EACCES","fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":155,"op":"check","args":{"label":"0400 refuses a later write-open"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":156,"op":"mkdirat","args":{"dirfd":"AT_FDCWD","mode":320,"path":"locked"},"ret":0,"errno":null,"fields":{},"norm":{}}
+{"seq":157,"op":"check","args":{"label":"mkdir 0500"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":158,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":65,"mode":384,"path":"locked/nope"},"ret":-1,"errno":"EACCES","fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":159,"op":"check","args":{"label":"0500 directory refuses a new name"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":160,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":2048,"mode":0,"path":"maskfifo"},"ret":"fd@160","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":161,"op":"fstat","args":{"fd":"fd@160"},"ret":0,"errno":null,"fields":{"gid":"id@8","ino":"ino@127","kind":"fifo","nlink":1,"perm":384,"size":0,"uid":"id@8"},"norm":{"args.fd":"relative:fd","fields.gid":"identity","fields.ino":"inode","fields.uid":"identity"}}
+{"seq":162,"op":"check","args":{"label":"FIFO fd reports FIFO"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":163,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":1,"mode":0,"path":"maskfifo"},"ret":"fd@163","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":164,"op":"write","args":{"fd":"fd@163","len":8},"ret":8,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":165,"op":"check","args":{"label":"FIFO transfer write"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":166,"op":"read","args":{"fd":"fd@160","len":16},"ret":8,"errno":null,"fields":{"data":"raw-fifo"},"norm":{"args.fd":"relative:fd"}}
+{"seq":167,"op":"check","args":{"label":"FIFO transfer read"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":168,"op":"close","args":{"fd":"fd@163"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":169,"op":"check","args":{"label":"close FIFO writer"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":170,"op":"read","args":{"fd":"fd@160","len":1},"ret":0,"errno":null,"fields":{"data":""},"norm":{"args.fd":"relative:fd"}}
+{"seq":171,"op":"check","args":{"label":"FIFO EOF after last writer"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":172,"op":"close","args":{"fd":"fd@160"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":173,"op":"openat","args":{"dirfd":"AT_FDCWD","flags":2049,"mode":0,"path":"maskfifo"},"ret":-1,"errno":"ENXIO","fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":174,"op":"check","args":{"label":"FIFO writer without reader is ENXIO"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":175,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

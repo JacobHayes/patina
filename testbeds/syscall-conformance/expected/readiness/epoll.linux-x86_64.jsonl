@@ -128,4 +128,14 @@
 {"seq":126,"op":"close","args":{"fd":"fd@0"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
 {"seq":127,"op":"epoll_wait","args":{"epfd":"fd@127","maxevents":8,"timeout_ms":0},"ret":-1,"errno":"EBADF","fields":{},"norm":{"args.epfd":"relative:fd"}}
 {"seq":128,"op":"check","args":{"label":"epoll_wait on the closed epoll descriptor is EBADF"},"ret":1,"errno":null,"fields":{},"norm":{}}
-{"seq":129,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}
+{"seq":129,"op":"eventfd2","args":{"flags":0,"initval":0},"ret":"fd@127","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":130,"op":"epoll_create1","args":{"flags":0},"ret":"fd@130","errno":null,"fields":{},"norm":{"ret":"relative:fd"}}
+{"seq":131,"op":"epoll_ctl","args":{"data":12648430,"epfd":"fd@130","events":1,"fd":"fd@127","op":1},"ret":0,"errno":null,"fields":{},"norm":{"args.epfd":"relative:fd","args.fd":"relative:fd"}}
+{"seq":132,"op":"check","args":{"label":"zero-flags EPOLL_CTL_ADD"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":133,"op":"write","args":{"fd":"fd@127","len":8},"ret":8,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":134,"op":"check","args":{"label":"zero-flags eventfd write"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":135,"op":"epoll_wait","args":{"epfd":"fd@130","maxevents":4,"timeout_ms":0},"ret":1,"errno":null,"fields":{"events":["12648430:0x1"]},"norm":{"args.epfd":"relative:fd"}}
+{"seq":136,"op":"check","args":{"label":"zero-flags eventfd readiness preserves data"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":137,"op":"close","args":{"fd":"fd@127"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":138,"op":"close","args":{"fd":"fd@130"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":139,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

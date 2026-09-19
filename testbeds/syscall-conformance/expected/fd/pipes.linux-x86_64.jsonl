@@ -93,4 +93,41 @@
 {"seq":91,"op":"close","args":{"fd":"fd@69"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
 {"seq":92,"op":"close","args":{"fd":"fd@70"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
 {"seq":93,"op":"close","args":{"fd":"fd@83"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
-{"seq":94,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}
+{"seq":94,"op":"pipe2","args":{"flags":2048},"ret":0,"errno":null,"fields":{"read_end":"fd@94","write_end":"fd@94.1"},"norm":{"fields.read_end":"relative:fd","fields.write_end":"relative:fd"}}
+{"seq":95,"op":"dup","args":{"fd":"fd@94.1"},"ret":"fd@95","errno":null,"fields":{},"norm":{"args.fd":"relative:fd","ret":"relative:fd"}}
+{"seq":96,"op":"close","args":{"fd":"fd@94.1"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":97,"op":"check","args":{"label":"close original writer"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":98,"op":"read","args":{"fd":"fd@94","len":1},"ret":-1,"errno":"EAGAIN","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":99,"op":"check","args":{"label":"writer alias prevents EOF"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":100,"op":"write","args":{"fd":"fd@95","len":1},"ret":1,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":101,"op":"check","args":{"label":"write through alias"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":102,"op":"read","args":{"fd":"fd@94","len":1},"ret":1,"errno":null,"fields":{"data":"a"},"norm":{"args.fd":"relative:fd"}}
+{"seq":103,"op":"check","args":{"label":"read alias payload"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":104,"op":"close","args":{"fd":"fd@95"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":105,"op":"check","args":{"label":"close last writer"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":106,"op":"read","args":{"fd":"fd@94","len":1},"ret":0,"errno":null,"fields":{"data":""},"norm":{"args.fd":"relative:fd"}}
+{"seq":107,"op":"check","args":{"label":"last writer produces EOF"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":108,"op":"close","args":{"fd":"fd@94"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":109,"op":"pipe2","args":{"flags":2048},"ret":0,"errno":null,"fields":{"read_end":"fd@109","write_end":"fd@109.1"},"norm":{"fields.read_end":"relative:fd","fields.write_end":"relative:fd"}}
+{"seq":110,"op":"fcntl","args":{"arg":0,"cmd":1030,"fd":"fd@109"},"ret":"fd@110","errno":null,"fields":{},"norm":{"args.fd":"relative:fd","ret":"relative:fd"}}
+{"seq":111,"op":"close","args":{"fd":"fd@109"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":112,"op":"check","args":{"label":"close original reader"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":113,"op":"write","args":{"fd":"fd@109.1","len":1},"ret":1,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":114,"op":"check","args":{"label":"reader alias prevents EPIPE"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":115,"op":"close","args":{"fd":"fd@110"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":116,"op":"check","args":{"label":"close last reader"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":117,"op":"write","args":{"fd":"fd@109.1","len":1},"ret":-1,"errno":"EPIPE","fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":118,"op":"check","args":{"label":"last reader produces EPIPE"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":119,"op":"close","args":{"fd":"fd@109.1"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":120,"op":"socketpair","args":{"domain":1,"protocol":0,"type":1},"ret":0,"errno":null,"fields":{"first":"fd@120","second":"fd@120.1"},"norm":{"fields.first":"relative:fd","fields.second":"relative:fd"}}
+{"seq":121,"op":"write","args":{"fd":"fd@120","len":4},"ret":4,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":122,"op":"check","args":{"label":"socketpair request"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":123,"op":"read","args":{"fd":"fd@120.1","len":4},"ret":4,"errno":null,"fields":{"data":"ping"},"norm":{"args.fd":"relative:fd"}}
+{"seq":124,"op":"check","args":{"label":"socketpair receives request"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":125,"op":"write","args":{"fd":"fd@120.1","len":4},"ret":4,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":126,"op":"check","args":{"label":"socketpair reply"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":127,"op":"read","args":{"fd":"fd@120","len":4},"ret":4,"errno":null,"fields":{"data":"PONG"},"norm":{"args.fd":"relative:fd"}}
+{"seq":128,"op":"check","args":{"label":"socketpair receives reply"},"ret":1,"errno":null,"fields":{},"norm":{}}
+{"seq":129,"op":"close","args":{"fd":"fd@120"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":130,"op":"close","args":{"fd":"fd@120.1"},"ret":0,"errno":null,"fields":{},"norm":{"args.fd":"relative:fd"}}
+{"seq":131,"op":"__termination","args":{},"ret":0,"errno":null,"fields":{"code":0,"kind":"exited"},"norm":{}}

@@ -22,8 +22,9 @@ Usage: scripts/check.sh <full|fast|msrv>
   full  Full local pre-landing gate. Cheap checks run first, the e2e-heavy
         workspace test rung runs alone, then independent runtime/testbed gates
         run concurrently.
-  fast  Inner-loop gate; excludes only the cargo-patina end_to_end test binary
-        and the landing-only docs/packaging/native-shim/testbed/full-e2e rungs.
+  fast  Inner-loop gate; excludes cargo-patina end_to_end and the five native execution targets
+        and the landing-only docs/packaging/testbed/full-e2e rungs.
+        Targeted native ABI feedback: mise run check:native-abi.
   msrv  Execute the complete Rust 1.86 suite. This is CI/final-gate evidence,
         not part of the ordinary local landing gate.
 
@@ -153,13 +154,15 @@ wait_rungs() {
 }
 
 run_fast_workspace_tests() {
-  # cargo has no "all tests except this integration-test binary" selector, so
-  # run every other package normally, then enumerate cargo-patina's non-e2e
-  # targets. This is the measured fix for the old fast tier's 190s+ e2e binary.
+  # Keep the expensive execution targets in the full and focused gates.
+  # Enumerate the remaining cargo-patina targets alongside the other packages.
   local cargo_patina_targets=(--lib --bin cargo-patina)
   local test_path test_name
   while IFS= read -r test_path; do
     test_name=$(basename "${test_path%.rs}")
+    case "$test_name" in
+      native_abi|native_containment|native_raw|native_trace|native_workloads) continue ;;
+    esac
     cargo_patina_targets+=(--test "$test_name")
   done < <(find crates/cargo-patina/tests -maxdepth 1 -type f -name '*.rs' ! -name end_to_end.rs | LC_ALL=C sort)
 
@@ -191,6 +194,11 @@ run_msrv_full() {
     cargo +1.86.0 test --target-dir "$msrv_target" -p patina-dst --features macros --locked
 }
 
+run_conformance() {
+  testbeds/syscall-conformance/run.sh --selftest &&
+    testbeds/syscall-conformance/run.sh "$@"
+}
+
 run_full() {
   local total_start
   total_start=$(date +%s)
@@ -219,7 +227,7 @@ run_full() {
   # rung through start_rung, plus each script's own runtime scratch paths.
   run_rung 'stable workspace tests (includes e2e)' cargo test --workspace --locked || return $?
 
-  start_rung 'native-shim validation' scripts/validate-native-shim.sh
+  start_rung 'native ecosystem testbeds' scripts/check-native-testbeds.sh
   start_rung 'macro adopter testbed' testbeds/patina-macro-adopter/run.sh
   start_rung 'pubsub testbed' testbeds/pubsub/run-patina.sh
   start_rung 'workq testbed' testbeds/workq/run-patina.sh
@@ -230,7 +238,7 @@ run_full() {
   # and the strace leak leg. Linux-only; loud counted skip elsewhere. (A frozen
   # family's own gate, `gate.sh --family <f>`, is its builder's done-line; it
   # joins this ladder in the change that makes it pass.)
-  start_rung 'syscall conformance' testbeds/syscall-conformance/run.sh
+  start_rung 'syscall conformance' run_conformance
   wait_rungs || return $?
 
   printf 'PASS  full landing gate (%ss total)\n' "$(( $(date +%s) - total_start ))"
@@ -247,14 +255,16 @@ run_fast() {
   # The fast test rung is cargo-heavy enough to inflate every other cargo-using
   # smoke when overlapped, even though it no longer contains the e2e binary.
   # Run it alone, then group the short independent smoke/selftest rungs.
-  run_rung 'workspace tests (no cargo-patina e2e)' run_fast_workspace_tests || return $?
+  run_rung 'workspace tests (no e2e/native execution targets)' run_fast_workspace_tests || return $?
   run_rung 'CLI flag drift' scripts/check-flag-drift.sh || return $?
   run_rung 'MSRV cargo check' run_msrv_check || return $?
   run_rung 'workq classifier selftest' testbeds/workq/fuzz-sweep.sh --selftest || return $?
   run_rung 'campaign classifier selftest' cargo run -q -p cargo-patina -- patina campaign --selftest || return $?
   run_rung 'conformance gate selftest' testbeds/syscall-conformance/gate.sh --selftest || return $?
 
-  start_rung 'syscall conformance (fast tier)' testbeds/syscall-conformance/run.sh --fast
+  run_rung 'native ecosystem receipt selftest' scripts/check-native-testbeds.sh --selftest || return $?
+
+  start_rung 'syscall conformance (fast tier)' run_conformance --fast
   start_rung 'WASI validation' scripts/validate-wasi.sh
   start_rung 'cross-target smoke' scripts/smoke-cross-target.sh
   wait_rungs || return $?

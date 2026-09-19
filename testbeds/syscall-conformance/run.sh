@@ -21,8 +21,8 @@
 #   replay  `run --record` then `replay` — the two streams must be
 #           byte-identical, and the recorded stream passes the patina diff.
 #   leak    the shim-linked binary directly under strace with the
-#           validate-native-shim.sh default-deny filter (its trace set widened
-#           to the classes the probes touch): no host syscall may escape. A
+#           default-deny filter over the classes the probes touch:
+#           no host syscall may escape. A
 #           probe blessed to die by a signal is also run directly, unstraced
 #           and unsupervised by patina, and its waitpid outcome (signal AND
 #           core flag) must be the blessed one.
@@ -172,10 +172,9 @@ if ! "$conform" declared-failing "${probes[0]}" libc "$divergences" >/dev/null 2
   fi
 fi
 
-# ---- the strace leak filter: validate-native-shim.sh's default-deny, verbatim,
-# with the trace set widened to every class the probes touch (%process, %signal,
-# %ipc on top of the original file/network/desc/memory/clock/entropy set). The
-# awk allow-list is name/path-keyed, so widening the trace set cannot loosen it.
+# ---- the strace leak filter: default-deny policy over process, signal, IPC,
+# file, network, descriptor, memory, clock and entropy syscalls.
+# The awk allow-list is name/path-keyed; tracing a class does not allow it.
 # Additions to the name-only prelude regex are the thread-lifecycle rows a
 # managed thread's host pthread_create issues (clone3/clone, set_robust_list,
 # rseq, set_tid_address, gettid, prlimit64, sched_getaffinity, mprotect on the

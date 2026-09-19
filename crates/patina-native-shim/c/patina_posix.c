@@ -9,8 +9,8 @@
  * compilation would have to export them, and every exported name is a symbol
  * the guest binary carries. `cargo patina build` stages this file and the
  * slices side by side and compiles it exactly once (see
- * `crates/cargo-patina/src/lib.rs`, `PATINA_POSIX_OBJECT`); `scripts/
- * validate-native-shim.sh` compiles it directly from the tree.
+ * `crates/cargo-patina/src/lib.rs`, `PATINA_POSIX_OBJECT`);
+ * `crates/cargo-patina/tests/common` compiles the embedded source for tests.
  *
  * Ordering rules: `core.c` first (feature macros and headers), then the
  * families a later slice's static helpers depend on (`env.c` before `init.c`,

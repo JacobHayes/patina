@@ -51,7 +51,7 @@ Unlike `rustix-default` and `cap-std-dirfd`, this testbed is **not** SUD-only:
 the guest reaches every call through libc, so it runs on every platform the
 native shim supports. The raw-syscall `mknodat` row (and the x86_64 legacy
 `mknod` alias) has its own probe inside the SUD battery of
-`scripts/validate-native-shim.sh`.
+`crates/cargo-patina/tests/native_raw.rs::raw_fifo_rows_transfer_and_refuse_consistently`.
 
 It asserts that the pre-run audit is **clean** — no allowance flag, and the
 mkfifo/mknod family appears nowhere in it — that the guest prints the expected

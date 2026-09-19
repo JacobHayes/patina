@@ -364,10 +364,10 @@ dev-dependency use under plain `cargo test`.
 ## Docs
 
 - Validation ladder: `mise run check:fast` is the inner loop (fmt, both clippy
-  passes, all workspace tests except `cargo-patina`'s `end_to_end` binary, fast
+  passes, workspace tests except cargo-patina's e2e/native execution targets, fast
   conformance, cheap selftests, flag drift, MSRV cargo check, WASI, cross smoke).
   `mise run check` is the local landing gate (adds docs, packaging, full stable
-  tests including e2e, native-shim validation, testbeds, full conformance gate,
+  tests including e2e, native acceptance tests, ecosystem testbeds, full conformance gate,
   and local MSRV detector/macros rungs). `mise run msrv` is the full Rust 1.86
   suite for CI/final-gate evidence.
 - `docs/skills/patina-dst.md`: tool-agnostic agent skill — what Patina is, the
@@ -387,3 +387,14 @@ dev-dependency use under plain `cargo test`.
 - `testbeds/`: real end-to-end guests — `workq` (the flagship durable-work-queue
   demo), `pubsub` (a tokio broker on the interposed reactors), and more; see
   `testbeds/README.md` and each testbed's `run-patina.sh`.
+
+## Native development feedback
+
+`mise run check:native-abi` selects cargo-patina's `native_abi` tests. The other
+native targets are `native_containment`, `native_raw`, `native_trace`, and
+`native_workloads`; use Cargo's test-name filter for a single proof. All run in
+`check` and the Linux/macOS workspace-test CI jobs, not `check:fast`. The full gate
+also runs receipt-checked FIFO/rustix-default/cap-std testbeds and conformance's full four-leg
+run and planted-failure selftest. See `testbeds/native-boundary/README.md` for
+exact owners and platform limits; Linux-only oracle expectations do not replace
+portable native ABI tests.

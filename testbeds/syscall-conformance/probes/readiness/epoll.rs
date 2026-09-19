@@ -257,6 +257,27 @@ mod scenario {
             "epoll_wait on the closed epoll descriptor is EBADF",
             p.epoll_wait(ep, 8, 0).0 == neg(EBADF),
         );
+
+        // Zero creation flags must preserve readiness and caller userdata too.
+        let ef = p.eventfd2(0, 0);
+        p.require("zero-flags eventfd2", ef >= 0);
+        let ep = p.epoll_create1(0);
+        p.require("zero-flags epoll_create1", ep >= 0);
+        p.check(
+            "zero-flags EPOLL_CTL_ADD",
+            p.epoll_ctl(ep, EPOLL_CTL_ADD, ef, EPOLLIN as u32, 0xC0FFEE) == 0,
+        );
+        p.check(
+            "zero-flags eventfd write",
+            p.write(ef, &1u64.to_ne_bytes()) == 8,
+        );
+        let (n, events) = p.epoll_wait(ep, 4, 0);
+        p.check(
+            "zero-flags eventfd readiness preserves data",
+            n == 1 && events == vec![(0xC0FFEE, EPOLLIN as u32)],
+        );
+        p.close(ef);
+        p.close(ep);
     }
 }
 

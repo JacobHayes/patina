@@ -1,0 +1,227 @@
+//! Ecosystem and std lowering: every fixture is independently targetable.
+#![cfg(any(target_os = "linux", target_os = "macos"))]
+mod common;
+use common::native::*;
+
+#[test]
+fn std_runs_seeded_and_replayable_but_not_standalone() {
+    let g = Guest::assert_build("std_probe.rs");
+    g.assert_audit_clean();
+    assert_success(g.command("audit", &["--allow", "dlsym"]));
+    let standalone = std::process::Command::new(&g.binary)
+        .env_clear()
+        .output()
+        .unwrap();
+    assert_refused(standalone, &["must run under"]);
+    let out = g.assert_seeded_record_replay_identity(9, &[]);
+    assert_exact_line(&out, "PATINA_STRACE_MARKER");
+    let fields = assert_fields(
+        &out,
+        "NATIVE_STD_RESULT ",
+        &["epoch_ns", "first_hash", "second_hash", "fs"],
+    );
+    assert_eq!(fields["epoch_ns"], "0");
+    assert_lower_hex(fields["first_hash"], 16);
+    assert_lower_hex(fields["second_hash"], 16);
+    assert_eq!(fields["fs"], "link:symlink,nested:dir,value:file");
+    g.assert_seed_variation(&[9, 10], &[]);
+}
+
+#[test]
+fn mutex_condvar_schedule_varies_by_seed() {
+    let g = Guest::assert_build("thread_probe.rs");
+    g.assert_audit_clean();
+    let out = g.assert_seeded_record_replay_identity(7, &[]);
+    let order = assert_unique_line_payload(&out, "NATIVE_THREAD_RESULT counter=12 order=");
+    assert_thread_counts(
+        order
+            .chars()
+            .map(|c| c.to_digit(10).expect("thread ID") as usize),
+        3,
+        4,
+    );
+    g.assert_seed_variation(&[1, 2, 3, 4, 5, 6], &[]);
+}
+
+#[test]
+fn mutex_held_across_sleep_does_not_deadlock() {
+    let g = Guest::assert_build("contend_probe.rs");
+    g.assert_audit_clean();
+    let out = g.assert_seed_repeatability(2, 2, &[]);
+    assert!(
+        matches!(
+            text(&out).trim_end(),
+            "NATIVE_CONTEND_RESULT worker=1 final=111"
+                | "NATIVE_CONTEND_RESULT worker=111 final=111"
+        ),
+        "{}",
+        text(&out)
+    );
+}
+
+#[test]
+fn udp_arrival_order_varies_by_seed() {
+    let g = Guest::assert_build("udp_probe.rs");
+    g.assert_audit_clean();
+    let out = g.assert_seeded_record_replay_identity(1, &[]);
+    let mut order: Vec<_> = assert_unique_line_payload(&out, "NATIVE_UDP_RESULT order=")
+        .chars()
+        .collect();
+    order.sort();
+    assert_eq!(order, ['0', '1', '2']);
+    g.assert_seed_variation(&[1, 2, 3, 4, 5, 6], &[]);
+}
+
+#[test]
+fn hashmap_iteration_order_is_seeded() {
+    let g = Guest::assert_build("hashmap_probe.rs");
+    g.assert_audit_clean();
+    let out = g.assert_seeded_record_replay_identity(1, &[]);
+    let keys: std::collections::BTreeSet<_> =
+        assert_unique_line_payload(&out, "NATIVE_HASHMAP_ORDER ")
+            .split(',')
+            .collect();
+    let expected: std::collections::BTreeSet<_> = (0..16).map(|n| format!("key-{n}")).collect();
+    assert_eq!(keys, expected.iter().map(String::as_str).collect());
+    g.assert_seed_variation(&[1, 2], &[]);
+}
+
+#[test]
+fn yield_points_preserve_single_threaded_output() {
+    let g = Guest::assert_build("hashmap_probe.rs");
+    let out = g.assert_run_success(1, &[]).stdout;
+    let instrumented = Guest::assert_build_with("hashmap_probe.rs", &["--yield-points"]);
+    assert_eq!(out, instrumented.assert_run_success(1, &[]).stdout);
+}
+
+#[test]
+fn rand_rng_is_seeded_and_replayable() {
+    let g = Guest::assert_build("rand-rng");
+    g.assert_audit_clean();
+    let out = g.assert_seeded_record_replay_identity(1, &[]);
+    let fields = assert_fields(&out, "NATIVE_RAND_RNG ", &["first", "bytes"]);
+    assert_lower_hex(fields["first"], 16);
+    assert_lower_hex(fields["bytes"], 48);
+    g.assert_seed_variation(&[1, 2], &[]);
+}
+
+#[test]
+fn urandom_device_is_seeded_and_replayable() {
+    let g = Guest::assert_build("urandom_probe.rs");
+    g.assert_audit_clean();
+    let out = g.assert_seeded_record_replay_identity(1, &[]);
+    assert_lower_hex(
+        assert_unique_line_payload(&out, "NATIVE_URANDOM bytes="),
+        48,
+    );
+    g.assert_seed_variation(&[1, 2], &[]);
+}
+
+#[test]
+fn condvar_waits_use_exact_virtual_deadlines() {
+    let g = Guest::assert_build("timed_wait_probe.rs");
+    g.assert_audit_clean();
+    let expected =
+        "NATIVE_TIMED_WAIT_RESULT signalled_elapsed_ns=25000000 timeout_elapsed_ns=100000000\n";
+    for seed in [5, 6] {
+        let baseline = g.assert_seed_repeatability(seed, 2, &[]);
+        assert_eq!(text(&baseline), expected);
+    }
+    g.assert_record_replay_identity(5, &[], expected.as_bytes());
+}
+
+#[test]
+fn recv_timeout_delivers_five_messages_and_five_timeouts() {
+    let g = Guest::assert_build("recv_timeout_probe.rs");
+    g.assert_audit_clean();
+    g.assert_no_imports(&["dispatch_semaphore"]);
+    let expected = "NATIVE_RECV_TIMEOUT_RESULT delivered=[0, 1, 2, 3, 4] timeouts=5\n";
+    for seed in [5, 6, 7] {
+        let baseline = g.assert_seed_repeatability(seed, 3, &[]);
+        assert_eq!(text(&baseline), expected);
+    }
+    g.assert_record_replay_identity(5, &[], expected.as_bytes());
+}
+
+#[test]
+fn pthread_rwlock_ffi_orders_are_repeatable_and_seeded() {
+    let g = Guest::assert_build("rwlock_ffi_probe.rs");
+    g.assert_audit_clean();
+    g.assert_no_imports(&["pthread_rwlock"]);
+    for seed in [1, 3, 5] {
+        let out = g.assert_seed_repeatability(seed, 3, &[]);
+        assert_thread_counts(
+            assert_thread_ids(&out, "NATIVE_RWLOCK_FFI_RESULT order="),
+            3,
+            3,
+        );
+    }
+    g.assert_seed_variation(&[1, 3, 5], &[]);
+}
+
+#[test]
+fn sleep_only_advances_when_idle() {
+    let g = Guest::assert_build("sleep_order_probe.rs");
+    g.assert_audit_clean();
+    for seed in [5, 6] {
+        let out = g.assert_seed_repeatability(seed, 2, &[]);
+        assert!(matches!(
+            assert_unique_line_payload(&out, "NATIVE_SLEEP_ORDER_RESULT "),
+            "order=AB a_elapsed_ns=100000000 work=4950"
+                | "order=BA a_elapsed_ns=100000000 work=4950"
+        ));
+    }
+}
+
+#[test]
+fn udp_latency_is_recorded_for_flag_free_replay() {
+    let g = Guest::assert_build("udp_latency_probe.rs");
+    g.assert_audit_clean();
+    let out = g.assert_seeded_record_replay_identity(5, &["--net-latency-nanos", "250000000"]);
+    assert_exact_line(
+        &out,
+        "NATIVE_UDP_LATENCY_RESULT elapsed_ns=250000000 payload=ping",
+    );
+    let zero = g.assert_seed_repeatability(5, 2, &["--net-latency-nanos", "0"]);
+    assert_exact_line(&zero, "NATIVE_UDP_LATENCY_RESULT elapsed_ns=0 payload=ping");
+}
+
+#[test]
+fn tcp_shutdown_dns_and_peer_are_deterministic() {
+    let g = Guest::assert_build("tcp_probe.rs");
+    g.assert_audit_clean();
+    let expected =
+        "NATIVE_TCP_RESULT reply=PING peer=127.0.0.1:49152 ipv6_closed=true dns_nxdomain=true\n";
+    for seed in [5, 6] {
+        let baseline = g.assert_seed_repeatability(seed, 2, &[]);
+        assert_eq!(text(&baseline), expected);
+    }
+    g.assert_record_replay_identity(5, &[], expected.as_bytes());
+}
+
+#[test]
+fn tokio_signal_parking_lot_rustix_use_product_backend() {
+    let g = Guest::assert_build("tokio");
+    g.assert_audit_clean();
+    assert_eq!(
+        text(&g.assert_seeded_record_replay_identity(1, &[])),
+        "NATIVE_TOKIO_RESULT client_got=pong server_got=ping lock=42 rustix_read=rustix-ok\n"
+    );
+}
+
+#[cfg(target_os = "macos")]
+mod darwin {
+    use super::*;
+
+    #[test]
+    fn os_unfair_lock_contention_is_repeatable() {
+        let g = Guest::assert_build("os_unfair_lock_probe.rs");
+        g.assert_audit_clean();
+        let out = g.assert_seed_repeatability(1, 2, &[]);
+        assert_thread_counts(
+            assert_thread_ids(&out, "OS_UNFAIR_LOCK_RESULT order="),
+            3,
+            3,
+        );
+    }
+}

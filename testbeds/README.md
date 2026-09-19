@@ -10,6 +10,7 @@ simulator that depends on the Patina runtime crates directly.
 
 | Testbed | Program under test | Shape | Patina phase exercised |
 |---|---|---|---|
+| [`native-boundary/`](native-boundary/) | native ABI and containment fixtures plus std/tokio/rand workloads | typed cargo-patina integration targets, each filterable with libtest | portable ABI and scheduler pins, exact virtual deadlines, replay/trace identity, planted escape refusals and whole-run std tracing; see its README for the platform/gate map |
 | [`workq/`](workq/) | itself — a single-process durable work queue (WAL segments + loopback UDP + worker/producer threads) | guest: server, workers, producers, and invariant checks in one process | WAL crash-recovery, SimNet drop/reorder/jitter, virtual-time visibility timeouts + retries, cooperative buggify faults, fail-closed recovery |
 | [`pubsub/`](pubsub/) | itself — a single-process tokio pub-sub broker (TcpListener fan-in over loopback TCP, credit-window backpressure, heartbeat timers) | guest: broker core actor, subscriber, and publisher tasks on one current-thread runtime, plus an exact-delivery audit | the deterministic readiness reactor (kqueue on macOS / epoll on Linux) under real tokio, virtual-time heartbeats + liveness timeouts, schedule-seed exploration, planted async bugs (lost wakeup, short-read framing, stale timeout) |
 | [`checkout-retry-idempotency/`](checkout-retry-idempotency/) | an ordinary checkout idempotency ledger called from a deterministic simulator | explicit-context virtual client/service actors over SimNet UDP; a virtual timeout forces one retry | component-level retry/idempotency testing: no host sockets or wall-clock sleeps, non-vacuous retry evidence, planted double-charge selftest |
@@ -46,10 +47,13 @@ Conventions:
   tree; temporary run data belongs in `mktemp` directories or under its assigned
   target directory.
 - The local ladder has one testbed path per tier: `mise run check:fast` runs the
-  cheap classifier/gate selftests plus syscall-conformance `run.sh --fast`; the
+  cheap classifier/gate selftests plus syscall-conformance `run.sh --selftest` and `run.sh --fast`; the
   full local gate runs the workq/pubsub/macro-adopter `run-patina.sh` batteries,
-  WASI/cross smoke, native-shim validation, and the syscall-conformance frozen
-  gate (which owns the full conformance run). The audit corpus and full MSRV
+  WASI/cross smoke, FIFO/rustix-default/cap-std gates, and the full
+  syscall-conformance run plus its selftest. Native acceptance tests run in the full
+  workspace-test tier and CI, not `check:fast`. FIFO/rustix-default/cap-std run
+  through `scripts/check-native-testbeds.sh`, which requires capability-matched
+  execution receipts. The frozen family gate is separate builder evidence. The audit corpus and full MSRV
   suite are CI/final-gate breadth.
 - The sweep/campaign scripts (`fuzz-sweep.sh`, `wasi-buggify-sweep.sh`,
   `audit-corpus/run.sh`) take `--help`, and classifier-carrying ones take

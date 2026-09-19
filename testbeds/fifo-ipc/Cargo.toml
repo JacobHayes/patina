@@ -10,7 +10,7 @@
 # (`OpenOptions` with `O_NONBLOCK`, `File::metadata`, `read_dir`,
 # `set_permissions`, `remove_file`), so it is portable to every platform the
 # native shim supports; the raw-syscall `mknodat` row is proved separately by
-# the SUD battery in `scripts/validate-native-shim.sh`.
+# `native_raw::raw_fifo_rows_transfer_and_refuse_consistently` (cargo-patina integration tests).
 [workspace]
 
 [package]
