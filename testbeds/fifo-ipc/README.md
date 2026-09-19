@@ -44,6 +44,9 @@ end-to-end proof.
 ./run-patina.sh
 ```
 
+The script builds and stages under `CARGO_TARGET_DIR`, defaulting to
+`../../target/testbeds/fifo-ipc` from this directory.
+
 Unlike `rustix-default` and `cap-std-dirfd`, this testbed is **not** SUD-only:
 the guest reaches every call through libc, so it runs on every platform the
 native shim supports. The raw-syscall `mknodat` row (and the x86_64 legacy

@@ -50,9 +50,11 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
-PATINA="$repo_root/target/release/cargo-patina"
-out="$here/target/conformance"
-conform="$here/target/release/conform"
+target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/syscall-conformance}"
+export CARGO_TARGET_DIR="$target_dir"
+PATINA="$target_dir/release/cargo-patina"
+out="$target_dir/conformance"
+conform="$target_dir/release/conform"
 divergences="$here/divergences.toml"
 manifest="$here/probes.toml"
 registry="$out/registry.json"
@@ -268,7 +270,7 @@ if [[ $selftest == 1 ]]; then
   if ! "$conform" selftest; then status=1; fi
   echo "==> strace leak selftest (planted openat(\"/etc/hostname\") through syscall(2); planted self-signal allowance bounds)"
   if [[ $have_strace == 1 ]]; then
-    leak_bin="$here/target/release/selftest-leak"
+    leak_bin="$target_dir/release/selftest-leak"
     if strace -f -s 4096 -e "$strace_events" -o "$out/selftest-leak.strace" \
         "$leak_bin" --vehicle syscall >"$out/selftest-leak.out" 2>"$out/selftest-leak.err"; then :; fi
     awk "$strace_filter" "$out/selftest-leak.strace" >"$out/selftest-leak.denied"
@@ -453,7 +455,7 @@ for probe in "${probes[@]}"; do
   expected="$here/expected/$probe.$platform.jsonl"
   legdir="$out/$bin"
   mkdir -p "$legdir"
-  native_bin="$here/target/release/$bin"
+  native_bin="$target_dir/release/$bin"
 
   if [[ $bless == 1 ]]; then
     echo "==> blessing $probe from the native libc vehicle on $platform ($host_kernel, glibc $host_glibc)"

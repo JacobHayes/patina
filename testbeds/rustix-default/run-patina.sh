@@ -31,16 +31,19 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
-built="$here/target/patina/rustix-default"
-PATINA="$repo_root/target/release/cargo-patina"
+target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/rustix-default}"
+export CARGO_TARGET_DIR="$target_dir"
+out="$target_dir/patina"
+built="$out/rustix-default"
+PATINA="$target_dir/release/cargo-patina"
 
 # The build prelude fails CLOSED (FATAL) — a gate that cannot build must never
 # read as a silent green (the fuzz-sweep FATAL convention).
 if ! cargo build --release --quiet -p cargo-patina; then
   echo "FATAL: cargo build -p cargo-patina failed" >&2; exit 3
 fi
-if ! mkdir -p "$here/target/patina"; then
-  echo "FATAL: mkdir $here/target/patina failed" >&2; exit 3
+if ! mkdir -p "$out"; then
+  echo "FATAL: mkdir $out failed" >&2; exit 3
 fi
 
 # ---- SUD availability gate (loud, counted skip; never a silent pass) ----
@@ -74,18 +77,18 @@ if ! "$PATINA" patina build "$here" --output "$built" --release >/dev/null; then
 fi
 
 echo "==> [1] audit: the raw-syscall sites must be reported SUD-managed"
-if ! "$PATINA" patina audit "$built" >"$here/target/patina/audit.txt" 2>&1; then
+if ! "$PATINA" patina audit "$built" >"$out/audit.txt" 2>&1; then
   echo "rustix-default: FAIL [1] audit refused a SUD-managed binary" >&2
-  cat "$here/target/patina/audit.txt" >&2; exit 1
+  cat "$out/audit.txt" >&2; exit 1
 fi
-if ! grep -q 'SUD-managed' "$here/target/patina/audit.txt"; then
+if ! grep -q 'SUD-managed' "$out/audit.txt"; then
   echo "rustix-default: FAIL [1] audit did not report direct-syscall (SUD-managed)" >&2
-  cat "$here/target/patina/audit.txt" >&2; exit 1
+  cat "$out/audit.txt" >&2; exit 1
 fi
 
 echo "==> [2]/[3] run + byte-identical repeats (seed 1)"
-r1="$("$PATINA" patina run "$built" --seed 1 2>"$here/target/patina/run1.err")" || {
-  echo "rustix-default: FAIL [2] run exited nonzero" >&2; cat "$here/target/patina/run1.err" >&2; exit 1; }
+r1="$("$PATINA" patina run "$built" --seed 1 2>"$out/run1.err")" || {
+  echo "rustix-default: FAIL [2] run exited nonzero" >&2; cat "$out/run1.err" >&2; exit 1; }
 r2="$("$PATINA" patina run "$built" --seed 1 2>/dev/null)" || {
   echo "rustix-default: FAIL [2] second run exited nonzero" >&2; exit 1; }
 if [[ "$r1" != "$r2" ]]; then
@@ -104,13 +107,13 @@ if [[ "$distinct" -lt 2 ]]; then
 fi
 
 echo "==> [5] record → replay byte-identical"
-"$PATINA" patina run "$built" --seed 1 --record "$here/target/patina/mre.patina" \
-  --fingerprint rustix-mre-v1 >"$here/target/patina/record.out" 2>/dev/null || {
+"$PATINA" patina run "$built" --seed 1 --record "$out/mre.patina" \
+  --fingerprint rustix-mre-v1 >"$out/record.out" 2>/dev/null || {
   echo "rustix-default: FAIL [5] record run failed" >&2; exit 1; }
-"$PATINA" patina replay "$built" "$here/target/patina/mre.patina" \
-  --fingerprint rustix-mre-v1 >"$here/target/patina/replay.out" 2>/dev/null || {
+"$PATINA" patina replay "$built" "$out/mre.patina" \
+  --fingerprint rustix-mre-v1 >"$out/replay.out" 2>/dev/null || {
   echo "rustix-default: FAIL [5] replay failed" >&2; exit 1; }
-if ! cmp -s "$here/target/patina/record.out" "$here/target/patina/replay.out"; then
+if ! cmp -s "$out/record.out" "$out/replay.out"; then
   echo "rustix-default: FAIL [5] record/replay diverged" >&2; exit 1; fi
 
 echo "$r1"

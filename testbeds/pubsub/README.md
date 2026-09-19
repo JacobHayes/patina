@@ -97,7 +97,9 @@ failing run to record + replay byte-identically.
 
 ## Gate
 
-`./run-patina.sh` (exits nonzero on any regression):
+`./run-patina.sh` (exits nonzero on any regression) builds and stages under
+`CARGO_TARGET_DIR`, defaulting to `../../target/testbeds/pubsub` from this
+directory:
 
 1. build + explicit audit (control-plane `dlsym` residue only; every run below
    also passes the baked-in default-deny pre-run gate with **no** allowance);

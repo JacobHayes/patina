@@ -42,8 +42,10 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
-built="$here/target/patina/pubsub"
-PATINA="$repo_root/target/release/cargo-patina"
+target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/pubsub}"
+export CARGO_TARGET_DIR="$target_dir"
+built="$target_dir/patina/pubsub"
+PATINA="$target_dir/release/cargo-patina"
 
 # No --allow-unsupported-symbols: the harness passes the default-deny gate clean.
 # Escape hatch mirror of workq's: export PATINA_ALLOW_SYMS=name[,name...] if a
@@ -77,8 +79,8 @@ echo "==> [1] building cargo-patina + the pubsub harness; explicit audit"
 if ! cargo build --release --quiet -p cargo-patina; then
   echo "FATAL: cargo build -p cargo-patina failed" >&2; exit 3
 fi
-if ! mkdir -p "$here/target/patina"; then
-  echo "FATAL: mkdir $here/target/patina failed" >&2; exit 3
+if ! mkdir -p "$target_dir/patina"; then
+  echo "FATAL: mkdir $target_dir/patina failed" >&2; exit 3
 fi
 if ! "$PATINA" patina build "$here" --output "$built" --release >/dev/null; then
   echo "FATAL: patina build of the pubsub harness failed" >&2; exit 3

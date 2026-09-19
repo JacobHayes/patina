@@ -41,9 +41,11 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
-built="$here/target/patina/fifo-ipc"
-PATINA="$repo_root/target/release/cargo-patina"
-out="$here/target/patina"
+target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/fifo-ipc}"
+export CARGO_TARGET_DIR="$target_dir"
+built="$target_dir/patina/fifo-ipc"
+PATINA="$target_dir/release/cargo-patina"
+out="$target_dir/patina"
 
 # The build prelude fails CLOSED (FATAL) — a gate that cannot build must never
 # read as a silent green (the fuzz-sweep FATAL convention).

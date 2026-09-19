@@ -32,6 +32,9 @@ What it exercises (all via raw syscalls on the default backend):
 ./run-patina.sh
 ```
 
+The script builds and stages under `CARGO_TARGET_DIR`, defaulting to
+`../../target/testbeds/rustix-default` from this directory.
+
 This testbed is **SUD-only**. SUD needs the kernel's generic-entry code (x86_64
 ≥ 5.11; arm64 does not have it yet), so on a non-SUD kernel or a non-Linux host
 `run-patina.sh` prints a **loud, counted** `rustix-default: SKIPPED 1 …` line and

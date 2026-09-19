@@ -28,8 +28,10 @@ esac
 
 ROOT="$PWD"
 MANIFEST="$ROOT/testbeds/patina-macro-adopter/Cargo.toml"
-OUT="$ROOT/target/patina-macro-adopter"
-CLI="$ROOT/target/debug/cargo-patina"
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target/testbeds/patina-macro-adopter}"
+export CARGO_TARGET_DIR="$TARGET_DIR"
+OUT="$TARGET_DIR/patina-macro-adopter"
+CLI="$TARGET_DIR/debug/cargo-patina"
 
 if [[ ! -f "$ROOT/Cargo.toml" || ! -f "$MANIFEST" ]]; then
   echo "patina-macro-adopter: run from the Patina repository root" >&2
@@ -137,22 +139,14 @@ echo "==> patina macro adopter: PATH-scrubbed missing-CLI refusal"
 SCRUB_BIN="$OUT/path-scrub-bin"
 rm -rf "$SCRUB_BIN"
 mkdir -p "$SCRUB_BIN"
-CARGO_BIN="$(command -v cargo)"
-RUSTC_BIN="$(command -v rustc)"
-RUSTDOC_BIN="$(command -v rustdoc || true)"
-ln -sf "$CARGO_BIN" "$SCRUB_BIN/cargo"
-ln -sf "$RUSTC_BIN" "$SCRUB_BIN/rustc"
-if [[ -n "$RUSTDOC_BIN" ]]; then
-  ln -sf "$RUSTDOC_BIN" "$SCRUB_BIN/rustdoc"
-fi
+CARGO_BIN="$(rustup which cargo 2>/dev/null || command -v cargo)"
+RUSTC_BIN="$(rustup which rustc 2>/dev/null || command -v rustc)"
 # The leg's claim is "cargo-patina is not on PATH", not "PATH is empty": drop
 # exactly the PATH entries that hold a cargo-patina and keep every other one —
 # the toolchain, and any rustc wrapper (sccache, kache) the user's cargo config
-# names, which cargo resolves by NAME through PATH at startup: lose it and cargo
-# dies on `<wrapper> rustc -vV` before the SDK's own lookup ever runs, so the
-# leg would fail for the wrong reason. cargo/rustc/rustdoc are pinned by
-# absolute symlink above so a dropped directory that also held them (a
-# `cargo install`ed cargo-patina in ~/.cargo/bin) cannot take them along.
+# names, which cargo resolves by NAME through PATH at startup. cargo/rustc are
+# invoked by absolute path/env below, so a dropped directory that also held them
+# (or a wrapper named cargo) cannot take them along or recurse through itself.
 SCRUB_PATH="$SCRUB_BIN"
 IFS=: read -r -a path_entries <<<"${PATH:-}"
 for entry in "${path_entries[@]}"; do

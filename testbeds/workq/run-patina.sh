@@ -56,8 +56,10 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
-built="$here/target/patina/workq"
-PATINA="$repo_root/target/release/cargo-patina"
+target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/workq}"
+export CARGO_TARGET_DIR="$target_dir"
+built="$target_dir/patina/workq"
+PATINA="$target_dir/release/cargo-patina"
 
 # shellcheck source=../buggify-campaign.sh
 source "$here/../buggify-campaign.sh"
@@ -88,8 +90,8 @@ echo "==> building cargo-patina and the workq harness under Patina"
 if ! cargo build --release --quiet -p cargo-patina; then
   echo "FATAL: cargo build -p cargo-patina failed" >&2; exit 3
 fi
-if ! mkdir -p "$here/target/patina"; then
-  echo "FATAL: mkdir $here/target/patina failed" >&2; exit 3
+if ! mkdir -p "$target_dir/patina"; then
+  echo "FATAL: mkdir $target_dir/patina failed" >&2; exit 3
 fi
 if ! "$PATINA" patina build "$here" --output "$built" --release >/dev/null; then
   echo "FATAL: patina build of the workq harness failed" >&2; exit 3

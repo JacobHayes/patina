@@ -46,6 +46,9 @@ end-to-end proof of the fix.
 ./run-patina.sh
 ```
 
+The script builds and stages under `CARGO_TARGET_DIR`, defaulting to
+`../../target/testbeds/cap-std-dirfd` from this directory.
+
 This testbed is **SUD-only**, for the same reason `rustix-default` is: the raw
 `*at` calls need the kernel's generic-entry syscall-user-dispatch (x86_64
 ≥ 5.11; arm64 does not have it yet). On a non-SUD kernel or a non-Linux host

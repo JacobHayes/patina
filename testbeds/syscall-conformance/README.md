@@ -43,7 +43,8 @@ line, `FAMILY_GATE <f>: PASS|FAIL`. It passes when:
 
 Every step runs; the work lines name the probes still pending or differing,
 the required unit tests missing, ignored or failing, and the trace facts unmet
-(each step's full log is under `target/conformance/gate/`). The gate is the
+(each step's full log is under `$CARGO_TARGET_DIR/conformance/gate`, defaulting
+under `../../target/testbeds/syscall-conformance`). The gate is the
 progress report and the definition of done; a family's spec may suggest an
 order of work (the signals family's M1..M5), but there are no partial gates.
 
@@ -124,7 +125,7 @@ The two are gated against each other both ways, and the prelude refuses a
 manifest naming a non-row (`conform check-manifest`). The virtual kernel ABI
 level (`registry::VIRTUAL_ABI`) and each row's first kernel (`since`) reach the
 harness through `cargo patina syscalls --format json` (dumped to
-`target/conformance/registry.json`), so an expectation header and the host
+`$CARGO_TARGET_DIR/conformance/registry.json`), so an expectation header and the host
 gate can never disagree with the registry. `abi/newer-than-virtual` is the
 probe for the rule: a number past the level (`fchroot`, 472, Linux 7.3) is
 `ENOSYS` through every vehicle, and natively the host must lack it too.

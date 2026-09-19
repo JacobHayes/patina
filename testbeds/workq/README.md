@@ -78,10 +78,12 @@ the seeded-bug demo below:
 ./run-patina.sh
 ```
 
-Run it once by hand to see the shape of a single simulated run:
+Run it once by hand to see the shape of a single simulated run. The script
+stages the binary under `CARGO_TARGET_DIR` (default:
+`../../target/testbeds/workq/patina/workq` from this directory):
 
 ```sh
-cargo patina run ./target/patina/workq --seed 1 -- --jobs 24 --data-dir /workq
+cargo patina run ../../target/testbeds/workq/patina/workq --seed 1 -- --jobs 24 --data-dir /workq
 ```
 
 ## The one-command bug-catch demo
@@ -107,7 +109,7 @@ durability slip, and a threading race.
 Watch Patina catch one (it fails, loudly and reproducibly):
 
 ```sh
-cargo patina run ./target/patina/workq --seed 2 --buggify=500 --buggify-after-setup \
+cargo patina run ../../target/testbeds/workq/patina/workq --seed 2 --buggify=500 --buggify-after-setup \
   -- --jobs 24 --data-dir /workq --bug skip-redelivery-commit
 ```
 

@@ -12,6 +12,9 @@ set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
+check_target_base="$root/target/check"
+export CARGO_TARGET_DIR="$check_target_base/serial"
+
 usage() {
   cat <<'EOF'
 Usage: scripts/check.sh <full|fast|msrv>
@@ -25,9 +28,10 @@ Usage: scripts/check.sh <full|fast|msrv>
         not part of the ordinary local landing gate.
 
 Successful rung logs are hidden. On failure, the complete rung log and exact
-command are printed. PATINA_CHECK_JOBS is intentionally not exposed: the full
-profile uses bounded, reviewed concurrency groups whose members have independent
-scratch/output paths.
+command are printed. The runner uses one Cargo target dir for serial work and one
+under target/check/parallel/ for each parallel rung. PATINA_CHECK_JOBS is
+intentionally not exposed: the full profile uses bounded, reviewed concurrency
+groups whose members have independent scratch/output paths.
 EOF
 }
 
@@ -68,6 +72,10 @@ quote_command() {
   done
 }
 
+rung_slug() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-//; s/-$//'
+}
+
 run_rung() {
   local label=$1
   shift
@@ -94,8 +102,12 @@ start_rung() {
   local index=${#pids[@]}
   local log="$logs/parallel-$index.log"
   local status_file="$logs/parallel-$index.status"
-  local command
-  printf -v command '%q ' "$@"
+  local arg command target_dir
+  target_dir="$check_target_base/parallel/$(rung_slug "$label")"
+  printf -v command 'CARGO_TARGET_DIR=%q' "$target_dir"
+  for arg in "$@"; do
+    printf -v command '%s %q' "$command" "$arg"
+  done
   printf 'START %s [parallel]\n' "$label"
   labels+=("$label")
   commands+=("$command")
@@ -103,7 +115,7 @@ start_rung() {
   status_paths+=("$status_file")
   start_times+=("$(date +%s)")
   (
-    "$@" >"$log" 2>&1
+    CARGO_TARGET_DIR="$target_dir" "$@" >"$log" 2>&1
     local_status=$?
     printf '%s %s\n' "$local_status" "$(date +%s)" >"$status_file"
     exit "$local_status"
@@ -157,24 +169,24 @@ run_fast_workspace_tests() {
 }
 
 run_msrv_check() {
-  cargo +1.86.0 check --workspace --all-targets --locked --target-dir "$root/target/msrv-check"
+  cargo +1.86.0 check --workspace --all-targets --locked --target-dir "$check_target_base/msrv-check"
 }
 
 run_msrv_detector() {
-  cargo +1.86.0 test --target-dir "$root/target/msrv-check" -p cargo-patina \
+  cargo +1.86.0 test --target-dir "$check_target_base/msrv-check" -p cargo-patina \
     --test self_sufficient_binary --locked
 }
 
 run_msrv_macro_feature_test() {
-  cargo +1.86.0 test --target-dir "$root/target/msrv-check" -p patina-dst \
+  cargo +1.86.0 test --target-dir "$check_target_base/msrv-check" -p patina-dst \
     --features macros --locked
 }
 
 run_msrv_full() {
-  # Keep outer Cargo artifacts separate without exporting CARGO_TARGET_DIR:
-  # e2e fixtures intentionally manage their own nested targets. cargo-patina's
-  # internal shim cache independently keys itself by the complete toolchain.
-  local msrv_target="$root/target/msrv"
+  # Keep MSRV artifacts separate from the stable serial and parallel target dirs.
+  # cargo-patina's internal shim cache independently keys itself by the complete
+  # toolchain.
+  local msrv_target="$check_target_base/msrv"
   cargo +1.86.0 test --target-dir "$msrv_target" --workspace --locked &&
     cargo +1.86.0 test --target-dir "$msrv_target" -p patina-dst --features macros --locked
 }
@@ -182,6 +194,7 @@ run_msrv_full() {
 run_full() {
   local total_start
   total_start=$(date +%s)
+  printf 'TARGET_BASE %s\n' "$check_target_base"
 
   # Cheap, high-signal failures stay serial and stop before expensive work.
   run_rung 'format' cargo fmt --all -- --check || return $?
@@ -202,8 +215,8 @@ run_full() {
 
   # The cargo-patina end_to_end binary dominates the stable workspace suite and
   # contends badly with other CPU-heavy cargo/check rungs, so the full workspace
-  # test rung runs alone. The post-test group below uses separate testbed output
-  # directories or runtime scratch paths.
+  # test rung runs alone. The post-test group below gets one Cargo target dir per
+  # rung through start_rung, plus each script's own runtime scratch paths.
   run_rung 'stable workspace tests (includes e2e)' cargo test --workspace --locked || return $?
 
   start_rung 'native-shim validation' scripts/validate-native-shim.sh
@@ -226,6 +239,7 @@ run_full() {
 run_fast() {
   local total_start
   total_start=$(date +%s)
+  printf 'TARGET_BASE %s\n' "$check_target_base"
   run_rung 'format' cargo fmt --all -- --check || return $?
   run_rung 'host clippy' cargo clippy --workspace --all-targets --locked -- -D warnings || return $?
   run_rung 'Linux-cfg clippy' cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu -- -D warnings || return $?

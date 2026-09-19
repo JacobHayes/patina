@@ -32,16 +32,19 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
-built="$here/target/patina/cap-std-dirfd"
-PATINA="$repo_root/target/release/cargo-patina"
+target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/cap-std-dirfd}"
+export CARGO_TARGET_DIR="$target_dir"
+out="$target_dir/patina"
+built="$out/cap-std-dirfd"
+PATINA="$target_dir/release/cargo-patina"
 
 # The build prelude fails CLOSED (FATAL) — a gate that cannot build must never
 # read as a silent green (the fuzz-sweep FATAL convention).
 if ! cargo build --release --quiet -p cargo-patina; then
   echo "FATAL: cargo build -p cargo-patina failed" >&2; exit 3
 fi
-if ! mkdir -p "$here/target/patina"; then
-  echo "FATAL: mkdir $here/target/patina failed" >&2; exit 3
+if ! mkdir -p "$out"; then
+  echo "FATAL: mkdir $out failed" >&2; exit 3
 fi
 
 # ---- SUD availability gate (loud, counted skip; never a silent pass) ----
@@ -75,50 +78,50 @@ if ! "$PATINA" patina build "$here" --output "$built" --release >/dev/null; then
 fi
 
 echo "==> [1] audit: the raw *at sites must be reported SUD-managed"
-if ! "$PATINA" patina audit "$built" >"$here/target/patina/audit.txt" 2>&1; then
+if ! "$PATINA" patina audit "$built" >"$out/audit.txt" 2>&1; then
   echo "cap-std-dirfd: FAIL [1] audit refused a SUD-managed binary" >&2
-  cat "$here/target/patina/audit.txt" >&2; exit 1
+  cat "$out/audit.txt" >&2; exit 1
 fi
-if ! grep -q 'SUD-managed' "$here/target/patina/audit.txt"; then
+if ! grep -q 'SUD-managed' "$out/audit.txt"; then
   echo "cap-std-dirfd: FAIL [1] audit did not report direct-syscall (SUD-managed)" >&2
-  cat "$here/target/patina/audit.txt" >&2; exit 1
+  cat "$out/audit.txt" >&2; exit 1
 fi
 
 echo "==> [2]/[3] run + byte-identical repeats (seed 1)"
 if ! "$PATINA" patina run "$built" --seed 1 \
-    >"$here/target/patina/run1.out" 2>"$here/target/patina/run1.err"; then
+    >"$out/run1.out" 2>"$out/run1.err"; then
   echo "cap-std-dirfd: FAIL [2] run exited nonzero" >&2
-  cat "$here/target/patina/run1.out" "$here/target/patina/run1.err" >&2; exit 1
+  cat "$out/run1.out" "$out/run1.err" >&2; exit 1
 fi
 if ! "$PATINA" patina run "$built" --seed 1 \
-    >"$here/target/patina/run2.out" 2>"$here/target/patina/run2.err"; then
+    >"$out/run2.out" 2>"$out/run2.err"; then
   echo "cap-std-dirfd: FAIL [2] second run exited nonzero" >&2; exit 1
 fi
 # Both streams: a refusal diagnostic lands on the CAPTURED stderr, so comparing
 # stdout alone would not notice a nondeterministic deny.
 for stream in out err; do
-  if ! cmp -s "$here/target/patina/run1.$stream" "$here/target/patina/run2.$stream"; then
+  if ! cmp -s "$out/run1.$stream" "$out/run2.$stream"; then
     echo "cap-std-dirfd: FAIL [3] two same-seed runs differ on std$stream" >&2
-    diff "$here/target/patina/run1.$stream" "$here/target/patina/run2.$stream" >&2 || true
+    diff "$out/run1.$stream" "$out/run2.$stream" >&2 || true
     exit 1
   fi
 done
 expected='^CAPSTD_RESULT root=/capstd-mre read=alpha-bytes dents=alpha.txt,sub nested=beta link=sub/moved.txt modes=enforced\+created pinned=node opath=nocost,list=r,walk=x$'
-if ! grep -Eq "$expected" "$here/target/patina/run1.out"; then
+if ! grep -Eq "$expected" "$out/run1.out"; then
   echo "cap-std-dirfd: FAIL [2] unexpected CAPSTD_RESULT:" >&2
-  cat "$here/target/patina/run1.out" >&2; exit 1
+  cat "$out/run1.out" >&2; exit 1
 fi
 
 echo "==> [4] record → replay byte-identical"
-"$PATINA" patina run "$built" --seed 1 --record "$here/target/patina/mre.patina" \
-  --fingerprint capstd-dirfd-v1 >"$here/target/patina/record.out" 2>/dev/null || {
+"$PATINA" patina run "$built" --seed 1 --record "$out/mre.patina" \
+  --fingerprint capstd-dirfd-v1 >"$out/record.out" 2>/dev/null || {
   echo "cap-std-dirfd: FAIL [4] record run failed" >&2; exit 1; }
-"$PATINA" patina replay "$built" "$here/target/patina/mre.patina" \
-  --fingerprint capstd-dirfd-v1 >"$here/target/patina/replay.out" 2>/dev/null || {
+"$PATINA" patina replay "$built" "$out/mre.patina" \
+  --fingerprint capstd-dirfd-v1 >"$out/replay.out" 2>/dev/null || {
   echo "cap-std-dirfd: FAIL [4] replay failed" >&2; exit 1; }
-if ! cmp -s "$here/target/patina/record.out" "$here/target/patina/replay.out"; then
+if ! cmp -s "$out/record.out" "$out/replay.out"; then
   echo "cap-std-dirfd: FAIL [4] record/replay diverged" >&2; exit 1; fi
 
-grep -E "$expected" "$here/target/patina/run1.out"
+grep -E "$expected" "$out/run1.out"
 # Loud execution proof for CI-log grepping: prints only after every leg passed.
 echo "CAPSTD_LEGS_RAN branch=sud legs=audit-sud-managed,run,seed-stable,record-replay"

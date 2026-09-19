@@ -37,6 +37,14 @@ workq, pubsub, and buggify-wasi sweeps.
 
 Conventions:
 
+- Testbed scripts build through Cargo's normal `CARGO_TARGET_DIR`. When the
+  variable is unset, the Patina-maintained scripts default to a per-testbed
+  directory under the repository target base, such as
+  `target/testbeds/workq/patina/workq`; when the local check ladder runs them in
+  parallel, `scripts/check.sh` gives each rung its own target directory under
+  `target/check/parallel/`. A script must not create a real `testbeds/*/target`
+  tree; temporary run data belongs in `mktemp` directories or under its assigned
+  target directory.
 - The local ladder has one testbed path per tier: `mise run check:fast` runs the
   cheap classifier/gate selftests plus syscall-conformance `run.sh --fast`; the
   full local gate runs the workq/pubsub/macro-adopter `run-patina.sh` batteries,

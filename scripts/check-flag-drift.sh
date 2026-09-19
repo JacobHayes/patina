@@ -66,6 +66,10 @@ esac
 
 cd "$(dirname "$0")/.."
 
+if [[ -z "${CARGO_TARGET_DIR:-}" ]]; then
+  export CARGO_TARGET_DIR="$PWD/target/check/check-flag-drift"
+fi
+
 # (0) Sources. DOCS is the curated user-facing set; SCRIPTS is every shell script
 # under scripts/ and testbeds/ (this gate excluded — its allowlist below quotes
 # flag names as data, not as invocations). SCRIPTS is globbed, not listed, so a

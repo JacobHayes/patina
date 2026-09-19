@@ -36,8 +36,10 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
+target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/syscall-conformance}"
+export CARGO_TARGET_DIR="$target_dir"
 frozen="$here/frozen.toml"
-conform="$here/target/release/conform"
+conform="$target_dir/release/conform"
 
 usage() {
   cat <<'EOF'
@@ -234,7 +236,7 @@ fi
 # Each step's output goes to its log; a failed step contributes work lines:
 # the log itself when the step prints work lines (`lines`), the failing legs of
 # the conformance run (`legs`), or one line naming the log (`log`).
-logs="$here/target/conformance/gate"
+logs="$target_dir/conformance/gate"
 mkdir -p "$logs"
 work=()
 step() {
@@ -265,7 +267,7 @@ step "rustfmt" log cargo fmt --all --manifest-path "$repo_root/Cargo.toml" -- --
 step "clippy" log cargo clippy --workspace --all-targets --manifest-path "$repo_root/Cargo.toml" -- -D warnings
 step "registry cross-gate" log cargo test --manifest-path "$repo_root/Cargo.toml" -p cargo-patina --test syscall_registry
 step "conformance run" legs "$here/run.sh"
-step "design obligations" lines check_obligations "$repo_root" "$family" "$here/target/conformance"
+step "design obligations" lines check_obligations "$repo_root" "$family" "$target_dir/conformance"
 
 if [[ ${#work[@]} == 0 ]]; then
   echo "FAMILY_GATE $family: PASS"
