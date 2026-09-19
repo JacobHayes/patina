@@ -155,7 +155,7 @@ ssize_t sendto(int fd, const void *buf, size_t len, int flags,
             errno = EOPNOTSUPP;
             return -1;
         }
-        return fail_size(patina_pipe_write(fd, buf, len));
+        return fail_size(patina_pipe_write(fd, buf, len, flags));
     }
     int kind = patina_net_kind(fd);
     if (kind == 3) {
@@ -167,7 +167,7 @@ ssize_t sendto(int fd, const void *buf, size_t len, int flags,
             errno = EOPNOTSUPP;
             return -1;
         }
-        return fail_size(patina_net_stream_send(fd, buf, len));
+        return fail_size(patina_net_stream_send(fd, buf, len, flags));
     }
     if (addr != NULL) {
         uint32_t ip;
@@ -189,7 +189,7 @@ ssize_t send(int fd, const void *buf, size_t len, int flags) {
             errno = EOPNOTSUPP;
             return -1;
         }
-        return fail_size(patina_pipe_write(fd, buf, len));
+        return fail_size(patina_pipe_write(fd, buf, len, flags));
     }
     int kind = patina_net_kind(fd);
     if (kind == 3) {
@@ -197,7 +197,7 @@ ssize_t send(int fd, const void *buf, size_t len, int flags) {
             errno = EOPNOTSUPP;
             return -1;
         }
-        return fail_size(patina_net_stream_send(fd, buf, len));
+        return fail_size(patina_net_stream_send(fd, buf, len, flags));
     }
     return fail_size(patina_net_send(fd, buf, len));
 }

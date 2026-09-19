@@ -1,6 +1,6 @@
 # Signals + threads + process: the family spec and its frozen oracle
 
-Status: oracle frozen (this document, the probes and expectations under
+Status: oracle frozen (the probes and expectations under
 `testbeds/syscall-conformance/{probes,expected}/{signal,thread,proc}/`, the
 harness, `frozen.toml` and `gate.sh`) before any runtime work; the runtime is
 built against one gate, `gate.sh --family signals` (§5), in the order §4
@@ -8,6 +8,40 @@ suggests. Parent arc: [syscall-conformance.md](syscall-conformance.md) §6 "sign
 + threads + process", §7. Every claim below about Linux is host-checked by a
 probe on this family's blessing host (Linux 6.8, glibc 2.39, x86_64); the
 kernel is the oracle, this text is the index.
+
+## As landed: implementation deltas
+
+The numbered design below records the original plan. These deltas describe the
+implementation; they do not change the frozen probes, expectations, declarations
+or required test names in `frozen.toml`.
+
+- `pidfd_send_signal(self)` is not a generation door: virtual pidfds do not exist,
+  and `pidfd_send_signal` is a final `process` trap. This is a deliberate limit,
+  not a claim of self-pidfd support.
+- `TaskSignals` has neither an `altstack` mirror nor an `in_delivery` flag. The
+  host kernel owns each task's alternate stack; host masks describe legitimate
+  nested delivery. Enclosing SIGSYS mask/stack dirty bits survive inner-frame
+  fixups by save-and-OR-back around kernel frame release.
+- Blocking syscall resumption uses typed `Resumed::{Normal, Restart, Eintr}`
+  rather than `Step::Interrupted`. Per-call restart and timeout rules still apply.
+- Pthread join, mutex/rwlock and condition waits deliver handlers without EINTR,
+  retain their semantic queues and resume the original wait/deadline unless
+  already granted. A handler interrupting such a wait may acquire uncontended
+  locks, but another blocking pthread wait is refused before queue mutation or
+  condvar unlock with `signal handler blocked on a pthread wait while interrupting
+  one: not modeled`. There is no nested pthread-wait stack.
+- Guest raw `rt_sigreturn` and `restart_syscall` are final `signal-abi` traps.
+  Actual handler returns use the allowed host restorer; no guest restart-block
+  protocol is implemented.
+- Explicit Linux guest abort finalizes a healthy trace. Internal fatal paths and
+  shim-owned Rust panics use host diagnostics/private abort and cannot finalize
+  through that guest interposer. POSIX startup installs the ownership-scoped
+  panic policy; guest callbacks suspend ownership, preserving caught guest
+  panics. Guard-unwind and panic-time abort checks protect against hook replacement.
+
+The family gate and full landing battery are required acceptance checks.
+Ambient host signals, nonlocal handler escape and macOS runtime behavior are not
+proved by the Linux signal detectors; see `VALIDATION.md` for the evidence scope.
 
 ## 1. Rows: the Linux semantics the probes pin
 

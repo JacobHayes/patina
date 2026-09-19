@@ -52,14 +52,20 @@ pub(super) fn sys_epoll_pwait(
     maxevents: i64,
     timeout_ms: i64,
     sigmask: u64,
+    sigsetsize: u64,
 ) -> i64 {
-    // Patina delivers no ambient signals, so a NULL mask is the plain wait; a
-    // real mask swap has no deterministic meaning. Mirror the C epoll_pwait
-    // interposer's deny EXACTLY — the same recorded diagnostic and -ENOSYS.
-    if sigmask != 0 {
-        return sud_deny("patina: epoll_pwait with a signal mask is not modeled; failing closed\n");
+    if sigmask != 0 && sigsetsize != 8 {
+        return -EINVAL;
     }
-    sys_epoll_wait(epfd, events, maxevents, timeout_ms)
+    unsafe {
+        crate::thread::readiness::patina_epoll_wait_masked(
+            epfd as i32,
+            events as *mut c_void,
+            maxevents as i32,
+            timeout_ms as i32,
+            sigmask as *const u64,
+        )
+    }
 }
 
 pub(super) fn sys_epoll_pwait2(
@@ -68,24 +74,28 @@ pub(super) fn sys_epoll_pwait2(
     maxevents: i64,
     timeout: u64,
     sigmask: u64,
+    sigsetsize: u64,
 ) -> i64 {
-    if sigmask != 0 {
+    if sigmask != 0 && sigsetsize != 8 {
         return -EINVAL;
     }
-    // epoll_pwait2 takes an absolute `struct timespec *timeout` (NULL == block
+    // epoll_pwait2 takes a relative `struct timespec *timeout` (NULL == block
     // forever). Convert to the millisecond timeout the reactor entry takes.
     let timeout_ms: i64 = if timeout == 0 {
         -1
     } else {
         // SAFETY: `timeout` is a guest `struct timespec`.
         let ts = unsafe { (timeout as *const Timespec).read() };
-        if ts.tv_sec < 0 || ts.tv_nsec < 0 {
+        if ts.tv_sec < 0 || !(0..NANOS_PER_SEC as i64).contains(&ts.tv_nsec) {
             return -EINVAL;
         }
-        let ms = ts.tv_sec.saturating_mul(1000) + ts.tv_nsec / 1_000_000;
+        let ms = ts
+            .tv_sec
+            .saturating_mul(1000)
+            .saturating_add((ts.tv_nsec + 999_999) / 1_000_000);
         ms.min(c_int::MAX as i64)
     };
-    sys_epoll_wait(epfd, events, maxevents, timeout_ms)
+    sys_epoll_pwait(epfd, events, maxevents, timeout_ms, sigmask, sigsetsize)
 }
 
 pub(super) fn sys_eventfd2(initval: u64, flags: i64) -> i64 {
@@ -93,60 +103,16 @@ pub(super) fn sys_eventfd2(initval: u64, flags: i64) -> i64 {
     ret_i32(unsafe { patina_eventfd(initval as u32, flags as c_int) })
 }
 
-/// The size of a Linux `struct pollfd` (`int fd; short events; short revents;`).
-pub(super) const POLLFD_SIZE: usize = 8;
-
-/// The shared `poll`/`ppoll` core, mirroring the C `poll` interposer
-/// (patina_posix.c). `timeout` is normalized to nanoseconds: `Some(0)` = return
-/// immediately, `Some(n>0)` = wait `n` ns of VIRTUAL time, `None` = the "infinite"
-/// timeout (poll's `-1` / ppoll's NULL). The C model:
-///  - with descriptors (`nfds != 0`): a non-zero timeout is an unmodeled real
-///    wait → `-ENOSYS`; a zero timeout requires every `events` to be empty (a
-///    non-empty event set is an unmodeled real readiness query → `-ENOSYS`),
-///    clearing each `revents` and returning 0.
-///  - with no descriptors (`nfds == 0`): sleep for a strictly-positive timeout
-///    (advancing virtual time), then return 0. An infinite/zero timeout returns 0
-///    immediately (no event can ever arrive on an empty set, so a real kernel's
-///    forever-block is deterministically an instant no-op here).
+/// Shared nanosecond wait core used by both POSIX and raw adapters.
 pub(super) fn poll_core(fds: u64, nfds: u64, timeout: Option<u64>) -> i64 {
-    let zero_timeout = timeout == Some(0);
-    if nfds != 0 {
-        if !zero_timeout {
-            // A real wait on descriptors has no deterministic model.
-            return -ENOSYS;
-        }
-        if fds == 0 {
-            return -EFAULT;
-        }
-        for i in 0..nfds as usize {
-            let entry = (fds as *mut u8).wrapping_add(i * POLLFD_SIZE);
-            // events/revents are `short` at offsets 4 and 6 of the pollfd.
-            // SAFETY: `fds` is the guest's array of `nfds` pollfd entries.
-            let events = unsafe { (entry.add(4) as *const u16).read_unaligned() };
-            if events != 0 {
-                // A real readiness query is unmodeled.
-                return -ENOSYS;
-            }
-            // SAFETY: as above; clear the result field.
-            unsafe { (entry.add(6) as *mut u16).write_unaligned(0) };
-        }
-        return 0;
-    }
-    // No descriptors: a strictly-positive timeout advances virtual time; an
-    // infinite or zero timeout returns 0 immediately.
-    match timeout {
-        Some(nanos) if nanos > 0 => {
-            let mut now: u64 = 0;
-            // SAFETY: local storage.
-            let rc = unsafe { patina_clock_now(PATINA_CLOCK_MONOTONIC, &mut now) };
-            if rc != 0 {
-                return ret_i32(rc);
-            }
-            let deadline = now.saturating_add(nanos);
-            // SAFETY: no pointers.
-            ret_i32(unsafe { patina_sleep_until(PATINA_CLOCK_MONOTONIC, deadline) })
-        }
-        _ => 0,
+    unsafe {
+        crate::thread::readiness::patina_poll(
+            fds as *mut _,
+            nfds as usize,
+            timeout.map_or(-1, |n| n.min(i64::MAX as u64) as i64),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+        )
     }
 }
 
@@ -162,12 +128,13 @@ pub(super) fn sys_poll(fds: u64, nfds: u64, timeout_ms: i64) -> i64 {
     poll_core(fds, nfds, timeout)
 }
 
-/// `ppoll(2)`. The `int`-milliseconds timeout of `poll` becomes a relative
-/// `struct timespec *` (NULL = infinite); a signal mask is inert in a signal-free
-/// deterministic world (no ambient signals exist to block), so it is ignored and
-/// the call routes through the same [`poll_core`]. `ppoll_time64` (x86_64 414) is
-/// deliberately NOT routed — 64-bit callers never use it — so it stays fail-closed.
-pub(super) fn sys_ppoll(fds: u64, nfds: u64, timeout: u64, _sigmask: u64, _sigsetsize: u64) -> i64 {
+/// `ppoll(2)` uses a temporary task mask and a relative timespec. Unlike
+/// libc's wrapper, the raw row writes the unslept timeout back to the guest.
+pub(super) fn sys_ppoll(fds: u64, nfds: u64, timeout: u64, sigmask: u64, sigsetsize: u64) -> i64 {
+    if sigmask != 0 && sigsetsize != 8 {
+        return -EINVAL;
+    }
+    let timeout_ptr = timeout as *mut Timespec;
     let timeout = if timeout == 0 {
         None
     } else {
@@ -182,5 +149,88 @@ pub(super) fn sys_ppoll(fds: u64, nfds: u64, timeout: u64, _sigmask: u64, _sigse
                 .saturating_add(ts.tv_nsec as u64),
         )
     };
-    poll_core(fds, nfds, timeout)
+    let mut remaining = timeout.unwrap_or(0);
+    let rc = unsafe {
+        crate::thread::readiness::patina_poll(
+            fds as *mut _,
+            nfds as usize,
+            timeout.map_or(-1, |n| n.min(i64::MAX as u64) as i64),
+            sigmask as *const u64,
+            &mut remaining,
+        )
+    };
+    if !timeout_ptr.is_null() && (rc >= 0 || rc == -4) {
+        unsafe {
+            timeout_ptr.write(Timespec {
+                tv_sec: (remaining / NANOS_PER_SEC) as i64,
+                tv_nsec: (remaining % NANOS_PER_SEC) as i64,
+            });
+        }
+    }
+    rc
+}
+
+/// select writes its timeval back; the raw pselect6 row writes its timespec
+/// back too (glibc preserves the caller's pselect timeout in its wrapper).
+pub(super) fn sys_select(
+    nfds: u64,
+    read: u64,
+    write: u64,
+    except: u64,
+    timeout: u64,
+    sigarg: Option<u64>,
+) -> i64 {
+    let nanos = if timeout == 0 {
+        -1
+    } else if sigarg.is_some() {
+        match read_timespec_nanos(timeout as *const Timespec) {
+            Ok(n) => n.min(i64::MAX as u64) as i64,
+            Err(e) => return e,
+        }
+    } else {
+        let tv = unsafe { &*(timeout as *const Timeval) };
+        if tv.tv_sec < 0 || !(0..1_000_000).contains(&tv.tv_usec) {
+            return -EINVAL;
+        }
+        tv.tv_sec
+            .saturating_mul(1_000_000_000)
+            .saturating_add(tv.tv_usec * 1000)
+    };
+    let mask = if let Some(arg) = sigarg.filter(|arg| *arg != 0) {
+        let pair = unsafe { &*(arg as *const [u64; 2]) };
+        if pair[0] != 0 && pair[1] != 8 {
+            return -EINVAL;
+        }
+        pair[0] as *const u64
+    } else {
+        std::ptr::null()
+    };
+    let mut remaining = nanos.max(0) as u64;
+    let rc = unsafe {
+        crate::thread::readiness::patina_select(
+            nfds as i32,
+            read as *mut u64,
+            write as *mut u64,
+            except as *mut u64,
+            nanos,
+            mask,
+            &mut remaining,
+        )
+    };
+    if timeout != 0 && (rc >= 0 || rc == -4) {
+        unsafe {
+            if sigarg.is_some() {
+                (timeout as *mut Timespec).write(Timespec {
+                    tv_sec: (remaining / 1_000_000_000) as i64,
+                    tv_nsec: (remaining % 1_000_000_000) as i64,
+                });
+            } else {
+                (timeout as *mut Timeval).write(Timeval {
+                    tv_sec: (remaining / 1_000_000_000) as i64,
+                    tv_usec: ((remaining % 1_000_000_000) / 1000) as i64,
+                });
+            }
+        }
+    }
+    rc
 }

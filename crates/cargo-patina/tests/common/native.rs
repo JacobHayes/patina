@@ -291,6 +291,39 @@ impl Guest {
             }
         }
     }
+    /// Record a direct POSIX guest through an inherited host fd, not a guest FS open.
+    pub fn record_standalone(&self, args: &[&str]) -> (Output, PathBuf) {
+        let trace = self.dir.path().join("standalone.patina");
+        let mut command = Command::new("/bin/sh");
+        command
+            .env_clear()
+            .args(["-c", "exec 3>\"$1\"; shift; exec \"$@\"", "native-boundary"])
+            .arg(&trace)
+            .arg(&self.binary)
+            .args(args)
+            .envs([
+                ("PATINA_MODE", "record"),
+                ("PATINA_SEED", "1"),
+                ("PATINA_TRACE_FD", "3"),
+                ("PATINA_FINGERPRINT", "native-boundary"),
+            ]);
+        let output = super::output_with_deadline(&mut command, Duration::from_secs(20))
+            .expect("recorded standalone guest exceeded 20s");
+        (output, trace)
+    }
+
+    /// Internal containment refusals must abort without publishing a complete trace.
+    #[cfg(target_os = "linux")]
+    pub fn assert_internal_fatal(&self, args: &[&str], diagnostics: &[&str]) {
+        use std::os::unix::process::ExitStatusExt;
+        let (output, trace) = self.record_standalone(args);
+        let output = assert_refused(output, diagnostics);
+        assert_eq!(output.status.signal(), Some(6), "{}", text(&output.stderr));
+        assert!(
+            patina_dst_trace::TraceBundle::load(&trace).is_err(),
+            "internal fatal must not finalize an invalid trace"
+        );
+    }
 }
 
 /// Mutually exclusive linkage contracts for a direct C guest.
@@ -340,14 +373,7 @@ pub fn assert_build_c_guest(name: &str, link: CLink) -> Guest {
 
 /// Run a direct C guest with only the explicitly supplied host environment.
 pub fn assert_standalone_success(binary: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
-    assert_success(
-        Command::new(binary)
-            .env_clear()
-            .args(args)
-            .envs(env.iter().copied())
-            .output()
-            .unwrap(),
-    )
+    assert_success(standalone_output(binary, args, env))
 }
 
 /// Diagnostics required when raw execution cannot be contained by SUD.
@@ -391,4 +417,32 @@ pub fn assert_required_sud(supported: bool, requirement: Option<&str>) {
         supported || requirement != Some("1"),
         "PATINA_REQUIRE_SUD=1 but the host lacks syscall-user-dispatch"
     );
+}
+
+/// Run a direct guest with an explicit environment and a bounded process group.
+pub fn standalone_output(binary: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
+    super::output_with_deadline(
+        Command::new(binary)
+            .env_clear()
+            .args(args)
+            .envs(env.iter().copied()),
+        Duration::from_secs(20),
+    )
+    .expect("standalone guest exceeded 20s")
+}
+
+/// Build a SUD-only C boundary probe, reporting missing runtime evidence explicitly.
+// Bypass libtest capture: missing evidence must remain visible even on success.
+#[allow(clippy::explicit_write)]
+pub fn sud_c_guest(name: &str) -> Option<Guest> {
+    if !kernel_supports(KernelFeature::Sud) {
+        use std::io::Write;
+        writeln!(
+            std::io::stderr(),
+            "SKIPPED {name}: host lacks syscall-user-dispatch"
+        )
+        .unwrap();
+        return None;
+    }
+    Some(assert_build_c_guest(name, CLink::PosixShim))
 }

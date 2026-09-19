@@ -2069,7 +2069,7 @@ fn replay_missing_trace_hard_errors_without_running_the_guest() {
 // DEFECT 4 (SEVERE, gate bypass): package-mode `run <dir>` must apply the SAME
 // pre-run default-deny symbol gate the prebuilt-binary path applies. The
 // regression ran a denied-import guest to completion from package/cwd mode. A
-// plain package that imports an uninterposed process-class symbol (`killpg`) is
+// plain package that imports an uninterposed process-class symbol (`system`) is
 // refused on BOTH paths, and the parity assertion checks both stderrs name the
 // SAME symbol (one gate, not two independent checks).
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2080,15 +2080,15 @@ fn run_package_dir_and_prebuilt_gate_deny_the_same_symbol() {
     write_plain_package(
         &pkg,
         "patina-gate-pkg",
-        // Imports `killpg` (process class, denied) behind an opaque branch so it
+        // Imports `system` (process class, denied) behind an opaque branch so it
         // is never actually called but stays in the import table. `kill` itself is
         // now shim-defined (a deterministic-model interposer that drops off the
-        // import table), so `killpg` is the still-uninterposed process-class member
+        // import table), so `system` is the still-uninterposed process-class member
         // the gate must flag.
-        "unsafe extern \"C\" { fn killpg(pgrp: i32, sig: i32) -> i32; }\n\
+        "unsafe extern \"C\" { fn system(command: *const u8) -> i32; }\n\
          fn main() {\n\
          let g = std::hint::black_box(0i32);\n\
-         if g != 0 { unsafe { killpg(g, 0); } }\n\
+         if g != 0 { unsafe { system(std::ptr::null()); } }\n\
          println!(\"GATE_PKG_RAN\");\n\
          }\n",
     );
@@ -2148,7 +2148,7 @@ fn run_package_dir_and_prebuilt_gate_deny_the_same_symbol() {
         denied_line(&dir_run),
         "the two paths named different denied symbols (gate not shared)",
     );
-    assert!(denied_line(&prebuilt).contains("killpg"));
+    assert!(denied_line(&prebuilt).contains("system"));
 }
 
 // DEFECT 4 corollary (cwd/no-positional): `cargo patina run --seed N` from inside
@@ -6110,7 +6110,7 @@ fn native_audit_attributes_unsupported_imports_to_dependency_crates() {
     .unwrap();
     fs::write(
         package.join("leaker_a/src/lib.rs"),
-        "unsafe extern \"C\" { fn killpg(pgrp: i32, sig: i32) -> i32; }\n#[inline(never)] pub fn addr() -> usize { killpg as *const () as usize }\n",
+        "unsafe extern \"C\" { fn system(command: *const u8) -> i32; }\n#[inline(never)] pub fn addr() -> usize { system as *const () as usize }\n",
     )
     .unwrap();
     fs::write(
@@ -6147,7 +6147,7 @@ fn native_audit_attributes_unsupported_imports_to_dependency_crates() {
         "unsupported native imports:",
         "provenance=crate=leaker_a",
         "provenance=crate=leaker_b",
-        "killpg (process)",
+        "system (process)",
         "shm_open (shared-memory-ipc)",
     ];
     // Object identity is what each format records, and the two formats record
@@ -6195,7 +6195,7 @@ fn native_audit_attributes_unsupported_imports_to_dependency_crates() {
     });
     assert_eq!(value["result"], "violation");
     assert_eq!(value["exit_code"], 2);
-    assert_json_finding_has_crate(&value, "killpg", "leaker_a");
+    assert_json_finding_has_crate(&value, "system", "leaker_a");
     assert_json_finding_has_crate(&value, "shm_open", "leaker_b");
 }
 
@@ -7284,7 +7284,7 @@ fn native_budget_abort_under_record_preserves_a_loadable_trace() {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn native_record_abort_leaves_trace_absent_and_infra_classified() {
+fn native_guest_abort_trace_finalization_is_platform_specific() {
     let directory = tempdir().unwrap();
     let workspace = native_workspace();
     let source = directory.path().join("abort_record.rs");
@@ -7328,13 +7328,9 @@ fn native_record_abort_leaves_trace_absent_and_infra_classified() {
     assert_eq!(
         ran.status.code(),
         Some(134),
-        "abort should be surfaced as 128+SIGABRT with a named infra marker\nstdout:\n{}\nstderr:\n{}",
+        "abort should be surfaced as 128+SIGABRT\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&ran.stdout),
         String::from_utf8_lossy(&ran.stderr)
-    );
-    assert!(
-        !trace.exists(),
-        "record abort must leave the requested trace path absent, not zero-byte"
     );
     assert!(
         fs::read_dir(directory.path()).unwrap().all(|entry| !entry
@@ -7351,28 +7347,54 @@ fn native_record_abort_leaves_trace_absent_and_infra_classified() {
             String::from_utf8_lossy(&ran.stderr)
         )
     });
-    assert_eq!(envelope["result"], "infra");
-    assert!(
-        envelope.get("trace").is_none(),
-        "no absent trace fact should be advertised: {envelope:#}"
-    );
-    let stderr = envelope["stderr"].as_str().unwrap();
-    assert!(
-        stderr.contains("PATINA_INFRA native_run"),
-        "missing infra marker: {stderr}"
-    );
-    assert!(
-        stderr.contains("signal=6"),
-        "missing signal detail: {stderr}"
-    );
-    assert!(
-        stderr.contains("trace=incomplete"),
-        "missing trace detail: {stderr}"
-    );
-    assert!(
-        stderr.contains("empty trace"),
-        "missing empty-trace refusal: {stderr}"
-    );
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        const SIGABRT: i32 = 6;
+        let direct = Command::new(&bin)
+            .env("PATINA_MODE", "seeded")
+            .env("PATINA_SEED", "1")
+            .output()
+            .unwrap();
+        assert_eq!(direct.status.signal(), Some(SIGABRT));
+        assert_eq!(envelope["guest_exit"]["signal"], SIGABRT);
+        assert_eq!(envelope["guest_exit"]["core"], direct.status.core_dumped());
+        assert!(envelope.get("refusal").is_none(), "{envelope:#}");
+        patina_dst_trace::TraceBundle::load(&trace)
+            .expect("explicit guest abort finalizes; internal fatals do not");
+        assert!(
+            !envelope["stderr"]
+                .as_str()
+                .unwrap()
+                .contains("trace=incomplete")
+        );
+    }
+    #[cfg(target_os = "macos")]
+    {
+        assert!(!trace.exists(), "macOS abort is not a modeled guest event");
+        assert_eq!(envelope["result"], "infra");
+        assert!(
+            envelope.get("trace").is_none(),
+            "no absent trace fact should be advertised: {envelope:#}"
+        );
+        let stderr = envelope["stderr"].as_str().unwrap();
+        assert!(
+            stderr.contains("PATINA_INFRA native_run"),
+            "missing infra marker: {stderr}"
+        );
+        assert!(
+            stderr.contains("signal=6"),
+            "missing signal detail: {stderr}"
+        );
+        assert!(
+            stderr.contains("trace=incomplete"),
+            "missing trace detail: {stderr}"
+        );
+        assert!(
+            stderr.contains("empty trace"),
+            "missing empty-trace refusal: {stderr}"
+        );
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -11743,18 +11765,18 @@ fn main() {
     .unwrap();
     fs::write(
         package.join("src/bin/leaky.rs"),
-        r#"// Imports an uninterposed process-class libc symbol (`killpg`) that the native
-// audit denies as "process". The spawn family (fork/posix_spawn*/waitpid/...) is
+        r#"// Imports an uninterposed process-class libc symbol (`system`) that the native
+// audit denies as "process". The spawn family (fork/posix_spawn*/...) is
 // shim-defined deny-traps and `kill` a deterministic-model interposer, so a
 // `Command::spawn` — or a `kill` — would
 // leave no process *import* to flag; this reaches for a still-uninterposed member
 // of the class instead. Taking its address forces the undefined import. Building
 // succeeds; the audit must reject the product with the "process" category.
 unsafe extern "C" {
-    fn killpg(pgrp: i32, sig: i32) -> i32;
+    fn system(command: *const u8) -> i32;
 }
 fn main() {
-    let reached = killpg as *const ();
+    let reached = system as *const ();
     std::process::exit((reached as usize & 1) as i32);
 }
 "#,
@@ -14026,7 +14048,7 @@ fn native_run_json_envelope_has_stable_shape() {
     assert_eq!(value["result"], "ok");
     assert_eq!(value["exit_code"], 0);
     assert_eq!(value["seed"], 7);
-    assert_eq!(value["trace"]["format_version"], 8);
+    assert_eq!(value["trace"]["format_version"], 9);
     assert!(value["trace"]["event_count"].as_u64().unwrap() > 0);
     // The guest's PATINA_RESULT line is captured and surfaced as a marker.
     assert!(
@@ -16897,7 +16919,7 @@ fn native_custom_op_records_replays_and_never_reruns_perform() {
     };
     let mismatched = directory.path().join("custom-op-mismatch.patina");
     edited.write_atomic(&mismatched).unwrap();
-    let refused = invoke_unchecked(
+    let refused = invoke_with_deadline(
         env!("CARGO_BIN_EXE_cargo-patina"),
         workspace,
         &[
@@ -16905,7 +16927,9 @@ fn native_custom_op_records_replays_and_never_reruns_perform() {
             bin.to_str().unwrap(),
             mismatched.to_str().unwrap(),
         ],
-    );
+        Duration::from_secs(20),
+    )
+    .expect("custom-op refusal must terminate rather than deadlock inside the shim");
     assert!(
         !refused.status.success(),
         "a custom-op key mismatch must fail the replay"
@@ -16934,16 +16958,16 @@ fn native_custom_op_wrapping_an_unmodeled_effect_still_fails_closed() {
     write_sdk_fixture(
         &pkg,
         r#"
-unsafe extern "C" { fn killpg(pgrp: i32, sig: i32) -> i32; }
+unsafe extern "C" { fn system(command: *const u8) -> i32; }
 
 fn main() {
     // The wrapped effect is an uninterposed process-class symbol: something
     // Patina does not model, which is the whole reason a guest would reach for a
     // custom op. Wrapping it changes nothing about the audit.
-    let bytes = patina_dst::custom_op_bytes("proc.signal", b"self", || {
+    let bytes = patina_dst::custom_op_bytes("proc.shell", b"self", || {
         let group = std::hint::black_box(0i32);
         if group != 0 {
-            unsafe { killpg(group, 0) };
+            unsafe { system(std::ptr::null()) };
         }
         vec![1]
     });
@@ -16974,7 +16998,7 @@ fn main() {
     );
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
-        stderr.contains("killpg"),
+        stderr.contains("system"),
         "the refusal must still name the wrapped symbol:\n{stderr}"
     );
     assert!(
@@ -16995,7 +17019,7 @@ fn main() {
         String::from_utf8_lossy(&audited.stderr)
     );
     assert!(
-        audit_text.contains("killpg"),
+        audit_text.contains("system"),
         "the audit must still name the wrapped symbol:\n{audit_text}"
     );
 }
@@ -17753,7 +17777,7 @@ fn a_liveness_violation_reaches_the_envelope_despite_the_abort_that_follows_it()
     // exactly the failures it exists to report.
     let directory = tempdir().unwrap();
     let guest = build_facts_guest(directory.path(), "facts-wedge-guest", FACTS_WEDGE_SOURCE);
-    let wedged = invoke_unchecked(
+    let wedged = invoke_with_deadline(
         env!("CARGO_BIN_EXE_cargo-patina"),
         native_workspace(),
         &[
@@ -17765,7 +17789,9 @@ fn a_liveness_violation_reaches_the_envelope_despite_the_abort_that_follows_it()
             "--format",
             "json",
         ],
-    );
+        Duration::from_secs(20),
+    )
+    .expect("the liveness refusal must terminate, not deadlock in its diagnostic");
     let envelope: serde_json::Value = serde_json::from_slice(&wedged.stdout).unwrap();
     let findings = envelope["runtime_findings"]
         .as_array()
@@ -17913,4 +17939,97 @@ fn wasi_campaign_generation_with_an_always_violation_classifies_violation() {
         "a guest-side trap is not a harness failure: {}",
         envelope["classes"]
     );
+}
+
+// Class-level pairing: frozen signals-family M4 termination and trace facts.
+// In addition to the supervisor envelope, read the linked guest's actual wait
+// status so exit(128 + signal) can never masquerade as signal death.
+#[cfg(target_os = "linux")]
+#[test]
+fn default_terminate_finalizes_then_dies_by_the_signal() {
+    use patina_dst_abi::{Operation, SignalTarget};
+    use patina_dst_trace::TraceBundle;
+    use std::os::unix::process::ExitStatusExt;
+    const SIGTERM: i32 = 15;
+    let directory = tempdir().unwrap();
+    let guest = build_facts_guest(
+        directory.path(),
+        "default-termination",
+        r#"
+unsafe extern "C" { fn getpid() -> i32; fn kill(pid: i32, sig: i32) -> i32; }
+fn main() {
+    const SIGTERM: i32 = 15;
+    println!("before-default-termination");
+    unsafe { kill(getpid(), SIGTERM); }
+    panic!("SIG_DFL returned");
+}
+"#,
+    );
+    let trace = directory.path().join("terminate.patina");
+    for args in [
+        vec![
+            "run",
+            guest.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--record",
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "default-termination",
+            "--format",
+            "json",
+        ],
+        vec![
+            "replay",
+            guest.to_str().unwrap(),
+            trace.to_str().unwrap(),
+            "--fingerprint",
+            "default-termination",
+            "--format",
+            "json",
+        ],
+    ] {
+        let output = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            native_workspace(),
+            &args,
+        );
+        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&output.stderr)));
+        assert_eq!(envelope["guest_exit"]["signal"], SIGTERM, "{envelope:#}");
+        assert_eq!(envelope["guest_exit"]["core"], false);
+        assert!(
+            envelope["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("before-default-termination")
+        );
+        assert!(envelope.get("refusal").is_none(), "{envelope:#}");
+        let bundle =
+            TraceBundle::load(&trace).expect("signal death leaves a complete finalized bundle");
+        assert_eq!(bundle.timelines.len(), 1);
+        let generations: Vec<_> = bundle.timelines[0]
+            .decisions
+            .iter()
+            .filter_map(|event| match event.operation {
+                Operation::SignalGenerated { sig, target, .. } => Some((sig, target)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(generations, [(SIGTERM as u8, SignalTarget::Process)]);
+    }
+    let output = Command::new(&guest)
+        .env("PATINA_MODE", "seeded")
+        .env("PATINA_SEED", "1")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.signal(),
+        Some(SIGTERM),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.status.code(), None);
+    assert!(!output.status.core_dumped());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("before-default-termination"));
 }

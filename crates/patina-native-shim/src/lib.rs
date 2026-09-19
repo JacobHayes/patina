@@ -89,6 +89,7 @@ mod tsc;
 // `patina_read`/`patina_close`/`patina_dup*` entries); the data structure and
 // its allocation/refcount rules are the module's own. See `fdtable.rs`.
 mod fdtable;
+mod panic_boundary;
 mod paths;
 
 use std::cell::{Cell, RefCell, UnsafeCell};
@@ -419,6 +420,11 @@ fn release_description(release: Release) -> Result<(), c_int> {
         FdKind::Socket => thread::socket_close(release.handle),
         FdKind::Pipe => thread::pipe_close(release.handle),
         #[cfg(target_os = "linux")]
+        FdKind::SignalFd => {
+            thread::signals::fd::close(release.handle);
+            Ok(())
+        }
+        #[cfg(target_os = "linux")]
         FdKind::EventFd => {
             thread::eventfd_close(release.handle);
             Ok(())
@@ -627,7 +633,6 @@ fn spin_depth_dec() {
 /// Whether this thread currently holds any shim spinlock — i.e. a lock-interposer
 /// call now would be allocator-internal reentrancy that must run natively rather
 /// than re-acquire the held spinlock. See [`SPIN_DEPTH`].
-#[cfg(target_os = "macos")]
 #[inline]
 fn in_shim_critical() -> bool {
     SPIN_DEPTH.with(Cell::get) > 0
@@ -749,6 +754,8 @@ mod hostapi {
         /// the worker's host thread so its teardown makes the joiner's
         /// deterministic last reference (see `patina_thread_join`).
         pub host_pthread_join: PthreadJoin,
+        pub host_abort: unsafe extern "C" fn() -> !,
+        pub host_pthread_detach: unsafe extern "C" fn(*mut c_void) -> c_int,
         pub pthread_mach_thread_np: PthreadMachThread,
         pub thread_resume: ThreadResume,
         /// The non-cancel-point host `read`/`write` for the trace control plane
@@ -784,7 +791,14 @@ mod hostapi {
             eprintln!(
                 "patina native shim fatal: could not resolve host symbol {name:?} via dlsym(RTLD_NEXT)"
             );
-            std::process::abort();
+            unsafe {
+                let abort = dlsym(RTLD_NEXT, c"abort".as_ptr());
+                if !abort.is_null() {
+                    std::mem::transmute::<*mut c_void, unsafe extern "C" fn() -> !>(abort)();
+                }
+                let exit = dlsym(RTLD_NEXT, c"_exit".as_ptr());
+                std::mem::transmute::<*mut c_void, unsafe extern "C" fn(i32) -> !>(exit)(127);
+            }
         }
         ptr
     }
@@ -817,6 +831,13 @@ mod hostapi {
                 >(resolve(
                     c"pthread_create_suspended_np",
                 )),
+                host_abort: std::mem::transmute::<*mut c_void, unsafe extern "C" fn() -> !>(
+                    resolve(c"abort"),
+                ),
+                host_pthread_detach: std::mem::transmute::<
+                    *mut c_void,
+                    unsafe extern "C" fn(*mut c_void) -> c_int,
+                >(resolve(c"pthread_detach")),
                 host_pthread_join: std::mem::transmute::<*mut c_void, PthreadJoin>(resolve(
                     c"pthread_join",
                 )),
@@ -934,6 +955,8 @@ mod hostapi {
         /// post-`main` teardown; resolving it here keeps the interposer from
         /// naming (and recursing into) the public `exit` it defines.
         pub host_exit: HostExit,
+        pub host_abort: unsafe extern "C" fn() -> !,
+        pub host_pthread_self: unsafe extern "C" fn() -> usize,
         /// The execution-baton POSIX semaphore vehicle.
         pub sem_init: SemInit,
         pub sem_wait: SemOp,
@@ -949,6 +972,7 @@ mod hostapi {
         /// The real glibc `pthread_join` for reaping completed worker host
         /// threads deterministically at the managed-join point.
         pub host_pthread_join: HostPthreadJoin,
+        pub host_pthread_detach: unsafe extern "C" fn(*mut c_void) -> c_int,
         /// The real glibc `syscall(2)` wrapper, the SUD dispatcher's pass-through
         /// vehicle for process-local memory-management rows.
         pub host_syscall: HostSyscall,
@@ -970,7 +994,16 @@ mod hostapi {
             eprintln!(
                 "patina native shim fatal: could not resolve host symbol {name:?} via dlsym(RTLD_NEXT)"
             );
-            std::process::abort();
+            // Resolve directly: the alias table is still being initialized.
+            unsafe {
+                let abort = __real_dlsym(RTLD_NEXT, c"abort".as_ptr());
+                if !abort.is_null() {
+                    std::mem::transmute::<*mut c_void, unsafe extern "C" fn() -> !>(abort)();
+                }
+                // A libc without abort is unusable; do not enter the public interposer.
+                let exit = __real_dlsym(RTLD_NEXT, c"_exit".as_ptr());
+                std::mem::transmute::<*mut c_void, unsafe extern "C" fn(i32) -> !>(exit)(127);
+            }
         }
         ptr
     }
@@ -983,12 +1016,23 @@ mod hostapi {
                 host_read: std::mem::transmute::<*mut c_void, HostRead>(resolve(c"read")),
                 host_write: std::mem::transmute::<*mut c_void, HostWrite>(resolve(c"write")),
                 host_exit: std::mem::transmute::<*mut c_void, HostExit>(resolve(c"exit")),
+                host_abort: std::mem::transmute::<*mut c_void, unsafe extern "C" fn() -> !>(
+                    resolve(c"abort"),
+                ),
+                host_pthread_self: std::mem::transmute::<
+                    *mut c_void,
+                    unsafe extern "C" fn() -> usize,
+                >(resolve(c"pthread_self")),
                 sem_init: std::mem::transmute::<*mut c_void, SemInit>(resolve(c"sem_init")),
                 sem_wait: std::mem::transmute::<*mut c_void, SemOp>(resolve(c"sem_wait")),
                 sem_post: std::mem::transmute::<*mut c_void, SemOp>(resolve(c"sem_post")),
                 host_pthread_create: std::mem::transmute::<*mut c_void, HostPthreadCreate>(
                     resolve(c"pthread_create"),
                 ),
+                host_pthread_detach: std::mem::transmute::<
+                    *mut c_void,
+                    unsafe extern "C" fn(*mut c_void) -> c_int,
+                >(resolve(c"pthread_detach")),
                 host_pthread_join: std::mem::transmute::<*mut c_void, HostPthreadJoin>(resolve(
                     c"pthread_join",
                 )),
@@ -1150,6 +1194,7 @@ mod hostcoll {
             }
         }
 
+        #[cfg(target_os = "macos")]
         pub fn as_mut_slice(&mut self) -> &mut [T] {
             if self.ptr.is_null() {
                 &mut []
@@ -1306,6 +1351,12 @@ mod hostcoll {
                 .map(|index| self.entries.swap_remove(index).1)
         }
 
+        #[cfg(all(test, target_os = "linux"))]
+        pub fn values(&self) -> impl Iterator<Item = &V> {
+            self.entries.as_slice().iter().map(|(_, value)| value)
+        }
+
+        #[cfg(target_os = "macos")]
         pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
             self.entries
                 .as_mut_slice()
@@ -1534,6 +1585,7 @@ fn register_coverage_range(ranges: &mut Vec<CoverageRange>, start: usize, len: u
 /// are the counters themselves, so registration records only the live range.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_coverage_register(start: *mut u32, stop: *mut u32) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let len = coverage_len(start.cast_const(), stop.cast_const());
     let mut state = coverage_state().lock();
     register_coverage_range(&mut state.guard_ranges, start as usize, len);
@@ -1545,6 +1597,7 @@ pub extern "C" fn patina_coverage_register(start: *mut u32, stop: *mut u32) {
 /// `patina.covmap/v1` format (12 bytes per edge: u32 count + i64 delta).
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_coverage_register_pcs(start: *const usize, stop: *const usize) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let words = coverage_len(start, stop);
     let entries = words / 2;
     let mut state = coverage_state().lock();
@@ -1941,14 +1994,14 @@ fn fail(errno: c_int) -> c_int {
 /// containment-invariant violations of both (§4.4, §7.4).
 #[cfg(any(target_os = "linux", test))]
 pub(crate) fn trap_fatal(message: &str) -> ! {
-    // `abort()` skips the atexit-driven shutdown flush, so the guest's captured
+    // `host_abort()` skips the atexit-driven shutdown flush, so the guest's captured
     // output would be lost with the diagnostic: flush it first, exactly as the
     // C layer's process-class traps do, so a probe that dies here still leaves
     // its event stream behind for the conformance differ.
     let _ = flush_captured_stdio();
     let text = format!("patina: {message}\n");
     let _ = host_write_all(2, text.as_bytes());
-    std::process::abort();
+    crate::host_abort();
 }
 
 /// C-callable loud fail-closed for the SUD C layer (arming failures, region
@@ -1961,6 +2014,7 @@ pub(crate) fn trap_fatal(message: &str) -> ! {
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_sud_report_fatal(message: *const c_char) -> ! {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the caller passes a valid NUL-terminated C string.
     let text = unsafe { CStr::from_ptr(message) }
         .to_string_lossy()
@@ -1981,6 +2035,7 @@ pub unsafe extern "C" fn patina_sud_report_fatal_addr(
     nr: std::ffi::c_long,
     addr: usize,
 ) -> ! {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the caller passes a valid NUL-terminated C string.
     let text = unsafe { CStr::from_ptr(message) }
         .to_string_lossy()
@@ -2061,12 +2116,12 @@ fn runtime_errno(error: &RuntimeError) -> c_int {
 
 /// Flush the captured guest output — which already carries the marker line
 /// explaining why (`PATINA_LIVENESS`, an exhausted step budget) — and abort the
-/// run. `abort()` skips the atexit-driven shutdown flush, so the explicit flush
+/// run. `host_abort()` skips the atexit-driven shutdown flush, so the explicit flush
 /// here is what preserves that marker; mirrors [`abort_with_init_error`] /
 /// [`abort_with_buggify_marker`].
 fn abort_after_flushing_output() -> ! {
     let _ = flush_captured_stdio();
-    std::process::abort();
+    crate::host_abort();
 }
 
 fn effect_errno(error: &EffectError) -> c_int {
@@ -2190,7 +2245,7 @@ fn ensure_runtime() -> Result<(), c_int> {
     let message: &[u8] = b"patina: this binary was built with `cargo patina build` and must \
 run under `cargo patina run` (or with the PATINA_MODE protocol set); no deterministic runtime is installed\n";
     let _ = host_write_all(2, message);
-    std::process::abort();
+    crate::host_abort();
 }
 
 /// Emit the runtime's own init-failure diagnostic and abort the process. The
@@ -2211,7 +2266,7 @@ fn abort_with_init_error(message: &str) -> ! {
     );
     let _ = host_write_all(2, message.as_bytes());
     let _ = host_write_all(2, b"\n");
-    std::process::abort();
+    crate::host_abort();
 }
 
 fn last_boundary_symbol_bytes() -> Option<&'static [u8]> {
@@ -2252,7 +2307,7 @@ fn abort_harness_before_install() -> ! {
 effect reached the deterministic boundary before patina_dst_harness::run/run_with installed the \
 runtime. Do all configuration and application effects inside the harness closure.\n";
     let _ = host_write_all(2, message);
-    std::process::abort();
+    crate::host_abort();
 }
 
 fn abort_preinit_interposed_call() -> ! {
@@ -2268,7 +2323,7 @@ fn abort_preinit_interposed_call() -> ! {
         2,
         b". This most likely came from a static constructor/ctor that ran before Patina's startup constructor. Patina fails closed here because the control plane is not installed yet; cfg-gate that constructor out of DST builds (for example with `#[cfg(not(patina))]` / `#[cfg(not(dst))]`) and move any setup that reads environment, files, clocks, threads, or other interposed APIs into `main` or the Patina harness closure.\n",
     );
-    std::process::abort();
+    crate::host_abort();
 }
 
 /// Run a closure against the installed [`Context`] without first taking a
@@ -2352,7 +2407,7 @@ fn terminate_for_injected_fs_crash(error: RuntimeError) -> ! {
         let _ = flush_captured_stdio();
         let line = format!("PATINA_FS_CRASH_HANDOFF_ERROR {message}\n");
         let _ = host_write_all(2, line.as_bytes());
-        std::process::abort();
+        crate::host_abort();
     }
     let _ = flush_captured_stdio();
     // SAFETY: `_exit` is the host process termination primitive. It skips guest
@@ -2384,7 +2439,7 @@ fn with_context_msg<T>(
             b"patina native shim fatal: a managed scheduling operation reached the trace after \
 `main` returned; the post-main teardown window must take no recorded scheduling points\n",
         );
-        std::process::abort();
+        crate::host_abort();
     }
     ensure_runtime().map_err(|_| "Patina context is not installed".to_string())?;
     let mut guard = slot().lock();
@@ -2881,12 +2936,23 @@ fn clock(value: u32) -> Result<ClockKind, c_int> {
 /// early-init abort can name the API that a constructor reached.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_note_boundary_symbol(symbol: *const c_char) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     LAST_BOUNDARY_SYMBOL.store(symbol.cast_mut(), Ordering::Relaxed);
+}
+
+/// Install the POSIX interposer's internal-panic policy without installing a
+/// runtime. Bare prefixed-C embedders have no guest abort interposer or required
+/// host aliases and deliberately do not call this startup control-plane entry.
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_init_panic_policy() {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    crate::panic_boundary::install();
 }
 
 /// Mark that the packaged C startup constructor finished capture/init/scrub.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_note_startup_constructor_finished() {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     STARTUP_CONSTRUCTOR_FINISHED.store(true, Ordering::Release);
 }
 
@@ -2899,6 +2965,7 @@ pub extern "C" fn patina_note_startup_constructor_finished() {
 /// call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_control_set_entry(entry: *const c_char) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if entry.is_null() {
         return;
     }
@@ -2917,11 +2984,13 @@ pub unsafe extern "C" fn patina_control_set_entry(entry: *const c_char) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_init_seed(seed: u64) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     install(Context::from_config(RuntimeConfig::seeded(seed)))
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_init_crash(seed: u64) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // Explicit manual-crash filesystem for C-ABI embedders that drive
     // `context.fs_crash()` themselves. Seed the crash policy from the argument
     // (a default-constructed `CrashFs` would pin seed 0 and silently ignore it).
@@ -2967,6 +3036,7 @@ fn init_from_env() -> c_int {
 /// than a double-init error.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_init_from_env() -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if slot().lock().is_some() {
         set_errno(0);
         return 0;
@@ -2993,6 +3063,7 @@ pub extern "C" fn patina_init_from_env() -> c_int {
 /// the configuration failed to build/validate (`HARNESS_ERR_CONFIG`).
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_harness_install() -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // Ordering matters: report the most specific fail-closed reason first. A
     // boundary already seen is the sharpest diagnostic (the run produced events
     // before configuration), so it precedes the generic already-installed check.
@@ -3055,6 +3126,7 @@ run through Patina, e.g. `cargo patina run <manifest> --target native --harness`
 /// no-op.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_shutdown() -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     thread::deactivate();
     let context = {
         let mut guard = slot().lock();
@@ -3081,12 +3153,12 @@ pub extern "C" fn patina_shutdown() -> c_int {
             b"PATINA_BUGGIFY_SETUP_NEVER_CALLED --buggify-after-setup was declared but the guest \
 never called patina_dst::lifecycle::setup_complete()\n",
         );
-        std::process::abort();
+        crate::host_abort();
     }
     if let Err(error) = coverage {
         let line = format!("patina: coverage finalization refused: {error}\n");
         let _ = host_write_all(2, line.as_bytes());
-        std::process::abort();
+        crate::host_abort();
     }
     // Patina fails closed by default: a shutdown failure is reported and the
     // atexit hook aborts on it, so a recorder that misbehaved can never be
@@ -3175,7 +3247,7 @@ const GUEST_EXIT_UNKNOWN: i32 = i32::MIN;
 
 /// The guest's OWN exit status, recorded the instant its `main` returned or it
 /// called `exit(3)` — before patina's atexit finalization runs and, on a
-/// finalization failure, before `abort()` replaces that status with SIGABRT.
+/// finalization failure, before `host_abort()` replaces that status with SIGABRT.
 ///
 /// Without this the guest's verdict is unrecoverable in exactly the case that
 /// matters most: a long run that both failed for a real reason AND outgrew or
@@ -3192,6 +3264,7 @@ static GUEST_EXIT_STATUS: std::sync::atomic::AtomicI32 =
 /// code must not be mistaken for a second, independent one.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_note_guest_exit_status(status: c_int) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let _ = GUEST_EXIT_STATUS.compare_exchange(
         GUEST_EXIT_UNKNOWN,
         status,
@@ -3209,7 +3282,7 @@ fn guest_exit_status() -> Option<i32> {
 
 /// Report a finalization failure, naming the status the GUEST itself reached.
 ///
-/// The atexit hook `abort()`s on this, so the process dies on SIGABRT and the
+/// The atexit hook `host_abort()`s on this, so the process dies on SIGABRT and the
 /// guest's own status is gone from everything downstream can see. Carrying it on
 /// the refusal line is what lets a supervisor tell "patina's recorder broke on a
 /// run that was otherwise clean" (infrastructure) from "patina's recorder broke
@@ -3228,10 +3301,11 @@ fn report_shutdown_error(message: &str) {
 /// Flush captured stdout/stderr to the real host descriptors WITHOUT finalizing
 /// the run (unlike [`patina_shutdown`], which also finishes the trace/record).
 /// The process-class deny-traps in `c/patina_posix.c` call this immediately
-/// before `abort()`: `abort()` skips the atexit-driven shutdown flush, so
+/// before `host_abort()`: `host_abort()` skips the atexit-driven shutdown flush, so
 /// without it the guest's buffered output and the deny diagnostic would be lost.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_flush_captured_stdio() -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match flush_captured_stdio() {
         Ok(()) => 0,
         Err(_) => -1,
@@ -3262,6 +3336,7 @@ pub unsafe extern "C" fn patina_stdio_write(
     source: *const c_void,
     length: usize,
 ) -> isize {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if fd != 1 && fd != 2 {
         return fail(EBADF) as isize;
     }
@@ -3277,8 +3352,13 @@ pub unsafe extern "C" fn patina_stdio_write(
     // fire for a binary run outside the supervisor, whose diagnostic is the
     // startup path's to give.
     abort_if_init_failed();
-    if let Err(errno) = thread::sched_point() {
-        return fail(errno) as isize;
+    // Runtime diagnostics can print with Context/ThreadRuntime locked. They use
+    // the same captured sink, but must not schedule or re-enter either lock.
+    // Guest writes still take their ordinary scheduling point.
+    if !in_shim_critical() {
+        if let Err(errno) = thread::sched_point() {
+            return fail(errno) as isize;
+        }
     }
     let bytes = if length == 0 {
         &[]
@@ -3302,6 +3382,7 @@ pub unsafe extern "C" fn patina_stdio_write(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_errno() -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     LAST_ERRNO.with(Cell::get)
 }
 
@@ -3317,6 +3398,7 @@ pub extern "C" fn patina_errno() -> c_int {
 /// `name` must be a valid NUL-terminated C string when non-null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_getenv(name: *const c_char) -> *mut c_char {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if name.is_null() {
         return std::ptr::null_mut();
     }
@@ -3352,7 +3434,7 @@ pub unsafe extern "C" fn patina_getenv(name: *const c_char) -> *mut c_char {
             2,
             b"patina: deterministic guest environment contained a NUL byte; failing closed\n",
         );
-        std::process::abort();
+        crate::host_abort();
     };
     GUEST_ENV_CSTRING.with(|slot| {
         let mut slot = slot.borrow_mut();
@@ -3399,6 +3481,7 @@ type EnvironInstaller = unsafe extern "C" fn(*mut *mut c_char);
 /// `installer` must be a valid `void (*)(char **)` for the life of the process.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_register_environ_installer(installer: Option<EnvironInstaller>) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // A function pointer and a data pointer are the same width on every platform
     // Patina targets; the value is only ever transmuted back to the same type.
     let pointer = match installer {
@@ -3436,7 +3519,7 @@ fn publish_environ(env: &BTreeMap<String, String>) {
                 2,
                 b"patina: deterministic guest environment contained a NUL byte; failing closed\n",
             );
-            std::process::abort();
+            crate::host_abort();
         };
         entries.push(entry.into_raw());
     }
@@ -3453,6 +3536,7 @@ fn publish_environ(env: &BTreeMap<String, String>) {
 /// startup `--env` set, or nothing) from the guest's first instruction.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_publish_environ() {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let guard = slot().lock();
     match guard.as_ref() {
         Some(context) => publish_environ(context.guest_env()),
@@ -3522,6 +3606,7 @@ pub unsafe extern "C" fn patina_setenv(
     value: *const c_char,
     overwrite: c_int,
 ) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: forwarded from the `setenv` interposer's C ABI contract.
     let (Some(name), Some(value)) = (unsafe { env_str(name) }, unsafe { env_str(value) }) else {
         return fail(EINVAL);
@@ -3541,6 +3626,7 @@ pub unsafe extern "C" fn patina_setenv(
 /// `name` must be a valid NUL-terminated C string when non-null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_unsetenv(name: *const c_char) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: forwarded from the `unsetenv` interposer's C ABI contract.
     let Some(name) = (unsafe { env_str(name) }) else {
         return fail(EINVAL);
@@ -3558,6 +3644,7 @@ pub unsafe extern "C" fn patina_unsetenv(name: *const c_char) -> c_int {
 /// `getenv` interposer or a direct `environ` walk — keeps a stale entry.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_clearenv() -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     with_guest_env(|context| {
         context.guest_env_clear();
         Ok(())
@@ -3570,6 +3657,7 @@ pub extern "C" fn patina_clearenv() -> c_int {
 /// `destination` must be writable for `length` bytes when `length` is nonzero.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_entropy(destination: *mut c_void, length: usize) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if length != 0 && destination.is_null() {
         return fail(EINVAL);
     }
@@ -3596,6 +3684,7 @@ pub unsafe extern "C" fn patina_entropy(destination: *mut c_void, length: usize)
 /// `nanos` must point to writable `uint64_t` storage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_clock_now(clock_id: u32, nanos: *mut u64) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if nanos.is_null() {
         return fail(EINVAL);
     }
@@ -3629,6 +3718,22 @@ pub unsafe extern "C" fn patina_clock_now(clock_id: u32, nanos: *mut u64) -> c_i
 
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_sleep_until(clock_id: u32, deadline_nanos: u64) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: null means no remaining-time output.
+    unsafe { patina_sleep_until_remaining(clock_id, deadline_nanos, std::ptr::null_mut()) }
+}
+
+/// Sleep with an optional two-i64 kernel timespec remaining-time output.
+/// Absolute sleeps pass null, so their caller's rem buffer is untouched.
+/// # Safety
+/// Non-null `remaining` must be writable for two i64 values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_sleep_until_remaining(
+    clock_id: u32,
+    deadline_nanos: u64,
+    remaining: *mut i64,
+) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let clock = match clock(clock_id) {
         Ok(clock) => clock,
         Err(errno) => return fail(errno),
@@ -3651,7 +3756,8 @@ pub extern "C" fn patina_sleep_until(clock_id: u32, deadline_nanos: u64) -> c_in
     // other runnable tasks execute while it sleeps and the clock advances only
     // through the deadlock rescue. A single-threaded program (thread subsystem
     // never activated) keeps the direct clock jump, which is identical.
-    if let Some(result) = thread::managed_sleep(clock, deadline_nanos) {
+    // SAFETY: the caller supplies the optional remaining-time buffer.
+    if let Some(result) = unsafe { thread::managed_sleep(clock, deadline_nanos, remaining) } {
         return if result == 0 {
             set_errno(0);
             0
@@ -3691,6 +3797,7 @@ pub extern "C" fn patina_sleep_until(clock_id: u32, deadline_nanos: u64) -> c_in
 /// `nanos` must be non-null and writable for one `u64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_cpu_time_nanos(nanos: *mut u64) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if nanos.is_null() {
         return fail(EINVAL);
     }
@@ -3765,6 +3872,7 @@ pub unsafe extern "C" fn patina_openat(
     flags: u32,
     mode: u32,
 ) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if flags & !O_ALL != 0 {
         return fail(EINVAL);
     }
@@ -3912,6 +4020,7 @@ pub unsafe extern "C" fn patina_openat(
 /// number that names nothing.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_fd_kind(raw_fd: c_int) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match fd_table().lock().kind(raw_fd) {
         Some(kind) => {
             set_errno(0);
@@ -3925,12 +4034,14 @@ pub extern "C" fn patina_fd_kind(raw_fd: c_int) -> c_int {
 /// `sysconf(_SC_OPEN_MAX)` and the `EMFILE` bound must agree on.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_fd_limit() -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     c_int::try_from(fdtable::RLIMIT_NOFILE).expect("the descriptor limit fits an int")
 }
 
 /// `F_GETFD`: 1 when the number carries `FD_CLOEXEC`, 0 when not, -1/`EBADF`.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_fd_getfd(raw_fd: c_int) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match fd_table().lock().cloexec(raw_fd) {
         Ok(cloexec) => {
             set_errno(0);
@@ -3943,6 +4054,7 @@ pub extern "C" fn patina_fd_getfd(raw_fd: c_int) -> c_int {
 /// `F_SETFD`: set (nonzero) or clear the number's `FD_CLOEXEC` bit.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_fd_setfd(raw_fd: c_int, cloexec: c_int) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match fd_table().lock().set_cloexec(raw_fd, cloexec != 0) {
         Ok(()) => {
             set_errno(0);
@@ -3956,6 +4068,7 @@ pub extern "C" fn patina_fd_setfd(raw_fd: c_int, cloexec: c_int) -> c_int {
 /// (access mode, `O_APPEND`, `O_NONBLOCK`, `O_PATH`), or -1/`EBADF`.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_fd_getfl(raw_fd: c_int) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match resolve_fd(raw_fd) {
         Ok(resolved) => {
             set_errno(0);
@@ -3970,6 +4083,7 @@ pub extern "C" fn patina_fd_getfl(raw_fd: c_int) -> c_int {
 /// the access mode and creation flags in an `F_SETFL` argument.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_fd_setfl(raw_fd: c_int, flags: u32) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match fd_table().lock().set_status(raw_fd, O_SETFL_MASK, flags) {
         Ok(()) => {
             set_errno(0);
@@ -3983,6 +4097,7 @@ pub extern "C" fn patina_fd_setfl(raw_fd: c_int, flags: u32) -> c_int {
 /// alone, leaving the other status flags as they are.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_fd_set_nonblocking(raw_fd: c_int, nonblocking: c_int) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let bits = if nonblocking != 0 { O_NONBLOCK } else { 0 };
     match fd_table().lock().set_status(raw_fd, O_NONBLOCK, bits) {
         Ok(()) => {
@@ -3997,6 +4112,7 @@ pub extern "C" fn patina_fd_set_nonblocking(raw_fd: c_int, nonblocking: c_int) -
 /// `FD_CLOEXEC`.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_dup(raw_fd: c_int) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     patina_dupfd(raw_fd, 0, 0)
 }
 
@@ -4005,6 +4121,7 @@ pub extern "C" fn patina_dup(raw_fd: c_int) -> c_int {
 /// at or above it is free.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_dupfd(raw_fd: c_int, minimum: c_int, cloexec: c_int) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match fd_table().lock().dup(raw_fd, minimum, cloexec != 0) {
         Ok(number) => {
             set_errno(0);
@@ -4018,6 +4135,7 @@ pub extern "C" fn patina_dupfd(raw_fd: c_int, minimum: c_int, cloexec: c_int) ->
 /// and return it unchanged (where `dup3` is `EINVAL`).
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_dup2(oldfd: c_int, newfd: c_int) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if oldfd == newfd {
         return match resolve_fd(oldfd) {
             Ok(_) => {
@@ -4036,6 +4154,7 @@ pub extern "C" fn patina_dup2(oldfd: c_int, newfd: c_int) -> c_int {
 /// does not report it.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_dup3(oldfd: c_int, newfd: c_int, cloexec: c_int) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let released = match fd_table().lock().dup3(oldfd, newfd, cloexec != 0) {
         Ok(released) => released,
         Err(errno) => return fail(errno),
@@ -4066,6 +4185,7 @@ fn retire_number(raw_fd: c_int) {
 /// `EBADF` for a number that names nothing.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_close(raw_fd: c_int) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let released = match fd_table().lock().close(raw_fd) {
         Ok(released) => released,
         Err(errno) => return fail(errno),
@@ -4089,6 +4209,7 @@ pub extern "C" fn patina_close(raw_fd: c_int) -> c_int {
 /// unknown flag is `EINVAL`; the range is clamped to the table.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_close_range(first: u32, last: u32, flags: u32) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let closed = match fd_table().lock().close_range(first, last, flags) {
         Ok(closed) => closed,
         Err(errno) => return fail(errno),
@@ -4109,6 +4230,7 @@ pub extern "C" fn patina_close_range(first: u32, last: u32, flags: u32) -> c_int
 /// with `EBADF`. Released with [`patina_desc_release`].
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_fd_retain(raw_fd: c_int) -> i64 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match fd_table().lock().retain(raw_fd) {
         Ok(desc) => {
             set_errno(0);
@@ -4130,6 +4252,7 @@ pub unsafe extern "C" fn patina_desc_pwrite(
     length: usize,
     offset: i64,
 ) -> isize {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let Ok(desc) = DescId::try_from(desc) else {
         return fail(EBADF) as isize;
     };
@@ -4149,6 +4272,7 @@ pub unsafe extern "C" fn patina_desc_pwrite(
 /// frees the description exactly as the last `close` would.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_desc_release(desc: i64) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let Ok(desc) = DescId::try_from(desc) else {
         return fail(EBADF);
     };
@@ -4213,6 +4337,7 @@ pub unsafe extern "C" fn patina_read(
     destination: *mut c_void,
     length: usize,
 ) -> isize {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if length != 0 && destination.is_null() {
         return fail(EINVAL) as isize;
     }
@@ -4248,6 +4373,10 @@ pub unsafe extern "C" fn patina_read(
         },
         // SAFETY: as above.
         #[cfg(target_os = "linux")]
+        FdKind::SignalFd => unsafe {
+            thread::signals::fd::read(resolved.handle, nonblocking, destination, length)
+        },
+        #[cfg(target_os = "linux")]
         FdKind::EventFd => unsafe {
             thread::eventfd_read(resolved.handle, nonblocking, destination, length)
         },
@@ -4282,6 +4411,7 @@ pub unsafe extern "C" fn patina_write(
     source: *const c_void,
     length: usize,
 ) -> isize {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if length != 0 && source.is_null() {
         return fail(EINVAL) as isize;
     }
@@ -4302,12 +4432,14 @@ pub unsafe extern "C" fn patina_write(
             thread::socket_write(resolved.handle, nonblocking, source, length)
         },
         // SAFETY: as above.
-        FdKind::Pipe => unsafe { thread::pipe_write(resolved.handle, nonblocking, source, length) },
+        FdKind::Pipe => unsafe {
+            thread::pipe_write(resolved.handle, nonblocking, source, length, false)
+        },
         // SAFETY: as above.
         #[cfg(target_os = "linux")]
         FdKind::EventFd => unsafe { thread::eventfd_write(resolved.handle, source, length) },
         #[cfg(target_os = "linux")]
-        FdKind::Epoll => fail(EINVAL) as isize,
+        FdKind::Epoll | FdKind::SignalFd => fail(EINVAL) as isize,
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => fail(EINVAL) as isize,
     }
@@ -4327,6 +4459,7 @@ pub unsafe extern "C" fn patina_pread(
     length: usize,
     offset: i64,
 ) -> isize {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if length != 0 && destination.is_null() {
         return fail(EINVAL) as isize;
     }
@@ -4386,6 +4519,7 @@ pub unsafe extern "C" fn patina_pwrite(
     length: usize,
     offset: i64,
 ) -> isize {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if length != 0 && source.is_null() {
         return fail(EINVAL) as isize;
     }
@@ -4426,6 +4560,7 @@ const LOCK_UN: c_int = 8;
 /// (std's `File::try_lock*` is always `LOCK_NB`).
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_flock(raw_fd: c_int, operation: c_int) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let resolved = match resolve_fd(raw_fd) {
         Ok(resolved) => resolved,
         Err(errno) => return fail(errno),
@@ -4475,6 +4610,7 @@ pub extern "C" fn patina_flock(raw_fd: c_int, operation: c_int) -> c_int {
 /// `ESPIPE`.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let handle = match resolve_fd(raw_fd) {
         Ok(resolved) if resolved.kind.is_fs() => Fd(resolved.handle),
         Ok(_) => return i64::from(fail(ESPIPE)),
@@ -4497,6 +4633,7 @@ pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
 /// a pipe or a socket.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_fsync(raw_fd: c_int) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let handle = match resolve_fd(raw_fd) {
         Ok(resolved) if resolved.kind.is_fs() => Fd(resolved.handle),
         Ok(_) => return fail(EINVAL),
@@ -4511,6 +4648,7 @@ pub extern "C" fn patina_fsync(raw_fd: c_int) -> c_int {
 /// `ftruncate(2)`: a file's length; every other kind is `EINVAL`.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_set_len(raw_fd: c_int, length: u64) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let handle = match resolve_fd(raw_fd) {
         Ok(resolved) if resolved.kind.is_fs() => Fd(resolved.handle),
         Ok(_) => return fail(EINVAL),
@@ -4589,12 +4727,14 @@ fn write_metadata(metadata: patina_dst_abi::FsMetadata, out: *mut PatinaMetadata
 /// `EPERM` exactly as an unprivileged process gets.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_uid() -> u32 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     registry::IDENTITY_UID
 }
 
 /// The one modeled identity's group id; see [`patina_uid`].
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_gid() -> u32 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     registry::IDENTITY_GID
 }
 
@@ -4616,6 +4756,7 @@ pub unsafe extern "C" fn patina_metadata_at(
     flags: u32,
     out: *mut PatinaMetadata,
 ) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if flags & !paths::RESOLVE_ALL != 0 {
         return fail(EINVAL);
     }
@@ -4639,6 +4780,7 @@ pub unsafe extern "C" fn patina_metadata_at(
 /// `out` must point to a writable `struct patina_metadata`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_fd_metadata_full(raw_fd: c_int, out: *mut PatinaMetadata) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // A FIFO descriptor is a pipe endpoint, not a filesystem descriptor: the
     // filesystem knows the ENTRY but holds no handle to ask about. What the
     // descriptor holds is the NODE, so the filesystem is asked about the inode —
@@ -4682,6 +4824,7 @@ pub unsafe extern "C" fn patina_chmod(
     mode: u32,
     flags: u32,
 ) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if flags & !paths::RESOLVE_ALL != 0 {
         return fail(EINVAL);
     }
@@ -4711,6 +4854,7 @@ pub unsafe extern "C" fn patina_chmod(
 /// A descriptor already names the node, so there is no symlink to resolve.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // A FIFO endpoint is a pipe, not a filesystem descriptor — so the bits it
     // changes are named by NODE, exactly as its `fstat` reads them by node. That
     // is what keeps `fchmod` working on an entry whose last name is gone.
@@ -4788,6 +4932,7 @@ pub unsafe extern "C" fn patina_utimensat(
     mtime_kind: u32,
     mtime_nanos: u64,
 ) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     abort_if_init_failed();
     if atime_kind == TIME_OMIT && mtime_kind == TIME_OMIT {
         set_errno(0);
@@ -4859,6 +5004,7 @@ pub extern "C" fn patina_futimens(
     mtime_kind: u32,
     mtime_nanos: u64,
 ) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     abort_if_init_failed();
     if atime_kind == TIME_OMIT && mtime_kind == TIME_OMIT {
         set_errno(0);
@@ -4942,6 +5088,7 @@ pub unsafe extern "C" fn patina_chown(
     uid: u32,
     gid: u32,
 ) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if flags & !paths::RESOLVE_ALL != 0 {
         return fail(EINVAL);
     }
@@ -4984,6 +5131,7 @@ pub unsafe extern "C" fn patina_chown(
 /// `EBADF`; descriptors without a modeled inode refuse loudly.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_fchown(raw_fd: c_int, uid: u32, gid: u32) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let resolved = match resolve_fd(raw_fd) {
         Ok(resolved) => resolved,
         Err(errno) => return fail(errno),
@@ -5037,6 +5185,7 @@ pub extern "C" fn patina_fchown(raw_fd: c_int, uid: u32, gid: u32) -> c_int {
 /// `path` must point to a valid NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_truncate(dirfd: c_int, path: *const c_char, length: i64) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let Ok(length) = u64::try_from(length) else {
         return fail(EINVAL);
     };
@@ -5100,6 +5249,7 @@ const FALLOC_FL_OPERATIONS: u32 = FALLOC_FL_PUNCH_HOLE
 /// filesystems without them. One recorded operation whatever the range.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length: i64) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if offset < 0 || length <= 0 {
         return fail(EINVAL);
     }
@@ -5129,7 +5279,7 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
         | FdKind::Urandom
         | FdKind::Socket => return fail(ENODEV),
         #[cfg(target_os = "linux")]
-        FdKind::EventFd | FdKind::Epoll => return fail(ENODEV),
+        FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd => return fail(ENODEV),
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => return fail(ENODEV),
     }
@@ -5169,6 +5319,7 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
 /// `state_out` must be writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_read_dir(raw_fd: c_int, state_out: *mut *mut c_void) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if state_out.is_null() {
         return fail(EINVAL);
     }
@@ -5205,6 +5356,7 @@ pub unsafe extern "C" fn patina_read_dir_next(
     buf_len: usize,
     kind: *mut u32,
 ) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if state.is_null() || kind.is_null() || (buf_len != 0 && name_buf.is_null()) {
         return fail(EINVAL);
     }
@@ -5241,6 +5393,7 @@ pub unsafe extern "C" fn patina_read_dir_next(
 /// freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_read_dir_free(state: *mut c_void) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if !state.is_null() {
         // SAFETY: Guaranteed by this function's C ABI contract.
         drop(unsafe { Box::from_raw(state.cast::<ReadDirState>()) });
@@ -5282,6 +5435,7 @@ unsafe fn path_unit(
 /// `path` must point to a valid NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_mkdir(dirfd: c_int, path: *const c_char, mode: u32) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // `vfs_mkdir` keeps the permission triads and the sticky bit of the
     // request and drops setuid/setgid: a directory never gets those from its
     // creation mode.
@@ -5304,6 +5458,7 @@ pub unsafe extern "C" fn patina_mkdir(dirfd: c_int, path: *const c_char, mode: u
 /// `path` must point to a valid NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_mkfifo(dirfd: c_int, path: *const c_char, mode: u32) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mode = (mode & 0o7777) & !paths::umask();
     // SAFETY: Forwarded from this function's C ABI contract.
     unsafe {
@@ -5320,6 +5475,7 @@ pub unsafe extern "C" fn patina_mkfifo(dirfd: c_int, path: *const c_char, mode: 
 /// `path` must point to a valid NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_unlink(dirfd: c_int, path: *const c_char) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: Forwarded from this function's C ABI contract.
     unsafe {
         path_unit(
@@ -5337,6 +5493,7 @@ pub unsafe extern "C" fn patina_unlink(dirfd: c_int, path: *const c_char) -> c_i
 /// `path` must point to a valid NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_rmdir(dirfd: c_int, path: *const c_char) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: Forwarded from this function's C ABI contract.
     unsafe {
         path_unit(
@@ -5361,6 +5518,7 @@ pub unsafe extern "C" fn patina_rename(
     tofd: c_int,
     to: *const c_char,
 ) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let from = match path_from_c(from) {
         Ok(path) => path,
         Err(errno) => return fail(errno),
@@ -5398,6 +5556,7 @@ pub unsafe extern "C" fn patina_symlink(
     dirfd: c_int,
     link_path: *const c_char,
 ) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let target = match path_from_c(target) {
         Ok(path) => path,
         Err(errno) => return fail(errno),
@@ -5432,6 +5591,7 @@ pub unsafe extern "C" fn patina_link(
     to: *const c_char,
     follow: c_int,
 ) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let from = match path_from_c(from) {
         Ok(path) => path,
         Err(errno) => return fail(errno),
@@ -5477,6 +5637,7 @@ pub unsafe extern "C" fn patina_read_link(
     buf: *mut c_char,
     len: usize,
 ) -> isize {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // Bootstrap window (see `SHIM_BOOTSTRAP`): this is an allocator's init-time
     // config probe — tikv-jemallocator's `obtain_malloc_conf` does
     // `readlink("/etc/malloc.conf")` while holding its init lock. The deterministic
@@ -5574,6 +5735,7 @@ pub unsafe extern "C" fn patina_resolve_path(
     len: usize,
     kind: *mut u32,
 ) -> isize {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if flags & !paths::RESOLVE_ALL != 0 || kind.is_null() {
         return fail(EINVAL) as isize;
     }
@@ -5605,6 +5767,7 @@ pub unsafe extern "C" fn patina_resolve_path(
 /// `buf` must be writable for `len` bytes when `len` is nonzero.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_getcwd(buf: *mut c_char, len: usize) -> isize {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match paths::cwd_path() {
         Ok(path) => copy_path_out(&path, buf, len),
         Err(errno) => fail(errno) as isize,
@@ -5620,6 +5783,7 @@ pub unsafe extern "C" fn patina_getcwd(buf: *mut c_char, len: usize) -> isize {
 /// `path` must point to a valid NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_chdir(dirfd: c_int, path: *const c_char) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let path = match path_from_c(path) {
         Ok(path) => path,
         Err(errno) => return fail(errno),
@@ -5638,6 +5802,7 @@ pub unsafe extern "C" fn patina_chdir(dirfd: c_int, path: *const c_char) -> c_in
 /// for any other kind.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_fchdir(raw_fd: c_int) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match paths::fchdir(raw_fd) {
         Ok(()) => {
             set_errno(0);
@@ -5651,12 +5816,14 @@ pub extern "C" fn patina_fchdir(raw_fd: c_int) -> c_int {
 /// creating entry applies, and return the previous one. Never fails.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_umask(mask: u32) -> u32 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     set_errno(0);
     paths::set_umask(mask)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_thread_id() -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     thread::deterministic_thread_id()
 }
 
@@ -5667,6 +5834,7 @@ pub extern "C" fn patina_thread_id() -> c_int {
 /// thread subsystem activates, so single-threaded programs are unaffected.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_sched_yield() -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let _ = thread::sched_point();
     0
 }
@@ -5677,6 +5845,7 @@ pub extern "C" fn patina_sched_yield() -> c_int {
 /// the extra scheduling point. Otherwise identical to [`patina_sched_yield`].
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_yield_point(site: *const c_void) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     thread::yield_point_from(site as usize);
 }
 
@@ -5696,11 +5865,43 @@ pub extern "C" fn patina_yield_point(site: *const c_void) {
 /// mode) and the TLS destructors, now with the teardown flag set.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_exit(status: c_int) -> ! {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     patina_note_guest_exit_status(status);
     thread::note_main_returned();
     // SAFETY: `host_exit` is the real libc `exit` resolved once via
     // `dlsym(RTLD_NEXT, "exit")`; it does not return.
+    let _guest = crate::panic_boundary::PanicScope::suspend();
     unsafe { (hostapi::get().host_exit)(status) }
+}
+
+/// Private fatal vehicle: never finalize an invalid run through the guest abort interposer.
+fn host_abort() -> ! {
+    unsafe { (hostapi::get().host_abort)() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_host_abort() -> ! {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    host_abort()
+}
+
+/// Explicit abort finalizes a healthy run, then uses libc's real abort vehicle.
+/// Internal lock-held fatal paths cannot recursively finalize the runtime.
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_abort() -> ! {
+    // Inspect the caller before entering: a guest abort is not a shim panic.
+    // This also covers panic=abort if the guest replaced our global hook.
+    let internal_panic = crate::panic_boundary::in_shim() && std::thread::panicking();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    if internal_panic {
+        let _ = host_write_all(2, b"patina native shim panic: aborting an owned boundary\n");
+        host_abort();
+    }
+    if !in_shim_critical() {
+        let _ = patina_shutdown();
+    }
+    unsafe { (hostapi::get().host_abort)() }
 }
 
 /// Mark the process as having entered post-`main` teardown WITHOUT terminating.
@@ -5715,6 +5916,7 @@ pub extern "C" fn patina_exit(status: c_int) -> ! {
 /// natural path (see `thread::sched_point`).
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_note_main_returned() {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     thread::note_main_returned();
 }
 
@@ -5737,6 +5939,7 @@ pub extern "C" fn patina_note_main_returned() {
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_assert_teardown_engaged() {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if !thread::main_returned() {
         let _ = host_write_all(
             2,
@@ -5745,12 +5948,13 @@ silencing is not active on this platform/toolchain (neither the __libc_start_mai
 exit interposer set the teardown flag before atexit); --yield-points teardown determinism is not \
 guaranteed\n",
         );
-        std::process::abort();
+        crate::host_abort();
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_crash() -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match with_context(Context::fs_crash) {
         Ok(()) => 0,
         Err(errno) => fail(errno),
@@ -5793,7 +5997,7 @@ fn abort_with_buggify_marker(marker: &str, label: &str) -> ! {
     let _ = flush_captured_stdio();
     let line = format!("{marker} label={label}\n");
     let _ = host_write_all(2, line.as_bytes());
-    std::process::abort();
+    crate::host_abort();
 }
 
 /// Flush captured guest output and abort, printing nothing of the shim's own.
@@ -5804,7 +6008,7 @@ fn abort_with_buggify_marker(marker: &str, label: &str) -> ! {
 /// the verdict, never a marker (`docs/arcs/outcome-channel.md`).
 fn abort_after_verdict() -> ! {
     let _ = flush_captured_stdio();
-    std::process::abort();
+    crate::host_abort();
 }
 
 /// Move the runtime's queued diagnostic lines (today: `PATINA_VERDICT`) into the
@@ -5869,6 +6073,7 @@ fn buggify_site_call(
 /// `patina_dst::is_simulated()`: 1 whenever the deterministic runtime is installed.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_is_simulated() -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     c_int::from(ensure_runtime().is_ok())
 }
 
@@ -5885,6 +6090,7 @@ pub unsafe extern "C" fn patina_buggify(
     site_len: usize,
     prob_permille: i32,
 ) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     buggify_site_call(label, label_len, site, site_len, move |context, l, s| {
         let prob = (prob_permille >= 0).then(|| prob_permille.clamp(0, 1000) as u16);
         context.buggify_evaluate(l, s, prob)
@@ -5903,6 +6109,7 @@ pub unsafe extern "C" fn patina_buggify_delay(
     site: *const u8,
     site_len: usize,
 ) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     buggify_site_call(label, label_len, site, site_len, |context, l, s| {
         context.buggify_delay(l, s)
     })
@@ -5923,6 +6130,7 @@ pub unsafe extern "C" fn patina_buggify_knob(
     lo: i64,
     hi: i64,
 ) -> i64 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the caller passes live slices.
     let label = match unsafe { buggify_label(label, label_len) } {
         Some(label) => label,
@@ -5952,6 +6160,7 @@ pub unsafe extern "C" fn patina_always(
     site: *const u8,
     site_len: usize,
 ) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     buggify_site_call(label, label_len, site, site_len, move |context, l, s| {
         context.always_check(l, s, condition != 0)
     })
@@ -5969,6 +6178,7 @@ pub unsafe extern "C" fn patina_sometimes(
     site: *const u8,
     site_len: usize,
 ) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     buggify_site_call(label, label_len, site, site_len, move |context, l, s| {
         context.sometimes_check(l, s, condition != 0)
     })
@@ -5985,6 +6195,7 @@ pub unsafe extern "C" fn patina_reachable(
     site: *const u8,
     site_len: usize,
 ) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     buggify_site_call(label, label_len, site, site_len, |context, l, s| {
         context.reachable_mark(l, s)
     })
@@ -6010,6 +6221,7 @@ pub unsafe extern "C" fn patina_verdict(
     detail: *const u8,
     detail_len: usize,
 ) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let Some(kind) = VerdictKind::from_abi(kind) else {
         return fail(EINVAL);
     };
@@ -6083,6 +6295,7 @@ pub unsafe extern "C" fn patina_custom_op_begin(
     fault_eligible: c_int,
     out_len: *mut usize,
 ) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the caller passes live slices.
     let Some(label) = (unsafe { buggify_label(label, label_len) }) else {
         return fail(EINVAL);
@@ -6123,6 +6336,7 @@ pub unsafe extern "C" fn patina_custom_op_begin(
 /// `out` must be writable for `out_cap` bytes, or be null when `out_cap == 0`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_custom_op_replay_result(out: *mut u8, out_cap: usize) -> isize {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // `with_context_raw`, not `with_context`: one custom operation is ONE
     // boundary, and its scheduling point was already taken by
     // `patina_custom_op_begin`. Taking a second one here would let another
@@ -6166,6 +6380,7 @@ pub unsafe extern "C" fn patina_custom_op_replay_result(out: *mut u8, out_cap: u
 /// zero length).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_custom_op_record(result: *const u8, result_len: usize) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the caller passes a live slice.
     let Some(result) = (unsafe { custom_op_bytes(result, result_len) }) else {
         return fail(EINVAL);
@@ -6199,12 +6414,14 @@ unsafe fn custom_op_bytes<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
 /// `patina_dst::rng()`: a deterministic 64-bit draw bridged to the root seed.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_rng() -> u64 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     with_context(|context| Ok(context.buggify_rng())).unwrap_or(0)
 }
 
 /// `patina_dst::lifecycle::setup_complete()`: mark the setup boundary and emit a marker.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_lifecycle_setup_complete() -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let _ = with_context(|context| {
         context.lifecycle_setup_complete();
         Ok(())
@@ -6219,6 +6436,7 @@ pub extern "C" fn patina_lifecycle_setup_complete() -> c_int {
 /// Label pointer must describe a live UTF-8 slice of `label_len` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_lifecycle_event(label: *const u8, label_len: usize) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the caller passes a live slice.
     let Some(label) = (unsafe { buggify_label(label, label_len) }) else {
         return fail(EINVAL);
@@ -6260,6 +6478,10 @@ pub unsafe extern "C" fn patina_lifecycle_event(label: *const u8, label_len: usi
 /// by [`DetScheduler`](patina_dst_sched_det) and recorded/replayed; the OS
 /// primitives only provide the vehicle and the blocking.
 mod thread {
+    #[cfg(target_os = "linux")]
+    pub(crate) mod readiness;
+    #[cfg(target_os = "linux")]
+    pub(crate) mod signals;
     use std::cell::Cell;
     use std::collections::{BTreeMap, VecDeque};
     use std::ffi::c_char;
@@ -6275,6 +6497,11 @@ mod thread {
         EWOULDBLOCK, O_NONBLOCK, O_READ, O_WRITE, SpinGuard, SpinMutex, TaskId, host_write_all,
         with_context_msg, with_context_raw,
     };
+
+    #[cfg(target_os = "linux")]
+    const MSG_NOSIGNAL: c_int = 0x4000;
+    #[cfg(target_os = "macos")]
+    const MSG_NOSIGNAL: c_int = 0x80000;
 
     /// Where a guest number lands in this module's class tables. Every extern
     /// entry below resolves its guest number ONCE through the descriptor table
@@ -6299,7 +6526,7 @@ mod thread {
             | FdKind::Urandom
             | FdKind::Pipe => Err(super::ENOTSOCK),
             #[cfg(target_os = "linux")]
-            FdKind::EventFd | FdKind::Epoll => Err(super::ENOTSOCK),
+            FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd => Err(super::ENOTSOCK),
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => Err(super::ENOTSOCK),
         }
@@ -6324,7 +6551,7 @@ mod thread {
             | FdKind::Urandom
             | FdKind::Socket => Err(super::EBADF),
             #[cfg(target_os = "linux")]
-            FdKind::EventFd | FdKind::Epoll => Err(super::EBADF),
+            FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd => Err(super::EBADF),
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => Err(super::EBADF),
         }
@@ -6488,7 +6715,7 @@ mod thread {
     }
 
     fn fatal(message: &str) -> ! {
-        // Like `trap_fatal`: `abort()` skips the shutdown flush, so the guest's
+        // Like `trap_fatal`: `host_abort()` skips the shutdown flush, so the guest's
         // captured output goes out first — a probe that dies here (a deadlock,
         // an unmodeled flag) still leaves its event stream for the conformance
         // differ, which is what lets the testbed declare the death at an exact
@@ -6496,7 +6723,7 @@ mod thread {
         let _ = super::flush_captured_stdio();
         let text = format!("patina native shim fatal: {message}\n");
         let _ = host_write_all(2, text.as_bytes());
-        std::process::abort();
+        crate::host_abort();
     }
 
     /// A recoverable POSIX error code or a fatal determinism violation.
@@ -6612,6 +6839,10 @@ mod thread {
         retval: usize,
         joiner: Option<TaskId>,
         detached: bool,
+        // Some(false): temporarily runnable for a signal, still semantically
+        // waiting. Some(true): an ordinary grant/notification arrived meanwhile.
+        #[cfg(target_os = "linux")]
+        signal_resume: Option<bool>,
     }
 
     enum LockStep {
@@ -6645,7 +6876,27 @@ mod thread {
         threads: BTreeMap<TaskId, ThreadEntry>,
     }
 
+    fn refuse_nested_sync_wait(interrupted: bool) {
+        if interrupted {
+            fatal("signal handler blocked on a pthread wait while interrupting one: not modeled");
+        }
+    }
+
     impl ThreadTable {
+        fn sync_interrupted(&self, task: TaskId) -> bool {
+            #[cfg(target_os = "linux")]
+            {
+                self.threads
+                    .get(&task)
+                    .is_some_and(|entry| entry.signal_resume.is_some())
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = task;
+                false
+            }
+        }
+
         fn register(&mut self, task: TaskId) {
             self.threads.insert(
                 task,
@@ -6654,8 +6905,56 @@ mod thread {
                     retval: 0,
                     joiner: None,
                     detached: false,
+                    #[cfg(target_os = "linux")]
+                    signal_resume: None,
                 },
             );
+        }
+
+        #[cfg(target_os = "linux")]
+        fn still_waiting(&self, task: TaskId, loc: WaiterLoc) -> bool {
+            match loc {
+                WaiterLoc::Mutex(key) => self
+                    .mutexes
+                    .get(&key)
+                    .is_some_and(|entry| entry.waiters.iter().any(|waiter| *waiter == task)),
+                WaiterLoc::RwRead(key) => self
+                    .rwlocks
+                    .get(&key)
+                    .is_some_and(|entry| entry.read_waiters.iter().any(|waiter| *waiter == task)),
+                WaiterLoc::RwWrite(key) => self
+                    .rwlocks
+                    .get(&key)
+                    .is_some_and(|entry| entry.write_waiters.iter().any(|waiter| *waiter == task)),
+                WaiterLoc::Cond(cond, mutex) => {
+                    self.conds.get(&cond).is_some_and(|entry| {
+                        entry.waiters.iter().any(|(waiter, _)| *waiter == task)
+                    }) || self.still_waiting(task, WaiterLoc::Mutex(mutex))
+                }
+                WaiterLoc::Join(target) => self
+                    .threads
+                    .get(&target)
+                    .is_some_and(|entry| !entry.finished && entry.joiner == Some(task)),
+                _ => false,
+            }
+        }
+
+        fn notify(
+            &mut self,
+            scheduler: &mut dyn Scheduler,
+            task: TaskId,
+        ) -> Result<(), ThreadError> {
+            #[cfg(target_os = "linux")]
+            if let Some(notified) = self
+                .threads
+                .get_mut(&task)
+                .and_then(|entry| entry.signal_resume.as_mut())
+            {
+                *notified = true;
+                return Ok(());
+            }
+            scheduler.wake(task)?;
+            Ok(())
         }
 
         fn init_mutex(&mut self, key: usize) {
@@ -6663,6 +6962,7 @@ mod thread {
         }
 
         fn lock(&mut self, me: TaskId, key: usize) -> Result<LockStep, ThreadError> {
+            let interrupted = self.sync_interrupted(me);
             let entry = self.mutexes.entry_or_default(key);
             match entry.owner {
                 None => {
@@ -6671,6 +6971,7 @@ mod thread {
                 }
                 Some(owner) if owner == me => Err(ThreadError::Posix(EDEADLK)),
                 Some(_) => {
+                    refuse_nested_sync_wait(interrupted);
                     entry.waiters.push_back(me);
                     Ok(LockStep::MustBlock)
                 }
@@ -6704,7 +7005,7 @@ mod thread {
             }
             if let Some(next) = entry.waiters.pop_front() {
                 entry.owner = Some(next);
-                scheduler.wake(next)?;
+                self.notify(scheduler, next)?;
             } else {
                 entry.owner = None;
             }
@@ -6728,6 +7029,7 @@ mod thread {
         /// Acquire the read lock. Writer-preferring: block while a writer holds
         /// the lock or any writer is waiting.
         fn rwlock_rdlock(&mut self, me: TaskId, key: usize) -> Result<LockStep, ThreadError> {
+            let interrupted = self.sync_interrupted(me);
             let entry = self.rwlocks.entry_or_default(key);
             if entry.writer == Some(me) {
                 return Err(ThreadError::Posix(EDEADLK));
@@ -6736,6 +7038,7 @@ mod thread {
                 entry.readers += 1;
                 Ok(LockStep::Acquired)
             } else {
+                refuse_nested_sync_wait(interrupted);
                 entry.read_waiters.push_back(me);
                 Ok(LockStep::MustBlock)
             }
@@ -6744,6 +7047,7 @@ mod thread {
         /// Acquire the write lock: exclusive, so block unless the lock is fully
         /// idle (no readers and no writer).
         fn rwlock_wrlock(&mut self, me: TaskId, key: usize) -> Result<LockStep, ThreadError> {
+            let interrupted = self.sync_interrupted(me);
             let entry = self.rwlocks.entry_or_default(key);
             if entry.writer == Some(me) {
                 return Err(ThreadError::Posix(EDEADLK));
@@ -6752,6 +7056,7 @@ mod thread {
                 entry.writer = Some(me);
                 Ok(LockStep::Acquired)
             } else {
+                refuse_nested_sync_wait(interrupted);
                 entry.write_waiters.push_back(me);
                 Ok(LockStep::MustBlock)
             }
@@ -6808,7 +7113,7 @@ mod thread {
             // The lock is now idle (no writer, no readers). Grant it.
             if let Some(next) = entry.write_waiters.pop_front() {
                 entry.writer = Some(next);
-                scheduler.wake(next)?;
+                self.notify(scheduler, next)?;
             } else {
                 // Batch-wake every blocked reader in FIFO order. Drained one at a
                 // time (re-borrowing the entry each step) rather than collected
@@ -6821,7 +7126,7 @@ mod thread {
                         .get_mut(&key)
                         .and_then(|entry| entry.read_waiters.pop_front());
                     match reader {
-                        Some(reader) => scheduler.wake(reader)?,
+                        Some(reader) => self.notify(scheduler, reader)?,
                         None => break,
                     }
                 }
@@ -6858,6 +7163,7 @@ mod thread {
             cond_key: usize,
             mutex_key: usize,
         ) -> Result<(), ThreadError> {
+            refuse_nested_sync_wait(self.sync_interrupted(me));
             self.unlock(scheduler, me, mutex_key)?;
             self.conds
                 .entry_or_default(cond_key)
@@ -6880,7 +7186,7 @@ mod thread {
                 match entry.owner {
                     None => {
                         entry.owner = Some(task);
-                        scheduler.wake(task)?;
+                        self.notify(scheduler, task)?;
                     }
                     Some(_) => entry.waiters.push_back(task),
                 }
@@ -6914,6 +7220,7 @@ mod thread {
         }
 
         fn begin_join(&mut self, me: TaskId, target: TaskId) -> Result<JoinStep, ThreadError> {
+            let interrupted = self.sync_interrupted(me);
             let entry = self
                 .threads
                 .get_mut(&target)
@@ -6929,6 +7236,7 @@ mod thread {
             if entry.joiner.is_some() {
                 return Err(ThreadError::Posix(EINVAL));
             }
+            refuse_nested_sync_wait(interrupted);
             entry.joiner = Some(me);
             Ok(JoinStep::MustBlock)
         }
@@ -6942,7 +7250,7 @@ mod thread {
                 .threads
                 .get_mut(&target)
                 .ok_or(ThreadError::Posix(ESRCH))?;
-            if entry.joiner.is_some() {
+            if entry.detached || entry.joiner.is_some() {
                 return Err(ThreadError::Posix(EINVAL));
             }
             entry.detached = true;
@@ -6964,13 +7272,54 @@ mod thread {
             let joiner = entry.joiner;
             let detached = entry.detached;
             if let Some(joiner) = joiner {
-                scheduler.wake(joiner)?;
+                self.notify(scheduler, joiner)?;
             }
             scheduler.complete(me)?;
             if detached && joiner.is_none() {
                 self.threads.remove(&me);
             }
             Ok(())
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum BlockClass {
+        Io,
+        Futex,
+        TimedFutex,
+        Sleep,
+        Readiness,
+        Sync,
+        #[cfg(target_os = "linux")]
+        Pause,
+        #[cfg(target_os = "linux")]
+        SigSuspend,
+        #[cfg(target_os = "linux")]
+        SigWait,
+        #[cfg(target_os = "linux")]
+        SignalfdRead,
+    }
+
+    #[derive(Clone)]
+    struct Wait {
+        class: BlockClass,
+        locs: Vec<WaiterLoc>,
+        #[cfg(target_os = "linux")]
+        wanted: u64,
+    }
+    impl Wait {
+        fn new(class: BlockClass, locs: Vec<WaiterLoc>) -> Self {
+            Self {
+                class,
+                locs,
+                #[cfg(target_os = "linux")]
+                wanted: 0,
+            }
+        }
+        #[cfg(target_os = "linux")]
+        fn signals(mut self, wanted: u64) -> Self {
+            self.wanted = wanted;
+            self
         }
     }
 
@@ -7123,7 +7472,7 @@ mod thread {
 
     /// Release the state lock, hand the baton to `picked` by signaling its
     /// semaphore, then park on `me`'s semaphore until it is handed back.
-    fn switch_and_park(state: SpinGuard<'_, ThreadRuntime>, picked: TaskId, me: TaskId) {
+    fn handoff(state: SpinGuard<'_, ThreadRuntime>, picked: TaskId, me: TaskId) {
         let picked_sem = state.task_sem(picked);
         let my_sem = state.task_sem(me);
         drop(state);
@@ -7131,10 +7480,63 @@ mod thread {
         my_sem.wait();
     }
 
+    fn switch_and_park(state: SpinGuard<'_, ThreadRuntime>, picked: TaskId, me: TaskId) {
+        handoff(state, picked, me);
+        #[cfg(target_os = "linux")]
+        {
+            while let Some(blocked) = signals::take_sync_resume(me) {
+                // Pthread waits retain their semantic registration while a
+                // handler runs. Grants mark completion, not another wake.
+                signals::deliver();
+                let mut state = lock_state();
+                let notified = state
+                    .table
+                    .threads
+                    .get_mut(&me)
+                    .unwrap()
+                    .signal_resume
+                    .take()
+                    .unwrap_or_else(|| fatal("signal-woken pthread waiter lost resume state"));
+                if notified {
+                    state.remove_signal_wait(me);
+                    return;
+                }
+                let wait = Wait::new(blocked.class, blocked.locs);
+                let step = match blocked.deadline {
+                    Some((clock, deadline)) => {
+                        state.block_timed(me, blocked.reason, wait, clock, deadline)
+                    }
+                    None => state.block(me, blocked.reason, wait),
+                };
+                match step {
+                    Ok(Step::Switch(next)) => handoff(state, next, me),
+                    Ok(Step::Continue) => return,
+                    Err(error) => fatal(&format!(
+                        "resuming pthread wait failed: {}",
+                        error.into_posix()
+                    )),
+                }
+            }
+            let mut resumed = lock_state();
+            let sync = resumed
+                .signals
+                .blocked
+                .get(&me)
+                .is_some_and(|wait| wait.class == BlockClass::Sync);
+            resumed.remove_signal_wait(me);
+            drop(resumed);
+            if sync {
+                signals::deliver();
+            }
+        }
+    }
+
     /// Baton-guarded state shared by every managed host thread. Only the current
     /// baton holder touches it, so the spinlock is essentially uncontended.
     struct ThreadRuntime {
         table: ThreadTable,
+        #[cfg(target_os = "linux")]
+        signals: signals::SignalRuntime,
         /// Real host `pthread_t` bits mapped to the managed task they run.
         handles: BTreeMap<usize, TaskId>,
         /// Per-task baton semaphores.
@@ -7202,6 +7604,11 @@ mod thread {
                 )));
             }
             self.table.register(main);
+            #[cfg(target_os = "linux")]
+            self.signals.spawn(main, None);
+            #[cfg(target_os = "linux")]
+            self.handles
+                .insert(unsafe { (crate::hostapi::get().host_pthread_self)() }, main);
             self.sems.insert(main, Arc::new(baton::Semaphore::new()));
             self.active = true;
             set_current_task(main);
@@ -7217,21 +7624,33 @@ mod thread {
         fn begin_lock(&mut self, me: TaskId, key: usize) -> Result<Step, ThreadError> {
             match self.table.lock(me, key)? {
                 LockStep::Acquired => Ok(Step::Continue),
-                LockStep::MustBlock => self.block(me, "mutex-contended"),
+                LockStep::MustBlock => self.block(
+                    me,
+                    "mutex-contended",
+                    Wait::new(BlockClass::Sync, vec![WaiterLoc::Mutex(key)]),
+                ),
             }
         }
 
         fn begin_rdlock(&mut self, me: TaskId, key: usize) -> Result<Step, ThreadError> {
             match self.table.rwlock_rdlock(me, key)? {
                 LockStep::Acquired => Ok(Step::Continue),
-                LockStep::MustBlock => self.block(me, "rwlock-read-contended"),
+                LockStep::MustBlock => self.block(
+                    me,
+                    "rwlock-read-contended",
+                    Wait::new(BlockClass::Sync, vec![WaiterLoc::RwRead(key)]),
+                ),
             }
         }
 
         fn begin_wrlock(&mut self, me: TaskId, key: usize) -> Result<Step, ThreadError> {
             match self.table.rwlock_wrlock(me, key)? {
                 LockStep::Acquired => Ok(Step::Continue),
-                LockStep::MustBlock => self.block(me, "rwlock-write-contended"),
+                LockStep::MustBlock => self.block(
+                    me,
+                    "rwlock-write-contended",
+                    Wait::new(BlockClass::Sync, vec![WaiterLoc::RwWrite(key)]),
+                ),
             }
         }
 
@@ -7244,17 +7663,37 @@ mod thread {
             let mut scheduler = RealScheduler;
             self.table
                 .cond_wait(&mut scheduler, me, cond_key, mutex_key)?;
-            self.block(me, "cond-wait")
+            self.block(
+                me,
+                "cond-wait",
+                Wait::new(BlockClass::Sync, vec![WaiterLoc::Cond(cond_key, mutex_key)]),
+            )
         }
 
         fn begin_join(&mut self, me: TaskId, target: TaskId) -> Result<JoinResolve, ThreadError> {
             match self.table.begin_join(me, target)? {
                 JoinStep::Done(retval) => Ok(JoinResolve::Ready(retval)),
-                JoinStep::MustBlock => Ok(JoinResolve::Blocked(self.block(me, "join")?)),
+                JoinStep::MustBlock => Ok(JoinResolve::Blocked(self.block(
+                    me,
+                    "join",
+                    Wait::new(BlockClass::Sync, vec![WaiterLoc::Join(target)]),
+                )?)),
             }
         }
 
-        fn block(&mut self, me: TaskId, reason: &str) -> Result<Step, ThreadError> {
+        fn block(
+            &mut self,
+            me: TaskId,
+            reason: &'static str,
+            wait: Wait,
+        ) -> Result<Step, ThreadError> {
+            if wait.class == BlockClass::Sync {
+                refuse_nested_sync_wait(self.table.sync_interrupted(me));
+            }
+            #[cfg(target_os = "linux")]
+            self.register_signal_wait(me, reason, wait, None);
+            #[cfg(not(target_os = "linux"))]
+            let _ = (wait.class, wait.locs);
             let mut scheduler = RealScheduler;
             scheduler.park(me, reason)?;
             let next = scheduler.next()?;
@@ -7275,11 +7714,19 @@ mod thread {
         fn block_timed(
             &mut self,
             me: TaskId,
-            reason: &str,
+            reason: &'static str,
+            wait: Wait,
             clock: ClockKind,
             deadline: u64,
         ) -> Result<Step, ThreadError> {
+            if wait.class == BlockClass::Sync {
+                refuse_nested_sync_wait(self.table.sync_interrupted(me));
+            }
             let mut scheduler = RealScheduler;
+            #[cfg(target_os = "linux")]
+            self.register_signal_wait(me, reason, wait, Some((clock, deadline)));
+            #[cfg(not(target_os = "linux"))]
+            let _ = (wait.class, wait.locs);
             scheduler.park_timed(me, reason, clock, deadline)?;
             let next = scheduler.next()?;
             self.settle_rescued()?;
@@ -7311,39 +7758,56 @@ mod thread {
         /// net-recv waiter simply retries the receive (the packet is now due),
         /// and a bare timed sleep is on no queue at all.
         fn mark_timed_out(&mut self, task: TaskId) {
-            for cond in self.table.conds.values_mut() {
-                if let Some(index) = cond.waiters.iter().position(|(waiter, _)| *waiter == task) {
-                    cond.waiters.remove(index);
+            #[cfg(target_os = "linux")]
+            {
+                if self.signals.blocked.get(&task).is_some_and(|blocked| {
+                    blocked.class == BlockClass::TimedFutex
+                        || blocked
+                            .locs
+                            .iter()
+                            .any(|loc| matches!(loc, WaiterLoc::Cond(..)))
+                }) {
                     self.timed_out.insert(task);
-                    return;
                 }
-            }
-            for waiters in self.futexes.values_mut() {
-                if let Some(index) = waiters.iter().position(|waiter| *waiter == task) {
-                    waiters.remove(index);
-                    self.timed_out.insert(task);
-                    return;
-                }
+                self.remove_signal_wait(task);
             }
             #[cfg(target_os = "macos")]
-            for sem in self.dispatch.values_mut() {
-                if let Some(index) = sem.waiters.iter().position(|waiter| *waiter == task) {
-                    sem.waiters.remove(index);
-                    // The waiter eagerly decremented on entry; restore it so a
-                    // negative `count` keeps equaling the live waiter total.
-                    sem.count += 1;
-                    self.timed_out.insert(task);
-                    return;
+            {
+                for cond in self.table.conds.values_mut() {
+                    if let Some(index) = cond.waiters.iter().position(|(waiter, _)| *waiter == task)
+                    {
+                        cond.waiters.remove(index);
+                        self.timed_out.insert(task);
+                        return;
+                    }
                 }
-            }
-            for socket in self.net.sockets.values_mut() {
-                if let Some(index) = socket
-                    .recv_waiters
-                    .iter()
-                    .position(|waiter| *waiter == task)
-                {
-                    socket.recv_waiters.remove(index);
-                    return;
+                for waiters in self.futexes.values_mut() {
+                    if let Some(index) = waiters.iter().position(|waiter| *waiter == task) {
+                        waiters.remove(index);
+                        self.timed_out.insert(task);
+                        return;
+                    }
+                }
+                #[cfg(target_os = "macos")]
+                for sem in self.dispatch.values_mut() {
+                    if let Some(index) = sem.waiters.iter().position(|waiter| *waiter == task) {
+                        sem.waiters.remove(index);
+                        // The waiter eagerly decremented on entry; restore it so a
+                        // negative `count` keeps equaling the live waiter total.
+                        sem.count += 1;
+                        self.timed_out.insert(task);
+                        return;
+                    }
+                }
+                for socket in self.net.sockets.values_mut() {
+                    if let Some(index) = socket
+                        .recv_waiters
+                        .iter()
+                        .position(|waiter| *waiter == task)
+                    {
+                        socket.recv_waiters.remove(index);
+                        return;
+                    }
                 }
             }
         }
@@ -7354,6 +7818,8 @@ mod thread {
         RUNTIME.get_or_init(|| {
             SpinMutex::new(ThreadRuntime {
                 table: ThreadTable::default(),
+                #[cfg(target_os = "linux")]
+                signals: signals::SignalRuntime::default(),
                 handles: BTreeMap::new(),
                 sems: BTreeMap::new(),
                 net: NetState::new(),
@@ -7423,6 +7889,8 @@ mod thread {
         if task_completed() || main_returned() {
             return Ok(());
         }
+        #[cfg(target_os = "linux")]
+        signals::deliver();
         let mut state = lock_state();
         if !state.active {
             return Ok(());
@@ -7432,6 +7900,8 @@ mod thread {
             Ok(Some(picked)) if picked == me => Ok(()),
             Ok(Some(picked)) => {
                 switch_and_park(state, picked, me);
+                #[cfg(target_os = "linux")]
+                signals::deliver();
                 Ok(())
             }
             Ok(None) => Ok(()),
@@ -7446,19 +7916,50 @@ mod thread {
     /// managed threads yet), so the caller performs a plain clock jump identical
     /// to the historical single-threaded behavior; otherwise `Some(0)` once the
     /// deadline is reached (a timed sleep has no distinct timeout return).
-    pub(crate) fn managed_sleep(clock: ClockKind, deadline: u64) -> Option<c_int> {
+    /// # Safety
+    /// Non-null `remaining` must name a writable pair of i64 timespec fields.
+    pub(crate) unsafe fn managed_sleep(
+        clock: ClockKind,
+        deadline: u64,
+        remaining: *mut i64,
+    ) -> Option<c_int> {
         let me = current_task();
         let mut state = lock_state();
         if !state.active {
             return None;
         }
-        match state.block_timed(me, "sleep", clock, deadline) {
+        match state.block_timed(
+            me,
+            "sleep",
+            Wait::new(BlockClass::Sleep, vec![]),
+            clock,
+            deadline,
+        ) {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Ok(Step::Continue) => drop(state),
             Err(error) => return Some(error.into_posix()),
         }
         // A bare sleep is on no waiter list; clear a defensive timer flag anyway.
         lock_state().timed_out.remove(&me);
+        #[cfg(target_os = "linux")]
+        if signals::resume_with(|| {
+            if !remaining.is_null() {
+                // Snapshot at interruption, not after a handler that may itself
+                // advance virtual time. A clock failure must never invent rem=0.
+                let now = with_context_raw(|context| context.now(clock))
+                    .unwrap_or_else(|_| fatal("reading interrupted sleep clock failed"));
+                let rem = deadline.saturating_sub(now);
+                unsafe {
+                    remaining.write((rem / 1_000_000_000) as i64);
+                    remaining.add(1).write((rem % 1_000_000_000) as i64);
+                }
+            }
+        }) == signals::Resumed::Eintr
+        {
+            return Some(super::EINTR);
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = remaining;
         Some(0)
     }
 
@@ -7495,6 +7996,7 @@ mod thread {
     );
 
     extern "C" fn thread_trampoline(raw: *mut c_void) -> *mut c_void {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         // SAFETY: `raw` is the `Box<ThreadStart>` leaked in patina_thread_create.
         let start = unsafe { Box::from_raw(raw.cast::<ThreadStart>()) };
         let ThreadStart { task, routine, arg } = *start;
@@ -7520,16 +8022,35 @@ mod thread {
         // Park on this task's baton semaphore until it is first scheduled.
         let sem = lock_state().task_sem(task);
         sem.wait();
-        let ret = routine(arg);
-        thread_finish(task, ret as usize);
+        #[cfg(target_os = "linux")]
+        {
+            let mask = lock_state().signals.mask(task);
+            signals::install_mask(mask);
+        }
+        let ret = {
+            let _guest = crate::panic_boundary::PanicScope::suspend();
+            routine(arg)
+        };
+        thread_finish(task, ret as usize, 0);
         ret
     }
 
-    fn thread_finish(task: TaskId, retval: usize) {
+    fn thread_finish(task: TaskId, retval: usize, exit_status: i32) {
+        #[cfg(not(target_os = "linux"))]
+        let _ = exit_status;
+        #[cfg(target_os = "linux")]
+        signals::clear_tid(task);
         let mut state = lock_state();
         let mut scheduler = RealScheduler;
         if let Err(ThreadError::Fatal(message)) = state.table.exit(&mut scheduler, task, retval) {
             fatal(&message);
+        }
+        #[cfg(target_os = "linux")]
+        state.signals.finish(task);
+        // Detached handles remain targetable while live, then disappear with
+        // their ThreadEntry; completed joinable handles remain until reaped.
+        if !state.table.threads.contains_key(&task) {
+            state.handles.retain(|_, owner| *owner != task);
         }
         // The task is gone from the scheduler; mark this host thread completed so
         // instrumented teardown (TLS destructors under `--yield-points`) takes no
@@ -7547,6 +8068,11 @@ mod thread {
             Err(ThreadError::Posix(errno)) => fatal(&format!(
                 "settling timers after task completion failed ({errno})"
             )),
+        }
+        #[cfg(target_os = "linux")]
+        if state.signals.is_empty() {
+            drop(state);
+            signals::patina_raw_exit_group(exit_status);
         }
         // The completed task never runs again; hand the baton to the next task
         // (if any) and let this host thread return out of the trampoline and
@@ -7572,6 +8098,7 @@ mod thread {
         start: Option<StartRoutine>,
         arg: *mut c_void,
     ) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         let Some(start) = start else {
             return EINVAL;
         };
@@ -7587,6 +8114,8 @@ mod thread {
             Err(message) => fatal(&message),
         };
         state.table.register(task);
+        #[cfg(target_os = "linux")]
+        state.signals.spawn(task, Some(current_task()));
         // The semaphore must exist before the host thread parks on it.
         state.sems.insert(task, Arc::new(baton::Semaphore::new()));
         let payload = Box::into_raw(Box::new(ThreadStart {
@@ -7619,6 +8148,7 @@ mod thread {
         handle: *mut c_void,
         retval_out: *mut *mut c_void,
     ) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         let key = handle as usize;
         let me = current_task();
         let mut state = lock_state();
@@ -7676,6 +8206,7 @@ mod thread {
     /// `handle` must be a `pthread_t` from [`patina_thread_create`].
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_thread_detach(handle: *mut c_void) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         let key = handle as usize;
         let mut state = lock_state();
         let Some(&target) = state.handles.get(&key) else {
@@ -7683,7 +8214,16 @@ mod thread {
         };
         match state.table.detach(target) {
             Ok(()) => {
-                state.handles.remove(&key);
+                if !state.table.threads.contains_key(&target) {
+                    state.handles.remove(&key);
+                }
+                drop(state);
+                // Reap the host vehicle too; its pthread identity remains valid
+                // until completion, exactly as the modeled detached handle does.
+                let rc = unsafe { (crate::hostapi::get().host_pthread_detach)(handle) };
+                if rc != 0 {
+                    fatal("host pthread_detach failed");
+                }
                 0
             }
             Err(error) => error.into_posix(),
@@ -7698,6 +8238,7 @@ mod thread {
     /// C ABI entry point; the argument is an opaque pointer.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_thread_exit(_retval: *mut c_void) -> ! {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         fatal(
             "pthread_exit is not supported by Patina's deterministic thread runtime; \
              return from the thread body instead",
@@ -7720,6 +8261,7 @@ mod thread {
     /// `mutex` must reference a valid `pthread_mutex_t`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_mutex_init(mutex: *mut c_void, _attr: *const c_void) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
             let mut state = lock_state();
             state.table.init_mutex(mutex as usize);
@@ -7731,6 +8273,7 @@ mod thread {
     /// `mutex` must reference a valid `pthread_mutex_t`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_mutex_lock(mutex: *mut c_void) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
             let key = mutex as usize;
             let me = current_task();
@@ -7750,6 +8293,7 @@ mod thread {
     /// `mutex` must reference a valid `pthread_mutex_t`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_mutex_trylock(mutex: *mut c_void) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
             let me = current_task();
             let mut state = lock_state();
@@ -7761,6 +8305,7 @@ mod thread {
     /// `mutex` must reference a valid `pthread_mutex_t`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_mutex_unlock(mutex: *mut c_void) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
             let me = current_task();
             let mut state = lock_state();
@@ -7776,6 +8321,7 @@ mod thread {
     /// `mutex` must reference a valid `pthread_mutex_t`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_mutex_destroy(mutex: *mut c_void) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
             let mut state = lock_state();
             match state.table.destroy_mutex(mutex as usize) {
@@ -7806,6 +8352,7 @@ mod thread {
     #[cfg(target_os = "macos")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_os_unfair_lock_lock(lock: *mut c_void) {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         // Run the lock natively — never through the deterministic model — for an
         // allocator-internal `os_unfair_lock` in either of the two windows where
         // one appears: (1) the bootstrap window, where a custom global allocator's
@@ -7852,6 +8399,7 @@ mod thread {
     #[cfg(target_os = "macos")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_os_unfair_lock_trylock(lock: *mut c_void) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         // Allocator-internal lock: run natively (see `patina_os_unfair_lock_lock`).
         // The real `os_unfair_lock_trylock` returns a C `bool`.
         if super::in_shim_critical() || super::in_shim_bootstrap() {
@@ -7874,6 +8422,7 @@ mod thread {
     #[cfg(target_os = "macos")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_os_unfair_lock_unlock(lock: *mut c_void) {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         // Allocator-internal lock: run natively (see `patina_os_unfair_lock_lock`).
         // A lock taken natively (bootstrap, or reentrant under a held spinlock) is
         // released natively too; the allocator's lock/unlock pair is balanced
@@ -7914,6 +8463,7 @@ mod thread {
     /// `lock` must reference a valid `pthread_rwlock_t`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_rwlock_init(lock: *mut c_void, _attr: *const c_void) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
             let mut state = lock_state();
             state.table.init_rwlock(lock as usize);
@@ -7925,6 +8475,7 @@ mod thread {
     /// `lock` must reference a valid `pthread_rwlock_t`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_rwlock_rdlock(lock: *mut c_void) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
             let key = lock as usize;
             let me = current_task();
@@ -7944,6 +8495,7 @@ mod thread {
     /// `lock` must reference a valid `pthread_rwlock_t`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_rwlock_wrlock(lock: *mut c_void) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
             let key = lock as usize;
             let me = current_task();
@@ -7963,6 +8515,7 @@ mod thread {
     /// `lock` must reference a valid `pthread_rwlock_t`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_rwlock_tryrdlock(lock: *mut c_void) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
             let me = current_task();
             let mut state = lock_state();
@@ -7974,6 +8527,7 @@ mod thread {
     /// `lock` must reference a valid `pthread_rwlock_t`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_rwlock_trywrlock(lock: *mut c_void) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
             let me = current_task();
             let mut state = lock_state();
@@ -7985,6 +8539,7 @@ mod thread {
     /// `lock` must reference a valid `pthread_rwlock_t` the caller holds.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_rwlock_unlock(lock: *mut c_void) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
             let me = current_task();
             let mut state = lock_state();
@@ -8000,6 +8555,7 @@ mod thread {
     /// `lock` must reference a valid `pthread_rwlock_t`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_rwlock_destroy(lock: *mut c_void) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
             let mut state = lock_state();
             match state.table.destroy_rwlock(lock as usize) {
@@ -8013,6 +8569,7 @@ mod thread {
     /// `cond` must reference a valid `pthread_cond_t`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_cond_init(cond: *mut c_void, _attr: *const c_void) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
             let mut state = lock_state();
             state.table.init_cond(cond as usize);
@@ -8025,6 +8582,7 @@ mod thread {
     /// must own `mutex`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_cond_wait(cond: *mut c_void, mutex: *mut c_void) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
             let me = current_task();
             let mut state = lock_state();
@@ -8082,6 +8640,7 @@ mod thread {
         mutex: *mut c_void,
         abstime: *const c_void,
     ) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         if abstime.is_null() {
             return EINVAL;
         }
@@ -8105,7 +8664,13 @@ mod thread {
         {
             return error.into_posix();
         }
-        match state.block_timed(me, "cond-timedwait", ClockKind::Realtime, deadline) {
+        match state.block_timed(
+            me,
+            "cond-timedwait",
+            Wait::new(BlockClass::Sync, vec![WaiterLoc::Cond(cond_key, mutex_key)]),
+            ClockKind::Realtime,
+            deadline,
+        ) {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Ok(Step::Continue) => drop(state),
             Err(error) => return error.into_posix(),
@@ -8130,6 +8695,7 @@ mod thread {
     /// `cond` must reference a valid `pthread_cond_t`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_cond_signal(cond: *mut c_void) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
             let mut state = lock_state();
             let mut scheduler = RealScheduler;
@@ -8144,6 +8710,7 @@ mod thread {
     /// `cond` must reference a valid `pthread_cond_t`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_cond_broadcast(cond: *mut c_void) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
             let mut state = lock_state();
             let mut scheduler = RealScheduler;
@@ -8158,6 +8725,7 @@ mod thread {
     /// `cond` must reference a valid `pthread_cond_t`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_cond_destroy(cond: *mut c_void) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         managed_op!({
             let mut state = lock_state();
             match state.table.destroy_cond(cond as usize) {
@@ -8211,6 +8779,7 @@ mod thread {
     #[cfg(target_os = "macos")]
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_dispatch_time(when: u64, delta: i64) -> u64 {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         if when == DISPATCH_TIME_FOREVER {
             return DISPATCH_TIME_FOREVER;
         }
@@ -8232,6 +8801,7 @@ mod thread {
     #[cfg(target_os = "macos")]
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_dispatch_semaphore_create(value: isize) -> *mut c_void {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         let mut state = lock_state();
         let handle = state.next_dispatch_handle;
         state.next_dispatch_handle = handle.wrapping_add(1).max(1);
@@ -8254,6 +8824,7 @@ mod thread {
     #[cfg(target_os = "macos")]
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_dispatch_release(object: *mut c_void) {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         lock_state().dispatch.remove(&(object as usize));
     }
 
@@ -8268,6 +8839,7 @@ mod thread {
     #[cfg(target_os = "macos")]
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_dispatch_semaphore_wait(sem: *mut c_void, timeout: u64) -> isize {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         let key = sem as usize;
         if sched_point().is_err() {
             fatal("scheduler error entering dispatch_semaphore_wait");
@@ -8302,7 +8874,7 @@ mod thread {
             .waiters
             .push_back(me);
         if timeout == DISPATCH_TIME_FOREVER {
-            match state.block(me, "dispatch-sem-wait") {
+            match state.block(me, "dispatch-sem-wait", Wait::new(BlockClass::Sync, vec![])) {
                 Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                 Ok(Step::Continue) => {
                     fatal("dispatch semaphore wait parked without transferring the baton")
@@ -8320,7 +8892,13 @@ mod thread {
                 Err(_) => fatal("dispatch semaphore timed wait could not read the virtual clock"),
             };
             let deadline = now.saturating_add(timeout);
-            match state.block_timed(me, "dispatch-sem-timedwait", ClockKind::Monotonic, deadline) {
+            match state.block_timed(
+                me,
+                "dispatch-sem-timedwait",
+                Wait::new(BlockClass::Sync, vec![]),
+                ClockKind::Monotonic,
+                deadline,
+            ) {
                 Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                 Ok(Step::Continue) => drop(state),
                 Err(ThreadError::Fatal(message)) => fatal(&message),
@@ -8348,6 +8926,7 @@ mod thread {
     #[cfg(target_os = "macos")]
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_dispatch_semaphore_signal(sem: *mut c_void) -> isize {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         let key = sem as usize;
         if sched_point().is_err() {
             fatal("scheduler error entering dispatch_semaphore_signal");
@@ -8577,6 +9156,8 @@ mod thread {
     fn wake_all(waiters: Vec<TaskId>) {
         let mut scheduler = RealScheduler;
         for task in waiters {
+            #[cfg(target_os = "linux")]
+            lock_state().remove_signal_wait(task);
             if let Err(message) = scheduler.wake(task) {
                 fatal(&message);
             }
@@ -8644,6 +9225,7 @@ mod thread {
         nonblocking: c_int,
         cloexec: c_int,
     ) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         let mut state = lock_state();
         if let Err(error) = state.ensure_active() {
             return super::fail(error.into_posix());
@@ -8687,6 +9269,7 @@ mod thread {
     /// C ABI entry point.
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_net_kind(guest_fd: c_int) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         let Ok(fd) = socket_handle(guest_fd) else {
             return -1;
         };
@@ -8704,6 +9287,7 @@ mod thread {
     /// C ABI entry point; `guest_fd` names a socket from [`patina_net_socket`].
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_net_bind(guest_fd: c_int, ip: u32, port: u16) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         match socket_handle(guest_fd) {
             Ok(fd) => net_bind(fd, ip, port),
             Err(errno) => super::fail(errno),
@@ -8776,6 +9360,7 @@ mod thread {
     /// C ABI entry point.
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_net_connect(guest_fd: c_int, ip: u32, port: u16) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         match socket_handle(guest_fd) {
             Ok(fd) => net_connect(fd, ip, port),
             Err(errno) => super::fail(errno),
@@ -8803,6 +9388,7 @@ mod thread {
     /// C ABI entry point.
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_net_listen(guest_fd: c_int, backlog: c_int) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         match socket_handle(guest_fd) {
             Ok(fd) => net_listen(fd, backlog),
             Err(errno) => super::fail(errno),
@@ -8855,6 +9441,7 @@ mod thread {
         nonblocking: c_int,
         cloexec: c_int,
     ) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         let (fd, listener_nonblocking) = match socket_entry(guest_fd) {
             Ok(entry) => entry,
             Err(errno) => return super::fail(errno),
@@ -8950,13 +9537,21 @@ mod thread {
                         .expect("socket was checked")
                         .recv_waiters
                         .push_back(me);
-                    let step = state.block(me, "tcp-accept");
+                    let step = state.block(
+                        me,
+                        "tcp-accept",
+                        Wait::new(BlockClass::Io, vec![WaiterLoc::SockRecv(fd)]),
+                    );
                     match step {
                         Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                         Ok(Step::Continue) => drop(state),
                         Err(error) => return error.into_posix(),
                     }
                     lock_state().timed_out.remove(&me);
+                    #[cfg(target_os = "linux")]
+                    if signals::resume() == signals::Resumed::Eintr {
+                        return super::fail(super::EINTR);
+                    }
                 }
                 Err(errno) => return super::fail(errno),
             }
@@ -8969,6 +9564,7 @@ mod thread {
     /// C ABI entry point.
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_net_tcp_connect(guest_fd: c_int, ip: u32, port: u16) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         match socket_handle(guest_fd) {
             Ok(fd) => net_tcp_connect(fd, ip, port),
             Err(errno) => super::fail(errno),
@@ -9067,6 +9663,7 @@ mod thread {
         ip: u32,
         port: u16,
     ) -> isize {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         match socket_handle(guest_fd) {
             // SAFETY: forwarded from this function's own contract.
             Ok(fd) => unsafe { net_sendto(fd, buf, len, ip, port) },
@@ -9101,6 +9698,7 @@ mod thread {
         buf: *const c_void,
         len: usize,
     ) -> isize {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         match socket_handle(guest_fd) {
             // SAFETY: forwarded from this function's own contract.
             Ok(fd) => unsafe { net_send(fd, buf, len) },
@@ -9145,10 +9743,14 @@ mod thread {
         guest_fd: c_int,
         buf: *const c_void,
         len: usize,
+        flags: c_int,
     ) -> isize {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         match socket_entry(guest_fd) {
             // SAFETY: forwarded from this function's own contract.
-            Ok((fd, nonblocking)) => unsafe { net_stream_send(fd, nonblocking, buf, len) },
+            Ok((fd, nonblocking)) => unsafe {
+                net_stream_send(fd, nonblocking, buf, len, flags & MSG_NOSIGNAL != 0)
+            },
             Err(errno) => super::fail(errno) as isize,
         }
     }
@@ -9160,6 +9762,7 @@ mod thread {
         nonblocking: bool,
         buf: *const c_void,
         len: usize,
+        nosignal: bool,
     ) -> isize {
         if let Err(errno) = sched_point() {
             return super::fail(errno) as isize;
@@ -9201,18 +9804,32 @@ mod thread {
                         .expect("socket was checked")
                         .send_waiters
                         .push_back(me);
-                    let step = state.block(me, "tcp-send");
+                    let step = state.block(
+                        me,
+                        "tcp-send",
+                        Wait::new(BlockClass::Io, vec![WaiterLoc::SockSend(fd)]),
+                    );
                     match step {
                         Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                         Ok(Step::Continue) => drop(state),
                         Err(error) => return super::fail(error.into_posix()) as isize,
                     }
                     lock_state().timed_out.remove(&me);
+                    #[cfg(target_os = "linux")]
+                    if signals::resume() == signals::Resumed::Eintr {
+                        return super::fail(super::EINTR) as isize;
+                    }
                 }
                 Ok(_) => {
                     fatal("TCP send returned more bytes than requested after zero-length check")
                 }
-                Err(errno) => return super::fail(errno) as isize,
+                Err(errno) => {
+                    drop(state);
+                    if errno == super::EPIPE && !nosignal {
+                        broken_pipe_signal();
+                    }
+                    return super::fail(errno) as isize;
+                }
             }
         }
     }
@@ -9255,6 +9872,7 @@ mod thread {
         ip_out: *mut u32,
         port_out: *mut u16,
     ) -> isize {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         match socket_entry(guest_fd) {
             // SAFETY: forwarded from this function's own contract.
             Ok((fd, nonblocking)) => unsafe {
@@ -9335,10 +9953,18 @@ mod thread {
                         (None, None) => None,
                     };
                     let step = match park_deadline {
-                        Some(deadline) => {
-                            state.block_timed(me, "net-recv", ClockKind::Monotonic, deadline)
-                        }
-                        None => state.block(me, "net-recv"),
+                        Some(deadline) => state.block_timed(
+                            me,
+                            "net-recv",
+                            Wait::new(BlockClass::Io, vec![WaiterLoc::SockRecv(fd)]),
+                            ClockKind::Monotonic,
+                            deadline,
+                        ),
+                        None => state.block(
+                            me,
+                            "net-recv",
+                            Wait::new(BlockClass::Io, vec![WaiterLoc::SockRecv(fd)]),
+                        ),
                     };
                     match step {
                         Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
@@ -9346,6 +9972,10 @@ mod thread {
                         Err(error) => return super::fail(error.into_posix()) as isize,
                     }
                     lock_state().timed_out.remove(&me);
+                    #[cfg(target_os = "linux")]
+                    if signals::resume() == signals::Resumed::Eintr {
+                        return super::fail(super::EINTR) as isize;
+                    }
                 }
                 Err(errno) => return super::fail(errno) as isize,
             }
@@ -9362,6 +9992,7 @@ mod thread {
         buf: *mut c_void,
         len: usize,
     ) -> isize {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         match socket_entry(guest_fd) {
             // SAFETY: forwarded from this function's own contract.
             Ok((fd, nonblocking)) => unsafe { net_recv(fd, nonblocking, buf, len) },
@@ -9395,6 +10026,7 @@ mod thread {
         buf: *mut c_void,
         len: usize,
     ) -> isize {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         match socket_entry(guest_fd) {
             // SAFETY: forwarded from this function's own contract.
             Ok((fd, nonblocking)) => unsafe { net_stream_recv(fd, nonblocking, buf, len) },
@@ -9440,7 +10072,9 @@ mod thread {
         let kind = lock_state().net.sockets.get(&fd).map(|socket| socket.kind);
         match kind {
             // SAFETY: forwarded from this function's own contract.
-            Some(SocketKind::Stream) => unsafe { net_stream_send(fd, nonblocking, buf, len) },
+            Some(SocketKind::Stream) => unsafe {
+                net_stream_send(fd, nonblocking, buf, len, false)
+            },
             // SAFETY: as above.
             Some(SocketKind::Datagram) => unsafe { net_send(fd, buf, len) },
             Some(SocketKind::StreamUnbound | SocketKind::StreamListener) => {
@@ -9510,10 +10144,18 @@ mod thread {
                         Err(errno) => return super::fail(errno) as isize,
                     };
                     let step = match delivery {
-                        Some(deadline) => {
-                            state.block_timed(me, "tcp-recv", ClockKind::Monotonic, deadline)
-                        }
-                        None => state.block(me, "tcp-recv"),
+                        Some(deadline) => state.block_timed(
+                            me,
+                            "tcp-recv",
+                            Wait::new(BlockClass::Io, vec![WaiterLoc::SockRecv(fd)]),
+                            ClockKind::Monotonic,
+                            deadline,
+                        ),
+                        None => state.block(
+                            me,
+                            "tcp-recv",
+                            Wait::new(BlockClass::Io, vec![WaiterLoc::SockRecv(fd)]),
+                        ),
                     };
                     match step {
                         Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
@@ -9521,6 +10163,10 @@ mod thread {
                         Err(error) => return super::fail(error.into_posix()) as isize,
                     }
                     lock_state().timed_out.remove(&me);
+                    #[cfg(target_os = "linux")]
+                    if signals::resume() == signals::Resumed::Eintr {
+                        return super::fail(super::EINTR) as isize;
+                    }
                 }
                 Err(errno) => return super::fail(errno) as isize,
             }
@@ -9533,6 +10179,7 @@ mod thread {
     /// C ABI entry point.
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_net_shutdown(guest_fd: c_int, how: c_int) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         match socket_handle(guest_fd) {
             Ok(fd) => net_shutdown(fd, how),
             Err(errno) => super::fail(errno),
@@ -9591,6 +10238,7 @@ mod thread {
         ip_out: *mut u32,
         port_out: *mut u16,
     ) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         match socket_handle(guest_fd) {
             // SAFETY: forwarded from this function's own contract.
             Ok(fd) => unsafe { net_getsockname(fd, ip_out, port_out) },
@@ -9626,6 +10274,7 @@ mod thread {
         ip_out: *mut u32,
         port_out: *mut u16,
     ) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         match socket_handle(guest_fd) {
             // SAFETY: forwarded from this function's own contract.
             Ok(fd) => unsafe { net_getpeername(fd, ip_out, port_out) },
@@ -9658,6 +10307,7 @@ mod thread {
     /// blocking receive by that many nanoseconds of virtual time from entry.
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_net_set_read_timeout(guest_fd: c_int, nanos: u64) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         let fd = match socket_handle(guest_fd) {
             Ok(fd) => fd,
             Err(errno) => return super::fail(errno),
@@ -9683,6 +10333,7 @@ mod thread {
     /// point at a writable `uint32_t`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn patina_dns_resolve(name: *const c_char, ip: *mut u32) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         if let Err(errno) = sched_point() {
             return super::fail(errno);
         }
@@ -9924,7 +10575,7 @@ mod thread {
 
         /// Push as many of `src`'s bytes as fit. `WouldBlock` when the buffer is
         /// full and the reader is open (the caller parks); a closed reader is
-        /// `BrokenPipe` (the caller returns `EPIPE`, never a signal).
+        /// `BrokenPipe` (the caller generates SIGPIPE before returning EPIPE).
         fn try_write(&mut self, src: &[u8]) -> PipeWrite {
             if self.read_closed() {
                 return PipeWrite::BrokenPipe;
@@ -9992,6 +10643,7 @@ mod thread {
         nonblocking: c_int,
         cloexec: c_int,
     ) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         if read_fd_out.is_null() || write_fd_out.is_null() {
             return super::fail(EINVAL);
         }
@@ -10091,6 +10743,7 @@ mod thread {
         nonblocking: c_int,
         cloexec: c_int,
     ) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         if fd0_out.is_null() || fd1_out.is_null() {
             return super::fail(EINVAL);
         }
@@ -10297,7 +10950,11 @@ mod thread {
                 } else {
                     "fifo-open-write"
                 };
-                let step = state.block(me, reason);
+                let step = state.block(
+                    me,
+                    reason,
+                    Wait::new(BlockClass::Io, vec![WaiterLoc::PipeOpen(channel_id)]),
+                );
                 match step {
                     Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                     Ok(Step::Continue) => drop(state),
@@ -10314,6 +10971,11 @@ mod thread {
                     }
                 }
                 lock_state().timed_out.remove(&me);
+                #[cfg(target_os = "linux")]
+                if signals::resume() == signals::Resumed::Eintr {
+                    super::patina_close(fd);
+                    return super::fail(super::EINTR);
+                }
             }
         }
         super::set_errno(0);
@@ -10342,6 +11004,7 @@ mod thread {
         buf: *mut c_void,
         len: usize,
     ) -> isize {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         match pipe_entry(guest_fd) {
             // SAFETY: forwarded from this function's own contract.
             Ok((end, nonblocking)) => unsafe { pipe_read(end as u64, nonblocking, buf, len) },
@@ -10404,13 +11067,21 @@ mod thread {
                     if let Some(channel) = state.net.pipe_channels.get_mut(&channel) {
                         channel.recv_waiters.push_back(me);
                     }
-                    let step = state.block(me, "pipe-read");
+                    let step = state.block(
+                        me,
+                        "pipe-read",
+                        Wait::new(BlockClass::Io, vec![WaiterLoc::PipeRecv(channel)]),
+                    );
                     match step {
                         Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                         Ok(Step::Continue) => drop(state),
                         Err(error) => return super::fail(error.into_posix()) as isize,
                     }
                     lock_state().timed_out.remove(&me);
+                    #[cfg(target_os = "linux")]
+                    if signals::resume() == signals::Resumed::Eintr {
+                        return super::fail(super::EINTR) as isize;
+                    }
                 }
             }
         }
@@ -10426,10 +11097,14 @@ mod thread {
         guest_fd: c_int,
         buf: *const c_void,
         len: usize,
+        flags: c_int,
     ) -> isize {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         match pipe_entry(guest_fd) {
             // SAFETY: forwarded from this function's own contract.
-            Ok((end, nonblocking)) => unsafe { pipe_write(end as u64, nonblocking, buf, len) },
+            Ok((end, nonblocking)) => unsafe {
+                pipe_write(end as u64, nonblocking, buf, len, flags & MSG_NOSIGNAL != 0)
+            },
             Err(errno) => super::fail(errno) as isize,
         }
     }
@@ -10441,6 +11116,7 @@ mod thread {
         nonblocking: bool,
         buf: *const c_void,
         len: usize,
+        nosignal: bool,
     ) -> isize {
         let fd = handle as c_int;
         if let Err(errno) = sched_point() {
@@ -10477,10 +11153,13 @@ mod thread {
                     wake_all(waiters);
                     return isize::try_from(count).unwrap_or(isize::MAX);
                 }
-                // Peer reader closed: EPIPE, and crucially NO SIGPIPE — the shim
-                // delivers no signals, so a broken-pipe write is a clean errno the
-                // guest handles, never a process-killing signal.
-                PipeWrite::BrokenPipe => return super::fail(super::EPIPE) as isize,
+                PipeWrite::BrokenPipe => {
+                    drop(state);
+                    if !nosignal {
+                        broken_pipe_signal();
+                    }
+                    return super::fail(super::EPIPE) as isize;
+                }
                 PipeWrite::WouldBlock => {
                     if nonblocking {
                         return super::fail(EWOULDBLOCK) as isize;
@@ -10488,15 +11167,44 @@ mod thread {
                     if let Some(channel) = state.net.pipe_channels.get_mut(&channel) {
                         channel.send_waiters.push_back(me);
                     }
-                    let step = state.block(me, "pipe-write");
+                    let step = state.block(
+                        me,
+                        "pipe-write",
+                        Wait::new(BlockClass::Io, vec![WaiterLoc::PipeSend(channel)]),
+                    );
                     match step {
                         Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                         Ok(Step::Continue) => drop(state),
                         Err(error) => return super::fail(error.into_posix()) as isize,
                     }
                     lock_state().timed_out.remove(&me);
+                    #[cfg(target_os = "linux")]
+                    if signals::resume() == signals::Resumed::Eintr {
+                        return super::fail(super::EINTR) as isize;
+                    }
                 }
             }
+        }
+    }
+
+    fn broken_pipe_signal() {
+        #[cfg(target_os = "linux")]
+        {
+            // The channel lock must be released before the shared generation entry.
+            let rc = unsafe {
+                signals::generate_signal(
+                    signals::GenerationTarget::Thread {
+                        tgid: Some(1),
+                        tid: current_task().0 as i32,
+                    },
+                    signals::SIGPIPE,
+                    signals::GenerationInfo::User,
+                )
+            };
+            if rc != 0 {
+                fatal("SIGPIPE generation failed");
+            }
+            signals::deliver();
         }
     }
 
@@ -10597,6 +11305,7 @@ mod thread {
     /// description that is not a pipe end.
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_pipe_size(guest_fd: c_int) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         let end = match class_entry(guest_fd) {
             Ok(resolved) if resolved.kind == FdKind::Pipe => resolved.handle as c_int,
             Ok(_) => return super::fail(EINVAL),
@@ -10621,6 +11330,7 @@ mod thread {
     /// below the bytes currently buffered. Returns the new capacity.
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_pipe_set_size(guest_fd: c_int, size: c_int) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         let end = match class_entry(guest_fd) {
             Ok(resolved) if resolved.kind == FdKind::Pipe => resolved.handle as c_int,
             Ok(_) => return super::fail(EINVAL),
@@ -10685,6 +11395,7 @@ mod thread {
     #[cfg(target_os = "linux")]
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_eventfd(initval: u32, flags: c_int) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         const EFD_SEMAPHORE: c_int = 0o1;
         const EFD_CLOEXEC: c_int = 0o2000000;
         const EFD_NONBLOCK: c_int = 0o4000;
@@ -10773,13 +11484,21 @@ mod thread {
                 return super::fail(EWOULDBLOCK) as isize;
             }
             efd.read_waiters.push_back(me);
-            let step = state.block(me, "eventfd-read");
+            let step = state.block(
+                me,
+                "eventfd-read",
+                Wait::new(BlockClass::Io, vec![WaiterLoc::EventFdRecv(fd)]),
+            );
             match step {
                 Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                 Ok(Step::Continue) => drop(state),
                 Err(error) => return super::fail(error.into_posix()) as isize,
             }
             lock_state().timed_out.remove(&me);
+            #[cfg(target_os = "linux")]
+            if signals::resume() == signals::Resumed::Eintr {
+                return super::fail(super::EINTR) as isize;
+            }
         }
     }
 
@@ -10926,6 +11645,13 @@ mod thread {
             FdKind::Pipe => pipe_readiness(state, handle),
             FdKind::Socket => socket_readiness(state, handle),
             #[cfg(target_os = "linux")]
+            FdKind::SignalFd => FdReadiness {
+                readable: signals::fd::readable(state, resolved.handle, current_task()),
+                writable: false,
+                read_eof: false,
+                write_eof: false,
+            },
+            #[cfg(target_os = "linux")]
             FdKind::EventFd => {
                 // Deterministic eventfd counter: readable iff nonzero; always
                 // writable (a write that would overflow fails closed loudly
@@ -11053,7 +11779,15 @@ mod thread {
     /// unlinked on resume regardless of which source woke it. Reactor-neutral: a
     /// kqueue or epoll frontend both watch the same virtual pipe/socket queues.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[derive(Clone, Copy)]
     enum WaiterLoc {
+        PipeOpen(u64),
+        Futex(usize),
+        Mutex(usize),
+        RwRead(usize),
+        RwWrite(usize),
+        Cond(usize, usize),
+        Join(TaskId),
         PipeRecv(u64),
         PipeSend(u64),
         SockRecv(c_int),
@@ -11062,6 +11796,8 @@ mod thread {
         /// writable, so there is no write-direction queue).
         #[cfg(target_os = "linux")]
         EventFdRecv(c_int),
+        #[cfg(target_os = "linux")]
+        SignalFdRecv(u64),
     }
 
     /// Register `me` on the waiter queue of every watched `(direction, fd)`
@@ -11088,6 +11824,16 @@ mod thread {
             let fd = resolved.handle as c_int;
             // Eventfd (Linux): only the readable direction has a queue; a write
             // watch needs no waiter because an eventfd is always writable.
+            #[cfg(target_os = "linux")]
+            if resolved.kind == FdKind::SignalFd {
+                if dir == ReadyDir::Read {
+                    if let Some(fd) = state.signals.signalfds.get_mut(&resolved.handle) {
+                        fd.waiters.push_back(me);
+                        locs.push(WaiterLoc::SignalFdRecv(resolved.handle));
+                    }
+                }
+                continue;
+            }
             #[cfg(target_os = "linux")]
             if resolved.kind == FdKind::EventFd {
                 if dir == ReadyDir::Read {
@@ -11142,7 +11888,7 @@ mod thread {
     /// Unlink `me` from every queue [`register_readiness_waiters`] enqueued it on,
     /// so a later wake of that queue never targets an already-resumed task.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn unregister_readiness_waiters(state: &mut ThreadRuntime, me: TaskId, locs: &[WaiterLoc]) {
+    fn unregister_waiters(state: &mut ThreadRuntime, me: TaskId, locs: &[WaiterLoc]) {
         let remove = |queue: &mut VecDeque<TaskId>| {
             if let Some(index) = queue.iter().position(|task| *task == me) {
                 queue.remove(index);
@@ -11150,6 +11896,51 @@ mod thread {
         };
         for loc in locs {
             match *loc {
+                WaiterLoc::PipeOpen(channel) => {
+                    if let Some(ch) = state.net.pipe_channels.get_mut(&channel) {
+                        remove(&mut ch.open_waiters);
+                    }
+                }
+                WaiterLoc::Futex(address) => {
+                    if let Some(queue) = state.futexes.get_mut(&address) {
+                        remove(queue);
+                    }
+                }
+                WaiterLoc::Mutex(key) => {
+                    if let Some(entry) = state.table.mutexes.get_mut(&key) {
+                        if let Some(index) = entry.waiters.iter().position(|task| *task == me) {
+                            entry.waiters.remove(index);
+                        }
+                    }
+                }
+                WaiterLoc::RwRead(key) | WaiterLoc::RwWrite(key) => {
+                    if let Some(entry) = state.table.rwlocks.get_mut(&key) {
+                        let queue = if matches!(loc, WaiterLoc::RwRead(_)) {
+                            &mut entry.read_waiters
+                        } else {
+                            &mut entry.write_waiters
+                        };
+                        if let Some(index) = queue.iter().position(|task| *task == me) {
+                            queue.remove(index);
+                        }
+                    }
+                }
+                WaiterLoc::Cond(cond, mutex) => {
+                    if let Some(entry) = state.table.conds.get_mut(&cond) {
+                        if let Some(index) = entry.waiters.iter().position(|(task, _)| *task == me)
+                        {
+                            entry.waiters.remove(index);
+                        }
+                    }
+                    unregister_waiters(state, me, &[WaiterLoc::Mutex(mutex)]);
+                }
+                WaiterLoc::Join(target) => {
+                    if let Some(entry) = state.table.threads.get_mut(&target) {
+                        if entry.joiner == Some(me) {
+                            entry.joiner = None;
+                        }
+                    }
+                }
                 WaiterLoc::PipeRecv(channel) => {
                     if let Some(ch) = state.net.pipe_channels.get_mut(&channel) {
                         remove(&mut ch.recv_waiters);
@@ -11168,6 +11959,12 @@ mod thread {
                 WaiterLoc::SockSend(fd) => {
                     if let Some(socket) = state.net.sockets.get_mut(&fd) {
                         remove(&mut socket.send_waiters);
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                WaiterLoc::SignalFdRecv(handle) => {
+                    if let Some(fd) = state.signals.signalfds.get_mut(&handle) {
+                        remove(&mut fd.waiters);
                     }
                 }
                 #[cfg(target_os = "linux")]
@@ -11193,9 +11990,10 @@ mod thread {
         use patina_dst_abi::ClockKind;
 
         use super::{
-            FdKind, O_READ, O_WRITE, PatinaKevent, ReadyDir, Step, TaskId, ThreadRuntime,
-            current_task, fatal, fd_readiness, lock_state, register_readiness_waiters, sched_point,
-            switch_and_park, unregister_readiness_waiters, wake_all, with_context_raw,
+            BlockClass, FdKind, O_READ, O_WRITE, PatinaKevent, ReadyDir, Step, TaskId,
+            ThreadRuntime, Wait, current_task, fatal, fd_readiness, lock_state,
+            register_readiness_waiters, sched_point, switch_and_park, unregister_waiters, wake_all,
+            with_context_raw,
         };
 
         // macOS <sys/event.h> filter identifiers (the reactor is macOS-only).
@@ -11288,6 +12086,7 @@ mod thread {
         /// C ABI entry point.
         #[unsafe(no_mangle)]
         pub extern "C" fn patina_kqueue() -> c_int {
+            let _panic_scope = crate::panic_boundary::PanicScope::enter();
             let mut state = lock_state();
             if let Err(error) = state.ensure_active() {
                 return super::super::fail(error.into_posix());
@@ -11357,6 +12156,7 @@ mod thread {
             data: i64,
             udata: usize,
         ) -> c_int {
+            let _panic_scope = crate::panic_boundary::PanicScope::enter();
             let me_wake: Vec<TaskId>;
             {
                 let mut state = lock_state();
@@ -11712,6 +12512,7 @@ mod thread {
             mode: c_int,
             timeout_nanos: u64,
         ) -> c_int {
+            let _panic_scope = crate::panic_boundary::PanicScope::enter();
             if let Err(errno) = sched_point() {
                 return super::super::fail(errno);
             }
@@ -11792,23 +12593,29 @@ mod thread {
                         .push_back(me);
                 }
                 let step = match park_deadline {
-                    Some(deadline) => {
-                        state.block_timed(me, "kevent", ClockKind::Monotonic, deadline)
+                    Some(deadline) => state.block_timed(
+                        me,
+                        "kevent",
+                        Wait::new(BlockClass::Readiness, locs.clone()),
+                        ClockKind::Monotonic,
+                        deadline,
+                    ),
+                    None => {
+                        state.block(me, "kevent", Wait::new(BlockClass::Readiness, locs.clone()))
                     }
-                    None => state.block(me, "kevent"),
                 };
                 match step {
                     Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                     Ok(Step::Continue) => drop(state),
                     Err(error) => {
                         let mut state = lock_state();
-                        unregister_readiness_waiters(&mut state, me, &locs);
+                        unregister_waiters(&mut state, me, &locs);
                         detach_user_waiter(&mut state, id, me);
                         return super::super::fail(error.into_posix());
                     }
                 }
                 let mut state = lock_state();
-                unregister_readiness_waiters(&mut state, me, &locs);
+                unregister_waiters(&mut state, me, &locs);
                 detach_user_waiter(&mut state, id, me);
                 state.timed_out.remove(&me);
                 drop(state);
@@ -11858,6 +12665,7 @@ mod thread {
     // scheduler parks/wakes are recorded.
     #[cfg(target_os = "linux")]
     mod epoll {
+        use super::{BlockClass, Wait};
         use std::collections::BTreeMap;
         use std::ffi::{c_int, c_void};
 
@@ -11866,7 +12674,7 @@ mod thread {
         use super::{
             DescId, EPERM, FdKind, O_READ, O_WRITE, ReadyDir, Step, ThreadRuntime, current_task,
             fatal, fd_readiness, lock_state, register_readiness_waiters, sched_point,
-            switch_and_park, unregister_readiness_waiters, with_context_raw,
+            switch_and_park, unregister_waiters, with_context_raw,
         };
 
         // <sys/epoll.h> control ops and event bits (the reactor is Linux-only).
@@ -11972,6 +12780,7 @@ mod thread {
         /// C ABI entry point.
         #[unsafe(no_mangle)]
         pub extern "C" fn patina_epoll_create1(flags: c_int) -> c_int {
+            let _panic_scope = crate::panic_boundary::PanicScope::enter();
             if flags & !EPOLL_CLOEXEC != 0 {
                 return super::super::fail(super::EINVAL);
             }
@@ -12023,6 +12832,7 @@ mod thread {
             fd: c_int,
             event: *const EpollEvent,
         ) -> c_int {
+            let _panic_scope = crate::panic_boundary::PanicScope::enter();
             let mut state = lock_state();
             // The kernel's `do_epoll_ctl` order: both numbers must name
             // something (EBADF, `epfd` first), the target must be pollable
@@ -12046,6 +12856,7 @@ mod thread {
                 FdKind::Pipe
                 | FdKind::Socket
                 | FdKind::EventFd
+                | FdKind::SignalFd
                 | FdKind::Stdin
                 | FdKind::Stdout
                 | FdKind::Stderr => {}
@@ -12144,6 +12955,16 @@ mod thread {
                 return (0, 0);
             };
             let fd = resolved.handle as c_int;
+            if resolved.kind == FdKind::SignalFd {
+                return (
+                    state
+                        .signals
+                        .signalfds
+                        .get(&resolved.handle)
+                        .map_or(0, |fd| fd.arrivals),
+                    0,
+                );
+            }
             if resolved.kind != FdKind::Pipe && resolved.kind != FdKind::EventFd {
                 return (0, 0);
             }
@@ -12315,6 +13136,7 @@ mod thread {
             maxevents: c_int,
             timeout_ms: c_int,
         ) -> c_int {
+            let _panic_scope = crate::panic_boundary::PanicScope::enter();
             if let Err(errno) = sched_point() {
                 return super::super::fail(errno);
             }
@@ -12373,23 +13195,36 @@ mod thread {
                 let locs = register_readiness_waiters(&mut state, me, &watched);
                 let step = if timeout_ms > 0 {
                     let deadline = timeout_deadline.expect("timeout deadline fixed above");
-                    state.block_timed(me, "epoll-wait", ClockKind::Monotonic, deadline)
+                    state.block_timed(
+                        me,
+                        "epoll-wait",
+                        Wait::new(BlockClass::Readiness, locs.clone()),
+                        ClockKind::Monotonic,
+                        deadline,
+                    )
                 } else {
-                    state.block(me, "epoll-wait")
+                    state.block(
+                        me,
+                        "epoll-wait",
+                        Wait::new(BlockClass::Readiness, locs.clone()),
+                    )
                 };
                 match step {
                     Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
                     Ok(Step::Continue) => drop(state),
                     Err(error) => {
                         let mut state = lock_state();
-                        unregister_readiness_waiters(&mut state, me, &locs);
+                        unregister_waiters(&mut state, me, &locs);
                         return super::super::fail(error.into_posix());
                     }
                 }
                 let mut state = lock_state();
-                unregister_readiness_waiters(&mut state, me, &locs);
+                unregister_waiters(&mut state, me, &locs);
                 state.timed_out.remove(&me);
                 drop(state);
+                if super::signals::resume() == super::signals::Resumed::Eintr {
+                    return super::super::fail(super::super::EINTR);
+                }
             }
         }
 
@@ -12452,24 +13287,41 @@ mod thread {
     /// `addr` must be the address of a live, aligned 4-byte futex word.
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_futex_wait(addr: usize, expected: u32) -> c_int {
-        let me = current_task();
-        let mut state = lock_state();
-        // SAFETY: `addr` is the guest's futex word per this function's contract;
-        // only the baton holder runs, so this read races with nothing.
-        let current = unsafe { core::ptr::read_volatile(addr as *const u32) };
-        if current != expected {
-            return super::fail(EWOULDBLOCK);
-        }
-        if !state.active {
-            // No other managed task exists to wake a matching wait; re-check
-            // rather than park an unmanaged thread with no waker.
-            return super::fail(EWOULDBLOCK);
-        }
-        state.futexes.entry(addr).or_default().push_back(me);
-        match state.block(me, "futex-wait") {
-            Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
-            Ok(Step::Continue) => fatal("futex wait parked without transferring the baton"),
-            Err(error) => return error.into_posix(),
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
+        let mut restart = true;
+        while restart {
+            let mut state = lock_state();
+            if let Err(error) = state.ensure_active() {
+                return super::fail(error.into_posix());
+            }
+            let me = current_task();
+            // SAFETY: `addr` is the guest's futex word per this function's contract;
+            // only the baton holder runs, so this read races with nothing.
+            let current = unsafe { core::ptr::read_volatile(addr as *const u32) };
+            if current != expected {
+                return super::fail(EWOULDBLOCK);
+            }
+
+            state.futexes.entry(addr).or_default().push_back(me);
+            match state.block(
+                me,
+                "futex-wait",
+                Wait::new(BlockClass::Futex, vec![WaiterLoc::Futex(addr)]),
+            ) {
+                Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
+                Ok(Step::Continue) => fatal("futex wait parked without transferring the baton"),
+                Err(error) => return error.into_posix(),
+            }
+            #[cfg(target_os = "linux")]
+            match signals::resume() {
+                signals::Resumed::Eintr => return super::fail(super::EINTR),
+                signals::Resumed::Restart => restart = true,
+                signals::Resumed::Normal => restart = false,
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                restart = false;
+            }
         }
         0
     }
@@ -12494,22 +13346,24 @@ mod thread {
         absolute: c_int,
         timeout_nanos: u64,
     ) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         let clock = match clock_id {
             0 => ClockKind::Realtime,
             1 => ClockKind::Monotonic,
             _ => return super::fail(EINVAL),
         };
-        let me = current_task();
         let mut state = lock_state();
+        if let Err(error) = state.ensure_active() {
+            return super::fail(error.into_posix());
+        }
+        let me = current_task();
         // SAFETY: `addr` is the guest's futex word per this function's contract;
         // only the baton holder runs, so this read races with nothing.
         let current = unsafe { core::ptr::read_volatile(addr as *const u32) };
         if current != expected {
             return super::fail(EWOULDBLOCK);
         }
-        if !state.active {
-            return super::fail(EWOULDBLOCK);
-        }
+
         // A relative timeout is anchored to the current virtual time; both reads
         // and the subsequent park happen without releasing the baton.
         let deadline = if absolute != 0 {
@@ -12521,10 +13375,20 @@ mod thread {
             }
         };
         state.futexes.entry(addr).or_default().push_back(me);
-        match state.block_timed(me, "futex-wait", clock, deadline) {
+        match state.block_timed(
+            me,
+            "futex-wait",
+            Wait::new(BlockClass::TimedFutex, vec![WaiterLoc::Futex(addr)]),
+            clock,
+            deadline,
+        ) {
             Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
             Ok(Step::Continue) => drop(state),
             Err(error) => return error.into_posix(),
+        }
+        #[cfg(target_os = "linux")]
+        if signals::resume() == signals::Resumed::Eintr {
+            return super::fail(super::EINTR);
         }
         let mut state = lock_state();
         if state.timed_out.remove(&me) {
@@ -12541,6 +13405,7 @@ mod thread {
     /// C ABI entry point.
     #[unsafe(no_mangle)]
     pub extern "C" fn patina_futex_wake(addr: usize, count: c_int) -> c_int {
+        let _panic_scope = crate::panic_boundary::PanicScope::enter();
         let mut state = lock_state();
         let to_wake: Vec<TaskId> = match state.futexes.get_mut(&addr) {
             Some(waiters) => {
@@ -12558,6 +13423,8 @@ mod thread {
         }
         let mut scheduler = RealScheduler;
         for task in &to_wake {
+            #[cfg(target_os = "linux")]
+            state.remove_signal_wait(*task);
             if let Err(message) = scheduler.wake(*task) {
                 fatal(&message);
             }

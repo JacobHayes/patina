@@ -50,7 +50,7 @@ static void patina_capture_control_plane(void) {
         static const char message[] =
             "patina: failed to capture the PATINA_* control plane before scrubbing the environment\n";
         (void)patina_stdio_write(2, message, sizeof message - 1);
-        abort();
+        patina_host_abort();
     }
     size_t index = 0;
     for (char **entry = base; *entry != NULL; ++entry) {

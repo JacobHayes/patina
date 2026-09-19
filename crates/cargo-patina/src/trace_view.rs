@@ -721,6 +721,7 @@ pub const OP_KINDS: &[(&str, Category)] = &[
     ("task_park", Category::Schedule),
     ("task_park_timed", Category::Schedule),
     ("task_wake", Category::Schedule),
+    ("signal_generated", Category::Schedule),
     ("task_complete", Category::Schedule),
     ("scheduler_next", Category::Schedule),
     ("net_bind", Category::Net),
@@ -802,6 +803,7 @@ pub fn operation_kind(operation: &Operation) -> &'static str {
         Operation::TaskPark { .. } => "task_park",
         Operation::TaskParkTimed { .. } => "task_park_timed",
         Operation::TaskWake { .. } => "task_wake",
+        Operation::SignalGenerated { .. } => "signal_generated",
         Operation::TaskComplete { .. } => "task_complete",
         Operation::SchedulerNext => "scheduler_next",
         Operation::NetBind { .. } => "net_bind",
@@ -824,8 +826,8 @@ pub fn operation_kind(operation: &Operation) -> &'static str {
 pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcome)> {
     use patina_dst_abi::{
         ClockKind, Datagram, EffectError, ErrorCode, Fd, FsDirectoryEntry, FsEntryKind, FsMetadata,
-        OpenFlags, SeekWhence, SendDisposition, SendReport, ShutdownHow, SocketId, TaskId,
-        TcpAccepted, VerdictKind,
+        OpenFlags, SeekWhence, SendDisposition, SendReport, ShutdownHow, SignalTarget, SocketId,
+        TaskId, TcpAccepted, VerdictKind,
     };
 
     let metadata = FsMetadata {
@@ -1082,6 +1084,16 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
             Outcome::Unit,
         ),
         (Operation::TaskWake { task: TaskId(1) }, Outcome::Unit),
+        (
+            Operation::SignalGenerated {
+                seq: 1,
+                sig: 10,
+                target: SignalTarget::Task(TaskId(1)),
+                code: -6,
+                value: 0,
+            },
+            Outcome::Unit,
+        ),
         (Operation::TaskComplete { task: TaskId(1) }, Outcome::Unit),
         (
             Operation::SchedulerNext,

@@ -2,6 +2,9 @@
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 mod common;
 use common::native::*;
+#[cfg(target_os = "linux")]
+const RESERVED_SIGNAL_DIAGNOSTIC: &str =
+    "reserved signal registration would disable deterministic containment";
 
 #[test]
 fn audit_rejects_unlinked_raw_syscall_or_thread_escape() {
@@ -203,10 +206,13 @@ mod linux {
     #[test]
     fn sigsys_registration_is_refused_on_every_kernel() {
         let g = Guest::assert_build("sigsys_probe.rs");
-        assert_eq!(
-            text(&g.assert_run_success(1, &[]).stdout),
-            "SIGSYS_REGISTER_REFUSED=true\n"
-        );
+        g.assert_run_refused(1, &[RESERVED_SIGNAL_DIAGNOSTIC]);
+        #[cfg(target_arch = "x86_64")]
+        if let Some(c) = sud_c_guest("signals/signal_boundary.c") {
+            for door in ["reserved-sys-libc", "reserved-sys-raw"] {
+                c.assert_internal_fatal(&[door], &[RESERVED_SIGNAL_DIAGNOSTIC]);
+            }
+        }
     }
 
     #[test]
@@ -303,9 +309,12 @@ mod linux {
         fn sigsegv_handler_hijack_is_refused() {
             let g = Guest::assert_build("tsc_hijack_probe.rs");
             if kernel_supports(KernelFeature::Tsc) {
-                let out = g.assert_run_success(1, &[]);
-                assert_eq!(text(&out.stdout), "SEGV_REGISTER_REFUSED=true\n");
-                assert!(text(&out.stderr).contains("signal(SIGSEGV) refused"));
+                g.assert_run_refused(1, &[RESERVED_SIGNAL_DIAGNOSTIC]);
+                if let Some(c) = sud_c_guest("signals/signal_boundary.c") {
+                    for door in ["reserved-segv-libc", "reserved-segv-raw"] {
+                        c.assert_internal_fatal(&[door], &[RESERVED_SIGNAL_DIAGNOSTIC]);
+                    }
+                }
             } else {
                 g.assert_run_refused(1, &["cpu-nondeterminism"]);
             }

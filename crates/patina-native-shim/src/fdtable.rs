@@ -64,6 +64,9 @@ pub(crate) enum FdKind {
     /// A deterministic eventfd counter; `handle` keys the eventfd table.
     #[cfg(target_os = "linux")]
     EventFd,
+    /// A virtual signal queue reader.
+    #[cfg(target_os = "linux")]
+    SignalFd,
     /// A virtual epoll instance; `handle` is the registry id.
     #[cfg(target_os = "linux")]
     Epoll,
@@ -89,6 +92,8 @@ impl FdKind {
             #[cfg(target_os = "linux")]
             FdKind::EventFd => 9,
             #[cfg(target_os = "linux")]
+            FdKind::SignalFd => 12,
+            #[cfg(target_os = "linux")]
             FdKind::Epoll => 10,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => 11,
@@ -107,7 +112,7 @@ impl FdKind {
             | FdKind::Socket
             | FdKind::Pipe => false,
             #[cfg(target_os = "linux")]
-            FdKind::EventFd | FdKind::Epoll => false,
+            FdKind::EventFd | FdKind::Epoll | FdKind::SignalFd => false,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => false,
         }

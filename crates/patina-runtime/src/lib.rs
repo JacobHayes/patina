@@ -5946,6 +5946,28 @@ recording was produced by a guest whose result type no longer matches this one"
         Ok(task)
     }
 
+    /// Record a successful virtual signal generation, including coalesced and
+    /// ignored instances. Delivery is derived from this stream and task state.
+    pub fn signal_generated(
+        &mut self,
+        seq: u64,
+        sig: u8,
+        target: patina_dst_abi::SignalTarget,
+        code: i32,
+        value: i64,
+    ) -> Result<(), RuntimeError> {
+        let operation = Operation::SignalGenerated {
+            seq,
+            sig,
+            target,
+            code,
+            value,
+        };
+        let expected = self.replay_expected(&operation)?;
+        let outcome = self.reconcile(operation.clone(), expected, Outcome::Unit)?;
+        decode_unit(&operation, outcome)
+    }
+
     pub fn task_yield(&mut self, task: TaskId) -> Result<(), RuntimeError> {
         self.scheduler_unit(Operation::TaskYield { task }, |scheduler| {
             scheduler.yield_task(task)
@@ -6969,16 +6991,16 @@ publish. Give the loop a wait the runtime can see (sleep/yield/park), or bound t
 
     /// Write the recording as it stands, WITHOUT consuming the context, so a
     /// runtime-initiated stop leaves a truncated-but-valid trace instead of the
-    /// empty file the supervisor pre-created. The interposed families reach the
-    /// stop through `std::process::abort()`, which skips the atexit-driven
-    /// shutdown that is [`Context::finish`]'s only caller there — so without
-    /// this, the one artifact that would explain the wedge is exactly what is
-    /// lost. At most one write per run ([`Context::recording_flushed`]): the
-    /// native transport is an append-only descriptor.
+    /// empty file the supervisor pre-created. Native internal stops use the
+    /// private host-abort vehicle, skipping both guest-abort finalization and
+    /// atexit shutdown. This explicit flush preserves the evidence explaining
+    /// a runtime-initiated stop. At most one write per run
+    /// ([`Context::recording_flushed`]): the native transport is append-only.
     ///
-    /// Deliberately scoped to stops the RUNTIME initiates (step-budget
-    /// exhaustion, frozen-clock churn). A guest that calls `abort()` itself is
-    /// untouched, and still leaves no trace.
+    /// Scoped to stops the RUNTIME initiates (step-budget exhaustion,
+    /// frozen-clock churn), not arbitrary shim failures or panics. Explicit
+    /// Linux guest `abort()` separately finalizes a healthy context; other
+    /// internal fatalities leave the trace incomplete.
     fn flush_recording(&mut self) {
         if self.recording_flushed || !matches!(self.execution, Execution::Record { .. }) {
             return;
@@ -11993,8 +12015,38 @@ class=crash|0 class=buggify|0"
         context.finish().unwrap();
     }
 
+    /// Class pairing: the signals-family wake-order and timer-rescue obligations.
     #[test]
-    fn an_early_wake_deregisters_the_timer_so_the_rescue_skips_it() {
+    fn signal_wake_records_task_wake_before_scheduler_next() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("signal-wake.patina");
+        fn drive(mut context: Context) {
+            let task = context.task_spawn("signal waiter").unwrap();
+            assert_eq!(context.scheduler_next().unwrap(), Some(task));
+            context.task_park(task, "pause").unwrap();
+            context.task_wake(task).unwrap();
+            assert_eq!(context.scheduler_next().unwrap(), Some(task));
+            context.task_complete(task).unwrap();
+            context.finish().unwrap();
+        }
+        drive(Context::from_config(RuntimeConfig::record(1, &path, "signal-wake")).unwrap());
+        let bundle = TraceBundle::load(&path).unwrap();
+        let ops: Vec<_> = bundle.timelines[0]
+            .decisions
+            .iter()
+            .map(|event| &event.operation)
+            .collect();
+        let park = ops
+            .iter()
+            .position(|op| matches!(op, Operation::TaskPark { .. }))
+            .unwrap();
+        assert!(matches!(ops[park + 1], Operation::TaskWake { .. }));
+        assert!(matches!(ops[park + 2], Operation::SchedulerNext));
+        drive(Context::from_config(RuntimeConfig::replay(&path, "signal-wake")).unwrap());
+    }
+
+    #[test]
+    fn early_signal_wake_deregisters_timed_sleep() {
         let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
         let a = context.task_spawn("a").unwrap();
         let b = context.task_spawn("b").unwrap();

@@ -162,3 +162,11 @@ void ZSTD_trace_decompress_end(unsigned long long ctx, const void *trace) {
     (void)trace;
 }
 #endif
+
+#ifdef __linux__
+static int signal_result(int64_t rc) {
+    patina_signal_deliver();
+    if (rc < 0) { errno = (int)-rc; return -1; }
+    return (int)rc;
+}
+#endif

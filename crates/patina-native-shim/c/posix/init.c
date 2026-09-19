@@ -416,6 +416,7 @@ static void patina_sud_sigsys(int sig, siginfo_t *info, void *ucontext) {
 #error "SUD SIGSYS handler: unsupported architecture"
 #endif
     long ret = patina_sud_dispatch(nr, a0, a1, a2, a3, a4, a5, call_addr);
+    patina_signal_frame((uint64_t *)&uc->uc_sigmask, &uc->uc_stack);
 #if defined(__x86_64__)
     uc->uc_mcontext.gregs[REG_RAX] = (greg_t)ret;
 #elif defined(__aarch64__)
@@ -441,19 +442,19 @@ void patina_sud_arm_thread(void) {
 
 /* Main-thread SUD setup, called from the `__libc_start_main` interposer BEFORE
  * guest constructors run. Arms only a managed run on a SUD-capable kernel; every
- * other case is a deliberate no-op (a binary that actually needs SUD was already
- * refused by the pre-run gate, and one that does not runs fine unarmed). */
+ * other case stays unarmed. The libc frame restorer is captured even for a
+ * standalone run: Rust std registers handlers before reporting NotUnderPatina. */
 static void patina_sud_init(int argc, char **argv) {
     /* A standalone run (no PATINA_MODE) is left unarmed: its first interposed
      * boundary already fails closed via ensure_runtime, and an unarmed raw
      * syscall there is no worse than today. environ is still intact here (the
      * ctor's scrub runs later), so read it directly. */
-    if (!patina_env_has("PATINA_MODE", argv, argc)) return;
+    int managed = patina_env_has("PATINA_MODE", argv, argc);
 
     /* AT_RANDOM determinization is kernel-independent: close the entropy leak on
      * EVERY managed run (SUD kernel or not), before the SUD kernel probe gate
      * below can early-return. */
-    patina_sud_determinize_at_random(argc, argv);
+    if (managed) patina_sud_determinize_at_random(argc, argv);
 
     patina_host_prctl = (patina_prctl_fn)__real_dlsym(RTLD_NEXT, "prctl");
     patina_host_open = (patina_host_open_fn)__real_dlsym(RTLD_NEXT, "open");
@@ -467,6 +468,22 @@ static void patina_sud_init(int argc, char **argv) {
          * with a missing vehicle. */
         return;
     }
+
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    action.sa_sigaction = patina_sud_sigsys;
+    action.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sigemptyset(&action.sa_mask);
+    if (patina_host_sigaction(SIGSYS, &action, NULL) != 0) {
+        patina_sud_report_fatal("SUD: failed to install the SIGSYS dispatch handler");
+    }
+
+    /* Learn glibc's kernel-frame return vehicle once, not per guest action. */
+    if (patina_host_sigaction(SIGSYS, NULL, &action) != 0) {
+        patina_sud_report_fatal("SUD: failed to query the signal restorer");
+    }
+    patina_signal_restorer((uintptr_t)action.sa_restorer);
+    if (!managed) return;
 
     /* Kernel support probe: PR_SYS_DISPATCH_OFF with all-zero args returns 0 on a
      * SUD kernel and -EINVAL where the feature is absent (arm64 <= 6.18, pre-5.11
@@ -484,15 +501,6 @@ static void patina_sud_init(int argc, char **argv) {
     }
 
     patina_sud_scrub_auxv(argc, argv);
-
-    struct sigaction action;
-    memset(&action, 0, sizeof action);
-    action.sa_sigaction = patina_sud_sigsys;
-    action.sa_flags = SA_SIGINFO;
-    sigemptyset(&action.sa_mask);
-    if (patina_host_sigaction(SIGSYS, &action, NULL) != 0) {
-        patina_sud_report_fatal("SUD: failed to install the SIGSYS dispatch handler");
-    }
 
     patina_sud_armed = 1;
     /* Publish the armed state to the Rust-owned flag (writable section) so the
@@ -742,6 +750,9 @@ static int patina_main_wrapper(int argc, char **argv, char **envp) {
 
 int __libc_start_main(patina_main_fn main_fn, int argc, char **argv, void *init,
                       void *fini, void *rtld_fini, void *stack_end) {
+    /* The POSIX link supplies host aliases; install panic containment before
+     * any guest constructors, independently of whether Context is deferred. */
+    patina_init_panic_policy();
     patina_real_main = main_fn;
     /* Arm syscall-user-dispatch (managed run on a SUD kernel) BEFORE the real
      * __libc_start_main runs the guest constructors: parse the libc region,
@@ -763,11 +774,11 @@ int __libc_start_main(patina_main_fn main_fn, int argc, char **argv, void *init,
          * -Wl,--wrap=dlsym, so __real_dlsym is the genuine resolver. Fail closed
          * LOUDLY (SIGABRT) rather than run the guest unwrapped — which would
          * silently reintroduce the nondeterministic teardown yields this
-         * interposer exists to remove. `abort()` is the real libc abort (the shim
-         * does not interpose it), so it works before the runtime is installed and
-         * without touching the interposed `syscall`/`write` layer.
+         * interposer exists to remove. The private `patina_host_abort()` alias
+         * reaches libc without guest finalization, even before installation,
+         * and never touches the interposed `syscall`/`write` layer.
          */
-        abort();
+        patina_host_abort();
     }
     return real(patina_main_wrapper, argc, argv, init, fini, rtld_fini, stack_end);
 }
@@ -806,7 +817,7 @@ static void patina_finalize_atexit(void) {
     if (patina_shutdown() != 0) {
         /* patina_shutdown already emitted the runtime error; atexit return values
          * are ignored, so abort to make record/replay finalization failures loud. */
-        abort();
+        patina_host_abort();
     }
 }
 
@@ -815,6 +826,8 @@ static void patina_finalize_atexit(void) {
  * letting deliberately earlier constructors (the e2e uses .init_array.00099 on
  * ELF) prove the fail-closed path. */
 __attribute__((constructor(101))) static void patina_native_start(void) {
+    /* Idempotent on Linux; also serves platforms without __libc_start_main. */
+    patina_init_panic_policy();
     atexit(patina_finalize_atexit);
     patina_capture_control_plane();
     /* Register before init: installing the runtime publishes environ from the

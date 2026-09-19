@@ -162,7 +162,7 @@ __attribute__((noreturn)) void __assert_rtn(const char *function, const char *fi
         (void)patina_stdio_write(2, message, length);
     }
     patina_flush_captured_stdio();
-    abort();
+    patina_host_abort();
 }
 
 /* Deterministic sysctl emit: copy a fixed value into the caller's oldp per the
@@ -396,11 +396,11 @@ __attribute__((noreturn)) static void patina_native_trap(const char *klass,
     static const char suffix[] =
         "; not interposed by the deterministic runtime; failing closed\n";
     (void)patina_stdio_write(2, suffix, sizeof suffix - 1);
-    /* abort() skips the atexit shutdown flush (patina_process_trap precedent), so
+    /* Private host abort skips the atexit shutdown flush (patina_process_trap precedent), so
      * push the captured guest output and this diagnostic to the real descriptors
      * before terminating. */
     patina_flush_captured_stdio();
-    abort();
+    patina_host_abort();
 }
 
 /*
@@ -553,7 +553,7 @@ PATINA_INTROSPECTION_TRAP(IOServiceGetMatchingServices)
 /* --- BSD per-process introspection (sysinfo process refresh) ---
  *
  * The deterministic world is a single process — the guest, pid 1 (getpid()==1,
- * getppid()==0). proc_listallpids honestly enumerates that one pid: the sizing
+ * getppid()==2). proc_listallpids honestly enumerates that one pid: the sizing
  * call (buffer==NULL) reports one pid; the fill call writes pid 1. (sysinfo's
  * get_proc_list treats a fill that exactly reaches the reported capacity as "the
  * list grew, retry" and drops it, so under sysinfo the *detailed* list ends up

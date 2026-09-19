@@ -623,7 +623,7 @@ pub type NativeDenyTrapSymbol = (&'static str, &'static str);
 ///
 /// This is the UNION across platforms. A given binary only *defines* the members
 /// its target actually compiles — the framework/introspection set is
-/// `__APPLE__`-only, `pidfd_*`/`waitid`/`posix_spawn_file_actions_addchdir*` are
+/// `__APPLE__`-only, `pidfd_*`/`posix_spawn_file_actions_addchdir*` are
 /// `__linux__`-only — so [`native_deny_trap_armed`] reports exactly the
 /// platform-correct subset by intersecting this union with the binary's real
 /// symbol table (macOS ld64 further narrows it to the *referenced* traps; ELF
@@ -661,8 +661,6 @@ const NATIVE_DENY_TRAP_SYMBOLS: &[NativeDenyTrapSymbol] = &[
     ("setpgid", "process"),
     ("setsid", "process"),
     ("setuid", "process"),
-    ("waitid", "process"),
-    ("waitpid", "process"),
     // host-introspection (patina_native_trap explicit sites + PATINA_INTROSPECTION_TRAP):
     // IOKit registry walk, unreachable while IOServiceMatching returns NULL.
     ("IOIteratorNext", "host-introspection"),

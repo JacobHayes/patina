@@ -64,6 +64,94 @@ Both halves of that link use the guest's verified concrete compiler. The shim's 
 
 Before a native guest runs, a default-deny audit over its imports (plus an instruction scan for raw syscall/clock/entropy opcodes) refuses anything the shim does not model — see [Enforcement](#enforcement).
 
+#### Linux signals and thread lifecycle
+
+Signal dispositions and shared pending instances belong to the process; masks,
+private pending instances belong to managed tasks. Alternate stacks live in the
+kernel state of each task's one host thread, which also validates stack updates;
+there is no shadow stack table. Generation
+records `SignalGenerated` and selects the leader when eligible, otherwise the
+lowest eligible live task (the leader has the first TaskId). Delivery runs on that
+task under the baton, using kernel-built handler frames, never on the generating
+helper's behalf. Instances blocked by an earlier handler's mask remain virtual
+and visible to pending queries and signalfd until eligible.
+
+Lock order is ThreadRuntime → context slot. Generation records and selects under
+ThreadRuntime, then releases it before scheduler wake; host frame release never
+holds either lock. Host masks describe nested handlers, so no in-delivery flag
+suppresses legitimate re-entry. Dirty mask/stack flags gate SIGSYS-frame fixup;
+frame release saves and restores the enclosing frame's dirty bits so an inner
+SIGSYS return cannot consume them. A no-pending syscall return needs no host
+signal syscall. Startup registration
+and immediately resolved descriptor queries do not install Context or activate
+the scheduler; this preserves deferred-harness setup. Captured runtime diagnostics
+skip scheduling while shim locks are held, without bypassing the captured sink.
+
+Every interruptible park registers its class, queue locations and optional
+virtual deadline. A signal removes only its recipient's registrations before
+waking it; an ordinary wake or timer rescue removes those registrations too.
+Resumed I/O and untimed futex waits obey `SA_RESTART`; timed futex waits, sleeps
+and readiness waits return `EINTR` after delivery. Relative sleeps report the
+virtual unslept time; absolute sleeps leave the remaining-time pointer untouched.
+Pthread locks, condition variables and joins also allow handler execution while
+parked, but never report EINTR. Unlike syscall waits, their semantic queue entries
+remain registered during handler execution to preserve FIFO ownership and
+condvar→mutex handoff. They resume the original wait/deadline unless ordinary
+completion arrived meanwhile; a runnable handler does not receive a duplicate wake.
+A handler interrupting a pthread wait may acquire uncontended locks, but attempting
+another blocking pthread wait is a named fatal refusal, before queue mutation or
+condvar unlock. Nested pthread parks are not modeled: one task's retained outer
+wait must not consume an inner wait's grant.
+
+A signalfd is one kind on the unified descriptor table, with shared-description
+mask replacement, ordinary duplication/close and reader-local pending visibility.
+Signal consumption selects one waiter. Readiness notification is separate: every
+matching signalfd reactor watcher is unlinked and notified once, without marking
+additional tasks interrupted. Thus multiple readiness `TaskWake` events do not
+mean multiple signal recipients. Poll/ppoll and select/pselect adapt the same
+readiness predicates and wait queues as epoll; temporary masks cover the complete
+wait and are restored on return. Raw timeout writes and libc's preserved
+ppoll/pselect timeouts remain distinct at the adapters.
+
+Default Term/Core delivery finalizes the trace and captured output, restores the
+host default disposition, then signals the calling host thread. The guest really
+dies by that signal; the native supervisor reports the observed wait-status
+`signal` and `core` in `guest_exit` (no `core` key on normal exit). Default Stop
+signals are named fatal traps rather than hangs; catchable Stop signals still
+run an installed handler. Broken pipes and closed stream peers generate a
+thread-directed SIGPIPE before EPIPE, unless a socket send uses MSG_NOSIGNAL.
+An ignored SIGPIPE is recorded but dropped. Only an explicit guest `abort()`
+finalizes a healthy run before calling the resolved host abort alias. Shim-internal
+fatal paths use private Rust/C host-abort vehicles and leave the trace incomplete.
+POSIX startup installs a production panic hook independently of Context setup.
+Thread-local Rust ABI ownership, suspended for guest callbacks, distinguishes
+shim panics from guest panics; owned panics report through host writes and private
+abort. Guest panics retain the prior hook and can be caught. Guard-unwind and
+panic-time abort checks preserve the private-abort policy if the guest replaces
+the hook. Bare prefixed-C/staticlib links have no public abort interposer and do
+not install this policy or require the POSIX host aliases. Libtest retains its
+own panic handling.
+A default-fatal batch releases only its fatal signal, never another queued handler
+after finalization.
+
+Thread-directed generation queues privately and delivers on the named task's
+host thread. `pthread_kill` resolves the managed pthread handle to that task.
+`set_tid_address` stores a guest word per task, separately from glibc's host
+thread bookkeeping; thread completion clears the word and wakes a futex waiter.
+Raw `exit` completes only the calling task, including the leader; another live
+task can subsequently end the process with `exit_group`. Raw `exit_group`
+finalizes without running guest atexit handlers; normal libc exit retains its
+atexit chain. The last worker returning normally exits zero; an explicit raw exit
+retains its requested status.
+
+Guest raw `rt_sigreturn` and `restart_syscall` are final `signal-abi` traps: handler
+returns use the allowed host restorer, and no guest restart-block protocol exists.
+`pidfd_send_signal` remains a process trap because there are no virtual pidfds;
+this does not implement the frozen signals spec's self-pidfd aspiration. Ambient
+host signals are outside the deterministic model and can execute a handler
+off-baton. Nonlocal `siglongjmp` escape from a handler is unverified, including
+mask/frame restoration; neither case carries a reproducibility claim.
+
 ### WASI
 
 The WASI target is a clean Patina target because WASI already represents host effects as explicit imports. Rust code uses the stock `wasm32-wasip1` `std`; `patina-dst-wasi-host` supplies deterministic implementations of the entire audited Preview 1 import surface (clocks, entropy, filesystem, configured datagram sockets, process state) over the same drivers.

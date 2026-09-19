@@ -76,7 +76,12 @@ pub use handoff::{
 /// and never reported a birth time (`STATX_BTIME` was never set), so the
 /// upgrade writes `ctime_nanos = mtime_nanos` and `btime_nanos = 0`: exactly
 /// what the recorded run answered.
-pub const TRACE_FORMAT_VERSION: u32 = 8;
+///
+/// Format 9 adds `SignalGenerated` with sequence, signal, process/task target,
+/// siginfo code and payload. Format-8 bundles contain no such variant, so
+/// migration preserves their observations and advances only the version tag.
+/// This does not promise replay compatibility with changed signal semantics.
+pub const TRACE_FORMAT_VERSION: u32 = 9;
 /// The oldest trace format version this runtime can read. A bundle at this
 /// version, or any later supported version, is migrated in memory through the
 /// `MIGRATIONS` chain up to [`TRACE_FORMAT_VERSION`] and then validated by
@@ -2192,6 +2197,7 @@ const MIGRATIONS: &[Migration] = &[
     migrate_v5_to_v6,
     migrate_v6_to_v7,
     migrate_v7_to_v8,
+    migrate_v8_to_v9,
 ];
 
 // One migration step must exist for each supported prior version; this keeps
@@ -2604,6 +2610,19 @@ fn migrate_v7_to_v8(mut value: serde_json::Value) -> Result<serde_json::Value, T
     Ok(value)
 }
 
+/// Upgrade format 8 to format 9.
+///
+/// Format 9 adds the `signal_generated` operation variant. Existing format-8
+/// traces contain no such operations, so the migration is an identity transform
+/// apart from the version tag.
+fn migrate_v8_to_v9(mut value: serde_json::Value) -> Result<serde_json::Value, TraceError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| TraceError::Invalid("format 8 trace is not a JSON object".into()))?;
+    object.insert("format_version".into(), serde_json::Value::from(9u32));
+    Ok(value)
+}
+
 fn value_contains_legacy_fs_crash(value: &serde_json::Value) -> bool {
     fn event_is_fs_crash(event: &serde_json::Value) -> bool {
         event
@@ -2690,7 +2709,7 @@ fn temporary_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use patina_dst_abi::{ClockKind, Fd};
+    use patina_dst_abi::{ClockKind, Fd, SignalTarget, TaskId};
     use tempfile::tempdir;
 
     use super::*;
@@ -2699,6 +2718,52 @@ mod tests {
         Operation::ClockNow {
             clock: ClockKind::Monotonic,
         }
+    }
+
+    #[test]
+    fn format_8_migrates_to_9() {
+        let bytes = include_bytes!("../tests/fixtures/format-8.patina");
+        let format8: TraceBundle = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(format8.format_version, 8);
+        let migrated = TraceBundle::from_slice(bytes).unwrap();
+        assert_eq!(TRACE_FORMAT_VERSION, 9);
+        assert_eq!(migrated.format_version, 9);
+        assert_eq!(
+            migrated.resolved_timeline("main").unwrap(),
+            format8.timelines[0].decisions
+        );
+
+        // Checked-in feature fixture pins both target encodings and every field.
+        const SIGUSR1: u8 = 10;
+        const SIGUSR2: u8 = 12;
+        const SI_USER: i32 = 0;
+        const SI_TKILL: i32 = -6;
+        let bytes = include_bytes!("../tests/fixtures/format-9-signals.patina");
+        let bundle = TraceBundle::from_slice(bytes).unwrap();
+        bundle.validate().unwrap();
+        assert_eq!(bundle.format_version, 9);
+        assert_eq!(bundle.to_bytes().unwrap(), bytes);
+        let expected = [
+            Operation::SignalGenerated {
+                seq: 1,
+                sig: SIGUSR1,
+                target: SignalTarget::Process,
+                code: SI_USER,
+                value: 0,
+            },
+            Operation::SignalGenerated {
+                seq: 2,
+                sig: SIGUSR2,
+                target: SignalTarget::Task(TaskId(2)),
+                code: SI_TKILL,
+                value: 123,
+            },
+        ];
+        let mut replay = Replayer::from_bundle(bundle, "fixture-fingerprint", "main").unwrap();
+        for operation in expected {
+            assert_eq!(replay.expect(&operation).unwrap(), Outcome::Unit);
+        }
+        replay.finish().unwrap();
     }
 
     #[test]

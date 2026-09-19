@@ -168,7 +168,7 @@ pub(super) fn sys_sendto(fd: i64, buf: u64, len: u64, flags: u64, addr: u64, ale
             return -EOPNOTSUPP;
         }
         // SAFETY: `buf`/`len` describe a guest buffer.
-        return ret_isize(unsafe { patina_pipe_write(cfd, src, n) });
+        return ret_isize(unsafe { patina_pipe_write(cfd, src, n, flags as c_int) });
     }
     // SAFETY: no pointers.
     let kind = unsafe { patina_net_kind(cfd) };
@@ -180,7 +180,7 @@ pub(super) fn sys_sendto(fd: i64, buf: u64, len: u64, flags: u64, addr: u64, ale
             return -EOPNOTSUPP;
         }
         // SAFETY: as above.
-        return ret_isize(unsafe { patina_net_stream_send(cfd, src, n) });
+        return ret_isize(unsafe { patina_net_stream_send(cfd, src, n, flags as c_int) });
     }
     if addr != 0 {
         let Some((ip, port)) = parse_sockaddr(addr, alen) else {

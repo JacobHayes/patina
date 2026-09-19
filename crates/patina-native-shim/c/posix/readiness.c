@@ -10,6 +10,10 @@
  */
 
 int poll(struct pollfd *descriptors, nfds_t count, int timeout) {
+#ifdef __linux__
+    return signal_result(patina_poll(descriptors, count,
+        timeout < 0 ? -1 : (int64_t)timeout * 1000000, NULL, NULL));
+#else
     if (count != 0) {
         if (timeout != 0) {
             errno = ENOSYS;
@@ -32,6 +36,7 @@ int poll(struct pollfd *descriptors, nfds_t count, int timeout) {
         if (nanosleep(&duration, NULL) != 0) return -1;
     }
     return 0;
+#endif
 }
 
 #ifdef __APPLE__
@@ -248,14 +253,54 @@ int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout)
 
 int epoll_pwait(int epfd, struct epoll_event *events, int maxevents, int timeout,
                 const sigset_t *sigmask) {
-    /* Patina delivers no ambient signals, so a NULL mask is the plain wait. A
-     * real mask swap has no deterministic meaning; fail closed loudly. */
-    if (sigmask != NULL)
-        return patina_posix_deny("patina: epoll_pwait with a signal mask is not modeled; failing closed\n");
-    return fail_int(patina_epoll_wait(epfd, events, maxevents, timeout));
+    return signal_result(patina_epoll_wait_masked(epfd, events, maxevents,
+        timeout, (const uint64_t *)sigmask));
 }
 
 int eventfd(unsigned int initval, int flags) {
     return fail_int(patina_eventfd(initval, flags));
+}
+#endif
+
+#ifdef __linux__
+static int64_t readiness_timeout(const struct timespec *ts) {
+    if (ts == NULL) return -1;
+    if (ts->tv_sec < 0 || ts->tv_nsec < 0 || ts->tv_nsec >= 1000000000) return -2;
+    if (ts->tv_sec > INT64_MAX / 1000000000) return INT64_MAX;
+    int64_t base = ts->tv_sec * INT64_C(1000000000);
+    return ts->tv_nsec > INT64_MAX - base ? INT64_MAX : base + ts->tv_nsec;
+}
+int ppoll(struct pollfd *fds, nfds_t count, const struct timespec *timeout, const sigset_t *mask) {
+    int64_t nanos = readiness_timeout(timeout);
+    if (nanos == -2) { errno = EINVAL; return -1; }
+    return signal_result(patina_poll(fds, count, nanos, (const uint64_t *)mask, NULL));
+}
+int select(int nfds, fd_set *restrict read, fd_set *restrict write,
+           fd_set *restrict except, struct timeval *restrict timeout) {
+    int64_t nanos = -1;
+    if (timeout != NULL) {
+        if (timeout->tv_sec < 0 || timeout->tv_usec < 0 || timeout->tv_usec >= 1000000) {
+            errno = EINVAL;
+            return -1;
+        }
+        struct timespec ts = {timeout->tv_sec, timeout->tv_usec * 1000};
+        nanos = readiness_timeout(&ts);
+    }
+    uint64_t remaining = nanos < 0 ? 0 : (uint64_t)nanos;
+    int64_t rc = patina_select(nfds, (uint64_t *)read, (uint64_t *)write,
+        (uint64_t *)except, nanos, NULL, &remaining);
+    if (timeout != NULL && (rc >= 0 || rc == -EINTR)) {
+        timeout->tv_sec = remaining / 1000000000;
+        timeout->tv_usec = (remaining % 1000000000) / 1000;
+    }
+    return signal_result(rc);
+}
+int pselect(int nfds, fd_set *restrict read, fd_set *restrict write,
+            fd_set *restrict except, const struct timespec *restrict timeout,
+            const sigset_t *restrict mask) {
+    int64_t nanos = readiness_timeout(timeout);
+    if (nanos == -2) { errno = EINVAL; return -1; }
+    return signal_result(patina_select(nfds, (uint64_t *)read, (uint64_t *)write,
+        (uint64_t *)except, nanos, (const uint64_t *)mask, NULL));
 }
 #endif

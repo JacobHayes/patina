@@ -135,6 +135,9 @@ pub struct Captured {
     /// that `exit(134)`s and one killed by `SIGABRT` are indistinguishable); the
     /// envelope's `guest_exit` carries the distinction structurally.
     pub signal: Option<i32>,
+    /// Observed OS wait-status core bit, meaningful only when `signal` is set.
+    /// This is not inferred from the signal's default disposition.
+    pub core: bool,
 }
 
 /// Run a fully-configured child command, capturing its output when the installed
@@ -193,6 +196,7 @@ pub fn execute_command(command: &mut Command) -> Result<Captured, CliError> {
             stderr: output.stderr,
             captured: true,
             signal: None,
+            core: false,
         })
     } else {
         let status: ExitStatus = command
@@ -204,6 +208,7 @@ pub fn execute_command(command: &mut Command) -> Result<Captured, CliError> {
             stderr: Vec::new(),
             captured: false,
             signal: None,
+            core: false,
         })
     }
 }
@@ -382,6 +387,7 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
         env.guest_exit = Some(GuestExit {
             code: captured.exit_code,
             signal: captured.signal,
+            core: captured.core,
         });
         env.markers = extract_markers(&stdout_text, &stderr_text);
         env.result_line = result_line(&stdout_text, &stderr_text);
@@ -409,6 +415,7 @@ pub fn finalize_inprocess(
             stderr,
             captured: true,
             signal: None,
+            core: false,
         },
     )
 }
@@ -483,6 +490,7 @@ fn extract_verdicts(stdout: &str, stderr: &str) -> Vec<VerdictFact> {
 pub struct GuestExit {
     code: i32,
     signal: Option<i32>,
+    core: bool,
 }
 
 /// The portable signal names worth spelling out. A signal outside this set keeps
@@ -1006,6 +1014,7 @@ impl Envelope {
             gm.insert("code".into(), Value::from(v.code));
             if let Some(signal) = v.signal {
                 gm.insert("signal".into(), Value::from(signal));
+                gm.insert("core".into(), Value::from(v.core));
                 if let Some((_, name)) = SIGNAL_NAMES.iter().find(|(n, _)| *n == signal) {
                     gm.insert("signal_name".into(), Value::from(*name));
                 }
@@ -1279,6 +1288,7 @@ mod tests {
         env.guest_exit = Some(GuestExit {
             code: 134,
             signal: Some(6),
+            core: false,
         });
         env.stdout = Some(String::new());
         env.stderr = Some(String::new());
@@ -1322,12 +1332,47 @@ mod tests {
         assert!(json.get("guest_exit").is_none());
     }
 
+    // Class-level pairing: signals-family M4 direct-termination conformance;
+    // exercise both wait-status core bits for the SAME signal, not a signal table.
+    #[cfg(unix)]
+    #[test]
+    fn guest_exit_reports_the_core_flag() {
+        use std::os::unix::process::ExitStatusExt;
+        const SIGABRT: i32 = 6;
+        const WCOREDUMP: i32 = 0x80;
+        for (raw, expected_signal, expected_core) in [
+            (SIGABRT, Some(SIGABRT), Some(false)),
+            (SIGABRT | WCOREDUMP, Some(SIGABRT), Some(true)),
+            (134 << 8, None, None),
+        ] {
+            let status = std::process::ExitStatus::from_raw(raw);
+            let crate::NativeChildStatus {
+                exit_code: code,
+                signal,
+                core,
+            } = crate::native_child_status(status);
+            assert_eq!(signal, expected_signal);
+            assert_eq!(core, status.core_dumped());
+            let mut env = Envelope::new("run", "failure", code);
+            env.guest_exit = Some(GuestExit { code, signal, core });
+            let json = env.to_json();
+            assert_eq!(json["schema"], "patina.result/v1");
+            assert_eq!(
+                json["guest_exit"]
+                    .get("core")
+                    .and_then(serde_json::Value::as_bool),
+                expected_core
+            );
+        }
+    }
+
     #[test]
     fn guest_exit_names_the_signal_the_exit_code_cannot_express() {
         let mut env = Envelope::new("run", "failure", 134);
         env.guest_exit = Some(GuestExit {
             code: 134,
             signal: Some(6),
+            core: false,
         });
         let json = env.to_json();
         assert_eq!(json["guest_exit"]["code"], 134);
@@ -1341,6 +1386,7 @@ mod tests {
         plain.guest_exit = Some(GuestExit {
             code: 134,
             signal: None,
+            core: false,
         });
         let json = plain.to_json();
         assert_eq!(json["guest_exit"]["code"], 134);

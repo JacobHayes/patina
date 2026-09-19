@@ -208,6 +208,14 @@ pub struct Fd(pub u64);
 #[serde(transparent)]
 pub struct TaskId(pub u64);
 
+/// The target class of a generated signal: process-directed or a specific task.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalTarget {
+    Process,
+    Task(TaskId),
+}
+
 /// A virtual network socket identifier scoped to one runtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -986,6 +994,16 @@ pub enum Operation {
     TaskWake {
         task: TaskId,
     },
+    /// A successfully generated signal. Delivery is derived from signal state
+    /// and scheduler operations; the generation itself is a boundary op so
+    /// replay refuses divergent signal sequences.
+    SignalGenerated {
+        seq: u64,
+        sig: u8,
+        target: SignalTarget,
+        code: i32,
+        value: i64,
+    },
     TaskComplete {
         task: TaskId,
     },
@@ -1179,6 +1197,50 @@ mod tests {
                 operation
             );
         }
+    }
+
+    #[test]
+    fn signal_generated_round_trips_and_mismatches() {
+        let operation = Operation::SignalGenerated {
+            seq: 7,
+            sig: 10,
+            target: SignalTarget::Task(TaskId(3)),
+            code: -6,
+            value: 42,
+        };
+        let json = serde_json::to_string(&operation).unwrap();
+        assert!(json.contains("\"kind\":\"signal_generated\""));
+        assert!(json.contains("\"seq\":7"));
+        assert!(json.contains("\"sig\":10"));
+        assert!(json.contains("\"target\":{"));
+        assert!(json.contains("\"code\":-6"));
+        assert!(json.contains("\"value\":42"));
+        assert_eq!(serde_json::from_str::<Operation>(&json).unwrap(), operation);
+
+        let different_seq = Operation::SignalGenerated {
+            seq: 8,
+            sig: 10,
+            target: SignalTarget::Task(TaskId(3)),
+            code: -6,
+            value: 42,
+        };
+        let different_sig = Operation::SignalGenerated {
+            seq: 7,
+            sig: 12,
+            target: SignalTarget::Task(TaskId(3)),
+            code: -6,
+            value: 42,
+        };
+        let different_target = Operation::SignalGenerated {
+            seq: 7,
+            sig: 10,
+            target: SignalTarget::Process,
+            code: -6,
+            value: 42,
+        };
+        assert_ne!(different_seq, operation);
+        assert_ne!(different_sig, operation);
+        assert_ne!(different_target, operation);
     }
 
     #[test]

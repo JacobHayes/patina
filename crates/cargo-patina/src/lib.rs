@@ -7122,15 +7122,34 @@ unsafe extern "C" {
 }
 
 #[cfg(unix)]
-fn native_child_status(status: ExitStatus) -> (i32, Option<i32>) {
+struct NativeChildStatus {
+    exit_code: i32,
+    signal: Option<i32>,
+    core: bool,
+}
+
+#[cfg(unix)]
+fn native_child_status(status: ExitStatus) -> NativeChildStatus {
     use std::os::unix::process::ExitStatusExt;
 
     if let Some(code) = status.code() {
-        (code, None)
+        NativeChildStatus {
+            exit_code: code,
+            signal: None,
+            core: false,
+        }
     } else if let Some(signal) = status.signal() {
-        (128 + signal, Some(signal))
+        NativeChildStatus {
+            exit_code: 128 + signal,
+            signal: Some(signal),
+            core: status.core_dumped(),
+        }
     } else {
-        (2, None)
+        NativeChildStatus {
+            exit_code: 2,
+            signal: None,
+            core: false,
+        }
     }
 }
 
@@ -7153,7 +7172,11 @@ fn wait_native_child_once(
             ))
         })?;
         inherited_guard.restore()?;
-        let (exit_code, signal) = native_child_status(output.status);
+        let NativeChildStatus {
+            exit_code,
+            signal,
+            core,
+        } = native_child_status(output.status);
         Ok((
             output::Captured {
                 exit_code,
@@ -7161,6 +7184,7 @@ fn wait_native_child_once(
                 stderr: output.stderr,
                 captured: true,
                 signal,
+                core,
             },
             host_pid,
         ))
@@ -7174,7 +7198,11 @@ fn wait_native_child_once(
             ))
         })?;
         inherited_guard.restore()?;
-        let (exit_code, signal) = native_child_status(status);
+        let NativeChildStatus {
+            exit_code,
+            signal,
+            core,
+        } = native_child_status(status);
         Ok((
             output::Captured {
                 exit_code,
@@ -7182,6 +7210,7 @@ fn wait_native_child_once(
                 stderr: Vec::new(),
                 captured: false,
                 signal,
+                core,
             },
             host_pid,
         ))
@@ -7849,6 +7878,7 @@ liveness-safe."
             }
             first.exit_code = second.exit_code;
             first.signal = second.signal;
+            first.core = second.core;
             first
         }
     } else if invocation.schedule.starve.is_some() {
@@ -7906,13 +7936,18 @@ Killed with a nonzero exit."
             ))
         })?;
         inherited_guard.restore()?;
-        let (exit_code, signal) = native_child_status(output.status);
+        let NativeChildStatus {
+            exit_code,
+            signal,
+            core,
+        } = native_child_status(output.status);
         output::Captured {
             exit_code,
             stdout: output.stdout,
             stderr: output.stderr,
             captured: capture,
             signal,
+            core,
         }
     } else if output::capture_active() {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -7924,13 +7959,18 @@ Killed with a nonzero exit."
             ))
         })?;
         inherited_guard.restore()?;
-        let (exit_code, signal) = native_child_status(output.status);
+        let NativeChildStatus {
+            exit_code,
+            signal,
+            core,
+        } = native_child_status(output.status);
         output::Captured {
             exit_code,
             stdout: output.stdout,
             stderr: output.stderr,
             captured: true,
             signal,
+            core,
         }
     } else {
         let (mut child, inherited_guard) =
@@ -7942,13 +7982,18 @@ Killed with a nonzero exit."
             ))
         })?;
         inherited_guard.restore()?;
-        let (exit_code, signal) = native_child_status(status);
+        let NativeChildStatus {
+            exit_code,
+            signal,
+            core,
+        } = native_child_status(status);
         output::Captured {
             exit_code,
             stdout: Vec::new(),
             stderr: Vec::new(),
             captured: false,
             signal,
+            core,
         }
     };
     drop(replay_trace_file);

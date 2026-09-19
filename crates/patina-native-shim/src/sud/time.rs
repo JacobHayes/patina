@@ -91,7 +91,7 @@ pub(super) fn read_timespec_nanos(ptr: *const Timespec) -> Result<u64, i64> {
     Ok(seconds * NANOS_PER_SEC + ts.tv_nsec as u64)
 }
 
-pub(super) fn sys_nanosleep(req: *const Timespec) -> i64 {
+pub(super) fn sys_nanosleep(req: *const Timespec, rem: *mut Timespec) -> i64 {
     // Relative CLOCK_MONOTONIC sleep. Convert to an absolute virtual deadline.
     let rel = match read_timespec_nanos(req) {
         Ok(nanos) => nanos,
@@ -105,10 +105,15 @@ pub(super) fn sys_nanosleep(req: *const Timespec) -> i64 {
     }
     let deadline = now.saturating_add(rel);
     // SAFETY: no pointers.
-    ret_i32(unsafe { patina_sleep_until(PATINA_CLOCK_MONOTONIC, deadline) })
+    ret_i32(unsafe { patina_sleep_until_remaining(PATINA_CLOCK_MONOTONIC, deadline, rem.cast()) })
 }
 
-pub(super) fn sys_clock_nanosleep(clock_raw: u64, flags: u64, req: *const Timespec) -> i64 {
+pub(super) fn sys_clock_nanosleep(
+    clock_raw: u64,
+    flags: u64,
+    req: *const Timespec,
+    rem: *mut Timespec,
+) -> i64 {
     let Some(clock) = clock_from_raw(clock_raw) else {
         return -EINVAL;
     };
@@ -128,5 +133,15 @@ pub(super) fn sys_clock_nanosleep(clock_raw: u64, flags: u64, req: *const Timesp
         now.saturating_add(requested)
     };
     // SAFETY: no pointers.
-    ret_i32(unsafe { patina_sleep_until(clock, deadline) })
+    ret_i32(unsafe {
+        patina_sleep_until_remaining(
+            clock,
+            deadline,
+            if flags & TIMER_ABSTIME == 0 {
+                rem.cast()
+            } else {
+                std::ptr::null_mut()
+            },
+        )
+    })
 }

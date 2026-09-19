@@ -209,9 +209,18 @@ pub fn invoke_with_deadline(
     arguments: &[&str],
     deadline: Duration,
 ) -> Option<Output> {
-    let mut child = Command::new(executable)
-        .current_dir(directory)
-        .args(arguments)
+    output_with_deadline(
+        Command::new(executable)
+            .current_dir(directory)
+            .args(arguments),
+        deadline,
+    )
+}
+
+/// Capture a configured command using the same process-group deadline as CLI runs.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn output_with_deadline(command: &mut Command, deadline: Duration) -> Option<Output> {
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
@@ -233,8 +242,13 @@ pub fn invoke_with_deadline(
                 .status()
                 .expect("launch kill for deadline process group");
             let _ = child.wait();
-            stdout.join().unwrap();
-            stderr.join().unwrap();
+            let stdout = stdout.join().unwrap();
+            let stderr = stderr.join().unwrap();
+            eprintln!(
+                "deadline exceeded: {command:?}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr),
+            );
             return None;
         }
         std::thread::sleep(Duration::from_millis(20));

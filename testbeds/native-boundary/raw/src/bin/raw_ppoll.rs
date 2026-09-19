@@ -32,40 +32,78 @@ fn mono_ns() -> i64 {
     }
     ts.sec * 1_000_000_000 + ts.nsec
 }
+// Class pairing: readiness/ppoll host oracle and signals readiness wait tests.
 fn main() {
     const PPOLL: i64 = 271;
-    let before = mono_ns();
-    let tmo = Ts {
-        sec: 0,
-        nsec: 5_000_000,
-    }; // 5ms
-    let rc = unsafe { sc5(PPOLL, 0, 0, &tmo as *const Ts as i64, 0, 0) };
-    assert_eq!(rc, 0, "ppoll empty+timeout rc {rc}");
-    let delta = mono_ns() - before;
-    assert!(
-        delta >= 5_000_000,
-        "ppoll must advance virtual time >= 5ms, got {delta}"
-    );
-    // Real events with an fd: the deterministic layer models no readiness → soft ENOSYS.
-    let mut pfd = Pollfd {
-        fd: 0,
-        events: 1, /*POLLIN*/
-        revents: 0,
-    };
-    let z = Ts { sec: 0, nsec: 0 };
-    let r2 = unsafe {
-        sc5(
-            PPOLL,
-            &mut pfd as *mut Pollfd as i64,
-            1,
-            &z as *const Ts as i64,
-            0,
-            0,
-        )
-    };
-    assert_eq!(
-        r2, -38,
-        "real-events ppoll must be soft -ENOSYS(-38), got {r2}"
-    );
-    println!("PPOLL_ROW empty_sleep={delta} real_enosys={r2}");
+    const PIPE2: i64 = 293;
+    const WRITE: i64 = 1;
+    const POLLIN: i16 = 1;
+    match std::env::args().nth(1).as_deref() {
+        Some("timeout") => {
+            let before = mono_ns();
+            let mut tmo = Ts {
+                sec: 0,
+                nsec: 5_000_000,
+            };
+            assert_eq!(
+                unsafe { sc5(PPOLL, 0, 0, &mut tmo as *mut Ts as i64, 0, 0) },
+                0
+            );
+            let delta = mono_ns() - before;
+            assert_eq!(delta, 5_000_000);
+            assert_eq!(
+                (tmo.sec, tmo.nsec),
+                (0, 0),
+                "raw ppoll writes remaining timeout"
+            );
+            println!("PPOLL_TIMEOUT elapsed={delta} remaining=0");
+        }
+        Some("readiness") => {
+            let mut fds = [-1i32; 2];
+            assert_eq!(
+                unsafe { sc5(PIPE2, fds.as_mut_ptr() as i64, 0, 0, 0, 0) },
+                0
+            );
+            let mut pfd = Pollfd {
+                fd: fds[0],
+                events: POLLIN,
+                revents: 0,
+            };
+            let mut z = Ts { sec: 0, nsec: 0 };
+            assert_eq!(
+                unsafe {
+                    sc5(
+                        PPOLL,
+                        &mut pfd as *mut Pollfd as i64,
+                        1,
+                        &mut z as *mut Ts as i64,
+                        0,
+                        0,
+                    )
+                },
+                0
+            );
+            assert_eq!(pfd.revents, 0, "an empty pipe is not readable");
+            assert_eq!(
+                unsafe { sc5(WRITE, fds[1] as i64, b"x".as_ptr() as i64, 1, 0, 0) },
+                1
+            );
+            assert_eq!(
+                unsafe {
+                    sc5(
+                        PPOLL,
+                        &mut pfd as *mut Pollfd as i64,
+                        1,
+                        &mut z as *mut Ts as i64,
+                        0,
+                        0,
+                    )
+                },
+                1
+            );
+            assert_eq!(pfd.revents, POLLIN);
+            println!("PPOLL_READINESS empty=0 ready=1 revents=1");
+        }
+        _ => panic!("expected timeout or readiness"),
+    }
 }

@@ -64,7 +64,7 @@ int gettimeofday(struct timeval *restrict time, void *restrict zone) {
     return 0;
 }
 
-int nanosleep(const struct timespec *duration, struct timespec *remaining) {
+static int patina_nanosleep(const struct timespec *duration, struct timespec *remaining) {
     if (duration == NULL || duration->tv_sec < 0 || duration->tv_nsec < 0 ||
         duration->tv_nsec >= 1000000000L) {
         errno = EINVAL;
@@ -85,12 +85,16 @@ int nanosleep(const struct timespec *duration, struct timespec *remaining) {
         errno = EOVERFLOW;
         return -1;
     }
-    if (patina_sleep_until(PATINA_CLOCK_MONOTONIC, now + delta) != 0) {
+    if (patina_sleep_until_remaining(PATINA_CLOCK_MONOTONIC, now + delta, (int64_t *)remaining) != 0) {
         errno = patina_errno();
         return -1;
     }
     if (remaining != NULL) memset(remaining, 0, sizeof *remaining);
     return 0;
+}
+
+int nanosleep(const struct timespec *duration, struct timespec *remaining) {
+    return patina_nanosleep(duration, remaining);
 }
 
 #ifdef __linux__
@@ -120,8 +124,11 @@ int clock_nanosleep(clockid_t clock_id, int flags, const struct timespec *reques
         if (request_nanos > UINT64_MAX - now) return EINVAL;
         deadline = now + request_nanos;
     }
-    if (patina_sleep_until(patina_clock, deadline) != 0) return patina_errno();
-    if (remain != NULL) memset(remain, 0, sizeof *remain);
+    if (patina_sleep_until_remaining(patina_clock, deadline,
+                                    (flags & TIMER_ABSTIME) ? NULL : (int64_t *)remain) != 0) {
+        return patina_errno();
+    }
+
     return 0;
 }
 
@@ -195,22 +202,15 @@ struct tm *localtime_r(const time_t *timep, struct tm *result) {
     return result;
 }
 
-/*
- * sleep(): the second-granularity blocking sleep (mimalloc's `mi_atomic_yield`
- * fallback issues `sleep(0)`). Route it through the virtual clock exactly like
- * nanosleep/usleep so it never blocks a real host thread. Always returns 0: under
- * virtual time the full interval elapses, so no seconds remain.
- */
+/* sleep() is the whole-second face of the same interruptible sleep. POSIX
+ * rounds a fractional unslept second up in its unsigned return value. */
 unsigned int sleep(unsigned int seconds) {
-    uint64_t now = 0;
-    if (patina_clock_now(PATINA_CLOCK_MONOTONIC, &now) != 0) {
-        return 0;
-    }
-    uint64_t delta = (uint64_t)seconds * UINT64_C(1000000000);
-    if (delta <= UINT64_MAX - now) {
-        (void)patina_sleep_until(PATINA_CLOCK_MONOTONIC, now + delta);
-    }
-    return 0;
+    struct timespec duration = {(time_t)seconds, 0};
+    struct timespec remaining = {0, 0};
+    if (patina_nanosleep(&duration, &remaining) == 0) return 0;
+    if (errno == EINTR)
+        return (unsigned int)remaining.tv_sec + (remaining.tv_nsec != 0);
+    return seconds;
 }
 
 /* Split a nanosecond count into a `struct timeval`. The CPU-time model attributes

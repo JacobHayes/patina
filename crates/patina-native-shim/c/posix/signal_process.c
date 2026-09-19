@@ -10,10 +10,12 @@
  * serves; a new interposer needs a symbol row (the object scan fails otherwise).
  */
 
+#ifndef __linux__
 int pause(void) {
     errno = ENOSYS;
     return -1;
 }
+#endif
 
 /*
  * `exit(3)` interposer. When the guest's `main` returns, the C runtime calls
@@ -48,102 +50,113 @@ _Noreturn void exit(int status) {
  * The shim's own handler install above uses the resolved real sigaction, never
  * this interposer, so it is not self-blocked.
  */
-int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact) {
-    if (signum == SIGSYS) {
-        patina_posix_deny(
-            "patina: sigaction(SIGSYS) refused: a guest may not register the "
-            "syscall-dispatch signal (it would disable deterministic containment)\n");
-        errno = EPERM;
+#endif
+
+#ifdef __linux__
+int sigaction(int sig, const struct sigaction *act, struct sigaction *old) {
+    struct patina_signal_action prior, next;
+    if (act != NULL) {
+        next.handler = (uintptr_t)act->sa_handler;
+        next.flags = (uint32_t)act->sa_flags;
+        next.restorer = (uintptr_t)act->sa_restorer;
+        memcpy(&next.mask, &act->sa_mask, sizeof next.mask);
+    }
+    int64_t rc = patina_signal_action_libc(sig, act ? &next : NULL, &prior);
+    if (old != NULL && rc == 0) {
+        memset(old, 0, sizeof *old);
+        old->sa_handler = (void (*)(int))prior.handler;
+        old->sa_flags = (int)prior.flags;
+        old->sa_restorer = (void (*)(void))prior.restorer;
+        memcpy(&old->sa_mask, &prior.mask, sizeof prior.mask);
+    }
+    return signal_result(rc);
+}
+void (*signal(int sig, void (*handler)(int)))(int) {
+    struct patina_signal_action next = {
+        .handler = (uintptr_t)handler, .flags = SA_RESTART
+    }, old;
+    if (signal_result(patina_signal_action_libc(sig, &next, &old)) < 0)
+        return SIG_ERR;
+    return (void (*)(int))old.handler;
+}
+int pthread_sigmask(int how, const sigset_t *set, sigset_t *old) {
+    int64_t rc = patina_signal_mask(how, (const uint64_t *)set, (uint64_t *)old, sizeof(uint64_t));
+    patina_signal_deliver();
+    return (int)-rc;
+}
+int sigprocmask(int how, const sigset_t *set, sigset_t *old) {
+    return signal_result(patina_signal_mask(how, (const uint64_t *)set, (uint64_t *)old, sizeof(uint64_t)));
+}
+int sigpending(sigset_t *set) {
+    memset(set, 0, sizeof *set);
+    return signal_result(patina_signal_pending((uint8_t *)set, sizeof(uint64_t)));
+}
+int sigaltstack(const stack_t *stack, stack_t *old) {
+    return signal_result(patina_signal_altstack(stack, old));
+}
+int pause(void) {
+    return signal_result(patina_signal_wait(NULL, NULL, NULL,
+        sizeof(uint64_t), PATINA_SIGNAL_PAUSE));
+}
+int sigsuspend(const sigset_t *set) {
+    return signal_result(patina_signal_wait((const uint64_t *)set, NULL, NULL,
+        sizeof(uint64_t), PATINA_SIGNAL_SUSPEND));
+}
+int sigtimedwait(const sigset_t *set, siginfo_t *info, const struct timespec *timeout) {
+    return signal_result(patina_signal_wait((const uint64_t *)set, info, timeout,
+        sizeof(uint64_t), PATINA_SIGNAL_DEQUEUE));
+}
+int sigwaitinfo(const sigset_t *set, siginfo_t *info) {
+    return signal_result(patina_signal_wait((const uint64_t *)set, info, NULL,
+        sizeof(uint64_t), PATINA_SIGNAL_DEQUEUE));
+}
+int sigwait(const sigset_t *set, int *sig) {
+    int64_t rc;
+    do {
+        rc = patina_signal_wait((const uint64_t *)set, NULL, NULL,
+                                sizeof(uint64_t), PATINA_SIGNAL_DEQUEUE);
+        patina_signal_deliver();
+    } while (rc == -EINTR);
+    if (rc < 0) return (int)-rc;
+    *sig = rc;
+    return 0;
+}
+int sigqueue(pid_t pid, int sig, const union sigval value) {
+    siginfo_t info;
+    memset(&info, 0, sizeof info);
+    info.si_signo = sig; info.si_code = SI_QUEUE;
+    info.si_pid = 1; info.si_uid = 1000; info.si_value = value;
+    return signal_result(patina_sud_dispatch(SYS_rt_sigqueueinfo,
+        (uint64_t)pid, (uint64_t)sig, (uintptr_t)&info, 0, 0, 0, 0));
+}
+_Noreturn void abort(void) { patina_abort(); }
+int pthread_kill(pthread_t thread, int sig) {
+    return patina_pthread_kill((uintptr_t)thread, sig);
+}
+int killpg(pid_t group, int sig) {
+    if (group < 0) { errno = EINVAL; return -1; }
+    if (group > 1) { errno = ESRCH; return -1; }
+    return signal_result(patina_sud_dispatch(SYS_kill, 0, (uint64_t)sig, 0, 0, 0, 0, 0));
+}
+int siginterrupt(int sig, int interrupt) {
+    struct patina_signal_action act;
+    if (signal_result(patina_signal_action_libc(sig, NULL, &act)) < 0)
         return -1;
-    }
-    if (signum == SIGSEGV && act != NULL && patina_tsc_armed) {
-        /* Same hardening, second trap: while the timestamp-counter trap is armed
-         * the SIGSEGV handler IS the containment for rdtsc/rdtscp, so replacing
-         * it would turn every counter read into a crash (or, worse, into a
-         * guest-handled fault that reads on). Rust std never reaches this — it
-         * installs its stack-overflow handler only over SIG_DFL, and the trap
-         * armed first — so this refuses a deliberate guest registration only.
-         * A pure QUERY (act == NULL) is still answered. */
-        patina_posix_deny(
-            "patina: sigaction(SIGSEGV) refused: a guest may not replace the "
-            "timestamp-counter trap handler (it would disable deterministic "
-            "containment of rdtsc/rdtscp)\n");
-        errno = EPERM;
-        return -1;
-    }
-    return patina_real_sigaction()(signum, act, oldact);
+    if (interrupt) act.flags &= ~SA_RESTART;
+    else act.flags |= SA_RESTART;
+    return signal_result(patina_signal_action_libc(sig, &act, NULL));
 }
-
-void (*signal(int signum, void (*handler)(int)))(int) {
-    if (signum == SIGSYS) {
-        patina_posix_deny(
-            "patina: signal(SIGSYS) refused: a guest may not register the "
-            "syscall-dispatch signal (it would disable deterministic containment)\n");
-        errno = EPERM;
-        return SIG_ERR;
-    }
-    if (signum == SIGSEGV && patina_tsc_armed) {
-        /* The `sigaction` hardening below reaches this path too: `signal()`
-         * installs through the REAL sigaction, so it would otherwise walk around
-         * the refusal and displace the timestamp-counter trap handler. */
-        patina_posix_deny(
-            "patina: signal(SIGSEGV) refused: a guest may not replace the "
-            "timestamp-counter trap handler (it would disable deterministic "
-            "containment of rdtsc/rdtscp)\n");
-        errno = EPERM;
-        return SIG_ERR;
-    }
-    /* Emulate signal() over the real sigaction to avoid a second host-alias:
-     * install the handler with the classic (restarting) semantics and return the
-     * previous handler. */
-    struct sigaction action;
-    struct sigaction previous;
-    memset(&action, 0, sizeof action);
-    action.sa_handler = handler;
-    action.sa_flags = SA_RESTART;
-    sigemptyset(&action.sa_mask);
-    if (patina_real_sigaction()(signum, &action, &previous) != 0) {
-        return SIG_ERR;
-    }
-    return previous.sa_handler;
+int tgkill(pid_t tgid, pid_t tid, int sig) {
+    return signal_result(patina_sud_dispatch(SYS_tgkill, (uint64_t)tgid,
+        (uint64_t)tid, (uint64_t)sig, 0, 0, 0, 0));
 }
-
-/*
- * glibc init-reachable helpers a custom global allocator (tikv-jemallocator)
- * links on Linux, made deterministic so the guest audits clean and runs
- * reproducibly. Each is a strong def, so it also drops off the guest import table.
- */
-
-/* Signal masking is inert under Patina (no ambient signals are ever delivered),
- * so forward to the real glibc mask op for faithful `oldset` semantics — but NEVER
- * let the guest block SIGSYS: under syscall-user-dispatch a blocked synchronous
- * SIGSYS would kill the process and disable deterministic containment. Strip SIGSYS
- * from any block/setmask set, mirroring the `sigaction(SIGSYS)` hardening above.
- * The shim uses no `pthread_sigmask` internally, so this never self-blocks. */
-typedef int (*patina_host_pthread_sigmask_fn)(int, const sigset_t *, sigset_t *);
-static patina_host_pthread_sigmask_fn patina_host_pthread_sigmask_ptr;
-static patina_host_pthread_sigmask_fn patina_real_pthread_sigmask(void) {
-    if (patina_host_pthread_sigmask_ptr == NULL) {
-        patina_host_pthread_sigmask_ptr =
-            (patina_host_pthread_sigmask_fn)__real_dlsym(RTLD_NEXT, "pthread_sigmask");
-    }
-    return patina_host_pthread_sigmask_ptr;
+int tkill(pid_t tid, int sig) {
+    return signal_result(patina_sud_dispatch(SYS_tkill, (uint64_t)tid,
+        (uint64_t)sig, 0, 0, 0, 0, 0));
 }
-int pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset) {
-    if (set != NULL && (how == SIG_BLOCK || how == SIG_SETMASK)) {
-        sigset_t adjusted = *set;
-        sigdelset(&adjusted, SIGSYS);
-        if (patina_tsc_armed) {
-            /* A blocked synchronous SIGSEGV would kill the process at the first
-             * rdtsc instead of being answered from the virtual clock — the same
-             * containment argument as SIGSYS above. */
-            sigdelset(&adjusted, SIGSEGV);
-        }
-        return patina_real_pthread_sigmask()(how, &adjusted, oldset);
-    }
-    return patina_real_pthread_sigmask()(how, set, oldset);
+int raise(int sig) {
+    return signal_result(patina_sud_dispatch(SYS_tgkill, 1, patina_thread_id(), (uint64_t)sig, 0, 0, 0, 0));
 }
-
 #endif
 
 /*
@@ -169,10 +182,10 @@ __attribute__((noreturn)) static void patina_process_trap(const char *symbol) {
     static const char suffix[] =
         "; the process class is a deterministic-runtime non-goal; failing closed\n";
     (void)patina_stdio_write(2, suffix, sizeof suffix - 1);
-    /* abort() skips the atexit shutdown flush, so push the captured guest output
+    /* Private host abort skips the atexit shutdown flush, so push the captured guest output
      * and this diagnostic to the real descriptors before terminating. */
     patina_flush_captured_stdio();
-    abort();
+    patina_host_abort();
 }
 
 pid_t fork(void) { patina_process_trap("fork"); }
@@ -182,10 +195,14 @@ int execvp(const char *file, char *const argv[]) {
     patina_process_trap("execvp");
 }
 pid_t waitpid(pid_t pid, int *status, int options) {
-    (void)pid;
-    (void)status;
-    (void)options;
-    patina_process_trap("waitpid");
+#ifdef __linux__
+    return signal_result(patina_sud_dispatch(SYS_wait4, (uint64_t)pid,
+        (uintptr_t)status, (uint64_t)options, 0, 0, 0, 0));
+#else
+    (void)pid; (void)status; (void)options;
+    errno = ECHILD;
+    return -1;
+#endif
 }
 pid_t setsid(void) { patina_process_trap("setsid"); }
 int setgid(gid_t gid) {
@@ -303,11 +320,8 @@ int posix_spawn_file_actions_addchdir(posix_spawn_file_actions_t *acts, const ch
     patina_process_trap("posix_spawn_file_actions_addchdir");
 }
 int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options) {
-    (void)idtype;
-    (void)id;
-    (void)infop;
-    (void)options;
-    patina_process_trap("waitid");
+    return signal_result(patina_sud_dispatch(SYS_waitid, (uint64_t)idtype,
+        id, (uintptr_t)infop, (uint64_t)options, 0, 0, 0));
 }
 
 /*
@@ -328,7 +342,7 @@ int __libc_current_sigrtmax(void) { return 64; }
  * answer, return it so a guest that reaches the path runs deterministically.
  *
  * `kill` in the single-process deterministic world: the guest is pid 1
- * (getpid()==1, getppid()==0) and no other process exists. A signal-0 probe
+ * (with a stable synthetic parent pid) and no other process exists. A signal-0 probe
  * (an existence/permission check that delivers nothing) reports the guest alive
  * and every other pid absent (ESRCH) — this is the shape sysinfo's
  * `check_if_pid_is_alive` and libc liveness probes rely on. A real signal to
@@ -338,13 +352,27 @@ int __libc_current_sigrtmax(void) { return 64; }
  * support) it fails closed with a loud line and a recoverable ENOSYS.
  */
 int kill(pid_t pid, int sig) {
+#ifdef __linux__
+    return signal_result(patina_sud_dispatch(SYS_kill, (uint64_t)pid, (uint64_t)sig, 0, 0, 0, 0, 0));
+#else
+    if (sig < 0 || sig > 64) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (sig == 0 && (pid == 1 || pid == 0 || pid == -1)) {
+        return 0; /* the guest process/group exists; signal 0 delivers nothing */
+    }
     if (pid != 1) {
         errno = ESRCH;
         return -1;
     }
-    if (sig == 0) {
-        return 0; /* the guest (pid 1) exists; signal 0 delivers nothing */
-    }
     return patina_posix_deny("patina: kill(self, signal) delivery is not modeled "
                              "by the deterministic runtime; failing closed\n");
+#endif
 }
+
+#ifdef __linux__
+int signalfd(int fd, const sigset_t *mask, int flags) {
+    return signal_result(patina_signalfd(fd, (const uint64_t *)mask, sizeof(uint64_t), flags));
+}
+#endif

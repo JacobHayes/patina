@@ -144,7 +144,7 @@ Automated evidence:
 - no host directory or socket is inherited: the filesystem is `MemFs`, and datagrams require `--socket FD=BIND->PEER`;
 - unsupported imports fail audit before instantiation.
 
-Documented semantic limitations: `sock_accept`/`proc_raise` return `NOSYS` (Preview 1 has no listen surface; Patina has no signal model — Preview 1 itself has no general socket-creation API, so the supported socket surface uses configured descriptors); symlinks are inert leaf nodes (one-hop terminal follow then `ELOOP`; intermediate traversal is a deterministic `NOTCAPABLE`); an unlinked-but-open entry stays fully alive behind its descriptors (link count 0) and is released with its last reference, exactly as a kernel releases an inode; `APPEND` set after open works through a traced seek-to-end per `fd_write`; read-only mounts are host-enforced with descriptor rights as advisory defense-in-depth; memory growth past the cap is a deterministic trap.
+Documented semantic limitations: `sock_accept`/`proc_raise` return `NOSYS` (Preview 1 has no listen surface; the native signal model is not exposed by the WASI host — Preview 1 itself has no general socket-creation API, so the supported socket surface uses configured descriptors); symlinks are inert leaf nodes (one-hop terminal follow then `ELOOP`; intermediate traversal is a deterministic `NOTCAPABLE`); an unlinked-but-open entry stays fully alive behind its descriptors (link count 0) and is released with its last reference, exactly as a kernel releases an inode; `APPEND` set after open works through a traced seek-to-end per `fd_write`; read-only mounts are host-enforced with descriptor rights as advisory defense-in-depth; memory growth past the cap is a deterministic trap.
 
 ### V4: native Rust Patina target
 
@@ -178,13 +178,18 @@ integration testing, with reviewable guests in `testbeds/native-boundary/`:
   `envp` array and ambient canaries, dlsym routing, live SUD arming or pre-exec
   refusal, SIGSYS protection, AT_RANDOM, vsyscall, and TSC containment.
 - `native_raw`: live mixed-door parity, legacy syscall aliases, exact identity
-  constants, soft ENOSYS refusals and scrubbed prctl auxv. These include
-  Patina-specific semantics and are not claims of host equivalence.
+  constants, soft ENOSYS refusals, scrubbed prctl auxv and modeled/unsupported/
+  privileged prctl options. Raw ppoll pins remaining-time writeback and pipe
+  readiness before/after a write. Patina-specific identity/refusal pins are not
+  claims of host equivalence.
+- `native_signals`: focused C readiness interruption, temporary masks and timeout
+  contracts; x86_64 Linux libc/raw prctl sharing, handler/mask visibility, sigwait
+  retry, and complete guest-abort versus incomplete internal-fatal traces.
 - `native_trace`: the whole-run std strace detector with a planted escape on
   both Linux architectures; explicit unsupported ktrace policy on macOS.
 - `shim_host_alias`: compiled-object doctrine scan and planted leak.
 
-The five native targets run in the full `check` workspace-test rung, in
+The six native targets run in the full `check` workspace-test rung, in
 both Linux CI architectures on stable and MSRV, and in the stable macOS job.
 `check:fast` retains the cheap `shim_host_alias` object scan, not native execution.
 `mise run check:native-abi` selects just `native_abi`; a libtest filter selects an
@@ -300,6 +305,7 @@ Required before claiming general native `std` control:
 - trace lifecycle protocol (format 5): operation events carry global order and incarnation ids, lifecycle markers share the same order namespace, branch suffix lifecycle/orders are validated against inherited prefix orders, and crash-restart traces are represented as `Start(0)`, triggering operation, `Crash(0,digest)`, `Restart(0->1,digest)`, `Start(1)`, fresh-incarnation operations, and `End(1)`; legacy v1-v4 `Operation::FsCrash` traces refuse as `LegacyCrashSemantics`;
 - creation modes on the boundary (format 6): every creating filesystem operation carries the mode its caller asked for — `fs_open`'s flags gain `mode` (POSIX `open`'s third argument, `0` when the call cannot create), `fs_create_directory` gains one, and `fs_make_fifo` already had one — so a mode survives record→replay instead of being reconstructed from a per-kind constant. The v5→v6 migration fills in exactly the request a format-5 recorder behaved as if it had made (`0o666` for a creating open, `0o777` for a directory, `0` otherwise), which is not a fabricated value: those are the requests the fixed umasked defaults came from. The restart snapshot goes to v4 in the same change, making a FIFO inode-backed like a file so a hard link to one is a second name for the same node across a restart;
 - the four timestamps on the boundary (format 8): every recorded metadata outcome carries `ctime_nanos` and `btime_nanos` beside `atime_nanos`/`mtime_nanos`, now that the deterministic filesystem stamps all four by the kernel's rules from the virtual clock the runtime hands each driver operation. The v7→v8 migration writes `ctime_nanos = mtime_nanos` (a format-7 runtime reported its modification time as the change time) and `btime_nanos = 0` (it never reported a birth time), exactly what the recorded run answered; fixture `format-7-times.patina`;
+- signal generation (format 9): `signal_generated` records sequence, signal, process/task target, siginfo code and payload. `format_8_migrates_to_9` decodes the checked-in format-8 fixture through the migration chain and replays the canonical `format-9-signals.patina` feature fixture. Migration preserves old observations; a format-8 guest that hit a broken-pipe write, called kill(self), or entered a single-task futex wait can migrate successfully and still diverge when replayed under the changed runtime semantics.
 - `O_PATH` on the boundary (format 7): `fs_open`'s flags gain `path_only`, the flag that distinguishes a directory descriptor that NAMES a location from one that OPENED the directory — different permission cost, different capability — so a capability guest's component walk and a real directory read are no longer the same recorded operation. The v6→v7 migration writes `false` on every prior open, which is not a fabricated value: format 6 had no path-only open in its vocabulary at all, so every open it recorded opened the entry. Two new recorded operations carry inode lifetime across the boundary (`fs_retain_inode`/`fs_release_inode`, the reference a FIFO endpoint holds on a node the filesystem hands back no handle for), plus `fs_read_directory_fd` (iteration through a descriptor rather than a name) and `fs_set_inode_mode` (`fchmod` through that same endpoint); all four are additive serde-tagged variants, so they need no version bump of their own;
 - failure-oracle delta debugging for unbranched main timelines, leaf branch suffixes, and non-leaf branch trees (inherited prefix protected, suffix reducible), exposed by `cargo patina minimize` through isolated candidate files and `PATINA_MINIMIZE_TRACE`, plus scenario/parameter reducers and bounded ascending seed canonicalization;
 - fault-knob reduction: `cargo patina minimize --generation N` delta-debugs the fault-knob vector a campaign generation drew, each candidate a fresh seeded `run` spelled by the campaign's own generation runner, and writes the surviving standalone reproduction command into the out-dir before the trace phase shrinks a trace recorded from it. Its oracle is patina-owned and its target is the campaign's own recognition of the generation: the verdicts recorded for it in `campaign-state.json` (`patina.campaign.state/v2`), so no failure text has to be hand-written. A candidate preserves the failure only when its replay reports every target failure verdict by `(kind, label)` AND did not diverge (no `patina native shim fatal`), which closes the fail-open direction a target-only oracle leaves open. `--marker TEXT` overrides the target for a guest that reports nothing structurally, and a generation with no failure verdict and no `--marker` is refused by name — never reduced against a guessed target, and never against a target the unmodified seed run does not itself reproduce. Because that oracle replays each candidate into its own temp directory with the guest's filesystem, clock, network and entropy virtualized, candidates are evaluated concurrently (`--jobs`) without a shared path between them; an external oracle command is opaque to patina and stays serial unless `--jobs` opts in. Parallelism is throughput-only by construction: a reducer offers the oracle the window of candidates a one-at-a-time scan would try next and keeps only the FIRST accept in scan order, so a widened window cannot move the result. Any oracle that reports the failure surviving in a candidate with every reducible decision deleted is refused by name (inverted exit polarity) rather than obeyed;
@@ -592,3 +598,72 @@ length-derived blocks are not an allocation inventory. Anonymous descriptors
 without filesystem inodes refuse metadata mutation loudly. Trace v7 migration
 preserves recorded observations, not a guarantee of executing an old binary under
 new timestamp rules; ordinary fingerprint/outcome mismatch checks still apply.
+
+### Signal-wait confidence boundary
+
+The frozen signals-family wait tests pair the host-oracle interruption probes with
+real managed-thread unit tests in `thread/signals/tests.rs`: recipient choice,
+queue unlinking before wake, no extra interruption, restart versus EINTR, mask
+restoration, remaining-time writes and signalfd consumption/readiness. Runtime
+tests independently record/replay park→wake→next and prove an early wake cancels
+its timer. Additional readiness tests distinguish one signal consumer from
+multiple deduplicated signalfd reactor notifications, including private-pending
+and nonmatching-mask controls. The typed `cargo-patina/tests/native_signals.rs`
+integration test compiles `testbeds/native-boundary/signals/blocking_readiness.c`
+to check actual libc poll/ppoll/select/pselect/epoll_pwait adapters under SA_RESTART
+and verify libc timeout preservation. These detectors
+pair with the existing full-family trace obligations; none substitutes for the
+family gate or for cross-platform execution evidence.
+
+### Signals evidence and residual scope
+
+The frozen family gate covers its 39 production-backed obligations and 22 trace
+facts; the landing battery runs it alongside the parallel testbeds, with isolated
+builds and conformance outputs in `target/check/parallel/signals-family-gate/`.
+`native_signals` and `native_containment` compile the real C layer through
+`cargo-patina/tests/common` with guests in `testbeds/native-boundary/signals/`.
+They exercise libc and inline SUD, including prctl sharing, reserved masks/actions,
+tgkill/tkill, sigwait retry and internal-fatal versus guest-abort finalization.
+The isolated-test harness rejects a missing filter and a planted child failure.
+Mixed-batch default death, handler-time pending visibility, transparent
+join/mutex/cond handler delivery and no-pending syscall transport cost have
+separate unit detectors. Sync queues are retained during handlers to preserve
+ownership and notification, unlike interrupted syscall queues. Nested pthread
+parking from such a handler is a named fatal refusal before queue mutation or
+condvar unlock, not an inner/outer wait-stack model. Child-process detectors cover
+timed and untimed waits, including an already-arrived outer grant; uncontended
+locks are allowed.
+
+Nested-frame detectors require both mask and stack fixups to survive an inner
+handler's frame consumption. A raw C unblock/handler/raw-query test independently
+checks that the enclosing SIGSYS return cannot restore the old blocked mask.
+The native internal-panic detector injects a panic into a scratch copy of a real
+Rust ABI entry, after ownership entry but before locks. Its RED control loads and
+validates the incorrectly finalized trace; its passing cases require SIGABRT and
+an unloadable trace for unwind and abort strategies, with original and replaced
+hooks. An export-scope audit pairs with that behavioral detector. Positive controls
+catch guest panics in main, pthread start, pthread once and signal callbacks, then
+validate complete traces. The production hook and guard backstops apply to
+POSIX-interposed binaries; alias-free prefixed-C links and libtest retain their
+own panic handling.
+
+Startup and locked-diagnostic detectors require that signal/altstack
+registration and immediate poll queries must not activate the scheduler or mark
+a boundary before harness installation; a context-locked custom-op refusal after
+thread activation must emit its diagnostic and abort, not recursively schedule
+through captured stdio. The custom-op replay and liveness e2e failure legs have
+process-group deadlines. The C custom-op header includes the Rust entry's
+fault-eligibility parameter, exercised by the linked C refusal guest.
+
+Poll/select/pselect6 remain network+readiness-owned despite being implemented to
+support signal interruption; their dedicated host-conformance oracle has not
+landed. The raw frame/restart protocols are final `signal-abi` traps; pidfd signal
+sending remains a process trap (no virtual pidfds), a stated deviation from the
+frozen spec's self-pidfd mention. Ambient host signals and siglongjmp escape from
+a handler remain outside verified deterministic behavior.
+
+macOS execution of waitpid's ECHILD answer, getppid=2, sleep and panic ownership is
+unverified. Linux interruption/frame semantics are cfg-bounded; macOS keeps
+virtual-time sleep without Linux signal interruption. Source/cfg review and
+Linux-host cross-target compilation are not macOS runtime evidence. Guest abort finalization is Linux-only; internal fatalities
+on both platforms must bypass the public interposer and leave incomplete traces.

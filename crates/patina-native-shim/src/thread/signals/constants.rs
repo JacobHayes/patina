@@ -1,0 +1,72 @@
+//! Linux signal ABI constants (kernel numbering, including NPTL's reserved pair).
+//! Kept here because the shim's kernel-layout ABI is independent of libc layouts.
+pub(in crate::thread) const SIGKILL: u8 = 9;
+pub(in crate::thread) const SIGSEGV: u8 = 11;
+pub(in crate::thread) const SIGCHLD: u8 = 17;
+pub(in crate::thread) const SIGCONT: u8 = 18;
+pub(in crate::thread) const SIGSTOP: u8 = 19;
+pub(in crate::thread) const SIGTSTP: u8 = 20;
+pub(in crate::thread) const SIGTTIN: u8 = 21;
+pub(in crate::thread) const SIGTTOU: u8 = 22;
+pub(in crate::thread) const SIGURG: u8 = 23;
+pub(in crate::thread) const SIGWINCH: u8 = 28;
+pub(in crate::thread) const SIGSYS: u8 = 31;
+pub(in crate::thread) const KERNEL_SIGRTMIN: u8 = 32;
+pub(in crate::thread) const SIGNAL_MAX: i32 = 64;
+pub(in crate::thread) const SIG_DFL: usize = 0;
+pub(in crate::thread) const SIG_IGN: usize = 1;
+pub(in crate::thread) const SI_TKILL: i32 = -6;
+pub(in crate::thread) const SIG_BLOCK: i32 = 0;
+pub(in crate::thread) const SIG_UNBLOCK: i32 = 1;
+pub(in crate::thread) const SIG_SETMASK: i32 = 2;
+pub(in crate::thread) const SS_DISABLE: i32 = 2;
+pub(in crate::thread) const SA_RESTART: u64 = 0x1000_0000;
+pub(in crate::thread) const SA_RESETHAND: u64 = 0x8000_0000;
+pub(in crate::thread) const GLIBC_SIGCANCEL: i32 = 32;
+pub(in crate::thread) const GLIBC_SIGSETXID: i32 = 33;
+pub(in crate::thread) const EAGAIN: i32 = 11;
+pub(in crate::thread) const EFAULT: i32 = 14;
+
+pub(in crate::thread) const SIGPIPE: i32 = 13;
+pub(in crate::thread) const SI_USER: i32 = 0;
+#[cfg(test)]
+pub(in crate::thread) const SI_QUEUE: i32 = -1;
+pub(in crate::thread) const SA_RESTORER: u64 = 0x0400_0000;
+pub(in crate::thread) const SA_NODEFER: u64 = 0x4000_0000;
+
+pub(in crate::thread) const SIGSET_BYTES: usize = 8;
+#[cfg(target_arch = "x86_64")]
+pub(in crate::thread) const SYS_RT_SIGACTION: i64 = 13;
+#[cfg(target_arch = "aarch64")]
+pub(in crate::thread) const SYS_RT_SIGACTION: i64 = 134;
+#[cfg(target_arch = "x86_64")]
+pub(in crate::thread) const SYS_RT_SIGPROCMASK: i64 = 14;
+#[cfg(target_arch = "aarch64")]
+pub(in crate::thread) const SYS_RT_SIGPROCMASK: i64 = 135;
+#[cfg(target_arch = "x86_64")]
+pub(in crate::thread) const SYS_SIGALTSTACK: i64 = 131;
+#[cfg(target_arch = "aarch64")]
+pub(in crate::thread) const SYS_SIGALTSTACK: i64 = 132;
+#[cfg(target_arch = "x86_64")]
+pub(in crate::thread) const SYS_RT_TGSIGQUEUEINFO: i64 = 297;
+#[cfg(target_arch = "aarch64")]
+pub(in crate::thread) const SYS_RT_TGSIGQUEUEINFO: i64 = 240;
+#[cfg(target_arch = "x86_64")]
+pub(in crate::thread) const SYS_GETPID: i64 = 39;
+#[cfg(target_arch = "aarch64")]
+pub(in crate::thread) const SYS_GETPID: i64 = 172;
+#[cfg(target_arch = "x86_64")]
+pub(in crate::thread) const SYS_GETTID: i64 = 186;
+#[cfg(target_arch = "aarch64")]
+pub(in crate::thread) const SYS_GETTID: i64 = 178;
+#[cfg(target_arch = "x86_64")]
+pub(in crate::thread) const SYS_EXIT: i64 = 60;
+#[cfg(target_arch = "aarch64")]
+pub(in crate::thread) const SYS_EXIT: i64 = 93;
+#[cfg(target_arch = "x86_64")]
+pub(in crate::thread) const SYS_EXIT_GROUP: i64 = 231;
+#[cfg(target_arch = "aarch64")]
+pub(in crate::thread) const SYS_EXIT_GROUP: i64 = 94;
+
+pub(in crate::thread) const SFD_NONBLOCK: i32 = 0x800;
+pub(in crate::thread) const SFD_CLOEXEC: i32 = 0x80000;

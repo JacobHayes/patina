@@ -66,8 +66,9 @@ fn every_table_number_has_exactly_one_row_and_every_row_is_in_the_table() {
 }
 
 /// A row's `Removed` family is exactly the set of numbers the table lists
-/// without an implementation, and a `removed` trap class is used by exactly
-/// those rows — so a number the kernel drops or revives moves the row.
+/// without an implementation, and those rows answer the kernel's own ENOSYS
+/// instead of trapping or reaching the host — so a number the kernel drops or
+/// revives moves the row.
 #[test]
 fn removed_rows_are_exactly_the_tables_unimplemented_numbers() {
     let unimplemented: BTreeSet<&str> = linux_table(Arch::X86_64)
@@ -84,12 +85,10 @@ fn removed_rows_are_exactly_the_tables_unimplemented_numbers() {
         removed_rows, unimplemented,
         "the Removed family must be exactly the table's entry-less numbers"
     );
-    for row in SYSCALLS {
-        let removed_class = matches!(row.disposition, Disposition::Trap(TRAP_REMOVED));
-        assert_eq!(
-            removed_class,
-            row.family == Family::Removed,
-            "{}: trap({TRAP_REMOVED}) and Family::Removed go together",
+    for row in SYSCALLS.iter().filter(|row| row.family == Family::Removed) {
+        assert!(
+            matches!(row.disposition, Disposition::SoftDeny(38)),
+            "{}: Family::Removed rows answer ENOSYS",
             row.name
         );
     }
@@ -121,10 +120,11 @@ fn rows_are_well_formed() {
                     "{}: unknown trap class {class}",
                     row.name
                 );
-                let final_class = class == TRAP_PROCESS || class == TRAP_PRIVILEGED;
+                let final_class =
+                    class == TRAP_PROCESS || class == TRAP_PRIVILEGED || class == TRAP_SIGNAL_ABI;
                 assert!(
                     final_class || row.closes_in.is_some(),
-                    "{}: a trap that is not process/privileged must name the arc that closes it",
+                    "{}: a trap that is not a final class must name the arc that closes it",
                     row.name
                 );
             }

@@ -60,7 +60,7 @@ __attribute__((noreturn)) static void patina_stdio_trap(const char *symbol) {
         "; a host FILE* means an un-interposed fopen leaked through; failing closed\n";
     (void)patina_stdio_write(2, suffix, sizeof suffix - 1);
     patina_flush_captured_stdio();
-    abort();
+    patina_host_abort();
 }
 
 int fputs(const char *string, FILE *stream) {

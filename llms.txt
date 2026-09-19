@@ -283,7 +283,8 @@ ABSENT means "did not fire", never zero.
   `unknown_import`, `starvation_stall`, `incomplete_trace`). Constructed by the
   supervising process from what the dying child printed and exited with. Its
   ABSENCE is meaningful: an abort with no `refusal` is the guest's own doing.
-- `guest_exit` = `{code, signal?, signal_name?}` — how the guest process ended.
+- `guest_exit` = `{code, signal?, signal_name?, core?}` — how the guest process ended.
+  `core` is the observed wait-status core flag, present only on signal death.
   `code` is the shell-style `128 + signal` on a signal death, which cannot be
   told apart from a deliberate `exit(134)`; `signal` is what tells them apart.
 
@@ -392,7 +393,7 @@ dev-dependency use under plain `cargo test`.
 
 `mise run check:native-abi` selects cargo-patina's `native_abi` tests. The other
 native targets are `native_containment`, `native_raw`, `native_trace`, and
-`native_workloads`; use Cargo's test-name filter for a single proof. All run in
+`native_workloads`, and `native_signals`; use Cargo's test-name filter for a single proof. All run in
 `check` and the Linux/macOS workspace-test CI jobs, not `check:fast`. The full gate
 also runs receipt-checked FIFO/rustix-default/cap-std testbeds and conformance's full four-leg
 run and planted-failure selftest. See `testbeds/native-boundary/README.md` for

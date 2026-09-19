@@ -22,7 +22,7 @@ Usage: scripts/check.sh <full|fast|msrv>
   full  Full local pre-landing gate. Cheap checks run first, the e2e-heavy
         workspace test rung runs alone, then independent runtime/testbed gates
         run concurrently.
-  fast  Inner-loop gate; excludes cargo-patina end_to_end and the five native execution targets
+  fast  Inner-loop gate; excludes cargo-patina end_to_end and the six native execution targets
         and the landing-only docs/packaging/testbed/full-e2e rungs.
         Targeted native ABI feedback: mise run check:native-abi.
   msrv  Execute the complete Rust 1.86 suite. This is CI/final-gate evidence,
@@ -161,7 +161,7 @@ run_fast_workspace_tests() {
   while IFS= read -r test_path; do
     test_name=$(basename "${test_path%.rs}")
     case "$test_name" in
-      native_abi|native_containment|native_raw|native_trace|native_workloads) continue ;;
+      native_abi|native_containment|native_raw|native_signals|native_trace|native_workloads) continue ;;
     esac
     cargo_patina_targets+=(--test "$test_name")
   done < <(find crates/cargo-patina/tests -maxdepth 1 -type f -name '*.rs' ! -name end_to_end.rs | LC_ALL=C sort)
@@ -216,6 +216,7 @@ run_full() {
   run_rung 'crate packaging' cargo package --workspace --no-verify --locked --allow-dirty || return $?
   run_rung 'workq classifier selftest' testbeds/workq/fuzz-sweep.sh --selftest || return $?
   run_rung 'campaign classifier selftest' cargo run -q -p cargo-patina -- patina campaign --selftest || return $?
+  run_rung 'conformance runner selftest' testbeds/syscall-conformance/run.sh --selftest || return $?
   run_rung 'conformance gate selftest' testbeds/syscall-conformance/gate.sh --selftest || return $?
   run_rung 'MSRV cargo check' run_msrv_check || return $?
   run_rung 'MSRV rodata detector' run_msrv_detector || return $?
@@ -233,12 +234,9 @@ run_full() {
   start_rung 'workq testbed' testbeds/workq/run-patina.sh
   start_rung 'WASI validation' scripts/validate-wasi.sh
   start_rung 'cross-target smoke' scripts/smoke-cross-target.sh
-  # The syscall-conformance testbed's full tier: every probe through all three
-  # vehicles natively (host oracle) and under patina, plus record/replay identity
-  # and the strace leak leg. Linux-only; loud counted skip elsewhere. (A frozen
-  # family's own gate, `gate.sh --family <f>`, is its builder's done-line; it
-  # joins this ladder in the change that makes it pass.)
-  start_rung 'syscall conformance' run_conformance
+  # Includes the full conformance run and obligations, replacing the standalone
+  # conformance rung. gate.sh and run.sh both inherit this rung's target dir.
+  start_rung 'signals family gate' testbeds/syscall-conformance/gate.sh --family signals
   wait_rungs || return $?
 
   printf 'PASS  full landing gate (%ss total)\n' "$(( $(date +%s) - total_start ))"

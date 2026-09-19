@@ -1,9 +1,11 @@
+// Class pairing: reserved_signals_are_stripped_from_every_host_mask.
+extern "C" fn ignore(_: i32) {}
 fn main() {
     unsafe extern "C" {
-        fn sigaction(sig: i32, act: *const core::ffi::c_void, old: *mut core::ffi::c_void) -> i32;
+        fn signal(sig: i32, handler: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
     }
-    const SIGSYS: i32 = 31;
-    // The interposer refuses SIGSYS before dereferencing `act`, so null is safe.
-    let rc = unsafe { sigaction(SIGSYS, core::ptr::null(), core::ptr::null_mut()) };
-    println!("SIGSYS_REGISTER_REFUSED={}", rc != 0);
+    unsafe {
+        signal(31, ignore as *mut core::ffi::c_void);
+    }
+    panic!("reserved signal registration unexpectedly returned");
 }

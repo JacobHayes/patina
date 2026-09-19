@@ -29,22 +29,45 @@ pub static PATINA_SUD_AUXV_BASE: AtomicUsize = AtomicUsize::new(0);
 #[unsafe(no_mangle)]
 pub static PATINA_SUD_AUXV_LEN: AtomicUsize = AtomicUsize::new(0);
 
-pub(super) fn sys_rt_sigaction(signum: i64) -> i64 {
-    // SIGSYS registration by the guest would replace the dispatch handler:
-    // containment over. Fatal (the raw door of the §7.5 SIGSYS hardening; the
-    // symbol door is the interposed sigaction/signal in patina_posix.c).
-    const SIGSYS: i64 = 31;
-    if signum == SIGSYS {
-        crate::trap_fatal(
-            "SUD trapped rt_sigaction(SIGSYS): a guest may not re-register the syscall-dispatch \
-             handler — doing so would disable deterministic containment",
-        );
-    }
-    // No ambient signals exist, so registering any other handler is a
-    // deterministic success no-op that records nothing (mirrors the allowlist
-    // stance for bare sigaction/signal).
-    0
+const PR_SET_NAME: u32 = 15;
+const PR_GET_NAME: u32 = 16;
+const PR_SET_PDEATHSIG: u32 = 1;
+const PR_GET_PDEATHSIG: u32 = 2;
+const PR_GET_DUMPABLE: u32 = 3;
+const PR_SET_DUMPABLE: u32 = 4;
+const PR_SET_NO_NEW_PRIVS: u32 = 38;
+const PR_GET_NO_NEW_PRIVS: u32 = 39;
+const PR_SET_TIMERSLACK: u32 = 29;
+const PR_GET_TIMERSLACK: u32 = 30;
+const PR_SET_VMA: u32 = 0x53564d41;
+const PR_SET_THP_DISABLE: u32 = 41;
+const PR_GET_THP_DISABLE: u32 = 42;
+
+const DEFAULT_TIMERSLACK_NS: u64 = 50_000;
+const SIGRTMAX: u64 = 64;
+
+#[derive(Clone, Copy)]
+struct PrctlState {
+    name: [u8; 16],
+    pdeathsig: u32,
+    dumpable: u32,
+    no_new_privs: bool,
+    timerslack_ns: u64,
 }
+
+impl PrctlState {
+    const fn new() -> Self {
+        Self {
+            name: [0; 16],
+            pdeathsig: 0,
+            dumpable: 1,
+            no_new_privs: false,
+            timerslack_ns: DEFAULT_TIMERSLACK_NS,
+        }
+    }
+}
+
+static PRCTL_STATE: Mutex<PrctlState> = Mutex::new(PrctlState::new());
 
 /// Read a `prctl` option register as the kernel does. The kernel's prctl entry
 /// is `SYSCALL_DEFINE5(prctl, int, option, …)` and immediately narrows it to an
@@ -96,20 +119,7 @@ pub(super) fn pr_get_auxv_copy(
     saved.len() as i64
 }
 
-/// `prctl(2)`: the ONLY routed option is `PR_GET_AUXV`. Every other option is
-/// the process/escape class (`PR_SET_SECCOMP`, `PR_SET_SYSCALL_USER_DISPATCH`,
-/// `PR_SET_NAME`, …) and must never reach the host — it fails closed with a
-/// named, diagnosable abort exactly like an unmapped syscall.
-pub(super) fn sys_prctl(option_reg: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i64 {
-    let option = prctl_option(option_reg);
-    if option != PR_GET_AUXV {
-        crate::trap_fatal(&format!(
-            "SUD trapped prctl(option={option:#x}): only PR_GET_AUXV is a deterministic route. Every \
-             other prctl option is the process/escape class (PR_SET_SECCOMP, \
-             PR_SET_SYSCALL_USER_DISPATCH, PR_SET_NAME, …) and fails closed — routing it would let a \
-             guest reconfigure the process behind the deterministic runtime"
-        ));
-    }
+fn prctl_get_auxv(arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i64 {
     let base = PATINA_SUD_AUXV_BASE.load(Ordering::Relaxed);
     let len = PATINA_SUD_AUXV_LEN.load(Ordering::Relaxed);
     if base == 0 || len == 0 {
@@ -126,4 +136,235 @@ pub(super) fn sys_prctl(option_reg: u64, arg2: u64, arg3: u64, arg4: u64, arg5: 
     // the slice is valid for the whole (synchronous) dispatch.
     let saved = unsafe { std::slice::from_raw_parts(base as *const u8, len) };
     pr_get_auxv_copy(saved, arg2 as *mut u8, arg3 as usize, arg4, arg5)
+}
+
+fn prctl_set_name(state: &mut PrctlState, user_name: u64) -> i64 {
+    if user_name == 0 {
+        return -EFAULT;
+    }
+    let mut name = [0u8; 16];
+    // SAFETY: mirrors the kernel copy_from_user shape for this process-local
+    // row. A bad non-null pointer may still fault like the real kernel access;
+    // the conformance row exercises the deterministic valid/null cases.
+    let src = user_name as *const u8;
+    for (index, byte) in name.iter_mut().take(15).enumerate() {
+        let value = unsafe { *src.add(index) };
+        if value == 0 {
+            break;
+        }
+        *byte = value;
+    }
+    state.name = name;
+    0
+}
+
+fn prctl_get_name(state: &PrctlState, user_name: u64) -> i64 {
+    if user_name == 0 {
+        return -EFAULT;
+    }
+    // SAFETY: `user_name` is the caller-provided 16-byte buffer for PR_GET_NAME.
+    unsafe {
+        std::ptr::copy_nonoverlapping(state.name.as_ptr(), user_name as *mut u8, state.name.len());
+    }
+    0
+}
+
+fn prctl_get_pdeathsig(state: &PrctlState, user_ptr: u64) -> i64 {
+    if user_ptr == 0 {
+        return -EFAULT;
+    }
+    // SAFETY: `user_ptr` is the caller-provided int*.
+    unsafe {
+        (user_ptr as *mut i32).write(state.pdeathsig as i32);
+    }
+    0
+}
+
+/// `prctl(2)`: model the process-local options owned by the signals/process
+/// conformance family and keep PR_GET_AUXV on its scrubbed auxv route. Other
+/// options fail with EINVAL, matching the family oracle's unknown-option row and
+/// never reaching the host process.
+pub(super) fn sys_prctl(option_reg: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i64 {
+    let option = prctl_option(option_reg);
+    if option == PR_GET_AUXV {
+        return prctl_get_auxv(arg2, arg3, arg4, arg5);
+    }
+
+    let mut state = PRCTL_STATE.lock().unwrap();
+    match option {
+        PR_SET_VMA | PR_SET_THP_DISABLE => 0,
+        PR_GET_THP_DISABLE => 1,
+        PR_SET_NAME => prctl_set_name(&mut state, arg2),
+        PR_GET_NAME => prctl_get_name(&state, arg2),
+        PR_SET_PDEATHSIG => {
+            if arg2 > SIGRTMAX {
+                -EINVAL
+            } else {
+                state.pdeathsig = arg2 as u32;
+                0
+            }
+        }
+        PR_GET_PDEATHSIG => prctl_get_pdeathsig(&state, arg2),
+        PR_GET_DUMPABLE => state.dumpable as i64,
+        PR_SET_DUMPABLE => match arg2 {
+            0 | 1 => {
+                state.dumpable = arg2 as u32;
+                0
+            }
+            _ => -EINVAL,
+        },
+        PR_GET_NO_NEW_PRIVS => i64::from(state.no_new_privs),
+        PR_SET_NO_NEW_PRIVS => {
+            if arg2 == 1 && arg3 == 0 && arg4 == 0 && arg5 == 0 {
+                state.no_new_privs = true;
+                0
+            } else {
+                -EINVAL
+            }
+        }
+        PR_GET_TIMERSLACK => state.timerslack_ns as i64,
+        PR_SET_TIMERSLACK => {
+            state.timerslack_ns = if arg2 == 0 {
+                DEFAULT_TIMERSLACK_NS
+            } else {
+                arg2
+            };
+            0
+        }
+        _ => -EINVAL,
+    }
+}
+
+pub(super) fn sys_wait4() -> i64 {
+    -ECHILD
+}
+
+pub(super) fn sys_waitid(options: u64) -> i64 {
+    const WNOHANG: u32 = 0x0000_0001;
+    const WSTOPPED: u32 = 0x0000_0002;
+    const WEXITED: u32 = 0x0000_0004;
+    const WCONTINUED: u32 = 0x0000_0008;
+    const WNOWAIT: u32 = 0x0100_0000;
+    const __WNOTHREAD: u32 = 0x2000_0000;
+    const __WALL: u32 = 0x4000_0000;
+    const __WCLONE: u32 = 0x8000_0000;
+    const ALLOWED: u32 =
+        WNOHANG | WSTOPPED | WEXITED | WCONTINUED | WNOWAIT | __WNOTHREAD | __WALL | __WCLONE;
+    const WAIT_CLASSES: u32 = WSTOPPED | WEXITED | WCONTINUED;
+
+    let options = options as u32;
+    if (options & !ALLOWED) != 0 || (options & WAIT_CLASSES) == 0 {
+        -EINVAL
+    } else {
+        -ECHILD
+    }
+}
+
+pub(super) fn sys_getpgid(pid: i64) -> i64 {
+    if pid == 0 || pid == 1 { 1 } else { -ESRCH }
+}
+
+pub(super) fn sys_getsid(pid: i64) -> i64 {
+    if pid == 0 || pid == 1 { 1 } else { -ESRCH }
+}
+
+pub(super) fn sys_kill(pid: i64, sig: i64) -> i64 {
+    unsafe {
+        generate_signal(
+            GenerationTarget::Process { pid: pid as i32 },
+            sig as i32,
+            GenerationInfo::User,
+        )
+    }
+}
+pub(super) fn sys_tgkill(tgid: i64, tid: i64, sig: i64) -> i64 {
+    unsafe {
+        generate_signal(
+            GenerationTarget::Thread {
+                tgid: Some(tgid as i32),
+                tid: tid as i32,
+            },
+            sig as i32,
+            GenerationInfo::Thread,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reset_prctl_state() -> std::sync::MutexGuard<'static, ()> {
+        static SERIAL: Mutex<()> = Mutex::new(());
+        let guard = SERIAL.lock().unwrap();
+        *PRCTL_STATE.lock().unwrap() = PrctlState::new();
+        guard
+    }
+
+    #[test]
+    fn prctl_no_new_privs_accepts_only_one_with_zero_tail() {
+        let _serial = reset_prctl_state();
+        assert_eq!(sys_prctl(PR_GET_NO_NEW_PRIVS as u64, 0, 0, 0, 0), 0);
+        assert_eq!(sys_prctl(PR_SET_NO_NEW_PRIVS as u64, 0, 0, 0, 0), -EINVAL);
+        assert_eq!(sys_prctl(PR_SET_NO_NEW_PRIVS as u64, 1, 1, 0, 0), -EINVAL);
+        assert_eq!(sys_prctl(PR_SET_NO_NEW_PRIVS as u64, 1, 0, 0, 0), 0);
+        assert_eq!(sys_prctl(PR_GET_NO_NEW_PRIVS as u64, 0, 0, 0, 0), 1);
+        assert_eq!(sys_prctl(PR_SET_NO_NEW_PRIVS as u64, 0, 0, 0, 0), -EINVAL);
+        assert_eq!(sys_prctl(PR_GET_NO_NEW_PRIVS as u64, 0, 0, 0, 0), 1);
+    }
+
+    #[test]
+    fn prctl_dumpable_refuses_two() {
+        let _serial = reset_prctl_state();
+        assert_eq!(sys_prctl(PR_GET_DUMPABLE as u64, 0, 0, 0, 0), 1);
+        assert_eq!(sys_prctl(PR_SET_DUMPABLE as u64, 0, 0, 0, 0), 0);
+        assert_eq!(sys_prctl(PR_GET_DUMPABLE as u64, 0, 0, 0, 0), 0);
+        assert_eq!(sys_prctl(PR_SET_DUMPABLE as u64, 1, 0, 0, 0), 0);
+        assert_eq!(sys_prctl(PR_GET_DUMPABLE as u64, 0, 0, 0, 0), 1);
+        assert_eq!(sys_prctl(PR_SET_DUMPABLE as u64, 2, 0, 0, 0), -EINVAL);
+        assert_eq!(sys_prctl(PR_SET_DUMPABLE as u64, 999, 0, 0, 0), -EINVAL);
+        assert_eq!(sys_prctl(PR_GET_DUMPABLE as u64, 0, 0, 0, 0), 1);
+    }
+
+    #[test]
+    fn prctl_pdeathsig_range() {
+        let _serial = reset_prctl_state();
+        let mut value = -1i32;
+        for sig in 0_u64..=64 {
+            assert_eq!(sys_prctl(PR_SET_PDEATHSIG as u64, sig, 0, 0, 0), 0);
+            assert_eq!(
+                sys_prctl(
+                    PR_GET_PDEATHSIG as u64,
+                    (&mut value as *mut i32) as u64,
+                    0,
+                    0,
+                    0,
+                ),
+                0
+            );
+            assert_eq!(value, sig as i32);
+        }
+        assert_eq!(sys_prctl(PR_SET_PDEATHSIG as u64, 65, 0, 0, 0), -EINVAL);
+        assert_eq!(sys_prctl(PR_GET_PDEATHSIG as u64, 0, 0, 0, 0), -EFAULT);
+    }
+
+    #[test]
+    fn prctl_timerslack_zero_restores_default() {
+        let _serial = reset_prctl_state();
+        assert_eq!(sys_prctl(PR_GET_TIMERSLACK as u64, 0, 0, 0, 0), 50_000);
+        assert_eq!(sys_prctl(PR_SET_TIMERSLACK as u64, 123_456, 0, 0, 0), 0);
+        assert_eq!(sys_prctl(PR_GET_TIMERSLACK as u64, 0, 0, 0, 0), 123_456);
+        assert_eq!(sys_prctl(PR_SET_TIMERSLACK as u64, 0, 0, 0, 0), 0);
+        assert_eq!(sys_prctl(PR_GET_TIMERSLACK as u64, 0, 0, 0, 0), 50_000);
+    }
+
+    #[test]
+    fn wait_rows_answer_echild_and_einval() {
+        assert_eq!(sys_wait4(), -ECHILD);
+        assert_eq!(sys_waitid(0x0000_0004), -ECHILD); // WEXITED
+        assert_eq!(sys_waitid(0x0000_0004 | 0x0000_0001), -ECHILD); // WEXITED|WNOHANG
+        assert_eq!(sys_waitid(0), -EINVAL);
+        assert_eq!(sys_waitid(0x0001_0000), -EINVAL);
+        assert_eq!(sys_waitid(0x4000_0000), -EINVAL); // __WALL alone lacks an event class
+    }
 }

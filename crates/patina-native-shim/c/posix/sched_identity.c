@@ -15,7 +15,7 @@ pid_t getpid(void) {
 }
 
 pid_t getppid(void) {
-    return (pid_t)0;
+    return (pid_t)2;
 }
 
 #ifdef __linux__
@@ -215,34 +215,17 @@ int sysinfo(struct sysinfo *info) {
     return 0;
 }
 
-/*
- * prctl: mimalloc issues three process-local memory-attribute ops on Linux —
- * PR_SET_VMA (name an anonymous mapping), PR_SET_THP_DISABLE, and the
- * PR_GET_THP_DISABLE probe. None is a guest-observable effect under Patina (the
- * runtime does not model transparent-hugepage state or VMA names), so the two
- * setters are deterministic no-op successes and the getter reports a fixed
- * "THP disabled" (1). Every other option fails closed with ENOSYS, the `uname`
- * doctrine — a guest reaching an unmodeled prctl op is a deterministic miss, not
- * a host passthrough. Variadic like glibc's declaration; the extra arguments are
- * inert for the handled ops.
- */
 int prctl(int option, ...) {
-    switch (option) {
-#ifdef PR_SET_VMA
-    case PR_SET_VMA:
-#endif
-#ifdef PR_SET_THP_DISABLE
-    case PR_SET_THP_DISABLE:
-#endif
-        return 0;
-#ifdef PR_GET_THP_DISABLE
-    case PR_GET_THP_DISABLE:
-        return 1;
-#endif
-    default:
-        errno = ENOSYS;
-        return -1;
-    }
+    va_list ap;
+    va_start(ap, option);
+    unsigned long arg2 = va_arg(ap, unsigned long);
+    unsigned long arg3 = va_arg(ap, unsigned long);
+    unsigned long arg4 = va_arg(ap, unsigned long);
+    unsigned long arg5 = va_arg(ap, unsigned long);
+    va_end(ap);
+
+    return signal_result(patina_sud_dispatch(SYS_prctl, (uint64_t)option,
+        arg2, arg3, arg4, arg5, 0, 0));
 }
 
 /*

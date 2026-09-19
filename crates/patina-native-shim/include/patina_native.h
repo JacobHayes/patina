@@ -74,6 +74,7 @@ enum {
     PATINA_FD_EVENTFD = 9, /* an eventfd counter (Linux) */
     PATINA_FD_EPOLL = 10,  /* an epoll instance (Linux) */
     PATINA_FD_KQUEUE = 11, /* a kqueue (Darwin) */
+    PATINA_FD_SIGNALFD = 12, /* a virtual signal queue reader (Linux) */
 };
 
 enum {
@@ -93,6 +94,8 @@ int32_t patina_init_crash(uint64_t seed);
  */
 int32_t patina_init_from_env(void);
 void patina_note_boundary_symbol(const char *symbol);
+/* POSIX-link startup only: installs panic containment, not a Context. */
+void patina_init_panic_policy(void);
 void patina_note_startup_constructor_finished(void);
 void patina_control_set_entry(const char *entry);
 char *patina_getenv(const char *name);
@@ -161,14 +164,15 @@ void patina_assert_teardown_engaged(void);
 /*
  * Flush captured stdout/stderr to the real host descriptors WITHOUT finalizing
  * the run (unlike patina_shutdown). The process-class deny-traps call this
- * before abort() so the guest's output and the deny diagnostic reach the
- * operator even though abort() skips the atexit-driven shutdown flush.
+ * before patina_host_abort() so the guest's output and the deny diagnostic reach the
+ * operator even though the private fatal vehicle skips the atexit-driven shutdown flush.
  */
 int32_t patina_flush_captured_stdio(void);
 int32_t patina_errno(void);
 int32_t patina_entropy(void *destination, size_t length);
 int32_t patina_clock_now(uint32_t clock, uint64_t *nanos);
 int32_t patina_sleep_until(uint32_t clock, uint64_t deadline_nanos);
+int patina_sleep_until_remaining(uint32_t clock_id, uint64_t deadline_nanos, int64_t *remaining);
 /*
  * Deterministic per-process CPU-time proxy in nanoseconds, for the resource
  * accounting interposers (`getrusage`/`task_info`/Linux `sysinfo`). Reports the
@@ -441,6 +445,41 @@ int32_t patina_link(int32_t fromfd, const char *from, int32_t tofd, const char *
                     int32_t follow);
 intptr_t patina_read_link(int32_t dirfd, const char *path, char *buf, size_t len);
 int32_t patina_thread_id(void);
+
+#ifdef __linux__
+struct patina_signal_action {
+    uintptr_t handler;
+    uint64_t flags;
+    uintptr_t restorer;
+    uint64_t mask;
+};
+int64_t patina_signal_action(int32_t sig, const struct patina_signal_action *act,
+                            struct patina_signal_action *old, size_t size);
+int64_t patina_signal_mask(int32_t how, const uint64_t *set, uint64_t *old, size_t size);
+int64_t patina_signal_pending(uint8_t *set, size_t size);
+int64_t patina_signal_altstack(const void *stack, void *old);
+enum patina_signal_wait_mode {
+    PATINA_SIGNAL_DEQUEUE = 0,
+    PATINA_SIGNAL_SUSPEND = 1,
+    PATINA_SIGNAL_PAUSE = 2,
+};
+int64_t patina_signal_wait(const uint64_t *set, void *info, const void *timeout,
+                          size_t size, enum patina_signal_wait_mode mode);
+int patina_pthread_kill(uintptr_t thread, int sig);
+int64_t patina_set_tid_address(int32_t *address);
+_Noreturn void patina_raw_exit(int status);
+_Noreturn void patina_raw_exit_group(int status);
+void patina_signal_deliver(void);
+void patina_signal_restorer(uintptr_t restorer);
+int64_t patina_signal_action_libc(int sig, const struct patina_signal_action *action,
+                                struct patina_signal_action *old);
+void patina_signal_frame(uint64_t *mask, void *stack);
+#endif
+/* Private internal-fatal vehicle: never finalize the guest trace. */
+_Noreturn void patina_host_abort(void);
+#ifdef __linux__
+_Noreturn void patina_abort(void);
+#endif
 int32_t patina_sched_yield(void);
 /*
  * --yield-points guard hook (patina_yield.c): a deterministic scheduling point
@@ -527,7 +566,7 @@ int32_t patina_verdict(uint32_t kind, const uint8_t *label, size_t label_len,
 #define PATINA_CUSTOM_OP_REPLAY 1
 int32_t patina_custom_op_begin(const uint8_t *label, size_t label_len,
                                const uint8_t *key, size_t key_len,
-                               size_t *out_len);
+                               int32_t fault_eligible, size_t *out_len);
 intptr_t patina_custom_op_replay_result(uint8_t *out, size_t out_cap);
 int32_t patina_custom_op_record(const uint8_t *result, size_t result_len);
 
@@ -586,7 +625,7 @@ int32_t patina_net_accept(int32_t fd, uint32_t *ip, uint16_t *port, int32_t nonb
 int32_t patina_net_tcp_connect(int32_t fd, uint32_t ip, uint16_t port);
 intptr_t patina_net_sendto(int32_t fd, const void *buf, size_t len, uint32_t ip, uint16_t port);
 intptr_t patina_net_send(int32_t fd, const void *buf, size_t len);
-intptr_t patina_net_stream_send(int32_t fd, const void *buf, size_t len);
+intptr_t patina_net_stream_send(int32_t fd, const void *buf, size_t len, int flags);
 intptr_t patina_net_recvfrom(int32_t fd, void *buf, size_t len, uint32_t *ip, uint16_t *port);
 intptr_t patina_net_recv(int32_t fd, void *buf, size_t len);
 intptr_t patina_net_stream_recv(int32_t fd, void *buf, size_t len);
@@ -623,7 +662,7 @@ int32_t patina_pipe(int32_t *read_fd_out, int32_t *write_fd_out, int32_t nonbloc
 int32_t patina_socketpair(int32_t *fd0_out, int32_t *fd1_out, int32_t nonblocking,
                           int32_t cloexec);
 intptr_t patina_pipe_read(int32_t fd, void *buf, size_t len);
-intptr_t patina_pipe_write(int32_t fd, const void *buf, size_t len);
+intptr_t patina_pipe_write(int32_t fd, const void *buf, size_t len, int flags);
 int32_t patina_pipe_size(int32_t fd);
 int32_t patina_pipe_set_size(int32_t fd, int32_t size);
 
@@ -749,8 +788,19 @@ int32_t patina_kevent_gather(int32_t kq, struct patina_kevent *out, int32_t neve
 #define PATINA_TSC_RDTSC 1
 #define PATINA_TSC_RDTSCP 2
 
+#ifdef __linux__
+int64_t patina_signalfd(int fd, const uint64_t *mask, size_t size, int flags);
+#endif
+
+#ifdef __linux__
+int64_t patina_poll(void *fds, size_t count, int64_t timeout, const uint64_t *mask, uint64_t *remaining);
+int64_t patina_epoll_wait_masked(int ep, void *events, int capacity, int timeout, const uint64_t *mask);
+int64_t patina_select(int nfds, uint64_t *read, uint64_t *write, uint64_t *except, int64_t timeout, const uint64_t *mask, uint64_t *remaining);
+#endif
+
 #ifdef __cplusplus
 }
 #endif
 
 #endif
+

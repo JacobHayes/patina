@@ -29,6 +29,11 @@
 //! lights up unchanged when generic-entry arm64 kernels ship, and the libc
 //! `syscall(2)` interposer already forwards into it on every Linux arch.
 
+use crate::thread::signals::{
+    Action, GenerationInfo, GenerationTarget, Info, Stack, WaitMode, deliver, generate_signal,
+    patina_signal_action, patina_signal_altstack, patina_signal_mask, patina_signal_pending,
+    patina_signal_wait,
+};
 use std::cell::Cell;
 
 use crate::PatinaMetadata;
@@ -63,7 +68,11 @@ use std::ffi::{c_char, c_int, c_long, c_void};
 unsafe extern "C" {
     fn patina_errno() -> c_int;
     fn patina_clock_now(clock: u32, nanos: *mut u64) -> c_int;
-    fn patina_sleep_until(clock: u32, deadline_nanos: u64) -> c_int;
+    fn patina_sleep_until_remaining(
+        clock_id: u32,
+        deadline_nanos: u64,
+        remaining: *mut i64,
+    ) -> c_int;
     // The one open entry (`openat(2)` shape): resolves `(dirfd, path)` through
     // the runtime's resolver and decides the descriptor's kind from the entry's.
     fn patina_openat(dirfd: c_int, path: *const c_char, flags: u32, mode: u32) -> c_int;
@@ -80,7 +89,9 @@ unsafe extern "C" {
     fn patina_entropy(destination: *mut c_void, length: usize) -> c_int;
     fn patina_sched_yield() -> c_int;
     fn patina_thread_id() -> c_int;
-    fn patina_exit(status: c_int) -> !;
+    fn patina_raw_exit(status: c_int) -> !;
+    fn patina_raw_exit_group(status: c_int) -> !;
+    fn patina_set_tid_address(address: *mut i32) -> i64;
     fn patina_stdio_write(fd: c_int, source: *const c_void, length: usize) -> isize;
     fn patina_futex_wait(addr: usize, expected: u32) -> c_int;
     fn patina_futex_wait_timed(
@@ -202,7 +213,7 @@ unsafe extern "C" {
     ) -> c_int;
     fn patina_net_sendto(fd: c_int, buf: *const c_void, len: usize, ip: u32, port: u16) -> isize;
     fn patina_net_send(fd: c_int, buf: *const c_void, len: usize) -> isize;
-    fn patina_net_stream_send(fd: c_int, buf: *const c_void, len: usize) -> isize;
+    fn patina_net_stream_send(fd: c_int, buf: *const c_void, len: usize, flags: c_int) -> isize;
     fn patina_net_recvfrom(
         fd: c_int,
         buf: *mut c_void,
@@ -225,7 +236,7 @@ unsafe extern "C" {
     // In-process pipe / socketpair endpoints (the send/recv face of a
     // socketpair end) and eventfds.
     fn patina_pipe_read(fd: c_int, buf: *mut c_void, len: usize) -> isize;
-    fn patina_pipe_write(fd: c_int, buf: *const c_void, len: usize) -> isize;
+    fn patina_pipe_write(fd: c_int, buf: *const c_void, len: usize, flags: c_int) -> isize;
     fn patina_eventfd(initval: u32, flags: c_int) -> c_int;
 
     // Readiness reactor (Linux epoll frontend over the OS-agnostic core). The SUD
@@ -251,6 +262,10 @@ const EBADF: i64 = 9;
 const EACCES: i64 = 13;
 
 const EFAULT: i64 = 14;
+
+const ECHILD: i64 = 10;
+
+const ESRCH: i64 = 3;
 
 const ENOTDIR: i64 = 20;
 
@@ -603,7 +618,19 @@ thread_local! {
     static IN_DISPATCH: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Run `body` with the reentry guard held. A re-entrant dispatch aborts loudly.
+/// Only the kernel-frame release may re-enter dispatch as guest code.
+pub(crate) fn with_signal_delivery(body: impl FnOnce()) {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            IN_DISPATCH.with(|cell| cell.set(self.0));
+        }
+    }
+    let _restore = Restore(IN_DISPATCH.with(|cell| cell.replace(false)));
+    body();
+}
+
+/// Run `body` with the reentry guard held. Re-entrant dispatch aborts loudly.
 fn with_dispatch_guard<F: FnOnce() -> i64>(nr: i64, body: F) -> i64 {
     if IN_DISPATCH.with(Cell::get) {
         crate::trap_fatal(&format!(
@@ -693,6 +720,7 @@ pub unsafe extern "C" fn patina_sud_dispatch(
     a5: u64,
     call_addr: usize,
 ) -> c_long {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let _ = call_addr;
     // `c_long` is `i64` on the LP64 Linux targets this module compiles for, so it
     // matches the `i64` syscall-number table and dispatch signature directly.
@@ -713,7 +741,12 @@ pub unsafe extern "C" fn patina_sud_dispatch(
     // text contains zero raw syscalls (audit-proven), backstopped by the reentry
     // guard below.
     let args = [a0, a1, a2, a3, a4, a5];
-    with_dispatch_guard(nr, || dispatch(nr, args))
+    let result = with_dispatch_guard(nr, || {
+        crate::thread::signals::refresh_handler_mask();
+        dispatch(nr, args)
+    });
+    deliver();
+    result
 }
 
 /// Interpret a syscall-argument register as a 32-bit `int` fd/dirfd — exactly as
@@ -749,6 +782,28 @@ type Handler = fn(i64, [u64; 6]) -> i64;
 /// fd/dirfd registers go through [`arg_fd`]; `AT_FDCWD` and any negative fd are
 /// 32-bit `int`s the kernel reads from the low register bits.
 const BINDINGS: &[(&str, Handler)] = &[
+    ("select", |_, a| {
+        sys_select(a[0], a[1], a[2], a[3], a[4], None)
+    }),
+    ("pselect6", |_, a| {
+        sys_select(a[0], a[1], a[2], a[3], a[4], Some(a[5]))
+    }),
+    ("signalfd", |_, a| unsafe {
+        crate::thread::signals::fd::patina_signalfd(
+            a[0] as i32,
+            a[1] as *const u64,
+            a[2] as usize,
+            0,
+        )
+    }),
+    ("signalfd4", |_, a| unsafe {
+        crate::thread::signals::fd::patina_signalfd(
+            a[0] as i32,
+            a[1] as *const u64,
+            a[2] as usize,
+            a[3] as i32,
+        )
+    }),
     // ---- time ----
     ("clock_gettime", |_, a| {
         sys_clock_gettime(a[0], a[1] as *mut Timespec)
@@ -759,9 +814,11 @@ const BINDINGS: &[(&str, Handler)] = &[
     ("gettimeofday", |_, a| {
         sys_gettimeofday(a[0] as *mut Timeval)
     }),
-    ("nanosleep", |_, a| sys_nanosleep(a[0] as *const Timespec)),
+    ("nanosleep", |_, a| {
+        sys_nanosleep(a[0] as *const Timespec, a[1] as *mut Timespec)
+    }),
     ("clock_nanosleep", |_, a| {
-        sys_clock_nanosleep(a[0], a[1], a[2] as *const Timespec)
+        sys_clock_nanosleep(a[0], a[1], a[2] as *const Timespec, a[3] as *mut Timespec)
     }),
     // ---- sync / sched / identity / entropy ----
     ("futex", |_, a| sys_futex(a)),
@@ -772,17 +829,12 @@ const BINDINGS: &[(&str, Handler)] = &[
     }),
     // SAFETY: as above.
     ("gettid", |_, _| unsafe { patina_thread_id() as i64 }),
-    // A raw `exit`/`exit_group` ends the run deterministically. A lone-thread
-    // raw `exit(2)` folds onto whole-process exit (no managed guest raw-exits a
-    // single thread — std threads return from the trampoline); true per-thread
-    // raw exit is the signals arc (D6).
-    // SAFETY: `patina_exit` terminates the process and never returns.
-    ("exit", |_, a| unsafe {
-        patina_exit((a[0] & 0xff) as c_int)
+    ("set_tid_address", |_, a| unsafe {
+        patina_set_tid_address(a[0] as *mut i32)
     }),
-    // SAFETY: as above.
+    ("exit", |_, a| unsafe { patina_raw_exit(a[0] as c_int) }),
     ("exit_group", |_, a| unsafe {
-        patina_exit((a[0] & 0xff) as c_int)
+        patina_raw_exit_group(a[0] as c_int)
     }),
     // ---- memory: process-local, passed through to the host kernel via the
     // glibc `syscall(2)` HOST ALIAS (never the interposed `syscall`). Anonymous
@@ -793,9 +845,92 @@ const BINDINGS: &[(&str, Handler)] = &[
     ("madvise", mem_passthrough),
     ("mremap", mem_passthrough),
     ("brk", mem_passthrough),
-    // ---- signals ----
+    // ---- signals / process rows owned by the signals conformance family ----
     // `rt_sigaction` for SIGSYS would replace the dispatch handler: fatal.
-    ("rt_sigaction", |_, a| sys_rt_sigaction(a[0] as i64)),
+    ("rt_sigaction", |_, a| unsafe {
+        patina_signal_action(
+            a[0] as i32,
+            a[1] as *const Action,
+            a[2] as *mut Action,
+            a[3] as usize,
+        )
+    }),
+    ("rt_sigprocmask", |_, a| unsafe {
+        patina_signal_mask(
+            a[0] as i32,
+            a[1] as *const u64,
+            a[2] as *mut u64,
+            a[3] as usize,
+        )
+    }),
+    ("rt_sigpending", |_, a| unsafe {
+        patina_signal_pending(a[0] as *mut u8, a[1] as usize)
+    }),
+    ("sigaltstack", |_, a| unsafe {
+        patina_signal_altstack(a[0] as *const Stack, a[1] as *mut Stack)
+    }),
+    ("tkill", |_, a| unsafe {
+        generate_signal(
+            GenerationTarget::Thread {
+                tgid: None,
+                tid: a[0] as i32,
+            },
+            a[1] as i32,
+            GenerationInfo::Thread,
+        )
+    }),
+    ("rt_sigqueueinfo", |_, a| unsafe {
+        generate_signal(
+            GenerationTarget::Process { pid: a[0] as i32 },
+            a[1] as i32,
+            GenerationInfo::Queued(a[2] as *const Info),
+        )
+    }),
+    ("rt_tgsigqueueinfo", |_, a| unsafe {
+        generate_signal(
+            GenerationTarget::Thread {
+                tgid: Some(a[0] as i32),
+                tid: a[1] as i32,
+            },
+            a[2] as i32,
+            GenerationInfo::Queued(a[3] as *const Info),
+        )
+    }),
+    ("pause", |_, _| unsafe {
+        patina_signal_wait(
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            8,
+            WaitMode::Pause,
+        )
+    }),
+    ("rt_sigsuspend", |_, a| unsafe {
+        patina_signal_wait(
+            a[0] as *const u64,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            a[1] as usize,
+            WaitMode::Suspend,
+        )
+    }),
+    ("rt_sigtimedwait", |_, a| unsafe {
+        patina_signal_wait(
+            a[0] as *const u64,
+            a[1] as *mut Info,
+            a[2] as *const crate::thread::signals::Timespec,
+            a[3] as usize,
+            WaitMode::Dequeue,
+        )
+    }),
+    ("kill", |_, a| sys_kill(a[0] as i64, a[1] as i64)),
+    ("tgkill", |_, a| {
+        sys_tgkill(a[0] as i64, a[1] as i64, a[2] as i64)
+    }),
+    ("wait4", |_, _| sys_wait4()),
+    ("waitid", |_, a| sys_waitid(a[3])),
+    ("getpgid", |_, a| sys_getpgid(a[0] as i64)),
+    ("getsid", |_, a| sys_getsid(a[0] as i64)),
     // ---- fd I/O ----
     ("read", |_, a| sys_read(arg_fd(a[0]), a[1], a[2])),
     ("write", |_, a| sys_write(arg_fd(a[0]), a[1], a[2])),
@@ -927,10 +1062,10 @@ const BINDINGS: &[(&str, Handler)] = &[
         sys_epoll_wait(arg_fd(a[0]), a[1], a[2] as i64, a[3] as i64)
     }),
     ("epoll_pwait", |_, a| {
-        sys_epoll_pwait(arg_fd(a[0]), a[1], a[2] as i64, a[3] as i64, a[4])
+        sys_epoll_pwait(arg_fd(a[0]), a[1], a[2] as i64, a[3] as i64, a[4], a[5])
     }),
     ("epoll_pwait2", |_, a| {
-        sys_epoll_pwait2(arg_fd(a[0]), a[1], a[2] as i64, a[3], a[4])
+        sys_epoll_pwait2(arg_fd(a[0]), a[1], a[2] as i64, a[3], a[4], a[5])
     }),
     ("eventfd2", |_, a| sys_eventfd2(a[0], a[1] as i64)),
     ("ppoll", |_, a| sys_ppoll(a[0], a[1], a[2], a[3], a[4])),
@@ -1415,27 +1550,10 @@ mod tests {
     }
 
     #[test]
-    fn poll_core_mirrors_the_c_poll_classification() {
-        // With descriptors, a non-zero timeout is an unmodeled real wait (-ENOSYS),
-        // whether infinite or positive — no guest memory is read on this path.
-        assert_eq!(poll_core(0x1000, 3, None), -ENOSYS);
-        assert_eq!(poll_core(0x1000, 3, Some(5_000_000)), -ENOSYS);
-        // With descriptors and a zero timeout: a real (non-empty) event set is
-        // unmodeled (-ENOSYS); an all-empty set clears revents and returns 0.
-        let mut one = [0u8; POLLFD_SIZE]; // fd=0, events=0, revents=0xBEEF
-        one[6] = 0xEF;
-        one[7] = 0xBE;
-        let ptr = one.as_mut_ptr() as u64;
-        assert_eq!(poll_core(ptr, 1, Some(0)), 0);
-        assert_eq!(&one[6..8], &[0, 0], "revents must be cleared");
-        // A pollfd requesting POLLIN (events != 0) → -ENOSYS.
-        let mut want = [0u8; POLLFD_SIZE];
-        want[4] = 0x01; // POLLIN in the low byte of the `short events`
-        assert_eq!(poll_core(want.as_mut_ptr() as u64, 1, Some(0)), -ENOSYS);
-        // Empty set (nfds == 0): infinite/zero timeout returns 0 immediately (no
-        // event can ever arrive), with no guest-memory access.
-        assert_eq!(poll_core(0, 0, None), 0);
-        assert_eq!(poll_core(0, 0, Some(0)), 0);
+    fn poll_validates_buffers_and_descriptor_limit_before_waiting() {
+        assert_eq!(poll_core(0, 1, None), -EFAULT);
+        assert_eq!(poll_core(0, 1025, Some(0)), -EINVAL);
+        assert_eq!(sys_ppoll(0, 0, 0, 1, 4), -EINVAL);
     }
 
     #[test]

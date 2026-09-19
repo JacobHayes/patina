@@ -1,5 +1,5 @@
 //! Live raw/libc parity and Patina-specific soft refusals. These are not host
-//! equivalence claims (identity, auxv, ppoll and sendmsg deliberately differ).
+//! equivalence claims (identity, auxv and sendmsg deliberately differ).
 mod common;
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -59,8 +59,30 @@ mod linux {
     }
 
     #[test]
-    fn ppoll_advances_virtual_time_and_refuses_real_fds() {
-        assert_raw_output("raw_ppoll", "PPOLL_ROW empty_sleep=5000000 real_enosys=-38");
+    fn ppoll_timeout_writes_back_zero_after_virtual_sleep() {
+        assert_ppoll_output("timeout", "PPOLL_TIMEOUT elapsed=5000000 remaining=0");
+    }
+
+    #[test]
+    fn ppoll_pipe_readiness_changes_only_after_write() {
+        assert_ppoll_output("readiness", "PPOLL_READINESS empty=0 ready=1 revents=1");
+    }
+
+    fn assert_ppoll_output(mode: &str, expected: &str) {
+        let g = Guest::assert_build_with("raw", &["--bin", "raw_ppoll"]);
+        if kernel_supports(KernelFeature::Sud) {
+            assert_eq!(
+                text(&g.assert_run_success(1, &["--", mode]).stdout),
+                format!("{expected}\n")
+            );
+        } else {
+            g.assert_run_refused(1, SUD_REFUSAL_DIAGNOSTICS);
+        }
+    }
+
+    #[test]
+    fn prctl_set_name_is_modeled() {
+        assert_raw_output("raw_prctl_modeled", "PR_SET_NAME_RET=0");
     }
 
     #[test]
@@ -91,10 +113,22 @@ mod linux {
     }
 
     #[test]
-    fn prctl_denied_option_aborts_with_named_diagnostic() {
-        let g = Guest::assert_build_with("raw", &["--bin", "raw_prctl_deny"]);
+    fn prctl_unsupported_option_returns_einval() {
+        assert_prctl_refused("unsupported");
+    }
+
+    #[test]
+    fn prctl_privileged_option_returns_einval() {
+        assert_prctl_refused("privileged");
+    }
+
+    fn assert_prctl_refused(mode: &str) {
+        let g = Guest::assert_build_with("raw", &["--bin", "raw_prctl_refusal"]);
         if kernel_supports(KernelFeature::Sud) {
-            g.assert_run_refused(1, &["SUD trapped prctl"]);
+            assert_eq!(
+                text(&g.assert_run_success(1, &["--", mode]).stdout),
+                "PRCTL_REFUSED errno=22\n"
+            );
         } else {
             g.assert_run_refused(1, SUD_REFUSAL_DIAGNOSTICS);
         }

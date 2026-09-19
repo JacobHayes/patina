@@ -50,7 +50,7 @@ run = "cargo test -p cargo-patina --test native_abi --locked"
 description = "Run core Patina native, WASI, and cross-target checks"
 run = [
   "scripts/validate-wasi.sh",
-  "cargo test -p cargo-patina --test native_abi --test native_containment --test native_raw --test native_trace --test native_workloads --test shim_host_alias --locked",
+  "cargo test -p cargo-patina --test native_abi --test native_containment --test native_raw --test native_signals --test native_trace --test native_workloads --test shim_host_alias --locked",
   "scripts/check-native-testbeds.sh",
   "scripts/smoke-cross-target.sh",
 ]

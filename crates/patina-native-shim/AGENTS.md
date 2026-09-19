@@ -195,6 +195,48 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   becomes a silent one. Arming failures abort loudly rather than continuing
   unarmed.
 
+## Signal boundaries
+
+- `host_abort` / `patina_host_abort` are private internal-fatal vehicles. They
+  never finalize a trace. Guest `abort` and fatal default dispositions finalize
+  exactly once, then use the private host vehicle; never call public `abort`
+  while holding shim locks. Rust ABI entries claim a thread-local panic scope;
+  guest callbacks suspend it. POSIX startup installs the policy independently of
+  Context; bare prefixed-C links have no guest abort interposer and do not install
+  it or require host aliases just to initialize. The production hook writes
+  directly to host stderr and private-aborts shim panics, delegating guest panics
+  to the previous hook.
+  Unwinding owned scopes and panic-time abort preserve this refusal if a guest
+  replaces the hook. Libtest retains its own hook. Add an entry scope to every
+  new Rust export and suspend it around guest callbacks.
+- `thread/signals` owns dispositions, pending sets, generation and delivery.
+  `thread/readiness` owns poll/select/epoll waits and uses only the signal wait /
+  temporary-mask hooks. Park sites supply typed `Wait` registrations; diagnostic
+  reason strings must not decide cleanup or restart policy. Pthread waits retain
+  semantic queue position during a handler, then resume transparently without
+  EINTR or a second wake if an ordinary grant arrived meanwhile. A handler that
+  would itself park on a pthread wait while interrupting one is a named fatal
+  refusal, before enqueue or notification changes (also after an outer grant).
+- Alternate stacks live in the kernel per host thread, not in a shim shadow.
+  Raw actions retain the caller's exact flags/restorer; libc actions use the
+  glibc restorer captured at initialization. `SIGSYS`/`SIGSEGV` cannot be replaced
+  or blocked by a guest. Ordinary no-pending syscall returns perform no host
+  signal queries; frame fixups read only explicitly dirtied mask/stack fields.
+  Frame release preserves both dirty bits across nested SIGSYS fixups.
+- Final `signal-abi` traps cover guest raw `rt_sigreturn`/`restart_syscall`:
+  actual handler return uses the allowed host restorer, not guest frame replay.
+  `pidfd_send_signal` is a final process trap because no virtual pidfd exists;
+  this is a declared limitation, not a modeled self-pidfd implementation.
+- `cargo-patina/tests/native_signals.rs` and `native_containment.rs` use the
+  shared `tests/common` builder and `testbeds/native-boundary/signals/` guests
+  to build fresh strong C interposers and execute real
+  inline SUD calls. It detects libc/raw state splits, reserved-signal damage,
+  unrelated-handler sigwait interruption, and internal-fatal trace finalization.
+  The signals unit harness checks exactly one selected child test and, for
+  ordinary isolated bodies, one passed test. Lifecycle tests instead assert
+  their deliberate exit status. Keep the planted-body-failure and empty-filter
+  detector paired with this harness.
+
 ## Layout: families, the registry, and the vendored tables
 
 - `c/patina_posix.c` is ONE translation unit assembled from per-family slices

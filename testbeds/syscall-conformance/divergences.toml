@@ -28,11 +28,6 @@ probe = "fs/getdents"
 kind = "probe"
 reason = "pending: fs — the libc symbol getdents64 is not interposed (no definition in patina_posix.c; C readdir is the only door), so the pre-run audit refuses the probe binary as unknown-import for every vehicle"
 
-[[divergence]]
-probe = "readiness/ppoll"
-kind = "probe"
-reason = "pending: network+readiness — the libc symbol ppoll is not interposed (no definition in patina_posix.c; only the SUD ppoll row exists), so the pre-run audit refuses the probe binary as wait-multiplex for every vehicle"
-
 # ---- fatal traps -----------------------------------------------------------
 # These probes die inside the runtime at a known event. Both fatal paths
 # (`trap_fatal` and the thread module's `fatal`) flush the captured stdout
@@ -520,26 +515,6 @@ reason = "pending: signed/wide filesystem timestamps — unsigned-nanosecond ABI
 # none is left.
 
 [[divergence]]
-probe = "proc/prctl"
-kind = "pending"
-reason = "pending: signals — M1: the prctl option table (PR_SET/GET_NAME, PDEATHSIG, DUMPABLE, NO_NEW_PRIVS, TIMERSLACK) with the kernel's validation and EINVAL for an unknown option, on both doors (c/posix/sched_identity.c prctl answers ENOSYS; sud/signal_process.rs sys_prctl traps everything but PR_GET_AUXV)"
-
-[[divergence]]
-probe = "proc/wait"
-kind = "pending"
-reason = "pending: signals — M1: wait4/waitid answer the childless kernel's ECHILD (and EINVAL for bad waitid options) instead of trapping (c/posix/signal_process.c waitpid/waitid traps; registry rows wait4/waitid are Trap(process))"
-
-[[divergence]]
-probe = "proc/absent"
-kind = "pending"
-reason = "pending: signals — M1: the fifteen removed x86_64 numbers (_sysctl, nfsservctl, vserver, security, tuxcall, afs_syscall, getpmsg, putpmsg, epoll_ctl_old, epoll_wait_old, lookup_dcookie, create_module, query_module, get_kernel_syms, uselib) answer ENOSYS (SoftDeny rows) instead of trapping"
-
-[[divergence]]
-probe = "proc/ids"
-kind = "pending"
-reason = "pending: signals — M1: getpgid/getsid answer the virtual process group and session (1) and kill(0, 0)/kill(-1, 0)/tgkill(pid, pid, 0) probe the one process (sud/sched_identity.rs traps getpgid; c/posix/signal_process.c kill answers ESRCH for pid 0 and -1)"
-
-[[divergence]]
 probe = "proc/traps"
 kind = "abort"
 seq = 0
@@ -547,101 +522,11 @@ stderr = "SUD trapped unsupported syscall fork (nr 57, class process"
 reason = "by design: fork is a process-lifecycle trap (docs/arcs/syscall-conformance.md §7); the child oracle runs natively only"
 
 [[divergence]]
-probe = "signal/basic"
-kind = "pending"
-reason = "pending: signals — M2: kill/tkill/tgkill to self generate a virtual signal delivered synchronously at syscall return through a kernel-built frame with the SI_USER/SI_TKILL sender fields, plus the kernel's EINVAL/ESRCH vocabulary (c/posix/signal_process.c kill answers ENOSYS; sud/signal_process.rs has no kill/tkill/tgkill rows)"
-
-[[divergence]]
-probe = "signal/raw_action"
-kind = "pending"
-reason = "pending: signals — M2: the raw rt_sigaction door installs the guest's action (with its restorer) and writes oldact, sharing one disposition table with the libc door (sud/signal_process.rs sys_rt_sigaction ignores act and oldact)"
-
-[[divergence]]
-probe = "signal/queue"
-kind = "pending"
-reason = "pending: signals — M2: rt_sigqueueinfo/rt_tgsigqueueinfo queue realtime instances FIFO with their payloads, the thread-private queue dequeues before the shared one, standard signals coalesce, a nonnegative si_code to the own thread group is accepted, ESRCH/EINVAL as the kernel (no rows in sud/signal_process.rs)"
-
-[[divergence]]
-probe = "signal/rt_order"
-kind = "pending"
-reason = "pending: signals — M2: rt_sigtimedwait dequeues the lowest-numbered pending signal first (standard before realtime) and FIFO within a number (no rt_sigtimedwait row)"
-
-[[divergence]]
-probe = "signal/unmask"
-kind = "pending"
-reason = "pending: signals — M2: rt_sigprocmask/rt_sigpending are per-task virtual state, a pending signal is delivered on the unblocking syscall before it returns (SI_USER and SI_TKILL), and several signals unblocked together are delivered through one host unblock so their frames stack as the kernel's do (sud/signal_process.rs rt_sigprocmask is a no-op without oldset; no rt_sigpending row)"
-
-[[divergence]]
-probe = "signal/altstack"
-kind = "pending"
-reason = "pending: signals — M2: sigaltstack is per-task virtual state forwarded to the host (old_ss written, ENOMEM/EINVAL/EPERM vocabulary), and SA_ONSTACK delivery of a virtual signal lands on it (sud/signal_process.rs sigaltstack is a no-op without old_ss; kill delivers nothing)"
-
-[[divergence]]
-probe = "signal/per_thread"
-kind = "pending"
-reason = "pending: signals — M2: the mask, the private pending set and the altstack are per TASK and a spawned task inherits its creator's mask, so a worker's block does not stop the main task's own kill(self) from being handled, its thread-directed pending signal is invisible to the main task's rt_sigpending, and its unmask delivers on the worker (no per-task signal state exists; kill answers ENOSYS / traps)"
-
-[[divergence]]
-probe = "signal/nested"
-kind = "pending"
-reason = "pending: signals — M2: the handler's frame mask defers a same-signal raise until the handler returns and SA_NODEFER permits nesting, through kernel-built frames (kill answers ENOSYS on the libc door and traps on the raw door)"
-
-[[divergence]]
 probe = "signal/nested"
 kind = "abort"
 seq = 6
 stderr = "patina: process spawn reached under patina: fork; the process class is a deterministic-runtime non-goal; failing closed"
 reason = "by design: fork is a process-lifecycle trap (docs/arcs/syscall-conformance.md §7); the child oracle runs natively only"
-
-[[divergence]]
-probe = "signal/mask"
-kind = "pending"
-reason = "pending: signals — M3: rt_sigtimedwait with a timeout parks on the virtual clock (EAGAIN after it elapses); rt_sigsuspend installs its mask atomically, parks until a handled signal is delivered, returns EINTR and restores the mask (no rows; kill answers ENOSYS)"
-
-[[divergence]]
-probe = "signal/eintr"
-kind = "pending"
-reason = "pending: signals — M3: generation against a task parked in a modeled blocking call wakes it interrupted and the per-call restart rule applies: read restarts under SA_RESTART else EINTR; nanosleep/clock_nanosleep always EINTR with remain from the virtual clock; epoll_wait always EINTR; FUTEX_WAIT restarts under SA_RESTART without a timeout, EINTR with one (the reader parks forever: patina native shim fatal: deadlock)"
-
-[[divergence]]
-probe = "signal/wait"
-kind = "pending"
-reason = "pending: signals — M3: signalfd/signalfd4 as a virtual fd kind readable exactly while a matching signal is pending (epoll readiness), a handled unblocked signal never reaches it, and rt_sigtimedwait/rt_sigqueueinfo answer from virtual state (sud/signal_process.rs has no signalfd rows)"
-
-[[divergence]]
-probe = "signal/block"
-kind = "pending"
-reason = "pending: signals — M3: pause, rt_sigtimedwait without a timeout and a blocking signalfd read park on the scheduler until a matching (or handled) signal is generated, never returning early (c/posix/signal_process.c pause answers ENOSYS; the raw rows trap)"
-
-[[divergence]]
-probe = "signal/one_wake"
-kind = "pending"
-reason = "pending: signals — M3: a process-directed signal interrupts exactly one task — the main task when it does not block it, else the lowest task that does not — unlinking only that task's wait; a task parked in a read that blocks the signal is neither failed EINTR nor woken (no generation or interruption exists: the reader parks forever)"
-
-[[divergence]]
-probe = "thread/futex"
-kind = "pending"
-reason = "pending: signals — M3: a timed FUTEX_WAIT nobody wakes returns ETIMEDOUT after the virtual timeout elapses instead of EAGAIN immediately on a single-task run (lib.rs patina_futex_wait_timed)"
-
-[[divergence]]
-probe = "signal/default_term"
-kind = "pending"
-reason = "pending: signals — M4: a SIG_DFL terminating signal to self ends the guest by that signal after trace finalization, and the supervisor's envelope reports guest_exit {signal, core} (kill answers ENOSYS / traps; guest_exit has no core field)"
-
-[[divergence]]
-probe = "signal/core_term"
-kind = "pending"
-reason = "pending: signals — M4: a SIG_DFL core signal to self ends the guest by that signal with the host's core flag reported in guest_exit.core (kill answers ENOSYS / traps; cargo-patina reports no core flag)"
-
-[[divergence]]
-probe = "signal/pipe_term"
-kind = "pending"
-reason = "pending: signals — M4: a write to a reader-less pipe or a send to a closed socketpair peer generates SIGPIPE to the writing task before EPIPE (handler runs first; MSG_NOSIGNAL suppresses it; SIG_IGN leaves a bare EPIPE; SIG_DFL ends the guest by SIGPIPE) — lib.rs pipe_write returns EPIPE without any generation"
-
-[[divergence]]
-probe = "signal/resethand_term"
-kind = "pending"
-reason = "pending: signals — M4: SA_RESETHAND restores SIG_DFL before the handler runs and the second signal ends the guest by SIGUSR2 (kill answers ENOSYS / traps)"
 
 [[divergence]]
 probe = "signal/default"
@@ -658,39 +543,8 @@ stderr = "patina: process spawn reached under patina: fork; the process class is
 reason = "by design: fork is a process-lifecycle trap (docs/arcs/syscall-conformance.md §7); the child oracle runs natively only"
 
 [[divergence]]
-probe = "thread/kill"
-kind = "pending"
-reason = "pending: signals — M5: tgkill/tkill deliver to the named managed task (the handler runs on that task's host thread, recorded through gettid), ESRCH for a dead or foreign tid, EINVAL for tid <= 0 (no rows in sud/signal_process.rs)"
-
-[[divergence]]
-probe = "thread/masks"
-kind = "pending"
-reason = "pending: signals — M5: the signal mask and pending set are per task: a process-directed signal goes to a task not blocking it, a thread-directed one stays pending for its task alone and is delivered on that task's unmask"
-
-[[divergence]]
-probe = "thread/pthread_kill"
-kind = "pending"
-reason = "pending: signals — M5: the pthread_kill wrapper is interposed (registry/symbols.rs marks it Absent, so the audit refuses the binary) and routes to the tgkill model"
-
-[[divergence]]
-probe = "thread/tid_clear"
-kind = "pending"
-reason = "pending: signals — M5: set_tid_address is per task (returns the managed tid) and the word is cleared and futex-woken when the task exits (sud/sched_identity.rs traps set_tid_address; thread_finish clears nothing)"
-
-[[divergence]]
-probe = "thread/main_exit"
-kind = "pending"
-reason = "pending: signals — M5: a raw exit from the main task ends only that task and the process lives until the worker's exit_group (sud/mod.rs routes exit to patina_exit, ending the whole process)"
-
-[[divergence]]
-probe = "thread/lifecycle"
-kind = "pending"
-reason = "pending: signals — M5: set_tid_address returns the calling task's tid on both doors (sud/sched_identity.rs traps it)"
-
-[[divergence]]
 probe = "thread/lifecycle"
 kind = "abort"
 seq = 3
 stderr = "patina: process spawn reached under patina: fork; the process class is a deterministic-runtime non-goal; failing closed"
 reason = "by design: fork is a process-lifecycle trap (docs/arcs/syscall-conformance.md §7); the child oracle runs natively only"
-
