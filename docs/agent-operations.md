@@ -126,6 +126,10 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   and pattern kills like `pkill -f "mise run check"` match every workspace's
   run, not just yours. Write battery logs to per-workspace paths and kill only
   by the PID of processes you started.
+- Avoid shelling out to `kill` with negative PIDs. They can be parsed as options
+  rather than process-group targets, potentially signaling unrelated processes.
+  Prefer a direct API with a validated group ID; if invoking the command,
+  explicitly separate operands with `--`.
 - Wall-clock timings taken while several batteries run concurrently are
   contention-inflated. Label them as such; only quote uncontended runs as
   representative durations.

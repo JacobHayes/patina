@@ -13,6 +13,8 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 pub mod native;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod process_group;
 
 use object::read::archive::ArchiveFile;
 use object::{Object, ObjectSymbol};
@@ -233,15 +235,8 @@ pub fn output_with_deadline(command: &mut Command, deadline: Duration) -> Option
     let give_up = Instant::now() + deadline;
     while child.try_wait().unwrap().is_none() || !stdout.is_finished() || !stderr.is_finished() {
         if Instant::now() >= give_up {
-            // The child leads its own group, so its pid IS the group id.
-            let group = format!("-{}", child.id());
-            // The process group may already have exited, but a missing kill
-            // executable must fail immediately rather than hang in a pipe join.
-            Command::new("kill")
-                .args(["-9", "--", &group])
-                .status()
-                .expect("launch kill for deadline process group");
-            let _ = child.wait();
+            process_group::kill(child.id()).expect("kill deadline child process group");
+            child.wait().expect("reap deadline child");
             let stdout = stdout.join().unwrap();
             let stderr = stderr.join().unwrap();
             eprintln!(
