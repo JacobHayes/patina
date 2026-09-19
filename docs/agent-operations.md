@@ -40,10 +40,14 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
 - Use the cheapest check that can catch the expected failure first, and encode
   recurring check sequences as one command or script. A prose checklist is not a
   gate.
-- `mise run check:fast` is an inner-loop tier, not landing evidence. `mise run
-  check` is the default landing gate. For runtime/shim/trace/target changes, the
-  native/WASI/cross-target validation scripts are part of the evidence, not
-  optional cleanup.
+- `mise run check:fast` is an inner-loop tier, not landing evidence. It includes
+  fmt, both clippy passes, all workspace tests except the `cargo-patina`
+  `end_to_end` binary, fast conformance, cheap selftests, flag drift, MSRV cargo
+  check, WASI, and cross-target smoke. `mise run check` is the default local
+  landing gate; CI/final gates add the full `mise run msrv` suite and audit
+  corpus breadth. For runtime/shim/trace/target changes, the native/WASI/
+  cross-target validation scripts are part of the evidence, not optional
+  cleanup.
 - A green gate is only evidence if it can fail. Selftests and planted fixtures
   should prove classifiers, drift detectors, default-deny audits, and vacuity
   checks actually bite.

@@ -346,8 +346,9 @@ then `run` the resulting artifact.
 | `wasm32-wasip1` | Supported via the deterministic WASI host. |
 
 If you use [mise](https://mise.jdx.dev/): `mise run setup` installs toolchains
-and targets, `mise run check` runs the validation battery, `mise run demo` runs
-a small end-to-end demo.
+and targets, `mise run check:fast` is the inner-loop signal, `mise run check` is
+the local landing gate, `mise run msrv` is the full Rust 1.86 CI/final-gate
+suite, and `mise run demo` runs a small end-to-end demo.
 
 ## What Patina is not (yet)
 

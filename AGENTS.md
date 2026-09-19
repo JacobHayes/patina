@@ -72,23 +72,42 @@ Prefer JSON when parsing results programmatically.
 With [mise](https://mise.jdx.dev/) (one-time `mise run setup` installs
 toolchains/targets, including the 1.86 MSRV toolchain with `wasm32-wasip1`):
 
-- `mise run check` — the full pre-landing battery: fmt, clippy (host +
-  cross-target `x86_64-unknown-linux-gnu` for Linux-cfg code), docs, workspace
-  tests, `scripts/check-flag-drift.sh`, the sweep and campaign selftests, the
-  workq/pubsub `run-patina.sh` batteries, MSRV compatibility, and the WASI /
-  cross-target / native-shim validation scripts. Cheap failure checks run first;
-  independent heavyweight suites then run concurrently. The runner prints
+- `mise run check:fast` — the inner-loop tier: fmt, clippy (host +
+  cross-target `x86_64-unknown-linux-gnu` for Linux-cfg code), every workspace
+  test except the `cargo-patina` `end_to_end` integration-test binary, syscall
+  conformance `--fast`, the cheap classifier/gate selftests, CLI flag drift,
+  MSRV `cargo check`, WASI validation, and cross-target smoke. It is designed to
+  give ordinary edits an honest signal quickly, but it is not landing evidence.
+- `mise run check` — the local pre-landing battery: the cheap checks above,
+  docs, packaging, the local MSRV rungs (cargo check, the cargo-patina rodata
+  detector, and the `patina-dst` macros feature test), the full stable workspace
+  test suite including `end_to_end`, native-shim validation, WASI/cross smoke,
+  the workq/pubsub/macro-adopter testbeds, and the syscall-conformance frozen
+  gate. Cheap failure checks run first; the e2e-heavy workspace test rung runs
+  alone; independent runtime/testbed rungs then overlap. The runner prints
   per-rung timings, suppresses successful command chatter, and replays a failed
-  rung's complete log. **This is the landing gate.** The only CI step it skips
-  is the audit-corpus run (heavy ecosystem builds; `mise run audit-corpus`).
-- `mise run check:fast` — the inner-loop tier (skips the slowest e2e tests, the
-  MSRV compatibility gate, `cargo doc`, the flag-drift gate, and
-  `validate-native-shim.sh`). Not sufficient for landing.
-- `mise run smoke`, `mise run msrv`, `mise run audit-corpus`, `mise run demo` —
-  the individual pieces.
+  rung's complete log. **This is the local landing gate.** CI/final gates add
+  `mise run msrv` and the audit corpus.
+- `mise run msrv` — the complete Rust 1.86 workspace suite. This is CI/final-gate
+  evidence, not part of the ordinary local landing gate.
+- `mise run smoke`, `mise run audit-corpus`, `mise run demo` — individual pieces.
 
-Without mise, run `scripts/check.sh full` directly after selecting the stable
-Rust toolchain.
+Run cargo and repository scripts through `mise exec --` or `mise run` so the repo
+selected toolchain is active. `scripts/check.sh` is the quiet/timed log-replay
+runner behind the mise tasks, not a separate tier.
+
+What to run after touching common surfaces:
+
+- Runtime crates (`patina-runtime`, drivers, traces, schedulers): start with
+  `mise run check:fast`; run `mise run check` before handing off.
+- Native shim C/Rust or native audit/run behavior: run the focused command you
+  need, then `mise run smoke` or `mise run check`; use `mise run check:fast` for
+  a quick guardrail after small edits.
+- Harness/SDK macro behavior: run the focused crate or testbed test, then
+  `mise run check:fast`; run `mise run check` if it changes runtime semantics.
+- CLI parser/help/flag behavior: inspect `crates/cargo-patina/src/help.rs`, run
+  the focused CLI tests plus `scripts/check-flag-drift.sh` through `mise exec --`,
+  then `mise run check:fast`.
 
 Gates worth knowing individually:
 

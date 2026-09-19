@@ -37,6 +37,12 @@ workq, pubsub, and buggify-wasi sweeps.
 
 Conventions:
 
+- The local ladder has one testbed path per tier: `mise run check:fast` runs the
+  cheap classifier/gate selftests plus syscall-conformance `run.sh --fast`; the
+  full local gate runs the workq/pubsub/macro-adopter `run-patina.sh` batteries,
+  WASI/cross smoke, native-shim validation, and the syscall-conformance frozen
+  gate (which owns the full conformance run). The audit corpus and full MSRV
+  suite are CI/final-gate breadth.
 - The sweep/campaign scripts (`fuzz-sweep.sh`, `wasi-buggify-sweep.sh`,
   `audit-corpus/run.sh`) take `--help`, and classifier-carrying ones take
   `--selftest`, proving every outcome class can fire. The `run-patina.sh` gates

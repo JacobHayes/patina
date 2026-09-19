@@ -23,21 +23,23 @@ cc --version >/dev/null
 echo "Patina local toolchains are ready."
 '''
 
-# The check runner keeps cheap, high-signal failures serial, then runs reviewed
-# independent heavyweight suites concurrently. It reports one timing line per
-# rung, hides successful command chatter, and replays complete failure logs.
+# The check runner keeps cheap, high-signal failures serial, runs only measured
+# overlap groups concurrently, reports one timing line per rung, hides successful
+# command chatter, and replays complete failure logs. That last failure-log
+# contract is the mise feature gap that keeps the small shell runner in place.
 [tasks.check]
-description = "Full pre-landing validation (heavyweight testbeds: audit-corpus only runs in CI)"
+description = "Full local pre-landing validation (audit-corpus and full MSRV suite run in CI/final gates)"
 run = "scripts/check.sh full"
 
-# Inner-loop tier: the same fast exclusions as the landing gate's stable test
-# pass, without MSRV, docs, drift, testbeds, or native-shim validation.
+# Inner-loop tier: fmt, both clippy passes, all workspace tests except the
+# cargo-patina end_to_end integration binary, fast conformance, cheap selftests,
+# flag drift, MSRV cargo check, WASI validation, and cross-target smoke.
 [tasks."check:fast"]
 description = "Fast iteration tier of `check`; not sufficient for landing"
 run = "scripts/check.sh fast"
 
 [tasks.msrv]
-description = "Run the root workspace MSRV compatibility gate"
+description = "Run the full Rust 1.86 suite (CI/final-gate tier)"
 run = "scripts/check.sh msrv"
 
 [tasks.smoke]

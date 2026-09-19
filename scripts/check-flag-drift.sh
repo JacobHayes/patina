@@ -94,6 +94,9 @@ ALLOWED_FLAGS='
 --all
 --all-targets
 --check
+--doc
+--exclude
+--lib
 --locked
 --no-deps
 --workspace
@@ -148,8 +151,9 @@ ALLOWED_FLAGS='
 --apply
 '
 # -- cargo / rustc / rustup / linker tool flags --
-# --all/--all-targets/--check/--no-deps/--workspace/--locked: cargo fmt/clippy/
-#   doc/package/test flags (VALIDATION.md's V0 gates and the scripts' builds).
+# --all/--all-targets/--check/--doc/--exclude/--lib/--no-deps/--workspace/
+#   --locked: cargo fmt/clippy/doc/package/test flags (VALIDATION.md's V0 gates
+#   and the scripts' builds).
 # --example: a cargo flag the Cargo package family forwards to `cargo build`.
 # --manifest-path/--quiet/--test/--features/--skip/--target-dir: cargo flags in
 #   the scripts' build/test preludes and timed check runner.

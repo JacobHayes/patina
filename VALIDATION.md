@@ -33,31 +33,44 @@ A level is complete only when all its required checks pass. Higher levels do not
 
 ### V0: workspace quality
 
-Required:
+Required locally before landing (`mise run check`):
 
 - `cargo fmt --all -- --check`
-- `cargo test --workspace`
 - `cargo clippy --workspace --all-targets -- -D warnings` (plus the same run with
   `--target x86_64-unknown-linux-gnu`, so Linux-cfg code lints from any host)
 - `cargo doc --workspace --no-deps`
-- `scripts/check.sh msrv` (execute the complete workspace and macro-feature
-  suite on Rust 1.86)
+- `cargo test --workspace` on the stable toolchain, including the
+  `cargo-patina` `end_to_end` integration-test binary
 - `scripts/check-flag-drift.sh` (CLI flag drift gate over the user-facing docs and every shell script)
+- packaging (`cargo package --workspace --no-verify`) so manifest/readme/include
+  drift fails before release work
+- local MSRV compatibility: `cargo +1.86.0 check --workspace --all-targets`, the
+  `cargo-patina` self-sufficient-binary rodata detector, and the `patina-dst`
+  macros feature test
 - `scripts/validate-wasi.sh` when validating V3
 - `scripts/validate-native-shim.sh` when validating native foundations
 - `scripts/smoke-cross-target.sh` when validating cross-target determinism
+- the workq/pubsub/macro-adopter testbeds and the syscall-conformance frozen gate
+
+`mise run check:fast` is the inner loop: fmt, both clippy passes, every workspace
+test except the `cargo-patina` `end_to_end` binary, syscall conformance `--fast`,
+the cheap selftests, CLI flag drift, MSRV `cargo check`, WASI validation, and
+cross-target smoke. It is intentionally not landing evidence.
+
+`mise run msrv` executes the complete Rust 1.86 workspace suite and the macros
+feature test. That full MSRV suite is CI/final-gate evidence rather than part of
+the ordinary local landing gate; the local gate covers the measured MSRV-only
+classes seen so far (compile compatibility, the self-sufficient-binary rodata
+detector, and the macros feature surface).
 
 These checks must run without network access after dependencies have been
 fetched. For local development, `mise run setup` installs the Rust
-toolchains/targets needed by these gates, and `mise run check` runs the
-root-workspace checks plus the core WASI/native smoke scripts. After cheap
-failure checks, its independent heavyweight suites run concurrently; successful
-rung logs are suppressed and every rung is timed. Stable, MSRV, and native
-validation overlap safely: the outer MSRV build uses `target/msrv`, while every
-nested native shim cache is keyed by the shim source bundle and complete compiler
-identity, under a Patina namespace even when `CARGO_TARGET_DIR` is explicit. The
-mise workflow intentionally excludes heavyweight standalone testbed setup such as
-raft and redb.
+toolchains/targets needed by these gates. After cheap failure checks, the full
+local gate runs the e2e-heavy stable workspace test rung alone, then overlaps
+runtime/testbed rungs with independent scratch/output paths. Successful rung logs
+are suppressed, every rung is timed, and a failed rung's complete log is replayed.
+The mise workflow intentionally excludes the audit corpus from the local landing
+gate; run `mise run audit-corpus` or let CI/final gates cover it.
 
 ### V1: deterministic Rust-level vertical slice
 
@@ -379,7 +392,7 @@ Before a release, run the V2 end-to-end fixture for:
 
 The routine push/pull-request matrix in `.github/workflows/ci.yml` runs stable and Rust 1.86 across Linux x86_64 and aarch64. Every row executes the workspace tests plus the WASI, native-shim, and cross-target smoke probes; all rows install `strace` and set `PATINA_REQUIRE_STRACE=1` so the syscall-containment pass cannot silently skip. Stable rows additionally run the `workq` and `pubsub` testbeds, while stable Linux runs formatting, clippy, docs, the flag-drift gate, the audit corpus, and the fuzz-sweep and campaign classifier selftests. A strict `audit` job checks RustSec advisories over the root and every testbed lockfile with no ignores.
 
-Stable macOS runs as a clean-host safety net daily and on manual dispatch, not on every locally validated push. It executes the workspace tests, WASI/native/cross-target probes, both full testbed gates, and the macOS audit corpus; Rust 1.86 remains covered on both Linux architectures and by the local macOS landing gate. The 200-generation randomized `workq` campaign runs nightly on Linux and on manual dispatch, without a duplicate hosted-macOS campaign. (`cargo package --workspace --locked` is the pre-publish packaging check, run deliberately as part of publish prep rather than in CI.)
+Stable macOS runs as a clean-host safety net daily and on manual dispatch, not on every locally validated push. It executes the workspace tests, WASI/native/cross-target probes, both full testbed gates, and the macOS audit corpus; the full Rust 1.86 suite remains covered on both Linux architectures and by explicit local `mise run msrv` final-gate runs. The ordinary local landing gate runs only the measured MSRV compile/detector/macros rungs. The 200-generation randomized `workq` campaign runs nightly on Linux and on manual dispatch, without a duplicate hosted-macOS campaign. (`cargo package --workspace --locked` is included in the local landing gate and is also the pre-publish packaging check.)
 
 A failure report must retain the command, seed, trace bundle when one exists, Patina version, Rust version, target triple, and compatibility fingerprint.
 

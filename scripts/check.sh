@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Timed, quiet orchestration for Patina's local validation gates.
 # Successful command output is suppressed; a failure replays its complete log.
+#
+# This script stays deliberately small-but-real because mise's task runner can
+# sequence tasks, limit jobs, print timings, and choose output styles, but it
+# cannot currently provide Patina's required output contract: hide successful
+# rung logs while replaying a failed rung's complete stdout/stderr. Keep the
+# ladder here until mise grows that behavior.
 set -uo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -10,10 +16,13 @@ usage() {
   cat <<'EOF'
 Usage: scripts/check.sh <full|fast|msrv>
 
-  full  Full pre-landing gate. Cheap checks run first, then independent
-        heavyweight gates run concurrently.
-  fast  Inner-loop gate; not sufficient for landing.
-  msrv  Execute the complete test suite on the documented MSRV.
+  full  Full local pre-landing gate. Cheap checks run first, the e2e-heavy
+        workspace test rung runs alone, then independent runtime/testbed gates
+        run concurrently.
+  fast  Inner-loop gate; excludes only the cargo-patina end_to_end test binary
+        and the landing-only docs/packaging/native-shim/testbed/full-e2e rungs.
+  msrv  Execute the complete Rust 1.86 suite. This is CI/final-gate evidence,
+        not part of the ordinary local landing gate.
 
 Successful rung logs are hidden. On failure, the complete rung log and exact
 command are printed. PATINA_CHECK_JOBS is intentionally not exposed: the full
@@ -131,7 +140,37 @@ wait_rungs() {
   ((failed == 0))
 }
 
-run_msrv() {
+run_fast_workspace_tests() {
+  # cargo has no "all tests except this integration-test binary" selector, so
+  # run every other package normally, then enumerate cargo-patina's non-e2e
+  # targets. This is the measured fix for the old fast tier's 190s+ e2e binary.
+  local cargo_patina_targets=(--lib --bin cargo-patina)
+  local test_path test_name
+  while IFS= read -r test_path; do
+    test_name=$(basename "${test_path%.rs}")
+    cargo_patina_targets+=(--test "$test_name")
+  done < <(find crates/cargo-patina/tests -maxdepth 1 -type f -name '*.rs' ! -name end_to_end.rs | LC_ALL=C sort)
+
+  cargo test --workspace --exclude cargo-patina --locked &&
+    cargo test -p cargo-patina --locked "${cargo_patina_targets[@]}" &&
+    cargo test -p cargo-patina --locked --doc
+}
+
+run_msrv_check() {
+  cargo +1.86.0 check --workspace --all-targets --locked --target-dir "$root/target/msrv-check"
+}
+
+run_msrv_detector() {
+  cargo +1.86.0 test --target-dir "$root/target/msrv-check" -p cargo-patina \
+    --test self_sufficient_binary --locked
+}
+
+run_msrv_macro_feature_test() {
+  cargo +1.86.0 test --target-dir "$root/target/msrv-check" -p patina-dst \
+    --features macros --locked
+}
+
+run_msrv_full() {
   # Keep outer Cargo artifacts separate without exporting CARGO_TARGET_DIR:
   # e2e fixtures intentionally manage their own nested targets. cargo-patina's
   # internal shim cache independently keys itself by the complete toolchain.
@@ -152,25 +191,22 @@ run_full() {
   run_rung 'CLI flag drift' scripts/check-flag-drift.sh || return $?
   # Every workspace member packages cleanly (manifest metadata, readme paths,
   # include/exclude). --no-verify skips the per-crate verify build; the release
-  # dry run (scripts/publish.sh) covers that and the license-text audit. 2.5s warm.
+  # dry run (scripts/publish.sh) covers that and the license-text audit.
   run_rung 'crate packaging' cargo package --workspace --no-verify --locked --allow-dirty || return $?
   run_rung 'workq classifier selftest' testbeds/workq/fuzz-sweep.sh --selftest || return $?
   run_rung 'campaign classifier selftest' cargo run -q -p cargo-patina -- patina campaign --selftest || return $?
   run_rung 'conformance gate selftest' testbeds/syscall-conformance/gate.sh --selftest || return $?
+  run_rung 'MSRV cargo check' run_msrv_check || return $?
+  run_rung 'MSRV rodata detector' run_msrv_detector || return $?
+  run_rung 'MSRV macro feature test' run_msrv_macro_feature_test || return $?
 
-  # The stable and MSRV outer Cargo caches are separate, and cargo-patina keys
-  # every nested shim cache by complete compiler identity. Native validation uses
-  # the stable toolchain and independent scratch paths. This bounded group keeps
-  # every test execution while removing the former serial toolchain boundary.
-  start_rung 'stable workspace tests' cargo test --workspace --locked
-  start_rung 'MSRV workspace tests' run_msrv
+  # The cargo-patina end_to_end binary dominates the stable workspace suite and
+  # contends badly with other CPU-heavy cargo/check rungs, so the full workspace
+  # test rung runs alone. The post-test group below uses separate testbed output
+  # directories or runtime scratch paths.
+  run_rung 'stable workspace tests (includes e2e)' cargo test --workspace --locked || return $?
+
   start_rung 'native-shim validation' scripts/validate-native-shim.sh
-  wait_rungs || return $?
-
-  # The remaining stable-toolchain suites have separate temp/testbed outputs.
-  # Their combined serial cost is small, but overlapping them removes it from
-  # the critical path without competing with the two CPU-heavy suites above.
-  start_rung 'patina-dst macro feature tests' cargo test -p patina-dst --features macros --locked
   start_rung 'macro adopter testbed' testbeds/patina-macro-adopter/run.sh
   start_rung 'pubsub testbed' testbeds/pubsub/run-patina.sh
   start_rung 'workq testbed' testbeds/workq/run-patina.sh
@@ -193,23 +229,27 @@ run_fast() {
   run_rung 'format' cargo fmt --all -- --check || return $?
   run_rung 'host clippy' cargo clippy --workspace --all-targets --locked -- -D warnings || return $?
   run_rung 'Linux-cfg clippy' cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu -- -D warnings || return $?
-  # The frozen-oracle gate's own selftest (each mechanism can refuse); cheap, so
-  # it sits in the inner loop.
+
+  # The fast test rung is cargo-heavy enough to inflate every other cargo-using
+  # smoke when overlapped, even though it no longer contains the e2e binary.
+  # Run it alone, then group the short independent smoke/selftest rungs.
+  run_rung 'workspace tests (no cargo-patina e2e)' run_fast_workspace_tests || return $?
+  run_rung 'CLI flag drift' scripts/check-flag-drift.sh || return $?
+  run_rung 'MSRV cargo check' run_msrv_check || return $?
+  run_rung 'workq classifier selftest' testbeds/workq/fuzz-sweep.sh --selftest || return $?
+  run_rung 'campaign classifier selftest' cargo run -q -p cargo-patina -- patina campaign --selftest || return $?
   run_rung 'conformance gate selftest' testbeds/syscall-conformance/gate.sh --selftest || return $?
-  start_rung 'workspace tests (fast exclusions)' cargo test --workspace --locked -- \
-    --skip native_two_axis_stateful_shrink_then_schedule_minimize \
-    --skip minimize_canonicalizes_a_recorded_schedule_via_replay_oracle \
-    --skip native_proptest_case_generation
+
+  start_rung 'syscall conformance (fast tier)' testbeds/syscall-conformance/run.sh --fast
   start_rung 'WASI validation' scripts/validate-wasi.sh
   start_rung 'cross-target smoke' scripts/smoke-cross-target.sh
-  # The syscall-conformance fast tier: native + patina legs, libc vehicle only.
-  start_rung 'syscall conformance (fast tier)' testbeds/syscall-conformance/run.sh --fast
   wait_rungs || return $?
+
   printf 'PASS  fast check (%ss total)\n' "$(( $(date +%s) - total_start ))"
 }
 
 case $profile in
   full) run_full ;;
   fast) run_fast ;;
-  msrv) run_rung 'MSRV compatibility' run_msrv ;;
+  msrv) run_rung 'MSRV full compatibility suite' run_msrv_full ;;
 esac
