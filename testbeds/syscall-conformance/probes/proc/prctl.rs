@@ -17,7 +17,7 @@ mod scenario {
             "PR_SET_NAME accepts a long name",
             p.prctl(PR_SET_NAME, long.as_ptr() as u64, 0, 0, 0) == 0,
         );
-        let mut name = [0i8; 16];
+        let mut name = [0 as c_char; 16];
         p.check(
             "PR_GET_NAME reads the truncated name",
             p.prctl(PR_GET_NAME, name.as_mut_ptr() as u64, 0, 0, 0) == 0,

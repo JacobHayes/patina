@@ -24,6 +24,10 @@ mod scenario {
             Sys::GetKernelSyms,
             Sys::Uselib,
         ] {
+            if !sys.has_number() {
+                eprintln!("proc/absent: SKIPPED 1 {} row (no architecture number)", sys.name());
+                continue;
+            }
             let result = p.call_observed(sys, [0; 6]);
             p.check(&format!("{} is ENOSYS", sys.name()), result == neg(libc::ENOSYS));
         }

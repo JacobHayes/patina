@@ -161,12 +161,18 @@ mod scenario {
             p.signalfd4(sfd_both, &set, SFD_NONBLOCK) == sfd_both,
         );
 
-        let sfd2 = p.signalfd(-1, &set);
-        p.require("legacy signalfd", sfd2 >= 0);
-        p.check(
-            "legacy signalfd does not set CLOEXEC",
-            p.fcntl(sfd2, F_GETFD, 0) == 0,
-        );
+        let sfd2 = if Sys::Signalfd.has_number() {
+            let sfd2 = p.signalfd(-1, &set);
+            p.require("legacy signalfd", sfd2 >= 0);
+            p.check(
+                "legacy signalfd does not set CLOEXEC",
+                p.fcntl(sfd2, F_GETFD, 0) == 0,
+            );
+            Some(sfd2)
+        } else {
+            eprintln!("signal/wait: SKIPPED 1 legacy signalfd row (no architecture number)");
+            None
+        };
         let q = queued_info(pid, uid, sig, 0x55);
         p.check(
             "queue signal for sigtimedwait",
@@ -192,7 +198,9 @@ mod scenario {
         );
         p.close(sfd);
         p.close(sfd_both);
-        p.close(sfd2);
+        if let Some(sfd2) = sfd2 {
+            p.close(sfd2);
+        }
         p.close(epfd);
         p.rt_sigprocmask(SIG_UNBLOCK, Some(&set), None, 8);
     }

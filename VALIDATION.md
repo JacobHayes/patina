@@ -706,3 +706,13 @@ counted `SKIP` for that Linux-ABI oracle, not a passing signal-model receipt.
 The runner's platform-selection selftest, the gate's own selftest, and shared
 native signal/panic tests still run on macOS. Direct family-gate invocations
 retain their frozen-path integrity and all Linux obligations.
+
+The conformance vehicle's
+`legacy_rows_match_architecture_table_and_refuse_before_dispatch` detector
+checks legacy-row applicability against the vendored architecture tables and
+refuses dispatch of numberless rows through every vehicle. It pairs with the
+arm64 compile regression and the architecture-local legacy sections in
+`signal/wait`, `proc/traps`, and `proc/absent`; missing numbers never become
+synthetic ENOSYS observations. Partial-probe omissions are named on stderr,
+not counted as passing row coverage or as whole-leg skips (see the testbed
+README). A planted wrong-number mapping makes the detector fail.

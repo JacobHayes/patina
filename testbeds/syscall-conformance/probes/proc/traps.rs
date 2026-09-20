@@ -9,14 +9,18 @@ mod scenario {
     use syscall_conformance::vehicle::Sys;
 
     pub fn run(p: &Probe) {
-        unsafe {
-            let r = p.call_unrecorded(Sys::Fork, [0; 6]);
-            if r == 0 { _exit(0); }
-            let mut st = 0;
-            waitpid(r as pid_t, &mut st, 0);
-            p.rec.event("fork", 0).emit();
+        if Sys::Fork.has_number() {
+            unsafe {
+                let r = p.call_unrecorded(Sys::Fork, [0; 6]);
+                if r == 0 { _exit(0); }
+                let mut st = 0;
+                waitpid(r as pid_t, &mut st, 0);
+                p.rec.event("fork", 0).emit();
+            }
+            p.check("fork child exited cleanly", true);
+        } else {
+            eprintln!("proc/traps: SKIPPED 1 fork row (no architecture number)");
         }
-        p.check("fork child exited cleanly", true);
 
         p.check("clone with impossible flags is EINVAL", p.call_observed(Sys::Clone, [!0, 0, 0, 0, 0, 0]) == neg(EINVAL));
         p.check("clone3 with null args and size 0 is EINVAL", p.call_observed(Sys::Clone3, [0, 0, 0, 0, 0, 0]) == neg(EINVAL));

@@ -306,3 +306,17 @@ Layout: `src/vehicle.rs` (vehicles, numbers, errno names), `src/observe.rs`
 `src/bin/conform.rs` (the CLI `run.sh`/`gate.sh` drive: `supervise`, `diff`,
 `gate`, …; positional arguments only), `probes.toml`, `divergences.toml`,
 `frozen.toml`, `gate.sh`, `expected/`.
+
+## Architecture-unavailable legacy rows
+
+A row without a syscall number on the host architecture is not an observed
+`ENOSYS`. The vehicle refuses any attempted dispatch before reaching libc or
+raw syscall entry. On arm64, `signal/wait` omits only the legacy `signalfd`
+create/check/close section (all `signalfd4` checks remain), `proc/traps` omits
+only `fork`, and `proc/absent` omits its thirteen x86-only rows while still
+checking `nfsservctl` and `lookup_dcookie`. Each omitted row prints a named
+`SKIPPED 1` diagnostic on stderr; these partial-probe omissions are not included
+in the runner's whole-leg skip count. No ARM oracle blessing or family-gate
+coverage is implied. The vehicle unit detector compares legacy numbers with
+the vendored kernel ABI tables and checks that unavailable calls refuse before
+dispatch through every vehicle.

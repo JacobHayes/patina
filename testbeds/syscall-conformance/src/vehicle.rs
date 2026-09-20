@@ -64,7 +64,7 @@ impl Vehicle {
         match self {
             Vehicle::Libc => libc_symbol(sys, args),
             Vehicle::Syscall => {
-                let (nr, args) = sys.number_and_args(args);
+                let (nr, args) = sys.require_number_and_args(args);
                 let result = unsafe {
                     libc::syscall(
                         nr,
@@ -83,7 +83,7 @@ impl Vehicle {
                 }
             }
             Vehicle::Raw => {
-                let (nr, args) = sys.number_and_args(args);
+                let (nr, args) = sys.require_number_and_args(args);
                 // c_long is i64 on every arch the raw vehicle exists for.
                 #[allow(clippy::unnecessary_cast)]
                 raw::syscall6(nr as i64, args)
@@ -336,9 +336,25 @@ impl Sys {
         }
     }
 
+    /// Whether this row has a callable number on this architecture. Absence is
+    /// not an observed ENOSYS: no kernel call can be issued for such a row.
+    pub fn has_number(self) -> bool {
+        self.number_and_args([0; 6]).is_some()
+    }
+
+    fn require_number_and_args(self, args: Args) -> (c_long, Args) {
+        self.number_and_args(args).unwrap_or_else(|| {
+            panic!(
+                "{}: no syscall number on {}",
+                self.name(),
+                std::env::consts::ARCH
+            )
+        })
+    }
+
     /// The syscall number on this arch, plus the argument vector the number's
     /// spelling wants.
-    fn number_and_args(self, args: Args) -> (c_long, Args) {
+    fn number_and_args(self, args: Args) -> Option<(c_long, Args)> {
         let nr = match self {
             Sys::Read => libc::SYS_read,
             Sys::Write => libc::SYS_write,
@@ -367,7 +383,7 @@ impl Sys {
                     // Generic-table arches carry only dup3; dup2's distinct
                     // equal-number semantics are asserted by the probe on
                     // x86_64 alone, so the shape here is dup3(old, new, 0).
-                    return (libc::SYS_dup3, [args[0], args[1], 0, 0, 0, 0]);
+                    return Some((libc::SYS_dup3, [args[0], args[1], 0, 0, 0, 0]));
                 }
             }
             Sys::Dup3 => libc::SYS_dup3,
@@ -402,10 +418,10 @@ impl Sys {
                 {
                     // Generic-table arches carry only epoll_pwait; a NULL sigmask
                     // (args[4]) with a zero size (args[5]) is the epoll_wait shape.
-                    return (
+                    return Some((
                         libc::SYS_epoll_pwait,
                         [args[0], args[1], args[2], args[3], 0, 0],
-                    );
+                    ));
                 }
             }
             Sys::Eventfd2 => libc::SYS_eventfd2,
@@ -420,7 +436,6 @@ impl Sys {
             Sys::Kill => libc::SYS_kill,
             Sys::Tkill => libc::SYS_tkill,
             Sys::Tgkill => libc::SYS_tgkill,
-            Sys::Signalfd => libc::SYS_signalfd,
             Sys::Signalfd4 => libc::SYS_signalfd4,
             Sys::RtSigqueueinfo => libc::SYS_rt_sigqueueinfo,
             Sys::RtTgsigqueueinfo => libc::SYS_rt_tgsigqueueinfo,
@@ -437,8 +452,6 @@ impl Sys {
             Sys::Waitid => libc::SYS_waitid,
             Sys::Clone => libc::SYS_clone,
             Sys::Clone3 => libc::SYS_clone3,
-            Sys::Fork => libc::SYS_fork,
-            Sys::Vfork => libc::SYS_vfork,
             Sys::Execve => libc::SYS_execve,
             Sys::Execveat => libc::SYS_execveat,
             Sys::Exit => libc::SYS_exit,
@@ -457,22 +470,9 @@ impl Sys {
             Sys::Truncate => libc::SYS_truncate,
             Sys::Ftruncate => libc::SYS_ftruncate,
             Sys::Fallocate => libc::SYS_fallocate,
-            Sys::Sysctl => libc::SYS__sysctl,
             Sys::Nfsservctl => libc::SYS_nfsservctl,
-            Sys::Vserver => libc::SYS_vserver,
-            Sys::Security => libc::SYS_security,
-            Sys::Tuxcall => libc::SYS_tuxcall,
-            Sys::AfsSyscall => libc::SYS_afs_syscall,
-            Sys::Getpmsg => libc::SYS_getpmsg,
-            Sys::Putpmsg => libc::SYS_putpmsg,
-            Sys::EpollCtlOld => libc::SYS_epoll_ctl_old,
-            Sys::EpollWaitOld => libc::SYS_epoll_wait_old,
             Sys::LookupDcookie => libc::SYS_lookup_dcookie,
-            Sys::CreateModule => libc::SYS_create_module,
-            Sys::QueryModule => libc::SYS_query_module,
-            Sys::GetKernelSyms => libc::SYS_get_kernel_syms,
-            Sys::Uselib => libc::SYS_uselib,
-            // The x86_64 legacy time and ownership rows have no number on the
+            // These x86_64 legacy rows have no number on the
             // generic (arm64) table; the probes issue them on x86_64 only.
             Sys::Access
             | Sys::Utime
@@ -480,7 +480,23 @@ impl Sys {
             | Sys::Futimesat
             | Sys::Chown
             | Sys::Lchown
-            | Sys::Pause => {
+            | Sys::Pause
+            | Sys::Signalfd
+            | Sys::Fork
+            | Sys::Vfork
+            | Sys::Sysctl
+            | Sys::Vserver
+            | Sys::Security
+            | Sys::Tuxcall
+            | Sys::AfsSyscall
+            | Sys::Getpmsg
+            | Sys::Putpmsg
+            | Sys::EpollCtlOld
+            | Sys::EpollWaitOld
+            | Sys::CreateModule
+            | Sys::QueryModule
+            | Sys::GetKernelSyms
+            | Sys::Uselib => {
                 #[cfg(target_arch = "x86_64")]
                 {
                     match self {
@@ -490,19 +506,36 @@ impl Sys {
                         Sys::Futimesat => libc::SYS_futimesat,
                         Sys::Chown => libc::SYS_chown,
                         Sys::Pause => libc::SYS_pause,
-                        _ => libc::SYS_lchown,
+                        Sys::Lchown => libc::SYS_lchown,
+                        Sys::Signalfd => libc::SYS_signalfd,
+                        Sys::Fork => libc::SYS_fork,
+                        Sys::Vfork => libc::SYS_vfork,
+                        Sys::Sysctl => libc::SYS__sysctl,
+                        Sys::Vserver => libc::SYS_vserver,
+                        Sys::Security => libc::SYS_security,
+                        Sys::Tuxcall => libc::SYS_tuxcall,
+                        Sys::AfsSyscall => libc::SYS_afs_syscall,
+                        Sys::Getpmsg => libc::SYS_getpmsg,
+                        Sys::Putpmsg => libc::SYS_putpmsg,
+                        Sys::EpollCtlOld => libc::SYS_epoll_ctl_old,
+                        Sys::EpollWaitOld => libc::SYS_epoll_wait_old,
+                        Sys::CreateModule => libc::SYS_create_module,
+                        Sys::QueryModule => libc::SYS_query_module,
+                        Sys::GetKernelSyms => libc::SYS_get_kernel_syms,
+                        Sys::Uselib => libc::SYS_uselib,
+                        _ => unreachable!(),
                     }
                 }
                 #[cfg(not(target_arch = "x86_64"))]
                 {
-                    panic!("{}: an x86_64-only legacy row", self.name())
+                    return None;
                 }
             }
             // libc 0.2.189 predates the number; it is 472 in the vendored
             // x86_64 table and the generic (arm64) table alike.
             Sys::Fchroot => 472,
         };
-        (nr, args)
+        Some((nr, args))
     }
 }
 
@@ -720,14 +753,11 @@ fn libc_symbol(sys: Sys, a: Args) -> i64 {
             ) as i64,
             // glibc has no wrappers for these Linux-only signal/thread rows.
             Sys::Tkill => syscall(SYS_tkill, a[0] as c_long, a[1] as c_long) as i64,
-            Sys::Tgkill => syscall(
-                SYS_tgkill,
-                a[0] as c_long,
-                a[1] as c_long,
-                a[2] as c_long,
-            ) as i64,
+            Sys::Tgkill => {
+                syscall(SYS_tgkill, a[0] as c_long, a[1] as c_long, a[2] as c_long) as i64
+            }
             Sys::Signalfd => syscall(
-                SYS_signalfd,
+                sys.require_number_and_args(a).0,
                 a[0] as c_long,
                 a[1] as c_long,
                 a[2] as c_long,
@@ -788,7 +818,7 @@ fn libc_symbol(sys: Sys, a: Args) -> i64 {
             | Sys::Tuxcall | Sys::AfsSyscall | Sys::Getpmsg | Sys::Putpmsg | Sys::EpollCtlOld
             | Sys::EpollWaitOld | Sys::LookupDcookie | Sys::CreateModule | Sys::QueryModule
             | Sys::GetKernelSyms | Sys::Uselib => syscall(
-                sys.number_and_args(a).0,
+                sys.require_number_and_args(a).0,
                 a[0] as c_long,
                 a[1] as c_long,
                 a[2] as c_long,
@@ -979,4 +1009,73 @@ pub fn errno_name(code: i32) -> String {
         _ => return format!("E#{code}"),
     };
     name.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Sys, Vehicle};
+
+    /// Class detector: architecture-unavailable rows must never borrow another
+    /// architecture's number or manufacture an ENOSYS observation. The kernel
+    /// tables, not a second availability map, decide which cases are callable.
+    #[test]
+    fn legacy_rows_match_architecture_table_and_refuse_before_dispatch() {
+        let (table, abis): (&str, &[&str]) = if cfg!(target_arch = "x86_64") {
+            (
+                include_str!("../../../crates/patina-native-shim/abi/linux/syscall_64.tbl"),
+                &["common", "64"],
+            )
+        } else {
+            (
+                include_str!("../../../crates/patina-native-shim/abi/linux/syscall.tbl"),
+                &["common", "64", "renameat", "rlimit", "memfd_secret"],
+            )
+        };
+        for sys in [
+            Sys::Signalfd,
+            Sys::Fork,
+            Sys::Vfork,
+            Sys::Sysctl,
+            Sys::Vserver,
+            Sys::Security,
+            Sys::Tuxcall,
+            Sys::AfsSyscall,
+            Sys::Getpmsg,
+            Sys::Putpmsg,
+            Sys::EpollCtlOld,
+            Sys::EpollWaitOld,
+            Sys::CreateModule,
+            Sys::QueryModule,
+            Sys::GetKernelSyms,
+            Sys::Uselib,
+            // Positive ARM controls: removed rows can still have real numbers.
+            Sys::Nfsservctl,
+            Sys::LookupDcookie,
+            Sys::Signalfd4,
+        ] {
+            let nr = table.lines().find_map(|line| {
+                let fields: Vec<_> = line.split_whitespace().collect();
+                (fields.len() >= 3 && abis.contains(&fields[1]) && fields[2] == sys.name())
+                    .then(|| fields[0].parse::<std::ffi::c_long>().unwrap())
+            });
+            assert_eq!(
+                sys.number_and_args([0; 6]).map(|(nr, _)| nr),
+                nr,
+                "{}",
+                sys.name()
+            );
+            assert_eq!(sys.has_number(), nr.is_some(), "{}", sys.name());
+            if nr.is_none() {
+                for vehicle in Vehicle::ALL {
+                    let refused = std::panic::catch_unwind(|| vehicle.call(sys, [0; 6]));
+                    let error = refused.expect_err("unavailable row reached dispatch");
+                    let message = error.downcast_ref::<String>().expect("named refusal");
+                    assert!(
+                        message.contains(&format!("{}: no syscall number on", sys.name())),
+                        "{message}"
+                    );
+                }
+            }
+        }
+    }
 }

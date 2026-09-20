@@ -265,6 +265,16 @@ rm -f "$probe_c" "$probe_bin"
 # ---- --selftest: every gate must be able to fail
 if [[ $selftest == 1 ]]; then
   status=0
+  echo "==> vehicle architecture applicability detector"
+  vehicle_test=vehicle::tests::legacy_rows_match_architecture_table_and_refuse_before_dispatch
+  if ! cargo test --manifest-path "$here/Cargo.toml" --lib -- --exact "$vehicle_test" >"$out/selftest-vehicle.log" 2>"$out/selftest-vehicle.err" ||
+     ! grep -Fxq "test $vehicle_test ... ok" "$out/selftest-vehicle.log"; then
+    echo "SELFTEST FAILED: vehicle architecture detector failed or did not execute" >&2
+    cat "$out/selftest-vehicle.log" "$out/selftest-vehicle.err" >&2
+    status=1
+  else
+    echo "SELFTEST ok: vehicle architecture applicability detector executed and passed"
+  fi
   echo "==> conform selftest (differ + termination + pending + frozen rule + design obligations + host gate, planted failures)"
   if ! "$conform" selftest; then status=1; fi
   echo "==> strace leak selftest (planted openat(\"/etc/hostname\") through syscall(2); planted self-signal allowance bounds)"
@@ -367,7 +377,7 @@ signalfd4(-1, [USR1], 8, SFD_NONBLOCK)'
   if [[ $status != 0 ]]; then
     echo "syscall-conformance: SELFTEST FAILED — a gate cannot fail" >&2; exit 1
   fi
-  echo "CONFORMANCE_SELFTEST_RAN cases=differ,termination,pending,frozen-rule,obligations,host-gate,strace-leak,self-signal-bounds,leg-timeout,direct-termination"
+  echo "CONFORMANCE_SELFTEST_RAN cases=vehicle-architecture,differ,termination,pending,frozen-rule,obligations,host-gate,strace-leak,self-signal-bounds,leg-timeout,direct-termination"
   exit 0
 fi
 
